@@ -1,1 +1,33 @@
-export {};
+export {
+  initTelemetry,
+  shutdownTelemetry,
+  withSpan,
+  withFinancialSpan,
+  currentTraceIds,
+  addSpanAttributes,
+  RastaSampler,
+  ALWAYS_SAMPLE_ATTRIBUTE,
+} from './telemetry';
+export type { TelemetryConfig } from './telemetry';
+
+export {
+  registry,
+  metricsText,
+  metricsContentType,
+  register,
+  normalizeRoute,
+  httpRequestDuration,
+  httpRequestsTotal,
+  httpActiveRequests,
+  dbQueryDuration,
+  dbPoolConnections,
+  outboxPendingTotal,
+  outboxPendingAgeSeconds,
+  eventsPublishedTotal,
+  eventProcessingDuration,
+  dlqMessagesTotal,
+  eventValidationFailuresTotal,
+  duplicateEventsTotal,
+  authorizationDenialsTotal,
+  authenticationFailuresTotal,
+} from './metrics';

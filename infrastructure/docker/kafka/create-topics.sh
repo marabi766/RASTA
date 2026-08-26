@@ -13,6 +13,7 @@
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
+KAFKA_BIN="${KAFKA_BIN:-/opt/kafka/bin}"
 BOOTSTRAP="${KAFKA_BOOTSTRAP:-kafka:9094}"
 PARTITIONS="${KAFKA_TOPIC_PARTITIONS:-3}"
 REPLICATION="${KAFKA_TOPIC_REPLICATION:-1}"
@@ -39,7 +40,7 @@ DOMAINS=(
 
 echo "==> Waiting for Kafka at ${BOOTSTRAP}"
 for _ in $(seq 1 30); do
-  if kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" --list >/dev/null 2>&1; then
+  if "${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" --list >/dev/null 2>&1; then
     break
   fi
   sleep 2
@@ -52,7 +53,7 @@ create_topic() {
   local extra="${4:-}"
 
   # shellcheck disable=SC2086
-  kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" \
+  "${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" \
     --create --if-not-exists \
     --topic "${name}" \
     --partitions "${partitions}" \
@@ -78,4 +79,4 @@ echo "==> Creating compacted state topics"
 create_topic "rasta.audit.trail.v1" "${PARTITIONS}" "2592000000"
 
 echo "==> Kafka topics ready"
-kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" --list | sort
+"${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" --list | sort

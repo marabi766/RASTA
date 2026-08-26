@@ -14,7 +14,6 @@
   "defaultLocale": "fa",
   "internationalizationEnabled": true,
   "supportedLocales": ["fa", "en"],
-
   "bruteForceProtected": true,
   "permanentLockout": false,
   "maxFailureWaitSeconds": 900,
@@ -23,15 +22,12 @@
   "quickLoginCheckMilliSeconds": 1000,
   "maxDeltaTimeSeconds": 43200,
   "failureFactor": 5,
-
   "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and specialChars(1) and notUsername(undefined) and passwordHistory(3) and hashAlgorithm(argon2)",
-
   "otpPolicyType": "totp",
   "otpPolicyAlgorithm": "HmacSHA256",
   "otpPolicyDigits": 6,
   "otpPolicyPeriod": 30,
   "otpPolicyLookAheadWindow": 1,
-
   "accessTokenLifespan": 900,
   "accessTokenLifespanForImplicitFlow": 900,
   "ssoSessionIdleTimeout": 1800,
@@ -39,7 +35,6 @@
   "offlineSessionIdleTimeout": 2592000,
   "refreshTokenMaxReuse": 0,
   "revokeRefreshToken": true,
-
   "roles": {
     "realm": [
       {
@@ -54,31 +49,61 @@
         "name": "ORGANIZATION_ADMIN",
         "description": "Administrator of a single organization (e.g. a dehyari)"
       },
-      { "name": "FLEET_MANAGER", "description": "Manages assets, drivers and usage for an org" },
-      { "name": "DRIVER", "description": "Assigned operator of one or more assets" },
-      { "name": "OPERATOR", "description": "Field operator; records usage and reports breakdowns" },
+      {
+        "name": "FLEET_MANAGER",
+        "description": "Manages assets, drivers and usage for an org"
+      },
+      {
+        "name": "DRIVER",
+        "description": "Assigned operator of one or more assets"
+      },
+      {
+        "name": "OPERATOR",
+        "description": "Field operator; records usage and reports breakdowns"
+      },
       {
         "name": "PROCUREMENT_USER",
         "description": "Raises demand requests and marketplace orders for an org"
       },
-      { "name": "SUPPLIER", "description": "External goods supplier" },
-      { "name": "WORKSHOP", "description": "External repair workshop / service provider" },
-      { "name": "CONTRACTOR", "description": "Civil-works contractor bidding on tenders" },
+      {
+        "name": "SUPPLIER",
+        "description": "External goods supplier"
+      },
+      {
+        "name": "WORKSHOP",
+        "description": "External repair workshop / service provider"
+      },
+      {
+        "name": "CONTRACTOR",
+        "description": "Civil-works contractor bidding on tenders"
+      },
       {
         "name": "AUDITOR",
         "description": "Read-only governance oversight (province); aggregate dashboards only"
       }
     ]
   },
-
-  "clientScopes": [
+  "clients": [
     {
-      "name": "rasta-tenant",
-      "description": "Carries the caller's organization scope into the access token",
+      "clientId": "rasta-web",
+      "name": "Rasta Web (public, PKCE)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
       "protocol": "openid-connect",
+      "rootUrl": "http://localhost:3200",
+      "baseUrl": "/",
+      "redirectUris": [
+        "http://localhost:3200/*",
+        "http://localhost:3201/*",
+        "http://localhost:3000/*"
+      ],
+      "webOrigins": ["http://localhost:3200", "http://localhost:3201", "http://localhost:3000"],
       "attributes": {
-        "include.in.token.scope": "true",
-        "display.on.consent.screen": "false"
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3200/*##http://localhost:3201/*"
       },
       "protocolMappers": [
         {
@@ -121,51 +146,8 @@
             "access.token.claim": "true"
           }
         }
-      ]
-    }
-  ],
-
-  "defaultDefaultClientScopes": [
-    "profile",
-    "email",
-    "roles",
-    "web-origins",
-    "acr",
-    "basic",
-    "rasta-tenant"
-  ],
-
-  "clients": [
-    {
-      "clientId": "rasta-web",
-      "name": "Rasta Web (public, PKCE)",
-      "enabled": true,
-      "publicClient": true,
-      "standardFlowEnabled": true,
-      "directAccessGrantsEnabled": true,
-      "serviceAccountsEnabled": false,
-      "protocol": "openid-connect",
-      "rootUrl": "http://localhost:3200",
-      "baseUrl": "/",
-      "redirectUris": [
-        "http://localhost:3200/*",
-        "http://localhost:3201/*",
-        "http://localhost:3000/*"
       ],
-      "webOrigins": ["http://localhost:3200", "http://localhost:3201", "http://localhost:3000"],
-      "attributes": {
-        "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:3200/*##http://localhost:3201/*"
-      },
-      "defaultClientScopes": [
-        "web-origins",
-        "acr",
-        "profile",
-        "roles",
-        "basic",
-        "email",
-        "rasta-tenant"
-      ]
+      "fullScopeAllowed": true
     },
     {
       "clientId": "rasta-backend",
@@ -180,7 +162,49 @@
       "attributes": {
         "use.refresh.tokens": "true"
       },
-      "defaultClientScopes": ["roles", "basic", "profile", "email", "rasta-tenant"]
+      "protocolMappers": [
+        {
+          "name": "active-organization-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "active_organization_id",
+            "claim.name": "org_id",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "organization-memberships",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "organization_ids",
+            "claim.name": "org_ids",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "rasta-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "rasta-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ],
+      "fullScopeAllowed": true
     },
     {
       "clientId": "rasta-api",
@@ -194,7 +218,6 @@
       "protocol": "openid-connect"
     }
   ],
-
   "users": [
     {
       "username": "system.admin",
@@ -203,9 +226,17 @@
       "lastName": "Administrator",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "RastaDev!2026", "temporary": false }],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "RastaDev!2026",
+          "temporary": false
+        }
+      ],
       "realmRoles": ["SYSTEM_ADMIN"],
-      "attributes": { "active_organization_id": ["ORG-UNION-YAZD"] }
+      "attributes": {
+        "active_organization_id": ["ORG-UNION-YAZD"]
+      }
     },
     {
       "username": "union.admin",
@@ -214,9 +245,17 @@
       "lastName": "اتحادیه",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "RastaDev!2026", "temporary": false }],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "RastaDev!2026",
+          "temporary": false
+        }
+      ],
       "realmRoles": ["UNION_ADMIN"],
-      "attributes": { "active_organization_id": ["ORG-UNION-YAZD"] }
+      "attributes": {
+        "active_organization_id": ["ORG-UNION-YAZD"]
+      }
     },
     {
       "username": "dehyari.admin",
@@ -225,9 +264,17 @@
       "lastName": "نمونه",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "RastaDev!2026", "temporary": false }],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "RastaDev!2026",
+          "temporary": false
+        }
+      ],
       "realmRoles": ["ORGANIZATION_ADMIN", "FLEET_MANAGER", "PROCUREMENT_USER"],
-      "attributes": { "active_organization_id": ["ORG-DEH-0001"] }
+      "attributes": {
+        "active_organization_id": ["ORG-DEH-0001"]
+      }
     },
     {
       "username": "province.auditor",
@@ -236,12 +283,19 @@
       "lastName": "استانداری",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "RastaDev!2026", "temporary": false }],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "RastaDev!2026",
+          "temporary": false
+        }
+      ],
       "realmRoles": ["AUDITOR"],
-      "attributes": { "active_organization_id": ["ORG-PROVINCE-YAZD"] }
+      "attributes": {
+        "active_organization_id": ["ORG-PROVINCE-YAZD"]
+      }
     }
   ],
-
   "smtpServer": {
     "host": "mailpit",
     "port": "1025",
@@ -251,7 +305,6 @@
     "starttls": "false",
     "auth": "false"
   },
-
   "eventsEnabled": true,
   "eventsExpiration": 604800,
   "adminEventsEnabled": true,
