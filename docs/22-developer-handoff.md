@@ -192,20 +192,22 @@ Checklist کامل در [`15-repository-architecture.md § ۱۵٫۸`](15-reposit
 
 ## ۲۲٫۸ عیب‌یابی
 
-| علامت                               | علت محتمل                              | اقدام                                                                                        |
-| ----------------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `ECONNREFUSED` روی پایگاه داده      | زیرساخت بالا نیست                      | `pnpm infra:up`؛ `docker compose ps`                                                         |
-| Migration شکست می‌خورد              | پایگاه داده یا نقش ساخته نشده          | `pnpm infra:reset` (⚠️ داده پاک می‌شود)                                                      |
-| `401` روی همه درخواست‌ها            | Keycloak آماده نیست یا Realm نیامده    | `docker compose logs keycloak`؛ Realm در `/opt/keycloak/data/import`                         |
-| `403 TENANT_MISMATCH`               | `X-Organization-Id` با عضویت نمی‌خواند | عضویت کاربر را بررسی کن                                                                      |
-| رویداد مصرف نمی‌شود                 | Topic نیست یا Consumer Group گیر کرده  | Kafka UI (`--profile tools`)؛ `create-topics.sh`                                             |
-| `outbox_message` انباشته می‌شود     | Relay متوقف است                        | Log سرویس؛ متریک `rasta_outbox_pending_age_seconds`                                          |
-| Workflow پیش نمی‌رود                | Worker متصل نیست                       | Temporal UI (`--profile tools`)؛ Task Queue را بررسی کن                                      |
-| تست یکپارچگی Timeout می‌خورد        | Docker کند یا Image نیامده             | `docker pull` تصاویر؛ `testTimeout` را افزایش بده                                            |
-| `EADDRINUSE`                        | پورت اشغال است                         | `netstat -ano \| findstr :<port>`                                                            |
-| Build شکست می‌خورد ولی محلی سبز است | Cache Turbo کهنه                       | `pnpm clean && pnpm install && pnpm build`                                                   |
-| تست جداسازی می‌شکند                 | **Query بدون Tenant Scope**            | **این باگ است، نه تست شکننده — Repository را درست کن**                                       |
-| Journal نامتوازن                    | **باگ منطق مالی**                      | **متوقف شو. این بحرانی است.** [`runbooks/ledger-imbalance.md`](runbooks/ledger-imbalance.md) |
+| علامت                                      | علت محتمل                              | اقدام                                                                                        |
+| ------------------------------------------ | -------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `ECONNREFUSED` روی پایگاه داده             | زیرساخت بالا نیست                      | `pnpm infra:up`؛ `docker compose ps`                                                         |
+| Migration شکست می‌خورد                     | پایگاه داده یا نقش ساخته نشده          | `pnpm infra:reset` (⚠️ داده پاک می‌شود)                                                      |
+| `401` روی همه درخواست‌ها                   | Keycloak آماده نیست یا Realm نیامده    | `docker compose logs keycloak`؛ Realm در `/opt/keycloak/data/import`                         |
+| `403 TENANT_MISMATCH`                      | `X-Organization-Id` با عضویت نمی‌خواند | عضویت کاربر را بررسی کن                                                                      |
+| رویداد مصرف نمی‌شود                        | Topic نیست یا Consumer Group گیر کرده  | Kafka UI (`--profile tools`)؛ `create-topics.sh`                                             |
+| `outbox_message` انباشته می‌شود            | Relay متوقف است                        | Log سرویس؛ متریک `rasta_outbox_pending_age_seconds`                                          |
+| Workflow پیش نمی‌رود                       | Worker متصل نیست                       | Temporal UI (`--profile tools`)؛ Task Queue را بررسی کن                                      |
+| تست یکپارچگی Timeout می‌خورد               | Docker کند یا Image نیامده             | `docker pull` تصاویر؛ `testTimeout` را افزایش بده                                            |
+| `EADDRINUSE`                               | پورت اشغال است                         | `netstat -ano \| findstr :<port>`                                                            |
+| Build شکست می‌خورد ولی محلی سبز است        | Cache Turbo کهنه                       | `pnpm clean && pnpm install && pnpm build`                                                   |
+| تست جداسازی می‌شکند                        | **Query بدون Tenant Scope**            | **این باگ است، نه تست شکننده — Repository را درست کن**                                       |
+| `EPERM ... query_engine-windows.dll.node`  | سرویس در حال اجرا، DLL را قفل کرده     | سرویس را متوقف کن، سپس `prisma generate` (فقط ویندوز)                                        |
+| `TimeoutNegativeWarning` هنگام اتصال Kafka | باگ شناخته‌شده در خود `kafkajs`        | بی‌اثر؛ رجوع به `docs/23` مورد D-001                                                         |
+| Journal نامتوازن                           | **باگ منطق مالی**                      | **متوقف شو. این بحرانی است.** [`runbooks/ledger-imbalance.md`](runbooks/ledger-imbalance.md) |
 
 ---
 

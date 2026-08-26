@@ -1,0 +1,281 @@
+// =============================================================================
+// organization-service — owned schema
+//
+// The organization model is deliberately generic (ADR-012 / docs/02 § 2.2).
+// The product document maps a path from 328 dehyaris to municipalities to
+// national scale, so nothing here may assume "dehyari". An organization has a
+// *type*, and the type is data.
+//
+// If `village_id` were a column today, tomorrow's move to municipalities would
+// be a rewrite rather than a migration.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Extensions (postgis, ltree, pg_trgm) are created by the postgres init
+// script, not by Prisma. Creating an extension needs superuser, which the
+// per-service role deliberately does not have (ADR-005) — and declaring them
+// here makes Prisma read them as schema drift and demand a reset.
+// See infrastructure/docker/postgres/00-init-databases.sh
+
+// -----------------------------------------------------------------------------
+// Organization
+// -----------------------------------------------------------------------------
+
+model Organization {
+  id String @id
+
+  /// Human-facing identifier, e.g. a national registry code. Optional because
+  /// not every organization type has one, and the platform must not require a
+  /// registry it does not control.
+  externalCode String? @unique @map("external_code")
+
+  name      String
+  shortName String? @map("short_name")
+
+  type   OrganizationType
+  status OrganizationStatus @default(ACTIVE)
+
+  parentId String? @map("parent_id")
+
+  /// Materialized path for subtree queries.
+  ///
+  /// "Every dehyari beneath this county" runs on every governance dashboard.
+  /// As an ltree with a GiST index that is an index scan; as a recursive CTE
+  /// over an adjacency list it is a repeated table walk. The adjacency edge
+  /// (`parentId`) stays as the source of truth and the path is derived.
+  path Unsupported("ltree")?
+
+  /// Cached depth, so "direct children only" needs no path parsing.
+  depth Int @default(0)
+
+  /// Free-form, type-specific attributes. Kept out of columns precisely
+  /// because organization types are extensible: a new type must not require a
+  /// migration.
+  metadata Json @default("{}")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  createdBy String    @map("created_by")
+  updatedBy String    @map("updated_by")
+  version   Int       @default(1)
+  deletedAt DateTime? @map("deleted_at")
+
+  parent   Organization?  @relation("OrganizationTree", fields: [parentId], references: [id])
+  children Organization[] @relation("OrganizationTree")
+
+  locations OrganizationLocation[]
+  policies  OrganizationPolicy[]
+  contacts  OrganizationContact[]
+
+  @@index([parentId])
+  @@index([type, status])
+  @@index([status])
+  @@map("organization")
+}
+
+/// Extensible by design. The product document requires the platform to grow
+/// beyond village councils, so this list is expected to gain members.
+enum OrganizationType {
+  /// Village council — the phase-one user.
+  DEHYARI
+  MUNICIPALITY
+  /// اتحادیه — the platform operator.
+  UNION
+  /// شرکت تعاونی دهیاری شهرستانی. An optional commercial partner, never a
+  /// mandatory approval layer (product document, ch. 4).
+  COOPERATIVE
+  COMPANY
+  GOVERNMENT
+  PRIVATE
+  NATIONAL_ORGANIZATION
+}
+
+enum OrganizationStatus {
+  /// Registered but not yet approved to transact.
+  PENDING
+  ACTIVE
+  SUSPENDED
+  /// Terminal. Retained because assets, contracts and ledger entries refer to it.
+  DEACTIVATED
+}
+
+// -----------------------------------------------------------------------------
+// Location
+// -----------------------------------------------------------------------------
+
+/// Where an organization is. Separate from Organization because an
+/// organization may have several sites, and because geometry columns are
+/// awkward to carry on a row read on every request.
+model OrganizationLocation {
+  id String @id
+
+  organizationId String       @map("organization_id")
+  kind           LocationKind @default(PRIMARY)
+
+  addressLine String?  @map("address_line")
+  city        String?
+  county      String?
+  province    String?
+  postalCode  String?  @map("postal_code")
+
+  /// GEOGRAPHY(Point, 4326), not GEOMETRY: distance comes back in metres with
+  /// no reprojection, which is what "assets near this project" needs.
+  point Unsupported("geography(Point, 4326)")?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("organization_location")
+}
+
+enum LocationKind {
+  PRIMARY
+  WAREHOUSE
+  BRANCH
+  SITE
+}
+
+// -----------------------------------------------------------------------------
+// Policy — configurable governance (ADR-023)
+// -----------------------------------------------------------------------------
+
+/// Per-organization configuration.
+///
+/// This table is how the platform honours the product document's constraint
+/// that it "creates no new decision-making authority": approval authorities,
+/// thresholds and procedure rules are rows here, set by the client, not
+/// branches in code.
+model OrganizationPolicy {
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  /// Namespaced key, e.g. `approval.project.threshold_minor`.
+  key   String
+  value Json
+
+  /// Whether descendants inherit this when they have no value of their own.
+  /// Lets the union set a default that a single dehyari can still override.
+  inheritable Boolean @default(true)
+
+  /// Why this value. A governance setting without a rationale is unauditable.
+  description String?
+
+  effectiveFrom DateTime  @default(now()) @map("effective_from")
+  effectiveTo   DateTime? @map("effective_to")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  createdBy String   @map("created_by")
+  updatedBy String   @map("updated_by")
+  version   Int      @default(1)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key, effectiveFrom])
+  @@index([organizationId, key])
+  @@index([key])
+  @@map("organization_policy")
+}
+
+// -----------------------------------------------------------------------------
+// Contact
+// -----------------------------------------------------------------------------
+
+model OrganizationContact {
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  kind        ContactKind
+  displayName String      @map("display_name")
+  phone       String?
+  email       String?
+  isPrimary   Boolean     @default(false) @map("is_primary")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("organization_contact")
+}
+
+enum ContactKind {
+  ADMINISTRATIVE
+  FINANCIAL
+  TECHNICAL
+  EMERGENCY
+}
+
+// -----------------------------------------------------------------------------
+// Platform plumbing (ADR-021)
+// -----------------------------------------------------------------------------
+
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic        String
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  publishedAt DateTime? @map("published_at")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  @@index([createdAt], map: "idx_outbox_pending")
+  @@map("outbox_message")
+}
+
+model ProcessedEvent {
+  eventId      String   @map("event_id")
+  consumerName String   @map("consumer_name")
+  processedAt  DateTime @default(now()) @map("processed_at")
+
+  @@id([eventId, consumerName])
+  @@index([processedAt])
+  @@map("processed_event")
+}
+
+model IdempotencyKey {
+  key            String @map("key")
+  organizationId String @map("organization_id")
+  endpoint       String
+
+  requestHash String @map("request_hash")
+
+  responseStatus Int?  @map("response_status")
+  responseBody   Json? @map("response_body")
+  state          String
+
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@id([organizationId, endpoint, key])
+  @@index([expiresAt])
+  @@map("idempotency_key")
+}

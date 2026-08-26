@@ -15,7 +15,25 @@ import { PrismaClient } from '../src/generated/prisma';
  * together deliberately.
  */
 
-const prisma = new PrismaClient();
+/**
+ * The repo-root .env names each service's database explicitly
+ * (DATABASE_URL_IDENTITY), so a single file can describe every service without
+ * any of them being able to open another's database by accident (ADR-005).
+ * The running service maps this in its env loader; the seed has no such
+ * loader, so it resolves the same variable itself.
+ */
+function resolveDatabaseUrl(): string {
+  const url = process.env.DATABASE_URL ?? process.env.DATABASE_URL_IDENTITY;
+  if (!url) {
+    throw new Error(
+      'Set DATABASE_URL or DATABASE_URL_IDENTITY. ' +
+        'Run via `pnpm db:seed`, which loads the repo-root .env.',
+    );
+  }
+  return url;
+}
+
+const prisma = new PrismaClient({ datasources: { db: { url: resolveDatabaseUrl() } } });
 
 const ORG = {
   province: 'ORG-PROVINCE-YAZD',

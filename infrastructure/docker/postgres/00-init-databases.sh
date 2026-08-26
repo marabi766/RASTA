@@ -64,11 +64,26 @@ for svc in "${SERVICES[@]}"; do
   echo "    - ${db} (owner ${role})"
 done
 
-echo "==> Enabling PostGIS where geospatial data is owned"
-# Organizations, assets, projects and warehouses all carry a location.
-for svc in organization asset fleet construction inventory analytics; do
-  psql_exec "rasta_${svc}" "CREATE EXTENSION IF NOT EXISTS postgis"
-  psql_exec "rasta_${svc}" "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+# -----------------------------------------------------------------------------
+# Extensions go into template1, so every database created afterwards inherits
+# them — including the throwaway shadow databases `prisma migrate dev` creates.
+#
+# The alternative is granting each service role superuser so it can run
+# CREATE EXTENSION itself, which would undo the privilege separation this
+# script exists to establish (ADR-005). In production the DBA provisions
+# extensions and `migrate deploy` uses no shadow database at all.
+# -----------------------------------------------------------------------------
+echo "==> Installing extensions into template1"
+for ext in postgis ltree pg_trgm pgcrypto; do
+  psql_exec template1 "CREATE EXTENSION IF NOT EXISTS ${ext}"
+  echo "    - ${ext}"
+done
+
+echo "==> Ensuring extensions in already-created service databases"
+for svc in "${SERVICES[@]}"; do
+  for ext in postgis ltree pg_trgm pgcrypto; do
+    psql_exec "rasta_${svc}" "CREATE EXTENSION IF NOT EXISTS ${ext}"
+  done
 done
 
 echo "==> Creating infrastructure databases"
