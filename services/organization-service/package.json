@@ -5,7 +5,7 @@
   "description": "Generic, extensible organization model and hierarchy. Deliberately knows nothing about dehyaris.",
   "main": "dist/main.js",
   "scripts": {
-    "build": "prisma generate && tsc -p tsconfig.json",
+    "build": "prisma generate && tsc -p tsconfig.json && node ../../scripts/copy-prisma-client.mjs",
     "clean": "rimraf dist .turbo",
     "dev": "prisma generate && node --import @swc-node/register/esm-register --watch --env-file=../../.env src/main.ts",
     "start": "node --env-file=../../.env dist/main.js",

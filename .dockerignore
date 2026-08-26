@@ -1,0 +1,30 @@
+# Never ship these into a build context.
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/.turbo
+**/coverage
+**/src/generated
+
+.git
+.github
+.vscode
+.idea
+
+# Secrets must not reach an image even transiently — a deleted file still
+# exists in the layer that added it.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+docs
+tests
+*.md
+!README.md
+
+.docker-data
+**/*.log
+**/*.tsbuildinfo

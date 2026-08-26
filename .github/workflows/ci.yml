@@ -1,0 +1,238 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  # Supersede an in-flight run for the same ref: a stale result on an old
+  # commit is worse than no result, because people act on it.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  PNPM_VERSION: '10'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast feedback. Everything here runs without Docker, so it fails in ~2
+  # minutes rather than after a container pull.
+  # ---------------------------------------------------------------------------
+  quality:
+    name: Lint, types and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Prisma clients are generated artefacts that typecheck depends on.
+      - run: pnpm run db:generate
+
+      - name: Format check
+        run: pnpm run format:check
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Type check
+        run: pnpm run typecheck
+
+      - name: Unit tests
+        run: pnpm run test:unit
+
+      - name: Build
+        run: pnpm run build
+
+  # ---------------------------------------------------------------------------
+  # Security. Every gate here fails the build rather than warning: a warning
+  # nobody is forced to read is not a control.
+  # ---------------------------------------------------------------------------
+  security:
+    name: Security scans
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Gitleaks needs history to scan past commits, not just the tip.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dependency audit
+        # High and critical fail. The repo holds no production secrets, but it
+        # does hold the ledger, so a known-exploitable transitive dependency is
+        # not something to merge past.
+        run: pnpm audit --audit-level=high
+
+      - name: Static analysis
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >-
+            p/typescript
+            p/nodejs
+            p/owasp-top-ten
+            p/secrets
+
+  # ---------------------------------------------------------------------------
+  # Integration and the security tests that need a real database.
+  #
+  # Service containers rather than Testcontainers here: GitHub provisions them
+  # before the job starts, which is faster and avoids docker-in-docker.
+  # ---------------------------------------------------------------------------
+  integration:
+    name: Integration and security tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: quality
+
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: rasta
+          POSTGRES_PASSWORD: rasta_ci_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rasta"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Provision databases, roles and extensions
+        env:
+          PGPASSWORD: rasta_ci_password
+          POSTGRES_USER: rasta
+          POSTGRES_SERVICE_PASSWORD: rasta_ci_service_password
+        run: |
+          # The same script the local stack uses, so CI and a developer
+          # laptop provision identically. Divergence here is how "works on my
+          # machine" starts.
+          export PGHOST=localhost PGPORT=5432
+          psql -U rasta -d postgres -c "SELECT 1" >/dev/null
+          bash infrastructure/docker/postgres/00-init-databases.sh
+
+      - run: pnpm run db:generate
+
+      - name: Apply migrations
+        run: pnpm run db:migrate
+        env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
+
+      - name: Integration tests
+        run: pnpm run test:integration
+        env:
+          NODE_ENV: test
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
+          REDIS_URL: redis://localhost:6379
+
+      # These are called out separately from the rest of the suite so a failure
+      # names itself in the job list. A tenant-isolation failure is a data
+      # leak, not a flaky test, and must never be waved through (AGENTS.md §5).
+      - name: Tenant isolation and authorization tests
+        run: pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"
+        env:
+          NODE_ENV: test
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
+
+  # ---------------------------------------------------------------------------
+  # Container build and image scan. Only on main, because it is the slowest
+  # stage and a PR has already been gated by everything above.
+  # ---------------------------------------------------------------------------
+  containers:
+    name: Build and scan images
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [quality, security, integration]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [identity-service, organization-service]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          # Tagged with the commit SHA, never a bare `latest`: an image you
+          # cannot trace back to a commit is not deployable.
+          tags: rasta/${{ matrix.service }}:${{ github.sha }}
+          push: false
+          load: true
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Scan image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: rasta/${{ matrix.service }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
