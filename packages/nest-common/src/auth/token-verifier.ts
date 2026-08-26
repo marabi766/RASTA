@@ -15,7 +15,17 @@ import { RastaError } from '../errors/rasta-error';
  */
 
 export interface UserClaims {
+  /** The identity provider's subject. Stable, but not our identifier. */
   sub: string;
+  /**
+   * The platform's own user id, carried in the `rasta_uid` claim.
+   *
+   * Without it every request would have to translate the IdP subject into a
+   * platform id before it could do anything — a database round trip on the
+   * hot path of every single call, purely to convert one identifier to
+   * another. Absent only for accounts provisioned outside the platform.
+   */
+  rastaUserId?: string;
   organizationId?: string;
   organizationIds: string[];
   roles: string[];
@@ -70,6 +80,7 @@ export class TokenVerifier {
 
     return {
       sub: payload.sub,
+      rastaUserId: readString(payload, 'rasta_uid'),
       organizationId: readString(payload, 'org_id'),
       organizationIds: readStringArray(payload, 'org_ids'),
       roles: readRealmRoles(payload),

@@ -4,9 +4,12 @@ import prettier from 'eslint-config-prettier';
 
 /**
  * Root ESLint flat config for the Rasta monorepo.
- * Individual workspaces extend this via their own eslint.config.mjs.
+ *
+ * Workspaces re-export from here rather than redefining rules, so a rule
+ * change lands everywhere at once. Two variants are exported: the default for
+ * plain TypeScript, and `nestjs` for workspaces using dependency injection.
  */
-export default tseslint.config(
+const base = tseslint.config(
   {
     ignores: [
       '**/node_modules/**',
@@ -51,39 +54,34 @@ export default tseslint.config(
     },
   },
   {
-    /**
-     * NestJS resolves constructor dependencies from `emitDecoratorMetadata`,
-     * which only records a *value* import. Rewriting an injected dependency to
-     * `import type` erases that metadata and the class silently fails to
-     * resolve at runtime — a bug the type checker cannot see.
-     *
-     * The rule is therefore off wherever DI is used. It stays on for pure
-     * libraries, where it is a genuine improvement.
-     */
-    // Globs are basePath-relative, and each workspace runs eslint from its own
-    // directory, so these must not be anchored to the repository root.
-    files: [
-      '**/guards/**/*.ts',
-      '**/interceptors/**/*.ts',
-      '**/filters/**/*.ts',
-      '**/middleware/**/*.ts',
-      '**/pipes/**/*.ts',
-      '**/*.controller.ts',
-      '**/*.service.ts',
-      '**/*.repository.ts',
-      '**/*.module.ts',
-      '**/*.consumer.ts',
-      '**/*.resolver.ts',
-    ],
-    rules: {
-      '@typescript-eslint/consistent-type-imports': 'off',
-    },
-  },
-  {
-    files: ['**/*.spec.ts', '**/*.e2e-spec.ts', '**/test/**/*.ts'],
+    files: ['**/*.spec.ts', '**/*.e2e-spec.ts', '**/*.int-spec.ts', '**/test/**/*.ts'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-non-null-assertion': 'off',
     },
   },
 );
+
+export default base;
+
+/**
+ * Config for workspaces that use NestJS dependency injection.
+ *
+ * `consistent-type-imports` and Nest DI are in direct conflict. Nest resolves
+ * constructor dependencies from the `design:paramtypes` metadata TypeScript
+ * emits, so a parameter's type annotation is simultaneously its injection
+ * token. Rewriting those imports to `import type` elides the binding and DI
+ * silently resolves to `undefined` at runtime — the exact failure that took a
+ * debugging session to find when tsx (esbuild) dropped the same metadata.
+ *
+ * A linter should not be able to introduce a runtime failure, so the rule is
+ * off wherever DI is in play. It stays on in `packages/`, which have none.
+ */
+export const nestjs = [
+  ...base,
+  {
+    rules: {
+      '@typescript-eslint/consistent-type-imports': 'off',
+    },
+  },
+];

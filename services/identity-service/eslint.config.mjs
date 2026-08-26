@@ -1,1 +1,1 @@
-export { default } from '../../eslint.config.mjs';
+export { nestjs as default } from '../../eslint.config.mjs';

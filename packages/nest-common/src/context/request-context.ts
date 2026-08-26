@@ -29,7 +29,10 @@ export interface RequestContext {
    */
   readonly organizationId?: string;
 
+  /** The platform's user id — what domain rows reference. */
   readonly userId?: string;
+  /** The identity provider's subject, kept for correlating with IdP logs. */
+  readonly subject?: string;
   readonly roles: readonly string[];
   readonly authType: AuthType;
   /** For service-to-service calls: which service is calling. */

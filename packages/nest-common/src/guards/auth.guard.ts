@@ -69,7 +69,10 @@ export class AuthGuard implements CanActivate {
 
     const state: AuthState = {
       authType: 'USER',
-      userId: claims.sub,
+      // Prefer the platform id. Falling back to the IdP subject keeps an
+      // account provisioned outside the platform usable rather than broken.
+      userId: claims.rastaUserId ?? claims.sub,
+      subject: claims.sub,
       organizationId,
       roles: claims.roles,
       username: claims.username,
@@ -79,6 +82,7 @@ export class AuthGuard implements CanActivate {
     upgradeContext({
       authType: 'USER',
       userId: state.userId,
+      subject: state.subject,
       organizationId: state.organizationId,
       roles: state.roles,
     });
@@ -147,6 +151,7 @@ export function resolveOrganization(
 export interface AuthState {
   authType: RequestContext['authType'];
   userId?: string;
+  subject?: string;
   organizationId?: string;
   roles: string[];
   username?: string;

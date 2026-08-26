@@ -145,6 +145,20 @@
             "id.token.claim": "false",
             "access.token.claim": "true"
           }
+        },
+        {
+          "name": "rasta-user-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "rasta_user_id",
+            "claim.name": "rasta_uid",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
         }
       ],
       "fullScopeAllowed": true
@@ -202,6 +216,20 @@
             "id.token.claim": "false",
             "access.token.claim": "true"
           }
+        },
+        {
+          "name": "rasta-user-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "rasta_user_id",
+            "claim.name": "rasta_uid",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
         }
       ],
       "fullScopeAllowed": true
@@ -235,7 +263,8 @@
       ],
       "realmRoles": ["SYSTEM_ADMIN"],
       "attributes": {
-        "active_organization_id": ["ORG-UNION-YAZD"]
+        "active_organization_id": ["ORG-UNION-YAZD"],
+        "rasta_user_id": ["USR-SEED-SYSTEM-ADMIN"]
       }
     },
     {
@@ -254,7 +283,8 @@
       ],
       "realmRoles": ["UNION_ADMIN"],
       "attributes": {
-        "active_organization_id": ["ORG-UNION-YAZD"]
+        "active_organization_id": ["ORG-UNION-YAZD"],
+        "rasta_user_id": ["USR-SEED-UNION-ADMIN"]
       }
     },
     {
@@ -273,7 +303,8 @@
       ],
       "realmRoles": ["ORGANIZATION_ADMIN", "FLEET_MANAGER", "PROCUREMENT_USER"],
       "attributes": {
-        "active_organization_id": ["ORG-DEH-0001"]
+        "active_organization_id": ["ORG-DEH-0001"],
+        "rasta_user_id": ["USR-SEED-DEHYARI-ADMIN"]
       }
     },
     {
@@ -292,7 +323,16 @@
       ],
       "realmRoles": ["AUDITOR"],
       "attributes": {
-        "active_organization_id": ["ORG-PROVINCE-YAZD"]
+        "active_organization_id": ["ORG-PROVINCE-YAZD"],
+        "rasta_user_id": ["USR-SEED-AUDITOR"]
+      }
+    },
+    {
+      "username": "service-account-rasta-backend",
+      "enabled": true,
+      "serviceAccountClientId": "rasta-backend",
+      "clientRoles": {
+        "realm-management": ["manage-users", "view-users", "query-users", "view-realm"]
       }
     }
   ],
