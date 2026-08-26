@@ -41,15 +41,21 @@ export class AuthGuard implements CanActivate {
       [execution.getHandler(), execution.getClass()],
     );
 
+    const bearer = extractBearer(headerValue(request, 'authorization'));
     const internalToken = headerValue(request, 'x-internal-token');
-    if (internalToken) {
+
+    // A gateway-forwarded request carries BOTH: the caller's user token and an
+    // internal token proving the hop came from the gateway. The user token
+    // wins, because it names the actual actor — the internal token only says
+    // which service relayed it.
+    //
+    // A genuine service-to-service call carries the internal token alone.
+    if (internalToken && !bearer) {
       const state = await this.authenticateService(execution, internalToken);
       request.rastaAuth = state;
       upgradeContext(state);
       return true;
     }
-
-    const bearer = extractBearer(headerValue(request, 'authorization'));
     if (!bearer) {
       if (publicMeta?.public) {
         request.rastaAuth = { authType: 'ANONYMOUS', roles: [] };
