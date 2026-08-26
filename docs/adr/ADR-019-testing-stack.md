@@ -1,0 +1,65 @@
+# ADR-019: Jest + @swc/jest + Testcontainers + Playwright
+
+- **وضعیت:** Accepted
+- **تاریخ:** 2026-08-26
+
+## Context
+
+تست باید سریع باشد وگرنه اجرا نمی‌شود. NestJS از دکوراتور و `emitDecoratorMetadata`
+استفاده می‌کند که ترجمه را کند می‌کند. `ts-jest` روی یک Monorepo با ۲۵ Workspace
+غیرقابل تحمل کند می‌شود.
+
+همزمان، تست‌های حساس این پروژه (تغییرناپذیری دفتر کل، قفل ردیف، Unique Index جزئی،
+رفتار PostGIS) **فقط روی PostgreSQL واقعی** معنا دارند.
+
+## Decision
+
+| لایه | ابزار |
+| --- | --- |
+| Unit و Integration | **Jest 29 + @swc/jest** |
+| زیرساخت تست | **Testcontainers** (PostgreSQL، Redis، Kafka واقعی) |
+| API | **Supertest** |
+| E2E | **Playwright** |
+| بار | **k6** |
+| قرارداد | **Zod** (همان Schemaهای `@rasta/contracts`) |
+
+## Alternatives Considered
+
+| گزینه | مزیت | عیب | چرا رد شد |
+| --- | --- | --- | --- |
+| ts-jest | استاندارد NestJS | **بسیار کند** روی Monorepo بزرگ | زمان اجرای تست، رفتار تیم را تعیین می‌کند |
+| Vitest | سریع، ESM بومی | پشتیبانی دکوراتور NestJS کمتر آزموده | ریسک ناسازگاری با اکوسیستم Nest |
+| Mock پایگاه داده | سریع، بدون Docker | **رفتارهایی که باگ می‌سازند را نمی‌بیند** | Trigger، قفل ردیف و Index جزئی فقط در PostgreSQL واقعی ظاهر می‌شوند |
+| SQLite در تست | سریع‌تر از Container | رفتار متفاوت؛ بدون PostGIS و بدون Trigger مشابه | تست کردن چیزی که Production نیست |
+| Cypress | محبوب | کندتر؛ پشتیبانی چندمرورگر ضعیف‌تر | Playwright بهتر است |
+
+## Consequences
+
+**مثبت**
+
+- @swc/jest دکوراتورها را ده‌ها برابر سریع‌تر از ts-jest ترجمه می‌کند
+- Testcontainers رفتار واقعی پایگاه داده را تست می‌کند، نه یک تقریب
+- یکنواختی ابزار در کل Monorepo
+
+**منفی**
+
+- Testcontainers به Docker نیاز دارد → تست یکپارچگی روی هر ماشینی اجرا نمی‌شود
+- راه‌اندازی Container چند ثانیه به هر Suite اضافه می‌کند
+- @swc/jest نوع را بررسی نمی‌کند (`tsc --noEmit` جدا لازم است)
+
+## Compliance
+
+**تست‌های اجباری که هرگز Skip نمی‌شوند:**
+
+1. **Tenant Isolation** — به‌ازای هر سرویس دارای داده مستأجر
+2. **Authorization Matrix** — هر نقش، هر Endpoint حساس، مثبت و منفی
+3. **Financial Integrity** — توازن Journal، تغییرناپذیری، همزمانی، Idempotency
+4. **Idempotency** — هر Endpoint مالی و هر Consumer رویداد
+
+**شکست هرکدام = شکست Build.** هیچ‌کدام به‌عنوان «تست شکننده» نادیده گرفته نمی‌شوند —
+هرکدام یک نشتی داده یا یک باگ مالی را نشان می‌دهد.
+
+**آستانه پوشش:** `economic` و `identity` ≥ ۹۰٪ · `construction` ≥ ۸۵٪ ·
+`packages` ≥ ۸۵٪ · بقیه ≥ ۷۵٪.
+
+پوشش هدف است، نه معیار موفقیت. ۱۰۰٪ پوشش با Assertهای بی‌معنا بدتر از ۷۰٪ معنادار است.
