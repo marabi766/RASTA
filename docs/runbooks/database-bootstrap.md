@@ -151,3 +151,42 @@ GRANT ALL PRIVILEGES ON DATABASE rasta_newservice TO rasta_newservice;
 هر سرویس **فقط** با اعتبارنامه خودش به پایگاه داده خودش وصل می‌شود.
 اگر سرویسی از اعتبارنامه Superuser استفاده کند، مرز ADR-005 شکسته است — این باید در
 بازبینی کد گرفته شود.
+
+---
+
+## پورت میزبان: ۵۴۳۳ نه ۵۴۳۲
+
+Rasta پایگاه داده خود را روی **پورت ۵۴۳۳** میزبان نگاشت می‌کند.
+
+**چرا؟** داشتن یک PostgreSQL نصب‌شده روی خود ویندوز/لینوکس که پورت ۵۴۳۲ را گرفته
+باشد، روی ماشین توسعه‌دهنده رایج است. تعارض **بی‌صدا** است: Docker همچنان بالا
+می‌آید (چون فقط روی IPv6 Bind می‌شود) اما اتصال از میزبان به **سرور اشتباه**
+می‌رسد. علامت آن یک خطای گمراه‌کننده است:
+
+```
+P1000: Authentication failed against database server,
+the provided database credentials for `rasta_identity` are not valid.
+```
+
+اعتبارنامه درست است؛ سرور اشتباه است.
+
+### تشخیص
+
+```bash
+# ویندوز
+netstat -ano | findstr :5432
+# لینوکس / مک
+sudo lsof -i :5432
+```
+
+اگر فرایندی غیر از `com.docker.backend` دیده شد، همین تعارض است.
+
+### تأیید اینکه به Container وصل شده‌اید
+
+```bash
+docker exec rasta-postgres psql -U rasta -d postgres -tAc "SHOW port"
+```
+
+### تغییر پورت
+
+`POSTGRES_PORT` در `.env` و همه `DATABASE_URL_*`ها را هماهنگ تغییر دهید.

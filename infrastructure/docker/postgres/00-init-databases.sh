@@ -42,9 +42,13 @@ for svc in "${SERVICES[@]}"; do
   role="rasta_${svc}"
   db="rasta_${svc}"
 
+  # CREATEDB is granted for local development only: `prisma migrate dev`
+  # provisions a temporary shadow database to diff against. Production applies
+  # migrations with `prisma migrate deploy`, which needs no shadow database and
+  # therefore no such privilege — and never runs this script.
   psql_exec postgres "DO \$\$ BEGIN
       IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${role}') THEN
-        CREATE ROLE ${role} LOGIN PASSWORD '${SERVICE_PASSWORD}';
+        CREATE ROLE ${role} LOGIN CREATEDB PASSWORD '${SERVICE_PASSWORD}';
       END IF;
     END \$\$;"
 

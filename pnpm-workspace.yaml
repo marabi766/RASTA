@@ -14,3 +14,6 @@ allowBuilds:
   prisma: true
   protobufjs: true
   sharp: true
+  # Analytics beacon pulled in transitively. Denied deliberately:
+  # this repository does not phone home at install time.
+  '@scarf/scarf': false
