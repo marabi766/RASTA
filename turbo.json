@@ -1,0 +1,26 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "ui": "stream",
+  "globalDependencies": ["tsconfig.base.json", ".env"],
+  "globalEnv": ["NODE_ENV", "CI"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+    },
+    "db:generate": {
+      "cache": false,
+      "outputs": ["node_modules/.prisma/**", "src/generated/**"]
+    },
+    "db:migrate": { "cache": false, "persistent": false },
+    "db:seed": { "cache": false, "persistent": false },
+    "typecheck": { "dependsOn": ["^build", "db:generate"], "outputs": [] },
+    "lint": { "dependsOn": ["^build"], "outputs": [] },
+    "test": { "dependsOn": ["^build", "db:generate"], "outputs": ["coverage/**"] },
+    "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
+    "test:integration": { "cache": false, "dependsOn": ["^build"] },
+    "test:e2e": { "cache": false, "dependsOn": ["^build"] },
+    "dev": { "cache": false, "persistent": true },
+    "clean": { "cache": false }
+  }
+}
