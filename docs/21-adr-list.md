@@ -1,0 +1,132 @@
+# ۲۱ — ADR List
+
+> هر تصمیم معماری مهم یک ADR دارد با ساختار ثابت: **Context · Decision · Alternatives ·
+> Consequences · Status**. متن کامل در [`adr/`](adr/).
+>
+> **قاعده.** تغییر Stack یا مرز معماری **فقط** با نوشتن ADR جدید مجاز است.
+> تغییر بی‌ADR، بدهی معماری است و باید برگردانده شود.
+
+---
+
+## فهرست
+
+| ADR                                     | عنوان                                  | وضعیت    | تأثیر                                    |
+| --------------------------------------- | -------------------------------------- | -------- | ---------------------------------------- |
+| [001](adr/ADR-001-microservices.md)     | معماری Microservices                   | Accepted | ساختار کل سیستم                          |
+| [002](adr/ADR-002-backend-stack.md)     | TypeScript + NestJS                    | Accepted | همه سرویس‌ها                             |
+| [003](adr/ADR-003-frontend-stack.md)    | Next.js + React + Tailwind             | Accepted | هر دو Frontend                           |
+| [004](adr/ADR-004-database.md)          | PostgreSQL + PostGIS + Prisma          | Accepted | لایه داده                                |
+| [005](adr/ADR-005-database-ownership.md)| مالکیت پایگاه داده به‌ازای سرویس       | Accepted | **قاعده بنیادین**                        |
+| [006](adr/ADR-006-kafka.md)             | Kafka به‌عنوان Event Backbone          | Accepted | همه ارتباط ناهمزمان                      |
+| [007](adr/ADR-007-redis.md)             | Redis برای Cache، قفل و Rate Limit     | Accepted | کارایی و همزمانی                         |
+| [008](adr/ADR-008-identity-keycloak.md) | Keycloak + OIDC/OAuth2                 | Accepted | احراز هویت                               |
+| [009](adr/ADR-009-api-gateway.md)       | API Gateway اختصاصی NestJS             | Accepted | **انحراف آگاهانه از Kong/APISIX**        |
+| [010](adr/ADR-010-workflow-temporal.md) | Temporal برای گردش‌کار                 | Accepted | فرآیندهای بلندمدت                        |
+| [011](adr/ADR-011-multi-tenancy.md)     | راهبرد Multi-Tenancy                   | Accepted | **قاعده بنیادین امنیتی**                 |
+| [012](adr/ADR-012-asset-centric.md)     | مدل Asset-Centric و شناسه سراسری       | Accepted | **قاعده بنیادین دامنه**                  |
+| [013](adr/ADR-013-wallet-ledger.md)     | تفکیک Wallet و Ledger؛ یک economic-service | Accepted | **یکپارچگی مالی**                    |
+| [014](adr/ADR-014-object-storage.md)    | Object Storage سازگار با S3            | Accepted | مدیریت اسناد                             |
+| [015](adr/ADR-015-kubernetes.md)        | Kubernetes + Helm                      | Accepted | استقرار Production                       |
+| [016](adr/ADR-016-search.md)            | OpenSearch برای جست‌وجو                | Accepted | جست‌وجوی چندوجهی                         |
+| [017](adr/ADR-017-observability.md)     | OpenTelemetry + Prometheus + Grafana   | Accepted | مشاهده‌پذیری                             |
+| [018](adr/ADR-018-monorepo.md)          | Monorepo با pnpm + Turborepo           | Accepted | ساختار Repository                        |
+| [019](adr/ADR-019-testing-stack.md)     | Jest + @swc/jest + Testcontainers + Playwright | Accepted | راهبرد تست                       |
+| [020](adr/ADR-020-service-to-service-auth.md) | احراز هویت سرویس‌به‌سرویس و Zero Trust | Accepted | امنیت داخلی                        |
+| [021](adr/ADR-021-outbox-pattern.md)    | Transactional Outbox                   | Accepted | **تضمین تحویل رویداد**                   |
+| [022](adr/ADR-022-money-representation.md) | نمایش پول با bigint و Basis Point   | Accepted | **دقت مالی**                             |
+| [023](adr/ADR-023-configurable-governance.md) | حکمرانی پیکربندی‌پذیر            | Accepted | **CONSTRAINT حقوقی سند محصول**           |
+| [024](adr/ADR-024-payment-abstraction.md) | Abstraction پرداخت و Mock Provider   | Accepted | **CONSTRAINT مقرراتی سند محصول**         |
+
+---
+
+## خلاصه تصمیم‌ها
+
+### ADR-001 — Microservices از روز اول
+
+**چرا نه Modular Monolith؟** مرز داده‌ای در Monolith عملاً هرگز رعایت نمی‌شود؛ یک `JOIN`
+بی‌ضرر امروز، یک وابستگی غیرقابل جدا کردن فرداست. اصلاح بعدی گران‌تر از هزینه اولیه است.
+Microservices اینجا برای مقیاس محاسباتی انتخاب نشده — برای **مرزبندی داده و تیم**.
+
+### ADR-005 — مالکیت پایگاه داده به‌ازای سرویس
+
+هیچ جدول مشترکی. هیچ Join میان‌سرویسی. در MVP یک Cluster با ۱۶ پایگاه داده منطقی و
+**نقش اختصاصی به‌ازای هر سرویس**؛ جداسازی فیزیکی یک تصمیم استقرار است، نه معماری.
+
+### ADR-009 — API Gateway اختصاصی به‌جای Kong/APISIX
+
+Gateway رستا باید `activeOrganizationId` را از عضویت‌های کاربر حل کند و Scope مستأجر را
+پیش از مسیریابی اعمال کند. پیاده‌سازی این در Plugin، منطق دامنه را به لایه زیرساخت می‌برد.
+**در Production یک Edge Gateway (Kong/APISIX) برای TLS، WAF و Rate Limit سراسری جلوی آن
+می‌نشیند** — دو نقش مکمل.
+
+### ADR-011 — Multi-Tenancy
+
+جداسازی در شش لایه: API، Application، Database، Authorization، Cache، Event.
+MVP: تضمین در لایه Application با Repository پایه + تست جداسازی به‌ازای هر سرویس.
+Production: **Row-Level Security** به‌عنوان لایه دوم دفاعی.
+
+### ADR-012 — Asset-Centric
+
+`AssetId` هویت پایدار است و **هرگز** به یزد، دهیاری یا سازمان مالک وابسته نیست.
+مالکیت یک رابطه است که تغییر می‌کند؛ هویت نیست. شناسه‌ها ULID با پیشوند نوع.
+
+### ADR-013 — Wallet ≠ Ledger؛ یک economic-service
+
+دفتر کل مرجع حقیقت است: دوطرفه، تغییرناپذیر (با Trigger پایگاه داده)، اصلاح فقط با
+Reversal. کیف پول نمای عملیاتی است. **پنج ماژول در یک سرویس** چون یک مرز تراکنشی مشترک
+دارند — تقسیم آن‌ها یک Saga پنج‌مرحله‌ای مالی می‌سازد، نه یک مزیت مقیاس.
+
+### ADR-021 — Transactional Outbox
+
+هیچ رویدادی مستقیماً منتشر نمی‌شود. تغییر وضعیت و درج Outbox در یک تراکنش؛ Relay جداگانه
+منتشر می‌کند. تضمین At-Least-Once + مصرف‌کننده Idempotent.
+**نتیجه جانبی مهم:** از دست رفتن Kafka باعث از دست رفتن رویداد نمی‌شود.
+
+### ADR-022 — نمایش پول
+
+`bigint` در واحد فرعی؛ در JSON رشته؛ نرخ‌ها بر حسب Basis Point صحیح؛ گرد کردن نیم به بالا
+با تابع مشترک. `float` برای پول ممنوع.
+
+### ADR-023 — حکمرانی پیکربندی‌پذیر
+
+**CONSTRAINT مستقیم سند محصول:** پلتفرم «هیچ اختیار یا مرجع تصمیم‌گیری تازه‌ای ایجاد
+نمی‌کند». بنابراین مرجع موافقت، سطوح اختیار، ماهیت حقوقی فرآیند تأمین، وزن معیارهای
+ارزیابی و نرخ کارمزد — **همه داده‌اند، نه کد**.
+
+### ADR-024 — Abstraction پرداخت
+
+**CONSTRAINT مستقیم سند محصول:** اجرای واقعی کیف پول و پرداخت مشروط به تأیید الزامات
+بانکی و مقرراتی است. `PaymentProvider` یک Interface است؛ MVP از `MockPaymentProvider`
+استفاده می‌کند. **هیچ ادعایی درباره اتصال بانکی واقعی — در کد، UI، مستند یا Demo.**
+
+---
+
+## قالب ADR
+
+```markdown
+# ADR-0XX: <عنوان>
+
+- **وضعیت:** Proposed | Accepted | Deprecated | Superseded by ADR-0YY
+- **تاریخ:** YYYY-MM-DD
+- **تصمیم‌گیرنده:** <نقش>
+
+## Context
+چه مسئله‌ای؟ چه محدودیت‌هایی؟ چه چیزی این تصمیم را لازم کرد؟
+
+## Decision
+دقیقاً چه تصمیمی گرفته شد. با فعل قطعی، نه احتمالی.
+
+## Alternatives Considered
+| گزینه | مزیت | عیب | چرا رد شد |
+
+## Consequences
+**مثبت:** …
+**منفی:** … (صادقانه — هر تصمیمی هزینه دارد)
+**خنثی:** …
+
+## Compliance
+چطور اجرای این تصمیم تأیید می‌شود؟ (قاعده ESLint، تست، بازبینی)
+```
+
+**قاعده.** بخش «Consequences منفی» **نباید خالی باشد**. تصمیمی که هیچ هزینه‌ای ندارد،
+احتمالاً به‌درستی بررسی نشده است.
