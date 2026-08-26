@@ -1,0 +1,31 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: rasta-local
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ['otel-collector:8889']
+
+  - job_name: keycloak
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['keycloak:9000']
+
+  # Rasta services expose /metrics on their own HTTP port. host.docker.internal
+  # lets the container reach services running on the developer's host.
+  - job_name: rasta-services
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 'host.docker.internal:3000'
+          - 'host.docker.internal:3101'
+          - 'host.docker.internal:3102'
+        labels:
+          environment: local

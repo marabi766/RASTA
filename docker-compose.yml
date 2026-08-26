@@ -1,0 +1,315 @@
+# =============================================================================
+# Rasta — local development infrastructure
+#
+#   docker compose up -d                           core stack (default)
+#   docker compose --profile search up -d          + OpenSearch
+#   docker compose --profile observability up -d   + OTel / Prometheus / Grafana
+#   docker compose --profile tools up -d           + Kafka UI, Temporal UI, Mailpit
+#   docker compose --profile all up -d             everything
+#
+# Every credential below is a throwaway development value (see .env.example).
+# =============================================================================
+
+name: rasta
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  # ----------------------------------------------------------------- database
+  postgres:
+    <<: *restart
+    image: postgis/postgis:16-3.4
+    container_name: rasta-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:-rasta}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-rasta_dev_password}
+      POSTGRES_DB: postgres
+      POSTGRES_SERVICE_PASSWORD: ${POSTGRES_SERVICE_PASSWORD:-rasta_service_dev_password}
+      LANG: C.UTF-8
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/docker/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_SUPERUSER:-rasta} -d postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # -------------------------------------------------------------------- cache
+  redis:
+    <<: *restart
+    image: redis:7.4-alpine
+    container_name: rasta-redis
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------- event backbone
+  kafka:
+    <<: *restart
+    image: bitnami/kafka:3.9
+    container_name: rasta-kafka
+    environment:
+      # KRaft, single node (controller + broker). Production runs a 3-node
+      # quorum — see docs/deployment/README.md.
+      KAFKA_CFG_NODE_ID: '1'
+      KAFKA_CFG_PROCESS_ROLES: 'controller,broker'
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
+      KAFKA_CFG_LISTENERS: 'PLAINTEXT://:9094,CONTROLLER://:9093,EXTERNAL://:9092'
+      KAFKA_CFG_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9094,EXTERNAL://localhost:9092'
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT'
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_CFG_LOG_RETENTION_HOURS: '168'
+      ALLOW_PLAINTEXT_LISTENER: 'yes'
+    ports:
+      - '9092:9092'
+    volumes:
+      - kafka-data:/bitnami/kafka
+    healthcheck:
+      test: ['CMD-SHELL', 'kafka-topics.sh --bootstrap-server localhost:9094 --list || exit 1']
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 40s
+
+  # Creates the platform topics once, then exits. Auto-creation is disabled on
+  # the broker: an unknown topic is a contract violation, not a typo to absorb.
+  kafka-init:
+    image: bitnami/kafka:3.9
+    container_name: rasta-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./infrastructure/docker/kafka/create-topics.sh:/create-topics.sh:ro
+    entrypoint: ['/bin/bash', '/create-topics.sh']
+    restart: 'no'
+
+  # ----------------------------------------------------------------- identity
+  keycloak:
+    <<: *restart
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: rasta-keycloak
+    command: ['start-dev', '--import-realm']
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin_dev_password}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: ${POSTGRES_SUPERUSER:-rasta}
+      KC_DB_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-rasta_dev_password}
+      KC_HTTP_ENABLED: 'true'
+      KC_HOSTNAME_STRICT: 'false'
+      KC_HEALTH_ENABLED: 'true'
+      KC_METRICS_ENABLED: 'true'
+    ports:
+      - '8080:8080'
+      - '9003:9000'
+    volumes:
+      - ./infrastructure/docker/keycloak:/opt/keycloak/data/import:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # The Keycloak image ships no curl/wget; talk to the management port
+      # through bash's own /dev/tcp.
+      test:
+        - CMD-SHELL
+        - "exec 3<>/dev/tcp/127.0.0.1/9000; printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3; grep -q UP <&3"
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # ------------------------------------------------------------ object storage
+  minio:
+    <<: *restart
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: rasta-minio
+    command: ['server', '/data', '--console-address', ':9001']
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-rasta_minio_admin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-rasta_minio_dev_password}
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    container_name: rasta-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set rasta http://minio:9000 "${S3_ACCESS_KEY:-rasta_minio_admin}" "${S3_SECRET_KEY:-rasta_minio_dev_password}"
+        mc mb --ignore-existing "rasta/${S3_BUCKET_DOCUMENTS:-rasta-documents}"
+        mc anonymous set none "rasta/${S3_BUCKET_DOCUMENTS:-rasta-documents}"
+        echo 'MinIO buckets ready'
+    restart: 'no'
+
+  # --------------------------------------------------------- workflow engine
+  temporal:
+    <<: *restart
+    image: temporalio/auto-setup:1.26.2
+    container_name: rasta-temporal
+    environment:
+      DB: postgres12
+      DB_PORT: '5432'
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:-rasta}
+      POSTGRES_PWD: ${POSTGRES_SUPERUSER_PASSWORD:-rasta_dev_password}
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+    ports:
+      - '7233:7233'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'temporal', 'operator', 'cluster', 'health', '--address', 'localhost:7233']
+      interval: 15s
+      timeout: 10s
+      retries: 15
+      start_period: 45s
+
+  temporal-ui:
+    <<: *restart
+    image: temporalio/ui:2.34.0
+    container_name: rasta-temporal-ui
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3200
+    ports:
+      - '8088:8080'
+    depends_on:
+      - temporal
+    profiles: ['tools', 'all']
+
+  # ------------------------------------------------------------------ search
+  opensearch:
+    <<: *restart
+    image: opensearchproject/opensearch:2.18.0
+    container_name: rasta-opensearch
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: 'true'
+      OPENSEARCH_JAVA_OPTS: '-Xms512m -Xmx512m'
+      DISABLE_SECURITY_PLUGIN: 'true'
+      DISABLE_INSTALL_DEMO_CONFIG: 'true'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - '9200:9200'
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    profiles: ['search', 'all']
+
+  # ----------------------------------------------------------- observability
+  otel-collector:
+    <<: *restart
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    container_name: rasta-otel-collector
+    command: ['--config=/etc/otel/config.yaml']
+    volumes:
+      - ./infrastructure/docker/otel/config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - '4317:4317'
+      - '4318:4318'
+      - '8889:8889'
+    profiles: ['observability', 'all']
+
+  prometheus:
+    <<: *restart
+    image: prom/prometheus:v3.1.0
+    container_name: rasta-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=7d'
+    volumes:
+      - ./infrastructure/docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - '9090:9090'
+    profiles: ['observability', 'all']
+
+  grafana:
+    <<: *restart
+    image: grafana/grafana:11.5.1
+    container_name: rasta-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin_dev_password
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    volumes:
+      - ./infrastructure/docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - '3001:3000'
+    depends_on:
+      - prometheus
+    profiles: ['observability', 'all']
+
+  # --------------------------------------------------------------- dev tools
+  kafka-ui:
+    <<: *restart
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: rasta-kafka-ui
+    environment:
+      KAFKA_CLUSTERS_0_NAME: rasta-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9094
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    ports:
+      - '8081:8080'
+    depends_on:
+      kafka:
+        condition: service_healthy
+    profiles: ['tools', 'all']
+
+  mailpit:
+    <<: *restart
+    image: axllent/mailpit:v1.22
+    container_name: rasta-mailpit
+    ports:
+      - '1025:1025'
+      - '8025:8025'
+    profiles: ['tools', 'all']
+
+volumes:
+  postgres-data:
+  redis-data:
+  kafka-data:
+  minio-data:
+  opensearch-data:
+  prometheus-data:
+  grafana-data:
