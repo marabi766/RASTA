@@ -5,7 +5,9 @@
   "description": "Structured logging with redaction and correlation. No business logic.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rimraf dist .turbo",
@@ -32,6 +34,8 @@
     "pino-pretty": "^13.0.0"
   },
   "peerDependenciesMeta": {
-    "pino-pretty": { "optional": true }
+    "pino-pretty": {
+      "optional": true
+    }
   }
 }

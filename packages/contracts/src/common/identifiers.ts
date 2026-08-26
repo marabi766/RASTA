@@ -86,7 +86,10 @@ export function prefixedIdSchema(prefix: IdPrefix) {
 
 /** Accepts either a real prefixed ULID or a readable seed identifier. */
 export function seedIdSchema(prefix: IdPrefix) {
-  return z.union([prefixedIdSchema(prefix), z.string().regex(new RegExp(`^${prefix}-[A-Z0-9-]{1,48}$`))]);
+  return z.union([
+    prefixedIdSchema(prefix),
+    z.string().regex(new RegExp(`^${prefix}-[A-Z0-9-]{1,48}$`)),
+  ]);
 }
 
 function splitOnce(value: string, separator: string): [string, string | undefined] {

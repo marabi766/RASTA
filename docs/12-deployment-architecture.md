@@ -10,24 +10,24 @@
 
 ## ۱۲٫۱ محیط‌ها
 
-| محیط            | هدف                                   | داده                        | استقرار                  |
-| --------------- | ------------------------------------- | --------------------------- | ------------------------ |
-| **Development** | توسعه محلی                            | Seed نمایشی                 | Docker Compose + `pnpm dev` |
-| **Test / CI**   | تست خودکار                            | Fixture یک‌بارمصرف          | Testcontainers، افمرال   |
-| **Staging**     | تأیید پیش از انتشار، Demo             | داده مصنوعی شبیه Production | Kubernetes، خودکار از `main` |
-| **Production**  | بهره‌برداری واقعی                     | داده واقعی                  | Kubernetes، دستی با تأیید |
+| محیط            | هدف                       | داده                        | استقرار                      |
+| --------------- | ------------------------- | --------------------------- | ---------------------------- |
+| **Development** | توسعه محلی                | Seed نمایشی                 | Docker Compose + `pnpm dev`  |
+| **Test / CI**   | تست خودکار                | Fixture یک‌بارمصرف          | Testcontainers، افمرال       |
+| **Staging**     | تأیید پیش از انتشار، Demo | داده مصنوعی شبیه Production | Kubernetes، خودکار از `main` |
+| **Production**  | بهره‌برداری واقعی         | داده واقعی                  | Kubernetes، دستی با تأیید    |
 
-| ویژگی               | Development | Staging       | Production            |
-| ------------------- | ----------- | ------------- | --------------------- |
-| Replica هر سرویس    | ۱           | ۱             | ۲–۳                   |
-| TLS خارجی           | ❌          | ✅            | ✅                    |
-| mTLS داخلی          | ❌          | ✅            | ✅                    |
-| MFA                 | اختیاری     | اختیاری       | **اجباری برای نقش‌های حساس** |
-| Rate Limit          | سست         | Production    | Production            |
-| Backup              | ندارد       | روزانه        | PITR + روزانه         |
-| پرداخت              | Mock        | Mock          | **OPEN QUESTION**     |
-| Log Level           | debug       | info          | info                  |
-| نمونه‌برداری Trace  | ۱۰۰٪        | ۱۰۰٪          | ۱۰٪ + ۱۰۰٪ خطاها      |
+| ویژگی              | Development | Staging    | Production                   |
+| ------------------ | ----------- | ---------- | ---------------------------- |
+| Replica هر سرویس   | ۱           | ۱          | ۲–۳                          |
+| TLS خارجی          | ❌          | ✅         | ✅                           |
+| mTLS داخلی         | ❌          | ✅         | ✅                           |
+| MFA                | اختیاری     | اختیاری    | **اجباری برای نقش‌های حساس** |
+| Rate Limit         | سست         | Production | Production                   |
+| Backup             | ندارد       | روزانه     | PITR + روزانه                |
+| پرداخت             | Mock        | Mock       | **OPEN QUESTION**            |
+| Log Level          | debug       | info       | info                         |
+| نمونه‌برداری Trace | ۱۰۰٪        | ۱۰۰٪       | ۱۰٪ + ۱۰۰٪ خطاها             |
 
 ---
 
@@ -136,7 +136,7 @@ spec:
   replicas: 2
   strategy:
     type: RollingUpdate
-    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }   # بدون قطعی
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } # بدون قطعی
   template:
     spec:
       serviceAccountName: asset-service
@@ -153,13 +153,13 @@ spec:
             capabilities: { drop: ['ALL'] }
           resources:
             requests: { cpu: 100m, memory: 256Mi }
-            limits:   { cpu: 500m, memory: 512Mi }
-          startupProbe:   { httpGet: { path: /health/startup, port: 3103 }, failureThreshold: 30, periodSeconds: 5 }
-          livenessProbe:  { httpGet: { path: /health/live,    port: 3103 }, periodSeconds: 15 }
-          readinessProbe: { httpGet: { path: /health/ready,   port: 3103 }, periodSeconds: 10 }
+            limits: { cpu: 500m, memory: 512Mi }
+          startupProbe: { httpGet: { path: /health/startup, port: 3103 }, failureThreshold: 30, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /health/live, port: 3103 }, periodSeconds: 15 }
+          readinessProbe: { httpGet: { path: /health/ready, port: 3103 }, periodSeconds: 10 }
           envFrom:
             - configMapRef: { name: asset-service-config }
-            - secretRef:    { name: asset-service-secrets }
+            - secretRef: { name: asset-service-secrets }
 ```
 
 **`maxUnavailable: 0`** تضمین می‌کند در حین به‌روزرسانی همیشه ظرفیت کامل در دسترس است.
@@ -244,14 +244,14 @@ Push / Pull Request
 
 **دروازه‌های سخت — بدون امکان دور زدن:**
 
-| دروازه                        | سیاست                                              |
-| ----------------------------- | -------------------------------------------------- |
-| **تست Tenant Isolation**      | هر شکست = شکست Build. هرگز `--skip`.               |
-| **تست مجوزدهی**               | هر شکست = شکست Build.                              |
-| **تست یکپارچگی مالی**         | هر شکست = شکست Build.                              |
-| **اسکن Secret**               | هر یافته = شکست.                                   |
-| **آسیب‌پذیری Critical**       | شکست.                                              |
-| **Coverage**                  | افت بیش از ۲٪ نسبت به `main` = هشدار؛ زیر آستانه سرویس = شکست |
+| دروازه                   | سیاست                                                         |
+| ------------------------ | ------------------------------------------------------------- |
+| **تست Tenant Isolation** | هر شکست = شکست Build. هرگز `--skip`.                          |
+| **تست مجوزدهی**          | هر شکست = شکست Build.                                         |
+| **تست یکپارچگی مالی**    | هر شکست = شکست Build.                                         |
+| **اسکن Secret**          | هر یافته = شکست.                                              |
+| **آسیب‌پذیری Critical**  | شکست.                                                         |
+| **Coverage**             | افت بیش از ۲٪ نسبت به `main` = هشدار؛ زیر آستانه سرویس = شکست |
 
 ### Deploy به Production
 
@@ -273,11 +273,11 @@ Tag روی main (v0.x.y)
 
 ## ۱۲٫۶ پیکربندی و Secret
 
-| نوع                          | مکانیزم                       |
-| ---------------------------- | ----------------------------- |
-| غیرحساس (Feature Flag، URL)  | ConfigMap                     |
-| حساس (رمز، کلید، توکن)       | Secret از External Secrets Operator |
-| پویا در زمان اجرا            | جدول پیکربندی در پایگاه داده سرویس مالک |
+| نوع                         | مکانیزم                                 |
+| --------------------------- | --------------------------------------- |
+| غیرحساس (Feature Flag، URL) | ConfigMap                               |
+| حساس (رمز، کلید، توکن)      | Secret از External Secrets Operator     |
+| پویا در زمان اجرا           | جدول پیکربندی در پایگاه داده سرویس مالک |
 
 **CONSTRAINT.** هیچ Secret واقعی در Repository، در Image، در Log یا در پیام Commit.
 همه اعتبارنامه‌ها از محیط تزریق می‌شوند تا چرخش کلید بدون تغییر کد ممکن باشد.
@@ -288,22 +288,22 @@ Tag روی main (v0.x.y)
 
 ### هدف‌ها
 
-| سرویس                        | RPO       | RTO      | دلیل                                      |
-| ---------------------------- | --------- | -------- | ----------------------------------------- |
-| `economic` · `audit`         | **۵ دقیقه** | **۱ ساعت** | داده مالی و حسابرسی — از دست رفتن غیرقابل قبول |
-| `identity` · `organization`  | ۱۵ دقیقه  | ۲ ساعت   | بدون آن‌ها هیچ‌چیز کار نمی‌کند             |
-| بقیه سرویس‌های دامنه         | ۱ ساعت    | ۴ ساعت   | قابل بازسازی جزئی از رویدادها             |
-| Object Storage               | ۲۴ ساعت   | ۴ ساعت   | Versioning + Replication میان‌منطقه‌ای    |
+| سرویس                       | RPO         | RTO        | دلیل                                           |
+| --------------------------- | ----------- | ---------- | ---------------------------------------------- |
+| `economic` · `audit`        | **۵ دقیقه** | **۱ ساعت** | داده مالی و حسابرسی — از دست رفتن غیرقابل قبول |
+| `identity` · `organization` | ۱۵ دقیقه    | ۲ ساعت     | بدون آن‌ها هیچ‌چیز کار نمی‌کند                 |
+| بقیه سرویس‌های دامنه        | ۱ ساعت      | ۴ ساعت     | قابل بازسازی جزئی از رویدادها                  |
+| Object Storage              | ۲۴ ساعت     | ۴ ساعت     | Versioning + Replication میان‌منطقه‌ای         |
 
 ### راهبرد
 
-| مورد                | MVP                       | Production                                   |
-| ------------------- | ------------------------- | -------------------------------------------- |
-| Backup کامل         | `pg_dump` روزانه، محلی    | روزانه به Object Storage، رمزنگاری‌شده       |
-| Point-in-Time       | ندارد                     | WAL Archiving مستمر                          |
-| Kafka               | ندارد                     | RF=3 + Backup Topic حسابرسی                  |
-| Object Storage      | ندارد                     | Versioning + Replication                     |
-| **تست Restore**     | دستی                      | **ماهانه، خودکار، با گزارش**                 |
+| مورد            | MVP                    | Production                             |
+| --------------- | ---------------------- | -------------------------------------- |
+| Backup کامل     | `pg_dump` روزانه، محلی | روزانه به Object Storage، رمزنگاری‌شده |
+| Point-in-Time   | ندارد                  | WAL Archiving مستمر                    |
+| Kafka           | ندارد                  | RF=3 + Backup Topic حسابرسی            |
+| Object Storage  | ندارد                  | Versioning + Replication               |
+| **تست Restore** | دستی                   | **ماهانه، خودکار، با گزارش**           |
 
 **CONSTRAINT.** یک Backup که Restore آن تست نشده، Backup نیست.
 تست Restore ماهانه شامل: بازیابی کامل در محیط جدا، اجرای Migration، اجرای تست یکپارچگی
@@ -314,15 +314,15 @@ Runbookها: [`runbooks/restore-database.md`](runbooks/restore-database.md) ·
 
 ### سناریوهای فاجعه
 
-| سناریو                            | پاسخ                                                                |
-| --------------------------------- | ------------------------------------------------------------------- |
-| از دست رفتن یک Pod                | Kubernetes بازسازی می‌کند؛ بدون اثر (چند Replica)                   |
-| از دست رفتن یک گره                | زمان‌بند Podها را جابه‌جا می‌کند                                    |
-| خرابی Primary پایگاه داده         | ارتقای Standby؛ RTO ≈ دقایق                                         |
-| از دست رفتن کامل پایگاه داده      | Restore از PITR؛ RTO طبق جدول بالا                                  |
-| از دست رفتن Cluster کافکا         | رویدادهای منتشرنشده در `outbox` می‌مانند و پس از بازیابی منتشر می‌شوند — **هیچ رویدادی گم نمی‌شود** |
-| از دست رفتن کامل منطقه            | DR Site (**OPEN QUESTION** — تصمیم زیرساختی)                        |
-| نشت Secret                        | چرخش فوری؛ [`runbooks/secret-leak.md`](runbooks/secret-leak.md)     |
+| سناریو                       | پاسخ                                                                                                |
+| ---------------------------- | --------------------------------------------------------------------------------------------------- |
+| از دست رفتن یک Pod           | Kubernetes بازسازی می‌کند؛ بدون اثر (چند Replica)                                                   |
+| از دست رفتن یک گره           | زمان‌بند Podها را جابه‌جا می‌کند                                                                    |
+| خرابی Primary پایگاه داده    | ارتقای Standby؛ RTO ≈ دقایق                                                                         |
+| از دست رفتن کامل پایگاه داده | Restore از PITR؛ RTO طبق جدول بالا                                                                  |
+| از دست رفتن Cluster کافکا    | رویدادهای منتشرنشده در `outbox` می‌مانند و پس از بازیابی منتشر می‌شوند — **هیچ رویدادی گم نمی‌شود** |
+| از دست رفتن کامل منطقه       | DR Site (**OPEN QUESTION** — تصمیم زیرساختی)                                                        |
+| نشت Secret                   | چرخش فوری؛ [`runbooks/secret-leak.md`](runbooks/secret-leak.md)                                     |
 
 **نکته مهم درباره Outbox.** چون رویدادها ابتدا در پایگاه داده (جدول `outbox_message`)
 ثبت می‌شوند و بعد منتشر، از دست رفتن Kafka باعث از دست رفتن رویداد نمی‌شود — فقط تأخیر.
@@ -332,13 +332,13 @@ Runbookها: [`runbooks/restore-database.md`](runbooks/restore-database.md) ·
 
 ## ۱۲٫۸ راهبرد Rollback
 
-| مورد                    | Rollback                                                          |
-| ----------------------- | ----------------------------------------------------------------- |
-| کد سرویس                | `helm rollback` — خودکار با `--atomic` در صورت شکست Health Check   |
+| مورد                    | Rollback                                                              |
+| ----------------------- | --------------------------------------------------------------------- |
+| کد سرویس                | `helm rollback` — خودکار با `--atomic` در صورت شکست Health Check      |
 | Migration پایگاه داده   | **همیشه سازگار به عقب** → Rollback کد بدون Rollback Schema کار می‌کند |
-| Migration بازگشت‌ناپذیر | ممنوع در یک استقرار واحد؛ فقط با الگوی Expand/Contract             |
-| Feature ناقص            | Feature Flag (خاموش کردن بدون استقرار)                             |
-| Schema رویداد           | Producer هر دو نسخه را منتشر می‌کند تا همه Consumerها مهاجرت کنند  |
+| Migration بازگشت‌ناپذیر | ممنوع در یک استقرار واحد؛ فقط با الگوی Expand/Contract                |
+| Feature ناقص            | Feature Flag (خاموش کردن بدون استقرار)                                |
+| Schema رویداد           | Producer هر دو نسخه را منتشر می‌کند تا همه Consumerها مهاجرت کنند     |
 
 **CONSTRAINT.** یک استقرار که Rollback ندارد، استقرار نیست — یک قمار است.
 هر Migration یا `Down` دارد یا صریحاً به‌عنوان بازگشت‌ناپذیر مستند و جداگانه تأیید شده است.

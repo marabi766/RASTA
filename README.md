@@ -13,12 +13,12 @@
 
 رستا یک **پلتفرم اقتصادی چندمستأجری** است که چهار عملکرد را در یک زیرساخت واحد ادغام می‌کند:
 
-| عملکرد                       | شرح                                                                       |
-| ---------------------------- | ------------------------------------------------------------------------- |
-| **مدیریت ناوگان**            | پرونده الکترونیکی دارایی، کارکرد، نگهداری پیشگیرانه، تعمیرات، بیمه         |
-| **بازار و زنجیره تأمین**     | Marketplace تخصصی کالا و خدمات، تجمیع تقاضا، ارزیابی تأمین‌کننده           |
-| **مناقصات و عملیات عمرانی**  | «رستا عمران»: از ثبت نیاز تا مناقصه، قرارداد، صورت‌وضعیت و تسویه            |
-| **موتور اقتصادی**            | کیف پول، دفتر کل دوطرفه، کارمزد، پاداش و Gamification                      |
+| عملکرد                      | شرح                                                                |
+| --------------------------- | ------------------------------------------------------------------ |
+| **مدیریت ناوگان**           | پرونده الکترونیکی دارایی، کارکرد، نگهداری پیشگیرانه، تعمیرات، بیمه |
+| **بازار و زنجیره تأمین**    | Marketplace تخصصی کالا و خدمات، تجمیع تقاضا، ارزیابی تأمین‌کننده   |
+| **مناقصات و عملیات عمرانی** | «رستا عمران»: از ثبت نیاز تا مناقصه، قرارداد، صورت‌وضعیت و تسویه   |
+| **موتور اقتصادی**           | کیف پول، دفتر کل دوطرفه، کارمزد، پاداش و Gamification              |
 
 مدل ارتباطی پلتفرم **مستقیم** است: `اتحادیه ↔ پلتفرم ↔ کاربر نهایی` — بدون لایه واسطه اجباری.
 
@@ -34,13 +34,13 @@
 
 ### پیش‌نیازها
 
-| ابزار          | حداقل نسخه | بررسی                  |
-| -------------- | ---------- | ---------------------- |
-| Node.js        | 22 LTS     | `node -v`              |
-| pnpm           | 10         | `pnpm -v`              |
-| Docker Engine  | 24         | `docker --version`     |
+| ابزار          | حداقل نسخه | بررسی                    |
+| -------------- | ---------- | ------------------------ |
+| Node.js        | 22 LTS     | `node -v`                |
+| pnpm           | 10         | `pnpm -v`                |
+| Docker Engine  | 24         | `docker --version`       |
 | Docker Compose | v2         | `docker compose version` |
-| Git            | 2.40       | `git --version`        |
+| Git            | 2.40       | `git --version`          |
 
 حداقل منابع توصیه‌شده برای اجرای کامل Stack محلی: **۸ گیگابایت RAM آزاد** و **۲۰ گیگابایت** فضای دیسک.
 
@@ -67,17 +67,17 @@ pnpm dev
 
 پس از بالا آمدن:
 
-| سرویس            | آدرس                    | اطلاعات ورود                        |
-| ---------------- | ----------------------- | ----------------------------------- |
-| Web App          | http://localhost:3200   | `dehyari.admin` / `RastaDev!2026`   |
-| Admin Console    | http://localhost:3201   | `union.admin` / `RastaDev!2026`     |
-| API Gateway      | http://localhost:3000   | —                                   |
-| OpenAPI (Swagger)| http://localhost:3000/docs | —                                |
-| Keycloak         | http://localhost:8080   | `admin` / `admin_dev_password`      |
-| MinIO Console    | http://localhost:9001   | `rasta_minio_admin` / `rasta_minio_dev_password` |
-| Kafka UI         | http://localhost:8081   | `--profile tools`                   |
-| Temporal UI      | http://localhost:8088   | `--profile tools`                   |
-| Grafana          | http://localhost:3001   | `--profile observability`           |
+| سرویس             | آدرس                       | اطلاعات ورود                                     |
+| ----------------- | -------------------------- | ------------------------------------------------ |
+| Web App           | http://localhost:3200      | `dehyari.admin` / `RastaDev!2026`                |
+| Admin Console     | http://localhost:3201      | `union.admin` / `RastaDev!2026`                  |
+| API Gateway       | http://localhost:3000      | —                                                |
+| OpenAPI (Swagger) | http://localhost:3000/docs | —                                                |
+| Keycloak          | http://localhost:8080      | `admin` / `admin_dev_password`                   |
+| MinIO Console     | http://localhost:9001      | `rasta_minio_admin` / `rasta_minio_dev_password` |
+| Kafka UI          | http://localhost:8081      | `--profile tools`                                |
+| Temporal UI       | http://localhost:8088      | `--profile tools`                                |
+| Grafana           | http://localhost:3001      | `--profile observability`                        |
 
 > **همه اعتبارنامه‌های بالا صرفاً محلی و یک‌بارمصرف‌اند.** هیچ‌کدام در محیط واقعی استفاده نمی‌شوند —
 > رجوع کنید به [`docs/09-security-architecture.md`](docs/09-security-architecture.md).
@@ -182,15 +182,15 @@ identity  organization   asset       fleet    maintenance  marketplace  economic
 
 ## ۶. مستندات
 
-| موضوع                   | مسیر                                                              |
-| ----------------------- | ----------------------------------------------------------------- |
-| فهرست ۲۴ سند مهندسی     | [`docs/README.md`](docs/README.md)                                |
-| تصمیم‌های معماری (ADR)  | [`docs/adr/`](docs/adr/)                                          |
-| قرارداد API             | [`docs/api/`](docs/api/) · Swagger UI روی `/docs` هر سرویس        |
-| کاتالوگ رویدادها        | [`docs/events/`](docs/events/)                                    |
-| امنیت و Threat Model    | [`docs/09-security-architecture.md`](docs/09-security-architecture.md) |
-| Runbookهای عملیاتی      | [`docs/runbooks/`](docs/runbooks/)                                |
-| قواعد کار عامل‌های توسعه| [`AGENTS.md`](AGENTS.md) · [`CLAUDE.md`](CLAUDE.md)               |
+| موضوع                    | مسیر                                                                   |
+| ------------------------ | ---------------------------------------------------------------------- |
+| فهرست ۲۴ سند مهندسی      | [`docs/README.md`](docs/README.md)                                     |
+| تصمیم‌های معماری (ADR)   | [`docs/adr/`](docs/adr/)                                               |
+| قرارداد API              | [`docs/api/`](docs/api/) · Swagger UI روی `/docs` هر سرویس             |
+| کاتالوگ رویدادها         | [`docs/events/`](docs/events/)                                         |
+| امنیت و Threat Model     | [`docs/09-security-architecture.md`](docs/09-security-architecture.md) |
+| Runbookهای عملیاتی       | [`docs/runbooks/`](docs/runbooks/)                                     |
+| قواعد کار عامل‌های توسعه | [`AGENTS.md`](AGENTS.md) · [`CLAUDE.md`](CLAUDE.md)                    |
 
 ---
 

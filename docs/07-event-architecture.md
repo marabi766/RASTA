@@ -6,13 +6,13 @@
 
 ## ۷٫۱ چرا Kafka
 
-| نیاز پلتفرم                                     | چرا Kafka و نه RabbitMQ/NATS                                       |
-| ----------------------------------------------- | ------------------------------------------------------------------- |
-| ترتیب رویدادهای یک دارایی/سفارش/کیف پول          | ترتیب تضمین‌شده **به‌ازای پارتیشن**؛ کلید = شناسه Aggregate         |
-| بازپخش تاریخی برای ساخت Read Model جدید          | Log ماندگار؛ Consumer جدید از Offset صفر می‌خواند                   |
-| چند مصرف‌کننده مستقل از یک جریان                 | Consumer Group؛ `audit`, `analytics`, `notification` مستقل‌اند       |
-| حسابرسی‌پذیری جریان مالی                         | Log تغییرناپذیر، قابل استناد                                        |
-| رشد به مقیاس ملی                                 | مقیاس افقی با افزودن پارتیشن                                        |
+| نیاز پلتفرم                             | چرا Kafka و نه RabbitMQ/NATS                                   |
+| --------------------------------------- | -------------------------------------------------------------- |
+| ترتیب رویدادهای یک دارایی/سفارش/کیف پول | ترتیب تضمین‌شده **به‌ازای پارتیشن**؛ کلید = شناسه Aggregate    |
+| بازپخش تاریخی برای ساخت Read Model جدید | Log ماندگار؛ Consumer جدید از Offset صفر می‌خواند              |
+| چند مصرف‌کننده مستقل از یک جریان        | Consumer Group؛ `audit`, `analytics`, `notification` مستقل‌اند |
+| حسابرسی‌پذیری جریان مالی                | Log تغییرناپذیر، قابل استناد                                   |
+| رشد به مقیاس ملی                        | مقیاس افقی با افزودن پارتیشن                                   |
 
 معاوضه: Kafka برای بار فاز ۱ **بیش از حد** است. این آگاهانه پذیرفته شده — دلیل در
 [`23-risks-and-tradeoffs.md`](23-risks-and-tradeoffs.md) و ADR-006.
@@ -31,12 +31,12 @@ rasta.audit.trail.v1             جریان حسابرسی (همه سرویس‌
 `<major>` نسخه **Envelope** است، نه نسخه Payload. نسخه هر رویداد در `eventVersion` داخل
 Envelope می‌آید تا یک Topic بتواند در طول یک Rollout جریان چندنسخه‌ای حمل کند.
 
-| Topic                                | پارتیشن (dev/prod) | نگهداشت      |
-| ------------------------------------ | ------------------ | ------------ |
-| `rasta.<domain>.v1`                  | ۳ / ۱۲             | ۷ روز        |
-| `rasta.<domain>.v1.retry`            | ۳ / ۱۲             | ۷ روز        |
-| `rasta.<domain>.v1.dlq`              | ۱ / ۳              | ۳۰ روز       |
-| `rasta.audit.trail.v1`               | ۳ / ۱۲             | **بی‌نهایت در Production** |
+| Topic                     | پارتیشن (dev/prod) | نگهداشت                    |
+| ------------------------- | ------------------ | -------------------------- |
+| `rasta.<domain>.v1`       | ۳ / ۱۲             | ۷ روز                      |
+| `rasta.<domain>.v1.retry` | ۳ / ۱۲             | ۷ روز                      |
+| `rasta.<domain>.v1.dlq`   | ۱ / ۳              | ۳۰ روز                     |
+| `rasta.audit.trail.v1`    | ۳ / ۱۲             | **بی‌نهایت در Production** |
 
 **CONSTRAINT.** `auto.create.topics.enable=false`. تولید روی Topic ناشناخته یک نقض قرارداد
 است و باید بلند شکست بخورد، نه اینکه بی‌صدا Topic با تنظیمات پیش‌فرض بسازد.
@@ -51,37 +51,37 @@ Envelope می‌آید تا یک Topic بتواند در طول یک Rollout ج�
 
 ```jsonc
 {
-  "eventId": "01JBQ8Z4K7M2N5P8R1T3V6X9Y2",   // ULID — کلید Idempotency مصرف‌کننده
+  "eventId": "01JBQ8Z4K7M2N5P8R1T3V6X9Y2", // ULID — کلید Idempotency مصرف‌کننده
   "eventName": "ORDER_COMPLETED",
   "eventVersion": 1,
-  "occurredAt": "2026-08-26T10:15:30.123Z",   // زمان وقوع در دامنه، نه زمان انتشار
+  "occurredAt": "2026-08-26T10:15:30.123Z", // زمان وقوع در دامنه، نه زمان انتشار
   "producer": "marketplace-service",
   "producerVersion": "0.3.1",
 
   "aggregateType": "Order",
   "aggregateId": "ORD_01JBQ8Z4K7M2N5P8R1T3V6X9Y2",
-  "aggregateVersion": 7,                       // تشخیص رویداد از دست رفته یا نامرتب
+  "aggregateVersion": 7, // تشخیص رویداد از دست رفته یا نامرتب
 
-  "tenantId": "ORG_01JBQ8...",                 // ⚠️ مصرف‌کننده باید اعمالش کند
+  "tenantId": "ORG_01JBQ8...", // ⚠️ مصرف‌کننده باید اعمالش کند
   "correlationId": "01JBQ8Z4K7M2N5P8R1T3V6X9Y2",
   "causationId": "01JBQ8Z4K7M2N5P8R1T3V6X9Y1", // رویداد یا فرمان مسبب
-  "traceparent": "00-4bf92f3577b34da6...-01",  // W3C Trace Context
+  "traceparent": "00-4bf92f3577b34da6...-01", // W3C Trace Context
 
   "actor": { "type": "USER", "id": "USR_01JBQ8..." },
 
-  "payload": { }                               // مطابق Schema این رویداد و این نسخه
+  "payload": {}, // مطابق Schema این رویداد و این نسخه
 }
 ```
 
 ### قواعد Payload
 
-| قاعده                                                          | چرا                                                                |
-| -------------------------------------------------------------- | ------------------------------------------------------------------ |
-| **شناسه حمل کن، نه داده شخصی**                                 | رویداد ماندگار است؛ داده شخصی در Log ماندگار یک بدهی حریم خصوصی است |
-| **پول همیشه `{amountMinor: string, currency}`**                | همان قرارداد API                                                    |
-| **زمان همیشه ISO-8601 با UTC**                                 | بدون ابهام منطقه زمانی                                             |
-| **بدون فیلد اختیاری بی‌معنا**                                  | `undefined` در برابر `null` منبع باگ Consumer است                   |
-| **Payload خودبسنده برای هدف اصلی رویداد**                      | Consumer نباید برای کار عادی‌اش REST بزند                           |
+| قاعده                                           | چرا                                                                 |
+| ----------------------------------------------- | ------------------------------------------------------------------- |
+| **شناسه حمل کن، نه داده شخصی**                  | رویداد ماندگار است؛ داده شخصی در Log ماندگار یک بدهی حریم خصوصی است |
+| **پول همیشه `{amountMinor: string, currency}`** | همان قرارداد API                                                    |
+| **زمان همیشه ISO-8601 با UTC**                  | بدون ابهام منطقه زمانی                                              |
+| **بدون فیلد اختیاری بی‌معنا**                   | `undefined` در برابر `null` منبع باگ Consumer است                   |
+| **Payload خودبسنده برای هدف اصلی رویداد**       | Consumer نباید برای کار عادی‌اش REST بزند                           |
 
 ---
 
@@ -164,13 +164,13 @@ COMMIT ──► Commit Offset
   Topic retry با تأخیر: 1s → 5s → 30s → 2m → 10m
 ```
 
-| نوع خطا                              | رفتار                                  |
-| ------------------------------------ | -------------------------------------- |
-| قطع شبکه، Timeout، افت موقت وابستگی | Retry با Backoff                       |
-| Deadlock پایگاه داده                 | Retry فوری (حداکثر ۳)                  |
-| Payload نامعتبر یا Schema ناسازگار   | **DLQ مستقیم** — Retry کمکی نمی‌کند    |
-| نقض قاعده کسب‌وکار                   | **DLQ مستقیم** + هشدار                 |
-| رویداد ناشناخته                      | Log + Skip (سازگاری رو به جلو)         |
+| نوع خطا                             | رفتار                               |
+| ----------------------------------- | ----------------------------------- |
+| قطع شبکه، Timeout، افت موقت وابستگی | Retry با Backoff                    |
+| Deadlock پایگاه داده                | Retry فوری (حداکثر ۳)               |
+| Payload نامعتبر یا Schema ناسازگار  | **DLQ مستقیم** — Retry کمکی نمی‌کند |
+| نقض قاعده کسب‌وکار                  | **DLQ مستقیم** + هشدار              |
+| رویداد ناشناخته                     | Log + Skip (سازگاری رو به جلو)      |
 
 **قواعد DLQ:**
 
@@ -184,14 +184,14 @@ COMMIT ──► Commit Offset
 
 ## ۷٫۷ ترتیب و پارتیشن‌بندی
 
-| Aggregate       | کلید پارتیشن       | تضمین                                                        |
-| --------------- | ------------------ | ------------------------------------------------------------ |
-| Asset           | `assetId`          | همه رویدادهای یک دارایی مرتب                                 |
-| Order           | `orderId`          | چرخه سفارش مرتب                                              |
-| Wallet          | `walletId`         | **بحرانی** — Hold/Release/Settle نباید نامرتب پردازش شوند     |
-| Tender          | `tenderId`         | چرخه مناقصه مرتب                                             |
-| Contract        | `contractId`       | چرخه صورت‌وضعیت مرتب                                         |
-| Organization    | `organizationId`   | تغییرات سازمان مرتب                                          |
+| Aggregate    | کلید پارتیشن     | تضمین                                                     |
+| ------------ | ---------------- | --------------------------------------------------------- |
+| Asset        | `assetId`        | همه رویدادهای یک دارایی مرتب                              |
+| Order        | `orderId`        | چرخه سفارش مرتب                                           |
+| Wallet       | `walletId`       | **بحرانی** — Hold/Release/Settle نباید نامرتب پردازش شوند |
+| Tender       | `tenderId`       | چرخه مناقصه مرتب                                          |
+| Contract     | `contractId`     | چرخه صورت‌وضعیت مرتب                                      |
+| Organization | `organizationId` | تغییرات سازمان مرتب                                       |
 
 **قاعده.** کلید پارتیشن **همیشه** `aggregateId` است. ترتیب سراسری تضمین نمی‌شود و لازم هم نیست.
 اگر یک Consumer به ترتیب میان دو Aggregate نیاز دارد، طراحی‌اش اشتباه است — باید از
@@ -201,13 +201,13 @@ COMMIT ──► Commit Offset
 
 ## ۷٫۸ نسخه‌گذاری Schema
 
-| تغییر                                   | شکننده؟ | اقدام                                            |
-| --------------------------------------- | ------- | ------------------------------------------------ |
-| افزودن فیلد اختیاری                     | ❌      | همان `eventVersion`                              |
-| افزودن مقدار Enum                       | ⚠️      | همان نسخه؛ Consumer باید ناشناخته را تحمل کند    |
-| حذف یا تغییر نام فیلد                   | ✅      | `eventVersion` جدید؛ هر دو نسخه منتشر شوند       |
-| تغییر نوع فیلد                          | ✅      | `eventVersion` جدید                              |
-| تغییر معنای فیلد                        | ✅      | **رویداد جدید با نام جدید** — نه فقط نسخه جدید   |
+| تغییر                 | شکننده؟ | اقدام                                          |
+| --------------------- | ------- | ---------------------------------------------- |
+| افزودن فیلد اختیاری   | ❌      | همان `eventVersion`                            |
+| افزودن مقدار Enum     | ⚠️      | همان نسخه؛ Consumer باید ناشناخته را تحمل کند  |
+| حذف یا تغییر نام فیلد | ✅      | `eventVersion` جدید؛ هر دو نسخه منتشر شوند     |
+| تغییر نوع فیلد        | ✅      | `eventVersion` جدید                            |
+| تغییر معنای فیلد      | ✅      | **رویداد جدید با نام جدید** — نه فقط نسخه جدید |
 
 **فرآیند تغییر شکننده (سه استقرار):**
 
@@ -229,118 +229,118 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 
 ### Identity · Organization
 
-| رویداد                     | Producer     | مصرف‌کنندگان اصلی                            |
-| -------------------------- | ------------ | -------------------------------------------- |
-| `USER_REGISTERED`          | identity     | notification · audit · analytics             |
-| `USER_ACTIVATED`           | identity     | notification · economic (باز کردن کیف پول)   |
-| `USER_DEACTIVATED`         | identity     | همه (ابطال Session)                          |
-| `MEMBERSHIP_CREATED`       | identity     | audit · analytics                            |
-| `ROLE_ASSIGNED` / `ROLE_REVOKED` | identity | audit · gateway (ابطال Cache مجوز)          |
-| `ORGANIZATION_CREATED`     | organization | **همه** (Replica مرجع) · economic (کیف پول)  |
-| `ORGANIZATION_UPDATED`     | organization | همه (Replica مرجع)                           |
-| `ORGANIZATION_DEACTIVATED` | organization | identity (ابطال عضویت) · همه                 |
+| رویداد                           | Producer     | مصرف‌کنندگان اصلی                           |
+| -------------------------------- | ------------ | ------------------------------------------- |
+| `USER_REGISTERED`                | identity     | notification · audit · analytics            |
+| `USER_ACTIVATED`                 | identity     | notification · economic (باز کردن کیف پول)  |
+| `USER_DEACTIVATED`               | identity     | همه (ابطال Session)                         |
+| `MEMBERSHIP_CREATED`             | identity     | audit · analytics                           |
+| `ROLE_ASSIGNED` / `ROLE_REVOKED` | identity     | audit · gateway (ابطال Cache مجوز)          |
+| `ORGANIZATION_CREATED`           | organization | **همه** (Replica مرجع) · economic (کیف پول) |
+| `ORGANIZATION_UPDATED`           | organization | همه (Replica مرجع)                          |
+| `ORGANIZATION_DEACTIVATED`       | organization | identity (ابطال عضویت) · همه                |
 
 ### Asset · Fleet · Maintenance · Insurance
 
-| رویداد                       | Producer    | مصرف‌کنندگان اصلی                                 |
-| ---------------------------- | ----------- | ------------------------------------------------- |
-| `ASSET_CREATED`              | asset       | fleet · analytics · audit · search                |
-| `ASSET_ACTIVATED`            | asset       | fleet · analytics                                 |
-| `ASSET_UPDATED`              | asset       | fleet · search · analytics                        |
-| `ASSET_TRANSFERRED`          | asset       | fleet · analytics · audit                         |
-| `ASSET_STATUS_CHANGED`       | asset       | fleet · construction · analytics                  |
-| `ASSET_DECOMMISSIONED`       | asset       | fleet · maintenance · analytics                   |
-| `USAGE_RECORDED`             | fleet       | **maintenance (محرک سرویس)** · asset · economic (پاداش) · analytics |
-| `ASSET_ASSIGNED` / `ASSIGNMENT_ENDED` | fleet | asset · analytics                              |
-| `AVAILABILITY_CHANGED`       | fleet       | construction · analytics                          |
-| `MAINTENANCE_DUE`            | maintenance | **notification** · fleet · analytics              |
-| `BREAKDOWN_REPORTED`         | maintenance | notification · asset · analytics                  |
-| `MAINTENANCE_CREATED`        | maintenance | asset · analytics                                 |
-| `WORKSHOP_ASSIGNED`          | maintenance | notification · supplier                           |
-| `REPAIR_COMPLETED`           | maintenance | asset · supplier (امتیاز) · analytics             |
-| `MAINTENANCE_COMPLETED`      | maintenance | asset · economic (پاداش) · analytics              |
-| `MAINTENANCE_APPROVED`       | maintenance | **economic (مجوز تسویه)** · analytics             |
-| `INSURANCE_RECORDED`         | asset       | notification · analytics                          |
-| `INSURANCE_EXPIRING`         | asset       | **notification** · analytics                      |
-| `INSPECTION_EXPIRING`        | asset       | notification                                      |
+| رویداد                                | Producer    | مصرف‌کنندگان اصلی                                                   |
+| ------------------------------------- | ----------- | ------------------------------------------------------------------- |
+| `ASSET_CREATED`                       | asset       | fleet · analytics · audit · search                                  |
+| `ASSET_ACTIVATED`                     | asset       | fleet · analytics                                                   |
+| `ASSET_UPDATED`                       | asset       | fleet · search · analytics                                          |
+| `ASSET_TRANSFERRED`                   | asset       | fleet · analytics · audit                                           |
+| `ASSET_STATUS_CHANGED`                | asset       | fleet · construction · analytics                                    |
+| `ASSET_DECOMMISSIONED`                | asset       | fleet · maintenance · analytics                                     |
+| `USAGE_RECORDED`                      | fleet       | **maintenance (محرک سرویس)** · asset · economic (پاداش) · analytics |
+| `ASSET_ASSIGNED` / `ASSIGNMENT_ENDED` | fleet       | asset · analytics                                                   |
+| `AVAILABILITY_CHANGED`                | fleet       | construction · analytics                                            |
+| `MAINTENANCE_DUE`                     | maintenance | **notification** · fleet · analytics                                |
+| `BREAKDOWN_REPORTED`                  | maintenance | notification · asset · analytics                                    |
+| `MAINTENANCE_CREATED`                 | maintenance | asset · analytics                                                   |
+| `WORKSHOP_ASSIGNED`                   | maintenance | notification · supplier                                             |
+| `REPAIR_COMPLETED`                    | maintenance | asset · supplier (امتیاز) · analytics                               |
+| `MAINTENANCE_COMPLETED`               | maintenance | asset · economic (پاداش) · analytics                                |
+| `MAINTENANCE_APPROVED`                | maintenance | **economic (مجوز تسویه)** · analytics                               |
+| `INSURANCE_RECORDED`                  | asset       | notification · analytics                                            |
+| `INSURANCE_EXPIRING`                  | asset       | **notification** · analytics                                        |
+| `INSPECTION_EXPIRING`                 | asset       | notification                                                        |
 
 ### Marketplace · Procurement · Supplier · Inventory
 
-| رویداد                      | Producer    | مصرف‌کنندگان اصلی                                     |
-| --------------------------- | ----------- | ----------------------------------------------------- |
-| `OFFER_PUBLISHED`           | marketplace | search · analytics                                    |
-| `ORDER_CREATED`             | marketplace | **economic (Hold)** · inventory (رزرو) · notification |
-| `ORDER_CONFIRMED`           | marketplace | notification · analytics                              |
-| `ORDER_FULFILLED`           | marketplace | notification · inventory                              |
-| `ORDER_RECEIPT_CONFIRMED`   | marketplace | **economic (Release + تسویه + کارمزد)**               |
-| `ORDER_COMPLETED`           | marketplace | economic (پاداش) · supplier (امتیاز) · asset · analytics |
-| `ORDER_CANCELLED`           | marketplace | economic (بازگشت) · inventory (آزادسازی)              |
-| `ORDER_DISPUTED`            | marketplace | **economic (توقف تسویه)** · notification · supplier   |
-| `REVIEW_SUBMITTED`          | marketplace | supplier (امتیاز) · economic (پاداش)                  |
-| `DEMAND_SUBMITTED`          | procurement | analytics                                             |
-| `DEMAND_AGGREGATED`         | procurement | notification · analytics                              |
-| `RFQ_ISSUED`                | procurement | **notification (دعوت تأمین‌کننده)**                   |
-| `QUOTATION_SUBMITTED`       | procurement | analytics                                             |
-| `PURCHASE_ORDER_ISSUED`     | procurement | inventory · economic · notification                   |
-| `GOODS_RECEIVED`            | procurement | inventory · economic                                  |
-| `SUPPLIER_QUALIFIED`        | supplier    | marketplace · procurement · construction              |
-| `SUPPLIER_SUSPENDED`        | supplier    | marketplace (پنهان‌سازی پیشنهاد) · procurement · construction |
-| `PERFORMANCE_SCORE_UPDATED` | supplier    | marketplace (رتبه‌بندی) · search                      |
-| `STOCK_RESERVED` / `STOCK_RELEASED` | inventory | marketplace (Saga سفارش)                       |
-| `LOW_STOCK_DETECTED`        | inventory   | notification · procurement                            |
-| `SHIPMENT_DELIVERED`        | inventory   | marketplace · notification                            |
+| رویداد                              | Producer    | مصرف‌کنندگان اصلی                                             |
+| ----------------------------------- | ----------- | ------------------------------------------------------------- |
+| `OFFER_PUBLISHED`                   | marketplace | search · analytics                                            |
+| `ORDER_CREATED`                     | marketplace | **economic (Hold)** · inventory (رزرو) · notification         |
+| `ORDER_CONFIRMED`                   | marketplace | notification · analytics                                      |
+| `ORDER_FULFILLED`                   | marketplace | notification · inventory                                      |
+| `ORDER_RECEIPT_CONFIRMED`           | marketplace | **economic (Release + تسویه + کارمزد)**                       |
+| `ORDER_COMPLETED`                   | marketplace | economic (پاداش) · supplier (امتیاز) · asset · analytics      |
+| `ORDER_CANCELLED`                   | marketplace | economic (بازگشت) · inventory (آزادسازی)                      |
+| `ORDER_DISPUTED`                    | marketplace | **economic (توقف تسویه)** · notification · supplier           |
+| `REVIEW_SUBMITTED`                  | marketplace | supplier (امتیاز) · economic (پاداش)                          |
+| `DEMAND_SUBMITTED`                  | procurement | analytics                                                     |
+| `DEMAND_AGGREGATED`                 | procurement | notification · analytics                                      |
+| `RFQ_ISSUED`                        | procurement | **notification (دعوت تأمین‌کننده)**                           |
+| `QUOTATION_SUBMITTED`               | procurement | analytics                                                     |
+| `PURCHASE_ORDER_ISSUED`             | procurement | inventory · economic · notification                           |
+| `GOODS_RECEIVED`                    | procurement | inventory · economic                                          |
+| `SUPPLIER_QUALIFIED`                | supplier    | marketplace · procurement · construction                      |
+| `SUPPLIER_SUSPENDED`                | supplier    | marketplace (پنهان‌سازی پیشنهاد) · procurement · construction |
+| `PERFORMANCE_SCORE_UPDATED`         | supplier    | marketplace (رتبه‌بندی) · search                              |
+| `STOCK_RESERVED` / `STOCK_RELEASED` | inventory   | marketplace (Saga سفارش)                                      |
+| `LOW_STOCK_DETECTED`                | inventory   | notification · procurement                                    |
+| `SHIPMENT_DELIVERED`                | inventory   | marketplace · notification                                    |
 
 ### Construction · Contract
 
-| رویداد                       | Producer     | مصرف‌کنندگان اصلی                              |
-| ---------------------------- | ------------ | ---------------------------------------------- |
-| `PROJECT_CREATED`            | construction | analytics · audit                              |
-| `APPROVAL_REQUESTED`         | construction | **notification (مرجع تأیید)** · audit          |
-| `APPROVAL_GRANTED` / `APPROVAL_REJECTED` | construction | notification · audit · analytics  |
-| `TENDER_CREATED`             | construction | audit                                          |
-| `TENDER_PUBLISHED`           | construction | **notification (پیمانکاران)** · search · analytics |
-| `BID_SUBMITTED`              | construction | notification · **audit (مهر زمانی)**           |
-| `BIDS_EVALUATED`             | construction | audit · analytics                              |
-| `TENDER_AWARDED`             | construction | **contract (ایجاد پیش‌نویس)** · notification · supplier |
-| `PROJECT_STARTED`            | construction | fleet · analytics                              |
-| `PROJECT_PROGRESS_UPDATED`   | construction | contract · notification · analytics            |
-| `PROJECT_COMPLETED`          | construction | contract · supplier (امتیاز) · analytics       |
-| `CONTRACT_CREATED`           | contract     | construction · notification                    |
-| `CONTRACT_SIGNED`            | contract     | construction · economic · notification         |
-| `CONTRACT_AMENDED`           | contract     | audit · analytics                              |
-| `STATEMENT_SUBMITTED`        | contract     | notification · analytics                       |
-| `STATEMENT_APPROVED`         | contract     | **economic (پرداخت)** · analytics              |
-| `STATEMENT_REJECTED`         | contract     | notification                                   |
-| `CONTRACT_COMPLETED`         | contract     | supplier (امتیاز) · analytics                  |
+| رویداد                                   | Producer     | مصرف‌کنندگان اصلی                                       |
+| ---------------------------------------- | ------------ | ------------------------------------------------------- |
+| `PROJECT_CREATED`                        | construction | analytics · audit                                       |
+| `APPROVAL_REQUESTED`                     | construction | **notification (مرجع تأیید)** · audit                   |
+| `APPROVAL_GRANTED` / `APPROVAL_REJECTED` | construction | notification · audit · analytics                        |
+| `TENDER_CREATED`                         | construction | audit                                                   |
+| `TENDER_PUBLISHED`                       | construction | **notification (پیمانکاران)** · search · analytics      |
+| `BID_SUBMITTED`                          | construction | notification · **audit (مهر زمانی)**                    |
+| `BIDS_EVALUATED`                         | construction | audit · analytics                                       |
+| `TENDER_AWARDED`                         | construction | **contract (ایجاد پیش‌نویس)** · notification · supplier |
+| `PROJECT_STARTED`                        | construction | fleet · analytics                                       |
+| `PROJECT_PROGRESS_UPDATED`               | construction | contract · notification · analytics                     |
+| `PROJECT_COMPLETED`                      | construction | contract · supplier (امتیاز) · analytics                |
+| `CONTRACT_CREATED`                       | contract     | construction · notification                             |
+| `CONTRACT_SIGNED`                        | contract     | construction · economic · notification                  |
+| `CONTRACT_AMENDED`                       | contract     | audit · analytics                                       |
+| `STATEMENT_SUBMITTED`                    | contract     | notification · analytics                                |
+| `STATEMENT_APPROVED`                     | contract     | **economic (پرداخت)** · analytics                       |
+| `STATEMENT_REJECTED`                     | contract     | notification                                            |
+| `CONTRACT_COMPLETED`                     | contract     | supplier (امتیاز) · analytics                           |
 
 ### Economic
 
-| رویداد                  | Producer | مصرف‌کنندگان اصلی                                  |
-| ----------------------- | -------- | -------------------------------------------------- |
-| `WALLET_OPENED`         | economic | notification                                       |
-| `FUNDS_HELD`            | economic | marketplace (پیشبرد Saga) · analytics              |
-| `FUNDS_RELEASED`        | economic | marketplace · analytics                            |
-| `PAYMENT_AUTHORIZED`    | economic | marketplace · contract                             |
-| `PAYMENT_COMPLETED`     | economic | marketplace · maintenance · contract · notification |
-| `PAYMENT_FAILED`        | economic | marketplace (جبران) · notification                 |
-| `COMMISSION_APPLIED`    | economic | analytics (**درآمد پلتفرم**) · audit               |
-| `REWARD_GRANTED`        | economic | notification · analytics                           |
-| `REWARD_LEVEL_CHANGED`  | economic | notification                                       |
-| `SETTLEMENT_COMPLETED`  | economic | marketplace · supplier · notification              |
-| `JOURNAL_POSTED`        | economic | audit · analytics                                  |
+| رویداد                 | Producer | مصرف‌کنندگان اصلی                                   |
+| ---------------------- | -------- | --------------------------------------------------- |
+| `WALLET_OPENED`        | economic | notification                                        |
+| `FUNDS_HELD`           | economic | marketplace (پیشبرد Saga) · analytics               |
+| `FUNDS_RELEASED`       | economic | marketplace · analytics                             |
+| `PAYMENT_AUTHORIZED`   | economic | marketplace · contract                              |
+| `PAYMENT_COMPLETED`    | economic | marketplace · maintenance · contract · notification |
+| `PAYMENT_FAILED`       | economic | marketplace (جبران) · notification                  |
+| `COMMISSION_APPLIED`   | economic | analytics (**درآمد پلتفرم**) · audit                |
+| `REWARD_GRANTED`       | economic | notification · analytics                            |
+| `REWARD_LEVEL_CHANGED` | economic | notification                                        |
+| `SETTLEMENT_COMPLETED` | economic | marketplace · supplier · notification               |
+| `JOURNAL_POSTED`       | economic | audit · analytics                                   |
 
 ---
 
 ## ۷٫۱۰ الگوهای مصرف
 
-| الگو                     | مثال                                             | نکته                                              |
-| ------------------------ | ------------------------------------------------ | ------------------------------------------------- |
-| **ساخت Read Model**      | `asset` تاریخچه دارایی می‌سازد                   | Idempotent؛ باید از Offset صفر قابل بازسازی باشد  |
-| **همگام‌سازی Replica**   | `organization_ref` در هر سرویس                   | فقط Upsert؛ هرگز مبنای مجوزدهی                    |
-| **محرک فرآیند**          | `ORDER_CREATED` → Hold وجه                       | باید Idempotent باشد — پول در میان است            |
-| **اعلان**                | `MAINTENANCE_DUE` → پیامک/ایمیل                  | شکست تحویل نباید Consumer را متوقف کند            |
-| **حسابرسی**              | همه رویدادها → `audit_event`                     | فقط الحاقی، بدون منطق                             |
-| **پیشبرد Saga**          | `PAYMENT_FAILED` → لغو سفارش                     | Temporal حالت را نگه می‌دارد، نه Consumer          |
+| الگو                   | مثال                            | نکته                                             |
+| ---------------------- | ------------------------------- | ------------------------------------------------ |
+| **ساخت Read Model**    | `asset` تاریخچه دارایی می‌سازد  | Idempotent؛ باید از Offset صفر قابل بازسازی باشد |
+| **همگام‌سازی Replica** | `organization_ref` در هر سرویس  | فقط Upsert؛ هرگز مبنای مجوزدهی                   |
+| **محرک فرآیند**        | `ORDER_CREATED` → Hold وجه      | باید Idempotent باشد — پول در میان است           |
+| **اعلان**              | `MAINTENANCE_DUE` → پیامک/ایمیل | شکست تحویل نباید Consumer را متوقف کند           |
+| **حسابرسی**            | همه رویدادها → `audit_event`    | فقط الحاقی، بدون منطق                            |
+| **پیشبرد Saga**        | `PAYMENT_FAILED` → لغو سفارش    | Temporal حالت را نگه می‌دارد، نه Consumer        |
 
 **Consumer Group** به‌ازای هر (سرویس، هدف):
 `asset-service.timeline` · `economic-service.order-saga` · `notification-service.dispatcher`
@@ -350,11 +350,11 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 
 ## ۷٫۱۱ پایش
 
-| متریک                                  | هشدار                                    |
-| -------------------------------------- | ---------------------------------------- |
-| `kafka_consumer_lag`                   | > ۱۰٬۰۰۰ پیام یا > ۵ دقیقه               |
-| `rasta_outbox_pending_age_seconds`     | > ۶۰ ثانیه (Relay گیر کرده)              |
-| `rasta_dlq_messages_total`             | **هر پیام جدید** → هشدار                 |
-| `rasta_event_processing_duration`      | p99 > ۵ ثانیه                            |
-| `rasta_event_validation_failures`      | > ۰ → هشدار (نقض قرارداد)                |
-| `rasta_duplicate_events_total`         | پایش (سلامت At-Least-Once)               |
+| متریک                              | هشدار                       |
+| ---------------------------------- | --------------------------- |
+| `kafka_consumer_lag`               | > ۱۰٬۰۰۰ پیام یا > ۵ دقیقه  |
+| `rasta_outbox_pending_age_seconds` | > ۶۰ ثانیه (Relay گیر کرده) |
+| `rasta_dlq_messages_total`         | **هر پیام جدید** → هشدار    |
+| `rasta_event_processing_duration`  | p99 > ۵ ثانیه               |
+| `rasta_event_validation_failures`  | > ۰ → هشدار (نقض قرارداد)   |
+| `rasta_duplicate_events_total`     | پایش (سلامت At-Least-Once)  |

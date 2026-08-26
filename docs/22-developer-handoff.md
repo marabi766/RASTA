@@ -10,16 +10,16 @@
 
 ## ۲۲٫۱ مسیر روز اول یک توسعه‌دهنده جدید
 
-| زمان         | کار                                | منبع                                                          |
-| ------------ | ---------------------------------- | ------------------------------------------------------------- |
-| ۰۰:۰۰–۰۰:۳۰  | Clone، نصب، راه‌اندازی محیط        | [`README.md`](../README.md) § ۲                                |
-| ۰۰:۳۰–۰۱:۰۰  | اجرای سرویس‌ها و مرور UI           | `pnpm dev` → http://localhost:3200                             |
-| ۰۱:۰۰–۰۱:۳۰  | اجرای تست‌ها                       | `pnpm test`                                                    |
-| ۰۱:۳۰–۰۳:۰۰  | **فهمیدن معماری**                  | [`01`](01-executive-architecture.md) · [`03`](03-domain-model.md) · [`04`](04-service-decomposition.md) |
-| ۰۳:۰۰–۰۳:۳۰  | **فهمیدن قواعد**                   | [`AGENTS.md`](../AGENTS.md) — الزام‌آور                        |
-| ۰۳:۳۰–۰۴:۳۰  | مرور یک سرویس نمونه                | `services/asset-service/` انتها به انتها                        |
-| ۰۴:۳۰–۰۶:۰۰  | **افزودن یک فیلد** (Migration تا API) | § ۲۲٫۴ زیر                                                  |
-| ۰۶:۰۰–۰۸:۰۰  | **افزودن یک Endpoint**             | § ۲۲٫۵ زیر                                                     |
+| زمان        | کار                                   | منبع                                                                                                    |
+| ----------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| ۰۰:۰۰–۰۰:۳۰ | Clone، نصب، راه‌اندازی محیط           | [`README.md`](../README.md) § ۲                                                                         |
+| ۰۰:۳۰–۰۱:۰۰ | اجرای سرویس‌ها و مرور UI              | `pnpm dev` → http://localhost:3200                                                                      |
+| ۰۱:۰۰–۰۱:۳۰ | اجرای تست‌ها                          | `pnpm test`                                                                                             |
+| ۰۱:۳۰–۰۳:۰۰ | **فهمیدن معماری**                     | [`01`](01-executive-architecture.md) · [`03`](03-domain-model.md) · [`04`](04-service-decomposition.md) |
+| ۰۳:۰۰–۰۳:۳۰ | **فهمیدن قواعد**                      | [`AGENTS.md`](../AGENTS.md) — الزام‌آور                                                                 |
+| ۰۳:۳۰–۰۴:۳۰ | مرور یک سرویس نمونه                   | `services/asset-service/` انتها به انتها                                                                |
+| ۰۴:۳۰–۰۶:۰۰ | **افزودن یک فیلد** (Migration تا API) | § ۲۲٫۴ زیر                                                                                              |
+| ۰۶:۰۰–۰۸:۰۰ | **افزودن یک Endpoint**                | § ۲۲٫۵ زیر                                                                                              |
 
 ---
 
@@ -192,36 +192,36 @@ Checklist کامل در [`15-repository-architecture.md § ۱۵٫۸`](15-reposit
 
 ## ۲۲٫۸ عیب‌یابی
 
-| علامت                                    | علت محتمل                          | اقدام                                                        |
-| ---------------------------------------- | ---------------------------------- | ------------------------------------------------------------ |
-| `ECONNREFUSED` روی پایگاه داده           | زیرساخت بالا نیست                  | `pnpm infra:up`؛ `docker compose ps`                          |
-| Migration شکست می‌خورد                   | پایگاه داده یا نقش ساخته نشده      | `pnpm infra:reset` (⚠️ داده پاک می‌شود)                       |
-| `401` روی همه درخواست‌ها                 | Keycloak آماده نیست یا Realm نیامده| `docker compose logs keycloak`؛ Realm در `/opt/keycloak/data/import` |
-| `403 TENANT_MISMATCH`                    | `X-Organization-Id` با عضویت نمی‌خواند | عضویت کاربر را بررسی کن                                  |
-| رویداد مصرف نمی‌شود                      | Topic نیست یا Consumer Group گیر کرده | Kafka UI (`--profile tools`)؛ `create-topics.sh`           |
-| `outbox_message` انباشته می‌شود          | Relay متوقف است                    | Log سرویس؛ متریک `rasta_outbox_pending_age_seconds`          |
-| Workflow پیش نمی‌رود                     | Worker متصل نیست                   | Temporal UI (`--profile tools`)؛ Task Queue را بررسی کن       |
-| تست یکپارچگی Timeout می‌خورد             | Docker کند یا Image نیامده         | `docker pull` تصاویر؛ `testTimeout` را افزایش بده             |
-| `EADDRINUSE`                             | پورت اشغال است                     | `netstat -ano \| findstr :<port>`                             |
-| Build شکست می‌خورد ولی محلی سبز است      | Cache Turbo کهنه                   | `pnpm clean && pnpm install && pnpm build`                    |
-| تست جداسازی می‌شکند                      | **Query بدون Tenant Scope**        | **این باگ است، نه تست شکننده — Repository را درست کن**       |
-| Journal نامتوازن                         | **باگ منطق مالی**                  | **متوقف شو. این بحرانی است.** [`runbooks/ledger-imbalance.md`](runbooks/ledger-imbalance.md) |
+| علامت                               | علت محتمل                              | اقدام                                                                                        |
+| ----------------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `ECONNREFUSED` روی پایگاه داده      | زیرساخت بالا نیست                      | `pnpm infra:up`؛ `docker compose ps`                                                         |
+| Migration شکست می‌خورد              | پایگاه داده یا نقش ساخته نشده          | `pnpm infra:reset` (⚠️ داده پاک می‌شود)                                                      |
+| `401` روی همه درخواست‌ها            | Keycloak آماده نیست یا Realm نیامده    | `docker compose logs keycloak`؛ Realm در `/opt/keycloak/data/import`                         |
+| `403 TENANT_MISMATCH`               | `X-Organization-Id` با عضویت نمی‌خواند | عضویت کاربر را بررسی کن                                                                      |
+| رویداد مصرف نمی‌شود                 | Topic نیست یا Consumer Group گیر کرده  | Kafka UI (`--profile tools`)؛ `create-topics.sh`                                             |
+| `outbox_message` انباشته می‌شود     | Relay متوقف است                        | Log سرویس؛ متریک `rasta_outbox_pending_age_seconds`                                          |
+| Workflow پیش نمی‌رود                | Worker متصل نیست                       | Temporal UI (`--profile tools`)؛ Task Queue را بررسی کن                                      |
+| تست یکپارچگی Timeout می‌خورد        | Docker کند یا Image نیامده             | `docker pull` تصاویر؛ `testTimeout` را افزایش بده                                            |
+| `EADDRINUSE`                        | پورت اشغال است                         | `netstat -ano \| findstr :<port>`                                                            |
+| Build شکست می‌خورد ولی محلی سبز است | Cache Turbo کهنه                       | `pnpm clean && pnpm install && pnpm build`                                                   |
+| تست جداسازی می‌شکند                 | **Query بدون Tenant Scope**            | **این باگ است، نه تست شکننده — Repository را درست کن**                                       |
+| Journal نامتوازن                    | **باگ منطق مالی**                      | **متوقف شو. این بحرانی است.** [`runbooks/ledger-imbalance.md`](runbooks/ledger-imbalance.md) |
 
 ---
 
 ## ۲۲٫۹ Runbookها
 
-| موقعیت                           | Runbook                                                   |
-| -------------------------------- | --------------------------------------------------------- |
-| Journal نامتوازن                 | [`runbooks/ledger-imbalance.md`](runbooks/ledger-imbalance.md) |
-| پیام در DLQ                      | [`runbooks/replay-dlq.md`](runbooks/replay-dlq.md)        |
-| Outbox Relay گیر کرده            | [`runbooks/outbox-stuck.md`](runbooks/outbox-stuck.md)    |
-| Bootstrap پایگاه داده            | [`runbooks/database-bootstrap.md`](runbooks/database-bootstrap.md) |
-| بازیابی پایگاه داده              | [`runbooks/restore-database.md`](runbooks/restore-database.md) |
-| بازیابی از فاجعه                 | [`runbooks/disaster-recovery.md`](runbooks/disaster-recovery.md) |
-| نشت Secret                       | [`runbooks/secret-leak.md`](runbooks/secret-leak.md)      |
-| Rollback استقرار                 | [`runbooks/rollback-deployment.md`](runbooks/rollback-deployment.md) |
-| Workflow شکست‌خورده تسویه        | [`runbooks/failed-settlement.md`](runbooks/failed-settlement.md) |
+| موقعیت                    | Runbook                                                              |
+| ------------------------- | -------------------------------------------------------------------- |
+| Journal نامتوازن          | [`runbooks/ledger-imbalance.md`](runbooks/ledger-imbalance.md)       |
+| پیام در DLQ               | [`runbooks/replay-dlq.md`](runbooks/replay-dlq.md)                   |
+| Outbox Relay گیر کرده     | [`runbooks/outbox-stuck.md`](runbooks/outbox-stuck.md)               |
+| Bootstrap پایگاه داده     | [`runbooks/database-bootstrap.md`](runbooks/database-bootstrap.md)   |
+| بازیابی پایگاه داده       | [`runbooks/restore-database.md`](runbooks/restore-database.md)       |
+| بازیابی از فاجعه          | [`runbooks/disaster-recovery.md`](runbooks/disaster-recovery.md)     |
+| نشت Secret                | [`runbooks/secret-leak.md`](runbooks/secret-leak.md)                 |
+| Rollback استقرار          | [`runbooks/rollback-deployment.md`](runbooks/rollback-deployment.md) |
+| Workflow شکست‌خورده تسویه | [`runbooks/failed-settlement.md`](runbooks/failed-settlement.md)     |
 
 **قاعده.** هر هشدار باید Runbook داشته باشد. هشدار بدون دستورالعمل پاسخ، نویز است.
 

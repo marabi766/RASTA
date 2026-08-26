@@ -8,12 +8,12 @@
 
 ## محیط‌ها
 
-| محیط | استقرار | داده | Trigger |
-| --- | --- | --- | --- |
-| Development | Docker Compose + `pnpm dev` | Seed نمایشی | دستی |
-| Test / CI | Testcontainers (افمرال) | Fixture یک‌بارمصرف | هر Push |
-| Staging | Kubernetes + Helm | داده مصنوعی | خودکار از `main` |
-| Production | Kubernetes + Helm | داده واقعی | **دستی با تأیید** |
+| محیط        | استقرار                     | داده               | Trigger           |
+| ----------- | --------------------------- | ------------------ | ----------------- |
+| Development | Docker Compose + `pnpm dev` | Seed نمایشی        | دستی              |
+| Test / CI   | Testcontainers (افمرال)     | Fixture یک‌بارمصرف | هر Push           |
+| Staging     | Kubernetes + Helm           | داده مصنوعی        | خودکار از `main`  |
+| Production  | Kubernetes + Helm           | داده واقعی         | **دستی با تأیید** |
 
 ## توسعه محلی
 
@@ -93,41 +93,41 @@ helm history rasta -n rasta-prod               # مشاهده تاریخچه
 
 ## پیکربندی
 
-| نوع | مکانیزم |
-| --- | --- |
-| غیرحساس (Feature Flag، URL) | ConfigMap |
-| حساس (رمز، کلید، توکن) | Secret از External Secrets Operator |
-| پویا در زمان اجرا | جدول پیکربندی در پایگاه داده سرویس مالک |
+| نوع                         | مکانیزم                                 |
+| --------------------------- | --------------------------------------- |
+| غیرحساس (Feature Flag، URL) | ConfigMap                               |
+| حساس (رمز، کلید، توکن)      | Secret از External Secrets Operator     |
+| پویا در زمان اجرا           | جدول پیکربندی در پایگاه داده سرویس مالک |
 
 ## Health Check
 
-| Probe | Endpoint | بررسی |
-| --- | --- | --- |
-| Startup | `/health/startup` | Migration اجرا شده، Consumerها متصل |
-| Liveness | `/health/live` | فرایند پاسخ می‌دهد |
-| Readiness | `/health/ready` | پایگاه داده + Kafka + Redis در دسترس |
+| Probe     | Endpoint          | بررسی                                |
+| --------- | ----------------- | ------------------------------------ |
+| Startup   | `/health/startup` | Migration اجرا شده، Consumerها متصل  |
+| Liveness  | `/health/live`    | فرایند پاسخ می‌دهد                   |
+| Readiness | `/health/ready`   | پایگاه داده + Kafka + Redis در دسترس |
 
 **قاعده.** `ready` فقط وابستگی‌های **ضروری** را بررسی می‌کند. بررسی بیش از حد باعث
 آبشار قطعی می‌شود.
 
 ## Backup
 
-| مورد | Staging | Production |
-| --- | --- | --- |
-| Backup کامل | روزانه | روزانه، رمزنگاری‌شده، به Object Storage |
-| Point-in-Time | ندارد | WAL Archiving — RPO ≤ ۵ دقیقه |
-| **تست Restore** | دستی | **ماهانه، خودکار، با گزارش** |
+| مورد            | Staging | Production                              |
+| --------------- | ------- | --------------------------------------- |
+| Backup کامل     | روزانه  | روزانه، رمزنگاری‌شده، به Object Storage |
+| Point-in-Time   | ندارد   | WAL Archiving — RPO ≤ ۵ دقیقه           |
+| **تست Restore** | دستی    | **ماهانه، خودکار، با گزارش**            |
 
 **CONSTRAINT.** یک Backup که Restore آن تست نشده، Backup نیست. تست ماهانه شامل بازیابی
 کامل، اجرای Migration، و **اثبات توازن دفتر کل** پس از بازیابی است.
 
 ## اهداف RPO و RTO
 
-| سرویس | RPO | RTO |
-| --- | --- | --- |
-| `economic` · `audit` | **۵ دقیقه** | **۱ ساعت** |
-| `identity` · `organization` | ۱۵ دقیقه | ۲ ساعت |
-| بقیه | ۱ ساعت | ۴ ساعت |
+| سرویس                       | RPO         | RTO        |
+| --------------------------- | ----------- | ---------- |
+| `economic` · `audit`        | **۵ دقیقه** | **۱ ساعت** |
+| `identity` · `organization` | ۱۵ دقیقه    | ۲ ساعت     |
+| بقیه                        | ۱ ساعت      | ۴ ساعت     |
 
 ## نکته مهم درباره Outbox
 

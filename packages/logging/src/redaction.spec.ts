@@ -55,9 +55,7 @@ describe('scrubMessage', () => {
   });
 
   it('handles multiple credentials in one message', () => {
-    const result = scrubMessage(
-      'redis://user:pw1@cache:6379 and postgresql://u2:pw2@db:5432/x',
-    );
+    const result = scrubMessage('redis://user:pw1@cache:6379 and postgresql://u2:pw2@db:5432/x');
     expect(result).not.toContain('pw1');
     expect(result).not.toContain('pw2');
   });

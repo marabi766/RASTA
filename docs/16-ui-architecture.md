@@ -7,19 +7,19 @@
 
 ## ۱۶٫۱ Stack
 
-| لایه            | انتخاب                       | دلیل                                                        |
-| --------------- | ---------------------------- | ----------------------------------------------------------- |
-| Framework       | Next.js 15 (App Router)      | SSR برای داشبورد سنگین، Streaming، Route Handler، PWA        |
-| UI              | React 19 + TypeScript strict | Server Component، مدل داده یکسان با Backend                 |
-| Styling         | Tailwind CSS v4              | **Logical Property بومی** → RTL بدون شاخه‌بندی کد            |
-| Component       | Radix UI Primitives          | دسترس‌پذیر و بدون Style؛ ما ظاهر را کنترل می‌کنیم            |
-| فرم             | React Hook Form + Zod        | **همان Schemaهای `@rasta/contracts`** — یک منبع حقیقت        |
-| داده سمت سرور   | TanStack Query               | Cache، Retry، به‌روزرسانی خوش‌بینانه                        |
-| نمودار          | Recharts                     | سبک، سازگار با SSR، قابل تم‌بندی                             |
-| جدول            | TanStack Table               | مرتب‌سازی، فیلتر و صفحه‌بندی سمت سرور                        |
-| آیکون           | Lucide React                 | ثابت، Tree-shakeable                                        |
-| تقویم           | `date-fns-jalali`            | تبدیل هجری شمسی **فقط در لایه ارائه**                        |
-| احراز هویت      | `oidc-client-ts`             | Authorization Code + PKCE                                    |
+| لایه          | انتخاب                       | دلیل                                                  |
+| ------------- | ---------------------------- | ----------------------------------------------------- |
+| Framework     | Next.js 15 (App Router)      | SSR برای داشبورد سنگین، Streaming، Route Handler، PWA |
+| UI            | React 19 + TypeScript strict | Server Component، مدل داده یکسان با Backend           |
+| Styling       | Tailwind CSS v4              | **Logical Property بومی** → RTL بدون شاخه‌بندی کد     |
+| Component     | Radix UI Primitives          | دسترس‌پذیر و بدون Style؛ ما ظاهر را کنترل می‌کنیم     |
+| فرم           | React Hook Form + Zod        | **همان Schemaهای `@rasta/contracts`** — یک منبع حقیقت |
+| داده سمت سرور | TanStack Query               | Cache، Retry، به‌روزرسانی خوش‌بینانه                  |
+| نمودار        | Recharts                     | سبک، سازگار با SSR، قابل تم‌بندی                      |
+| جدول          | TanStack Table               | مرتب‌سازی، فیلتر و صفحه‌بندی سمت سرور                 |
+| آیکون         | Lucide React                 | ثابت، Tree-shakeable                                  |
+| تقویم         | `date-fns-jalali`            | تبدیل هجری شمسی **فقط در لایه ارائه**                 |
+| احراز هویت    | `oidc-client-ts`             | Authorization Code + PKCE                             |
 
 **CONSTRAINT.** Zod Schema از `@rasta/contracts` می‌آید. یک تعریف: هم اعتبارسنجی فرم،
 هم اعتبارسنجی سرور، هم نوع TypeScript، هم مستند OpenAPI. اگر فرم و API از هم واگرا شوند،
@@ -29,10 +29,10 @@ Build می‌شکند.
 
 ## ۱۶٫۲ دو اپلیکیشن
 
-| اپ           | مخاطب                                            | پورت | تمرکز                                        |
-| ------------ | ------------------------------------------------ | ---- | -------------------------------------------- |
-| `apps/web`   | کاربر نهایی — دهیاری، اپراتور، تأمین‌کننده، پیمانکار | 3200 | عملیات روزمره؛ **PWA و موبایل‌محور**        |
-| `apps/admin` | اپراتور پلتفرم (اتحادیه) + ناظر (استانداری)      | 3201 | مدیریت، پیکربندی، داشبورد تجمیعی             |
+| اپ           | مخاطب                                                | پورت | تمرکز                                |
+| ------------ | ---------------------------------------------------- | ---- | ------------------------------------ |
+| `apps/web`   | کاربر نهایی — دهیاری، اپراتور، تأمین‌کننده، پیمانکار | 3200 | عملیات روزمره؛ **PWA و موبایل‌محور** |
+| `apps/admin` | اپراتور پلتفرم (اتحادیه) + ناظر (استانداری)          | 3201 | مدیریت، پیکربندی، داشبورد تجمیعی     |
 
 **چرا دو اپ و نه یک اپ با نقش‌های متفاوت؟**
 مخاطبان، دستگاه‌ها و الگوهای استفاده به‌کلی متفاوت‌اند. یک اپراتور ماشین‌آلات در روستا با
@@ -47,19 +47,19 @@ Design System مشترک است؛ Bundle نیست.
 این بخش **الزام معماری** است، نه سلیقه.
 
 ```html
-<html lang="fa" dir="rtl">
+<html lang="fa" dir="rtl"></html>
 ```
 
-| قاعده                                                              | چرا                                                    |
-| ------------------------------------------------------------------ | ------------------------------------------------------ |
-| **همیشه** Logical Property                                         | `ms-4` نه `ml-4`؛ `text-start` نه `text-left`          |
-| هرگز `left`/`right` فیزیکی در چیدمان                               | در RTL معکوس نمی‌شوند                                  |
-| آیکون‌های جهت‌دار در RTL آینه می‌شوند                              | فلش «بعدی» به چپ اشاره می‌کند                          |
-| **اعداد در داده و API همیشه لاتین**                                | تبدیل به فارسی فقط در لحظه رندر                        |
-| **تاریخ در پایگاه داده و API همیشه میلادی/UTC**                    | تبدیل به هجری شمسی فقط در لحظه رندر                    |
-| نیم‌فاصله (ZWNJ) در متن فارسی رابط                                 | «می‌شود» نه «می شود»                                   |
-| نویسه‌های استاندارد فارسی                                          | «ی» و «ک» فارسی، نه عربی                               |
-| جهت‌دهی صحیح متن دوزبانه                                           | شناسه‌های لاتین داخل متن فارسی با `dir="auto"`         |
+| قاعده                                           | چرا                                            |
+| ----------------------------------------------- | ---------------------------------------------- |
+| **همیشه** Logical Property                      | `ms-4` نه `ml-4`؛ `text-start` نه `text-left`  |
+| هرگز `left`/`right` فیزیکی در چیدمان            | در RTL معکوس نمی‌شوند                          |
+| آیکون‌های جهت‌دار در RTL آینه می‌شوند           | فلش «بعدی» به چپ اشاره می‌کند                  |
+| **اعداد در داده و API همیشه لاتین**             | تبدیل به فارسی فقط در لحظه رندر                |
+| **تاریخ در پایگاه داده و API همیشه میلادی/UTC** | تبدیل به هجری شمسی فقط در لحظه رندر            |
+| نیم‌فاصله (ZWNJ) در متن فارسی رابط              | «می‌شود» نه «می شود»                           |
+| نویسه‌های استاندارد فارسی                       | «ی» و «ک» فارسی، نه عربی                       |
+| جهت‌دهی صحیح متن دوزبانه                        | شناسه‌های لاتین داخل متن فارسی با `dir="auto"` |
 
 **فونت:** Vazirmatn (متغیر) برای فارسی، `ui-monospace` برای شناسه و کد.
 بارگذاری محلی با `next/font` — بدون CDN خارجی (کنترل CSP و کارایی).
@@ -111,16 +111,16 @@ LTR درست است، در این پروژه شکسته است.
 
 ### کتابخانه Component
 
-| دسته        | Componentها                                                                 |
-| ----------- | --------------------------------------------------------------------------- |
-| چیدمان      | `AppShell` · `Sidebar` · `TopBar` · `PageHeader` · `Section` · `Grid`        |
-| داده        | `DataTable` · `StatCard` · `MetricTile` · `Timeline` · `DescriptionList`     |
-| فرم         | `Form` · `TextField` · `NumberField` · `MoneyField` · `DateField` (شمسی) · `Select` · `Combobox` · `FileUpload` · `FormSection` |
-| بازخورد     | `StatusBadge` · `Alert` · `Toast` · `ProgressBar` · `WorkflowStepper`         |
-| Overlay     | `Dialog` · `Drawer` · `Popover` · `Tooltip` · `ConfirmDialog`                 |
-| ناوبری      | `Tabs` · `Breadcrumb` · `Pagination` · `CommandPalette`                       |
-| نمودار      | `LineChart` · `BarChart` · `DonutChart` · `Sparkline` · `GaugeChart`          |
-| **وضعیت**   | `EmptyState` · `LoadingState` · `ErrorState` · `Skeleton` · `NoAccessState`   |
+| دسته      | Componentها                                                                                                                     |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| چیدمان    | `AppShell` · `Sidebar` · `TopBar` · `PageHeader` · `Section` · `Grid`                                                           |
+| داده      | `DataTable` · `StatCard` · `MetricTile` · `Timeline` · `DescriptionList`                                                        |
+| فرم       | `Form` · `TextField` · `NumberField` · `MoneyField` · `DateField` (شمسی) · `Select` · `Combobox` · `FileUpload` · `FormSection` |
+| بازخورد   | `StatusBadge` · `Alert` · `Toast` · `ProgressBar` · `WorkflowStepper`                                                           |
+| Overlay   | `Dialog` · `Drawer` · `Popover` · `Tooltip` · `ConfirmDialog`                                                                   |
+| ناوبری    | `Tabs` · `Breadcrumb` · `Pagination` · `CommandPalette`                                                                         |
+| نمودار    | `LineChart` · `BarChart` · `DonutChart` · `Sparkline` · `GaugeChart`                                                            |
+| **وضعیت** | `EmptyState` · `LoadingState` · `ErrorState` · `Skeleton` · `NoAccessState`                                                     |
 
 **CONSTRAINT — سه حالت اجباری.** هر نمای داده‌محور **باید** هر سه را داشته باشد:
 
@@ -140,13 +140,13 @@ ErrorState   — پیام قابل فهم + دکمه تلاش دوباره + cor
 
 هر وضعیت در پلتفرم یک رنگ و یک نماد ثابت دارد، در همه صفحات:
 
-| وضعیت                            | رنگ      |
-| -------------------------------- | -------- |
-| `ACTIVE` · `APPROVED` · `COMPLETED` · `SETTLED` | success  |
-| `PENDING_APPROVAL` · `BID_OPEN` · `IN_PROGRESS` | warning  |
-| `REJECTED` · `CANCELLED` · `FAILED` · `OUT_OF_SERVICE` | danger |
-| `DRAFT` · `IDLE`                 | neutral  |
-| `IN_MAINTENANCE` · `EVALUATION`  | info     |
+| وضعیت                                                  | رنگ     |
+| ------------------------------------------------------ | ------- |
+| `ACTIVE` · `APPROVED` · `COMPLETED` · `SETTLED`        | success |
+| `PENDING_APPROVAL` · `BID_OPEN` · `IN_PROGRESS`        | warning |
+| `REJECTED` · `CANCELLED` · `FAILED` · `OUT_OF_SERVICE` | danger  |
+| `DRAFT` · `IDLE`                                       | neutral |
+| `IN_MAINTENANCE` · `EVALUATION`                        | info    |
 
 ### WorkflowStepper — گردش‌کار قابل مشاهده
 
@@ -181,52 +181,52 @@ ErrorState   — پیام قابل فهم + دکمه تلاش دوباره + cor
 
 ### apps/web — پورتال کاربر نهایی
 
-| مسیر                        | صفحه                    | نقش‌ها                              | فاز |
-| --------------------------- | ----------------------- | ----------------------------------- | --- |
-| `/login`                    | ورود (OIDC)             | همه                                 | P0  |
-| `/`                         | داشبورد                 | همه                                 | P0  |
-| `/organizations`            | سازمان و اعضا           | ORGANIZATION_ADMIN                  | P0  |
-| `/assets`                   | فهرست ماشین‌آلات        | FLEET_MANAGER، OPERATOR             | P0  |
-| `/assets/[id]`              | **پرونده الکترونیکی**   | FLEET_MANAGER، OPERATOR             | P0  |
-| `/assets/[id]/timeline`     | تاریخچه دارایی          | FLEET_MANAGER                       | P0  |
-| `/drivers`                  | راننده و تخصیص          | FLEET_MANAGER                       | P0  |
-| `/usage`                    | ثبت کارکرد              | OPERATOR، DRIVER                    | P0  |
-| `/maintenance`              | نگهداری و تعمیرات       | FLEET_MANAGER، OPERATOR             | P0  |
-| `/maintenance/[id]`         | جزئیات درخواست تعمیر    | FLEET_MANAGER، WORKSHOP             | P0  |
-| `/marketplace`              | جست‌وجوی کالا و خدمت    | PROCUREMENT_USER                    | P0  |
-| `/marketplace/[productId]`  | مقایسه پیشنهادها        | PROCUREMENT_USER                    | P0  |
-| `/orders`                   | سفارش‌ها                | PROCUREMENT_USER، SUPPLIER          | P0  |
-| `/orders/[id]`              | جزئیات سفارش + Stepper  | PROCUREMENT_USER، SUPPLIER          | P0  |
-| `/procurement/demands`      | ثبت نیاز و تجمیع        | PROCUREMENT_USER                    | P1  |
-| `/procurement/rfqs`         | استعلام‌ها              | PROCUREMENT_USER، SUPPLIER          | P1  |
-| `/suppliers`                | تأمین‌کنندگان           | PROCUREMENT_USER                    | P1  |
-| `/projects`                 | پروژه‌های عمرانی        | ORGANIZATION_ADMIN                  | P0  |
-| `/projects/[id]`            | جزئیات + گردش موافقت    | ORGANIZATION_ADMIN                  | P0  |
-| `/tenders`                  | مناقصه‌ها               | ORGANIZATION_ADMIN، CONTRACTOR      | P0  |
-| `/tenders/[id]`             | جزئیات + ثبت پیشنهاد    | ORGANIZATION_ADMIN، CONTRACTOR      | P0  |
-| `/contracts`                | قراردادها               | ORGANIZATION_ADMIN، CONTRACTOR      | P0  |
-| `/contracts/[id]`           | جزئیات + صورت‌وضعیت     | ORGANIZATION_ADMIN، CONTRACTOR      | P0  |
-| `/wallet`                   | کیف پول و تراکنش        | ORGANIZATION_ADMIN                  | P0  |
-| `/rewards`                  | امتیاز و سطح            | همه                                 | P1  |
-| `/notifications`            | اعلان‌ها                | همه                                 | P0  |
-| `/reports`                  | گزارش‌ها                | ORGANIZATION_ADMIN                  | P1  |
+| مسیر                       | صفحه                   | نقش‌ها                         | فاز |
+| -------------------------- | ---------------------- | ------------------------------ | --- |
+| `/login`                   | ورود (OIDC)            | همه                            | P0  |
+| `/`                        | داشبورد                | همه                            | P0  |
+| `/organizations`           | سازمان و اعضا          | ORGANIZATION_ADMIN             | P0  |
+| `/assets`                  | فهرست ماشین‌آلات       | FLEET_MANAGER، OPERATOR        | P0  |
+| `/assets/[id]`             | **پرونده الکترونیکی**  | FLEET_MANAGER، OPERATOR        | P0  |
+| `/assets/[id]/timeline`    | تاریخچه دارایی         | FLEET_MANAGER                  | P0  |
+| `/drivers`                 | راننده و تخصیص         | FLEET_MANAGER                  | P0  |
+| `/usage`                   | ثبت کارکرد             | OPERATOR، DRIVER               | P0  |
+| `/maintenance`             | نگهداری و تعمیرات      | FLEET_MANAGER، OPERATOR        | P0  |
+| `/maintenance/[id]`        | جزئیات درخواست تعمیر   | FLEET_MANAGER، WORKSHOP        | P0  |
+| `/marketplace`             | جست‌وجوی کالا و خدمت   | PROCUREMENT_USER               | P0  |
+| `/marketplace/[productId]` | مقایسه پیشنهادها       | PROCUREMENT_USER               | P0  |
+| `/orders`                  | سفارش‌ها               | PROCUREMENT_USER، SUPPLIER     | P0  |
+| `/orders/[id]`             | جزئیات سفارش + Stepper | PROCUREMENT_USER، SUPPLIER     | P0  |
+| `/procurement/demands`     | ثبت نیاز و تجمیع       | PROCUREMENT_USER               | P1  |
+| `/procurement/rfqs`        | استعلام‌ها             | PROCUREMENT_USER، SUPPLIER     | P1  |
+| `/suppliers`               | تأمین‌کنندگان          | PROCUREMENT_USER               | P1  |
+| `/projects`                | پروژه‌های عمرانی       | ORGANIZATION_ADMIN             | P0  |
+| `/projects/[id]`           | جزئیات + گردش موافقت   | ORGANIZATION_ADMIN             | P0  |
+| `/tenders`                 | مناقصه‌ها              | ORGANIZATION_ADMIN، CONTRACTOR | P0  |
+| `/tenders/[id]`            | جزئیات + ثبت پیشنهاد   | ORGANIZATION_ADMIN، CONTRACTOR | P0  |
+| `/contracts`               | قراردادها              | ORGANIZATION_ADMIN، CONTRACTOR | P0  |
+| `/contracts/[id]`          | جزئیات + صورت‌وضعیت    | ORGANIZATION_ADMIN، CONTRACTOR | P0  |
+| `/wallet`                  | کیف پول و تراکنش       | ORGANIZATION_ADMIN             | P0  |
+| `/rewards`                 | امتیاز و سطح           | همه                            | P1  |
+| `/notifications`           | اعلان‌ها               | همه                            | P0  |
+| `/reports`                 | گزارش‌ها               | ORGANIZATION_ADMIN             | P1  |
 
 ### apps/admin — کنسول اپراتور
 
-| مسیر                        | صفحه                        | نقش‌ها               | فاز |
-| --------------------------- | --------------------------- | -------------------- | --- |
-| `/`                         | داشبورد عملیاتی پلتفرم      | UNION_ADMIN          | P0  |
-| `/organizations`            | مدیریت سازمان‌ها و سلسله‌مراتب | UNION_ADMIN       | P0  |
-| `/users`                    | کاربران، نقش‌ها، عضویت      | UNION_ADMIN          | P0  |
-| `/suppliers`                | احراز صلاحیت و تعلیق        | UNION_ADMIN          | P1  |
-| `/catalog`                  | مدیریت فهرست کالا           | UNION_ADMIN          | P1  |
-| `/financial`                | تراکنش، تسویه، کارمزد       | UNION_ADMIN          | P0  |
-| `/financial/ledger`         | دفتر کل و تراز آزمایشی      | UNION_ADMIN          | P1  |
-| `/config/commission-rules`  | **قواعد کارمزد**            | SYSTEM_ADMIN         | P1  |
-| `/config/reward-rules`      | **قواعد پاداش**             | SYSTEM_ADMIN         | P1  |
-| `/config/approval-policies` | **سیاست‌های موافقت**        | SYSTEM_ADMIN         | P1  |
-| `/audit`                    | سوابق حسابرسی               | UNION_ADMIN          | P0  |
-| `/governance`               | **داشبورد تجمیعی استانداری**| AUDITOR              | P1  |
+| مسیر                        | صفحه                           | نقش‌ها       | فاز |
+| --------------------------- | ------------------------------ | ------------ | --- |
+| `/`                         | داشبورد عملیاتی پلتفرم         | UNION_ADMIN  | P0  |
+| `/organizations`            | مدیریت سازمان‌ها و سلسله‌مراتب | UNION_ADMIN  | P0  |
+| `/users`                    | کاربران، نقش‌ها، عضویت         | UNION_ADMIN  | P0  |
+| `/suppliers`                | احراز صلاحیت و تعلیق           | UNION_ADMIN  | P1  |
+| `/catalog`                  | مدیریت فهرست کالا              | UNION_ADMIN  | P1  |
+| `/financial`                | تراکنش، تسویه، کارمزد          | UNION_ADMIN  | P0  |
+| `/financial/ledger`         | دفتر کل و تراز آزمایشی         | UNION_ADMIN  | P1  |
+| `/config/commission-rules`  | **قواعد کارمزد**               | SYSTEM_ADMIN | P1  |
+| `/config/reward-rules`      | **قواعد پاداش**                | SYSTEM_ADMIN | P1  |
+| `/config/approval-policies` | **سیاست‌های موافقت**           | SYSTEM_ADMIN | P1  |
+| `/audit`                    | سوابق حسابرسی                  | UNION_ADMIN  | P0  |
+| `/governance`               | **داشبورد تجمیعی استانداری**   | AUDITOR      | P1  |
 
 **CONSTRAINT.** نقش `AUDITOR` **فقط** به `/governance` دسترسی دارد. مسیرهای دیگر برای این
 نقش وجود ندارند — نه پنهان، بلکه Route Guard آن‌ها را رد می‌کند و API هم مجوز نمی‌دهد.
@@ -236,13 +236,13 @@ ErrorState   — پیام قابل فهم + دکمه تلاش دوباره + cor
 
 ## ۱۶٫۷ داشبوردها
 
-| داشبورد            | مخاطب              | محتوا                                                              |
-| ------------------ | ------------------ | ------------------------------------------------------------------ |
-| کاربر نهایی        | دهیاری             | آمادگی ناوگان · سرویس‌های پیش رو · سفارش‌های باز · موجودی کیف پول · پروژه‌های فعال |
-| ناوگان             | FLEET_MANAGER      | ترکیب ناوگان · نرخ بهره‌برداری · **نسبت تعمیر پیشگیرانه/اضطراری** · انقضای بیمه |
-| مالی               | UNION_ADMIN        | حجم تراکنش · درآمد کارمزد · تسویه معلق · اعتراض‌های باز            |
-| عمران              | ORGANIZATION_ADMIN | پروژه‌های فعال · در انتظار موافقت · مناقصه باز · تعداد پیشنهاد · صورت‌وضعیت معلق |
-| **حاکمیتی**        | AUDITOR            | **فقط تجمیعی:** ترکیب ناوگان استان · روند هزینه · **سه شاخص اقتصادی** |
+| داشبورد     | مخاطب              | محتوا                                                                              |
+| ----------- | ------------------ | ---------------------------------------------------------------------------------- |
+| کاربر نهایی | دهیاری             | آمادگی ناوگان · سرویس‌های پیش رو · سفارش‌های باز · موجودی کیف پول · پروژه‌های فعال |
+| ناوگان      | FLEET_MANAGER      | ترکیب ناوگان · نرخ بهره‌برداری · **نسبت تعمیر پیشگیرانه/اضطراری** · انقضای بیمه    |
+| مالی        | UNION_ADMIN        | حجم تراکنش · درآمد کارمزد · تسویه معلق · اعتراض‌های باز                            |
+| عمران       | ORGANIZATION_ADMIN | پروژه‌های فعال · در انتظار موافقت · مناقصه باز · تعداد پیشنهاد · صورت‌وضعیت معلق   |
+| **حاکمیتی** | AUDITOR            | **فقط تجمیعی:** ترکیب ناوگان استان · روند هزینه · **سه شاخص اقتصادی**              |
 
 **CONSTRAINT — صداقت داده.** KPIهای وابسته به خط مبنا تا پر نشدن `baseline_metric`
 با پیام صریح «نیازمند ایجاد خط مبنا» نمایش داده می‌شوند — **نه صفر، نه عدد ساختگی**.
@@ -273,17 +273,17 @@ ErrorState   — پیام قابل فهم + دکمه تلاش دوباره + cor
 
 ## ۱۶٫۹ دسترس‌پذیری (WCAG 2.1 AA)
 
-| الزام                                                            |
-| ---------------------------------------------------------------- |
-| کنتراست ≥ ۴٫۵:۱ برای متن، ≥ ۳:۱ برای عناصر رابط                 |
-| هر عملکرد با صفحه‌کلید در دسترس؛ ترتیب Tab منطقی                 |
-| حلقه Focus قابل مشاهده — هرگز `outline: none` بدون جایگزین       |
-| HTML معنایی؛ ARIA فقط جایی که HTML کافی نیست                     |
-| هر ورودی `<label>` مرتبط دارد                                     |
-| خطای فرم با `aria-live` اعلام می‌شود و به فیلد گره می‌خورد        |
-| هدف لمسی ≥ ۴۴×۴۴ پیکسل                                           |
-| هرگز رنگ به‌تنهایی حامل معنا نیست — همیشه با متن یا نماد          |
-| `prefers-reduced-motion` رعایت می‌شود                             |
+| الزام                                                      |
+| ---------------------------------------------------------- |
+| کنتراست ≥ ۴٫۵:۱ برای متن، ≥ ۳:۱ برای عناصر رابط            |
+| هر عملکرد با صفحه‌کلید در دسترس؛ ترتیب Tab منطقی           |
+| حلقه Focus قابل مشاهده — هرگز `outline: none` بدون جایگزین |
+| HTML معنایی؛ ARIA فقط جایی که HTML کافی نیست               |
+| هر ورودی `<label>` مرتبط دارد                              |
+| خطای فرم با `aria-live` اعلام می‌شود و به فیلد گره می‌خورد |
+| هدف لمسی ≥ ۴۴×۴۴ پیکسل                                     |
+| هرگز رنگ به‌تنهایی حامل معنا نیست — همیشه با متن یا نماد   |
+| `prefers-reduced-motion` رعایت می‌شود                      |
 
 تست: `axe-core` در تست Component، و بررسی دستی صفحه‌کلید برای هر جریان بحرانی.
 
@@ -291,13 +291,13 @@ ErrorState   — پیام قابل فهم + دکمه تلاش دوباره + cor
 
 ## ۱۶٫۱۰ کارایی و PWA
 
-| هدف                          | مقدار                                    |
-| ---------------------------- | ---------------------------------------- |
-| First Contentful Paint       | < ۱٫۵ ثانیه (3G)                         |
-| Largest Contentful Paint     | < ۲٫۵ ثانیه                              |
-| Interaction to Next Paint    | < ۲۰۰ms                                  |
-| Cumulative Layout Shift      | < ۰٫۱                                    |
-| Bundle اولیه JS              | < ۲۰۰KB gzip                             |
+| هدف                       | مقدار            |
+| ------------------------- | ---------------- |
+| First Contentful Paint    | < ۱٫۵ ثانیه (3G) |
+| Largest Contentful Paint  | < ۲٫۵ ثانیه      |
+| Interaction to Next Paint | < ۲۰۰ms          |
+| Cumulative Layout Shift   | < ۰٫۱            |
+| Bundle اولیه JS           | < ۲۰۰KB gzip     |
 
 **راهبرد:** Server Component به‌صورت پیش‌فرض · تقسیم کد بر اساس مسیر ·
 `next/image` با AVIF/WebP · فونت محلی با `font-display: swap` · صفحه‌بندی سمت سرور.

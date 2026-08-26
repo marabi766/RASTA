@@ -6,7 +6,5 @@
   "tabWidth": 2,
   "arrowParens": "always",
   "endOfLine": "lf",
-  "overrides": [
-    { "files": "*.md", "options": { "printWidth": 120, "proseWrap": "preserve" } }
-  ]
+  "overrides": [{ "files": "*.md", "options": { "printWidth": 120, "proseWrap": "preserve" } }]
 }

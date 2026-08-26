@@ -5,7 +5,9 @@
   "description": "Shared NestJS building blocks: request context, guards, filters, interceptors, tenant-scoped repository base, outbox and Kafka wrappers. No business logic.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rimraf dist .turbo",

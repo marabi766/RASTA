@@ -22,15 +22,15 @@
        ╱────────────────────────╲
 ```
 
-| لایه            | ابزار                       | سرعت    | نیاز به زیرساخت |
-| --------------- | --------------------------- | ------- | --------------- |
-| Unit            | Jest + @swc/jest            | ms      | ❌              |
-| Integration     | Jest + Testcontainers       | ثانیه   | ✅ (خودکار)     |
-| Contract        | Zod + OpenAPI Validator     | ms      | ❌              |
-| API / Component | Jest + Supertest            | ثانیه   | ✅              |
-| E2E             | Playwright                  | دقیقه   | ✅ (کل Stack)   |
-| Load            | k6                          | دقیقه   | ✅              |
-| Security        | Jest + Semgrep + Trivy + ZAP| متغیر   | جزئی           |
+| لایه            | ابزار                        | سرعت  | نیاز به زیرساخت |
+| --------------- | ---------------------------- | ----- | --------------- |
+| Unit            | Jest + @swc/jest             | ms    | ❌              |
+| Integration     | Jest + Testcontainers        | ثانیه | ✅ (خودکار)     |
+| Contract        | Zod + OpenAPI Validator      | ms    | ❌              |
+| API / Component | Jest + Supertest             | ثانیه | ✅              |
+| E2E             | Playwright                   | دقیقه | ✅ (کل Stack)   |
+| Load            | k6                           | دقیقه | ✅              |
+| Security        | Jest + Semgrep + Trivy + ZAP | متغیر | جزئی            |
 
 ---
 
@@ -60,13 +60,13 @@ describe('applyBasisPoints', () => {
 
 **آستانه پوشش:**
 
-| بخش                                       | حداقل پوشش شاخه |
-| ----------------------------------------- | --------------- |
-| `economic-service` (منطق مالی)            | **۹۰٪**         |
-| `identity-service` (مجوزدهی)              | **۹۰٪**         |
-| `construction-service` (گذار مناقصه)      | **۸۵٪**         |
-| بقیه سرویس‌ها                              | ۷۵٪             |
-| `packages/*`                              | ۸۵٪             |
+| بخش                                  | حداقل پوشش شاخه |
+| ------------------------------------ | --------------- |
+| `economic-service` (منطق مالی)       | **۹۰٪**         |
+| `identity-service` (مجوزدهی)         | **۹۰٪**         |
+| `construction-service` (گذار مناقصه) | **۸۵٪**         |
+| بقیه سرویس‌ها                        | ۷۵٪             |
+| `packages/*`                         | ۸۵٪             |
 
 پوشش هدف است، نه معیار موفقیت. ۱۰۰٪ پوشش با Assertهای بی‌معنا بدتر از ۷۰٪ معنادار است.
 
@@ -177,15 +177,13 @@ Idempotency (اگر کاربرد دارد).
 ```typescript
 describe('Tenant isolation — asset-service', () => {
   it.each([
-    ['GET',    (id) => `/v1/assets/${id}`],
-    ['PATCH',  (id) => `/v1/assets/${id}`],
+    ['GET', (id) => `/v1/assets/${id}`],
+    ['PATCH', (id) => `/v1/assets/${id}`],
     ['DELETE', (id) => `/v1/assets/${id}`],
-    ['GET',    (id) => `/v1/assets/${id}/dossier`],
+    ['GET', (id) => `/v1/assets/${id}/dossier`],
   ])('%s روی منبع مستأجر دیگر ۴۰۴ می‌دهد', async (method, path) => {
     const asset = await createAssetAs(tenantA);
-    await request(app)[method.toLowerCase()](path(asset.id))
-      .set('Authorization', `Bearer ${tenantBToken}`)
-      .expect(404);              // ۴۰۴ نه ۴۰۳ — وجود منبع نباید لو برود
+    await request(app)[method.toLowerCase()](path(asset.id)).set('Authorization', `Bearer ${tenantBToken}`).expect(404); // ۴۰۴ نه ۴۰۳ — وجود منبع نباید لو برود
   });
 
   it('فهرست هرگز داده مستأجر دیگر را برنمی‌گرداند', async () => {
@@ -201,14 +199,16 @@ describe('Tenant isolation — asset-service', () => {
 ```typescript
 describe('Authorization matrix', () => {
   it.each([
-    ['DRIVER',            'POST /v1/assets',              403],
-    ['DRIVER',            'POST /v1/assets/:id/usage',    201],
-    ['FLEET_MANAGER',     'POST /v1/assets',              201],
-    ['AUDITOR',           'GET  /v1/wallets/me',          403],  // الزام سند محصول
-    ['AUDITOR',           'GET  /v1/transactions',        403],  // الزام سند محصول
-    ['AUDITOR',           'GET  /v1/dashboards/governance', 200],
-    ['SUPPLIER',          'GET  /v1/orders/:otherOrderId', 404],
-  ])('%s روی %s باید %d بگیرد', async (role, route, expected) => { /* ... */ });
+    ['DRIVER', 'POST /v1/assets', 403],
+    ['DRIVER', 'POST /v1/assets/:id/usage', 201],
+    ['FLEET_MANAGER', 'POST /v1/assets', 201],
+    ['AUDITOR', 'GET  /v1/wallets/me', 403], // الزام سند محصول
+    ['AUDITOR', 'GET  /v1/transactions', 403], // الزام سند محصول
+    ['AUDITOR', 'GET  /v1/dashboards/governance', 200],
+    ['SUPPLIER', 'GET  /v1/orders/:otherOrderId', 404],
+  ])('%s روی %s باید %d بگیرد', async (role, route, expected) => {
+    /* ... */
+  });
 });
 ```
 
@@ -225,16 +225,14 @@ describe('Financial integrity', () => {
   });
 
   it('UPDATE روی ورودی دفتر کل غیرممکن است', async () => {
-    await expect(
-      db.$executeRaw`UPDATE ledger_entry SET amount_minor = 1 WHERE id = ${entryId}`,
-    ).rejects.toThrow(/append-only/);
+    await expect(db.$executeRaw`UPDATE ledger_entry SET amount_minor = 1 WHERE id = ${entryId}`).rejects.toThrow(
+      /append-only/,
+    );
   });
 
   it('۱۰۰ برداشت موازی هرگز مانده را منفی نمی‌کند', async () => {
     await topUp(wallet, 10_000n);
-    const results = await Promise.allSettled(
-      Array.from({ length: 100 }, () => withdraw(wallet, 1_000n)),
-    );
+    const results = await Promise.allSettled(Array.from({ length: 100 }, () => withdraw(wallet, 1_000n)));
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(10);
     expect((await getWallet(wallet)).availableBalanceMinor).toBe('0');
   });
@@ -251,7 +249,7 @@ describe('Financial integrity', () => {
 ```typescript
 it('پردازش دو باره یک رویداد اثر دوم ندارد', async () => {
   await consumer.handle(orderCompletedEvent);
-  await consumer.handle(orderCompletedEvent);          // همان eventId
+  await consumer.handle(orderCompletedEvent); // همان eventId
   expect(await countCommissionsFor(orderId)).toBe(1);
 });
 ```
@@ -265,18 +263,18 @@ it('پردازش دو باره یک رویداد اثر دوم ندارد', asyn
 
 با Playwright روی Stack کامل.
 
-| # | سناریو                                                                    | فاز |
-| - | ------------------------------------------------------------------------- | --- |
-| ۱ | ورود · انتخاب سازمان · مشاهده داشبورد                                     | P0  |
-| ۲ | ثبت دارایی → تخصیص راننده → ثبت کارکرد → مشاهده در پرونده                  | P0  |
-| ۳ | ثبت خرابی → ارجاع تعمیرگاه → اتمام تعمیر → تأیید کاربر → تسویه            | P0  |
-| ۴ | **جریان کامل Marketplace:** جست‌وجو → سفارش → Hold → تحویل → تأیید → تسویه → کارمزد → پاداش | P0 |
-| ۵ | **جریان کامل عمران:** پروژه → موافقت → مناقصه → پیشنهاد → ارزیابی → قرارداد → پیشرفت | P0 |
-| ۶ | صورت‌وضعیت → تأیید فنی → تأیید مالی → پرداخت                              | P1  |
-| ۷ | تجمیع تقاضا → RFQ → پیشنهاد قیمت → سفارش خرید                             | P1  |
-| ۸ | **Tenant Isolation از دید UI** — کاربر A داده B را نمی‌بیند                | P0  |
-| ۹ | اعتراض روی سفارش → توقف تسویه                                             | P1  |
-| ۱۰| هشدار انقضای بیمه → تمدید                                                 | P1  |
+| #   | سناریو                                                                                      | فاز |
+| --- | ------------------------------------------------------------------------------------------- | --- |
+| ۱   | ورود · انتخاب سازمان · مشاهده داشبورد                                                       | P0  |
+| ۲   | ثبت دارایی → تخصیص راننده → ثبت کارکرد → مشاهده در پرونده                                   | P0  |
+| ۳   | ثبت خرابی → ارجاع تعمیرگاه → اتمام تعمیر → تأیید کاربر → تسویه                              | P0  |
+| ۴   | **جریان کامل Marketplace:** جست‌وجو → سفارش → Hold → تحویل → تأیید → تسویه → کارمزد → پاداش | P0  |
+| ۵   | **جریان کامل عمران:** پروژه → موافقت → مناقصه → پیشنهاد → ارزیابی → قرارداد → پیشرفت        | P0  |
+| ۶   | صورت‌وضعیت → تأیید فنی → تأیید مالی → پرداخت                                                | P1  |
+| ۷   | تجمیع تقاضا → RFQ → پیشنهاد قیمت → سفارش خرید                                               | P1  |
+| ۸   | **Tenant Isolation از دید UI** — کاربر A داده B را نمی‌بیند                                 | P0  |
+| ۹   | اعتراض روی سفارش → توقف تسویه                                                               | P1  |
+| ۱۰  | هشدار انقضای بیمه → تمدید                                                                   | P1  |
 
 **قواعد:** هر تست داده خودش را می‌سازد و پاک می‌کند · بدون `sleep` ثابت (انتظار روی شرط) ·
 اجرا روی Staging در CI · شکست E2E روی مسیر بحرانی = مسدود کردن انتشار.
@@ -287,25 +285,25 @@ it('پردازش دو باره یک رویداد اثر دوم ندارد', asyn
 
 با k6 — پس از Day 20.
 
-| سناریو                       | هدف                                       | آستانه قبولی           |
-| ---------------------------- | ----------------------------------------- | ---------------------- |
-| فهرست دارایی                 | ۵۰ کاربر همزمان، ۵ دقیقه                  | p95 < ۳۰۰ms            |
-| جست‌وجوی Marketplace         | ۱۰۰ کاربر همزمان                          | p95 < ۵۰۰ms            |
-| ثبت سفارش                    | ۲۰ سفارش/ثانیه                            | p95 < ۱s، خطا < ۰٫۱٪   |
-| ثبت کارکرد (نوشتن‌سنگین)     | ۱۰۰ ثبت/ثانیه                             | p95 < ۵۰۰ms            |
-| **همزمانی کیف پول**          | ۵۰ عملیات موازی روی یک کیف پول            | **بدون مانده منفی، بدون Deadlock** |
-| مصرف رویداد                  | ۱٬۰۰۰ رویداد/ثانیه                        | تأخیر < ۳۰s            |
+| سناریو                   | هدف                            | آستانه قبولی                       |
+| ------------------------ | ------------------------------ | ---------------------------------- |
+| فهرست دارایی             | ۵۰ کاربر همزمان، ۵ دقیقه       | p95 < ۳۰۰ms                        |
+| جست‌وجوی Marketplace     | ۱۰۰ کاربر همزمان               | p95 < ۵۰۰ms                        |
+| ثبت سفارش                | ۲۰ سفارش/ثانیه                 | p95 < ۱s، خطا < ۰٫۱٪               |
+| ثبت کارکرد (نوشتن‌سنگین) | ۱۰۰ ثبت/ثانیه                  | p95 < ۵۰۰ms                        |
+| **همزمانی کیف پول**      | ۵۰ عملیات موازی روی یک کیف پول | **بدون مانده منفی، بدون Deadlock** |
+| مصرف رویداد              | ۱٬۰۰۰ رویداد/ثانیه             | تأخیر < ۳۰s                        |
 
 ---
 
 ## ۱۴٫۹ داده تست
 
-| نوع        | کاربرد                    | مکان                                    |
-| ---------- | ------------------------- | --------------------------------------- |
-| Factory    | Unit و Integration        | `packages/testing/src/factories/`       |
-| Fixture    | تست API                   | `<service>/test/fixtures/`              |
-| Seed نمایشی| توسعه و Demo              | `<service>/prisma/seed.ts`              |
-| Seed E2E   | Playwright                | `tests/e2e/fixtures/`                   |
+| نوع         | کاربرد             | مکان                              |
+| ----------- | ------------------ | --------------------------------- |
+| Factory     | Unit و Integration | `packages/testing/src/factories/` |
+| Fixture     | تست API            | `<service>/test/fixtures/`        |
+| Seed نمایشی | توسعه و Demo       | `<service>/prisma/seed.ts`        |
+| Seed E2E    | Playwright         | `tests/e2e/fixtures/`             |
 
 **Dataset نمایشی (الزام Day 10):** ۳ سازمان · ۲۰+ ماشین‌آلات · ۱۰ کاربر · چند راننده ·
 چند تعمیرگاه · چند تأمین‌کننده · چند کالا · چند سفارش · چند تراکنش · چند پروژه عمرانی ·

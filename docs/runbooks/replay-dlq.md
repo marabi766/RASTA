@@ -14,12 +14,12 @@
 
 یک رویداد پردازش نشده. اثر بستگی به رویداد دارد:
 
-| رویداد | اثر |
-| --- | --- |
+| رویداد                    | اثر                                           |
+| ------------------------- | --------------------------------------------- |
 | `ORDER_RECEIPT_CONFIRMED` | **تسویه انجام نشد — پول کاربر Hold مانده** 🔴 |
-| `STATEMENT_APPROVED` | **پرداخت پیمانکار انجام نشد** 🔴 |
-| `MAINTENANCE_DUE` | اعلان سررسید نرفت 🟠 |
-| `ASSET_UPDATED` | Read Model کهنه ماند 🟡 |
+| `STATEMENT_APPROVED`      | **پرداخت پیمانکار انجام نشد** 🔴              |
+| `MAINTENANCE_DUE`         | اعلان سررسید نرفت 🟠                          |
+| `ASSET_UPDATED`           | Read Model کهنه ماند 🟡                       |
 
 **DLQ صندوق فراموشی نیست.** هر پیام باید بررسی و تعیین تکلیف شود.
 
@@ -39,13 +39,13 @@ docker compose exec kafka kafka-console-consumer.sh \
 
 Headerهای کلیدی:
 
-| Header | معنا |
-| --- | --- |
-| `x-dlq-reason` | دلیل دسته‌بندی‌شده |
-| `x-dlq-original-topic` | Topic مبدأ |
-| `x-dlq-attempts` | تعداد تلاش پیش از DLQ |
-| `x-dlq-error` | متن خطا |
-| `x-dlq-first-failed-at` | نخستین شکست |
+| Header                  | معنا                  |
+| ----------------------- | --------------------- |
+| `x-dlq-reason`          | دلیل دسته‌بندی‌شده    |
+| `x-dlq-original-topic`  | Topic مبدأ            |
+| `x-dlq-attempts`        | تعداد تلاش پیش از DLQ |
+| `x-dlq-error`           | متن خطا               |
+| `x-dlq-first-failed-at` | نخستین شکست           |
 
 ### ۲. عمق DLQ به تفکیک دلیل
 
@@ -68,13 +68,13 @@ docker compose exec kafka kafka-run-class.sh kafka.tools.GetOffsetShell \
 
 ### گام ۱ — دسته‌بندی علت
 
-| `x-dlq-reason` | معنا | اقدام |
-| --- | --- | --- |
-| `VALIDATION_FAILED` | Payload با Schema نمی‌خواند | باگ Producer — رفع کن، سپس بازپخش |
-| `SCHEMA_VERSION_UNSUPPORTED` | Consumer نسخه را نمی‌شناسد | Consumer را به‌روز کن، سپس بازپخش |
-| `BUSINESS_RULE_VIOLATION` | رویداد در وضعیت فعلی معتبر نیست | **بررسی دستی** — ممکن است بازپخش نباید انجام شود |
-| `UPSTREAM_UNAVAILABLE` | وابستگی در دسترس نبود | وابستگی را برگردان، سپس بازپخش |
-| `MAX_RETRIES_EXCEEDED` | خطای گذرا که ادامه یافت | علت را بررسی کن، سپس بازپخش |
+| `x-dlq-reason`               | معنا                            | اقدام                                            |
+| ---------------------------- | ------------------------------- | ------------------------------------------------ |
+| `VALIDATION_FAILED`          | Payload با Schema نمی‌خواند     | باگ Producer — رفع کن، سپس بازپخش                |
+| `SCHEMA_VERSION_UNSUPPORTED` | Consumer نسخه را نمی‌شناسد      | Consumer را به‌روز کن، سپس بازپخش                |
+| `BUSINESS_RULE_VIOLATION`    | رویداد در وضعیت فعلی معتبر نیست | **بررسی دستی** — ممکن است بازپخش نباید انجام شود |
+| `UPSTREAM_UNAVAILABLE`       | وابستگی در دسترس نبود           | وابستگی را برگردان، سپس بازپخش                   |
+| `MAX_RETRIES_EXCEEDED`       | خطای گذرا که ادامه یافت         | علت را بررسی کن، سپس بازپخش                      |
 
 ### گام ۲ — رفع علت ریشه‌ای
 

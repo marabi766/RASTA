@@ -12,13 +12,13 @@
 Monorepo مبتنی بر TypeScript با ۱۶ Microservice (NestJS)، دو Frontend (Next.js) و
 زیرساخت رویدادمحور (Kafka + Temporal).
 
-| منبع                    | مسیر                                      |
-| ----------------------- | ----------------------------------------- |
-| الزامات محصول («چه؟»)   | `01-طرح-جامع-پلتفرم-رستا.docx`            |
-| تصمیم‌های فنی («چگونه؟»)| `docs/01..24-*.md`                        |
-| تصمیم‌های ثبت‌شده       | `docs/adr/ADR-*.md`                       |
-| قواعد الزام‌آور         | `AGENTS.md`                               |
-| پرسش‌های باز            | `docs/24-open-questions.md`               |
+| منبع                     | مسیر                           |
+| ------------------------ | ------------------------------ |
+| الزامات محصول («چه؟»)    | `01-طرح-جامع-پلتفرم-رستا.docx` |
+| تصمیم‌های فنی («چگونه؟») | `docs/01..24-*.md`             |
+| تصمیم‌های ثبت‌شده        | `docs/adr/ADR-*.md`            |
+| قواعد الزام‌آور          | `AGENTS.md`                    |
+| پرسش‌های باز             | `docs/24-open-questions.md`    |
 
 ---
 
@@ -127,25 +127,25 @@ Hard-Code کردن نرخ کارمزد یا مرجع موافقت.
 
 ## Service Map
 
-| سرویس                  | پورت | مالکیت داده                                        | فاز |
-| ---------------------- | ---- | -------------------------------------------------- | --- |
-| `api-gateway`          | 3000 | — (بدون پایگاه داده)                               | P0  |
-| `identity-service`     | 3101 | User، Credential، Session، Membership، Role         | P0  |
-| `organization-service` | 3102 | Organization، Hierarchy، Policy، Location           | P0  |
-| `asset-service`        | 3103 | Asset، AssetDocument، InsurancePolicy، Inspection   | P0  |
-| `fleet-service`        | 3104 | Driver، Assignment، UsageRecord، Availability       | P0  |
-| `maintenance-service`  | 3105 | Schedule، MaintenanceRequest، RepairOrder، Part     | P0  |
-| `marketplace-service`  | 3106 | Catalog، Product، Offer، Cart، Order، Review        | P0  |
-| `procurement-service`  | 3107 | DemandRequest، Aggregation، RFQ، Quotation، PO      | P1  |
-| `supplier-service`     | 3108 | Supplier، Contractor، Qualification، Rating         | P1  |
-| `inventory-service`    | 3109 | Warehouse، Stock، Movement، Shipment                | P1  |
-| `construction-service` | 3110 | Project، Need، Approval، Tender، Bid، Progress      | P0  |
-| `contract-service`     | 3111 | Contract، Amendment، Statement، Milestone           | P0  |
-| `economic-service`     | 3112 | Wallet، Ledger، Transaction، Commission، Reward     | P0  |
-| `notification-service` | 3113 | Notification، Template، Delivery، Preference        | P0  |
-| `document-service`     | 3114 | Document، Version، AccessGrant (فراداده؛ فایل در S3)| P0  |
-| `audit-service`        | 3115 | AuditEvent (فقط الحاقی)                            | P0  |
-| `analytics-service`    | 3116 | ReadModel، KPI Snapshot                            | P1  |
+| سرویس                  | پورت | مالکیت داده                                          | فاز |
+| ---------------------- | ---- | ---------------------------------------------------- | --- |
+| `api-gateway`          | 3000 | — (بدون پایگاه داده)                                 | P0  |
+| `identity-service`     | 3101 | User، Credential، Session، Membership، Role          | P0  |
+| `organization-service` | 3102 | Organization، Hierarchy، Policy، Location            | P0  |
+| `asset-service`        | 3103 | Asset، AssetDocument، InsurancePolicy، Inspection    | P0  |
+| `fleet-service`        | 3104 | Driver، Assignment، UsageRecord، Availability        | P0  |
+| `maintenance-service`  | 3105 | Schedule، MaintenanceRequest، RepairOrder، Part      | P0  |
+| `marketplace-service`  | 3106 | Catalog، Product، Offer، Cart، Order، Review         | P0  |
+| `procurement-service`  | 3107 | DemandRequest، Aggregation، RFQ، Quotation، PO       | P1  |
+| `supplier-service`     | 3108 | Supplier، Contractor، Qualification، Rating          | P1  |
+| `inventory-service`    | 3109 | Warehouse، Stock، Movement، Shipment                 | P1  |
+| `construction-service` | 3110 | Project، Need، Approval، Tender، Bid، Progress       | P0  |
+| `contract-service`     | 3111 | Contract، Amendment، Statement، Milestone            | P0  |
+| `economic-service`     | 3112 | Wallet، Ledger، Transaction، Commission، Reward      | P0  |
+| `notification-service` | 3113 | Notification، Template، Delivery، Preference         | P0  |
+| `document-service`     | 3114 | Document، Version، AccessGrant (فراداده؛ فایل در S3) | P0  |
+| `audit-service`        | 3115 | AuditEvent (فقط الحاقی)                              | P0  |
+| `analytics-service`    | 3116 | ReadModel، KPI Snapshot                              | P1  |
 
 Frontend: `apps/web` (3200) — پورتال کاربر · `apps/admin` (3201) — کنسول اپراتور.
 

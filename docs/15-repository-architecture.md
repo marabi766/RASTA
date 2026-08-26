@@ -7,12 +7,12 @@
 
 ## ۱۵٫۱ چرا Monorepo
 
-| نیاز                                                  | چرا Monorepo پاسخ می‌دهد                                    |
-| ----------------------------------------------------- | ------------------------------------------------------------ |
-| قرارداد رویداد و API باید بین سرویس‌ها همگام بماند     | یک نسخه از `@rasta/contracts` برای همه؛ تغییر شکننده فوری دیده می‌شود |
-| تغییر عرضی (افزودن یک Header به همه سرویس‌ها)         | یک PR به‌جای ۱۷ PR هماهنگ‌شده                                |
-| تیم کوچک                                              | سربار مدیریت ۱۷ Repository توجیه ندارد                       |
-| Refactor فرامرزی                                      | ابزار همه مصرف‌کنندگان را می‌بیند                            |
+| نیاز                                               | چرا Monorepo پاسخ می‌دهد                                              |
+| -------------------------------------------------- | --------------------------------------------------------------------- |
+| قرارداد رویداد و API باید بین سرویس‌ها همگام بماند | یک نسخه از `@rasta/contracts` برای همه؛ تغییر شکننده فوری دیده می‌شود |
+| تغییر عرضی (افزودن یک Header به همه سرویس‌ها)      | یک PR به‌جای ۱۷ PR هماهنگ‌شده                                         |
+| تیم کوچک                                           | سربار مدیریت ۱۷ Repository توجیه ندارد                                |
+| Refactor فرامرزی                                   | ابزار همه مصرف‌کنندگان را می‌بیند                                     |
 
 **معاوضه پذیرفته‌شده.** Monorepo وسوسه «فقط این یک تابع را از آنجا Import کن» را می‌سازد.
 پاسخ ما ابزاری است، نه اخلاقی: قاعده ESLint، Import میان‌سرویسی را **خطا** می‌کند.
@@ -126,13 +126,13 @@ services/asset-service/
 
 **تفکیک مسئولیت درون سرویس:**
 
-| لایه         | مسئولیت                                       | چه چیزی آنجا نیست                    |
-| ------------ | --------------------------------------------- | ------------------------------------- |
-| Controller   | HTTP، اعتبارسنجی DTO، کد وضعیت                | **هیچ منطق کسب‌وکاری**                |
-| Service      | قواعد دامنه، Invariantها، هماهنگی             | SQL خام، جزئیات HTTP                  |
-| Repository   | دسترسی داده، **Scope مستأجر اجباری**          | تصمیم کسب‌وکاری                       |
-| Domain       | Entity، Value Object، State Machine           | I/O                                   |
-| Consumer     | مصرف رویداد، Idempotency                      | منطق پیچیده (به Service واگذار می‌شود) |
+| لایه       | مسئولیت                              | چه چیزی آنجا نیست                      |
+| ---------- | ------------------------------------ | -------------------------------------- |
+| Controller | HTTP، اعتبارسنجی DTO، کد وضعیت       | **هیچ منطق کسب‌وکاری**                 |
+| Service    | قواعد دامنه، Invariantها، هماهنگی    | SQL خام، جزئیات HTTP                   |
+| Repository | دسترسی داده، **Scope مستأجر اجباری** | تصمیم کسب‌وکاری                        |
+| Domain     | Entity، Value Object، State Machine  | I/O                                    |
+| Consumer   | مصرف رویداد، Idempotency             | منطق پیچیده (به Service واگذار می‌شود) |
 
 ---
 
@@ -140,14 +140,14 @@ services/asset-service/
 
 ### چه چیزی مجاز است
 
-| بسته                 | محتوای مجاز                                                        |
-| -------------------- | ------------------------------------------------------------------ |
-| `@rasta/contracts`   | Envelope رویداد · نام و Schema رویداد · Value Object (Money، ID) · Error Code · Schema صفحه‌بندی |
-| `@rasta/config`      | بارگذاری env · اعتبارسنجی Schema · پیکربندی مشترک زیرساخت          |
-| `@rasta/logging`     | ساخت Logger · Redaction · انتشار Correlation                        |
-| `@rasta/observability`| راه‌اندازی OTel SDK · Helper ساخت Span                             |
-| `@rasta/nest-common` | Guard (JWT، Role، Tenant) · Filter (خطا) · Interceptor (Correlation، Logging) · `RequestContext` · Repository پایه با Scope · Outbox Relay · Wrapper تولید/مصرف Kafka · ماژول Health |
-| `@rasta/testing`     | Factory · Helper Testcontainers · Matcher سفارشی · Builder توکن تست |
+| بسته                   | محتوای مجاز                                                                                                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@rasta/contracts`     | Envelope رویداد · نام و Schema رویداد · Value Object (Money، ID) · Error Code · Schema صفحه‌بندی                                                                                     |
+| `@rasta/config`        | بارگذاری env · اعتبارسنجی Schema · پیکربندی مشترک زیرساخت                                                                                                                            |
+| `@rasta/logging`       | ساخت Logger · Redaction · انتشار Correlation                                                                                                                                         |
+| `@rasta/observability` | راه‌اندازی OTel SDK · Helper ساخت Span                                                                                                                                               |
+| `@rasta/nest-common`   | Guard (JWT، Role، Tenant) · Filter (خطا) · Interceptor (Correlation، Logging) · `RequestContext` · Repository پایه با Scope · Outbox Relay · Wrapper تولید/مصرف Kafka · ماژول Health |
+| `@rasta/testing`       | Factory · Helper Testcontainers · Matcher سفارشی · Builder توکن تست                                                                                                                  |
 
 ### چه چیزی ممنوع است
 
@@ -223,11 +223,11 @@ services/* ───────────┤
 ```jsonc
 {
   "tasks": {
-    "build":     { "dependsOn": ["^build"], "outputs": ["dist/**", ".next/**"] },
+    "build": { "dependsOn": ["^build"], "outputs": ["dist/**", ".next/**"] },
     "typecheck": { "dependsOn": ["^build", "db:generate"] },
-    "test":      { "dependsOn": ["^build", "db:generate"], "outputs": ["coverage/**"] },
-    "dev":       { "cache": false, "persistent": true }
-  }
+    "test": { "dependsOn": ["^build", "db:generate"], "outputs": ["coverage/**"] },
+    "dev": { "cache": false, "persistent": true },
+  },
 }
 ```
 
@@ -246,15 +246,15 @@ turbo run test --filter=...[origin/main]           # فقط آنچه تغییر 
 
 ## ۱۵٫۷ قراردادهای نام‌گذاری
 
-| مورد               | قرارداد                    | مثال                          |
-| ------------------ | -------------------------- | ----------------------------- |
-| بسته Workspace     | `@rasta/<name>`            | `@rasta/asset-service`        |
-| پوشه سرویس         | `<domain>-service`         | `asset-service`               |
-| فایل               | `kebab-case.<role>.ts`     | `asset.repository.ts`         |
-| فایل تست           | `<name>.spec.ts`           | `asset.service.spec.ts`       |
-| تست E2E            | `<name>.e2e-spec.ts`       | `order-flow.e2e-spec.ts`      |
-| ماژول Nest         | `<name>.module.ts`         | `insurance.module.ts`         |
-| Migration          | Timestamp + شرح            | `20260826_add_asset_status`   |
+| مورد           | قرارداد                | مثال                        |
+| -------------- | ---------------------- | --------------------------- |
+| بسته Workspace | `@rasta/<name>`        | `@rasta/asset-service`      |
+| پوشه سرویس     | `<domain>-service`     | `asset-service`             |
+| فایل           | `kebab-case.<role>.ts` | `asset.repository.ts`       |
+| فایل تست       | `<name>.spec.ts`       | `asset.service.spec.ts`     |
+| تست E2E        | `<name>.e2e-spec.ts`   | `order-flow.e2e-spec.ts`    |
+| ماژول Nest     | `<name>.module.ts`     | `insurance.module.ts`       |
+| Migration      | Timestamp + شرح        | `20260826_add_asset_status` |
 
 ---
 
@@ -287,12 +287,12 @@ mkdir -p services/<name>-service/{src,prisma,test}
 | فایل                 | نقش                                                       |
 | -------------------- | --------------------------------------------------------- |
 | `AGENTS.md`          | **قانون دائمی** — قواعد الزام‌آور معماری، امنیت، Git، DoD |
-| `CLAUDE.md`          | راهنمای عملیاتی — دستورها، نقشه سرویس‌ها، مرجع سریع        |
+| `CLAUDE.md`          | راهنمای عملیاتی — دستورها، نقشه سرویس‌ها، مرجع سریع       |
 | `README.md`          | راه‌اندازی، معماری در یک نگاه، وضعیت پروژه                |
-| `docker-compose.yml` | زیرساخت محلی با پروفایل                                    |
-| `turbo.json`         | گراف وظایف و Cache                                         |
-| `tsconfig.base.json` | پیکربندی سخت‌گیرانه TypeScript برای همه                    |
-| `eslint.config.mjs`  | قواعد Lint، شامل **تحمیل مرز وابستگی**                     |
-| `.env.example`       | **تنها فایل محیطی در Repository** — فقط مقادیر یک‌بارمصرف  |
-| `.prettierrc.json`   | قالب‌بندی                                                  |
-| `.swcrc`             | ترجمه سریع برای Jest                                       |
+| `docker-compose.yml` | زیرساخت محلی با پروفایل                                   |
+| `turbo.json`         | گراف وظایف و Cache                                        |
+| `tsconfig.base.json` | پیکربندی سخت‌گیرانه TypeScript برای همه                   |
+| `eslint.config.mjs`  | قواعد Lint، شامل **تحمیل مرز وابستگی**                    |
+| `.env.example`       | **تنها فایل محیطی در Repository** — فقط مقادیر یک‌بارمصرف |
+| `.prettierrc.json`   | قالب‌بندی                                                 |
+| `.swcrc`             | ترجمه سریع برای Jest                                      |

@@ -9,24 +9,24 @@
 
 هر سرویس یک پایگاه داده منطقی با نقش اختصاصی خودش دارد:
 
-| سرویس           | پایگاه داده           | نقش پایگاه داده        | افزونه‌ها               |
-| --------------- | --------------------- | ---------------------- | ----------------------- |
-| identity        | `rasta_identity`      | `rasta_identity`       | `pg_trgm`               |
-| organization    | `rasta_organization`  | `rasta_organization`   | `postgis`, `pg_trgm`, `ltree` |
-| asset           | `rasta_asset`         | `rasta_asset`          | `postgis`, `pg_trgm`    |
-| fleet           | `rasta_fleet`         | `rasta_fleet`          | `postgis`               |
-| maintenance     | `rasta_maintenance`   | `rasta_maintenance`    | —                       |
-| marketplace     | `rasta_marketplace`   | `rasta_marketplace`    | `pg_trgm`               |
-| procurement     | `rasta_procurement`   | `rasta_procurement`    | `pgcrypto`              |
-| supplier        | `rasta_supplier`      | `rasta_supplier`       | `pg_trgm`               |
-| inventory       | `rasta_inventory`     | `rasta_inventory`      | `postgis`               |
-| construction    | `rasta_construction`  | `rasta_construction`   | `postgis`, `pgcrypto`   |
-| contract        | `rasta_contract`      | `rasta_contract`       | —                       |
-| economic        | `rasta_economic`      | `rasta_economic`       | —                       |
-| notification    | `rasta_notification`  | `rasta_notification`   | —                       |
-| document        | `rasta_document`      | `rasta_document`       | —                       |
-| audit           | `rasta_audit`         | `rasta_audit`          | —                       |
-| analytics       | `rasta_analytics`     | `rasta_analytics`      | `postgis`               |
+| سرویس        | پایگاه داده          | نقش پایگاه داده      | افزونه‌ها                     |
+| ------------ | -------------------- | -------------------- | ----------------------------- |
+| identity     | `rasta_identity`     | `rasta_identity`     | `pg_trgm`                     |
+| organization | `rasta_organization` | `rasta_organization` | `postgis`, `pg_trgm`, `ltree` |
+| asset        | `rasta_asset`        | `rasta_asset`        | `postgis`, `pg_trgm`          |
+| fleet        | `rasta_fleet`        | `rasta_fleet`        | `postgis`                     |
+| maintenance  | `rasta_maintenance`  | `rasta_maintenance`  | —                             |
+| marketplace  | `rasta_marketplace`  | `rasta_marketplace`  | `pg_trgm`                     |
+| procurement  | `rasta_procurement`  | `rasta_procurement`  | `pgcrypto`                    |
+| supplier     | `rasta_supplier`     | `rasta_supplier`     | `pg_trgm`                     |
+| inventory    | `rasta_inventory`    | `rasta_inventory`    | `postgis`                     |
+| construction | `rasta_construction` | `rasta_construction` | `postgis`, `pgcrypto`         |
+| contract     | `rasta_contract`     | `rasta_contract`     | —                             |
+| economic     | `rasta_economic`     | `rasta_economic`     | —                             |
+| notification | `rasta_notification` | `rasta_notification` | —                             |
+| document     | `rasta_document`     | `rasta_document`     | —                             |
+| audit        | `rasta_audit`        | `rasta_audit`        | —                             |
+| analytics    | `rasta_analytics`    | `rasta_analytics`    | `postgis`                     |
 
 **MVP → PRODUCTION.**
 MVP: ۱۶ پایگاه داده روی یک Cluster PostgreSQL؛ هر کدام با نقش و اعتبارنامه اختصاصی و
@@ -56,13 +56,13 @@ deleted_at        TIMESTAMPTZ                 -- حذف نرم؛ NULL = فعال
 
 **قواعد:**
 
-| قاعده                                                                                       | چرا                                                                    |
-| ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `organization_id` روی **هر** جدول مستأجرمحور، حتی جداول فرزند                                 | Join برای Scope کردن، یک نشتی منتظر وقوع است. ستون تکراری ارزان است.    |
-| نخستین ستون هر Index مرکب `organization_id` است                                              | هر Query با Scope شروع می‌شود؛ Index باید همان الگو را داشته باشد.      |
-| `version` برای قفل خوش‌بینانه در Aggregateهای رقابتی                                          | جلوگیری از Lost Update بدون قفل بدبینانه                                |
-| حذف نرم پیش‌فرض؛ حذف سخت فقط با Runbook                                                       | سوابق مالی و حسابرسی نباید ناپدید شوند                                  |
-| `deleted_at` در هر Unique Index جزئی لحاظ می‌شود                                             | تا رکورد حذف‌شده مانع ثبت مجدد نشود                                     |
+| قاعده                                                         | چرا                                                                  |
+| ------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `organization_id` روی **هر** جدول مستأجرمحور، حتی جداول فرزند | Join برای Scope کردن، یک نشتی منتظر وقوع است. ستون تکراری ارزان است. |
+| نخستین ستون هر Index مرکب `organization_id` است               | هر Query با Scope شروع می‌شود؛ Index باید همان الگو را داشته باشد.   |
+| `version` برای قفل خوش‌بینانه در Aggregateهای رقابتی          | جلوگیری از Lost Update بدون قفل بدبینانه                             |
+| حذف نرم پیش‌فرض؛ حذف سخت فقط با Runbook                       | سوابق مالی و حسابرسی نباید ناپدید شوند                               |
+| `deleted_at` در هر Unique Index جزئی لحاظ می‌شود              | تا رکورد حذف‌شده مانع ثبت مجدد نشود                                  |
 
 **استثناها (بدون `organization_id`):** `organization` (خودش مستأجر است)، `user` (هویت
 فرامستأجری است؛ Scope از راه `membership` می‌آید)، `role`، `permission`، `commission_rule`
@@ -221,26 +221,26 @@ HAVING SUM(CASE WHEN direction='DEBIT' THEN amount_minor ELSE -amount_minor END)
 
 قاعده: **هر Index باید یک Query واقعی را توجیه کند.** Index بدون Query، هزینه نوشتن است.
 
-| جدول                 | Index                                                                    | Query پشتیبان                         |
-| -------------------- | ------------------------------------------------------------------------ | ------------------------------------- |
-| `asset`              | `(organization_id, status, asset_type)`                                  | فهرست دارایی داشبورد ناوگان           |
-| `asset`              | `GIN (search_vector)` — `pg_trgm`                                        | جست‌وجوی متنی دارایی                  |
-| `asset_location`     | `GIST (location)`                                                        | «دارایی‌های نزدیک این پروژه»          |
-| `usage_record`       | `(organization_id, asset_id, recorded_at DESC)`                          | تاریخچه کارکرد دستگاه                 |
-| `assignment`         | `UNIQUE (driver_id) WHERE ended_at IS NULL`                              | **Invariant:** یک تخصیص فعال به راننده |
-| `maintenance_request`| `UNIQUE (asset_id, type) WHERE status IN ('OPEN','IN_PROGRESS')`          | **کنترل سند: منع درخواست تکراری**     |
-| `maintenance_request`| `(organization_id, status, due_date)`                                    | سررسیدهای پیش رو                      |
-| `order`              | `(organization_id, status, created_at DESC)`                             | فهرست سفارش‌ها                        |
-| `order`              | `(supplier_organization_id, status, created_at DESC)`                    | نمای تأمین‌کننده                      |
-| `bid`                | `UNIQUE (tender_id, contractor_id)`                                      | یک پیشنهاد به‌ازای هر پیمانکار        |
-| `bid`                | `(tender_id, submitted_at)`                                              | ترتیب دریافت — الزام حسابرسی          |
-| `ledger_entry`       | `(account_id, posted_at DESC)`                                           | صورت‌حساب                             |
-| `ledger_entry`       | `(journal_id)`                                                           | بررسی توازن                           |
-| `wallet`             | `UNIQUE (organization_id, currency)`                                     | یک کیف پول به‌ازای هر ارز             |
-| `transaction`        | `UNIQUE (idempotency_key, organization_id)`                              | **Invariant:** منع تراکنش تکراری      |
-| `audit_event`        | `(organization_id, occurred_at DESC)` + `(actor_id, occurred_at DESC)`   | جست‌وجوی حسابرسی                      |
-| `outbox_message`     | `(created_at) WHERE published_at IS NULL`                                | Relay                                 |
-| `organization`       | `GIST (path)` — `ltree`                                                  | زیردرخت سلسله‌مراتب                   |
+| جدول                  | Index                                                                  | Query پشتیبان                          |
+| --------------------- | ---------------------------------------------------------------------- | -------------------------------------- |
+| `asset`               | `(organization_id, status, asset_type)`                                | فهرست دارایی داشبورد ناوگان            |
+| `asset`               | `GIN (search_vector)` — `pg_trgm`                                      | جست‌وجوی متنی دارایی                   |
+| `asset_location`      | `GIST (location)`                                                      | «دارایی‌های نزدیک این پروژه»           |
+| `usage_record`        | `(organization_id, asset_id, recorded_at DESC)`                        | تاریخچه کارکرد دستگاه                  |
+| `assignment`          | `UNIQUE (driver_id) WHERE ended_at IS NULL`                            | **Invariant:** یک تخصیص فعال به راننده |
+| `maintenance_request` | `UNIQUE (asset_id, type) WHERE status IN ('OPEN','IN_PROGRESS')`       | **کنترل سند: منع درخواست تکراری**      |
+| `maintenance_request` | `(organization_id, status, due_date)`                                  | سررسیدهای پیش رو                       |
+| `order`               | `(organization_id, status, created_at DESC)`                           | فهرست سفارش‌ها                         |
+| `order`               | `(supplier_organization_id, status, created_at DESC)`                  | نمای تأمین‌کننده                       |
+| `bid`                 | `UNIQUE (tender_id, contractor_id)`                                    | یک پیشنهاد به‌ازای هر پیمانکار         |
+| `bid`                 | `(tender_id, submitted_at)`                                            | ترتیب دریافت — الزام حسابرسی           |
+| `ledger_entry`        | `(account_id, posted_at DESC)`                                         | صورت‌حساب                              |
+| `ledger_entry`        | `(journal_id)`                                                         | بررسی توازن                            |
+| `wallet`              | `UNIQUE (organization_id, currency)`                                   | یک کیف پول به‌ازای هر ارز              |
+| `transaction`         | `UNIQUE (idempotency_key, organization_id)`                            | **Invariant:** منع تراکنش تکراری       |
+| `audit_event`         | `(organization_id, occurred_at DESC)` + `(actor_id, occurred_at DESC)` | جست‌وجوی حسابرسی                       |
+| `outbox_message`      | `(created_at) WHERE published_at IS NULL`                              | Relay                                  |
+| `organization`        | `GIST (path)` — `ltree`                                                | زیردرخت سلسله‌مراتب                    |
 
 ---
 
@@ -248,14 +248,14 @@ HAVING SUM(CASE WHEN direction='DEBIT' THEN amount_minor ELSE -amount_minor END)
 
 پارتیشن فقط برای جداولی که **بی‌کران رشد می‌کنند**:
 
-| جدول                | کلید پارتیشن  | بازه   | نگهداشت داغ        |
-| ------------------- | ------------- | ------ | ------------------ |
-| `ledger_entry`      | `posted_at`   | ماهانه | ۱۳ ماه، سپس آرشیو  |
-| `audit_event`       | `occurred_at` | ماهانه | ۱۳ ماه، سپس آرشیو  |
-| `usage_record`      | `recorded_at` | ماهانه | ۲۵ ماه             |
-| `asset_timeline`    | `occurred_at` | ماهانه | ۲۵ ماه             |
-| `tracking_event`    | `occurred_at` | ماهانه | ۷ ماه              |
-| `outbox_message`    | —             | —      | پاکسازی پس از ۷ روز از انتشار |
+| جدول             | کلید پارتیشن  | بازه   | نگهداشت داغ                   |
+| ---------------- | ------------- | ------ | ----------------------------- |
+| `ledger_entry`   | `posted_at`   | ماهانه | ۱۳ ماه، سپس آرشیو             |
+| `audit_event`    | `occurred_at` | ماهانه | ۱۳ ماه، سپس آرشیو             |
+| `usage_record`   | `recorded_at` | ماهانه | ۲۵ ماه                        |
+| `asset_timeline` | `occurred_at` | ماهانه | ۲۵ ماه                        |
+| `tracking_event` | `occurred_at` | ماهانه | ۷ ماه                         |
+| `outbox_message` | —             | —      | پاکسازی پس از ۷ روز از انتشار |
 
 **MVP → PRODUCTION.** MVP: پارتیشن‌ها با یک Migration برای ۱۸ ماه پیش‌ساخته می‌شوند.
 Production: `pg_partman` برای ایجاد و بایگانی خودکار.
@@ -267,13 +267,13 @@ Production: `pg_partman` برای ایجاد و بایگانی خودکار.
 
 ## ۵٫۷ داده جغرافیایی (PostGIS)
 
-| موجودیت                  | ستون                          | کاربرد                                        |
-| ------------------------ | ----------------------------- | --------------------------------------------- |
-| `organization_location`  | `GEOGRAPHY(Point, 4326)`      | مکان سازمان؛ داشبورد نقشه‌ای استانداری        |
-| `asset_location`         | `GEOGRAPHY(Point, 4326)`      | آخرین موقعیت دارایی                           |
-| `project`                | `GEOGRAPHY(Polygon, 4326)`    | محدوده عملیات پروژه                           |
-| `warehouse`              | `GEOGRAPHY(Point, 4326)`      | یافتن نزدیک‌ترین انبار                        |
-| `shipment_leg`           | `GEOGRAPHY(LineString, 4326)` | مسیر حمل                                      |
+| موجودیت                 | ستون                          | کاربرد                                 |
+| ----------------------- | ----------------------------- | -------------------------------------- |
+| `organization_location` | `GEOGRAPHY(Point, 4326)`      | مکان سازمان؛ داشبورد نقشه‌ای استانداری |
+| `asset_location`        | `GEOGRAPHY(Point, 4326)`      | آخرین موقعیت دارایی                    |
+| `project`               | `GEOGRAPHY(Polygon, 4326)`    | محدوده عملیات پروژه                    |
+| `warehouse`             | `GEOGRAPHY(Point, 4326)`      | یافتن نزدیک‌ترین انبار                 |
+| `shipment_leg`          | `GEOGRAPHY(LineString, 4326)` | مسیر حمل                               |
 
 **SRID همیشه 4326 (WGS 84).** نوع `GEOGRAPHY` نه `GEOMETRY` — فاصله بر حسب متر و بدون
 نیاز به Reprojection. Index همیشه `GIST`.
@@ -294,15 +294,15 @@ ORDER BY distance_m;
 
 ## ۵٫۸ راهبرد Migration
 
-| قاعده                                                                                       | دلیل                                                             |
-| ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| هر سرویس Migrationهای مستقل خودش را دارد (`prisma/migrations/`)                              | مالکیت داده                                                      |
-| Migration **همیشه سازگار به عقب** در یک استقرار                                              | Rolling Deploy: نسخه قدیم و جدید هم‌زمان زنده‌اند                |
-| تغییر شکننده = **الگوی Expand/Contract** در سه استقرار                                       | افزودن ستون → نوشتن دوگانه → مهاجرت داده → حذف ستون قدیم         |
-| هرگز `DROP COLUMN` در همان استقراری که استفاده‌اش حذف شده                                    | Rollback باید ممکن بماند                                         |
-| هر Migration باید **Down** داشته باشد یا صریحاً به‌عنوان بازگشت‌ناپذیر مستند شود              | بازیابی از استقرار خراب                                          |
-| Migration داده (نه Schema) به‌صورت Script جداگانه و Idempotent                                | Migration سنگین نباید استقرار را قفل کند                         |
-| Migration هرگز Business Logic ندارد                                                          | Migration در آینده روی داده‌ای اجرا می‌شود که قواعدش عوض شده      |
+| قاعده                                                                            | دلیل                                                         |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| هر سرویس Migrationهای مستقل خودش را دارد (`prisma/migrations/`)                  | مالکیت داده                                                  |
+| Migration **همیشه سازگار به عقب** در یک استقرار                                  | Rolling Deploy: نسخه قدیم و جدید هم‌زمان زنده‌اند            |
+| تغییر شکننده = **الگوی Expand/Contract** در سه استقرار                           | افزودن ستون → نوشتن دوگانه → مهاجرت داده → حذف ستون قدیم     |
+| هرگز `DROP COLUMN` در همان استقراری که استفاده‌اش حذف شده                        | Rollback باید ممکن بماند                                     |
+| هر Migration باید **Down** داشته باشد یا صریحاً به‌عنوان بازگشت‌ناپذیر مستند شود | بازیابی از استقرار خراب                                      |
+| Migration داده (نه Schema) به‌صورت Script جداگانه و Idempotent                   | Migration سنگین نباید استقرار را قفل کند                     |
+| Migration هرگز Business Logic ندارد                                              | Migration در آینده روی داده‌ای اجرا می‌شود که قواعدش عوض شده |
 
 ```bash
 pnpm --filter @rasta/asset-service exec prisma migrate dev --name add_asset_decommission_reason
@@ -313,15 +313,15 @@ pnpm --filter @rasta/asset-service exec prisma migrate deploy   # در CI/CD
 
 ## ۵٫۹ Cache (Redis)
 
-| داده                         | کلید                                  | TTL     | ابطال                    |
-| ---------------------------- | ------------------------------------- | ------- | ------------------------ |
-| مجوزهای مؤثر کاربر           | `perm:{userId}:{orgId}`               | ۶۰ ثانیه | رویداد `ROLE_*`          |
-| فراداده سازمان               | `org:{orgId}`                         | ۵ دقیقه | رویداد `ORGANIZATION_*`  |
-| JWKS                         | `jwks:{issuer}`                       | ۱ ساعت  | خطای اعتبارسنجی          |
-| سبد خرید                     | `cart:{orgId}:{userId}`               | ۷ روز   | ثبت سفارش                |
-| شمارنده Rate Limit           | `rl:{scope}:{key}`                    | پنجره   | خودکار                   |
-| قفل توزیع‌شده                | `lock:{resource}`                     | ۳۰ ثانیه | آزادسازی صریح            |
-| پاسخ Idempotency (لایه Gateway)| `idem:{orgId}:{key}`                | ۲۴ ساعت | خودکار                   |
+| داده                            | کلید                    | TTL      | ابطال                   |
+| ------------------------------- | ----------------------- | -------- | ----------------------- |
+| مجوزهای مؤثر کاربر              | `perm:{userId}:{orgId}` | ۶۰ ثانیه | رویداد `ROLE_*`         |
+| فراداده سازمان                  | `org:{orgId}`           | ۵ دقیقه  | رویداد `ORGANIZATION_*` |
+| JWKS                            | `jwks:{issuer}`         | ۱ ساعت   | خطای اعتبارسنجی         |
+| سبد خرید                        | `cart:{orgId}:{userId}` | ۷ روز    | ثبت سفارش               |
+| شمارنده Rate Limit              | `rl:{scope}:{key}`      | پنجره    | خودکار                  |
+| قفل توزیع‌شده                   | `lock:{resource}`       | ۳۰ ثانیه | آزادسازی صریح           |
+| پاسخ Idempotency (لایه Gateway) | `idem:{orgId}:{key}`    | ۲۴ ساعت  | خودکار                  |
 
 **هرگز Cache نمی‌شود — CONSTRAINT:**
 
@@ -340,13 +340,13 @@ pnpm --filter @rasta/asset-service exec prisma migrate deploy   # در CI/CD
 
 ## ۵٫۱۰ Backup و نگهداشت
 
-| مورد                | MVP                                | Production                                       |
-| ------------------- | ---------------------------------- | ------------------------------------------------ |
-| Backup کامل         | روزانه، `pg_dump`، محلی            | روزانه به Object Storage، رمزنگاری‌شده           |
-| Point-in-Time       | ندارد                              | WAL Archiving، **RPO ≤ ۵ دقیقه**                 |
-| RTO هدف             | ساعت‌ها (محیط توسعه)               | ≤ ۱ ساعت (`economic`)، ≤ ۴ ساعت (بقیه)           |
-| تست Restore         | دستی                               | **ماهانه و خودکار** — Backup تست‌نشده Backup نیست |
-| نگهداشت Backup      | ۷ روز                              | ۳۰ روز روزانه + ۱۲ ماه ماهانه                    |
+| مورد           | MVP                     | Production                                        |
+| -------------- | ----------------------- | ------------------------------------------------- |
+| Backup کامل    | روزانه، `pg_dump`، محلی | روزانه به Object Storage، رمزنگاری‌شده            |
+| Point-in-Time  | ندارد                   | WAL Archiving، **RPO ≤ ۵ دقیقه**                  |
+| RTO هدف        | ساعت‌ها (محیط توسعه)    | ≤ ۱ ساعت (`economic`)، ≤ ۴ ساعت (بقیه)            |
+| تست Restore    | دستی                    | **ماهانه و خودکار** — Backup تست‌نشده Backup نیست |
+| نگهداشت Backup | ۷ روز                   | ۳۰ روز روزانه + ۱۲ ماه ماهانه                     |
 
 تفصیل و Runbook: [`12-deployment-architecture.md`](12-deployment-architecture.md) و [`runbooks/`](runbooks/)
 
@@ -354,13 +354,13 @@ pnpm --filter @rasta/asset-service exec prisma migrate deploy   # در CI/CD
 
 ## ۵٫۱۱ حریم خصوصی و طبقه‌بندی داده
 
-| طبقه            | نمونه                                          | کنترل                                                       |
-| --------------- | ---------------------------------------------- | ----------------------------------------------------------- |
-| **عمومی**       | فهرست کالا، مناقصه منتشرشده                    | بدون محدودیت                                                |
-| **داخلی**       | مشخصات دارایی، سوابق تعمیر                     | محدود به مستأجر                                             |
-| **محرمانه**     | قیمت پیشنهادی، صورت‌وضعیت، موجودی کیف پول       | محدود به طرفین؛ در Log ظاهر نمی‌شود                         |
-| **حساس شخصی**   | کد ملی، شماره تماس، مدارک هویتی                | رمزنگاری در حالت سکون (`pgcrypto`)؛ دسترسی با Audit          |
-| **بحرانی**      | پیشنهاد مناقصه پیش از مهلت                     | رمزنگاری؛ **غیرقابل مشاهده حتی برای اپراتور پلتفرم**        |
+| طبقه          | نمونه                                     | کنترل                                                |
+| ------------- | ----------------------------------------- | ---------------------------------------------------- |
+| **عمومی**     | فهرست کالا، مناقصه منتشرشده               | بدون محدودیت                                         |
+| **داخلی**     | مشخصات دارایی، سوابق تعمیر                | محدود به مستأجر                                      |
+| **محرمانه**   | قیمت پیشنهادی، صورت‌وضعیت، موجودی کیف پول | محدود به طرفین؛ در Log ظاهر نمی‌شود                  |
+| **حساس شخصی** | کد ملی، شماره تماس، مدارک هویتی           | رمزنگاری در حالت سکون (`pgcrypto`)؛ دسترسی با Audit  |
+| **بحرانی**    | پیشنهاد مناقصه پیش از مهلت                | رمزنگاری؛ **غیرقابل مشاهده حتی برای اپراتور پلتفرم** |
 
 **CONSTRAINT.** داده حساس شخصی هرگز در Log، URL، پیام خطا یا Payload رویداد ظاهر نمی‌شود.
 رویدادها **شناسه** حمل می‌کنند، نه داده شخصی. Consumer در صورت نیاز از API می‌گیرد.

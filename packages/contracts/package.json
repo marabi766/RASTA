@@ -5,7 +5,9 @@
   "description": "Cross-service contracts: event envelope, event catalogue, shared value objects and error codes. Contains NO business logic.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rimraf dist .turbo",

@@ -51,6 +51,35 @@ export default tseslint.config(
     },
   },
   {
+    /**
+     * NestJS resolves constructor dependencies from `emitDecoratorMetadata`,
+     * which only records a *value* import. Rewriting an injected dependency to
+     * `import type` erases that metadata and the class silently fails to
+     * resolve at runtime — a bug the type checker cannot see.
+     *
+     * The rule is therefore off wherever DI is used. It stays on for pure
+     * libraries, where it is a genuine improvement.
+     */
+    // Globs are basePath-relative, and each workspace runs eslint from its own
+    // directory, so these must not be anchored to the repository root.
+    files: [
+      '**/guards/**/*.ts',
+      '**/interceptors/**/*.ts',
+      '**/filters/**/*.ts',
+      '**/middleware/**/*.ts',
+      '**/pipes/**/*.ts',
+      '**/*.controller.ts',
+      '**/*.service.ts',
+      '**/*.repository.ts',
+      '**/*.module.ts',
+      '**/*.consumer.ts',
+      '**/*.resolver.ts',
+    ],
+    rules: {
+      '@typescript-eslint/consistent-type-imports': 'off',
+    },
+  },
+  {
     files: ['**/*.spec.ts', '**/*.e2e-spec.ts', '**/test/**/*.ts'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',

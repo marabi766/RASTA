@@ -30,9 +30,9 @@ describe('loadEnv', () => {
   });
 
   it('rejects a port outside the valid range', () => {
-    expect(() => loadEnv(baseEnvSchema, { ...validBase, PORT: '70000' } as NodeJS.ProcessEnv)).toThrow(
-      EnvValidationError,
-    );
+    expect(() =>
+      loadEnv(baseEnvSchema, { ...validBase, PORT: '70000' } as NodeJS.ProcessEnv),
+    ).toThrow(EnvValidationError);
   });
 
   it('rejects an unknown NODE_ENV rather than falling back silently', () => {
@@ -47,18 +47,18 @@ describe('loadEnv', () => {
     ['postgresql://', 'no host'],
     ['not a url at all', 'unparseable'],
   ])('rejects DATABASE_URL %p (%s)', (value) => {
-    expect(() =>
-      loadEnv(databaseEnvSchema, { DATABASE_URL: value } as NodeJS.ProcessEnv),
-    ).toThrow(EnvValidationError);
+    expect(() => loadEnv(databaseEnvSchema, { DATABASE_URL: value } as NodeJS.ProcessEnv)).toThrow(
+      EnvValidationError,
+    );
   });
 
   it.each([
     'postgresql://user:pass@localhost:5432/rasta_asset?schema=public',
     'postgres://user:pass@db.internal:5432/rasta_asset',
   ])('accepts DATABASE_URL %p', (value) => {
-    expect(loadEnv(databaseEnvSchema, { DATABASE_URL: value } as NodeJS.ProcessEnv).DATABASE_URL).toBe(
-      value,
-    );
+    expect(
+      loadEnv(databaseEnvSchema, { DATABASE_URL: value } as NodeJS.ProcessEnv).DATABASE_URL,
+    ).toBe(value);
   });
 
   it('applies pool defaults when not specified', () => {

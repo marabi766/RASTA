@@ -6,19 +6,19 @@
 
 ## ۱۱٫۱ نمای اجزا
 
-| جزء            | فناوری                       | نسخه         | نقش                                              |
-| -------------- | ---------------------------- | ------------ | ------------------------------------------------ |
-| پایگاه داده    | PostgreSQL + PostGIS         | 16 / 3.4     | ذخیره‌سازی تراکنشی + GIS                         |
-| Cache / قفل    | Redis                        | 7.4          | Cache، قفل توزیع‌شده، Rate Limit، سبد خرید       |
-| Event Bus      | Apache Kafka (KRaft)         | 3.9          | ستون فقرات رویداد                                |
-| Identity       | Keycloak                     | 26           | OIDC/OAuth2، MFA، Federation                     |
-| Workflow       | Temporal                     | 1.26         | گردش‌کار بلندمدت و Saga                          |
-| Object Storage | S3-compatible (MinIO در dev) | —            | اسناد، تصاویر، فایل قرارداد                      |
-| Search         | OpenSearch                   | 2.18         | جست‌وجوی چندوجهی                                 |
-| Telemetry      | OpenTelemetry Collector      | 0.116        | جمع‌آوری Log/Metric/Trace                        |
-| Metrics        | Prometheus                   | 3.1          | ذخیره و پرس‌وجوی متریک                           |
-| Dashboards     | Grafana                      | 11.5         | نمایش                                            |
-| Mail (dev)     | Mailpit                      | 1.22         | تست ایمیل محلی                                   |
+| جزء            | فناوری                       | نسخه     | نقش                                        |
+| -------------- | ---------------------------- | -------- | ------------------------------------------ |
+| پایگاه داده    | PostgreSQL + PostGIS         | 16 / 3.4 | ذخیره‌سازی تراکنشی + GIS                   |
+| Cache / قفل    | Redis                        | 7.4      | Cache، قفل توزیع‌شده، Rate Limit، سبد خرید |
+| Event Bus      | Apache Kafka (KRaft)         | 3.9      | ستون فقرات رویداد                          |
+| Identity       | Keycloak                     | 26       | OIDC/OAuth2، MFA، Federation               |
+| Workflow       | Temporal                     | 1.26     | گردش‌کار بلندمدت و Saga                    |
+| Object Storage | S3-compatible (MinIO در dev) | —        | اسناد، تصاویر، فایل قرارداد                |
+| Search         | OpenSearch                   | 2.18     | جست‌وجوی چندوجهی                           |
+| Telemetry      | OpenTelemetry Collector      | 0.116    | جمع‌آوری Log/Metric/Trace                  |
+| Metrics        | Prometheus                   | 3.1      | ذخیره و پرس‌وجوی متریک                     |
+| Dashboards     | Grafana                      | 11.5     | نمایش                                      |
+| Mail (dev)     | Mailpit                      | 1.22     | تست ایمیل محلی                             |
 
 پیکربندی محلی: [`docker-compose.yml`](../docker-compose.yml)
 
@@ -57,14 +57,14 @@ Production: **PgBouncer** در حالت Transaction Pooling جلوی Cluster —
 
 ## ۱۱٫۳ Redis
 
-| کاربرد                 | ساختار داده         | نکته                                                    |
-| ---------------------- | ------------------- | ------------------------------------------------------- |
-| Cache                  | String با TTL       | همیشه با پیشوند مستأجر                                  |
-| Rate Limit             | Sorted Set          | Sliding Window                                          |
-| قفل توزیع‌شده          | String با `SET NX PX` | Redlock برای عملیات چندکیف‌پولی                       |
-| سبد خرید               | Hash                | TTL ۷ روز                                               |
-| Cache Idempotency      | String با TTL       | لایه Gateway؛ منبع اصلی همچنان پایگاه داده است          |
-| صف اعلان (کوتاه‌عمر)   | List                | فقط بافر تحویل، نه منبع حقیقت                           |
+| کاربرد               | ساختار داده           | نکته                                           |
+| -------------------- | --------------------- | ---------------------------------------------- |
+| Cache                | String با TTL         | همیشه با پیشوند مستأجر                         |
+| Rate Limit           | Sorted Set            | Sliding Window                                 |
+| قفل توزیع‌شده        | String با `SET NX PX` | Redlock برای عملیات چندکیف‌پولی                |
+| سبد خرید             | Hash                  | TTL ۷ روز                                      |
+| Cache Idempotency    | String با TTL         | لایه Gateway؛ منبع اصلی همچنان پایگاه داده است |
+| صف اعلان (کوتاه‌عمر) | List                  | فقط بافر تحویل، نه منبع حقیقت                  |
 
 **`maxmemory-policy = noeviction`.** Redis اینجا Cache صرف نیست — قفل و Rate Limit در آن
 است. حذف خودکار یک قفل زیر فشار حافظه، یک باگ همزمانی تولید می‌کند.
@@ -86,14 +86,14 @@ Production: **PgBouncer** در حالت Transaction Pooling جلوی Cluster —
 
 **KRaft** (بدون ZooKeeper) — یک جزء کمتر برای نگهداری.
 
-| تنظیم                                  | dev | Production |
-| -------------------------------------- | --- | ---------- |
-| گره                                    | ۱   | ۳          |
-| `replication.factor`                   | ۱   | ۳          |
-| `min.insync.replicas`                  | ۱   | ۲          |
-| پارتیشن به‌ازای Topic دامنه            | ۳   | ۱۲         |
-| `auto.create.topics.enable`            | false | false    |
-| `unclean.leader.election.enable`       | false | false    |
+| تنظیم                            | dev   | Production |
+| -------------------------------- | ----- | ---------- |
+| گره                              | ۱     | ۳          |
+| `replication.factor`             | ۱     | ۳          |
+| `min.insync.replicas`            | ۱     | ۲          |
+| پارتیشن به‌ازای Topic دامنه      | ۳     | ۱۲         |
+| `auto.create.topics.enable`      | false | false      |
+| `unclean.leader.election.enable` | false | false      |
 
 **`unclean.leader.election.enable=false` غیرقابل مذاکره است.** انتخاب یک Replica عقب‌مانده
 به‌عنوان Leader یعنی از دست رفتن رویداد — در جریان مالی غیرقابل قبول.
@@ -134,13 +134,13 @@ Admin API با Keycloak همگام می‌کند تا در توکن بنشینن
 
 ## ۱۱٫۶ Temporal
 
-| مورد        | MVP                                  | Production                                  |
-| ----------- | ------------------------------------ | ------------------------------------------- |
-| استقرار     | تک‌گره `auto-setup`                  | Cluster چندگره                              |
-| پایگاه داده | PostgreSQL مشترک                     | PostgreSQL اختصاصی                          |
-| Namespace   | `default`                            | `rasta-prod` · `rasta-staging` (جدا)        |
-| نگهداشت     | ۷ روز                                | ۳۰ روز (۹۰ روز برای صف `rasta-settlement`)  |
-| Worker      | داخل فرایند سرویس مالک               | Deployment جدا با HPA مستقل                 |
+| مورد        | MVP                    | Production                                 |
+| ----------- | ---------------------- | ------------------------------------------ |
+| استقرار     | تک‌گره `auto-setup`    | Cluster چندگره                             |
+| پایگاه داده | PostgreSQL مشترک       | PostgreSQL اختصاصی                         |
+| Namespace   | `default`              | `rasta-prod` · `rasta-staging` (جدا)       |
+| نگهداشت     | ۷ روز                  | ۳۰ روز (۹۰ روز برای صف `rasta-settlement`) |
+| Worker      | داخل فرایند سرویس مالک | Deployment جدا با HPA مستقل                |
 
 چهار Task Queue برای Bulkhead: `rasta-tender` · `rasta-order` · `rasta-settlement` ·
 `rasta-scheduled`. تفصیل: [`08-workflow-architecture.md`](08-workflow-architecture.md)
@@ -152,12 +152,12 @@ Admin API با Keycloak همگام می‌کند تا در توکن بنشینن
 **CONSTRAINT.** فایل **هرگز** در پایگاه داده ذخیره نمی‌شود. `document-service` فقط فراداده
 و کنترل دسترسی را نگه می‌دارد.
 
-| Bucket              | محتوا                                       | چرخه عمر                       |
-| ------------------- | ------------------------------------------- | ------------------------------ |
-| `rasta-documents`   | قرارداد، بیمه، مناقصه، صورت‌وضعیت، فاکتور   | نگهداشت طولانی (OPEN QUESTION) |
-| `rasta-images`      | تصاویر دارایی، گزارش خرابی، پیشرفت پروژه    | ۵ سال                          |
-| `rasta-exports`     | خروجی گزارش تولیدشده                        | ۷ روز، سپس حذف خودکار          |
-| `rasta-backups`     | Backup پایگاه داده (Production)             | ۳۰ روز + ۱۲ ماه ماهانه         |
+| Bucket            | محتوا                                     | چرخه عمر                       |
+| ----------------- | ----------------------------------------- | ------------------------------ |
+| `rasta-documents` | قرارداد، بیمه، مناقصه، صورت‌وضعیت، فاکتور | نگهداشت طولانی (OPEN QUESTION) |
+| `rasta-images`    | تصاویر دارایی، گزارش خرابی، پیشرفت پروژه  | ۵ سال                          |
+| `rasta-exports`   | خروجی گزارش تولیدشده                      | ۷ روز، سپس حذف خودکار          |
+| `rasta-backups`   | Backup پایگاه داده (Production)           | ۳۰ روز + ۱۲ ماه ماهانه         |
 
 **الگوی آپلود (بدون عبور فایل از سرویس):**
 
@@ -181,13 +181,13 @@ Admin API با Keycloak همگام می‌کند تا در توکن بنشینن
 **فاز:** P1. در P0 جست‌وجو با `pg_trgm` در PostgreSQL انجام می‌شود — برای چند هزار دارایی
 کافی است و یک وابستگی کمتر در Demo.
 
-| Index                | منبع                    | کاربرد                                       |
-| -------------------- | ----------------------- | -------------------------------------------- |
-| `rasta-assets`       | رویدادهای `asset`       | جست‌وجوی ماشین‌آلات با فیلتر و Facet         |
-| `rasta-products`     | رویدادهای `marketplace` | جست‌وجوی کالا و خدمت                         |
-| `rasta-suppliers`    | رویدادهای `supplier`    | جست‌وجوی تأمین‌کننده/پیمانکار با امتیاز       |
-| `rasta-tenders`      | رویدادهای `construction`| مناقصه‌های باز                               |
-| `rasta-contracts`    | رویدادهای `contract`    | جست‌وجوی قرارداد                             |
+| Index             | منبع                     | کاربرد                                  |
+| ----------------- | ------------------------ | --------------------------------------- |
+| `rasta-assets`    | رویدادهای `asset`        | جست‌وجوی ماشین‌آلات با فیلتر و Facet    |
+| `rasta-products`  | رویدادهای `marketplace`  | جست‌وجوی کالا و خدمت                    |
+| `rasta-suppliers` | رویدادهای `supplier`     | جست‌وجوی تأمین‌کننده/پیمانکار با امتیاز |
+| `rasta-tenders`   | رویدادهای `construction` | مناقصه‌های باز                          |
+| `rasta-contracts` | رویدادهای `contract`     | جست‌وجوی قرارداد                        |
 
 **قواعد:**
 
@@ -200,14 +200,14 @@ Admin API با Keycloak همگام می‌کند تا در توکن بنشینن
 
 ## ۱۱٫۹ منابع
 
-| سرویس            | CPU (req/lim) | Memory (req/lim) | Replica (Prod) |
-| ---------------- | ------------- | ---------------- | -------------- |
-| api-gateway      | 200m / 1000m  | 256Mi / 512Mi    | ۳              |
-| سرویس دامنه معمول| 100m / 500m   | 256Mi / 512Mi    | ۲              |
-| economic-service | 300m / 1500m  | 512Mi / 1Gi      | ۳              |
-| analytics-service| 200m / 1000m  | 512Mi / 1Gi      | ۲              |
-| Temporal Worker  | 200m / 1000m  | 512Mi / 1Gi      | ۲              |
-| web / admin      | 200m / 1000m  | 512Mi / 1Gi      | ۲              |
+| سرویس             | CPU (req/lim) | Memory (req/lim) | Replica (Prod) |
+| ----------------- | ------------- | ---------------- | -------------- |
+| api-gateway       | 200m / 1000m  | 256Mi / 512Mi    | ۳              |
+| سرویس دامنه معمول | 100m / 500m   | 256Mi / 512Mi    | ۲              |
+| economic-service  | 300m / 1500m  | 512Mi / 1Gi      | ۳              |
+| analytics-service | 200m / 1000m  | 512Mi / 1Gi      | ۲              |
+| Temporal Worker   | 200m / 1000m  | 512Mi / 1Gi      | ۲              |
+| web / admin       | 200m / 1000m  | 512Mi / 1Gi      | ۲              |
 
 **حداقل برای توسعه محلی:** ۸ گیگابایت RAM آزاد، ۲۰ گیگابایت دیسک، ۴ هسته.
 پروفایل `all` در Docker Compose حدود ۶ گیگابایت مصرف می‌کند — به همین دلیل OpenSearch و
@@ -244,15 +244,15 @@ Data Layer  ── NetworkPolicy: فقط از سرویس مالک همان پا�
 
 ## ۱۱٫۱۱ ماتریس MVP → Production
 
-| جزء            | MVP                          | Production                                          |
-| -------------- | ---------------------------- | --------------------------------------------------- |
-| PostgreSQL     | تک‌گره، ۱۶ DB منطقی          | Primary + Standby، PgBouncer، Cluster جدا برای مالی |
-| Redis          | تک‌گره                       | Sentinel/Cluster با AOF                             |
-| Kafka          | تک‌گره KRaft، PLAINTEXT      | ۳ گره، RF=3، **SASL/SCRAM + TLS + ACL**             |
-| Keycloak       | `start-dev`، تک‌گره          | حالت Production، TLS، چند Replica، MFA اجباری       |
-| Temporal       | `auto-setup`، تک‌گره         | Cluster، Namespace جدا                              |
-| Object Storage | MinIO تک‌گره                 | S3 مدیریت‌شده یا MinIO توزیع‌شده، Versioning        |
-| Search         | `pg_trgm` (P0) → OpenSearch تک‌گره (P1) | Cluster ۳ گره                            |
-| Secrets        | `.env`                       | External Secrets Operator                           |
-| TLS داخلی      | ندارد                        | **mTLS** (Service Mesh یا SPIFFE)                   |
-| Backup         | `pg_dump` روزانه             | PITR با WAL، تست Restore ماهانه                     |
+| جزء            | MVP                                     | Production                                          |
+| -------------- | --------------------------------------- | --------------------------------------------------- |
+| PostgreSQL     | تک‌گره، ۱۶ DB منطقی                     | Primary + Standby، PgBouncer، Cluster جدا برای مالی |
+| Redis          | تک‌گره                                  | Sentinel/Cluster با AOF                             |
+| Kafka          | تک‌گره KRaft، PLAINTEXT                 | ۳ گره، RF=3، **SASL/SCRAM + TLS + ACL**             |
+| Keycloak       | `start-dev`، تک‌گره                     | حالت Production، TLS، چند Replica، MFA اجباری       |
+| Temporal       | `auto-setup`، تک‌گره                    | Cluster، Namespace جدا                              |
+| Object Storage | MinIO تک‌گره                            | S3 مدیریت‌شده یا MinIO توزیع‌شده، Versioning        |
+| Search         | `pg_trgm` (P0) → OpenSearch تک‌گره (P1) | Cluster ۳ گره                                       |
+| Secrets        | `.env`                                  | External Secrets Operator                           |
+| TLS داخلی      | ندارد                                   | **mTLS** (Service Mesh یا SPIFFE)                   |
+| Backup         | `pg_dump` روزانه                        | PITR با WAL، تست Restore ماهانه                     |
