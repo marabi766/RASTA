@@ -1,0 +1,7 @@
+# Integration tests (*.int-spec.ts) live here.
+#
+# The directory is tracked while empty because jest.config.js names it as a
+# project rootDir and validates every project even under --selectProjects unit.
+# Untracked, a fresh clone fails with "Directory test in the rootDir option was
+# not found" — which is exactly how CI failed the first time it ever got far
+# enough to run the tests (D-005).
