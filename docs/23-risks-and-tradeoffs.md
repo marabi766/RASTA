@@ -187,6 +187,88 @@
   پس CI و Container نیاز به استثنا ندارند.
 - **ثبت‌شده:** 2026-08-27
 
+### D-005 · CI هرگز روی GitHub Actions سبز نشده
+
+- **چه چیزی:** هر سه Push به `main` که Workflow `.github/workflows/ci.yml`
+  را فعال کرده‌اند (شامل کامیت‌های ساخت `api-gateway` و `asset-service`)
+  **Fail** شده‌اند — با علت یکسان در هر سه: `pnpm/action-setup@v4` نسخه ۱۰
+  را در YAML Pin کرده، درحالی‌که `package.json#packageManager` روی
+  `pnpm@11.22.0` قفل شده (برای رفع مشکل قدیمی‌تر نصب corepack — تاریخچه
+  Commit). نتیجه: `ERR_PNPM_BAD_PM_VERSION` — Job حتی از مرحله
+  `pnpm install --frozen-lockfile` رد نمی‌شود.
+- **چرا مهم است:** هیچ مرحله‌ای از Pipeline — نه Lint، نه Type Check، نه
+  Test، نه Build Image، نه Trivy Scan — تا امروز حتی یک‌بار روی GitHub
+  Actions واقعاً اجرا نشده. هر تأییدی درباره «CI سبز است» تا این لحظه فقط
+  از اجرای محلی `pnpm verify` بوده، نه از Runner واقعی. کشف شد با
+  `gh run list` و `gh run view <id>` — نه با فرض.
+- **ریسک:** بدون یک Guard خودکار روی هر Push/PR، تنها ضمانت کیفیت،
+  انضباط دستی اجراکننده است.
+- **رفع:** یکی از دو نسخه Pin‌شده باید حذف شود — یا `version: 10` از
+  YAML، یا `packageManager` از `package.json`. سطح دشواری: کم.
+- **اولویت:** بحرانی (پیش‌نیاز هر Automation آینده)
+- **ثبت‌شده:** 2026-08-27
+
+### D-006 · تصادم پورت Redis با نصب Native ویندوز
+
+- **چه چیزی:** یک نصب Native Redis روی ویندوز
+  (`C:\Program Files\Redis\redis-server.exe`) هم‌زمان با Container
+  `rasta-redis` روی پورت `6379` گوش می‌دهد — الگویی هم‌خانواده با تصادم
+  قبلاً مستندشده PostgreSQL روی ۵۴۳۲ (که با انتقال به ۵۴۳۳ حل شد، اما آن
+  رفع هرگز برای Redis تکرار نشد چون تصادم آن موقع کشف نشده بود).
+- **چطور کشف شد:** رفتار غیرمنتظره Rate Limiter Gateway هنگام تست زنده —
+  حتی بلافاصله پس از `FLUSHALL` روی `rasta-redis`، اولین درخواست همچنان
+  `429 RATE_LIMIT_EXCEEDED` می‌گرفت. بررسی با `Get-NetTCPConnection -LocalPort
+6379` دو Listener را نشان داد: `com.docker.backend` (IPv6 `::`) و یک
+  `redis-server.exe` مستقل ویندوزی (IPv4 `0.0.0.0`). اتصال از Node با
+  `redis://localhost:6379` به سرور Native می‌رسید که از تست‌های قبلی این
+  Session (و/یا ابزاری نامرتبط روی همین ماشین) داده باقیمانده داشت؛ در همین
+  حال `docker exec rasta-redis redis-cli` همیشه مستقیم داخل Namespace شبکه
+  Container می‌رود و هرگز همان سرور را نمی‌بیند — یعنی `FLUSHALL` من هیچ اثری
+  روی سروری که Gateway واقعاً به آن وصل بود نداشت.
+- **ریسک:** هر بررسی زنده Rate Limiting/Idempotency-Cache که از راه
+  `localhost:6379` روی این ماشین انجام شود، غیرقابل‌اعتماد است. منطق خود
+  Rate Limiter (تست شد مستقیم با Redis Container، جدا از این تصادم) **درست
+  است** — این یک مسئله محیط توسعه محلی است، نه باگ کد.
+  خود منطق Fail-Open (`GATEWAY_RATE_LIMIT_FAIL_OPEN`) هم به‌درستی کار
+  می‌کند و در این بررسی مشاهده شد.
+- **رفع:** مثل الگوی Postgres، `REDIS_URL`/پورت Docker Compose به یک پورت
+  غیرپیش‌فرض (مثلاً ۶۳۸۰) منتقل شود؛ یا نصب Native Redis از این ماشین
+  توسعه حذف/متوقف شود.
+- **اولویت:** بالا (فقط محیط این ماشین توسعه؛ در CI/Container واقعی رخ
+  نمی‌دهد چون آنجا Native Redis وجود ندارد)
+- **ثبت‌شده:** 2026-08-27
+
+### D-007 · Gateway، تنها Endpoint عمومی گمنام پلتفرم را می‌شکند
+
+- **چه چیزی:** `ProxyService` در `api-gateway` روی **هر** درخواست
+  Forward‌شده، بدون قید و شرط Header `x-internal-token` می‌گذارد — حتی وقتی
+  درخواست اصلی گمنام بوده (بدون `Authorization`). در `AuthGuard`
+  (`packages/nest-common/src/guards/auth.guard.ts`)، شرط
+  `if (internalToken && !bearer)` **زودتر از** بررسی Decorator `@Public()`
+  ارزیابی می‌شود؛ پس این حالت به‌اشتباه به‌عنوان فراخوانی سرویس‌به‌سرویس
+  تفسیر می‌شود. چون Endpoint مقصد (`POST /v1/registration-requests`،
+  ثبت‌نام خوداظهاری) فقط `@Public()` دارد و `@AllowService()` ندارد
+  (طبق طراحی — این Endpoint برای کاربر واقعی است، نه سرویس دیگر)،
+  `AuthGuard` آن را رد می‌کند: `403 "This endpoint is not callable by
+another service"`.
+- **چطور کشف و اثبات شد:** درخواست مستقیم به `identity-service:3101` (بدون
+  Gateway) با همان بدنه، به‌درستی رد از مرحله Auth عبور کرد (خطای بعدی فقط
+  Validation عادی بود — `400`). همان درخواست از راه `api-gateway:3010`
+  دقیقاً `403` با پیام بالا برگرداند. دو نتیجه متفاوت برای مسیر یکسان،
+  تفاوتش فقط عبور از Gateway بود.
+- **چرا بحرانی است:** طبق کامنت خود کد
+  («تنها Endpoint این سرویس که بدون توکن قابل‌دسترس است»)، این تنها راه
+  ورود یک کاربر جدید به کل پلتفرم است. Gateway تنها سطح Public در معماری
+  است (سرویس‌ها روی پورت‌های داخلی، نه برای Internet). یعنی امروز **هیچ
+  کاربر واقعی نمی‌تواند از راه مسیر پیش‌بینی‌شده ثبت‌نام کند.**
+- **رفع:** یکی از این دو (تصمیم مهندسی، نه معماری جدید): (۱) `ProxyService`
+  فقط وقتی `x-internal-token` بگذارد که درخواست اصلی هم Bearer معتبر داشته
+  باشد یا Route صراحتاً آن را بخواهد؛ یا (۲) `AuthGuard` ترتیب بررسی را
+  عوض کند — اول `@Public()` را چک کند، فقط اگر `bearer` هم نبود و Public
+  نبود سراغ توکن داخلی برود.
+- **اولویت:** بحرانی
+- **ثبت‌شده:** 2026-08-27
+
 ## ۲۳٫۶ ثبت بدهی معماری
 
 بدهی جدید در همین فایل، در همین قالب، با شناسه ثبت می‌شود:

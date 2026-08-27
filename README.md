@@ -3,7 +3,7 @@
 > پلتفرم هوشمند مدیریت ناوگان، زنجیره تأمین، خدمات و عملیات عمرانی
 > **Smart platform for fleet, supply chain, services and civil-works management**
 
-[![CI](https://img.shields.io/badge/CI-GitHub_Actions-blue)](.github/workflows/ci.yml)
+[![CI](https://github.com/marabi766/RASTA/actions/workflows/ci.yml/badge.svg)](https://github.com/marabi766/RASTA/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue)](tsconfig.base.json)
 
@@ -217,8 +217,15 @@ pnpm verify
 
 این کدبیس یک **MVP مهندسی‌شده** است، نه یک سامانه گواهی‌شده برای بهره‌برداری ملی.
 
-**آنچه واقعی است:** معماری Microservices، پایگاه داده و Migration، APIها، Event Bus،
-احراز هویت، گردش‌کار، دفتر کل دوطرفه، تست‌ها و CI.
+> **برای وضعیت دقیق و به‌روز — کدام قابلیت واقعاً پیاده‌شده، کدام تست‌شده، کدام
+> زنده تأیید شده، و کدام Known Issue باز است — به [`PROJECT_MEMORY.md`](PROJECT_MEMORY.md)
+> مراجعه کنید.** خلاصه زیر برای آشنایی سریع است، نه مرجع دقیق.
+
+**آنچه واقعی است:** معماری Microservices، پایگاه داده و Migration، APIها، Event Bus
+(Outbox + Consumer)، احراز هویت، تست‌های واحد. **دفتر کل دوطرفه هنوز ساخته نشده**
+(`economic-service` در فهرست سرویس‌های آینده است). **CI روی GitHub Actions هنوز هیچ
+اجرای موفقی نداشته** — فایل Workflow نوشته شده اما یک ناسازگاری نسخه pnpm مانع اجرای
+هر مرحله‌ای شده؛ جزئیات در `PROJECT_MEMORY.md`.
 
 **سرویس‌های پیاده‌سازی‌شده تا این لحظه** — بقیه در `docs/17-mvp-scope.md` زمان‌بندی شده‌اند:
 
