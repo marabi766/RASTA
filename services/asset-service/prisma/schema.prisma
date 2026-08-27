@@ -1,0 +1,574 @@
+// =============================================================================
+// asset-service — owned schema
+//
+// The Asset is the central entity of the platform (ADR-012). Everything else —
+// fleet, maintenance, orders, projects, ledger entries — eventually points at
+// one of these rows.
+//
+// The rule that shapes this whole file: an asset's *identity* is permanent and
+// its *ownership* is not. A backhoe transferred from one dehyari to another
+// keeps the same AssetId and carries its entire history with it. So:
+//
+//   id                  never changes, and encodes nothing about who owns it
+//   organizationId      the current owner; changes only via a recorded transfer
+//   asset_transfer      the ownership history, append-only
+//
+// `organizationId` is used as the tenant column here, matching the platform
+// convention (docs/05 § 5.2), rather than a bespoke `ownerOrganizationId`. It
+// is the same fact under the standard name, which lets the shared tenant guard
+// scope this service like every other.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Extensions (postgis, pg_trgm) are provisioned by the postgres init script,
+// not by Prisma — creating one needs superuser, which the per-service role
+// deliberately lacks (ADR-005).
+
+// -----------------------------------------------------------------------------
+// Asset
+// -----------------------------------------------------------------------------
+
+model Asset {
+  /// `AST_<ULID>`. Permanent, sortable by creation time, and deliberately free
+  /// of any provincial, organizational or sequence marker (ADR-012).
+  id String @id
+
+  /// Current owner. The tenant boundary.
+  organizationId String @map("organization_id")
+
+  /// Registration plate, fleet number or asset tag — whatever the operator
+  /// actually calls it. Optional because a newly delivered machine may have
+  /// none yet, and the platform must not block registration on paperwork it
+  /// does not control.
+  ///
+  /// This is the identifier a human reads; `id` is the one the system uses.
+  /// Unique per organization, not globally: two dehyaris may legitimately both
+  /// number a machine "۱۲".
+  assetTag String? @map("asset_tag")
+
+  name String
+  type AssetType
+
+  manufacturer String?
+  model        String?
+  /// Manufacturer's serial or VIN. Globally unique when present — this is the
+  /// one identifier that genuinely identifies a physical machine worldwide.
+  serialNumber String? @unique @map("serial_number")
+
+  manufactureYear Int? @map("manufacture_year")
+
+  status OperationalStatus @default(REGISTERED)
+
+  /// When the asset entered service with its current owner.
+  commissionedAt DateTime? @map("commissioned_at")
+
+  /// Set once, terminally. A decommissioned asset is never deleted: financial
+  /// and audit records still reference it.
+  decommissionedAt     DateTime? @map("decommissioned_at")
+  decommissionedReason String?   @map("decommissioned_reason")
+
+  /// Type-specific attributes — bucket capacity, tank volume, axle count.
+  /// Free-form so a new AssetType needs no migration.
+  specifications Json @default("{}")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  createdBy String    @map("created_by")
+  updatedBy String    @map("updated_by")
+  version   Int       @default(1)
+  deletedAt DateTime? @map("deleted_at")
+
+  locations   AssetLocation[]
+  documents   AssetDocumentRef[]
+  policies    InsurancePolicy[]
+  inspections TechnicalInspection[]
+  transfers   AssetTransfer[]
+  timeline    AssetTimelineEntry[]
+
+  /// Partial on deletedAt so a tag freed by a removed record can be reused.
+  @@unique([organizationId, assetTag, deletedAt], name: "unique_asset_tag_per_org")
+  @@index([organizationId, status])
+  @@index([organizationId, type])
+  @@index([status])
+  @@map("asset")
+}
+
+/// The machine classes named in the product document (ch. 2.1), plus room to
+/// grow. Extensible by design, like OrganizationType.
+enum AssetType {
+  /// گریدر
+  GRADER
+  /// لودر
+  LOADER
+  /// بیل مکانیکی
+  EXCAVATOR
+  /// بولدوزر
+  BULLDOZER
+  /// کامیون
+  TRUCK
+  /// کامیونت
+  LIGHT_TRUCK
+  /// تراکتور
+  TRACTOR
+  /// تانکر آبرسانی
+  WATER_TANKER
+  /// خودروی جمع‌آوری پسماند
+  WASTE_COLLECTOR
+  /// آمبولانس / خودروی امدادی
+  EMERGENCY_VEHICLE
+  /// خودروی سواری اداری
+  PASSENGER_VEHICLE
+  /// تجهیزات ثابت
+  FIXED_EQUIPMENT
+  OTHER
+}
+
+/// Lifecycle states (docs/03 § 3.4).
+///
+/// The transitions are enforced in the domain service, not here — an enum
+/// cannot express "only with a valid insurance policy".
+enum OperationalStatus {
+  /// Registered, dossier incomplete. Cannot be assigned or used.
+  REGISTERED
+  /// In service and available.
+  ACTIVE
+  /// In service, currently assigned to a driver or mission.
+  ASSIGNED
+  /// In service, idle.
+  IDLE
+  /// Withdrawn while under repair.
+  IN_MAINTENANCE
+  /// Withdrawn for another reason, with a recorded justification.
+  OUT_OF_SERVICE
+  /// Terminal. Retained for its financial and audit history.
+  DECOMMISSIONED
+}
+
+// -----------------------------------------------------------------------------
+// Ownership history
+// -----------------------------------------------------------------------------
+
+/// A recorded change of owner.
+///
+/// Exists so the question "who owned this machine when that repair was
+/// invoiced?" is answerable years later. Append-only.
+model AssetTransfer {
+  id String @id
+
+  assetId String @map("asset_id")
+
+  fromOrganizationId String @map("from_organization_id")
+  toOrganizationId   String @map("to_organization_id")
+
+  /// The tenant column for scoping. Set to the *receiving* organization, so a
+  /// transfer appears in the new owner's history.
+  organizationId String @map("organization_id")
+
+  reason      String
+  referenceNo String? @map("reference_no")
+
+  transferredAt DateTime @default(now()) @map("transferred_at")
+  transferredBy String   @map("transferred_by")
+
+  asset Asset @relation(fields: [assetId], references: [id])
+
+  @@index([assetId, transferredAt])
+  @@index([organizationId])
+  @@map("asset_transfer")
+}
+
+// -----------------------------------------------------------------------------
+// Location
+// -----------------------------------------------------------------------------
+
+/// Where the asset is.
+///
+/// Only the latest row per asset is `current`. History is retained because
+/// "where was this machine on the day of the incident?" is a real question.
+model AssetLocation {
+  id String @id
+
+  assetId        String @map("asset_id")
+  organizationId String @map("organization_id")
+
+  /// GEOGRAPHY(Point, 4326): distances come back in metres, which is what
+  /// "assets near this project" needs.
+  point Unsupported("geography(Point, 4326)")?
+
+  addressLine String? @map("address_line")
+  siteName    String? @map("site_name")
+
+  /// How the position was obtained. `TELEMATICS` is unused in phase one but
+  /// present so IoT ingestion is a new producer rather than a migration.
+  source LocationSource @default(MANUAL)
+
+  isCurrent  Boolean  @default(true) @map("is_current")
+  recordedAt DateTime @default(now()) @map("recorded_at")
+  recordedBy String   @map("recorded_by")
+
+  asset Asset @relation(fields: [assetId], references: [id])
+
+  /// One current location per asset, enforced by the database rather than by
+  /// remembering to clear the flag.
+  @@unique([assetId, isCurrent], name: "one_current_location")
+  @@index([assetId, recordedAt])
+  @@index([organizationId])
+  @@map("asset_location")
+}
+
+enum LocationSource {
+  MANUAL
+  TELEMATICS
+  IMPORTED
+}
+
+// -----------------------------------------------------------------------------
+// Documents
+// -----------------------------------------------------------------------------
+
+/// A reference to a file held by document-service.
+///
+/// Only the reference lives here. The file itself never touches this database
+/// (ADR-014), and this service never sees its bytes.
+model AssetDocumentRef {
+  id String @id
+
+  assetId        String @map("asset_id")
+  organizationId String @map("organization_id")
+
+  /// The id document-service issued.
+  documentId String @map("document_id")
+
+  kind  AssetDocumentKind
+  title String
+
+  issuedAt  DateTime? @map("issued_at")
+  expiresAt DateTime? @map("expires_at")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String    @map("created_by")
+  deletedAt DateTime? @map("deleted_at")
+
+  asset Asset @relation(fields: [assetId], references: [id])
+
+  @@index([assetId, kind])
+  @@index([organizationId])
+  @@index([expiresAt])
+  @@map("asset_document_ref")
+}
+
+enum AssetDocumentKind {
+  /// سند مالکیت
+  OWNERSHIP_TITLE
+  /// کارت خودرو
+  REGISTRATION_CARD
+  /// بیمه‌نامه
+  INSURANCE_POLICY
+  /// گواهی معاینه فنی
+  TECHNICAL_INSPECTION
+  /// فاکتور خرید
+  PURCHASE_INVOICE
+  /// دفترچه راهنما
+  MANUAL
+  PHOTO
+  OTHER
+}
+
+// -----------------------------------------------------------------------------
+// Insurance — a module inside this service, with its own topic (docs/04 § 4.1)
+// -----------------------------------------------------------------------------
+
+/// An insurance policy on the asset.
+///
+/// Lives here rather than in its own service because "an active asset must
+/// carry valid insurance" is an invariant that needs immediate consistency,
+/// and a policy expires with the asset it covers. The seam for extraction is
+/// kept clean: separate topic, separate module.
+model InsurancePolicy {
+  id String @id
+
+  assetId        String @map("asset_id")
+  organizationId String @map("organization_id")
+
+  policyNumber String @map("policy_number")
+  /// Insurer name. Kept as text rather than a foreign key: the platform does
+  /// not maintain a registry of insurers, and inventing one would be scope the
+  /// product document does not ask for.
+  insurerName  String @map("insurer_name")
+
+  coverage InsuranceCoverage
+
+  /// Premium and insured value in rial minor units, as strings on the wire
+  /// (ADR-022). BigInt in the database.
+  premiumMinor      BigInt? @map("premium_minor")
+  insuredValueMinor BigInt? @map("insured_value_minor")
+
+  validFrom DateTime @map("valid_from")
+  validTo   DateTime @map("valid_to")
+
+  status PolicyStatus @default(ACTIVE)
+
+  documentId String? @map("document_id")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  createdBy String    @map("created_by")
+  updatedBy String    @map("updated_by")
+  deletedAt DateTime? @map("deleted_at")
+
+  asset  Asset            @relation(fields: [assetId], references: [id])
+  claims InsuranceClaim[]
+
+  @@unique([policyNumber, insurerName, deletedAt], name: "unique_policy_per_insurer")
+  /// Drives the expiry sweep: "policies ending soon, still active".
+  @@index([validTo, status])
+  @@index([assetId, status])
+  @@index([organizationId, status])
+  @@map("insurance_policy")
+}
+
+enum InsuranceCoverage {
+  /// شخص ثالث
+  THIRD_PARTY
+  /// بدنه
+  COMPREHENSIVE
+  /// حوادث سرنشین
+  PASSENGER_ACCIDENT
+  /// مسئولیت
+  LIABILITY
+}
+
+enum PolicyStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+/// A claim against a policy.
+///
+/// Phase one records and tracks; settlement through the platform is deferred
+/// pending the regulatory review the product document requires (docs/24 Q-09).
+model InsuranceClaim {
+  id String @id
+
+  policyId       String @map("policy_id")
+  assetId        String @map("asset_id")
+  organizationId String @map("organization_id")
+
+  claimNumber String?  @map("claim_number")
+  description String
+  incidentAt  DateTime @map("incident_at")
+
+  claimedAmountMinor  BigInt? @map("claimed_amount_minor")
+  approvedAmountMinor BigInt? @map("approved_amount_minor")
+
+  status ClaimStatus @default(SUBMITTED)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  createdBy String   @map("created_by")
+  updatedBy String   @map("updated_by")
+
+  policy InsurancePolicy @relation(fields: [policyId], references: [id])
+
+  @@index([policyId])
+  @@index([organizationId, status])
+  @@map("insurance_claim")
+}
+
+enum ClaimStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  SETTLED
+}
+
+/// Periodic roadworthiness certificate (معاینه فنی).
+model TechnicalInspection {
+  id String @id
+
+  assetId        String @map("asset_id")
+  organizationId String @map("organization_id")
+
+  certificateNo String   @map("certificate_no")
+  centerName    String?  @map("center_name")
+  inspectedAt   DateTime @map("inspected_at")
+  validTo       DateTime @map("valid_to")
+
+  result     InspectionResult
+  /// Defects noted by the inspection centre.
+  notes      String?
+  documentId String?          @map("document_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+
+  asset Asset @relation(fields: [assetId], references: [id])
+
+  @@index([validTo])
+  @@index([assetId, inspectedAt])
+  @@index([organizationId])
+  @@map("technical_inspection")
+}
+
+enum InspectionResult {
+  PASSED
+  /// Passed with defects to correct before the next inspection.
+  CONDITIONAL
+  FAILED
+}
+
+// -----------------------------------------------------------------------------
+// Timeline — the electronic dossier (پرونده الکترونیکی)
+// -----------------------------------------------------------------------------
+
+/// One line in an asset's history.
+///
+/// This is the table the product document's central promise rests on: "every
+/// event recorded in other modules is automatically attached to the machine's
+/// file" (ch. 5.4). It is built entirely by consuming events from fleet,
+/// maintenance, marketplace and construction — this service never reads their
+/// databases (ADR-005).
+///
+/// It is a **read model**: derivable, disposable, and rebuildable from Kafka
+/// by replaying from offset zero. Nothing here is a source of truth, which is
+/// what makes it safe to reshape later.
+model AssetTimelineEntry {
+  id String @id
+
+  assetId        String @map("asset_id")
+  organizationId String @map("organization_id")
+
+  /// The event that produced this line, e.g. `MAINTENANCE_COMPLETED`.
+  eventName   String @map("event_name")
+  /// Which service reported it.
+  sourceService String @map("source_service")
+  /// The originating event's id, so a rebuild is idempotent.
+  sourceEventId String @map("source_event_id")
+
+  category TimelineCategory
+
+  title       String
+  description String?
+
+  /// Cost attached to this line, in rial minor units. Present for repairs,
+  /// parts and orders; null for a usage reading.
+  amountMinor BigInt? @map("amount_minor")
+
+  /// Event-specific detail, kept loose because each producer carries different
+  /// facts and this table must not need a migration when one of them changes.
+  detail Json @default("{}")
+
+  occurredAt DateTime @map("occurred_at")
+  recordedAt DateTime @default(now()) @map("recorded_at")
+
+  asset Asset @relation(fields: [assetId], references: [id])
+
+  /// A replayed event must not duplicate its line.
+  @@unique([sourceEventId, assetId], name: "unique_timeline_source")
+  @@index([assetId, occurredAt(sort: Desc)])
+  @@index([organizationId, occurredAt(sort: Desc)])
+  @@index([category])
+  @@map("asset_timeline_entry")
+}
+
+enum TimelineCategory {
+  LIFECYCLE
+  USAGE
+  MAINTENANCE
+  INSURANCE
+  INSPECTION
+  DOCUMENT
+  COST
+  PROJECT
+  TRANSFER
+}
+
+// -----------------------------------------------------------------------------
+// Reference replica
+// -----------------------------------------------------------------------------
+
+/// Read-only copy of organization facts, built from ORGANIZATION_* events.
+///
+/// CONSTRAINT: never consulted for an authorization decision. Authorization
+/// comes from the verified token.
+model OrganizationRef {
+  id     String @id
+  name   String
+  type   String
+  status String
+
+  syncedAt    DateTime @map("synced_at")
+  sourceEvent String   @map("source_event")
+
+  @@map("organization_ref")
+}
+
+// -----------------------------------------------------------------------------
+// Platform plumbing (ADR-021)
+// -----------------------------------------------------------------------------
+
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic        String
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  publishedAt DateTime? @map("published_at")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  @@index([createdAt], map: "idx_outbox_pending")
+  @@map("outbox_message")
+}
+
+model ProcessedEvent {
+  eventId      String   @map("event_id")
+  consumerName String   @map("consumer_name")
+  processedAt  DateTime @default(now()) @map("processed_at")
+
+  @@id([eventId, consumerName])
+  @@index([processedAt])
+  @@map("processed_event")
+}
+
+model IdempotencyKey {
+  key            String @map("key")
+  organizationId String @map("organization_id")
+  endpoint       String
+
+  requestHash String @map("request_hash")
+
+  responseStatus Int?  @map("response_status")
+  responseBody   Json? @map("response_body")
+  state          String
+
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@id([organizationId, endpoint, key])
+  @@index([expiresAt])
+  @@map("idempotency_key")
+}
