@@ -1,4 +1,5 @@
-const swcTransform = { '^.+\\.(t|j)s$': ['@swc/jest'] };
+const swcOptions = require('../../jest.swc.cjs');
+const swcTransform = { '^.+\\.(t|j)s$': ['@swc/jest', swcOptions] };
 
 /** @type {import('jest').Config} */
 module.exports = {
