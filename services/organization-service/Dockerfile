@@ -67,6 +67,14 @@ WORKDIR /app
 # Non-root, owning nothing it does not need to write.
 RUN addgroup -S rasta && adduser -S rasta -G rasta
 
+# The runtime runs exactly one command: `node dist/main.js`. It has no use for
+# a package manager, and shipping one costs twice — npm's own bundled
+# dependencies carry CVEs into an image that never calls them (a CRITICAL and
+# four HIGH on the first scan that ever ran, all of them npm's), and anything
+# that gains code execution finds a ready-made way to fetch more. Removed
+# rather than added to an ignore list.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
+
 ENV NODE_ENV=production
 
 COPY --from=build --chown=rasta:rasta /deploy ./
