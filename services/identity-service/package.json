@@ -15,9 +15,9 @@
     "test:unit": "jest --selectProjects unit --passWithNoTests",
     "test:integration": "jest --selectProjects integration --passWithNoTests --runInBand",
     "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate deploy",
-    "db:migrate:dev": "prisma migrate dev",
-    "db:seed": "node --import @swc-node/register/esm-register --env-file=../../.env prisma/seed.ts",
+    "db:migrate": "node --env-file-if-exists=../../.env ../../scripts/prisma.mjs migrate deploy",
+    "db:migrate:dev": "node --env-file-if-exists=../../.env ../../scripts/prisma.mjs migrate dev",
+    "db:seed": "node --import @swc-node/register/esm-register --env-file-if-exists=../../.env prisma/seed.ts",
     "openapi:generate": "tsx src/openapi.ts"
   },
   "prisma": {
