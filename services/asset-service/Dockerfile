@@ -64,6 +64,14 @@ RUN --mount=type=cache,id=prisma-engines,target=/root/.cache/prisma     CI=true 
 FROM node:22-alpine AS runtime
 WORKDIR /app
 
+# Apply whatever OS patches Alpine has published since this base image was
+# cut. The base tag moves slower than the security feed, so a freshly built
+# image can already carry a fixed-upstream CVE — openssl 3.5.7-r0 on the
+# first scan that ever ran. Deliberately unpinned: reproducibility of the OS
+# layer is worth less than shipping a patched one, and the scan below still
+# fails the build if anything fixed remains.
+RUN apk --no-cache upgrade
+
 # Non-root, owning nothing it does not need to write.
 RUN addgroup -S rasta && adduser -S rasta -G rasta
 
