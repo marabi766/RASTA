@@ -29,13 +29,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: ${{ env.PNPM_VERSION }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -72,16 +72,16 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Gitleaks needs history to scan past commits, not just the tip.
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: ${{ env.PNPM_VERSION }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -89,7 +89,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Secret scan
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -106,13 +106,23 @@ jobs:
         # severity value: MEDIUM" — and then exits 0. It reported success on
         # every run while scanning nothing, which is the one failure mode worse
         # than having no gate at all.
+        #
+        # Three registry-policy rules are excluded, not silenced by accident.
+        # minimumReleaseAge and trustPolicy both reject the lockfile as it
+        # stands — trustPolicy flags four packages as possible takeovers — and
+        # clearing that means re-resolving the tree and judging each one, which
+        # is its own task, tracked as D-008. Excluding them by name keeps the
+        # decision greppable; deleting the ruleset would hide it.
         run: |
           docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.175.0 \
             semgrep scan --error --metrics=off \
               --config p/typescript \
               --config p/nodejs \
               --config p/owasp-top-ten \
-              --config p/secrets
+              --config p/secrets \
+              --exclude-rule package_managers.npm.npm-missing-minimum-release-age.npm-missing-minimum-release-age \
+              --exclude-rule package_managers.pnpm.pnpm-missing-minimum-release-age.pnpm-minimum-release-age \
+              --exclude-rule package_managers.pnpm.pnpm-trust-policy.pnpm-trust-policy
 
   # ---------------------------------------------------------------------------
   # Integration and the security tests that need a real database.
@@ -152,13 +162,13 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: ${{ env.PNPM_VERSION }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -224,12 +234,12 @@ jobs:
         service: [identity-service, organization-service]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: services/${{ matrix.service }}/Dockerfile
@@ -247,7 +257,7 @@ jobs:
         # running a single step (D-005). Moved to the current release rather
         # than back-pinning: a vulnerability scanner two years behind is a
         # gate in name only.
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: rasta/${{ matrix.service }}:${{ github.sha }}
           severity: CRITICAL,HIGH

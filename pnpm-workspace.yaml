@@ -26,3 +26,8 @@ overrides:
   # only through @prisma/config, which the Prisma CLI uses at build time; the
   # newest Prisma 6 still resolves 7.x, so the fix has to be pinned here.
   deepmerge-ts: '^8.0.0'
+
+# A transitive dependency may not arrive from a git URL or a tarball over
+# http. Everything here comes from the registry, and a sub-dependency that
+# suddenly does not is worth stopping on.
+blockExoticSubdeps: true
