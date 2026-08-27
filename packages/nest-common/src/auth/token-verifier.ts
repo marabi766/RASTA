@@ -34,9 +34,27 @@ export interface UserClaims {
   expiresAt: number;
 }
 
+/**
+ * What authority an internal token carries.
+ *
+ * `SERVICE` — the caller is acting on its own behalf. The callee still decides
+ * whether that is allowed, via `@AllowService` (ADR-020).
+ *
+ * `RELAY` — the api-gateway is forwarding somebody else's request. The token
+ * proves the hop came from the gateway; it names no actor and grants no
+ * service authority. A relayed request that carried no credentials of its own
+ * is simply an anonymous request, and is judged by `@Public` like any other.
+ *
+ * Keeping these apart is what lets an unauthenticated caller reach a public
+ * endpoint through the gateway without the gateway ever being able to mint a
+ * token that satisfies `@AllowService` (D-007).
+ */
+export type InternalTokenPurpose = 'SERVICE' | 'RELAY';
+
 export interface ServiceClaims {
   callerService: string;
   targetService: string;
+  purpose: InternalTokenPurpose;
   expiresAt: number;
 }
 
@@ -114,8 +132,12 @@ export class InternalTokenService {
     this.key = new TextEncoder().encode(secret);
   }
 
-  async issue(callerService: string, targetService: string): Promise<string> {
-    return new SignJWT({ svc: callerService })
+  async issue(
+    callerService: string,
+    targetService: string,
+    purpose: InternalTokenPurpose = 'SERVICE',
+  ): Promise<string> {
+    return new SignJWT({ svc: callerService, purpose })
       .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
       .setIssuer(this.issuer)
       .setAudience(targetService)
@@ -141,6 +163,9 @@ export class InternalTokenService {
       return {
         callerService: payload.sub,
         targetService: expectedTarget,
+        // Absent means SERVICE: the stricter reading, and what every token
+        // minted before the claim existed meant.
+        purpose: payload['purpose'] === 'RELAY' ? 'RELAY' : 'SERVICE',
         expiresAt: (payload.exp ?? 0) * 1000,
       };
     } catch (error) {

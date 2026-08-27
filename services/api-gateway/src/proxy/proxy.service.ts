@@ -76,10 +76,18 @@ export class ProxyService {
     const context = getContext();
     const target = `${serviceUrl(this.urls, request.service)}${request.path}${request.query}`;
 
-    // Scoped to this specific service, and short-lived.
+    // Scoped to this specific service, short-lived, and minted as a RELAY.
+    //
+    // The gateway never acts on its own authority — everything it sends is
+    // somebody else's request being forwarded. Saying so in the token is what
+    // lets the downstream tell a forwarded anonymous request (judged by
+    // `@Public`) from a genuine service-to-service call (judged by
+    // `@AllowService`), without loosening either. It also means a token minted
+    // here can never satisfy `@AllowService` on any service (ADR-020, D-007).
     const internalToken = await this.internalTokens.issue(
       'api-gateway',
       `${request.service}-service`,
+      'RELAY',
     );
 
     const headers: Record<string, string> = {

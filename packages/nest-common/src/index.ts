@@ -42,7 +42,12 @@ export {
 
 // Authentication -------------------------------------------------------------
 export { TokenVerifier, InternalTokenService } from './auth/token-verifier';
-export type { UserClaims, ServiceClaims, TokenVerifierOptions } from './auth/token-verifier';
+export type {
+  UserClaims,
+  ServiceClaims,
+  TokenVerifierOptions,
+  InternalTokenPurpose,
+} from './auth/token-verifier';
 
 export { AuthGuard, AUTH_OPTIONS, resolveOrganization } from './guards/auth.guard';
 export type { AuthGuardOptions, AuthState, AuthenticatedRequest } from './guards/auth.guard';

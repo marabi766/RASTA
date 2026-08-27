@@ -49,9 +49,15 @@ export class AuthGuard implements CanActivate {
     // wins, because it names the actual actor — the internal token only says
     // which service relayed it.
     //
-    // A genuine service-to-service call carries the internal token alone.
+    // An internal token on its own is either a genuine service-to-service
+    // call or the gateway relaying a request that had no credentials. Those
+    // two mean very different things, and the token itself says which.
     if (internalToken && !bearer) {
-      const state = await this.authenticateService(execution, internalToken);
+      const state = await this.authenticateInternal(
+        execution,
+        internalToken,
+        publicMeta?.public === true,
+      );
       request.rastaAuth = state;
       upgradeContext(state);
       return true;
@@ -96,15 +102,38 @@ export class AuthGuard implements CanActivate {
     return true;
   }
 
-  private async authenticateService(
+  private async authenticateInternal(
     execution: ExecutionContext,
     token: string,
+    isPublicEndpoint: boolean,
   ): Promise<AuthState> {
     if (!this.options.internalTokens) {
       throw RastaError.unauthenticated('Service-to-service authentication is not configured');
     }
 
+    // Verified either way. The token proves the hop is internal; what it
+    // *authorizes* depends on why it was minted.
     const claims = await this.options.internalTokens.verify(token, this.options.serviceName);
+
+    // The gateway relaying a request that carried no credentials of its own.
+    // The token names the hop, not an actor, so this is an anonymous request
+    // and `@Public` decides it — exactly as if the caller had reached the
+    // service directly.
+    //
+    // Reading this as a service-to-service call is what broke every public
+    // endpoint behind the gateway: self-registration, the one door a new user
+    // can walk through, answered 403 because it carries no `@AllowService`
+    // (D-007). Opening it by loosening `@AllowService` would have been the
+    // wrong repair — a relay token deliberately grants *less* than a service
+    // token, never more.
+    if (claims.purpose === 'RELAY') {
+      if (!isPublicEndpoint) {
+        // Not a leak: an anonymous caller learns only that the endpoint needs
+        // authentication, which the gateway would already have told them.
+        throw RastaError.unauthenticated('Missing bearer token');
+      }
+      return { authType: 'ANONYMOUS', roles: [] };
+    }
 
     const allowed = this.reflector.getAllAndOverride<string[] | undefined>(ALLOW_SERVICE_KEY, [
       execution.getHandler(),
