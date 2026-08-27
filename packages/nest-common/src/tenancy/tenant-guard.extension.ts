@@ -54,7 +54,40 @@ export function runUnscoped<T>(reason: string, fn: () => T): T {
   if (!reason || reason.trim().length < 10) {
     throw new Error('runUnscoped() requires a written reason of at least 10 characters');
   }
-  return unscopedStorage.run({ reason }, fn);
+
+  return unscopedStorage.run({ reason }, () => {
+    const result = fn();
+
+    // A Prisma query is *lazy*: `client.asset.findFirst(...)` builds a
+    // PrismaPromise and runs nothing until something calls `.then` on it. If
+    // the caller writes `runUnscoped(reason, () => client.asset.findFirst(…))`
+    // — the obvious form — that `.then` happens on the outer `await`, after
+    // this scope has already closed, and the query executes *scoped* after
+    // all. The failure is silent and reads as correct code: the row is simply
+    // not found.
+    //
+    // Calling `.then` here, inside the scope, is what makes the operation
+    // actually run unscoped. It costs one extra promise link and removes a
+    // trap that every future call site would otherwise have to remember.
+    if (isThenable(result)) {
+      // `new Promise` runs its executor synchronously, so `.then` is called
+      // while the scope is still open — and the caller gets a real Promise
+      // back whatever the thenable's own `then` happens to return.
+      return new Promise((resolve, reject) => {
+        result.then(resolve, reject);
+      }) as T;
+    }
+
+    return result;
+  });
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
 }
 
 export function isUnscoped(): boolean {

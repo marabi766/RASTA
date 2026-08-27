@@ -181,6 +181,46 @@ describe('runUnscoped', () => {
     });
     expect(isUnscoped()).toBe(false);
   });
+
+  it('holds the scope open for a lazily-executed query', async () => {
+    // A Prisma query runs nothing until something calls `.then` on it. If the
+    // scope closed before that happened, the query would execute *scoped* and
+    // silently return no rows — code that reads as correct and is not.
+    let executedUnscoped: boolean | undefined;
+
+    // Shaped like a PrismaPromise: inert until something calls `then`.
+    const lazy = {
+      then(resolve: (value: string) => void) {
+        executedUnscoped = isUnscoped();
+        resolve('ran');
+      },
+    };
+
+    const result = await runUnscoped('platform-wide reconciliation job', () => lazy);
+
+    expect(result).toBe('ran');
+    expect(executedUnscoped).toBe(true);
+    expect(isUnscoped()).toBe(false);
+  });
+
+  it('keeps the scope for an async callback that awaits inside', async () => {
+    let insideAfterAwait: boolean | undefined;
+
+    await runUnscoped('platform-wide reconciliation job', async () => {
+      await Promise.resolve();
+      insideAfterAwait = isUnscoped();
+    });
+
+    expect(insideAfterAwait).toBe(true);
+  });
+
+  it('propagates a rejection rather than swallowing it', async () => {
+    await expect(
+      runUnscoped('platform-wide reconciliation job', () =>
+        Promise.reject(new Error('query failed')),
+      ),
+    ).rejects.toThrow('query failed');
+  });
 });
 
 describe('assertTenantOwned', () => {
