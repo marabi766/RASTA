@@ -83,6 +83,15 @@ export {
 } from './tenancy/tenant-guard.extension';
 export type { TenantGuardOptions } from './tenancy/tenant-guard.extension';
 
+// Event consumption ----------------------------------------------------------
+export { EventConsumer } from './consumer/event-consumer';
+export type {
+  EventConsumerOptions,
+  EventHandler,
+  HandlerOutcome,
+  ConsumerLogger,
+} from './consumer/event-consumer';
+
 // Outbox ---------------------------------------------------------------------
 export { buildOutboxRow, OutboxRelay } from './outbox/outbox';
 export type {
