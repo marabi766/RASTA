@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type { ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
 import { AuthGuard, type AuthGuardOptions } from './auth.guard';
@@ -21,7 +22,10 @@ import { RastaError } from '../errors/rasta-error';
  * else gets any easier to reach.
  */
 
-const SECRET = 'a-test-internal-secret-of-at-least-32-chars';
+// Generated per run rather than written down. Nothing here should depend on a
+// particular secret, and a literal that looks like one trips the secret
+// scanner in CI for no benefit.
+const SECRET = randomBytes(32).toString('hex');
 const ISSUER = 'rasta-internal';
 const THIS_SERVICE = 'identity-service';
 
@@ -192,7 +196,7 @@ describe('AuthGuard — service-to-service authentication (ADR-020)', () => {
   });
 
   it('refuses a forged internal token', async () => {
-    const forged = new InternalTokenService('a-different-secret-also-32-characters-x', ISSUER, 300);
+    const forged = new InternalTokenService(randomBytes(32).toString('hex'), ISSUER, 300);
     await expect(
       activate(INTERNAL_ENDPOINT, {
         'x-internal-token': await forged.issue('fleet-service', THIS_SERVICE, 'SERVICE'),

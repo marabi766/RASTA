@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { decodeJwt } from 'jose';
 import { InternalTokenService, runWithContext } from '@rasta/nest-common';
 import { ProxyService } from './proxy.service';
@@ -12,8 +13,13 @@ import type { ServiceUrls } from '../config/routes';
  * gateway relays; it never acts as itself.
  */
 
-const SECRET = 'a-test-internal-secret-of-at-least-32-chars';
-const internalTokens = new InternalTokenService(SECRET, 'rasta-internal', 300);
+// Generated per run: nothing here depends on a particular secret, and a
+// literal that looks like one trips the secret scanner in CI for no benefit.
+const internalTokens = new InternalTokenService(
+  randomBytes(32).toString('hex'),
+  'rasta-internal',
+  300,
+);
 
 const urls = { IDENTITY_SERVICE_URL: 'http://identity.test:3101' } as unknown as ServiceUrls;
 
