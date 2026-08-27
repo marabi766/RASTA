@@ -1,7 +1,7 @@
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
-import { Resource } from '@opentelemetry/resources';
+import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
 import {
   ParentBasedSampler,
@@ -88,7 +88,9 @@ export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
   if (config.enabled === false) return undefined;
   if (sdk) return sdk;
 
-  const resource = new Resource({
+  // OpenTelemetry 2.x replaced the `Resource` class with a factory; the
+  // attributes it carries are unchanged.
+  const resource = resourceFromAttributes({
     [ATTR_SERVICE_NAME]: config.serviceName,
     [ATTR_SERVICE_VERSION]: config.serviceVersion ?? '0.0.0',
     'service.namespace': config.namespace ?? 'rasta',

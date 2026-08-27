@@ -17,3 +17,12 @@ allowBuilds:
   # Analytics beacon pulled in transitively. Denied deliberately:
   # this repository does not phone home at install time.
   '@scarf/scarf': false
+
+# Transitive pins for published advisories the direct dependency cannot yet
+# resolve. Each entry states which advisory it closes, so an upgrade that makes
+# it unnecessary is easy to spot and remove.
+overrides:
+  # GHSA-ggr8-5vv4-36mx — stack exhaustion on recursive object graphs. Reached
+  # only through @prisma/config, which the Prisma CLI uses at build time; the
+  # newest Prisma 6 still resolves 7.x, so the fix has to be pinned here.
+  deepmerge-ts: '^8.0.0'
