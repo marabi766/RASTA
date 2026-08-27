@@ -84,22 +84,35 @@
 
 ## Asset — `rasta.asset.v1`
 
-| رویداد                 | مصرف‌کنندگان                       | Payload کلیدی                                       |
-| ---------------------- | ---------------------------------- | --------------------------------------------------- |
-| `ASSET_CREATED`        | fleet · analytics · audit · search | `assetId`, `assetType`, `ownerOrganizationId`       |
-| `ASSET_ACTIVATED`      | fleet · analytics                  | `assetId`                                           |
-| `ASSET_UPDATED`        | fleet · search · analytics         | `assetId`, `changes`                                |
-| `ASSET_TRANSFERRED`    | fleet · analytics · audit          | `assetId`, `fromOrganizationId`, `toOrganizationId` |
-| `ASSET_STATUS_CHANGED` | fleet · construction · analytics   | `assetId`, `from`, `to`, `reason`                   |
-| `ASSET_DECOMMISSIONED` | fleet · maintenance · analytics    | `assetId`, `reason`                                 |
+| رویداد                    | مصرف‌کنندگان                       | Payload کلیدی                                                     |
+| ------------------------- | ---------------------------------- | ----------------------------------------------------------------- |
+| `ASSET_CREATED`           | fleet · analytics · audit · search | `assetId`, `organizationId`, `name`, `type`, `assetTag`, `status` |
+| `ASSET_ACTIVATED`         | fleet · analytics                  | `assetId`, `organizationId`, `commissionedAt`                     |
+| `ASSET_UPDATED`           | fleet · search · analytics         | `assetId`, `organizationId`, `changedFields`                      |
+| `ASSET_TRANSFERRED`       | fleet · analytics · audit          | `assetId`, `fromOrganizationId`, `toOrganizationId`, `reason`     |
+| `ASSET_STATUS_CHANGED`    | fleet · construction · analytics   | `assetId`, `previousStatus`, `newStatus`, `reason`                |
+| `ASSET_DECOMMISSIONED`    | fleet · maintenance · analytics    | `assetId`, `reason`, `decommissionedAt`                           |
+| `ASSET_LOCATION_RECORDED` | fleet · construction · analytics   | `assetId`, `locationId`, `hasCoordinate`, `source`                |
+| `ASSET_DOCUMENT_ATTACHED` | document · analytics               | `assetId`, `documentId`, `kind`, `expiresAt`                      |
+
+`ASSET_UPDATED` حمل نام فیلدهای تغییریافته است، نه مقدار پیشین آن‌ها: یک تغییر نام
+نباید مقدار قدیمی را روی Topic‌ای بگذارد که همه سرویس‌ها می‌خوانند و نگه می‌دارند.
 
 ## Insurance — `rasta.insurance.v1`
 
-| رویداد                | مصرف‌کنندگان                 | Payload کلیدی                                 |
-| --------------------- | ---------------------------- | --------------------------------------------- |
-| `INSURANCE_RECORDED`  | notification · analytics     | `assetId`, `policyId`, `validFrom`, `validTo` |
-| `INSURANCE_EXPIRING`  | **notification** · analytics | `assetId`, `policyId`, `daysRemaining`        |
-| `INSPECTION_EXPIRING` | notification                 | `assetId`, `inspectionId`, `daysRemaining`    |
+| رویداد                | مصرف‌کنندگان                        | Payload کلیدی                                                |
+| --------------------- | ----------------------------------- | ------------------------------------------------------------ |
+| `INSURANCE_RECORDED`  | notification · analytics            | `assetId`, `policyId`, `insurerName`, `validFrom`, `validTo` |
+| `INSURANCE_EXPIRING`  | **notification** · analytics        | `assetId`, `policyId`, `insurerName`, `daysRemaining`        |
+| `INSURANCE_EXPIRED`   | fleet · notification · analytics    | `assetId`, `policyId`, `validTo`                             |
+| `INSPECTION_RECORDED` | analytics                           | `assetId`, `inspectionId`, `certificateNo`, `result`         |
+| `INSPECTION_EXPIRING` | notification                        | `assetId`, `inspectionId`, `daysRemaining`                   |
+| `INSPECTION_FAILED`   | **fleet** · maintenance · analytics | `assetId`, `inspectionId`, `notes`                           |
+
+`INSPECTION_FAILED` رویدادی ایمنی است، نه اداری: `fleet` باید بلافاصله دستگاه را از
+فهرست قابل اعزام بردارد، و نباید مجبور باشد برای فهمیدن این موضوع فیلد `result` یک
+رویداد عمومی «ثبت شد» را بازرسی کند. `daysRemaining` در رویدادهای انقضا حمل می‌شود تا
+`notification` بتواند بدون محاسبه دوباره تاریخ، یادآور ۳۰ روزه را از ۳ روزه تشخیص دهد.
 
 ## Fleet — `rasta.fleet.v1`
 
