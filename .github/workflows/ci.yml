@@ -100,13 +100,19 @@ jobs:
         run: pnpm audit --audit-level=high
 
       - name: Static analysis
-        uses: semgrep/semgrep-action@v1
-        with:
-          config: >-
-            p/typescript
-            p/nodejs
-            p/owasp-top-ten
-            p/secrets
+        # Run the maintained image directly rather than semgrep/semgrep-action@v1.
+        # That action is archived and ships semgrep 1.36 (2023), which dies on
+        # any ruleset using the MEDIUM severity — "ValueError: invalid rule
+        # severity value: MEDIUM" — and then exits 0. It reported success on
+        # every run while scanning nothing, which is the one failure mode worse
+        # than having no gate at all.
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.175.0 \
+            semgrep scan --error --metrics=off \
+              --config p/typescript \
+              --config p/nodejs \
+              --config p/owasp-top-ten \
+              --config p/secrets
 
   # ---------------------------------------------------------------------------
   # Integration and the security tests that need a real database.
