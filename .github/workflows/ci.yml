@@ -14,7 +14,10 @@ concurrency:
 
 env:
   NODE_VERSION: '22'
-  PNPM_VERSION: '10'
+  # Must match `packageManager` in package.json exactly. pnpm/action-setup
+  # refuses to run when the two disagree, which is how every run before
+  # 2026-08-27 died before `pnpm install` ever started (D-005).
+  PNPM_VERSION: '11.22.0'
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -176,6 +179,7 @@ jobs:
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
 
       - name: Integration tests
         run: pnpm run test:integration
@@ -183,6 +187,7 @@ jobs:
           NODE_ENV: test
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
           REDIS_URL: redis://localhost:6379
 
       # These are called out separately from the rest of the suite so a failure
@@ -194,6 +199,7 @@ jobs:
           NODE_ENV: test
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
 
   # ---------------------------------------------------------------------------
   # Container build and image scan. Only on main, because it is the slowest
