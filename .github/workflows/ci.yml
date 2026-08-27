@@ -236,7 +236,12 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
       - name: Scan image
-        uses: aquasecurity/trivy-action@0.28.0
+        # Tags on this action carry a `v` prefix; the unprefixed `0.28.0` this
+        # once pinned does not resolve, so the job died at "Set up job" before
+        # running a single step (D-005). Moved to the current release rather
+        # than back-pinning: a vulnerability scanner two years behind is a
+        # gate in name only.
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: rasta/${{ matrix.service }}:${{ github.sha }}
           severity: CRITICAL,HIGH
