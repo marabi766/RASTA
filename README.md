@@ -222,10 +222,13 @@ pnpm verify
 > مراجعه کنید.** خلاصه زیر برای آشنایی سریع است، نه مرجع دقیق.
 
 **آنچه واقعی است:** معماری Microservices، پایگاه داده و Migration، APIها، Event Bus
-(Outbox + Consumer)، احراز هویت، تست‌های واحد. **دفتر کل دوطرفه هنوز ساخته نشده**
-(`economic-service` در فهرست سرویس‌های آینده است). **CI روی GitHub Actions هنوز هیچ
-اجرای موفقی نداشته** — فایل Workflow نوشته شده اما یک ناسازگاری نسخه pnpm مانع اجرای
-هر مرحله‌ای شده؛ جزئیات در `PROJECT_MEMORY.md`.
+(Outbox + Consumer)، احراز هویت، ۲۲۰ تست واحد، و **یک Pipeline کامل CI که روی
+GitHub Actions سبز است** — Lint، Type Check، Test، Build، Gitleaks، Dependency
+Audit، Semgrep، Migration، و Build+Trivy Scan دو Image.
+
+**دفتر کل دوطرفه هنوز ساخته نشده** (`economic-service` در فهرست سرویس‌های آینده
+است). مرحله Integration در CI سبز است اما هنوز **تهی** — هیچ فایل `*.int-spec.ts`
+وجود ندارد. وضعیت دقیق هر قابلیت در `PROJECT_MEMORY.md`.
 
 **سرویس‌های پیاده‌سازی‌شده تا این لحظه** — بقیه در `docs/17-mvp-scope.md` زمان‌بندی شده‌اند:
 

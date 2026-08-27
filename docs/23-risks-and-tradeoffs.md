@@ -187,7 +187,7 @@
   پس CI و Container نیاز به استثنا ندارند.
 - **ثبت‌شده:** 2026-08-27
 
-### D-005 · CI هرگز روی GitHub Actions سبز نشده
+### D-005 · CI هرگز روی GitHub Actions سبز نشده — **رفع شد و CI VERIFIED**
 
 - **چه چیزی:** هر سه Push به `main` که Workflow `.github/workflows/ci.yml`
   را فعال کرده‌اند (شامل کامیت‌های ساخت `api-gateway` و `asset-service`)
@@ -207,6 +207,46 @@
   YAML، یا `packageManager` از `package.json`. سطح دشواری: کم.
 - **اولویت:** بحرانی (پیش‌نیاز هر Automation آینده)
 - **ثبت‌شده:** 2026-08-27
+
+#### رفع — 2026-08-27
+
+- **وضعیت پیشین:** هر ۴ Run روی `main` در ۲۱ تا ۲۶ ثانیه Fail شده بود؛ هیچ
+  مرحله‌ای هرگز اجرا نشده بود.
+- **ریشه:** `PNPM_VERSION: '10'` در برابر `packageManager: pnpm@11.22.0`.
+  `pnpm/action-setup` روی این اختلاف اجرا را رد می‌کند.
+- **رفع:** `PNPM_VERSION` به `'11.22.0'` تغییر کرد. پس از آن، هر بار که
+  Pipeline یک قدم جلوتر رفت، یک نقص واقعی دیگر آشکار شد که فقط Runner واقعی
+  می‌توانست نشانش دهد — همگی در همین جلسه رفع شدند:
+  1. سه پوشه `test/` سرویس‌ها Track نشده بودند؛ jest روی Clone تازه با
+     «Directory test in the rootDir option was not found» می‌مرد.
+  2. `DATABASE_URL_ASSET` در Job یکپارچه‌سازی اعلام نشده بود
+     (`asset-service` بعد از نوشتن Workflow اضافه شده بود).
+  3. پنج آسیب‌پذیری High در Audit — با ارتقای OpenTelemetry و یک Override
+     روی `deepmerge-ts` پاک شدند.
+  4. `semgrep/semgrep-action@v1` بایگانی‌شده است و semgrep 1.36 را اجرا
+     می‌کند که روی Ruleset های دارای شدت MEDIUM با
+     `ValueError: invalid rule severity value: MEDIUM` می‌میرد و سپس
+     **صفر برمی‌گرداند**. یعنی این دروازه در هر Run موفق گزارش می‌شد
+     درحالی‌که هیچ فایلی را Scan نکرده بود — بدترین حالت ممکن: نه نبودِ
+     کنترل، بلکه کنترلی که دروغ می‌گوید. با اجرای مستقیم Image نگهداری‌شده
+     (`semgrep/semgrep:1.175.0`) جایگزین شد.
+  5. اولین خروجی واقعی همان Scan: ۱۴ ارجاع Mutable به Action ها. همه به
+     Commit SHA چهل‌کاراکتری Pin شدند.
+  6. jest به کشف خودکار `.swcrc` تکیه می‌کرد که در Runner وجود نداشت؛
+     تنظیمات SWC صریح شد (`jest.swc.cjs`).
+  7. دو Dockerfile در لایه Runtime آسیب‌پذیری Alpine داشتند؛ Trivy با
+     `exit-code: 1` آن‌ها را متوقف کرد. مدیر بسته از Image نهایی حذف و لایه
+     Alpine در زمان Build وصله شد.
+- **تأیید خودکار:** `pnpm verify` محلی — ۲۲۰ تست، همه سبز.
+- **تأیید GitHub CI:** Run `33076090420` روی Commit `1872bd7` —
+  **success** در ۹ دقیقه و ۸ ثانیه. هر پنج Job سبز، و هر مرحله واقعاً اجرا
+  شد: `pnpm install` · `db:generate` · Format · Lint · Type check · Unit
+  tests · Build · Gitleaks · Dependency audit · Semgrep · Provision
+  PostgreSQL/Redis · Migrations · Integration tests · Tenant isolation and
+  authorization tests · Build image × ۲ · Trivy scan × ۲.
+- **هشدار صادقانه:** مرحله «Integration tests» سبز است اما هنوز **صفر فایل
+  `*.int-spec.ts`** وجود دارد؛ با `--passWithNoTests` عبور می‌کند. سبز بودن
+  آن امروز یعنی «چیزی نشکست»، نه «مسیر داده تست شد».
 
 ### D-006 · تصادم پورت Redis با نصب Native ویندوز
 
@@ -238,7 +278,7 @@
   نمی‌دهد چون آنجا Native Redis وجود ندارد)
 - **ثبت‌شده:** 2026-08-27
 
-### D-007 · Gateway، تنها Endpoint عمومی گمنام پلتفرم را می‌شکند
+### D-007 · Gateway، تنها Endpoint عمومی گمنام پلتفرم را می‌شکند — **رفع شد و LIVE VERIFIED**
 
 - **چه چیزی:** `ProxyService` در `api-gateway` روی **هر** درخواست
   Forward‌شده، بدون قید و شرط Header `x-internal-token` می‌گذارد — حتی وقتی
@@ -267,6 +307,110 @@ another service"`.
   عوض کند — اول `@Public()` را چک کند، فقط اگر `bearer` هم نبود و Public
   نبود سراغ توکن داخلی برود.
 - **اولویت:** بحرانی
+- **ثبت‌شده:** 2026-08-27
+
+#### رفع — 2026-08-27
+
+- **وضعیت پیشین:** `POST /v1/registration-requests` از راه Gateway
+  `403 "This endpoint is not callable by another service"` می‌داد؛ مستقیم
+  به `identity-service` کار می‌کرد.
+- **ریشه:** توکن داخلی دو معنای متفاوت را با یک شکل حمل می‌کرد. «Gateway
+  درخواست کسی دیگر را Forward می‌کند» و «سرویس A از طرف خودش سرویس B را
+  صدا می‌زند» در سیم قابل‌تفکیک نبودند، پس `AuthGuard` ناچار بود حدس بزند —
+  و حدسش برای هر درخواست گمنام غلط بود.
+- **رفع:** توکن داخلی یک Claim جدید گرفت: `purpose` با دو مقدار `SERVICE`
+  و `RELAY`.
+  - `api-gateway` **همیشه** `RELAY` صادر می‌کند. Gateway هرگز از طرف خودش
+    عمل نمی‌کند.
+  - `AuthGuard` توکن `RELAY` را همچنان **کامل اعتبارسنجی می‌کند** (امضا،
+    `iss`، `aud`، `exp`) اما آن را «اثبات Hop» می‌خواند، نه «هویت
+    بازیگر»؛ پس درخواست گمنام می‌ماند و `@Public()` درباره‌اش تصمیم
+    می‌گیرد.
+  - توکن بدون Claim به‌عنوان `SERVICE` خوانده می‌شود — سازگاری رو به عقب،
+    و سخت‌گیرانه‌ترین قرائت.
+- **چرا Zero Trust تضعیف نشد — بلکه سفت‌تر شد:**
+  1. `@AllowService` دست‌نخورده است. توکن `RELAY` **هرگز** آن را ارضا
+     نمی‌کند، حتی روی Endpoint ای که هم `@Public` و هم `@AllowService`
+     داشته باشد.
+  2. Gateway دیگر نمی‌تواند توکنی با اقتدار سرویس بسازد — سطح حمله‌ای که
+     پیش از این وجود داشت.
+  3. توکن حتی روی Endpoint عمومی هم اعتبارسنجی می‌شود: توکن داخلی جعلی
+     روی `POST /v1/registration-requests` اکنون `401 TOKEN_INVALID`
+     می‌گیرد. این **سخت‌گیرانه‌تر** از ترتیب‌عوض‌کردن ساده `@Public` است.
+- **تأیید خودکار:** ۱۷ تست جدید در
+  `packages/nest-common/src/guards/auth.guard.access.spec.ts` و
+  `services/api-gateway/src/proxy/proxy.service.spec.ts`.
+- **تأیید زنده (2026-08-27، برابر Stack واقعی — بدون Mock):**
+
+  | سناریو                                   | انتظار | مشاهده                                      |
+  | ---------------------------------------- | ------ | ------------------------------------------- |
+  | ثبت‌نام گمنام از راه Gateway             | موفق   | **`201`** `{"registrationId":"REG_01M11…"}` |
+  | گمنام → `GET /v1/users` از راه Gateway   | رد     | `401 UNAUTHENTICATED`                       |
+  | گمنام → `GET /v1/users` مستقیم           | رد     | `401 UNAUTHENTICATED`                       |
+  | توکن داخلی جعلی → Endpoint عمومی         | رد     | `401 TOKEN_INVALID`                         |
+  | توکن داخلی جعلی → Endpoint محافظت‌شده    | رد     | `401 TOKEN_INVALID`                         |
+  | کاربر معتبر (JWT کی‌کلوک) از راه Gateway | موفق   | `200` با پرونده کاربر                       |
+  | همان کاربر با `X-Organization-Id` بیگانه | رد     | `403 TENANT_MISMATCH`                       |
+  | `province.auditor` → `POST /v1/users`    | رد     | `403 INSUFFICIENT_ROLE`                     |
+
+### D-008 · سه قاعده Supply-Chain که Lockfile فعلی رد می‌کند
+
+- **چه چیزی:** وقتی Semgrep برای نخستین‌بار واقعاً اجرا شد (D-005)، پنج
+  قاعده Blocking داد. سه‌تای اول رفع شدند (Pin کردن Action ها به SHA، و
+  `blockExoticSubdeps: true`). سه قاعده باقی‌مانده — `minimumReleaseAge`
+  در pnpm، `min-release-age` در npm، و `trustPolicy: no-downgrade` —
+  با `--exclude-rule` **به‌صراحت و با نام** کنار گذاشته شدند، نه با حذف
+  Ruleset.
+- **چرا کنار گذاشته شدند:** هر سه با Lockfile فعلی ناسازگارند و
+  `pnpm install --frozen-lockfile` را می‌شکنند — این محلی آزمایش شد، نه
+  حدس زده شد:
+  - `minimumReleaseAge: 10080` نُه بسته را رد می‌کند که در ۷ روز گذشته
+    منتشر شده‌اند (از جمله `deepmerge-ts@8.0.2` که خودمان برای رفع یک
+    آسیب‌پذیری High پین کردیم).
+  - `trustPolicy: no-downgrade` چهار بسته را
+    `High-risk trust downgrade (possible package takeover)` علامت می‌زند:
+    `chokidar@4.0.3`، `pino@9.14.0`، `semver@6.3.1`،
+    `undici-types@6.21.0`.
+- **ریسک:** پنجره‌ای که یک نسخه تازه‌منتشرشده و مخرب می‌تواند وارد درخت
+  وابستگی شود، همچنان باز است. چهار هشدار `trust downgrade` هنوز
+  **بررسی نشده‌اند** — ممکن است صرفاً بازتاب نبودِ Provenance روی
+  نسخه‌های قدیمی باشند، یا نباشند. تا بررسی نشوند نمی‌توان گفت کدام.
+- **رفع:** یک کار مستقل: هر چهار هشدار Trust بررسی شود، درخت دوباره
+  Resolve شود، و سه قاعده دوباره فعال شوند. این کار Lockfile را به‌طور
+  گسترده تغییر می‌دهد و نباید با یک Task امنیتی دیگر مخلوط شود.
+- **اولویت:** متوسط
+- **ثبت‌شده:** 2026-08-27
+
+### D-009 · Healthcheck کانتینر Temporal همیشه Fail است
+
+- **چه چیزی:** `docker compose ps` کانتینر `rasta-temporal` را
+  **unhealthy** نشان می‌دهد، با `FailingStreak: 754` — یعنی از لحظه
+  بالا آمدن، هرگز یک‌بار هم موفق نشده. این با ثبت قبلی در
+  `PROJECT_MEMORY.md` («همه `healthy`») در تناقض است؛ ثبت قبلی اشتباه
+  بوده است.
+- **ریشه (بررسی‌شده، نه حدس‌زده):** Healthcheck فرمان
+  `temporal operator cluster health --address localhost:7233` را اجرا
+  می‌کند و در ۱۰ ثانیه Timeout می‌خورد. اما مسئله شبکه نیست:
+  - `docker exec rasta-temporal echo hi` → `0`، بلافاصله.
+  - `docker exec rasta-temporal temporal --version` → **Hang** تا Timeout.
+    این فرمان هیچ شبکه‌ای لمس نمی‌کند.
+
+  یعنی **خودِ باینری `temporal` داخل این Image روی این میزبان اجرا
+  نمی‌شود**؛ نه اینکه Server پاسخ ندهد. تعویض `localhost` با `127.0.0.1`
+  هیچ تفاوتی نکرد، پس فرضیه IPv6 هم رد شد.
+
+- **وضعیت واقعی Server:** شواهد **غیرمستقیم** می‌گویند سالم است — پورت
+  gRPC `7233` از میزبان باز است، Log ها جریان عادی
+  `Started/Stopped physicalTaskQueueManager` را نشان می‌دهند، هیچ خطا یا
+  Restart ای نیست. اما چون هر ابزار Probe در دسترس Hang می‌کند،
+  **سلامت gRPC مثبتاً تأیید نشده است.** وضعیت درست: `NOT_VERIFIED`.
+- **اثر امروز:** هیچ. هیچ سرویسی هنوز از Temporal استفاده نمی‌کند
+  (`docs/08` برنامه‌ریزی‌شده است، پیاده نشده) و CI هم Temporal را بالا
+  نمی‌آورد.
+- **رفع:** موکول به نخستین سرویسی که واقعاً Workflow می‌نویسد. آن‌وقت هم
+  Healthcheck باید به یک Probe مستقل از CLI تغییر کند (مثلاً `grpc_health_probe`
+  یا یک TCP Probe ساده)، هم سلامت واقعی Server مثبتاً تأیید شود.
+- **اولویت:** پایین (تا وقتی هیچ سرویسی Temporal را لمس نکند)
 - **ثبت‌شده:** 2026-08-27
 
 ## ۲۳٫۶ ثبت بدهی معماری

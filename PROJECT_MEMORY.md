@@ -9,6 +9,12 @@
 > **آخرین Audit کامل:** 2026-08-27 — با اجرای واقعی `pnpm verify`، بالا آوردن ۴
 > سرویس از حالت تمیز، تست زنده Auth/Tenant Isolation/Event Flow، و بررسی مستقیم
 > GitHub Actions.
+>
+> **آخرین به‌روزرسانی:** 2026-08-27 — Task سخت‌سازی پیش از `fleet-service`:
+> D-005 و D-007 هر دو رفع و تأیید شدند. برای نخستین‌بار در عمر این Repository،
+> Pipeline کامل CI روی GitHub Actions **سبز** شد (Run `33076090420`). دو نقص
+> تازه در همین مسیر کشف و ثبت شد: D-008 (Supply-Chain) و D-009 (Temporal).
+> `fleet-service` **شروع نشد**.
 
 ---
 
@@ -43,10 +49,11 @@
 4. Infrastructure (docker-compose: Postgres/Redis/Kafka/Keycloak/MinIO/Temporal)
 5. identity-service  ← کامل
 6. organization-service  ← کامل
-7. CI pipeline + Dockerfiles  ← نوشته شده، هرگز روی GitHub سبز نشده (بخش ۱۹)
+7. CI pipeline + Dockerfiles  ← نوشته شد؛ از 2026-08-27 روی GitHub سبز (بخش ۱۹)
 8. api-gateway  ← کامل
 9. asset-service  ← کامل (آخرین سرویس ساخته‌شده)
 10. packages/nest-common: EventConsumer  ← کامل (زیرساخت مصرف رویداد)
+11. سخت‌سازی پیش از fleet: D-005 (CI سبز شد) + D-007 (ثبت‌نام گمنام)
 ```
 
 **گام بعدی طبق مستندسازی این Repository:** `fleet-service` (بخش ۲۸).
@@ -55,29 +62,37 @@
 
 ## ۳. Current Verified State
 
-فرق سه سطح در این فایل همیشه رعایت شده: **Implemented** (کد وجود دارد) ≠
-**Tested** (تست خودکار روی آن هست) ≠ **Live Verified** (همین امروز در برابر
-Stack واقعی اجرا و مشاهده شد).
+این فایل پنج سطح را از هم جدا نگه می‌دارد و هرگز یکی را به‌جای دیگری
+نمی‌نویسد:
 
-| Feature                                                      |                   Implemented                    | Automated Tests | Live Verified (2026-08-27)                                                                         |
-| ------------------------------------------------------------ | :----------------------------------------------: | :-------------: | -------------------------------------------------------------------------------------------------- |
-| Tenant Isolation (API)                                       |                        ✅                        |       ✅        | ✅ (403 TENANT_MISMATCH زنده گرفته شد)                                                             |
-| Tenant Isolation (Database)                                  |                        ✅                        |        —        | ✅ (`permission denied for database` زنده گرفته شد)                                                |
-| Cross-tenant read → 404                                      |                        ✅                        |       ✅        | ✅                                                                                                 |
-| RBAC (Roles Guard)                                           |                        ✅                        |       ✅        | ✅ (Auditor → 403 روی POST)                                                                        |
-| JWT verification (Keycloak/JWKS)                             |                        ✅                        |       ✅        | ✅ (۴ کاربر Seed، توکن واقعی گرفته شد)                                                             |
-| Transactional Outbox → Kafka                                 |                        ✅                        |       ✅        | ✅ (Asset ساخته شد → Outbox → Kafka، Correlation تطبیق)                                            |
-| Event Consumer / Dossier Projector                           |                        ✅                        |   ✅ (18 تست)   | ✅ (رویداد ساختگی maintenance → یک خط Timeline، Replay دوباره = بدون تکرار)                        |
-| API Gateway routing + circuit breaker                        |                        ✅                        |   ✅ (21 تست)   | ✅ (مسیر به سرویس نساخته‌شده fleet → 503 تمیز)                                                     |
-| Redis Rate Limiting (منطق)                                   |                        ✅                        |    ✅ (واحد)    | ⚠️ **مسدود شده توسط تداخل Port میزبان — بخش ۲۲.۳ D-006**                                           |
-| Anonymous public endpoint (self-registration) از راه Gateway |                    ✅ (طراحی)                    |        —        | ❌ **شکسته — بخش ۲۲.۳ D-007 (باگ واقعی، تازه کشف‌شده)**                                            |
-| CI/CD روی GitHub Actions                                     |                    ✅ (فایل)                     |        —        | ❌ **هیچ Run موفق نبوده — بخش ۱۹**                                                                 |
-| Docker Build (identity, organization)                        |                        ✅                        |        —        | ⚠️ Previously Reported / Not Reverified این جلسه (CI که این را اجرا می‌کرد هرگز به این Job نرسیده) |
-| Docker Build (asset-service, api-gateway)                    | ⚠️ Dockerfile فقط برای asset؛ گیت‌وی اصلاً ندارد |        —        | ❌ در CI Matrix نیستند اصلاً                                                                       |
-| Frontend (`apps/web`, `apps/admin`)                          |                        ❌                        |        —        | NOT_STARTED — پوشه خالی                                                                            |
-| Integration Tests (`*.int-spec.ts`)                          |                ❌ (Scaffold فقط)                 |        —        | صفر فایل تست وجود دارد                                                                             |
-| E2E Tests (`tests/e2e`, Playwright)                          |                        ❌                        |        —        | پوشه خالی، بدون Config                                                                             |
-| fleet/maintenance/marketplace/… (۱۲ سرویس)                   |                        ❌                        |        —        | NOT_STARTED                                                                                        |
+| سطح               | معنا                                                    |
+| ----------------- | ------------------------------------------------------- |
+| **IMPLEMENTED**   | کد وجود دارد                                            |
+| **TESTED**        | تست خودکار روی آن هست و سبز است                         |
+| **LIVE VERIFIED** | در برابر Stack واقعی اجرا و پاسخش مشاهده شد — بدون Mock |
+| **CI VERIFIED**   | روی Runner واقعی GitHub Actions اجرا شد و سبز بود       |
+| **NOT VERIFIED**  | شواهد غیرمستقیم داریم اما تأیید مثبت نداریم             |
+| **PLANNED**       | تصمیم گرفته شده، کد نوشته نشده                          |
+
+| Feature                                                      |                   Implemented                    | Automated Tests | Live Verified (2026-08-27)                                                  |
+| ------------------------------------------------------------ | :----------------------------------------------: | :-------------: | --------------------------------------------------------------------------- |
+| Tenant Isolation (API)                                       |                        ✅                        |       ✅        | ✅ (403 TENANT_MISMATCH زنده گرفته شد)                                      |
+| Tenant Isolation (Database)                                  |                        ✅                        |        —        | ✅ (`permission denied for database` زنده گرفته شد)                         |
+| Cross-tenant read → 404                                      |                        ✅                        |       ✅        | ✅                                                                          |
+| RBAC (Roles Guard)                                           |                        ✅                        |       ✅        | ✅ (Auditor → 403 روی POST)                                                 |
+| JWT verification (Keycloak/JWKS)                             |                        ✅                        |       ✅        | ✅ (۴ کاربر Seed، توکن واقعی گرفته شد)                                      |
+| Transactional Outbox → Kafka                                 |                        ✅                        |       ✅        | ✅ (Asset ساخته شد → Outbox → Kafka، Correlation تطبیق)                     |
+| Event Consumer / Dossier Projector                           |                        ✅                        |   ✅ (18 تست)   | ✅ (رویداد ساختگی maintenance → یک خط Timeline، Replay دوباره = بدون تکرار) |
+| API Gateway routing + circuit breaker                        |                        ✅                        |   ✅ (21 تست)   | ✅ (مسیر به سرویس نساخته‌شده fleet → 503 تمیز)                              |
+| Redis Rate Limiting (منطق)                                   |                        ✅                        |    ✅ (واحد)    | ⚠️ **مسدود شده توسط تداخل Port میزبان — بخش ۲۲.۳ D-006**                    |
+| Anonymous public endpoint (self-registration) از راه Gateway |                        ✅                        |   ✅ (17 تست)   | ✅ **`201` زنده گرفته شد — D-007 رفع شد**                                   |
+| CI/CD روی GitHub Actions                                     |                        ✅                        |        —        | ✅ **CI VERIFIED** — Run `33076090420`، هر ۵ Job سبز (بخش ۱۹)               |
+| Docker Build (identity, organization)                        |                        ✅                        |        —        | ✅ **CI VERIFIED** — Build + Trivy Scan هر دو Image روی Runner سبز          |
+| Docker Build (asset-service, api-gateway)                    | ⚠️ Dockerfile فقط برای asset؛ گیت‌وی اصلاً ندارد |        —        | ❌ هنوز در CI Matrix نیستند (بخش ۲۲)                                        |
+| Frontend (`apps/web`, `apps/admin`)                          |                        ❌                        |        —        | NOT_STARTED — پوشه خالی                                                     |
+| Integration Tests (`*.int-spec.ts`)                          |                ❌ (Scaffold فقط)                 |        —        | صفر فایل تست وجود دارد                                                      |
+| E2E Tests (`tests/e2e`, Playwright)                          |                        ❌                        |        —        | پوشه خالی، بدون Config                                                      |
+| fleet/maintenance/marketplace/… (۱۲ سرویس)                   |                        ❌                        |        —        | NOT_STARTED                                                                 |
 
 ---
 
@@ -234,16 +249,23 @@ Promise های Prisma، Scope را زودتر از موعد می‌بست و Que
   می‌دهد (Zero Trust، ADR-020).
 - **RBAC:** `RolesGuard` + `@Roles(...)` سطح Endpoint (فیلتر درشت)؛
   هر سرویس دوباره در سطح Object بررسی می‌کند (`AGENTS.md` A-10).
-- **⚠️ باگ زنده کشف‌شده این جلسه (D-007، بخش ۲۳):** `api-gateway` روی
-  **هر** درخواست Forward‌شده، بدون قید و شرط `x-internal-token` می‌گذارد —
-  حتی وقتی درخواست اصلی گمنام (بدون Bearer) بوده. در `AuthGuard`، شرط
-  `if (internalToken && !bearer)` **قبل از** بررسی `@Public()` چک می‌شود؛
-  پس یک تماس گمنام واقعی که از Gateway عبور کرده، به‌اشتباه به‌عنوان
-  فراخوانی سرویس‌به‌سرویس تفسیر و رد می‌شود — مگر آن Endpoint هم
-  `@AllowService` داشته باشد. تنها Endpoint عمومی پلتفرم امروز
-  (`POST /v1/registration-requests`، ثبت‌نام خوداظهاری) دقیقاً به همین
-  دلیل **از راه Gateway کار نمی‌کند**، درحالی‌که مستقیم به
-  `identity-service` کار می‌کند. شواهد کامل در بخش ۲۳.
+- **Purpose توکن داخلی (رفع D-007، 2026-08-27):** توکن داخلی یک Claim
+  `purpose` دارد با دو مقدار:
+  - **`RELAY`** — `api-gateway` درخواست کسی دیگر را Forward می‌کند.
+    Gateway **همیشه** همین را صادر می‌کند و هرگز از طرف خودش عمل نمی‌کند.
+    `AuthGuard` این توکن را کامل اعتبارسنجی می‌کند اما آن را «اثبات Hop»
+    می‌خواند نه «هویت بازیگر»؛ پس اگر درخواست اصلی Bearer نداشته،
+    **گمنام** می‌ماند و `@Public()` درباره‌اش تصمیم می‌گیرد.
+  - **`SERVICE`** — سرویس A از طرف خودش سرویس B را صدا می‌زند. همان قاعده
+    قبلی: `@AllowService(...)` لازم است، وگرنه `403`. توکن بدون Claim هم
+    `SERVICE` خوانده می‌شود (سازگاری رو به عقب، سخت‌گیرانه‌ترین قرائت).
+
+  این تفکیک، Zero Trust را **سفت‌تر** کرد نه شل‌تر: توکن `RELAY` هرگز
+  `@AllowService` را ارضا نمی‌کند، Gateway دیگر نمی‌تواند توکنی با اقتدار
+  سرویس بسازد، و توکن داخلی حتی روی Endpoint عمومی هم اعتبارسنجی می‌شود —
+  یک توکن جعلی روی `POST /v1/registration-requests` اکنون
+  `401 TOKEN_INVALID` می‌گیرد. جزئیات کامل و جدول تأیید زنده: `docs/23`
+  بخش D-007.
 
 ---
 
@@ -375,8 +397,29 @@ Windows** (`C:\Program Files\Redis\redis-server.exe`) هم‌زمان روی پ�
 مستند شده بود (D-002 قدیمی، حل‌شده با انتقال به ۵۴۳۳). این یکی حل نشده.
 شواهد کامل و اثر آن روی Rate Limiting در بخش ۲۳.
 
-Infrastructure از حالت تمیز بالا آمد و ۱۱+ ساعت پایدار ماند (زمان این Audit)
-— `docker compose ps` همه ۶ سرویس اصلی را `healthy` نشان داد.
+**⚠️ تصحیح ثبت قبلی (D-009، 2026-08-27):** جمله پیشین این بخش می‌گفت
+`docker compose ps` هر ۶ سرویس را `healthy` نشان داد. **این درست نبود.**
+`rasta-temporal` از لحظه بالا آمدن `unhealthy` بوده، با
+`FailingStreak: 754` — یعنی هرگز حتی یک‌بار Healthcheck را رد نکرده.
+
+بررسی ریشه (اجرا شد، حدس نیست): Healthcheck فرمان
+`temporal operator cluster health` را اجرا می‌کند و Timeout می‌خورد، اما
+مسئله شبکه نیست — `docker exec rasta-temporal temporal --version`، که هیچ
+شبکه‌ای لمس نمی‌کند، هم Hang می‌کند، درحالی‌که
+`docker exec rasta-temporal echo hi` بلافاصله برمی‌گردد. یعنی **باینری
+`temporal` داخل Image روی این میزبان اجرا نمی‌شود**، نه اینکه Server مرده
+باشد.
+
+وضعیت Server: پورت gRPC `7233` از میزبان باز است و Log ها جریان عادی
+`Started/Stopped physicalTaskQueueManager` را بدون هیچ خطا یا Restart نشان
+می‌دهند — اما چون هر ابزار Probe در دسترس Hang می‌کند، سلامت gRPC
+**مثبتاً تأیید نشده** است. وضعیت درست: **NOT_VERIFIED**، نه `healthy`.
+
+اثر امروز: هیچ — هیچ سرویسی هنوز Temporal را لمس نمی‌کند و CI آن را بالا
+نمی‌آورد. رفع موکول به نخستین سرویسی که واقعاً Workflow بنویسد.
+
+پنج سرویس دیگر (`postgres, redis, kafka, keycloak, minio`) `healthy` بودند
+و ۱۷+ ساعت پایدار ماندند.
 
 ---
 
@@ -402,14 +445,17 @@ Profile اختیاری است و در این Audit بالا آورده **نشد*
 @rasta/config              11 تست
 @rasta/logging               9 تست
 @rasta/observability         10 تست
-@rasta/nest-common           40 تست  (شامل ۳ تست جدید برای باگ D-003)
-@rasta/api-gateway           21 تست
+@rasta/nest-common           56 تست  (+16: قواعد دسترسی Endpoint عمومی، D-007)
+@rasta/api-gateway           25 تست  (+4: Gateway توکن RELAY صادر می‌کند)
 @rasta/organization-service  21 تست
 @rasta/asset-service         74 تست
 @rasta/identity-service      14 تست
 ———————————————————————————————
-مجموع                       200 تست، همه سبز
+مجموع                       220 تست، همه سبز
 ```
+
+همین ۲۲۰ عدد روی Runner واقعی GitHub Actions هم دیده شد (Run
+`33076090420`) — یعنی این شمارش دیگر فقط محلی نیست.
 
 **Integration Tests:** زیرساخت هست (`jest.config.js` هر سرویس یک Project
 `integration` با `testRegex: '.*\\.int-spec\\.ts$'` دارد، `test/` پوشه با
@@ -421,18 +467,31 @@ Profile اختیاری است و در این Audit بالا آورده **نشد*
 `pnpm test:e2e` هست اما `turbo run test:e2e` روی هیچ Package ای Script
 واقعی ندارد.
 
-### ⚠️ CI/CD — یافته بحرانی این جلسه (بخش ۲۳، D-005)
+### ✅ CI/CD — **CI VERIFIED** (D-005 رفع شد، 2026-08-27)
 
-`gh run list` سه Push به `main` را نشان می‌دهد و **هر سه Fail شده‌اند**،
-همه با یک علت یکسان: تصادم نسخه pnpm بین `pnpm/action-setup@v4` (نسخه ۱۰ در
-YAML) و `packageManager: pnpm@11.22.0` در `package.json`. Job حتی از مرحله
-`pnpm install` رد نشده — یعنی **هیچ مرحله‌ای از Pipeline CI (نه Lint، نه
-Test، نه Build Container، نه Trivy Scan) تا امروز حتی یک‌بار روی GitHub
-Actions واقعاً اجرا نشده.**
+**Run `33076090420`، Commit `1872bd7`: success در ۹ دقیقه و ۸ ثانیه.**
+نخستین اجرای موفق Pipeline در تمام عمر این Repository.
 
-هر ادعای قبلی «CI سبز است» یا «Container Build تأیید شد» باید به‌عنوان
-**Previously Reported / Not Reverified** خوانده شود، نه Verified — چون
-تنها Evidence موجود، اجرای محلی `docker build` بوده، نه CI.
+هر پنج Job سبز، و هر مرحله واقعاً اجرا شد — نه Skip، نه Cache:
+
+| Job                            | مراحلی که واقعاً اجرا شدند                                                                                     |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| Lint, types and unit tests     | `pnpm install --frozen-lockfile` · `db:generate` · Format check · Lint · Type check · Unit tests (۲۲۰) · Build |
+| Security scans                 | Gitleaks · Dependency audit (`--audit-level=high`) · Semgrep                                                   |
+| Integration and security tests | Provision PostgreSQL+Redis · Migrations · Integration tests · Tenant isolation and authorization tests         |
+| Build and scan images × ۲      | Docker build + Trivy scan (`identity-service`، `organization-service`)                                         |
+
+**دو هشدار صادقانه که نباید با «سبز» اشتباه گرفته شوند:**
+
+1. مرحله «Integration tests» سبز است اما **صفر فایل `*.int-spec.ts`**
+   وجود دارد؛ با `--passWithNoTests` عبور می‌کند. سبز بودنش یعنی «چیزی
+   نشکست»، نه «مسیر داده تست شد».
+2. `asset-service` و `api-gateway` هنوز در Matrix ساخت Image نیستند
+   (Gateway اصلاً Dockerfile ندارد). یعنی CI هنوز همه چیزی را که می‌سازیم
+   Scan نمی‌کند.
+
+مسیر رسیدن به این نقطه — و شش نقص دیگری که فقط Runner واقعی می‌توانست
+نشانشان دهد — در `docs/23` بخش D-005 ثبت شده.
 
 ---
 
@@ -440,10 +499,10 @@ Actions واقعاً اجرا نشده.**
 
 | مکانیزم                              | Implemented | Tested |                  Live Verified                  | یادداشت                                                                 |
 | ------------------------------------ | :---------: | :----: | :---------------------------------------------: | ----------------------------------------------------------------------- |
-| Authentication (JWT/JWKS)            |     ✅      |   ✅   |                       ✅                        |                                                                         |
-| Authorization (RBAC سطح Endpoint)    |     ✅      |   ✅   |                       ✅                        |                                                                         |
-| Tenant Isolation (API + DB)          |     ✅      |   ✅   |                       ✅                        |                                                                         |
-| Service-to-Service Auth (Zero Trust) |     ✅      |   ✅   |                     ⚠️ جزئی                     | D-007: مسیر Gateway→Public Endpoint شکسته                               |
+| Authentication (JWT/JWKS)            |     ✅      |   ✅   |                       ✅                        | زنده دوباره تأیید شد: `200` با JWT کی‌کلوک از راه Gateway               |
+| Authorization (RBAC سطح Endpoint)    |     ✅      |   ✅   |                       ✅                        | زنده: `province.auditor` → `POST /v1/users` → `403 INSUFFICIENT_ROLE`   |
+| Tenant Isolation (API + DB)          |     ✅      |   ✅   |                       ✅                        | زنده: `X-Organization-Id` بیگانه → `403 TENANT_MISMATCH`                |
+| Service-to-Service Auth (Zero Trust) |     ✅      |   ✅   |                       ✅                        | D-007 رفع شد؛ Claim `purpose` — RELAY در برابر SERVICE (بخش ۱۱)         |
 | Rate Limiting (منطق Redis)           |     ✅      |   ✅   |                    ⚠️ مسدود                     | D-006: تصادم پورت Redis                                                 |
 | Input Validation (Zod در مرز)        |     ✅      |   ✅   |                       ✅                        |                                                                         |
 | Audit Trail                          |   ⚠️ جزئی   |   —    |                       نشد                       | `audit-service` نساخته؛ Event های تولید می‌شوند اما جایی ذخیره نمی‌شوند |
@@ -452,9 +511,14 @@ Actions واقعاً اجرا نشده.**
 | mTLS بین سرویس‌ها                    |     ❌      |   —    |                        —                        | Planned — Production-only                                               |
 | Database RLS                         |     ❌      |   —    |                        —                        | Tenant Isolation فعلاً فقط لایه Application است                         |
 
-**High-risk items برای رفع فوری (بدون نیاز به تصمیم کسب‌وکاری، فقط تصمیم مهندسی):**
-D-005 (CI هرگز اجرا نشده)، D-006 (تصادم پورت Redis)، D-007 (Gateway مسیر
-عمومی را می‌شکند).
+**وضعیت High-risk items پس از Task سخت‌سازی 2026-08-27:**
+
+- ✅ **D-005 رفع شد** — CI روی GitHub Actions سبز است (**CI VERIFIED**).
+- ✅ **D-007 رفع شد** — ثبت‌نام گمنام از راه Gateway کار می‌کند
+  (**LIVE VERIFIED**)، بدون تضعیف Zero Trust.
+- ⏳ **D-006 باز است** — تصادم پورت Redis روی این ماشین توسعه.
+- 🆕 **D-008 باز است** — سه قاعده Supply-Chain که Lockfile فعلی رد می‌کند.
+- 🆕 **D-009 باز است** — Healthcheck کانتینر Temporal (اثر عملی: هیچ).
 
 ---
 
@@ -471,7 +535,7 @@ api-gateway           :3010   {"status":"ok","checks":{"redis":true}}
 ```
 
 Infra Docker (`docker compose ps`): `postgres, redis, kafka, keycloak,
-minio, temporal` — همه `healthy`.
+minio` همه `healthy`؛ **`temporal` unhealthy** — بخش ۱۷ و D-009.
 
 Kafka Consumer Group `asset-service.timeline`: فعال، Lag صفر روی هر ۱۲
 Partition (۴ Topic × ۳ Partition).
@@ -482,14 +546,15 @@ Partition (۴ Topic × ۳ Partition).
 
 ### فعال (رفع‌نشده)
 
-| #     | مسئله                                                         | شدت                                    | تأثیر                                                                     | راه‌حل موقت                                                                                   |
-| ----- | ------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| D-005 | CI هرگز روی GitHub سبز نشده (تصادم نسخه pnpm)                 | **بحرانی**                             | هیچ Guard خودکاری قبل از Merge وجود ندارد؛ همه تأییدها محلی بوده‌اند      | فعلاً `pnpm verify` محلی قبل از هر Push                                                       |
-| D-006 | Redis محلی Windows روی پورت ۶۳۷۹ با Redis داکری تصادم دارد    | بالا (فقط محیط توسعه این ماشین)        | تست زنده Rate Limiting/Idempotency از راه `localhost:6379` غیرقابل‌اعتماد | استفاده از `docker exec` مستقیم برای بررسی؛ یا تغییر `REDIS_PORT` مثل الگوی Postgres (۵۴۳۳)   |
-| D-007 | Gateway، Endpoint عمومی گمنام (ثبت‌نام خوداظهاری) را می‌شکند  | **بحرانی** (تنها مسیر ورود کاربر جدید) | کاربر واقعی نمی‌تواند از راه Gateway ثبت‌نام کند                          | فراخوانی مستقیم `identity-service:3101` (فقط توسعه؛ در Production این پورت نباید Public باشد) |
-| —     | `asset-service` و `api-gateway` در CI Container Matrix نیستند | متوسط                                  | حتی اگر D-005 رفع شود، این دو Image هرگز Scan/Build نمی‌شوند              | افزودن به Matrix لازم است                                                                     |
-| —     | `api-gateway` هیچ Dockerfile ندارد                            | متوسط                                  | نمی‌توان آن را Containerize کرد                                           | نوشتن Dockerfile لازم است                                                                     |
-| —     | `InsuranceClaim` جدول بدون API                                | پایین                                  | داده قابل‌ثبت نیست از راه سرویس                                           | Controller/Service لازم است، هروقت claim-flow اولویت شد                                       |
+| #     | مسئله                                                            | شدت                             | تأثیر                                                                     | راه‌حل موقت                                                                                     |
+| ----- | ---------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| D-006 | Redis محلی Windows روی پورت ۶۳۷۹ با Redis داکری تصادم دارد       | بالا (فقط محیط توسعه این ماشین) | تست زنده Rate Limiting/Idempotency از راه `localhost:6379` غیرقابل‌اعتماد | استفاده از `docker exec rasta-redis redis-cli` مستقیم؛ یا تغییر `REDIS_PORT` مثل الگوی Postgres |
+| D-008 | سه قاعده Supply-Chain که Lockfile فعلی رد می‌کند                 | متوسط                           | پنجره نصب نسخه تازه‌منتشرشده مخرب باز است؛ ۴ هشدار Trust بررسی‌نشده       | Semgrep با `--exclude-rule` نام‌دار عبور می‌کند؛ بررسی کامل یک Task مستقل است                   |
+| D-009 | Healthcheck کانتینر Temporal همیشه Fail (باینری CLI Hang می‌کند) | پایین                           | **هیچ** — هیچ سرویسی هنوز Temporal را لمس نمی‌کند                         | نادیده گرفتن تا نخستین Workflow واقعی؛ سلامت Server مثبتاً تأیید نشده (NOT_VERIFIED)            |
+| —     | `asset-service` و `api-gateway` در CI Container Matrix نیستند    | متوسط                           | این دو Image هرگز Build/Scan نمی‌شوند، حتی حالا که CI سبز است             | افزودن به Matrix لازم است                                                                       |
+| —     | `api-gateway` هیچ Dockerfile ندارد                               | متوسط                           | نمی‌توان آن را Containerize کرد                                           | نوشتن Dockerfile لازم است                                                                       |
+| —     | صفر فایل `*.int-spec.ts` — مرحله Integration در CI تهی است       | متوسط                           | «Integration tests سبز» امروز یعنی «چیزی نشکست»، نه «مسیر داده تست شد»    | نصب Testcontainers و نوشتن نخستین تست واقعی                                                     |
+| —     | `InsuranceClaim` جدول بدون API                                   | پایین                           | داده قابل‌ثبت نیست از راه سرویس                                           | Controller/Service لازم است، هروقت claim-flow اولویت شد                                         |
 
 ### رفع‌شده (این جلسه — برای شفافیت ثبت شده، نه به‌عنوان کار باقی‌مانده)
 
@@ -497,6 +562,13 @@ Partition (۴ Topic × ۳ Partition).
   رفع در `packages/nest-common`.
 - D-004: `pnpm db:migrate` بدون `DATABASE_URL` صریح کار نمی‌کرد —
   `scripts/prisma.mjs` اضافه شد.
+- **D-005: CI هرگز روی GitHub سبز نشده بود — رفع و CI VERIFIED**
+  (Run `33076090420`). ریشه: تصادم نسخه pnpm. در مسیر رفع، شش نقص واقعی
+  دیگر هم آشکار و رفع شد که هیچ‌کدام محلی دیده نمی‌شدند — از جمله یک
+  دروازه Semgrep که سبز گزارش می‌داد بی‌آنکه چیزی Scan کند.
+- **D-007: Gateway مسیر عمومی را می‌شکست — رفع و LIVE VERIFIED**
+  (`201` زنده). ریشه: توکن داخلی دو معنا را با یک شکل حمل می‌کرد؛ با Claim
+  `purpose` تفکیک شد (بخش ۱۱).
 
 ### قدیمی (از پیش مستند، هنوز صادق)
 
@@ -562,10 +634,12 @@ ADR-001 (Microservices)، ADR-004/005 (Database + Ownership)، ADR-006
 - Infrastructure کامل (Postgres+PostGIS، Redis، Kafka، Keycloak Realm با
   ۴ کاربر Seed، MinIO، Temporal) — با Runbook برای هر مشکل واقعی برخورده‌شده
 - ۴ سرویس Backend کامل: `identity, organization, asset, api-gateway`
-- ۲۰۰ تست واحد، همه سبز
+- ۲۲۰ تست واحد، همه سبز — محلی و روی Runner واقعی
 - Kafka Consumer عمومی (`EventConsumer`) + Projector واقعی (`asset-service`
   Timeline از رویدادهای سرویس‌های دیگر)
-- CI Workflow نوشته‌شده (۴ Job) — **نوشته شده، اجرا نشده** (بخش ۱۹)
+- **CI Pipeline سبز روی GitHub Actions** (۴ Job، ۵ اجرا با Matrix) —
+  **CI VERIFIED**، Run `33076090420` (بخش ۱۹)
+- **رفع D-005 و D-007** با تأیید زنده و CI (بخش ۲۲؛ جزئیات در `docs/23`)
 - Git History تمیز: هر Commit اتمیک، Conventional Commits
 
 ---
@@ -578,7 +652,7 @@ supplier, inventory, construction, contract, economic, notification,
 document, audit, analytics`)
 - Integration Tests واقعی (فقط Scaffold)
 - E2E Tests واقعی (فقط پوشه خالی)
-- CI که واقعاً اجرا شود (بخش ۱۹، ۲۲)
+- Integration Test واقعی در CI (مرحله هست و سبز است، اما تهی — بخش ۱۹)
 - Kubernetes manifests (`infrastructure/k8s/` خالی)
 - Temporal Workflow واقعی (زیرساخت هست، هیچ Workflow نوشته نشده)
 - Dockerfile برای `api-gateway`
@@ -613,20 +687,25 @@ document, audit, analytics`)
 
 ## ۲۹. Immediate Next Task
 
-طبق دستور صریح کاربر برای این Task: **هیچ کاری روی `fleet-service` یا هر
-Feature جدید در همین Task انجام نشد.** این بخش صرفاً نقشه راه واقعی را ثبت
-می‌کند برای Session بعدی:
+**اولویت ۱ (D-005 و D-007) انجام شد.** هر دو رفع، تست، و تأیید شدند —
+D-005 روی Runner واقعی GitHub (**CI VERIFIED**)، D-007 در برابر Stack زنده
+بدون Mock (**LIVE VERIFIED**). جزئیات در `docs/23`.
 
-**اولویت ۱ (پیش از هر Feature جدید، توصیه‌شده نه اجباری):** رفع D-005
-(pnpm mismatch در CI) — یک تغییر تک‌خطی، اما پیش‌نیاز هر Guard خودکار روی
-هر PR بعدی. سپس D-007 (Gateway/Public Endpoint) چون تنها مسیر ورود کاربر
-جدید را می‌شکند.
+طبق دستور صریح کاربر: **هیچ کاری روی `fleet-service` شروع نشد، و هیچ UI
+تولیدی ساخته نشد.**
 
-**اولویت ۲:** `fleet-service` — Driver، Assignment، UsageRecord،
-Availability. اولین مصرف‌کننده واقعی رویدادهای `asset` (که در
-`TimelineConsumer` قبلاً منتظرشان هستیم) و اولین تولیدکننده رویدادهایی که
+**گام بعدی توصیه‌شده: `fleet-service`** — Driver، Assignment، UsageRecord،
+Availability. اکنون پیش‌نیازهایش برقرارند: یک دروازه CI واقعی که هر Push را
+Lint/Type/Test/Build/Scan می‌کند، و یک مسیر ورود کاربر که واقعاً کار
+می‌کند. این نخستین مصرف‌کننده واقعی رویدادهای `asset` است (که
+`TimelineConsumer` از قبل منتظرشان است) و نخستین تولیدکننده رویدادهایی که
 همان Projector مصرف می‌کند — یعنی حلقه Event Flow برای اولین‌بار End-to-End
-واقعی می‌شود، نه فقط با رویداد ساختگی تست‌شده.
+واقعی می‌شود، نه فقط با رویداد ساختگی.
+
+**کارهای کوچک‌تری که می‌توانند پیش یا هم‌زمان بروند** (هیچ‌کدام مسدودکننده
+`fleet-service` نیستند): افزودن `asset-service` به Matrix ساخت Image،
+نوشتن Dockerfile برای `api-gateway`، نخستین `*.int-spec.ts` واقعی با
+Testcontainers، و D-008.
 
 ---
 
@@ -664,6 +743,14 @@ Availability. اولین مصرف‌کننده واقعی رویدادهای `as
 rasta-redis redis-cli` (نه `localhost:6379` از میزبان) قطعی نگیر — D-006.
 - پیش از هر ادعا درباره CI، `gh run list` را واقعاً اجرا کن — فرض «CI سبز
   است» چون فایل Workflow وجود دارد، اشتباه اثبات‌شده در این Repository است (D-005).
+- **یک دروازه سبز لزوماً یعنی دروازه کار کرد، نه اینکه چیزی را بررسی کرد.**
+  در همین Repository، Semgrep ماه‌ها `0` برمی‌گرداند بی‌آنکه یک فایل را
+  Scan کند، و مرحله «Integration tests» امروز هم با صفر تست سبز می‌شود.
+  پیش از اتکا به یک دروازه، Log خروجی‌اش را بخوان و ببین واقعاً چند چیز را
+  دید (D-005).
+- Healthcheck داکر را به‌عنوان حقیقتِ سلامت نخوان: `rasta-temporal`
+  `unhealthy` است چون باینری CLI داخل Image اجرا نمی‌شود، نه چون Server
+  مرده (D-009). و برعکس — سبز بودن Healthcheck هم اثبات سلامت نیست.
 
 ---
 
