@@ -12,13 +12,35 @@
       "cache": false,
       "outputs": ["node_modules/.prisma/**", "src/generated/**"]
     },
-    "db:migrate": { "cache": false, "persistent": false },
-    "db:seed": { "cache": false, "persistent": false },
+    // Turbo 2 runs tasks in a strict environment: a variable it is not told
+    // about is not passed through. Locally that goes unnoticed because the db
+    // scripts load the root .env inside the node process. In CI there is no
+    // .env — the connection strings come from the job environment — so without
+    // these declarations every migration fails with "DATABASE_URL_<X> is not
+    // set" while the same command works on a developer machine (D-005).
+    "db:migrate": {
+      "cache": false,
+      "persistent": false,
+      "env": ["DATABASE_URL", "DATABASE_URL_*"]
+    },
+    "db:seed": {
+      "cache": false,
+      "persistent": false,
+      "env": ["DATABASE_URL", "DATABASE_URL_*"]
+    },
     "typecheck": { "dependsOn": ["^build", "db:generate"], "outputs": [] },
     "lint": { "dependsOn": ["^build"], "outputs": [] },
-    "test": { "dependsOn": ["^build", "db:generate"], "outputs": ["coverage/**"] },
+    "test": {
+      "dependsOn": ["^build", "db:generate"],
+      "outputs": ["coverage/**"],
+      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL"]
+    },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
-    "test:integration": { "cache": false, "dependsOn": ["^build"] },
+    "test:integration": {
+      "cache": false,
+      "dependsOn": ["^build"],
+      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "KAFKA_BROKERS"]
+    },
     "test:e2e": { "cache": false, "dependsOn": ["^build"] },
     "dev": { "cache": false, "persistent": true },
     "clean": { "cache": false }
