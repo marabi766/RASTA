@@ -1,0 +1,407 @@
+// =============================================================================
+// fleet-service — owned schema
+//
+// The question this service answers is narrow and operational: *who* is using
+// *which* machine, *when*, and *how much* — and which machines are free right
+// now (docs/04 § 4.6).
+//
+// What it deliberately does NOT own is the machine itself. `Asset` belongs to
+// asset-service (ADR-012). Every reference here is an `assetId` string, never a
+// foreign key, because the two live in different databases and a cross-database
+// constraint is not expressible — nor desirable (ADR-005). The local
+// `asset_ref` table is a read-only replica built from ASSET_* events, exactly
+// the pattern docs/03 § 3.6 prescribes: eventually consistent, never a source
+// of truth, and never consulted for an authorization decision.
+//
+// `organizationId` is the tenant column throughout, so the shared tenant guard
+// scopes this service like every other (docs/05 § 5.2).
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// Driver
+// -----------------------------------------------------------------------------
+
+/// A person who operates machinery on behalf of an organization.
+///
+/// Distinct from `User` on purpose (docs/03 § 3.2): a user is an identity, a
+/// driver is an operational role held inside one organization. The same person
+/// can be a driver for one dehyari and an administrator in another, and
+/// suspending them as a driver must not touch their ability to log in.
+///
+/// `userId` is required rather than optional, because it is what makes
+/// object-level authorization possible: the product document limits `DRIVER`
+/// and `OPERATOR` to "the assets assigned to them" (docs/02 § 2.3), and that
+/// check needs a way to map the authenticated user to a driver row.
+model Driver {
+  /// `DRV_<ULID>`. Organization-agnostic, like every platform identifier.
+  id String @id
+
+  /// The tenant boundary.
+  organizationId String @map("organization_id")
+
+  /// The platform user this driver is. Owned by identity-service; stored here
+  /// as a reference only.
+  userId String @map("user_id")
+
+  /// Payroll or fleet-internal number. Whatever the organization already calls
+  /// this person on paper.
+  employeeNo String? @map("employee_no")
+
+  /// Driving licence facts.
+  ///
+  /// Recorded, but deliberately *not* enforced: no document states that an
+  /// expired licence must block an assignment, and inventing that rule would
+  /// invent a regulatory fact (AGENTS.md § 9). Whether it should gate
+  /// assignment is tracked as docs/24 Q-22.
+  licenceNumber  String?   @map("licence_number")
+  licenceClass   String?   @map("licence_class")
+  licenceValidTo DateTime? @map("licence_valid_to")
+
+  status DriverStatus @default(ACTIVE)
+  /// Why the driver is not ACTIVE. Required by the service layer whenever the
+  /// status leaves ACTIVE, so a suspension is never unexplained.
+  statusReason String? @map("status_reason")
+
+  notes String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  createdBy String   @map("created_by")
+  updatedBy String   @map("updated_by")
+  /// Optimistic concurrency for status changes and edits.
+  version   Int      @default(1)
+
+  assignments  Assignment[]
+  usageRecords UsageRecord[]
+
+  /// One driver record per person per organization. A second row would make
+  /// "this driver's active assignment" ambiguous, which is the invariant the
+  /// whole assignment model rests on.
+  @@unique([organizationId, userId], name: "unique_driver_per_user_per_org")
+  @@index([organizationId, status])
+  @@map("driver")
+}
+
+/// Driver lifecycle.
+///
+/// The vocabulary is taken from identity-service's `UserStatus` rather than
+/// invented, so "SUSPENDED" means the same thing across the platform.
+/// `PENDING` is absent: a driver record is created by a fleet manager, and the
+/// act of creating it is the approval.
+enum DriverStatus {
+  ACTIVE
+  /// Temporarily barred from new assignments; existing ones are ended.
+  SUSPENDED
+  /// Terminal. Retained because assignment and usage history reference it.
+  DEACTIVATED
+}
+
+// -----------------------------------------------------------------------------
+// Assignment
+// -----------------------------------------------------------------------------
+
+/// A time-bounded relationship between one driver and one asset.
+///
+/// Active-ness is expressed by exactly one column: `endedAt IS NULL`. There is
+/// deliberately no `status` enum beside it — two representations of the same
+/// fact eventually disagree, and the partial unique indexes that enforce
+/// exclusivity are written against `ended_at` (docs/05 § 5.5).
+///
+/// Two invariants, both enforced by the database rather than by application
+/// checks, because a check-then-insert loses to a concurrent request:
+///
+///   ux_assignment_active_driver   one active assignment per driver
+///   ux_assignment_active_asset    one active assignment per asset
+///
+/// The first is documented (docs/03 § 3.3, docs/05 § 5.5). The second is a
+/// decision recorded in ADR-025: `OperationalStatus` is single-valued, so two
+/// concurrent assignments would make an asset's status — and the "which
+/// machines are free" answer the product document promises — meaningless.
+///
+/// Both indexes live in the migration rather than in this schema, because
+/// Prisma cannot express a partial index. See the warning in the migration.
+model Assignment {
+  /// `ASG_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  driverId String @map("driver_id")
+  /// Owned by asset-service. A reference, never a foreign key (ADR-005).
+  assetId  String @map("asset_id")
+
+  startedAt DateTime  @default(now()) @map("started_at")
+  /// NULL means active. This is the single source of truth for active-ness.
+  endedAt   DateTime? @map("ended_at")
+
+  /// Why the assignment exists — a shift, a mission, a specific job. Free text
+  /// because the platform does not model shift patterns and inventing a
+  /// taxonomy here would be inventing business structure.
+  purpose String?
+
+  endReason AssignmentEndReason? @map("end_reason")
+  endNotes  String?              @map("end_notes")
+
+  assignedBy String  @map("assigned_by")
+  endedBy    String? @map("ended_by")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  driver       Driver        @relation(fields: [driverId], references: [id])
+  usageRecords UsageRecord[]
+
+  /// "This driver's history" and "this asset's history", the two list queries
+  /// the API actually serves.
+  @@index([organizationId, driverId, startedAt(sort: Desc)])
+  @@index([organizationId, assetId, startedAt(sort: Desc)])
+  @@index([organizationId, endedAt])
+  @@map("assignment")
+}
+
+/// Why an assignment ended.
+///
+/// A closed set because each value drives different downstream behaviour: an
+/// assignment ended by maintenance is a machine that may come back, one ended
+/// by a suspended driver is not.
+enum AssignmentEndReason {
+  /// The work finished. The ordinary case.
+  COMPLETED
+  /// Ended early by a fleet manager.
+  CANCELLED
+  /// The driver was suspended or deactivated.
+  DRIVER_UNAVAILABLE
+  /// The asset went out of service, into maintenance, or was decommissioned.
+  ASSET_UNAVAILABLE
+  /// Replaced by a new assignment of the same asset or driver.
+  REASSIGNED
+}
+
+// -----------------------------------------------------------------------------
+// Usage
+// -----------------------------------------------------------------------------
+
+/// A recorded period of machine use.
+///
+/// The domain distinguishes two measures and keeps them distinct, because the
+/// machines do: an excavator is serviced on engine hours, a truck on
+/// kilometres (docs/03 § 3.2, docs/17 § "ثبت کارکرد"). Both are optional
+/// individually; the service layer requires at least one, since a usage record
+/// that measures nothing is not a record of usage.
+///
+/// `hours` and `kilometres` are the amount consumed *during this period* — a
+/// delta. `hourMeter` and `odometer` are instrument readings at the end of the
+/// period — cumulative. Recording both is what lets maintenance-service
+/// evaluate "service every 250 hours" without having to reconstruct a total
+/// from every prior row.
+///
+/// NUMERIC, never a float: 0.1 + 0.2 does not equal 0.3, and a usage-based
+/// service schedule that drifts is a machine that misses its service.
+model UsageRecord {
+  /// `USG_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  /// Owned by asset-service. A reference, never a foreign key.
+  assetId String @map("asset_id")
+
+  /// Who operated it. Optional because a machine can be used by someone with
+  /// no driver record — a contractor's operator, for instance — and refusing
+  /// to record that would lose real usage.
+  driverId     String? @map("driver_id")
+  /// The assignment this usage falls under, when there was one.
+  assignmentId String? @map("assignment_id")
+
+  periodStart DateTime @map("period_start")
+  periodEnd   DateTime @map("period_end")
+
+  /// Engine hours consumed in the period.
+  hours      Decimal? @db.Decimal(10, 2)
+  /// Kilometres travelled in the period.
+  kilometres Decimal? @db.Decimal(12, 2)
+
+  /// Instrument readings at the end of the period.
+  hourMeter Decimal? @map("hour_meter") @db.Decimal(12, 2)
+  odometer  Decimal? @db.Decimal(12, 2)
+
+  /// How the reading arrived. `TELEMATICS` is unused in phase one but present
+  /// from day one so IoT ingestion becomes a new producer rather than a
+  /// migration (docs/04 § 4.1).
+  source UsageSource @default(MANUAL)
+
+  notes String?
+
+  /// Client-supplied deduplication key.
+  ///
+  /// The product asks for offline usage capture that syncs later (docs/17):
+  /// a PWA queues readings in the field and replays them when it reconnects,
+  /// which means the same reading will arrive twice. Unique per organization,
+  /// so a replayed submission finds its own earlier row instead of creating a
+  /// second one.
+  clientReference String? @map("client_reference")
+
+  recordedAt DateTime @default(now()) @map("recorded_at")
+  recordedBy String   @map("recorded_by")
+
+  driver     Driver?     @relation(fields: [driverId], references: [id])
+  assignment Assignment? @relation(fields: [assignmentId], references: [id])
+
+  @@unique([organizationId, clientReference], name: "unique_usage_client_reference")
+  /// The history query: "this machine's usage, newest first" (docs/05 § 5.5).
+  @@index([organizationId, assetId, periodEnd(sort: Desc)])
+  @@index([organizationId, driverId, periodEnd(sort: Desc)])
+  @@index([assignmentId])
+  @@map("usage_record")
+}
+
+enum UsageSource {
+  MANUAL
+  TELEMATICS
+  IMPORTED
+}
+
+// -----------------------------------------------------------------------------
+// Availability
+// -----------------------------------------------------------------------------
+
+/// A period during which an asset is declared unavailable by the fleet.
+///
+/// This is the part of availability fleet-service genuinely *owns*. The other
+/// parts are owned elsewhere and only replicated here (see `AssetRef`):
+///
+///   asset lifecycle state   asset-service
+///   maintenance withdrawal  maintenance-service
+///   safety blocks           asset-service (insurance, inspection)
+///   active assignment       fleet-service
+///   declared window         fleet-service  ← this table
+///
+/// Keeping them distinct is what stops two services from disagreeing about
+/// whether a machine may be dispatched (ADR-026).
+model AvailabilityWindow {
+  /// `AVW_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+  assetId        String @map("asset_id")
+
+  /// What the window declares. A window can equally reserve a machine as free
+  /// for a project or withhold it — both are statements the fleet manager
+  /// makes about the future.
+  available Boolean
+
+  fromAt DateTime  @map("from_at")
+  /// NULL means open-ended, until someone closes it.
+  toAt   DateTime? @map("to_at")
+
+  reason String
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String    @map("created_by")
+  /// Soft-closed rather than deleted: "why was this machine unavailable last
+  /// March?" is a question the fleet manager will be asked.
+  revokedAt DateTime? @map("revoked_at")
+  revokedBy String?   @map("revoked_by")
+
+  @@index([organizationId, assetId, fromAt])
+  @@index([organizationId, revokedAt, toAt])
+  @@map("availability_window")
+}
+
+// -----------------------------------------------------------------------------
+// Reference replicas
+// -----------------------------------------------------------------------------
+
+/// Read-only copy of the asset facts fleet needs, built from ASSET_*,
+/// MAINTENANCE_* and inspection/insurance events.
+///
+/// It exists so "which machines are free right now" is one indexed query
+/// instead of an HTTP call to asset-service per row — the exact coupling
+/// docs/03 § 3.6 rejects.
+///
+/// CONSTRAINT: eventually consistent, never a source of truth, and **never**
+/// consulted for an authorization decision. Authorization comes from the
+/// verified token and from `organizationId` on fleet's own rows.
+model AssetRef {
+  /// The asset id issued by asset-service.
+  id String @id
+
+  /// The owning organization, as asset-service last reported it. Used for
+  /// filtering availability listings, not for access control.
+  organizationId String @map("organization_id")
+
+  name      String?
+  assetType String? @map("asset_type")
+  assetTag  String? @map("asset_tag")
+
+  /// asset-service's `OperationalStatus`, mirrored as text so a new value on
+  /// the producer's side does not require a migration here.
+  status String
+
+  /// Set by MAINTENANCE_STARTED, cleared by MAINTENANCE_COMPLETED. Owned by
+  /// maintenance-service; fleet only mirrors it.
+  inMaintenance Boolean @default(false) @map("in_maintenance")
+
+  /// A safety block reported by asset-service — a failed technical inspection
+  /// or a lapsed insurance policy. The event catalogue is explicit that a
+  /// failed inspection is a safety event and fleet must stop dispatching the
+  /// machine immediately (docs/events/README.md § Insurance).
+  dispatchBlockedReason String?   @map("dispatch_blocked_reason")
+  dispatchBlockedAt     DateTime? @map("dispatch_blocked_at")
+
+  syncedAt    DateTime @map("synced_at")
+  sourceEvent String   @map("source_event")
+
+  @@index([organizationId, status])
+  @@map("asset_ref")
+}
+
+// -----------------------------------------------------------------------------
+// Platform plumbing (ADR-021)
+// -----------------------------------------------------------------------------
+
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic        String
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  publishedAt DateTime? @map("published_at")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  @@index([createdAt], map: "idx_outbox_pending")
+  @@map("outbox_message")
+}
+
+model ProcessedEvent {
+  eventId      String   @map("event_id")
+  consumerName String   @map("consumer_name")
+  processedAt  DateTime @default(now()) @map("processed_at")
+
+  @@id([eventId, consumerName])
+  @@index([processedAt])
+  @@map("processed_event")
+}
