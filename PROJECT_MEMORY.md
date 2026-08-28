@@ -13,13 +13,13 @@
 > **آخرین به‌روزرسانی:** 2026-08-28 — **فاز `fleet-service` بسته شد:
 > READY_FOR_NEXT_PHASE.** پنجمین سرویس، با هر پنج سطح تأیید کامل:
 >
-> | سطح             | شاهد                                                           |
-> | --------------- | -------------------------------------------------------------- |
-> | IMPLEMENTED     | Driver · Assignment · UsageRecord · Availability · Utilization |
-> | TESTED          | ۸۸ تست واحد در fleet؛ ۳۱۳ در کل Monorepo                       |
-> | INTEGRATION     | ۳۲ تست روی PostgreSQL و Kafka **واقعی** — بدون Mock            |
-> | LIVE VERIFIED   | ۲۰ سناریو از راه Gateway با توکن واقعی Keycloak (بخش ۲۱)       |
-> | **CI VERIFIED** | **Run `33149848438`، Commit `af74157`، هر ۷ Job سبز، ۷ دقیقه** |
+> | سطح             | شاهد                                                                       |
+> | --------------- | -------------------------------------------------------------------------- |
+> | IMPLEMENTED     | Driver · Assignment · UsageRecord · Availability · Utilization             |
+> | TESTED          | ۸۸ تست واحد در fleet؛ ۳۱۳ در کل Monorepo                                   |
+> | INTEGRATION     | ۳۲ تست روی PostgreSQL و Kafka **واقعی** — بدون Mock                        |
+> | LIVE VERIFIED   | ۲۰ سناریو از راه Gateway با توکن واقعی Keycloak (بخش ۲۱)                   |
+> | **CI VERIFIED** | **Run `33147827056`، Commit `d2f82f8` (آخرین تغییر کد فاز)، هر ۷ Job سبز** |
 >
 > دو ADR تازه (۰۲۵، ۰۲۶) و دو Open Question تازه (Q-22، Q-23).
 >
@@ -87,31 +87,31 @@
 | **NOT VERIFIED**  | شواهد غیرمستقیم داریم اما تأیید مثبت نداریم             |
 | **PLANNED**       | تصمیم گرفته شده، کد نوشته نشده                          |
 
-| Feature                                                      |     Implemented     | Automated Tests  | Live Verified (2026-08-27)                                                  |
-| ------------------------------------------------------------ | :-----------------: | :--------------: | --------------------------------------------------------------------------- |
-| Tenant Isolation (API)                                       |         ✅          |        ✅        | ✅ (403 TENANT_MISMATCH زنده گرفته شد)                                      |
-| Tenant Isolation (Database)                                  |         ✅          |        —         | ✅ (`permission denied for database` زنده گرفته شد)                         |
-| Cross-tenant read → 404                                      |         ✅          |        ✅        | ✅                                                                          |
-| RBAC (Roles Guard)                                           |         ✅          |        ✅        | ✅ (Auditor → 403 روی POST)                                                 |
-| JWT verification (Keycloak/JWKS)                             |         ✅          |        ✅        | ✅ (۴ کاربر Seed، توکن واقعی گرفته شد)                                      |
-| Transactional Outbox → Kafka                                 |         ✅          |        ✅        | ✅ (Asset ساخته شد → Outbox → Kafka، Correlation تطبیق)                     |
-| Event Consumer / Dossier Projector                           |         ✅          |   ✅ (18 تست)    | ✅ (رویداد ساختگی maintenance → یک خط Timeline، Replay دوباره = بدون تکرار) |
-| API Gateway routing + circuit breaker                        |         ✅          |   ✅ (21 تست)    | ✅ (مسیر به سرویس نساخته‌شده fleet → 503 تمیز)                              |
-| Redis Rate Limiting (منطق)                                   |         ✅          |    ✅ (واحد)     | ⚠️ **مسدود شده توسط تداخل Port میزبان — بخش ۲۲.۳ D-006**                    |
-| Anonymous public endpoint (self-registration) از راه Gateway |         ✅          |   ✅ (17 تست)    | ✅ **`201` زنده گرفته شد — D-007 رفع شد**                                   |
-| CI/CD روی GitHub Actions                                     |         ✅          |        —         | ✅ **CI VERIFIED** — Run `33149848438`، Commit `af74157`، هر ۷ Job سبز      |
-| Docker Build (identity, organization)                        |         ✅          |        —         | ✅ **CI VERIFIED** — Build + Trivy Scan هر دو Image روی Runner سبز          |
-| Docker Build (asset, fleet)                                  | ✅ Dockerfile دارند |        —         | ✅ **CI VERIFIED** — Build + Trivy روی Runner برای هر دو                    |
-| Docker Build (api-gateway)                                   | ❌ Dockerfile ندارد |        —         | ❌ باز (بخش ۲۲)                                                             |
-| **fleet-service — Driver/Assignment/Usage/Availability**     |         ✅          |   ✅ (۸۸ تست)    | ✅ زنده + **CI VERIFIED**                                                   |
-| **Assignment Exclusivity (Partial Unique Index)**            |         ✅          | ✅ (Integration) | ✅ زنده: راننده مشغول → `422 DRIVER_ALREADY_ASSIGNED`                       |
-| **Fleet → Kafka → Asset Projector**                          |         ✅          |   ✅ (۳۲ تست)    | ✅ **زنده** — Timeline پر شد، وضعیت `IDLE→ASSIGNED→ACTIVE`                  |
-| **Idempotency (ثبت آفلاین + Replay مصرف‌کننده)**             |         ✅          |        ✅        | ✅ زنده: ارسال دوباره = همان رکورد؛ Replay کافکا = بدون اثر دوم             |
-| **correlationId در کل زنجیره**                               |         ✅          |        ✅        | ✅ زنده: HTTP → Outbox → Header کافکا → Timeline، یکسان                     |
-| Frontend (`apps/web`, `apps/admin`)                          |         ❌          |        —         | NOT_STARTED — پوشه خالی                                                     |
-| Integration Tests (`*.int-spec.ts`)                          | ✅ ۴ Suite در fleet |        —         | ✅ **۳۲ از ۳۲ روی Runner واقعی GitHub**                                     |
-| E2E Tests (`tests/e2e`, Playwright)                          |         ❌          |        —         | پوشه خالی، بدون Config                                                      |
-| maintenance/marketplace/… (۱۱ سرویس)                         |         ❌          |        —         | NOT_STARTED                                                                 |
+| Feature                                                      |     Implemented     | Automated Tests  | Live Verified (2026-08-27)                                                                       |
+| ------------------------------------------------------------ | :-----------------: | :--------------: | ------------------------------------------------------------------------------------------------ |
+| Tenant Isolation (API)                                       |         ✅          |        ✅        | ✅ (403 TENANT_MISMATCH زنده گرفته شد)                                                           |
+| Tenant Isolation (Database)                                  |         ✅          |        —         | ✅ (`permission denied for database` زنده گرفته شد)                                              |
+| Cross-tenant read → 404                                      |         ✅          |        ✅        | ✅                                                                                               |
+| RBAC (Roles Guard)                                           |         ✅          |        ✅        | ✅ (Auditor → 403 روی POST)                                                                      |
+| JWT verification (Keycloak/JWKS)                             |         ✅          |        ✅        | ✅ (۴ کاربر Seed، توکن واقعی گرفته شد)                                                           |
+| Transactional Outbox → Kafka                                 |         ✅          |        ✅        | ✅ (Asset ساخته شد → Outbox → Kafka، Correlation تطبیق)                                          |
+| Event Consumer / Dossier Projector                           |         ✅          |   ✅ (18 تست)    | ✅ (رویداد ساختگی maintenance → یک خط Timeline، Replay دوباره = بدون تکرار)                      |
+| API Gateway routing + circuit breaker                        |         ✅          |   ✅ (21 تست)    | ✅ (مسیر به سرویس نساخته‌شده fleet → 503 تمیز)                                                   |
+| Redis Rate Limiting (منطق)                                   |         ✅          |    ✅ (واحد)     | ⚠️ **مسدود شده توسط تداخل Port میزبان — بخش ۲۲.۳ D-006**                                         |
+| Anonymous public endpoint (self-registration) از راه Gateway |         ✅          |   ✅ (17 تست)    | ✅ **`201` زنده گرفته شد — D-007 رفع شد**                                                        |
+| CI/CD روی GitHub Actions                                     |         ✅          |        —         | ✅ **CI VERIFIED** — Run `33147827056`، Commit `d2f82f8`، هر ۷ Job سبز؛ ۴ Run پیاپی سبز پس از آن |
+| Docker Build (identity, organization)                        |         ✅          |        —         | ✅ **CI VERIFIED** — Build + Trivy Scan هر دو Image روی Runner سبز                               |
+| Docker Build (asset, fleet)                                  | ✅ Dockerfile دارند |        —         | ✅ **CI VERIFIED** — Build + Trivy روی Runner برای هر دو                                         |
+| Docker Build (api-gateway)                                   | ❌ Dockerfile ندارد |        —         | ❌ باز (بخش ۲۲)                                                                                  |
+| **fleet-service — Driver/Assignment/Usage/Availability**     |         ✅          |   ✅ (۸۸ تست)    | ✅ زنده + **CI VERIFIED**                                                                        |
+| **Assignment Exclusivity (Partial Unique Index)**            |         ✅          | ✅ (Integration) | ✅ زنده: راننده مشغول → `422 DRIVER_ALREADY_ASSIGNED`                                            |
+| **Fleet → Kafka → Asset Projector**                          |         ✅          |   ✅ (۳۲ تست)    | ✅ **زنده** — Timeline پر شد، وضعیت `IDLE→ASSIGNED→ACTIVE`                                       |
+| **Idempotency (ثبت آفلاین + Replay مصرف‌کننده)**             |         ✅          |        ✅        | ✅ زنده: ارسال دوباره = همان رکورد؛ Replay کافکا = بدون اثر دوم                                  |
+| **correlationId در کل زنجیره**                               |         ✅          |        ✅        | ✅ زنده: HTTP → Outbox → Header کافکا → Timeline، یکسان                                          |
+| Frontend (`apps/web`, `apps/admin`)                          |         ❌          |        —         | NOT_STARTED — پوشه خالی                                                                          |
+| Integration Tests (`*.int-spec.ts`)                          | ✅ ۴ Suite در fleet |        —         | ✅ **۳۲ از ۳۲ روی Runner واقعی GitHub**                                                          |
+| E2E Tests (`tests/e2e`, Playwright)                          |         ❌          |        —         | پوشه خالی، بدون Config                                                                           |
+| maintenance/marketplace/… (۱۱ سرویس)                         |         ❌          |        —         | NOT_STARTED                                                                                      |
 
 ---
 
@@ -610,8 +610,8 @@ E2E                           NOT IMPLEMENTED — بدون Playwright، پوشه
 از `pnpm run test` و `pnpm --filter @rasta/fleet-service test:integration`،
 اجراشده در 2026-08-28. اعداد از خروجی واقعی گرفته شده، نه از گزارش پیشین.
 
-هر ۳۱۳ عدد روی Runner واقعی GitHub هم دیده شد — **Run `33149848438`،
-Commit `af74157`** — پس این شمارش دیگر فقط محلی نیست.
+هر ۳۱۳ عدد روی Runner واقعی GitHub هم دیده شد — **Run `33147827056`،
+Commit `d2f82f8`** — پس این شمارش دیگر فقط محلی نیست.
 
 **Integration Tests — دیگر تهی نیست.** `fleet-service` نخستین سرویسی است که تست
 Integration واقعی دارد (۴ Suite در `services/fleet-service/test/`):
@@ -645,10 +645,21 @@ Integration واقعی دارد (۴ Suite در `services/fleet-service/test/`):
 
 ### ✅ CI/CD — **CI VERIFIED** (به‌روزشده برای فاز ناوگان)
 
-**Run `33149848438`، Commit `af74157`: success در ۷ دقیقه (۰۶:۵۹ تا ۰۷:۰۶ UTC).**
+**نخستین Run سبز روی کد کامل ناوگان: `33147827056`، Commit `d2f82f8`،
+success در ۱۱ دقیقه.** این همان Commit ای است که آخرین تغییر کد فاز را دارد؛
+Commit های پس از آن فقط مستندات‌اند.
 
-سه Run پیاپی سبز روی سه Commit پشت‌سرهم — `33147827056`/`d2f82f8`،
-`33148910234`/`7acd619` و این یکی — یعنی سبز بودن پایدار است، نه یک اتفاق.
+| Run           | Commit    | محتوا           | نتیجه                                               |
+| ------------- | --------- | --------------- | --------------------------------------------------- |
+| `33147388059` | `97430e7` | کد کامل ناوگان  | **failure** — Race در Group Coordinator کافکا (زیر) |
+| `33147827056` | `d2f82f8` | + رفع همان Race | success                                             |
+| `33148910234` | `7acd619` | فقط مستندات     | success                                             |
+| `33149848438` | `af74157` | فقط مستندات     | success                                             |
+| `33150357661` | `1edf8ee` | فقط مستندات     | success                                             |
+
+چهار Run پیاپی سبز پس از آن یک شکست — یعنی سبز بودن یک وضعیت پایدار است، نه
+یک اتفاق. **قاعده به‌روزرسانی:** این جدول فقط وقتی تغییر می‌کند که **کد** عوض
+شود؛ Commit مستنداتیِ بعدی لازم نیست اینجا ثبت شود.
 هر **هفت** Job سبز — چهار Image به‌جای دو، و برای نخستین‌بار یک Broker واقعی
 در Pipeline.
 
@@ -980,7 +991,7 @@ ADR-001 (Microservices)، ADR-004/005 (Database + Ownership)، ADR-006
 - Kafka Consumer عمومی (`EventConsumer`) + Projector واقعی (`asset-service`
   Timeline از رویدادهای سرویس‌های دیگر)
 - **CI Pipeline سبز روی GitHub Actions** (۴ Job، ۵ اجرا با Matrix) —
-  **CI VERIFIED** تا Commit `af74157`، Run `33149848438` (بخش ۱۹)
+  **CI VERIFIED** تا Commit `d2f82f8`، Run `33147827056` (بخش ۱۹)
 - **fleet-service:** Driver · Assignment (با Invariant انحصار در پایگاه داده) ·
   UsageRecord (Idempotent برای ثبت آفلاین) · Availability (ترکیبی، با نام مالک هر
   مانع) · Utilization · Consumer دوطرفه با asset-service
@@ -1053,7 +1064,7 @@ document, audit, analytics`)
 | TESTED        | ۸۸ تست واحد در fleet، ۳۱۳ در Monorepo — `pnpm verify --force`  |
 | INTEGRATION   | ۳۲ تست روی PostgreSQL و Kafka واقعی، بدون Mock                 |
 | LIVE VERIFIED | ۲۰ سناریو از راه Gateway با توکن واقعی Keycloak (بخش ۲۱)       |
-| CI VERIFIED   | Run `33149848438`، Commit `af74157`، هر ۷ Job سبز              |
+| CI VERIFIED   | Run `33147827056`، Commit `d2f82f8`، هر ۷ Job سبز              |
 
 ### گام بعدی: `maintenance-service`
 
