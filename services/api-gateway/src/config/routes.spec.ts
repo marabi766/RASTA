@@ -69,9 +69,29 @@ describe('routing table integrity', () => {
   it('never routes AUDITOR to a row-level economic prefix', () => {
     // CONSTRAINT (product document, ch. 4): province oversight is aggregate
     // only. No route may hand AUDITOR individual transactions.
-    for (const prefix of ['transactions', 'wallets', 'ledger', 'orders']) {
+    for (const prefix of [
+      'transactions',
+      'wallets',
+      'ledger',
+      'orders',
+      'settlements',
+      'commissions',
+      'rewards',
+      'payment-intents',
+    ]) {
       const route = ROUTES.find((r) => r.prefix === prefix);
       expect(route?.roles ?? []).not.toContain('AUDITOR');
+    }
+  });
+
+  it('requires an idempotency key on every prefix that moves money', () => {
+    // docs/06 § 6.8. A retried POST that charges twice is the failure this
+    // exists to prevent, and the gateway is the first of the two places that
+    // enforce it — economic-service checks again, because a service must not
+    // assume it was only reached through the gateway (ADR-020).
+    for (const prefix of ['wallets', 'transactions', 'settlements', 'payment-intents', 'orders']) {
+      const route = ROUTES.find((r) => r.prefix === prefix);
+      expect(route?.requiresIdempotencyKey).toBe(true);
     }
   });
 });
