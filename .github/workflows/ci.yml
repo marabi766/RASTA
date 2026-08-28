@@ -244,6 +244,23 @@ jobs:
             create "$topic"
           done
 
+          # Force the group coordinator up before any test needs it.
+          #
+          # A freshly started broker answers `kafka-topics --list` — which is
+          # all its healthcheck asks — while `__consumer_offsets` is still
+          # loading. A consumer connecting in that window is told "the group
+          # coordinator is not available" and retries in the background, so the
+          # test publishes into a topic nobody is reading yet and fails on a
+          # timeout that names the wrong thing. That is exactly how the first
+          # CI run of this suite failed.
+          #
+          # Listing consumer groups creates and loads the internal topic, which
+          # removes the race rather than making it rarer. The event-flow test
+          # also waits for GROUP_JOIN, so neither guard relies on the other.
+          docker run --rm --network host apache/kafka:3.9.0 \
+            /opt/kafka/bin/kafka-consumer-groups.sh \
+            --bootstrap-server localhost:9092 --list
+
       - name: Apply migrations
         run: pnpm run db:migrate
         env:

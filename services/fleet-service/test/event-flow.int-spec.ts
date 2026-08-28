@@ -70,6 +70,31 @@ describeWithKafka('fleet event flow over Kafka', () => {
       logLevel: 1,
     });
     consumer = kafka.consumer({ groupId, sessionTimeout: 30_000 });
+
+    // Resolves when the consumer has actually joined its group — not merely
+    // when `run()` returned.
+    //
+    // On a broker that has just started, `connect()`, `subscribe()` and `run()`
+    // all succeed while the group coordinator is still unavailable: the
+    // `__consumer_offsets` partitions have not finished loading. kafkajs then
+    // retries in the background and the test proceeds to publish into a topic
+    // nobody is reading yet, so it fails on a timeout that names the wrong
+    // thing.
+    //
+    // CI found this; a developer machine cannot, because the broker there has
+    // been up for hours. Waiting on GROUP_JOIN is the honest fix — a longer
+    // timeout would only make the race rarer.
+    const joined = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`Consumer group ${groupId} did not join within 60s`)),
+        60_000,
+      );
+      consumer.on(consumer.events.GROUP_JOIN, () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+
     await consumer.connect();
     await consumer.subscribe({ topic: FLEET_TOPIC, fromBeginning: false });
     await consumer.run({
@@ -78,6 +103,7 @@ describeWithKafka('fleet event flow over Kafka', () => {
         received.push(JSON.parse(message.value.toString('utf8')) as EventEnvelope);
       },
     });
+    await joined;
 
     await cleanup(prisma, [org.a, org.b]);
 
