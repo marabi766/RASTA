@@ -54,16 +54,9 @@ export class IdempotencyStore {
     @Inject(ENV) private readonly env: EconomicEnv,
   ) {}
 
-  /**
-   * Canonical hash of a request body.
-   *
-   * Keys are sorted recursively so that `{a:1,b:2}` and `{b:2,a:1}` — the same
-   * request, serialised by two different clients — match. Whitespace is
-   * removed by `JSON.stringify` on the rebuilt value. Undefined and function
-   * values cannot appear in a parsed JSON body, so nothing is lost.
-   */
+  /** SHA-256 over the canonical form. See {@link hashRequestBody}. */
   hash(body: unknown): string {
-    return createHash('sha256').update(canonicalise(body)).digest('hex');
+    return hashRequestBody(body);
   }
 
   /**
@@ -198,6 +191,22 @@ export class IdempotencyStore {
     });
     return result.count;
   }
+}
+
+/**
+ * Canonical hash of a request body.
+ *
+ * Keys are sorted recursively so that `{a:1,b:2}` and `{b:2,a:1}` — the same
+ * request, serialised by two different clients — produce the same hash and are
+ * therefore recognised as a retry rather than refused as a key reused with a
+ * different body (docs/06 § 6.8).
+ *
+ * Exported as a free function so the canonicalisation can be tested without a
+ * database: it is the part most likely to be quietly wrong, and the failure
+ * mode is a legitimate retry being rejected with 409.
+ */
+export function hashRequestBody(body: unknown): string {
+  return createHash('sha256').update(canonicalise(body)).digest('hex');
 }
 
 /**

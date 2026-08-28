@@ -64,6 +64,15 @@ export class TransactionService {
       throw RastaError.businessRule('Funds can only be held against a transaction with a payee');
     }
 
+    // Resolved *before* the transaction opens, and that placement is the fix
+    // for a real defect the concurrency suite caught: `getOrOpen` opens its own
+    // transaction when the wallet does not exist yet, and Prisma runs a nested
+    // interactive transaction on a **different connection** — so the inner one
+    // waits on locks the outer one holds, and the pair deadlocks until the
+    // timeout. Anything that might open a transaction of its own has to happen
+    // before the money-moving one begins.
+    const payerWallet = dto.holdFunds ? await this.wallets.getOrOpen(dto.currency ?? 'IRR') : null;
+
     const stop = financialTransactionDuration.startTimer({
       service: SERVICE_NAME,
       operation: 'create-transaction',
@@ -100,9 +109,8 @@ export class TransactionService {
           ),
         );
 
-        if (dto.holdFunds) {
-          const wallet = await this.wallets.getOrOpen(dto.currency ?? 'IRR');
-          const [locked] = await this.walletRepository.lock(tx, [wallet.id]);
+        if (payerWallet) {
+          const [locked] = await this.walletRepository.lock(tx, [payerWallet.id]);
           if (!locked) throw RastaError.internal('Wallet vanished while locking it');
 
           await this.wallets.placeHold(tx, {

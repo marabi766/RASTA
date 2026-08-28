@@ -1,6 +1,11 @@
 const swcOptions = require('../../jest.swc.cjs');
 const swcTransform = { '^.+\.(t|j)s$': ['@swc/jest', swcOptions] };
 
+// Every amount in this service is a bigint, and jest-worker serialises results
+// with JSON.stringify — so without this, a failing money assertion is reported
+// as a serialisation error instead of as the failure it is. See jest.setup.cjs.
+const setupFiles = [require.resolve('./jest.setup.cjs')];
+
 /** @type {import('jest').Config} */
 module.exports = {
   // Two projects, for the reasons fleet-service and maintenance-service split
@@ -22,6 +27,7 @@ module.exports = {
       testEnvironment: 'node',
       testRegex: '.*\.spec\.ts$',
       transform: swcTransform,
+      setupFiles,
       clearMocks: true,
     },
     {
@@ -30,6 +36,7 @@ module.exports = {
       testEnvironment: 'node',
       testRegex: '.*\.int-spec\.ts$',
       transform: swcTransform,
+      setupFiles,
       clearMocks: true,
     },
   ],
