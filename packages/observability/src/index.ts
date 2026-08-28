@@ -30,4 +30,8 @@ export {
   duplicateEventsTotal,
   authorizationDenialsTotal,
   authenticationFailuresTotal,
+  Counter,
+  Gauge,
+  Histogram,
 } from './metrics';
+export type { Metric } from './metrics';

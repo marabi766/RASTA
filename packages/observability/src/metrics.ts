@@ -159,6 +159,22 @@ export function register<T extends Metric>(metric: T): T {
 }
 
 /**
+ * The metric constructors, re-exported.
+ *
+ * A service defining its own metric — fleet's assignment conflicts, for
+ * instance — must build it from the *same* prom-client module instance that
+ * created {@link registry}, or `registers: [registry]` hands a Registry from
+ * one copy of the library a Metric from another. Re-exporting here makes that
+ * the only thing a service can do, and keeps prom-client out of every
+ * service's dependency list.
+ *
+ * Metric *definitions* stay with the service that owns them. This package
+ * holds the mechanism, never another domain's counters (AGENTS.md A-03).
+ */
+export { Counter, Gauge, Histogram } from 'prom-client';
+export type { Metric } from 'prom-client';
+
+/**
  * Collapses a concrete path to its route template.
  *
  * `/v1/assets/AST_01JBQ8.../usage` becomes `/v1/assets/:id/usage`. Without
