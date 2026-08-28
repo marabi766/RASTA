@@ -40,6 +40,24 @@ import {
  * (docs/04 § 4.14), because releasing money is a different decision from
  * recording that it may be released — often taken by a different person.
  *
+ * ## Every unsafe route here requires an `Idempotency-Key`
+ *
+ * Including the four that move no money — `authorise-settlement`, `dispute`,
+ * `resolve-dispute` and `cancel`. Two reasons, and the second is the one that
+ * settled it:
+ *
+ *   - each is an **irreversible effect** in docs/06 § 6.8's sense: authorising
+ *     settlement is what lets money move afterwards, and a dispute halts it
+ *     indefinitely.
+ *   - the gateway applies `requiresIdempotencyKey` to a whole prefix, because
+ *     teaching it which verb under `transactions` moves money would put domain
+ *     knowledge in the routing layer — the "hidden monolith" ADR-009 exists to
+ *     prevent. So the service accepting a key on some routes and refusing it
+ *     on others would make the gateway's rule wrong rather than coarse.
+ *
+ * Live verification found this: the gateway rejected `authorise-settlement`
+ * for a missing key that this controller had no way to accept.
+ *
  * ## Service callers
  *
  * `@AllowService('marketplace-service', 'contract-service')` on the paths
@@ -134,10 +152,21 @@ export class TransactionController {
       '(docs/10 § 10.5). Separate from settlement itself, because confirming that goods ' +
       'arrived and releasing the money are two decisions, often by two people.',
   })
-  async authorise(@Param('id') id: string) {
+  async authorise(
+    @Param('id') id: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+  ) {
     assertNotAuditor();
-    const result = await this.transactions.authoriseSettlement(id);
-    return toTransactionDetailView(result as never);
+    const key = requireIdempotencyKey(idempotencyKey);
+
+    return this.idempotency.run(
+      'POST /v1/transactions/:id/authorise-settlement',
+      key,
+      { id },
+      200,
+      async () =>
+        toTransactionDetailView((await this.transactions.authoriseSettlement(id)) as never),
+    );
   }
 
   @Post(':id/dispute')
@@ -153,11 +182,15 @@ export class TransactionController {
   })
   async dispute(
     @Param('id') id: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body(zodPipe(disputeTransactionSchema)) dto: DisputeTransactionDto,
   ) {
     assertNotAuditor();
-    const result = await this.transactions.dispute(id, dto);
-    return toTransactionDetailView(result as never);
+    const key = requireIdempotencyKey(idempotencyKey);
+
+    return this.idempotency.run('POST /v1/transactions/:id/dispute', key, dto, 200, async () =>
+      toTransactionDetailView((await this.transactions.dispute(id, dto)) as never),
+    );
   }
 
   @Post(':id/resolve-dispute')
@@ -171,11 +204,20 @@ export class TransactionController {
   })
   async resolveDispute(
     @Param('id') id: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body(zodPipe(resolveDisputeSchema)) dto: ResolveDisputeDto,
   ) {
     assertNotAuditor();
-    const result = await this.transactions.resolveDispute(id, dto);
-    return toTransactionDetailView(result as never);
+    const key = requireIdempotencyKey(idempotencyKey);
+
+    return this.idempotency.run(
+      'POST /v1/transactions/:id/resolve-dispute',
+      key,
+      dto,
+      200,
+      async () =>
+        toTransactionDetailView((await this.transactions.resolveDispute(id, dto)) as never),
+    );
   }
 
   @Post(':id/refund')
@@ -215,10 +257,14 @@ export class TransactionController {
   })
   async cancel(
     @Param('id') id: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body(zodPipe(cancelTransactionSchema)) dto: CancelTransactionDto,
   ) {
     assertNotAuditor();
-    const result = await this.transactions.cancel(id, dto.reason);
-    return toTransactionDetailView(result as never);
+    const key = requireIdempotencyKey(idempotencyKey);
+
+    return this.idempotency.run('POST /v1/transactions/:id/cancel', key, dto, 200, async () =>
+      toTransactionDetailView((await this.transactions.cancel(id, dto.reason)) as never),
+    );
   }
 }

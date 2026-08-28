@@ -80,15 +80,25 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
 /**
  * Routes that will not accept a request without an `Idempotency-Key`.
  *
- * Everything that moves money or creates an irreversible effect (docs/06 §
- * 6.8). Listed rather than inferred from the method, because not every POST
- * here moves money — `dispute` and `authorise-settlement` change state without
- * moving anything, and requiring a key for them would be ceremony.
+ * Every unsafe route in this service, because every one of them either moves
+ * money or creates an irreversible effect in docs/06 § 6.8's sense —
+ * authorising settlement is what lets money move afterwards, and a dispute
+ * halts it indefinitely.
+ *
+ * It is also what the gateway enforces: `requiresIdempotencyKey` applies to a
+ * whole prefix, since teaching the routing layer which verb under
+ * `transactions` moves money would give it domain knowledge ADR-009 keeps out
+ * of it. A service that accepted a key on some of these and refused it on
+ * others would make the gateway's rule wrong rather than coarse.
  */
 const IDEMPOTENT_ROUTES = new Set([
   'POST /v1/wallets/{id}/top-up',
   'POST /v1/transactions',
+  'POST /v1/transactions/{id}/authorise-settlement',
+  'POST /v1/transactions/{id}/dispute',
+  'POST /v1/transactions/{id}/resolve-dispute',
   'POST /v1/transactions/{id}/refund',
+  'POST /v1/transactions/{id}/cancel',
   'POST /v1/settlements',
   'POST /v1/payment-intents/{id}/refund',
 ]);

@@ -269,7 +269,18 @@ export async function cleanup(
   prisma: PrismaService,
   organizationIds: readonly string[],
 ): Promise<void> {
-  const orgs = [...organizationIds, PLATFORM_ORGANIZATION_ID];
+  // Matched by **prefix**, not by equality.
+  //
+  // Suites derive per-test organizations from the suite's own — `${org.a}-ATOMIC`,
+  // `${org.a}-PARALLEL` — and call `cleanup` at the end of the test body. A test
+  // that *fails* never reaches that line, so its rows survive; without a prefix
+  // match the `afterAll` sweep would not recognise them either, and a shared
+  // development database slowly fills with debris from every failed run. That
+  // debris is what first made a leftover commission rule reprice a later suite.
+  //
+  // The suffix is a ULID, so a prefix can only ever match this run's own
+  // organizations.
+  const orgs = [...organizationIds, PLATFORM_ORGANIZATION_ID].map((id) => `${id}%`);
   const client = prisma.client;
 
   await runUnscoped('integration cleanup spans the tenants the suite created', async () => {
@@ -291,7 +302,7 @@ export async function cleanup(
         `DELETE FROM ledger_entry
           WHERE journal_id IN (
             SELECT DISTINCT journal_id FROM ledger_entry
-             WHERE organization_id = ANY($1::text[])
+             WHERE organization_id LIKE ANY($1::text[])
           )`,
         orgs,
       );
@@ -303,25 +314,25 @@ export async function cleanup(
         `DELETE FROM transaction_leg
           WHERE transaction_id IN (
             SELECT id FROM "transaction"
-             WHERE organization_id = ANY($1::text[])
-                OR counterparty_organization_id = ANY($1::text[])
+             WHERE organization_id LIKE ANY($1::text[])
+                OR counterparty_organization_id LIKE ANY($1::text[])
           )
-          OR organization_id = ANY($1::text[])`,
+          OR organization_id LIKE ANY($1::text[])`,
         orgs,
       );
 
       await client.$executeRawUnsafe(
         `DELETE FROM settlement WHERE transaction_id IN (
            SELECT id FROM "transaction"
-            WHERE organization_id = ANY($1::text[])
-               OR counterparty_organization_id = ANY($1::text[]))`,
+            WHERE organization_id LIKE ANY($1::text[])
+               OR counterparty_organization_id LIKE ANY($1::text[]))`,
         orgs,
       );
       await client.$executeRawUnsafe(
         `DELETE FROM commission WHERE transaction_id IN (
            SELECT id FROM "transaction"
-            WHERE organization_id = ANY($1::text[])
-               OR counterparty_organization_id = ANY($1::text[]))`,
+            WHERE organization_id LIKE ANY($1::text[])
+               OR counterparty_organization_id LIKE ANY($1::text[]))`,
         orgs,
       );
 
@@ -335,7 +346,7 @@ export async function cleanup(
         'idempotency_key',
       ]) {
         await client.$executeRawUnsafe(
-          `DELETE FROM ${table} WHERE organization_id = ANY($1::text[])`,
+          `DELETE FROM ${table} WHERE organization_id LIKE ANY($1::text[])`,
           orgs,
         );
       }
@@ -352,34 +363,34 @@ export async function cleanup(
           WHERE id NOT IN (SELECT DISTINCT journal_id FROM ledger_entry)`,
       );
       await client.$executeRawUnsafe(
-        `DELETE FROM "transaction" WHERE organization_id = ANY($1::text[])
-           OR counterparty_organization_id = ANY($1::text[])`,
+        `DELETE FROM "transaction" WHERE organization_id LIKE ANY($1::text[])
+           OR counterparty_organization_id LIKE ANY($1::text[])`,
         orgs,
       );
       await client.$executeRawUnsafe(
-        `DELETE FROM wallet WHERE organization_id = ANY($1::text[])`,
+        `DELETE FROM wallet WHERE organization_id LIKE ANY($1::text[])`,
         orgs,
       );
       await client.$executeRawUnsafe(
-        `DELETE FROM ledger_account WHERE organization_id = ANY($1::text[])`,
+        `DELETE FROM ledger_account WHERE organization_id LIKE ANY($1::text[])`,
         orgs,
       );
       await client.$executeRawUnsafe(
         `DELETE FROM commission_rule
-          WHERE organization_id = ANY($1::text[])
+          WHERE organization_id LIKE ANY($1::text[])
              OR created_by = 'itest'
              OR created_by LIKE 'USR-ITEST-%'`,
         orgs,
       );
       await client.$executeRawUnsafe(
         `DELETE FROM reward_rule
-          WHERE organization_id = ANY($1::text[])
+          WHERE organization_id LIKE ANY($1::text[])
              OR created_by = 'itest'
              OR created_by LIKE 'USR-ITEST-%'`,
         orgs,
       );
       await client.$executeRawUnsafe(
-        `DELETE FROM outbox_message WHERE organization_id = ANY($1::text[])`,
+        `DELETE FROM outbox_message WHERE organization_id LIKE ANY($1::text[])`,
         orgs,
       );
     } finally {
