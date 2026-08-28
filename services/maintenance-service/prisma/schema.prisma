@@ -1,0 +1,654 @@
+// =============================================================================
+// maintenance-service — owned schema
+//
+// The question this service answers: *what does this machine need, what was
+// done to it, by whom, and what did it cost* (docs/04 § 4.7). It turns
+// maintenance from reactive to preventive, and carries a repair from the
+// moment a breakdown is reported to the moment the owner approves the bill.
+//
+// What it deliberately does NOT own:
+//
+//   Asset               asset-service (ADR-012). Referenced by id, never by
+//                       foreign key — the two live in different databases and
+//                       a cross-database constraint is not expressible (ADR-005).
+//   Driver, Assignment  fleet-service. Usage arrives as USAGE_RECORDED and is
+//                       reduced to a meter reading here; the usage records
+//                       themselves are never copied (docs/04 § 4.6).
+//   Workshop profile    supplier-service. `workshop_organization_id` is a
+//                       reference to an organization, not a profile.
+//   Part stock          inventory-service. A consumed part records what was
+//                       fitted and what it cost, not what is on a shelf.
+//   Money movement      economic-service. This service produces the
+//                       authoritative *operational* cost record and the
+//                       approval that gates settlement. It holds no wallet,
+//                       computes no commission, and settles nothing (ADR-028).
+//
+// `organizationId` is the tenant column throughout, so the shared tenant guard
+// scopes this service like every other (docs/05 § 5.2).
+//
+// One rule about time runs through every table below: **business timestamps
+// are supplied by the application, never defaulted by the database.** Several
+// CHECK constraints compare two of these columns, and a database default would
+// put PostgreSQL's clock on one side and Node's on the other. On the
+// development stack those differ by 14–56 ms, which is enough for a request
+// created and completed inside one test to violate its own constraint — the
+// bug fleet-service hit on its first real integration run. Only `created_at`
+// keeps a default, and no constraint compares it to anything.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// Schedule
+// -----------------------------------------------------------------------------
+
+/// A recurring service rule for one machine — "قاعده دوره‌ای بر مبنای زمان یا
+/// کارکرد" (docs/03 § 3.2).
+///
+/// A schedule expresses a *rule*, never a hard-coded threshold. The platform
+/// supplies no interval of its own: "every 250 hours" is a fact about a
+/// particular grader that an organization knows and the product document does
+/// not state, so inventing one here would be inventing a business fact
+/// (AGENTS.md § 9). Every interval below is nullable and comes from the caller.
+///
+/// Three triggers, any combination of which may be set:
+///
+///   intervalDays        elapsed time since the last service
+///   intervalHours       engine hours since the last service
+///   intervalKilometres  distance since the last service
+///
+/// When more than one is set the schedule comes due on **whichever is reached
+/// first**, which is how a service book reads and the only interpretation that
+/// cannot leave a machine overdue on one measure while compliant on another.
+/// An organization that wants a single measure sets a single interval.
+///
+/// CONSTRAINT: at least one interval must be present. A schedule with none
+/// would never come due, which is worse than no schedule at all — it looks
+/// like coverage.
+model MaintenanceSchedule {
+  /// `MSC_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+  /// Owned by asset-service. A reference, never a foreign key.
+  assetId String @map("asset_id")
+
+  /// What this service is, in the organization's own words — "تعویض روغن
+  /// موتور". Free text because the platform does not own a catalogue of
+  /// service types and importing one would be inventing structure.
+  title String
+
+  maintenanceType MaintenanceType    @default(PREVENTIVE) @map("maintenance_type")
+  recurrence      ScheduleRecurrence @default(RECURRING)
+  status          ScheduleStatus     @default(ACTIVE)
+
+  /// Intervals. NUMERIC rather than float for the same reason usage readings
+  /// are: a schedule evaluated against a drifting total is a machine that
+  /// misses its service (ADR-022's argument, applied to hours).
+  intervalDays       Int?     @map("interval_days")
+  intervalHours      Decimal? @map("interval_hours") @db.Decimal(10, 2)
+  intervalKilometres Decimal? @map("interval_kilometres") @db.Decimal(12, 2)
+
+  /// How far ahead of the due point the schedule announces itself.
+  ///
+  /// The product asks for a warning *before* the deadline ("هشدار پیش از
+  /// موعد", docs/17). How far before is an organizational preference, not a
+  /// platform fact, so it is per-schedule with a configured default rather
+  /// than a constant in the evaluator.
+  leadDays       Int?     @map("lead_days")
+  leadHours      Decimal? @map("lead_hours") @db.Decimal(10, 2)
+  leadKilometres Decimal? @map("lead_kilometres") @db.Decimal(12, 2)
+
+  /// The anchor the next due point is measured from.
+  ///
+  /// Set when the schedule is created — from the machine's current meter, so a
+  /// schedule added to a machine with 4 310 hours on it is not instantly
+  /// overdue — and moved forward each time a maintenance request raised from
+  /// this schedule is completed.
+  ///
+  /// Re-anchoring is also the supported repair for a replaced hour meter: the
+  /// meter read model never moves backwards, so a new instrument reading low
+  /// is corrected by setting this anchor rather than by rewriting history.
+  lastServicedAt        DateTime? @map("last_serviced_at")
+  lastServicedHourMeter Decimal?  @map("last_serviced_hour_meter") @db.Decimal(12, 2)
+  lastServicedOdometer  Decimal?  @map("last_serviced_odometer") @db.Decimal(12, 2)
+  /// The request that last served this schedule, for the audit trail.
+  lastServiceRequestId  String?   @map("last_service_request_id")
+
+  /// When MAINTENANCE_DUE was last published for the *current* cycle.
+  ///
+  /// Cleared when the schedule is served, so the event fires once per cycle
+  /// rather than on every usage reading. It is also what makes announcement
+  /// safe across replicas: the update that sets it is guarded on the column
+  /// still being null, so exactly one replica publishes (ADR-027).
+  ///
+  /// It is deliberately **not** the source of truth for due-ness. Due state is
+  /// derived on read from the schedule, the meter and the clock, so a scanner
+  /// that has not run cannot make an overdue machine look compliant.
+  dueAnnouncedAt DateTime? @map("due_announced_at")
+
+  notes String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  createdBy String   @map("created_by")
+  updatedBy String   @map("updated_by")
+
+  requests MaintenanceRequest[]
+
+  /// "What is due, soonest first" and "this machine's schedules" — the two
+  /// list queries the API serves.
+  @@index([organizationId, status, assetId])
+  @@index([organizationId, assetId])
+  @@map("maintenance_schedule")
+}
+
+enum MaintenanceType {
+  /// Planned service, raised from a schedule.
+  PREVENTIVE
+  /// A repair after a failure — a breakdown report (docs/03 § 3.2).
+  CORRECTIVE
+}
+
+enum ScheduleRecurrence {
+  /// Re-arms after each service. The ordinary case.
+  RECURRING
+  /// Serves once and then archives itself — a manufacturer's single running-in
+  /// service, for instance.
+  ONE_TIME
+}
+
+enum ScheduleStatus {
+  ACTIVE
+  /// Temporarily not evaluated. The machine is laid up for the season, say.
+  PAUSED
+  /// Terminal. Kept because completed requests reference it.
+  ARCHIVED
+}
+
+// -----------------------------------------------------------------------------
+// Maintenance request
+// -----------------------------------------------------------------------------
+
+/// The aggregate root of the maintenance domain (docs/03 § 3.3): one piece of
+/// work on one machine, from the moment it is raised to the moment the owner
+/// approves the bill.
+///
+/// The status set is short on purpose. Whether a workshop has been engaged is
+/// answered by the existence of a repair order, not by a status of its own —
+/// two representations of one fact eventually disagree, and the partial unique
+/// index that prevents duplicate requests is written against `status`.
+///
+///   OPEN ──► IN_PROGRESS ──► COMPLETED ──► APPROVED
+///     │            │              │
+///     └────────────┴──────────────┴──► CANCELLED
+///
+/// `APPROVED` is the product document's mandatory control: "الزام تأیید کاربر
+/// پیش از تسویه نهایی" (docs/17). economic-service may not settle a repair
+/// that has not reached it, and MAINTENANCE_APPROVED is the only event that
+/// says it has (ADR-028).
+model MaintenanceRequest {
+  /// `MNT_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+  assetId        String @map("asset_id")
+
+  /// The schedule this was raised from, when it was raised from one. Null for
+  /// a breakdown, which by definition no schedule predicted.
+  scheduleId String? @map("schedule_id")
+
+  type   MaintenanceType
+  status MaintenanceRequestStatus @default(OPEN)
+
+  /// How bad the failure is, as the reporter judged it.
+  ///
+  /// Recorded and carried on BREAKDOWN_REPORTED, but deliberately **not**
+  /// wired to any automatic behaviour: no document states what the platform
+  /// should do differently for a CRITICAL fault, and inventing an escalation
+  /// rule would invent a business fact. It is information for the people who
+  /// triage, not an input to a decision this service makes.
+  severity BreakdownSeverity?
+
+  title       String
+  description String?
+
+  reportedAt DateTime @map("reported_at")
+  reportedBy String   @map("reported_by")
+
+  /// When this should be done by, copied from the schedule's due point at the
+  /// moment the request was raised. Supports the "سررسیدهای پیش رو" query
+  /// docs/05 § 5.5 names.
+  dueDate DateTime? @map("due_date")
+
+  /// Operational downtime, kept distinct from repair duration.
+  ///
+  /// `startedAt`..`completedAt` is how long the *repair* took. Downtime is how
+  /// long the *machine* was unusable, and the two differ: a breakdown takes a
+  /// machine out of service the moment it fails, which can be days before a
+  /// workshop is free. `outOfServiceAt` defaults to the repair start for
+  /// planned work and is stated by the reporter for a breakdown.
+  outOfServiceAt      DateTime? @map("out_of_service_at")
+  returnedToServiceAt DateTime? @map("returned_to_service_at")
+  /// Derived at completion from the two columns above. Stored so the figure
+  /// cannot change as the code that computes it changes, which is what makes
+  /// a maintenance history reportable years later.
+  downtimeMinutes     Int?      @map("downtime_minutes")
+
+  startedAt   DateTime? @map("started_at")
+  startedBy   String?   @map("started_by")
+  completedAt DateTime? @map("completed_at")
+  completedBy String?   @map("completed_by")
+
+  approvedAt    DateTime? @map("approved_at")
+  approvedBy    String?   @map("approved_by")
+  approvalNotes String?   @map("approval_notes")
+
+  cancelledAt        DateTime? @map("cancelled_at")
+  cancelledBy        String?   @map("cancelled_by")
+  cancellationReason String?   @map("cancellation_reason")
+
+  /// The sum of every cost line under this request, maintained atomically with
+  /// those lines (docs/03 § 3.3: "هزینه کل باید با اجزایش اتمیک بماند").
+  ///
+  /// BigInt in minor units, never a float (ADR-022). It is a stored total
+  /// rather than a view because it is the figure MAINTENANCE_APPROVED carries
+  /// to economic-service, and that figure must be exactly what the approver
+  /// saw.
+  totalCostMinor BigInt @default(0) @map("total_cost_minor")
+  currency       String @default("IRR")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  schedule     MaintenanceSchedule? @relation(fields: [scheduleId], references: [id])
+  repairOrders RepairOrder[]
+  costs        MaintenanceCost[]
+
+  /// The three queries the API actually serves: upcoming work, one machine's
+  /// history, and "what did I report" for a narrowed caller.
+  @@index([organizationId, status, dueDate])
+  @@index([organizationId, assetId, reportedAt(sort: Desc)])
+  @@index([organizationId, reportedBy, reportedAt(sort: Desc)])
+  @@map("maintenance_request")
+}
+
+enum MaintenanceRequestStatus {
+  /// Raised, not yet being worked on. A workshop may or may not be engaged.
+  OPEN
+  /// A workshop has started work; the machine is withdrawn from dispatch.
+  IN_PROGRESS
+  /// The work is finished and costed, awaiting the owner's approval.
+  COMPLETED
+  /// The owner has approved the work and its cost. Terminal, and the gate
+  /// economic-service settles behind.
+  APPROVED
+  /// Abandoned. Terminal.
+  CANCELLED
+}
+
+enum BreakdownSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+// -----------------------------------------------------------------------------
+// Repair order
+// -----------------------------------------------------------------------------
+
+/// Work referred to one workshop — "دستور تعمیر: کار ارجاع‌شده به یک تعمیرگاه"
+/// (docs/03 § 3.2).
+///
+/// Inside the maintenance request's aggregate boundary, so cost lines and the
+/// totals derived from them change in one transaction.
+///
+/// A request has at most one live repair order, enforced by a partial unique
+/// index rather than by an application check: re-referring a job after
+/// cancelling the first referral is legitimate, two workshops holding the same
+/// job at once is not, and only the database can tell two concurrent referrals
+/// apart.
+model RepairOrder {
+  /// `RPO_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  maintenanceRequestId String @map("maintenance_request_id")
+  /// Denormalised from the request. Every event this service publishes is
+  /// keyed by asset, and reaching through the relation to build one would put
+  /// a join on the publish path.
+  assetId              String @map("asset_id")
+
+  /// The organization doing the work. supplier-service owns its profile and
+  /// its qualification; this is a reference, and today nothing verifies that
+  /// the reference is a qualified workshop (ADR-029, docs/24 Q-25).
+  workshopOrganizationId String  @map("workshop_organization_id")
+  /// The workshop's name as recorded at referral time, so a historical repair
+  /// order still reads sensibly after supplier-service renames it.
+  workshopName           String? @map("workshop_name")
+
+  status RepairOrderStatus @default(OPEN)
+
+  /// What was asked for, and what was actually done.
+  workSummary   String? @map("work_summary")
+  workPerformed String? @map("work_performed")
+
+  assignedAt DateTime @map("assigned_at")
+  assignedBy String   @map("assigned_by")
+
+  startedAt   DateTime? @map("started_at")
+  startedBy   String?   @map("started_by")
+  completedAt DateTime? @map("completed_at")
+  completedBy String?   @map("completed_by")
+
+  cancelledAt        DateTime? @map("cancelled_at")
+  cancelledBy        String?   @map("cancelled_by")
+  cancellationReason String?   @map("cancellation_reason")
+
+  /// Totals by category, recomputed from `maintenance_cost` inside the same
+  /// transaction as every line that changes them. Never incremented in place:
+  /// an increment is a read-modify-write, and two concurrent part entries
+  /// would lose one of them.
+  partsCostMinor  BigInt @default(0) @map("parts_cost_minor")
+  labourCostMinor BigInt @default(0) @map("labour_cost_minor")
+  otherCostMinor  BigInt @default(0) @map("other_cost_minor")
+  totalCostMinor  BigInt @default(0) @map("total_cost_minor")
+  currency        String @default("IRR")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  request MaintenanceRequest @relation(fields: [maintenanceRequestId], references: [id])
+  parts   PartUsage[]
+  labour  LaborEntry[]
+  costs   MaintenanceCost[]
+
+  @@index([organizationId, status])
+  /// The workshop's own queue, for when supplier-side access is built.
+  @@index([organizationId, workshopOrganizationId, status])
+  @@index([maintenanceRequestId])
+  @@map("repair_order")
+}
+
+enum RepairOrderStatus {
+  /// Referred, work not started.
+  OPEN
+  /// In the workshop. The machine is withdrawn from dispatch.
+  IN_PROGRESS
+  /// Work finished and costed. Terminal.
+  COMPLETED
+  /// The referral was withdrawn. Terminal, and frees the request to be
+  /// referred elsewhere.
+  CANCELLED
+}
+
+// -----------------------------------------------------------------------------
+// Consumption and cost
+// -----------------------------------------------------------------------------
+
+/// A part fitted during a repair — "قطعه به‌کاررفته در یک RepairOrder، با
+/// هزینه" (docs/03 § 3.2).
+///
+/// This is a record of consumption, not of stock. inventory-service owns what
+/// is on a shelf and marketplace-service owns what was bought; when a part
+/// came from either, `sourceReference` carries their identifier and nothing
+/// here is authoritative about it.
+model PartUsage {
+  /// `PTU_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+  repairOrderId  String @map("repair_order_id")
+
+  /// The part's identifier in whichever system supplied it, when there is one.
+  partReference String? @map("part_reference")
+  partName      String  @map("part_name")
+
+  quantity Decimal @db.Decimal(12, 3)
+  /// The workshop's own unit — عدد, لیتر, متر. Free text because the platform
+  /// owns no unit catalogue, and a fixed enum would either refuse a real entry
+  /// or invent a conversion.
+  unit     String
+
+  unitCostMinor  BigInt @map("unit_cost_minor")
+  /// `quantity × unitCostMinor`, rounded once, here. Stored rather than
+  /// derived so the arithmetic that produced the approved total is fixed at
+  /// the moment it was approved.
+  totalCostMinor BigInt @map("total_cost_minor")
+
+  source          PartSource @default(WORKSHOP_SUPPLIED)
+  /// Order id, stock movement id — owned by the service that issued it.
+  sourceReference String?    @map("source_reference")
+
+  recordedAt DateTime @map("recorded_at")
+  recordedBy String   @map("recorded_by")
+
+  repairOrder RepairOrder      @relation(fields: [repairOrderId], references: [id])
+  cost        MaintenanceCost?
+
+  @@index([organizationId, repairOrderId])
+  @@map("part_usage")
+}
+
+enum PartSource {
+  /// Drawn from the organization's own warehouse (inventory-service).
+  INVENTORY
+  /// Bought through the platform (marketplace-service).
+  MARKETPLACE
+  /// Supplied by the workshop as part of the job.
+  WORKSHOP_SUPPLIED
+  OTHER
+}
+
+/// Labour spent on a repair.
+///
+/// `technician` is free text, not a user reference: a village workshop's
+/// mechanic has no account on this platform, and requiring one would either
+/// block the entry or invent an identity.
+model LaborEntry {
+  /// `LBR_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+  repairOrderId  String @map("repair_order_id")
+
+  description String
+  technician  String?
+
+  hours           Decimal @db.Decimal(8, 2)
+  hourlyRateMinor BigInt  @map("hourly_rate_minor")
+  totalCostMinor  BigInt  @map("total_cost_minor")
+
+  performedAt DateTime @map("performed_at")
+  recordedAt  DateTime @map("recorded_at")
+  recordedBy  String   @map("recorded_by")
+
+  repairOrder RepairOrder      @relation(fields: [repairOrderId], references: [id])
+  cost        MaintenanceCost?
+
+  @@index([organizationId, repairOrderId])
+  @@map("labor_entry")
+}
+
+/// Every cost on a repair, one row per line, with its provenance.
+///
+/// This table is the reason the economic seam is clean (ADR-028). A total on
+/// its own is a number economic-service has to trust; a total that decomposes
+/// into lines, each naming what produced it, is a number it can audit. Parts
+/// and labour write a line automatically when they are recorded, so a cost can
+/// never exist without the work it came from — and a line recorded directly
+/// (an external repair invoice, a towing charge) names no source, which is
+/// itself the provenance: someone entered it.
+///
+/// The repair order's category totals are recomputed from these rows, never
+/// incremented, so the sum and its parts cannot drift.
+model MaintenanceCost {
+  /// `MCS_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+  repairOrderId  String @map("repair_order_id")
+  /// Denormalised from the repair order so a request's total is one query
+  /// rather than a join through every referral it ever had.
+  maintenanceRequestId String @map("maintenance_request_id")
+
+  category    MaintenanceCostCategory
+  amountMinor BigInt                  @map("amount_minor")
+  currency    String                  @default("IRR")
+  description String?
+
+  /// Provenance. At most one is set; both null means the line was entered
+  /// directly by the recorder named below.
+  partUsageId  String? @unique @map("part_usage_id")
+  laborEntryId String? @unique @map("labor_entry_id")
+
+  recordedAt DateTime @map("recorded_at")
+  recordedBy String   @map("recorded_by")
+
+  repairOrder RepairOrder        @relation(fields: [repairOrderId], references: [id])
+  request     MaintenanceRequest @relation(fields: [maintenanceRequestId], references: [id])
+  part        PartUsage?         @relation(fields: [partUsageId], references: [id])
+  labour      LaborEntry?        @relation(fields: [laborEntryId], references: [id])
+
+  @@index([organizationId, repairOrderId])
+  @@index([organizationId, maintenanceRequestId])
+  @@map("maintenance_cost")
+}
+
+enum MaintenanceCostCategory {
+  PART
+  LABOUR
+  /// A service charge from the workshop that is neither parts nor metered
+  /// labour — a call-out fee, a diagnostic charge.
+  SERVICE
+  /// Work sent on to a third party, invoiced as a whole.
+  EXTERNAL_REPAIR
+  OTHER
+}
+
+// -----------------------------------------------------------------------------
+// Reference replicas
+//
+// Both are read models this service owns, built from other services' events.
+// Neither is a source of truth and neither is ever consulted for an
+// authorization decision — those come from the verified token and from
+// `organizationId` on this service's own rows.
+// -----------------------------------------------------------------------------
+
+/// Read-only copy of the asset facts maintenance needs, built from `ASSET_*`.
+///
+/// It exists so raising a request against a machine can be refused locally,
+/// rather than by an HTTP call to asset-service on every write — the coupling
+/// docs/03 § 3.6 rejects. A decommissioned machine is refused a new request
+/// from this replica; the cost of the replica being seconds stale is that a
+/// machine decommissioned moments ago might still accept one, which is
+/// recoverable, whereas asset-service being down blocking every breakdown
+/// report is not.
+model AssetRef {
+  /// The asset id issued by asset-service.
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  name      String?
+  assetType String? @map("asset_type")
+  assetTag  String? @map("asset_tag")
+
+  /// asset-service's `OperationalStatus`, mirrored as text so a new value on
+  /// the producer's side does not require a migration here.
+  status String
+
+  syncedAt    DateTime @map("synced_at")
+  sourceEvent String   @map("source_event")
+
+  @@index([organizationId, status])
+  @@map("asset_ref")
+}
+
+/// How much each machine has run, reduced from fleet-service's usage stream.
+///
+/// This is **not** a copy of `UsageRecord`. fleet-service owns those rows and
+/// this service never mirrors them; what it keeps is the one derived number a
+/// usage-based schedule needs — the current meter — which cannot be obtained
+/// any other way without asking fleet-service on every evaluation.
+///
+/// `USAGE_RECORDED` carries both a delta for the period (`hours`,
+/// `kilometres`) and an instrument reading at its end (`hourMeter`,
+/// `odometer`), and either may be absent. The counters below take the higher
+/// of "what the instrument says" and "what we had plus the delta", which
+/// yields one monotonic number from both kinds of reading.
+///
+/// The deliberate consequence: a replaced hour meter reading low does not pull
+/// the counter backwards. Re-anchoring the affected schedule
+/// (`lastServicedHourMeter`) is the supported repair, rather than rewriting a
+/// history that other services also hold.
+model AssetUsageMeter {
+  /// The asset id issued by asset-service.
+  assetId String @id @map("asset_id")
+
+  organizationId String @map("organization_id")
+
+  hourMeter Decimal @default(0) @map("hour_meter") @db.Decimal(12, 2)
+  odometer  Decimal @default(0) @db.Decimal(12, 2)
+
+  /// The last usage record folded in, and the end of its period. Kept for
+  /// diagnosis: "why does this machine read 4 310 hours" is answerable.
+  lastUsageRecordId String?   @map("last_usage_record_id")
+  lastPeriodEnd     DateTime? @map("last_period_end")
+  recordCount       Int       @default(0) @map("record_count")
+
+  updatedAt DateTime @map("updated_at")
+
+  @@index([organizationId])
+  @@map("asset_usage_meter")
+}
+
+// -----------------------------------------------------------------------------
+// Platform plumbing (ADR-021)
+// -----------------------------------------------------------------------------
+
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic        String
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  publishedAt DateTime? @map("published_at")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  @@index([createdAt], map: "idx_outbox_pending")
+  @@map("outbox_message")
+}
+
+model ProcessedEvent {
+  eventId      String   @map("event_id")
+  consumerName String   @map("consumer_name")
+  processedAt  DateTime @default(now()) @map("processed_at")
+
+  @@id([eventId, consumerName])
+  @@index([processedAt])
+  @@map("processed_event")
+}
