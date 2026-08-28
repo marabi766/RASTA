@@ -314,6 +314,13 @@ Prefix های خودشان منتقل شدند و `assetId` یک **فیلد بد
 | خطاها             | قرارداد خطای پلتفرم. تعارض انحصار → `422 BUSINESS_RULE_VIOLATION` با `rule` مشخص؛ گذار نامعتبر → `409`.                      |
 | کمیت‌ها           | `hours`، `kilometres`، `hourMeter`، `odometer` **رشته**‌اند (ستون `NUMERIC`؛ همان استدلال ADR-022).                          |
 
+**OpenAPI این سرویس Schema واقعی دارد.** پلتفرم با Zod در مرز اعتبارسنجی می‌کند
+و `@nestjs/swagger` از Class های Decorate شده Schema می‌سازد — پس تا پیش از فاز
+ناوگان، هر Endpoint نوشتنی با یک Summary و بدون Request Body منتشر می‌شد.
+`services/fleet-service/src/openapi/` این شکاف را می‌بندد: JSON Schema را از
+**همان** Schema هایی تولید می‌کند که سرویس با آن‌ها اعتبارسنجی می‌کند، پس سند
+نمی‌تواند از رفتار واگرا شود. سایر سرویس‌ها هنوز این شکاف را دارند.
+
 **Maintenance**
 
 ```

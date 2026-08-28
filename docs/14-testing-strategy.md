@@ -76,6 +76,20 @@ describe('applyBasisPoints', () => {
 
 با **Testcontainers** — PostgreSQL، Redis و Kafka واقعی در Container، نه Mock.
 
+**وضعیت واقعی (2026-08-28).** `fleet-service` نخستین — و تا امروز تنها — سرویسی
+است که تست Integration واقعی دارد: ۴ Suite، ۳۲ تست، روی PostgreSQL و Kafka
+واقعی، بدون Mock. Testcontainers استفاده **نشد**؛ به‌جایش زیرساخت موجود
+(`pnpm infra:up` محلی، Service Container ها در CI) به‌کار رفت — همان نتیجه بدون
+Docker-in-Docker.
+
+دو قاعده که از این فاز درآمد و باید در سرویس‌های بعدی رعایت شود:
+
+- **`--passWithNoTests` روی Project Integration ممنوع.** حذف آخرین تست باید
+  Build را بشکند. چهار سرویس دیگر هنوز این Flag را دارند و Project شان تهی است.
+- **`test` فقط Project Unit را اجرا کند**، تا `pnpm verify` روی ماشین بدون
+  Docker قابل اجرا بماند. Suite Integration یک دروازه جداست که CI صریحاً در
+  برابر سرویس‌های Provision‌شده اجرا می‌کند.
+
 ```typescript
 describe('AssetRepository (integration)', () => {
   let container: StartedPostgreSqlContainer;
