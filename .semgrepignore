@@ -1,0 +1,5 @@
+# Generated Design Component preview runtime. It is committed only as an
+# inspectable design checkpoint, is never bundled into apps/web, and requires
+# wildcard parent-frame postMessage calls in the design host. Its dynamic
+# execution and runtime limitations are disclosed in design/README.md.
+design/source/support.js
