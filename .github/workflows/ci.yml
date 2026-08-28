@@ -70,6 +70,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      # Gitleaks queries the PR commit list through GitHub's REST API.
+      pull-requests: read
       security-events: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
