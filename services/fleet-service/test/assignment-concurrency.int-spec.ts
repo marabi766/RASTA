@@ -5,10 +5,7 @@ import {
   violatedConstraint,
 } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
-import {
-  ACTIVE_ASSIGNMENT_ASSET_CONSTRAINT,
-  ACTIVE_ASSIGNMENT_DRIVER_CONSTRAINT,
-} from '../src/fleet/constraints';
+import { identifyExclusivityConstraint } from '../src/fleet/constraints';
 import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
 
 /**
@@ -19,6 +16,18 @@ import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
  * application-level check would pass both — which is the whole reason the
  * invariant lives in a partial unique index (ADR-025).
  */
+/**
+ * A fixed instant, so nothing here depends on a clock.
+ *
+ * `started_at` used to carry a `now()` default, which meant a row could take
+ * its start from PostgreSQL's clock and its end from Node's. Those differ —
+ * measurably, on a WSL2 stack — and an assignment created and ended inside the
+ * gap violated `ck_assignment_period` for no reason a reader could guess. The
+ * default is gone now; setting the value explicitly here keeps the test honest
+ * about the fact that the application owns this column.
+ */
+const STARTED_AT = new Date('2026-08-01T06:00:00.000Z');
+
 describe('assignment exclusivity', () => {
   const org = tenants();
   let prisma: PrismaService;
@@ -83,17 +92,34 @@ describe('assignment exclusivity', () => {
       // through.
       await asActor({ organizationId: org.a }, async () => {
         await prisma.client.assignment.create({
-          data: { id: id('ASG'), driverId: driverOne, assetId: assetOne, assignedBy: 'ITEST' },
+          data: {
+            id: id('ASG'),
+            driverId: driverOne,
+            assetId: assetOne,
+            startedAt: STARTED_AT,
+            assignedBy: 'ITEST',
+          },
         });
 
         try {
           await prisma.client.assignment.create({
-            data: { id: id('ASG'), driverId: driverOne, assetId: assetTwo, assignedBy: 'ITEST' },
+            data: {
+              id: id('ASG'),
+              driverId: driverOne,
+              assetId: assetTwo,
+              startedAt: STARTED_AT,
+              assignedBy: 'ITEST',
+            },
           });
           throw new Error('expected the database to refuse a second active assignment');
         } catch (error) {
           expect(isUniqueViolation(error)).toBe(true);
-          expect(violatedConstraint(error)).toContain(ACTIVE_ASSIGNMENT_DRIVER_CONSTRAINT);
+          // Matched through `identifyExclusivityConstraint`, not against the
+          // index name. Prisma reports the indexed *column* in `meta.target`
+          // and never the index name — asserting the name here is what let the
+          // production translation silently fall through to a generic
+          // ALREADY_EXISTS before this suite ran against a real database.
+          expect(identifyExclusivityConstraint(violatedConstraint(error))).toBe('driver');
         }
       });
     });
@@ -105,16 +131,32 @@ describe('assignment exclusivity', () => {
       await asActor({ organizationId: org.a }, async () => {
         const first = id('ASG');
         await prisma.client.assignment.create({
-          data: { id: first, driverId: driverOne, assetId: assetOne, assignedBy: 'ITEST' },
+          data: {
+            id: first,
+            driverId: driverOne,
+            assetId: assetOne,
+            startedAt: STARTED_AT,
+            assignedBy: 'ITEST',
+          },
         });
         await prisma.client.assignment.updateMany({
           where: { id: first },
-          data: { endedAt: new Date(), endedBy: 'ITEST', endReason: 'COMPLETED' },
+          data: {
+            endedAt: new Date(STARTED_AT.getTime() + 3_600_000),
+            endedBy: 'ITEST',
+            endReason: 'COMPLETED',
+          },
         });
 
         await expect(
           prisma.client.assignment.create({
-            data: { id: id('ASG'), driverId: driverOne, assetId: assetTwo, assignedBy: 'ITEST' },
+            data: {
+              id: id('ASG'),
+              driverId: driverOne,
+              assetId: assetTwo,
+              startedAt: STARTED_AT,
+              assignedBy: 'ITEST',
+            },
           }),
         ).resolves.toBeDefined();
       });
@@ -125,16 +167,28 @@ describe('assignment exclusivity', () => {
     it('is enforced by the database', async () => {
       await asActor({ organizationId: org.a }, async () => {
         await prisma.client.assignment.create({
-          data: { id: id('ASG'), driverId: driverOne, assetId: assetOne, assignedBy: 'ITEST' },
+          data: {
+            id: id('ASG'),
+            driverId: driverOne,
+            assetId: assetOne,
+            startedAt: STARTED_AT,
+            assignedBy: 'ITEST',
+          },
         });
 
         try {
           await prisma.client.assignment.create({
-            data: { id: id('ASG'), driverId: driverTwo, assetId: assetOne, assignedBy: 'ITEST' },
+            data: {
+              id: id('ASG'),
+              driverId: driverTwo,
+              assetId: assetOne,
+              startedAt: STARTED_AT,
+              assignedBy: 'ITEST',
+            },
           });
           throw new Error('expected the database to refuse a second driver on one machine');
         } catch (error) {
-          expect(violatedConstraint(error)).toContain(ACTIVE_ASSIGNMENT_ASSET_CONSTRAINT);
+          expect(identifyExclusivityConstraint(violatedConstraint(error))).toBe('asset');
         }
       });
     });
@@ -210,7 +264,13 @@ describe('assignment exclusivity', () => {
       const assignmentId = id('ASG');
       await asActor({ organizationId: org.a }, () =>
         prisma.client.assignment.create({
-          data: { id: assignmentId, driverId: driverOne, assetId: assetOne, assignedBy: 'ITEST' },
+          data: {
+            id: assignmentId,
+            driverId: driverOne,
+            assetId: assetOne,
+            startedAt: STARTED_AT,
+            assignedBy: 'ITEST',
+          },
         }),
       );
 

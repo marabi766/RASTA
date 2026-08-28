@@ -155,9 +155,12 @@ describe('usage recording', () => {
 
       expect(results[0].id).toBe(results[1].id);
 
-      const stored = await prisma.client.usageRecord.findMany({
-        where: { organizationId: org.a, clientReference },
-      });
+      // Read back inside a context. A scoped model outside one throws by
+      // design, and the guard doing exactly that is what caught this
+      // assertion the first time it ran against a real database.
+      const stored = await asActor({ organizationId: org.a }, () =>
+        prisma.client.usageRecord.findMany({ where: { clientReference } }),
+      );
       expect(stored).toHaveLength(1);
     });
 

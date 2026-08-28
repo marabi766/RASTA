@@ -47,7 +47,13 @@ describe('tenant isolation', () => {
           },
         });
         await prisma.client.assignment.create({
-          data: { id: assignmentId, driverId, assetId, assignedBy: 'ITEST' },
+          data: {
+            id: assignmentId,
+            driverId,
+            assetId,
+            startedAt: new Date('2026-08-01T06:00:00.000Z'),
+            assignedBy: 'ITEST',
+          },
         });
         await prisma.client.usageRecord.create({
           data: {
