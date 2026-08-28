@@ -139,6 +139,7 @@ main            ← همیشه سبز، همیشه قابل استقرار
   └─ fix/<scope>-<short-description>
   └─ chore/<scope>-<short-description>
   └─ docs/<scope>-<short-description>
+  └─ design/claude-design
 ```
 
 **Commit** — قالب Conventional Commits:
@@ -153,6 +154,9 @@ Refs: docs/adr/ADR-0XX.md
 
 قواعد:
 
+- همه خروجی‌های تأییدشده Claude Design فقط در شاخه دائمی
+  `design/claude-design` نسخه‌بندی می‌شوند و از طریق Pull Request به `main` می‌رسند.
+  این شاخه محل کد Backend یا Frontend تولیدی نیست.
 - هر Commit **اتمیک**، **خوانا** و **قابل برگشت**.
 - Commit عظیم و مبهم ممنوع. اگر پیام Commit به «and» نیاز دارد، احتمالاً دو Commit است.
 - هرگز `--no-verify` و هرگز دور زدن Hookها.
