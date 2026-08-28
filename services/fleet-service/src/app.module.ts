@@ -186,7 +186,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly relay: OutboxRelay,
     private readonly store: PrismaOutboxStore,
-    private readonly prisma: PrismaService,
+    private readonly repository: FleetRepository,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -205,10 +205,13 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
           { service: SERVICE_NAME },
           await this.store.oldestPendingAgeSeconds(),
         );
-        // Counted across every tenant, which is why it does not go through the
-        // scoped client: this is an operational gauge for the deployment, not
-        // a figure any tenant sees.
-        assignmentsActiveTotal.set({ service: SERVICE_NAME }, await this.countActiveAssignments());
+        // Spans tenants by design — an operational gauge, never a figure any
+        // tenant sees. It goes through the repository's `runUnscoped` path so
+        // the crossing stays greppable and lands in the audit log.
+        assignmentsActiveTotal.set(
+          { service: SERVICE_NAME },
+          await this.repository.countActiveAssignmentsAcrossTenants(),
+        );
       } catch {
         // Metrics must never take the service down.
       }
@@ -222,13 +225,6 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // Let an in-flight batch finish so it is not republished on restart.
     await this.relay.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-  }
-
-  private async countActiveAssignments(): Promise<number> {
-    const rows = await this.prisma.client.$queryRaw<{ count: bigint }[]>`
-      SELECT COUNT(*)::bigint AS count FROM assignment WHERE ended_at IS NULL
-    `;
-    return Number(rows[0]?.count ?? 0n);
   }
 }
 

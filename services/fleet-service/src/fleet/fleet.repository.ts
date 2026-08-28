@@ -108,6 +108,22 @@ export class FleetRepository {
     return (tx ?? this.client).assignment.findFirst({ where: { driverId, endedAt: null } });
   }
 
+  /**
+   * How many assignments are open across the whole deployment.
+   *
+   * Feeds a Prometheus gauge, so it deliberately spans tenants — no tenant
+   * ever sees the number. It goes through `runUnscoped` and the Prisma model
+   * API rather than raw SQL for one reason: raw SQL is not intercepted by the
+   * tenant extension, so a crossing written that way is invisible both to
+   * `grep -r runUnscoped` and to the unscoped-query audit log. The audit story
+   * only works if every crossing is enumerable, including the harmless ones.
+   */
+  async countActiveAssignmentsAcrossTenants(): Promise<number> {
+    return runUnscoped('operational gauge across the deployment; never returned to a tenant', () =>
+      this.client.assignment.count({ where: { endedAt: null } }),
+    );
+  }
+
   /** Every active assignment in the tenant, keyed by asset. Feeds availability. */
   async findActiveAssignments(assetIds?: readonly string[]) {
     return this.client.assignment.findMany({
@@ -308,6 +324,21 @@ export class FleetRepository {
   async findAssetRef(id: string, tx?: ExtendedPrismaClient) {
     return runUnscoped('asset reference replica is platform-wide, not tenant data', () =>
       (tx ?? this.client).assetRef.findFirst({ where: { id } }),
+    );
+  }
+
+  /**
+   * Several replica rows in one query.
+   *
+   * Exists so the utilization report does not call {@link findAssetRef} once
+   * per asset. That version issued up to `limit` (200) round trips to decorate
+   * a report with names — the textbook N+1, and the one query on this service
+   * that grows with the size of the fleet rather than with the page.
+   */
+  async findAssetRefs(ids: readonly string[]) {
+    if (ids.length === 0) return [];
+    return runUnscoped('asset reference replica is platform-wide, not tenant data', () =>
+      this.client.assetRef.findMany({ where: { id: { in: [...ids] } } }),
     );
   }
 

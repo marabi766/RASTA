@@ -267,15 +267,16 @@ export class AvailabilityService {
     const totals = await this.repository.usageTotals(organizationId, from, to, query);
     const assetIds = totals.map((row) => row.asset_id);
 
+    // Two batched reads, not one per asset. Decorating the report with names
+    // one row at a time would issue up to `limit` round trips — the query that
+    // grows with the fleet rather than with the page.
     const [counts, assets] = await Promise.all([
       this.repository.assignmentCounts(organizationId, from, to, assetIds),
-      Promise.all(assetIds.map((id) => this.repository.findAssetRef(id))),
+      this.repository.findAssetRefs(assetIds),
     ]);
 
     const countByAsset = new Map(counts.map((row) => [row.asset_id, row.assignment_count]));
-    const nameByAsset = new Map(
-      assets.filter((asset) => asset !== null).map((asset) => [asset.id, asset.name]),
-    );
+    const nameByAsset = new Map(assets.map((asset) => [asset.id, asset.name]));
 
     const windowHours = ((to.getTime() - from.getTime()) / 86_400_000) * availableHoursPerDay;
 
