@@ -188,6 +188,17 @@ Checklist کامل در [`15-repository-architecture.md § ۱۵٫۸`](15-reposit
 · پایگاه داده و نقش در اسکریپت init · Topic کافکا · متغیرهای `.env.example` · مستندسازی در
 سند ۰۴ · ماژول Health و Outbox · **تست Tenant Isolation پیش از نخستین Endpoint** · Helm.
 
+**نمونه کارشده:** `services/maintenance-service` (2026-08-28) تازه‌ترین سرویسی است
+که این مسیر را کامل رفته و کوتاه‌ترین راه یادگیری الگوهاست — Outbox، دو Consumer با
+دو Group، Tenant Guard، مجوزدهی سطح Object، و پنج Suite تست Integration روی
+PostgreSQL و Kafka واقعی. سه چیز که آنجا از فاز ناوگان آموخته و تکرار شد:
+
+- **تست Integration از روز اول**، بدون `--passWithNoTests` روی Project Integration.
+- **Invariant را در پایگاه داده بگذار**، نه فقط در لایه Application — دو درخواست
+  هم‌زمان از هر بررسی Application عبور می‌کنند.
+- **هیچ ستون زمانی کسب‌وکاری `@default(now())` نداشته باشد** اگر یک CHECK آن را با
+  ستونی که برنامه می‌نویسد مقایسه می‌کند. ساعت PostgreSQL و ساعت Node یکی نیستند.
+
 ---
 
 ## ۲۲٫۸ عیب‌یابی

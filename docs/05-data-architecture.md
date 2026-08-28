@@ -221,26 +221,29 @@ HAVING SUM(CASE WHEN direction='DEBIT' THEN amount_minor ELSE -amount_minor END)
 
 قاعده: **هر Index باید یک Query واقعی را توجیه کند.** Index بدون Query، هزینه نوشتن است.
 
-| جدول                  | Index                                                                  | Query پشتیبان                          |
-| --------------------- | ---------------------------------------------------------------------- | -------------------------------------- |
-| `asset`               | `(organization_id, status, asset_type)`                                | فهرست دارایی داشبورد ناوگان            |
-| `asset`               | `GIN (search_vector)` — `pg_trgm`                                      | جست‌وجوی متنی دارایی                   |
-| `asset_location`      | `GIST (location)`                                                      | «دارایی‌های نزدیک این پروژه»           |
-| `usage_record`        | `(organization_id, asset_id, recorded_at DESC)`                        | تاریخچه کارکرد دستگاه                  |
-| `assignment`          | `UNIQUE (driver_id) WHERE ended_at IS NULL`                            | **Invariant:** یک تخصیص فعال به راننده |
-| `maintenance_request` | `UNIQUE (asset_id, type) WHERE status IN ('OPEN','IN_PROGRESS')`       | **کنترل سند: منع درخواست تکراری**      |
-| `maintenance_request` | `(organization_id, status, due_date)`                                  | سررسیدهای پیش رو                       |
-| `order`               | `(organization_id, status, created_at DESC)`                           | فهرست سفارش‌ها                         |
-| `order`               | `(supplier_organization_id, status, created_at DESC)`                  | نمای تأمین‌کننده                       |
-| `bid`                 | `UNIQUE (tender_id, contractor_id)`                                    | یک پیشنهاد به‌ازای هر پیمانکار         |
-| `bid`                 | `(tender_id, submitted_at)`                                            | ترتیب دریافت — الزام حسابرسی           |
-| `ledger_entry`        | `(account_id, posted_at DESC)`                                         | صورت‌حساب                              |
-| `ledger_entry`        | `(journal_id)`                                                         | بررسی توازن                            |
-| `wallet`              | `UNIQUE (organization_id, currency)`                                   | یک کیف پول به‌ازای هر ارز              |
-| `transaction`         | `UNIQUE (idempotency_key, organization_id)`                            | **Invariant:** منع تراکنش تکراری       |
-| `audit_event`         | `(organization_id, occurred_at DESC)` + `(actor_id, occurred_at DESC)` | جست‌وجوی حسابرسی                       |
-| `outbox_message`      | `(created_at) WHERE published_at IS NULL`                              | Relay                                  |
-| `organization`        | `GIST (path)` — `ltree`                                                | زیردرخت سلسله‌مراتب                    |
+| جدول                   | Index                                                                  | Query پشتیبان                          |
+| ---------------------- | ---------------------------------------------------------------------- | -------------------------------------- |
+| `asset`                | `(organization_id, status, asset_type)`                                | فهرست دارایی داشبورد ناوگان            |
+| `asset`                | `GIN (search_vector)` — `pg_trgm`                                      | جست‌وجوی متنی دارایی                   |
+| `asset_location`       | `GIST (location)`                                                      | «دارایی‌های نزدیک این پروژه»           |
+| `usage_record`         | `(organization_id, asset_id, recorded_at DESC)`                        | تاریخچه کارکرد دستگاه                  |
+| `assignment`           | `UNIQUE (driver_id) WHERE ended_at IS NULL`                            | **Invariant:** یک تخصیص فعال به راننده |
+| `maintenance_request`  | `UNIQUE (asset_id, type) WHERE status IN ('OPEN','IN_PROGRESS')`       | **کنترل سند: منع درخواست تکراری**      |
+| `repair_order`         | `UNIQUE (maintenance_request_id) WHERE status <> 'CANCELLED'`          | یک ارجاع زنده به‌ازای هر درخواست       |
+| `maintenance_schedule` | `UNIQUE (organization_id, asset_id, title) WHERE status <> 'ARCHIVED'` | یک برنامه زنده به‌ازای هر عنوان        |
+| `maintenance_cost`     | `CHECK ck_cost_provenance`                                             | **هر خط هزینه مبدأ دارد** (ADR-028)    |
+| `maintenance_request`  | `(organization_id, status, due_date)`                                  | سررسیدهای پیش رو                       |
+| `order`                | `(organization_id, status, created_at DESC)`                           | فهرست سفارش‌ها                         |
+| `order`                | `(supplier_organization_id, status, created_at DESC)`                  | نمای تأمین‌کننده                       |
+| `bid`                  | `UNIQUE (tender_id, contractor_id)`                                    | یک پیشنهاد به‌ازای هر پیمانکار         |
+| `bid`                  | `(tender_id, submitted_at)`                                            | ترتیب دریافت — الزام حسابرسی           |
+| `ledger_entry`         | `(account_id, posted_at DESC)`                                         | صورت‌حساب                              |
+| `ledger_entry`         | `(journal_id)`                                                         | بررسی توازن                            |
+| `wallet`               | `UNIQUE (organization_id, currency)`                                   | یک کیف پول به‌ازای هر ارز              |
+| `transaction`          | `UNIQUE (idempotency_key, organization_id)`                            | **Invariant:** منع تراکنش تکراری       |
+| `audit_event`          | `(organization_id, occurred_at DESC)` + `(actor_id, occurred_at DESC)` | جست‌وجوی حسابرسی                       |
+| `outbox_message`       | `(created_at) WHERE published_at IS NULL`                              | Relay                                  |
+| `organization`         | `GIST (path)` — `ltree`                                                | زیردرخت سلسله‌مراتب                    |
 
 ---
 

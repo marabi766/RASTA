@@ -185,16 +185,82 @@ Consumer Group: `fleet-service.asset-sync`. Topicها: `rasta.asset.v1` ·
 
 ## Maintenance — `rasta.maintenance.v1`
 
-| رویداد                  | مصرف‌کنندگان                                 | Payload کلیدی                             |
-| ----------------------- | -------------------------------------------- | ----------------------------------------- |
-| `MAINTENANCE_DUE`       | **notification** · fleet · analytics         | `assetId`, `scheduleId`, `dueBy`, `basis` |
-| `BREAKDOWN_REPORTED`    | notification · asset · analytics             | `assetId`, `requestId`, `severity`        |
-| `MAINTENANCE_CREATED`   | asset · analytics                            | `requestId`, `assetId`, `type`            |
-| `MAINTENANCE_STARTED`   | fleet (در دسترس بودن) · asset                | `requestId`, `assetId`                    |
-| `WORKSHOP_ASSIGNED`     | notification · supplier                      | `requestId`, `workshopOrganizationId`     |
-| `REPAIR_COMPLETED`      | asset · supplier (امتیاز) · analytics        | `repairOrderId`, `totalCost`              |
-| `MAINTENANCE_COMPLETED` | asset · economic (پاداش) · fleet · analytics | `requestId`, `assetId`, `totalCost`       |
-| `MAINTENANCE_APPROVED`  | **economic (مجوز تسویه)** · analytics        | `requestId`, `approvedBy`, `amount`       |
+> **پیاده‌شده و LIVE VERIFIED (2026-08-28).** `maintenance-service` هر ۹ رویداد
+> زیر را تولید می‌کند. جدول این بخش پیش از ساخت سرویس نوشته شده بود و اینجا با
+> کد Sync شده — سه تفاوت که پیروی تحت‌اللفظی از نسخه پیشین، مصرف‌کننده‌ها را
+> بی‌صدا می‌شکست، در پی جدول توضیح داده شده است.
+
+| رویداد                  | Aggregate           | مصرف‌کنندگان                                 | Payload                                                                                                                                             |
+| ----------------------- | ------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MAINTENANCE_DUE`       | MaintenanceSchedule | **notification** · fleet · analytics         | `scheduleId`, `assetId`, `organizationId`, `title`, `basis`, `state`, `dueBy`, `dueAtMeter`                                                         |
+| `BREAKDOWN_REPORTED`    | MaintenanceRequest  | notification · asset · analytics             | `requestId`, `assetId`, `organizationId`, `severity`, `title`, `reportedAt`                                                                         |
+| `MAINTENANCE_CREATED`   | MaintenanceRequest  | **asset** (پرونده) · analytics               | `requestId`, `assetId`, `organizationId`, `type`, `title`, `scheduleId`, `dueDate`, `reportedAt`                                                    |
+| `WORKSHOP_ASSIGNED`     | RepairOrder         | notification · supplier                      | `requestId`, `repairOrderId`, `assetId`, `organizationId`, `workshopOrganizationId`, `assignedAt`                                                   |
+| `MAINTENANCE_STARTED`   | MaintenanceRequest  | **fleet** (در دسترس بودن) · **asset**        | `requestId`, `repairOrderId`, `assetId`, `organizationId`, `startedAt`, `workshopOrganizationId`                                                    |
+| `REPAIR_COMPLETED`      | RepairOrder         | asset · supplier (امتیاز) · analytics        | `repairOrderId`, `requestId`, `assetId`, `organizationId`, `workshopOrganizationId`, `completedAt`, **`totalCostMinor`**, `currency`                |
+| `MAINTENANCE_COMPLETED` | MaintenanceRequest  | **asset** · **fleet** · economic · analytics | `requestId`, `assetId`, `organizationId`, `type`, `scheduleId`, `completedAt`, `downtimeMinutes`, **`totalCostMinor`**, `currency`                  |
+| `MAINTENANCE_APPROVED`  | MaintenanceRequest  | **economic (مجوز تسویه)** · analytics        | `requestId`, `assetId`, `organizationId`, `approvedBy`, `approvedAt`, `workshopOrganizationId`, **`totalCostMinor`**, `currency`, `costBreakdown[]` |
+| `MAINTENANCE_CANCELLED` | MaintenanceRequest  | asset · notification · audit · analytics     | `requestId`, `assetId`, `organizationId`, `cancelledAt`, `reason`, `previousStatus`                                                                 |
+
+**کلید پارتیشن هر نُه رویداد `assetId` است، نه `aggregateId`** — همان استثنای
+آگاهانه‌ای که `rasta.fleet.v1` دارد. هر مصرف‌کننده درباره **یک دستگاه** استدلال
+می‌کند، و ترتیب فقط درون یک پارتیشن تضمین می‌شود. اگر `MAINTENANCE_STARTED` و
+`MAINTENANCE_COMPLETED` یک دستگاه روی دو پارتیشن می‌نشستند، دستگاه تعمیرشده
+می‌توانست برای همیشه در `IN_MAINTENANCE` بماند.
+
+**هر نُه رویداد `assetId` حمل می‌کنند — بدون استثنا.** ستون Payload نسخه پیشین
+این سند برای `MAINTENANCE_DUE`، `WORKSHOP_ASSIGNED` و `MAINTENANCE_APPROVED`
+آن را نیاورده بود. پیروی تحت‌اللفظی از آن، رویدادی می‌ساخت که `TimelineConsumer`
+در `asset-service` نمی‌تواند به چیزی بچسباند (`timelineSourceSchema` بدون
+`assetId` رویداد را بی‌صدا Skip می‌کند) — همان اشتباهی که `ASSIGNMENT_ENDED`
+مرتکب شد. تست قرارداد این را قفل کرده (`src/maintenance/events.spec.ts`).
+
+**هزینه به‌صورت `totalCostMinor` (رشته، واحد فرعی) + `currency` منتقل می‌شود،
+نه `{ amountMinor, currency }`.** انحراف آگاهانه از قاعده پول این سند. علت:
+`TimelineConsumer` در `asset-service` پیش از ساخت این سرویس نوشته شده و فیلد
+مسطح `totalCostMinor` را می‌خواند و هر چیز دیگری را `null` می‌گیرد — یعنی شکل
+تودرتو باعث می‌شد پرونده هر دستگاه، هزینه هر تعمیر را صفر ثبت کند. حمل هر دو
+شکل بدتر بود: دو نمایش از یک مبلغ، در نهایت با هم اختلاف پیدا می‌کنند.
+
+**`MAINTENANCE_CANCELLED` افزوده این فاز است و در نسخه پیشین کاتالوگ نبود.**
+بدون آن، هر مصرف‌کننده‌ای که `MAINTENANCE_CREATED` را دیده تا ابد باور می‌کند
+کار باز است، و `audit-service` — که تنها ورودی‌اش رویداد است — هرگز نمی‌فهمد کار
+رها شده (AGENTS.md S-06). قاعده افزودن رویداد فراتر از کاتالوگ در این سرویس یکی
+است: **فقط برای درست نگه داشتن ادعایی که قبلاً منتشر شده.**
+
+**`MAINTENANCE_APPROVED` تنها مجوز تسویه است.** کنترل اجباری سند محصول
+(«الزام تأیید کاربر پیش از تسویه نهایی»، `docs/17`). `costBreakdown` تفکیک
+به‌ازای دسته (`PART`, `LABOUR`, `SERVICE`, `EXTERNAL_REPAIR`, `OTHER`) را حمل
+می‌کند تا `economic-service` بتواند تسویه را خط‌به‌خط تطبیق دهد، نه اینکه یک عدد
+را بپذیرد (ADR-028). هیچ نرخ کارمزد، هیچ قاعده تقسیم و هیچ زمان‌بندی پرداختی در
+این Payload نیست — هیچ‌کدام مال این سرویس نیستند و چند تا از آن‌ها هنوز پرسش باز
+هستند (`docs/24` Q-08).
+
+**Idempotency:** `eventId` کلید مصرف‌کننده است (جدول `processed_event`).
+Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintenance.v1.dlq`.
+
+### رویدادهایی که maintenance مصرف می‌کند
+
+دو Consumer Group جدا، چون دو کار متفاوت با دو نوع شکست‌اند (`docs/07` § ۷٫۱۰):
+
+| Consumer Group                   | Topic            | رویدادها                                                                                                    | اثر                                                        |
+| -------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `maintenance-service.usage`      | `rasta.fleet.v1` | **`USAGE_RECORDED`**                                                                                        | انباشت `asset_usage_meter` + ارزیابی برنامه‌های کارکردمحور |
+| `maintenance-service.asset-sync` | `rasta.asset.v1` | `ASSET_CREATED` · `ASSET_ACTIVATED` · `ASSET_STATUS_CHANGED` · `ASSET_TRANSFERRED` · `ASSET_DECOMMISSIONED` | Replica مرجع `asset_ref`                                   |
+
+هر دو از Offset صفر می‌خوانند: سرویسی که فقط دستگاه‌های ثبت‌شده — و ساعت‌های
+کارکرد — پس از نخستین استقرار خودش را می‌شناسد، نمی‌تواند یک برنامه سرویس را
+ارزیابی کند.
+
+**آنچه عمداً مصرف نمی‌شود:**
+
+- **`ASSET_UPDATED`** — فقط _نام_ فیلدهای تغییرکرده را حمل می‌کند، نه مقدارشان،
+  پس چیزی برای اعمال ندارد. مصرف یک رویداد برای انجام ندادن هیچ کاری، فهرست
+  اشتراک را از توصیف واقعیت تهی می‌کند.
+- **`PAYMENT_COMPLETED`** — `docs/04` § ۴٫۷ آن را برای «بستن چرخه تسویه» فهرست
+  کرده. `economic-service` وجود ندارد، پس معنای «بستن» تعریف‌نشده است و اختراع
+  یک وضعیت پس از تأیید، دقیقاً همان فرآیند مالی را اختراع می‌کند که این سرویس
+  اجازه مالکیتش را ندارد (ADR-028). **DEFERRED، آگاهانه.**
 
 ## Marketplace — `rasta.marketplace.v1`
 
