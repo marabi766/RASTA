@@ -7,3 +7,4 @@ coverage
 pnpm-lock.yaml
 **/src/generated
 docs/api/*.generated.json
+design/source/support.js
