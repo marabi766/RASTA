@@ -240,7 +240,8 @@ jobs:
           }
           for topic in \
             rasta.fleet.v1 rasta.fleet.v1.retry rasta.fleet.v1.dlq \
-            rasta.asset.v1 rasta.insurance.v1 rasta.maintenance.v1; do
+            rasta.asset.v1 rasta.insurance.v1 \
+            rasta.maintenance.v1 rasta.maintenance.v1.retry rasta.maintenance.v1.dlq; do
             create "$topic"
           done
 
@@ -268,6 +269,7 @@ jobs:
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
 
       - name: Integration tests
         run: pnpm run test:integration
@@ -278,6 +280,7 @@ jobs:
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
           REDIS_URL: redis://localhost:6379
 
       # These are called out separately from the rest of the suite so a failure
@@ -289,17 +292,24 @@ jobs:
         # not a flaky test, and must never be waved through (AGENTS.md § 5).
         #
         # Both projects, because the strongest isolation evidence now lives in
-        # fleet-service's integration suite — it proves the guard against a
-        # real database rather than a mock that would assume the behaviour.
+        # the integration suites — they prove the guard against a real database
+        # rather than a mock that would assume the behaviour.
+        #
+        # The integration pattern names the invariants the product document
+        # makes mandatory, one word each: `exclusivity` is fleet's one-driver
+        # rule, `duplicate` is maintenance's duplicate-report control, and
+        # `provenance` is the rule that a cost line must name the work that
+        # produced it — the property economic-service will audit against.
         run: |
           pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"
-          pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity)"
+          pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance)"
         env:
           NODE_ENV: test
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
 
   # ---------------------------------------------------------------------------
   # Container build and image scan. Only on main, because it is the slowest
@@ -319,7 +329,14 @@ jobs:
         # two images we ship were never built or scanned by CI
         # (PROJECT_MEMORY § 22). Adding them here is what makes the scan gate
         # cover what we actually deploy.
-        service: [identity-service, organization-service, asset-service, fleet-service]
+        service:
+          [
+            identity-service,
+            organization-service,
+            asset-service,
+            fleet-service,
+            maintenance-service,
+          ]
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
