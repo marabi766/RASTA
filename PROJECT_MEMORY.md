@@ -10,16 +10,18 @@
 > سرویس از حالت تمیز، تست زنده Auth/Tenant Isolation/Event Flow، و بررسی مستقیم
 > GitHub Actions.
 >
-> **آخرین به‌روزرسانی:** 2026-08-28 — **`fleet-service` ساخته شد** (پنجمین سرویس).
-> ۶۷ تست واحد + ۴ Suite تست Integration **واقعی** — نخستین تست‌های Integration
-> این Repository، که خودشان دو باگ واقعی گرفتند. `pnpm verify` کامل سبز
-> (۲۹۲ تست). دو ADR تازه (۰۲۵، ۰۲۶) و دو Open Question تازه (Q-22، Q-23).
+> **آخرین به‌روزرسانی:** 2026-08-28 — **`fleet-service` ساخته و زنده تأیید شد**
+> (پنجمین سرویس). ۷۵ تست واحد + **۳۲ تست Integration روی PostgreSQL و Kafka
+> واقعی** — نخستین تست‌های Integration این Repository. `pnpm verify` کامل سبز
+> (۳۰۰ تست واحد). دو ADR تازه (۰۲۵، ۰۲۶) و دو Open Question تازه (Q-22، Q-23).
 >
-> **⚠️ Live Verification انجام نشد.** Docker Desktop روی این ماشین در میانه کار
-> از کار افتاد و بازنگشت — بخش ۲۲، **D-010**. مسیر E2E زنده
-> (Gateway → fleet → Kafka → Asset Projector) **NOT VERIFIED** است. تست‌های
-> Integration پیش از خرابی تا حدی روی PostgreSQL واقعی اجرا شدند اما **یک اجرای
-> کامل سبز ثبت نشده**. CI هم هنوز روی این تغییرات اجرا نشده.
+> **✅ Live Verification انجام شد** — سناریوی کامل از راه Gateway با توکن واقعی
+> Keycloak، شامل حلقه `fleet → Outbox → Kafka → Asset Projector → Timeline`،
+> Idempotency، Tenant Isolation و اجرای Docker Image. جدول شواهد در بخش ۲۱.
+>
+> **این تست‌ها پنج باگ واقعی گرفتند** — سه‌تا در کد تولیدی، دوتا در خود تست‌ها.
+> هیچ‌کدام با تست واحد پیدا نمی‌شد (بخش ۲۲). **D-010 رفع شد.**
+> CI هنوز روی این تغییرات اجرا نشده.
 
 ---
 
@@ -59,11 +61,11 @@
 9. asset-service  ← کامل (آخرین سرویس ساخته‌شده)
 10. packages/nest-common: EventConsumer  ← کامل (زیرساخت مصرف رویداد)
 11. سخت‌سازی پیش از fleet: D-005 (CI سبز شد) + D-007 (ثبت‌نام گمنام)
-12. fleet-service  ← کامل (کد + تست)، اما Live Verify نشده (D-010)
+12. fleet-service  ← کامل: کد، تست، و تأیید زنده End-to-End
 ```
 
 **گام بعدی طبق مستندسازی این Repository:** `maintenance-service` (بخش ۲۸) —
-**پس از** رفع D-010 و تأیید زنده `fleet-service`.
+`fleet-service` زنده تأیید شد (بخش ۲۱).
 
 ---
 
@@ -95,13 +97,15 @@
 | Anonymous public endpoint (self-registration) از راه Gateway |               ✅               |   ✅ (17 تست)    | ✅ **`201` زنده گرفته شد — D-007 رفع شد**                                                    |
 | CI/CD روی GitHub Actions                                     |               ✅               |        —         | ✅ **CI VERIFIED** تا Commit `1872bd7` — Run `33076090420`. تغییرات fleet **هنوز اجرا نشده** |
 | Docker Build (identity, organization)                        |               ✅               |        —         | ✅ **CI VERIFIED** — Build + Trivy Scan هر دو Image روی Runner سبز                           |
-| Docker Build (asset, fleet)                                  | ✅ Dockerfile دارند، در Matrix |        —         | ⚠️ **NOT VERIFIED** — به Matrix افزوده شد اما هنوز روی Runner ساخته نشده                     |
+| Docker Build (asset, fleet)                                  | ✅ Dockerfile دارند، در Matrix |        —         | ✅ fleet محلی Build و اجرا شد (non-root)؛ روی Runner هنوز نه                                 |
 | Docker Build (api-gateway)                                   |      ❌ Dockerfile ندارد       |        —         | ❌ باز (بخش ۲۲)                                                                              |
-| **fleet-service — Driver/Assignment/Usage/Availability**     |               ✅               |   ✅ (۶۷ تست)    | ❌ **NOT VERIFIED** — Docker از کار افتاد (D-010)                                            |
-| **Assignment Exclusivity (Partial Unique Index)**            |               ✅               | ✅ (Integration) | ⚠️ Index در پایگاه داده **مستقیماً تأیید شد**؛ اجرای کامل Suite ثبت نشده                     |
-| **Fleet → Kafka → Asset Projector**                          |               ✅               |   ✅ (قرارداد)   | ❌ **NOT VERIFIED** زنده — تست نوشته شده، اجرا نشده                                          |
+| **fleet-service — Driver/Assignment/Usage/Availability**     |               ✅               |   ✅ (۷۵ تست)    | ✅ از راه Gateway با توکن واقعی Keycloak                                                     |
+| **Assignment Exclusivity (Partial Unique Index)**            |               ✅               | ✅ (Integration) | ✅ زنده: راننده مشغول → `422 DRIVER_ALREADY_ASSIGNED`                                        |
+| **Fleet → Kafka → Asset Projector**                          |               ✅               |   ✅ (۳۲ تست)    | ✅ **زنده** — Timeline پر شد، وضعیت `IDLE→ASSIGNED→ACTIVE`                                   |
+| **Idempotency (ثبت آفلاین + Replay مصرف‌کننده)**             |               ✅               |        ✅        | ✅ زنده: ارسال دوباره = همان رکورد؛ Replay کافکا = بدون اثر دوم                              |
+| **correlationId در کل زنجیره**                               |               ✅               |        ✅        | ✅ زنده: HTTP → Outbox → Header کافکا → Timeline، یکسان                                      |
 | Frontend (`apps/web`, `apps/admin`)                          |               ❌               |        —         | NOT_STARTED — پوشه خالی                                                                      |
-| Integration Tests (`*.int-spec.ts`)                          |    ✅ **۴ Suite در fleet**     |        —         | ⚠️ اجرای جزئی روی PostgreSQL واقعی؛ اجرای کامل سبز ثبت نشده (D-010)                          |
+| Integration Tests (`*.int-spec.ts`)                          |    ✅ **۴ Suite در fleet**     |        —         | ✅ **۳۲ از ۳۲ سبز** روی PostgreSQL و Kafka واقعی                                             |
 | E2E Tests (`tests/e2e`, Playwright)                          |               ❌               |        —         | پوشه خالی، بدون Config                                                                       |
 | maintenance/marketplace/… (۱۱ سرویس)                         |               ❌               |        —         | NOT_STARTED                                                                                  |
 
@@ -149,7 +153,7 @@ services/
   identity-service/       IMPLEMENTED
   organization-service/   IMPLEMENTED
   asset-service/          IMPLEMENTED
-  fleet-service/          IMPLEMENTED — کد و تست کامل؛ Live Verify نشده (D-010)
+  fleet-service/          IMPLEMENTED — کد، تست و تأیید زنده کامل
   (11 سرویس دیگر)         NOT_STARTED — حتی پوشه هم وجود ندارد
 
 packages/
@@ -531,11 +535,12 @@ Integration واقعی دارد (۴ Suite در `services/fleet-service/test/`):
   ماشین بدون Docker قابل اجرا بماند. Suite Integration یک دروازه جدا است که CI
   صریحاً در برابر سرویس‌های Provision‌شده اجرا می‌کند.
 
-**⚠️ وضعیت اجرا — صادقانه.** این تست‌ها پیش از خرابی Docker (D-010) تا حدی روی
-PostgreSQL واقعی اجرا شدند و **در همان اجرا دو باگ واقعی گرفتند** (هر دو رفع
-شد — بخش ۲۲). اما **یک اجرای کامل سبز ثبت نشده است.** تنها چیزی که مثبتاً تأیید
-شد: هر دو Partial Unique Index و هر شش CHECK Constraint با پرس‌وجوی مستقیم از
-`pg_indexes` و `pg_constraint` در پایگاه داده دیده شدند.
+**وضعیت اجرا:** **۳۲ از ۳۲ سبز** روی PostgreSQL و Kafka واقعی (2026-08-28).
+
+این Suite در نخستین اجرای واقعی‌اش **پنج باگ** گرفت که هیچ‌کدام با تست واحد
+پیدا نمی‌شد — سه‌تا در کد تولیدی و دوتا در خود تست‌ها. فهرست کامل در بخش ۲۲.
+همچنین هر دو Partial Unique Index و هر شش CHECK Constraint با پرس‌وجوی مستقیم
+از `pg_indexes` و `pg_constraint` در پایگاه داده دیده شدند.
 
 **E2E Tests:** `tests/e2e/` پوشه‌ای خالی است، بدون `playwright.config.ts`.
 `pnpm test:e2e` هست اما `turbo run test:e2e` روی هیچ Package ای Script
@@ -590,29 +595,65 @@ PostgreSQL واقعی اجرا شدند و **در همان اجرا دو باگ 
 - ✅ **D-005 رفع شد** — CI روی GitHub Actions سبز است (**CI VERIFIED**).
 - ✅ **D-007 رفع شد** — ثبت‌نام گمنام از راه Gateway کار می‌کند
   (**LIVE VERIFIED**)، بدون تضعیف Zero Trust.
+- ✅ **D-010 رفع شد** — Docker بازیابی شد؛ ریشه: Socket های یتیم (بخش ۲۲).
 - ⏳ **D-006 باز است** — تصادم پورت Redis روی این ماشین توسعه.
 - 🆕 **D-008 باز است** — سه قاعده Supply-Chain که Lockfile فعلی رد می‌کند.
-- 🆕 **D-009 باز است** — Healthcheck کانتینر Temporal (اثر عملی: هیچ).
+- ⚠️ **D-009** — Healthcheck کانتینر Temporal. پس از بازیابی محیط (D-010)
+  `healthy` شد، اما ریشه‌یابی قطعی نشد.
 
 ---
 
 ## ۲۱. Current Runtime State
 
-در لحظه این Audit (2026-08-27، بعدازظهر)، از حالت **کاملاً تمیز** (همه
-پردازه‌ها Kill شده) بالا آورده شدند و سالم گزارش دادند:
+در لحظه تأیید زنده (2026-08-28)، هر ۵ سرویس پیاده‌شده از حالت تمیز بالا آمدند و
+سالم گزارش دادند:
 
 ```
+api-gateway           :3010   {"status":"ok","checks":{"redis":true}}
 identity-service      :3101   {"status":"ok","checks":{"database":true,"kafka":true}}
 organization-service  :3102   {"status":"ok","checks":{"database":true,"kafka":true}}
 asset-service         :3103   {"status":"ok","checks":{"database":true,"kafka":true}}
-api-gateway           :3010   {"status":"ok","checks":{"redis":true}}
+fleet-service         :3104   {"status":"ok","checks":{"database":true,"kafka":true}}
 ```
 
-Infra Docker (`docker compose ps`): `postgres, redis, kafka, keycloak,
-minio` همه `healthy`؛ **`temporal` unhealthy** — بخش ۱۷ و D-009.
+Infra Docker: `postgres, redis, kafka, keycloak, minio` همه `healthy`.
+**`temporal` این‌بار `healthy` است** — پس از بازیابی Docker (D-010) دیگر
+`unhealthy` نیست. D-009 ظاهراً پیامد همان خرابی محیط بوده، نه نقص Image؛ اما
+چون علت قطعی اثبات نشده، به‌عنوان «مشاهده‌شده رفع»، نه «ریشه‌یابی‌شده» ثبت شده.
 
-Kafka Consumer Group `asset-service.timeline`: فعال، Lag صفر روی هر ۱۲
-Partition (۴ Topic × ۳ Partition).
+### جدول شواهد تأیید زنده — `fleet-service`
+
+هر ردیف یک فرمان واقعی از راه Gateway (`:3010`) با توکن واقعی Keycloak است.
+
+| #   | آنچه آزموده شد                      | نتیجه واقعی                                                                             |
+| --- | ----------------------------------- | --------------------------------------------------------------------------------------- |
+| ۱   | درخواست بدون توکن                   | `401` — Endpoint پیش‌فرض بسته                                                           |
+| ۲   | توکن `dehyari.admin` (ORG-DEH-0001) | `200`، Claim ها: `rasta_uid`، `org_id`، ۳ نقش                                           |
+| ۳   | `GET /v1/fleet/availability`        | هر مانع با **مالکش**: `ACTIVE_ASSIGNMENT(fleet-service)`، `ASSET_STATUS(asset-service)` |
+| ۴   | `POST /v1/assignments`              | `201`، `active=true`، `assignedBy=USR-SEED-DEHYARI-ADMIN`                               |
+| ۵   | Outbox → Kafka                      | ردیف `outbox_message` با `topic=rasta.fleet.v1`, `key=AST-SEED-0002`, منتشر             |
+| ۶   | **Asset Projector**                 | خط `تخصیص به راننده` در Timeline دارایی، `sourceService=fleet-service`                  |
+| ۷   | وضعیت دارایی                        | `IDLE → ASSIGNED` (توسط `ASSET_ASSIGNED`)                                               |
+| ۸   | `correlationId`                     | `e2e-…` یکسان در: درخواست HTTP، `outbox.correlation_id`، Header کافکا                   |
+| ۹   | Idempotency ثبت کارکرد              | دو ارسال با `clientReference` یکسان → **همان `USG_…`**                                  |
+| ۱۰  | Idempotency مصرف‌کننده              | همان رویداد دوباره روی کافکا منتشر شد → Timeline **بدون خط دوم**                        |
+| ۱۱  | انحصار دارایی                       | `422 BUSINESS_RULE_VIOLATION` — «machine in state ASSIGNED»                             |
+| ۱۲  | انحصار راننده                       | `422` — «This driver already holds an active assignment»                                |
+| ۱۳  | پایان تخصیص                         | `ASSIGNMENT_ENDED` → دارایی به `ACTIVE` بازگشت، خط Timeline ثبت شد                      |
+| ۱۴  | Tenant Isolation (خواندن تخصیص)     | `union.admin` → **`404`**، نه ۴۰۳                                                       |
+| ۱۵  | Tenant Isolation (خواندن راننده)    | `union.admin` → **`404`**                                                               |
+| ۱۶  | مجوز سطح نقش                        | `province.auditor` → `POST /v1/drivers` → `403 INSUFFICIENT_ROLE`                       |
+| ۱۷  | مجوز سطح Object                     | `province.auditor` → فهرست راننده‌ها **خالی** (به رکورد خودش محدود شد)                  |
+| ۱۸  | انقضای توکن                         | توکن منقضی → `401 TOKEN_EXPIRED`                                                        |
+| ۱۹  | Docker Image                        | Build شد، اجرا شد، `uid=100(rasta)`، بدون `npm/npx/corepack`                            |
+| ۲۰  | E2E از داخل **Container**           | تخصیص از Container → Kafka → Timeline دارایی                                            |
+
+**یک یافته امنیتی مثبت در همین مسیر:** Container با `OIDC_ISSUER_URL` داخلی
+(`keycloak:8080`) توکنی با `iss=localhost:8080` را **رد کرد** (`TOKEN_INVALID`).
+یعنی بررسی `iss` واقعاً اجرا می‌شود (S-04)، نه اینکه فقط امضا بررسی شود.
+
+Kafka Consumer Group های فعال: `asset-service.timeline` و
+`fleet-service.asset-sync`.
 
 ---
 
@@ -620,90 +661,43 @@ Partition (۴ Topic × ۳ Partition).
 
 ### فعال (رفع‌نشده)
 
-| #         | مسئله                                                                       | شدت                               | تأثیر                                                                     | راه‌حل موقت                                                                                     |
-| --------- | --------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| D-006     | Redis محلی Windows روی پورت ۶۳۷۹ با Redis داکری تصادم دارد                  | بالا (فقط محیط توسعه این ماشین)   | تست زنده Rate Limiting/Idempotency از راه `localhost:6379` غیرقابل‌اعتماد | استفاده از `docker exec rasta-redis redis-cli` مستقیم؛ یا تغییر `REDIS_PORT` مثل الگوی Postgres |
-| D-008     | سه قاعده Supply-Chain که Lockfile فعلی رد می‌کند                            | متوسط                             | پنجره نصب نسخه تازه‌منتشرشده مخرب باز است؛ ۴ هشدار Trust بررسی‌نشده       | Semgrep با `--exclude-rule` نام‌دار عبور می‌کند؛ بررسی کامل یک Task مستقل است                   |
-| D-009     | Healthcheck کانتینر Temporal همیشه Fail (باینری CLI Hang می‌کند)            | پایین                             | **هیچ** — هیچ سرویسی هنوز Temporal را لمس نمی‌کند                         | نادیده گرفتن تا نخستین Workflow واقعی؛ سلامت Server مثبتاً تأیید نشده (NOT_VERIFIED)            |
-| **D-010** | **Docker Desktop روی این ماشین از کار افتاده — Engine API خطای ۵۰۰ می‌دهد** | **بالا (مسدودکننده Live Verify)** | **هیچ Live Verification و هیچ اجرای کامل Integration ممکن نیست**          | جزئیات و مسیر بازیابی در ادامه همین بخش                                                         |
-| —         | `api-gateway` هیچ Dockerfile ندارد                                          | متوسط                             | نمی‌توان آن را Containerize کرد                                           | نوشتن Dockerfile لازم است                                                                       |
-| —         | `InsuranceClaim` جدول بدون API                                              | پایین                             | داده قابل‌ثبت نیست از راه سرویس                                           | Controller/Service لازم است، هروقت claim-flow اولویت شد                                         |
-| —         | `mission` و رویدادهای `MISSION_*` پیاده نشدند                               | پایین                             | تحلیل «ناوگان داخلی در برابر برون‌سپاری» هنوز داده مأموریت ندارد          | عمدی — به `construction-service` گره خورده که وجود ندارد؛ ADR-026 § Consequences                |
+| #     | مسئله                                                            | شدت                             | تأثیر                                                                     | راه‌حل موقت                                                                                     |
+| ----- | ---------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| D-006 | Redis محلی Windows روی پورت ۶۳۷۹ با Redis داکری تصادم دارد       | بالا (فقط محیط توسعه این ماشین) | تست زنده Rate Limiting/Idempotency از راه `localhost:6379` غیرقابل‌اعتماد | استفاده از `docker exec rasta-redis redis-cli` مستقیم؛ یا تغییر `REDIS_PORT` مثل الگوی Postgres |
+| D-008 | سه قاعده Supply-Chain که Lockfile فعلی رد می‌کند                 | متوسط                           | پنجره نصب نسخه تازه‌منتشرشده مخرب باز است؛ ۴ هشدار Trust بررسی‌نشده       | Semgrep با `--exclude-rule` نام‌دار عبور می‌کند؛ بررسی کامل یک Task مستقل است                   |
+| D-009 | Healthcheck کانتینر Temporal همیشه Fail (باینری CLI Hang می‌کند) | پایین                           | **هیچ** — هیچ سرویسی هنوز Temporal را لمس نمی‌کند                         | نادیده گرفتن تا نخستین Workflow واقعی؛ سلامت Server مثبتاً تأیید نشده (NOT_VERIFIED)            |
+| —     | `api-gateway` هیچ Dockerfile ندارد                               | متوسط                           | نمی‌توان آن را Containerize کرد                                           | نوشتن Dockerfile لازم است                                                                       |
+| —     | `InsuranceClaim` جدول بدون API                                   | پایین                           | داده قابل‌ثبت نیست از راه سرویس                                           | Controller/Service لازم است، هروقت claim-flow اولویت شد                                         |
+| —     | `mission` و رویدادهای `MISSION_*` پیاده نشدند                    | پایین                           | تحلیل «ناوگان داخلی در برابر برون‌سپاری» هنوز داده مأموریت ندارد          | عمدی — به `construction-service` گره خورده که وجود ندارد؛ ADR-026 § Consequences                |
 
-### D-010 — Docker Desktop از کار افتاد (2026-08-28)
+### D-010 — Docker Desktop از کار افتاد و رفع شد (2026-08-28) ✅
 
-**نشانه.** هر فرمان `docker` با این خطا برمی‌گردد:
+**ریشه، به ترتیب کشف:**
 
-```
-request returned 500 Internal Server Error for API route and version
-http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.55/containers/json
-```
+1. `com.docker.service` (سرویس ویندوزی که Engine لینوکسی به آن وابسته است)
+   متوقف بود.
+2. پس از Start شدن آن، Named Pipe همچنان ساخته نمی‌شد چون Docker Desktop خطای
+   `initializing Ingest server` می‌داد.
+3. علت واقعی: چهار **Socket یتیم** در
+   `%LOCALAPPDATA%\Docker
+un\` — فایل‌های صفر-بایتی از نوع ReparsePoint که از
+   Process کشته‌شده قبلی مانده بودند. Docker نمی‌توانست حذف و بازسازی‌شان کند، و
+   API فایل ویندوز هم نمی‌توانست بازشان کند («The file cannot be accessed by
+   the system»).
 
-هر دو Context (`default` و `desktop-linux`) یکسان شکست می‌خورند و Pin کردن
-`DOCKER_API_VERSION` روی ۱٫۴۱ تا ۱٫۵۱ کمکی نکرد. `docker desktop status` روی
-`starting` گیر کرده و از آن جلوتر نمی‌رود.
+**رفع:** تغییر نام پوشه `run` (غیرمخرب — نسخه قدیمی به‌عنوان `run.stale-*` ماند)
+و راه‌اندازی دوباره Docker Desktop. Docker پوشه را از نو ساخت و همه کانتینرها
+سالم بالا آمدند.
 
-**تاریخچه دقیق — مهم برای اینکه علت با معلول اشتباه نشود.**
+**درس عملیاتی — این اشتباه در همین Task رخ داد.** Engine API از ابتدای جلسه
+خطای ۵۰۰ می‌داد **اما کانتینرها کار می‌کردند** و پورت‌ها پاسخ می‌دادند. Restart
+کردن Docker Desktop، یک Stack کارکن ولی غیرقابل‌مدیریت را به یک Stack خاموش
+تبدیل کرد و ساعت‌ها وقت گرفت. **اول پورت‌ها را بررسی کن؛ اگر پاسخ می‌دهند، با
+همان کار کن.**
 
-۱. این خطا **از ابتدای این جلسه وجود داشت**: نخستین `docker compose ps` هم
-همین ۵۰۰ را داد. اما کانتینرها از قبل در حال اجرا بودند و پورت‌ها (۵۴۳۳،
-۹۰۹۲، ۸۰۸۰، ۹۰۰۰، ۶۳۷۹) پاسخ می‌دادند. یعنی **Engine API خراب بود ولی
-Runtime سالم** — Migration با موفقیت اجرا شد و بخشی از تست‌های Integration
-واقعاً روی PostgreSQL اجرا شدند.
-
-۲. برای بازیابی Engine، Docker Desktop **Restart شد**. این کار کانتینرهای در
-حال اجرا را از بین برد و چون Engine خراب است، دیگر بالا نیامدند. **این یک
-اشتباه عملیاتی در همین Task بود**: یک Stack کارکن ولی غیرقابل‌مدیریت، به یک
-Stack خاموش تبدیل شد.
-
-۳. تلاش‌های بعدی — `docker desktop restart`، `wsl --shutdown`، اجرای CLI از
-داخل distro — هیچ‌کدام Engine را برنگرداندند.
-
-**اثر امروز.** مسدودکننده برای: Live Verification سناریوی E2E، اجرای کامل
-Suite Integration، و Build واقعی Image. غیر‌مسدودکننده برای: `pnpm verify`
-کامل (سبز، ۲۹۲ تست) و CI (که Runner خودش را دارد).
-
-**ریشه — تشخیص داده شد (نه حدس):**
-
-```
-Get-Service com.docker.service   →   Status: Stopped
-wsl.exe --status                 →   خروجی خالی، بدون خطا
-Test-Path \.\pipe\dockerDesktopLinuxEngine  →  False
-docker desktop start             →   "Docker Desktop is already running"
-```
-
-`com.docker.service` سرویس ویندوزی‌ای است که Engine لینوکسی Docker Desktop به آن
-وابسته است، و Engine خودش داخل distro به‌نام `docker-desktop` در WSL2 اجرا
-می‌شود. متوقف بودن این سرویس + بی‌پاسخ بودن `wsl --status` توضیح می‌دهد چرا
-Named Pipe هرگز ساخته نمی‌شود، حتی وقتی UI ادعا می‌کند «در حال اجراست».
-
-**مسیر بازیابی — نیازمند دسترسی Administrator:**
-
-```powershell
-# در PowerShell با دسترسی Administrator:
-Start-Service com.docker.service
-wsl --shutdown
-# سپس Docker Desktop را باز کن و منتظر بمان تا Engine بالا بیاید
-```
-
-اگر کار نکرد، به ترتیب:
-
-1. **Restart کامل ویندوز** — رایج‌ترین رفع برای WSL بی‌پاسخ.
-2. `wsl --update` سپس Restart.
-3. `Settings → Troubleshoot → Clean / Purge data` در Docker Desktop، سپس
-   `pnpm infra:up` و `pnpm db:migrate && pnpm db:seed` (داده محلی دورریختنی است).
-4. نصب دوباره Docker Desktop.
-
-**این Task سرویس ویندوزی را Start نکرد** — عمل سطح سیستم با نیاز به Elevation
-است و تصمیمش با صاحب ماشین است، نه با عامل توسعه.
-
-**پس از بازیابی، این‌ها باید اجرا و نتیجه‌شان اینجا ثبت شود:**
-
-```bash
-pnpm infra:up && pnpm db:migrate && pnpm db:seed
-KAFKA_BROKERS=localhost:9092 pnpm --filter @rasta/fleet-service test:integration
-# سپس ۵ سرویس را بالا بیاور و سناریوی بخش ۲۹ را اجرا کن
-```
+**نکته جانبی:** پس از این بازیابی، `rasta-temporal` برای نخستین‌بار `healthy`
+است. D-009 احتمالاً پیامد همان خرابی محیط بوده، نه نقص Image — اما چون
+ریشه‌یابی قطعی نشد، به‌عنوان «مشاهده‌شده رفع» ثبت می‌شود، نه «حل‌شده».
 
 ### رفع‌شده در Task ناوگان (2026-08-28)
 
@@ -713,13 +707,41 @@ KAFKA_BROKERS=localhost:9092 pnpm --filter @rasta/fleet-service test:integration
 - **`asset-service` در CI Container Matrix نبود — رفع شد.** هم `asset-service`
   و هم `fleet-service` به Matrix افزوده شدند. (`api-gateway` همچنان
   Dockerfile ندارد و باز است.)
-- **دو باگ واقعی که تست‌های Integration گرفتند** — هر دو رفع شد:
-  - `AssetSyncConsumer`: یک کلید `patch` که مقدارش `undefined` بود، تنانت
-    حل‌شده را بازنویسی می‌کرد. اثر: یک `ASSET_CREATED` که سازمانش فقط روی
-    Envelope بود، ردیفی بدون سازمان می‌نوشت.
-  - `test/helpers.ts`: همان تله‌ای که `runUnscoped` مستندش کرده — Query تنبل
-    Prisma **پس از** بسته شدن Context اجرا می‌شد، یعنی بدون هیچ Tenant Scope.
-    این دقیقاً شکل D-003 است که در یک فایل تازه دوباره ظاهر شد.
+- **پنج باگ که تست‌های Integration گرفتند** — همه رفع شدند. هیچ‌کدام با تست
+  واحد پیدا نمی‌شد؛ سه‌تا نیازمند پایگاه داده واقعی بودند و دوتا نیازمند اجرای
+  واقعی خود تست.
+
+  **در کد تولیدی:**
+
+  1. **`AssetSyncConsumer` — تنانت پاک می‌شد.** یک کلید `patch` با مقدار
+     `undefined` سازمان حل‌شده را بازنویسی می‌کرد. اثر: `ASSET_CREATED` که
+     سازمانش فقط روی Envelope بود، ردیفی بدون سازمان می‌نوشت.
+
+  2. **`AssignmentService` — ترجمه خطای انحصار هرگز کار نمی‌کرد.** کد روی
+     **نام Index** تطبیق می‌داد (`ux_assignment_active_driver`)، اما Prisma در
+     `P2002` **نام ستون** را در `meta.target` می‌گذارد (`driver_id`). پس هر
+     مسابقه واقعی به مسیر عمومی `ALREADY_EXISTS` می‌افتاد. Invariant همیشه
+     برقرار بود — چیزی که می‌شکست، وعده ADR-025 بود که «مسابقه از تعارض عادی
+     قابل تشخیص نیست»: فراخوان ترتیبی `422` با نام قاعده می‌گرفت و فراخوان
+     همزمان `409` بی‌نام.
+
+  3. **`Assignment.startedAt` — دو ساعت روی یک ردیف.** ستون
+     `@default(now())` داشت (ساعت PostgreSQL) در حالی که `ended_at` همیشه از
+     Node می‌آید، و `ck_assignment_period` آن دو را مقایسه می‌کند. روی این
+     ماشین PostgreSQL در WSL2 **۱۴ تا ۵۶ میلی‌ثانیه جلوتر** از میزبان است، پس
+     تخصیصی که در همان پنجره ساخته و بسته شود، Constraint خودش را نقض می‌کند.
+     مسیر تولیدی امن بود (همه جا `startedAt` صریح داده می‌شود)، ولی Default ای
+     که هیچ‌کس استفاده نمی‌کند و فقط می‌تواند ساعت دوم وارد کند، یک تله است.
+     حذف شد.
+
+  **در خود تست‌ها:**
+
+  4. **`test/helpers.ts` — همان تله D-003 در فایلی تازه.** Query تنبل Prisma
+     **پس از** بسته شدن Context اجرا می‌شد، یعنی بدون هیچ Tenant Scope.
+
+  5. **`usage-outbox.int-spec.ts` — خواندن خارج از Context.** یک `findMany`
+     روی مدل Scope‌دار بیرون از `asActor`. Tenant Guard **درست** خطا داد — که
+     خودش شاهدی است بر اینکه Guard کار می‌کند.
 
 ### رفع‌شده در جلسه پیشین (برای شفافیت ثبت شده، نه به‌عنوان کار باقی‌مانده)
 
@@ -854,60 +876,53 @@ document, audit, analytics`)
 
 ## ۲۹. Immediate Next Task
 
-**`fleet-service` ساخته شد** — کد، تست واحد، تست Integration، مستندات، ADR و
-Commit های اتمیک. `pnpm verify` کامل سبز است.
+**`fleet-service` کامل است** — کد، ۷۵ تست واحد، ۳۲ تست Integration روی زیرساخت
+واقعی، تأیید زنده End-to-End (بخش ۲۱)، مستندات، دو ADR و Commit های اتمیک.
+`pnpm verify` کامل سبز (۳۰۰ تست واحد).
 
-### اولویت ۱ — رفع D-010 و تکمیل تأیید (مسدودکننده)
+### اولویت ۱ — اجرای CI روی این تغییرات
 
-Docker Desktop روی این ماشین از کار افتاد و **Live Verification انجام نشد**.
-این تنها بخش ناتمام این Task است، و باید پیش از هر سرویس تازه بسته شود —
-وگرنه `maintenance-service` روی پایه‌ای ساخته می‌شود که هرگز زنده اجرا نشده.
+تنها ادعای تأییدنشده باقی‌مانده. Pipeline اکنون شامل یک Container کافکا، ایجاد
+صریح Topic ها، و دو Image تازه در Matrix است — هیچ‌کدام هنوز روی Runner اجرا
+نشده‌اند.
 
 ```bash
-# ۱. زیرساخت را برگردان (مسیر بازیابی در بخش ۲۲، D-010)
-pnpm infra:up && pnpm db:migrate && pnpm db:seed
-
-# ۲. Suite Integration را کامل اجرا کن و نتیجه را در بخش ۱۹ ثبت کن
-KAFKA_BROKERS=localhost:9092 pnpm --filter @rasta/fleet-service test:integration
-
-# ۳. پنج سرویس را بالا بیاور و سناریوی زیر را واقعاً اجرا کن
+git push && gh run list --limit 3
 ```
 
-**سناریوی E2E که باید اجرا و ثبت شود:**
+`gh run list` را واقعاً اجرا کن. فرض «CI سبز است» چون فایل Workflow تغییر کرده،
+همان اشتباه اثبات‌شده D-005 است.
 
-1. توکن واقعی از Keycloak برای `dehyari.admin` بگیر.
-2. از راه Gateway: `POST /v1/drivers` با `userId` کاربر Seed.
-3. `POST /v1/assignments` با `AST-SEED-0002` (وضعیت `IDLE`).
-4. تأیید ردیف در `assignment`، ردیف در `outbox_message`، سپس انتشار روی
-   `rasta.fleet.v1`.
-5. تأیید اینکه `asset-service` یک خط `تخصیص به راننده` در
-   `GET /v1/assets/AST-SEED-0002/timeline` ساخت و وضعیت به `ASSIGNED` رفت.
-6. `POST /v1/usage-records` با `clientReference`؛ همان درخواست را دوباره
-   بفرست و تأیید کن **یک** رکورد و **یک** رویداد ساخته شد.
-7. با توکن `dehyari2.admin` همان تخصیص را بخوان → باید **۴۰۴** بگیرد.
-8. `correlationId` را از پاسخ HTTP تا Envelope کافکا تا خط Timeline دنبال کن.
+**دو چیزی که ممکن است روی Runner فرق کند و اینجا نشد:**
 
-**تا وقتی این اجرا نشده، هیچ ادعای LIVE VERIFIED برای `fleet-service` نکن.**
+- Container کافکا در GitHub Actions با `KAFKA_ADVERTISED_LISTENERS` روی
+  `localhost:9092` — محلی از `kafka:9094` استفاده شد. اگر Handshake شکست خورد،
+  اینجا را نگاه کن.
+- Healthcheck کافکا `--health-start-period 40s` دارد؛ اگر Job زودتر شروع کند،
+  ایجاد Topic شکست می‌خورد.
 
-### اولویت ۲ — اجرای CI روی این تغییرات
+### اولویت ۲ — گام بعدی نقشه راه: `maintenance-service`
 
-CI هنوز روی این Commit ها اجرا نشده. Pipeline اکنون شامل یک Container کافکا و
-دو Image تازه در Matrix است؛ هر دو تغییر **NOT VERIFIED** اند.
-`gh run list` را واقعاً اجرا کن — فرض «CI سبز است» چون فایل Workflow تغییر
-کرده، همان اشتباه اثبات‌شده D-005 است.
+پورت ۳۱۰۵. دو مسیر امروز **مرده**اند و این سرویس هر دو را زنده می‌کند:
 
-### اولویت ۳ — گام بعدی نقشه راه
+- `fleet` از امروز `USAGE_RECORDED` منتشر می‌کند — **محرک اصلی نگهداری
+  پیشگیرانه** (`docs/04` § ۴٫۶). مصرف‌کننده‌اش وجود ندارد.
+- `fleet` از پیش `MAINTENANCE_STARTED`/`MAINTENANCE_COMPLETED` را مصرف می‌کند و
+  به `asset_ref.inMaintenance` می‌نویسد. تولیدکننده‌اش وجود ندارد.
 
-**`maintenance-service`** (پورت ۳۱۰۵). دو دلیل که آن را گام درست بعدی می‌کند:
+یعنی `maintenance-service` نخستین سرویسی است که هر دو سرش از قبل آماده است.
 
-- `fleet-service` از امروز `USAGE_RECORDED` منتشر می‌کند، که **محرک اصلی
-  نگهداری پیشگیرانه** است (`docs/04` § ۴٫۶). مصرف‌کننده‌اش هنوز وجود ندارد.
-- `fleet-service` از پیش `MAINTENANCE_STARTED` و `MAINTENANCE_COMPLETED` را
-  مصرف می‌کند و به `asset_ref.inMaintenance` می‌نویسد. تولیدکننده‌اش وجود
-  ندارد، پس آن مسیر امروز **مرده** است.
+**الگویی که کار کرد و باید تکرار شود:** تست Integration واقعی از روز اول. در
+`fleet` پنج باگ گرفت که هیچ‌کدام با تست واحد پیدا نمی‌شد (بخش ۲۲).
 
-**کارهای کوچک‌تر و مستقل:** Dockerfile برای `api-gateway` · D-008
-(Supply-Chain) · `InsuranceClaim` بدون API · نصب Playwright برای E2E واقعی.
+### کارهای کوچک‌تر و مستقل
+
+- **Dockerfile برای `api-gateway`** — تنها سرویسی که ندارد.
+- **D-008** (Supply-Chain، سه قاعده Semgrep که Lockfile رد می‌کند).
+- **D-009** — Temporal اکنون `healthy` است، اما ریشه‌یابی نشده. پیش از نخستین
+  Workflow واقعی باید قطعی شود.
+- **`InsuranceClaim`** جدول بدون API در `asset-service`.
+- **Playwright** برای E2E واقعی (`tests/e2e/` هنوز خالی است).
 
 **هیچ‌کدام از این‌ها را خودکار شروع نکن.**
 
@@ -958,11 +973,29 @@ rasta-redis redis-cli` (نه `localhost:6379` از میزبان) قطعی نگی
 
 **قواعد افزوده در Task ناوگان (2026-08-28):**
 
+- **Prisma نام Index را در خطای یکتایی گزارش نمی‌کند** — نام **ستون** را در
+  `meta.target` می‌گذارد. هر کدی که نقض Constraint را به خطای کسب‌وکاری ترجمه
+  می‌کند باید روی ستون تطبیق دهد، نه نام Index. این باگ در `fleet` بی‌صدا زنده
+  بود تا نخستین تست Integration واقعی.
+- **هرگز Default پایگاه داده و مقدار برنامه را در یک CHECK مقایسه نکن.**
+  PostgreSQL در WSL2 روی این ماشین ۱۴–۵۶ میلی‌ثانیه از میزبان جلوتر است. اگر
+  یک ستون `@default(now())` دارد و ستون دیگری از `new Date()` می‌آید و
+  Constraint آن دو را مقایسه می‌کند، ردیف Constraint خودش را نقض می‌کند.
+- **تست Integration را از روز اول بنویس، نه بعداً.** در `fleet` پنج باگ گرفت
+  که هیچ‌کدام با تست واحد پیدا نمی‌شد — سه‌تا در کد تولیدی. تست واحد نمی‌تواند
+  شکل خطای Prisma، انحراف ساعت، یا رفتار Tenant Guard را بسنجد؛ فقط پایگاه
+  داده واقعی می‌تواند.
 - **Docker Desktop خراب را Restart نکن اگر کانتینرها هنوز کار می‌کنند.**
   در این Task، Engine API از ابتدا خطای ۵۰۰ می‌داد ولی Runtime سالم بود و
   Migration و تست اجرا می‌شد. Restart، Stack کارکن را کشت و Engine هم
   برنگشت (D-010). اول بررسی کن پورت‌ها پاسخ می‌دهند یا نه؛ اگر می‌دهند، با
-  همان کار کن.
+  همان کار کن. اگر ناچار شدی: ریشه معمولاً Socket های یتیم در
+  `%LOCALAPPDATA%\Docker
+un\` است — تغییر نام آن پوشه رفعش می‌کند.
+- **PUT روی کاربر Keycloak، نمایش کامل را جایگزین می‌کند.** فرستادن فقط
+  `{"attributes": …}` فیلدهای `email`/`firstName`/`lastName` را پاک کرد و کاربر
+  با «Account is not fully set up» از کار افتاد. همیشه نمایش کامل را بفرست —
+  `infrastructure/docker/keycloak/rasta-realm.json` منبع درست آن است.
 - **Prisma نمی‌تواند Partial Index یا CHECK را بیان کند.** هر دو در SQL
   دست‌نویس انتهای Migration زندگی می‌کنند. اگر `prisma migrate dev` پیشنهاد
   `DROP` روی `ux_assignment_*` یا `ck_*` داد، **آن Hunk را رد کن** — Drift
