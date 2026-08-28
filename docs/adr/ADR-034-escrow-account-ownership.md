@@ -149,7 +149,7 @@ Read-Modify-Write است، و انحراف کیف پول از دفتر کل دق
 
 - `ck_wallet_balances` رابطه را در پایگاه داده تحمیل می‌کند؛ بدون آن هیچ ردیف کیف پولی
   نوشته نمی‌شود.
-- `wallet-ledger.int-spec.ts` برای هر کیف پول ثابت می‌کند
+- `financial-consistency.int-spec.ts` برای هر کیف پول ثابت می‌کند
   `available = مانده حساب کیف پول` و `pending = مانده حساب امانت = Σ holdهای فعال`.
 - `wallet-concurrency.int-spec.ts` سناریوی اجباری بند ۱۰٫۱۲ را اجرا می‌کند و ثابت می‌کند
   مانده هرگز منفی نمی‌شود.

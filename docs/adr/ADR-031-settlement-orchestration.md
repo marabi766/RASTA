@@ -126,7 +126,8 @@ Deadlock ساختاری غیرممکن می‌شود — نه کمتر محتم�
 ## Compliance
 
 - `settlement-atomicity.int-spec.ts` ثابت می‌کند شکست میانی هیچ Journal، هیچ تغییر کیف پول
-  و هیچ کارمزدی باقی نمی‌گذارد.
+  و هیچ کارمزدی باقی نمی‌گذارد — با تزریق خطا **پس از** Post شدن Journal، که تنها
+  جای جالب است.
 - `wallet-concurrency.int-spec.ts` سناریوی اجباری `docs/10` § ۱۰٫۱۲ را اجرا می‌کند:
   برداشت‌های موازی از یک کیف پول، هرگز مانده منفی.
 - `grep -rn "redis" services/economic-service/src` باید خالی باشد.

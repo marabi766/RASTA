@@ -138,9 +138,12 @@ Endpoint هایی که مصرف‌کننده سرویسی دارند. وقتی `
 
 ## Compliance
 
-- `consumers/*.spec.ts` هر Handler فعال را با Payload معتبر و نامعتبر می‌آزماید.
 - `event-flow.int-spec.ts` روی Kafka واقعی ثابت می‌کند: یک تعهد ساخته می‌شود،
-  **صفر Journal** و **صفر تغییر مانده** رخ می‌دهد، و Replay همان رویداد اثر دوم ندارد.
+  **صفر Journal** و **صفر تغییر مانده** رخ می‌دهد، Replay همان رویداد اثر دوم ندارد،
+  و انتشار دوباره همان تأیید با `eventId` تازه هم تعهد دوم نمی‌سازد.
+- `events/events.spec.ts` قرارداد `MAINTENANCE_APPROVED` را دقیقاً به شکلی که
+  `maintenance-service` منتشر می‌کند می‌آزماید — بدون `import` میان‌سرویسی، چون
+  `AGENTS.md` A-02 آن را ممنوع می‌کند و تغییر تولیدکننده باید اینجا **شکست** بدهد.
 - `docs/events/README.md` بخش Economic، مصرف‌کننده‌های فعال و موکول را جدا فهرست می‌کند.
 - `grep -rn "ORDER_CREATED\|STATEMENT_APPROVED" services/economic-service/src` فقط باید
   به کامنت‌هایی برسد که همین تعویق را توضیح می‌دهند.

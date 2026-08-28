@@ -120,9 +120,8 @@ Journal پاداش بدهکار `EXP-PLATFORM-REWARD` می‌زند — یک ح�
 ## Compliance
 
 - `reward/rule-engine.spec.ts` هر دو مسیر را می‌آزماید، شامل حالت نرخ نال.
-- `reward-cap.int-spec.ts` سقف دوره‌ای را زیر اعطای موازی می‌آزماید.
-- `financial-consistency.int-spec.ts` ثابت می‌کند پاداش پولی‌شده Journal متوازن می‌زند و
-  پاداش امتیازی **هیچ** Journal نمی‌زند.
+- `reward-cap.int-spec.ts` سقف دوره‌ای را زیر **بیست محرک هم‌زمان** می‌آزماید، و ثابت
+  می‌کند پاداش پولی‌شده Journal متوازن می‌زند و پاداش امتیازی **هیچ** Journal نمی‌زند.
 - Seed هیچ `creditPerPointMinor` ای نمی‌گذارد؛ داده نمونه برچسب صریح «نمونه — نیازمند
   تصویب» دارد.
 - `grep -rn "creditPerPointMinor" services/economic-service/prisma/seed.ts` باید خالی
