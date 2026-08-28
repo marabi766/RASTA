@@ -663,13 +663,39 @@ Stack خاموش تبدیل شد.
 Suite Integration، و Build واقعی Image. غیر‌مسدودکننده برای: `pnpm verify`
 کامل (سبز، ۲۹۲ تست) و CI (که Runner خودش را دارد).
 
-**مسیر بازیابی پیشنهادی، به ترتیب کم‌هزینه‌ترین:**
+**ریشه — تشخیص داده شد (نه حدس):**
 
-1. Restart کامل ویندوز — رایج‌ترین رفع برای Named Pipe گیرکرده.
-2. `Settings → Troubleshoot → Clean / Purge data` در Docker Desktop، سپس
+```
+Get-Service com.docker.service   →   Status: Stopped
+wsl.exe --status                 →   خروجی خالی، بدون خطا
+Test-Path \.\pipe\dockerDesktopLinuxEngine  →  False
+docker desktop start             →   "Docker Desktop is already running"
+```
+
+`com.docker.service` سرویس ویندوزی‌ای است که Engine لینوکسی Docker Desktop به آن
+وابسته است، و Engine خودش داخل distro به‌نام `docker-desktop` در WSL2 اجرا
+می‌شود. متوقف بودن این سرویس + بی‌پاسخ بودن `wsl --status` توضیح می‌دهد چرا
+Named Pipe هرگز ساخته نمی‌شود، حتی وقتی UI ادعا می‌کند «در حال اجراست».
+
+**مسیر بازیابی — نیازمند دسترسی Administrator:**
+
+```powershell
+# در PowerShell با دسترسی Administrator:
+Start-Service com.docker.service
+wsl --shutdown
+# سپس Docker Desktop را باز کن و منتظر بمان تا Engine بالا بیاید
+```
+
+اگر کار نکرد، به ترتیب:
+
+1. **Restart کامل ویندوز** — رایج‌ترین رفع برای WSL بی‌پاسخ.
+2. `wsl --update` سپس Restart.
+3. `Settings → Troubleshoot → Clean / Purge data` در Docker Desktop، سپس
    `pnpm infra:up` و `pnpm db:migrate && pnpm db:seed` (داده محلی دورریختنی است).
-3. اگر باز هم شکست خورد: نصب دوباره Docker Desktop، یا سنجش نسخه CLI
-   (۲۹٫۷٫۲) در برابر Backend.
+4. نصب دوباره Docker Desktop.
+
+**این Task سرویس ویندوزی را Start نکرد** — عمل سطح سیستم با نیاز به Elevation
+است و تصمیمش با صاحب ماشین است، نه با عامل توسعه.
 
 **پس از بازیابی، این‌ها باید اجرا و نتیجه‌شان اینجا ثبت شود:**
 
