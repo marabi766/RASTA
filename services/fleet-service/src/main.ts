@@ -30,6 +30,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { enrichOpenApiDocument } from './openapi/document';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -72,6 +73,9 @@ async function bootstrap(): Promise<void> {
   app.useBodyParser('json', { limit: '256kb' });
 
   if (allowsDeveloperTooling(env)) {
+    // Nest derives paths, methods and security from the decorators but cannot
+    // see a Zod schema, so the payload shapes are filled in afterwards from
+    // the very schemas the service validates with (src/openapi/document.ts).
     const document = SwaggerModule.createDocument(
       app,
       new DocumentBuilder()
@@ -85,7 +89,7 @@ async function bootstrap(): Promise<void> {
         .addBearerAuth()
         .build(),
     );
-    SwaggerModule.setup('docs', app, document);
+    SwaggerModule.setup('docs', app, enrichOpenApiDocument(document));
   }
 
   app.enableShutdownHooks();
