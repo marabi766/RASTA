@@ -8,11 +8,7 @@ import { FLEET_EVENTS, validateFleetPayload } from './events';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
 import { assertOwnDriverRecord, currentFleetScope } from './access';
 import { isAssignable } from './driver-lifecycle';
-import {
-  ACTIVE_ASSET_STATUSES,
-  ACTIVE_ASSIGNMENT_ASSET_CONSTRAINT,
-  ACTIVE_ASSIGNMENT_DRIVER_CONSTRAINT,
-} from './constraints';
+import { ACTIVE_ASSET_STATUSES, identifyExclusivityConstraint } from './constraints';
 import type {
   AssignmentView,
   CreateAssignmentDto,
@@ -358,19 +354,21 @@ export class AssignmentService {
   ): unknown {
     if (!isUniqueViolation(error)) return error;
 
-    const constraint = violatedConstraint(error) ?? '';
-    this.logger.warn(`Assignment exclusivity violated on ${constraint || 'an unnamed constraint'}`);
+    const target = violatedConstraint(error);
+    const constraint = identifyExclusivityConstraint(target);
+    this.logger.warn(
+      `Assignment exclusivity violated on ${target ?? 'an unnamed constraint'} (${constraint})`,
+    );
+    assignmentConflictsTotal.inc({ service: SERVICE_NAME, constraint });
 
-    if (constraint.includes(ACTIVE_ASSIGNMENT_DRIVER_CONSTRAINT)) {
-      assignmentConflictsTotal.inc({ service: SERVICE_NAME, constraint: 'driver' });
+    if (constraint === 'driver') {
       return RastaError.businessRule(
         'This driver already holds an active assignment. End it before starting another.',
         { rule: 'DRIVER_ALREADY_ASSIGNED', driverId, concurrent: true },
       );
     }
 
-    if (constraint.includes(ACTIVE_ASSIGNMENT_ASSET_CONSTRAINT)) {
-      assignmentConflictsTotal.inc({ service: SERVICE_NAME, constraint: 'asset' });
+    if (constraint === 'asset') {
       return RastaError.businessRule(
         'This machine is already assigned to a driver. End that assignment first.',
         { rule: 'ASSET_ALREADY_ASSIGNED', assetId, concurrent: true },
@@ -379,7 +377,6 @@ export class AssignmentService {
 
     // Some other unique index. Reported as a conflict rather than swallowed:
     // an unexplained 500 would hide it, and a generic success would be worse.
-    assignmentConflictsTotal.inc({ service: SERVICE_NAME, constraint: 'other' });
     return RastaError.alreadyExists('Assignment');
   }
 }
