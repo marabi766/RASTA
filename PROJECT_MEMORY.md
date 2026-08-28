@@ -19,7 +19,7 @@
 > | TESTED          | ۸۸ تست واحد در fleet؛ ۳۱۳ در کل Monorepo                       |
 > | INTEGRATION     | ۳۲ تست روی PostgreSQL و Kafka **واقعی** — بدون Mock            |
 > | LIVE VERIFIED   | ۲۰ سناریو از راه Gateway با توکن واقعی Keycloak (بخش ۲۱)       |
-> | **CI VERIFIED** | **Run `33148910234`، Commit `7acd619`، هر ۷ Job سبز، ۸ دقیقه** |
+> | **CI VERIFIED** | **Run `33149848438`، Commit `af74157`، هر ۷ Job سبز، ۷ دقیقه** |
 >
 > دو ADR تازه (۰۲۵، ۰۲۶) و دو Open Question تازه (Q-22، Q-23).
 >
@@ -99,7 +99,7 @@
 | API Gateway routing + circuit breaker                        |         ✅          |   ✅ (21 تست)    | ✅ (مسیر به سرویس نساخته‌شده fleet → 503 تمیز)                              |
 | Redis Rate Limiting (منطق)                                   |         ✅          |    ✅ (واحد)     | ⚠️ **مسدود شده توسط تداخل Port میزبان — بخش ۲۲.۳ D-006**                    |
 | Anonymous public endpoint (self-registration) از راه Gateway |         ✅          |   ✅ (17 تست)    | ✅ **`201` زنده گرفته شد — D-007 رفع شد**                                   |
-| CI/CD روی GitHub Actions                                     |         ✅          |        —         | ✅ **CI VERIFIED** — Run `33148910234`، Commit `7acd619`، هر ۷ Job سبز      |
+| CI/CD روی GitHub Actions                                     |         ✅          |        —         | ✅ **CI VERIFIED** — Run `33149848438`، Commit `af74157`، هر ۷ Job سبز      |
 | Docker Build (identity, organization)                        |         ✅          |        —         | ✅ **CI VERIFIED** — Build + Trivy Scan هر دو Image روی Runner سبز          |
 | Docker Build (asset, fleet)                                  | ✅ Dockerfile دارند |        —         | ✅ **CI VERIFIED** — Build + Trivy روی Runner برای هر دو                    |
 | Docker Build (api-gateway)                                   | ❌ Dockerfile ندارد |        —         | ❌ باز (بخش ۲۲)                                                             |
@@ -610,8 +610,8 @@ E2E                           NOT IMPLEMENTED — بدون Playwright، پوشه
 از `pnpm run test` و `pnpm --filter @rasta/fleet-service test:integration`،
 اجراشده در 2026-08-28. اعداد از خروجی واقعی گرفته شده، نه از گزارش پیشین.
 
-هر ۳۱۳ عدد روی Runner واقعی GitHub هم دیده شد — **Run `33148910234`،
-Commit `7acd619`** — پس این شمارش دیگر فقط محلی نیست.
+هر ۳۱۳ عدد روی Runner واقعی GitHub هم دیده شد — **Run `33149848438`،
+Commit `af74157`** — پس این شمارش دیگر فقط محلی نیست.
 
 **Integration Tests — دیگر تهی نیست.** `fleet-service` نخستین سرویسی است که تست
 Integration واقعی دارد (۴ Suite در `services/fleet-service/test/`):
@@ -645,8 +645,10 @@ Integration واقعی دارد (۴ Suite در `services/fleet-service/test/`):
 
 ### ✅ CI/CD — **CI VERIFIED** (به‌روزشده برای فاز ناوگان)
 
-**Run `33148910234`، Commit `7acd619`: success در ۸ دقیقه (۰۶:۴۳ تا ۰۶:۵۱ UTC).**
-(Run پیشین `33147827056` روی `d2f82f8` هم سبز بود؛ این آخرین است.)
+**Run `33149848438`، Commit `af74157`: success در ۷ دقیقه (۰۶:۵۹ تا ۰۷:۰۶ UTC).**
+
+سه Run پیاپی سبز روی سه Commit پشت‌سرهم — `33147827056`/`d2f82f8`،
+`33148910234`/`7acd619` و این یکی — یعنی سبز بودن پایدار است، نه یک اتفاق.
 هر **هفت** Job سبز — چهار Image به‌جای دو، و برای نخستین‌بار یک Broker واقعی
 در Pipeline.
 
@@ -978,7 +980,7 @@ ADR-001 (Microservices)، ADR-004/005 (Database + Ownership)، ADR-006
 - Kafka Consumer عمومی (`EventConsumer`) + Projector واقعی (`asset-service`
   Timeline از رویدادهای سرویس‌های دیگر)
 - **CI Pipeline سبز روی GitHub Actions** (۴ Job، ۵ اجرا با Matrix) —
-  **CI VERIFIED** تا Commit `7acd619`، Run `33148910234` (بخش ۱۹)
+  **CI VERIFIED** تا Commit `af74157`، Run `33149848438` (بخش ۱۹)
 - **fleet-service:** Driver · Assignment (با Invariant انحصار در پایگاه داده) ·
   UsageRecord (Idempotent برای ثبت آفلاین) · Availability (ترکیبی، با نام مالک هر
   مانع) · Utilization · Consumer دوطرفه با asset-service
@@ -1051,7 +1053,7 @@ document, audit, analytics`)
 | TESTED        | ۸۸ تست واحد در fleet، ۳۱۳ در Monorepo — `pnpm verify --force`  |
 | INTEGRATION   | ۳۲ تست روی PostgreSQL و Kafka واقعی، بدون Mock                 |
 | LIVE VERIFIED | ۲۰ سناریو از راه Gateway با توکن واقعی Keycloak (بخش ۲۱)       |
-| CI VERIFIED   | Run `33148910234`، Commit `7acd619`، هر ۷ Job سبز              |
+| CI VERIFIED   | Run `33149848438`، Commit `af74157`، هر ۷ Job سبز              |
 
 ### گام بعدی: `maintenance-service`
 
