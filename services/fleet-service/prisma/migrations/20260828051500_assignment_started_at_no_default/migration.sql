@@ -1,0 +1,17 @@
+-- Drop the database default on assignment.started_at.
+--
+-- `ended_at` is always written by the application, and `ck_assignment_period`
+-- compares the two columns. Leaving a `now()` default here meant one side of
+-- that comparison could come from PostgreSQL's clock and the other from
+-- Node's — and they are not the same clock. On the development stack Postgres
+-- runs inside a WSL2 VM and measured 14–56 ms ahead of the host, so an
+-- assignment created and ended within that window violated the constraint
+-- with a row whose ended_at appeared to precede its started_at by 2 ms.
+--
+-- The integration suite hit this on its first real run. No production path was
+-- affected — AssignmentService and the seed both set started_at explicitly —
+-- but a default nothing uses, which can only ever introduce a second clock, is
+-- a trap rather than a convenience.
+--
+-- Reversible: `ALTER TABLE "assignment" ALTER COLUMN "started_at" SET DEFAULT CURRENT_TIMESTAMP;`
+ALTER TABLE "assignment" ALTER COLUMN "started_at" DROP DEFAULT;

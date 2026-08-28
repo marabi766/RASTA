@@ -140,7 +140,20 @@ model Assignment {
   /// Owned by asset-service. A reference, never a foreign key (ADR-005).
   assetId  String @map("asset_id")
 
-  startedAt DateTime  @default(now()) @map("started_at")
+  /// Deliberately has **no** `@default(now())`.
+  ///
+  /// `ended_at` is always supplied by the application, and `ck_assignment_period`
+  /// compares the two. A database default would fill this column from
+  /// PostgreSQL's clock while the other came from Node's, and those clocks are
+  /// not the same one: on the development stack Postgres runs in a WSL2 VM and
+  /// measured 14–56 ms ahead of the host. An assignment created and ended
+  /// inside that window violates the constraint for no reason a reader could
+  /// ever guess — which is exactly what happened the first time the integration
+  /// suite ran against a real database.
+  ///
+  /// Requiring the caller to set it keeps both ends of the comparison on one
+  /// clock. Every write path already does.
+  startedAt DateTime  @map("started_at")
   /// NULL means active. This is the single source of truth for active-ness.
   endedAt   DateTime? @map("ended_at")
 
