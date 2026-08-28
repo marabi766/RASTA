@@ -13,13 +13,13 @@
 > **آخرین به‌روزرسانی:** 2026-08-28 — **فاز `fleet-service` بسته شد:
 > READY_FOR_NEXT_PHASE.** پنجمین سرویس، با هر پنج سطح تأیید کامل:
 >
-> | سطح             | شاهد                                                            |
-> | --------------- | --------------------------------------------------------------- |
-> | IMPLEMENTED     | Driver · Assignment · UsageRecord · Availability · Utilization  |
-> | TESTED          | ۸۸ تست واحد در fleet؛ ۳۱۳ در کل Monorepo                        |
-> | INTEGRATION     | ۳۲ تست روی PostgreSQL و Kafka **واقعی** — بدون Mock             |
-> | LIVE VERIFIED   | ۲۰ سناریو از راه Gateway با توکن واقعی Keycloak (بخش ۲۱)        |
-> | **CI VERIFIED** | **Run `33147827056`، Commit `d2f82f8`، هر ۷ Job سبز، ۱۱ دقیقه** |
+> | سطح             | شاهد                                                           |
+> | --------------- | -------------------------------------------------------------- |
+> | IMPLEMENTED     | Driver · Assignment · UsageRecord · Availability · Utilization |
+> | TESTED          | ۸۸ تست واحد در fleet؛ ۳۱۳ در کل Monorepo                       |
+> | INTEGRATION     | ۳۲ تست روی PostgreSQL و Kafka **واقعی** — بدون Mock            |
+> | LIVE VERIFIED   | ۲۰ سناریو از راه Gateway با توکن واقعی Keycloak (بخش ۲۱)       |
+> | **CI VERIFIED** | **Run `33148910234`، Commit `7acd619`، هر ۷ Job سبز، ۸ دقیقه** |
 >
 > دو ADR تازه (۰۲۵، ۰۲۶) و دو Open Question تازه (Q-22، Q-23).
 >
@@ -99,7 +99,7 @@
 | API Gateway routing + circuit breaker                        |         ✅          |   ✅ (21 تست)    | ✅ (مسیر به سرویس نساخته‌شده fleet → 503 تمیز)                              |
 | Redis Rate Limiting (منطق)                                   |         ✅          |    ✅ (واحد)     | ⚠️ **مسدود شده توسط تداخل Port میزبان — بخش ۲۲.۳ D-006**                    |
 | Anonymous public endpoint (self-registration) از راه Gateway |         ✅          |   ✅ (17 تست)    | ✅ **`201` زنده گرفته شد — D-007 رفع شد**                                   |
-| CI/CD روی GitHub Actions                                     |         ✅          |        —         | ✅ **CI VERIFIED** — Run `33147827056`، Commit `d2f82f8`، هر ۷ Job سبز      |
+| CI/CD روی GitHub Actions                                     |         ✅          |        —         | ✅ **CI VERIFIED** — Run `33148910234`، Commit `7acd619`، هر ۷ Job سبز      |
 | Docker Build (identity, organization)                        |         ✅          |        —         | ✅ **CI VERIFIED** — Build + Trivy Scan هر دو Image روی Runner سبز          |
 | Docker Build (asset, fleet)                                  | ✅ Dockerfile دارند |        —         | ✅ **CI VERIFIED** — Build + Trivy روی Runner برای هر دو                    |
 | Docker Build (api-gateway)                                   | ❌ Dockerfile ندارد |        —         | ❌ باز (بخش ۲۲)                                                             |
@@ -189,14 +189,14 @@ scripts/
 
 ## ۷. Service Inventory
 
-| Service                | Port       | Status                           | DB                   | Tests                    | Docker                          |
-| ---------------------- | ---------- | -------------------------------- | -------------------- | ------------------------ | ------------------------------- |
-| `api-gateway`          | 3000/3010* | IMPLEMENTED                      | — (بدون Database)    | 21                       | ❌ ندارد                        |
-| `identity-service`     | 3101       | IMPLEMENTED                      | `rasta_identity`     | 14                       | ✅ در CI Matrix                 |
-| `organization-service` | 3102       | IMPLEMENTED                      | `rasta_organization` | 21                       | ✅ در CI Matrix                 |
-| `asset-service`        | 3103       | IMPLEMENTED (با یک Gap — بخش ۱۸) | `rasta_asset`        | 74                       | ✅ دارد؛ **اکنون در CI Matrix** |
-| `fleet-service`        | 3104       | IMPLEMENTED                      | `rasta_fleet`        | 67 + ۴ Suite Integration | ✅ دارد؛ **در CI Matrix**       |
-| ۱۱ سرویس دیگر          | 3105–3116  | NOT_STARTED                      | —                    | ۰                        | —                               |
+| Service                | Port        | Status                                                 | DB                   | Tests                        | Docker                               |
+| ---------------------- | ----------- | ------------------------------------------------------ | -------------------- | ---------------------------- | ------------------------------------ |
+| `api-gateway`          | 3000/3010\* | IMPLEMENTED                                            | — (بدون Database)    | 30 Unit                      | ❌ Dockerfile ندارد                  |
+| `identity-service`     | 3101        | IMPLEMENTED                                            | `rasta_identity`     | 14 Unit                      | ✅ در CI Matrix                      |
+| `organization-service` | 3102        | IMPLEMENTED                                            | `rasta_organization` | 21 Unit                      | ✅ در CI Matrix                      |
+| `asset-service`        | 3103        | IMPLEMENTED (با یک Gap — بخش ۱۸)                       | `rasta_asset`        | 74 Unit                      | ✅ **در CI Matrix**                  |
+| `fleet-service`        | 3104        | IMPLEMENTED · TESTED · LIVE VERIFIED · **CI VERIFIED** | `rasta_fleet`        | **88 Unit + 32 Integration** | ✅ **در CI Matrix**، Build+Trivy سبز |
+| ۱۱ سرویس دیگر          | 3105–3116   | NOT_STARTED                                            | —                    | ۰                            | —                                    |
 
 \* پورت داکیومنت‌شده در `CLAUDE.md`/`docs` **۳۰۰۰** است؛ در `.env` محلی فعلی
 روی **۳۰۱۰** تنظیم شده چون یک Container نامرتبط (`purchase-workflow-system-app-1`)
@@ -205,6 +205,92 @@ scripts/
 
 برای هر سرویس پیاده‌شده، Authentication/Authorization/Tenant Isolation همگی
 Implemented + Tested + Live Verified هستند (بخش ۳).
+
+---
+
+## ۷-الف. fleet-service — ورودی کامل حافظه
+
+> نوشته‌شده در پایان دروازه انتشار فاز ناوگان (2026-08-28). هر ادعا شاهد دارد.
+
+| بُعد           | مقدار                                                                  |
+| -------------- | ---------------------------------------------------------------------- |
+| Service        | `fleet-service` (`@rasta/fleet-service`)                               |
+| Status         | **IMPLEMENTED · TESTED · LIVE VERIFIED · CI VERIFIED**                 |
+| Port           | `3104` (`PORT_FLEET`)                                                  |
+| Database       | `rasta_fleet` — نقش اختصاصی، بدون دسترسی به پایگاه داده هیچ سرویس دیگر |
+| Topic تولیدی   | `rasta.fleet.v1` (+ `.retry`, `.dlq`)                                  |
+| Topic مصرفی    | `rasta.asset.v1` · `rasta.insurance.v1` · `rasta.maintenance.v1`       |
+| Consumer Group | `fleet-service.asset-sync` (از Offset صفر)                             |
+
+### مالکیت دامنه
+
+**مالک است:** `Driver` · `Assignment` · `UsageRecord` · `AvailabilityWindow`
+و نمای مشتق `Utilization`.
+
+**مالک نیست — و این مرز اجرا می‌شود:**
+
+> `Asset` در مالکیت `asset-service` باقی می‌ماند. `fleet-service` دارایی را
+> **فقط با شناسه ارجاع می‌دهد** و هرگز داده اصلی دارایی را مالک نمی‌شود.
+
+تأییدشده با بازرسی، نه با ادعا:
+
+- صفر `import` از `services/asset-service/**` (`grep` اجرا شد)
+- صفر ارجاع به `DATABASE_URL_ASSET` یا `rasta_asset`
+- هیچ Foreign Key میان‌پایگاه‌داده‌ای؛ `assetId` یک ستون `String` است
+- جدول `asset_ref` یک **Replica فقط‌خواندنی** از رویدادهاست (الگوی `docs/03` § ۳٫۶)
+  و **هرگز** مبنای تصمیم مجوزدهی نیست
+
+### رویدادها — تولیدشده روی `rasta.fleet.v1`
+
+همه با Envelope استاندارد (`eventId`، `eventVersion`، `producer`،
+`aggregateType`، `aggregateId`، `tenantId`، `correlationId`، `causationId`،
+`traceparent`، `actor`، `payload`) و **کلید پارتیشن `assetId`**.
+
+| رویداد                  | v   | Aggregate          | مصرف‌کنندگان                                   | هدف                            |
+| ----------------------- | --- | ------------------ | ---------------------------------------------- | ------------------------------ |
+| `DRIVER_REGISTERED`     | 1   | Driver             | audit · analytics                              | ثبت راننده تازه                |
+| `DRIVER_STATUS_CHANGED` | 1   | Driver             | audit · analytics                              | تعلیق/فعال‌سازی — قابل حسابرسی |
+| `ASSET_ASSIGNED`        | 1   | Assignment         | **asset** (پرونده + وضعیت) · analytics         | راننده دستگاه را تحویل گرفت    |
+| `ASSIGNMENT_ENDED`      | 1   | Assignment         | **asset** (پرونده + بازگشت) · analytics        | دستگاه آزاد شد                 |
+| `USAGE_RECORDED`        | 1   | UsageRecord        | **maintenance** · asset · economic · analytics | محرک نگهداری کارکردمحور        |
+| `AVAILABILITY_CHANGED`  | 1   | AvailabilityWindow | construction · analytics                       | اعلام دستی در دسترس بودن       |
+
+`MISSION_STARTED` / `MISSION_COMPLETED`: **DEFERRED** — به
+`construction-service` گره خورده که وجود ندارد (ADR-026).
+
+### مسیر رویداد — **LIVE VERIFIED**
+
+```
+HTTP (Gateway، توکن واقعی Keycloak)
+  → fleet-service
+  → PostgreSQL (تغییر وضعیت + Outbox در یک تراکنش)
+  → OutboxRelay
+  → Kafka (rasta.fleet.v1، کلید = assetId)
+  → asset-service TimelineConsumer
+  → asset_timeline_entry + تغییر OperationalStatus
+```
+
+این **دقیقاً همین مسیر** اجرا شد (بخش ۲۱، ردیف ۴ تا ۸): دارایی
+`IDLE → ASSIGNED → ACTIVE` رفت، دو خط Timeline ساخته شد، و `correlationId`
+از درخواست HTTP تا Header کافکا تا Timeline یکسان ماند.
+
+### تست
+
+| دسته             | تعداد | وضعیت                                                          |
+| ---------------- | ----- | -------------------------------------------------------------- |
+| Unit             | 88    | سبز — ۷ فایل                                                   |
+| Integration      | 32    | سبز — ۴ Suite روی PostgreSQL و Kafka **واقعی**، بدون Mock      |
+| Security/AuthZ   | —     | داخل دو دسته بالا؛ Tenant Isolation و مجوزدهی Suite جدا ندارند |
+| E2E (Playwright) | ۰     | **NOT IMPLEMENTED** — بدون Config، پوشه خالی                   |
+
+### محدودیت‌های شناخته‌شده
+
+- `mission` پیاده نشده (**DEFERRED**، ADR-026)
+- `asset_ref` در نهایت سازگار است — پنجره‌ای هست که fleet نمی‌داند دستگاهی
+  تازه اسقاط شده (**OPEN**، پذیرفته‌شده در ADR-026)
+- انحصار دارایی، شیفت‌بندی را ممنوع می‌کند (**OPEN** — Q-23)
+- اعتبار گواهینامه ثبت می‌شود ولی اجرا نمی‌شود (**OPEN** — Q-22)
+- `DELETE /v1/assignments/{id}` چیزی حذف نمی‌کند؛ مترادف `end` است
 
 ---
 
@@ -458,6 +544,17 @@ Windows** (`C:\Program Files\Redis\redis-server.exe`) هم‌زمان روی پ�
 مستند شده بود (D-002 قدیمی، حل‌شده با انتقال به ۵۴۳۳). این یکی حل نشده.
 شواهد کامل و اثر آن روی Rate Limiting در بخش ۲۳.
 
+**وضعیت مشاهده‌شده زیرساخت (2026-08-28، `docker ps`):**
+
+| سرویس    | وضعیت       | یادداشت                                           |
+| -------- | ----------- | ------------------------------------------------- |
+| postgres | **HEALTHY** | ۵ ساعت پایدار                                     |
+| redis    | **HEALTHY** | مصرف‌کننده: فقط `api-gateway`                     |
+| kafka    | **HEALTHY** | ۶ Topic ناوگان/دارایی ساخته شده                   |
+| keycloak | **HEALTHY** | ۴ کاربر Seed؛ `dehyari.admin` بازیابی شد (بخش ۲۲) |
+| minio    | **HEALTHY** | **NOT USED** — هیچ سرویسی هنوز لمسش نمی‌کند       |
+| temporal | **HEALTHY** | **NOT USED** — هیچ Workflow ای نوشته نشده         |
+
 **✅ D-009 رفع شد (2026-08-28).** `rasta-temporal` اکنون `healthy` است با
 `FailingStreak: 0`، و — که مهم‌تر است — `docker exec rasta-temporal temporal
 --version` دیگر Hang نمی‌کند و پاسخ می‌دهد:
@@ -495,22 +592,26 @@ Profile اختیاری است و در این Audit بالا آورده **نشد*
 ### واقعی، از اجرای امروز `pnpm verify` (نه از حافظه سند قدیمی):
 
 ```
-@rasta/config              11 تست
-@rasta/logging               9 تست
+@rasta/config                11 تست
+@rasta/logging                9 تست
 @rasta/observability         10 تست
-@rasta/nest-common           56 تست  (+16: قواعد دسترسی Endpoint عمومی، D-007)
-@rasta/api-gateway           25 تست  (+4: Gateway توکن RELAY صادر می‌کند)
+@rasta/nest-common           56 تست
+@rasta/api-gateway           30 تست
+@rasta/identity-service      14 تست
 @rasta/organization-service  21 تست
 @rasta/asset-service         74 تست
-@rasta/identity-service      14 تست
-@rasta/fleet-service         67 تست  (جدید — 2026-08-28)
-@rasta/api-gateway           +5 تست  (مسیرهای fleet؛ مجموع 30)
+@rasta/fleet-service         88 تست   ← فاز ناوگان
 ———————————————————————————————
-مجموع                       292 تست، همه سبز — محلی، 2026-08-28
+مجموع Unit                  313 تست، همه سبز
+مجموع Integration            32 تست، همه سبز (فقط fleet)
+E2E                           NOT IMPLEMENTED — بدون Playwright، پوشه خالی
 ```
 
-۲۲۰ عدد پیشین روی Runner واقعی GitHub دیده شده بود (Run `33076090420`).
-**۲۹۲ تا این لحظه فقط محلی تأیید شده؛ CI روی تغییرات fleet هنوز اجرا نشده.**
+از `pnpm run test` و `pnpm --filter @rasta/fleet-service test:integration`،
+اجراشده در 2026-08-28. اعداد از خروجی واقعی گرفته شده، نه از گزارش پیشین.
+
+هر ۳۱۳ عدد روی Runner واقعی GitHub هم دیده شد — **Run `33148910234`،
+Commit `7acd619`** — پس این شمارش دیگر فقط محلی نیست.
 
 **Integration Tests — دیگر تهی نیست.** `fleet-service` نخستین سرویسی است که تست
 Integration واقعی دارد (۴ Suite در `services/fleet-service/test/`):
@@ -544,7 +645,8 @@ Integration واقعی دارد (۴ Suite در `services/fleet-service/test/`):
 
 ### ✅ CI/CD — **CI VERIFIED** (به‌روزشده برای فاز ناوگان)
 
-**Run `33147827056`، Commit `d2f82f8`: success در ۱۱ دقیقه (۰۶:۲۴ تا ۰۶:۳۵ UTC).**
+**Run `33148910234`، Commit `7acd619`: success در ۸ دقیقه (۰۶:۴۳ تا ۰۶:۵۱ UTC).**
+(Run پیشین `33147827056` روی `d2f82f8` هم سبز بود؛ این آخرین است.)
 هر **هفت** Job سبز — چهار Image به‌جای دو، و برای نخستین‌بار یک Broker واقعی
 در Pipeline.
 
@@ -585,19 +687,21 @@ not available» می‌گیرد و در پس‌زمینه Retry می‌کند �
 
 ## ۲۰. Security State
 
-| مکانیزم                              | Implemented | Tested |                  Live Verified                  | یادداشت                                                                 |
-| ------------------------------------ | :---------: | :----: | :---------------------------------------------: | ----------------------------------------------------------------------- |
-| Authentication (JWT/JWKS)            |     ✅      |   ✅   |                       ✅                        | زنده دوباره تأیید شد: `200` با JWT کی‌کلوک از راه Gateway               |
-| Authorization (RBAC سطح Endpoint)    |     ✅      |   ✅   |                       ✅                        | زنده: `province.auditor` → `POST /v1/users` → `403 INSUFFICIENT_ROLE`   |
-| Tenant Isolation (API + DB)          |     ✅      |   ✅   |                       ✅                        | زنده: `X-Organization-Id` بیگانه → `403 TENANT_MISMATCH`                |
-| Service-to-Service Auth (Zero Trust) |     ✅      |   ✅   |                       ✅                        | D-007 رفع شد؛ Claim `purpose` — RELAY در برابر SERVICE (بخش ۱۱)         |
-| Rate Limiting (منطق Redis)           |     ✅      |   ✅   |                    ⚠️ مسدود                     | D-006: تصادم پورت Redis                                                 |
-| Input Validation (Zod در مرز)        |     ✅      |   ✅   |                       ✅                        |                                                                         |
-| Audit Trail                          |   ⚠️ جزئی   |   —    |                       نشد                       | `audit-service` نساخته؛ Event های تولید می‌شوند اما جایی ذخیره نمی‌شوند |
-| Secrets فقط از Env                   |     ✅      |   —    | ✅ (`.env` بررسی شد؛ Secret واقعی در Repo نیست) |                                                                         |
-| Security Headers (helmet)            |     ✅      |   —    |                       ✅                        | CSP، HSTS، Referrer-Policy                                              |
-| mTLS بین سرویس‌ها                    |     ❌      |   —    |                        —                        | Planned — Production-only                                               |
-| Database RLS                         |     ❌      |   —    |                        —                        | Tenant Isolation فعلاً فقط لایه Application است                         |
+| مکانیزم                               | Implemented | Tested |                  Live Verified                  | یادداشت                                                                                                                                                                          |
+| ------------------------------------- | :---------: | :----: | :---------------------------------------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Authentication (JWT/JWKS)             |     ✅      |   ✅   |                       ✅                        | زنده دوباره تأیید شد: `200` با JWT کی‌کلوک از راه Gateway                                                                                                                        |
+| Authorization (RBAC سطح Endpoint)     |     ✅      |   ✅   |                       ✅                        | زنده: `province.auditor` → `POST /v1/users` → `403 INSUFFICIENT_ROLE`                                                                                                            |
+| Tenant Isolation (API + DB)           |     ✅      |   ✅   |                       ✅                        | زنده: `X-Organization-Id` بیگانه → `403 TENANT_MISMATCH`                                                                                                                         |
+| Service-to-Service Auth (Zero Trust)  |     ✅      |   ✅   |                       ✅                        | D-007 رفع شد؛ Claim `purpose` — RELAY در برابر SERVICE (بخش ۱۱)                                                                                                                  |
+| Rate Limiting (منطق Redis)            |     ✅      |   ✅   |                    ⚠️ مسدود                     | D-006: تصادم پورت Redis                                                                                                                                                          |
+| Input Validation (Zod در مرز)         |     ✅      |   ✅   |                       ✅                        |                                                                                                                                                                                  |
+| **Object-level Authorization (BOLA)** |     ✅      |   ✅   |                       ✅                        | **IMPLEMENTED در fleet** (`src/fleet/access.ts`): `DRIVER`/`OPERATOR` فقط رکورد خود و دستگاهی که در دست دارند. زنده: `province.auditor` → فهرست خالی. سایر سرویس‌ها هنوز ندارند. |
+| **Non-disclosure میان تنانتی**        |     ✅      |   ✅   |                       ✅                        | زنده: منبع تنانت دیگر → **`404`**، هرگز `403` — روی Driver، Assignment و UsageRecord آزموده شد                                                                                   |
+| Audit Trail                           |   ⚠️ جزئی   |   —    |                       نشد                       | `audit-service` نساخته؛ Event های تولید می‌شوند اما جایی ذخیره نمی‌شوند                                                                                                          |
+| Secrets فقط از Env                    |     ✅      |   —    | ✅ (`.env` بررسی شد؛ Secret واقعی در Repo نیست) |                                                                                                                                                                                  |
+| Security Headers (helmet)             |     ✅      |   —    |                       ✅                        | CSP، HSTS، Referrer-Policy                                                                                                                                                       |
+| mTLS بین سرویس‌ها                     |     ❌      |   —    |                        —                        | **PLANNED** — صفر ارجاع در کد (`grep` تأیید شد). Production-only                                                                                                                 |
+| Database RLS                          |     ❌      |   —    |                        —                        | **PLANNED** — صفر Migration دارد. Tenant Isolation فعلاً **فقط لایه Application** است                                                                                            |
 
 **وضعیت High-risk items پس از Task سخت‌سازی 2026-08-27:**
 
@@ -608,7 +712,19 @@ not available» می‌گیرد و در پس‌زمینه Retry می‌کند �
 - ⏳ **D-006 باز است** — تصادم پورت Redis روی این ماشین توسعه.
 - 🆕 **D-008 باز است** — سه قاعده Supply-Chain که Lockfile فعلی رد می‌کند.
 - ✅ **D-009 رفع شد** — Temporal `healthy` است و CLI داخل Image پاسخ می‌دهد.
-  ریشه، خرابی محیط Docker بود (D-010)، نه نقص Image.
+
+**تفکیک IMPLEMENTED از PLANNED — تأییدشده با بازرسی کد، نه با سند:**
+
+| کنترل                                              | وضعیت واقعی                                                                               |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Keycloak / OIDC / JWKS                             | **IMPLEMENTED** + LIVE VERIFIED                                                           |
+| اعتبارسنجی JWT (`iss`, `exp`)                      | **IMPLEMENTED** + LIVE VERIFIED — Container توکن با `iss` نامنطبق را رد کرد               |
+| Tenant Isolation سطح Application                   | **IMPLEMENTED** + LIVE VERIFIED + CI VERIFIED                                             |
+| Object-level Authorization                         | **IMPLEMENTED** در fleet؛ سایر سرویس‌ها **NOT IMPLEMENTED**                               |
+| Database RLS                                       | **PLANNED** — صفر Migration                                                               |
+| mTLS سرویس‌به‌سرویس                                | **PLANNED** — صفر ارجاع در کد                                                             |
+| Audit Trail ماندگار                                | **PLANNED** — `audit-service` وجود ندارد؛ رویدادها تولید می‌شوند اما مصرف‌کننده‌ای ندارند |
+| ریشه، خرابی محیط Docker بود (D-010)، نه نقص Image. |
 
 ---
 
@@ -857,12 +973,12 @@ ADR-001 (Microservices)، ADR-004/005 (Database + Ownership)، ADR-006
 - Infrastructure کامل (Postgres+PostGIS، Redis، Kafka، Keycloak Realm با
   ۴ کاربر Seed، MinIO، Temporal) — با Runbook برای هر مشکل واقعی برخورده‌شده
 - ۵ سرویس Backend کامل: `identity, organization, asset, api-gateway, fleet`
-- ۲۹۲ تست واحد، همه سبز — ۲۲۰ تای اول روی Runner واقعی هم دیده شده
+- ۳۱۳ تست واحد + ۳۲ تست Integration، همه سبز — محلی و روی Runner واقعی
 - **۴ Suite تست Integration واقعی** (نخستین در این Repository) — در fleet
 - Kafka Consumer عمومی (`EventConsumer`) + Projector واقعی (`asset-service`
   Timeline از رویدادهای سرویس‌های دیگر)
 - **CI Pipeline سبز روی GitHub Actions** (۴ Job، ۵ اجرا با Matrix) —
-  **CI VERIFIED** تا Commit `1872bd7`، Run `33076090420` (بخش ۱۹)
+  **CI VERIFIED** تا Commit `7acd619`، Run `33148910234` (بخش ۱۹)
 - **fleet-service:** Driver · Assignment (با Invariant انحصار در پایگاه داده) ·
   UsageRecord (Idempotent برای ثبت آفلاین) · Availability (ترکیبی، با نام مالک هر
   مانع) · Utilization · Consumer دوطرفه با asset-service
@@ -894,7 +1010,7 @@ document, audit, analytics`)
 ```
 ✅ identity → ✅ organization → ✅ api-gateway → ✅ asset → ✅ fleet
       ↓
-   maintenance-service   ← گام بعدی (بخش ۲۹)
+   maintenance-service   ← NEXT / RECOMMENDED — شروع نشده (بخش ۲۹)
       ↓
    marketplace-service → economic-service
       ↓
@@ -907,6 +1023,19 @@ document, audit, analytics`)
 
 این ترتیب از `docs/17-mvp-scope.md` و توالی واقعی Git History استخراج شده؛
 هیچ تغییری در تاریخ یا دامنه این Roadmap داده نشده.
+
+**وضعیت هر گام (2026-08-28):**
+
+| سرویس         | وضعیت                                                  |
+| ------------- | ------------------------------------------------------ |
+| identity      | IMPLEMENTED · TESTED · LIVE VERIFIED · CI VERIFIED     |
+| organization  | IMPLEMENTED · TESTED · LIVE VERIFIED · CI VERIFIED     |
+| api-gateway   | IMPLEMENTED · TESTED · LIVE VERIFIED (بدون Dockerfile) |
+| asset         | IMPLEMENTED · TESTED · LIVE VERIFIED · CI VERIFIED     |
+| **fleet**     | **IMPLEMENTED · TESTED · LIVE VERIFIED · CI VERIFIED** |
+| maintenance   | **NEXT / RECOMMENDED — NOT_STARTED**                   |
+| ۱۰ سرویس دیگر | NOT_STARTED                                            |
+| Frontend      | NOT_STARTED — UI پشت دروازه تأیید صریح کاربر است       |
 
 ---
 
@@ -922,7 +1051,7 @@ document, audit, analytics`)
 | TESTED        | ۸۸ تست واحد در fleet، ۳۱۳ در Monorepo — `pnpm verify --force`  |
 | INTEGRATION   | ۳۲ تست روی PostgreSQL و Kafka واقعی، بدون Mock                 |
 | LIVE VERIFIED | ۲۰ سناریو از راه Gateway با توکن واقعی Keycloak (بخش ۲۱)       |
-| CI VERIFIED   | Run `33147827056`، Commit `d2f82f8`، هر ۷ Job سبز              |
+| CI VERIFIED   | Run `33148910234`، Commit `7acd619`، هر ۷ Job سبز              |
 
 ### گام بعدی: `maintenance-service`
 
