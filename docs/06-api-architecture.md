@@ -361,19 +361,60 @@ POST   /v1/projects/{id}/progress        گزارش پیشرفت
 GET    /v1/projects/{id}/fleet-analysis  تحلیل ناوگان داخلی در برابر برون‌سپاری
 ```
 
-**Economic**
+**Economic** — پیاده‌شده (2026-08-29). `[K]` یعنی `Idempotency-Key` اجباری.
 
 ```
-GET    /v1/wallets/me                    کیف پول سازمان جاری
-POST   /v1/wallets/{id}/top-up           شارژ   [Idempotency-Key]
-POST   /v1/transactions                  ایجاد تراکنش   [Idempotency-Key]
-GET    /v1/transactions/{id}             دریافت
-GET    /v1/transactions                  فهرست (Cursor)
-GET    /v1/ledger/accounts/{id}/entries  صورت‌حساب (Cursor)
-GET    /v1/ledger/trial-balance          تراز آزمایشی
-GET    /v1/commissions                   کارمزدهای دریافتی
-GET    /v1/rewards/me                    امتیاز و سطح
+GET    /v1/wallets/provider                        ارائه‌دهنده پرداخت و اینکه شبیه‌سازی است
+GET    /v1/wallets/me                              کیف پول سازمان جاری (در نخستین استفاده باز می‌شود)
+GET    /v1/wallets/{id}                            یک کیف پول
+GET    /v1/wallets/{id}/holds                      Holdهای امانت
+POST   /v1/wallets/{id}/top-up                     شارژ — شبیه‌سازی‌شده   [K]
+
+POST   /v1/transactions                            ثبت تعهد (اختیاری: Hold هم‌زمان)   [K]
+GET    /v1/transactions                            فهرست (Cursor؛ includeIncoming برای نمای دریافت‌کننده)
+GET    /v1/transactions/{id}                       دریافت
+POST   /v1/transactions/{id}/authorise-settlement  تأیید دریافت   [K]
+POST   /v1/transactions/{id}/dispute               ثبت اعتراض — توقف کامل تسویه   [K]
+POST   /v1/transactions/{id}/resolve-dispute       رفع اختلاف (تصمیم انسانی)   [K]
+POST   /v1/transactions/{id}/refund                بازگشت وجه به پرداخت‌کننده   [K]
+POST   /v1/transactions/{id}/cancel                لغو پیش از هر حرکت   [K]
+
+POST   /v1/settlements                             تسویه   [K]
+GET    /v1/settlements                             فهرست (incoming برای نمای دریافت‌کننده)
+GET    /v1/settlements/{id}                        دریافت
+
+GET    /v1/ledger/accounts                         نمودار حساب‌های سازمان
+GET    /v1/ledger/accounts/{id}/entries            صورت‌حساب (Cursor)
+GET    /v1/ledger/journals/{id}                    یک Journal با همه خطوطش
+POST   /v1/ledger/journals/{id}/reverse            معکوس کردن — تنها اصلاح ممکن   (SYSTEM_ADMIN/UNION_ADMIN)
+GET    /v1/ledger/trial-balance                    تراز آزمایشی   (SYSTEM_ADMIN/UNION_ADMIN)
+
+GET    /v1/commissions                             کارمزدهای اعمال‌شده
+GET    /v1/commissions/rules                       قواعد قابل اعمال
+POST   /v1/commissions/rules                       تعریف نرخ   (SYSTEM_ADMIN)
+PATCH  /v1/commissions/rules/{id}                  اصلاح نرخ   (SYSTEM_ADMIN)
+
+GET    /v1/rewards/me                              امتیاز، سطح و پاداش‌های اخیر
+GET    /v1/rewards/rules                           قواعد قابل اعمال
+POST   /v1/rewards/rules                           تعریف قاعده   (SYSTEM_ADMIN)
+PATCH  /v1/rewards/rules/{id}                      اصلاح قاعده   (SYSTEM_ADMIN)
+
+GET    /v1/payment-intents                         فهرست پرداخت‌ها
+GET    /v1/payment-intents/{id}                    یک پرداخت
+POST   /v1/payment-intents/{id}/refund             بازگشت شارژ — با Reversal   [K]
 ```
+
+**سه نکته که از فهرست بالا پیدا نیست:**
+
+- **هیچ Endpoint ی Journal دلخواه Post نمی‌کند.** یک Journal همیشه رکورد چیزی
+  است که اتفاق افتاده؛ Endpoint ای که Journal دلخواه بپذیرد یعنی جابه‌جایی
+  مانده بدون هیچ واقعیت کسب‌وکاری پشتش — همان چیزی که یک دفتر کل برای غیرممکن
+  کردنش وجود دارد.
+- **هیچ Endpoint ی حساب نمی‌سازد.** نمودار حساب‌ها از `AccountPurpose` مشتق
+  می‌شود و در نخستین استفاده ساخته می‌شود.
+- **نقش `AUDITOR` هیچ‌کدام از این‌ها را نمی‌بیند** — نه در جدول مسیریابی
+  Gateway، نه در `@Roles` هیچ Controller ی، و `assertNotAuditor()` هم بار سوم
+  ردش می‌کند. یک قاعده به این اندازه مهم نباید به درست ماندن یک فایل وابسته باشد.
 
 ---
 

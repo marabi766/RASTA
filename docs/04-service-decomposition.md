@@ -21,7 +21,7 @@
 | `inventory-service`    | 3109 | P1  | `rasta_inventory`    | `rasta.inventory.v1`                    | ✅ (شامل ماژول logistics)                             |
 | `construction-service` | 3110 | P0  | `rasta_construction` | `rasta.construction.v1`                 | ✅                                                    |
 | `contract-service`     | 3111 | P0  | `rasta_contract`     | `rasta.contract.v1`                     | ✅                                                    |
-| `economic-service`     | 3112 | P0  | `rasta_economic`     | `rasta.economic.v1`                     | ✅ (۵ ماژول: wallet/ledger/payment/commission/reward) |
+| `economic-service`     | 3112 | P0  | `rasta_economic`     | `rasta.economic.v1`                     | ✅ **IMPLEMENTED** (۵ ماژول + transaction/settlement) |
 | `notification-service` | 3113 | P0  | `rasta_notification` | `rasta.notification.v1`                 | ✅                                                    |
 | `document-service`     | 3114 | P0  | `rasta_document`     | `rasta.document.v1`                     | ✅                                                    |
 | `audit-service`        | 3115 | P0  | `rasta_audit`        | `rasta.audit.trail.v1`                  | ✅                                                    |
@@ -338,8 +338,29 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 
 ## ۴٫۱۴ economic-service
 
-> پنج ماژول با مرزبندی داخلی کامل: `wallet` · `ledger` · `payment` · `commission` · `reward`.
+> پنج ماژول با مرزبندی داخلی کامل: `wallet` · `ledger` · `payment` · `commission` · `reward`
+> — به‌علاوه `transaction` (تعهدی که هر پنج‌تا رویش کار می‌کنند) و `settlement`
+> (فرآیندی که ADR-031 حاکم بر آن است) و `shared`.
 > تفصیل کامل در [`10-economic-architecture.md`](10-economic-architecture.md).
+>
+> **وضعیت (2026-08-29): IMPLEMENTED · TESTED · LIVE VERIFIED.**
+>
+> **مصرف رویداد، واقعی در برابر مستند (ADR-032).** فقط سه رویداد مصرف می‌شوند —
+> `MAINTENANCE_APPROVED`، `USAGE_RECORDED` و `MAINTENANCE_COMPLETED` — چون فقط
+> قرارداد این سه واقعاً تعریف شده است. `ORDER_*`، `STATEMENT_APPROVED`،
+> `PURCHASE_ORDER_ISSUED` و `GOODS_RECEIVED` **موکول**اند: نبودِ تولیدکننده
+> به‌تنهایی مانع نیست، اما نوشتن آن Handler‌ها یعنی این سرویس شکل Payload سرویس
+> دیگری را اختراع کند. **هیچ Handler خالی‌ای برایشان وجود ندارد** — یک
+> مصرف‌کننده که رویداد را می‌بلعد و کاری نمی‌کند، در `processed_event` رد
+> می‌گذارد و دقیقاً شبیه یکی است که کار کرد.
+>
+> آنچه آن جریان‌ها لازم دارند از راه **API** در دسترس است، که همان چیزی است که
+> `docs/08` § ۸٫۶ می‌خواهد: `OrderSagaWorkflow` مراحلش را به‌عنوان **Activity**
+> صدا می‌زند، نه به‌عنوان رویداد.
+>
+> **و `MAINTENANCE_APPROVED` پول را حرکت نمی‌دهد** — یک تعهد
+> `PENDING_SETTLEMENT` ثبت می‌کند، تا یک تعمیر واقعیِ تأییدشده به‌خاطر کیف پول
+> خالی گم نشود. تسویه یک فرمان صریح است.
 
 | بُعد             | مشخصات                                                                                                                                                                                                                                                                                                 |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

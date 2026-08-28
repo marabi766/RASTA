@@ -152,6 +152,32 @@ CREATE TABLE organization_ref (
 
 ## ۵٫۴ مدل داده دفتر کل (بحرانی‌ترین بخش)
 
+> **وضعیت واقعی (2026-08-29).** پیاده‌سازی شده در `economic-service`، با سه
+> انحراف ثبت‌شده از DDL زیر:
+>
+> | انحراف                                                 | چرا                                                                                                                                                                                                                        |
+> | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+> | `ledger_entry` **پارتیشن‌بندی نشده**                   | جدول پارتیشن‌بندی‌شده بدون پارتیشن ماه جاری، `INSERT` را رد می‌کند و هیچ ساز‌و‌کار خودکار ساخت پارتیشنی در این پلتفرم نیست (**ADR-030**). ستون `posted_at` از روز اول درست است؛ شرط فعال‌سازی یک عدد قابل اندازه‌گیری است. |
+> | حساب امانت **به‌ازای هر سازمان** (`LIAB-<ORG>-ESCROW`) | حل تناقض میان Invariant بند ۱۰٫۳ و Journal بند ۱۰٫۴ (**ADR-034**). وجه در امانت هنوز مال پرداخت‌کننده است.                                                                                                                 |
+> | Trigger تغییرناپذیری روی `journal` هم هست              | یک Header تغییرپذیر روی خطوط تغییرناپذیر، یک شکاف است: بازنویسی `description` یا `posted_at` معنای ورودی‌ها را عوض می‌کند بدون آنکه به آن‌ها دست بزند.                                                                     |
+>
+> و چند تضمین **افزون بر** آنچه اینجا نوشته شده — همه در
+> `services/economic-service/prisma/migrations/*/migration.sql` و همه با تست
+> یکپارچگی روی PostgreSQL واقعی:
+>
+> - **توازن هر Journal با یک `CONSTRAINT TRIGGER` معوق (`DEFERRABLE INITIALLY
+DEFERRED`) در پایان تراکنش بررسی می‌شود.** معوق، چون خطوط یک Journal در چند
+>   دستور درج می‌شوند و بررسی سطر‌به‌سطر روی نخستین خطِ یک Journalِ کاملاً متوازن
+>   شکست می‌خورد.
+> - `ck_wallet_balances`: `available = ledger − pending` و هیچ‌کدام منفی نیست —
+>   **این محدودیت است که خرج بیش از موجودی را غیرممکن می‌کند**، نه بررسی
+>   Application.
+> - Foreign Key ترکیبی از `ledger_entry(account_id, organization_id, currency)`
+>   به `ledger_account`: یک ورودی ریالی روی حساب ارز دیگر، یا ورودی ثبت‌شده زیر
+>   سازمان اشتباه، در پایگاه داده رد می‌شود.
+> - `uq_wallet_hold_active_reference`: یک Hold زنده به‌ازای هر تعهد.
+> - `ck_reward_monetisation`: پرچم `monetised` نمی‌تواند دروغ بگوید (ADR-033).
+
 ```sql
 CREATE TABLE ledger_account (
   id              TEXT PRIMARY KEY,
@@ -183,7 +209,8 @@ CREATE TABLE ledger_entry (
   amount_minor    BIGINT NOT NULL CHECK (amount_minor > 0),
   currency        TEXT NOT NULL,
   posted_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-) PARTITION BY RANGE (posted_at);
+);
+-- PARTITION BY RANGE (posted_at) — موکول، با شرط فعال‌سازی عددی (ADR-030).
 ```
 
 ### تضمین تغییرناپذیری در سطح پایگاه داده
@@ -198,10 +225,19 @@ END; $$ LANGUAGE plpgsql;
 CREATE TRIGGER trg_ledger_entry_immutable
   BEFORE UPDATE OR DELETE ON ledger_entry
   FOR EACH ROW EXECUTE FUNCTION reject_ledger_mutation();
+
+-- و همین برای خودِ Journal، به همان دلیل.
+CREATE TRIGGER trg_journal_immutable
+  BEFORE UPDATE OR DELETE ON journal
+  FOR EACH ROW EXECUTE FUNCTION reject_journal_mutation();
 ```
 
 **چرا در پایگاه داده و نه فقط در کد؟** چون یک اسکریپت اصلاحی، یک ORM بدقلق یا یک توسعه‌دهنده
 عجول می‌تواند لایه Domain را دور بزند. Trigger نمی‌تواند دور زده شود.
+
+**تأیید زنده (2026-08-29).** `UPDATE`، `DELETE` و `UPDATE` دسته‌جمعی روی
+`ledger_entry` — و همان‌ها روی `journal` — همگی از **SQL خام** اجرا شدند و همگی
+رد شدند (`test/ledger-immutability.int-spec.ts`، ۱۵ تست).
 
 ### تضمین توازن
 
@@ -212,6 +248,12 @@ FROM ledger_entry
 GROUP BY journal_id, currency
 HAVING SUM(CASE WHEN direction='DEBIT' THEN amount_minor ELSE -amount_minor END) <> 0;
 ```
+
+**و همین بررسی، در پایگاه داده.** `trg_journal_balanced` یک
+`CONSTRAINT TRIGGER` معوق است که در `COMMIT` همین محاسبه را انجام می‌دهد و یک
+Journal نامتوازن یا تک‌خطی را رد می‌کند. لایه Domain هم پیش از نوشتن بررسی
+می‌کند — اما آن بررسی برای پیام خطای خوانا است، و Trigger برای این است که هیچ
+مسیر کدی نتواند دورش بزند.
 
 این پرس‌وجو هم در تست یکپارچگی مالی و هم در Health Check دوره‌ای اجرا می‌شود.
 

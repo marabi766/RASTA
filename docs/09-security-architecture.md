@@ -163,6 +163,21 @@ Gateway پاسخ `403` می‌داد (D-007). حالا Claim `purpose` آن دو
 جزئیات تراکنش‌های فردی» دارد. این در کد یعنی: `AUDITOR` هیچ مجوزی روی `economic-service`،
 `marketplace-service` یا هر Endpoint سطح ردیف ندارد — فقط `analytics-service`.
 
+**اجرا و تأیید زنده در `economic-service` (2026-08-29).** سه لایه، به‌عمد:
+
+1. جدول مسیریابی Gateway هیچ Prefix اقتصادی‌ای به `AUDITOR` نمی‌دهد
+   (تست: `routes.spec.ts`).
+2. هیچ `@Roles` در هیچ Controller اقتصادی نام `AUDITOR` را ندارد.
+3. `assertNotAuditor()` در `access.ts` حتی اگر هر دوی بالا ویرایش شوند ردش
+   می‌کند.
+
+زنده گرفته شد با توکن واقعی Keycloak: `GET /v1/wallets/me` → `403
+INSUFFICIENT_ROLE`، `GET /v1/transactions` → `403`، `GET
+/v1/ledger/trial-balance` → `403 FORBIDDEN`.
+
+و خواندن میان‌مستأجری همان‌جا **۴۰۴** گرفت، نه ۴۰۳: `GET /v1/wallets/{id}`
+برای کیف پول سازمان دیگر → `404 NOT_FOUND`، تا وجود رکورد فاش نشود.
+
 **وضعیت واقعی دو قاعده این جدول در `maintenance-service` (2026-08-28).** هر دو
 **باریک‌تر** از آنچه نوشته شده پیاده شده‌اند، نه تقریبی از آن، و هر دو در ADR-029
 با پرسش باز ثبت شده‌اند:
