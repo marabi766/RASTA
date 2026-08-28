@@ -71,6 +71,13 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      # Gitleaks enumerates a pull request's commits through the API to decide
+      # what to scan, so on a `pull_request` event it needs to read them. Until
+      # the first PR-triggered run this job had only ever run on a push to
+      # main, where that call is never made — so the missing permission
+      # surfaced as `403 Resource not accessible by integration` and looked
+      # exactly like a secret finding. It was not one.
+      pull-requests: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -241,7 +248,8 @@ jobs:
           for topic in \
             rasta.fleet.v1 rasta.fleet.v1.retry rasta.fleet.v1.dlq \
             rasta.asset.v1 rasta.insurance.v1 \
-            rasta.maintenance.v1 rasta.maintenance.v1.retry rasta.maintenance.v1.dlq; do
+            rasta.maintenance.v1 rasta.maintenance.v1.retry rasta.maintenance.v1.dlq \
+            rasta.economic.v1 rasta.economic.v1.retry rasta.economic.v1.dlq; do
             create "$topic"
           done
 
@@ -270,6 +278,7 @@ jobs:
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
 
       - name: Integration tests
         run: pnpm run test:integration
@@ -281,6 +290,7 @@ jobs:
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           REDIS_URL: redis://localhost:6379
 
       # These are called out separately from the rest of the suite so a failure
@@ -299,10 +309,20 @@ jobs:
         # makes mandatory, one word each: `exclusivity` is fleet's one-driver
         # rule, `duplicate` is maintenance's duplicate-report control, and
         # `provenance` is the rule that a cost line must name the work that
-        # produced it — the property economic-service will audit against.
+        # produced it — the property economic-service audits against.
+        #
+        # The financial half was added with economic-service, and each word is
+        # a row of docs/10 § 10.12's mandatory table rather than a test name:
+        # `immutab` is the append-only ledger, `balance` is Σdebit = Σcredit and
+        # the wallet/ledger agreement, `concurren` is the hundred parallel
+        # withdrawals, `idempot` is one key one effect, `atomic` is a failed
+        # settlement leaving nothing behind, `dispute` is the objection that
+        # stops all movement, `overspend` is the negative balance that cannot
+        # happen, and `cap` is the anti-fraud reward ceiling. A failure in any
+        # of them is a financial defect, not a flaky test.
         run: |
           pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"
-          pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance)"
+          pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)"
         env:
           NODE_ENV: test
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
@@ -310,6 +330,7 @@ jobs:
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
 
   # ---------------------------------------------------------------------------
   # Container build and image scan. Only on main, because it is the slowest
@@ -336,6 +357,7 @@ jobs:
             asset-service,
             fleet-service,
             maintenance-service,
+            economic-service,
           ]
 
     steps:

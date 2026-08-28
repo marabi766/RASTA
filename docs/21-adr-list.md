@@ -10,37 +10,41 @@
 
 ## فهرست
 
-| ADR                                               | عنوان                                          | وضعیت    | تأثیر                             |
-| ------------------------------------------------- | ---------------------------------------------- | -------- | --------------------------------- |
-| [001](adr/ADR-001-microservices.md)               | معماری Microservices                           | Accepted | ساختار کل سیستم                   |
-| [002](adr/ADR-002-backend-stack.md)               | TypeScript + NestJS                            | Accepted | همه سرویس‌ها                      |
-| [003](adr/ADR-003-frontend-stack.md)              | Next.js + React + Tailwind                     | Accepted | هر دو Frontend                    |
-| [004](adr/ADR-004-database.md)                    | PostgreSQL + PostGIS + Prisma                  | Accepted | لایه داده                         |
-| [005](adr/ADR-005-database-ownership.md)          | مالکیت پایگاه داده به‌ازای سرویس               | Accepted | **قاعده بنیادین**                 |
-| [006](adr/ADR-006-kafka.md)                       | Kafka به‌عنوان Event Backbone                  | Accepted | همه ارتباط ناهمزمان               |
-| [007](adr/ADR-007-redis.md)                       | Redis برای Cache، قفل و Rate Limit             | Accepted | کارایی و همزمانی                  |
-| [008](adr/ADR-008-identity-keycloak.md)           | Keycloak + OIDC/OAuth2                         | Accepted | احراز هویت                        |
-| [009](adr/ADR-009-api-gateway.md)                 | API Gateway اختصاصی NestJS                     | Accepted | **انحراف آگاهانه از Kong/APISIX** |
-| [010](adr/ADR-010-workflow-temporal.md)           | Temporal برای گردش‌کار                         | Accepted | فرآیندهای بلندمدت                 |
-| [011](adr/ADR-011-multi-tenancy.md)               | راهبرد Multi-Tenancy                           | Accepted | **قاعده بنیادین امنیتی**          |
-| [012](adr/ADR-012-asset-centric.md)               | مدل Asset-Centric و شناسه سراسری               | Accepted | **قاعده بنیادین دامنه**           |
-| [013](adr/ADR-013-wallet-ledger.md)               | تفکیک Wallet و Ledger؛ یک economic-service     | Accepted | **یکپارچگی مالی**                 |
-| [014](adr/ADR-014-object-storage.md)              | Object Storage سازگار با S3                    | Accepted | مدیریت اسناد                      |
-| [015](adr/ADR-015-kubernetes.md)                  | Kubernetes + Helm                              | Accepted | استقرار Production                |
-| [016](adr/ADR-016-search.md)                      | OpenSearch برای جست‌وجو                        | Accepted | جست‌وجوی چندوجهی                  |
-| [017](adr/ADR-017-observability.md)               | OpenTelemetry + Prometheus + Grafana           | Accepted | مشاهده‌پذیری                      |
-| [018](adr/ADR-018-monorepo.md)                    | Monorepo با pnpm + Turborepo                   | Accepted | ساختار Repository                 |
-| [019](adr/ADR-019-testing-stack.md)               | Jest + @swc/jest + Testcontainers + Playwright | Accepted | راهبرد تست                        |
-| [020](adr/ADR-020-service-to-service-auth.md)     | احراز هویت سرویس‌به‌سرویس و Zero Trust         | Accepted | امنیت داخلی                       |
-| [021](adr/ADR-021-outbox-pattern.md)              | Transactional Outbox                           | Accepted | **تضمین تحویل رویداد**            |
-| [022](adr/ADR-022-money-representation.md)        | نمایش پول با bigint و Basis Point              | Accepted | **دقت مالی**                      |
-| [023](adr/ADR-023-configurable-governance.md)     | حکمرانی پیکربندی‌پذیر                          | Accepted | **CONSTRAINT حقوقی سند محصول**    |
-| [024](adr/ADR-024-payment-abstraction.md)         | Abstraction پرداخت و Mock Provider             | Accepted | **CONSTRAINT مقرراتی سند محصول**  |
-| [025](adr/ADR-025-assignment-exclusivity.md)      | انحصار تخصیص و کنترل همروندی                   | Accepted | یکپارچگی داده عملیاتی، ایمنی      |
-| [026](adr/ADR-026-fleet-asset-boundary.md)        | مرز fleet ↔ asset و مالکیت در دسترس بودن       | Accepted | مرز سرویس، صحت معماری             |
-| [027](adr/ADR-027-maintenance-due-evaluation.md)  | ارزیابی سررسید نگهداری — مشتق در خواندن        | Accepted | صحت عملیاتی، ایمنی                |
-| [028](adr/ADR-028-maintenance-cost-provenance.md) | مبدأ هزینه نگهداری و درز اقتصادی               | Accepted | **یکپارچگی مالی، مرز سرویس**      |
-| [029](adr/ADR-029-maintenance-workshop-access.md) | دسترسی تعمیرگاه و مجوزدهی سطح Object           | Accepted | **امنیت، ایمنی عملیاتی**          |
+| ADR                                                 | عنوان                                          | وضعیت    | تأثیر                             |
+| --------------------------------------------------- | ---------------------------------------------- | -------- | --------------------------------- |
+| [001](adr/ADR-001-microservices.md)                 | معماری Microservices                           | Accepted | ساختار کل سیستم                   |
+| [002](adr/ADR-002-backend-stack.md)                 | TypeScript + NestJS                            | Accepted | همه سرویس‌ها                      |
+| [003](adr/ADR-003-frontend-stack.md)                | Next.js + React + Tailwind                     | Accepted | هر دو Frontend                    |
+| [004](adr/ADR-004-database.md)                      | PostgreSQL + PostGIS + Prisma                  | Accepted | لایه داده                         |
+| [005](adr/ADR-005-database-ownership.md)            | مالکیت پایگاه داده به‌ازای سرویس               | Accepted | **قاعده بنیادین**                 |
+| [006](adr/ADR-006-kafka.md)                         | Kafka به‌عنوان Event Backbone                  | Accepted | همه ارتباط ناهمزمان               |
+| [007](adr/ADR-007-redis.md)                         | Redis برای Cache، قفل و Rate Limit             | Accepted | کارایی و همزمانی                  |
+| [008](adr/ADR-008-identity-keycloak.md)             | Keycloak + OIDC/OAuth2                         | Accepted | احراز هویت                        |
+| [009](adr/ADR-009-api-gateway.md)                   | API Gateway اختصاصی NestJS                     | Accepted | **انحراف آگاهانه از Kong/APISIX** |
+| [010](adr/ADR-010-workflow-temporal.md)             | Temporal برای گردش‌کار                         | Accepted | فرآیندهای بلندمدت                 |
+| [011](adr/ADR-011-multi-tenancy.md)                 | راهبرد Multi-Tenancy                           | Accepted | **قاعده بنیادین امنیتی**          |
+| [012](adr/ADR-012-asset-centric.md)                 | مدل Asset-Centric و شناسه سراسری               | Accepted | **قاعده بنیادین دامنه**           |
+| [013](adr/ADR-013-wallet-ledger.md)                 | تفکیک Wallet و Ledger؛ یک economic-service     | Accepted | **یکپارچگی مالی**                 |
+| [014](adr/ADR-014-object-storage.md)                | Object Storage سازگار با S3                    | Accepted | مدیریت اسناد                      |
+| [015](adr/ADR-015-kubernetes.md)                    | Kubernetes + Helm                              | Accepted | استقرار Production                |
+| [016](adr/ADR-016-search.md)                        | OpenSearch برای جست‌وجو                        | Accepted | جست‌وجوی چندوجهی                  |
+| [017](adr/ADR-017-observability.md)                 | OpenTelemetry + Prometheus + Grafana           | Accepted | مشاهده‌پذیری                      |
+| [018](adr/ADR-018-monorepo.md)                      | Monorepo با pnpm + Turborepo                   | Accepted | ساختار Repository                 |
+| [019](adr/ADR-019-testing-stack.md)                 | Jest + @swc/jest + Testcontainers + Playwright | Accepted | راهبرد تست                        |
+| [020](adr/ADR-020-service-to-service-auth.md)       | احراز هویت سرویس‌به‌سرویس و Zero Trust         | Accepted | امنیت داخلی                       |
+| [021](adr/ADR-021-outbox-pattern.md)                | Transactional Outbox                           | Accepted | **تضمین تحویل رویداد**            |
+| [022](adr/ADR-022-money-representation.md)          | نمایش پول با bigint و Basis Point              | Accepted | **دقت مالی**                      |
+| [023](adr/ADR-023-configurable-governance.md)       | حکمرانی پیکربندی‌پذیر                          | Accepted | **CONSTRAINT حقوقی سند محصول**    |
+| [024](adr/ADR-024-payment-abstraction.md)           | Abstraction پرداخت و Mock Provider             | Accepted | **CONSTRAINT مقرراتی سند محصول**  |
+| [025](adr/ADR-025-assignment-exclusivity.md)        | انحصار تخصیص و کنترل همروندی                   | Accepted | یکپارچگی داده عملیاتی، ایمنی      |
+| [026](adr/ADR-026-fleet-asset-boundary.md)          | مرز fleet ↔ asset و مالکیت در دسترس بودن       | Accepted | مرز سرویس، صحت معماری             |
+| [027](adr/ADR-027-maintenance-due-evaluation.md)    | ارزیابی سررسید نگهداری — مشتق در خواندن        | Accepted | صحت عملیاتی، ایمنی                |
+| [028](adr/ADR-028-maintenance-cost-provenance.md)   | مبدأ هزینه نگهداری و درز اقتصادی               | Accepted | **یکپارچگی مالی، مرز سرویس**      |
+| [029](adr/ADR-029-maintenance-workshop-access.md)   | دسترسی تعمیرگاه و مجوزدهی سطح Object           | Accepted | **امنیت، ایمنی عملیاتی**          |
+| [030](adr/ADR-030-ledger-partitioning.md)           | پارتیشن‌بندی `ledger_entry` — موکول با شرط     | Accepted | یکپارچگی مالی، عملیات پایگاه داده |
+| [031](adr/ADR-031-settlement-orchestration.md)      | هماهنگی تسویه بدون Temporal و بدون قفل Redis   | Accepted | **یکپارچگی مالی، همروندی**        |
+| [032](adr/ADR-032-economic-consumption-boundary.md) | مرز مصرف رویداد در economic و مدل تعهد         | Accepted | **یکپارچگی مالی، مرز سرویس**      |
+| [033](adr/ADR-033-reward-monetisation.md)           | پولی‌سازی پاداش — امتیاز در برابر اعتبار       | Accepted | **CONSTRAINT حکمرانی، مالی**      |
 
 ---
 
@@ -149,6 +153,42 @@ Reversal. کیف پول نمای عملیاتی است. **پنج ماژول در
 میان‌تنانتی که این پلتفرم ندارد؛ نقش `WORKSHOP` در همان باریک‌سازی می‌افتد و هیچ
 نمی‌بیند — امن به‌صورت پیش‌فرض. احراز صلاحیت تعمیرگاه پشت یک Port نام‌گذاری شده
 (`WorkshopDirectory`) که صریحاً می‌گوید بررسی نشده.
+
+### ADR-030 — پارتیشن‌بندی دفتر کل
+
+`docs/05` § ۵٫۴ جدول `ledger_entry` را پارتیشن‌بندی‌شده تعریف کرده. امروز نیست، و
+دلیلش حالت شکست است، نه تنبلی: جدول پارتیشن‌بندی‌شده بدون پارتیشنِ ماهِ جاری،
+`INSERT` را رد می‌کند — یعنی **نیمه‌شب اول ماه، نوشتن مالی متوقف می‌شود**. جلوگیری از
+آن یک ساز‌و‌کار خودکار ساخت پارتیشن می‌خواهد که این پلتفرم ندارد. ستون `posted_at` از
+روز اول درست است و هرگز تغییر نمی‌کند، پس مهاجرت بعدی یک کپی است نه بازنویسی. شرط
+فعال‌سازی عددی است: **یک میلیون ورودی در ماه**، ده برابر زودتر از آستانه استخراج.
+
+### ADR-031 — هماهنگی تسویه
+
+هسته تسویه **یک تراکنش ACID** است، نه Saga — چون `docs/10` § ۱۰٫۱۰ خودش جبران خودکار
+پس از Post کردن Journal را ممنوع کرده، و Temporal برای چیزی که جبران ندارد هماهنگی
+اضافه نمی‌کند. کیف پول‌ها با **ترتیب قطعی `wallet.id`** قفل می‌شوند، که Deadlock را
+ساختاری غیرممکن می‌کند. **Redis در هیچ مسیر مالی استفاده نمی‌شود**: قفل ردیف در یک
+پایگاه داده از یک قفل بیرونیِ منقضی‌شدنی قوی‌تر است. پاداش بیرون تراکنش است و هرگز
+تسویه را Rollback نمی‌کند.
+
+### ADR-032 — مرز مصرف رویداد در economic
+
+فقط رویدادهایی مصرف می‌شوند که **قراردادشان واقعاً تعریف شده**:
+`MAINTENANCE_APPROVED`، `USAGE_RECORDED`، `MAINTENANCE_COMPLETED`. `ORDER_*` و
+`STATEMENT_APPROVED` موکول‌اند — نه چون تولیدکننده‌شان نیست، بلکه چون نوشتنشان یعنی
+`economic-service` قرارداد رویداد سرویس دیگری را اختراع کند. چرخه کامل Hold ← تسویه ←
+کارمزد ← پاداش از راه **API** پیاده و تست شده، که همان چیزی است که `docs/08` § ۸٫۶ به
+شکل Activity می‌خواهد. و **یک تأیید، پول را حرکت نمی‌دهد**: `MAINTENANCE_APPROVED` یک
+تعهد `PENDING_SETTLEMENT` ثبت می‌کند تا یک تعمیر واقعی به‌خاطر کیف پول خالی گم نشود.
+
+### ADR-033 — پولی‌سازی پاداش
+
+امتیاز و اعتبار دو چیزند. هر `RewardRule` امتیاز می‌دهد؛ ارزش ریالی فقط وقتی وجود دارد
+که `creditPerPointMinor` **پیکربندی شده باشد** — بدون پیش‌فرض، چون Q-09 هنوز باز است.
+پاداش امتیازی هیچ Journal نمی‌زند (یک Journal صفر، `CHECK (amount_minor > 0)` را
+می‌شکند و چیزی نمی‌گوید)؛ پاداش پولی‌شده بدهکار `EXP-PLATFORM-REWARD` می‌زند و در تراز
+آزمایشی به‌عنوان هزینه پلتفرم دیده می‌شود. `CASHBACK` پشت Feature Flag خاموش می‌ماند.
 
 ---
 

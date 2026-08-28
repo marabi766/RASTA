@@ -343,19 +343,51 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 
 ## Economic — `rasta.economic.v1`
 
-| رویداد                 | مصرف‌کنندگان                                        | Payload کلیدی                                                |
-| ---------------------- | --------------------------------------------------- | ------------------------------------------------------------ |
-| `WALLET_OPENED`        | notification                                        | `walletId`, `organizationId`, `currency`                     |
-| `FUNDS_HELD`           | marketplace (Saga) · analytics                      | `holdId`, `walletId`, `amount`, `reference`                  |
-| `FUNDS_RELEASED`       | marketplace · analytics                             | `holdId`, `amount`                                           |
-| `PAYMENT_AUTHORIZED`   | marketplace · contract                              | `paymentIntentId`, `amount`, `provider`                      |
-| `PAYMENT_COMPLETED`    | marketplace · maintenance · contract · notification | `paymentIntentId`, `transactionId`, `amount`                 |
-| `PAYMENT_FAILED`       | **marketplace (جبران)** · notification              | `paymentIntentId`, `reason`                                  |
-| `COMMISSION_APPLIED`   | **analytics (درآمد پلتفرم)** · audit                | `commissionId`, `transactionId`, `rateBasisPoints`, `amount` |
-| `REWARD_GRANTED`       | notification · analytics                            | `rewardId`, `userId`, `points`, `ruleId`                     |
-| `REWARD_LEVEL_CHANGED` | notification                                        | `userId`, `from`, `to`                                       |
-| `SETTLEMENT_COMPLETED` | marketplace · supplier · notification               | `settlementId`, `netAmount`, `commissionAmount`              |
-| `JOURNAL_POSTED`       | audit · analytics                                   | `journalId`, `entries[]`, `type`                             |
+**تولیدکننده واقعی از 2026-08-29.** هر یازده رویداد پیاده و زنده تأیید شده‌اند.
+Schema رسمی در `services/economic-service/src/events/events.ts` و اعتبارسنجی
+**پیش از رسیدن به Outbox** انجام می‌شود.
+
+| رویداد                 | مصرف‌کنندگان                                        | Payload واقعی                                                                                                                                             |
+| ---------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WALLET_OPENED`        | notification                                        | `walletId`, `organizationId`, `currency`, `openedAt`                                                                                                      |
+| `FUNDS_HELD`           | marketplace (Saga) · analytics                      | `holdId`, `walletId`, `organizationId`, `transactionId`, `reference`, `referenceType`, `amountMinor`, `currency`, `heldAt`                                |
+| `FUNDS_RELEASED`       | marketplace · analytics                             | `holdId`, `walletId`, `transactionId`, `reference`, `amountMinor`, `currency`, **`resolution`**, `resolvedAt`                                             |
+| `PAYMENT_AUTHORIZED`   | marketplace · contract                              | `paymentIntentId`, `organizationId`, `walletId`, `amountMinor`, `currency`, `provider`, **`simulated`**, `authorizedAt`                                   |
+| `PAYMENT_COMPLETED`    | marketplace · maintenance · contract · notification | `paymentIntentId`, `transactionId`, `journalId`, `amountMinor`, `currency`, `provider`, **`simulated`**, `completedAt`                                    |
+| `PAYMENT_FAILED`       | **marketplace (جبران)** · notification              | `paymentIntentId`, `amountMinor`, `currency`, `provider`, **`simulated`**, `reason`, `failedAt`                                                           |
+| `COMMISSION_APPLIED`   | **analytics (درآمد پلتفرم)** · audit                | `commissionId`, `transactionId`, `organizationId`, **`ruleId` (nullable)**, `rateBasisPoints`, `grossAmountMinor`, `amountMinor`                          |
+| `REWARD_GRANTED`       | notification · analytics                            | `rewardId`, `userId`, `ruleId`, `triggerEvent`, `sourceReference`, `points`, `creditAmountMinor`, **`monetised`**, `journalId`                            |
+| `REWARD_LEVEL_CHANGED` | notification                                        | `organizationId`, `userId`, `from` (nullable), `to`, `totalPoints`, `changedAt`                                                                           |
+| `SETTLEMENT_COMPLETED` | marketplace · supplier · notification               | `settlementId`, `transactionId`, `payerOrganizationId`, `payeeOrganizationId`, `journalId`, `grossAmountMinor`, `commissionAmountMinor`, `netAmountMinor` |
+| `JOURNAL_POSTED`       | audit · analytics                                   | `journalId`, `transactionId`, `journalType`, `reversesJournalId`, `entries[]` (حداقل دو)                                                                  |
+
+**چهار قاعده که در جدول بالا پیدا نیست:**
+
+- **پول همیشه رشته در واحد فرعی است**، کنار یک `currency` صریح — هرگز عدد JSON
+  (ADR-022). شکل مسطح `amountMinor` + `currency` استفاده می‌شود، نه شیء تودرتو،
+  چون `maintenance-service` از پیش همین را منتشر می‌کند.
+- **`simulated` روی هر رویداد پرداخت اجباری است.** ADR-024 هر ادعای اتصال بانکی
+  را ممنوع می‌کند و سکوت خودش یک ادعاست.
+- **`resolution` و `monetised` وجود دارند تا مصرف‌کننده مجبور به حدس نباشد.**
+  یک `FUNDS_RELEASED` بدون `resolution` مصرف‌کننده‌ای را که سفارش لغوشده را
+  جبران می‌کند از یکی که سفارش تحویل‌شده را می‌بندد، جدا نمی‌کند. یک
+  `creditAmountMinor: "0"` بدون `monetised` «فقط امتیاز» را از «نرخی که به صفر
+  گرد شد» جدا نمی‌کند.
+- **`ruleId` می‌تواند `null` باشد و این حالت واقعی است، نه دفاعی:** بدون قاعده
+  فعال، کارمزد صفر است و قاعده‌ای برای نام بردن وجود ندارد (ADR-023، Q-08).
+
+### مصرف‌شده توسط economic — فعال در برابر موکول (ADR-032)
+
+| رویداد                                                                             | وضعیت                                                                         |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `MAINTENANCE_APPROVED`                                                             | **فعال.** یک تعهد `PENDING_SETTLEMENT` ثبت می‌کند و **هیچ پولی حرکت نمی‌دهد** |
+| `USAGE_RECORDED` · `MAINTENANCE_COMPLETED`                                         | **فعال.** محرک پاداش                                                          |
+| `ORDER_CREATED` · `ORDER_RECEIPT_CONFIRMED` · `ORDER_CANCELLED` · `ORDER_DISPUTED` | **موکول** — قرارداد فقط طرح فیلدهای کلیدی است                                 |
+| `STATEMENT_APPROVED` · `PURCHASE_ORDER_ISSUED` · `GOODS_RECEIVED`                  | **موکول** — همان دلیل                                                         |
+
+موکول‌ها **Stub ندارند**. یک Handler خالی در `processed_event` رد می‌گذارد و
+دقیقاً شبیه یکی است که کار کرد. آنچه آن جریان‌ها لازم دارند از راه API در
+دسترس است — که همان چیزی است که `docs/08` § ۸٫۶ می‌خواهد.
 
 ## Document — `rasta.document.v1`
 

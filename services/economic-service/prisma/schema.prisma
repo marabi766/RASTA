@@ -1,0 +1,991 @@
+// =============================================================================
+// economic-service — owned schema
+//
+// The question this service answers: *what moved, from whom to whom, why, and
+// can it be proven years later* (docs/04 § 4.14). It is the most sensitive
+// domain on the platform, and the schema is written so that the properties
+// that matter are enforced by PostgreSQL rather than promised by TypeScript.
+//
+// ## The one rule everything below is arranged around
+//
+//   Wallet ≠ Ledger.  (AGENTS.md A-07, ADR-013)
+//
+// The ledger is the source of financial truth: double-entry, append-only,
+// corrected only by a reversal journal. The wallet is an operational
+// projection — "how much can I spend right now" — and it never changes without
+// a corresponding ledger entry. Two tables, two jobs, and the invariant
+// between them is checked by a database CHECK constraint, not by a code path
+// somebody has to remember to call.
+//
+// ## What this service deliberately does NOT own
+//
+//   Order              marketplace-service. A transaction references one by
+//                      `sourceReference`; it never joins to it, and the two
+//                      live in different databases (ADR-005).
+//   Contract, statement contract-service.
+//   Maintenance cost   maintenance-service (ADR-028). MAINTENANCE_APPROVED
+//                      carries the figure the owner approved; this service
+//                      records it as an obligation and never recomputes it.
+//   Identity           identity-service. `userId` and `organizationId` are
+//                      references, never rows.
+//   Real money         **nobody.** The payment provider in this MVP is
+//                      simulated (ADR-024). See `payment_intent.simulated`.
+//
+// ## Deviations from docs/05 § 5.4, recorded rather than hidden
+//
+//   `ledger_entry` is **not** partitioned yet. Why, on what condition it will
+//   be, and how, is ADR-030. `posted_at` is correct from day one so the
+//   migration is a copy rather than a rewrite.
+//
+// ## Time
+//
+// Business timestamps are supplied by the application, never defaulted by the
+// database — the trap fleet-service hit on its first integration run, where
+// PostgreSQL's clock and Node's differed by enough to violate a CHECK
+// comparing two columns written inside one request. Only `created_at` keeps a
+// default, and no constraint compares it to anything.
+//
+// ## Money
+//
+// Every amount is `BigInt` in minor units (rial). No `Decimal`, no `Float`,
+// ever — ADR-022. Rates are integer basis points. The schema has no column
+// that could hold 0.024999999999999998.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// Ledger — the source of truth
+// -----------------------------------------------------------------------------
+
+/// One account in the platform chart of accounts (docs/10 § 10.4).
+///
+/// Account code is `<TYPE>-<ORG>-<PURPOSE>` — `LIAB-ORG_01JBQ8-WALLET`. The
+/// organization segment is part of the code so a code reads unambiguously in a
+/// journal without a lookup, and the uniqueness constraint is on
+/// `(organization_id, account_code, currency)` exactly as docs/05 § 5.4
+/// specifies.
+///
+/// Platform-side accounts (escrow, commission revenue, reward expense, the
+/// cash counterpart of a top-up) belong to a configured *platform
+/// organization*, not to a hard-coded constant: the platform must stay
+/// organization-agnostic (AGENTS.md A-05), and which organization plays the
+/// operator role is a deployment fact.
+model LedgerAccount {
+  /// `ACC_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  accountType AccountType @map("account_type")
+  accountCode String      @map("account_code")
+  /// What this account is *for*, as a closed set. The code is the human
+  /// label; this is what code branches on, so a renamed code cannot silently
+  /// change behaviour.
+  purpose     AccountPurpose
+
+  currency String        @default("IRR")
+  status   AccountStatus @default(ACTIVE)
+
+  /// Free-text label in the organization's own words, for statements.
+  title String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+
+  entries LedgerEntry[]
+  wallet  Wallet?
+
+  @@unique([organizationId, accountCode, currency])
+  /// "Give me this organization's account of purpose X in currency Y" — the
+  /// lookup every posting path performs.
+  @@unique([organizationId, purpose, currency])
+  @@index([organizationId, accountType])
+  @@map("ledger_account")
+}
+
+/// The five account types of double-entry bookkeeping (docs/10 § 10.4).
+///
+/// Natural balance — which direction increases the account — is a property of
+/// the type, and it lives in `ledger/accounts.ts` as a pure function rather
+/// than as a column, because it is a fact about accounting rather than a fact
+/// about this row.
+enum AccountType {
+  /// Platform-held value. Debit-natured.
+  ASSET
+  /// What the platform owes a user for their wallet balance. Credit-natured.
+  LIABILITY
+  EQUITY
+  /// Commission income. Credit-natured.
+  REVENUE
+  /// Reward paid out. Debit-natured.
+  EXPENSE
+}
+
+enum AccountPurpose {
+  /// The liability account behind one organization's wallet.
+  WALLET
+  /// Funds held pending settlement — the escrow leg of a hold.
+  ESCROW
+  /// Platform commission income.
+  COMMISSION_REVENUE
+  /// Cost of rewards granted as wallet credit.
+  REWARD_EXPENSE
+  /// The counterpart of an inbound top-up. In this MVP it is the simulated
+  /// provider's settlement account and holds no real money (ADR-024).
+  PAYMENT_CLEARING
+}
+
+enum AccountStatus {
+  ACTIVE
+  /// Closed to new postings. History is retained; nothing is deleted.
+  CLOSED
+}
+
+/// A balanced set of entries, posted atomically (docs/10 § 10.4).
+///
+/// A journal is **immutable once written** — enforced by a database trigger,
+/// not only by this comment. There is no `reversed_by` column precisely
+/// because writing one would require an UPDATE: whether a journal has been
+/// reversed is answered by looking for the journal whose `reverses_id` points
+/// at it, and `reverses_id` is UNIQUE so a journal can be reversed at most
+/// once.
+model Journal {
+  /// `JRN_<ULID>`.
+  id String @id
+
+  /// The tenant this journal belongs to.
+  ///
+  /// A settlement moves value between two organizations and the platform, so
+  /// "the" organization of a journal is the one that initiated it. Each
+  /// counterparty still sees its own side: `ledger_entry.organization_id`
+  /// carries the owner of each leg, and a statement is built from entries.
+  organizationId String @map("organization_id")
+
+  /// The business transaction this journal records, when there is one.
+  /// A reference, not a foreign key across an aggregate that may be created
+  /// after the journal in a repair scenario.
+  transactionId String? @map("transaction_id")
+
+  journalType JournalType @map("journal_type")
+  description String
+
+  postedAt DateTime @map("posted_at")
+  postedBy String   @map("posted_by")
+
+  /// Set on a reversal journal, pointing at the journal it reverses.
+  ///
+  /// UNIQUE: a posted journal may be reversed exactly once. A second attempt
+  /// is refused by the database, which is what makes concurrent reversal
+  /// requests safe without an application lock.
+  reversesId String? @unique @map("reverses_id")
+  /// Why it was reversed. Required when `reversesId` is set — enforced by a
+  /// CHECK constraint in the migration.
+  reversalReason String? @map("reversal_reason")
+
+  correlationId String @map("correlation_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  entries    LedgerEntry[]
+  reverses   Journal?      @relation("JournalReversal", fields: [reversesId], references: [id])
+  reversedBy Journal?      @relation("JournalReversal")
+
+  @@index([organizationId, postedAt(sort: Desc)])
+  @@index([transactionId])
+  @@map("journal")
+}
+
+enum JournalType {
+  /// Money entering a wallet through the (simulated) payment provider.
+  WALLET_TOP_UP
+  /// Funds moved from a wallet into escrow against a pending obligation.
+  FUNDS_HELD
+  /// Escrowed funds returned to the payer.
+  FUNDS_REFUNDED
+  /// Escrow released to the payee, net of commission.
+  SETTLEMENT
+  /// Wallet credit granted as a reward, expensed by the platform.
+  REWARD_GRANT
+  /// The exact opposite of an earlier journal. The only correction mechanism
+  /// this system has (AGENTS.md A-06).
+  REVERSAL
+}
+
+/// One side of one journal. **Append-only, forever.**
+///
+/// `direction` carries the sign and `amount_minor` is always positive
+/// (`CHECK (amount_minor > 0)`, docs/05 § 5.4). Storing a signed amount would
+/// permit an entry of zero and would make "sum the debits" a conditional
+/// rather than a filter.
+///
+/// UPDATE and DELETE are rejected by `trg_ledger_entry_immutable`. The trigger
+/// exists because a correction script, a careless ORM or a hurried developer
+/// can all bypass the domain layer, and none of them can bypass PostgreSQL
+/// (docs/05 § 5.4).
+model LedgerEntry {
+  /// `LGE_<ULID>`.
+  id String @id
+
+  journalId String @map("journal_id")
+  accountId String @map("account_id")
+  /// The organization that owns *this leg*. A settlement journal has legs
+  /// belonging to the payer, the payee and the platform, and each sees only
+  /// its own.
+  organizationId String @map("organization_id")
+
+  direction   EntryDirection
+  amountMinor BigInt         @map("amount_minor")
+  currency    String
+
+  postedAt DateTime @map("posted_at")
+
+  journal Journal       @relation(fields: [journalId], references: [id])
+  account LedgerAccount @relation(fields: [accountId], references: [id])
+
+  /// The statement query (docs/05 § 5.5).
+  @@index([accountId, postedAt(sort: Desc)])
+  /// The balance check.
+  @@index([journalId])
+  @@index([organizationId, postedAt(sort: Desc)])
+  @@map("ledger_entry")
+}
+
+enum EntryDirection {
+  DEBIT
+  CREDIT
+}
+
+// -----------------------------------------------------------------------------
+// Wallet — the operational projection
+// -----------------------------------------------------------------------------
+
+/// One organization's spendable balance in one currency (docs/10 § 10.3).
+///
+/// The three balances are stored rather than derived, because "how much can I
+/// spend" is asked on every checkout and summing a ledger for it would not
+/// scale. Storing them creates the risk they drift, so two things guard
+/// against it:
+///
+///   1. `ck_wallet_balances` — a database CHECK that
+///      `available = ledger − pending` and that none of the three is negative.
+///      **This is what makes an overspend impossible**, not the application
+///      check that produces the nice error message.
+///   2. `LedgerBalanceAudit` — the reconciliation that recomputes
+///      `ledger_balance_minor` from `ledger_entry` and reports any deviation
+///      (docs/10 § 10.3).
+///
+/// Every mutation happens under `SELECT ... FOR UPDATE` on this row, inside
+/// the same transaction as the ledger entries that justify it (ADR-031).
+model Wallet {
+  /// `WLT_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+  currency       String
+
+  /// The LIABILITY account this wallet projects. One-to-one: the wallet is a
+  /// view of that account, and there is no second place a balance could live.
+  ledgerAccountId String @unique @map("ledger_account_id")
+
+  /// Σ(ledger entries on the wallet account). Never negative: the platform
+  /// does not owe a user a negative amount.
+  ledgerBalanceMinor BigInt @default(0) @map("ledger_balance_minor")
+  /// Σ(active holds).
+  pendingBalanceMinor BigInt @default(0) @map("pending_balance_minor")
+  /// `ledger − pending`. Stored so the spend check is one indexed read, and
+  /// constrained so it can never disagree with the other two.
+  availableBalanceMinor BigInt @default(0) @map("available_balance_minor")
+
+  status WalletStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  account LedgerAccount @relation(fields: [ledgerAccountId], references: [id])
+  holds   WalletHold[]
+
+  /// docs/05 § 5.5: one wallet per organization per currency.
+  @@unique([organizationId, currency])
+  @@map("wallet")
+}
+
+enum WalletStatus {
+  ACTIVE
+  /// Reads allowed, no new debits or holds. Used when an organization is
+  /// suspended; existing holds still resolve so money already committed is
+  /// not stranded.
+  FROZEN
+  CLOSED
+}
+
+/// Funds reserved against a pending obligation — the escrow half of the
+/// hold/release cycle the product document requires (docs/10 § 10.5).
+///
+/// A hold is not a ledger concept on its own: placing one posts a real journal
+/// moving value from the wallet account to the platform escrow account, so
+/// "money in escrow" is visible in the trial balance rather than being an
+/// application-level annotation.
+model WalletHold {
+  /// `HLD_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+  walletId       String @map("wallet_id")
+
+  amountMinor BigInt @map("amount_minor")
+  currency    String
+
+  status HoldStatus @default(ACTIVE)
+
+  /// What the hold is for — a transaction id. Together with the partial
+  /// unique index below, this is what makes `placeHold` idempotent at the
+  /// database level: a retried request cannot create a second live hold for
+  /// the same obligation.
+  reference     String
+  referenceType String @map("reference_type")
+
+  /// The journal that moved the funds into escrow, and the one that resolved
+  /// them. Both are the audit trail for "where did this money go".
+  placedJournalId   String? @map("placed_journal_id")
+  resolvedJournalId String? @map("resolved_journal_id")
+
+  placedAt DateTime @map("placed_at")
+  placedBy String   @map("placed_by")
+
+  resolvedAt     DateTime? @map("resolved_at")
+  resolvedBy     String?   @map("resolved_by")
+  resolutionNote String?   @map("resolution_note")
+
+  wallet Wallet @relation(fields: [walletId], references: [id])
+
+  @@index([organizationId, status])
+  @@index([reference])
+  @@map("wallet_hold")
+}
+
+enum HoldStatus {
+  /// Funds are in escrow.
+  ACTIVE
+  /// Released to the payee as part of a settlement. Terminal.
+  RELEASED
+  /// Returned to the payer. Terminal.
+  REFUNDED
+}
+
+// -----------------------------------------------------------------------------
+// Transaction — the business obligation
+// -----------------------------------------------------------------------------
+
+/// One economic event between parties, from the moment it is recorded to the
+/// moment it settles or is refunded.
+///
+/// This is the aggregate the other modules turn around: a hold references it,
+/// a commission is computed for it, a settlement discharges it. Its lifecycle
+/// is an explicit state machine (`transaction/state-machine.ts`), never a
+/// chain of `if`s in a service (AGENTS.md A-11).
+///
+///   CREATED ──► HELD ──────► PENDING_SETTLEMENT ──► SETTLED
+///      │          │    ▲              │
+///      │          │    └──────────────┤
+///      │          ▼                   ▼
+///      │       REFUNDED            DISPUTED ──► REFUNDED
+///      ▼
+///   CANCELLED / FAILED
+///
+/// **A disputed transaction never moves.** docs/10 § 10.5 makes it a
+/// CONSTRAINT: a registered objection stops settlement completely and nothing
+/// automatic happens until a human resolves it.
+model Transaction {
+  /// `TXN_<ULID>`.
+  id String @id
+
+  /// The payer, and the tenant that owns this row.
+  organizationId String @map("organization_id")
+  /// The payee. Null for a top-up, where the counterparty is the platform.
+  counterpartyOrganizationId String? @map("counterparty_organization_id")
+
+  transactionType TransactionType   @map("transaction_type")
+  status          TransactionStatus @default(CREATED)
+
+  /// What is owed. Fixed at creation and never recomputed — for a maintenance
+  /// obligation this is exactly the figure the owner approved (ADR-028).
+  grossAmountMinor BigInt @map("gross_amount_minor")
+  /// Computed at settlement from the rule in force at `occurredAt`, not now.
+  commissionAmountMinor BigInt @default(0) @map("commission_amount_minor")
+  /// `gross − commission`. Zero until settled.
+  netAmountMinor BigInt @default(0) @map("net_amount_minor")
+  currency       String @default("IRR")
+
+  /// When the underlying business event happened. **This is the timestamp the
+  /// commission rule is selected against**, so a transaction recorded late is
+  /// still charged the rate that was in force when it occurred (docs/10 §
+  /// 10.7).
+  occurredAt DateTime @map("occurred_at")
+
+  /// What caused this, in the owning service's identifier space. Never a
+  /// foreign key — that row is in another database (ADR-005).
+  sourceType      String? @map("source_type")
+  sourceReference String? @map("source_reference")
+
+  /// The client's idempotency key, when the transaction came in over HTTP.
+  /// UNIQUE per tenant: docs/05 § 5.5 names this an invariant.
+  idempotencyKey String? @map("idempotency_key")
+
+  correlationId String  @map("correlation_id")
+  /// The event that caused this, for the causal chain across services.
+  causationId   String? @map("causation_id")
+
+  disputedAt     DateTime? @map("disputed_at")
+  disputedBy     String?   @map("disputed_by")
+  disputeReason  String?   @map("dispute_reason")
+  disputeResolvedAt DateTime? @map("dispute_resolved_at")
+  disputeResolvedBy String?   @map("dispute_resolved_by")
+
+  settledAt DateTime? @map("settled_at")
+
+  failureReason String? @map("failure_reason")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  createdBy String   @map("created_by")
+
+  legs       TransactionLeg[]
+  commission Commission?
+  settlement Settlement?
+
+  @@unique([organizationId, idempotencyKey])
+  /// "What have I not settled yet" and "this order's transaction".
+  @@index([organizationId, status, occurredAt(sort: Desc)])
+  @@index([organizationId, sourceType, sourceReference])
+  @@index([counterpartyOrganizationId, status])
+  @@map("transaction")
+}
+
+/// The transaction categories commission rules are written against
+/// (docs/10 § 10.7). Extending this set is a migration *and* a governance
+/// decision, which is the point: a new category with no rule earns no
+/// commission rather than falling into someone else's rate.
+enum TransactionType {
+  MARKETPLACE_ORDER
+  MAINTENANCE_SERVICE
+  LOGISTICS
+  CONSTRUCTION_STATEMENT
+  PROCUREMENT_ORDER
+  /// Money entering a wallet. Never commissioned.
+  WALLET_TOP_UP
+}
+
+enum TransactionStatus {
+  /// Recorded. Nothing has moved.
+  CREATED
+  /// Funds are in escrow against it.
+  HELD
+  /// Authorised to settle — receipt confirmed, or the owner approved the work.
+  PENDING_SETTLEMENT
+  /// An objection is registered. **No automatic movement** (docs/10 § 10.5).
+  DISPUTED
+  /// Discharged. Terminal.
+  SETTLED
+  /// Funds returned to the payer. Terminal.
+  REFUNDED
+  /// Abandoned before anything moved. Terminal.
+  CANCELLED
+  /// The payment behind it failed. Terminal.
+  FAILED
+}
+
+/// Who is party to a transaction and for how much.
+///
+/// `docs/04` § 4.14 names this table without specifying it. It exists so that
+/// a transaction states its parties explicitly rather than leaving them to be
+/// inferred from two nullable columns — and so a future three-party
+/// arrangement (a broker, a guarantor) is a new row rather than a migration.
+model TransactionLeg {
+  /// `TXL_<ULID>`.
+  id String @id
+
+  transactionId String @map("transaction_id")
+  /// The party. Not tenant-scoped away from the payee: a leg carries the
+  /// organization it belongs to and the payee sees its own.
+  organizationId String @map("organization_id")
+
+  role        LegRole
+  amountMinor BigInt  @map("amount_minor")
+  currency    String
+
+  transaction Transaction @relation(fields: [transactionId], references: [id])
+
+  @@unique([transactionId, role])
+  @@index([organizationId])
+  @@map("transaction_leg")
+}
+
+enum LegRole {
+  PAYER
+  PAYEE
+  /// The platform's share — the commission leg.
+  PLATFORM
+}
+
+// -----------------------------------------------------------------------------
+// Payment — the provider boundary
+// -----------------------------------------------------------------------------
+
+/// One attempt to move money across the platform boundary (ADR-024).
+///
+/// **`simulated` is `true` for every row this MVP will ever write, and the API
+/// says so on every response.** The provider is `MockPaymentProvider`; there
+/// is no bank connection, no custody of funds, and no claim of either. Adding
+/// a real provider is a new class and a configuration row — the domain model
+/// below does not change, which is the entire reason this table exists rather
+/// than a PSP-shaped one.
+model PaymentIntent {
+  /// `PAY_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+  walletId       String @map("wallet_id")
+  /// The ledger transaction this payment funds, once captured.
+  transactionId  String? @unique @map("transaction_id")
+
+  /// The provider that handled it, recorded on the row so a historical
+  /// payment still names its origin after the platform switches providers.
+  provider String
+  /// Whether the money movement was real. Always `true` today (ADR-024).
+  simulated Boolean @default(true)
+
+  amountMinor BigInt @map("amount_minor")
+  currency    String
+
+  status PaymentIntentStatus @default(CREATED)
+
+  /// The provider's own reference. Opaque to the domain.
+  providerReference String? @map("provider_reference")
+  /// A provider-supplied failure code. Never contains an account number, a
+  /// card reference or anything else that must not be logged (AGENTS.md S-09).
+  failureReason String? @map("failure_reason")
+
+  /// Required. A retried top-up must not charge twice (docs/06 § 6.8).
+  idempotencyKey String @map("idempotency_key")
+
+  correlationId String @map("correlation_id")
+
+  createdAt    DateTime  @default(now()) @map("created_at")
+  authorizedAt DateTime? @map("authorized_at")
+  capturedAt   DateTime? @map("captured_at")
+  failedAt     DateTime? @map("failed_at")
+  refundedAt   DateTime? @map("refunded_at")
+  createdBy    String    @map("created_by")
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, status, createdAt(sort: Desc)])
+  @@map("payment_intent")
+}
+
+/// `CREATED → AUTHORIZED → CAPTURED | FAILED | REFUNDED` (ADR-024).
+enum PaymentIntentStatus {
+  CREATED
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+}
+
+// -----------------------------------------------------------------------------
+// Commission — configuration, never code
+// -----------------------------------------------------------------------------
+
+/// A commission rate, versioned in time (docs/10 § 10.7, ADR-023).
+///
+/// **CONSTRAINT from the product document:** "تعیین درصد دقیق کارمزد … ساختگی
+/// و پیشینی نیست". No rate is hard-coded anywhere in this service and no
+/// commercial default is seeded. Q-08 is open; the answer will be an INSERT,
+/// not a deployment.
+///
+/// Matching, in order: an organization-specific rule beats a global one; among
+/// equals, the one valid at the transaction's `occurredAt` with the latest
+/// `validFrom` wins. **No active rule means no commission** — not an error and
+/// not a guess (docs/10 § 10.7).
+model CommissionRule {
+  /// `CMR_<ULID>`.
+  id String @id
+
+  /// NULL means platform-wide. This is why `CommissionRule` is *not* in the
+  /// automatic tenant-scope list: the guard injects `organization_id = X`,
+  /// which would hide every global rule. Scoping is explicit and tested in
+  /// `commission.repository.ts`.
+  organizationId String? @map("organization_id")
+
+  transactionType TransactionType @map("transaction_type")
+
+  /// Integer basis points. 250 = 2.5% (ADR-022). Never a float, so "2.5%" is
+  /// exactly 250 and cannot become 0.024999999999999998.
+  rateBasisPoints Int @map("rate_basis_points")
+
+  /// Floor and ceiling on the *commission*, not on the transaction.
+  minAmountMinor BigInt? @map("min_amount_minor")
+  maxAmountMinor BigInt? @map("max_amount_minor")
+
+  validFrom DateTime  @map("valid_from")
+  validTo   DateTime? @map("valid_to")
+
+  status RuleStatus @default(ACTIVE)
+
+  /// Provenance of the rule, shown wherever it is displayed.
+  ///
+  /// Demonstration data must be labelled "نمونه — نیازمند تصویب" (ADR-023),
+  /// so that a sample rate can never be mistaken for an approved one.
+  label String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String   @map("updated_by")
+
+  commissions Commission[]
+
+  @@index([transactionType, status, validFrom])
+  @@index([organizationId, transactionType, status])
+  @@map("commission_rule")
+}
+
+enum RuleStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// Commission actually charged on one transaction.
+///
+/// One per transaction, enforced by the UNIQUE on `transaction_id`: charging
+/// twice for one settlement is the failure this constraint exists to make
+/// impossible, and a retried settlement hits it rather than the application.
+///
+/// The rate is copied onto the row rather than only referenced, so the charge
+/// remains explicable after the rule is superseded.
+model Commission {
+  /// `CMS_<ULID>`.
+  id String @id
+
+  /// The organization the commission was charged to — the payee, whose
+  /// proceeds it comes out of.
+  organizationId String @map("organization_id")
+
+  transactionId String  @unique @map("transaction_id")
+  ruleId        String? @map("rule_id")
+
+  rateBasisPoints  Int    @map("rate_basis_points")
+  grossAmountMinor BigInt @map("gross_amount_minor")
+  amountMinor      BigInt @map("amount_minor")
+  currency         String
+
+  /// The journal leg that recognised the revenue.
+  journalId String? @map("journal_id")
+
+  appliedAt DateTime @map("applied_at")
+
+  transaction Transaction     @relation(fields: [transactionId], references: [id])
+  rule        CommissionRule? @relation(fields: [ruleId], references: [id])
+
+  @@index([organizationId, appliedAt(sort: Desc)])
+  @@map("commission")
+}
+
+// -----------------------------------------------------------------------------
+// Reward — configuration, never code (ADR-033)
+// -----------------------------------------------------------------------------
+
+/// A rule granting points for a desired behaviour (docs/10 § 10.8).
+///
+/// Points are always granted. Rial value exists **only** when
+/// `creditPerPointMinor` is configured, because the share of commission that
+/// funds rewards is Q-09 and still open — and a default rate would be an
+/// invented commercial term (ADR-023, ADR-033).
+model RewardRule {
+  /// `RWR_<ULID>`.
+  id String @id
+
+  /// NULL means platform-wide. Excluded from automatic tenant scoping for the
+  /// same reason as `CommissionRule`.
+  organizationId String? @map("organization_id")
+
+  /// The event name that triggers evaluation, e.g. `USAGE_RECORDED`.
+  triggerEvent String @map("trigger_event")
+
+  rewardType RewardType @default(POINTS) @map("reward_type")
+
+  /// Optional predicate over the trigger payload, e.g. "recorded within 24
+  /// hours". JSON because the set of conditions is configuration, not code.
+  condition Json?
+
+  /// Always positive — a rule that grants nothing is a rule that should be
+  /// INACTIVE instead.
+  points Int
+
+  /// Rial of wallet credit per point. **No default, ever.** When null, the
+  /// reward is points-only and posts no journal (ADR-033).
+  creditPerPointMinor BigInt? @map("credit_per_point_minor")
+
+  /// Anti-fraud: the most points this rule may grant one subject per period.
+  periodCap  Int?        @map("period_cap")
+  periodType PeriodType? @map("period_type")
+
+  validFrom DateTime  @map("valid_from")
+  validTo   DateTime? @map("valid_to")
+
+  status RuleStatus @default(ACTIVE)
+
+  /// "نمونه — نیازمند تصویب" for demonstration data (ADR-023).
+  label String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String   @map("updated_by")
+
+  rewards Reward[]
+
+  @@index([triggerEvent, status, validFrom])
+  @@index([organizationId, triggerEvent, status])
+  @@map("reward_rule")
+}
+
+enum RewardType {
+  POINTS
+  /// Behind `ECONOMIC_REWARD_CASHBACK_ENABLED`, default off — the product
+  /// document conditions it on a regulatory review (docs/24 Q-07).
+  CASHBACK
+}
+
+enum PeriodType {
+  DAY
+  WEEK
+  MONTH
+}
+
+/// One granted reward.
+///
+/// `@@unique([ruleId, sourceReference])` is the idempotency guarantee: one
+/// rule grants at most once per triggering fact, so a replayed
+/// `USAGE_RECORDED` cannot pay twice. It is also an anti-fraud control — the
+/// same usage record cannot be resubmitted for points.
+model Reward {
+  /// `RWD_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+  /// The user whose behaviour earned it, from the triggering event's actor.
+  /// A trigger with no user actor grants nothing (ADR-033).
+  userId String @map("user_id")
+
+  ruleId       String @map("rule_id")
+  triggerEvent String @map("trigger_event")
+  /// The aggregate that caused it — a usage record id, a maintenance request
+  /// id. Half of the uniqueness constraint above.
+  sourceReference String @map("source_reference")
+
+  points Int
+
+  /// Rial credited to the organization's wallet. Zero for a points-only
+  /// reward, and `monetised` says which case this is so a consumer never has
+  /// to infer it from a zero.
+  creditAmountMinor BigInt  @default(0) @map("credit_amount_minor")
+  currency          String  @default("IRR")
+  monetised         Boolean @default(false)
+
+  /// The journal that expensed the credit. Null for a points-only reward.
+  journalId String? @map("journal_id")
+
+  /// The cap window this grant counted against, e.g. `2026-08`. Stored so cap
+  /// enforcement is an indexed count rather than a date-range scan.
+  periodKey String @map("period_key")
+
+  grantedAt DateTime @map("granted_at")
+
+  rule RewardRule @relation(fields: [ruleId], references: [id])
+
+  @@unique([ruleId, sourceReference])
+  /// The cap query: "how many points has this subject taken from this rule in
+  /// this window".
+  @@index([organizationId, userId, ruleId, periodKey])
+  @@index([organizationId, grantedAt(sort: Desc)])
+  @@map("reward")
+}
+
+/// A named level reached at a points threshold (docs/10 § 10.8).
+///
+/// `benefits` is deliberately empty in this MVP: docs/24 Q-13 asks what a
+/// higher level actually gets, and the product document names only "priority
+/// support" and "earlier access to limited capacity" without detail. Levels
+/// are computed and `REWARD_LEVEL_CHANGED` is published; nothing is granted,
+/// because nothing has been decided.
+model RewardLevel {
+  /// `RWL_<ULID>`.
+  id String @id
+
+  /// NULL means the platform-wide ladder.
+  organizationId String? @map("organization_id")
+
+  name      String
+  /// Ordering. Rank 0 is the entry level.
+  rank      Int
+  minPoints Int @map("min_points")
+
+  /// Configuration only, empty until Q-13 is answered.
+  benefits Json?
+
+  status RuleStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+
+  balances RewardBalance[]
+
+  @@unique([organizationId, rank])
+  @@index([status, minPoints])
+  @@map("reward_level")
+}
+
+/// Accumulated points for one user in one organization.
+///
+/// Kept rather than summed because the level check runs on every grant, and
+/// because it is what `GET /v1/rewards/me` answers.
+model RewardBalance {
+  organizationId String @map("organization_id")
+  userId         String @map("user_id")
+
+  totalPoints Int     @default(0) @map("total_points")
+  levelId     String? @map("level_id")
+
+  /// Lifetime credit granted, for the "what has this been worth" view. Not a
+  /// balance — the money itself lives in the wallet.
+  lifetimeCreditMinor BigInt @default(0) @map("lifetime_credit_minor")
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  level RewardLevel? @relation(fields: [levelId], references: [id])
+
+  @@id([organizationId, userId])
+  @@index([organizationId, totalPoints(sort: Desc)])
+  @@map("reward_balance")
+}
+
+// -----------------------------------------------------------------------------
+// Settlement
+// -----------------------------------------------------------------------------
+
+/// The record that one transaction was discharged (docs/10 § 10.10).
+///
+/// One per transaction and one per journal, both UNIQUE. A settlement without
+/// its journal is not expressible, and a journal cannot back two settlements.
+model Settlement {
+  /// `STL_<ULID>`.
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  transactionId String @unique @map("transaction_id")
+  journalId     String @unique @map("journal_id")
+
+  payerOrganizationId String @map("payer_organization_id")
+  payeeOrganizationId String @map("payee_organization_id")
+
+  grossAmountMinor      BigInt @map("gross_amount_minor")
+  commissionAmountMinor BigInt @map("commission_amount_minor")
+  netAmountMinor        BigInt @map("net_amount_minor")
+  currency              String
+
+  settledAt DateTime @map("settled_at")
+  settledBy String   @map("settled_by")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id])
+
+  @@index([organizationId, settledAt(sort: Desc)])
+  @@index([payeeOrganizationId, settledAt(sort: Desc)])
+  @@map("settlement")
+}
+
+// -----------------------------------------------------------------------------
+// Platform plumbing
+// -----------------------------------------------------------------------------
+
+/// Stored idempotency keys for financial writes (docs/06 § 6.8).
+///
+/// The shape mirrors asset-service's declaration so the platform has one
+/// answer to this problem — but this is the service that actually uses it,
+/// because this is where a retried POST would charge twice.
+///
+/// `state` distinguishes IN_PROGRESS from COMPLETED so that a client retrying
+/// while the first attempt is still running gets `409 CONFLICT` with a
+/// `Retry-After`, rather than a second execution.
+model IdempotencyKey {
+  key            String
+  organizationId String @map("organization_id")
+  endpoint       String
+
+  /// SHA-256 of the normalised request body. A repeated key with a different
+  /// body is `409 IDEMPOTENCY_KEY_REUSED`, never a silent replay of the wrong
+  /// response.
+  requestHash String @map("request_hash")
+
+  responseStatus Int?  @map("response_status")
+  responseBody   Json? @map("response_body")
+  state          IdempotencyState
+
+  createdAt DateTime @default(now()) @map("created_at")
+  /// 24 hours (docs/06 § 6.8).
+  expiresAt DateTime @map("expires_at")
+
+  @@id([organizationId, endpoint, key])
+  @@index([expiresAt])
+  @@map("idempotency_key")
+}
+
+enum IdempotencyState {
+  IN_PROGRESS
+  COMPLETED
+}
+
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic        String
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  publishedAt DateTime? @map("published_at")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  @@index([createdAt], map: "idx_outbox_pending")
+  @@map("outbox_message")
+}
+
+model ProcessedEvent {
+  eventId      String   @map("event_id")
+  consumerName String   @map("consumer_name")
+  processedAt  DateTime @default(now()) @map("processed_at")
+
+  @@id([eventId, consumerName])
+  @@index([processedAt])
+  @@map("processed_event")
+}

@@ -130,6 +130,10 @@ export const ROUTES: readonly RouteRule[] = [
   { prefix: 'wallets', service: 'economic', requiresIdempotencyKey: true },
   { prefix: 'transactions', service: 'economic', requiresIdempotencyKey: true },
   { prefix: 'settlements', service: 'economic', requiresIdempotencyKey: true },
+  // A refund is the only unsafe method here, and it moves money, so the whole
+  // prefix carries the key requirement rather than the route table learning
+  // which verb does what.
+  { prefix: 'payment-intents', service: 'economic', requiresIdempotencyKey: true },
   { prefix: 'commissions', service: 'economic' },
   { prefix: 'rewards', service: 'economic' },
   { prefix: 'ledger', service: 'economic', roles: ['SYSTEM_ADMIN', 'UNION_ADMIN'] },

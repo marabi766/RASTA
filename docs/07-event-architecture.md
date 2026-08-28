@@ -329,6 +329,10 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 | `SETTLEMENT_COMPLETED` | economic | marketplace · supplier · notification               |
 | `JOURNAL_POSTED`       | economic | audit · analytics                                   |
 
+> **وضعیت (2026-08-29).** `economic` تولیدکننده واقعی است: هر یازده رویداد بالا
+> پیاده، تست قرارداد شده و روی `rasta.economic.v1` زنده مشاهده شده‌اند. مصرف
+> واقعی این سرویس محدودتر از فهرست `docs/04` است و دلیلش در **ADR-032** است.
+
 ---
 
 ## ۷٫۱۰ الگوهای مصرف

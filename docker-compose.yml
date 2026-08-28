@@ -70,7 +70,14 @@ services:
       KAFKA_PROCESS_ROLES: 'controller,broker'
       KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
       KAFKA_LISTENERS: 'PLAINTEXT://:9094,CONTROLLER://:9093,EXTERNAL://:9092'
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9094,EXTERNAL://localhost:9092'
+      # The external advertised address must match the *host* port, because a
+      # client connecting from the host is redirected to whatever this says.
+      # It is configurable for the same reason POSTGRES_PORT is: a Windows
+      # machine can have 9092 inside a reserved exclusion range
+      # (`netsh interface ipv4 show excludedportrange protocol=tcp`), and
+      # Docker then refuses to publish it at all. Defaults to 9092 so CI and
+      # every other machine are unaffected.
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9094,EXTERNAL://localhost:${KAFKA_HOST_PORT:-9092}'
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT'
       KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
       KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
@@ -83,7 +90,7 @@ services:
       KAFKA_LOG_RETENTION_HOURS: '168'
       CLUSTER_ID: 'rasta-local-cluster-000001'
     ports:
-      - '9092:9092'
+      - '${KAFKA_HOST_PORT:-9092}:9092'
     # Deliberately no named volume. The container runs as uid 1000, and a named
     # volume mounts root-owned, so the broker cannot write its log dir. Local
     # Kafka data is disposable anyway — kafka-init recreates every topic on each
