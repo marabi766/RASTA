@@ -161,6 +161,41 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      # A real broker, because fleet-service's event-path test is the first
+      # integration test on the platform that carries a domain write through
+      # the outbox to Kafka and back out of a consumer. Without this container
+      # that test skips itself, and the stage would be green while never
+      # exercising the path it exists to prove.
+      #
+      # Single-node KRaft, mirroring docker-compose.yml. Topics are created
+      # explicitly below: auto-creation stays off, because producing to an
+      # unknown topic is a contract violation and must fail loudly (ADR-006).
+      kafka:
+        image: apache/kafka:3.9.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: '1'
+          KAFKA_PROCESS_ROLES: 'controller,broker'
+          KAFKA_CONTROLLER_QUORUM_VOTERS: '1@localhost:9093'
+          KAFKA_LISTENERS: 'PLAINTEXT://:9092,CONTROLLER://:9093'
+          KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://localhost:9092'
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT'
+          KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+          KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+          CLUSTER_ID: 'rasta-ci-cluster-000001'
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 20
+          --health-start-period 40s
+
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -190,32 +225,64 @@ jobs:
 
       - run: pnpm run db:generate
 
+      - name: Create Kafka topics
+        # Auto-creation is off by design (ADR-006), so every topic a test
+        # touches has to exist first. A missing one then fails the test rather
+        # than being silently created with default partitioning — which is the
+        # behaviour that makes ordering guarantees meaningless.
+        run: |
+          set -euo pipefail
+          create() {
+            docker run --rm --network host apache/kafka:3.9.0 \
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+              --create --if-not-exists --partitions 3 --replication-factor 1 \
+              --topic "$1"
+          }
+          for topic in \
+            rasta.fleet.v1 rasta.fleet.v1.retry rasta.fleet.v1.dlq \
+            rasta.asset.v1 rasta.insurance.v1 rasta.maintenance.v1; do
+            create "$topic"
+          done
+
       - name: Apply migrations
         run: pnpm run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
 
       - name: Integration tests
         run: pnpm run test:integration
         env:
           NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
           REDIS_URL: redis://localhost:6379
 
       # These are called out separately from the rest of the suite so a failure
       # names itself in the job list. A tenant-isolation failure is a data
       # leak, not a flaky test, and must never be waved through (AGENTS.md §5).
       - name: Tenant isolation and authorization tests
-        run: pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"
+        # Called out separately from the rest of the suite so a failure names
+        # itself in the job list. A tenant-isolation failure is a data leak,
+        # not a flaky test, and must never be waved through (AGENTS.md § 5).
+        #
+        # Both projects, because the strongest isolation evidence now lives in
+        # fleet-service's integration suite — it proves the guard against a
+        # real database rather than a mock that would assume the behaviour.
+        run: |
+          pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"
+          pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity)"
         env:
           NODE_ENV: test
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
 
   # ---------------------------------------------------------------------------
   # Container build and image scan. Only on main, because it is the slowest
@@ -231,7 +298,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [identity-service, organization-service]
+        # asset-service and fleet-service were absent until fleet landed, so
+        # two images we ship were never built or scanned by CI
+        # (PROJECT_MEMORY § 22). Adding them here is what makes the scan gate
+        # cover what we actually deploy.
+        service: [identity-service, organization-service, asset-service, fleet-service]
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
