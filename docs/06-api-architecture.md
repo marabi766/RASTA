@@ -267,16 +267,52 @@ POST   /v1/assets/{id}/insurance-policies ثبت بیمه‌نامه
 GET    /v1/insurance-policies/expiring   بیمه‌های در آستانه انقضا
 ```
 
-**Fleet**
+**Fleet** — پیاده‌شده (`fleet-service`، پورت ۳۱۰۴)
 
 ```
-GET    /v1/assets/{id}/usage             تاریخچه کارکرد
-POST   /v1/assets/{id}/usage             ثبت کارکرد
-POST   /v1/assets/{id}/assignments       تخصیص راننده
-DELETE /v1/assignments/{id}              پایان تخصیص
-GET    /v1/fleet/availability            دارایی‌های آزاد
+POST   /v1/drivers                       ثبت راننده
+GET    /v1/drivers                       فهرست راننده‌ها
+GET    /v1/drivers/me                    رکورد راننده کاربر جاری (یا null)
+GET    /v1/drivers/{id}                  دریافت
+PATCH  /v1/drivers/{id}                  ویرایش
+POST   /v1/drivers/{id}/status           تغییر وضعیت راننده
+GET    /v1/drivers/{id}/assignments      تاریخچه تخصیص راننده
+
+POST   /v1/assignments                   تخصیص راننده به دستگاه
+GET    /v1/assignments                   فهرست (assetId، driverId، active، from/to)
+GET    /v1/assignments/{id}              دریافت
+POST   /v1/assignments/{id}/end          پایان تخصیص
+DELETE /v1/assignments/{id}              مترادف پایان تخصیص
+
+POST   /v1/usage-records                 ثبت کارکرد
+GET    /v1/usage-records                 تاریخچه کارکرد (assetId، driverId، source، from/to)
+GET    /v1/usage-records/{id}            دریافت
+
+GET    /v1/fleet/availability            دارایی‌های آزاد، با مانع‌های نام‌دار
+POST   /v1/fleet/availability            اعلام در دسترس/غیرقابل‌دسترس بودن
+POST   /v1/fleet/availability/{id}/revoke  ابطال اعلام
 GET    /v1/fleet/utilization             نرخ بهره‌برداری
 ```
+
+**انحراف از طرح اولیه — ثبت‌شده در ADR-026.** نسخه پیشین این بخش مسیرهای
+`/v1/assets/{id}/usage` و `/v1/assets/{id}/assignments` را نوشته بود. `api-gateway`
+پیاده‌شده مسیر را از **نخستین قطعه مسیر** حل می‌کند (ADR-009: Gateway بدون دانش
+دامنه)، پس هرچه زیر `assets/` باشد به `asset-service` می‌رود. منابع ناوگان به
+Prefix های خودشان منتقل شدند و `assetId` یک **فیلد بدنه** است. این علاوه بر رفع
+مسیریابی، صادقانه‌تر هم هست: تخصیص و کارکرد به ناوگان تعلق دارند، نه به دارایی.
+
+**قواعد مشترک این سرویس:**
+
+| مورد              | رفتار                                                                                                                        |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| احراز هویت        | همه Endpoint ها بسته‌اند. هیچ `@Public` ای جز Probe های سلامت وجود ندارد.                                                    |
+| مجوز سطح Endpoint | نوشتن: `ORGANIZATION_ADMIN` · `FLEET_MANAGER` · `UNION_ADMIN`. ثبت کارکرد + `OPERATOR` · `DRIVER`.                           |
+| مجوز سطح Object   | `DRIVER`/`OPERATOR` فقط رکورد خودشان و دستگاهی که واقعاً در دست دارند را می‌بینند (`src/fleet/access.ts`).                   |
+| منبع دیگر تنانت   | **۴۰۴**، هرگز ۴۰۳ — تا وجود رکورد در سازمان دیگر فاش نشود.                                                                   |
+| صفحه‌بندی         | Cursor برای هر فهرست؛ `nextCursor` را به‌عنوان `cursor` بفرستید.                                                             |
+| Idempotency       | `POST /v1/usage-records` فیلد `clientReference` می‌پذیرد؛ ارسال دوباره همان رکورد را برمی‌گرداند و رویداد دوم منتشر نمی‌کند. |
+| خطاها             | قرارداد خطای پلتفرم. تعارض انحصار → `422 BUSINESS_RULE_VIOLATION` با `rule` مشخص؛ گذار نامعتبر → `409`.                      |
+| کمیت‌ها           | `hours`، `kilometres`، `hourMeter`، `odometer` **رشته**‌اند (ستون `NUMERIC`؛ همان استدلال ADR-022).                          |
 
 **Maintenance**
 

@@ -36,6 +36,8 @@
 | [022](adr/ADR-022-money-representation.md)    | نمایش پول با bigint و Basis Point              | Accepted | **دقت مالی**                      |
 | [023](adr/ADR-023-configurable-governance.md) | حکمرانی پیکربندی‌پذیر                          | Accepted | **CONSTRAINT حقوقی سند محصول**    |
 | [024](adr/ADR-024-payment-abstraction.md)     | Abstraction پرداخت و Mock Provider             | Accepted | **CONSTRAINT مقرراتی سند محصول**  |
+| [025](adr/ADR-025-assignment-exclusivity.md)  | انحصار تخصیص و کنترل همروندی                   | Accepted | یکپارچگی داده عملیاتی، ایمنی      |
+| [026](adr/ADR-026-fleet-asset-boundary.md)    | مرز fleet ↔ asset و مالکیت در دسترس بودن       | Accepted | مرز سرویس، صحت معماری             |
 
 ---
 
@@ -98,6 +100,22 @@ Reversal. کیف پول نمای عملیاتی است. **پنج ماژول در
 **CONSTRAINT مستقیم سند محصول:** اجرای واقعی کیف پول و پرداخت مشروط به تأیید الزامات
 بانکی و مقرراتی است. `PaymentProvider` یک Interface است؛ MVP از `MockPaymentProvider`
 استفاده می‌کند. **هیچ ادعایی درباره اتصال بانکی واقعی — در کد، UI، مستند یا Demo.**
+
+### ADR-025 — انحصار تخصیص و کنترل همروندی
+
+یک تخصیص فعال به‌ازای هر راننده (**مستند** در `docs/03` § ۳٫۳ و `docs/05` § ۵٫۵) و یک
+تخصیص فعال به‌ازای هر دارایی (**تصمیم این ADR**، چون `OperationalStatus` تک‌مقداری است).
+هر دو با **Partial Unique Index** اجرا می‌شوند، نه با بررسی در لایه Application — که دو
+درخواست هم‌زمان از آن عبور می‌کنند. `ended_at IS NULL` تنها منبع حقیقت «فعال بودن» است؛
+هیچ ستون `status` موازی وجود ندارد. بدون قفل بدبینانه و بدون Redis.
+
+### ADR-026 — مرز fleet ↔ asset
+
+منابع fleet زیر Prefix های خودش می‌آیند (`/v1/assignments`، `/v1/usage-records`)، نه
+تودرتو زیر `/v1/assets/{id}/…` — چون Gateway از نخستین قطعه مسیر، مسیریابی می‌کند و
+دانستن اینکه `assets/*/assignments` مال fleet است، دانش دامنه در Gateway است (نقض ADR-009).
+«در دسترس بودن» از واقعیت‌های چهار سرویس **ترکیب** می‌شود؛ fleet هیچ‌کدام جز مال خودش را
+مالک نیست و هر مانع، **مالکش را نام می‌برد**.
 
 ---
 

@@ -116,14 +116,72 @@
 
 ## Fleet — `rasta.fleet.v1`
 
-| رویداد                                  | مصرف‌کنندگان                                                        | Payload کلیدی                              |
-| --------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------ |
-| `DRIVER_REGISTERED`                     | asset · analytics                                                   | `driverId`, `userId`                       |
-| `ASSET_ASSIGNED`                        | asset · analytics                                                   | `assetId`, `driverId`, `assignmentId`      |
-| `ASSIGNMENT_ENDED`                      | asset · analytics                                                   | `assignmentId`, `endedAt`                  |
-| `USAGE_RECORDED`                        | **maintenance (محرک سرویس)** · asset · economic (پاداش) · analytics | `assetId`, `hours`, `kilometers`, `source` |
-| `AVAILABILITY_CHANGED`                  | construction · analytics                                            | `assetId`, `available`, `from`, `to`       |
-| `MISSION_STARTED` / `MISSION_COMPLETED` | asset · analytics                                                   | `missionId`, `assetId`, `projectId`        |
+> پیاده‌شده در `services/fleet-service/src/fleet/events.ts`. Schema هر Payload
+> آنجاست و در زمان انتشار اعتبارسنجی می‌شود.
+
+| رویداد                  | Aggregate          | مصرف‌کنندگان                                                        | Payload                                                                                                                                                        |
+| ----------------------- | ------------------ | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DRIVER_REGISTERED`     | Driver             | audit · analytics                                                   | `driverId`, `organizationId`, `userId`, `status`                                                                                                               |
+| `DRIVER_STATUS_CHANGED` | Driver             | audit · analytics                                                   | `driverId`, `organizationId`, `userId`, `previousStatus`, `newStatus`, `reason`                                                                                |
+| `ASSET_ASSIGNED`        | Assignment         | **asset (پرونده + وضعیت `ASSIGNED`)** · analytics                   | `assignmentId`, `assetId`, `driverId`, `organizationId`, `startedAt`, `purpose`                                                                                |
+| `ASSIGNMENT_ENDED`      | Assignment         | **asset (پرونده + بازگشت به `ACTIVE`)** · analytics                 | `assignmentId`, **`assetId`**, `driverId`, `organizationId`, `startedAt`, `endedAt`, `reason`                                                                  |
+| `USAGE_RECORDED`        | UsageRecord        | **maintenance (محرک سرویس)** · asset · economic (پاداش) · analytics | `usageRecordId`, `assetId`, `organizationId`, `driverId`, `assignmentId`, `periodStart`, `periodEnd`, `hours`, `kilometres`, `hourMeter`, `odometer`, `source` |
+| `AVAILABILITY_CHANGED`  | AvailabilityWindow | construction · analytics                                            | `assetId`, `organizationId`, `available`, `reason`, `from`, `to`                                                                                               |
+
+**کلید پارتیشن هر شش رویداد `assetId` است، نه `aggregateId`.** استثنای آگاهانه‌ای بر
+قاعده § «کلید پارتیشن». هر مصرف‌کننده درباره **یک دستگاه** استدلال می‌کند — پرونده
+الکترونیکی، برنامه سرویس کارکردمحور — و ترتیب فقط درون یک پارتیشن تضمین می‌شود. اگر
+`ASSET_ASSIGNED` و `ASSIGNMENT_ENDED` یک دستگاه روی دو پارتیشن می‌نشستند، دستگاه
+آزادشده می‌توانست برای همیشه در `ASSIGNED` گیر کند. (`DRIVER_*` هم به همین شکل کلید
+ندارند و روی `aggregateId` می‌مانند، چون هیچ ترتیبی میان راننده و دستگاه لازم نیست.)
+
+**`ASSIGNMENT_ENDED` حتماً `assetId` دارد.** ستون «Payload کلیدی» نسخه پیشین این سند
+فقط `assignmentId` و `endedAt` را فهرست کرده بود. پیروی تحت‌اللفظی از آن، رویدادی
+می‌ساخت که `TimelineConsumer` در `asset-service` نمی‌تواند به چیزی بچسباند
+(`timelineSourceSchema` بدون `assetId` رویداد را Skip می‌کند) — یعنی نگاشت
+`ASSIGNMENT_ENDED → ACTIVE` هرگز اجرا نمی‌شد و هر دستگاه آزادشده در `ASSIGNED`
+می‌ماند. تست قرارداد این را قفل کرده (`src/fleet/events.spec.ts`).
+
+**`hours`/`kilometres`/`hourMeter`/`odometer` رشته‌اند، نه عدد.** ستون‌ها `NUMERIC`
+هستند؛ عبور از `float` در JSON دقیقاً همان دریفتی را برمی‌گرداند که نوع ستون برای
+جلوگیری از آن انتخاب شده. `maintenance-service` ساعت‌ها را از همین رویداد انباشته
+می‌کند تا «سرویس هر ۲۵۰ ساعت» را ارزیابی کند، پس دریفت در نهایت یعنی دستگاهی که
+سرویسش را از دست داده. همان استدلال ADR-022 برای پول.
+
+**تفکیک Delta از قرائت کنتور.** `hours`/`kilometres` مقدار **مصرف‌شده در دوره**اند؛
+`hourMeter`/`odometer` **قرائت کنتور** در پایان دوره. هر دو حمل می‌شوند تا
+مصرف‌کننده برای ارزیابی برنامه کارکردمحور مجبور به بازسازی مجموع از همه ردیف‌های
+پیشین نباشد.
+
+**Idempotency:** `eventId` کلید مصرف‌کننده است (جدول `processed_event`). سمت تولید،
+ثبت کارکرد با `clientReference` تکراری **رویداد دوم منتشر نمی‌کند** — وگرنه
+`maintenance-service` ساعت‌ها را دوبار می‌شمرد. Retry/DLQ: سیاست پیش‌فرض این سند؛
+DLQ روی `rasta.fleet.v1.dlq`.
+
+**`MISSION_STARTED` / `MISSION_COMPLETED` — PLANNED، پیاده نشده.** مأموریت به پروژه‌های
+`construction-service` گره خورده که هنوز وجود ندارد، و `docs/17` آن را در دامنه MVP
+نیاورده. `TimelineConsumer` در `asset-service` از پیش برایشان نگاشت دارد، پس افزودنشان
+بعداً هیچ تغییری در سرویس مصرف‌کننده نمی‌خواهد. (ADR-026، بخش Consequences)
+
+### رویدادهایی که fleet مصرف می‌کند
+
+Consumer Group: `fleet-service.asset-sync`. Topicها: `rasta.asset.v1` ·
+`rasta.insurance.v1` · `rasta.maintenance.v1`. از Offset صفر می‌خواند (Replica باید
+دستگاه‌های پیش از استقرار را هم بشناسد).
+
+| رویداد                                     | از            | اثر در fleet                                              |
+| ------------------------------------------ | ------------- | --------------------------------------------------------- |
+| `ASSET_CREATED` / `ASSET_UPDATED`          | asset         | ساخت/به‌روزرسانی `asset_ref`                              |
+| `ASSET_ACTIVATED` / `ASSET_STATUS_CHANGED` | asset         | وضعیت Replica                                             |
+| `ASSET_TRANSFERRED`                        | asset         | دستگاه به سازمان جدید منتقل می‌شود؛ وضعیت به `REGISTERED` |
+| `ASSET_DECOMMISSIONED`                     | asset         | وضعیت `DECOMMISSIONED` — دیگر قابل تخصیص نیست             |
+| **`INSPECTION_FAILED`**                    | asset         | **مسدودسازی فوری اعزام** — رویداد ایمنی                   |
+| **`INSURANCE_EXPIRED`**                    | asset         | **مسدودسازی فوری اعزام**                                  |
+| `MAINTENANCE_STARTED`                      | maintenance\* | `inMaintenance = true`                                    |
+| `MAINTENANCE_COMPLETED`                    | maintenance\* | `inMaintenance = false` + رفع مسدودی اعزام                |
+
+\* تولیدکننده هنوز ساخته نشده؛ اشتراک از امروز برقرار است تا راه‌اندازی
+`maintenance-service` یک استقرار باشد، نه تغییر کد.
 
 ## Maintenance — `rasta.maintenance.v1`
 
