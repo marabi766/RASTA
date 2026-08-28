@@ -81,11 +81,24 @@ describe('resolveRoute', () => {
     ['/users/me', 'identity'],
     ['/organizations/ORG-DEH-0001/children', 'organization'],
     ['/assets/AST_123/usage', 'asset'],
+    ['/drivers/DRV_1/assignments', 'fleet'],
+    ['/assignments/ASG_1/end', 'fleet'],
+    ['/usage-records', 'fleet'],
+    ['/fleet/availability', 'fleet'],
     ['/orders', 'marketplace'],
     ['/tenders/TND_1/bids', 'construction'],
     ['/ledger/trial-balance', 'economic'],
   ])('routes %s to %s', (path, service) => {
     expect(resolveRoute(path)?.service).toBe(service);
+  });
+
+  it('keeps usage records with fleet, not with the asset they describe', () => {
+    // The asset is owned by asset-service and a usage record is not; routing
+    // `usage-records` to `asset` would put a fleet write behind the wrong
+    // service and the wrong database (ADR-026). This test is the guard on a
+    // prefix that reads as if it belonged to assets.
+    expect(resolveRoute('/usage-records/USG_1')?.service).toBe('fleet');
+    expect(resolveRoute('/assets/AST_1')?.service).toBe('asset');
   });
 
   it('matches on the first segment only, so a longer path cannot escape', () => {

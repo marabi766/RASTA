@@ -89,6 +89,13 @@ export const ROUTES: readonly RouteRule[] = [
   { prefix: 'insurance-policies', service: 'asset' },
   { prefix: 'drivers', service: 'fleet' },
   { prefix: 'assignments', service: 'fleet' },
+  // docs/04 § 4.6 sketched usage as `POST /assets/{assetId}/usage`. This
+  // gateway resolves a route from the *first* path segment only, so anything
+  // under `assets/` reaches asset-service — and teaching it to route by second
+  // segment would give it knowledge of a domain it deliberately does not have
+  // (ADR-009). A top-level prefix is the honest fix: a usage record belongs to
+  // fleet, not to the asset (ADR-026).
+  { prefix: 'usage-records', service: 'fleet' },
   { prefix: 'fleet', service: 'fleet' },
 
   // ---- maintenance -------------------------------------------------------
