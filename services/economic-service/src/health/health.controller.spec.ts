@@ -32,7 +32,6 @@ describe('HealthController', () => {
       // so the code it chose is only observable here.
       // JUSTIFIED-ANY: only `status` is called on the response, and typing the
       // whole express Response would add nothing this assertion can use.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       response: response as any,
       statuses,
     };

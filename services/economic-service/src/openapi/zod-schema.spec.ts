@@ -64,6 +64,17 @@ describe('toJsonSchema', () => {
     expect(properties.link).toEqual({ type: 'string', format: 'uri' });
   });
 
+  it('publishes a bare string and a bare number with no constraints invented', () => {
+    // A field with no `.min()`, no `.max()` and no format publishes as the
+    // plain type. Inventing a bound here would put a limit in the contract
+    // that the service does not actually enforce, which is worse than none.
+    const schema = z.object({ note: z.string(), count: z.number() });
+    const properties = toJsonSchema(schema).properties!;
+
+    expect(properties.note).toEqual({ type: 'string' });
+    expect(properties.count).toEqual({ type: 'number' });
+  });
+
   it('publishes a basis-point rate as a bounded integer, never a decimal', () => {
     // 2.5% must be exactly 250. A decimal percentage cannot promise that, and
     // a document that says `number` invites a client to send 2.5 (ADR-022).

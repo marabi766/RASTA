@@ -242,3 +242,21 @@ describe('computeCommission', () => {
     expect(decision.amountMinor).toBe(input.grossAmountMinor);
   });
 });
+
+describe('when nothing matches', () => {
+  it('charges nothing rather than picking a rate nobody chose', () => {
+    // Zero because unconfigured, which is a different fact from a configured
+    // rate of zero — and the one the settlement response reports as
+    // `commissionRuleMatched: false` (docs/24 Q-08).
+    const decision = computeCommission([], {
+      organizationId: 'ORG-A',
+      occurredAt: new Date('2026-08-29T10:00:00.000Z'),
+      grossAmountMinor: 1_000_000n,
+      currency: 'IRR',
+    });
+
+    expect(decision.matched).toBe(false);
+    expect(decision.amountMinor).toBe(0n);
+    expect(decision.ruleId).toBeNull();
+  });
+});

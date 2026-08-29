@@ -290,3 +290,100 @@ describe('levelFor', () => {
     ).toBeNull();
   });
 });
+
+describe('every comparison the condition language offers', () => {
+  /**
+   * The whole operator set, exercised in both directions.
+   *
+   * The language is deliberately small — equality, presence and numeric
+   * comparison over top-level fields — because a configurable rule language
+   * grows into a programming language nobody tests. Small is only an advantage
+   * if the whole of it is covered, and an operator that silently returns the
+   * wrong answer grants or withholds a reward with no error anywhere.
+   */
+  const payload = {
+    type: 'PREVENTIVE',
+    hours: '8.5',
+    downtimeMinutes: 45,
+    kilometres: null,
+    infinite: Number.POSITIVE_INFINITY,
+    blank: '   ',
+  };
+
+  it.each([
+    ['neq', 'type', 'CORRECTIVE', true],
+    ['neq', 'type', 'PREVENTIVE', false],
+    ['gt', 'hours', '8', true],
+    ['gt', 'hours', '8.5', false],
+    ['gte', 'hours', '8.5', true],
+    ['lt', 'hours', '9', true],
+    ['lt', 'hours', '8.5', false],
+    ['lte', 'hours', '8.5', true],
+    ['lte', 'hours', '8', false],
+  ])('%s on %s against %s is %s', (op, field, value, expected) => {
+    expect(conditionMet({ field, op, value }, payload)).toBe(expected);
+  });
+
+  it('compares a JSON number as readily as a numeric string', () => {
+    // Quantities arrive as strings because they are NUMERIC at the source and
+    // a JSON float would reintroduce the drift the column type prevents — but
+    // a producer may still send a plain number, and a rule must not silently
+    // stop matching because of it.
+    expect(conditionMet({ field: 'downtimeMinutes', op: 'gt', value: 30 }, payload)).toBe(true);
+    expect(conditionMet({ field: 'downtimeMinutes', op: 'lte', value: 30 }, payload)).toBe(false);
+  });
+
+  it('refuses to compare a value that is not a finite number', () => {
+    // A non-comparable value yields **false**, which withholds a reward rather
+    // than granting one. That direction is deliberate: a mistyped condition
+    // must not pay out.
+    expect(conditionMet({ field: 'infinite', op: 'gt', value: 1 }, payload)).toBe(false);
+    expect(conditionMet({ field: 'blank', op: 'gt', value: 1 }, payload)).toBe(false);
+    expect(conditionMet({ field: 'kilometres', op: 'gte', value: 0 }, payload)).toBe(false);
+  });
+
+  it('treats an unknown operator as unmatched rather than as an error', () => {
+    // A rule referencing an operator that does not exist withholds the reward.
+    // Throwing would stall the consumer for every event on the topic.
+    expect(conditionMet({ field: 'hours', op: 'between', value: '1' }, payload)).toBe(false);
+  });
+});
+
+describe('the cap window', () => {
+  const at = new Date('2026-08-29T10:00:00.000Z');
+
+  it('falls back to a single all-time window for an unrecognised period', () => {
+    // A rule whose `periodType` is not one of the three the schema allows can
+    // only arrive from a hand-written row. Treating it as all-time is the safe
+    // reading: one window, so the cap still binds. Falling through to a
+    // per-day key would silently multiply the ceiling by 365.
+    expect(periodKeyFor('QUARTER', at)).toBe('ALL');
+    expect(periodKeyFor(null, at)).toBe('ALL');
+  });
+
+  it('reports the ceiling it stopped at, and zero when there is none', () => {
+    const capped = {
+      id: 'RWR_1',
+      organizationId: null,
+      triggerEvent: 'USAGE_RECORDED',
+      rewardType: 'POINTS',
+      condition: null,
+      points: 10,
+      creditPerPointMinor: null,
+      periodCap: 20,
+      periodType: 'DAY',
+      validFrom: new Date('2026-01-01T00:00:00.000Z'),
+      validTo: null,
+      status: 'ACTIVE',
+      // JUSTIFIED-ANY: RewardRuleView is a Prisma row shape; spelling every
+      // column out at each call site would restate the schema.
+    } as any;
+
+    // The whole allowance already granted this window.
+    const refusal = evaluate(capped, {}, at, 20);
+    expect(isRefusal(refusal)).toBe(true);
+    expect(refusal).toEqual(
+      expect.objectContaining({ reason: 'cap_reached', ruleId: 'RWR_1', capped: 20 }),
+    );
+  });
+});
