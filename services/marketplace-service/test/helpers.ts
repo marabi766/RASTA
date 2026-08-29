@@ -38,6 +38,20 @@ export function testEnv(): MarketplaceEnv {
     DATABASE_URL: databaseUrl(),
     // The suites drive the services directly; no worker is started.
     MARKETPLACE_TEMPORAL_ENABLED: 'false',
+
+    // These suites never verify a token: they call the domain services with an
+    // explicit `RequestContext`, so no OIDC discovery and no internal token is
+    // ever exchanged. The schema still demands them because the running
+    // service needs them, and turbo passes only its declared env list through —
+    // so without these the suite fails on configuration that has no bearing on
+    // what it tests. Throwaway values, never used to sign or verify anything.
+    OIDC_ISSUER_URL: process.env.OIDC_ISSUER_URL ?? 'http://localhost:8080/realms/rasta',
+    OIDC_JWKS_URI:
+      process.env.OIDC_JWKS_URI ??
+      'http://localhost:8080/realms/rasta/protocol/openid-connect/certs',
+    OIDC_AUDIENCE: process.env.OIDC_AUDIENCE ?? 'rasta-api',
+    INTERNAL_TOKEN_SECRET:
+      process.env.INTERNAL_TOKEN_SECRET ?? 'integration_suite_unused_secret_32_chars',
   });
 }
 
