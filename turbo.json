@@ -53,6 +53,7 @@
         "E2E_*",
         "KEYCLOAK_*",
         "KAFKA_BROKERS",
+        "INTERNAL_TOKEN_SECRET",
         "PORT_API_GATEWAY",
         "PORT_ECONOMIC",
         "PLAYWRIGHT_*"

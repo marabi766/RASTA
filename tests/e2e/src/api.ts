@@ -46,6 +46,16 @@ export interface CallOptions {
    * are part of what is under test.
    */
   baseUrl?: string;
+  /**
+   * Sent as `X-Internal-Token`, and **instead of** the bearer token.
+   *
+   * A service-to-service call is not a user call wearing a different hat: it
+   * carries no user credential at all, and the guard treats a request holding
+   * both as the user's (the internal token then names only the relaying hop).
+   * Passing this therefore drops the `Authorization` header, which is what a
+   * calling service actually sends.
+   */
+  internalToken?: string;
 }
 
 /**
@@ -83,9 +93,11 @@ export class Actor {
     const correlationId = options.correlationId ?? `e2e-${randomUUID()}`;
 
     const headers: Record<string, string> = {
-      authorization: `Bearer ${this.token}`,
       'x-correlation-id': correlationId,
       accept: 'application/json',
+      ...(options.internalToken
+        ? { 'x-internal-token': options.internalToken }
+        : { authorization: `Bearer ${this.token}` }),
     };
     if (options.idempotencyKey) headers['idempotency-key'] = options.idempotencyKey;
     if (options.organizationId) headers['x-organization-id'] = options.organizationId;

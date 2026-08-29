@@ -37,6 +37,16 @@ export interface E2eConfig {
   economicTopic: string;
   /** Keycloak admin, used once to reconcile the E2E users into an imported realm. */
   keycloakAdmin: { username: string; password: string };
+  /**
+   * The shared secret internal service tokens are signed with.
+   *
+   * Needed because one scenario acts as `marketplace-service` rather than as a
+   * person, which is the path `docs/08` § 8.6 specifies for the order saga.
+   * It is the same throwaway development value the running services are
+   * configured with — the suite has to hold it to mint a token they will
+   * accept, exactly as a real calling service would.
+   */
+  internalTokenSecret: string;
 }
 
 export function e2eConfig(): E2eConfig {
@@ -60,6 +70,10 @@ export function e2eConfig(): E2eConfig {
       username: required('KEYCLOAK_ADMIN', 'admin'),
       password: required('KEYCLOAK_ADMIN_PASSWORD', 'admin_dev_password'),
     },
+    internalTokenSecret: required(
+      'INTERNAL_TOKEN_SECRET',
+      'internal_dev_secret_change_me_at_least_32_chars',
+    ),
   };
 }
 

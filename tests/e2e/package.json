@@ -14,6 +14,7 @@
     "@playwright/test": "^1.62.1",
     "@rasta/contracts": "workspace:*",
     "@types/node": "^22.18.14",
+    "jose": "^5.10.0",
     "kafkajs": "^2.2.4",
     "rimraf": "^6.0.1",
     "typescript": "^5.9.3"

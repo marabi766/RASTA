@@ -180,20 +180,35 @@ const INTERNAL_SECRET = randomBytes(24).toString('hex');
  * the second as the first is what once broke every public endpoint behind the
  * gateway (D-007).
  */
-export function internalToken(
-  callerService: string,
-  purpose: 'SERVICE' | 'RELAY' = 'SERVICE',
+export interface InternalTokenOptions {
+  purpose?: 'SERVICE' | 'RELAY';
   /**
    * Who the token is minted **for**. Defaults to this service; naming another
    * one produces exactly the token a leak from elsewhere would be, which is
    * how the audience check is tested.
    */
-  targetService: string = SERVICE_NAME,
+  targetService?: string;
+  /**
+   * The organization this token may act for, signed into the token (ADR-035).
+   *
+   * Omit it to mint the claim-less token a platform-wide internal operation
+   * would carry — and which a tenant-scoped endpoint must refuse.
+   */
+  organizationId?: string;
+  /** Seconds. Short values are how the expiry path is reached. */
+  ttlSeconds?: number;
+}
+
+export function internalToken(
+  callerService: string,
+  options: InternalTokenOptions = {},
 ): Promise<string> {
-  return new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300).issue(
+  const ttl = options.ttlSeconds ?? 300;
+  return new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', ttl).issue(
     callerService,
-    targetService,
-    purpose,
+    options.targetService ?? SERVICE_NAME,
+    options.purpose ?? 'SERVICE',
+    options.organizationId,
   );
 }
 
