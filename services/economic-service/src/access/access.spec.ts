@@ -164,6 +164,28 @@ describe('canCommitOrganization', () => {
     // (docs/08 § 8.6).
     expect(() => run(asService(), () => canCommitOrganization('ORG-Z'))).not.toThrow();
   });
+
+  it('refuses a request with no organization at all before it can commit one', () => {
+    // A context with no tenant reaches this only through a misconfiguration,
+    // and the honest answer is a refusal rather than a commitment made on
+    // behalf of nobody.
+    const anonymous: RequestContext = {
+      correlationId: 'corr-1',
+      requestId: 'req-1',
+      roles: ['ORGANIZATION_ADMIN'],
+      authType: 'USER',
+      startedAt: Date.now(),
+    };
+    expect(() => run(anonymous, () => canCommitOrganization('ORG-A'))).toThrow(
+      expect.objectContaining({ code: 'TENANT_MISMATCH' }),
+    );
+  });
+
+  it('refuses the oversight role even for its own organization', () => {
+    expect(() => run(asUser(['AUDITOR']), () => canCommitOrganization('ORG-A'))).toThrow(
+      expect.objectContaining({ code: 'FORBIDDEN' }),
+    );
+  });
 });
 
 describe('assertTransactionVisible', () => {
@@ -231,5 +253,29 @@ describe('assertWalletVisible', () => {
     expect(() =>
       run(asUser(['ORGANIZATION_ADMIN'], 'ORG-B'), () => assertWalletVisible(wallet)),
     ).toThrow(expect.objectContaining({ code: 'NOT_FOUND' }));
+  });
+
+  it('shows any wallet to a platform administrator', () => {
+    // The crossing an operator needs to diagnose a wallet that disagrees with
+    // its ledger. Narrow and explicit: platform scope, and nothing below it.
+    const wallet = { id: 'WLT_1', organizationId: 'ORG-A' };
+    expect(() =>
+      run(asUser(['UNION_ADMIN'], 'ORG-B'), () => assertWalletVisible(wallet)),
+    ).not.toThrow();
+  });
+
+  it('shows any wallet to a service caller, already authorised by @AllowService', () => {
+    // The calling *service* has been authorised for the endpoint; the wallet
+    // check is not the place to re-litigate that decision.
+    const wallet = { id: 'WLT_1', organizationId: 'ORG-A' };
+    expect(() => run(asService(), () => assertWalletVisible(wallet))).not.toThrow();
+  });
+
+  it('refuses the oversight role a wallet it would otherwise own', () => {
+    // Ownership does not help: the constraint is on the role, not on the row.
+    const wallet = { id: 'WLT_1', organizationId: 'ORG-A' };
+    expect(() => run(asUser(['AUDITOR'], 'ORG-A'), () => assertWalletVisible(wallet))).toThrow(
+      expect.objectContaining({ code: 'FORBIDDEN' }),
+    );
   });
 });

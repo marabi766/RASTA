@@ -6,6 +6,7 @@ import {
   TERMINAL_STATUSES,
   type TransactionEvent,
 } from './state-machine';
+import { RastaError } from '@rasta/nest-common';
 import type { TransactionStatus } from '../generated/prisma';
 
 /**
@@ -194,5 +195,55 @@ describe('attractsCommission', () => {
     'PROCUREMENT_ORDER',
   ])('treats %s as eligible — the rule decides whether anything is charged', (type) => {
     expect(attractsCommission(type)).toBe(true);
+  });
+});
+
+describe('the refusal message', () => {
+  /**
+   * Every event, refused from a state that does not allow it.
+   *
+   * The message is what an operator reads at three in the morning, and it
+   * names the act rather than restating the rule: "a SETTLED transaction
+   * cannot be settled" tells them what happened; "settlement requires prior
+   * authorisation" makes them go and find out which transaction and which
+   * state. Each event is exercised here because a missing case in the
+   * description switch would produce `undefined` in the middle of that
+   * sentence, and nothing else would notice.
+   */
+  const refusals: [TransactionStatus, TransactionEvent, string][] = [
+    ['SETTLED', 'HOLD_PLACED', 'have funds held against it'],
+    ['SETTLED', 'AUTHORISE_SETTLEMENT', 'be authorised for settlement'],
+    ['CREATED', 'SETTLE', 'be settled'],
+    ['CREATED', 'REFUND', 'be refunded'],
+    ['HELD', 'CANCEL', 'be cancelled'],
+    ['HELD', 'FAIL', 'be marked failed'],
+    ['CREATED', 'DISPUTE', 'be disputed'],
+    ['HELD', 'RESOLVE_DISPUTE', 'have a dispute resolved'],
+  ];
+
+  it.each(refusals)('refuses %s + %s and says it cannot %s', (from, event, phrase) => {
+    expect(() => nextStatus('TXN_MESSAGE', from, event)).toThrow(
+      new RegExp(`A ${from} transaction cannot ${phrase}`),
+    );
+  });
+
+  it('carries the transaction id for the operator, and the platform error code', () => {
+    // The identifier reaches the log through `internalContext`, never the
+    // response body: a refusal must not confirm which transactions exist.
+    try {
+      nextStatus('TXN_CONTEXT', 'DISPUTED', 'SETTLE');
+      throw new Error('expected a refusal');
+    } catch (error) {
+      expect(error).toBeInstanceOf(RastaError);
+      const rasta = error as RastaError;
+      expect(rasta.code).toBe('INVALID_STATE_TRANSITION');
+      expect(rasta.status).toBe(409);
+      expect(rasta.internalContext).toEqual({
+        transactionId: 'TXN_CONTEXT',
+        from: 'DISPUTED',
+        event: 'SETTLE',
+      });
+      expect(rasta.details).toBeUndefined();
+    }
   });
 });
