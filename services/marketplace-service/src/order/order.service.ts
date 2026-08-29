@@ -312,6 +312,10 @@ export class OrderService {
     const confirmedAt = new Date();
 
     return this.transition(orderId, 'RECEIPT_CONFIRMED', {
+      // Never from DISPUTED. That edge belongs to `resolveDispute` and to a
+      // platform operator; a buyer travelling it would be resolving their own
+      // dispute in their own favour.
+      from: ['AWAITING_RECEIPT_CONFIRMATION'],
       authorise: (order) => assertBuyer(order, 'confirm receipt'),
       apply: async (tx, order) => {
         await tx.order.update({
@@ -404,6 +408,9 @@ export class OrderService {
     const target: OrderStatus = dto.outcome === 'SETTLE' ? 'RECEIPT_CONFIRMED' : 'CANCELLING';
 
     return this.transition(orderId, target, {
+      // The mirror of the restriction on `confirmReceipt`: an operator resolves
+      // a dispute, and there is nothing to resolve on an order that has none.
+      from: ['DISPUTED'],
       authorise: () => assertDisputeResolver(),
       apply: async (tx, order) => {
         await runUnscoped('an operator resolves a dispute on either party’s order', () =>
@@ -717,12 +724,33 @@ export class OrderService {
       authorise: (order: LockedOrderRow) => void;
       apply: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<void>;
       reason?: string;
+      /**
+       * The states this particular command may be issued from.
+       *
+       * The transition table says which moves are legal; it does not say *who*
+       * may make them, and two commands can legitimately target the same state
+       * from different places. `DISPUTED → RECEIPT_CONFIRMED` exists for an
+       * operator resolving a dispute — and without this restriction the buyer's
+       * own `ConfirmReceipt` would travel the same edge, letting the party who
+       * raised the dispute walk out of it and release the money. That is the
+       * one invariant this service exists to keep, so the restriction is
+       * declared per command rather than inferred.
+       */
+      from?: readonly OrderStatus[];
     },
   ): Promise<OrderView> {
     const view = await this.prisma.transaction(async (tx) => {
       const order = await this.repository.lockOrder(tx, orderId);
 
       handlers.authorise(order);
+
+      if (handlers.from && !handlers.from.includes(order.status)) {
+        orderRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'WRONG_SOURCE_STATE' });
+        throw RastaError.businessRule(
+          `Order ${order.id} cannot take this command while it is ${order.status}`,
+          { orderId: order.id, status: order.status },
+        );
+      }
 
       try {
         assertTransition(order.id, order.status, to);

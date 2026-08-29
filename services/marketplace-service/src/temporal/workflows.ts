@@ -39,7 +39,7 @@ import type { OrderActivities } from './activities';
 export const orderConfirmed = defineSignal('orderConfirmed');
 export const orderFulfilled = defineSignal('orderFulfilled');
 export const receiptConfirmed = defineSignal('receiptConfirmed');
-export const orderDisputed = defineSignal('orderDisputed');
+export const orderDisputed = defineSignal<[string]>('orderDisputed');
 export const orderCancelled = defineSignal<[string]>('orderCancelled');
 export const disputeResolved = defineSignal<['SETTLE' | 'REFUND']>('disputeResolved');
 
@@ -81,6 +81,8 @@ const {
   markCompleted,
   compensate,
   markCancelled,
+  disputeObligation,
+  resolveObligationDispute,
   recordReminder,
 } = proxyActivities<OrderActivities>({
   startToCloseTimeout: '30 seconds',
@@ -113,6 +115,8 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     disputed: false,
     cancelled: false,
     cancelReason: '',
+    disputeReason: '',
+    disputeResolution: '',
     disputeOutcome: undefined as 'SETTLE' | 'REFUND' | undefined,
   };
 
@@ -133,16 +137,20 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   setHandler(receiptConfirmed, () => {
     state.receipted = true;
   });
-  setHandler(orderDisputed, () => {
+  setHandler(orderDisputed, (reason: string) => {
     state.disputed = true;
+    state.disputeReason = reason;
   });
   setHandler(orderCancelled, (reason: string) => {
     state.cancelled = true;
     state.cancelReason = reason;
   });
   setHandler(disputeResolved, (outcome: 'SETTLE' | 'REFUND') => {
+    // `state.disputed` is deliberately **not** cleared here. A resolution can
+    // arrive before the workflow has observed the dispute at all, and clearing
+    // it would skip the step that tells economic-service — leaving the
+    // transaction settled on one side and disputed on the other.
     state.disputeOutcome = outcome;
-    state.disputed = false;
     if (outcome === 'REFUND') {
       state.cancelled = true;
       state.cancelReason = 'Dispute resolved in favour of a refund';
@@ -207,9 +215,26 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   // ---- 4. A dispute stops everything until somebody decides ---------------
   if (state.disputed) {
     status.phase = 'DISPUTED';
+    // economic-service is told too, so a direct settlement command there is
+    // refused independently of anything this service does (ADR-040 § 5).
+    await disputeObligation(
+      input.orderId,
+      transactionId,
+      state.disputeReason || 'A dispute was raised on this order',
+    );
+
     // No timeout. A dispute that expired into a settlement would be worse than
     // one that waits: the money would move because nobody looked.
     await condition(() => state.disputeOutcome !== undefined);
+
+    // And the resolution is mirrored back, or economic-service would still
+    // refuse to settle a transaction it believes is disputed.
+    await resolveObligationDispute(
+      input.orderId,
+      transactionId,
+      state.disputeResolution || `Dispute resolved: ${String(state.disputeOutcome)}`,
+    );
+    state.disputed = false;
   }
 
   // ---- 5. Compensation ----------------------------------------------------

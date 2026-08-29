@@ -237,6 +237,58 @@ describe('order lifecycle (real database)', () => {
     expect(disputed.status).toBe('DISPUTED');
   });
 
+  it('does not let the buyer walk out of their own dispute', async () => {
+    // The transition table permits DISPUTED → RECEIPT_CONFIRMED, because that
+    // is how an operator resolves a dispute in the supplier's favour. Without a
+    // per-command restriction on the source state, the buyer's own
+    // `ConfirmReceipt` travels the same edge — and the party who raised the
+    // dispute releases the money by withdrawing nothing.
+    //
+    // Found by the end-to-end suite, which asserted the refusal and got a 200.
+    const { offerId } = await publishOffer(wiring, org.supplier);
+    const order = await placeOrder(offerId, 1);
+
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSupplier(() => wiring.orders.confirm(order.id));
+    await asSupplier(() => wiring.orders.fulfill(order.id, {}));
+    await asBuyer(() =>
+      wiring.orders.raiseDispute(order.id, { reason: 'the delivered goods are the wrong part' }),
+    );
+
+    await expect(asBuyer(() => wiring.orders.confirmReceipt(order.id, {}))).rejects.toThrow(
+      expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }),
+    );
+
+    const stillDisputed = await asBuyer(() => wiring.orders.get(order.id));
+    expect(stillDisputed.status).toBe('DISPUTED');
+    expect(stillDisputed.receiptConfirmedAt).toBeNull();
+
+    // And an operator can still resolve it, which is what that edge is for.
+    await asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, () =>
+      wiring.orders.resolveDispute(order.id, {
+        outcome: 'SETTLE',
+        resolution: 'the supplier provided evidence of correct delivery',
+      }),
+    );
+    const resolved = await asBuyer(() => wiring.orders.get(order.id));
+    expect(resolved.status).toBe('RECEIPT_CONFIRMED');
+  });
+
+  it('refuses to resolve a dispute on an order that has none', async () => {
+    const { offerId } = await publishOffer(wiring, org.supplier);
+    const order = await placeOrder(offerId, 1);
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+
+    await expect(
+      asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, () =>
+        wiring.orders.resolveDispute(order.id, {
+          outcome: 'REFUND',
+          resolution: 'resolving something that was never disputed',
+        }),
+      ),
+    ).rejects.toThrow(expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }));
+  });
+
   it('allows one open dispute per order and no more', async () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await placeOrder(offerId, 1);

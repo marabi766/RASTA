@@ -134,7 +134,7 @@ export function createActivities(deps: ActivityDependencies) {
             correlationId: order.correlationId,
           });
           return {
-            settlementId: settlement.id,
+            settlementId: settlement.settlementId,
             commissionAmountMinor: settlement.commissionAmountMinor,
             netAmountMinor: settlement.netAmountMinor,
           };
@@ -168,6 +168,52 @@ export function createActivities(deps: ActivityDependencies) {
             transactionId,
             buyerOrganizationId: order.buyerOrganizationId,
             reason,
+            correlationId: order.correlationId,
+          });
+        } catch (error) {
+          throw asTemporalFailure(error);
+        }
+      });
+    },
+
+    /**
+     * Tells economic-service the order is disputed (ADR-040 § 5).
+     *
+     * Both sides have to know. If only marketplace did, a direct settlement
+     * command to economic-service would still succeed; if only economic did,
+     * the order could not say why it was stuck. The transaction moves to
+     * DISPUTED there, and economic-service refuses to settle it independently
+     * of anything this service does.
+     */
+    async disputeObligation(orderId: string, transactionId: string, reason: string): Promise<void> {
+      await asSystemFor(orderId, async (order) => {
+        try {
+          await deps.economic.dispute({
+            orderId: order.id,
+            transactionId,
+            buyerOrganizationId: order.buyerOrganizationId,
+            reason,
+            correlationId: order.correlationId,
+          });
+        } catch (error) {
+          throw asTemporalFailure(error);
+        }
+      });
+    },
+
+    /** Reopens the transaction so a dispute decided for the supplier can settle. */
+    async resolveObligationDispute(
+      orderId: string,
+      transactionId: string,
+      resolution: string,
+    ): Promise<void> {
+      await asSystemFor(orderId, async (order) => {
+        try {
+          await deps.economic.resolveDispute({
+            orderId: order.id,
+            transactionId,
+            buyerOrganizationId: order.buyerOrganizationId,
+            resolution,
             correlationId: order.correlationId,
           });
         } catch (error) {

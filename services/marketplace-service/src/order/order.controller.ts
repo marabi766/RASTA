@@ -36,6 +36,15 @@ import {
 /**
  * The order HTTP surface (`docs/06` § Marketplace).
  *
+ * ## Why the transition routes declare 200 explicitly
+ *
+ * Nest answers a POST with 201 by default, which would be wrong twice over
+ * here: these commands change an existing order rather than creating anything,
+ * and the status recorded for an idempotent replay is 200 — so the default
+ * meant a retry answered with a different status than the original call. Only
+ * `POST /orders` and `POST /orders/{id}/reviews` create a resource, and only
+ * those two return 201.
+ *
  * ## Two things every unsafe route here does
  *
  * **It requires an `Idempotency-Key`.** The gateway marks the whole `orders`
@@ -115,7 +124,8 @@ export class OrderController {
   }
 
   @Post(':id/confirm')
-  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'SUPPLIER')
+  @HttpCode(HttpStatus.OK)
+  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'SUPPLIER', 'ORGANIZATION_ADMIN')
   @ApiOperation({
     summary: 'Accept an order',
     description: 'The supplier accepts. Only the supplying organization may.',
@@ -130,7 +140,8 @@ export class OrderController {
   }
 
   @Post(':id/fulfill')
-  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'SUPPLIER')
+  @HttpCode(HttpStatus.OK)
+  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'SUPPLIER', 'ORGANIZATION_ADMIN')
   @ApiOperation({
     summary: 'Record fulfilment',
     description:
@@ -151,6 +162,7 @@ export class OrderController {
   }
 
   @Post(':id/confirm-receipt')
+  @HttpCode(HttpStatus.OK)
   @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN', 'PROCUREMENT_USER')
   @ApiOperation({
     summary: 'Confirm receipt',
@@ -177,6 +189,7 @@ export class OrderController {
   }
 
   @Post(':id/disputes')
+  @HttpCode(HttpStatus.OK)
   @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN', 'PROCUREMENT_USER')
   @ApiOperation({
     summary: 'Raise a dispute',
@@ -193,11 +206,12 @@ export class OrderController {
     const order = await this.idempotency.run('POST /v1/orders/:id/disputes', key, dto, 200, () =>
       this.orders.raiseDispute(id, dto),
     );
-    await this.saga.signal(id, 'orderDisputed');
+    await this.saga.signal(id, 'orderDisputed', dto.reason);
     return order;
   }
 
   @Post(':id/disputes/resolve')
+  @HttpCode(HttpStatus.OK)
   @Roles('SYSTEM_ADMIN', 'UNION_ADMIN')
   @ApiOperation({
     summary: 'Resolve a dispute',
@@ -223,6 +237,7 @@ export class OrderController {
   }
 
   @Post(':id/cancel')
+  @HttpCode(HttpStatus.OK)
   @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN', 'PROCUREMENT_USER')
   @ApiOperation({
     summary: 'Cancel an order',

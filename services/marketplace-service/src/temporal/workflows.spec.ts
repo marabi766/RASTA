@@ -51,6 +51,8 @@ function recordingActivities(overrides: Partial<OrderActivities> = {}) {
     markCompleted: record('markCompleted', undefined),
     compensate: record('compensate', undefined),
     markCancelled: record('markCancelled', undefined),
+    disputeObligation: record('disputeObligation', undefined),
+    resolveObligationDispute: record('resolveObligationDispute', undefined),
     recordReminder: record('recordReminder', undefined),
     ...overrides,
   } as OrderActivities;
@@ -212,13 +214,19 @@ describe('the order saga', () => {
     const result = await run(activities, async ({ signal }) => {
       await signal('orderConfirmed');
       await signal('orderFulfilled');
-      await signal('orderDisputed');
+      await signal('orderDisputed', 'the delivered goods do not match the offer');
       // Nothing else happens until an operator decides.
       await signal('disputeResolved', 'SETTLE');
     });
 
     expect(result).toBe('COMPLETED');
-    expect(calls.indexOf('settle')).toBeGreaterThan(-1);
+    // economic-service is told before anything waits, so a direct settlement
+    // command there is refused too (ADR-040 § 5).
+    expect(calls.indexOf('disputeObligation')).toBeGreaterThan(-1);
+    expect(calls.indexOf('disputeObligation')).toBeLessThan(calls.indexOf('settle'));
+    // And the resolution is mirrored back, or economic-service would still
+    // refuse to settle a transaction it believes is disputed.
+    expect(calls.indexOf('resolveObligationDispute')).toBeLessThan(calls.indexOf('settle'));
   });
 
   it('refunds when a dispute is resolved against the supplier', async () => {
@@ -227,11 +235,12 @@ describe('the order saga', () => {
     const result = await run(activities, async ({ signal }) => {
       await signal('orderConfirmed');
       await signal('orderFulfilled');
-      await signal('orderDisputed');
+      await signal('orderDisputed', 'the goods never arrived');
       await signal('disputeResolved', 'REFUND');
     });
 
     expect(result).toBe('CANCELLED');
+    expect(calls).toContain('disputeObligation');
     expect(calls).toContain('compensate');
     expect(calls).not.toContain('settle');
   });

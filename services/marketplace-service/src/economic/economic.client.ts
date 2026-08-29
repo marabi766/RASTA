@@ -48,14 +48,25 @@ export interface TransactionView {
   sourceReference: string | null;
 }
 
+/**
+ * What `POST /v1/settlements` answers with.
+ *
+ * Field names copied from economic-service's controller, not guessed: the id
+ * is `settlementId`, not `id`. Guessing it produced an order recorded as
+ * COMPLETED with no settlement to reconcile against, which
+ * `ck_order_completed_has_settlement` then refused — the constraint doing
+ * exactly the job it exists for.
+ */
 export interface SettlementView {
-  id: string;
+  settlementId: string;
   transactionId: string;
   journalId: string;
   grossAmountMinor: string;
   commissionAmountMinor: string;
   netAmountMinor: string;
   currency: string;
+  /** False when no active commission rule matched, so nothing was charged. */
+  commissionRuleMatched: boolean;
   settledAt: string;
 }
 
@@ -67,6 +78,7 @@ export const idempotencyKeyFor = {
   refund: (orderId: string) => `order:${orderId}:refund`,
   cancel: (orderId: string) => `order:${orderId}:cancel`,
   dispute: (orderId: string) => `order:${orderId}:dispute`,
+  resolveDispute: (orderId: string) => `order:${orderId}:resolve-dispute`,
 } as const;
 
 @Injectable()
@@ -205,6 +217,31 @@ export class EconomicClient {
       idempotencyKey: idempotencyKeyFor.dispute(input.orderId),
       correlationId: input.correlationId,
       body: { reason: input.reason },
+    });
+  }
+
+  /**
+   * Mirrors a dispute resolution back onto the transaction.
+   *
+   * Without it a dispute decided in the supplier's favour could never settle:
+   * economic-service refuses to settle a DISPUTED transaction, and only this
+   * call reopens it. The decision itself was made by a platform operator —
+   * `assertDisputeResolver` required that before the saga ever got here.
+   */
+  async resolveDispute(input: {
+    orderId: string;
+    transactionId: string;
+    buyerOrganizationId: string;
+    resolution: string;
+    correlationId: string;
+  }): Promise<TransactionView> {
+    return this.call<TransactionView>('resolveDispute', {
+      method: 'POST',
+      path: `/v1/transactions/${input.transactionId}/resolve-dispute`,
+      organizationId: input.buyerOrganizationId,
+      idempotencyKey: idempotencyKeyFor.resolveDispute(input.orderId),
+      correlationId: input.correlationId,
+      body: { resolution: input.resolution },
     });
   }
 
