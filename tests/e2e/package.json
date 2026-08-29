@@ -1,0 +1,21 @@
+{
+  "name": "@rasta/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end scenarios against a running Rasta stack (Playwright).",
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:report": "playwright show-report",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rimraf test-results playwright-report .turbo"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@rasta/contracts": "workspace:*",
+    "@types/node": "^22.18.14",
+    "kafkajs": "^2.2.4",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.9.3"
+  }
+}
