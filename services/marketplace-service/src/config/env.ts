@@ -35,8 +35,16 @@ export const marketplaceEnvSchema = baseEnvSchema
 
     TEMPORAL_ADDRESS: z.string().default('localhost:7233'),
     TEMPORAL_NAMESPACE: z.string().default('default'),
-    /** The queue this service's worker owns; nobody else polls it (ADR-039). */
-    TEMPORAL_TASK_QUEUE: z.string().default('rasta-order'),
+    /**
+     * The queue this service's worker owns; nobody else polls it (ADR-039).
+     *
+     * Deliberately **not** the platform-wide `TEMPORAL_TASK_QUEUE`, which
+     * `.env.example` sets to `rasta-main`. A shared queue means one service's
+     * worker is handed another service's workflow tasks and cannot execute
+     * them — and reading the generic variable here made exactly that happen
+     * silently, with the worker reporting that it was polling normally.
+     */
+    MARKETPLACE_TEMPORAL_TASK_QUEUE: z.string().default('rasta-order'),
     /**
      * Whether the worker starts with the service.
      *

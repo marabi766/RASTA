@@ -74,7 +74,7 @@ export class OrderSagaClient implements OnModuleDestroy {
     try {
       const client = await this.getClient();
       await client.workflow.start('orderSaga', {
-        taskQueue: this.env.TEMPORAL_TASK_QUEUE,
+        taskQueue: this.env.MARKETPLACE_TEMPORAL_TASK_QUEUE,
         workflowId: OrderSagaClient.workflowIdFor(orderId),
         args: [
           {

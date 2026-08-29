@@ -249,6 +249,7 @@ jobs:
             rasta.fleet.v1 rasta.fleet.v1.retry rasta.fleet.v1.dlq \
             rasta.asset.v1 rasta.insurance.v1 \
             rasta.maintenance.v1 rasta.maintenance.v1.retry rasta.maintenance.v1.dlq \
+            rasta.marketplace.v1 rasta.marketplace.v1.retry rasta.marketplace.v1.dlq \
             rasta.economic.v1 rasta.economic.v1.retry rasta.economic.v1.dlq; do
             create "$topic"
           done
@@ -279,6 +280,7 @@ jobs:
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
 
       - name: Integration tests
         run: pnpm run test:integration
@@ -291,6 +293,7 @@ jobs:
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           REDIS_URL: redis://localhost:6379
 
       # These are called out separately from the rest of the suite so a failure
@@ -331,6 +334,7 @@ jobs:
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
 
       - name: Migration reversibility
         # AGENTS.md § 7 requires every migration to be reversible, and until
@@ -342,6 +346,7 @@ jobs:
         run: pnpm run test:migration
         env:
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
 
   # ---------------------------------------------------------------------------
   # End-to-end. The economic critical path through the whole stack.
@@ -475,6 +480,7 @@ jobs:
           for topic in \
             rasta.economic.v1 rasta.economic.v1.retry rasta.economic.v1.dlq \
             rasta.maintenance.v1 rasta.maintenance.v1.retry rasta.maintenance.v1.dlq \
+            rasta.marketplace.v1 rasta.marketplace.v1.retry rasta.marketplace.v1.dlq \
             rasta.fleet.v1 rasta.fleet.v1.retry rasta.fleet.v1.dlq \
             rasta.asset.v1 rasta.insurance.v1; do
             docker run --rm --network host apache/kafka:3.9.0 \
@@ -489,9 +495,12 @@ jobs:
       - run: pnpm run db:generate
 
       - name: Apply migrations
-        run: pnpm --filter @rasta/economic-service run db:migrate
+        run: |
+          pnpm --filter @rasta/economic-service run db:migrate
+          pnpm --filter @rasta/marketplace-service run db:migrate
         env:
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
 
       - name: Build
         run: pnpm run build
@@ -514,7 +523,26 @@ jobs:
           docker logs rasta-e2e-keycloak
           exit 1
 
-      - name: Start economic-service and api-gateway
+      - name: Start Temporal
+        # marketplace-service's order saga needs a real Temporal server. An
+        # in-memory `dev-server` rather than the compose stack's Postgres-backed
+        # one: this cluster lives for a single job and imports nothing.
+        run: |
+          set -euo pipefail
+          docker run -d --name rasta-e2e-temporal --network host \n            temporalio/admin-tools:1.26.2-tctl-1.18.1-cli-1.1.1 \n            temporal server start-dev --ip 0.0.0.0 --port 7233 --headless
+
+          for attempt in $(seq 1 40); do
+            if docker exec rasta-e2e-temporal temporal operator cluster health \n                 --address localhost:7233 >/dev/null 2>&1; then
+              echo "Temporal ready after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo 'Temporal did not become ready'
+          docker logs rasta-e2e-temporal
+          exit 1
+
+      - name: Start economic-service, marketplace-service and api-gateway
         # From `dist`, the same artefact the container image runs, rather than
         # from a watch-mode dev server. Started here rather than by Playwright's
         # `webServer` because two processes have to come up in order and their
@@ -533,6 +561,15 @@ jobs:
           # The reconciliation is a timer that reports; it has nothing to
           # observe in a fresh database and only adds noise to the log.
           ECONOMIC_BALANCE_AUDIT_ENABLED: 'false'
+          PORT_MARKETPLACE: '3106'
+          TEMPORAL_ADDRESS: localhost:7233
+          MARKETPLACE_TEMPORAL_TASK_QUEUE: rasta-order
+          MARKETPLACE_TEMPORAL_ENABLED: 'true'
+          # Short enough that the E2E suite can observe an overdue order
+          # without waiting a week, and long enough that no scenario trips it
+          # by accident. Nothing expires into a settlement (ADR-043).
+          MARKETPLACE_FULFILLMENT_WINDOW_DAYS: '7'
+          MARKETPLACE_RECEIPT_WINDOW_DAYS: '3'
           # api-gateway validates every service URL at boot, including the
           # fourteen services that do not exist yet. They are unreachable and
           # unrouted-to by this suite; the values only have to parse.
@@ -589,6 +626,7 @@ jobs:
         env:
           E2E_GATEWAY_URL: http://localhost:3000
           E2E_ECONOMIC_URL: http://localhost:3112
+          E2E_MARKETPLACE_URL: http://localhost:3106
           KEYCLOAK_URL: http://localhost:8080
           KEYCLOAK_REALM: rasta
           KEYCLOAK_WEB_CLIENT_ID: rasta-web
@@ -642,6 +680,7 @@ jobs:
             fleet-service,
             maintenance-service,
             economic-service,
+            marketplace-service,
           ]
 
     steps:

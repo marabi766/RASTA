@@ -63,7 +63,7 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
       this.worker = await Worker.create({
         connection: this.connection,
         namespace: this.env.TEMPORAL_NAMESPACE,
-        taskQueue: this.env.TEMPORAL_TASK_QUEUE,
+        taskQueue: this.env.MARKETPLACE_TEMPORAL_TASK_QUEUE,
         workflowsPath: require.resolve('./workflows'),
         activities: createActivities({ orders: this.orders, economic: this.economic }),
       });
@@ -71,7 +71,7 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
       // Not awaited: `run()` resolves only on shutdown, and awaiting it here
       // would block Nest's bootstrap forever.
       this.running = this.worker.run();
-      this.logger.log(`Order saga worker polling ${this.env.TEMPORAL_TASK_QUEUE}`);
+      this.logger.log(`Order saga worker polling ${this.env.MARKETPLACE_TEMPORAL_TASK_QUEUE}`);
     } catch (error) {
       // A missing Temporal server must not take the API down: existing orders
       // are still readable and the failure is loud in the log.

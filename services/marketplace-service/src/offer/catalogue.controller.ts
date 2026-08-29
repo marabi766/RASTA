@@ -87,7 +87,7 @@ export class OfferController {
   constructor(private readonly catalogue: CatalogueService) {}
 
   @Get()
-  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'SUPPLIER')
+  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'SUPPLIER', 'ORGANIZATION_ADMIN')
   @ApiOperation({
     summary: 'List the caller’s own offers',
     description: 'Every state, including drafts. Scoped to the calling organization.',
@@ -98,7 +98,7 @@ export class OfferController {
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'SUPPLIER')
+  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'SUPPLIER', 'ORGANIZATION_ADMIN')
   @ApiOperation({
     summary: 'Publish an offer',
     description:
@@ -111,7 +111,7 @@ export class OfferController {
   }
 
   @Patch(':id')
-  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'SUPPLIER')
+  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'SUPPLIER', 'ORGANIZATION_ADMIN')
   @ApiOperation({
     summary: 'Reprice or restock an offer',
     description:

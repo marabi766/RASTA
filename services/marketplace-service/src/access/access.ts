@@ -33,8 +33,25 @@ export const BUYER_ROLES = [
   'PROCUREMENT_USER',
 ] as const;
 
-/** Roles that may publish offers and record fulfilment. */
-export const SUPPLIER_ROLES = ['SYSTEM_ADMIN', 'UNION_ADMIN', 'SUPPLIER'] as const;
+/**
+ * Roles that may publish offers and record fulfilment.
+ *
+ * `ORGANIZATION_ADMIN` is here because `docs/09` § 9.3 defines it as "everything
+ * in their own organization" — and selling is something an organization does.
+ * It grants nothing extra: {@link assertSupplier} still requires the caller's
+ * organization to be the one named on the order, so an administrator can act as
+ * the seller for their own organization's orders and for nobody else's.
+ *
+ * An organization is a buyer in one order and a seller in the next; the
+ * platform has no separate "supplier account" concept, and inventing one would
+ * be inventing a business fact (AGENTS.md § 9).
+ */
+export const SUPPLIER_ROLES = [
+  'SYSTEM_ADMIN',
+  'UNION_ADMIN',
+  'SUPPLIER',
+  'ORGANIZATION_ADMIN',
+] as const;
 
 /** Roles allowed to read the marketplace at all. */
 export const READ_ROLES = [...new Set([...BUYER_ROLES, ...SUPPLIER_ROLES])] as const;

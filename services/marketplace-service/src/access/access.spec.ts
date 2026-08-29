@@ -177,10 +177,31 @@ describe('supplier-only commands', () => {
     ).toBe('FORBIDDEN');
   });
 
-  it('refuse a buyer role even on the right organization', () => {
+  it('refuse a buyer-only role even on the right organization', () => {
     expect(
       codeOf(() =>
         as({ organizationId: SUPPLIER, roles: ['PROCUREMENT_USER'] }, () =>
+          assertSupplier(ORDER, 'record fulfilment'),
+        ),
+      ),
+    ).toBe('FORBIDDEN');
+  });
+
+  it('permit an organization administrator of the selling organization', () => {
+    // `docs/09` § 9.3 gives ORGANIZATION_ADMIN "everything in their own
+    // organization", and selling is something an organization does. It grants
+    // nothing extra — the organization check below still applies.
+    expect(() =>
+      as({ organizationId: SUPPLIER, roles: ['ORGANIZATION_ADMIN'] }, () =>
+        assertSupplier(ORDER, 'record fulfilment'),
+      ),
+    ).not.toThrow();
+  });
+
+  it('refuse an organization administrator of any other organization', () => {
+    expect(
+      codeOf(() =>
+        as({ organizationId: STRANGER, roles: ['ORGANIZATION_ADMIN'] }, () =>
           assertSupplier(ORDER, 'record fulfilment'),
         ),
       ),
