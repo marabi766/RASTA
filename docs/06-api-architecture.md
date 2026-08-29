@@ -56,8 +56,14 @@ Domain Services  :31xx    ◄── فقط از شبکه داخلی؛ NetworkPol
 | `If-Match`          | اختیاری          | ETag برای قفل خوش‌بینانه در `PATCH`                                            |
 | `Accept-Language`   | اختیاری          | `fa-IR` (پیش‌فرض) یا `en`                                                      |
 
-**CONSTRAINT.** `X-Organization-Id` **هرگز** بدون بررسی پذیرفته نمی‌شود. Gateway بررسی
-می‌کند کاربر عضویت فعال در آن سازمان دارد، وگرنه `TENANT_MISMATCH` (۴۰۳).
+**CONSTRAINT.** `X-Organization-Id` **هرگز** بدون بررسی پذیرفته نمی‌شود، و این
+روی هر دو مسیر صادق است:
+
+- **توکن کاربر** — Gateway و سرویس بررسی می‌کنند کاربر عضویت فعال در آن سازمان
+  دارد، وگرنه `TENANT_MISMATCH` (۴۰۳) — ADR-011.
+- **توکن سرویس** — Header باید با Claim امضاشده `org_id` برابر باشد، وگرنه
+  `SERVICE_TENANT_CONTEXT_INVALID` (۴۰۳) — ADR-035، § ۶٫۱۲.
+
 این نقطه دقیقاً همان جایی است که یک اشتباه به Tenant Escape تبدیل می‌شود.
 
 ### پاسخ
@@ -435,10 +441,25 @@ POST   /v1/payment-intents/{id}/refund             بازگشت شارژ — ب�
 
 ```
 POST /internal/v1/...
-Authorization: Bearer <internal-service-token>
+X-Internal-Token: <signed service token>
 X-Correlation-Id: <propagated>
-X-Organization-Id: <propagated>
+X-Organization-Id: <optional; must MATCH the token's signed org_id>
 ```
+
+**CONSTRAINT (ADR-035).** تنانت یک فراخوان سرویسی از Claim امضاشده `org_id`
+داخل توکن می‌آید، **نه از Header**. Header می‌تواند بیاید و برای Log و
+همبستگی مفید است، اما فقط اجازه دارد با امضا **موافقت** کند:
+
+| حالت                                   | نتیجه                                    |
+| -------------------------------------- | ---------------------------------------- |
+| `org_id` امضاشده، بدون Header          | پذیرفته — تنانت از امضا                  |
+| `org_id` امضاشده + Header هم‌خوان      | پذیرفته                                  |
+| `org_id` امضاشده + Header ناهم‌خوان    | **`403 SERVICE_TENANT_CONTEXT_INVALID`** |
+| بدون `org_id`، روی عملیات مستأجر-محدود | **`403 SERVICE_TENANT_CONTEXT_INVALID`** |
+| بدون `org_id`، روی عملیات غیرمستأجری   | پذیرفته، مشروط به `@AllowService`        |
+
+هیچ Fallback به Header وجود ندارد. توکن `RELAY` هرگز `@AllowService` را ارضا
+نمی‌کند و `org_id` روی آن نادیده گرفته می‌شود.
 
 قواعد:
 
