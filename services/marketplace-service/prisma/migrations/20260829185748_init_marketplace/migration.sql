@@ -463,4 +463,10 @@ CREATE UNIQUE INDEX "uq_dispute_one_open_per_order"
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
-CREATE INDEX "ix_product_search" ON "product" USING gin ("search_text" gin_trgm_ops);
+-- `public.gin_trgm_ops`, schema-qualified deliberately.
+--
+-- The extension lives in `public`, and a migration applied into any other
+-- schema — which is exactly what the reversibility check does, and what a
+-- schema-per-tenant deployment would do — has a `search_path` that does not
+-- include it. Unqualified, the operator class simply does not resolve there.
+CREATE INDEX "ix_product_search" ON "product" USING gin ("search_text" public.gin_trgm_ops);

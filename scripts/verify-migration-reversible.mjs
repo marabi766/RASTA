@@ -57,6 +57,23 @@ const EXPECTED = {
     triggers: ['trg_ledger_entry_immutable', 'trg_journal_immutable', 'trg_journal_balanced'],
     constraints: ['ck_wallet_balances'],
   },
+  /**
+   * The constraints listed are the ones carrying a financial invariant, not a
+   * sample: `ck_order_settled_after_receipt` is what makes "no settlement
+   * without a recorded confirmation" true of the *row* as well as of the state
+   * machine, and a down script that dropped it without the forward migration
+   * restoring it would leave an order table that enforces nothing.
+   */
+  marketplace: {
+    tables: ['product', 'offer', 'order', 'order_line', 'fulfillment', 'order_status_history'],
+    triggers: [],
+    constraints: [
+      'ck_order_settled_after_receipt',
+      'ck_order_completed_has_settlement',
+      'ck_order_line_total_consistent',
+      'ck_offer_available_non_negative',
+    ],
+  },
 };
 
 function usage(message) {
