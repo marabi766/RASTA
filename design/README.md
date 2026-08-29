@@ -10,9 +10,11 @@ design/
 │   ├── RASTA-Web-Portal.dc.html   design source (all portal surfaces)
 │   └── support.js                 generated Design Component runtime (required)
 ├── handoff/
-│   └── maintenance.md             implementation handoff for the Maintenance domain
+│   ├── maintenance.md             implementation handoff for the Maintenance domain
+│   └── mobile.md                  implementation handoff for the mobile-responsive experience
 └── screenshots/
-    └── maintenance/
+    ├── maintenance/
+    └── mobile/
 ```
 
 ---
@@ -108,10 +110,26 @@ external dependency** — the React, ReactDOM and Babel fallbacks are equally re
 
 ---
 
+## 4a. Checkpoint integrity — SHA-256
+
+Computed over the exported files in this directory:
+
+| File                              | Bytes  | SHA-256                                                            |
+| --------------------------------- | ------ | ------------------------------------------------------------------ |
+| `source/RASTA-Web-Portal.dc.html` | 305686 | `cd425a5fedf70723125cfb797762f2581a2a1123558f12be627afafc0d1f79a8` |
+| `source/support.js`               | 69150  | `8fe7df74405f3c55f49b7249c74ea1397e65d07dea2b1bd3b4a489bec2e28cbe` |
+
+---
+
 ## 5. Relationship between backend commit and design checkpoint
 
 Each checkpoint names the backend commit it was synchronised against. This checkpoint is
 bound to **`e4f9b1e7867bac701fba49caec8a1e76697981e7`** on `main`.
+
+Between that commit and `main` (read 2026-08-29), a complete `services/economic-service` and
+ADR-030…ADR-034 were added upstream. **This checkpoint does not represent economic or marketplace as
+implemented** — those surfaces remain `PLANNED` by instruction, and re-grounding them is a separate
+approval-gated task.
 
 **Backend code and API contracts remain the functional source of truth.** Where this
 design and the code disagree, the code is right and the design is stale — raise it as a
@@ -140,7 +158,7 @@ finding rather than implementing the design.
 
 1. Sync the design against the domain's real code first, and record the findings.
 2. Update the design source in `source/` if the sync changed it.
-3. Add `handoff/<domain>.md` following the shape of `handoff/maintenance.md`: metadata
+3. Add `handoff/<domain>.md` following the shape of `handoff/maintenance.md` or `handoff/mobile.md`: metadata
    and backend commit, surfaces represented, routes, API-to-UI mapping, lifecycle and
    states, roles, validation, cross-domain effects, deferred capabilities, and an honest
    verification statement.

@@ -20,7 +20,7 @@
 :root{
 --bg:#F5F8F7;--surf:#FFFFFF;--raised:#FFFFFF;--sunken:#EDF2F1;
 --bd:#E1E7E6;--bd2:#C9D3D1;
---tx:#101A19;--tx2:#576765;--tx3:#8A9896;
+--tx:#101A19;--tx2:#576765;--tx3:#697775;
 --pri:#0E6E64;--pri-h:#0A564E;--pri-soft:#E6F2F0;--pri-tx:#0A564E;
 --omran:#A6602C;--omran-soft:#F8EFE7;--omran-tx:#8A4E22;
 --ok:#1A7A4B;--ok-soft:#E6F4EC;--ok-tx:#14603A;
@@ -33,7 +33,7 @@
 [data-theme="dark"]{
 --bg:#0B1211;--surf:#121A19;--raised:#182221;--sunken:#0E1615;
 --bd:#26312F;--bd2:#3A4745;
---tx:#E7EEED;--tx2:#9DAEAB;--tx3:#728382;
+--tx:#E7EEED;--tx2:#9DAEAB;--tx3:#7E908F;
 --pri:#2A9D8F;--pri-h:#38B3A4;--pri-soft:#10302C;--pri-tx:#7FD6C9;
 --omran:#C98A52;--omran-soft:#2A1D12;--omran-tx:#DFA875;
 --ok:#3FA372;--ok-soft:#0F2618;--ok-tx:#7FCCA3;
@@ -154,7 +154,7 @@ i[data-lucide] svg{width:1em;height:1em;stroke-width:1.75}
 
       <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap">
         <div style="display:flex;flex-direction:column;gap:5px">
-          <h1 style="margin:0;font-family:Estedad,Vazir,sans-serif;font-size:22px;font-weight:700;letter-spacing:-.015em">{{ pageTitle }}</h1>
+          <h1 style="margin:0;font-family:'Estedad','Vazirmatn','Vazir','Noto Naskh Arabic',system-ui,sans-serif;font-size:22px;font-weight:700;letter-spacing:-.015em">{{ pageTitle }}</h1>
           <div style="font-size:11.5px;color:var(--tx3)">{{ pageSub }}</div>
         </div>
         <div style="display:flex;gap:9px;flex-wrap:wrap">
@@ -297,7 +297,7 @@ i[data-lucide] svg{width:1em;height:1em;stroke-width:1.75}
         <div style="display:flex;flex-direction:column;gap:20px">
           <div style="background:var(--info-soft);border:1px solid var(--info);border-radius:12px;padding:14px 16px;font-size:11.5px;color:var(--info-tx);line-height:1.9;display:flex;gap:10px;align-items:flex-start">
             <i data-lucide="smartphone" style="font-size:16px;margin-top:2px"></i>
-            <span>پرکاربردترین جریان پلتفرم و تنها جریانی که موبایل‌اول طراحی می‌شود: اپراتور میدانی، دستکش‌به‌دست، اینترنت ضعیف. ثبت محلی می‌شود و با بازگشت اتصال با <span dir="ltr" style="font-family:ui-monospace,monospace;font-size:10.5px">Idempotency-Key</span> همگام می‌شود تا رکورد تکراری نسازد.</span>
+            <span>پرکاربردترین جریان پلتفرم و تنها جریانی که موبایل‌اول طراحی می‌شود: اپراتور میدانی، دستکش‌به‌دست، اینترنت ضعیف. ثبت <b>مستقیم به fleet-service</b> می‌رود؛ هیچ صف محلی و هیچ ارسال خودکار پس‌زمینه وجود ندارد. آنچه واقعاً پیاده شده تکرارناپذیری سمت سرور است: ارسال دوباره با همان <span dir="ltr" style="font-family:ui-monospace,monospace;font-size:10.5px">clientReference</span> رکورد اصلی را برمی‌گرداند، نه رکورد تازه.</span>
           </div>
 
           <div data-g="three" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px">
@@ -338,7 +338,7 @@ i[data-lucide] svg{width:1em;height:1em;stroke-width:1.75}
 
           <div data-g="two" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px">
             <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
-              <div style="font-size:13.5px;font-weight:700">صف آفلاین — قواعد</div>
+              <div style="display:flex;align-items:baseline;gap:9px;flex-wrap:wrap"><span style="font-size:13.5px;font-weight:700">تلاش دوباره و تکرارناپذیری</span><span dir="ltr" style="font-size:9.5px;font-weight:700;padding:3px 8px;border-radius:6px;background:var(--ok-soft);color:var(--ok-tx)">IMPLEMENTED IN BACKEND</span></div>
               <sc-for list="{{ offlineRules }}" as="o" hint-placeholder-count="5">
                 <div style="display:grid;grid-template-columns:120px minmax(0,1fr);gap:14px;font-size:11.5px;padding:9px 0;border-block-end:1px solid var(--bd);align-items:start">
                   <span style="font-weight:600;color:var(--tx2)">{{ o.k }}</span>
@@ -347,9 +347,9 @@ i[data-lucide] svg{width:1em;height:1em;stroke-width:1.75}
               </sc-for>
             </div>
             <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
-              <div style="font-size:13.5px;font-weight:700">دسکتاپ — بازبینی و تأیید کارکرد</div>
+              <div style="font-size:13.5px;font-weight:700">دسکتاپ — فهرست کارکرد ثبت‌شده</div>
               <div style="border:1px solid var(--bd);border-radius:11px;overflow:hidden">
-                <div style="display:grid;grid-template-columns:1.3fr .9fr .8fr .8fr;gap:10px;padding:{{ cellPad }};background:var(--sunken);font-size:11px;font-weight:600;color:var(--tx2)"><span>دستگاه و راننده</span><span>تاریخ</span><span>ساعت</span><span>وضعیت</span></div>
+                <div style="display:grid;grid-template-columns:1.3fr .9fr .8fr .8fr;gap:10px;padding:{{ cellPad }};background:var(--sunken);font-size:11px;font-weight:600;color:var(--tx2)"><span>دستگاه و راننده</span><span>پایان بازه</span><span>ساعت</span><span>منبع</span></div>
                 <sc-for list="{{ usageReview }}" as="u" hint-placeholder-count="5">
                   <div style="display:grid;grid-template-columns:1.3fr .9fr .8fr .8fr;gap:10px;padding:{{ cellPad }};border-block-start:1px solid var(--bd);font-size:{{ cellFs }};align-items:center">
                     <div style="display:flex;flex-direction:column;gap:1px;min-width:0">
@@ -362,7 +362,7 @@ i[data-lucide] svg{width:1em;height:1em;stroke-width:1.75}
                   </div>
                 </sc-for>
               </div>
-              <div style="font-size:11px;color:var(--tx3);line-height:1.85">کارکرد پرت (بیش از ۱۸ ساعت در روز یا کاهش نسبت به ثبت قبلی) به‌صورت خودکار برای بازبینی علامت می‌خورد و بی‌صدا رد نمی‌شود.</div>
+              <div style="font-size:11px;color:var(--tx2);line-height:1.85">رکورد کارکرد <b>حالت تأیید ندارد</b> و بک‌اند هیچ کارکردی را خودکار «پرت» یا «نیازمند بازبینی» علامت نمی‌زند — چنین قاعده‌ای در fleet-service وجود ندارد. تنها ردهای واقعی: بازه در آینده (<span dir="ltr" style="font-family:ui-monospace,monospace">FUTURE_PERIOD</span>)، پایان پیش از آغاز، و نبودن هر دو مقدار ساعت و کیلومتر. بازبینی انسانی از همین فهرست انجام می‌شود.</div>
             </div>
           </div>
         </div>
@@ -1463,228 +1463,12 @@ i[data-lucide] svg{width:1em;height:1em;stroke-width:1.75}
       <!-- ══════════ نسخه موبایل ══════════ -->
       <sc-if value="{{ isMobile }}" hint-placeholder-val="{{ false }}">
         <div style="display:flex;flex-direction:column;gap:20px">
-          <div style="background:var(--info-soft);border:1px solid var(--info);border-radius:12px;padding:14px 16px;font-size:11.5px;color:var(--info-tx);line-height:1.9;display:flex;gap:10px;align-items:flex-start">
-            <i data-lucide="smartphone" style="font-size:16px;margin-top:2px"></i>
-            <span>موبایل نسخه کوچک‌شده دسکتاپ نیست — مخاطب و کار متفاوتی دارد: اپراتور و راننده میدانی، با دستکش، زیر آفتاب، اینترنت ضعیف. این شش صفحه جریان‌های واقعی میدان‌اند؛ صفحه‌های تحلیلی و مدیریتی روی موبایل بازطراحی نمی‌شوند و تنها خواندنی‌اند.</span>
-          </div>
-
-          <div data-g="cards3" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px">
-
-            <div style="display:flex;flex-direction:column;gap:11px">
-              <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:12.5px;font-weight:700">خانه اپراتور</span><span style="font-size:10.5px;color:var(--tx3)">۳۹۰×۸۴۴ · یک اقدام اصلی</span></div>
-              <div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken)">
-                <div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:620px">
-                  <div style="padding:9px 16px 0;display:flex;justify-content:space-between;font-size:10px;color:var(--tx3);font-variant-numeric:tabular-nums"><span>۸:۴۱</span><span>۸۴٪</span></div>
-                  <div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)">
-                    <div style="width:28px;height:28px;border-radius:50%;background:var(--pri-soft);color:var(--pri-tx);display:grid;place-items:center;font-size:10.5px;font-weight:600;flex:none">ح‌ن</div>
-                    <div style="flex:1;min-width:0"><div style="font-size:12.5px;font-weight:600">حسین نجفی</div><div style="font-size:10px;color:var(--tx3)">دهیاری خرانق · اپراتور</div></div>
-                    <span style="display:inline-flex;align-items:center;gap:5px;font-size:9.5px;font-weight:600;padding:3px 7px;border-radius:6px;background:var(--ok-soft);color:var(--ok-tx)"><i data-lucide="wifi" style="font-size:11px"></i>آنلاین</span>
-                  </div>
-                  <div style="padding:14px 16px;display:flex;flex-direction:column;gap:10px;flex:1;overflow-y:auto">
-                    <sc-for list="{{ mobileHomeCards }}" as="c" hint-placeholder-count="3">
-                      <div style="border:1px solid {{ c.bd }};background:{{ c.bg }};border-radius:12px;padding:13px;display:flex;gap:11px;align-items:flex-start">
-                        <i data-lucide="{{ c.icon }}" style="font-size:16px;color:{{ c.tx }};margin-top:2px"></i>
-                        <div style="display:flex;flex-direction:column;gap:3px;flex:1;min-width:0">
-                          <span style="font-size:10.5px;color:{{ c.tx }};opacity:.8">{{ c.k }}</span>
-                          <span style="font-size:14px;font-weight:600;color:{{ c.tx }}">{{ c.v }}</span>
-                          <span style="font-size:10.5px;color:{{ c.tx }};opacity:.78;line-height:1.7">{{ c.note }}</span>
-                        </div>
-                      </div>
-                    </sc-for>
-                  </div>
-                  <div style="padding:12px 16px;display:flex;flex-direction:column;gap:9px">
-                    <button style="font-family:inherit;font-size:14px;font-weight:600;padding:14px;border-radius:11px;border:1px solid var(--pri);background:var(--pri);color:#fff;cursor:pointer;min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="clipboard-list" style="font-size:16px"></i>ثبت کارکرد امروز</button>
-                    <button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:11px;border-radius:11px;border:1px solid var(--bd2);background:transparent;color:var(--tx);cursor:pointer;min-height:44px;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="triangle-alert" style="font-size:15px"></i>ثبت خرابی</button>
-                  </div>
-                  <div style="border-block-start:1px solid var(--bd);display:grid;grid-template-columns:repeat(4,1fr);padding:8px 4px">
-                    <sc-for list="{{ mobileHomeTabs }}" as="t" hint-placeholder-count="4">
-                      <div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding:4px 0;position:relative;min-height:44px;justify-content:center">
-                        <i data-lucide="{{ t.icon }}" style="font-size:18px;color:{{ t.c }}"></i>
-                        <span style="font-size:9.5px;color:{{ t.c }};font-weight:{{ t.fw }}">{{ t.label }}</span>
-                        <span style="position:absolute;top:2px;inset-inline-end:16px;font-size:8.5px;font-weight:700;color:#fff;background:var(--dgr);border-radius:7px;padding:0 4px;min-width:13px;text-align:center">{{ t.badge }}</span>
-                      </div>
-                    </sc-for>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div style="display:flex;flex-direction:column;gap:11px">
-              <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:12.5px;font-weight:700">ثبت کارکرد</span><span style="font-size:10.5px;color:var(--tx3)">صفحه‌کلید عددی · گام نیم ساعت</span></div>
-              <div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken)">
-                <div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:620px">
-                  <div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)">
-                    <i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i>
-                    <span style="font-size:13px;font-weight:600;flex:1">ثبت کارکرد</span>
-                    <span style="display:inline-flex;align-items:center;gap:5px;font-size:9.5px;font-weight:600;padding:3px 7px;border-radius:6px;background:var(--warn-soft);color:var(--warn-tx)"><i data-lucide="wifi-off" style="font-size:11px"></i>۲ در صف</span>
-                  </div>
-                  <div style="padding:14px 16px;display:flex;flex-direction:column;gap:12px;flex:1;overflow-y:auto">
-                    <div style="border:1px solid var(--pri);background:var(--pri-soft);border-radius:12px;padding:12px;display:flex;align-items:center;gap:10px">
-                      <i data-lucide="truck" style="font-size:16px;color:var(--pri-tx)"></i>
-                      <div style="flex:1;min-width:0"><div style="font-size:12.5px;font-weight:600;color:var(--pri-tx)">لودر ولوو L120</div><div dir="ltr" style="font-size:9.5px;color:var(--pri-tx);opacity:.8;font-family:ui-monospace,monospace">AST-YZD-0413</div></div>
-                    </div>
-                    <div style="display:flex;flex-direction:column;gap:8px">
-                      <span style="font-size:11.5px;font-weight:600;color:var(--tx2)">ساعت کارکرد امروز</span>
-                      <div style="border:1.5px solid var(--pri);border-radius:12px;padding:16px;display:flex;align-items:center;justify-content:center;gap:16px">
-                        <span style="width:44px;height:44px;border-radius:11px;border:1px solid var(--bd2);display:grid;place-items:center;font-size:19px;color:var(--tx2)">−</span>
-                        <div style="display:flex;flex-direction:column;align-items:center;gap:1px;min-width:76px">
-                          <span style="font-size:30px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1">۸٫۵</span>
-                          <span style="font-size:10px;color:var(--tx3)">ساعت</span>
-                        </div>
-                        <span style="width:44px;height:44px;border-radius:11px;border:1px solid var(--pri);background:var(--pri-soft);display:grid;place-items:center;font-size:19px;color:var(--pri-tx)">+</span>
-                      </div>
-                    </div>
-                    <div style="display:flex;flex-direction:column;gap:7px">
-                      <span style="font-size:11.5px;font-weight:600;color:var(--tx2)">کیلومترشمار <span style="font-weight:400;color:var(--tx3)">— اختیاری</span></span>
-                      <div style="border:1px solid var(--bd2);border-radius:11px;padding:13px;font-size:15px;font-weight:600;font-variant-numeric:tabular-nums;min-height:44px;display:flex;align-items:center">۱۴٬۸۲۰</div>
-                      <span style="font-size:10px;color:var(--tx3);line-height:1.7">کمتر از ثبت قبلی (۱۴٬۶۹۰) پذیرفته نمی‌شود.</span>
-                    </div>
-                    <div style="border:1px solid var(--bd);background:var(--sunken);border-radius:11px;padding:12px;display:flex;align-items:center;gap:10px;min-height:44px">
-                      <i data-lucide="triangle-alert" style="font-size:15px;color:var(--tx3)"></i>
-                      <span style="font-size:12px;color:var(--tx2);flex:1">خرابی هم ثبت می‌کنید؟</span>
-                      <i data-lucide="chevron-left" style="font-size:15px;color:var(--tx3)"></i>
-                    </div>
-                  </div>
-                  <div style="padding:12px 16px;display:flex;flex-direction:column;gap:7px;border-block-start:1px solid var(--bd)">
-                    <button style="font-family:inherit;font-size:14px;font-weight:600;padding:14px;border-radius:11px;border:1px solid var(--warn);background:var(--warn-soft);color:var(--warn-tx);cursor:pointer;min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="save" style="font-size:16px"></i>ذخیره در صف محلی</button>
-                    <span style="font-size:9.5px;color:var(--tx3);text-align:center;line-height:1.7">با بازگشت اتصال خودکار ارسال می‌شود؛ صفحه می‌تواند بسته شود.</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div style="display:flex;flex-direction:column;gap:11px">
-              <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:12.5px;font-weight:700">ثبت خرابی</span><span style="font-size:10.5px;color:var(--tx3)">دوربین · آفلاین‌پذیر</span></div>
-              <div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken)">
-                <div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:620px">
-                  <div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)">
-                    <i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i>
-                    <span style="font-size:13px;font-weight:600;flex:1">ثبت خرابی</span>
-                  </div>
-                  <div style="padding:14px 16px;display:flex;flex-direction:column;gap:10px;flex:1;overflow-y:auto">
-                    <sc-for list="{{ mobileFault }}" as="f" hint-placeholder-count="4">
-                      <div style="border:1px solid {{ f.bd }};background:{{ f.bg }};border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:4px">
-                        <span style="font-size:10.5px;color:{{ f.tx }};opacity:.8">{{ f.k }}</span>
-                        <span style="font-size:13px;font-weight:600;color:{{ f.tx }}">{{ f.v }}</span>
-                        <span style="font-size:10px;color:{{ f.tx }};opacity:.75;line-height:1.7">{{ f.note }}</span>
-                      </div>
-                    </sc-for>
-                    <div style="display:flex;gap:9px">
-                      <div style="flex:1;min-height:64px;border-radius:11px;background:var(--sunken);border:1px solid var(--bd);display:grid;place-items:center"><i data-lucide="image" style="font-size:20px;color:var(--tx3)"></i></div>
-                      <div style="flex:1;min-height:64px;border-radius:11px;background:var(--sunken);border:1px solid var(--bd);display:grid;place-items:center"><i data-lucide="image" style="font-size:20px;color:var(--tx3)"></i></div>
-                      <div style="flex:1;min-height:64px;border-radius:11px;border:1.5px dashed var(--bd2);display:grid;place-items:center"><i data-lucide="camera" style="font-size:20px;color:var(--tx3)"></i></div>
-                    </div>
-                  </div>
-                  <div style="padding:12px 16px;border-block-start:1px solid var(--bd)">
-                    <button style="font-family:inherit;font-size:14px;font-weight:600;padding:14px;border-radius:11px;border:1px solid var(--dgr);background:var(--dgr);color:#fff;cursor:pointer;min-height:48px;width:100%;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="send" style="font-size:16px"></i>ارسال به مدیر ناوگان</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div style="display:flex;flex-direction:column;gap:11px">
-              <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:12.5px;font-weight:700">فهرست دستگاه‌ها</span><span style="font-size:10.5px;color:var(--tx3)">کارت، نه جدول</span></div>
-              <div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken)">
-                <div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:620px">
-                  <div style="padding:12px 16px;display:flex;flex-direction:column;gap:10px;border-block-end:1px solid var(--bd)">
-                    <span style="font-size:13px;font-weight:600">دستگاه‌های من</span>
-                    <div style="display:flex;align-items:center;gap:9px;background:var(--sunken);border:1px solid var(--bd);border-radius:10px;padding:10px 12px;min-height:44px">
-                      <i data-lucide="search" style="font-size:15px;color:var(--tx3)"></i>
-                      <span style="font-size:12px;color:var(--tx3);flex:1">جست‌وجوی نام یا کد</span>
-                      <i data-lucide="sliders-horizontal" style="font-size:15px;color:var(--tx2)"></i>
-                    </div>
-                  </div>
-                  <div style="padding:12px 16px;display:flex;flex-direction:column;gap:10px;flex:1;overflow-y:auto">
-                    <sc-for list="{{ mobileAssets }}" as="m" hint-placeholder-count="3">
-                      <div style="border:1px solid var(--bd);border-radius:12px;padding:13px;display:flex;flex-direction:column;gap:9px">
-                        <div style="display:flex;align-items:flex-start;gap:9px">
-                          <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
-                            <span style="font-size:13px;font-weight:600">{{ m.name }}</span>
-                            <span dir="ltr" style="font-size:9.5px;color:var(--tx3);font-family:ui-monospace,monospace">{{ m.code }}</span>
-                          </div>
-                          <span style="font-size:10px;font-weight:600;padding:3px 8px;border-radius:6px;background:{{ m.stBg }};color:{{ m.stTx }};flex:none">{{ m.status }}</span>
-                        </div>
-                        <span style="font-size:11px;color:var(--tx2)">کارکرد ماه: <b style="font-variant-numeric:tabular-nums">{{ m.usage }}</b></span>
-                        <button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:11px;border-radius:10px;border:1px solid var(--bd2);background:transparent;color:var(--tx);cursor:pointer;min-height:44px">{{ m.action }}</button>
-                      </div>
-                    </sc-for>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div style="display:flex;flex-direction:column;gap:11px">
-              <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:12.5px;font-weight:700">اعلان‌ها</span><span style="font-size:10.5px;color:var(--tx3)">اقدام لازم در بالا</span></div>
-              <div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken)">
-                <div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:620px">
-                  <div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)">
-                    <span style="font-size:13px;font-weight:600;flex:1">اعلان‌ها</span>
-                    <span style="font-size:10.5px;color:var(--pri-tx);font-weight:600">خواندن همه</span>
-                  </div>
-                  <div style="padding:12px 16px;display:flex;flex-direction:column;gap:9px;flex:1;overflow-y:auto">
-                    <span style="font-size:10px;font-weight:600;color:var(--warn-tx);letter-spacing:.03em">اقدام لازم — ۲</span>
-                    <sc-for list="{{ mobileNotif }}" as="n" hint-placeholder-count="4">
-                      <div style="border:1px solid var(--bd);background:{{ n.bg }};border-radius:12px;padding:12px;display:flex;gap:10px;align-items:flex-start;min-height:44px">
-                        <i data-lucide="{{ n.icon }}" style="font-size:15px;color:{{ n.tx }};margin-top:2px"></i>
-                        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
-                          <span style="font-size:12px;font-weight:600;color:{{ n.tx }}">{{ n.title }}</span>
-                          <span style="font-size:10.5px;color:{{ n.tx }};opacity:.82;line-height:1.7">{{ n.body }}</span>
-                        </div>
-                        <span style="font-size:9.5px;color:{{ n.tx }};opacity:.7;flex:none;font-variant-numeric:tabular-nums">{{ n.when }}</span>
-                      </div>
-                    </sc-for>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div style="display:flex;flex-direction:column;gap:11px">
-              <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:12.5px;font-weight:700">تأیید دریافت سفارش</span><span style="font-size:10.5px;color:var(--tx3)">تصمیم مالی</span></div>
-              <div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken)">
-                <div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:620px">
-                  <div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)">
-                    <i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i>
-                    <span style="font-size:13px;font-weight:600;flex:1">سفارش ORD-1405-2214</span>
-                  </div>
-                  <div style="padding:14px 16px;display:flex;flex-direction:column;gap:12px;flex:1;overflow-y:auto">
-                    <div style="display:flex;flex-direction:column;gap:5px">
-                      <span style="font-size:13.5px;font-weight:600">لاستیک لودر ۲۳٫۵-۲۵ — ۲ حلقه</span>
-                      <span style="font-size:11px;color:var(--tx3)">بازرگانی فولادگر یزد</span>
-                    </div>
-                    <div style="border:1px solid var(--bd);border-radius:12px;padding:13px;display:flex;flex-direction:column;gap:8px;background:var(--sunken)">
-                      <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--tx3)">مبلغ نهایی</span><span style="font-weight:700;font-variant-numeric:tabular-nums">۳۱۰٬۰۰۰٬۰۰۰ ریال</span></div>
-                      <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--tx3)">وضعیت مبلغ</span><span style="color:var(--warn-tx);font-weight:600">Hold شده</span></div>
-                      <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--tx3)">تحویل</span><span style="font-variant-numeric:tabular-nums">۱۴۰۵/۰۶/۲۸</span></div>
-                    </div>
-                    <div style="border:1px solid var(--warn);background:var(--warn-soft);border-radius:12px;padding:13px;font-size:11px;color:var(--warn-tx);line-height:1.85">مبلغ فقط با تأیید شما به تأمین‌کننده منتقل می‌شود. مهلت: <b>۳ روز</b> — <b>بدون تأیید خودکار</b>؛ تا تأیید یا اعتراض شما سفارش در انتظار می‌ماند.</div>
-                    <div style="display:flex;gap:9px">
-                      <div style="flex:1;min-height:64px;border-radius:11px;background:var(--sunken);border:1px solid var(--bd);display:grid;place-items:center"><i data-lucide="image" style="font-size:20px;color:var(--tx3)"></i></div>
-                      <div style="flex:1;min-height:64px;border-radius:11px;background:var(--sunken);border:1px solid var(--bd);display:grid;place-items:center"><i data-lucide="file-text" style="font-size:20px;color:var(--tx3)"></i></div>
-                    </div>
-                  </div>
-                  <div style="padding:12px 16px;display:flex;flex-direction:column;gap:8px;border-block-start:1px solid var(--bd)">
-                    <button style="font-family:inherit;font-size:14px;font-weight:600;padding:14px;border-radius:11px;border:1px solid var(--pri);background:var(--pri);color:#fff;cursor:pointer;min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="check" style="font-size:16px"></i>تأیید دریافت</button>
-                    <button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:11px;border-radius:11px;border:1px solid var(--dgr);background:transparent;color:var(--dgr-tx);cursor:pointer;min-height:44px">ثبت اعتراض</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
-            <div style="font-size:13.5px;font-weight:700">قواعد موبایل</div>
-            <sc-for list="{{ mobileRules }}" as="m" hint-placeholder-count="7">
-              <div style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:14px;font-size:11.5px;padding:9px 0;border-block-end:1px solid var(--bd);align-items:start">
-                <span style="font-weight:600;color:var(--tx2)">{{ m.k }}</span>
-                <span style="color:var(--tx2);line-height:1.85">{{ m.v }}</span>
-              </div>
-            </sc-for>
-          </div>
+<div style="background:var(--info-soft);border:1px solid var(--info);border-radius:12px;padding:14px 16px;font-size:13px;color:var(--info-tx);line-height:1.9;display:flex;gap:10px;align-items:flex-start"><i data-lucide="smartphone" style="font-size:16px;margin-top:2px;flex:none"></i><span>این مشخصات <b>وب واکنش‌گرای همین پرتال</b> است، نه یک اپلیکیشن بومی جدا. هیچ فرانت‌اند موبایلی، PWA نصب‌شده، Service Worker یا اعلان Push امروز وجود ندارد. آنچه اینجا با API پشتیبانی می‌شود از آنچه برنامه آینده است به‌صورت دیداری جدا شده.</span></div><div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px"><div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap"><div style="font-size:13.5px;font-weight:700">نقش‌ها و مرز دسترسی روی موبایل</div><span style="font-size:12.5px;color:var(--tx3)">تنگ‌کردن دسترسی، نه گشودن آن — نقش ناشناخته کمترین دسترسی می‌گیرد.</span></div><div data-g="three" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px"><sc-for list="{{ mobilePersonas }}" as="r" hint-placeholder-count="5"><div style="border:1px solid var(--bd);border-inline-start:3px solid {{ r.bar }};border-radius:12px;padding:14px 15px;display:flex;flex-direction:column;gap:7px"><div dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere;font-size:12.5px;font-weight:700;color:{{ r.bar }};text-align:start">{{ r.code }}</div><span style="font-size:12.5px;color:var(--tx2);line-height:1.85">{{ r.can }}</span><span style="font-size:12px;color:var(--dgr-tx);line-height:1.8">{{ r.cannot }}</span></div></sc-for></div></div><div style="display:flex;align-items:center;gap:11px;flex-wrap:wrap"><span style="font-size:12px;font-weight:700">بخش ۱ — جریان‌های متکی بر API پیاده‌شده</span><span dir="ltr" style="font-size:12px;font-weight:700;padding:3px 8px;border-radius:6px;background:var(--ok-soft);color:var(--ok-tx)">IMPLEMENTED IN BACKEND · READY FOR FRONTEND</span><span style="flex:1;min-width:40px;height:1px;background:var(--bd)"></span></div><div data-g="cards3" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px"><div style="display:flex;flex-direction:column;gap:11px"><div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:12.5px;font-weight:700">ورود و بافت سازمان</span><span style="font-size:12px;color:var(--tx3)">identity · organization</span></div><div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken);width:fit-content;max-width:100%"><div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:648px;width:390px;max-width:100%"><div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)"><i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i><span style="font-size:13px;font-weight:600;flex:1">ورود و بافت سازمان</span></div><div style="padding:14px 16px;display:flex;flex-direction:column;gap:11px;flex:1;overflow-y:auto"><div style="display:flex;flex-direction:column;gap:5px"><span style="font-size:13px;font-weight:700">ورود به رستا</span><span style="font-size:12.5px;color:var(--tx3);line-height:1.8">احراز هویت با Keycloak OIDC انجام می‌شود؛ رمز در خود برنامه گرفته نمی‌شود.</span></div><button style="font-family:inherit;font-size:14px;font-weight:600;padding:14px;border-radius:11px;border:1px solid var(--pri);background:var(--pri);color:#fff;cursor:pointer;min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="log-in" style="font-size:16px"></i>ورود با حساب سازمانی</button><div style="border:1px solid var(--bd);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px"><span style="font-size:12px;color:var(--tx3)">سازمان فعال</span><div style="display:flex;align-items:center;gap:9px"><div style="width:30px;height:30px;border-radius:9px;background:var(--pri-soft);color:var(--pri-tx);display:grid;place-items:center;font-size:12.5px;font-weight:700;flex:none">خ</div><div style="flex:1;min-width:0"><div style="font-size:12.5px;font-weight:600">دهیاری خرانق</div><div dir="ltr" style="font-size:12px;color:var(--tx3);font-family:ui-monospace,monospace;overflow-wrap:anywhere">ORG-YZD-0031</div></div><span style="font-size:12px;font-weight:600;padding:3px 7px;border-radius:6px;background:var(--pri-soft);color:var(--pri-tx)">OPERATOR</span></div><button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:11px;border-radius:11px;border:1px solid var(--bd2);background:transparent;color:var(--tx);cursor:pointer;min-height:44px;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="repeat" style="font-size:14px"></i>تغییر سازمان — ۲ عضویت</button></div><div style="border:1px solid var(--warn);background:var(--warn-soft);border-radius:12px;padding:12px;display:flex;gap:9px;align-items:flex-start"><i data-lucide="clock-alert" style="font-size:15px;color:var(--warn-tx);margin-top:2px"></i><div style="display:flex;flex-direction:column;gap:3px"><span style="font-size:13px;font-weight:600;color:var(--warn-tx)">نشست منقضی شد</span><span style="font-size:12px;color:var(--warn-tx);line-height:1.8">۴۰۱ از API. آنچه نوشته‌اید در فرم می‌ماند؛ پس از ورود دوباره همان‌جا ادامه می‌دهید.</span></div></div><div style="border:1px solid var(--bd);background:var(--sunken);border-radius:12px;padding:12px;font-size:12px;color:var(--tx2);line-height:1.85">هیچ اقدام تغییردهنده‌ای بدون نمایش سازمان فعال انجام نمی‌شود. رکورد سازمان دیگر همیشه ۴۰۴ است، نه ۴۰۳.</div></div></div></div></div><div style="display:flex;flex-direction:column;gap:11px"><div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:12.5px;font-weight:700">خانه اپراتور</span><span style="font-size:12px;color:var(--tx3)">۳۹۰×۸۴۴ · یک اقدام اصلی</span></div><div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken);width:fit-content;max-width:100%"><div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:648px;width:390px;max-width:100%"><div style="padding:9px 16px 0;display:flex;justify-content:space-between;font-size:12.5px;color:var(--tx3);font-variant-numeric:tabular-nums"><span>۸:۴۱</span><span>۸۴٪</span></div><div style="padding:8px 16px;display:flex;align-items:center;gap:7px;background:var(--pri-soft);border-block-end:1px solid var(--bd)"><i data-lucide="building-2" style="font-size:12px;color:var(--pri-tx)"></i><span style="font-size:12.5px;color:var(--pri-tx);font-weight:600">دهیاری خرانق</span><span dir="ltr" style="font-size:12px;color:var(--pri-tx);opacity:.8;font-family:ui-monospace,monospace;overflow-wrap:anywhere">ORG-YZD-0031</span><span style="font-size:12px;color:var(--pri-tx);opacity:.8;margin-inline-start:auto">OPERATOR</span></div><div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)"><div style="width:28px;height:28px;border-radius:50%;background:var(--pri-soft);color:var(--pri-tx);display:grid;place-items:center;font-size:12px;font-weight:600;flex:none">ح‌ن</div><div style="flex:1;min-width:0"><div style="font-size:12.5px;font-weight:600">حسین نجفی</div><div style="font-size:12.5px;color:var(--tx3)">اپراتور میدانی</div></div><span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:3px 7px;border-radius:6px;background:var(--ok-soft);color:var(--ok-tx)"><i data-lucide="wifi" style="font-size:12.5px"></i>آنلاین</span></div><div style="padding:14px 16px;display:flex;flex-direction:column;gap:10px;flex:1;overflow-y:auto"><sc-for list="{{ mobileHomeCards }}" as="c" hint-placeholder-count="3"><div style="border:1px solid {{ c.bd }};background:{{ c.bg }};border-radius:12px;padding:13px;display:flex;gap:11px;align-items:flex-start"><i data-lucide="{{ c.icon }}" style="font-size:16px;color:{{ c.tx }};margin-top:2px"></i><div style="display:flex;flex-direction:column;gap:3px;flex:1;min-width:0"><span style="font-size:12px;color:{{ c.tx }};opacity:.85">{{ c.k }}</span><span style="font-size:14px;font-weight:600;color:{{ c.tx }}">{{ c.v }}</span><span style="font-size:12px;color:{{ c.tx }};opacity:.8;line-height:1.7">{{ c.note }}</span></div></div></sc-for></div><div style="padding:12px 16px;display:flex;flex-direction:column;gap:9px"><button style="font-family:inherit;font-size:14px;font-weight:600;padding:14px;border-radius:11px;border:1px solid var(--pri);background:var(--pri);color:#fff;cursor:pointer;min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="clipboard-list" style="font-size:16px"></i>ثبت کارکرد امروز</button><button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:11px;border-radius:11px;border:1px solid var(--bd2);background:transparent;color:var(--tx);cursor:pointer;min-height:44px;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="triangle-alert" style="font-size:15px"></i>ثبت خرابی</button></div><div style="border-block-start:1px solid var(--bd);display:grid;grid-template-columns:repeat(4,1fr);padding:8px 4px;padding-bottom:calc(8px + env(safe-area-inset-bottom))"><sc-for list="{{ mobileHomeTabs }}" as="t" hint-placeholder-count="4"><div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding:4px 0;position:relative;min-height:44px;justify-content:center"><i data-lucide="{{ t.icon }}" style="font-size:18px;color:{{ t.c }}"></i><span style="font-size:12px;color:{{ t.c }};font-weight:{{ t.fw }}">{{ t.label }}</span><sc-if value="{{ t.hasBadge }}" hint-placeholder-val="{{ false }}"><span dir="ltr" style="position:absolute;top:2px;inset-inline-end:14px;font-size:12px;font-weight:700;color:#fff;background:var(--dgr);border-radius:7px;padding:1px 5px;min-width:15px;text-align:center">{{ t.badge }}</span></sc-if></div></sc-for></div></div></div></div><div style="display:flex;flex-direction:column;gap:11px"><div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:12.5px;font-weight:700">فهرست دستگاه‌ها</span><span style="font-size:12px;color:var(--tx3)">۳۹۰px · asset + fleet</span></div><div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken);width:fit-content;max-width:100%"><div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:648px;width:390px;max-width:100%"><div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)"><i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i><span style="font-size:13px;font-weight:600;flex:1">دستگاه‌ها</span><span style="font-size:12px;font-weight:600;padding:3px 7px;border-radius:6px;background:var(--neu-soft);color:var(--tx2)">۳ از ۱۲</span></div><div style="padding:8px 16px;display:flex;align-items:center;gap:7px;background:var(--pri-soft);border-block-end:1px solid var(--bd)"><i data-lucide="building-2" style="font-size:12px;color:var(--pri-tx)"></i><span style="font-size:12.5px;color:var(--pri-tx);font-weight:600">دهیاری خرانق</span><span dir="ltr" style="font-size:12px;color:var(--pri-tx);opacity:.85;font-family:ui-monospace,monospace;overflow-wrap:anywhere">ORG-YZD-0031</span><span style="font-size:12px;color:var(--pri-tx);opacity:.85;margin-inline-start:auto">FLEET_MANAGER</span></div><div style="padding:12px 16px;border-block-end:1px solid var(--bd)"><div style="display:flex;align-items:center;gap:9px;border:1px solid var(--tx3);border-radius:11px;padding:11px 12px;min-height:44px"><i data-lucide="search" style="font-size:15px;color:var(--tx2)"></i><span style="font-size:13px;color:var(--tx2);flex:1">جست‌وجو در نام، کد یا پلاک</span></div><span style="font-size:12.5px;color:var(--tx2);line-height:1.75;display:block;padding-top:7px">دامنه پاسخ همیشه سازمان فعال است؛ صفحه‌بندی با cursor انجام می‌شود، نه با شماره صفحه.</span></div><div style="padding:14px 16px;display:flex;flex-direction:column;gap:11px;flex:1;overflow-y:auto"><sc-for list="{{ mobileAssets }}" as="a" hint-placeholder-count="3"><div style="border:1px solid var(--bd);border-inline-start:3px solid {{ a.bar }};border-radius:12px;padding:13px;display:flex;flex-direction:column;gap:8px"><div style="display:flex;align-items:flex-start;gap:9px"><div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><span style="font-size:12.5px;font-weight:600">{{ a.name }}</span><span dir="ltr" style="font-size:12px;color:var(--tx3);font-family:ui-monospace,monospace;overflow-wrap:anywhere">{{ a.code }}</span></div><span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere;font-size:12px;font-weight:700;padding:4px 8px;border-radius:6px;background:{{ a.stBg }};color:{{ a.stTx }};flex:none">{{ a.state }}</span></div><div style="display:flex;flex-direction:column;gap:4px;padding:9px 10px;border-radius:10px;background:var(--sunken)"><span style="font-size:12px;color:var(--tx2)">{{ a.assignment }}</span><span dir="ltr" style="font-size:12px;font-family:ui-monospace,monospace;overflow-wrap:anywhere;color:{{ a.blockerTx }};text-align:start">{{ a.blocker }}</span></div><span style="font-size:12px;color:var(--tx2);line-height:1.75">{{ a.note }}</span></div></sc-for><div style="border:1px solid var(--bd);background:var(--sunken);border-radius:12px;padding:12px;font-size:12px;color:var(--tx2);line-height:1.85">جست‌وجوی بی‌نتیجه «موردی پیدا نشد» است؛ دستگاه سازمان دیگر هم همان «پیدا نشد» را می‌گیرد — هرگز ۴۰۳، چون ۴۰۳ وجود رکورد را لو می‌دهد. اپراتور و راننده در همین فهرست فقط دستگاه تخصیص فعال خودشان را می‌بینند.</div></div></div></div></div><div style="display:flex;flex-direction:column;gap:11px"><div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:12.5px;font-weight:700">جزئیات دستگاه</span><span style="font-size:12px;color:var(--tx3)">وضعیت عملیاتی و مانع‌ها</span></div><div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken);width:fit-content;max-width:100%"><div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:648px;width:390px;max-width:100%"><div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)"><i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i><span style="font-size:13px;font-weight:600;flex:1">لودر ولوو L120</span><span dir="ltr" style="font-size:12px;font-weight:700;padding:3px 7px;border-radius:6px;background:var(--ok-soft);color:var(--ok-tx);font-family:ui-monospace,monospace;overflow-wrap:anywhere">AVAILABLE</span></div><div style="padding:8px 16px;display:flex;align-items:center;gap:7px;background:var(--pri-soft);border-block-end:1px solid var(--bd)"><i data-lucide="building-2" style="font-size:12px;color:var(--pri-tx)"></i><span style="font-size:12.5px;color:var(--pri-tx);font-weight:600">دهیاری خرانق</span><span dir="ltr" style="font-size:12px;color:var(--pri-tx);opacity:.85;font-family:ui-monospace,monospace;overflow-wrap:anywhere">ORG-YZD-0031</span><span style="font-size:12px;color:var(--pri-tx);opacity:.85;margin-inline-start:auto">FLEET_MANAGER</span></div><div style="padding:14px 16px;display:flex;flex-direction:column;gap:11px;flex:1;overflow-y:auto"><sc-for list="{{ mobileAssetDetail }}" as="d" hint-placeholder-count="5"><div style="border:1px solid {{ d.bd }};background:{{ d.bg }};border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:4px"><div style="display:flex;align-items:center;gap:8px"><i data-lucide="{{ d.icon }}" style="font-size:14px;color:{{ d.tx }}"></i><span style="font-size:12px;color:{{ d.tx }};opacity:.9;flex:1">{{ d.k }}</span></div><span style="font-size:13px;font-weight:600;color:{{ d.tx }}">{{ d.v }}</span><span style="font-size:12px;color:{{ d.tx }};opacity:.85;line-height:1.75">{{ d.note }}</span></div></sc-for><div style="border:1px solid var(--bd);background:var(--sunken);border-radius:12px;padding:12px;font-size:12px;color:var(--tx2);line-height:1.85">هر مانع با <span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere">code</span> و سرویس مالک خودش می‌آید؛ «در دسترس نیست» بی‌توضیح نمایش داده نمی‌شود.</div></div><div style="padding:12px 16px;display:flex;flex-direction:column;gap:9px;border-block-start:1px solid var(--bd);padding-bottom:calc(12px + env(safe-area-inset-bottom))"><button style="font-family:inherit;font-size:14px;font-weight:600;padding:14px;border-radius:11px;border:1px solid var(--pri);background:var(--pri);color:#fff;cursor:pointer;min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="clipboard-list" style="font-size:16px"></i>ثبت کارکرد این دستگاه</button><button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:11px;border-radius:11px;border:1px solid var(--tx3);background:transparent;color:var(--tx);cursor:pointer;min-height:44px;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="triangle-alert" style="font-size:15px"></i>ثبت خرابی</button></div></div></div></div><div style="display:flex;flex-direction:column;gap:11px"><div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:12.5px;font-weight:700">ثبت کارکرد</span><span style="font-size:12px;color:var(--tx3)">fleet-service · تکرارناپذیر</span></div><div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken);width:fit-content;max-width:100%"><div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:648px;width:390px;max-width:100%"><div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)"><i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i><span style="font-size:13px;font-weight:600;flex:1">ثبت کارکرد</span></div><div style="padding:8px 16px;display:flex;align-items:center;gap:7px;background:var(--pri-soft);border-block-end:1px solid var(--bd)"><i data-lucide="building-2" style="font-size:12px;color:var(--pri-tx)"></i><span style="font-size:12.5px;color:var(--pri-tx);font-weight:600">دهیاری خرانق</span><span dir="ltr" style="font-size:12px;color:var(--pri-tx);opacity:.8;font-family:ui-monospace,monospace;overflow-wrap:anywhere">ORG-YZD-0031</span><span style="font-size:12px;color:var(--pri-tx);opacity:.8;margin-inline-start:auto">OPERATOR</span></div><div style="padding:14px 16px;display:flex;flex-direction:column;gap:11px;flex:1;overflow-y:auto"><div style="border:1px solid var(--pri);background:var(--pri-soft);border-radius:12px;padding:12px;display:flex;align-items:center;gap:10px"><i data-lucide="truck" style="font-size:16px;color:var(--pri-tx)"></i><div style="flex:1;min-width:0"><div style="font-size:12.5px;font-weight:600;color:var(--pri-tx)">لودر ولوو L120</div><div dir="ltr" style="font-size:12px;color:var(--pri-tx);opacity:.85;font-family:ui-monospace,monospace;overflow-wrap:anywhere">AST-YZD-0413 · تخصیص فعال</div></div></div><sc-for list="{{ mobileUsage }}" as="u" hint-placeholder-count="5"><div style="display:flex;flex-direction:column;gap:6px"><div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px"><label style="font-size:13px;font-weight:600;color:var(--tx2)">{{ u.label }}</label><span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere;font-size:12px;color:var(--tx3)">{{ u.field }}</span></div><div style="border:1px solid {{ u.bd }};background:{{ u.bg }};border-radius:11px;padding:12px;min-height:44px;display:flex;align-items:center;justify-content:space-between;gap:8px"><span style="font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;color:{{ u.vTx }}">{{ u.value }}</span><span style="font-size:12.5px;color:var(--tx3)">{{ u.unit }}</span></div><span style="font-size:12.5px;color:{{ u.hintTx }};line-height:1.75">{{ u.hint }}</span></div></sc-for></div><div style="padding:12px 16px;display:flex;flex-direction:column;gap:8px;border-block-start:1px solid var(--bd)"><button style="font-family:inherit;font-size:14px;font-weight:600;padding:14px;border-radius:11px;border:1px solid var(--pri);background:var(--pri);color:#fff;cursor:pointer;min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="send" style="font-size:16px"></i>ارسال ثبت کارکرد</button><span style="font-size:12px;color:var(--tx3);text-align:center;line-height:1.75">ارسال مستقیم به fleet-service. اگر شبکه قطع شود خطا نشان داده می‌شود و «تلاش دوباره» با همان <span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere">clientReference</span> امن است — رکورد اصلی برمی‌گردد، نه رکورد تازه.</span></div></div></div></div><div style="display:flex;flex-direction:column;gap:11px"><div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:12.5px;font-weight:700">ثبت خرابی</span><span style="font-size:12px;color:var(--tx3)">درخواست CORRECTIVE</span></div><div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken);width:fit-content;max-width:100%"><div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:648px;width:390px;max-width:100%"><div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)"><i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i><span style="font-size:13px;font-weight:600;flex:1">ثبت خرابی</span></div><div style="padding:8px 16px;display:flex;align-items:center;gap:7px;background:var(--pri-soft);border-block-end:1px solid var(--bd)"><i data-lucide="building-2" style="font-size:12px;color:var(--pri-tx)"></i><span style="font-size:12.5px;color:var(--pri-tx);font-weight:600">دهیاری خرانق</span><span dir="ltr" style="font-size:12px;color:var(--pri-tx);opacity:.8;font-family:ui-monospace,monospace;overflow-wrap:anywhere">ORG-YZD-0031</span><span style="font-size:12px;color:var(--pri-tx);opacity:.8;margin-inline-start:auto">OPERATOR</span></div><div style="padding:14px 16px;display:flex;flex-direction:column;gap:11px;flex:1;overflow-y:auto"><sc-for list="{{ mobileFault }}" as="f" hint-placeholder-count="4"><div style="border:1px solid {{ f.bd }};background:{{ f.bg }};border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:4px"><span style="font-size:12px;color:{{ f.tx }};opacity:.85">{{ f.k }}</span><span style="font-size:13px;font-weight:600;color:{{ f.tx }}">{{ f.v }}</span><span style="font-size:12.5px;color:{{ f.tx }};opacity:.8;line-height:1.7">{{ f.note }}</span></div></sc-for><div style="display:flex;flex-direction:column;gap:7px"><span style="font-size:13px;font-weight:600;color:var(--tx2)">شدت خرابی — اجباری برای CORRECTIVE</span><div style="display:flex;gap:7px;flex-wrap:wrap"><sc-for list="{{ mobileSeverity }}" as="s" hint-placeholder-count="4"><span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere;font-size:12px;font-weight:700;padding:11px 12px;border-radius:10px;border:1px solid {{ s.bd }};background:{{ s.bg }};color:{{ s.tx }};min-height:44px;display:inline-flex;align-items:center">{{ s.code }}</span></sc-for></div><span style="font-size:12.5px;color:var(--tx3);line-height:1.75">چهار مقدار پشتیبانی‌شده. شدت ثبت و منتشر می‌شود ولی هیچ رفتار خودکاری به آن گره نخورده — تریاژ انسانی است.</span></div><div style="border:1.5px dashed var(--bd2);background:var(--neu-soft);border-radius:12px;padding:12px;display:flex;gap:10px;align-items:flex-start"><i data-lucide="camera-off" style="font-size:15px;color:var(--tx2);margin-top:2px"></i><div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:6px"><span style="font-size:13px;font-weight:600;color:var(--tx2)">پیوست عکس</span><span dir="ltr" style="font-size:12px;font-weight:700;padding:2px 6px;border-radius:5px;background:var(--bd);color:var(--tx2)">PLANNED · document-service</span></div><span style="font-size:12px;color:var(--tx2);line-height:1.75">هیچ کنترل بارگذاری فعالی نمایش داده نمی‌شود؛ سرویس سند وجود ندارد.</span></div></div><div style="border:1px solid var(--warn);background:var(--warn-soft);border-radius:12px;padding:12px;font-size:12px;color:var(--warn-tx);line-height:1.8">اگر همین دستگاه درخواست باز از همین نوع داشته باشد، ثبت با ۴۲۲ رد می‌شود و شما به درخواست موجود برده می‌شوید.</div></div><div style="padding:12px 16px;display:flex;flex-direction:column;gap:8px;border-block-start:1px solid var(--bd)"><button style="font-family:inherit;font-size:14px;font-weight:600;padding:14px;border-radius:11px;border:1px solid var(--dgr);background:var(--dgr);color:#fff;cursor:pointer;min-height:48px;width:100%;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="send" style="font-size:16px"></i>ثبت خرابی</button><span style="font-size:12px;color:var(--tx3);text-align:center;line-height:1.75">پس از ثبت، شناسه درخواست نشان داده می‌شود و همان‌جا قابل پیگیری است.</span></div></div></div></div><div style="display:flex;flex-direction:column;gap:11px"><div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:12.5px;font-weight:700">پیگیری درخواست تعمیر</span><span style="font-size:12px;color:var(--tx3)">دامنه شخصی اپراتور</span></div><div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken);width:fit-content;max-width:100%"><div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:648px;width:390px;max-width:100%"><div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)"><i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i><span style="font-size:13px;font-weight:600;flex:1">درخواست‌های من</span><span style="font-size:12px;font-weight:600;padding:3px 7px;border-radius:6px;background:var(--neu-soft);color:var(--tx2)">۳</span></div><div style="padding:8px 16px;display:flex;align-items:center;gap:7px;background:var(--pri-soft);border-block-end:1px solid var(--bd)"><i data-lucide="building-2" style="font-size:12px;color:var(--pri-tx)"></i><span style="font-size:12.5px;color:var(--pri-tx);font-weight:600">دهیاری خرانق</span><span dir="ltr" style="font-size:12px;color:var(--pri-tx);opacity:.8;font-family:ui-monospace,monospace;overflow-wrap:anywhere">ORG-YZD-0031</span><span style="font-size:12px;color:var(--pri-tx);opacity:.8;margin-inline-start:auto">OPERATOR</span></div><div style="padding:14px 16px;display:flex;flex-direction:column;gap:11px;flex:1;overflow-y:auto"><div style="font-size:12px;color:var(--tx2);line-height:1.8;padding:10px 12px;border-radius:10px;background:var(--sunken);border:1px solid var(--bd)">اپراتور فقط درخواست‌هایی را می‌بیند که خودش ثبت کرده است. درخواست دیگران ۴۰۴ می‌گیرد.</div><sc-for list="{{ mobileTrack }}" as="t" hint-placeholder-count="3"><div style="border:1px solid var(--bd);border-radius:12px;padding:13px;display:flex;flex-direction:column;gap:8px"><div style="display:flex;align-items:flex-start;gap:9px"><div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><span style="font-size:12.5px;font-weight:600">{{ t.title }}</span><span dir="ltr" style="font-size:12px;color:var(--tx3);font-family:ui-monospace,monospace;overflow-wrap:anywhere">{{ t.code }}</span></div><span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere;font-size:12px;font-weight:700;padding:4px 8px;border-radius:6px;background:{{ t.bg }};color:{{ t.tx }};flex:none">{{ t.state }}</span></div><div style="display:flex;flex-direction:column;gap:4px"><span style="font-size:12px;color:var(--tx2);line-height:1.75">{{ t.note }}</span><span style="font-size:12.5px;color:var(--tx3)">{{ t.when }}</span></div><span style="font-size:12.5px;color:var(--tx3);line-height:1.7">{{ t.actions }}</span></div></sc-for></div></div></div></div><div style="display:flex;flex-direction:column;gap:11px"><div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:12.5px;font-weight:700">سررسید سرویس</span><span style="font-size:12px;color:var(--tx3)">کارت و آکاردئون، نه جدول</span></div><div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken);width:fit-content;max-width:100%"><div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:648px;width:390px;max-width:100%"><div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)"><i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i><span style="font-size:13px;font-weight:600;flex:1">سررسید سرویس</span></div><div style="padding:10px 16px;display:flex;gap:6px;border-block-end:1px solid var(--bd);overflow-x:auto"><sc-for list="{{ mobileDueTabs }}" as="v" hint-placeholder-count="3"><span style="font-size:12.5px;font-weight:{{ v.fw }};padding:9px 12px;border-radius:9px;background:{{ v.bg }};color:{{ v.tx }};white-space:nowrap;min-height:40px;display:inline-flex;align-items:center">{{ v.label }}</span></sc-for></div><div style="padding:9px 16px;display:flex;align-items:center;gap:8px;background:var(--info-soft);border-block-end:1px solid var(--bd)"><i data-lucide="calculator" style="font-size:12px;color:var(--info-tx);flex:none"></i><span style="font-size:12px;color:var(--info-tx);line-height:1.7;flex:1">حکم در همین لحظه محاسبه شد — ۰۹:۱۲</span><span style="font-size:12px;font-weight:600;color:var(--info-tx);text-decoration:underline">تازه‌سازی</span></div><div style="padding:14px 16px;display:flex;flex-direction:column;gap:11px;flex:1;overflow-y:auto"><sc-for list="{{ mobileDue }}" as="d" hint-placeholder-count="4"><div style="border:1px solid var(--bd);border-inline-start:3px solid {{ d.bar }};border-radius:12px;padding:13px;display:flex;flex-direction:column;gap:9px"><div style="display:flex;align-items:flex-start;gap:9px"><div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><span style="font-size:12.5px;font-weight:600">{{ d.title }}</span><span style="font-size:12.5px;color:var(--tx3)">{{ d.asset }}</span></div><span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere;font-size:12px;font-weight:700;padding:4px 8px;border-radius:6px;background:{{ d.bg }};color:{{ d.tx }};flex:none">{{ d.state }}</span></div><div style="display:flex;flex-direction:column;gap:5px;padding:10px;border-radius:10px;background:var(--sunken)"><div style="display:flex;justify-content:space-between;gap:8px;font-size:12px"><span style="color:var(--tx2)">مبنای تعیین‌کننده</span><span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere;font-weight:700;color:{{ d.tx }}">{{ d.basis }}</span></div><div style="display:flex;justify-content:space-between;gap:8px;font-size:12px"><span style="color:var(--tx2)">{{ d.dueKind }}</span><span style="font-variant-numeric:tabular-nums;color:var(--tx)">{{ d.due }}</span></div><div style="display:flex;justify-content:space-between;gap:8px;font-size:12px"><span style="color:var(--tx2)">باقی‌مانده</span><span style="font-variant-numeric:tabular-nums;font-weight:600;color:{{ d.tx }}">{{ d.remaining }}</span></div><div style="display:flex;justify-content:space-between;gap:8px;font-size:12px"><span style="color:var(--tx2)">کنتور فعلی</span><span style="font-variant-numeric:tabular-nums;color:{{ d.meterTx }}">{{ d.meter }}</span></div></div><div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding-block-start:2px;min-height:44px"><span style="font-size:12px;color:var(--tx2)">{{ d.trigSummary }}</span><span style="font-size:12px;font-weight:600;color:var(--pri-tx);display:inline-flex;align-items:center;gap:4px">محرک‌ها<i data-lucide="chevron-down" style="font-size:13px"></i></span></div><sc-if value="{{ d.open }}" hint-placeholder-val="{{ false }}"><div style="display:flex;flex-direction:column;gap:6px;padding:10px;border-radius:10px;border:1px solid var(--bd)"><sc-for list="{{ d.trigs }}" as="g" hint-placeholder-count="2"><div style="display:flex;align-items:center;gap:7px;font-size:12.5px"><span style="width:7px;height:7px;border-radius:50%;background:{{ g.dot }};flex:none"></span><span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere;font-size:12px;color:var(--tx3)">{{ g.basis }}</span><span style="color:var(--tx2);flex:1">{{ g.rule }}</span><span style="color:var(--tx3);font-weight:{{ g.fw }}">{{ g.tag }}</span></div></sc-for></div></sc-if></div></sc-for></div></div></div></div><div style="display:flex;flex-direction:column;gap:11px"><div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:12.5px;font-weight:700">اقدام‌های مدیر ناوگان</span><span style="font-size:12px;color:var(--tx3)">FLEET_MANAGER · تأیید محافظت‌شده</span></div><div style="border:1px solid var(--bd2);border-radius:26px;padding:9px;background:var(--sunken);width:fit-content;max-width:100%"><div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:648px;width:390px;max-width:100%"><div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)"><i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i><span style="font-size:13px;font-weight:600;flex:1">MNT-1405-0412</span><span dir="ltr" style="font-size:12px;font-weight:700;padding:3px 7px;border-radius:6px;background:var(--info-soft);color:var(--info-tx);font-family:ui-monospace,monospace;overflow-wrap:anywhere">IN_PROGRESS</span></div><div style="padding:8px 16px;display:flex;align-items:center;gap:7px;background:var(--pri-soft);border-block-end:1px solid var(--bd)"><i data-lucide="building-2" style="font-size:12px;color:var(--pri-tx)"></i><span style="font-size:12.5px;color:var(--pri-tx);font-weight:600">دهیاری خرانق</span><span style="font-size:12px;color:var(--pri-tx);opacity:.8;margin-inline-start:auto">FLEET_MANAGER</span></div><div style="padding:14px 16px;display:flex;flex-direction:column;gap:11px;flex:1;overflow-y:auto"><sc-for list="{{ mobileManager }}" as="m" hint-placeholder-count="4"><div style="border:1px solid {{ m.bd }};background:{{ m.bg }};border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:4px"><div style="display:flex;align-items:center;gap:7px"><i data-lucide="{{ m.icon }}" style="font-size:14px;color:{{ m.tx }}"></i><span style="font-size:13px;font-weight:600;color:{{ m.tx }};flex:1">{{ m.k }}</span></div><span style="font-size:12px;color:{{ m.tx }};opacity:.85;line-height:1.8">{{ m.v }}</span></div></sc-for><div style="border:1px solid var(--warn);background:var(--warn-soft);border-radius:12px;padding:13px;display:flex;flex-direction:column;gap:9px"><div style="display:flex;align-items:center;gap:7px"><i data-lucide="shield-alert" style="font-size:15px;color:var(--warn-tx)"></i><span style="font-size:13px;font-weight:700;color:var(--warn-tx)">تأیید هزینه — تأیید نهایی</span></div><span style="font-size:12px;color:var(--warn-tx);line-height:1.85">مجموع روی صفحه <b style="font-variant-numeric:tabular-nums">۲۵۴٬۵۰۰٬۰۰۰</b> ریال است. اگر بین باز شدن صفحه و فشردن دکمه تغییر کرده باشد، تأیید با ۴۲۲ رد و مبلغ تازه نشان داده می‌شود.</span><span style="font-size:12px;color:var(--warn-tx);line-height:1.85">این اقدام بازگشت‌ناپذیر است و تنها دروازه‌ای است که اجازه تسویه می‌دهد.</span></div></div><div style="padding:12px 16px;display:flex;flex-direction:column;gap:8px;border-block-start:1px solid var(--bd);padding-bottom:calc(12px + env(safe-area-inset-bottom))"><button style="font-family:inherit;font-size:14px;font-weight:600;padding:14px;border-radius:11px;border:1px solid var(--pri);background:var(--pri);color:#fff;cursor:pointer;min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:8px"><i data-lucide="check-check" style="font-size:16px"></i>پایان کار تعمیرگاه</button><button disabled="disabled" title="تأیید فقط روی درخواست COMPLETED ممکن است" style="font-family:inherit;font-size:12.5px;font-weight:600;padding:11px;border-radius:11px;border:1px dashed var(--bd2);background:transparent;color:var(--tx3);cursor:not-allowed;min-height:44px;display:inline-flex;align-items:center;justify-content:center;gap:8px">تأیید هزینه — پس از COMPLETED</button><div style="height:9px"></div><button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:11px;border-radius:11px;border:1px solid var(--dgr);background:transparent;color:var(--dgr-tx);cursor:pointer;min-height:44px">لغو ارجاع — دلیل لازم</button></div></div></div></div></div><div style="display:flex;align-items:center;gap:11px;flex-wrap:wrap"><span style="font-size:12px;font-weight:700">بخش ۲ — مشخصات آینده</span><span dir="ltr" style="font-size:12px;font-weight:700;padding:3px 8px;border-radius:6px;background:var(--neu-soft);color:var(--tx2)">PLANNED · NOT IMPLEMENTED</span><span style="flex:1;min-width:40px;height:1px;background:var(--bd)"></span></div><div data-g="cards3" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px"><div style="display:flex;flex-direction:column;gap:11px"><div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:12.5px;font-weight:700">صف آفلاین و PWA</span><span style="font-size:12px;color:var(--tx3)">هیچ‌کدام امروز وجود ندارد</span></div><div style="border:1.5px dashed var(--bd2);border-radius:26px;padding:9px;background:var(--neu-soft);width:fit-content;max-width:100%"><div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:648px;width:390px;max-width:100%"><div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)"><i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i><span style="font-size:13px;font-weight:600;flex:1">صف آفلاین و PWA</span></div><div style="padding:14px 16px;display:flex;flex-direction:column;gap:11px;flex:1;overflow-y:auto"><div style="border:1.5px dashed var(--bd2);border-radius:12px;padding:13px;display:flex;flex-direction:column;gap:5px;background:var(--neu-soft)"><span dir="ltr" style="font-size:12px;font-weight:700;padding:2px 6px;border-radius:5px;background:var(--bd);color:var(--tx2);align-self:flex-start">PLANNED · NOT IMPLEMENTED</span><span style="font-size:12.5px;color:var(--tx2);line-height:1.85">هیچ‌کدام از موارد زیر امروز وجود ندارد. اینجا فقط مشخصات آینده است و از جریان‌های متکی بر API جدا نگه داشته می‌شود.</span></div><sc-for list="{{ mobilePlanned }}" as="q" hint-placeholder-count="5"><div style="border:1px dashed var(--bd2);border-radius:11px;padding:11px 12px;display:flex;gap:9px;align-items:flex-start;background:var(--surf)"><i data-lucide="{{ q.icon }}" style="font-size:14px;color:var(--tx3);margin-top:2px"></i><div style="display:flex;flex-direction:column;gap:3px"><span style="font-size:13px;font-weight:600;color:var(--tx2)">{{ q.k }}</span><span style="font-size:12.5px;color:var(--tx3);line-height:1.75">{{ q.v }}</span></div></div></sc-for><div style="border:1px solid var(--ok);background:var(--ok-soft);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:4px"><span style="font-size:12.5px;font-weight:700;color:var(--ok-tx)">آنچه امروز واقعاً هست</span><span style="font-size:12px;color:var(--ok-tx);line-height:1.85">تکرارناپذیری سمت سرور: ارسال دوباره با همان <span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere">clientReference</span> رکورد اصلی را برمی‌گرداند. یعنی «تلاش دوباره» دستی امن است — بدون هیچ صف محلی.</span></div></div></div></div></div><div style="display:flex;flex-direction:column;gap:11px"><div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:12.5px;font-weight:700">تأیید دریافت سفارش</span><span style="font-size:12px;color:var(--tx3)">بازار و اقتصاد — پیاده نشده</span></div><div style="border:1.5px dashed var(--bd2);border-radius:26px;padding:9px;background:var(--neu-soft);width:fit-content;max-width:100%"><div style="background:var(--surf);border:1px solid var(--bd);border-radius:20px;overflow:hidden;display:flex;flex-direction:column;height:648px;width:390px;max-width:100%"><div style="padding:12px 16px;display:flex;align-items:center;gap:10px;border-block-end:1px solid var(--bd)"><i data-lucide="chevron-right" style="font-size:17px;color:var(--tx2)"></i><span style="font-size:13px;font-weight:600;flex:1">سفارش ORD-1405-2214</span></div><div style="padding:8px 16px;background:var(--neu-soft);border-block-end:1px solid var(--bd);display:flex;align-items:center;gap:7px"><span dir="ltr" style="font-size:12px;font-weight:700;padding:2px 6px;border-radius:5px;background:var(--bd);color:var(--tx2)">PLANNED · marketplace + economic</span></div><div style="padding:14px 16px;display:flex;flex-direction:column;gap:11px;flex:1;overflow-y:auto"><div style="display:flex;flex-direction:column;gap:5px"><span style="font-size:13.5px;font-weight:600">لاستیک لودر ۲۳٫۵-۲۵ — ۲ حلقه</span><span style="font-size:12.5px;color:var(--tx3)">بازرگانی نمونه یزد — داده نمایشی</span></div><div style="border:1px solid var(--bd);border-radius:12px;padding:13px;display:flex;flex-direction:column;gap:8px;background:var(--sunken)"><div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--tx3)">مبلغ نهایی</span><span dir="ltr" style="font-weight:700;font-variant-numeric:tabular-nums">۳۱۰٬۰۰۰٬۰۰۰ ریال</span></div><div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--tx3)">تحویل</span><span style="font-variant-numeric:tabular-nums">۱۴۰۵/۰۶/۲۸</span></div></div><div style="border:1px solid var(--warn);background:var(--warn-soft);border-radius:12px;padding:13px;font-size:12.5px;color:var(--warn-tx);line-height:1.85">مهلت تأیید: <b>۳ روز</b> (مقدار موقت — Q-11) — <b>تأیید خودکار وجود ندارد</b>؛ تا تأیید یا اعتراض شما سفارش در انتظار می‌ماند و هیچ تسویه‌ای صرفاً با پایان مهلت راه نمی‌افتد.</div><div style="border:1px solid var(--bd);background:var(--sunken);border-radius:12px;padding:12px;font-size:12px;color:var(--tx2);line-height:1.85">کیف پول، Hold و تسویه وجود ندارند — economic-service ساخته نشده. این صفحه مشخصات است، نه قابلیت.</div></div><div style="padding:12px 16px;display:flex;flex-direction:column;gap:8px;border-block-start:1px solid var(--bd)"><button disabled="disabled" style="font-family:inherit;font-size:14px;font-weight:600;padding:14px;border-radius:11px;border:1px dashed var(--bd2);background:transparent;color:var(--tx3);cursor:not-allowed;min-height:48px;width:100%">تأیید دریافت — بدون سرویس پشتیبان</button></div></div></div></div></div><div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px"><div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap"><div style="font-size:13.5px;font-weight:700">حالت‌های موبایل</div><span style="font-size:12.5px;color:var(--tx3)">هر حالت از پاسخ واقعی API می‌آید یا صریحاً PLANNED است.</span></div><div data-g="three" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px"><sc-for list="{{ mobileStates }}" as="s" hint-placeholder-count="12"><div style="border:1px solid {{ s.bd }};background:{{ s.bg }};border-radius:12px;padding:14px 15px;display:flex;flex-direction:column;gap:6px;min-height:112px"><div style="display:flex;align-items:center;gap:8px"><i data-lucide="{{ s.icon }}" style="font-size:14px;color:{{ s.tx }}"></i><span style="font-size:13px;font-weight:700;color:{{ s.tx }}">{{ s.t }}</span></div><span style="font-size:12px;color:var(--tx2);line-height:1.85;overflow-wrap:anywhere">{{ s.d }}</span><span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere;font-size:12px;color:var(--tx3);text-align:start">{{ s.api }}</span></div></sc-for></div></div><div data-g="split" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px"><div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:12px"><div style="font-size:13.5px;font-weight:700">بررسی عرض‌های نمایش</div><sc-for list="{{ mobileViewports }}" as="v" hint-placeholder-count="5"><div style="display:grid;grid-template-columns:74px minmax(0,1fr);gap:12px;font-size:12.5px;padding:9px 0;border-block-end:1px solid var(--bd);align-items:start"><span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere;font-weight:700;color:{{ v.c }};text-align:start">{{ v.w }}</span><span style="color:var(--tx2);line-height:1.85;overflow-wrap:anywhere">{{ v.v }}</span></div></sc-for><div style="font-size:12px;color:var(--warn-tx);line-height:1.85;padding:11px 12px;border-radius:10px;background:var(--warn-soft);border:1px solid var(--warn)">محدودیت روش: این اندازه‌ها با تغییر عرض ظرف پیش‌نمایش و اعمال قواعد شکست بررسی شده‌اند، نه روی دستگاه واقعی با نوار مرورگر و صفحه‌کلید نرم‌افزاری. پیش از انتشار باید روی دستگاه واقعی آزمایش شود.</div></div><div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:12px"><div style="font-size:13.5px;font-weight:700">نسبت کنتراست — اندازه‌گیری‌شده</div><sc-for list="{{ mobileContrast }}" as="c" hint-placeholder-count="10"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12.5px;padding:8px 0;border-block-end:1px solid var(--bd)"><span style="color:var(--tx2);flex:1;min-width:0">{{ c.label }}</span><span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere;font-weight:700;color:{{ c.c }};font-variant-numeric:tabular-nums">{{ c.r }}:1</span></div></sc-for><div style="font-size:12px;color:var(--tx2);line-height:1.85">مقادیر با فرمول WCAG روی توکن‌های تم روشن محاسبه شده‌اند. <span dir="ltr" style="font-family:ui-monospace,monospace;overflow-wrap:anywhere">--tx3</span> پیش از این ۲٫۹۹ بود و در همین بازبینی تیره شد تا از حد AA بگذرد.</div></div></div><div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px"><div style="font-size:13.5px;font-weight:700">قواعد موبایل</div><sc-for list="{{ mobileRules }}" as="m" hint-placeholder-count="8"><div style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:14px;font-size:13px;padding:9px 0;border-block-end:1px solid var(--bd);align-items:start"><span style="font-weight:600;color:var(--tx2)">{{ m.k }}</span><span style="color:var(--tx2);line-height:1.85;overflow-wrap:anywhere">{{ m.v }}</span></div></sc-for></div>
         </div>
       </sc-if>
 
       <div style="display:flex;align-items:center;gap:14px;padding-top:8px;flex-wrap:wrap;border-top:1px solid var(--bd)">
-        <span style="font-size:11px;color:var(--tx3);line-height:1.9">RASTA · apps/web · همگام‌سازی طراحی با کدبیس — 2026-08-28 · نوار بالای هر نما سرویس مالک و وضعیت پیاده‌سازی را نام می‌بردحی V2 · داده نمونه بر پایه استان یزد</span>
+        <span style="font-size:11px;color:var(--tx3);line-height:1.9">RASTA · apps/web · همگام‌سازی طراحی با کدبیس — 2026-08-28 · نوار بالای هر نما سرویس مالک و وضعیت پیاده‌سازی را نام می‌برد · سیستم طراحی V2 · داده نمونه و فرضی، بر پایه استان یزد</span>
         <span style="font-size:11px;color:var(--tx3);margin-inline-start:auto">{{ densityLabel }} · {{ themeLabel }}</span>
       </div>
     </div>
@@ -1814,7 +1598,7 @@ class Component extends DCLogic {
       { label:'عمومی', items:[
         { id:'notifications', label:'اعلان‌ها', icon:'bell', meta:'۵' },
         { id:'organizations', label:'سازمان و اعضا', icon:'building-2', meta:'' },
-        { id:'mobile', label:'نسخه موبایل', icon:'smartphone', meta:'۶' }
+        { id:'mobile', label:'نسخه موبایل', icon:'smartphone', meta:'۹' }
       ]}
     ];
 
@@ -1884,43 +1668,44 @@ class Component extends DCLogic {
 
     // ── ثبت کارکرد ──────────────────────────────────
     const usageFrames = [
-      { title:'۱ — انتخاب دستگاه', sub:'موبایل ۳۹۰px', head:'ثبت کارکرد امروز', headMeta:'آنلاین', headIcon:'wifi', headBg:T('okSoft'), headTx:T('okTx'),
-        btn:'ادامه', btnIcon:'arrow-left', btnBg:T('pri'), btnBd:T('pri'), btnTx:'#fff', foot:'دستگاه‌های تخصیص‌یافته به شما — بدون جست‌وجو در حالت عادی.',
+      { title:'۱ — انتخاب دستگاه', sub:'موبایل ۳۹۰px', head:'ثبت کارکرد', headMeta:'دهیاری خرانق · OPERATOR', headIcon:'building-2', headBg:T('priSoft'), headTx:T('priTx'),
+        btn:'ادامه', btnIcon:'arrow-left', btnBg:T('pri'), btnBd:T('pri'), btnTx:'#fff', foot:'اپراتور فقط دستگاهی را می‌بیند که تخصیص فعال آن به نام خودش است؛ دستگاه دیگر ۴۰۴ می‌گیرد.',
         rows:[
-          { k:'دستگاه تخصیص‌یافته', v:'لودر ولوو L120', meta:'انتخاب‌شده', note:'AST-YZD-0413 · پروژه بهسازی معابر خرانق', vFs:'14px', vFw:600, bg:T('priSoft'), bd:T('pri'), tx:T('priTx') },
-          { k:'دستگاه دیگر', v:'کمپرسی بنز ۱۹۲۴', meta:'', note:'AST-YZD-0421 · خارج از سرویس — قابل ثبت نیست', vFs:'13px', vFw:400, bg:T('surf'), bd:T('bd'), tx:T('tx3') },
-          { k:'آخرین ثبت شما', v:'۹ ساعت — دیروز', meta:'', note:'کارکرد تجمعی: ۱۸۶ ساعت در این ماه', vFs:'13px', vFw:400, bg:T('sunken'), bd:T('bd'), tx:T('tx2') }
+          { k:'تخصیص فعال — GET /v1/assignments?active=true', v:'لودر ولوو L120', meta:'انتخاب‌شده', note:'AST-YZD-0413 · assignmentId خودکار به رکورد کارکرد بسته می‌شود', vFs:'14px', vFw:600, bg:T('priSoft'), bd:T('pri'), tx:T('priTx') },
+          { k:'دستگاه بدون تخصیص شما', v:'کمپرسی بنز ۱۹۲۴', meta:'', note:'AST-YZD-0421 · ثبت روی این دستگاه ۴۰۴ می‌گیرد، نه ۴۰۳', vFs:'13px', vFw:400, bg:T('surf'), bd:T('bd'), tx:T('tx3') },
+          { k:'آخرین کارکرد ثبت‌شده شما', v:'۸٫۵۰ ساعت — دیروز', meta:'', note:'GET /v1/usage-records · فهرست به رکورد راننده خودتان تنگ می‌شود', vFs:'13px', vFw:400, bg:T('sunken'), bd:T('bd'), tx:T('tx2') }
         ] },
-      { title:'۲ — ثبت عدد', sub:'اینترنت قطع', head:'آفلاین — در صف محلی', headMeta:'۲ در صف', headIcon:'wifi-off', headBg:T('warnSoft'), headTx:T('warnTx'),
-        btn:'ذخیره در صف', btnIcon:'save', btnBg:T('warnSoft'), btnBd:T('warn'), btnTx:T('warnTx'), foot:'با بازگشت اتصال خودکار ارسال می‌شود؛ لازم نیست صفحه باز بماند.',
+      { title:'۲ — ثبت عدد', sub:'اعتبارسنجی واقعی DTO', head:'بازه و مقدار', headMeta:'strict — میدان ناشناخته رد می‌شود', headIcon:'keyboard', headBg:T('sunken'), headTx:T('tx2'),
+        btn:'ارسال ثبت کارکرد', btnIcon:'send', btnBg:T('pri'), btnBd:T('pri'), btnTx:'#fff', foot:'بدون ذخیره محلی؛ ارسال همان لحظه به fleet-service می‌رود.',
         rows:[
-          { k:'ساعت کارکرد امروز', v:'۸٫۵', meta:'ساعت', note:'صفحه‌کلید عددی · گام نیم ساعت · حداکثر ۱۸ ساعت', vFs:'26px', vFw:700, bg:T('surf'), bd:T('pri'), tx:T('tx') },
-          { k:'کیلومتر / موتورساعت شمارنده', v:'۱۴٬۸۲۰', meta:'اختیاری', note:'کمتر از ثبت قبلی پذیرفته نمی‌شود', vFs:'17px', vFw:600, bg:T('surf'), bd:T('bd'), tx:T('tx') },
-          { k:'یادداشت یا خرابی', v:'ثبت خرابی تازه؟', meta:'', note:'در همین صفحه به درخواست تعمیر تبدیل می‌شود', vFs:'13px', vFw:500, bg:T('sunken'), bd:T('bd'), tx:T('tx2') }
+          { k:'ساعت کارکرد — hours', v:'۸٫۵۰', meta:'رشته، دو رقم اعشار', note:'حداقل یکی از hours یا kilometres لازم است؛ خطای ۴۲۲ زیر همین میدان می‌نشیند', vFs:'26px', vFw:700, bg:T('surf'), bd:T('pri'), tx:T('tx') },
+          { k:'قرائت کنتور — hourMeter', v:'۴٬۳۱۸٫۰۰', meta:'اختیاری', note:'به مدل خوانش کنتور و برنامه سرویس می‌رود؛ هیچ سقف روزانه‌ای در بک‌اند نیست', vFs:'17px', vFw:600, bg:T('surf'), bd:T('bd'), tx:T('tx') },
+          { k:'کلید تکرارناپذیری — clientReference', v:'usg-0413-14050625-01', meta:'۸ تا ۱۲۸ نویسه', note:'همین کلید است که تلاش دوباره را امن می‌کند', vFs:'13px', vFw:500, bg:T('infoSoft'), bd:T('info'), tx:T('infoTx') }
         ] },
-      { title:'۳ — همگام‌سازی', sub:'اتصال برگشت', head:'همگام شد', headMeta:'صف خالی', headIcon:'cloud-check', headBg:T('okSoft'), headTx:T('okTx'),
-        btn:'ثبت کارکرد بعدی', btnIcon:'plus', btnBg:'transparent', btnBd:T('bd2'), btnTx:T('tx'), foot:'کد پیگیری هر ثبت برای پشتیبانی نگه داشته می‌شود.',
+      { title:'۳ — نتیجه، خطا، تلاش دوباره', sub:'سه پاسخ واقعی API', head:'پاسخ سرور', headMeta:'', headIcon:'server', headBg:T('sunken'), headTx:T('tx2'),
+        btn:'تلاش دوباره با همان کلید', btnIcon:'refresh-cw', btnBg:'transparent', btnBd:T('bd2'), btnTx:T('tx'), foot:'تلاش دوباره اقدام آشکار کاربر است؛ هیچ ارسال خودکاری در پس‌زمینه انجام نمی‌شود.',
         rows:[
-          { k:'۸٫۵ ساعت — امروز', v:'ثبت شد', meta:'۱۴:۲۲', note:'شناسه: USG-1405-8841 · بدون رکورد تکراری', vFs:'14px', vFw:600, bg:T('okSoft'), bd:T('ok'), tx:T('okTx') },
-          { k:'۹ ساعت — دیروز', v:'ثبت شد', meta:'۱۴:۲۲', note:'از صف محلی ارسال شد', vFs:'14px', vFw:600, bg:T('okSoft'), bd:T('ok'), tx:T('okTx') },
-          { k:'خرابی سیستم ترمز', v:'برای بازبینی', meta:'', note:'به مدیر ناوگان رفت — MNT-1405-0418', vFs:'13px', vFw:500, bg:T('warnSoft'), bd:T('warn'), tx:T('warnTx') }
+          { k:'موفق', v:'USG-1405-8841', meta:'۱۴:۲۲', note:'USAGE_RECORDED منتشر شد؛ رکورد کارکرد حالت تأیید ندارد و همین‌جا نهایی است', vFs:'14px', vFw:600, bg:T('okSoft'), bd:T('ok'), tx:T('okTx') },
+          { k:'شبکه قطع بود', v:'ارسال نشد', meta:'خطای صریح', note:'آنچه نوشته‌اید در فرم می‌ماند؛ ذخیره محلی وعده داده نمی‌شود', vFs:'14px', vFw:600, bg:T('dgrSoft'), bd:T('dgr'), tx:T('dgrTx') },
+          { k:'ارسال دوباره همان کلید', v:'همان USG-1405-8841', meta:'بدون رکورد دوم', note:'رکورد اصلی برمی‌گردد و رویداد دوم منتشر نمی‌شود — ساعت‌ها دو بار شمرده نمی‌شوند', vFs:'13px', vFw:500, bg:T('infoSoft'), bd:T('info'), tx:T('infoTx') }
         ] }
     ];
 
     const offlineRules = [
-      { k:'صف محلی', v:'هر ثبت با Idempotency-Key یکتا در حافظه دستگاه ذخیره می‌شود؛ حداکثر ۵۰ رکورد.' },
-      { k:'نشانگر اتصال', v:'وضعیت آنلاین/آفلاین همیشه در سرصفحه دیده می‌شود، با شمارش رکوردهای در صف.' },
-      { k:'تکرار', v:'ارسال دوباره همان کلید رکورد جدید نمی‌سازد؛ سرور همان پاسخ قبلی را برمی‌گرداند.' },
-      { k:'تعارض', v:'اگر مدیر همان روز را ثبت کرده باشد، رکورد به حالت «نیازمند بازبینی» می‌رود و بی‌صدا بازنویسی نمی‌شود.' },
-      { k:'شکست دائمی', v:'پس از ۵ تلاش، رکورد در صف می‌ماند و به کاربر با دکمه «ارسال دستی» نشان داده می‌شود — هرگز حذف نمی‌شود.' }
+      { k:'کلید تکرارناپذیری', v:'clientReference اختیاری است ولی برنامه موبایل همیشه آن را می‌سازد: ۸ تا ۱۲۸ نویسه، یکتا به ازای هر ثبت.' },
+      { k:'ارسال دوباره', v:'همان کلید همان رکورد را برمی‌گرداند و رویداد USAGE_RECORDED دوباره منتشر نمی‌شود؛ برنامه سرویس ساعت‌ها را دو بار نمی‌شمارد.' },
+      { k:'مسابقه هم‌زمان', v:'اگر دو دستگاه هم‌زمان بفرستند، ایندکس یکتا برنده را نگه می‌دارد و بازنده همان ردیف را می‌خواند — نه خطای تعارض.' },
+      { k:'شکست شبکه', v:'خطای صریح با دکمه «تلاش دوباره». هیچ صف محلی، هیچ تلاش خودکار، هیچ Service Worker — این‌ها PLANNED هستند.' },
+      { k:'آنچه بک‌اند رد می‌کند', v:'بازه در آینده بیش از ۵ دقیقه (FUTURE_PERIOD)، پایان پیش از آغاز، هیچ‌یک از hours و kilometres، و هر میدان ناشناخته.' },
+      { k:'آنچه بک‌اند نمی‌کند', v:'تأیید کارکرد، تشخیص کارکرد پرت، تشخیص تعارض روز تکراری، و برگرداندن کنتور به عقب — هیچ‌کدام وجود ندارند.' }
     ];
 
     const usageReview = [
-      { asset:'لودر ولوو L120', driver:'حسین نجفی', date:'۱۴۰۵/۰۶/۲۴', hours:'۸٫۵', status:'تأییدشده', ...{ bg:T('okSoft'), tx:T('okTx') } },
-      { asset:'وانت نیسان خدماتی', driver:'سعید موسوی', date:'۱۴۰۵/۰۶/۲۴', hours:'۱۱', status:'تأییدشده', bg:T('okSoft'), tx:T('okTx') },
-      { asset:'کمپرسی بنز ۱۹۲۴', driver:'علی صادقی', date:'۱۴۰۵/۰۶/۲۴', hours:'۱۹', status:'نیازمند بازبینی', bg:T('warnSoft'), tx:T('warnTx') },
-      { asset:'گریدر کاترپیلار 140K', driver:'اکبر زارع', date:'۱۴۰۵/۰۶/۲۳', hours:'۶', status:'از صف آفلاین', bg:T('infoSoft'), tx:T('infoTx') },
-      { asset:'بیل هیوندای R220', driver:'محمد کریمی', date:'۱۴۰۵/۰۶/۲۲', hours:'۰', status:'دستگاه در تعمیر', bg:T('neuSoft'), tx:T('tx2') }
+      { asset:'لودر ولوو L120', driver:'حسین نجفی', date:'۱۴۰۵/۰۶/۲۴ — ۱۵:۳۰', hours:'۸٫۵۰', status:'MANUAL', bg:T('neuSoft'), tx:T('tx2') },
+      { asset:'وانت نیسان خدماتی', driver:'سعید موسوی', date:'۱۴۰۵/۰۶/۲۴ — ۱۷:۰۰', hours:'۱۱٫۰۰', status:'MANUAL', bg:T('neuSoft'), tx:T('tx2') },
+      { asset:'کمپرسی بنز ۱۹۲۴', driver:'علی صادقی', date:'۱۴۰۵/۰۶/۲۴ — ۲۳:۵۰', hours:'۱۹٫۰۰', status:'MANUAL', bg:T('neuSoft'), tx:T('tx2') },
+      { asset:'گریدر کاترپیلار 140K', driver:'— بدون راننده', date:'۱۴۰۵/۰۶/۲۳ — ۱۴:۰۰', hours:'۶٫۰۰', status:'IMPORTED', bg:T('infoSoft'), tx:T('infoTx') },
+      { asset:'بیل هیوندای R220', driver:'محمد کریمی', date:'۱۴۰۵/۰۶/۲۲ — ۱۲:۰۰', hours:'۰٫۰۰', status:'MANUAL', bg:T('neuSoft'), tx:T('tx2') }
     ];
 
     // ── جزئیات تعمیر ────────────────────────────────
@@ -2549,50 +2334,210 @@ class Component extends DCLogic {
     ];
 
     // ── نسخه موبایل ─────────────────────────────────
-    const mobileScreens = [
-      { title:'خانه اپراتور', sub:'ورود روزانه — یک اقدام اصلی', kind:'home' },
-      { title:'ثبت کارکرد', sub:'صفحه‌کلید عددی، هدف لمسی ۴۸px', kind:'usage' },
-      { title:'ثبت خرابی', sub:'دوربین + شرح، آفلاین‌پذیر', kind:'fault' },
-      { title:'فهرست دستگاه‌ها', sub:'کارت، بدون اسکرول افقی', kind:'assets' },
-      { title:'اعلان‌ها', sub:'اقدام لازم در بالا', kind:'notif' },
-      { title:'تأیید دریافت سفارش', sub:'تصمیم مالی — دو دکمه روشن', kind:'order' }
+    // همه اعداد و نام‌های میدان از DTO های واقعی می‌آیند:
+    // fleet: POST/GET /v1/usage-records · GET /v1/drivers/me · GET /v1/assignments
+    // maintenance: POST/GET /v1/maintenance-requests · GET /v1/maintenance-schedules(/due)
+    const mobilePersonas = [
+      { code:'OPERATOR', bar:T('pri'),
+        can:'کارکرد دستگاهی که تخصیص فعال آن به نام خودش است، ثبت خرابی روی دستگاه سازمان خودش، و خواندن فقط درخواست‌هایی که خودش ثبت کرده.',
+        cannot:'بدون ارجاع به تعمیرگاه، بدون ثبت هزینه، بدون تأیید، بدون نوشتن برنامه سرویس. دستگاه بدون تخصیص فعال ۴۰۴ می‌گیرد، نه ۴۰۳.' },
+      { code:'DRIVER', bar:T('pri'),
+        can:'همان دامنه اپراتور: تخصیص فعال خود را می‌بیند، کارکرد همان دستگاه را ثبت می‌کند، خرابی را گزارش می‌دهد.',
+        cannot:'هیچ اقدام سرپرستی. فهرست کارکرد به رکورد راننده خودش تنگ می‌شود؛ اگر رکورد راننده نداشته باشد فهرست خالی است، نه خطا.' },
+      { code:'FLEET_MANAGER', bar:T('info'),
+        can:'کل ناوگان سازمان: ارجاع به تعمیرگاه، شروع/پایان کار، ثبت قطعه و دستمزد و هزینه، تأیید هزینه، و همه نوشتن‌های برنامه سرویس.',
+        cannot:'بدون عبور از مرز سازمان. تأیید پیش از COMPLETED غیرفعال است — پنهان نیست، دلیلش نوشته می‌شود.' },
+      { code:'ORGANIZATION_ADMIN · UNION_ADMIN', bar:T('info'),
+        can:'همان دامنه سرپرستی مدیر ناوگان در محدوده مستأجر خودش، به‌علاوه اقدام‌های سازمانی.',
+        cannot:'رکورد سازمان دیگر همیشه ۴۰۴ است. جداسازی مستأجر مستقل از نقش اعمال می‌شود.' },
+      { code:'WORKSHOP · نقش ناشناخته', bar:T('bd2'),
+        can:'کمترین دسترسی. قاعده به‌صورت «تنگ‌کردن» نوشته شده: هر نقشی که سرپرست نباشد به رکورد راننده خودش محدود می‌شود.',
+        cannot:'هیچ پرتال تعمیرگاه، هیچ پیام‌رسانی، هیچ دسترسی بین‌سازمانی — Q-25 باز است و اینجا حل نشده.' }
     ];
-    const mobileHome = {
-      tabs: [
-        { label:'خانه', icon:'house', on:true }, { label:'دستگاه', icon:'truck' },
-        { label:'کارکرد', icon:'clipboard-list' }, { label:'اعلان', icon:'bell', badge:'۵' }
-      ].map(t => ({ ...t, c: t.on ? T('pri') : T('tx3'), fw: t.on ? 600 : 400 })),
-      cards: [
-        { k:'دستگاه امروز شما', v:'لودر ولوو L120', note:'پروژه بهسازی معابر خرانق', bg:T('priSoft'), bd:T('pri'), tx:T('priTx'), icon:'truck' },
-        { k:'کارکرد ثبت‌نشده', v:'امروز', note:'ثبت پیش از پایان شیفت لازم است', bg:T('warnSoft'), bd:T('warn'), tx:T('warnTx'), icon:'clock' },
-        { k:'کارکرد این ماه', v:'۱۸۶ ساعت', note:'همه تأییدشده', bg:T('surf'), bd:T('bd'), tx:T('tx'), icon:'chart-column' }
-      ]
-    };
-    const mobileFault = [
-      { k:'دستگاه', v:'بیل مکانیکی هیوندای R220', note:'AST-YZD-0388', bg:T('surf'), bd:T('bd'), tx:T('tx') },
-      { k:'شدت خرابی', v:'اضطراری — دستگاه از کار افتاده', note:'سه گزینه: جزئی، مهم، اضطراری', bg:T('dgrSoft'), bd:T('dgr'), tx:T('dgrTx') },
-      { k:'عکس', v:'۲ تصویر', note:'دوربین یا انتخاب از گالری — در صف آفلاین می‌ماند', bg:T('surf'), bd:T('bd'), tx:T('tx2') },
-      { k:'شرح', v:'نشتی سیستم هیدرولیک از شیلنگ بوم', note:'صدا به متن هم پشتیبانی می‌شود', bg:T('surf'), bd:T('bd'), tx:T('tx2') }
+    const mobileHomeTabs = [
+      { label:'خانه', icon:'house', on:true },
+      { label:'دستگاه‌ها', icon:'truck' },
+      { label:'کارکرد', icon:'clipboard-list' },
+      { label:'تعمیرها', icon:'wrench', badge:'۲' }
+    ].map(t => ({ ...t, c: t.on ? T('pri') : T('tx2'), fw: t.on ? 600 : 400, hasBadge: !!t.badge }));
+    const mobileHomeCards = [
+      { k:'تخصیص فعال شما', v:'لودر ولوو L120', note:'AST-YZD-0413 · از GET /v1/assignments?active=true — کارکرد فقط برای همین دستگاه پذیرفته می‌شود', bg:T('priSoft'), bd:T('pri'), tx:T('priTx'), icon:'truck' },
+      { k:'آخرین کارکرد ثبت‌شده', v:'۸٫۵۰ ساعت — دیروز', note:'GET /v1/usage-records · رکورد کارکرد حالت تأیید ندارد؛ ثبت‌شده یعنی نهایی', bg:T('surf'), bd:T('bd'), tx:T('tx'), icon:'clock' },
+      { k:'سررسید سرویس دستگاه', v:'۱ مورد OVERDUE', note:'GET /v1/maintenance-schedules/due · حکم در همین درخواست محاسبه می‌شود', bg:T('warnSoft'), bd:T('warn'), tx:T('warnTx'), icon:'calendar-clock' }
     ];
     const mobileAssets = [
-      { name:'لودر ولوو L120', code:'AST-YZD-0413', status:'آماده', usage:'۱۸۶ ساعت', action:'ثبت کارکرد', stBg:T('okSoft'), stTx:T('okTx') },
-      { name:'بیل هیوندای R220', code:'AST-YZD-0388', status:'در تعمیر', usage:'۹۴ ساعت', action:'پیگیری تعمیر', stBg:T('infoSoft'), stTx:T('infoTx') },
-      { name:'کمپرسی بنز ۱۹۲۴', code:'AST-YZD-0421', status:'خارج از سرویس', usage:'۰ ساعت', action:'مشاهده پرونده', stBg:T('dgrSoft'), stTx:T('dgrTx') }
+      { name:'لودر ولوو L120', code:'AST-YZD-0413 · plate ۲۲ع۳۴۱-۵۴', state:'AVAILABLE', stBg:T('okSoft'), stTx:T('okTx'), bar:T('ok'),
+        assignment:'تخصیص فعال: حسین نجفی — از ۱۴۰۵/۰۶/۲۰', blocker:'ACTIVE_ASSIGNMENT · fleet-service', blockerTx:T('tx2'),
+        note:'قابل ثبت کارکرد. تخصیص فعال مانع دیسپچ تازه است، نه مانع ثبت کارکرد.' },
+      { name:'بیل مکانیکی هیوندای R220', code:'AST-YZD-0388 · plate ۳۱ع۸۷۲-۵۴', state:'IN_MAINTENANCE', stBg:T('infoSoft'), stTx:T('infoTx'), bar:T('info'),
+        assignment:'تخصیص فعال ندارد — دیسپچ مسدود است', blocker:'IN_MAINTENANCE · maintenance-service', blockerTx:T('infoTx'),
+        note:'با MAINTENANCE_STARTED به این حالت رفت و با MAINTENANCE_COMPLETED برمی‌گردد؛ هیچ فرمانی از تعمیر به دارایی فرستاده نمی‌شود.' },
+      { name:'کمپرسی بنز ۱۹۲۴', code:'AST-YZD-0421 · plate ۱۴ع۵۰۲-۵۴', state:'OUT_OF_SERVICE', stBg:T('dgrSoft'), stTx:T('dgrTx'), bar:T('dgr'),
+        assignment:'تخصیص فعال ندارد', blocker:'ASSET_STATUS · asset-service', blockerTx:T('dgrTx'),
+        note:'ثبت کارکرد ممکن است ولی دیسپچ نه. درخواست باز تعمیر: MNT-1405-0431.' }
     ];
-    const mobileNotif = [
-      { title:'تأیید دریافت سفارش', body:'لاستیک لودر — مهلت ۳ روز · بدون تأیید خودکار', when:'۱۲ د', icon:'package-check', bg:T('warnSoft'), tx:T('warnTx'), urgent:true },
-      { title:'کارکرد پرت برای بازبینی', body:'کمپرسی بنز — ۱۹ ساعت در یک روز', when:'۲ س', icon:'triangle-alert', bg:T('warnSoft'), tx:T('warnTx'), urgent:true },
-      { title:'تعمیر آغاز شد', body:'تعمیرگاه مرکزی اشکذر', when:'۲ ر', icon:'wrench', bg:T('neuSoft'), tx:T('tx2'), urgent:false },
-      { title:'پاداش ۱۲۰ امتیازی', body:'ثبت به‌موقع در ۳۰ روز پیوسته', when:'۳ ر', icon:'award', bg:T('okSoft'), tx:T('okTx'), urgent:false }
+    const mobileAssetDetail = [
+      { k:'وضعیت عملیاتی — GET /v1/fleet/availability', v:'قابل دیسپچ', icon:'circle-check', bg:T('okSoft'), bd:T('ok'), tx:T('okTx'),
+        note:'available: true · فهرست مانع‌ها خالی نیست ولی هیچ‌کدام بازدارنده نیستند.' },
+      { k:'تخصیص فعال — currentAssignment', v:'حسین نجفی — از ۱۴۰۵/۰۶/۲۰', icon:'user-check', bg:T('surf'), bd:T('bd'), tx:T('tx'),
+        note:'assignmentId به هر رکورد کارکرد این دستگاه بسته می‌شود؛ تخصیص دوم هم‌زمان پذیرفته نمی‌شود.' },
+      { k:'وضعیت تعمیر', v:'بدون درخواست باز', icon:'wrench', bg:T('surf'), bd:T('bd'), tx:T('tx'),
+        note:'GET /v1/maintenance-requests?assetId=…&openOnly=true — درخواست باز تازه با ۴۲۲ رد می‌شود اگر مورد بازی وجود داشته باشد.' },
+      { k:'سررسید سرویس', v:'۱ برنامه OVERDUE', icon:'calendar-clock', bg:T('dgrSoft'), bd:T('dgr'), tx:T('dgrTx'),
+        note:'سرویس ۲۵۰ ساعت · ۱۸٫۰۰ ساعت گذشته. حکم در همین درخواست محاسبه شد، از ستون ذخیره‌شده خوانده نشد.' },
+      { k:'کنتور — از مدل خوانش کارکرد', v:'۴٬۳۱۸٫۰۰ ساعت', icon:'gauge', bg:T('surf'), bd:T('bd'), tx:T('tx'),
+        note:'آخرین پایان بازه: ۱۴۰۵/۰۶/۲۵. کنتور یکنواست و عقب نمی‌رود؛ تعویض کنتور خودکار تشخیص داده نمی‌شود (D-012).' },
+      { k:'مانع‌های اعلام‌شده', v:'DECLARED_UNAVAILABLE — ندارد', icon:'ban', bg:T('surf'), bd:T('bd'), tx:T('tx2'),
+        note:'اعلام عدم دسترسی دستی با دلیل اجباری ثبت می‌شود و در همین فهرست با سرویس مالکش دیده می‌شود.' }
+    ];
+    const mobileUsage = [
+      { label:'بازه کارکرد — آغاز', field:'periodStart', value:'۱۴۰۵/۰۶/۲۵ — ۰۷:۰۰', unit:'ISO-8601 UTC',
+        hint:'اجباری. تاریخ جلالی فقط نمایش است؛ آنچه ارسال می‌شود UTC است.', bd:T('bd'), bg:T('surf'), vTx:T('tx'), hintTx:T('tx2') },
+      { label:'بازه کارکرد — پایان', field:'periodEnd', value:'۱۴۰۵/۰۶/۲۵ — ۱۵:۳۰', unit:'ISO-8601 UTC',
+        hint:'باید بزرگ‌تر از آغاز باشد. آینده پذیرفته نمی‌شود — تنها ۵ دقیقه اختلاف ساعت دستگاه بخشیده می‌شود (FUTURE_PERIOD).', bd:T('bd'), bg:T('surf'), vTx:T('tx'), hintTx:T('tx2') },
+      { label:'ساعت کارکرد', field:'hours', value:'۸٫۵۰', unit:'ساعت',
+        hint:'رشته با حداکثر دو رقم اعشار، نه عدد JSON. حداقل یکی از ساعت یا کیلومتر لازم است؛ خطا زیر همین میدان می‌نشیند.', bd:T('pri'), bg:T('priSoft'), vTx:T('priTx'), hintTx:T('tx2') },
+      { label:'کیلومتر پیموده', field:'kilometres', value:'—', unit:'کیلومتر',
+        hint:'اختیاری اگر ساعت پر شده باشد. هیچ سقف روزانه و هیچ علامت‌گذاری خودکار «پرت» در بک‌اند وجود ندارد.', bd:T('bd'), bg:T('surf'), vTx:T('tx3'), hintTx:T('tx2') },
+      { label:'قرائت کنتور ساعت', field:'hourMeter', value:'۴٬۳۱۸٫۰۰', unit:'قرائت پایان بازه',
+        hint:'اختیاری ولی تعیین‌کننده: مدل خوانش کنتور همین را به برنامه سرویس می‌دهد. کنتور هرگز عقب نمی‌رود.', bd:T('bd'), bg:T('surf'), vTx:T('tx'), hintTx:T('tx2') },
+      { label:'کیلومتر‌شمار', field:'odometer', value:'—', unit:'قرائت پایان بازه',
+        hint:'اختیاری. تعویض کنتور خودکار تشخیص داده نمی‌شود؛ اصلاح آن لنگرگذاری دستی برنامه سرویس است (D-012).', bd:T('bd'), bg:T('surf'), vTx:T('tx3'), hintTx:T('tx2') },
+      { label:'کلید تکرارناپذیری', field:'clientReference', value:'usg-0413-14050625-01', unit:'۸ تا ۱۲۸ نویسه',
+        hint:'کلید یکتای همین ثبت. ارسال دوباره با همان کلید رکورد اصلی را برمی‌گرداند و رویداد دوم منتشر نمی‌کند — پس «تلاش دوباره» امن است.', bd:T('info'), bg:T('infoSoft'), vTx:T('infoTx'), hintTx:T('infoTx') },
+      { label:'منبع', field:'source', value:'MANUAL', unit:'MANUAL · TELEMATICS · IMPORTED',
+        hint:'پیش‌فرض MANUAL. میدان ناشناخته رد می‌شود، حذف نمی‌شود — طرح strict است.', bd:T('bd'), bg:T('surf'), vTx:T('tx'), hintTx:T('tx2') }
+    ];
+    const mobileFault = [
+      { k:'دستگاه — assetId', v:'بیل مکانیکی هیوندای R220', note:'AST-YZD-0388 · دستگاه سازمان دیگر ۴۰۴ می‌گیرد', bg:T('surf'), bd:T('bd'), tx:T('tx') },
+      { k:'نوع — type', v:'CORRECTIVE', note:'خرابی همیشه CORRECTIVE است؛ PREVENTIVE برای کار برنامه‌ای است و شدت نمی‌پذیرد', bg:T('dgrSoft'), bd:T('dgr'), tx:T('dgrTx') },
+      { k:'عنوان — title', v:'نشتی هیدرولیک از شیلنگ بوم', note:'۲ تا ۲۰۰ نویسه · اجباری', bg:T('surf'), bd:T('bd'), tx:T('tx') },
+      { k:'شرح — description', v:'روغن زیر بوم جمع می‌شود؛ فشار بالا نمی‌آید.', note:'اختیاری · تا ۲۰۰۰ نویسه · بدون صدا‌به‌متن (چنین قابلیتی وجود ندارد)', bg:T('surf'), bd:T('bd'), tx:T('tx2') },
+      { k:'زمان از کار افتادن — outOfServiceAt', v:'۱۴۰۵/۰۶/۲۲ — ۰۸:۴۰', note:'اختیاری و جدا از زمان شروع تعمیر؛ مبنای محاسبه توقف است', bg:T('surf'), bd:T('bd'), tx:T('tx2') }
+    ];
+    const mobileSeverity = [
+      { code:'LOW', bg:T('surf'), bd:T('bd2'), tx:T('tx2') },
+      { code:'MEDIUM', bg:T('warnSoft'), bd:T('warn'), tx:T('warnTx') },
+      { code:'HIGH', bg:T('warnSoft'), bd:T('warn'), tx:T('warnTx') },
+      { code:'CRITICAL', bg:T('dgrSoft'), bd:T('dgr'), tx:T('dgrTx') }
+    ];
+    const mobileTrack = [
+      { title:'نشتی هیدرولیک از شیلنگ بوم', code:'MNT-1405-0412 · AST-YZD-0388', state:'IN_PROGRESS', bg:T('infoSoft'), tx:T('infoTx'),
+        note:'ارجاع به تعمیرگاه ثبت شده و کار آغاز شده. دستگاه در همین فاصله IN_MAINTENANCE است و تخصیص تازه نمی‌گیرد.',
+        when:'ثبت شما: ۰۶/۲۲ — ۰۸:۴۰ · آخرین تغییر: ۰۶/۲۲ — ۱۱:۴۰',
+        actions:'برای اپراتور فقط خواندنی؛ هیچ اقدامی روی این صفحه به او داده نمی‌شود.' },
+      { title:'صدای غیرعادی از گیربکس', code:'MNT-1405-0431 · AST-YZD-0421', state:'OPEN', bg:T('warnSoft'), tx:T('warnTx'),
+        note:'هنوز به تعمیرگاهی ارجاع نشده. تا وقتی این درخواست باز است، ثبت خرابی دوم روی همین دستگاه با ۴۲۲ رد می‌شود.',
+        when:'ثبت شما: ۰۶/۲۵ — ۰۹:۰۵',
+        actions:'شدت ثبت‌شده: MEDIUM — منتشر می‌شود ولی هیچ رفتار خودکاری به آن گره نخورده.' },
+      { title:'تعویض روغن و فیلتر ۲۵۰ ساعت', code:'MNT-1405-0399 · AST-YZD-0413', state:'APPROVED', bg:T('okSoft'), tx:T('okTx'),
+        note:'پایانی. تأیید انجام شده و اجازه تسویه صادر شده؛ درخواست دیگر باز نمی‌شود.',
+        when:'تأیید: ۰۶/۱۸ — ۱۶:۱۰',
+        actions:'این مورد را اپراتور ثبت نکرده بود و در فهرست او دیده نمی‌شود؛ اینجا برای نمایش چرخه کامل آمده.' }
+    ];
+    const mobileDueTabs = [
+      { label:'فقط سررسیدشده', on:true },
+      { label:'شامل سررسیدنشده', q:'includeNotDue=true' },
+      { label:'همه برنامه‌ها', q:'/maintenance-schedules' }
+    ].map(v => ({ ...v, fw: v.on ? 700 : 500, bg: v.on ? T('priSoft') : T('neuSoft'), tx: v.on ? T('priTx') : T('tx2') }));
+    const mobileDue = [
+      { title:'سرویس ۲۵۰ ساعت', asset:'لودر ولوو L120 · AST-YZD-0413', state:'OVERDUE', bg:T('dgrSoft'), tx:T('dgrTx'), bar:T('dgr'),
+        basis:'HOURS', dueKind:'نقطه سررسید (قرائت کنتور)', due:'۴٬۳۰۰٫۰۰ ساعت', remaining:'−۱۸٫۰۰ ساعت (گذشته)',
+        meter:'۴٬۳۱۸٫۰۰ ساعت — ۱۴۰۵/۰۶/۲۵', meterTx:T('tx2'), trigSummary:'۲ محرک · تعیین‌کننده: HOURS', open:true,
+        trigs:[ { basis:'HOURS', rule:'هر ۲۵۰ ساعت · هشدار ۲۰ ساعت', tag:'← تعیین‌کننده', dot:T('dgr'), fw:700 },
+                { basis:'TIME', rule:'هر ۱۸۰ روز · هشدار ۱۴ روز', tag:'NOT_DUE', dot:T('ok'), fw:400 } ] },
+      { title:'بازدید فصلی سیستم ترمز', asset:'کمپرسی بنز ۱۹۲۴ · AST-YZD-0421', state:'DUE_SOON', bg:T('warnSoft'), tx:T('warnTx'), bar:T('warn'),
+        basis:'TIME', dueKind:'نقطه سررسید (تاریخ)', due:'۱۴۰۵/۰۷/۰۳', remaining:'۸ روز',
+        meter:'کیلومتر‌شمار: ۱۸۲٬۴۱۰ کیلومتر', meterTx:T('tx2'), trigSummary:'۱ محرک · درخواست باز: MNT-1405-0431', open:false,
+        trigs:[ { basis:'TIME', rule:'هر ۹۰ روز · هشدار ۱۴ روز', tag:'← تعیین‌کننده', dot:T('warn'), fw:700 } ] },
+      { title:'سرویس ۵۰۰ ساعت گیربکس', asset:'گریدر کاترپیلار 140K · AST-YZD-0444', state:'NOT_DUE', bg:T('okSoft'), tx:T('okTx'), bar:T('ok'),
+        basis:'HOURS', dueKind:'نقطه سررسید (قرائت کنتور)', due:'۵٬۱۰۰٫۰۰ ساعت', remaining:'۲۴۰٫۰۰ ساعت',
+        meter:'۴٬۸۶۰٫۰۰ ساعت — ۱۴۰۵/۰۶/۲۴', meterTx:T('tx2'), trigSummary:'۱ محرک · فقط با includeNotDue=true دیده می‌شود', open:false,
+        trigs:[ { basis:'HOURS', rule:'هر ۵۰۰ ساعت · هشدار ۴۰ ساعت', tag:'← تعیین‌کننده', dot:T('ok'), fw:700 } ] },
+      { title:'گریس‌کاری هفتگی', asset:'بیل هیوندای R220 · AST-YZD-0388', state:'PAUSED', bg:T('neuSoft'), tx:T('tx2'), bar:T('bd2'),
+        basis:'ارزیابی نشد', dueKind:'نقطه سررسید', due:'—', remaining:'برنامه غیرفعال — حکمی صادر نمی‌شود',
+        meter:'بدون قرائت — محرک ساعتی با ۰٫۰۰ سنجیده می‌شود', meterTx:T('warnTx'), trigSummary:'دلیل توقف: دستگاه در تعمیر است', open:false,
+        trigs:[ { basis:'HOURS', rule:'هر ۵۰ ساعت', tag:'ارزیابی نشد', dot:T('bd2'), fw:400 } ] }
+    ];
+    const mobileManager = [
+      { k:'ارجاع به تعمیرگاه — POST /assign', icon:'store', bg:T('surf'), bd:T('bd'), tx:T('tx2'),
+        v:'سفارش تعمیر می‌سازد. نام تعمیرگاه در لحظه ارجاع عکس‌برداری می‌شود و صلاحیت آن بررسی نمی‌شود — پاسخ verified:false است (ADR-029).' },
+      { k:'ورود و پایان کار — POST /start · /complete', icon:'wrench', bg:T('surf'), bd:T('bd'), tx:T('tx2'),
+        v:'پایان کار به workPerformed اجباری نیاز دارد. زمان بازگشت به سرویس جدا ثبت می‌شود.' },
+      { k:'قطعه، دستمزد، هزینه', icon:'receipt', bg:T('surf'), bd:T('bd'), tx:T('tx2'),
+        v:'PART و LABOUR فقط با ثبت کار خودشان نوشته می‌شوند؛ POST /costs تنها SERVICE، EXTERNAL_REPAIR و OTHER را می‌پذیرد. مجموع در هر ثبت زیر قفل ردیف بازمحاسبه می‌شود.' },
+      { k:'لنگرگذاری دوباره کنتور — PATCH', icon:'gauge', bg:T('warnSoft'), bd:T('warn'), tx:T('warnTx'),
+        v:'اقدام آگاهانه با کارت هشدار خودش. تاریخ کارکرد بازنویسی نمی‌شود؛ برنامه سرویس جابه‌جا می‌شود (D-012).' },
+      { k:'توقف · از سرگیری · بایگانی', icon:'circle-pause', bg:T('warnSoft'), bd:T('warn'), tx:T('warnTx'),
+        v:'دلیل اجباری است. بایگانی پایانی و غیرقابل ویرایش است. از سرگیری اعلان سررسید را دوباره مسلح می‌کند.' }
+    ];
+    const mobilePlanned = [
+      { k:'Service Worker و نصب PWA', icon:'download', v:'وجود ندارد. امروز این پرتال یک وب واکنش‌گراست که فقط آنلاین کار می‌کند.' },
+      { k:'صف محلی ثبت‌ها', icon:'database', v:'وجود ندارد. اگر شبکه قطع باشد، فرم پر می‌ماند و کاربر خودش دوباره ارسال می‌کند.' },
+      { k:'ارسال دوباره خودکار در پس‌زمینه', icon:'refresh-cw', v:'وجود ندارد. تلاش دوباره اقدام آشکار کاربر است.' },
+      { k:'حل تعارض پس از اتصال دوباره', icon:'git-merge', v:'وجود ندارد. بک‌اند تعارض کارکرد را نمی‌شناسد و رکوردی را «نیازمند بازبینی» نمی‌کند.' },
+      { k:'اعلان Push', icon:'bell-off', v:'وجود ندارد. سرویس اعلان ساخته نشده؛ سررسید با باز کردن صفحه دیده می‌شود.' },
+      { k:'دوربین و بارگذاری پیوست', icon:'camera-off', v:'وجود ندارد. document-service ساخته نشده و هیچ کنترل فعالی نمایش داده نمی‌شود.' },
+      { k:'کیف پول، تسویه، بازار', icon:'wallet', v:'در این نسخه طراحی PLANNED می‌ماند؛ در این چرخه طراحی نمی‌شود.' }
+    ];
+    const mobileStates = [
+      { k:'info', t:'بارگذاری', icon:'loader', d:'اسکلت ردیف؛ هیچ حکم سررسیدی پیش از رسیدن پاسخ حدس زده نمی‌شود.', api:'pending request' },
+      { k:'neu', t:'خالی', icon:'inbox', d:'دعوت به اقدام، نه پنل سفید. برای فهرست سررسید یک جمله مثبت.', api:'items: []' },
+      { k:'dgr', t:'شبکه در دسترس نیست', icon:'wifi-off', d:'خطای صریح با دکمه «تلاش دوباره». هیچ صف محلی‌ای وعده داده نمی‌شود.', api:'fetch failure' },
+      { k:'dgr', t:'مهلت تمام شد', icon:'timer-off', d:'همان الگوی خطای شبکه؛ ارسال دوباره با همان clientReference امن است.', api:'timeout' },
+      { k:'warn', t:'نشست منقضی', icon:'clock-alert', d:'ورود دوباره؛ آنچه در فرم نوشته شده از دست نمی‌رود.', api:'401' },
+      { k:'warn', t:'غیرمجاز', icon:'lock', d:'کنترل غیرفعال با دلیل نوشته‌شده — پنهان نمی‌شود.', api:'403' },
+      { k:'neu', t:'پیدا نشد / مستأجر دیگر', icon:'search-x', d:'همیشه ۴۰۴؛ ۴۰۳ وجود رکورد را لو می‌دهد.', api:'404' },
+      { k:'dgr', t:'خطای اعتبارسنجی', icon:'circle-alert', d:'پیام زیر همان میدانی که path خطا نام می‌برد، به‌علاوه خلاصه بالای فرم.', api:'422 · Zod path' },
+      { k:'warn', t:'درخواست تکراری', icon:'copy', d:'درخواست باز روی همین دستگاه؛ کاربر به مورد موجود برده می‌شود.', api:'422 DUPLICATE' },
+      { k:'ok', t:'تلاش دوباره تکرارناپذیر', icon:'refresh-cw', d:'همان clientReference رکورد اصلی را برمی‌گرداند، بدون رویداد دوم.', api:'200 · original record' },
+      { k:'warn', t:'داده کهنه', icon:'history', d:'بنر زمان ارزیابی با «ارزیابی دوباره»؛ حکم سررسید هرگز کش نمی‌شود.', api:'client re-fetch' },
+      { k:'dgr', t:'تعارض گذار وضعیت', icon:'git-branch', d:'اقدام پایانی تکراری یا تأیید پیش از COMPLETED.', api:'409' },
+      { k:'warn', t:'مجموع کهنه', icon:'shield-alert', d:'مبلغ روی صفحه تغییر کرده؛ تأیید رد و مبلغ تازه نشان داده می‌شود.', api:'422 · expectedTotalCostMinor' },
+      { k:'warn', t:'بدون قرائت کنتور', icon:'gauge', d:'«بدون قرائت» با یادآوری اینکه محرک ساعتی با ۰٫۰۰ سنجیده شد.', api:'meter.lastPeriodEnd: null' },
+      { k:'neu', t:'برنامه متوقف یا بایگانی', icon:'circle-pause', d:'ردیف خاکستری، بدون حکم، با دلیل توقف.', api:'status' },
+      { k:'neu', t:'داده ناقص یا محتوای بسیار بلند', icon:'text-cursor-input', d:'میدان نبود «—» است نه صفر؛ نام بلند فارسی می‌شکند و شناسه LTR جدا نگه داشته می‌شود.', api:'partial API data' }
+    ].map(s => ({ ...s,
+      bg: s.k === 'ok' ? T('okSoft') : s.k === 'warn' ? T('warnSoft') : s.k === 'dgr' ? T('dgrSoft') : s.k === 'info' ? T('infoSoft') : T('neuSoft'),
+      bd: s.k === 'ok' ? T('ok') : s.k === 'warn' ? T('warn') : s.k === 'dgr' ? T('dgr') : s.k === 'info' ? T('info') : T('bd'),
+      tx: s.k === 'ok' ? T('okTx') : s.k === 'warn' ? T('warnTx') : s.k === 'dgr' ? T('dgrTx') : s.k === 'info' ? T('infoTx') : T('tx2') }));
+    const mobileViewports = [
+      { w:'360px', c:T('okTx'), v:'ریل چپ به نوار افقی چسبان تبدیل می‌شود، کارت‌ها تک‌ستونی، بدون اسکرول افقی سند. جدول برنامه سرویس در نمای دسکتاپ داخل ناحیه اسکرول برچسب‌دار می‌ماند؛ نمای موبایل کارت است.' },
+      { w:'390px', c:T('okTx'), v:'عرض مرجع طراحی. همه قاب‌های این صفحه با همین عرض CSS رسم شده‌اند و دکمه اصلی ۴۸ و ثانویه ۴۴ پیکسل است.' },
+      { w:'430px', c:T('okTx'), v:'همان چیدمان با فضای بیشتر؛ کارت سررسید هر چهار عدد تصمیم‌ساز را بدون شکستن نگه می‌دارد.' },
+      { w:'768px', c:T('okTx'), v:'دو ستون برای شبکه‌های سه‌ستونی و kpi؛ نوار افقی ریل باقی می‌ماند. جست‌وجوی سرصفحه پنهان می‌شود، نام سازمان می‌ماند.' },
+      { w:'1440px', c:T('tx2'), v:'مرجع دسکتاپ — سه ستون، ریل کنار، جدول‌ها در شکل اصلی.' }
+    ];
+    const mobileContrast = [
+      { label:'tx روی surf — متن اصلی', r:'۱۷٫۷۴', c:T('okTx') },
+      { label:'tx2 روی surf — متن فرعی', r:'۵٫۹۴', c:T('okTx') },
+      { label:'tx3 روی surf — متن کم‌رنگ', r:'۴٫۶۷', c:T('okTx') },
+      { label:'tx2 روی sunken — برچسب داخل پنل', r:'۵٫۲۶', c:T('okTx') },
+      { label:'tx3 روی sunken — رد شد، به tx2 تغییر کرد', r:'۴٫۱۳', c:T('dgrTx') },
+      { label:'pri-tx روی pri-soft', r:'۷٫۴۷', c:T('okTx') },
+      { label:'ok-tx روی ok-soft', r:'۶٫۷۰', c:T('okTx') },
+      { label:'warn-tx روی warn-soft', r:'۶٫۱۶', c:T('okTx') },
+      { label:'dgr-tx روی dgr-soft', r:'۷٫۵۵', c:T('okTx') },
+      { label:'info-tx روی info-soft', r:'۷٫۴۷', c:T('okTx') },
+      { label:'سفید روی pri — دکمه اصلی', r:'۶٫۱۲', c:T('okTx') },
+      { label:'سفید روی dgr — دکمه ثبت خرابی', r:'۶٫۷۶', c:T('okTx') },
+      { label:'حلقه تمرکز pri روی surf', r:'۶٫۱۲', c:T('okTx') },
+      { label:'bd2 به‌عنوان مرز کنترل روی surf — زیر ۳:۱', r:'۱٫۵۳', c:T('dgrTx') },
+      { label:'تم تیره: tx2 روی surf', r:'۷٫۶۴', c:T('okTx') },
+      { label:'تم تیره: tx3 روی surf', r:'۵٫۲۸', c:T('okTx') },
+      { label:'تم تیره: warn-tx روی warn-soft', r:'۸٫۵۷', c:T('okTx') }
     ];
     const mobileRules = [
-      { k:'هدف لمسی', v:'هیچ عنصر قابل لمسی زیر ۴۴ پیکسل نیست؛ اقدام اصلی ۴۸ پیکسل و در دسترس شست.' },
-      { k:'یک اقدام اصلی', v:'هر صفحه یک دکمه اصلی چسبیده به پایین دارد؛ اقدام ثانویه هرگز هم‌وزن آن نیست.' },
-      { k:'ورودی عددی', v:'ساعت و کیلومتر با صفحه‌کلید عددی و گام مشخص — تایپ آزاد حداقل می‌شود.' },
-      { k:'آفلاین', v:'وضعیت اتصال همیشه در سرصفحه است؛ ثبت در صف محلی می‌ماند و هیچ‌گاه حذف نمی‌شود.' },
-      { k:'بدون اسکرول افقی', v:'جدول‌های دسکتاپ در موبایل کارت می‌شوند؛ فیلتر به Drawer پایینی می‌رود.' },
-      { k:'شرایط میدانی', v:'کنتراست بالا برای نور آفتاب، متن حداقل ۱۳px، دکمه‌ها با دستکش قابل لمس.' },
-      { k:'اجبار نکردن', v:'هیچ جریان میدانی به اینترنت پایدار وابسته نیست؛ دوربین و صدا به متن اختیاری‌اند.' }
+      { k:'هدف لمسی', v:'اقدام اصلی ۴۸ پیکسل، هر کنترل لمسی دیگر حداقل ۴۴ پیکسل، و فاصله میان اقدام مخرب و اصلی حداقل ۹ پیکسل با جداکننده.' },
+      { k:'یک اقدام اصلی', v:'هر صفحه یک دکمه اصلی در پای صفحه دارد؛ اقدام پایانی یا مالی هرگز هم‌وزن آن نیست و با تأییدیه همراه است.' },
+      { k:'بافت همیشه دیده می‌شود', v:'نوار سازمان و نقش بالای هر صفحه تغییردهنده می‌ماند؛ هیچ نوشتنی بدون نمایش مستأجر و دستگاه انجام نمی‌شود.' },
+      { k:'بدون اسکرول افقی سند', v:'جدول‌های دسکتاپ در موبایل کارت و آکاردئون می‌شوند. هر ناحیه اسکرول باقی‌مانده برچسب صریح دارد.' },
+      { k:'وضعیت با متن، نه فقط رنگ', v:'OVERDUE، DUE_SOON، NOT_DUE، OPEN، IN_PROGRESS، PART، LABOUR همه به‌صورت متن LTR جدا هم نوشته می‌شوند.' },
+      { k:'RTL با شناسه LTR', v:'چیدمان راست‌به‌چپ است؛ شناسه، مبلغ و enum در جزیره LTR با dir صریح می‌نشینند تا ترتیب نویسه‌ها نشکند.' },
+      { k:'صفحه‌کلید نرم‌افزاری', v:'نوار اقدام پای صفحه در فرم‌ها چسبان نیست بلکه انتهای جریان است، تا صفحه‌کلید آن را نپوشاند.' },
+      { k:'حاشیه امن', v:'پای صفحه‌ها env(safe-area-inset-bottom) را به padding اضافه می‌کنند.' },
+      { k:'بدون وابستگی به Hover', v:'هیچ اطلاع ضروری داخل tooltip نیست؛ دلیل غیرفعال بودن یک کنترل کنارش نوشته می‌شود.' },
+      { k:'صداقت وضعیت', v:'هیچ قابلیت ناموجودی به‌شکل فعال نمایش داده نمی‌شود. PLANNED با قاب خط‌چین و برچسب متنی از جریان‌های واقعی جدا می‌شود.' }
     ];
 
     return {
@@ -2604,8 +2549,9 @@ class Component extends DCLogic {
       srcTx: srcKind.k === 'ok' ? T('okTx') : (srcKind.k === 'info' ? T('infoTx') : T('tx2')),
       srcChipBg: srcKind.k === 'ok' ? T('ok') : (srcKind.k === 'info' ? T('info') : T('bd2')),
       srcChipTx: srcKind.k === 'neu' ? T('tx') : '#fff',
-      mobileScreens, mobileHomeTabs: mobileHome.tabs, mobileHomeCards: mobileHome.cards,
-      mobileFault, mobileAssets, mobileNotif, mobileRules,
+      mobilePersonas, mobileHomeTabs, mobileHomeCards, mobileAssets, mobileAssetDetail, mobileUsage, mobileFault, mobileSeverity,
+      mobileTrack, mobileDueTabs, mobileDue, mobileManager, mobilePlanned,
+      mobileStates, mobileViewports, mobileContrast, mobileRules,
       isDemands: r === 'demands', isSuppliers: r === 'suppliers', isMobile: r === 'mobile',
       isAssetNew: r === 'assetNew', isOffers: r === 'offers', isFleetAnalysis: r === 'fleetAnalysis',
       assetForm, assetFormRules, assetLifecycle,
