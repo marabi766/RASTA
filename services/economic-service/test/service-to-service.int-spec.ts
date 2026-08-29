@@ -1,31 +1,26 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
+import { runUnscoped } from '@rasta/nest-common';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id } from './helpers';
 
 /**
- * Zero Trust between services (ADR-020, AGENTS.md S-08).
+ * Zero Trust between services, with a signed tenant (ADR-020, ADR-035).
  *
- * Every scenario elsewhere in this suite arrives as a person. This one arrives
- * as a **service**, which is how `docs/08` § 8.6 says the order saga will
- * actually reach this domain: `OrderSagaWorkflow` calls `placeHold()` and
- * `settle()` as activities, not as events.
+ * Every other scenario in this suite arrives as a person. This one arrives as
+ * a **service**, which is how `docs/08` § 8.6 says the order saga reaches this
+ * domain: `OrderSagaWorkflow` calls `placeHold()` and `settle()` as
+ * activities, not as events.
  *
- * Three properties are asserted, and each one is a different refusal:
+ * The property under test is narrow and absolute: **the tenant comes from the
+ * signature, never from a header.** An unsigned `X-Organization-Id` can be
+ * written by anything that reaches this service, so honouring it would turn a
+ * leaked internal token from "impersonate marketplace-service" into "move
+ * money for any organization on the platform".
  *
- *  1. A valid internal token proves *which* service is calling. It does not by
- *     itself grant access to anything — the callee still decides, through
- *     `@AllowService`.
- *  2. A service that is not on an endpoint's list is refused even with a
- *     perfectly valid token.
- *  3. A `RELAY` token — the gateway forwarding somebody else's request —
- *     carries no service authority at all. Reading it as a service token is
- *     what once made every public endpoint behind the gateway answer 403
- *     (D-007), and the repair must not be allowed to regress.
- *
- * It also exercises the actor fallback that a person's request never reaches:
- * with no `userId` in context, every write records the *service* as the actor
- * rather than leaving the column empty.
+ * This file previously asserted the opposite — that a service call could not
+ * resolve a tenant at all and died with a 500. That was the defect Q-28
+ * recorded, and every one of those assertions is now inverted.
  */
 describe('service-to-service access', () => {
   let harness: ApiHarness;
@@ -33,11 +28,11 @@ describe('service-to-service access', () => {
 
   const payer = apiTenant('S2S-PAYER');
   const payee = apiTenant('S2S-PAYEE');
+  const stranger = apiTenant('S2S-STRANGER');
 
-  /** Tenant on the header, because a service call carries no membership. */
-  const tenantHeaders = (organizationId: string) => ({
-    'x-organization-id': organizationId,
-  });
+  /** A token bound to one organization and to this service. */
+  const forTenant = (organizationId: string, caller = 'marketplace-service') =>
+    internalToken(caller, { organizationId });
 
   beforeAll(async () => {
     harness = await startApi();
@@ -53,135 +48,121 @@ describe('service-to-service access', () => {
       .set('idempotency-key', id('s2s-fund'))
       .send({ amountMinor: '30000000' })
       .expect(201);
-    await request(http)
-      .get('/v1/wallets/me')
-      .set('authorization', `Bearer ${admin(payee)}`)
-      .expect(200);
+
+    for (const org of [payee, stranger]) {
+      await request(http)
+        .get('/v1/wallets/me')
+        .set('authorization', `Bearer ${admin(org)}`)
+        .expect(200);
+    }
   });
 
   afterAll(async () => {
-    await cleanup(harness.prisma, [payer, payee]);
+    await cleanup(harness.prisma, [payer, payee, stranger]);
     await harness.close();
   });
 
   // -------------------------------------------------------------------------
+  // The tenant comes from the signature
+  // -------------------------------------------------------------------------
 
-  it('authenticates a permitted service, but cannot yet resolve a tenant for it', async () => {
-    // **A gap, recorded rather than papered over — docs/24 Q-28.**
-    //
-    // `AuthGuard.authenticateInternal` returns an auth state with no
-    // `organizationId`, and its own comment says the opposite: "a service call
-    // carries the tenant of the request that caused it, which the caller
-    // propagates in the header". `x-organization-id` is read only on the user
-    // branch. So every `@AllowService` endpoint on the platform — twenty-six of
-    // them — authenticates the caller and then fails the moment it touches
-    // tenant-scoped data.
-    //
-    // It fails **closed**: no data is returned and nothing leaks, which is why
-    // this is a broken integration path rather than a security defect. The
-    // repair belongs in `packages/nest-common` and is a decision about whether
-    // an unvalidated header may select a tenant for a service caller, so it is
-    // not this task's to make.
-    //
-    // Asserted at all because the alternative is that the day somebody fixes
-    // it, nothing tells them it was ever broken.
-    const token = await internalToken('marketplace-service');
-
+  it('serves a permitted service the organization its token was signed for', async () => {
     const response = await request(http)
       .get('/v1/wallets/me')
-      .set('x-internal-token', token)
-      .set(tenantHeaders(payer))
-      .expect(500);
+      .set('x-internal-token', await forTenant(payer))
+      .expect(200);
 
-    expect(response.body.code).toBe('INTERNAL_ERROR');
-    // No tenant data on the way out, whatever else is wrong.
-    expect(JSON.stringify(response.body)).not.toContain(payer);
+    expect(response.body.organizationId).toBe(payer);
   });
 
-  it('refuses a service that is not on the endpoint’s list', async () => {
-    // A valid token, correctly signed and correctly targeted — and still
-    // refused, because proving who is calling is a different question from
-    // whether they may call this.
-    const token = await internalToken('notification-service');
-
+  it('accepts a header that agrees with the signed claim', async () => {
+    // The header still travels — the gateway and the calling service both
+    // propagate it — but it may only agree.
     const response = await request(http)
       .get('/v1/wallets/me')
-      .set('x-internal-token', token)
-      .set(tenantHeaders(payer))
+      .set('x-internal-token', await forTenant(payer))
+      .set('x-organization-id', payer)
+      .expect(200);
+
+    expect(response.body.organizationId).toBe(payer);
+  });
+
+  it('refuses a header that disagrees with the signed claim', async () => {
+    const response = await request(http)
+      .get('/v1/wallets/me')
+      .set('x-internal-token', await forTenant(payer))
+      .set('x-organization-id', payee)
       .expect(403);
 
-    expect(response.body.code).toBe('FORBIDDEN');
+    expect(response.body.code).toBe('SERVICE_TENANT_CONTEXT_INVALID');
   });
 
-  it('refuses every service an endpoint that names none', async () => {
-    // `POST /v1/commissions/rules` carries no `@AllowService`: changing a
-    // commission rate is a governance act that a service must never perform on
-    // its own authority (ADR-023).
-    const token = await internalToken('marketplace-service');
+  it('never lets a forged header reach another tenant’s money', async () => {
+    // The attack ADR-035 exists to stop, asserted on a read and on a write.
+    const token = await forTenant(payer);
 
-    const response = await request(http)
-      .post('/v1/commissions/rules')
+    const read = await request(http)
+      .get('/v1/wallets/me')
       .set('x-internal-token', token)
-      .set(tenantHeaders(payer))
-      .send({ organizationId: payer, transactionType: 'LOGISTICS', rateBasisPoints: 100 })
+      .set('x-organization-id', payee)
+      .expect(403);
+    // Nothing about the other organization comes back — not a balance, not an
+    // id, not a confirmation that it exists.
+    expect(JSON.stringify(read.body)).not.toContain(payee);
+
+    const write = await request(http)
+      .post('/v1/transactions')
+      .set('x-internal-token', token)
+      .set('x-organization-id', payee)
+      .set('idempotency-key', id('s2s-forged'))
+      .send({
+        transactionType: 'MARKETPLACE_ORDER',
+        counterpartyOrganizationId: stranger,
+        grossAmountMinor: '5000',
+        currency: 'IRR',
+        holdFunds: true,
+      })
+      .expect(403);
+    expect(write.body.code).toBe('SERVICE_TENANT_CONTEXT_INVALID');
+
+    // And the payee's wallet is untouched: no hold, no balance change.
+    const payeeWallet = await request(http)
+      .get('/v1/wallets/me')
+      .set('authorization', `Bearer ${admin(payee)}`)
+      .expect(200);
+    expect(BigInt(payeeWallet.body.pendingBalanceMinor)).toBe(0n);
+  });
+
+  it('refuses a claim-less token on a tenant-scoped endpoint, as 403 and not 500', async () => {
+    // The whole point of the repair. This path used to raise a raw Error from
+    // `getOrganizationId()` and surface as `500 INTERNAL_ERROR`, which made a
+    // deliberate security rule look like a fault.
+    const response = await request(http)
+      .get('/v1/wallets/me')
+      .set('x-internal-token', await internalToken('marketplace-service'))
       .expect(403);
 
-    expect(response.body.code).toBe('FORBIDDEN');
+    expect(response.body.code).toBe('SERVICE_TENANT_CONTEXT_INVALID');
+    // The response says nothing about which check failed, or about the token.
+    expect(JSON.stringify(response.body)).not.toContain('MISSING_CLAIM');
+    expect(JSON.stringify(response.body)).not.toContain('marketplace-service');
   });
 
-  it('treats a relay token as an anonymous request, not as a service one', async () => {
-    // The gateway forwarding a request that carried no credentials. It names a
-    // hop, not an actor, so a closed endpoint must answer 401 — the same thing
-    // the caller would have been told directly.
-    const token = await internalToken('api-gateway', 'RELAY');
-
-    const response = await request(http)
-      .get('/v1/wallets/me')
-      .set('x-internal-token', token)
-      .set(tenantHeaders(payer))
-      .expect(401);
-
-    expect(response.body.code).toBe('UNAUTHENTICATED');
-  });
-
-  it('refuses a token minted for a different service', async () => {
-    // The token is scoped to one target, so one leaked from
-    // notification-service cannot be replayed against this one.
-    const foreign = await internalToken('marketplace-service', 'SERVICE', 'notification-service');
-
-    await request(http)
-      .get('/v1/wallets/me')
-      .set('x-internal-token', foreign)
-      .set(tenantHeaders(payer))
-      .expect(401);
-  });
-
-  it('writes nothing when it cannot resolve the tenant it was asked to act for', async () => {
-    // The same gap as above (docs/24 Q-28), asserted on a **write**, because
-    // the consequence there is different in kind: an obligation recorded
-    // against no tenant, or a hold taken from a wallet nobody owns, would be a
-    // financial record with no owner.
-    //
-    // Nothing is written. That is the property worth locking down whatever the
-    // eventual repair looks like.
-    const token = await internalToken('marketplace-service');
-    const reference = id('s2s-order');
+  it('writes nothing when the token carries no tenant', async () => {
+    const reference = id('s2s-claimless');
 
     await request(http)
       .post('/v1/transactions')
-      .set('x-internal-token', token)
-      .set(tenantHeaders(payer))
+      .set('x-internal-token', await internalToken('marketplace-service'))
       .set('idempotency-key', reference)
       .send({
         transactionType: 'MARKETPLACE_ORDER',
         counterpartyOrganizationId: payee,
         grossAmountMinor: '150000',
         currency: 'IRR',
-        sourceType: 'ORDER',
-        sourceReference: reference,
         holdFunds: true,
       })
-      .expect(500);
+      .expect(403);
 
     const listed = await request(http)
       .get(`/v1/transactions?sourceReference=${encodeURIComponent(reference)}`)
@@ -190,15 +171,135 @@ describe('service-to-service access', () => {
     expect(listed.body.items).toHaveLength(0);
   });
 
-  it('still requires an Idempotency-Key from a service', async () => {
-    // A retrying workflow is exactly the caller most likely to send the same
-    // write twice, so the requirement is stricter here rather than relaxed.
-    const token = await internalToken('marketplace-service');
+  // -------------------------------------------------------------------------
+  // Tenant isolation, from a service caller
+  // -------------------------------------------------------------------------
 
+  it('cannot read another tenant’s record even with a valid token of its own', async () => {
+    // A transaction that belongs to `payer`, read with a token signed for
+    // `stranger`. The object-access contract answers 404, never 403: a 403
+    // would confirm the record exists.
+    const key = id('s2s-isolation');
+    const created = await request(http)
+      .post('/v1/transactions')
+      .set('x-internal-token', await forTenant(payer))
+      .set('idempotency-key', key)
+      .send({
+        transactionType: 'LOGISTICS',
+        counterpartyOrganizationId: payee,
+        grossAmountMinor: '4000',
+        currency: 'IRR',
+        sourceType: 'ORDER',
+        sourceReference: key,
+        holdFunds: false,
+      })
+      .expect(201);
+
+    const refused = await request(http)
+      .get(`/v1/transactions/${created.body.id}`)
+      .set('x-internal-token', await forTenant(stranger))
+      .expect(404);
+    expect(refused.body.code).toBe('NOT_FOUND');
+    expect(JSON.stringify(refused.body)).not.toContain(payer);
+
+    // And it cannot mutate it either.
+    await request(http)
+      .post(`/v1/transactions/${created.body.id}/cancel`)
+      .set('x-internal-token', await forTenant(stranger))
+      .set('idempotency-key', id('s2s-isolation-cancel'))
+      .send({ reason: 'attempted from another tenant' })
+      .expect(404);
+
+    // The row is untouched.
+    const still = await request(http)
+      .get(`/v1/transactions/${created.body.id}`)
+      .set('x-internal-token', await forTenant(payer))
+      .expect(200);
+    expect(still.body.status).toBe('CREATED');
+  });
+
+  // -------------------------------------------------------------------------
+  // Everything ADR-020 already required
+  // -------------------------------------------------------------------------
+
+  it('refuses a token minted for a different service', async () => {
+    await request(http)
+      .get('/v1/wallets/me')
+      .set(
+        'x-internal-token',
+        await internalToken('marketplace-service', {
+          organizationId: payer,
+          targetService: 'notification-service',
+        }),
+      )
+      .expect(401);
+  });
+
+  it('refuses an expired token', async () => {
+    const token = await internalToken('marketplace-service', {
+      organizationId: payer,
+      ttlSeconds: 30,
+    });
+
+    // `jest.setSystemTime` rather than stubbing `Date.now`: jose reads the
+    // clock through `new Date()`, so replacing only the static method leaves
+    // the token looking fresh and the test passing for no reason.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(Date.now() + 120_000);
+    try {
+      await request(http).get('/v1/wallets/me').set('x-internal-token', token).expect(401);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('refuses a malformed token', async () => {
+    await request(http).get('/v1/wallets/me').set('x-internal-token', 'not-a-token').expect(401);
+  });
+
+  it('refuses a service the endpoint does not name', async () => {
+    const response = await request(http)
+      .get('/v1/wallets/me')
+      .set('x-internal-token', await forTenant(payer, 'notification-service'))
+      .expect(403);
+
+    expect(response.body.code).toBe('FORBIDDEN');
+  });
+
+  it('refuses every service an endpoint that names none', async () => {
+    // Changing a commission rate is a governance act no service performs on
+    // its own authority (ADR-023) — and a signed tenant does not change that.
+    const response = await request(http)
+      .post('/v1/commissions/rules')
+      .set('x-internal-token', await forTenant(payer))
+      .send({ organizationId: payer, transactionType: 'LOGISTICS', rateBasisPoints: 100 })
+      .expect(403);
+
+    expect(response.body.code).toBe('FORBIDDEN');
+  });
+
+  it('never lets a relay token satisfy @AllowService, tenant claim or not', async () => {
+    // A relay names a hop, not an actor. Reading one as a service call is what
+    // broke every public endpoint behind the gateway (D-007), and signing a
+    // tenant into it must not change that.
+    for (const organizationId of [undefined, payer]) {
+      const response = await request(http)
+        .get('/v1/wallets/me')
+        .set(
+          'x-internal-token',
+          await internalToken('api-gateway', { purpose: 'RELAY', organizationId }),
+        )
+        .expect(401);
+      expect(response.body.code).toBe('UNAUTHENTICATED');
+    }
+  });
+
+  it('still requires an Idempotency-Key from a service', async () => {
+    // A retrying workflow is the caller most likely to send the same write
+    // twice, so the requirement is stricter here rather than relaxed.
     const response = await request(http)
       .post('/v1/transactions')
-      .set('x-internal-token', token)
-      .set(tenantHeaders(payer))
+      .set('x-internal-token', await forTenant(payer))
       .send({
         transactionType: 'MARKETPLACE_ORDER',
         counterpartyOrganizationId: payee,
@@ -215,12 +316,102 @@ describe('service-to-service access', () => {
     // endpoint. Whether a report of every organization's balances should be
     // readable over an internal call is a different question, and the
     // conservative answer is the right one for a trial balance.
-    const token = await internalToken('marketplace-service');
-
     await request(http)
       .get('/v1/ledger/trial-balance?currency=IRR')
-      .set('x-internal-token', token)
-      .set(tenantHeaders(payer))
+      .set('x-internal-token', await forTenant(payer))
       .expect(403);
+  });
+
+  // -------------------------------------------------------------------------
+  // The path docs/08 § 8.6 specifies
+  // -------------------------------------------------------------------------
+
+  it('runs the order saga end to end, recording the service as the actor', async () => {
+    const token = await forTenant(payer);
+    const reference = id('s2s-order');
+
+    // Activity one: record the obligation and reserve the money together.
+    const created = await request(http)
+      .post('/v1/transactions')
+      .set('x-internal-token', token)
+      .set('idempotency-key', reference)
+      .send({
+        transactionType: 'MARKETPLACE_ORDER',
+        counterpartyOrganizationId: payee,
+        grossAmountMinor: '150000',
+        currency: 'IRR',
+        sourceType: 'ORDER',
+        sourceReference: reference,
+        holdFunds: true,
+      })
+      .expect(201);
+
+    expect(created.body.status).toBe('HELD');
+    expect(created.body.organizationId).toBe(payer);
+    // No user, so the row names the service. An empty actor column on a
+    // financial record leaves an auditor unable to say who committed the
+    // organization at all (AGENTS.md S-06).
+    expect(created.body.createdBy).toBe('economic-service');
+
+    // Activity two: receipt confirmed, then pay.
+    await request(http)
+      .post(`/v1/transactions/${created.body.id}/authorise-settlement`)
+      .set('x-internal-token', token)
+      .set('idempotency-key', id('s2s-authorise'))
+      .expect(200);
+
+    const settled = await request(http)
+      .post('/v1/settlements')
+      .set('x-internal-token', token)
+      .set('idempotency-key', id('s2s-settle'))
+      .send({ transactionId: created.body.id })
+      .expect(201);
+
+    expect(BigInt(settled.body.grossAmountMinor)).toBe(150_000n);
+
+    const settlement = await runUnscoped('the suite verifies the settlement it produced', () =>
+      harness.prisma.client.settlement.findUnique({
+        where: { id: settled.body.settlementId },
+      }),
+    );
+    expect(settlement?.organizationId).toBe(payer);
+    expect(settlement?.payeeOrganizationId).toBe(payee);
+  });
+
+  it('replays a saga activity without a second financial effect', async () => {
+    // A workflow retries. The same signed token and the same key must produce
+    // the first response, not a second hold.
+    const token = await forTenant(payer);
+    const key = id('s2s-replay');
+    const body = {
+      transactionType: 'MARKETPLACE_ORDER',
+      counterpartyOrganizationId: payee,
+      grossAmountMinor: '7000',
+      currency: 'IRR',
+      sourceType: 'ORDER',
+      sourceReference: key,
+      holdFunds: true,
+    };
+
+    const first = await request(http)
+      .post('/v1/transactions')
+      .set('x-internal-token', token)
+      .set('idempotency-key', key)
+      .send(body)
+      .expect(201);
+
+    const replay = await request(http)
+      .post('/v1/transactions')
+      .set('x-internal-token', token)
+      .set('idempotency-key', key)
+      .send(body)
+      .expect(201);
+
+    expect(replay.body.id).toBe(first.body.id);
+
+    const holds = await runUnscoped('the suite counts the holds the retry produced', () =>
+      harness.prisma.client.walletHold.count({ where: { reference: first.body.id } }),
+    );
+    expect(holds).toBe(1);
   });
 });

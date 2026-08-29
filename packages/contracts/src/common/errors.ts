@@ -21,6 +21,16 @@ export const ERROR_CODES = {
   INSUFFICIENT_ROLE: 'INSUFFICIENT_ROLE',
   /** The caller authenticated, but the target belongs to another tenant. */
   TENANT_MISMATCH: 'TENANT_MISMATCH',
+  /**
+   * A service-to-service call carries no usable tenant context.
+   *
+   * Either the internal token has no signed `org_id` and the operation is
+   * tenant-scoped, or an `X-Organization-Id` header disagreed with the signed
+   * claim. One code for both, because from the caller's side they are the same
+   * fact: the token you hold is not the right token for this call. Which of
+   * the two it was goes to the log, never to the response (ADR-035).
+   */
+  SERVICE_TENANT_CONTEXT_INVALID: 'SERVICE_TENANT_CONTEXT_INVALID',
 
   // 404 / 409 — resource state
   NOT_FOUND: 'NOT_FOUND',
@@ -83,6 +93,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   FORBIDDEN: 403,
   INSUFFICIENT_ROLE: 403,
   TENANT_MISMATCH: 403,
+  SERVICE_TENANT_CONTEXT_INVALID: 403,
   NOT_FOUND: 404,
   ALREADY_EXISTS: 409,
   CONFLICT: 409,

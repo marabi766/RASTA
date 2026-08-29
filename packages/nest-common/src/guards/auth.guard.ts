@@ -21,10 +21,16 @@ export interface AuthGuardOptions {
  * the only way to open one, which keeps "what is exposed?" answerable by
  * grepping for a single decorator.
  *
- * The tenant resolution below is the security-critical part. A caller may ask
- * to act for a specific organization via `X-Organization-Id`, but that header
- * is never trusted: it is checked against the memberships in the verified
- * token. This is the exact point at which a mistake becomes a tenant escape.
+ * The tenant resolution below is the security-critical part, and it works the
+ * same way on both paths: **the header is never the authority.**
+ *
+ *   user token     `X-Organization-Id` is checked against the memberships in
+ *                  the verified token (ADR-011)
+ *   service token  `X-Organization-Id` is checked against the signed `org_id`
+ *                  claim in the internal token (ADR-035)
+ *
+ * In both cases a header that does not agree is refused, never resolved. This
+ * is the exact point at which a mistake becomes a tenant escape.
  */
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -55,6 +61,7 @@ export class AuthGuard implements CanActivate {
     if (internalToken && !bearer) {
       const state = await this.authenticateInternal(
         execution,
+        request,
         internalToken,
         publicMeta?.public === true,
       );
@@ -104,6 +111,7 @@ export class AuthGuard implements CanActivate {
 
   private async authenticateInternal(
     execution: ExecutionContext,
+    request: AuthenticatedRequest,
     token: string,
     isPublicEndpoint: boolean,
   ): Promise<AuthState> {
@@ -150,12 +158,30 @@ export class AuthGuard implements CanActivate {
       throw RastaError.forbidden('This service is not permitted to call this endpoint');
     }
 
+    // The tenant comes from the **signed** claim, never from the header
+    // (ADR-035). An unsigned `X-Organization-Id` can be written by anything
+    // that reaches this service, so honouring it would turn a leaked internal
+    // token from "impersonate one service" into "act for any organization".
+    //
+    // The header is still allowed — the gateway and the calling service both
+    // propagate it for correlation and logging — but it may only *agree* with
+    // the claim. Disagreement is refused rather than resolved, because the two
+    // sources disagreeing means one of them is lying and there is no way to
+    // tell which.
+    const requestedTenant = headerValue(request, 'x-organization-id');
+    if (requestedTenant && requestedTenant !== claims.organizationId) {
+      throw RastaError.serviceTenantContextInvalid('HEADER_CLAIM_MISMATCH', {
+        callerService: claims.callerService,
+      });
+    }
+
     return {
       authType: 'SERVICE',
       callerService: claims.callerService,
-      // A service call carries the tenant of the request that caused it, which
-      // the caller propagates in the header. There is no membership to check
-      // because there is no user; the originating request already checked it.
+      // Undefined for a platform-wide operation. A tenant-scoped one that
+      // reaches `getOrganizationId()` with nothing here is refused there, with
+      // a 403 rather than the raw error that used to surface as a 500.
+      organizationId: claims.organizationId,
       roles: ['SERVICE'],
     };
   }

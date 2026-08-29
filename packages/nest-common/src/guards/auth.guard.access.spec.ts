@@ -89,7 +89,12 @@ function guardFor(endpoint: Endpoint, tokenVerifier: TokenVerifier): AuthGuard {
 async function activate(
   endpoint: Endpoint,
   headers: Record<string, string | undefined>,
-): Promise<{ allowed: boolean; authType?: string; callerService?: string }> {
+): Promise<{
+  allowed: boolean;
+  authType?: string;
+  callerService?: string;
+  organizationId?: string;
+}> {
   return runWithContext(
     {
       correlationId: 'COR_1',
@@ -102,7 +107,12 @@ async function activate(
       const guard = guardFor(endpoint, verifierAccepting('user-token'));
       const allowed = await guard.canActivate(executionFor(headers));
       const context = tryGetContext();
-      return { allowed, authType: context?.authType, callerService: context?.callerService };
+      return {
+        allowed,
+        authType: context?.authType,
+        callerService: context?.callerService,
+        organizationId: context?.organizationId,
+      };
     },
   );
 }
@@ -121,6 +131,18 @@ function relayToken(target = THIS_SERVICE): Promise<string> {
 function serviceToken(caller = 'fleet-service', target = THIS_SERVICE): Promise<string> {
   return internalTokens.issue(caller, target, 'SERVICE');
 }
+
+/** A service token bound to one organization by its signed `org_id` claim. */
+function tenantToken(
+  organizationId: string,
+  caller = 'fleet-service',
+  target = THIS_SERVICE,
+): Promise<string> {
+  return internalTokens.issue(caller, target, 'SERVICE', organizationId);
+}
+
+const ORG_A = 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YA';
+const ORG_B = 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YB';
 
 describe('AuthGuard — anonymous access through the gateway (D-007)', () => {
   it('lets a relayed anonymous request reach a public endpoint', async () => {
@@ -264,5 +286,151 @@ describe('AuthGuard — authenticated users are unaffected', () => {
 
   it('refuses an anonymous request to a protected endpoint with no tokens at all', async () => {
     await expect(activate(PROTECTED_ENDPOINT, {})).rejects.toMatchObject({ status: 401 });
+  });
+});
+
+describe('AuthGuard — signed tenant context for service calls (ADR-035)', () => {
+  /**
+   * The rule this block exists to keep: **the header is not an authority.**
+   *
+   * Before ADR-035 the guard read no tenant at all for a service call, so
+   * every `@AllowService` endpoint authenticated its caller and then failed on
+   * the first tenant-scoped read — as a 500, which made a deliberate security
+   * rule look like a bug. The obvious repair, reading `X-Organization-Id`,
+   * would have been worse than the fault: an unsigned header can be written by
+   * anything that reaches the service, so a leaked internal token would have
+   * gone from "impersonate one service" to "act for any organization".
+   */
+
+  it('takes the tenant from the signed claim', async () => {
+    const result = await activate(INTERNAL_ENDPOINT, {
+      'x-internal-token': await tenantToken(ORG_A),
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.authType).toBe('SERVICE');
+    expect(result.organizationId).toBe(ORG_A);
+  });
+
+  it('accepts a header that agrees with the claim', async () => {
+    // The gateway and the calling service both propagate the header for
+    // correlation. Agreeing with the signature is allowed; being the source of
+    // truth is not.
+    const result = await activate(INTERNAL_ENDPOINT, {
+      'x-internal-token': await tenantToken(ORG_A),
+      'x-organization-id': ORG_A,
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.organizationId).toBe(ORG_A);
+  });
+
+  it('refuses a header that disagrees with the claim', async () => {
+    // Refused rather than resolved: the two sources disagreeing means one of
+    // them is lying, and nothing here can tell which.
+    await expect(
+      activate(INTERNAL_ENDPOINT, {
+        'x-internal-token': await tenantToken(ORG_A),
+        'x-organization-id': ORG_B,
+      }),
+    ).rejects.toThrow(
+      expect.objectContaining({ code: 'SERVICE_TENANT_CONTEXT_INVALID', status: 403 }),
+    );
+  });
+
+  it('never lets a forged header select another tenant', async () => {
+    // The attack this whole ADR exists to stop. A caller holding a token for
+    // organization A asks, in an unsigned header, to act for organization B.
+    await expect(
+      activate(INTERNAL_ENDPOINT, {
+        'x-internal-token': await tenantToken(ORG_A),
+        'x-organization-id': ORG_B,
+      }),
+    ).rejects.toThrow(expect.objectContaining({ code: 'SERVICE_TENANT_CONTEXT_INVALID' }));
+
+    // And with no claim at all, a header alone selects nothing: the token
+    // resolves to no tenant rather than to B.
+    const result = await activate(INTERNAL_ENDPOINT, {
+      'x-internal-token': await serviceToken(),
+    });
+    expect(result.organizationId).toBeUndefined();
+  });
+
+  it('leaves a claim-less service token with no tenant at all', async () => {
+    // Not a fallback to the header, and not an error at the guard: a
+    // platform-wide internal operation is legitimate. The refusal happens at
+    // the point of use, in `getOrganizationId()`.
+    const result = await activate(INTERNAL_ENDPOINT, {
+      'x-internal-token': await serviceToken(),
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.authType).toBe('SERVICE');
+    expect(result.organizationId).toBeUndefined();
+  });
+
+  it('ignores an org claim on a relay token', async () => {
+    // A relay names a hop, not an actor, so it names no tenant. Honouring one
+    // would let the gateway — the component exposed to outside traffic —
+    // choose a tenant for a request it is only forwarding.
+    const forged = await internalTokens.issue('api-gateway', THIS_SERVICE, 'RELAY', ORG_B);
+
+    const result = await activate(PUBLIC_ENDPOINT, { 'x-internal-token': forged });
+
+    expect(result.allowed).toBe(true);
+    expect(result.authType).toBe('ANONYMOUS');
+    expect(result.organizationId).toBeUndefined();
+  });
+
+  it('still refuses a relay token on an @AllowService endpoint, tenant or not', async () => {
+    const forged = await internalTokens.issue('api-gateway', THIS_SERVICE, 'RELAY', ORG_A);
+
+    await expect(activate(INTERNAL_ENDPOINT, { 'x-internal-token': forged })).rejects.toThrow(
+      expect.objectContaining({ code: 'UNAUTHENTICATED' }),
+    );
+  });
+
+  it('still enforces audience and the caller allow-list on a tenant token', async () => {
+    // The tenant claim is additive. Everything ADR-020 already required is
+    // still required, and a tenant-bound token is not a way around any of it.
+    await expect(
+      activate(INTERNAL_ENDPOINT, {
+        'x-internal-token': await tenantToken(ORG_A, 'fleet-service', 'economic-service'),
+      }),
+    ).rejects.toThrow(expect.objectContaining({ code: 'TOKEN_INVALID' }));
+
+    await expect(
+      activate(INTERNAL_ENDPOINT, {
+        'x-internal-token': await tenantToken(ORG_A, 'notification-service'),
+      }),
+    ).rejects.toThrow(expect.objectContaining({ code: 'FORBIDDEN' }));
+  });
+
+  it('refuses an expired tenant token', async () => {
+    const shortLived = new InternalTokenService(SECRET, ISSUER, 30);
+    const token = await shortLived.issue('fleet-service', THIS_SERVICE, 'SERVICE', ORG_A);
+
+    // The system clock is moved past the lifetime rather than waited out.
+    // `jest.setSystemTime` rather than stubbing `Date.now`: jose reads the
+    // clock through `new Date()`, so replacing only the static method leaves
+    // the token looking perfectly fresh and the test passing for no reason.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(Date.now() + 120_000);
+    try {
+      await expect(activate(INTERNAL_ENDPOINT, { 'x-internal-token': token })).rejects.toThrow(
+        expect.objectContaining({ code: 'TOKEN_EXPIRED' }),
+      );
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not change the tenant a user token resolves to', async () => {
+    // The user path is untouched: its tenant still comes from the verified
+    // user token and its memberships (ADR-011).
+    const result = await activate(PROTECTED_ENDPOINT, { authorization: 'Bearer user-token' });
+
+    expect(result.authType).toBe('USER');
+    expect(result.organizationId).toBe(ORG_A);
   });
 });

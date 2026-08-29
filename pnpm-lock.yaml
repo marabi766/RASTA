@@ -942,6 +942,9 @@ importers:
       '@types/node':
         specifier: ^22.18.14
         version: 22.20.1
+      jose:
+        specifier: ^5.10.0
+        version: 5.10.0
       kafkajs:
         specifier: ^2.2.4
         version: 2.2.4

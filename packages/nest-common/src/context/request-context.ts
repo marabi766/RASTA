@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { RastaError } from '../errors/rasta-error';
 
 /**
  * The identity and provenance of the work currently being done.
@@ -110,13 +111,36 @@ export function getContext(): RequestContext {
 /**
  * The organization this request acts for, throwing if there is none.
  *
- * This is the function tenant-scoped data access calls. It throws rather than
- * returning undefined precisely so that a missing tenant becomes a loud
- * failure instead of a query that quietly returns every organization's rows.
+ * This is the function tenant-scoped data access calls, and calling it is what
+ * *makes* an operation tenant-scoped — there is no separate registry of which
+ * endpoints are which, so the two can never drift apart.
+ *
+ * It throws rather than returning undefined precisely so that a missing tenant
+ * becomes a loud failure instead of a query that quietly returns every
+ * organization's rows. **Which** failure depends on who is calling:
+ *
+ *   SERVICE  a platform `403 SERVICE_TENANT_CONTEXT_INVALID`. The token was
+ *            minted without a signed `org_id` and this operation needs one —
+ *            a refusal, not a fault, and one the caller can act on by minting
+ *            the right token (ADR-035). Reporting it as a 500, which is what
+ *            happened before, made a deliberate security rule look like a bug
+ *            and sent operators hunting for one.
+ *
+ *   USER     a raw Error, and therefore a 500. Here it genuinely is a bug: the
+ *            auth guard resolves a tenant for every authenticated user, so
+ *            arriving with none means an endpoint is tenant-scoped when it
+ *            should not be, or is missing its guard entirely. That deserves to
+ *            be as loud as possible.
  */
 export function getOrganizationId(): string {
   const context = getContext();
   if (!context.organizationId) {
+    if (context.authType === 'SERVICE') {
+      throw RastaError.serviceTenantContextInvalid('MISSING_CLAIM', {
+        callerService: context.callerService,
+        path: context.path,
+      });
+    }
     throw new Error(
       `Request ${context.requestId} has no organizationId, but tenant-scoped data was accessed. ` +
         'This is a bug: either the endpoint should be tenant-scoped and is not, ' +

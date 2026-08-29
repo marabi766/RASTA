@@ -55,6 +55,18 @@ export interface ServiceClaims {
   callerService: string;
   targetService: string;
   purpose: InternalTokenPurpose;
+  /**
+   * The organization this token was minted for, from the signed `org_id`
+   * claim (ADR-035).
+   *
+   * Absent for a `RELAY` token — a relay names no actor, so it names no tenant
+   * either; the tenant comes from the user token it is relaying. Absent for a
+   * `SERVICE` token minted for a platform-wide operation. Present and
+   * immutable for a tenant-scoped service call: it is inside the signature, so
+   * a caller cannot change which organization it acts for without the signing
+   * key.
+   */
+  organizationId?: string;
   expiresAt: number;
 }
 
@@ -132,12 +144,29 @@ export class InternalTokenService {
     this.key = new TextEncoder().encode(secret);
   }
 
+  /**
+   * Mints a token for one caller, one target and — for a tenant-scoped call —
+   * one organization.
+   *
+   * `organizationId` goes **inside the signature**. That is the whole point of
+   * ADR-035: an unsigned `X-Organization-Id` header can be written by anything
+   * that reaches the service, so it cannot be the authority for which tenant a
+   * service acts as. Minting per (target, organization) keeps a leaked token
+   * worth exactly one organization on one service for `ttlSeconds`.
+   *
+   * Omit it for a platform-wide operation, and for every `RELAY` token.
+   */
   async issue(
     callerService: string,
     targetService: string,
     purpose: InternalTokenPurpose = 'SERVICE',
+    organizationId?: string,
   ): Promise<string> {
-    return new SignJWT({ svc: callerService, purpose })
+    return new SignJWT({
+      svc: callerService,
+      purpose,
+      ...(organizationId ? { org_id: organizationId } : {}),
+    })
       .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
       .setIssuer(this.issuer)
       .setAudience(targetService)
@@ -160,12 +189,19 @@ export class InternalTokenService {
         throw new RastaError('TOKEN_INVALID', 'Internal token has no subject');
       }
 
+      const purpose: InternalTokenPurpose = payload['purpose'] === 'RELAY' ? 'RELAY' : 'SERVICE';
+
       return {
         callerService: payload.sub,
         targetService: expectedTarget,
         // Absent means SERVICE: the stricter reading, and what every token
         // minted before the claim existed meant.
-        purpose: payload['purpose'] === 'RELAY' ? 'RELAY' : 'SERVICE',
+        purpose,
+        // Read only for SERVICE. A relay names no actor and therefore no
+        // tenant; honouring an `org_id` on one would let the gateway — the
+        // component exposed to outside traffic — choose a tenant for a call it
+        // is only forwarding (ADR-035).
+        ...(purpose === 'SERVICE' ? { organizationId: readString(payload, 'org_id') } : {}),
         expiresAt: (payload.exp ?? 0) * 1000,
       };
     } catch (error) {
