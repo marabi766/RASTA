@@ -14,7 +14,7 @@
 | ------------ | ----------------------------------------------------------------------- |
 | نام          | `SCREAMING_SNAKE_CASE`، **فعل گذشته** — رویداد چیزی است که اتفاق افتاده |
 | Topic        | `rasta.<domain>.v1` + `.retry` + `.dlq`                                 |
-| کلید پارتیشن | همیشه `aggregateId` — تضمین ترتیب به‌ازای Aggregate                     |
+| کلید پارتیشن | پیش‌فرض `aggregateId`؛ انحراف صریح و مستند (ADR-036، `docs/07` § ۷٫۷)   |
 | انتشار       | **همیشه از راه Transactional Outbox** (ADR-021)                         |
 | مصرف         | **همیشه Idempotent** با جدول `processed_event`                          |
 | Payload      | **شناسه حمل می‌کند، نه داده شخصی**                                      |
@@ -360,6 +360,29 @@ Schema رسمی در `services/economic-service/src/events/events.ts` و اعت�
 | `REWARD_LEVEL_CHANGED` | notification                                        | `organizationId`, `userId`, `from` (nullable), `to`, `totalPoints`, `changedAt`                                                                           |
 | `SETTLEMENT_COMPLETED` | marketplace · supplier · notification               | `settlementId`, `transactionId`, `payerOrganizationId`, `payeeOrganizationId`, `journalId`, `grossAmountMinor`, `commissionAmountMinor`, `netAmountMinor` |
 | `JOURNAL_POSTED`       | audit · analytics                                   | `journalId`, `transactionId`, `journalType`, `reversesJournalId`, `entries[]` (حداقل دو)                                                                  |
+
+**کلید پارتیشن هر یازده رویداد (ADR-036).** «درباره چیست» و «با چه چیزی مرتب
+می‌ماند» دو پرسش‌اند و اینجا برای چهار رویداد پاسخشان یکی نیست:
+
+| رویداد                 | Aggregate (Envelope) | کلید پارتیشن                     |
+| ---------------------- | -------------------- | -------------------------------- |
+| `WALLET_OPENED`        | `Wallet`             | `walletId`                       |
+| `FUNDS_HELD`           | `WalletHold`         | **`transactionId`**              |
+| `FUNDS_RELEASED`       | `WalletHold`         | **`transactionId`**              |
+| `PAYMENT_AUTHORIZED`   | `PaymentIntent`      | `paymentIntentId`                |
+| `PAYMENT_COMPLETED`    | `PaymentIntent`      | **`transactionId`**              |
+| `PAYMENT_FAILED`       | `PaymentIntent`      | `paymentIntentId`                |
+| `COMMISSION_APPLIED`   | `Commission`         | `transactionId`                  |
+| `REWARD_GRANTED`       | `Reward`             | `rewardId`                       |
+| `REWARD_LEVEL_CHANGED` | `RewardBalance`      | `${organizationId}:${userId}`    |
+| `SETTLEMENT_COMPLETED` | `Settlement`         | `transactionId`                  |
+| `JOURNAL_POSTED`       | `Journal`            | **`transactionId ?? journalId`** |
+
+`PAYMENT_AUTHORIZED` و `PAYMENT_FAILED` عمداً تراکنشی نیستند: در لحظه انتشارشان
+هیچ تراکنشی وجود ندارد (`PaymentIntent.transaction_id` هنگام Capture نوشته
+می‌شود) و اختراع یکی، نوشتن شناسه‌ای دروغین در یک Payload مالی است. قاعده در
+`services/economic-service/src/events/routing.ts` تنها یک‌جا نوشته شده و افزودن
+رویداد بدون تصمیم درباره ترتیب، Compile نمی‌شود.
 
 **چهار قاعده که در جدول بالا پیدا نیست:**
 
