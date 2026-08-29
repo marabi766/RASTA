@@ -328,6 +328,7 @@ jobs:
           pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)"
         env:
           NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
@@ -530,8 +531,9 @@ jobs:
         run: |
           set -euo pipefail
           docker run -d --name rasta-e2e-temporal --network host \
-            temporalio/admin-tools:1.26.2-tctl-1.18.1-cli-1.1.1 \
-            temporal server start-dev --ip 0.0.0.0 --port 7233 --headless
+            --entrypoint temporal \
+            temporalio/admin-tools:1.26.2 \
+            server start-dev --ip 0.0.0.0 --port 7233 --headless
 
           for attempt in $(seq 1 40); do
             if docker exec rasta-e2e-temporal temporal operator cluster health \
