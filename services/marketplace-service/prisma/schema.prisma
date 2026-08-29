@@ -1,0 +1,480 @@
+// marketplace-service — products, offers, orders (ADR-037).
+//
+// Everything here is owned by this service alone. There is no foreign key to
+// any other service's database and no replicated copy of another service's
+// rows: `supplierOrganizationId` and `buyerUserId` are plain strings whose
+// authority is the verified token, not a local table (AGENTS.md A-01).
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../src/generated/prisma"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// Order lifecycle (ADR-038).
+///
+/// `FULFILLED` is deliberately absent: the state after a supplier records
+/// delivery is *waiting for the buyer*, and having both would need a
+/// transition with no actor.
+enum OrderStatus {
+  PENDING
+  FUNDS_HELD
+  CONFIRMED
+  AWAITING_RECEIPT_CONFIRMATION
+  RECEIPT_CONFIRMED
+  SETTLING
+  COMPLETED
+  DISPUTED
+  CANCELLING
+  CANCELLED
+  FAILED
+}
+
+enum OfferStatus {
+  DRAFT
+  PUBLISHED
+  SUSPENDED
+  WITHDRAWN
+}
+
+enum ProductStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+/// What a `Product` is. A service has no shippable quantity in the same sense
+/// a good does, and a consumer that cannot tell them apart cannot render
+/// either correctly.
+enum ProductKind {
+  GOOD
+  SERVICE
+}
+
+enum DisputeStatus {
+  OPEN
+  RESOLVED_SETTLE
+  RESOLVED_REFUND
+}
+
+/// Why a history row exists.
+///
+/// `REMINDER` rows have `fromStatus == toStatus` on purpose (ADR-043): an
+/// overdue order has not changed state, and recording it as a transition would
+/// claim something happened that did not.
+enum OrderHistoryKind {
+  TRANSITION
+  REMINDER
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue
+// ---------------------------------------------------------------------------
+
+model Product {
+  /// `PRD_<ULID>`.
+  id String @id
+
+  /// The organization that defined this product. Tenant-scoped.
+  organizationId String @map("organization_id")
+
+  sku         String
+  name        String
+  description String?
+  category    String
+  kind        ProductKind @default(GOOD)
+  /// Unit of measure, free text from the defining organization ("عدد", "لیتر").
+  unit        String
+
+  status ProductStatus @default(ACTIVE)
+
+  /// Denormalised text the trigram index is built on (ADR-042).
+  ///
+  /// A written column rather than a GENERATED one: Prisma does not know about
+  /// generated columns in `create`, so it would need a second write.
+  searchText String @map("search_text")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by")
+
+  offers Offer[]
+
+  @@unique([organizationId, sku], map: "uq_product_org_sku")
+  @@index([organizationId, status], map: "ix_product_org_status")
+  @@index([category], map: "ix_product_category")
+  @@map("product")
+}
+
+model Offer {
+  /// `OFR_<ULID>`.
+  id String @id
+
+  /// The supplier organization. Tenant-scoped: an offer belongs to its seller.
+  organizationId String @map("organization_id")
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  /// Price per unit in minor units (ADR-022). Never a float.
+  unitPriceMinor BigInt @map("unit_price_minor")
+  currency       String @default("IRR")
+
+  /// What the supplier says it can supply. **Not** warehouse stock — that
+  /// belongs to inventory-service, which does not exist (ADR-041).
+  availableQuantity Int @map("available_quantity")
+
+  /// Days from order confirmation to delivery, as promised by the supplier.
+  /// One of the two sort keys search supports (ADR-042).
+  leadTimeDays Int @map("lead_time_days")
+
+  minimumQuantity Int @default(1) @map("minimum_quantity")
+
+  status OfferStatus @default(DRAFT)
+
+  /// Incremented on every price change.
+  ///
+  /// An `OrderLine` records the version it bought at, so "which price did this
+  /// order actually agree to" stays answerable after the offer has been
+  /// repriced ten times.
+  version Int @default(1)
+
+  publishedAt DateTime? @map("published_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by")
+
+  priceHistory OfferPriceHistory[]
+  orderLines   OrderLine[]
+
+  @@index([organizationId, status], map: "ix_offer_org_status")
+  @@index([productId, status], map: "ix_offer_product_status")
+  @@index([status, unitPriceMinor], map: "ix_offer_status_price")
+  @@map("offer")
+}
+
+model OfferPriceHistory {
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  offerId String @map("offer_id")
+  offer   Offer  @relation(fields: [offerId], references: [id], onDelete: Cascade)
+
+  /// The version this row describes — the same number `OrderLine` records.
+  version Int
+
+  unitPriceMinor BigInt @map("unit_price_minor")
+  currency       String
+
+  changedAt DateTime @default(now()) @map("changed_at")
+  changedBy String   @map("changed_by")
+
+  @@unique([offerId, version], map: "uq_offer_price_version")
+  @@index([organizationId], map: "ix_offer_price_org")
+  @@map("offer_price_history")
+}
+
+// ---------------------------------------------------------------------------
+// Order
+// ---------------------------------------------------------------------------
+
+model Order {
+  /// `ORD_<ULID>`.
+  id String @id
+
+  /// The **buyer**. Tenant-scoped to the buyer, because the buyer creates the
+  /// order, commits the money and cancels it — so the common path never
+  /// crosses the tenant boundary (ADR-037 § 8).
+  organizationId String @map("organization_id")
+
+  /// The seller. A plain column, deliberately: a supplier reading its own
+  /// orders crosses the boundary once, with a written reason.
+  supplierOrganizationId String @map("supplier_organization_id")
+
+  /// The user who placed it. Needed because `ConfirmReceipt` is an act by a
+  /// person and S-06 wants to know which one.
+  placedBy String @map("placed_by")
+
+  status OrderStatus @default(PENDING)
+
+  /// Recomputed from the lines, never accumulated (the maintenance-service
+  /// lesson): a total that drifts from its lines is a total nobody can audit.
+  totalAmountMinor BigInt @map("total_amount_minor")
+  currency         String @default("IRR")
+
+  /// The economic obligation this order created.
+  ///
+  /// UNIQUE, so "one financial transaction per order" is a database
+  /// constraint rather than a rule the saga is trusted to follow (ADR-040).
+  economicTransactionId String? @unique @map("economic_transaction_id")
+
+  /// Filled once economic-service reports a completed settlement.
+  economicSettlementId String? @map("economic_settlement_id")
+
+  /// Mirrors the `Idempotency-Key` of the creating request, for tracing.
+  idempotencyKey String @map("idempotency_key")
+  correlationId  String @map("correlation_id")
+
+  /// ADR-043. Set when a window elapses; never used to move money.
+  reminderCount  Int       @default(0) @map("reminder_count")
+  lastReminderAt DateTime? @map("last_reminder_at")
+
+  confirmedAt DateTime? @map("confirmed_at")
+  fulfilledAt DateTime? @map("fulfilled_at")
+  receiptConfirmedAt DateTime? @map("receipt_confirmed_at")
+  receiptConfirmedBy String?   @map("receipt_confirmed_by")
+  completedAt DateTime? @map("completed_at")
+  cancelledAt DateTime? @map("cancelled_at")
+
+  cancellationReason String? @map("cancellation_reason")
+  failureReason      String? @map("failure_reason")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  lines        OrderLine[]
+  fulfillments Fulfillment[]
+  history      OrderStatusHistory[]
+  disputes     OrderDispute[]
+  review       Review?
+
+  @@index([organizationId, status], map: "ix_order_org_status")
+  @@index([supplierOrganizationId, status], map: "ix_order_supplier_status")
+  @@index([organizationId, createdAt], map: "ix_order_org_created")
+  @@map("order")
+}
+
+model OrderLine {
+  id String @id
+
+  /// Denormalised from the order so the tenant guard can scope lines directly.
+  organizationId String @map("organization_id")
+
+  orderId String @map("order_id")
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  offerId String @map("offer_id")
+  offer   Offer  @relation(fields: [offerId], references: [id], onDelete: Restrict)
+
+  productId String @map("product_id")
+
+  /// Copied from the offer at order time. The client cannot supply it
+  /// (ADR-037 § 5) — the request schema is strict and has no such field.
+  unitPriceMinor BigInt @map("unit_price_minor")
+  quantity       Int
+  lineTotalMinor BigInt @map("line_total_minor")
+  currency       String
+
+  /// The offer version this line agreed to.
+  offerVersion Int @map("offer_version")
+
+  /// A snapshot for display, so a completed order still reads correctly after
+  /// the product is renamed. Never used for an authorization or price
+  /// decision.
+  productName String @map("product_name")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([orderId, offerId], map: "uq_order_line_offer")
+  @@index([organizationId], map: "ix_order_line_org")
+  @@map("order_line")
+}
+
+model Fulfillment {
+  id String @id
+
+  /// The **buyer's** organization, matching the order, so the tenant guard
+  /// scopes it the same way. The supplier that recorded it is `fulfilledBy`.
+  organizationId String @map("organization_id")
+
+  orderId String @map("order_id")
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// Free text from the supplier: a waybill number, a courier reference.
+  /// Opaque to this service.
+  trackingReference String? @map("tracking_reference")
+  note              String?
+
+  fulfilledAt DateTime @default(now()) @map("fulfilled_at")
+  fulfilledBy String   @map("fulfilled_by")
+  /// The supplier organization that recorded it, for the audit trail.
+  fulfilledByOrganizationId String @map("fulfilled_by_organization_id")
+
+  @@index([orderId], map: "ix_fulfillment_order")
+  @@index([organizationId], map: "ix_fulfillment_org")
+  @@map("fulfillment")
+}
+
+/// Every state change, and every reminder, in the order they happened.
+///
+/// S-06: "who, what, when, from where" for each mutation. Without it, "why was
+/// this order cancelled" has no answer but a guess.
+model OrderStatusHistory {
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  orderId String @map("order_id")
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  kind OrderHistoryKind @default(TRANSITION)
+
+  fromStatus OrderStatus @map("from_status")
+  toStatus   OrderStatus @map("to_status")
+
+  reason String?
+
+  actorId        String  @map("actor_id")
+  actorType      String  @map("actor_type")
+  correlationId  String  @map("correlation_id")
+
+  occurredAt DateTime @default(now()) @map("occurred_at")
+
+  @@index([orderId, occurredAt], map: "ix_order_history_order")
+  @@index([organizationId], map: "ix_order_history_org")
+  @@map("order_status_history")
+}
+
+model OrderDispute {
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  orderId String @map("order_id")
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// At least a sentence, mirroring economic-service: whoever resolves this
+  /// needs to know what it is about, and a one-word reason is how a dispute
+  /// becomes permanent by neglect.
+  reason String
+
+  status DisputeStatus @default(OPEN)
+
+  raisedAt DateTime @default(now()) @map("raised_at")
+  raisedBy String   @map("raised_by")
+
+  resolution   String?   @map("resolution")
+  resolvedAt   DateTime? @map("resolved_at")
+  resolvedBy   String?   @map("resolved_by")
+
+  @@index([orderId], map: "ix_dispute_order")
+  @@index([organizationId, status], map: "ix_dispute_org_status")
+  @@map("order_dispute")
+}
+
+model Review {
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  /// One review per order (`docs/17`: "یک ارزیابی به‌ازای سفارش").
+  orderId String @unique @map("order_id")
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  supplierOrganizationId String @map("supplier_organization_id")
+
+  /// 1..5, checked in the database as well as in the DTO.
+  rating  Int
+  comment String?
+
+  submittedAt DateTime @default(now()) @map("submitted_at")
+  submittedBy String   @map("submitted_by")
+
+  @@index([supplierOrganizationId], map: "ix_review_supplier")
+  @@index([organizationId], map: "ix_review_org")
+  @@map("review")
+}
+
+// ---------------------------------------------------------------------------
+// Infrastructure
+// ---------------------------------------------------------------------------
+
+/// Transactional outbox (ADR-021). Same shape as every other service's.
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic String
+  /// What the message is ordered by — `orderId` for every order-lifecycle
+  /// event (ADR-036 applied to this domain).
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  publishedAt DateTime? @map("published_at")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  @@index([publishedAt, createdAt], map: "ix_outbox_pending")
+  @@map("outbox_message")
+}
+
+/// Consumer idempotency (A-09).
+///
+/// The table and its plumbing exist; no handler is registered, because every
+/// event `docs/04` lists for this service either has no producer or would be a
+/// second path for a fact the saga already gets synchronously (ADR-041 § 4).
+model ProcessedEvent {
+  eventId      String   @map("event_id")
+  consumerName String   @map("consumer_name")
+  processedAt  DateTime @default(now()) @map("processed_at")
+
+  @@id([eventId, consumerName])
+  @@map("processed_event")
+}
+
+/// Stored responses for `Idempotency-Key` (docs/06 § 6.8).
+///
+/// Same shape economic-service proved: the claim is written and committed
+/// before the work starts, so a concurrent duplicate finds `IN_PROGRESS` and
+/// backs off rather than doing the work twice and discovering the collision
+/// afterwards.
+model IdempotencyKey {
+  key            String
+  organizationId String @map("organization_id")
+  endpoint       String
+
+  /// SHA-256 of the normalised request body. A repeated key with a different
+  /// body is `409 IDEMPOTENCY_KEY_REUSED`, never a silent replay of the wrong
+  /// response.
+  requestHash String @map("request_hash")
+
+  responseStatus Int?  @map("response_status")
+  responseBody   Json? @map("response_body")
+  state          IdempotencyState
+
+  createdAt DateTime @default(now()) @map("created_at")
+  /// 24 hours by default, configurable (docs/06 § 6.8).
+  expiresAt DateTime @map("expires_at")
+
+  @@id([organizationId, endpoint, key])
+  @@index([expiresAt])
+  @@map("idempotency_key")
+}
+
+enum IdempotencyState {
+  IN_PROGRESS
+  COMPLETED
+}

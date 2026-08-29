@@ -106,10 +106,36 @@ describe('resolveRoute', () => {
     ['/usage-records', 'fleet'],
     ['/fleet/availability', 'fleet'],
     ['/orders', 'marketplace'],
+    ['/orders/ORD_1/confirm-receipt', 'marketplace'],
+    ['/products', 'marketplace'],
+    ['/offers/OFR_1', 'marketplace'],
     ['/tenders/TND_1/bids', 'construction'],
     ['/ledger/trial-balance', 'economic'],
   ])('routes %s to %s', (path, service) => {
     expect(resolveRoute(path)?.service).toBe(service);
+  });
+
+  it('requires an Idempotency-Key on every unsafe order route', () => {
+    // docs/06 § 6.8 lists order creation among the operations that must be
+    // idempotent. The gateway applies it to the whole prefix, and
+    // marketplace-service requires it again — the gateway is not the only way
+    // to reach that port.
+    expect(resolveRoute('/orders')?.requiresIdempotencyKey).toBe(true);
+    expect(resolveRoute('/orders/ORD_1/cancel')?.requiresIdempotencyKey).toBe(true);
+  });
+
+  it('does not require one on catalogue reads', () => {
+    // A search is safe and repeatable; demanding a key would be ceremony that
+    // teaches clients to send meaningless ones.
+    expect(resolveRoute('/products')?.requiresIdempotencyKey).toBeUndefined();
+  });
+
+  it('gives the oversight role no marketplace prefix at all', () => {
+    // docs/09 § 9.3: aggregate access only, served by analytics-service. The
+    // first of three layers — the service refuses AUDITOR independently.
+    for (const path of ['/orders', '/products', '/offers']) {
+      expect(resolveRoute(path)?.roles ?? []).not.toContain('AUDITOR');
+    }
   });
 
   it('keeps usage records with fleet, not with the asset they describe', () => {

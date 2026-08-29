@@ -80,5 +80,14 @@ export default defineConfig({
       name: 'economic-api',
       testDir: './specs/economic',
     },
+    {
+      name: 'marketplace-api',
+      testDir: './specs/marketplace',
+      // After the economic project, because a marketplace order settles
+      // through economic-service: if the financial critical path is broken,
+      // the failure should name itself there rather than surfacing as an order
+      // that never completed.
+      dependencies: ['economic-api'],
+    },
   ],
 });

@@ -104,8 +104,13 @@ export const ROUTES: readonly RouteRule[] = [
   { prefix: 'repair-orders', service: 'maintenance' },
 
   // ---- commerce ----------------------------------------------------------
-  { prefix: 'products', service: 'marketplace' },
+  // Search is read-heavy and cheap to abuse, so it carries the tighter limit
+  // docs/06 § 6.9 sets for search rather than the default per-user one.
+  { prefix: 'products', service: 'marketplace', rateLimit: { limit: 60, windowSeconds: 60 } },
   { prefix: 'offers', service: 'marketplace' },
+  // `cart` is deferred, not removed (ADR-037 § 3): the prefix stays so the
+  // routing table still reflects docs/04, and reaches a service that has no
+  // handler for it — which answers 404, exactly what "not built yet" means.
   { prefix: 'cart', service: 'marketplace' },
   { prefix: 'orders', service: 'marketplace', requiresIdempotencyKey: true },
   { prefix: 'demand-requests', service: 'procurement' },

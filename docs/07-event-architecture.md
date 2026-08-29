@@ -197,14 +197,17 @@ COMMIT ──► Commit Offset
 | Economic — Journal محض   | `journalId`             | سندی که به تراکنشی تعلق ندارد                              |
 | Economic — پرداخت پیش‌تر | `paymentIntentId`       | پیش از آنکه تراکنشی وجود داشته باشد                        |
 | Economic — پاداش         | `rewardId` · `org:user` | چرخه یک پاداش · موجودی یک شخص                              |
-| Order                    | `orderId`               | چرخه سفارش مرتب                                            |
+| **Marketplace — سفارش**  | **`orderId`**           | **کل چرخه‌عمر یک سفارش مرتب** (ADR-036 روی این دامنه)      |
+| Marketplace — عرضه       | `offerId`               | تغییر قیمت یک عرضه به ترتیب اعمال می‌شود                   |
 | Tender                   | `tenderId`              | چرخه مناقصه مرتب                                           |
 | Contract                 | `contractId`            | چرخه صورت‌وضعیت مرتب                                       |
 | Organization             | `organizationId`        | تغییرات سازمان مرتب                                        |
 
 **قاعده.** کلید پارتیشن **پیش‌فرض** `aggregateId` است و انحراف از آن باید صریح و
-مستند باشد — امروز سه انحراف داریم: `assetId` در `fleet` و `maintenance`، و
-`transactionId` در رویدادهای تراکنشی `economic`.
+مستند باشد — امروز چهار انحراف داریم: `assetId` در `fleet` و `maintenance`،
+`transactionId` در رویدادهای تراکنشی `economic`، و `orderId` در رویدادهای
+چرخه‌عمر سفارش `marketplace` (که `REVIEW_SUBMITTED` را هم شامل می‌شود، با آنکه
+Aggregate اش `Review` است).
 
 ترتیب سراسری تضمین نمی‌شود و لازم هم نیست. اگر یک Consumer به ترتیب میان دو
 Aggregate نیاز دارد، یا آن دو در واقع **یک** چرخه‌عمرند و باید یک کلید بگیرند

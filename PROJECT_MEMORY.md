@@ -10,8 +10,20 @@
 > سرویس از حالت تمیز، تست زنده Auth/Tenant Isolation/Event Flow، و بررسی مستقیم
 > GitHub Actions.
 >
-> **آخرین به‌روزرسانی:** 2026-08-29 (چهارم) — **Q-28 روی `main` است، و Q-26 و
-> Q-27 بسته شدند.**
+> **آخرین به‌روزرسانی:** 2026-08-30 — **`marketplace-service` ساخته شد.**
+>
+> PR #6 (Q-26) با یک Merge Commit معمولی وارد `main` شد (`4ebdfc0`، هر ۴ Commit
+> اتمیک حفظ شد) و CI روی `main` کامل سبز بود — هر ۱۰ Job شامل Trivy روی هر شش
+> Image (Run `33267994013`). Branch ‏`fix/economic-event-ordering` محلی و Remote
+> حذف شد. پیش‌نیازهای اقتصادی **`READY_FOR_MARKETPLACE`** شدند.
+>
+> سپس `marketplace-service` ساخته شد: کاتالوگ، عرضه، سفارش، و **نخستین Workflow
+> واقعی Temporal در این پلتفرم** (ADR-039). چرخه کامل خرید تا تسویه روی Stack
+> واقعی آزموده شده. کار روی `feat/marketplace-service` است و **هنوز Merge نشده**.
+>
+> ---
+>
+> **پیشین — 2026-08-29 (چهارم):** Q-28 روی `main` رفت، و Q-26 و Q-27 بسته شدند.
 >
 > PR #5 با یک Merge Commit معمولی وارد `main` شد (`98dd7c0`، هر ۶ Commit اتمیک
 > حفظ شد) و CI روی `main` کامل سبز بود — هر ۱۰ Job شامل Trivy روی هر شش Image
@@ -1897,12 +1909,50 @@ construction, contract, notification, document, audit, analytics`)
 سیاست موقت محصول، بدون تغییر کد) روی `fix/economic-event-ordering` منتظر
 بازبینی‌اند.
 
-هر دو پیش‌نیاز `marketplace-service` بودند و به همین دلیل پیش از آن انجام شدند:
-نخستین مصرف‌کننده واقعی `rasta.economic.v1` هم به تنانت امضاشده نیاز دارد و هم
-به ترتیب تضمین‌شده رویدادهای یک تراکنش. **`READY_FOR_MARKETPLACE` تنها پس از
-Merge شدن PR ‏Q-26 و سبز شدن CI روی `main` اعلام می‌شود.**
+هر دو پیش‌نیاز `marketplace-service` بودند و پیش از آن انجام شدند.
+**`READY_FOR_MARKETPLACE` در 2026-08-30 اعلام شد**، پس از Merge شدن PR #6
+(`4ebdfc0`) و سبز شدن کامل CI روی `main` (Run `33267994013`).
 
-### گام بعدی: `marketplace-service`
+### `marketplace-service` — ساخته شد (2026-08-30) ✅
+
+پورت ۳۱۰۶، پایگاه داده `rasta_marketplace`، Topic `rasta.marketplace.v1`، صف
+Temporal ‏`rasta-order`.
+
+| سطح           | شاهد                                                                                          |
+| ------------- | --------------------------------------------------------------------------------------------- |
+| IMPLEMENTED   | Product · Offer · Order · OrderLine · Fulfillment · Dispute · Review · OrderStatusHistory     |
+| ADR           | **هفت** ADR، همه پیش از کد: ADR-037 تا ADR-043                                                |
+| TESTED        | **۱۰۹** تست واحد (شامل ۹ تست Workflow روی Temporal با ساعت زمان‌پرش)                          |
+| INTEGRATION   | **۴۴** تست روی PostgreSQL واقعی — Overselling، Deadlock، Idempotency، جداسازی مستأجر          |
+| **E2E**       | **۱۷ سناریو** روی Gateway + marketplace + economic + PostgreSQL + Kafka + Temporal + Keycloak |
+| **MIGRATION** | up → down → up در ۱۲۲۲۱ms، با ادعا روی چهار `CHECK` مالی                                      |
+| TEMPORAL      | نخستین مصرف واقعی پلتفرم. جبران پیش از تسویه؛ پس از آن **هرگز خودکار**                        |
+
+**چهار نقصی که خودِ تست‌ها پیدا کردند** (هیچ‌کدام از تست واحد قابل دیدن نبود):
+
+1. **خریدار می‌توانست از اعتراض خودش بیرون بیاید.** جدول گذار
+   `DISPUTED → RECEIPT_CONFIRMED` را مجاز می‌داند چون اپراتور از آن استفاده
+   می‌کند — و `ConfirmReceipt` خریدار همان یال را می‌رفت. حالا هر فرمان
+   وضعیت‌های مبدأ خودش را اعلام می‌کند.
+2. **اعتراض هرگز به `economic-service` نمی‌رسید.** ADR-040 § ۵ می‌گفت هر دو طرف
+   باید بدانند؛ Activity اش نام‌برده شده بود و نوشته نشده بود. حالا هست، و
+   بازتاب تصمیمِ حل اعتراض هم — بدون آن، اعتراضی که به نفع فروشنده حل شود هرگز
+   تسویه نمی‌شد.
+3. **مسیرهای گذار `201` برمی‌گرداندند** در حالی که بازپخش Idempotent شان `200`
+   ثبت شده بود، پس Retry با کدی متفاوت پاسخ می‌گرفت.
+4. **شناسه تسویه `settlement.id` خوانده می‌شد** و `economic-service`
+   `settlementId` برمی‌گرداند — سفارشی `COMPLETED` بدون چیزی برای تطبیق، که
+   `ck_order_completed_has_settlement` ردش کرد.
+
+**سه شکاف نام‌دار و ادعانشده (ADR-041):**
+
+| سرویس نبوده    | آنچه هست                               | آنچه **ادعا نمی‌شود**                       |
+| -------------- | -------------------------------------- | ------------------------------------------- |
+| `supplier`     | هویت از توکن تأییدشده                  | صلاحیت، مجوز، امتیاز، تعلیق — `UNAVAILABLE` |
+| `inventory`    | `offer.availableQuantity` زیر قفل ردیف | هیچ رزروی در هیچ انباری                     |
+| `notification` | رویدادهای دامنه‌ای واقعی منتشر می‌شوند | هیچ اعلانی تحویل داده نمی‌شود               |
+
+### گام بعدی پس از این
 
 پورت ۳۱۰۶، پایگاه داده `rasta_marketplace`، Topic `rasta.marketplace.v1`.
 

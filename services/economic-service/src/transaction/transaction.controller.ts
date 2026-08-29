@@ -196,11 +196,17 @@ export class TransactionController {
   @Post(':id/resolve-dispute')
   @HttpCode(200)
   @Roles('SYSTEM_ADMIN', 'UNION_ADMIN')
+  @AllowService('marketplace-service')
   @ApiOperation({
     summary: 'Resolve a dispute back into the settlement queue',
     description:
       'Records who decided and what they decided, and unblocks settlement. It does not settle: ' +
-      'releasing the money stays a separate, deliberate act.',
+      'releasing the money stays a separate, deliberate act. ' +
+      'Reachable by marketplace-service, whose order saga mirrors a dispute onto the ' +
+      'transaction and must be able to mirror the resolution back — otherwise a dispute ' +
+      'decided in the supplier’s favour could never settle. The decision itself is still a ' +
+      'platform-operator act: marketplace-service only reaches here after its own ' +
+      '`assertDisputeResolver` has required a platform role of the person who decided.',
   })
   async resolveDispute(
     @Param('id') id: string,

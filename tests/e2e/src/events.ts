@@ -58,7 +58,15 @@ export class EconomicEventTap {
    * window produces an event nobody sees and a timeout that blames the wrong
    * component.
    */
-  static async start(config: E2eConfig = e2eConfig()): Promise<EconomicEventTap> {
+  /**
+   * @param topic which domain stream to observe. Defaults to the economic one,
+   *   because that is what most scenarios watch; the marketplace scenarios pass
+   *   their own rather than having a second near-identical tap.
+   */
+  static async start(
+    config: E2eConfig = e2eConfig(),
+    topic: string = config.economicTopic,
+  ): Promise<EconomicEventTap> {
     const kafka = new Kafka({
       clientId: `e2e-tap-${randomUUID()}`,
       brokers: config.kafkaBrokers,
@@ -76,7 +84,7 @@ export class EconomicEventTap {
     });
 
     await consumer.connect();
-    await consumer.subscribe({ topic: config.economicTopic, fromBeginning: false });
+    await consumer.subscribe({ topic, fromBeginning: false });
     await consumer.run({
       eachMessage: async ({ message }) => {
         const headers = message.headers ?? {};

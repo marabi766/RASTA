@@ -28,6 +28,14 @@ export interface E2eConfig {
   gatewayUrl: string;
   /** economic-service directly — used only for health gating, never for assertions. */
   economicUrl: string;
+  /**
+   * marketplace-service directly.
+   *
+   * The order scenarios go through the **gateway**; this URL exists so a
+   * scenario can read the saga's internal view of an order without asking the
+   * gateway for a route it does not expose.
+   */
+  marketplaceUrl: string;
   keycloakUrl: string;
   realm: string;
   /** The public client with direct access grants enabled in the dev realm. */
@@ -35,6 +43,8 @@ export interface E2eConfig {
   kafkaBrokers: string[];
   /** Topic economic-service publishes to. */
   economicTopic: string;
+  /** Topic marketplace-service publishes to. */
+  marketplaceTopic: string;
   /** Keycloak admin, used once to reconcile the E2E users into an imported realm. */
   keycloakAdmin: { username: string; password: string };
   /**
@@ -58,6 +68,10 @@ export function e2eConfig(): E2eConfig {
       'E2E_ECONOMIC_URL',
       `http://localhost:${process.env.PORT_ECONOMIC?.trim() || '3112'}`,
     ).replace(/\/+$/, ''),
+    marketplaceUrl: required(
+      'E2E_MARKETPLACE_URL',
+      `http://localhost:${process.env.PORT_MARKETPLACE?.trim() || '3106'}`,
+    ).replace(/\/+$/, ''),
     keycloakUrl: required('KEYCLOAK_URL', 'http://localhost:8080').replace(/\/+$/, ''),
     realm: required('KEYCLOAK_REALM', 'rasta'),
     clientId: required('KEYCLOAK_WEB_CLIENT_ID', 'rasta-web'),
@@ -66,6 +80,7 @@ export function e2eConfig(): E2eConfig {
       .map((broker) => broker.trim())
       .filter(Boolean),
     economicTopic: 'rasta.economic.v1',
+    marketplaceTopic: 'rasta.marketplace.v1',
     keycloakAdmin: {
       username: required('KEYCLOAK_ADMIN', 'admin'),
       password: required('KEYCLOAK_ADMIN_PASSWORD', 'admin_dev_password'),
