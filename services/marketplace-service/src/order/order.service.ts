@@ -217,10 +217,15 @@ export class OrderService {
     return this.transition(orderId, 'CONFIRMED', {
       authorise: (order) => assertSupplier(order, 'confirm this order'),
       apply: async (tx, order) => {
-        await tx.order.update({
-          where: { id: order.id },
-          data: { status: 'CONFIRMED', confirmedAt: new Date() },
-        });
+        // The order row is scoped to the **buyer** (ADR-037 § 8) and the actor
+        // here is the seller, so this write crosses the guard with its reason.
+        // `assertSupplier` above has already established which seller.
+        await runUnscoped('the supplier accepts an order the buyer owns', () =>
+          tx.order.update({
+            where: { id: order.id },
+            data: { status: 'CONFIRMED', confirmedAt: new Date() },
+          }),
+        );
         await this.events.enqueue(tx, {
           eventName: MARKETPLACE_EVENTS.ORDER_CONFIRMED,
           aggregateId: order.id,
@@ -270,10 +275,12 @@ export class OrderService {
           }),
         );
 
-        await tx.order.update({
-          where: { id: order.id },
-          data: { status: 'AWAITING_RECEIPT_CONFIRMATION', fulfilledAt },
-        });
+        await runUnscoped('the supplier records delivery on an order the buyer owns', () =>
+          tx.order.update({
+            where: { id: order.id },
+            data: { status: 'AWAITING_RECEIPT_CONFIRMATION', fulfilledAt },
+          }),
+        );
 
         await this.events.enqueue(tx, {
           eventName: MARKETPLACE_EVENTS.ORDER_FULFILLED,
