@@ -144,6 +144,32 @@ export class RastaError extends Error {
     );
   }
 
+  /**
+   * A service-to-service call whose tenant context cannot be trusted.
+   *
+   * Raised when an internal token carries no signed `org_id` and the operation
+   * is tenant-scoped, or when an `X-Organization-Id` header disagrees with the
+   * signed claim (ADR-035).
+   *
+   * `403` rather than `500`: refusing a call whose authority cannot be
+   * established is a decision, not a fault, and reporting it as a fault sends
+   * an operator hunting for a bug that is not there.
+   *
+   * `reason` reaches the log through `internalContext` and never the response
+   * body — telling a caller *which* check failed lets them probe for the
+   * shape of a token that would pass (S-09).
+   */
+  static serviceTenantContextInvalid(
+    reason: 'MISSING_CLAIM' | 'HEADER_CLAIM_MISMATCH',
+    context?: Record<string, unknown>,
+  ): RastaError {
+    return new RastaError(
+      ERROR_CODES.SERVICE_TENANT_CONTEXT_INVALID,
+      'This service call carries no usable organization context',
+      { internalContext: { reason, ...context } },
+    );
+  }
+
   // ---- 5xx -----------------------------------------------------------------
 
   static upstreamUnavailable(service: string, cause?: unknown): RastaError {
