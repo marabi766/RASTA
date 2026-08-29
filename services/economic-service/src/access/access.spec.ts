@@ -159,16 +159,43 @@ describe('canCommitOrganization', () => {
     expect(() => run(asUser(['UNION_ADMIN']), () => canCommitOrganization('ORG-B'))).not.toThrow();
   });
 
-  it('permits a service caller, already authorised by @AllowService', () => {
+  it('permits a service caller to commit the organization its token names', () => {
     // marketplace-service settling an order it owns is the documented flow
-    // (docs/08 § 8.6).
-    expect(() => run(asService(), () => canCommitOrganization('ORG-Z'))).not.toThrow();
+    // (docs/08 § 8.6). `asService()` carries a token signed for ORG-A.
+    expect(() => run(asService(), () => canCommitOrganization('ORG-A'))).not.toThrow();
   });
 
-  it('refuses a request with no organization at all before it can commit one', () => {
-    // A context with no tenant reaches this only through a misconfiguration,
-    // and the honest answer is a refusal rather than a commitment made on
-    // behalf of nobody.
+  it('refuses a service caller acting for an organization its token does not name', () => {
+    // ADR-035. `@AllowService` exempts a service from the *role* check and
+    // from nothing else: its signed `org_id` is the organization it may commit,
+    // and one signed for ORG-A cannot move ORG-Z's money.
+    expect(() => run(asService(), () => canCommitOrganization('ORG-Z'))).toThrow(
+      expect.objectContaining({ code: 'TENANT_MISMATCH' }),
+    );
+  });
+
+  it('refuses a service caller whose token carries no organization at all', () => {
+    // The claim-less token a platform-wide internal operation would use. It
+    // reaches a tenant-scoped commit and is refused with the platform's own
+    // 403 rather than an unhandled error.
+    const tenantless: RequestContext = {
+      correlationId: 'corr-1',
+      requestId: 'req-1',
+      roles: ['SERVICE'],
+      authType: 'SERVICE',
+      callerService: 'marketplace-service',
+      startedAt: Date.now(),
+    };
+    expect(() => run(tenantless, () => canCommitOrganization('ORG-A'))).toThrow(
+      expect.objectContaining({ code: 'SERVICE_TENANT_CONTEXT_INVALID' }),
+    );
+  });
+
+  it('refuses a user request with no organization at all, and loudly', () => {
+    // A user context with no tenant reaches this only through a
+    // misconfiguration — the guard resolves one for every authenticated user —
+    // so it stays a raw error rather than becoming an ordinary-looking 403
+    // that somebody could mistake for a normal authorization outcome.
     const anonymous: RequestContext = {
       correlationId: 'corr-1',
       requestId: 'req-1',
@@ -177,7 +204,7 @@ describe('canCommitOrganization', () => {
       startedAt: Date.now(),
     };
     expect(() => run(anonymous, () => canCommitOrganization('ORG-A'))).toThrow(
-      expect.objectContaining({ code: 'TENANT_MISMATCH' }),
+      /tenant-scoped data was accessed/,
     );
   });
 

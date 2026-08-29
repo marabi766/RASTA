@@ -1,4 +1,9 @@
-import { runWithContext, isRastaError, type RequestContext } from '@rasta/nest-common';
+import {
+  getOrganizationId,
+  isRastaError,
+  runWithContext,
+  type RequestContext,
+} from '@rasta/nest-common';
 import { assertOwnDriverRecord, currentFleetScope, isFleetSupervisor } from './access';
 
 /**
@@ -133,5 +138,68 @@ describe('fleet access scope', () => {
         expect((error as { code: string }).code).toBe('NOT_FOUND');
       }
     });
+  });
+});
+
+describe('a service caller after ADR-035', () => {
+  /**
+   * Regression coverage for the shared change, from a service that is not the
+   * one it was written for.
+   *
+   * `currentFleetScope()` returns a **role** scope, not a tenant scope — a
+   * service caller sees the whole organization rather than one driver's
+   * records, because narrowing it to a driver record it does not have would
+   * break every internal read. The organization it sees is still bounded by
+   * the tenant-guarded client, from the signed `org_id` on its token.
+   *
+   * Those two are different questions, and this block exists so that a future
+   * change to one is not mistaken for a change to the other.
+   */
+
+  it('keeps its supervisor role scope', () => {
+    const scope = runWithContext(
+      context({
+        authType: 'SERVICE',
+        roles: ['SERVICE'],
+        callerService: 'maintenance-service',
+        organizationId: 'ORG-A',
+      }),
+      () => currentFleetScope(),
+    );
+
+    expect(scope.kind).toBe('SUPERVISOR');
+  });
+
+  it('is still bounded by the organization its token was signed for', () => {
+    // The scope says "the whole organization". *Which* organization is the one
+    // on the context, and it comes from the signed claim (ADR-035) — never
+    // from a header, which the shared AuthGuard refuses to honour on its own.
+    const organizationId = runWithContext(
+      context({
+        authType: 'SERVICE',
+        roles: ['SERVICE'],
+        callerService: 'maintenance-service',
+        organizationId: 'ORG-A',
+      }),
+      () => getOrganizationId(),
+    );
+
+    expect(organizationId).toBe('ORG-A');
+  });
+
+  it('is refused with a platform 403 when its token carries no organization', () => {
+    // Not a 500. Before ADR-035 this raised a raw Error and surfaced as
+    // INTERNAL_ERROR, which made a deliberate refusal look like a fault.
+    try {
+      runWithContext(
+        context({ authType: 'SERVICE', roles: ['SERVICE'], callerService: 'maintenance-service' }),
+        () => getOrganizationId(),
+      );
+      throw new Error('expected a refusal');
+    } catch (error) {
+      expect(isRastaError(error)).toBe(true);
+      expect((error as { code: string }).code).toBe('SERVICE_TENANT_CONTEXT_INVALID');
+      expect((error as { status: number }).status).toBe(403);
+    }
   });
 });

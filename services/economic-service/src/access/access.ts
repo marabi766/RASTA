@@ -114,11 +114,18 @@ export function canCommitOrganization(organizationId: string): void {
   // A service-to-service caller has already been authorized against
   // `@AllowService`, which is a stricter question than role membership:
   // marketplace-service settling an order it owns is exactly the documented
-  // flow (docs/08 § 8.6).
-  if (context.authType === 'SERVICE') return;
+  // flow (docs/08 § 8.6). It is exempt from the *role* check, and from
+  // nothing else — the tenant check below still applies.
+  //
+  // Until ADR-035 this returned outright, because a service call carried no
+  // tenant and there was nothing to compare against. Now that its token is
+  // signed for one organization, returning here would let a service holding a
+  // token for A commit B, which is precisely the escape the signature exists
+  // to prevent.
+  const isService = context.authType === 'SERVICE';
 
   const isAdmin = FINANCIAL_ADMIN_ROLES.some((role) => context.roles.includes(role));
-  if (!isAdmin) {
+  if (!isService && !isAdmin) {
     throw RastaError.forbidden(
       'You do not have permission to commit this organization financially',
     );
@@ -128,7 +135,10 @@ export function canCommitOrganization(organizationId: string): void {
   // resolving a stuck settlement. Everyone else is confined to their own, and
   // the mismatch is a 403 rather than a 404 because the caller already knows
   // which organization they asked to act for.
-  if (context.organizationId !== organizationId && !hasPlatformScope()) {
+  // `getOrganizationId()` rather than `context.organizationId`: a service
+  // whose token carries no signed tenant is refused here with the platform's
+  // 403 rather than silently comparing against `undefined` (ADR-035).
+  if (getOrganizationId() !== organizationId && !hasPlatformScope()) {
     throw RastaError.tenantMismatch(organizationId, [context.organizationId ?? '(none)']);
   }
 }
@@ -148,9 +158,9 @@ export function assertTransactionVisible(transaction: {
 }): void {
   assertNotAuditor();
 
-  const context = getContext();
-  if (context.authType === 'SERVICE') return;
-
+  // No exemption for a service caller. Its token names one organization, and
+  // that is the organization it is a party as — the same question asked of
+  // everybody else (ADR-035).
   const caller = getOrganizationId();
   if (transaction.organizationId === caller) return;
   if (transaction.counterpartyOrganizationId === caller) return;
@@ -173,9 +183,8 @@ export function assertTransactionVisible(transaction: {
 export function assertWalletVisible(wallet: { id: string; organizationId: string }): void {
   assertNotAuditor();
 
-  const context = getContext();
-  if (context.authType === 'SERVICE') return;
-
+  // A service caller is held to the same rule, against the organization its
+  // token was signed for (ADR-035).
   if (wallet.organizationId !== getOrganizationId() && !hasPlatformScope()) {
     throw RastaError.notFound('Wallet', wallet.id);
   }

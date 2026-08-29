@@ -1,4 +1,10 @@
-import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
+import {
+  getOrganizationId,
+  isRastaError,
+  RastaError,
+  runWithContext,
+  type RequestContext,
+} from '@rasta/nest-common';
 import {
   assertOwnReport,
   currentMaintenanceScope,
@@ -134,5 +140,58 @@ describe('record-level refusal', () => {
     expect(() =>
       assertOwnReport({ kind: 'REPORTER', userId: 'USR-OP' }, null, 'RepairOrder', 'RPO_1'),
     ).toThrow(RastaError);
+  });
+});
+
+
+describe('a service caller after ADR-035', () => {
+  /**
+   * Regression coverage for the shared change, from a service other than the
+   * one it was written for.
+   *
+   * `currentMaintenanceScope()` returns a **role** scope, not a tenant scope —
+   * a service caller sees the whole organization rather than one reporter's
+   * records, because narrowing it to a user record it does not have would
+   * break every internal read. *Which* organization is still bounded by the
+   * tenant-guarded client, from the signed `org_id` on its token.
+   *
+   * Those are different questions, and this block exists so a future change to
+   * one is not mistaken for a change to the other.
+   */
+
+  function asService<T>(organizationId: string | undefined, fn: () => T): T {
+    const context: RequestContext = {
+      correlationId: 'spec',
+      requestId: 'spec',
+      roles: ['SERVICE'],
+      authType: 'SERVICE',
+      callerService: 'economic-service',
+      startedAt: Date.now(),
+      ...(organizationId ? { organizationId } : {}),
+    };
+    return runWithContext(context, fn);
+  }
+
+  it('keeps its supervisor role scope', () => {
+    expect(asService('ORG-DEH-0001', () => currentMaintenanceScope()).kind).toBe('SUPERVISOR');
+  });
+
+  it('is still bounded by the organization its token was signed for', () => {
+    // Never from a header: the shared AuthGuard refuses to honour one that
+    // does not match the signed claim (ADR-035).
+    expect(asService('ORG-DEH-0001', () => getOrganizationId())).toBe('ORG-DEH-0001');
+  });
+
+  it('is refused with a platform 403 when its token carries no organization', () => {
+    // Not a 500. Before ADR-035 this raised a raw Error and surfaced as
+    // INTERNAL_ERROR, which made a deliberate refusal look like a fault.
+    try {
+      asService(undefined, () => getOrganizationId());
+      throw new Error('expected a refusal');
+    } catch (error) {
+      expect(isRastaError(error)).toBe(true);
+      expect((error as { code: string }).code).toBe('SERVICE_TENANT_CONTEXT_INVALID');
+      expect((error as { status: number }).status).toBe(403);
+    }
   });
 });
