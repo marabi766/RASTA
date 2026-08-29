@@ -41,7 +41,23 @@
       "dependsOn": ["^build"],
       "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "KAFKA_BROKERS"]
     },
-    "test:e2e": { "cache": false, "dependsOn": ["^build"] },
+    // Turbo runs tasks in a strict environment, so anything the E2E harness
+    // reads has to be declared here or it simply is not there — and the
+    // failure looks like "the gateway is down" rather than "the port was
+    // never passed through", which is the same trap D-005 sprang on
+    // `db:migrate`.
+    "test:e2e": {
+      "cache": false,
+      "dependsOn": ["^build"],
+      "env": [
+        "E2E_*",
+        "KEYCLOAK_*",
+        "KAFKA_BROKERS",
+        "PORT_API_GATEWAY",
+        "PORT_ECONOMIC",
+        "PLAYWRIGHT_*"
+      ]
+    },
     "dev": { "cache": false, "persistent": true },
     "clean": { "cache": false }
   }

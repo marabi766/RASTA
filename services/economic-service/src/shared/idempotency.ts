@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { RastaError, getOrganizationId } from '@rasta/nest-common';
+import { RastaError, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { isUniqueViolation } from '../ledger/ledger.repository';
 import { idempotentReplaysTotal } from '../observability/metrics';
@@ -184,11 +184,29 @@ export class IdempotencyStore {
     }
   }
 
-  /** Removes expired records. Called on the same timer as the other upkeep. */
+  /**
+   * Removes expired records. Called on the same timer as the other upkeep.
+   *
+   * Unscoped, and it has to be. The timer in `app.module.ts` runs outside any
+   * request, so there is no tenant in context — and the tenant guard refuses a
+   * `deleteMany` it cannot scope. Until this crossing was written the call
+   * threw `Request has no organizationId` on every pass, into a `catch` that
+   * exists so upkeep can never take the service down; the table therefore grew
+   * without bound while the failure was invisible.
+   *
+   * Crossing the guard is safe here in a way it very rarely is: the predicate
+   * is `expiresAt < now` and nothing else, so it can only ever remove records
+   * that are already unusable — a key past its window is refused on read by
+   * `claim()` regardless of who asks. It reads no tenant data and returns none.
+   */
   async purgeExpired(): Promise<number> {
-    const result = await this.prisma.client.idempotencyKey.deleteMany({
-      where: { expiresAt: { lt: new Date() } },
-    });
+    const result = await runUnscoped(
+      'expired idempotency records are platform upkeep, deleted by age alone and never by tenant',
+      () =>
+        this.prisma.client.idempotencyKey.deleteMany({
+          where: { expiresAt: { lt: new Date() } },
+        }),
+    );
     return result.count;
   }
 }

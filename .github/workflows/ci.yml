@@ -332,6 +332,287 @@ jobs:
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
 
+      - name: Migration reversibility
+        # AGENTS.md § 7 requires every migration to be reversible, and until
+        # now nothing had ever run a down script. up → down → up against a
+        # throwaway schema, asserting between each step that the tables, the
+        # three ledger triggers and `ck_wallet_balances` are there, gone, and
+        # back. It runs here rather than in its own job because this is where
+        # a migrated database already exists.
+        run: pnpm run test:migration
+        env:
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+
+  # ---------------------------------------------------------------------------
+  # End-to-end. The economic critical path through the whole stack.
+  #
+  # AGENTS.md § 7 makes a green E2E suite mandatory for `economic`, `identity`
+  # and `construction`, and until this job existed `pnpm test:e2e` exited zero
+  # having executed nothing — a gate that passes without running, which is
+  # read as evidence.
+  #
+  # Everything this job needs, it provisions. Nothing is assumed to be on the
+  # runner and nothing is borrowed from a developer machine.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: End-to-end (economic critical path)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: quality
+
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: rasta
+          POSTGRES_PASSWORD: rasta_ci_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rasta"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      kafka:
+        image: apache/kafka:3.9.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: '1'
+          KAFKA_PROCESS_ROLES: 'controller,broker'
+          KAFKA_CONTROLLER_QUORUM_VOTERS: '1@localhost:9093'
+          KAFKA_LISTENERS: 'PLAINTEXT://:9092,CONTROLLER://:9093'
+          KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://localhost:9092'
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT'
+          KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+          KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+          CLUSTER_ID: 'rasta-e2e-cluster-000001'
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 20
+          --health-start-period 40s
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Generate run secrets
+        # Minted per run and masked, never stored. The repository holds no real
+        # secret and must not start holding one because a test needed a value
+        # (AGENTS.md S-01). The Keycloak administrator password is only ever
+        # used by the harness to reconcile a realm that predates a fixture user;
+        # here the realm is imported fresh, so it is never exercised.
+        run: |
+          set -euo pipefail
+          keycloak_password="$(openssl rand -hex 24)"
+          internal_secret="$(openssl rand -hex 32)"
+          echo "::add-mask::${keycloak_password}"
+          echo "::add-mask::${internal_secret}"
+          echo "KEYCLOAK_ADMIN_PASSWORD=${keycloak_password}" >> "$GITHUB_ENV"
+          echo "INTERNAL_TOKEN_SECRET=${internal_secret}" >> "$GITHUB_ENV"
+
+      - name: Start Keycloak with the platform realm
+        # A `docker run` rather than a service container, because the realm
+        # import needs a file from the repository and service containers start
+        # before the checkout exists. In-memory storage: this Keycloak lives for
+        # one job and imports the realm on every boot.
+        run: |
+          set -euo pipefail
+          docker run -d --name rasta-e2e-keycloak \
+            -p 8080:8080 \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+            -e KC_BOOTSTRAP_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD}" \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_HOSTNAME_STRICT=false \
+            -v "$PWD/infrastructure/docker/keycloak:/opt/keycloak/data/import:ro" \
+            quay.io/keycloak/keycloak:26.0 \
+            start-dev --import-realm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Provision databases, roles and extensions
+        env:
+          PGPASSWORD: rasta_ci_password
+          POSTGRES_SERVICE_PASSWORD: rasta_ci_service_password
+        run: |
+          export PGHOST=localhost PGPORT=5432 POSTGRES_USER=rasta
+          bash infrastructure/docker/postgres/00-init-databases.sh
+
+      - name: Create Kafka topics
+        # Auto-creation is off by design (ADR-006). The economic topic and its
+        # retry/dlq siblings must exist before the service connects, or the
+        # outbox relay fails to publish and the correlation scenario times out
+        # blaming the wrong component.
+        run: |
+          set -euo pipefail
+          for topic in \
+            rasta.economic.v1 rasta.economic.v1.retry rasta.economic.v1.dlq \
+            rasta.maintenance.v1 rasta.maintenance.v1.retry rasta.maintenance.v1.dlq \
+            rasta.fleet.v1 rasta.fleet.v1.retry rasta.fleet.v1.dlq \
+            rasta.asset.v1 rasta.insurance.v1; do
+            docker run --rm --network host apache/kafka:3.9.0 \
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+              --create --if-not-exists --partitions 3 --replication-factor 1 \
+              --topic "$topic"
+          done
+          docker run --rm --network host apache/kafka:3.9.0 \
+            /opt/kafka/bin/kafka-consumer-groups.sh \
+            --bootstrap-server localhost:9092 --list
+
+      - run: pnpm run db:generate
+
+      - name: Apply migrations
+        run: pnpm --filter @rasta/economic-service run db:migrate
+        env:
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Wait for Keycloak to import the realm
+        # Waited for here rather than only inside globalSetup, so that a
+        # Keycloak that never came up is reported as a Keycloak failure and its
+        # log is printed, instead of surfacing as a token error in a test.
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl -sfo /dev/null \
+              "http://localhost:8080/realms/rasta/.well-known/openid-configuration"; then
+              echo "Keycloak realm 'rasta' is ready after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Keycloak did not become ready"
+          docker logs rasta-e2e-keycloak
+          exit 1
+
+      - name: Start economic-service and api-gateway
+        # From `dist`, the same artefact the container image runs, rather than
+        # from a watch-mode dev server. Started here rather than by Playwright's
+        # `webServer` because two processes have to come up in order and their
+        # logs must survive the job for a failure to be diagnosable.
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+          KAFKA_BROKERS: localhost:9092
+          REDIS_URL: redis://localhost:6379
+          OIDC_ISSUER_URL: http://localhost:8080/realms/rasta
+          OIDC_JWKS_URI: http://localhost:8080/realms/rasta/protocol/openid-connect/certs
+          OIDC_AUDIENCE: rasta-api
+          PORT_ECONOMIC: '3112'
+          PORT_API_GATEWAY: '3000'
+          ECONOMIC_PLATFORM_ORGANIZATION_ID: ORG-PLATFORM
+          # The reconciliation is a timer that reports; it has nothing to
+          # observe in a fresh database and only adds noise to the log.
+          ECONOMIC_BALANCE_AUDIT_ENABLED: 'false'
+          # api-gateway validates every service URL at boot, including the
+          # fourteen services that do not exist yet. They are unreachable and
+          # unrouted-to by this suite; the values only have to parse.
+          IDENTITY_SERVICE_URL: http://localhost:3101
+          ORGANIZATION_SERVICE_URL: http://localhost:3102
+          ASSET_SERVICE_URL: http://localhost:3103
+          FLEET_SERVICE_URL: http://localhost:3104
+          MAINTENANCE_SERVICE_URL: http://localhost:3105
+          MARKETPLACE_SERVICE_URL: http://localhost:3106
+          PROCUREMENT_SERVICE_URL: http://localhost:3107
+          SUPPLIER_SERVICE_URL: http://localhost:3108
+          INVENTORY_SERVICE_URL: http://localhost:3109
+          CONSTRUCTION_SERVICE_URL: http://localhost:3110
+          CONTRACT_SERVICE_URL: http://localhost:3111
+          ECONOMIC_SERVICE_URL: http://localhost:3112
+          NOTIFICATION_SERVICE_URL: http://localhost:3113
+          DOCUMENT_SERVICE_URL: http://localhost:3114
+          AUDIT_SERVICE_URL: http://localhost:3115
+          ANALYTICS_SERVICE_URL: http://localhost:3116
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/rasta-logs
+
+          ( cd services/economic-service && \
+            PORT=3112 SERVICE_NAME=economic-service \
+            node dist/main.js > /tmp/rasta-logs/economic.log 2>&1 & )
+
+          ( cd services/api-gateway && \
+            PORT=3000 SERVICE_NAME=api-gateway \
+            node dist/main.js > /tmp/rasta-logs/gateway.log 2>&1 & )
+
+          for attempt in $(seq 1 60); do
+            economic="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3112/health/ready || true)"
+            gateway="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3000/v1/wallets/me || true)"
+            if [ "$economic" = "200" ] && [ "$gateway" = "401" ]; then
+              echo "stack up after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 3
+          done
+
+          echo "the stack did not come up (economic=${economic}, gateway=${gateway})"
+          cat /tmp/rasta-logs/economic.log
+          cat /tmp/rasta-logs/gateway.log
+          exit 1
+
+      - name: End-to-end tests
+        # Playwright fails a run that matches no tests, and that default is kept
+        # deliberately — `--pass-with-no-tests` appears nowhere in this
+        # repository.
+        run: pnpm run test:e2e
+        env:
+          E2E_GATEWAY_URL: http://localhost:3000
+          E2E_ECONOMIC_URL: http://localhost:3112
+          KEYCLOAK_URL: http://localhost:8080
+          KEYCLOAK_REALM: rasta
+          KEYCLOAK_WEB_CLIENT_ID: rasta-web
+          KEYCLOAK_ADMIN: admin
+          KAFKA_BROKERS: localhost:9092
+
+      - name: Service logs
+        if: failure()
+        run: |
+          echo '--- economic-service ---'
+          tail -n 200 /tmp/rasta-logs/economic.log || true
+          echo '--- api-gateway ---'
+          tail -n 200 /tmp/rasta-logs/gateway.log || true
+          echo '--- keycloak ---'
+          docker logs --tail 200 rasta-e2e-keycloak || true
+
+      - name: Playwright report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: playwright-report
+          path: tests/e2e/playwright-report
+          retention-days: 7
+
   # ---------------------------------------------------------------------------
   # Container build and image scan. Only on main, because it is the slowest
   # stage and a PR has already been gated by everything above.
@@ -340,7 +621,10 @@ jobs:
     name: Build and scan images
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [quality, security, integration]
+    # E2E joins the list: main must stay deployable, and an image built from a
+    # commit whose critical financial path was never exercised is not something
+    # to publish (AGENTS.md § 6, § 7).
+    needs: [quality, security, integration, e2e]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     strategy:
