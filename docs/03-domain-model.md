@@ -20,7 +20,7 @@
 │                            ASSET DOMAIN  ◄── هسته کسب‌وکار                │
 │  Asset Context        │ Fleet Context      │ Maintenance Context         │
 │  Asset · Document ·   │ Driver ·           │ Schedule · Request ·        │
-│  InsurancePolicy ·    │ Assignment ·       │ RepairOrder · Part ·        │
+│  InsurancePolicyRef · │ Assignment ·       │ RepairOrder · Part ·        │
 │  Inspection           │ UsageRecord        │ Labor                       │
 └────────────┬──────────┴──────────┬─────────┴──────────┬──────────────────┘
              │ AST_                 │                    │
@@ -46,15 +46,21 @@
                              │
                              ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
+│                         TARGET EXTENSIONS                                │
+│  Insurance: Quote · Offer · Policy · Claim │ IoT: Device · Telemetry     │
+└──────────────────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────────────────┐
 │                       PLATFORM SUPPORT                                   │
 │  Notification  │  Document  │  Audit (فقط الحاقی)  │  Analytics (ReadModel)│
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 **قاعده جهت وابستگی.** جریان همیشه از بالا به پایین است. `asset` می‌داند `organization`
-وجود دارد؛ `organization` چیزی درباره `asset` نمی‌داند. `economic` رویدادهای همه را مصرف
-می‌کند اما هیچ‌کس منطق مالی را فراخوانی نمی‌کند — کارمزد و پاداش **نتیجه رویداد**اند،
-نه فراخوانی مستقیم.
+وجود دارد؛ `organization` چیزی درباره `asset` نمی‌داند. اثر مالی فقط در مرز `economic`
+ایجاد می‌شود: یا از واقعیت دامنه‌ای منتشرشده، یا از فرمان احرازشده و Idempotent در یک
+Workflow مصوب. هیچ سرویس دیگری نرخ، Journal یا منطق تسویه را محاسبه نمی‌کند.
 
 ---
 
@@ -76,17 +82,21 @@
 
 ### دارایی و ناوگان
 
-| فارسی               | کد                    | تعریف                                                                    |
-| ------------------- | --------------------- | ------------------------------------------------------------------------ |
-| دارایی / ماشین‌آلات | `Asset`               | **Aggregate Root مرکزی.** هویت دیجیتال پایدار یک ماشین یا تجهیز          |
-| پرونده الکترونیکی   | `AssetDossier`        | نمای تجمیعی تاریخچه دارایی (Read Model، از رویدادها ساخته می‌شود)        |
-| نوع دستگاه          | `AssetType`           | گریدر، لودر، بیل مکانیکی، کامیون، تراکتور، …                             |
-| وضعیت بهره‌برداری   | `OperationalStatus`   | `ACTIVE\|IDLE\|IN_MAINTENANCE\|ASSIGNED\|OUT_OF_SERVICE\|DECOMMISSIONED` |
-| راننده / اپراتور    | `Driver`              | فرد مسئول بهره‌برداری؛ به `User` پیوند می‌خورد اما موجودیت جداست         |
-| تخصیص               | `Assignment`          | رابطه زمان‌دار راننده ↔ دارایی                                           |
-| کارکرد              | `UsageRecord`         | ثبت ساعت/کیلومتر با منبع (`MANUAL\|TELEMATICS\|IMPORTED`)                |
-| بیمه‌نامه           | `InsurancePolicy`     | پوشش، تاریخ شروع و پایان، شرکت بیمه                                      |
-| معاینه فنی          | `TechnicalInspection` | گواهی معاینه فنی با تاریخ انقضا                                          |
+| فارسی                    | کد                      | تعریف                                                                    |
+| ------------------------ | ----------------------- | ------------------------------------------------------------------------ |
+| دارایی / ماشین‌آلات      | `Asset`                 | **Aggregate Root مرکزی.** هویت دیجیتال پایدار یک ماشین یا تجهیز          |
+| پرونده الکترونیکی        | `AssetDossier`          | نمای تجمیعی تاریخچه دارایی (Read Model، از رویدادها ساخته می‌شود)        |
+| نوع دستگاه               | `AssetType`             | گریدر، لودر، بیل مکانیکی، کامیون، تراکتور، …                             |
+| وضعیت بهره‌برداری        | `OperationalStatus`     | `ACTIVE\|IDLE\|IN_MAINTENANCE\|ASSIGNED\|OUT_OF_SERVICE\|DECOMMISSIONED` |
+| راننده / اپراتور         | `Driver`                | فرد مسئول بهره‌برداری؛ به `User` پیوند می‌خورد اما موجودیت جداست         |
+| تخصیص                    | `Assignment`            | رابطه زمان‌دار راننده ↔ دارایی                                           |
+| کارکرد                   | `UsageRecord`           | ثبت ساعت/کیلومتر با منبع (`MANUAL\|TELEMATICS\|IMPORTED`)                |
+| مرجع بیمه‌نامه در دارایی | `InsurancePolicyRef`    | Read Model حداقلی پوشش و انقضا در `asset`                                |
+| بیمه‌نامه تجاری          | `InsurancePolicy`       | قرارداد و وضعیت پوشش؛ در معماری هدف متعلق به `insurance`                 |
+| معاینه فنی               | `TechnicalInspection`   | گواهی معاینه فنی با تاریخ انقضا                                          |
+| درخواست استعلام بیمه     | `InsuranceQuoteRequest` | نیاز بیمه‌ای یک دارایی برای دریافت پیشنهاد                               |
+| پیشنهاد بیمه             | `InsuranceOffer`        | حق بیمه، پوشش، فرانشیز و شرایط اعلام‌شدهٔ یک Provider                    |
+| پرونده خسارت             | `InsuranceClaim`        | چرخهٔ اعلام، ارزیابی، تصمیم و تسویهٔ خسارت                               |
 
 ### نگهداری و تعمیر
 
@@ -116,6 +126,10 @@
 | سفارش خرید         | `PurchaseOrder`            | سند خرید نهایی‌شده                                            |
 | رسید و کنترل کیفیت | `Receipt` / `QualityCheck` | تأیید دریافت و انطباق                                         |
 | تأمین‌کننده        | `Supplier`                 | سازمان عرضه‌کننده؛ دارای `Qualification` و `PerformanceScore` |
+| درخواست مرجوعی     | `ReturnRequest`            | درخواست تجاری بازگرداندن قلم متصل به سفارش                    |
+| ادعای ضمانت        | `WarrantyClaim`            | مطالبهٔ تعمیر یا تعویض مطابق شرایط ثبت‌شده                    |
+| حمل برگشت          | `ReturnShipment`           | حرکت فیزیکی کالا به مقصد بازرسی یا تأمین‌کننده                |
+| تعیین تکلیف برگشتی | `Disposition`              | بازگشت به موجودی، تعمیر، تعویض، اسقاط یا بازیافت              |
 
 ### رستا عمران
 
@@ -138,23 +152,28 @@
 
 ### موتور اقتصادی
 
-| فارسی               | کد                 | تعریف                                                |
-| ------------------- | ------------------ | ---------------------------------------------------- |
-| کیف پول             | `Wallet`           | حساب عملیاتی هر سازمان؛ نمای دفتر کل                 |
-| موجودی در دسترس     | `availableBalance` | قابل خرج کردن                                        |
-| موجودی معلق         | `pendingBalance`   | Hold شده برای سفارش تأییدنشده                        |
-| نگه‌داشت / آزادسازی | `Hold` / `Release` | رزرو مبلغ و آزاد کردن آن پس از تأیید دریافت          |
-| حساب دفتر کل        | `LedgerAccount`    | حساب در نظام دوطرفه، با `AccountType`                |
-| دفتر روزنامه        | `Journal`          | مجموعه اتمیک ورودی‌ها؛ مجموع بدهکار = مجموع بستانکار |
-| ورودی دفتر کل       | `LedgerEntry`      | **تغییرناپذیر.** بدهکار یا بستانکار روی یک حساب      |
-| ورودی معکوس         | `ReversalEntry`    | تنها راه اصلاح                                       |
-| تراکنش              | `Transaction`      | واحد کسب‌وکاری پرداخت؛ دارای `IdempotencyKey`        |
-| کارمزد              | `Commission`       | سهم پلتفرم؛ محاسبه‌شده از `CommissionRule`           |
-| قاعده کارمزد        | `CommissionRule`   | **پیکربندی:** نوع تراکنش، نرخ (Basis Point)، سقف، کف |
-| پاداش               | `Reward`           | امتیاز یا اعتبار اعطاشده                             |
-| قاعده پاداش         | `RewardRule`       | **پیکربندی:** رویداد محرک، شرط، امتیاز، سقف دوره‌ای  |
-| سطح کاربر           | `RewardLevel`      | دسته‌بندی بر مبنای امتیاز انباشته                    |
-| تسویه               | `Settlement`       | انتقال نهایی به ارائه‌دهنده خدمت پس از کسر کارمزد    |
+| فارسی               | کد                   | تعریف                                                                          |
+| ------------------- | -------------------- | ------------------------------------------------------------------------------ |
+| کیف پول             | `Wallet`             | حساب عملیاتی هر سازمان؛ نمای دفتر کل                                           |
+| موجودی در دسترس     | `availableBalance`   | قابل خرج کردن                                                                  |
+| موجودی معلق         | `pendingBalance`     | Hold شده برای سفارش تأییدنشده                                                  |
+| نگه‌داشت / آزادسازی | `Hold` / `Release`   | رزرو مبلغ و آزاد کردن آن پس از تأیید دریافت                                    |
+| حساب دفتر کل        | `LedgerAccount`      | حساب در نظام دوطرفه، با `AccountType`                                          |
+| دفتر روزنامه        | `Journal`            | مجموعه اتمیک ورودی‌ها؛ مجموع بدهکار = مجموع بستانکار                           |
+| ورودی دفتر کل       | `LedgerEntry`        | **تغییرناپذیر.** بدهکار یا بستانکار روی یک حساب                                |
+| ورودی معکوس         | `ReversalEntry`      | تنها راه اصلاح                                                                 |
+| تراکنش              | `Transaction`        | واحد کسب‌وکاری پرداخت؛ دارای `IdempotencyKey`                                  |
+| کارمزد              | `Commission`         | سهم پلتفرم؛ محاسبه‌شده از `CommissionRule`                                     |
+| قاعده کارمزد        | `CommissionRule`     | **پیکربندی:** نوع تراکنش، نرخ (Basis Point)، سقف، کف                           |
+| خط کسب‌وکار         | `BusinessLine`       | علت اقتصادی کارمزد: قطعه، بیمه، نگهداری، لجستیک، تأمین، عمران یا خدمت بازارگاه |
+| پاداش               | `Reward`             | امتیاز یا اعتبار اعطاشده                                                       |
+| قاعده پاداش         | `RewardRule`         | **پیکربندی:** رویداد محرک، شرط، امتیاز، سقف دوره‌ای                            |
+| سطح کاربر           | `RewardLevel`        | دسته‌بندی بر مبنای امتیاز انباشته                                              |
+| امتیاز مشارکت       | `ParticipationScore` | شاخص غلتان کیفیت همکاری؛ قابل خرج‌کردن نیست                                    |
+| رتبهٔ دوره‌ای       | `RankingSnapshot`    | جایگاه در گروه همتای مجاز و بازهٔ مشخص                                         |
+| مزیت                | `RewardBenefit`      | منفعت پیکربندی‌شدهٔ یک سطح یا انتخاب کاربر                                     |
+| اعتراض امتیاز       | `ScoreAppeal`        | درخواست توضیح یا بازبینی یک محاسبهٔ مشخص                                       |
+| تسویه               | `Settlement`         | انتقال نهایی به ارائه‌دهنده خدمت پس از کسر کارمزد                              |
 
 ---
 
@@ -164,21 +183,24 @@
 از راه رویداد و در نهایت سازگاری (Eventual Consistency) انجام می‌شود — مگر آنکه هر دو
 در یک Bounded Context و یک پایگاه داده باشند و ثبات فوری الزام کسب‌وکار باشد.
 
-| Aggregate Root       | موجودیت‌های داخل مرز                                      | چرا این مرز                                                       |
-| -------------------- | --------------------------------------------------------- | ----------------------------------------------------------------- |
-| `Organization`       | `OrganizationPolicy`, `OrganizationLocation`              | سیاست بدون سازمان معنا ندارد                                      |
-| `User`               | `Credential`, `Membership`, `Session`                     | عضویت‌ها باید با کاربر اتمیک تغییر کنند (فعال/غیرفعال شدن)        |
-| `Asset`              | `AssetDocument`, `InsurancePolicy`, `TechnicalInspection` | ثبات فوری لازم: دارایی بدون بیمه معتبر نباید فعال شمرده شود       |
-| `Driver`             | `Assignment`                                              | یک راننده نباید هم‌زمان به دو دارایی فعال تخصیص یابد              |
-| `MaintenanceRequest` | `RepairOrder`, `PartUsage`, `LaborEntry`                  | هزینه کل باید با اجزایش اتمیک بماند                               |
-| `Order`              | `OrderLine`, `Fulfillment`, `OrderStatusHistory`          | جمع سفارش و اقلامش باید همیشه سازگار باشند                        |
-| `DemandAggregation`  | `AggregatedDemandLine`                                    | تجمیع یک عمل اتمیک است                                            |
-| `Project`            | `ProjectNeed`, `Approval`                                 | موافقت بدون پروژه معنا ندارد                                      |
-| `Tender`             | `TenderDocument`, `Bid`, `Evaluation`                     | ارزیابی باید در برابر مجموعه کامل پیشنهادها اتمیک باشد            |
-| `Contract`           | `Amendment`, `Milestone`, `Statement`                     | مبلغ قرارداد و الحاقیه‌هایش باید سازگار بمانند                    |
-| `Wallet`             | `WalletHold`                                              | موجودی و Holdها **باید** اتمیک باشند — مبنای Insufficient Balance |
-| `Journal`            | `LedgerEntry`                                             | **CONSTRAINT:** توازن Journal یک Invariant اتمیک است              |
-| `Transaction`        | `TransactionLeg`, `Commission`                            | کارمزد و تراکنش در یک لحظه ثبت می‌شوند                            |
+| Aggregate Root       | موجودیت‌های داخل مرز                                         | چرا این مرز                                                                                |
+| -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `Organization`       | `OrganizationPolicy`, `OrganizationLocation`                 | سیاست بدون سازمان معنا ندارد                                                               |
+| `User`               | `Credential`, `Membership`, `Session`                        | عضویت‌ها باید با کاربر اتمیک تغییر کنند (فعال/غیرفعال شدن)                                 |
+| `Asset`              | `AssetDocument`, `InsurancePolicyRef`, `TechnicalInspection` | وضعیت پوشش در Read Model دارایی فوری است؛ Policy تجاری پس از استخراج نزد insurance می‌ماند |
+| `Driver`             | `Assignment`                                                 | یک راننده نباید هم‌زمان به دو دارایی فعال تخصیص یابد                                       |
+| `MaintenanceRequest` | `RepairOrder`, `PartUsage`, `LaborEntry`                     | هزینه کل باید با اجزایش اتمیک بماند                                                        |
+| `Order`              | `OrderLine`, `Fulfillment`, `OrderStatusHistory`             | جمع سفارش و اقلامش باید همیشه سازگار باشند                                                 |
+| `DemandAggregation`  | `AggregatedDemandLine`                                       | تجمیع یک عمل اتمیک است                                                                     |
+| `Project`            | `ProjectNeed`, `Approval`                                    | موافقت بدون پروژه معنا ندارد                                                               |
+| `Tender`             | `TenderDocument`, `Bid`, `Evaluation`                        | ارزیابی باید در برابر مجموعه کامل پیشنهادها اتمیک باشد                                     |
+| `Contract`           | `Amendment`, `Milestone`, `Statement`                        | مبلغ قرارداد و الحاقیه‌هایش باید سازگار بمانند                                             |
+| `Wallet`             | `WalletHold`                                                 | موجودی و Holdها **باید** اتمیک باشند — مبنای Insufficient Balance                          |
+| `Journal`            | `LedgerEntry`                                                | **CONSTRAINT:** توازن Journal یک Invariant اتمیک است                                       |
+| `Transaction`        | `TransactionLeg`, `Commission`                               | کارمزد و تراکنش در یک لحظه ثبت می‌شوند                                                     |
+| `InsuranceClaim`     | `ClaimAssessment`, `ClaimDecision`                           | تصمیم و سابقهٔ ارزیابی باید سازگار و حسابرسی‌پذیر بماند                                    |
+| `ReturnRequest`      | `ReturnLine`, `ReturnDecision`                               | تصمیم تجاری مرجوعی به اقلام سفارش متصل است                                                 |
+| `ParticipationScore` | `ScoreContribution`, `ScoreAdjustment`                       | Breakdown و اصلاح امتیاز باید با نتیجهٔ نهایی سازگار بماند                                 |
 
 ### Invariantهای بحرانی
 
@@ -287,14 +309,18 @@ Organization ─┬─< Membership >─┬─ User
               │                └─< Session
               │
               ├─< Asset ─┬─< AssetDocument
-              │          ├─< InsurancePolicy
+              │          ├─< InsurancePolicyRef
               │          ├─< TechnicalInspection
               │          ├─< UsageRecord
               │          ├─< Assignment >── Driver
               │          └─< MaintenanceRequest ─< RepairOrder ─< PartUsage
               │
               ├─< Order ─< OrderLine >── Offer >── Product
-              │      └─< Fulfillment
+              │      ├─< Fulfillment
+              │      └─< ReturnRequest ─< ReturnShipment ─< ReturnInspection
+              │
+              ├─< InsuranceQuoteRequest ─< InsuranceOffer
+              │      └─< InsurancePolicy ─< InsuranceClaim
               │
               ├─< DemandRequest >── DemandAggregation ─< RFQ ─< Quotation
               │
@@ -305,6 +331,9 @@ Organization ─┬─< Membership >─┬─ User
               │                              └── Contract ─┬─< Amendment
               │                                            ├─< Milestone
               │                                            └─< Statement
+              │
+              ├─< ParticipationScore ─< ScoreContribution
+              │      └─< RankingSnapshot
               │
               └─── Wallet ─< WalletHold
                       │

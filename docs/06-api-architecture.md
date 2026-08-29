@@ -431,6 +431,40 @@ GET    /v1/payment-intents/{id}                    یک پرداخت
 POST   /v1/payment-intents/{id}/refund             بازگشت شارژ — با Reversal   [K]
 ```
 
+**قابلیت‌های هدف — PLANNED، نه API موجود**
+
+مسیرهای زیر قرارداد جهت‌گیری محصول‌اند و تا زمان پیاده‌سازی نباید در Gateway یا OpenAPI
+به‌عنوان Endpoint زنده منتشر شوند:
+
+```
+# Insurance — ADR-046
+POST   /v1/insurance/quote-requests               درخواست استعلام
+GET    /v1/insurance/quote-requests/{id}/offers   مقایسه پیشنهادها
+POST   /v1/insurance/policies/{id}/renewals       درخواست تمدید
+POST   /v1/insurance/claims                       اعلام خسارت
+GET    /v1/insurance/claims/{id}                  پرونده و تاریخچه وضعیت
+POST   /v1/insurance/claims/{id}/decisions        تصمیم صریح مرجع مجاز
+
+# Participation and reward — ADR-047
+GET    /v1/participation/me                       امتیاز، Breakdown و نسخه قاعده
+GET    /v1/participation/me/ranking               جایگاه در گروه همتای مجاز
+GET    /v1/reward-benefits                        مزایای مصوب قابل انتخاب
+POST   /v1/reward-benefits/{id}/redeem        [K] انتخاب یا مصرف مزیت
+POST   /v1/score-appeals                      [K] اعتراض به محاسبه مشخص
+GET    /v1/score-appeals/{id}                     وضعیت اعتراض
+
+# Reverse logistics — ADR-048
+POST   /v1/orders/{id}/returns                [K] درخواست مرجوعی
+POST   /v1/orders/{id}/warranty-claims        [K] ادعای ضمانت
+GET    /v1/returns/{id}                           چرخه تجاری و فیزیکی
+POST   /v1/returns/{id}/decisions             [K] پذیرش یا رد مرجع مجاز
+POST   /v1/return-shipments                   [K] ایجاد حمل برگشت
+POST   /v1/returns/{id}/inspections           [K] ثبت بازرسی و تعیین تکلیف
+```
+
+همهٔ مسیرهای نوشتنی به Tenant Scope، مجوز سطح Object، Audit و در صورت اثر تکرارپذیر به
+`Idempotency-Key` نیاز دارند. نمایش مسیر برنامه‌ریزی‌شده به‌عنوان API موجود ممنوع است.
+
 **سه نکته که از فهرست بالا پیدا نیست:**
 
 - **هیچ Endpoint ی Journal دلخواه Post نمی‌کند.** یک Journal همیشه رکورد چیزی
