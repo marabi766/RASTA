@@ -339,18 +339,39 @@ POST   /v1/maintenance-requests/{id}/approve  تأیید کاربر (پیش‌ن
 GET    /v1/maintenance-schedules/due     سررسیدهای پیش رو
 ```
 
-**Marketplace**
+**Marketplace** — پیاده‌شده (2026-08-30). `[K]` یعنی `Idempotency-Key` اجباری.
 
 ```
-GET    /v1/products                      جست‌وجوی کالا
-GET    /v1/products/{id}/offers          پیشنهادهای تأمین‌کنندگان
-POST   /v1/orders                        ثبت سفارش   [Idempotency-Key]
-GET    /v1/orders/{id}                   دریافت
-POST   /v1/orders/{id}/fulfill           اعلام تحویل (تأمین‌کننده)
-POST   /v1/orders/{id}/confirm-receipt   تأیید دریافت (کاربر) → آزادسازی تسویه
-POST   /v1/orders/{id}/disputes          ثبت اعتراض
-POST   /v1/orders/{id}/reviews           ارزیابی
+GET    /v1/products                          جست‌وجو (q, category, sort)
+GET    /v1/products/{id}/offers              پیشنهادهای تأمین‌کنندگان
+POST   /v1/products                          تعریف کالا
+GET    /v1/offers                            عرضه‌های خودِ تأمین‌کننده
+POST   /v1/offers                            انتشار عرضه
+PATCH  /v1/offers/{id}                       تغییر قیمت/موجودی → نسخه +۱
+POST   /v1/orders                        [K] ثبت سفارش — قیمت از سرور
+GET    /v1/orders                            فهرست (role=BUYER|SUPPLIER)
+GET    /v1/orders/{id}                       دریافت — هر دو طرف
+POST   /v1/orders/{id}/confirm           [K] پذیرش (تأمین‌کننده)
+POST   /v1/orders/{id}/fulfill           [K] اعلام تحویل (تأمین‌کننده)
+POST   /v1/orders/{id}/confirm-receipt   [K] تأیید دریافت (خریدار) → مجوز تسویه
+POST   /v1/orders/{id}/disputes          [K] ثبت اعتراض → توقف کامل تسویه
+POST   /v1/orders/{id}/disputes/resolve  [K] تصمیم اپراتور پلتفرم
+POST   /v1/orders/{id}/cancel            [K] لغو → جبران مالی
+POST   /v1/orders/{id}/reviews           [K] ارزیابی — فقط پس از تکمیل
 ```
+
+**سه نکته که در فهرست بالا پیدا نیست:**
+
+- **بدنه `POST /v1/orders` هیچ فیلد قیمتی ندارد و `.strict()` است.** قیمتی که
+  کلاینت بفرستد `400 VALIDATION_FAILED` می‌گیرد — نادیده گرفتنش بی‌صدا بود و به
+  کلاینتی که فکر می‌کند قیمت می‌گذارد نمی‌گفت که نمی‌گذارد (ADR-037 § ۵).
+- **`sort` مقدار `RATING` نمی‌پذیرد.** امتیاز تأمین‌کننده نزد `supplier-service`
+  است که وجود ندارد؛ پذیرفتن و مرتب کردن بر چیز دیگر، دروغ گفتن درباره نتیجه
+  است (ADR-042 § ۲).
+- **مسیرهای گذار وضعیت `200` برمی‌گردانند، نه `201`.** پیش‌فرض Nest برای `POST`
+  اینجا دو بار نادرست بود: چیزی ساخته نمی‌شود، و وضعیت ثبت‌شده برای بازپخش
+  Idempotent هم `200` است — پس Retry با کدی متفاوت از فراخوان اول پاسخ می‌گرفت.
+  فقط ثبت سفارش و ثبت ارزیابی `201`اند.
 
 **Construction**
 
