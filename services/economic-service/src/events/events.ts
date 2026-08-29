@@ -315,7 +315,19 @@ export const ECONOMIC_EVENT_SCHEMAS = {
  * usual: an unreadable `SETTLEMENT_COMPLETED` is a payment that other services
  * never learn about, discovered in someone else's dead-letter topic where it
  * may not be replayed automatically.
+ *
+ * Returns the parsed payload typed to the event it belongs to, so that
+ * whatever reads a field off it afterwards — the partition-key policy, above
+ * all — is checked against that event's own schema rather than against
+ * `unknown` (ADR-036).
  */
-export function validateEconomicPayload(eventName: EconomicEventName, payload: unknown): unknown {
-  return ECONOMIC_EVENT_SCHEMAS[eventName].parse(payload);
+export function validateEconomicPayload<N extends EconomicEventName>(
+  eventName: N,
+  payload: unknown,
+): z.infer<(typeof ECONOMIC_EVENT_SCHEMAS)[N]> {
+  // The schema is selected by the same key as the return type; TypeScript
+  // cannot correlate the two through a generic parameter, hence the assertion.
+  return ECONOMIC_EVENT_SCHEMAS[eventName].parse(payload) as z.infer<
+    (typeof ECONOMIC_EVENT_SCHEMAS)[N]
+  >;
 }

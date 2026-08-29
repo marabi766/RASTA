@@ -152,10 +152,6 @@ export class CommissionService {
       eventName: ECONOMIC_EVENTS.COMMISSION_APPLIED,
       aggregateId: id,
       organizationId: input.organizationId,
-      // Partitioned by transaction, not by commission id: a consumer
-      // reconciling one transaction sees its commission in order with the
-      // settlement that produced it.
-      partitionKey: input.transactionId,
       payload: {
         commissionId: id,
         transactionId: input.transactionId,

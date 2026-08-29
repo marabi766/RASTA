@@ -288,6 +288,37 @@ describe('reward lifecycle', () => {
     // otherwise turn every single reward into a message.
     expect(second.every((outcome) => outcome.levelChangedTo === null)).toBe(true);
 
+    // ADR-036: a reward lifecycle is not a transaction lifecycle, so these
+    // events keep their own aggregate keys rather than being handed a
+    // transaction id that does not exist.
+    const rewardRows = await runUnscoped('the suite reads the outbox it produced', () =>
+      prisma.client.outboxMessage.findMany({
+        where: {
+          organizationId: org.a,
+          eventName: { in: ['REWARD_GRANTED', 'REWARD_LEVEL_CHANGED'] },
+        },
+        orderBy: { createdAt: 'asc' },
+      }),
+    );
+
+    const granted = rewardRows.filter((row) => row.eventName === 'REWARD_GRANTED');
+    expect(granted.length).toBeGreaterThan(0);
+    for (const row of granted) {
+      const rewardId = (row.payload as { payload?: { rewardId?: string } })?.payload?.rewardId;
+      expect(rewardId).toBeTruthy();
+      expect(row.partitionKey).toBe(rewardId);
+    }
+
+    const levelChange = rewardRows.find(
+      (row) =>
+        row.eventName === 'REWARD_LEVEL_CHANGED' &&
+        (row.payload as { payload?: { userId?: string } })?.payload?.userId === 'USR-LEVEL-SUBJECT',
+    );
+    // Keyed by the subject whose running balance moved, not by the reward that
+    // moved it: consecutive level changes for one person must stay in order,
+    // and each one comes from a different reward.
+    expect(levelChange?.partitionKey).toBe(`${org.a}:USR-LEVEL-SUBJECT`);
+
     await runUnscoped('the suite removes the ladder it configured', () =>
       prisma.client.rewardLevel.delete({ where: { id: levelId } }),
     );

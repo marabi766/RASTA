@@ -480,6 +480,7 @@ SettlementWorkflow (Temporal، صف rasta-settlement) — تصمیم معمار�
 | **توقف با اعتراض**          | اعتراض ثبت‌شده → هیچ حرکت مالی خودکار                                   | `financial-consistency`                                   |
 | **اتمیک بودن تسویه**        | شکست میانی → نه Journal، نه تغییر مانده، نه کارمزد؛ وجه در Hold می‌ماند | `settlement-atomicity` (افزوده — ADR-031)                 |
 | **Outbox**                  | تغییری که Rollback شود هرگز رویدادی منتشر نمی‌کند                       | `outbox` (افزوده — ADR-021)                               |
+| **ترتیب رویداد تراکنش**     | همه رویدادهای چرخه‌عمر یک تراکنش یک کلید پارتیشن می‌گیرند               | `events/routing` + `outbox` + `05-correlation` (ADR-036)  |
 
 ---
 

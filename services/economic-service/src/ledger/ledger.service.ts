@@ -10,7 +10,8 @@ import { formatMinor } from '../shared/money';
 import { ledgerEntriesTotal, journalsPostedTotal } from '../observability/metrics';
 import { ENV, LOGGER } from '../tokens';
 import { ECONOMIC_TOPIC, SERVICE_NAME, type EconomicEnv } from '../config/env';
-import { ECONOMIC_EVENTS, validateEconomicPayload } from '../events/events';
+import { ECONOMIC_EVENTS, validateEconomicPayload, type EconomicEventName } from '../events/events';
+import { AGGREGATE_OF, resolvePartitionKey } from '../events/routing';
 import { buildOutboxRow } from '@rasta/nest-common';
 import type { Logger as StructuredLogger } from '@rasta/logging';
 import type { AccountPurpose, JournalType } from '../generated/prisma';
@@ -405,21 +406,26 @@ export class LedgerService {
    * service emits (docs/07 § 7.8) — a malformed payload is refused before it
    * enters the log, rather than discovered in someone else's dead-letter topic.
    *
-   * The partition key is the aggregate id, so events about one journal, one
-   * wallet or one transaction stay in order (ADR-006).
+   * The partition key comes from `PARTITION_KEY_POLICY` (ADR-036) and from
+   * nowhere else. There is deliberately no `partitionKey` parameter: while a
+   * caller could override it, the policy was a suggestion rather than a rule,
+   * and Q-26 is exactly what came of that.
    */
-  async enqueue(
+  async enqueue<N extends EconomicEventName>(
     tx: ExtendedPrismaClient,
     input: {
-      eventName: (typeof ECONOMIC_EVENTS)[keyof typeof ECONOMIC_EVENTS];
+      eventName: N;
       aggregateId: string;
       organizationId: string;
       payload: unknown;
       causationId?: string;
-      partitionKey?: string;
     },
   ): Promise<void> {
     const payload = validateEconomicPayload(input.eventName, input.payload);
+    // Resolved from the validated payload, so the key is read off the same
+    // data the consumer will see rather than off a variable at the call site
+    // that may or may not still mean the same thing.
+    const partition = resolvePartitionKey(input.eventName, payload);
 
     const row = buildOutboxRow(
       {
@@ -429,7 +435,7 @@ export class LedgerService {
         topic: ECONOMIC_TOPIC,
         payload,
         organizationId: input.organizationId,
-        partitionKey: input.partitionKey ?? input.aggregateId,
+        partitionKey: partition.key,
         ...(input.causationId ? { causationId: input.causationId } : {}),
       },
       { producer: SERVICE_NAME, producerVersion: this.env.SERVICE_VERSION },
@@ -455,28 +461,6 @@ export class LedgerService {
     );
   }
 }
-
-/**
- * The aggregate each event is *about*.
- *
- * Stated once here rather than at each call site, because the aggregate type
- * and the partition key together are what give a consumer ordering guarantees,
- * and getting them inconsistent across call sites is the kind of defect that
- * only shows up under load.
- */
-const AGGREGATE_OF: Record<string, string> = {
-  WALLET_OPENED: 'Wallet',
-  FUNDS_HELD: 'WalletHold',
-  FUNDS_RELEASED: 'WalletHold',
-  PAYMENT_AUTHORIZED: 'PaymentIntent',
-  PAYMENT_COMPLETED: 'PaymentIntent',
-  PAYMENT_FAILED: 'PaymentIntent',
-  COMMISSION_APPLIED: 'Commission',
-  REWARD_GRANTED: 'Reward',
-  REWARD_LEVEL_CHANGED: 'RewardBalance',
-  SETTLEMENT_COMPLETED: 'Settlement',
-  JOURNAL_POSTED: 'Journal',
-};
 
 export interface PostedJournal {
   id: string;

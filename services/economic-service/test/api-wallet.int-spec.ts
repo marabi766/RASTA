@@ -2,6 +2,7 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { admin, apiTenant, auditor, bearer, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id } from './helpers';
+import { runUnscoped } from '@rasta/nest-common';
 
 /**
  * The wallet and payment HTTP surface, every path including the refusals.
@@ -169,6 +170,37 @@ describe('wallet API', () => {
     expect(response.body.status).toBe('CAPTURED');
     expect(response.body.simulated).toBe(true);
     expect(BigInt(response.body.balances.ledgerBalanceMinor)).toBe(before + 5_000_000n);
+
+    // ADR-036 on the two phases of one payment. The authorisation happened
+    // before any transaction existed — `PaymentIntent.transaction_id` is
+    // written at capture — so it is keyed by the intent, and the capture, which
+    // does have a transaction, is keyed by that.
+    const intentId = response.body.paymentIntentId as string;
+    const rows = await runUnscoped('the suite reads the outbox it produced', () =>
+      harness.prisma.client.outboxMessage.findMany({
+        where: {
+          organizationId: org,
+          eventName: { in: ['PAYMENT_AUTHORIZED', 'PAYMENT_COMPLETED'] },
+        },
+      }),
+    );
+
+    const forThisIntent = rows.filter(
+      (row) =>
+        (row.payload as { payload?: { paymentIntentId?: string } })?.payload?.paymentIntentId ===
+        intentId,
+    );
+
+    const authorised = forThisIntent.find((row) => row.eventName === 'PAYMENT_AUTHORIZED');
+    const completed = forThisIntent.find((row) => row.eventName === 'PAYMENT_COMPLETED');
+
+    expect(authorised?.partitionKey).toBe(intentId);
+    expect(completed?.partitionKey).toBe(response.body.transactionId);
+    // No invented transaction id: the authorisation payload has no such field
+    // at all, and giving it one would be a falsehood in a financial payload.
+    expect(
+      (authorised?.payload as { payload?: Record<string, unknown> })?.payload,
+    ).not.toHaveProperty('transactionId');
   });
 
   it('reports a provider failure without moving money', async () => {

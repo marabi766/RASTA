@@ -264,7 +264,6 @@ export class SettlementService {
       eventName: ECONOMIC_EVENTS.SETTLEMENT_COMPLETED,
       aggregateId: settlementId,
       organizationId: transaction.organizationId,
-      partitionKey: transaction.id,
       payload: {
         settlementId,
         transactionId: transaction.id,
