@@ -103,11 +103,11 @@ test.describe.serial('Correlation across the request and event path', () => {
     expect(held).toBeDefined();
     expect(held!.payload.transactionId).toBe(transactionId);
     expect(minor(held!.payload.amountMinor)).toBe(3_000_000n);
-    // Keyed by the hold, which is the aggregate this event is about
-    // (`LedgerService.enqueue` partitions by aggregate id). Asserted rather
-    // than assumed, because `kafka.publisher.ts` describes a stronger
-    // guarantee than the code gives — see docs/24 Q-26.
-    expect(held!.key).toBe(held!.payload.holdId);
+    // Keyed by the **transaction**, not by the hold (ADR-036). Read off a real
+    // broker rather than off the outbox table, because the key a consumer
+    // partitions on is the one the producer actually put on the wire.
+    expect(held!.key).toBe(transactionId);
+    expect(held!.key).not.toBe(held!.payload.holdId);
 
     const payment = events.find((event) => event.eventName === 'PAYMENT_COMPLETED');
     // ADR-024: silence would itself be a claim. Every payment event states
@@ -162,9 +162,15 @@ test.describe.serial('Correlation across the request and event path', () => {
 
     const completed = events.find((event) => event.eventName === 'SETTLEMENT_COMPLETED');
     expect(completed!.payload.transactionId).toBe(transactionId);
-    // Keyed by the **transaction**, not by the settlement id — deliberately, so
-    // that a consumer rebuilding one transaction reads its settlement in the
-    // partition it expects (settlement.service.ts sets `partitionKey`).
-    expect(completed!.key).toBe(transactionId);
+
+    // The whole lifecycle on one key, measured on a real broker (ADR-036).
+    // This is the assertion Q-26 was opened for: before it, these three
+    // carried the hold id, the hold id and the transaction id, so a consumer
+    // rebuilding the transaction had no ordering between them at all.
+    const lifecycle = events.filter((event) =>
+      ['FUNDS_HELD', 'FUNDS_RELEASED', 'SETTLEMENT_COMPLETED'].includes(event.eventName),
+    );
+    expect(lifecycle).toHaveLength(3);
+    expect(new Set(lifecycle.map((event) => event.key))).toEqual(new Set([transactionId]));
   });
 });

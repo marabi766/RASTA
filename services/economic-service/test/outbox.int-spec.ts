@@ -101,10 +101,11 @@ describe('transactional outbox (real database)', () => {
       await cleanup(prisma, [organizationId]);
     });
 
-    it('keys a settlement event by its transaction, so the pair stays ordered', async () => {
-      // ADR-006. `FUNDS_HELD` and `SETTLEMENT_COMPLETED` for one transaction
-      // must reach a consumer in the order they happened — reversed, it would
-      // see money released before it was ever held.
+    it('puts a whole transaction lifecycle on one partition key', async () => {
+      // ADR-036, the invariant Q-26 asked for. Before it, these rows carried
+      // four different keys — the hold, the journal, the settlement's own id
+      // and the transaction — so a consumer rebuilding one transaction could
+      // see the money released before it learned it had been held.
       const organizationId = `${org.a}-OUTBOX-KEY`;
       await fundWallet(wiring, organizationId, 1_000_000n);
 
@@ -124,10 +125,29 @@ describe('transactional outbox (real database)', () => {
         wiring.settlements.settle(transaction.id, 'USR-ITEST'),
       );
 
-      const settlement = (await outboxFor(organizationId)).find(
-        (row) => row.eventName === 'SETTLEMENT_COMPLETED',
+      const rows = await outboxFor(organizationId);
+      const ofThisTransaction = rows.filter(
+        (row) =>
+          (row.payload as { payload?: { transactionId?: string } })?.payload?.transactionId ===
+          transaction.id,
       );
-      expect(settlement?.partitionKey).toBe(transaction.id);
+
+      // The hold, its release, and both journals — every row whose payload
+      // names this transaction.
+      expect(new Set(ofThisTransaction.map((row) => row.eventName))).toEqual(
+        new Set(['FUNDS_HELD', 'FUNDS_RELEASED', 'SETTLEMENT_COMPLETED', 'JOURNAL_POSTED']),
+      );
+      expect(ofThisTransaction.length).toBeGreaterThanOrEqual(4);
+      expect(new Set(ofThisTransaction.map((row) => row.partitionKey))).toEqual(
+        new Set([transaction.id]),
+      );
+
+      // And the aggregate identity is *not* flattened along with the key: each
+      // row still names the entity it is about, which is what an auditor reads.
+      const held = ofThisTransaction.find((row) => row.eventName === 'FUNDS_HELD');
+      expect(held?.aggregateType).toBe('WalletHold');
+      expect(held?.aggregateId).not.toBe(transaction.id);
+      expect(held?.partitionKey).toBe(transaction.id);
 
       // `COMMISSION_APPLIED` is filed under the **payee**, because the
       // commission is charged out of their proceeds — so it is looked up there
@@ -145,6 +165,83 @@ describe('transactional outbox (real database)', () => {
       );
       expect(commission).toBeDefined();
       expect(commission?.partitionKey).toBe(transaction.id);
+      expect(commission?.aggregateType).toBe('Commission');
+
+      await cleanup(prisma, [organizationId]);
+    });
+
+    it('lets two transactions of one wallet partition independently', async () => {
+      // Ordering is per transaction, not global and not per wallet. Two
+      // unrelated obligations on the same wallet have no causal order between
+      // them, and forcing one would serialise the whole domain behind a single
+      // busy tenant.
+      const organizationId = `${org.a}-OUTBOX-KEY-2`;
+      await fundWallet(wiring, organizationId, 2_000_000n);
+
+      const create = () =>
+        asActor({ organizationId }, () =>
+          wiring.transactions.create({
+            transactionType: 'MARKETPLACE_ORDER',
+            counterpartyOrganizationId: org.b,
+            grossAmountMinor: '500000',
+            currency: 'IRR',
+            holdFunds: true,
+          }),
+        );
+
+      const first = await create();
+      const second = await create();
+
+      const holds = (await outboxFor(organizationId)).filter(
+        (row) => row.eventName === 'FUNDS_HELD',
+      );
+
+      expect(holds.map((row) => row.partitionKey).sort()).toEqual([first.id, second.id].sort());
+
+      await cleanup(prisma, [organizationId]);
+    });
+
+    it('keys a wallet-only event by the wallet', async () => {
+      // `WALLET_OPENED` has no transaction and is not given one. It is ordered
+      // against the wallet it opened, which is the only thing it is about.
+      const organizationId = `${org.a}-OUTBOX-KEY-WALLET`;
+      await fundWallet(wiring, organizationId, 100_000n);
+
+      const opened = (await outboxFor(organizationId)).find(
+        (row) => row.eventName === 'WALLET_OPENED',
+      );
+      const walletId = (opened?.payload as { payload?: { walletId?: string } })?.payload?.walletId;
+
+      expect(walletId).toBeTruthy();
+      expect(opened?.partitionKey).toBe(walletId);
+      expect(opened?.aggregateType).toBe('Wallet');
+
+      await cleanup(prisma, [organizationId]);
+    });
+
+    it('keys a journal with no transaction by the journal', async () => {
+      // The wallet's opening credit in `fundWallet` is posted without a
+      // transaction, exactly like a reward grant. Its `JOURNAL_POSTED` has
+      // nothing to be ordered with, so it is ordered by itself — rather than
+      // borrowing a transaction id that does not belong to it.
+      const organizationId = `${org.a}-OUTBOX-KEY-JOURNAL`;
+      await fundWallet(wiring, organizationId, 100_000n);
+
+      const journals = (await outboxFor(organizationId)).filter(
+        (row) => row.eventName === 'JOURNAL_POSTED',
+      );
+      const detached = journals.filter(
+        (row) =>
+          (row.payload as { payload?: { transactionId?: string | null } })?.payload
+            ?.transactionId == null,
+      );
+
+      expect(detached.length).toBeGreaterThan(0);
+      for (const row of detached) {
+        const journalId = (row.payload as { payload?: { journalId?: string } })?.payload?.journalId;
+        expect(journalId).toBeTruthy();
+        expect(row.partitionKey).toBe(journalId);
+      }
 
       await cleanup(prisma, [organizationId]);
     });
@@ -304,6 +401,46 @@ describe('transactional outbox (real database)', () => {
       expect(row?.attempts).toBe(1);
       expect(row?.lastError).toBe('broker unreachable');
       expect(row?.publishedAt).toBeNull();
+    });
+
+    it('retries a failed row with the key it was written with', async () => {
+      // ADR-036. A retry that re-derived the key — or lost it — would move the
+      // event to another partition and undo the ordering on the second
+      // attempt, which is the attempt nobody watches.
+      const id = `OBX_ITEST_${ulid()}`;
+      const transactionId = `TXN_ITEST_${ulid()}`;
+
+      await runUnscoped('the outbox audit writes platform plumbing', () =>
+        prisma.client.outboxMessage.create({
+          data: {
+            id,
+            aggregateType: 'WalletHold',
+            aggregateId: `HLD_ITEST_${ulid()}`,
+            eventName: 'FUNDS_HELD',
+            topic: ECONOMIC_TOPIC,
+            partitionKey: transactionId,
+            payload: {},
+            headers: {},
+            organizationId: org.a,
+            correlationId: 'itest',
+          },
+        }),
+      );
+
+      await store.markFailed(id, 'broker unreachable');
+      await store.markFailed(id, 'broker unreachable again');
+
+      const retried = (await store.claimPending(500)).find((row) => row.id === id);
+
+      expect(retried).toBeDefined();
+      expect(retried?.attempts).toBe(2);
+      // The key is a stored column, not something recomputed at publish time,
+      // so the second attempt and the tenth carry what the first did.
+      expect(retried?.partitionKey).toBe(transactionId);
+      // A manual DLQ replay reads the same row (docs/runbooks/replay-dlq.md);
+      // every economic event is in `NEVER_AUTO_REPLAY`, so this is the only
+      // path back onto the topic, and it cannot reorder what it republishes.
+      expect(retried?.aggregateType).toBe('WalletHold');
     });
 
     it('purges only published rows past their retention window', async () => {
