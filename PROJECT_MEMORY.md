@@ -10,8 +10,26 @@
 > سرویس از حالت تمیز، تست زنده Auth/Tenant Isolation/Event Flow، و بررسی مستقیم
 > GitHub Actions.
 >
-> **آخرین به‌روزرسانی:** 2026-08-29 — **فاز `economic-service` بسته شد:
-> READY_FOR_NEXT_PHASE.** هفتمین سرویس، و حساس‌ترین دامنه پلتفرم:
+> **آخرین به‌روزرسانی:** 2026-08-29 (دوم) — **شکاف E2E فاز اقتصادی بسته شد.**
+> ورودی پیشین این فایل `READY_FOR_NEXT_PHASE` می‌گفت در حالی که `tests/e2e`
+> پوشه‌ای خالی بود و `AGENTS.md` § ۷ برای این دامنه E2E سبز می‌خواهد. آن ادعا
+> نادرست بود و اکنون اصلاح شده — همراه با سه چیز دیگر که همین کار پیدا کرد:
+> آستانه پوشش هرگز سنجیده نمی‌شد (عدد واقعی ۴۴٫۸۴٪ شاخه بود)، هیچ Down
+> Migration هرگز اجرا نشده بود، و `purgeExpired` در هر اجرا بی‌صدا شکست
+> می‌خورد.
+>
+> | سطح           | شاهد                                                                     |
+> | ------------- | ------------------------------------------------------------------------ |
+> | **E2E**       | **۳۷ سناریو** — Gateway + economic + PostgreSQL + Kafka + Keycloak واقعی |
+> | **TESTED**    | **۳۰۸** واحد + **۲۵۵** یکپارچگی در economic (پیش‌تر ۲۳۹ + ۱۰۰)           |
+> | **COVERAGE**  | Branches **۹۰٫۱۳٪** (آستانه ۹۰٪) · Statements ۹۳٫۸۰٪ · Lines ۹۵٫۷۷٪      |
+> | **MIGRATION** | up → down → up، با ادعا بین هر گام                                       |
+> | **CI**        | ⏳ Job تازه `e2e` روی PR — تا سبز شدن، ادعا نیست                         |
+>
+> ---
+>
+> **پیشین — 2026-08-29 (اول):** فاز `economic-service` ساخته شد. هفتمین سرویس،
+> و حساس‌ترین دامنه پلتفرم:
 >
 > | سطح             | شاهد                                                                                              |
 > | --------------- | ------------------------------------------------------------------------------------------------- |
@@ -78,7 +96,8 @@
 - **Multi-Tenant by Default** — جداسازی در API، DB، Cache، Event.
 - **Event-Driven با Transactional Outbox** — بدون Publish مستقیم به Kafka.
 - **Database Ownership per Service** — بدون جدول مشترک، بدون Join میان‌سرویسی.
-- **Financial Integrity** — دفتر کل دوطرفه (هنوز پیاده نشده — economic-service).
+- **Financial Integrity** — دفتر کل دوطرفه، تغییرناپذیر و متوازن — پیاده‌شده در
+  `economic-service` (بخش ۷-ج).
 - **Configurable Governance** — نرخ کارمزد و مرجع موافقت از پیکربندی، نه Hard-Code.
 
 نقشه کامل: [`AGENTS.md`](AGENTS.md) (قواعد الزام‌آور) و [`CLAUDE.md`](CLAUDE.md)
@@ -131,50 +150,50 @@
 | **NOT VERIFIED**  | شواهد غیرمستقیم داریم اما تأیید مثبت نداریم             |
 | **PLANNED**       | تصمیم گرفته شده، کد نوشته نشده                          |
 
-| Feature                                                      |                     Implemented                      | Automated Tests  | Live Verified (2026-08-27)                                                                                         |
-| ------------------------------------------------------------ | :--------------------------------------------------: | :--------------: | ------------------------------------------------------------------------------------------------------------------ |
-| Tenant Isolation (API)                                       |                          ✅                          |        ✅        | ✅ (403 TENANT_MISMATCH زنده گرفته شد)                                                                             |
-| Tenant Isolation (Database)                                  |                          ✅                          |        —         | ✅ (`permission denied for database` زنده گرفته شد)                                                                |
-| Cross-tenant read → 404                                      |                          ✅                          |        ✅        | ✅                                                                                                                 |
-| RBAC (Roles Guard)                                           |                          ✅                          |        ✅        | ✅ (Auditor → 403 روی POST)                                                                                        |
-| JWT verification (Keycloak/JWKS)                             |                          ✅                          |        ✅        | ✅ (۴ کاربر Seed، توکن واقعی گرفته شد)                                                                             |
-| Transactional Outbox → Kafka                                 |                          ✅                          |        ✅        | ✅ (Asset ساخته شد → Outbox → Kafka، Correlation تطبیق)                                                            |
-| Event Consumer / Dossier Projector                           |                          ✅                          |   ✅ (18 تست)    | ✅ (رویداد ساختگی maintenance → یک خط Timeline، Replay دوباره = بدون تکرار)                                        |
-| API Gateway routing + circuit breaker                        |                          ✅                          |   ✅ (21 تست)    | ✅ (مسیر به سرویس نساخته‌شده fleet → 503 تمیز)                                                                     |
-| Redis Rate Limiting (منطق)                                   |                          ✅                          |    ✅ (واحد)     | ⚠️ **مسدود شده توسط تداخل Port میزبان — بخش ۲۲.۳ D-006**                                                           |
-| Anonymous public endpoint (self-registration) از راه Gateway |                          ✅                          |   ✅ (17 تست)    | ✅ **`201` زنده گرفته شد — D-007 رفع شد**                                                                          |
-| CI/CD روی GitHub Actions                                     |                          ✅                          |        —         | ✅ **CI VERIFIED** — Run `33219920446`، Commit `a36a2cf`، هر **۹** Job سبز (فاز اقتصادی)                           |
-| Docker Build (identity, organization)                        |                          ✅                          |        —         | ✅ **CI VERIFIED** — Build + Trivy Scan هر دو Image روی Runner سبز                                                 |
-| Docker Build (asset, fleet, maintenance)                     |                 ✅ Dockerfile دارند                  |        —         | ✅ **CI VERIFIED** — Build + Trivy روی Runner برای هر سه؛ maintenance محلی هم اجرا شد (uid=100)                    |
-| Docker Build (economic)                                      |                  ✅ Dockerfile دارد                  |        —         | ✅ **CI VERIFIED** — Build + Trivy روی Runner سبز؛ محلی هم: `uid=100(rasta)`، `npm` حذف‌شده، Trivy ۰ CRITICAL/HIGH |
-| Docker Build (api-gateway)                                   |                 ❌ Dockerfile ندارد                  |        —         | ❌ باز (بخش ۲۲)                                                                                                    |
-| **fleet-service — Driver/Assignment/Usage/Availability**     |                          ✅                          |   ✅ (۸۸ تست)    | ✅ زنده + **CI VERIFIED**                                                                                          |
-| **Assignment Exclusivity (Partial Unique Index)**            |                          ✅                          | ✅ (Integration) | ✅ زنده: راننده مشغول → `422 DRIVER_ALREADY_ASSIGNED`                                                              |
-| **Fleet → Kafka → Asset Projector**                          |                          ✅                          |   ✅ (۳۲ تست)    | ✅ **زنده** — Timeline پر شد، وضعیت `IDLE→ASSIGNED→ACTIVE`                                                         |
-| **Idempotency (ثبت آفلاین + Replay مصرف‌کننده)**             |                          ✅                          |        ✅        | ✅ زنده: ارسال دوباره = همان رکورد؛ Replay کافکا = بدون اثر دوم                                                    |
-| **correlationId در کل زنجیره**                               |                          ✅                          |        ✅        | ✅ زنده: HTTP → Outbox → Header کافکا → Timeline، یکسان                                                            |
-| **maintenance — Schedule/Request/RepairOrder/Cost**          |                          ✅                          |   ✅ (۱۰۲ تست)   | ✅ زنده + **CI VERIFIED**                                                                                          |
-| **سررسید مشتق‌شده (نه Flag ذخیره‌شده)**                      |                          ✅                          |   ✅ (۱۴ تست)    | ✅ زنده: گریدر `OVERDUE on HOURS`، کنتور ۴۳۸۶٫۵۰ در برابر سررسید ۴۳۷۰٫۵۰                                           |
-| **منع درخواست تکراری (Partial Unique Index)**                |                          ✅                          | ✅ (Integration) | ✅ زنده: درخواست دوم → `422 DUPLICATE_OPEN_REQUEST`                                                                |
-| **اتمیک بودن هزینه زیر همروندی**                             |                          ✅                          | ✅ (Integration) | ✅ ده ثبت هم‌زمان → مجموع دقیقاً برابر `SUM` پایگاه داده                                                           |
-| **تأیید پیش از تسویه (کنترل سند محصول)**                     |                          ✅                          |        ✅        | ✅ زنده: تأیید زودهنگام `409`، مبلغ کهنه `422`، تأیید دوباره `409`                                                 |
-| **Fleet USAGE_RECORDED → Maintenance (مسیر مرده پیشین)**     |                          ✅                          |   ✅ (۴۱ تست)    | ✅ **زنده** — کنتور ۴۳۸۰٫۵۰ → ۴۳۸۶٫۵۰، سپس `MAINTENANCE_DUE`                                                       |
-| **Maintenance → Kafka → Asset Timeline + Fleet Replica**     |                          ✅                          |        ✅        | ✅ **زنده** — ۳ خط Timeline، `IN_MAINTENANCE` → `ACTIVE`، `inMaintenance` روشن و خاموش                             |
-| **economic — Wallet/Hold/Ledger/Journal/Transaction**        |                          ✅                          |   ✅ (۲۳۹ تست)   | ✅ زنده (۲۶ سناریو، بخش ۲۱-ج)                                                                                      |
-| **تغییرناپذیری دفتر کل (Trigger پایگاه داده)**               |                          ✅                          | ✅ (Integration) | ✅ **از SQL خام** — `UPDATE`/`DELETE` روی `ledger_entry` و `journal` هر دو رد شدند                                 |
-| **توازن هر Journal (Trigger معوق در COMMIT)**                |                          ✅                          | ✅ (Integration) | ✅ تراز آزمایشی زنده: `balanced: true`، ۱۳۶٬۰۰۰٬۰۰۰ = ۱۳۶٬۰۰۰٬۰۰۰                                                  |
-| **`available = ledger − pending` (CHECK پایگاه داده)**       |                          ✅                          | ✅ (Integration) | ✅ زنده: Hold ۱۲م → available ۷۶م، pending ۱۲م، مجموع ۸۸م                                                          |
-| **همروندی کیف پول — ۱۰۰ برداشت موازی**                       |                          ✅                          | ✅ (Integration) | ✅ دقیقاً ۱۰ موفق از ۱۰۰ برای موجودی ۱۰ واحدی؛ هرگز مانده منفی                                                     |
-| **Idempotency واقعی (کلید ذخیره‌شده + Hash بدنه)**           |                          ✅                          |   ✅ (۱۳ تست)    | ✅ زنده: کلید تکراری → همان پاسخ؛ بدنه متفاوت → `409`؛ بدون کلید → `400`                                           |
-| **تسویه اتمیک — شکست میانی چیزی باقی نمی‌گذارد**             |                          ✅                          | ✅ (Integration) | ✅ تزریق خطا پس از Post شدن Journal → صفر Journal، صفر تغییر مانده، وجه در Hold                                    |
-| **اعتراض → توقف کامل تسویه**                                 |                          ✅                          |        ✅        | ✅ زنده: تسویه پیش از تأیید `409`؛ ماشین حالت یال DISPUTED→SETTLED ندارد                                           |
-| **`AUDITOR` هیچ دسترسی اقتصادی ندارد**                       |                          ✅                          |        ✅        | ✅ زنده با توکن واقعی: کیف پول `403`، تراکنش `403`، تراز آزمایشی `403`                                             |
-| **Maintenance → Kafka → economic (مسیر مرده پیشین)**         |                          ✅                          |    ✅ (۹ تست)    | ✅ **زنده** — `MAINTENANCE_APPROVED` → تعهد `PENDING_SETTLEMENT`، و **صفر حرکت پول**                               |
-| **پرداخت شبیه‌سازی‌شده، با اعلام صریح**                      |                          ✅                          |        ✅        | ✅ زنده: `simulated: true` روی پاسخ، ردیف و رویداد؛ شکست قابل تحریک → `INSUFFICIENT_FUNDS`                         |
-| Frontend (`apps/web`, `apps/admin`)                          |                          ❌                          |        —         | NOT_STARTED — پوشه خالی                                                                                            |
-| Integration Tests (`*.int-spec.ts`)                          | ✅ ۱۸ Suite (fleet ۴، maintenance ۵، **economic ۹**) |        —         | ✅ **۱۷۳** — ۷۳ پیشین + ۱۰۰ economic                                                                               |
-| E2E Tests (`tests/e2e`, Playwright)                          |                          ❌                          |        —         | پوشه خالی، بدون Config — بخش ۲۲ (**بدهی باز**)                                                                     |
-| marketplace/procurement/… (۹ سرویس)                          |                          ❌                          |        —         | NOT_STARTED                                                                                                        |
+| Feature                                                      |                      Implemented                      | Automated Tests  | Live Verified (2026-08-27)                                                                                         |
+| ------------------------------------------------------------ | :---------------------------------------------------: | :--------------: | ------------------------------------------------------------------------------------------------------------------ |
+| Tenant Isolation (API)                                       |                          ✅                           |        ✅        | ✅ (403 TENANT_MISMATCH زنده گرفته شد)                                                                             |
+| Tenant Isolation (Database)                                  |                          ✅                           |        —         | ✅ (`permission denied for database` زنده گرفته شد)                                                                |
+| Cross-tenant read → 404                                      |                          ✅                           |        ✅        | ✅                                                                                                                 |
+| RBAC (Roles Guard)                                           |                          ✅                           |        ✅        | ✅ (Auditor → 403 روی POST)                                                                                        |
+| JWT verification (Keycloak/JWKS)                             |                          ✅                           |        ✅        | ✅ (۴ کاربر Seed، توکن واقعی گرفته شد)                                                                             |
+| Transactional Outbox → Kafka                                 |                          ✅                           |        ✅        | ✅ (Asset ساخته شد → Outbox → Kafka، Correlation تطبیق)                                                            |
+| Event Consumer / Dossier Projector                           |                          ✅                           |   ✅ (18 تست)    | ✅ (رویداد ساختگی maintenance → یک خط Timeline، Replay دوباره = بدون تکرار)                                        |
+| API Gateway routing + circuit breaker                        |                          ✅                           |   ✅ (21 تست)    | ✅ (مسیر به سرویس نساخته‌شده fleet → 503 تمیز)                                                                     |
+| Redis Rate Limiting (منطق)                                   |                          ✅                           |    ✅ (واحد)     | ⚠️ **مسدود شده توسط تداخل Port میزبان — بخش ۲۲.۳ D-006**                                                           |
+| Anonymous public endpoint (self-registration) از راه Gateway |                          ✅                           |   ✅ (17 تست)    | ✅ **`201` زنده گرفته شد — D-007 رفع شد**                                                                          |
+| CI/CD روی GitHub Actions                                     |                          ✅                           |        —         | ✅ **CI VERIFIED** — Run `33219920446`، Commit `a36a2cf`، هر **۹** Job سبز (فاز اقتصادی)                           |
+| Docker Build (identity, organization)                        |                          ✅                           |        —         | ✅ **CI VERIFIED** — Build + Trivy Scan هر دو Image روی Runner سبز                                                 |
+| Docker Build (asset, fleet, maintenance)                     |                  ✅ Dockerfile دارند                  |        —         | ✅ **CI VERIFIED** — Build + Trivy روی Runner برای هر سه؛ maintenance محلی هم اجرا شد (uid=100)                    |
+| Docker Build (economic)                                      |                  ✅ Dockerfile دارد                   |        —         | ✅ **CI VERIFIED** — Build + Trivy روی Runner سبز؛ محلی هم: `uid=100(rasta)`، `npm` حذف‌شده، Trivy ۰ CRITICAL/HIGH |
+| Docker Build (api-gateway)                                   |                  ❌ Dockerfile ندارد                  |        —         | ❌ باز (بخش ۲۲)                                                                                                    |
+| **fleet-service — Driver/Assignment/Usage/Availability**     |                          ✅                           |   ✅ (۸۸ تست)    | ✅ زنده + **CI VERIFIED**                                                                                          |
+| **Assignment Exclusivity (Partial Unique Index)**            |                          ✅                           | ✅ (Integration) | ✅ زنده: راننده مشغول → `422 DRIVER_ALREADY_ASSIGNED`                                                              |
+| **Fleet → Kafka → Asset Projector**                          |                          ✅                           |   ✅ (۳۲ تست)    | ✅ **زنده** — Timeline پر شد، وضعیت `IDLE→ASSIGNED→ACTIVE`                                                         |
+| **Idempotency (ثبت آفلاین + Replay مصرف‌کننده)**             |                          ✅                           |        ✅        | ✅ زنده: ارسال دوباره = همان رکورد؛ Replay کافکا = بدون اثر دوم                                                    |
+| **correlationId در کل زنجیره**                               |                          ✅                           |        ✅        | ✅ زنده: HTTP → Outbox → Header کافکا → Timeline، یکسان                                                            |
+| **maintenance — Schedule/Request/RepairOrder/Cost**          |                          ✅                           |   ✅ (۱۰۲ تست)   | ✅ زنده + **CI VERIFIED**                                                                                          |
+| **سررسید مشتق‌شده (نه Flag ذخیره‌شده)**                      |                          ✅                           |   ✅ (۱۴ تست)    | ✅ زنده: گریدر `OVERDUE on HOURS`، کنتور ۴۳۸۶٫۵۰ در برابر سررسید ۴۳۷۰٫۵۰                                           |
+| **منع درخواست تکراری (Partial Unique Index)**                |                          ✅                           | ✅ (Integration) | ✅ زنده: درخواست دوم → `422 DUPLICATE_OPEN_REQUEST`                                                                |
+| **اتمیک بودن هزینه زیر همروندی**                             |                          ✅                           | ✅ (Integration) | ✅ ده ثبت هم‌زمان → مجموع دقیقاً برابر `SUM` پایگاه داده                                                           |
+| **تأیید پیش از تسویه (کنترل سند محصول)**                     |                          ✅                           |        ✅        | ✅ زنده: تأیید زودهنگام `409`، مبلغ کهنه `422`، تأیید دوباره `409`                                                 |
+| **Fleet USAGE_RECORDED → Maintenance (مسیر مرده پیشین)**     |                          ✅                           |   ✅ (۴۱ تست)    | ✅ **زنده** — کنتور ۴۳۸۰٫۵۰ → ۴۳۸۶٫۵۰، سپس `MAINTENANCE_DUE`                                                       |
+| **Maintenance → Kafka → Asset Timeline + Fleet Replica**     |                          ✅                           |        ✅        | ✅ **زنده** — ۳ خط Timeline، `IN_MAINTENANCE` → `ACTIVE`، `inMaintenance` روشن و خاموش                             |
+| **economic — Wallet/Hold/Ledger/Journal/Transaction**        |                          ✅                           |   ✅ (۲۳۹ تست)   | ✅ زنده (۲۶ سناریو، بخش ۲۱-ج)                                                                                      |
+| **تغییرناپذیری دفتر کل (Trigger پایگاه داده)**               |                          ✅                           | ✅ (Integration) | ✅ **از SQL خام** — `UPDATE`/`DELETE` روی `ledger_entry` و `journal` هر دو رد شدند                                 |
+| **توازن هر Journal (Trigger معوق در COMMIT)**                |                          ✅                           | ✅ (Integration) | ✅ تراز آزمایشی زنده: `balanced: true`، ۱۳۶٬۰۰۰٬۰۰۰ = ۱۳۶٬۰۰۰٬۰۰۰                                                  |
+| **`available = ledger − pending` (CHECK پایگاه داده)**       |                          ✅                           | ✅ (Integration) | ✅ زنده: Hold ۱۲م → available ۷۶م، pending ۱۲م، مجموع ۸۸م                                                          |
+| **همروندی کیف پول — ۱۰۰ برداشت موازی**                       |                          ✅                           | ✅ (Integration) | ✅ دقیقاً ۱۰ موفق از ۱۰۰ برای موجودی ۱۰ واحدی؛ هرگز مانده منفی                                                     |
+| **Idempotency واقعی (کلید ذخیره‌شده + Hash بدنه)**           |                          ✅                           |   ✅ (۱۳ تست)    | ✅ زنده: کلید تکراری → همان پاسخ؛ بدنه متفاوت → `409`؛ بدون کلید → `400`                                           |
+| **تسویه اتمیک — شکست میانی چیزی باقی نمی‌گذارد**             |                          ✅                           | ✅ (Integration) | ✅ تزریق خطا پس از Post شدن Journal → صفر Journal، صفر تغییر مانده، وجه در Hold                                    |
+| **اعتراض → توقف کامل تسویه**                                 |                          ✅                           |        ✅        | ✅ زنده: تسویه پیش از تأیید `409`؛ ماشین حالت یال DISPUTED→SETTLED ندارد                                           |
+| **`AUDITOR` هیچ دسترسی اقتصادی ندارد**                       |                          ✅                           |        ✅        | ✅ زنده با توکن واقعی: کیف پول `403`، تراکنش `403`، تراز آزمایشی `403`                                             |
+| **Maintenance → Kafka → economic (مسیر مرده پیشین)**         |                          ✅                           |    ✅ (۹ تست)    | ✅ **زنده** — `MAINTENANCE_APPROVED` → تعهد `PENDING_SETTLEMENT`، و **صفر حرکت پول**                               |
+| **پرداخت شبیه‌سازی‌شده، با اعلام صریح**                      |                          ✅                           |        ✅        | ✅ زنده: `simulated: true` روی پاسخ، ردیف و رویداد؛ شکست قابل تحریک → `INSUFFICIENT_FUNDS`                         |
+| Frontend (`apps/web`, `apps/admin`)                          |                          ❌                           |        —         | NOT_STARTED — پوشه خالی                                                                                            |
+| Integration Tests (`*.int-spec.ts`)                          | ✅ ۳۰ Suite (fleet ۴، maintenance ۵، **economic ۲۱**) |        —         | ✅ **۳۲۸** — ۷۳ پیشین + ۲۵۵ economic                                                                               |
+| E2E Tests (`tests/e2e`, Playwright)                          |                          ✅                           |  ✅ (۳۷ سناریو)  | ✅ **زنده** — Gateway + economic + PostgreSQL + Kafka + توکن واقعی Keycloak (بخش ۱۹)                               |
+| marketplace/procurement/… (۹ سرویس)                          |                          ❌                           |        —         | NOT_STARTED                                                                                                        |
 
 ---
 
@@ -194,21 +213,21 @@ tenant-scope، business logic) → Postgres (نوشتن + Outbox در یک Trans
 
 ## ۵. Technology Stack
 
-| لایه           | فناوری                                                                       |
-| -------------- | ---------------------------------------------------------------------------- |
-| زبان           | TypeScript 5.9 strict، Node 22/24                                            |
-| Backend        | NestJS 11، Zod برای Validation                                               |
-| Frontend       | Next.js 15 (برنامه‌ریزی‌شده — کد نساخته)                                     |
-| Database       | PostgreSQL 16 + PostGIS 3.4 + ltree + pg_trgm + pgcrypto، Prisma 6           |
-| Message Bus    | Kafka 3.9 KRaft (`apache/kafka:3.9.0`)                                       |
-| Cache          | Redis 7.4                                                                    |
-| Identity       | Keycloak 26 (OIDC/OAuth2، JWKS، RS256)                                       |
-| Workflow       | Temporal 1.26 (زیرساخت بالا هست؛ هیچ سرویسی هنوز استفاده نمی‌کند)            |
-| Object Storage | MinIO (S3-compatible)                                                        |
-| Observability  | OpenTelemetry + Prometheus + pino (ساختاریافته، با Redaction)                |
-| Test           | Jest + @swc/jest (Unit)؛ Testcontainers/Playwright برنامه‌ریزی‌شده، نصب‌نشده |
-| Monorepo       | pnpm workspaces + Turborepo                                                  |
-| Container      | Docker multi-stage (`pnpm deploy --prod --legacy`)                           |
+| لایه           | فناوری                                                                     |
+| -------------- | -------------------------------------------------------------------------- |
+| زبان           | TypeScript 5.9 strict، Node 22/24                                          |
+| Backend        | NestJS 11، Zod برای Validation                                             |
+| Frontend       | Next.js 15 (برنامه‌ریزی‌شده — کد نساخته)                                   |
+| Database       | PostgreSQL 16 + PostGIS 3.4 + ltree + pg_trgm + pgcrypto، Prisma 6         |
+| Message Bus    | Kafka 3.9 KRaft (`apache/kafka:3.9.0`)                                     |
+| Cache          | Redis 7.4                                                                  |
+| Identity       | Keycloak 26 (OIDC/OAuth2، JWKS، RS256)                                     |
+| Workflow       | Temporal 1.26 (زیرساخت بالا هست؛ هیچ سرویسی هنوز استفاده نمی‌کند)          |
+| Object Storage | MinIO (S3-compatible)                                                      |
+| Observability  | OpenTelemetry + Prometheus + pino (ساختاریافته، با Redaction)              |
+| Test           | Jest + @swc/jest (Unit و Integration)؛ **Playwright ۱٫۶۲ نصب‌شده و در CI** |
+| Monorepo       | pnpm workspaces + Turborepo                                                |
+| Container      | Docker multi-stage (`pnpm deploy --prod --legacy`)                         |
 
 ---
 
@@ -238,7 +257,8 @@ apps/
   admin/  NOT_STARTED — پوشه خالی
 
 tests/
-  e2e/    NOT_STARTED — پوشه خالی، بدون Playwright Config
+  e2e/    IMPLEMENTED — @rasta/e2e: Playwright Config، Global Setup،
+          ۳۷ سناریو روی Stack واقعی (بدون Browser تا ساخته‌شدن apps/web)
 
 infrastructure/
   docker/   Postgres Init، Kafka Topics، Keycloak Realm — IMPLEMENTED
@@ -254,16 +274,16 @@ scripts/
 
 ## ۷. Service Inventory
 
-| Service                | Port        | Status                                                 | DB                   | Tests                          | Docker                                                          |
-| ---------------------- | ----------- | ------------------------------------------------------ | -------------------- | ------------------------------ | --------------------------------------------------------------- |
-| `api-gateway`          | 3000/3010\* | IMPLEMENTED                                            | — (بدون Database)    | 30 Unit                        | ❌ Dockerfile ندارد                                             |
-| `identity-service`     | 3101        | IMPLEMENTED                                            | `rasta_identity`     | 14 Unit                        | ✅ در CI Matrix                                                 |
-| `organization-service` | 3102        | IMPLEMENTED                                            | `rasta_organization` | 21 Unit                        | ✅ در CI Matrix                                                 |
-| `asset-service`        | 3103        | IMPLEMENTED (با یک Gap — بخش ۱۸)                       | `rasta_asset`        | 74 Unit                        | ✅ **در CI Matrix**                                             |
-| `fleet-service`        | 3104        | IMPLEMENTED · TESTED · LIVE VERIFIED · **CI VERIFIED** | `rasta_fleet`        | **88 Unit + 32 Integration**   | ✅ **در CI Matrix**، Build+Trivy سبز                            |
-| `maintenance-service`  | 3105        | IMPLEMENTED · TESTED · LIVE VERIFIED · **CI VERIFIED** | `rasta_maintenance`  | **102 Unit + 41 Integration**  | ✅ **در CI Matrix**، Build+Trivy سبز                            |
-| `economic-service`     | **3112**    | IMPLEMENTED · TESTED · LIVE VERIFIED · **CI VERIFIED** | `rasta_economic`     | **239 Unit + 100 Integration** | ✅ **در CI Matrix**، Build+Trivy سبز (۰ CRITICAL/HIGH، uid=100) |
-| ۹ سرویس دیگر           | 3106–3116   | NOT_STARTED                                            | —                    | ۰                              | —                                                               |
+| Service                | Port        | Status                                                 | DB                   | Tests                                   | Docker                                                          |
+| ---------------------- | ----------- | ------------------------------------------------------ | -------------------- | --------------------------------------- | --------------------------------------------------------------- |
+| `api-gateway`          | 3000/3010\* | IMPLEMENTED                                            | — (بدون Database)    | 30 Unit                                 | ❌ Dockerfile ندارد                                             |
+| `identity-service`     | 3101        | IMPLEMENTED                                            | `rasta_identity`     | 14 Unit                                 | ✅ در CI Matrix                                                 |
+| `organization-service` | 3102        | IMPLEMENTED                                            | `rasta_organization` | 21 Unit                                 | ✅ در CI Matrix                                                 |
+| `asset-service`        | 3103        | IMPLEMENTED (با یک Gap — بخش ۱۸)                       | `rasta_asset`        | 74 Unit                                 | ✅ **در CI Matrix**                                             |
+| `fleet-service`        | 3104        | IMPLEMENTED · TESTED · LIVE VERIFIED · **CI VERIFIED** | `rasta_fleet`        | **88 Unit + 32 Integration**            | ✅ **در CI Matrix**، Build+Trivy سبز                            |
+| `maintenance-service`  | 3105        | IMPLEMENTED · TESTED · LIVE VERIFIED · **CI VERIFIED** | `rasta_maintenance`  | **102 Unit + 41 Integration**           | ✅ **در CI Matrix**، Build+Trivy سبز                            |
+| `economic-service`     | **3112**    | IMPLEMENTED · TESTED · LIVE VERIFIED · **CI VERIFIED** | `rasta_economic`     | **308 Unit + 255 Integration + 37 E2E** | ✅ **در CI Matrix**، Build+Trivy سبز (۰ CRITICAL/HIGH، uid=100) |
+| ۹ سرویس دیگر           | 3106–3116   | NOT_STARTED                                            | —                    | ۰                                       | —                                                               |
 
 \* پورت داکیومنت‌شده در `CLAUDE.md`/`docs` **۳۰۰۰** است؛ در `.env` محلی فعلی
 روی **۳۰۱۰** تنظیم شده چون یک Container نامرتبط (`purchase-workflow-system-app-1`)
@@ -348,7 +368,7 @@ HTTP (Gateway، توکن واقعی Keycloak)
 | Unit             | 88    | سبز — ۷ فایل                                                   |
 | Integration      | 32    | سبز — ۴ Suite روی PostgreSQL و Kafka **واقعی**، بدون Mock      |
 | Security/AuthZ   | —     | داخل دو دسته بالا؛ Tenant Isolation و مجوزدهی Suite جدا ندارند |
-| E2E (Playwright) | ۰     | **NOT IMPLEMENTED** — بدون Config، پوشه خالی                   |
+| E2E (Playwright) | ۰     | Harness از 2026-08-29 هست؛ سناریوهایش فقط دامنه اقتصادی است    |
 
 ### محدودیت‌های شناخته‌شده
 
@@ -390,7 +410,7 @@ HTTP (Gateway، توکن واقعی Keycloak)
 | رکورد کارکرد     | `fleet-service`     | رویداد → `asset_usage_meter` (کنتور مشتق‌شده)  |
 | پروفایل تعمیرگاه | `supplier-service`  | فقط یک ارجاع `workshopOrganizationId` — نساخته |
 | موجودی قطعه      | `inventory-service` | فقط `sourceReference` روی مصرف قطعه — نساخته   |
-| هر حرکت پول      | `economic-service`  | `MAINTENANCE_APPROVED` — نساخته                |
+| هر حرکت پول      | `economic-service`  | `MAINTENANCE_APPROVED` — **زنده** (بخش ۷-ج)    |
 
 تأییدشده با بازرسی، نه با ادعا:
 
@@ -470,7 +490,7 @@ HTTP → maintenance-service
 | Unit             | 102   | سبز — ۸ فایل                                                                 |
 | Integration      | 41    | سبز — ۵ Suite روی PostgreSQL و Kafka **واقعی**، بدون Mock                    |
 | Security/AuthZ   | —     | داخل دو دسته بالا؛ Tenant Isolation و باریک‌سازی سطح Object Suite جدا ندارند |
-| E2E (Playwright) | ۰     | **NOT IMPLEMENTED** — بدون Config، پوشه خالی                                 |
+| E2E (Playwright) | ۰     | Harness از 2026-08-29 هست؛ سناریوهایش فقط دامنه اقتصادی است                  |
 
 پنج Suite Integration: `tenant-isolation` · `request-lifecycle` · `cost-atomicity` ·
 `outbox` · `event-flow`. `test:integration` **`--passWithNoTests` ندارد.**
@@ -627,12 +647,14 @@ HTTP → economic-service → PostgreSQL + Outbox (یک تراکنش) → Outbox
 
 ### تست
 
-| دسته             | تعداد | وضعیت                                                                |
-| ---------------- | ----- | -------------------------------------------------------------------- |
-| Unit             | 239   | سبز — ۱۱ فایل                                                        |
-| Integration      | 100   | سبز — ۹ Suite روی PostgreSQL و Kafka **واقعی**، بدون Mock            |
-| Security/AuthZ   | —     | داخل دو دسته بالا؛ `access.spec.ts` و `tenant-isolation.int-spec.ts` |
-| E2E (Playwright) | ۰     | **NOT IMPLEMENTED** — بدون Config، پوشه خالی (بخش ۲۲، بدهی باز)      |
+| دسته             | تعداد   | وضعیت                                                                         |
+| ---------------- | ------- | ----------------------------------------------------------------------------- |
+| Unit             | **۳۰۸** | سبز — ۱۶ فایل                                                                 |
+| Integration      | **۲۵۵** | سبز — ۲۱ Suite روی PostgreSQL **واقعی**، بدون Mock                            |
+| API (Supertest)  | —       | داخل Integration؛ ۵ Suite که `AppModule` واقعی را Boot می‌کنند                |
+| Security/AuthZ   | —       | داخل دو دسته بالا؛ `access.spec.ts`، `tenant-isolation`، `service-to-service` |
+| E2E (Playwright) | **۳۷**  | سبز — از راه Gateway، با توکن واقعی Keycloak (`tests/e2e`)                    |
+| **پوشش**         | —       | Statements ۹۳٫۸۰٪ · **Branches ۹۰٫۱۳٪** · Functions ۹۱٫۶۶٪ · Lines ۹۵٫۷۷٪     |
 
 نُه Suite یکپارچگی، سازمان‌یافته حول جدول اجباری `docs/10` § ۱۰٫۱۲ — نه حول
 ساختار کد، چون همان جدول دروازه Merge است: `ledger-immutability` ·
@@ -1004,17 +1026,33 @@ Profile اختیاری است و در این Audit بالا آورده **نشد*
 
 ## ۱۹. Testing State
 
-### 2026-08-29 — پس از فاز اقتصادی
+### 2026-08-29 (دوم) — پس از بستن شکاف E2E
 
-| دسته                 | عدد                                                              |
-| -------------------- | ---------------------------------------------------------------- |
-| Unit در کل Monorepo  | **۶۵۴** (۴۱۵ پیشین + ۲۳۹ economic)                               |
-| Integration در کل    | **۱۷۳** (۷۳ پیشین + ۱۰۰ economic) — روی PostgreSQL و Kafka واقعی |
-| Suiteهای Integration | ۱۸ (fleet ۴، maintenance ۵، **economic ۹**)                      |
-| E2E (Playwright)     | ۰ — همچنان بدهی باز                                              |
+| دسته                 | عدد                                                                       |
+| -------------------- | ------------------------------------------------------------------------- |
+| Unit در کل Monorepo  | **۷۲۴** (۴۱۶ پیشین + ۳۰۸ economic)                                        |
+| Integration در کل    | **۳۲۸** (۷۳ پیشین + ۲۵۵ economic) — روی PostgreSQL و Kafka واقعی          |
+| Suiteهای Integration | ۳۰ (fleet ۴، maintenance ۵، **economic ۲۱**)                              |
+| **E2E (Playwright)** | **۳۷** — روی Gateway، economic، PostgreSQL، Kafka و Keycloak واقعی        |
+| پوشش `economic`      | Statements ۹۳٫۸۰٪ · **Branches ۹۰٫۱۳٪** · Functions ۹۱٫۶۶٪ · Lines ۹۵٫۷۷٪ |
+
+**دو چیز که این فاز درباره خودِ سنجش پیدا کرد:**
+
+۱. **آستانه پوشش هرگز سنجیده نمی‌شد.** هر دو Project در `jest.config.js`
+`rootDir` را روی پوشه تست خودشان می‌گذاشتند، و Jest الگوهای
+`collectCoverageFrom` را نسبت به همان `rootDir` حل می‌کند — پس `src/**`
+می‌شد `src/src/**` و `test/src/**`. هیچ فایلی مطابقت نمی‌کرد،
+`--coverage` گزارش می‌داد `All files | 0 | 0 | 0 | 0`، و چون فایلی برای
+داوری نبود، آستانه ۹۰٪ هرگز شکست نمی‌خورد. عدد واقعی پس از رفع: **۴۴٫۸۴٪
+شاخه**.
+
+۲. **`purgeExpired` هرگز اجرا نشده بود.** یک `deleteMany` مستأجر-محدود از
+Timer نگهداری، که خارج از هر درخواستی اجرا می‌شود؛ نگهبان مستأجر ردش
+می‌کرد و خطا داخل `catch`ی می‌افتاد که عمداً همه‌چیز را می‌بلعد.
 
 سرویس‌هایی که `test:integration` شان `--passWithNoTests` **ندارد**: `fleet`،
-`maintenance`، `economic`.
+`maintenance`، `economic`. **`test:e2e` هم ندارد** — Playwright به‌صورت
+پیش‌فرض روی «هیچ تستی پیدا نشد» شکست می‌خورد و همان پیش‌فرض نگه داشته شده.
 
 ### واقعی، از اجرای پیشین `pnpm verify` (نه از حافظه سند قدیمی):
 
@@ -1084,9 +1122,14 @@ Suite نگهداری در نخستین اجرا **هیچ باگ تولیدی ن�
 همچنین هر دو Partial Unique Index و هر شش CHECK Constraint با پرس‌وجوی مستقیم
 از `pg_indexes` و `pg_constraint` در پایگاه داده دیده شدند.
 
-**E2E Tests:** `tests/e2e/` پوشه‌ای خالی است، بدون `playwright.config.ts`.
-`pnpm test:e2e` هست اما `turbo run test:e2e` روی هیچ Package ای Script
-واقعی ندارد.
+**E2E Tests:** `tests/e2e/` اکنون Package ‏`@rasta/e2e` است — با
+`playwright.config.ts`، یک Global Setup که هر وابستگی را **مثبت** بررسی
+می‌کند، و ۳۷ سناریو. `pnpm test:e2e` واقعاً اجرا می‌کند و اگر هیچ تستی پیدا
+نشود شکست می‌خورد.
+
+**چرا API و نه Browser:** `apps/web` پوشه خالی است. تست Browser باید صفحه‌ای
+را Drive کند که وجود ندارد. `APIRequestContext` همان Stack واقعی را می‌زند و
+Harness برای Browser آماده است (یک Project دوم در همان Config).
 
 ### ✅ CI/CD — **CI VERIFIED** (به‌روزشده برای فاز اقتصادی)
 
@@ -1412,18 +1455,27 @@ live-verify-17  WALLET_OPENED         actor=USR-SEED-DEHYARI-ADMIN
 
 ## ۲۲. Known Issues
 
+> **به‌روزرسانی 2026-08-29 (دوم).** بدهی E2E بسته شد: `tests/e2e` اکنون
+> ۳۷ سناریو روی Stack واقعی اجرا می‌کند و در CI Job جداگانه دارد. آستانه
+> پوشش هم برای نخستین بار واقعاً سنجیده می‌شود (بخش ۱۹). سه یافته تازه —
+> هر سه، درزی میان لایه‌هایی که جداگانه درست‌اند — در جدول زیر آمده و در
+> `docs/24` به‌عنوان Q-26، Q-27 و Q-28 ثبت شده‌اند.
+
 ### فعال (رفع‌نشده)
 
-| #     | مسئله                                                                            | شدت                             | تأثیر                                                                         | راه‌حل موقت                                                                                     |
-| ----- | -------------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| D-006 | Redis محلی Windows روی پورت ۶۳۷۹ با Redis داکری تصادم دارد                       | بالا (فقط محیط توسعه این ماشین) | تست زنده Rate Limiting/Idempotency از راه `localhost:6379` غیرقابل‌اعتماد     | استفاده از `docker exec rasta-redis redis-cli` مستقیم؛ یا تغییر `REDIS_PORT` مثل الگوی Postgres |
-| D-008 | سه قاعده Supply-Chain که Lockfile فعلی رد می‌کند                                 | متوسط                           | پنجره نصب نسخه تازه‌منتشرشده مخرب باز است؛ ۴ هشدار Trust بررسی‌نشده           | Semgrep با `--exclude-rule` نام‌دار عبور می‌کند؛ بررسی کامل یک Task مستقل است                   |
-| —     | چهار سرویس دیگر هنوز `--passWithNoTests` دارند و Project Integration شان تهی است | متوسط                           | سهم آن‌ها از مرحله Integration در CI یعنی «چیزی نشکست»، نه «مسیر داده تست شد» | برای هر سرویس، کار همان سرویس است؛ `fleet` الگو را نشان داده                                    |
-| —     | `api-gateway` هیچ Dockerfile ندارد                                               | متوسط                           | نمی‌توان آن را Containerize کرد                                               | نوشتن Dockerfile لازم است                                                                       |
-| D-011 | تغییر برنامه سرویس در `maintenance` هیچ رویدادی تولید نمی‌کند                    | متوسط (امروز پایین)             | خاموش کردن بی‌صدای یک برنامه سرویس را `audit-service` هرگز نمی‌بیند           | دلیل در ستون `notes` می‌ماند؛ هنگام ساخت `audit-service` رویداد لازم است                        |
-| D-012 | کنتور کارکرد هرگز عقب نمی‌رود                                                    | پایین                           | پس از تعویض کنتور، برنامه‌های کارکردمحور جلوتر از عدد روی دستگاه‌اند          | مسیر پشتیبانی‌شده: `PATCH /v1/maintenance-schedules/{id}` با `lastServicedHourMeter`            |
-| —     | `InsuranceClaim` جدول بدون API                                                   | پایین                           | داده قابل‌ثبت نیست از راه سرویس                                               | Controller/Service لازم است، هروقت claim-flow اولویت شد                                         |
-| —     | `mission` و رویدادهای `MISSION_*` پیاده نشدند                                    | پایین                           | تحلیل «ناوگان داخلی در برابر برون‌سپاری» هنوز داده مأموریت ندارد              | عمدی — به `construction-service` گره خورده که وجود ندارد؛ ADR-026 § Consequences                |
+| #     | مسئله                                                                            | شدت                             | تأثیر                                                                                                                                           | راه‌حل موقت                                                                                          |
+| ----- | -------------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| D-006 | Redis محلی Windows روی پورت ۶۳۷۹ با Redis داکری تصادم دارد                       | بالا (فقط محیط توسعه این ماشین) | تست زنده Rate Limiting/Idempotency از راه `localhost:6379` غیرقابل‌اعتماد                                                                       | استفاده از `docker exec rasta-redis redis-cli` مستقیم؛ یا تغییر `REDIS_PORT` مثل الگوی Postgres      |
+| D-008 | سه قاعده Supply-Chain که Lockfile فعلی رد می‌کند                                 | متوسط                           | پنجره نصب نسخه تازه‌منتشرشده مخرب باز است؛ ۴ هشدار Trust بررسی‌نشده                                                                             | Semgrep با `--exclude-rule` نام‌دار عبور می‌کند؛ بررسی کامل یک Task مستقل است                        |
+| —     | چهار سرویس دیگر هنوز `--passWithNoTests` دارند و Project Integration شان تهی است | متوسط                           | سهم آن‌ها از مرحله Integration در CI یعنی «چیزی نشکست»، نه «مسیر داده تست شد»                                                                   | برای هر سرویس، کار همان سرویس است؛ `fleet` الگو را نشان داده                                         |
+| —     | `api-gateway` هیچ Dockerfile ندارد                                               | متوسط                           | نمی‌توان آن را Containerize کرد                                                                                                                 | نوشتن Dockerfile لازم است                                                                            |
+| D-017 | `AuthGuard` برای توکن داخلی `x-organization-id` را نمی‌خواند (Q-28)              | **بالا**                        | هر ۲۶ Endpoint دارای `@AllowService` پس از احراز هویت روی نخستین خواندن مستأجر‌محدود `500` می‌دهد؛ مسیر Activity در `docs/08` § ۸٫۶ کار نمی‌کند | **Fail-Closed** — هیچ نشتی. تصمیم امنیتی لازم است؛ در `test/service-to-service.int-spec.ts` ادعا شده |
+| D-018 | مسیرهای خواندنی `ledger` از Gateway به هیچ نقشی داده نمی‌دهند (Q-27)             | متوسط                           | سازمان مالک Journal ‏`403` می‌گیرد و نقش پلتفرمی ‏`404`                                                                                         | تراز آزمایشی کار می‌کند؛ سناریوی E2E توازن Journal را مستقیم از سرویس می‌خواند و دلیلش را می‌نویسد   |
+| D-019 | کامنت `kafka.publisher.ts` تضمین ترتیبی قوی‌تر از کد ادعا می‌کند (Q-26)          | پایین                           | فقط `SETTLEMENT_COMPLETED` و `COMMISSION_APPLIED` با `transactionId` پارتیشن می‌شوند                                                            | تصمیم نخستین مصرف‌کننده واقعی است؛ هر دو حالت در `05-correlation` صریح ادعا شده                      |
+| D-011 | تغییر برنامه سرویس در `maintenance` هیچ رویدادی تولید نمی‌کند                    | متوسط (امروز پایین)             | خاموش کردن بی‌صدای یک برنامه سرویس را `audit-service` هرگز نمی‌بیند                                                                             | دلیل در ستون `notes` می‌ماند؛ هنگام ساخت `audit-service` رویداد لازم است                             |
+| D-012 | کنتور کارکرد هرگز عقب نمی‌رود                                                    | پایین                           | پس از تعویض کنتور، برنامه‌های کارکردمحور جلوتر از عدد روی دستگاه‌اند                                                                            | مسیر پشتیبانی‌شده: `PATCH /v1/maintenance-schedules/{id}` با `lastServicedHourMeter`                 |
+| —     | `InsuranceClaim` جدول بدون API                                                   | پایین                           | داده قابل‌ثبت نیست از راه سرویس                                                                                                                 | Controller/Service لازم است، هروقت claim-flow اولویت شد                                              |
+| —     | `mission` و رویدادهای `MISSION_*` پیاده نشدند                                    | پایین                           | تحلیل «ناوگان داخلی در برابر برون‌سپاری» هنوز داده مأموریت ندارد                                                                                | عمدی — به `construction-service` گره خورده که وجود ندارد؛ ADR-026 § Consequences                     |
 
 ### D-010 — Docker Desktop از کار افتاد و رفع شد (2026-08-28) ✅
 
@@ -1572,8 +1624,10 @@ un\` — فایل‌های صفر-بایتی از نوع ReparsePoint که از
 
 - T-01 تا T-05 در `docs/23-risks-and-tradeoffs.md` (Microservices در مقیاس
   کوچک، Kafka برای حجم کم، Temporal سنگین، رد Kong/APISIX، Prisma به‌ازای سرویس).
-- Testcontainers نصب نشده — تست Integration واقعی هنوز ممکن نیست بدون آن.
-- Playwright نصب نشده — E2E واقعی هنوز ممکن نیست.
+- Testcontainers نصب نشده — تست‌های Integration به‌جایش روی Stack ‏`infra:up`
+  و روی Service Container های CI اجرا می‌شوند. تصمیم آگاهانه، نه شکاف.
+- **Playwright نصب شد** (2026-08-29). Project ‏`web` تا ساخته‌شدن `apps/web`
+  اضافه نمی‌شود؛ Harness آماده است.
 - Production mTLS و Database RLS — Planned، نه Implemented (بخش ۲۰).
 
 ---
@@ -1679,8 +1733,9 @@ ADR-001 (Microservices)، ADR-004/005 (Database + Ownership)، ADR-006
 
 - Frontend (`apps/web`, `apps/admin`) — پوشه خالی، هیچ خط کدی نیست
 - ۱۰ سرویس Backend باقی‌مانده (`marketplace, procurement, supplier, inventory,
-construction, contract, economic, notification, document, audit, analytics`)
-- E2E Tests واقعی (فقط پوشه خالی، بدون Playwright)
+construction, contract, notification, document, audit, analytics`)
+- E2E **Browser** (Playwright هست و ۳۷ سناریو API اجرا می‌شود؛ Project ‏`web`
+  وقتی `apps/web` ساخته شود اضافه می‌شود — `tests/e2e/playwright.config.ts`)
 - `mission` و رویدادهای `MISSION_*` در fleet — عمداً موکول شد (ADR-026)
 - Kubernetes manifests (`infrastructure/k8s/` خالی)
 - Temporal Workflow واقعی (زیرساخت هست، هیچ Workflow نوشته نشده) — نخستین سرویسی
@@ -1732,18 +1787,29 @@ construction, contract, economic, notification, document, audit, analytics`)
 
 ## ۲۹. Immediate Next Task
 
-### فاز اقتصادی بسته شد — **READY_FOR_NEXT_PHASE**
+### فاز اقتصادی — **در انتظار تأیید صاحب محصول**
 
-هر پنج سطح تأیید کامل است و هیچ نقص بازِ مسدودکننده‌ای در `economic-service`
-نمانده:
+> **این بخش پیش‌تر `READY_FOR_NEXT_PHASE` می‌گفت در حالی که `tests/e2e` پوشه‌ای
+> خالی بود و `AGENTS.md` § ۷ برای این دامنه E2E سبز می‌خواهد.** آن شکاف اکنون
+> بسته است. عنوان تا سبز شدن CI روی PR و تأیید انسانی، عمداً
+> `READY_FOR_NEXT_PHASE` نیست.
 
 | سطح           | شاهد                                                                                        |
 | ------------- | ------------------------------------------------------------------------------------------- |
 | IMPLEMENTED   | Wallet · Hold · Ledger · Journal · Transaction · Payment · Commission · Reward · Settlement |
-| TESTED        | ۲۳۹ تست واحد در economic، ۶۵۴ در Monorepo                                                   |
-| INTEGRATION   | ۱۰۰ تست روی PostgreSQL و Kafka واقعی، ۹ Suite، بدون Mock                                    |
-| LIVE VERIFIED | ۲۶ سناریو از راه Gateway با توکن واقعی Keycloak (بخش ۲۱-ج)                                  |
-| CI VERIFIED   | بخش ۱۹                                                                                      |
+| TESTED        | **۳۰۸** تست واحد در economic، **۷۲۴** در Monorepo                                           |
+| INTEGRATION   | **۲۵۵** تست روی PostgreSQL و Kafka واقعی، **۲۱** Suite، بدون Mock                           |
+| **E2E**       | **۳۷ سناریو** روی Gateway + economic + PostgreSQL + Kafka + Keycloak واقعی                  |
+| **COVERAGE**  | Statements ۹۳٫۸۰٪ · **Branches ۹۰٫۱۳٪** · Functions ۹۱٫۶۶٪ · Lines ۹۵٫۷۷٪                   |
+| **MIGRATION** | up → down → up روی Schema یک‌بارمصرف، با ادعا بین هر گام (`pnpm test:migration`)            |
+| LIVE VERIFIED | ۲۶ سناریو پیشین (بخش ۲۱-ج) + ۳۷ سناریو E2E                                                  |
+| CI VERIFIED   | ⏳ در انتظار اجرای PR — تا آن لحظه این ردیف ادعا نیست                                       |
+
+**سه یافته باز که پیش از فاز بعد باید تصمیم انسانی بگیرند:** D-017/Q-28
+(تنانتِ فراخوان سرویس‌به‌سرویس)، D-018/Q-27 (دسترسی خواندنی دفتر کل از
+Gateway)، D-019/Q-26 (کلید پارتیشن رویدادهای یک تراکنش). هیچ‌کدام مسدودکننده
+`economic` نیست؛ Q-28 پیش از `marketplace-service` باید حل شود، چون نخستین
+مصرف‌کننده واقعی آن مسیر همان است.
 
 ### گام بعدی: `marketplace-service`
 
@@ -1789,7 +1855,7 @@ construction, contract, economic, notification, document, audit, analytics`)
 
 | کار                                            | چرا                                          |
 | ---------------------------------------------- | -------------------------------------------- |
-| Playwright برای E2E واقعی                      | `AGENTS.md` § ۷ برای `economic` می‌خواهدش    |
+| Dockerfile برای `api-gateway`                  | تنها سرویسی که ندارد                         |
 | Dockerfile برای `api-gateway`                  | تنها سرویسی که ندارد                         |
 | حذف `--passWithNoTests` از سه سرویس باقی‌مانده | Project Integration شان تهی است              |
 | D-008 (Supply-Chain)                           | سه قاعده Semgrep که Lockfile رد می‌کند       |
@@ -1850,7 +1916,6 @@ construction, contract, economic, notification, document, audit, analytics`)
 | D-006 (تصادم پورت Redis روی این ماشین)                      | فقط محیط توسعه                          |
 | D-011 (رویداد نداشتن تغییر برنامه سرویس)                    | هنگام ساخت `audit-service` باید حل شود  |
 | `InsuranceClaim` بدون API در `asset-service`                | جدول هست، Controller نیست               |
-| Playwright برای E2E واقعی                                   | `tests/e2e/` هنوز خالی است              |
 | Q-24 / Q-25 — تصمیم انسانی درباره دسترسی اپراتور و تعمیرگاه | هر دو مسدودکننده پورتال تعمیرگاه‌اند    |
 
 **هیچ‌کدام از این‌ها را خودکار شروع نکن.**

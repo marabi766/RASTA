@@ -16,11 +16,22 @@ export interface KafkaPublisherOptions {
  *                          replica has it, so a leader failure cannot lose it
  *   idempotent=true        the broker deduplicates producer retries, so a
  *                          network hiccup does not duplicate an event
- *   maxInFlightRequests=1  preserves per-partition ordering under retry, which
- *                          is what keeps FUNDS_HELD and SETTLEMENT_COMPLETED
- *                          for the same transaction in the order they
- *                          happened — reversed, a consumer would see money
- *                          released before it was ever held
+ *   maxInFlightRequests=1  preserves ordering **within a partition** under
+ *                          retry, so two events about the same aggregate can
+ *                          never be reordered by a network hiccup
+ *
+ * ## What that does and does not guarantee
+ *
+ * Ordering holds per partition, and the partition key is the aggregate id
+ * unless a caller overrides it (`LedgerService.enqueue`). So `FUNDS_HELD`
+ * (keyed by the hold) and `SETTLEMENT_COMPLETED` (keyed by the transaction,
+ * deliberately) are **not** ordered relative to each other today.
+ *
+ * That is a real gap for a consumer rebuilding one transaction, and it is
+ * recorded as docs/24 Q-26 rather than fixed here: which guarantee should hold
+ * is the first real consumer's decision, and marketplace-service does not
+ * exist yet. This comment previously claimed the stronger property; it was
+ * describing an intention rather than the code.
  */
 @Injectable()
 export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {

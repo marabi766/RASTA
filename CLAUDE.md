@@ -101,6 +101,7 @@ pnpm test                       # همه تست‌ها
 pnpm test:unit                  # فقط Unit (بدون نیاز به زیرساخت)
 pnpm test:integration           # نیازمند `pnpm infra:up`
 pnpm test:e2e                   # Playwright (نیازمند اجرای کامل Stack)
+pnpm test:migration             # up → down → up روی Schema یک‌بارمصرف (economic)
 pnpm --filter @rasta/economic-service test
 pnpm --filter @rasta/economic-service test -- --testNamePattern="tenant isolation"
 pnpm --filter @rasta/economic-service test -- --coverage
