@@ -550,7 +550,7 @@ jobs:
       - name: Start economic-service, marketplace-service and api-gateway
         # From `dist`, the same artefact the container image runs, rather than
         # from a watch-mode dev server. Started here rather than by Playwright's
-        # `webServer` because two processes have to come up in order and their
+        # `webServer` because three processes have to come up in order and their
         # logs must survive the job for a failure to be diagnosable.
         env:
           NODE_ENV: test
@@ -602,6 +602,11 @@ jobs:
             PORT=3112 SERVICE_NAME=economic-service \
             node dist/main.js > /tmp/rasta-logs/economic.log 2>&1 & )
 
+          ( cd services/marketplace-service && \
+            PORT=3106 SERVICE_NAME=marketplace-service \
+            DATABASE_URL=postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public \
+            node dist/main.js > /tmp/rasta-logs/marketplace.log 2>&1 & )
+
           ( cd services/api-gateway && \
             PORT=3000 SERVICE_NAME=api-gateway \
             node dist/main.js > /tmp/rasta-logs/gateway.log 2>&1 & )
@@ -609,17 +614,20 @@ jobs:
           for attempt in $(seq 1 60); do
             economic="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3112/health/ready || true)"
+            marketplace="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3106/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/wallets/me || true)"
-            if [ "$economic" = "200" ] && [ "$gateway" = "401" ]; then
+            if [ "$economic" = "200" ] && [ "$marketplace" = "200" ] && [ "$gateway" = "401" ]; then
               echo "stack up after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 3
           done
 
-          echo "the stack did not come up (economic=${economic}, gateway=${gateway})"
+          echo "the stack did not come up (economic=${economic}, marketplace=${marketplace}, gateway=${gateway})"
           cat /tmp/rasta-logs/economic.log
+          cat /tmp/rasta-logs/marketplace.log
           cat /tmp/rasta-logs/gateway.log
           exit 1
 
@@ -643,6 +651,8 @@ jobs:
         run: |
           echo '--- economic-service ---'
           tail -n 200 /tmp/rasta-logs/economic.log || true
+          echo '--- marketplace-service ---'
+          tail -n 200 /tmp/rasta-logs/marketplace.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-logs/gateway.log || true
           echo '--- keycloak ---'
