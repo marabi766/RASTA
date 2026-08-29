@@ -243,7 +243,33 @@ describe('economic edge cases', () => {
   // -------------------------------------------------------------------------
 
   describe('a reward rule', () => {
-    let ruleId: string;
+    /**
+     * A fresh rule per test.
+     *
+     * Not a `let` filled in by the first case: CI runs this suite a second
+     * time under `--testNamePattern`, and the pattern matches "capped" but not
+     * "accepts", so the shared value would be `undefined` and the PATCH would
+     * hit `/rules/undefined`. A test that only passes when its neighbour ran
+     * first is exactly what AGENTS.md § 5 forbids — and this is how it was
+     * caught.
+     */
+    async function createRule(): Promise<string> {
+      const created = await request(http)
+        .post('/v1/rewards/rules')
+        .set('authorization', asSystem())
+        .send({
+          organizationId: org,
+          triggerEvent: 'USAGE_RECORDED',
+          rewardType: 'POINTS',
+          points: 12,
+          creditPerPointMinor: '1000',
+          periodCap: 500,
+          periodType: 'MONTH',
+          label: 'نمونه — نیازمند تصویب',
+        })
+        .expect(201);
+      return created.body.id as string;
+    }
 
     it('accepts every optional field the schema offers', async () => {
       const created = await request(http)
@@ -265,7 +291,6 @@ describe('economic edge cases', () => {
         })
         .expect(201);
 
-      ruleId = created.body.id;
       // With a conversion rate set, a grant stops being a display number and
       // becomes a recorded platform expense (ADR-033).
       expect(created.body.creditPerPointMinor).toBe('1000');
@@ -273,6 +298,8 @@ describe('economic edge cases', () => {
     });
 
     it('is repriced, capped, closed and reopened one field at a time', async () => {
+      const ruleId = await createRule();
+
       const points = await request(http)
         .patch(`/v1/rewards/rules/${ruleId}`)
         .set('authorization', asSystem())
