@@ -308,6 +308,26 @@
       }
     },
     {
+      "username": "dehyari.admin.b",
+      "email": "dehyari.admin.b@rasta.local",
+      "firstName": "دهیار",
+      "lastName": "نمونه دو",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "RastaDev!2026",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["ORGANIZATION_ADMIN"],
+      "attributes": {
+        "active_organization_id": ["ORG-DEH-0002"],
+        "rasta_user_id": ["USR-SEED-DEHYARI-ADMIN-B"]
+      }
+    },
+    {
       "username": "province.auditor",
       "email": "auditor@rasta.local",
       "firstName": "ناظر",
