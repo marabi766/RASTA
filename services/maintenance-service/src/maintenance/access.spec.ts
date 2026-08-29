@@ -143,7 +143,6 @@ describe('record-level refusal', () => {
   });
 });
 
-
 describe('a service caller after ADR-035', () => {
   /**
    * Regression coverage for the shared change, from a service other than the
