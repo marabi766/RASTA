@@ -46,11 +46,7 @@ describe('economic consumers', () => {
   beforeAll(() => {
     prisma = newPrisma();
     wiring = wire(prisma);
-    settlementAuthority = new SettlementAuthorityConsumer(
-      noBroker,
-      prisma,
-      wiring.transactions,
-    );
+    settlementAuthority = new SettlementAuthorityConsumer(noBroker, prisma, wiring.transactions);
     rewardTrigger = new RewardTriggerConsumer(noBroker, prisma, wiring.rewards);
   });
 

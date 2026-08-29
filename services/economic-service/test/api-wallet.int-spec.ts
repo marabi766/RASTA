@@ -137,7 +137,10 @@ describe('wallet API', () => {
   it('refuses a request whose token names an organization it has no membership in', async () => {
     const response = await request(http)
       .get('/v1/wallets/me')
-      .set('authorization', `Bearer ${bearer({ sub: 'x', organizationId: org, roles: ['ORGANIZATION_ADMIN'], organizationIds: [org] })}`)
+      .set(
+        'authorization',
+        `Bearer ${bearer({ sub: 'x', organizationId: org, roles: ['ORGANIZATION_ADMIN'], organizationIds: [org] })}`,
+      )
       .set('x-organization-id', other)
       .expect(403);
 

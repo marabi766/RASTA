@@ -285,9 +285,9 @@ describe('transaction and settlement API', () => {
       .expect(201);
 
     expect(BigInt(settled.body.grossAmountMinor)).toBe(30_000n);
-    expect(
-      BigInt(settled.body.netAmountMinor) + BigInt(settled.body.commissionAmountMinor),
-    ).toBe(30_000n);
+    expect(BigInt(settled.body.netAmountMinor) + BigInt(settled.body.commissionAmountMinor)).toBe(
+      30_000n,
+    );
     // Zero because no rule is configured, which the response says out loud
     // rather than leaving to be inferred from a zero (docs/24 Q-08).
     expect(settled.body.commissionRuleMatched).toBe(false);
