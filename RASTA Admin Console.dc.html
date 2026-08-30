@@ -1,0 +1,1195 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta charset="utf-8">
+<title>RASTA — apps/admin · کنسول اتحادیه</title>
+
+<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js"></script>
+<style>
+/* Portable checkpoint: font binaries are not redistributed without licence files. */
+:root{
+--bg:#F5F8F7;--surf:#FFFFFF;--sunken:#EDF2F1;
+--bd:#E1E7E6;--bd2:#C9D3D1;
+--tx:#101A19;--tx2:#576765;--tx3:#8A9896;
+--pri:#0E6E64;--pri-h:#0A564E;--pri-soft:#E6F2F0;--pri-tx:#0A564E;
+--omran:#A6602C;--omran-soft:#F8EFE7;--omran-tx:#8A4E22;
+--ok:#1A7A4B;--ok-soft:#E6F4EC;--ok-tx:#14603A;
+--warn:#96650A;--warn-soft:#FAF1DE;--warn-tx:#7A5208;
+--dgr:#AC2A20;--dgr-soft:#FAEAE8;--dgr-tx:#8E211A;
+--info:#1B6698;--info-soft:#E8F1F8;--info-tx:#14507A;
+--neu-soft:#EDF1F0;
+--sh1:0 1px 2px rgba(14,32,30,.06);--sh2:0 6px 20px -6px rgba(14,32,30,.14);
+}
+[data-theme="dark"]{
+--bg:#0B1211;--surf:#121A19;--sunken:#0E1615;
+--bd:#26312F;--bd2:#3A4745;
+--tx:#E7EEED;--tx2:#9DAEAB;--tx3:#728382;
+--pri:#2A9D8F;--pri-h:#38B3A4;--pri-soft:#10302C;--pri-tx:#7FD6C9;
+--omran:#C98A52;--omran-soft:#2A1D12;--omran-tx:#DFA875;
+--ok:#3FA372;--ok-soft:#0F2618;--ok-tx:#7FCCA3;
+--warn:#C99327;--warn-soft:#291F0C;--warn-tx:#E0B75E;
+--dgr:#D2564A;--dgr-soft:#2B1311;--dgr-tx:#EE9089;
+--info:#4A93C9;--info-soft:#0E2130;--info-tx:#8FC3E6;
+--neu-soft:#1B2524;
+--sh1:0 1px 2px rgba(0,0,0,.4);--sh2:0 8px 24px -8px rgba(0,0,0,.6);
+}
+html,body{margin:0;padding:0}
+body{background:var(--bg)}
+*{box-sizing:border-box}
+a{color:var(--pri);text-decoration:none}
+a:hover{color:var(--pri-h);text-decoration:underline}
+::selection{background:var(--pri-soft);color:var(--pri-tx)}
+i[data-lucide]{display:inline-flex;align-items:center;justify-content:center;flex:none;line-height:0}
+i[data-lucide] svg{width:1em;height:1em;stroke-width:1.75}
+[data-g]{min-width:0}
+[data-g]>*{min-width:0}
+@media (max-width:1279px){
+  [data-g="split"],[data-g="two"]{grid-template-columns:1fr!important}
+  [data-g="kpi4"]{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+}
+@media (max-width:1023px){
+  [data-g="shell"]{grid-template-columns:minmax(0,1fr)!important}
+  [data-g="shell"]>aside{position:sticky!important;top:0!important;z-index:30!important;height:auto!important;flex-direction:row!important;flex-wrap:nowrap!important;align-items:center!important;gap:8px!important;overflow-x:auto!important;overflow-y:hidden!important;padding:10px 14px!important;border-inline-end:none!important;border-block-end:1px solid var(--bd)!important}
+  [data-g="shell"]>aside>[data-rail-foot]{display:none!important}
+  [data-g="shell"]>aside [data-rail-group]{flex-direction:row!important;flex-wrap:nowrap!important;margin-block-end:0!important;gap:6px!important;flex:none!important}
+  [data-g="shell"]>aside [data-rail-label]{display:none!important}
+  [data-g="shell"]>aside [data-rail-item]{flex:none!important;min-height:44px!important;white-space:nowrap!important;border:1px solid var(--bd)!important;padding:10px 13px!important}
+  [data-topbar-search]{display:none!important}
+}
+@media (max-width:767px){
+  [data-g="kpi4"]{grid-template-columns:1fr!important}
+  [data-scroll]{overflow-x:auto}
+}
+</style>
+</helmet>
+
+<div dir="rtl" data-g="shell" data-theme="{{ theme }}" style="font-family:'Vazirmatn','Vazir','Estedad','Noto Naskh Arabic','Segoe UI',Tahoma,system-ui,sans-serif;background:var(--bg);color:var(--tx);min-height:100vh;display:grid;grid-template-columns:262px minmax(0,1fr);font-feature-settings:'ss01';-webkit-font-smoothing:antialiased">
+
+  <aside style="background:var(--surf);border-inline-end:1px solid var(--bd);display:flex;flex-direction:column;gap:4px;padding:20px 14px;position:sticky;top:0;height:100vh;overflow-y:auto">
+    <div style="display:flex;align-items:center;gap:10px;padding:0 6px 18px">
+      <div style="width:32px;height:32px;border-radius:9px;background:var(--tx);display:grid;place-items:center;flex:none">
+        <div style="width:14px;height:14px;border:2.5px solid var(--surf);border-radius:2px;border-block-end-color:transparent;border-inline-start-color:transparent;transform:rotate(45deg)"></div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <div style="font-size:16px;font-weight:800;letter-spacing:.06em;line-height:1">RASTA</div>
+        <div style="font-size:10px;color:var(--tx3);line-height:1.2">apps/admin · کنسول اتحادیه</div>
+      </div>
+    </div>
+
+    <sc-for list="{{ navGroups }}" as="g" hint-placeholder-count="3">
+      <div data-rail-group="1" style="display:flex;flex-direction:column;gap:2px;margin-block-end:14px">
+        <div data-rail-label="1" style="font-size:10px;font-weight:600;color:var(--tx3);letter-spacing:.04em;padding:0 8px 6px">{{ g.label }}</div>
+        <sc-for list="{{ g.items }}" as="it" hint-placeholder-count="3">
+          <div data-rail-item="1" onClick="{{ it.go }}" style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px;cursor:pointer;font-size:13px;transition:background 150ms cubic-bezier(.16,1,.3,1);background:{{ it.bg }};color:{{ it.fg }};font-weight:{{ it.fw }}" style-hover="background:var(--sunken)">
+            <i data-lucide="{{ it.icon }}" style="font-size:16px;color:{{ it.ic }}"></i>
+            <span style="flex:1 1 auto">{{ it.label }}</span>
+            <span style="font-size:10px;color:var(--tx3);font-variant-numeric:tabular-nums">{{ it.meta }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </sc-for>
+
+    <div data-rail-foot="1" style="margin-top:auto;display:flex;flex-direction:column;gap:8px;padding-top:12px;border-top:1px solid var(--bd)">
+      <div onClick="{{ toggleDensity }}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;cursor:pointer;font-size:12px;color:var(--tx2)" style-hover="background:var(--sunken)">
+        <i data-lucide="rows-3" style="font-size:15px"></i><span style="flex:1">چگالی</span><span style="font-weight:600;color:var(--pri-tx)">{{ densityLabel }}</span>
+      </div>
+      <div onClick="{{ toggleTheme }}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;cursor:pointer;font-size:12px;color:var(--tx2)" style-hover="background:var(--sunken)">
+        <i data-lucide="sun-moon" style="font-size:15px"></i><span style="flex:1">حالت نمایش</span><span style="font-weight:600;color:var(--pri-tx)">{{ themeLabel }}</span>
+      </div>
+    </div>
+  </aside>
+
+  <main style="display:flex;flex-direction:column;min-width:0">
+
+    <div style="height:56px;background:var(--surf);border-block-end:1px solid var(--bd);display:flex;align-items:center;gap:14px;padding:0 22px;position:sticky;top:0;z-index:20">
+      <div style="display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--tx3);flex:none">
+        <i data-lucide="chevron-left" style="font-size:13px"></i><span>{{ crumb }}</span>
+      </div>
+      <div data-topbar-search="1" style="flex:1;max-width:420px;margin-inline:auto;display:flex;align-items:center;gap:9px;background:var(--sunken);border:1px solid var(--bd);border-radius:9px;padding:8px 12px;font-size:12.5px;color:var(--tx3);cursor:pointer">
+        <i data-lucide="search" style="font-size:15px"></i>
+        <span style="flex:1">جست‌وجو در سازمان، کاربر، سند مالی…</span>
+        <span dir="ltr" style="font-family:ui-monospace,monospace;font-size:10px;border:1px solid var(--bd2);border-radius:5px;padding:1px 5px">⌘K</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-inline-start:auto;flex:none">
+        <div style="width:36px;height:36px;border-radius:9px;display:grid;place-items:center;cursor:pointer;position:relative;color:var(--tx2)" style-hover="background:var(--sunken)">
+          <i data-lucide="bell" style="font-size:17px"></i>
+          <span style="position:absolute;top:6px;inset-inline-end:6px;min-width:15px;height:15px;border-radius:8px;background:var(--dgr);color:#fff;font-size:9px;font-weight:700;display:grid;place-items:center;padding:0 3px">۹</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:9px;border:1px solid var(--bd);cursor:pointer;font-size:12px">
+          <i data-lucide="landmark" style="font-size:15px;color:var(--tx2)"></i>
+          <span style="font-weight:500">اتحادیه — استان یزد</span>
+          <i data-lucide="chevrons-up-down" style="font-size:13px;color:var(--tx3)"></i>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:5px 6px 5px 10px;border-radius:9px;cursor:pointer" style-hover="background:var(--sunken)">
+          <div style="display:flex;flex-direction:column;gap:1px;align-items:flex-end">
+            <span style="font-size:12px;font-weight:500">فاطمه دهقان</span>
+            <span style="font-size:9.5px;color:var(--tx3)" dir="ltr">{{ activeRole }}</span>
+          </div>
+          <div style="width:30px;height:30px;border-radius:50%;background:var(--neu-soft);color:var(--tx2);display:grid;place-items:center;font-size:11.5px;font-weight:600;flex:none">ف‌د</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="padding:24px 26px 60px;display:flex;flex-direction:column;gap:20px;max-width:1520px;width:100%;margin-inline:auto">
+
+      <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap">
+        <div style="display:flex;flex-direction:column;gap:5px">
+          <h1 style="margin:0;font-family:'Estedad','Vazirmatn','Vazir','Noto Naskh Arabic',system-ui,sans-serif;font-size:22px;font-weight:700;letter-spacing:-.015em">{{ pageTitle }}</h1>
+          <div style="font-size:11.5px;color:var(--tx3)">{{ pageSub }}</div>
+        </div>
+        <div style="display:flex;gap:9px;flex-wrap:wrap">
+          <button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:9px 15px;border-radius:9px;border:1px solid var(--bd2);background:transparent;color:var(--tx);cursor:pointer;display:inline-flex;align-items:center;gap:7px" style-hover="background:var(--sunken)"><i data-lucide="calendar" style="font-size:14px"></i>شهریور ۱۴۰۵</button>
+          <button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:9px 15px;border-radius:9px;border:1px solid var(--bd2);background:transparent;color:var(--tx);cursor:pointer;display:inline-flex;align-items:center;gap:7px" style-hover="background:var(--sunken)"><i data-lucide="download" style="font-size:14px"></i>خروجی</button>
+        </div>
+      </div>
+
+      <!-- ══════════ داشبورد عملیاتی پلتفرم ══════════ -->
+      <sc-if value="{{ isPlatform }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;flex-direction:column;gap:20px">
+          <div data-g="kpi4" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px">
+            <sc-for list="{{ platKpis }}" as="k" hint-placeholder-count="4">
+              <div style="background:var(--surf);border:1px solid var(--bd);border-radius:13px;padding:17px 19px;display:flex;flex-direction:column;gap:8px;box-shadow:var(--sh1)">
+                <div style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--tx3)"><i data-lucide="{{ k.icon }}" style="font-size:14px"></i>{{ k.t }}</div>
+                <div style="display:flex;align-items:baseline;gap:5px">
+                  <span style="font-size:25px;font-weight:700;font-variant-numeric:tabular-nums;color:{{ k.c }}">{{ k.v }}</span>
+                  <span style="font-size:11px;color:var(--tx3)">{{ k.u }}</span>
+                </div>
+                <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:10px">
+                  <span style="font-size:11px;color:var(--tx2);line-height:1.7;flex:1">{{ k.s }}</span>
+                  <svg viewBox="0 0 90 26" preserveAspectRatio="none" style="width:90px;height:26px;flex:none">
+                    <polyline points="{{ k.pts }}" fill="none" stroke="{{ k.sc }}" stroke-width="2" stroke-linejoin="round"></polyline>
+                  </svg>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div data-g="split" style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:20px">
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+              <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                <div>
+                  <div style="font-size:13.5px;font-weight:700">پذیرش پلتفرم — ۳۲۸ دهیاری استان</div>
+                  <div style="font-size:11px;color:var(--tx3);margin-top:3px">پرسش: کدام مرحله پذیرش گلوگاه است و کجا سازمان‌ها متوقف می‌شوند؟</div>
+                </div>
+                <span style="font-size:11px;color:var(--tx3)">پیوسته از فروردین ۱۴۰۵</span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:10px">
+                <sc-for list="{{ funnel }}" as="f" hint-placeholder-count="5">
+                  <div style="display:grid;grid-template-columns:150px minmax(0,1fr) 96px;gap:12px;align-items:center">
+                    <span style="font-size:12px;color:var(--tx2)">{{ f.k }}</span>
+                    <div style="height:22px;border-radius:6px;background:var(--sunken);overflow:hidden;position:relative">
+                      <div style="height:100%;width:{{ f.w }};background:{{ f.c }};border-radius:6px"></div>
+                    </div>
+                    <span style="font-size:11.5px;font-variant-numeric:tabular-nums;color:var(--tx2);text-align:end">{{ f.v }}</span>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="font-size:11px;color:var(--tx3);line-height:1.85;padding:12px 14px;border-radius:10px;background:var(--sunken);border:1px solid var(--bd)">گلوگاه فعلی: ثبت دارایی. ۵۱ سازمان ثبت‌نام کرده‌اند اما هنوز هیچ دستگاهی وارد نکرده‌اند — بی‌داده، بقیه پلتفرم برای آن‌ها بی‌فایده است.</div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:20px">
+              <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:13px">
+                <div style="display:flex;align-items:center;gap:9px;font-size:13.5px;font-weight:700"><i data-lucide="activity" style="font-size:16px;color:var(--pri)"></i>سلامت سرویس‌ها</div>
+                <sc-for list="{{ services }}" as="s" hint-placeholder-count="6">
+                  <div style="display:flex;align-items:center;gap:10px;font-size:11.5px;padding-block-end:9px;border-block-end:1px solid var(--bd)">
+                    <span style="width:7px;height:7px;border-radius:50%;background:{{ s.dot }};flex:none"></span>
+                    <span dir="ltr" style="font-family:ui-monospace,monospace;font-size:10.5px;color:var(--tx2);flex:1">{{ s.name }}</span>
+                    <span style="color:var(--tx3);font-variant-numeric:tabular-nums">{{ s.p95 }}</span>
+                    <span style="color:{{ s.c }};font-weight:500;font-variant-numeric:tabular-nums;min-width:52px;text-align:end">{{ s.err }}</span>
+                  </div>
+                </sc-for>
+                <div style="font-size:10.5px;color:var(--tx3);line-height:1.8">p95 پاسخ · نرخ خطای ۲۴ ساعت. آستانه هشدار: p95 بیش از ۸۰۰ms یا خطای بیش از ۱٪.</div>
+              </div>
+              <div style="background:var(--surf);border:1px solid var(--warn);border-radius:14px;padding:18px 20px;display:flex;flex-direction:column;gap:11px">
+                <div style="display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700;color:var(--warn-tx)"><i data-lucide="triangle-alert" style="font-size:15px"></i>نیازمند اقدام اتحادیه</div>
+                <sc-for list="{{ platAlerts }}" as="a" hint-placeholder-count="4">
+                  <div style="display:flex;gap:9px;align-items:flex-start;font-size:11.5px;color:var(--warn-tx);line-height:1.85">
+                    <span style="font-weight:700;flex:none;font-variant-numeric:tabular-nums">{{ a.n }}</span>
+                    <span style="flex:1">{{ a.v }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+
+          <div data-g="two" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px">
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+              <div style="font-size:13.5px;font-weight:700">سازمان‌های پرتحرک</div>
+              <div style="border:1px solid var(--bd);border-radius:11px;overflow:hidden">
+                <div style="display:grid;grid-template-columns:1.4fr .7fr .8fr .9fr;gap:10px;padding:{{ cellPad }};background:var(--sunken);font-size:11px;font-weight:600;color:var(--tx2)"><span>سازمان</span><span>دستگاه</span><span>سفارش ماه</span><span>گردش (م ریال)</span></div>
+                <sc-for list="{{ topOrgs }}" as="o" hint-placeholder-count="5">
+                  <div style="display:grid;grid-template-columns:1.4fr .7fr .8fr .9fr;gap:10px;padding:{{ cellPad }};border-block-start:1px solid var(--bd);font-size:{{ cellFs }};align-items:center">
+                    <div style="display:flex;flex-direction:column;gap:1px;min-width:0"><span style="font-weight:500">{{ o.name }}</span><span style="font-size:10px;color:var(--tx3)">{{ o.path }}</span></div>
+                    <span style="font-variant-numeric:tabular-nums;color:var(--tx2)">{{ o.assets }}</span>
+                    <span style="font-variant-numeric:tabular-nums;color:var(--tx2)">{{ o.orders }}</span>
+                    <span style="font-variant-numeric:tabular-nums">{{ o.volume }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+              <div style="font-size:13.5px;font-weight:700">صداقت داده — شاخص‌های مسدود</div>
+              <sc-for list="{{ blockedKpis }}" as="b" hint-placeholder-count="3">
+                <div style="border:1px solid var(--warn);background:var(--warn-soft);border-radius:11px;padding:13px 15px;display:flex;flex-direction:column;gap:5px">
+                  <span style="font-size:12px;font-weight:600;color:var(--warn-tx)">{{ b.k }}</span>
+                  <span style="font-size:11px;color:var(--warn-tx);line-height:1.85;opacity:.92">{{ b.v }}</span>
+                </div>
+              </sc-for>
+              <div style="font-size:11px;color:var(--tx3);line-height:1.85">این شاخص‌ها با صفر یا عدد ساختگی پر نمی‌شوند. یک داشبورد که عدد جعلی نشان می‌دهد، بدتر از داشبورد خالی است.</div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ══════════ دفتر کل و تراز آزمایشی ══════════ -->
+      <sc-if value="{{ isLedger }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:20px">
+          <div style="background:var(--info-soft);border:1px solid var(--info);border-radius:12px;padding:14px 16px;font-size:11.5px;color:var(--info-tx);line-height:1.9;display:flex;gap:10px;align-items:flex-start">
+            <i data-lucide="book-open" style="font-size:16px;margin-top:2px"></i>
+            <span>دفتر کل دوطرفه و <b>تغییرناپذیر</b> مرجع حقیقت مالی است؛ کیف پول صرفاً نمای عملیاتی آن است. هیچ سندی ویرایش یا حذف نمی‌شود — اصلاح فقط با سند معکوس انجام می‌شود. هر سند به رویداد منشأ خود گره خورده است.</span>
+          </div>
+
+          <div data-g="kpi4" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px">
+            <sc-for list="{{ ledgerKpis }}" as="k" hint-placeholder-count="4">
+              <div style="background:var(--surf);border:1px solid var(--bd);border-radius:13px;padding:17px 19px;display:flex;flex-direction:column;gap:7px;box-shadow:var(--sh1)">
+                <div style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--tx3)"><i data-lucide="{{ k.icon }}" style="font-size:14px"></i>{{ k.t }}</div>
+                <div style="font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;color:{{ k.c }}">{{ k.v }}</div>
+                <div style="font-size:11px;color:var(--tx2);line-height:1.7">{{ k.s }}</div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+              <div>
+                <div style="font-size:13.5px;font-weight:700">تراز آزمایشی — شهریور ۱۴۰۵</div>
+                <div style="font-size:11px;color:var(--tx3);margin-top:3px">جمع بدهکار و بستانکار باید برابر باشند. نابرابری یعنی نقص در ثبت، نه خطای نمایش.</div>
+              </div>
+              <span style="font-size:11.5px;font-weight:600;padding:6px 12px;border-radius:8px;background:var(--ok-soft);color:var(--ok-tx);display:inline-flex;align-items:center;gap:7px"><i data-lucide="check-check" style="font-size:14px"></i>تراز است</span>
+            </div>
+            <div data-scroll="1" style="border:1px solid var(--bd);border-radius:11px;overflow:auto">
+              <div style="min-width:820px">
+                <div style="display:grid;grid-template-columns:.6fr 1.6fr 1fr 1fr .9fr;gap:10px;padding:{{ cellPad }};background:var(--sunken);font-size:11px;font-weight:600;color:var(--tx2);border-block-end:1px solid var(--bd)">
+                  <span>کد</span><span>حساب</span><span>بدهکار (ریال)</span><span>بستانکار (ریال)</span><span>مانده</span>
+                </div>
+                <sc-for list="{{ trialBalance }}" as="t" hint-placeholder-count="8">
+                  <div style="display:grid;grid-template-columns:.6fr 1.6fr 1fr 1fr .9fr;gap:10px;padding:{{ cellPad }};border-block-end:1px solid var(--bd);font-size:{{ cellFs }};align-items:center;background:{{ t.rowBg }}">
+                    <span dir="ltr" style="font-family:ui-monospace,monospace;font-size:10.5px;color:var(--tx3)">{{ t.code }}</span>
+                    <span style="font-weight:{{ t.fw }}">{{ t.name }}</span>
+                    <span style="font-variant-numeric:tabular-nums;color:var(--tx2)">{{ t.debit }}</span>
+                    <span style="font-variant-numeric:tabular-nums;color:var(--tx2)">{{ t.credit }}</span>
+                    <span style="font-variant-numeric:tabular-nums;color:{{ t.balC }};font-weight:500">{{ t.balance }}</span>
+                  </div>
+                </sc-for>
+                <div style="display:grid;grid-template-columns:.6fr 1.6fr 1fr 1fr .9fr;gap:10px;padding:{{ cellPad }};background:var(--sunken);font-size:12.5px;font-weight:700;align-items:center">
+                  <span></span><span>جمع</span>
+                  <span style="font-variant-numeric:tabular-nums">۹۴٬۸۲۰٬۰۰۰٬۰۰۰</span>
+                  <span style="font-variant-numeric:tabular-nums">۹۴٬۸۲۰٬۰۰۰٬۰۰۰</span>
+                  <span style="font-size:10.5px;color:var(--ok-tx);font-weight:600">اختلاف: ۰</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div data-g="split" style="display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:20px">
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+                <div style="font-size:13.5px;font-weight:700">اسناد دفتر کل</div>
+                <div style="display:flex;gap:7px;flex-wrap:wrap">
+                  <sc-for list="{{ journalFilters }}" as="f" hint-placeholder-count="4">
+                    <span style="font-size:11px;padding:5px 10px;border-radius:7px;background:{{ f.bg }};color:{{ f.fg }};border:1px solid {{ f.bd }};font-weight:{{ f.fw }}">{{ f.label }}</span>
+                  </sc-for>
+                </div>
+              </div>
+              <sc-for list="{{ journal }}" as="j" hint-placeholder-count="4">
+                <div style="border:1px solid var(--bd);border-radius:11px;overflow:hidden">
+                  <div style="padding:11px 14px;background:var(--sunken);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                    <span dir="ltr" style="font-family:ui-monospace,monospace;font-size:10.5px;color:var(--tx2)">{{ j.code }}</span>
+                    <span style="font-size:12px;font-weight:600;flex:1;min-width:120px">{{ j.title }}</span>
+                    <span style="font-size:10.5px;color:var(--tx3);font-variant-numeric:tabular-nums">{{ j.date }}</span>
+                    <span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:5px;background:{{ j.bg }};color:{{ j.tx }}">{{ j.kind }}</span>
+                  </div>
+                  <sc-for list="{{ j.lines }}" as="l" hint-placeholder-count="2">
+                    <div style="display:grid;grid-template-columns:1.6fr 1fr 1fr;gap:10px;padding:10px 14px;border-block-start:1px solid var(--bd);font-size:{{ cellFs }};align-items:center">
+                      <span style="color:var(--tx2)"><span dir="ltr" style="font-family:ui-monospace,monospace;font-size:10px;color:var(--tx3)">{{ l.code }}</span> {{ l.account }}</span>
+                      <span style="font-variant-numeric:tabular-nums">{{ l.debit }}</span>
+                      <span style="font-variant-numeric:tabular-nums">{{ l.credit }}</span>
+                    </div>
+                  </sc-for>
+                  <div style="padding:9px 14px;border-block-start:1px solid var(--bd);font-size:10.5px;color:var(--tx3);line-height:1.75" dir="ltr">{{ j.src }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:20px">
+              <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:13px">
+                <div style="font-size:13.5px;font-weight:700">قواعد تغییرناپذیری</div>
+                <sc-for list="{{ ledgerRules }}" as="l" hint-placeholder-count="5">
+                  <div style="display:flex;gap:10px;align-items:flex-start;font-size:11.5px;line-height:1.85">
+                    <i data-lucide="{{ l.icon }}" style="font-size:14px;color:{{ l.c }};margin-top:2px"></i>
+                    <span style="color:var(--tx2);flex:1">{{ l.v }}</span>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:13px">
+                <div style="font-size:13.5px;font-weight:700">مغایرت‌گیری</div>
+                <sc-for list="{{ reconcile }}" as="rc" hint-placeholder-count="4">
+                  <div style="display:flex;justify-content:space-between;gap:10px;font-size:11.5px;padding-block-end:9px;border-block-end:1px solid var(--bd)">
+                    <span style="color:var(--tx3)">{{ rc.k }}</span>
+                    <span style="color:{{ rc.c }};font-weight:500;font-variant-numeric:tabular-nums">{{ rc.v }}</span>
+                  </div>
+                </sc-for>
+                <div style="font-size:11px;color:var(--dgr-tx);line-height:1.85;padding:11px 13px;border-radius:10px;background:var(--dgr-soft);border:1px solid var(--dgr)">درگاه پرداخت در MVP شبیه‌سازی‌شده است (MockPaymentProvider). هیچ اتصال بانکی واقعی وجود ندارد و این نما آن را ادعا نمی‌کند.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ══════════ سوابق حسابرسی ══════════ -->
+      <sc-if value="{{ isAudit }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:20px">
+          <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+            <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+              <div style="flex:1;min-width:200px;display:flex;align-items:center;gap:9px;background:var(--sunken);border:1px solid var(--bd);border-radius:9px;padding:9px 12px;font-size:12.5px;color:var(--tx3)">
+                <i data-lucide="search" style="font-size:15px"></i>
+                <span style="flex:1">جست‌وجو با شناسه سند، کاربر، سازمان یا کد پیگیری…</span>
+              </div>
+              <div style="display:flex;gap:7px;flex-wrap:wrap">
+                <sc-for list="{{ auditFilters }}" as="f" hint-placeholder-count="5">
+                  <span style="font-size:11.5px;padding:6px 11px;border-radius:8px;background:{{ f.bg }};color:{{ f.fg }};border:1px solid {{ f.bd }};font-weight:{{ f.fw }}">{{ f.label }}</span>
+                </sc-for>
+              </div>
+            </div>
+            <div data-scroll="1" style="border:1px solid var(--bd);border-radius:11px;overflow:auto;max-height:520px">
+              <div style="min-width:1080px">
+                <div style="display:grid;grid-template-columns:110px 150px 1fr 150px 130px 110px;gap:10px;padding:{{ cellPad }};background:var(--sunken);font-size:11px;font-weight:600;color:var(--tx2);position:sticky;top:0;z-index:2;border-block-end:1px solid var(--bd)">
+                  <span>زمان</span><span>کاربر و نقش</span><span>رویداد</span><span>موضوع</span><span>سازمان</span><span>منشأ</span>
+                </div>
+                <sc-for list="{{ auditRows }}" as="a" hint-placeholder-count="10">
+                  <div style="display:grid;grid-template-columns:110px 150px 1fr 150px 130px 110px;gap:10px;padding:{{ cellPad }};border-block-end:1px solid var(--bd);font-size:{{ cellFs }};align-items:start">
+                    <div style="display:flex;flex-direction:column;gap:1px">
+                      <span style="font-variant-numeric:tabular-nums">{{ a.date }}</span>
+                      <span style="font-size:10px;color:var(--tx3);font-variant-numeric:tabular-nums">{{ a.time }}</span>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:1px;min-width:0">
+                      <span style="color:var(--tx2)">{{ a.user }}</span>
+                      <span dir="ltr" style="font-family:ui-monospace,monospace;font-size:9.5px;color:var(--tx3)">{{ a.role }}</span>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:2px;min-width:0">
+                      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                        <span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:5px;background:{{ a.bg }};color:{{ a.tx }}">{{ a.kind }}</span>
+                        <span style="font-weight:500">{{ a.event }}</span>
+                      </div>
+                      <span style="font-size:10.5px;color:var(--tx3);line-height:1.7">{{ a.detail }}</span>
+                    </div>
+                    <span dir="ltr" style="font-family:ui-monospace,monospace;font-size:10px;color:var(--tx2)">{{ a.subject }}</span>
+                    <span style="color:var(--tx2);font-size:11px">{{ a.org }}</span>
+                    <span dir="ltr" style="font-family:ui-monospace,monospace;font-size:9.5px;color:var(--tx3)">{{ a.src }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+              <span style="font-size:11px;color:var(--tx3);font-variant-numeric:tabular-nums">۱ تا ۱۰ از ۴۱٬۲۸۶ رکورد · بازه: شهریور ۱۴۰۵</span>
+              <span style="font-size:11px;color:var(--tx3)">سوابق حسابرسی فقط افزودنی است؛ هیچ نقشی اجازه حذف یا ویرایش ندارد.</span>
+            </div>
+          </div>
+
+          <div data-g="two" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px">
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:13px">
+              <div style="font-size:13.5px;font-weight:700">چه چیزی ثبت می‌شود</div>
+              <sc-for list="{{ auditScope }}" as="s" hint-placeholder-count="6">
+                <div style="display:grid;grid-template-columns:1fr .7fr;gap:12px;font-size:11.5px;padding:9px 0;border-block-end:1px solid var(--bd);align-items:center">
+                  <span style="color:var(--tx2)">{{ s.k }}</span>
+                  <span style="color:{{ s.c }};font-weight:500">{{ s.v }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:13px">
+              <div style="font-size:13.5px;font-weight:700">دسترسی و حریم خصوصی</div>
+              <sc-for list="{{ auditAccess }}" as="a" hint-placeholder-count="4">
+                <div style="display:flex;gap:10px;align-items:flex-start;font-size:11.5px;line-height:1.85">
+                  <i data-lucide="{{ a.icon }}" style="font-size:14px;color:{{ a.c }};margin-top:2px"></i>
+                  <span style="color:var(--tx2);flex:1">{{ a.v }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ══════════ داشبورد حاکمیتی ══════════ -->
+      <sc-if value="{{ isGovernance }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:20px">
+          <div style="background:var(--dgr-soft);border:1px solid var(--dgr);border-radius:12px;padding:14px 16px;font-size:11.5px;color:var(--dgr-tx);line-height:1.9;display:flex;gap:10px;align-items:flex-start">
+            <i data-lucide="lock" style="font-size:16px;margin-top:2px"></i>
+            <span>نمای محدود نقش <span dir="ltr" style="font-family:ui-monospace,monospace;font-size:10.5px">AUDITOR</span>. این نقش <b>فقط</b> همین صفحه را می‌بیند؛ بقیه مسیرها برای او وجود ندارند — نه پنهان، بلکه Route Guard آن‌ها را رد می‌کند و API هم مجوز نمی‌دهد. همه اعداد تجمیعی‌اند و هیچ داده‌ای قابل تفکیک به تراکنش فردی نیست.</span>
+          </div>
+
+          <div data-g="kpi4" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px">
+            <sc-for list="{{ govKpis }}" as="k" hint-placeholder-count="3">
+              <div style="background:var(--surf);border:1px solid var(--bd);border-radius:13px;padding:19px 21px;display:flex;flex-direction:column;gap:9px;box-shadow:var(--sh1)">
+                <div style="font-size:11.5px;color:var(--tx3)">{{ k.t }}</div>
+                <div style="display:flex;align-items:baseline;gap:5px">
+                  <span style="font-size:27px;font-weight:700;font-variant-numeric:tabular-nums;color:{{ k.c }}">{{ k.v }}</span>
+                  <span style="font-size:11px;color:var(--tx3)">{{ k.u }}</span>
+                </div>
+                <div style="font-size:11px;color:var(--tx2);line-height:1.75">{{ k.s }}</div>
+                <div style="height:5px;border-radius:3px;background:var(--sunken);overflow:hidden;margin-top:2px"><div style="height:100%;width:{{ k.w }};background:{{ k.c }};border-radius:3px"></div></div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div data-g="split" style="display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:20px">
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+              <div>
+                <div style="font-size:13.5px;font-weight:700">ترکیب ناوگان استان — تجمیعی</div>
+                <div style="font-size:11px;color:var(--tx3);margin-top:3px">۳۲۸ دهیاری · بدون تفکیک به سازمان</div>
+              </div>
+              <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap">
+                <div style="width:132px;height:132px;border-radius:50%;background:{{ govDonut }};display:grid;place-items:center;flex:none">
+                  <div style="width:84px;height:84px;border-radius:50%;background:var(--surf);display:grid;place-items:center">
+                    <div style="display:flex;flex-direction:column;gap:1px;text-align:center">
+                      <span style="font-size:19px;font-weight:700;font-variant-numeric:tabular-nums">۲٬۴۱۰</span>
+                      <span style="font-size:9.5px;color:var(--tx3)">دستگاه</span>
+                    </div>
+                  </div>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:8px;flex:1;min-width:150px">
+                  <sc-for list="{{ govMix }}" as="m" hint-placeholder-count="4">
+                    <div style="display:flex;align-items:center;gap:9px;font-size:11.5px">
+                      <span style="width:9px;height:9px;border-radius:2px;background:{{ m.c }};flex:none"></span>
+                      <span style="flex:1;color:var(--tx2)">{{ m.k }}</span>
+                      <span style="font-variant-numeric:tabular-nums;color:var(--tx3)">{{ m.v }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+              <div style="font-size:11px;color:var(--tx3);line-height:1.85;padding:12px 14px;border-radius:10px;background:var(--sunken);border:1px solid var(--bd)">میانگین سن ناوگان ۱۴٫۲ سال است؛ ۳۱٪ دستگاه‌ها بیش از ۲۰ سال کارکرد دارند و بیشترین سهم هزینه تعمیر اضطراری را می‌سازند.</div>
+            </div>
+
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+              <div>
+                <div style="font-size:13.5px;font-weight:700">روند هزینه استان</div>
+                <div style="font-size:11px;color:var(--tx3);margin-top:3px">هزینه تعمیر و تأمین، تجمیعی — میلیارد ریال</div>
+              </div>
+              <div style="display:flex;align-items:flex-end;gap:7px;height:150px;padding-top:8px">
+                <sc-for list="{{ govBars }}" as="b" hint-placeholder-count="8">
+                  <div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;gap:6px;height:100%">
+                    <div style="width:100%;border-radius:5px 5px 2px 2px;background:{{ b.c }};height:{{ b.h }}"></div>
+                    <span style="font-size:9px;color:var(--tx3);text-align:center">{{ b.m }}</span>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="display:flex;gap:14px;font-size:11px;color:var(--tx2);flex-wrap:wrap">
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:9px;height:9px;border-radius:2px;background:var(--pri)"></span>هزینه ثبت‌شده</span>
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:9px;height:9px;border-radius:2px;background:var(--warn)"></span>ماه ناقص</span>
+              </div>
+            </div>
+          </div>
+
+          <div data-g="two" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px">
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:13px">
+              <div style="font-size:13.5px;font-weight:700">آنچه این نقش نمی‌بیند</div>
+              <sc-for list="{{ govDenied }}" as="d" hint-placeholder-count="5">
+                <div style="display:flex;gap:10px;align-items:flex-start;font-size:11.5px;line-height:1.85;padding:10px 12px;border-radius:10px;background:var(--sunken);border:1px solid var(--bd)">
+                  <i data-lucide="eye-off" style="font-size:14px;color:var(--tx3);margin-top:2px"></i>
+                  <span style="color:var(--tx2);flex:1">{{ d }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:13px">
+              <div style="font-size:13.5px;font-weight:700">سه شاخص اقتصادی</div>
+              <sc-for list="{{ govEcon }}" as="e" hint-placeholder-count="3">
+                <div style="border:1px solid {{ e.bd }};background:{{ e.bg }};border-radius:11px;padding:14px;display:flex;flex-direction:column;gap:5px">
+                  <span style="font-size:12px;font-weight:600;color:{{ e.tx }}">{{ e.k }}</span>
+                  <span style="font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;color:{{ e.tx }}">{{ e.v }}</span>
+                  <span style="font-size:10.5px;color:{{ e.tx }};opacity:.85;line-height:1.8">{{ e.note }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ══════════ قواعد پیکربندی‌پذیر ══════════ -->
+      <sc-if value="{{ isRules }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:20px">
+          <div style="background:var(--warn-soft);border:1px solid var(--warn);border-radius:12px;padding:14px 16px;font-size:11.5px;color:var(--warn-tx);line-height:1.9;display:flex;gap:10px;align-items:flex-start">
+            <i data-lucide="sliders-horizontal" style="font-size:16px;margin-top:2px"></i>
+            <span>«حاکمیت پیکربندی‌پذیر» وعده اصلی محصول است: هیچ نرخ کارمزد، قاعده پاداش یا مرحله موافقتی در کد سخت‌نوشته نیست — همه از این صفحه خوانده می‌شوند. هر تغییر تاریخ اجرا دارد، گذشته را بازنویسی نمی‌کند، و در سوابق حسابرسی با مقدار قبل و بعد ثبت می‌شود.</span>
+          </div>
+
+          <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+            <div style="display:flex;gap:2px;border-block-end:1px solid var(--bd);flex-wrap:wrap">
+              <sc-for list="{{ ruleTabs }}" as="t" hint-placeholder-count="3">
+                <span style="font-size:12.5px;padding:9px 14px;color:{{ t.fg }};font-weight:{{ t.fw }};border-block-end:2px solid {{ t.bd }};display:inline-flex;gap:7px;align-items:center">{{ t.label }}<span style="font-size:10px;color:var(--tx3);font-variant-numeric:tabular-nums">{{ t.n }}</span></span>
+              </sc-for>
+            </div>
+
+            <div style="font-size:12.5px;font-weight:700">قواعد کارمزد</div>
+            <div data-scroll="1" style="border:1px solid var(--bd);border-radius:11px;overflow:auto">
+              <div style="min-width:1060px">
+                <div style="display:grid;grid-template-columns:1.5fr 1fr 1.1fr .6fr 1fr 1.1fr .9fr .9fr;gap:10px;padding:{{ cellPad }};background:var(--sunken);font-size:11px;font-weight:600;color:var(--tx2);border-block-end:1px solid var(--bd)">
+                  <span>قاعده</span><span>دامنه</span><span>مبنا</span><span>نرخ</span><span>کف</span><span>سقف</span><span>اجرا از</span><span>وضعیت</span>
+                </div>
+                <sc-for list="{{ commissionRules }}" as="c" hint-placeholder-count="4">
+                  <div style="display:grid;grid-template-columns:1.5fr 1fr 1.1fr .6fr 1fr 1.1fr .9fr .9fr;gap:10px;padding:{{ cellPad }};align-items:center;border-block-end:1px solid var(--bd);font-size:{{ cellFs }}">
+                    <span style="font-weight:500">{{ c.name }}</span>
+                    <span style="color:var(--tx2);font-size:11px">{{ c.scope }}</span>
+                    <span style="color:var(--tx2);font-size:11px">{{ c.basis }}</span>
+                    <span style="font-variant-numeric:tabular-nums;font-weight:600">{{ c.value }}</span>
+                    <span style="font-variant-numeric:tabular-nums;color:var(--tx3);font-size:11px">{{ c.floor }}</span>
+                    <span style="font-variant-numeric:tabular-nums;color:var(--tx3);font-size:11px">{{ c.cap }}</span>
+                    <span style="font-variant-numeric:tabular-nums;color:var(--tx2)">{{ c.from }}</span>
+                    <span><span style="display:inline-flex;font-size:10.5px;font-weight:600;padding:3px 8px;border-radius:6px;background:{{ c.bg }};color:{{ c.tx }}">{{ c.status }}</span></span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+
+          <div data-g="split" style="display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:20px">
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+              <div style="font-size:12.5px;font-weight:700">قواعد پاداش</div>
+              <div data-scroll="1" style="border:1px solid var(--bd);border-radius:11px;overflow:auto">
+                <div style="min-width:660px">
+                  <div style="display:grid;grid-template-columns:1.3fr 1.7fr .5fr .9fr .9fr;gap:10px;padding:{{ cellPad }};background:var(--sunken);font-size:11px;font-weight:600;color:var(--tx2);border-block-end:1px solid var(--bd)">
+                    <span>قاعده</span><span>شرط فعال‌شدن</span><span>امتیاز</span><span>سقف</span><span>وضعیت</span>
+                  </div>
+                  <sc-for list="{{ rewardRules }}" as="rw" hint-placeholder-count="6">
+                    <div style="display:grid;grid-template-columns:1.3fr 1.7fr .5fr .9fr .9fr;gap:10px;padding:{{ cellPad }};align-items:center;border-block-end:1px solid var(--bd);font-size:{{ cellFs }}">
+                      <span style="font-weight:500">{{ rw.name }}</span>
+                      <span style="color:var(--tx2);font-size:11px;line-height:1.7">{{ rw.trigger }}</span>
+                      <span style="font-variant-numeric:tabular-nums;font-weight:600">{{ rw.pts }}</span>
+                      <span style="color:var(--tx3);font-size:11px">{{ rw.cap }}</span>
+                      <span><span style="display:inline-flex;font-size:10.5px;font-weight:600;padding:3px 8px;border-radius:6px;background:{{ rw.bg }};color:{{ rw.tx }}">{{ rw.status }}</span></span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+              <div style="font-size:11px;color:var(--tx3);line-height:1.85">پاداش هیچ‌گاه به رفتار قابل سوءاستفاده گره نمی‌خورد: امتیاز از رویداد تأییدشده ساخته می‌شود، نه از تعداد کلیک یا ثبت. سقف هر قاعده اجباری است.</div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:20px">
+              <div style="background:var(--surf);border:1px solid var(--warn);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:13px">
+                <div style="display:flex;align-items:center;gap:9px;font-size:13px;font-weight:700;color:var(--warn-tx)"><i data-lucide="calculator" style="font-size:16px"></i>شبیه‌سازی پیش از اعمال</div>
+                <div style="font-size:11px;color:var(--tx3);line-height:1.8">اثر نرخ تازه ۲٫۰٪ روی داده واقعی ماه گذشته:</div>
+                <sc-for list="{{ ruleSim }}" as="s" hint-placeholder-count="5">
+                  <div style="display:flex;justify-content:space-between;gap:12px;font-size:11.5px;padding-block-end:9px;border-block-end:1px solid var(--bd)">
+                    <span style="color:var(--tx3)">{{ s.k }}</span>
+                    <span style="color:{{ s.c }};font-weight:500;font-variant-numeric:tabular-nums">{{ s.v }}</span>
+                  </div>
+                </sc-for>
+                <div style="display:flex;gap:9px;flex-wrap:wrap">
+                  <button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:10px 15px;border-radius:9px;border:1px solid var(--pri);background:var(--pri);color:#fff;cursor:pointer;min-height:44px">تأیید و زمان‌بندی</button>
+                  <button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:10px 15px;border-radius:9px;border:1px solid var(--bd2);background:transparent;color:var(--tx);cursor:pointer;min-height:44px">لغو تغییر</button>
+                </div>
+                <div style="font-size:10.5px;color:var(--tx3);line-height:1.8">فقط SYSTEM_ADMIN مجاز است — UNION_ADMIN هم رد می‌شود (ADR-023).</div>
+              </div>
+              <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:13px">
+                <div style="font-size:13px;font-weight:700">محافظ‌های تغییر</div>
+                <sc-for list="{{ ruleGuards }}" as="g" hint-placeholder-count="5">
+                  <div style="display:flex;gap:10px;align-items:flex-start;font-size:11.5px;line-height:1.85">
+                    <i data-lucide="{{ g.icon }}" style="font-size:14px;color:{{ g.c }};margin-top:2px"></i>
+                    <span style="color:var(--tx2);flex:1">{{ g.v }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+
+          <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+            <div style="font-size:12.5px;font-weight:700">سیاست‌های موافقت</div>
+            <div data-scroll="1" style="border:1px solid var(--bd);border-radius:11px;overflow:auto">
+              <div style="min-width:940px">
+                <div style="display:grid;grid-template-columns:1.4fr 1.2fr 1.6fr .9fr 1.1fr;gap:10px;padding:{{ cellPad }};background:var(--sunken);font-size:11px;font-weight:600;color:var(--tx2);border-block-end:1px solid var(--bd)">
+                  <span>سیاست</span><span>شرط</span><span>مراحل موافقت</span><span>مهلت</span><span>در صورت سکوت</span>
+                </div>
+                <sc-for list="{{ approvalPolicies }}" as="p" hint-placeholder-count="5">
+                  <div style="display:grid;grid-template-columns:1.4fr 1.2fr 1.6fr .9fr 1.1fr;gap:10px;padding:{{ cellPad }};align-items:center;border-block-end:1px solid var(--bd);font-size:{{ cellFs }}">
+                    <span style="font-weight:500">{{ p.name }}</span>
+                    <span style="color:var(--tx2);font-size:11px;font-variant-numeric:tabular-nums">{{ p.cond }}</span>
+                    <span><span style="display:inline-flex;font-size:10.5px;font-weight:500;padding:3px 8px;border-radius:6px;background:{{ p.bg }};color:{{ p.tx }}">{{ p.steps }}</span></span>
+                    <span style="color:var(--tx2);font-variant-numeric:tabular-nums;font-size:11px">{{ p.sla }}</span>
+                    <span style="color:var(--tx2);font-size:11px">{{ p.esc }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="font-size:11px;color:var(--tx3);line-height:1.85">سکوت هرگز به‌معنای تأیید نیست. با پایان مهلت، مورد به سطح بالاتر ارجاع می‌شود و در کارتابل هر دو طرف باقی می‌ماند.</div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ══════════ احراز صلاحیت ══════════ -->
+      <sc-if value="{{ isQualify }}" hint-placeholder-val="{{ false }}">
+        <div data-g="split" style="display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:20px">
+          <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+            <div>
+              <div style="font-size:13.5px;font-weight:700">کارتابل احراز صلاحیت</div>
+              <div style="font-size:11px;color:var(--tx3);margin-top:3px;line-height:1.85"><b style="color:var(--warn-tx)">PLANNED —</b> سرویس تأمین‌کننده وجود ندارد و این صفحه طراحی است، نه قابلیت. تا ساخته‌شدنش، احراز صلاحیت در هر پاسخ API همیشه <span dir="ltr">UNAVAILABLE</span> است و هرگز <span dir="ltr">false</span> — یعنی بررسی‌ای انجام نشده، نه اینکه رد شده (ADR-041). تصمیم صلاحیت تنها با اتحادیه است و مهلت ۱۴ روز یک پیش‌فرض طراحی است.</div>
+            </div>
+            <div data-scroll="1" style="border:1px solid var(--bd);border-radius:11px;overflow:auto">
+              <div style="min-width:760px">
+                <div style="display:grid;grid-template-columns:1.7fr 1.1fr .8fr .8fr 1.2fr;gap:10px;padding:{{ cellPad }};background:var(--sunken);font-size:11px;font-weight:600;color:var(--tx2);border-block-end:1px solid var(--bd)">
+                  <span>متقاضی</span><span>حوزه</span><span>در انتظار</span><span>مدارک</span><span>وضعیت</span>
+                </div>
+                <sc-for list="{{ qualifyQueue }}" as="q" hint-placeholder-count="5">
+                  <div style="display:grid;grid-template-columns:1.7fr 1.1fr .8fr .8fr 1.2fr;gap:10px;padding:{{ cellPad }};align-items:center;border-block-end:1px solid var(--bd);font-size:{{ cellFs }};cursor:pointer" style-hover="background:var(--sunken)">
+                    <div style="display:flex;align-items:center;gap:9px;min-width:0">
+                      <span style="width:28px;height:28px;border-radius:8px;background:{{ q.avBg }};color:{{ q.avTx }};display:grid;place-items:center;font-size:10.5px;font-weight:600;flex:none">{{ q.ini }}</span>
+                      <div style="display:flex;flex-direction:column;gap:1px;min-width:0">
+                        <span style="font-weight:500">{{ q.name }}</span>
+                        <span style="font-size:10px;color:var(--tx3)">{{ q.city }}</span>
+                      </div>
+                    </div>
+                    <span style="color:var(--tx2);font-size:11px">{{ q.cat }}</span>
+                    <span style="font-variant-numeric:tabular-nums;color:var(--tx2)">{{ q.days }}</span>
+                    <span style="font-variant-numeric:tabular-nums;color:var(--tx2)">{{ q.docs }}</span>
+                    <span><span style="display:inline-flex;font-size:10.5px;font-weight:600;padding:3px 8px;border-radius:6px;background:{{ q.bg }};color:{{ q.tx }}">{{ q.status }}</span></span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:9px;padding-top:4px">
+              <span style="font-size:11.5px;font-weight:600;color:var(--tx2)">سطوح صلاحیت</span>
+              <sc-for list="{{ qualifyLevels }}" as="l" hint-placeholder-count="4">
+                <div style="display:grid;grid-template-columns:80px minmax(0,1fr);gap:14px;font-size:11.5px;padding:9px 0;border-block-end:1px solid var(--bd);align-items:start">
+                  <span style="font-weight:600;color:var(--tx2)">{{ l.k }}</span>
+                  <span style="color:var(--tx2);line-height:1.85">{{ l.v }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:20px">
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+              <div style="display:flex;align-items:center;gap:11px">
+                <span style="width:38px;height:38px;border-radius:10px;background:var(--warn-soft);color:var(--warn-tx);display:grid;place-items:center;font-size:12.5px;font-weight:700;flex:none">آ‌ک</span>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:13.5px;font-weight:700">آسفالت کویر اردکان</div>
+                  <div style="font-size:10.5px;color:var(--tx3)">مصالح راهسازی · اردکان · ۱۶ روز در انتظار</div>
+                </div>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <span style="font-size:11.5px;font-weight:600;color:var(--tx2)">مدارک</span>
+                <sc-for list="{{ qualifyDocs }}" as="d" hint-placeholder-count="5">
+                  <div style="display:flex;align-items:center;gap:10px;font-size:11.5px;padding:9px 11px;border-radius:10px;border:1px solid var(--bd)">
+                    <span style="flex:1;min-width:0;color:var(--tx2)">{{ d.k }}</span>
+                    <span style="font-size:10.5px;font-weight:600;padding:3px 8px;border-radius:6px;background:{{ d.bg }};color:{{ d.tx }};flex:none">{{ d.v }}</span>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:8px;padding-top:2px">
+                <span style="font-size:11.5px;font-weight:600;color:var(--tx2)">تصمیم</span>
+                <div style="display:flex;gap:9px;flex-wrap:wrap">
+                  <button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:10px 15px;border-radius:9px;border:1px solid var(--pri);background:var(--pri);color:#fff;cursor:pointer;min-height:44px">تأیید در سطح ۲</button>
+                  <button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:10px 15px;border-radius:9px;border:1px solid var(--bd2);background:transparent;color:var(--tx);cursor:pointer;min-height:44px">درخواست مدرک</button>
+                  <button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:10px 15px;border-radius:9px;border:1px solid var(--dgr);background:transparent;color:var(--dgr-tx);cursor:pointer;min-height:44px">رد با دلیل</button>
+                </div>
+                <span style="font-size:10.5px;color:var(--tx3);line-height:1.8">رد بی‌دلیل ممکن نیست؛ دلیل به متقاضی ابلاغ و در سوابق ثبت می‌شود.</span>
+              </div>
+            </div>
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:11px">
+              <div style="font-size:13px;font-weight:700">قواعد</div>
+              <sc-for list="{{ qualifyRules }}" as="q" hint-placeholder-count="4">
+                <div style="font-size:11.5px;color:var(--tx2);line-height:1.9;padding-inline-start:10px;border-inline-start:2px solid var(--bd)">{{ q }}</div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ══════════ کاتالوگ ══════════ -->
+      <sc-if value="{{ isCatalog }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:20px">
+          <div data-g="split" style="display:grid;grid-template-columns:minmax(0,.6fr) minmax(0,1.4fr);gap:20px">
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:12px">
+              <div>
+                <div style="font-size:13.5px;font-weight:700">دسته‌بندی</div>
+                <div style="font-size:11px;color:var(--tx3);margin-top:3px">۸۴۱ قلم در ۸ دسته اصلی</div>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:2px">
+                <sc-for list="{{ catalogTree }}" as="c" hint-placeholder-count="8">
+                  <div style="display:flex;align-items:center;gap:9px;padding:9px 11px;padding-inline-start:{{ c.pad }};border-radius:9px;font-size:12px;cursor:pointer;background:{{ c.bg }};color:{{ c.fg }};font-weight:{{ c.fw }};min-height:40px" style-hover="background:var(--sunken)">
+                    <span style="flex:1;min-width:0">{{ c.k }}</span>
+                    <span style="font-size:10px;color:var(--tx3);font-variant-numeric:tabular-nums;flex:none">{{ c.n }}</span>
+                  </div>
+                </sc-for>
+              </div>
+              <button style="font-family:inherit;font-size:12.5px;font-weight:600;padding:10px;border-radius:9px;border:1px solid var(--bd2);background:transparent;color:var(--tx);cursor:pointer;min-height:44px;display:inline-flex;align-items:center;justify-content:center;gap:7px" style-hover="background:var(--sunken)"><i data-lucide="plus" style="font-size:14px"></i>دسته تازه</button>
+            </div>
+
+            <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                <div>
+                  <div style="font-size:13.5px;font-weight:700">لاستیک ماشین‌آلات سنگین</div>
+                  <div style="font-size:11px;color:var(--tx3);margin-top:3px">۲۸ قلم · ۲ قلم کم‌تأمین · ۱ قلم بازنشسته</div>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                  <span style="font-size:11.5px;padding:6px 11px;border-radius:8px;border:1px solid var(--bd);color:var(--tx2);display:inline-flex;align-items:center;gap:6px"><i data-lucide="upload" style="font-size:13px"></i>ورود گروهی</span>
+                  <span style="font-size:11.5px;padding:6px 11px;border-radius:8px;border:1px solid var(--pri);background:var(--pri);color:#fff;font-weight:600;display:inline-flex;align-items:center;gap:6px"><i data-lucide="plus" style="font-size:13px"></i>قلم تازه</span>
+                </div>
+              </div>
+              <div data-scroll="1" style="border:1px solid var(--bd);border-radius:11px;overflow:auto">
+                <div style="min-width:840px">
+                  <div style="display:grid;grid-template-columns:1.8fr .6fr .7fr 1fr .8fr 1.2fr;gap:10px;padding:{{ cellPad }};background:var(--sunken);font-size:11px;font-weight:600;color:var(--tx2);border-block-end:1px solid var(--bd)">
+                    <span>قلم</span><span>واحد</span><span>تأمین‌کننده</span><span>بازه قیمت (ریال)</span><span>تقاضای جاری</span><span>وضعیت</span>
+                  </div>
+                  <sc-for list="{{ catalogItems }}" as="c" hint-placeholder-count="6">
+                    <div style="display:grid;grid-template-columns:1.8fr .6fr .7fr 1fr .8fr 1.2fr;gap:10px;padding:{{ cellPad }};align-items:center;border-block-end:1px solid var(--bd);font-size:{{ cellFs }}">
+                      <div style="display:flex;flex-direction:column;gap:2px;min-width:0">
+                        <span style="font-weight:500">{{ c.name }}</span>
+                        <span dir="ltr" style="font-size:10px;color:var(--tx3);font-family:ui-monospace,monospace">{{ c.code }}</span>
+                      </div>
+                      <span style="color:var(--tx2);font-size:11px">{{ c.unit }}</span>
+                      <span style="font-variant-numeric:tabular-nums;color:var(--tx2)">{{ c.suppliers }}</span>
+                      <span style="font-variant-numeric:tabular-nums;color:var(--tx2)">{{ c.priceRange }}</span>
+                      <span style="font-variant-numeric:tabular-nums;color:var(--tx2)">{{ c.demand }}</span>
+                      <span><span style="display:inline-flex;font-size:10.5px;font-weight:600;padding:3px 8px;border-radius:6px;background:{{ c.bg }};color:{{ c.tx }}">{{ c.status }}</span></span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+            <div style="font-size:13.5px;font-weight:700">قواعد کاتالوگ</div>
+            <sc-for list="{{ catalogRules }}" as="c" hint-placeholder-count="5">
+              <div style="display:grid;grid-template-columns:140px minmax(0,1fr);gap:14px;font-size:11.5px;padding:9px 0;border-block-end:1px solid var(--bd);align-items:start">
+                <span style="font-weight:600;color:var(--tx2)">{{ c.k }}</span>
+                <span style="color:var(--tx2);line-height:1.85">{{ c.v }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <div style="display:flex;align-items:center;gap:14px;padding-top:8px;flex-wrap:wrap;border-top:1px solid var(--bd)">
+        <span style="font-size:11px;color:var(--tx3);line-height:1.9">RASTA · apps/admin · فاز B — کنسول اپراتور پلتفرم · توکن، کامپوننت و آیکون از سیستم طراحی V2</span>
+        <span style="font-size:11px;color:var(--tx3);margin-inline-start:auto">{{ densityLabel }} · {{ themeLabel }}</span>
+      </div>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;default&quot;:&quot;light&quot;,&quot;tsType&quot;:&quot;'light' | 'dark'&quot;,&quot;section&quot;:&quot;نمایش&quot;},&quot;density&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;open&quot;,&quot;compact&quot;],&quot;default&quot;:&quot;compact&quot;,&quot;tsType&quot;:&quot;'open' | 'compact'&quot;,&quot;section&quot;:&quot;نمایش&quot;}}">
+class Component extends DCLogic {
+  state = { route: 'platform', theme: null, density: null };
+
+  componentDidMount() { this.icons(); }
+  componentDidUpdate() { this.icons(); }
+  icons() {
+    try { if (window.lucide) window.lucide.createIcons(); } catch (e) {}
+    if (!this._retry) {
+      this._retry = true;
+      setTimeout(() => { try { window.lucide && window.lucide.createIcons(); } catch (e) {} }, 600);
+    }
+  }
+
+  T(k) {
+    const th = this.state.theme || this.props.theme || 'light';
+    const L = {
+      pri:'#0E6E64', priSoft:'#E6F2F0', priTx:'#0A564E',
+      ok:'#1A7A4B', okSoft:'#E6F4EC', okTx:'#14603A',
+      warn:'#96650A', warnSoft:'#FAF1DE', warnTx:'#7A5208',
+      dgr:'#AC2A20', dgrSoft:'#FAEAE8', dgrTx:'#8E211A',
+      info:'#1B6698', infoSoft:'#E8F1F8', infoTx:'#14507A',
+      omran:'#A6602C', omranSoft:'#F8EFE7', omranTx:'#8A4E22',
+      neuSoft:'#EDF1F0', tx:'#101A19', tx2:'#576765', tx3:'#8A9896',
+      bd:'#E1E7E6', bd2:'#C9D3D1', surf:'#FFFFFF', sunken:'#EDF2F1'
+    };
+    const D = {
+      pri:'#2A9D8F', priSoft:'#10302C', priTx:'#7FD6C9',
+      ok:'#3FA372', okSoft:'#0F2618', okTx:'#7FCCA3',
+      warn:'#C99327', warnSoft:'#291F0C', warnTx:'#E0B75E',
+      dgr:'#D2564A', dgrSoft:'#2B1311', dgrTx:'#EE9089',
+      info:'#4A93C9', infoSoft:'#0E2130', infoTx:'#8FC3E6',
+      omran:'#C98A52', omranSoft:'#2A1D12', omranTx:'#DFA875',
+      neuSoft:'#1B2524', tx:'#E7EEED', tx2:'#9DAEAB', tx3:'#728382',
+      bd:'#26312F', bd2:'#3A4745', surf:'#121A19', sunken:'#0E1615'
+    };
+    return (th === 'dark' ? D : L)[k];
+  }
+
+  go = (r) => () => {
+    this.setState({ route: r });
+    try { window.scrollTo({ top: 0, behavior: 'auto' }); } catch (e) {}
+  };
+
+  renderVals() {
+    const theme = this.state.theme || this.props.theme || 'light';
+    const density = this.state.density || this.props.density || 'compact';
+    const compact = density === 'compact';
+    const r = this.state.route;
+    const T = (k) => this.T(k);
+
+    const pages = {
+      platform:   { title:'داشبورد عملیاتی پلتفرم', sub:'apps/admin / داشبورد', crumb:'داشبورد', role:'UNION_ADMIN' },
+      ledger:     { title:'دفتر کل و تراز آزمایشی', sub:'apps/admin / مالی / دفتر کل', crumb:'مالی › دفتر کل', role:'UNION_ADMIN' },
+      audit:      { title:'سوابق حسابرسی', sub:'apps/admin / حسابرسی', crumb:'حسابرسی', role:'UNION_ADMIN' },
+      governance: { title:'داشبورد حاکمیتی استانداری', sub:'apps/admin / حاکمیتی — نمای محدود', crumb:'حاکمیتی', role:'AUDITOR' },
+      rules:      { title:'قواعد پیکربندی‌پذیر', sub:'apps/admin / پیکربندی — کارمزد، پاداش، موافقت', crumb:'پیکربندی › قواعد', role:'SYSTEM_ADMIN' },
+      qualify:    { title:'احراز صلاحیت تأمین‌کننده', sub:'apps/admin / تأمین‌کنندگان', crumb:'تأمین‌کنندگان › صلاحیت', role:'UNION_ADMIN' },
+      catalog:    { title:'مدیریت فهرست کالا', sub:'apps/admin / کاتالوگ', crumb:'کاتالوگ', role:'UNION_ADMIN' }
+    };
+
+    const navDef = [
+      { label:'پلتفرم', items:[
+        { id:'platform', label:'داشبورد عملیاتی', icon:'layout-dashboard', meta:'' }
+      ]},
+      { label:'مالی', items:[
+        { id:'ledger', label:'دفتر کل و تراز', icon:'book-open', meta:'' }
+      ]},
+      { label:'پیکربندی و صلاحیت', items:[
+        { id:'rules', label:'قواعد پیکربندی‌پذیر', icon:'sliders-horizontal', meta:'' },
+        { id:'qualify', label:'احراز صلاحیت', icon:'badge-check', meta:'۵' },
+        { id:'catalog', label:'فهرست کالا', icon:'boxes', meta:'۸۴۱' }
+      ]},
+      { label:'نظارت', items:[
+        { id:'audit', label:'سوابق حسابرسی', icon:'scroll-text', meta:'۴۱K' },
+        { id:'governance', label:'حاکمیتی — AUDITOR', icon:'lock', meta:'' }
+      ]}
+    ];
+    const navGroups = navDef.map(g => ({
+      label: g.label,
+      items: g.items.map(it => ({
+        label: it.label, meta: it.meta || '', icon: it.icon, go: this.go(it.id),
+        bg: r === it.id ? T('priSoft') : 'transparent',
+        fg: r === it.id ? T('priTx') : T('tx2'),
+        ic: r === it.id ? T('pri') : T('tx3'),
+        fw: r === it.id ? 600 : 400
+      }))
+    }));
+
+    const spark = (vals, c) => vals.map((v, i) => Math.round(i * (90 / (vals.length - 1))) + ',' + Math.round(24 - ((v - Math.min(...vals)) / ((Math.max(...vals) - Math.min(...vals)) || 1)) * 21)).join(' ');
+
+    // ── داشبورد پلتفرم ──────────────────────────────
+    const platKpis = [
+      { t:'سازمان فعال', v:'۱۴۲', u:'از ۳۲۸', s:'۹ سازمان تازه در این ماه', c:T('tx'), icon:'building-2', sc:T('ok'), pts: spark([84,92,101,110,118,127,135,142]) },
+      { t:'حجم تراکنش ماه', v:'۳۸٫۴', u:'میلیارد ریال', s:'۱۱٪ بیشتر از مرداد', c:T('tx'), icon:'arrow-left-right', sc:T('ok'), pts: spark([21,24,26,29,28,32,35,38]) },
+      { t:'درآمد کارمزد ماه', v:'۰', u:'میلیون ریال', s:'هیچ قاعده کارمزدی فعال نیست — نرخ تصویب نشده (Q-08 باز)', c:T('tx2'), icon:'percent', sc:T('bd2'), pts: spark([0,0,0,0,0,0,0,0]) },
+      { t:'تسویه معلق', v:'۲۳', u:'مورد', s:'۴ مورد بیش از ۷ روز — نیازمند اقدام', c:T('warnTx'), icon:'hourglass', sc:T('warn'), pts: spark([9,12,14,11,16,19,21,23]) }
+    ];
+
+    const funnelDef = [
+      { k:'ثبت‌نام‌شده', n:328, v:'۳۲۸', c:T('bd2') },
+      { k:'کاربر فعال‌شده', n:214, v:'۲۱۴', c:T('info') },
+      { k:'دارایی ثبت‌شده', n:163, v:'۱۶۳', c:T('pri') },
+      { k:'اولین سفارش', n:142, v:'۱۴۲', c:T('pri') },
+      { k:'کیف پول فعال', n:118, v:'۱۱۸', c:T('ok') }
+    ];
+    const funnel = funnelDef.map(f => ({ k:f.k, v:f.v, w: Math.round((f.n / 328) * 100) + '%', c:f.c }));
+
+    const servicesDef = [
+      { name:'api-gateway', p95:'۱۴۲ms', err:'۰٫۰۴٪', k:'ok' },
+      { name:'identity-service', p95:'۹۸ms', err:'۰٫۰۲٪', k:'ok' },
+      { name:'organization-service', p95:'۲۱۰ms', err:'۰٫۰۹٪', k:'ok' },
+      { name:'asset-service', p95:'۸۹۴ms', err:'۰٫۳۱٪', k:'warn' },
+      { name:'marketplace-service', p95:'۳۱۲ms', err:'۰٫۱۲٪', k:'ok' },
+      { name:'economic-service', p95:'۲۶۴ms', err:'۰٫۰۶٪', k:'ok' }
+    ];
+    const services = servicesDef.map(s => ({
+      ...s,
+      dot: s.k === 'ok' ? T('ok') : (s.k === 'warn' ? T('warn') : T('bd2')),
+      c: s.k === 'ok' ? T('okTx') : (s.k === 'warn' ? T('warnTx') : T('tx3'))
+    }));
+
+    const platAlerts = [
+      { n:'۴', v:'تسویه بیش از ۷ روز معلق مانده — بررسی دستی لازم است.' },
+      { n:'۵۱', v:'سازمان ثبت‌نام‌کرده هنوز هیچ دارایی وارد نکرده است؛ گلوگاه اصلی پذیرش.' },
+      { n:'۳', v:'سفارش از پنجره تأیید دریافت گذشته — یادآور ثبت شده و هیچ تأیید یا لغو خودکاری رخ نمی‌دهد (ADR-043).' },
+      { n:'۱', v:'p95 سرویس دارایی از آستانه ۸۰۰ms گذشته است.' }
+    ];
+
+    const topOrgs = [
+      { name:'شهرداری اردکان', path:'یزد › اردکان', assets:'۴۱', orders:'۲۸', volume:'۴٬۱۲۰' },
+      { name:'دهیاری خرانق', path:'یزد › اردکان › خرانق', assets:'۱۸', orders:'۱۹', volume:'۲٬۳۸۰' },
+      { name:'دهیاری زارچ', path:'یزد › صفائیه › زارچ', assets:'۲۲', orders:'۱۴', volume:'۱٬۹۴۰' },
+      { name:'دهیاری اشکذر', path:'یزد › اشکذر', assets:'۱۶', orders:'۱۲', volume:'۱٬۶۱۰' },
+      { name:'دهیاری مهریز', path:'یزد › مهریز', assets:'۱۳', orders:'۹', volume:'۱٬۱۸۰' }
+    ];
+
+    const blockedKpis = [
+      { k:'صرفه‌جویی ناشی از تجمیع تقاضا', v:'نیازمند ایجاد خط مبنا — تا پر شدن baseline_metric برای ۱۲ ماه، این عدد محاسبه نمی‌شود.' },
+      { k:'کاهش زمان تأمین', v:'نیازمند داده پیش از پلتفرم؛ ۳۸٪ سازمان‌ها آن را ثبت نکرده‌اند.' },
+      { k:'نرخ بهره‌برداری استانی', v:'داده کارکرد ۹۱ سازمان ناقص است؛ نمایش تجمیعی گمراه‌کننده می‌شود.' }
+    ];
+
+    // ── دفتر کل ─────────────────────────────────────
+    const ledgerKpis = [
+      { t:'جمع اسناد ماه', v:'۱٬۸۴۲', s:'همه از رویداد دامنه ساخته شده‌اند', c:T('tx'), icon:'file-stack' },
+      { t:'گردش ماه (ریال)', v:'۳۸٬۴۰۰٬۰۰۰٬۰۰۰', s:'بدهکار و بستانکار برابر', c:T('tx'), icon:'arrow-left-right' },
+      { t:'مانده Hold', v:'۴٬۲۱۰٬۰۰۰٬۰۰۰', s:'۳۱ سفارش در جریان', c:T('warnTx'), icon:'lock' },
+      { t:'سند معکوس ماه', v:'۴', s:'اصلاح فقط با معکوس؛ هیچ ویرایشی', c:T('tx2'), icon:'undo-2' }
+    ];
+
+    const tbDef = [
+      { code:'۱۰۱۰', name:'موجودی نقد پلتفرم', debit:'۴۲٬۱۸۰٬۰۰۰٬۰۰۰', credit:'۳۷٬۹۷۰٬۰۰۰٬۰۰۰', balance:'۴٬۲۱۰٬۰۰۰٬۰۰۰', dr:true },
+      { code:'۲۰۱۰', name:'بدهی به سازمان‌ها — کیف پول', debit:'۳۱٬۴۰۰٬۰۰۰٬۰۰۰', credit:'۳۴٬۸۲۰٬۰۰۰٬۰۰۰', balance:'۳٬۴۲۰٬۰۰۰٬۰۰۰', dr:false },
+      { code:'۲۰۲۰', name:'وجوه نگهداشته (Hold)', debit:'۸٬۹۴۰٬۰۰۰٬۰۰۰', credit:'۹٬۷۳۰٬۰۰۰٬۰۰۰', balance:'۷۹۰٬۰۰۰٬۰۰۰', dr:false },
+      { code:'۲۰۳۰', name:'بدهی به تأمین‌کنندگان', debit:'۶٬۲۱۰٬۰۰۰٬۰۰۰', credit:'۶٬۴۸۰٬۰۰۰٬۰۰۰', balance:'۲۷۰٬۰۰۰٬۰۰۰', dr:false },
+      { code:'۴۰۱۰', name:'درآمد کارمزد — قاعده‌ای فعال نیست', debit:'۰', credit:'۰', balance:'۰', dr:false },
+      { code:'۵۰۱۰', name:'هزینه پاداش — تنها با نرخ تبدیل پیکربندی‌شده', debit:'۰', credit:'۰', balance:'۰', dr:true },
+      { code:'۱۰۲۰', name:'تسویه پرداخت — PAYMENT_CLEARING', debit:'۴٬۲۱۰٬۰۰۰٬۰۰۰', credit:'۴٬۲۰۴٬۰۰۰٬۰۰۰', balance:'۶٬۰۰۰٬۰۰۰', dr:true }
+    ];
+    const trialBalance = tbDef.map(t => ({
+      ...t, fw:500,
+      balC: t.balance === '۰' ? T('tx3') : (t.dr ? T('tx') : T('info')),
+      rowBg: 'transparent'
+    }));
+
+    const journalFilters = [
+      { label:'همه', on:true }, { label:'سفارش' }, { label:'تسویه' }, { label:'کارمزد' }, { label:'معکوس' }
+    ].map(f => ({ label:f.label, bg: f.on ? T('pri') : 'transparent', fg: f.on ? '#fff' : T('tx2'), bd: f.on ? T('pri') : T('bd'), fw: f.on ? 600 : 400 }));
+
+    const journal = [
+      { code:'JRN-1405-08841', title:'Hold مبلغ سفارش ORD-1405-2214', date:'۱۴۰۵/۰۶/۲۶', kind:'سفارش', bg:T('infoSoft'), tx:T('infoTx'),
+        src:'marketplace-service · OrderPlaced · cid: 8f3a-91d2-4c',
+        lines:[
+          { code:'۲۰۱۰', account:'بدهی به سازمان‌ها — دهیاری خرانق', debit:'۳۱۰٬۰۰۰٬۰۰۰', credit:'—' },
+          { code:'۲۰۲۰', account:'وجوه نگهداشته (Hold)', debit:'—', credit:'۳۱۰٬۰۰۰٬۰۰۰' }
+        ] },
+      { code:'JRN-1405-08802', title:'آزادسازی Hold و تسویه ORD-1405-2188', date:'۱۴۰۵/۰۶/۲۴', kind:'تسویه', bg:T('okSoft'), tx:T('okTx'),
+        src:'economic-service · SettlementCompleted · cid: 41bd-77a1-90',
+        lines:[
+          { code:'۲۰۲۰', account:'وجوه نگهداشته (Hold)', debit:'۸۴٬۰۰۰٬۰۰۰', credit:'—' },
+          { code:'۲۰۳۰', account:'بدهی به تأمین‌کننده — تعمیرگاه اشکذر', debit:'—', credit:'۸۴٬۰۰۰٬۰۰۰' }
+        ] },
+      { code:'JRN-1405-08790', title:'سند معکوس — بازگشت افزایش موجودی PAY-1405-0301', date:'۱۴۰۵/۰۶/۲۳', kind:'معکوس', bg:T('dgrSoft'), tx:T('dgrTx'),
+        src:'economic-service · JOURNAL_REVERSED · مرجع: JRN-1405-08776',
+        lines:[
+          { code:'۲۰۱۰', account:'بدهی به سازمان‌ها — دهیاری خرانق', debit:'۶٬۰۰۰٬۰۰۰', credit:'—' },
+          { code:'۱۰۱۰', account:'موجودی نقد پلتفرم', debit:'—', credit:'۶٬۰۰۰٬۰۰۰' }
+        ] }
+    ];
+
+    const ledgerRules = [
+      { v:'هر سند حداقل دو سطر دارد و جمع بدهکار و بستانکار آن برابر است؛ سند نامتراز پذیرفته نمی‌شود.', icon:'scale', c:T('pri') },
+      { v:'هیچ سندی ویرایش یا حذف نمی‌شود. اصلاح فقط با سند معکوس که به سند اصلی ارجاع می‌دهد.', icon:'shield-check', c:T('pri') },
+      { v:'هر سند به رویداد منشأ و correlationId خود گره خورده است؛ مسیر از تراکنش تا رویداد قابل پیمایش است.', icon:'link-2', c:T('pri') },
+      { v:'مبالغ صحیح و در واحد ریال ذخیره می‌شوند؛ هیچ اعشار شناوری در مسیر مالی نیست.', icon:'calculator', c:T('pri') },
+      { v:'کیف پول هیچ‌گاه مرجع نیست؛ اگر با دفتر کل مغایرت داشته باشد، دفتر کل درست است.', icon:'book-open', c:T('warn') }
+    ];
+    const reconcile = [
+      { k:'آخرین مغایرت‌گیری', v:'۱۴۰۵/۰۶/۲۴ — ۰۲:۰۰', c:T('tx2') },
+      { k:'اختلاف کیف پول و دفتر کل', v:'۰ ریال', c:T('okTx') },
+      { k:'بازگشت افزایش موجودی', v:'۱ مورد — سند معکوس ثبت شد', c:T('warnTx') },
+      { k:'سند بی‌رویداد منشأ', v:'۰', c:T('okTx') }
+    ];
+
+    // ── سوابق حسابرسی ───────────────────────────────
+    const auditFilters = [
+      { label:'همه', on:true }, { label:'مالی' }, { label:'موافقت' }, { label:'دسترسی' }, { label:'پیکربندی' }
+    ].map(f => ({ label:f.label, bg: f.on ? T('pri') : 'transparent', fg: f.on ? '#fff' : T('tx2'), bd: f.on ? T('pri') : T('bd'), fw: f.on ? 600 : 400 }));
+
+    const auditDef = [
+      { date:'۱۴۰۵/۰۶/۲۶', time:'۰۹:۱۲:۴۴', user:'زهرا کاظمی', role:'PROCUREMENT_USER', kind:'مالی', k:'info', event:'ثبت سفارش و Hold مبلغ', detail:'۳۱۰٬۰۰۰٬۰۰۰ ریال — بازرگانی فولادگر یزد', subject:'ORD-1405-2214', org:'دهیاری خرانق', src:'marketplace-svc' },
+      { date:'۱۴۰۵/۰۶/۲۶', time:'۰۸:۵۱:۰۲', user:'مهدی رضایی', role:'ORGANIZATION_ADMIN', kind:'موافقت', k:'ok', event:'تأیید نیاز پروژه عمرانی', detail:'مرحله ۲ از ۳ — ارجاع به بخشداری', subject:'PRJ-1405-021', org:'دهیاری خرانق', src:'workflow-svc' },
+      { date:'۱۴۰۵/۰۶/۲۵', time:'۱۷:۳۳:۱۹', user:'فاطمه دهقان', role:'SYSTEM_ADMIN', kind:'پیکربندی', k:'warn', event:'نمونه طراحی تغییر نرخ — PLANNED', detail:'نرخ واقعی تصویب و پیکربندی نشده است — Q-08', subject:'CFG-COMM-004', org:'اتحادیه', src:'planned' },
+      { date:'۱۴۰۵/۰۶/۲۵', time:'۱۴:۰۵:۵۰', user:'سامانه', role:'SYSTEM', kind:'مالی', k:'dgr', event:'سند معکوس ثبت شد', detail:'بازگشت افزایش موجودی PAY-1405-0301 — ۶٬۰۰۰٬۰۰۰ ریال، مرجع JRN-1405-08776', subject:'JRN-1405-08790', org:'اتحادیه', src:'economic-svc' },
+      { date:'۱۴۰۵/۰۶/۲۵', time:'۱۱:۲۰:۰۸', user:'حمید نوری', role:'FLEET_MANAGER', kind:'دسترسی', k:'dgr', event:'تلاش دسترسی رد شد', detail:'مسیر /financial/ledger — نقش مجوز ندارد', subject:'—', org:'دهیاری زارچ', src:'api-gateway' },
+      { date:'۱۴۰۵/۰۶/۲۴', time:'۱۶:۴۴:۳۱', user:'فاطمه دهقان', role:'UNION_ADMIN', kind:'موافقت', k:'neu', event:'احراز صلاحیت تأمین‌کننده — PLANNED، بدون سرویس', detail:'نمونه طراحی؛ هیچ تأیید یا سطح واقعی ثبت نشده است', subject:'SUP-0188', org:'اتحادیه', src:'planned' },
+      { date:'۱۴۰۵/۰۶/۲۴', time:'۱۰:۰۲:۱۷', user:'سامانه', role:'SYSTEM', kind:'مالی', k:'ok', event:'تسویه سفارش تکمیل شد', detail:'۸۴٬۰۰۰٬۰۰۰ ریال — کارمزد ۱٬۶۸۰٬۰۰۰', subject:'ORD-1405-2188', org:'دهیاری خرانق', src:'economic-svc' },
+      { date:'۱۴۰۵/۰۶/۲۳', time:'۱۳:۵۵:۰۹', user:'علی صادقی', role:'DRIVER', kind:'عملیات', k:'neu', event:'ثبت کارکرد با کلید تکرارناپذیری', detail:'۹ ساعت — کلید یکتا، بدون رکورد تکراری', subject:'USG-1405-8840', org:'دهیاری خرانق', src:'usage-svc' },
+      { date:'۱۴۰۵/۰۶/۲۳', time:'۰۹:۱۸:۴۰', user:'فاطمه دهقان', role:'SYSTEM_ADMIN', kind:'پیکربندی', k:'warn', event:'افزودن مرحله موافقت', detail:'مناقصه بالای ۵ میلیارد — تأیید استانداری', subject:'CFG-APPR-011', org:'اتحادیه', src:'config-svc' },
+      { date:'۱۴۰۵/۰۶/۲۲', time:'۰۸:۴۰:۱۲', user:'حسین نجفی', role:'OPERATOR', kind:'عملیات', k:'neu', event:'ثبت خرابی دستگاه', detail:'نشتی سیلندر بوم — دستگاه خارج از سرویس شد', subject:'MNT-1405-0412', org:'دهیاری خرانق', src:'maintenance-svc' }
+    ];
+    const auditRows = auditDef.map(a => {
+      const m = { ok:['okSoft','okTx'], warn:['warnSoft','warnTx'], dgr:['dgrSoft','dgrTx'], info:['infoSoft','infoTx'], neu:['neuSoft','tx2'] }[a.k];
+      return { ...a, bg:T(m[0]), tx:T(m[1]) };
+    });
+
+    const auditScope = [
+      { k:'رویداد مالی — Hold، تسویه، کارمزد، معکوس', v:'همیشه', c:T('okTx') },
+      { k:'موافقت، رد و برگشت برای اصلاح', v:'همیشه', c:T('okTx') },
+      { k:'تغییر پیکربندی — کارمزد، پاداش، سیاست موافقت', v:'همیشه، با مقدار قبل و بعد', c:T('okTx') },
+      { k:'تلاش دسترسی ردشده', v:'همیشه', c:T('okTx') },
+      { k:'ورود و خروج کاربر', v:'همیشه', c:T('okTx') },
+      { k:'مشاهده صفحه و پیمایش', v:'ثبت نمی‌شود — نظارت بر کارکنان هدف این سامانه نیست', c:T('tx3') }
+    ];
+    const auditAccess = [
+      { v:'سوابق فقط افزودنی است؛ هیچ نقشی — از جمله SYSTEM_ADMIN — اجازه حذف یا ویرایش ندارد.', icon:'shield-check', c:T('pri') },
+      { v:'نقش AUDITOR به این صفحه دسترسی ندارد؛ او فقط داشبورد تجمیعی حاکمیتی را می‌بیند.', icon:'eye-off', c:T('warn') },
+      { v:'شماره تلفن و اطلاعات تماس در سوابق ماسک می‌شوند؛ شناسه کاربر جای آن را می‌گیرد.', icon:'user', c:T('pri') },
+      { v:'نگهداری ۷ سال، سپس انتقال به بایگانی سرد — بدون حذف.', icon:'archive', c:T('pri') }
+    ];
+
+    // ── حاکمیتی ─────────────────────────────────────
+    const govKpis = [
+      { t:'پوشش پلتفرم', v:'۴۳٪', u:'از ۳۲۸ دهیاری', s:'۱۴۲ سازمان فعال — رشد ۹ سازمان در ماه', c:T('pri'), w:'43%' },
+      { t:'آمادگی ناوگان استان', v:'۷۶٪', u:'میانگین وزنی', s:'۲٬۴۱۰ دستگاه ثبت‌شده', c:T('ok'), w:'76%' },
+      { t:'شفافیت تأمین', v:'۶۸٪', u:'خرید از مسیر رسمی', s:'سهم خرید ثبت‌شده در پلتفرم از کل', c:T('warn'), w:'68%' }
+    ];
+    const govMixDef = [
+      { k:'کمپرسی و حمل', v:'۷۴۰ · ۳۱٪', p:31, c:T('pri') },
+      { k:'راهسازی', v:'۶۲۰ · ۲۶٪', p:26, c:T('omran') },
+      { k:'خدمات شهری', v:'۵۸۰ · ۲۴٪', p:24, c:T('info') },
+      { k:'لودر و بیل', v:'۴۷۰ · ۱۹٪', p:19, c:T('warn') }
+    ];
+    let acc = 0;
+    const govDonut = 'conic-gradient(' + govMixDef.map(d => {
+      const seg = d.c + ' ' + acc + '% ' + (acc + d.p) + '%';
+      acc += d.p;
+      return seg;
+    }).join(',') + ')';
+    const govMix = govMixDef.map(d => ({ k:d.k, v:d.v, c:d.c }));
+
+    const barVals = [21,24,26,29,28,32,35,22];
+    const govBars = barVals.map((v, i) => ({
+      m: ['فرو','ارد','خرد','تیر','مرد','شهر','مهر','آبان'][i],
+      h: Math.round((v / 38) * 100) + '%',
+      c: i === barVals.length - 1 ? T('warn') : T('pri')
+    }));
+
+    const govDenied = [
+      'تراکنش فردی، سند دفتر کل و گردش کیف پول هیچ سازمانی.',
+      'نام کاربران، رانندگان و اعضای سازمان‌ها.',
+      'مبالغ پیشنهادی مناقصه و هویت شرکت‌کنندگان.',
+      'سوابق حسابرسی و تغییرات پیکربندی پلتفرم.',
+      'هر نمایی که با فیلتر بتوان آن را به یک سازمان یا فرد رساند.'
+    ];
+    const govEcon = [
+      { k:'صرفه‌جویی ناشی از تجمیع تقاضا', v:'نیازمند خط مبنا', note:'تا پر شدن baseline_metric برای ۱۲ ماه محاسبه نمی‌شود — نه صفر، نه عدد ساختگی.', bg:T('warnSoft'), bd:T('warn'), tx:T('warnTx') },
+      { k:'گردش اقتصادی ثبت‌شده در استان', v:'۲۴۱ میلیارد ریال', note:'مجموع سفارش، قرارداد و تسویه از ابتدای ۱۴۰۵.', bg:T('surf'), bd:T('bd'), tx:T('tx') },
+      { k:'سهم تأمین‌کننده بومی استان', v:'۷۲٪', note:'از ارزش سفارش‌های بازار؛ هدف سیاستی: بالای ۷۰٪.', bg:T('okSoft'), bd:T('ok'), tx:T('okTx') }
+    ];
+
+    // ── فاز C — قواعد پیکربندی‌پذیر ─────────────────
+    const ruleTabs = [
+      { label:'کارمزد', n:'۴', on:true }, { label:'پاداش', n:'۶' }, { label:'سیاست موافقت', n:'۹' }
+    ].map(t => ({ label:t.label, n:t.n, fg: t.on ? T('priTx') : T('tx3'), fw: t.on ? 600 : 400, bd: t.on ? T('pri') : 'transparent' }));
+
+    const commissionRules = [
+      { name:'سفارش بازار — پیش‌فرض', scope:'همه سازمان‌ها', basis:'درصد مبلغ سفارش', value:'۲٫۰٪', floor:'حداقل ۵۰٬۰۰۰', cap:'سقف ۵۰٬۰۰۰٬۰۰۰', from:'۱۴۰۵/۰۷/۰۱', status:'زمان‌بندی‌شده', k:'warn' },
+      { name:'سفارش بازار — نرخ فعلی', scope:'همه سازمان‌ها', basis:'درصد مبلغ سفارش', value:'۱٫۸٪', floor:'حداقل ۵۰٬۰۰۰', cap:'سقف ۵۰٬۰۰۰٬۰۰۰', from:'۱۴۰۵/۰۱/۰۱', status:'فعال', k:'ok' },
+      { name:'قرارداد عمرانی', scope:'دامنه عمران', basis:'درصد مبلغ قرارداد', value:'۰٫۵٪', floor:'—', cap:'سقف ۲۰۰٬۰۰۰٬۰۰۰', from:'۱۴۰۵/۰۱/۰۱', status:'فعال', k:'ok' },
+      { name:'استعلام تجمیعی', scope:'خرید تجمیعی', basis:'درصد مبلغ استعلام', value:'۱٫۲٪', floor:'—', cap:'—', from:'۱۴۰۵/۰۴/۱۵', status:'فعال', k:'ok' }
+    ].map(c => ({ ...c, bg: T(c.k + 'Soft'), tx: T(c.k + 'Tx') }));
+
+    const rewardRules = [
+      { name:'ثبت کارکرد به‌موقع', trigger:'۳۰ روز پیوسته بدون ثبت دیرهنگام', pts:'۱۲۰', cap:'ماهی یک‌بار', status:'فعال', k:'ok' },
+      { name:'تکمیل پرونده دارایی', trigger:'همه فیلدهای الزامی + بیمه‌نامه معتبر', pts:'۵۰', cap:'هر دارایی یک‌بار', status:'فعال', k:'ok' },
+      { name:'مشارکت در تجمیع تقاضا', trigger:'ثبت نیاز پیش از بسته‌شدن پنجره', pts:'۳۰', cap:'هر پنجره یک‌بار', status:'فعال', k:'ok' },
+      { name:'تأیید سریع دریافت سفارش', trigger:'تأیید در کمتر از ۲۴ ساعت', pts:'۱۵', cap:'هر سفارش', status:'فعال', k:'ok' },
+      { name:'سرویس پیشگیرانه به‌موقع', trigger:'انجام سرویس پیش از سررسید', pts:'۴۰', cap:'هر سرویس', status:'زمان‌بندی‌شده', k:'warn' },
+      { name:'معرفی تأمین‌کننده تأییدشده', trigger:'تأمین‌کننده معرفی‌شده احراز صلاحیت شود', pts:'۲۰۰', cap:'سالی سه‌بار', status:'غیرفعال', k:'neu' }
+    ].map(r => ({ ...r, bg: r.k === 'neu' ? T('neuSoft') : T(r.k + 'Soft'), tx: r.k === 'neu' ? T('tx2') : T(r.k + 'Tx') }));
+
+    const approvalPolicies = [
+      { name:'خرید بازار — زیر سقف سازمان', cond:'مبلغ ≤ ۵۰۰٬۰۰۰٬۰۰۰ ریال', steps:'مدیر سازمان', sla:'۳ روز', esc:'ارجاع به بخشداری', k:'ok' },
+      { name:'خرید بازار — بالای سقف سازمان', cond:'مبلغ > ۵۰۰٬۰۰۰٬۰۰۰ ریال', steps:'مدیر سازمان → بخشداری', sla:'۵ روز هر مرحله', esc:'ارجاع به اتحادیه', k:'warn' },
+      { name:'نیاز پروژه عمرانی', cond:'همه مبالغ', steps:'مدیر سازمان → ناظر فنی → بخشداری', sla:'۵ روز هر مرحله', esc:'ارجاع به سطح بالاتر', k:'warn' },
+      { name:'مناقصه بالای ۵ میلیارد', cond:'برآورد > ۵٬۰۰۰٬۰۰۰٬۰۰۰ ریال', steps:'+ تأیید استانداری', sla:'۷ روز', esc:'بدون ارجاع خودکار', k:'dgr' },
+      { name:'صورت‌وضعیت پیمانکار', cond:'همه مبالغ', steps:'ناظر فنی → مدیر سازمان', sla:'۱۵ روز', esc:'کارتابل ناظر و مدیر', k:'ok' }
+    ].map(p => ({ ...p, bg: T(p.k + 'Soft'), tx: T(p.k + 'Tx') }));
+
+    const ruleGuards = [
+      { v:'هر تغییر قاعده تاریخ اجرا دارد و گذشته را بازنویسی نمی‌کند؛ سند مالی ثبت‌شده با نرخ زمان خودش می‌ماند.', icon:'calendar-clock', c:T('pri') },
+      { v:'تغییر نرخ کارمزد فقط با نقش SYSTEM_ADMIN ممکن است — UNION_ADMIN هم رد می‌شود. نرخ را کارگروه راهبری تصویب می‌کند و پلتفرم ثبت می‌کند چه کسی آن تصمیم را اعمال کرده است (ADR-023).', icon:'user-check', c:T('pri') },
+      { v:'حذف قاعده ممکن نیست؛ قاعده غیرفعال می‌شود و سابقه‌اش می‌ماند.', icon:'shield-check', c:T('pri') },
+      { v:'هیچ نرخی در کد سخت‌نوشته نیست — همه از این صفحه خوانده می‌شوند. این وعده اصلی «حاکمیت پیکربندی‌پذیر» است.', icon:'sliders-horizontal', c:T('warn') },
+      { v:'شبیه‌سازی اثر نرخ پیش از اعمال، طراحی است و در سرویس مالی Endpoint ی ندارد — PLANNED.', icon:'calculator', c:T('warn') },
+      { v:'«سیاست موافقت» هم PLANNED است: موتور گردش‌کار موافقت چندمرحله‌ای سرویسی ندارد. تنها دروازه موافقت پیاده‌شده، تأیید مالک در نگهداری و تأیید دریافت خریدار در بازار است.', icon:'git-branch', c:T('warn') }
+    ];
+    const ruleSim = [
+      { k:'حجم سفارش ماه گذشته', v:'۳۸٬۴۰۰٬۰۰۰٬۰۰۰ ریال', c:T('tx2') },
+      { k:'کارمزد با وضع فعلی', v:'۰ — قاعده‌ای فعال نیست', c:T('tx2') },
+      { k:'نرخ نمونه ۲٫۰٪ — ۲۰۰ در پایه ده‌هزارم', v:'۷۶۸٬۰۰۰٬۰۰۰ ریال', c:T('tx') },
+      { k:'وضعیت این نرخ', v:'نمونه — نیازمند تصویب (Q-08 باز)', c:T('warnTx') },
+      { k:'سازمان متأثر', v:'۱۴۲ سازمان', c:T('tx2') }
+    ];
+
+    // ── فاز C — احراز صلاحیت ────────────────────────
+    const qualifyQueue = [
+      { ini:'آ‌ک', name:'آسفالت کویر اردکان', cat:'مصالح راهسازی', city:'اردکان', days:'۱۶ روز', docs:'۵ از ۵', status:'کامل — آماده تصمیم', k:'ok' },
+      { ini:'ت‌ی', name:'تجهیزات یدک یزد', cat:'قطعه یدکی سنگین', city:'یزد', days:'۹ روز', docs:'۴ از ۵', status:'ناقص — گواهی مالیاتی', k:'warn' },
+      { ini:'م‌ب', name:'ماشین‌سازی بافق', cat:'تعمیرگاه مجاز', city:'بافق', days:'۲۱ روز', docs:'۵ از ۵', status:'کامل — بیش از مهلت', k:'dgr' },
+      { ini:'ن‌م', name:'نگین مهریز', cat:'روانکار', city:'مهریز', days:'۴ روز', docs:'۳ از ۵', status:'ناقص — بیمه و رتبه‌بندی', k:'warn' },
+      { ini:'ص‌س', name:'صنعت سبز یزد', cat:'مبلمان شهری', city:'یزد', days:'—', docs:'۵ از ۵', status:'درخواست رفع تعلیق', k:'info' }
+    ].map((q, i) => ({ ...q, bg: T(q.k + 'Soft'), tx: T(q.k + 'Tx'), avBg: T(['pri','info','omran','warn'][i % 4] + 'Soft'), avTx: T(['pri','info','omran','warn'][i % 4] + 'Tx') }));
+
+    const qualifyDocs = [
+      { k:'پروانه کسب یا آگهی ثبت', v:'تأیید شد', k2:'ok' },
+      { k:'گواهی ارزش افزوده', v:'تأیید شد', k2:'ok' },
+      { k:'گواهی مالیاتی', v:'تأیید شد', k2:'ok' },
+      { k:'بیمه مسئولیت', v:'تأیید شد', k2:'ok' },
+      { k:'رتبه‌بندی فنی (برای پیمانکار)', v:'لازم نیست — تأمین‌کننده کالا', k2:'neu' }
+    ].map(d => ({ k:d.k, v:d.v, bg: d.k2 === 'ok' ? T('okSoft') : T('neuSoft'), tx: d.k2 === 'ok' ? T('okTx') : T('tx2') }));
+
+    const qualifyLevels = [
+      { k:'سطح ۱', v:'سقف سفارش ۵۰۰ میلیون ریال · حوزه محدود · بازبینی هر ۶ ماه' },
+      { k:'سطح ۲', v:'سقف ۲ میلیارد ریال · چند حوزه · بازبینی سالانه' },
+      { k:'سطح ۳', v:'سقف ۵ میلیارد ریال · بدون محدودیت حوزه مجاز · بازبینی سالانه' },
+      { k:'تعلیق', v:'با سه تأخیر یا دو اعتراض تأییدشده در ۹۰ روز — خودکار پیشنهاد می‌شود، تصمیم انسانی است' }
+    ];
+    const qualifyRules = [
+      'صلاحیت همیشه تاریخ انقضا دارد؛ تأمین‌کننده بدون تمدید خودکار از فهرست خرید کنار می‌رود.',
+      'رد درخواست نیازمند دلیل نوشته‌شده است و به تأمین‌کننده ابلاغ می‌شود؛ رد بی‌دلیل ممکن نیست.',
+      'تعلیق سفارش‌های در جریان را لغو نمی‌کند — تسویه آن‌ها طبق روال پیش می‌رود.',
+      'سازمان‌ها می‌توانند تأمین‌کننده معرفی کنند؛ تصمیم صلاحیت تنها با اتحادیه است.'
+    ];
+
+    // ── فاز C — کاتالوگ ─────────────────────────────
+    const catalogTree = [
+      { k:'لاستیک و رینگ', n:'۶۴ قلم', depth:0, on:true },
+      { k:'لاستیک ماشین‌آلات سنگین', n:'۲۸ قلم', depth:1, on:true },
+      { k:'لاستیک خودرو سبک', n:'۳۶ قلم', depth:1 },
+      { k:'روانکار و فیلتر', n:'۱۱۲ قلم', depth:0 },
+      { k:'قطعه یدکی', n:'۳۴۱ قلم', depth:0 },
+      { k:'مصالح راهسازی', n:'۸۴ قلم', depth:0 },
+      { k:'روشنایی و تجهیزات برقی', n:'۹۷ قلم', depth:0 },
+      { k:'مبلمان شهری', n:'۴۳ قلم', depth:0 }
+    ].map(c => ({ ...c, pad: (12 + c.depth * 16) + 'px', bg: c.on ? T('priSoft') : 'transparent', fg: c.on ? T('priTx') : T('tx2'), fw: c.on ? 600 : 400 }));
+
+    const catalogItems = [
+      { name:'لاستیک لودر ۲۳٫۵-۲۵ — L3', code:'CAT-TIR-0142', unit:'حلقه', suppliers:'۶', priceRange:'۱۳۸ — ۱۵۲ م', demand:'۳۱ حلقه', status:'فعال', k:'ok' },
+      { name:'لاستیک لودر ۱۷٫۵-۲۵ — L2', code:'CAT-TIR-0138', unit:'حلقه', suppliers:'۴', priceRange:'۹۴ — ۱۰۶ م', demand:'۸ حلقه', status:'فعال', k:'ok' },
+      { name:'لاستیک گریدر ۱۴٫۰۰-۲۴', code:'CAT-TIR-0151', unit:'حلقه', suppliers:'۳', priceRange:'۷۸ — ۸۹ م', demand:'۵ حلقه', status:'فعال', k:'ok' },
+      { name:'لاستیک بیل مکانیکی ۱۲٫۰۰-۲۰', code:'CAT-TIR-0163', unit:'حلقه', suppliers:'۲', priceRange:'۶۲ — ۷۱ م', demand:'—', status:'کم‌تأمین — زیر ۳ تأمین‌کننده', k:'warn' },
+      { name:'رینگ لودر ۲۵ اینچ', code:'CAT-RIM-0021', unit:'عدد', suppliers:'۳', priceRange:'۴۱ — ۴۸ م', demand:'۲ عدد', status:'فعال', k:'ok' },
+      { name:'لاستیک تویی ۲۳٫۵-۲۵', code:'CAT-TIR-0199', unit:'عدد', suppliers:'۰', priceRange:'—', demand:'—', status:'بازنشسته — بدون تأمین‌کننده', k:'neu' }
+    ].map(c => ({ ...c, bg: c.k === 'neu' ? T('neuSoft') : T(c.k + 'Soft'), tx: c.k === 'neu' ? T('tx2') : T(c.k + 'Tx') }));
+
+    const catalogRules = [
+      { k:'مرجع یگانه', v:'هر قلم یک شناسه یکتا و یک واحد اندازه‌گیری دارد؛ تجمیع تقاضا و مقایسه قیمت تنها بر همین پایه ممکن است.' },
+      { k:'بدون قلم آزاد', v:'سازمان نمی‌تواند قلم دلخواه بسازد؛ می‌تواند قلم تازه پیشنهاد دهد که به کارتابل اتحادیه می‌رود.' },
+      { k:'بازنشستگی', v:'قلم حذف نمی‌شود، بازنشسته می‌شود — سفارش‌های تاریخی و قیمت‌های ثبت‌شده دست‌نخورده می‌مانند.' },
+      { k:'هشدار کم‌تأمین', v:'قلم با کمتر از ۳ تأمین‌کننده فعال علامت می‌خورد؛ رقابت قیمت در آن معنادار نیست.' },
+      { k:'دامنه قیمت', v:'قیمت پلتفرمی وجود ندارد؛ فقط بازه قیمت پیشنهادهای واقعی نمایش داده می‌شود.' }
+    ];
+
+    return {
+      ruleTabs, commissionRules, rewardRules, approvalPolicies, ruleGuards, ruleSim,
+      qualifyQueue, qualifyDocs, qualifyLevels, qualifyRules,
+      catalogTree, catalogItems, catalogRules,
+      isRules: r === 'rules', isQualify: r === 'qualify', isCatalog: r === 'catalog',
+      theme, themeLabel: theme === 'dark' ? 'تیره' : 'روشن',
+      densityLabel: compact ? 'فشرده' : 'باز',
+      cellPad: compact ? '8px 12px' : '13px 14px',
+      cellFs: compact ? '12px' : '12.5px',
+      toggleTheme: () => this.setState({ theme: theme === 'dark' ? 'light' : 'dark' }),
+      toggleDensity: () => this.setState({ density: compact ? 'open' : 'compact' }),
+      navGroups,
+      pageTitle: pages[r].title, pageSub: pages[r].sub, crumb: pages[r].crumb, activeRole: pages[r].role,
+      isPlatform: r === 'platform', isLedger: r === 'ledger', isAudit: r === 'audit', isGovernance: r === 'governance',
+      platKpis, funnel, services, platAlerts, topOrgs, blockedKpis,
+      ledgerKpis, trialBalance, journalFilters, journal, ledgerRules, reconcile,
+      auditFilters, auditRows, auditScope, auditAccess,
+      govKpis, govDonut, govMix, govBars, govDenied, govEcon
+    };
+  }
+}
+</script>
+</body>
+</html>

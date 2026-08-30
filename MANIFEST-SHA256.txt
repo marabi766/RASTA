@@ -1,0 +1,38 @@
+# RASTA design checkpoint — SHA-256 manifest
+
+Backend baseline : main@69dbcc3 (resolved 69dbcc31eed8), read 2026-08-31
+Exported         : 2026-08-31
+Intended branch  : design/claude-design
+Files            : 9
+Excluded         : .git, dependencies, caches, screenshots, scraps, uploads,
+                   absolute paths, credentials, tokens and font binaries.
+
+The checkpoint uses a portable Persian system-font stack. Font binaries from the
+design export were intentionally excluded because the archive contained no licence
+files authorising redistribution in this public repository.
+
+Verify from the repository root:
+    sha256sum -c MANIFEST-SHA256.txt
+
+629abed7613baa6a415baf1139431268a12f56f75497ab8b214eb720178d4820  RASTA Web Portal.dc.html
+171f4b245399e561106eba4e476d1ea0e3a33eff372387ec1f34d7021f85eebb  RASTA Admin Console.dc.html
+89ca6f9b63f5d9a84a2091338e35fd3be1d478fefcbbc4b3c6b255e79c043086  RASTA Design System V2.dc.html
+8fe7df74405f3c55f49b7249c74ea1397e65d07dea2b1bd3b4a489bec2e28cbe  support.js
+eb3da85aff2a914ffa48faee16d2b914e413fd0a38f04286ab46419cdef5171b  github.md
+09ac7ba7ce8d95618b4f0e7f656521846acefdb4f11a982ce2a6e7a39e81c92f  design/README.md
+d997aacfa0fb1f5746b9ab3206b8a0e55253186f1949cc8fda2c94040c685e5d  design/handoff/commerce.md
+629abed7613baa6a415baf1139431268a12f56f75497ab8b214eb720178d4820  design/source/RASTA-Web-Portal.dc.html
+8fe7df74405f3c55f49b7249c74ea1397e65d07dea2b1bd3b4a489bec2e28cbe  design/source/support.js
+
+---
+Sizes, for reference only — not part of the checksum format above:
+
+RASTA Web Portal.dc.html                     338559 bytes
+RASTA Admin Console.dc.html                  105220 bytes
+RASTA Design System V2.dc.html               350953 bytes
+support.js                                   69150 bytes
+github.md                                    8380 bytes
+design/README.md                             11545 bytes
+design/handoff/commerce.md                   17257 bytes
+design/source/RASTA-Web-Portal.dc.html       338559 bytes
+design/source/support.js                     69150 bytes

@@ -11,7 +11,8 @@ design/
 │   └── support.js                 generated Design Component runtime (required)
 ├── handoff/
 │   ├── maintenance.md             implementation handoff for the Maintenance domain
-│   └── mobile.md                  implementation handoff for the mobile-responsive experience
+│   ├── mobile.md                  implementation handoff for the mobile-responsive experience
+│   └── commerce.md                implementation handoff for Marketplace + Economic
 └── screenshots/
     ├── maintenance/
     └── mobile/
@@ -77,14 +78,14 @@ To restore the exact production typeface, add the licensed font files under
 
 Everything this package loads at runtime:
 
-| Resource                                                                | Loaded by               | Version                 | Pinned           | Integrity metadata                                       |
-| ----------------------------------------------------------------------- | ----------------------- | ----------------------- | ---------------- | -------------------------------------------------------- |
-| `./support.js`                                                          | the HTML, relative path | ships in this directory | n/a (local file) | none                                                     |
-| Lucide icons — `unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js`        | the HTML                | 0.469.0                 | yes              | **no** SRI attribute                                     |
-| React — `unpkg.com/react@18.3.1/umd/react.production.min.js`            | `support.js` fallback   | 18.3.1                  | yes              | SRI applied when the runtime supplies a hash for the URL |
-| ReactDOM — `unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js` | `support.js` fallback   | 18.3.1                  | yes              | as above                                                 |
-| Babel Standalone — `unpkg.com/@babel/standalone@7.29.0/babel.min.js`    | `support.js` fallback   | 7.29.0                  | yes              | as above                                                 |
-| Fonts                                                                   | none                    | —                       | —                | —                                                        |
+| Resource | Loaded by | Version | Pinned | Integrity metadata |
+| --- | --- | --- | --- | --- |
+| `./support.js` | the HTML, relative path | ships in this directory | n/a (local file) | none |
+| Lucide icons — `unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js` | the HTML | 0.469.0 | yes | **no** SRI attribute |
+| React — `unpkg.com/react@18.3.1/umd/react.production.min.js` | `support.js` fallback | 18.3.1 | yes | SRI applied when the runtime supplies a hash for the URL |
+| ReactDOM — `unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js` | `support.js` fallback | 18.3.1 | yes | as above |
+| Babel Standalone — `unpkg.com/@babel/standalone@7.29.0/babel.min.js` | `support.js` fallback | 7.29.0 | yes | as above |
+| Fonts | none | — | — | — |
 
 All five URLs are version-pinned. The Lucide tag in the HTML carries **no** `integrity`
 attribute. The runtime's script loader sets `integrity` and `crossOrigin="anonymous"`
@@ -114,26 +115,58 @@ external dependency** — the React, ReactDOM and Babel fallbacks are equally re
 
 Computed over the exported files in this directory:
 
-| File                              | Bytes  | SHA-256                                                            |
-| --------------------------------- | ------ | ------------------------------------------------------------------ |
-| `source/RASTA-Web-Portal.dc.html` | 305686 | `cd425a5fedf70723125cfb797762f2581a2a1123558f12be627afafc0d1f79a8` |
-| `source/support.js`               | 69150  | `8fe7df74405f3c55f49b7249c74ea1397e65d07dea2b1bd3b4a489bec2e28cbe` |
+| File | Bytes | SHA-256 |
+| --- | --- | --- |
+| `source/RASTA-Web-Portal.dc.html` | 338559 | `629abed7613baa6a415baf1139431268a12f56f75497ab8b214eb720178d4820` |
+| `source/support.js` | 69150 | `8fe7df74405f3c55f49b7249c74ea1397e65d07dea2b1bd3b4a489bec2e28cbe` |
 
 ---
 
 ## 5. Relationship between backend commit and design checkpoint
 
-Each checkpoint names the backend commit it was synchronised against. This checkpoint is
-bound to **`e4f9b1e7867bac701fba49caec8a1e76697981e7`** on `main`.
+Each checkpoint names the backend state it was synchronised against. This checkpoint is bound to
+**`main@69dbcc3`** (resolved `69dbcc31eed8`), read 2026-08-31 — 78 commits after the original baseline
+`e4f9b1e7867bac701fba49caec8a1e76697981e7` and 9 after the previous checkpoint. The commit is named
+here because it was given explicitly; earlier checkpoints quoted a dated read instead, since the
+sync tooling resolves a tree hash rather than a commit and a guessed sha is worse than a date.
 
-Between that commit and `main` (read 2026-08-29), a complete `services/economic-service` and
-ADR-030…ADR-034 were added upstream. **This checkpoint does not represent economic or marketplace as
-implemented** — those surfaces remain `PLANNED` by instruction, and re-grounding them is a separate
-approval-gated task.
+What changed upstream in that range: complete `services/economic-service` and
+`services/marketplace-service`, ADR-030…ADR-048, an end-to-end Playwright suite, and signed internal
+tenant context in `packages/nest-common`. The `offers`, `orderDetail` and `wallet` surfaces were
+**re-grounded against that code** and now read
+`IMPLEMENTED IN BACKEND · ready for frontend` — see `handoff/commerce.md` for what was removed as
+false and why. Procurement, supplier, inventory, construction, contract and notification surfaces
+remain `PLANNED`; their services still do not exist.
 
 **Backend code and API contracts remain the functional source of truth.** Where this
 design and the code disagree, the code is right and the design is stale — raise it as a
 finding rather than implementing the design.
+
+---
+
+## 5a. Colour tokens and interactive boundaries
+
+`--bd2` (#C9D3D1) is **decorative only** — dividers and non-essential container borders. It is
+1.53:1 on white and must never draw the visible boundary of an interactive component.
+
+Interactive boundaries use the semantic token `--control-border` (#73837F light, #6B7D7B dark):
+inputs, secondary buttons, tabs, selectors, toggles and the responsive rail chips. Measured against
+every surface it appears on, its worst case is **3.27:1**, so it satisfies WCAG 2.1 AA criterion
+1.4.11 in both themes. Full per-surface table in `handoff/mobile.md` §11.
+
+`RASTA Design System V2.dc.html` — the design-language document the portal's vocabulary comes from —
+now **declares and uses the same token**. It previously drew every control it demonstrated with
+`--bd2`, which contradicted this rule in the one file that is supposed to establish it; 37 solid
+boundaries (secondary buttons, text inputs, selects, checkboxes, the search field, stepper controls,
+OTP cells, mobile form controls) and two dashed control affordances were migrated. `--bd2` remains
+in that file only for genuinely decorative work: dividers, the phone bezel, chart strokes and
+placeholder frames. Its token table now documents both, as `border.decorative` and
+`border.control` — the old single `border.strong` row described `--bd2` as "the form input
+border", which is exactly the claim this rule retired.
+
+Mobile functional text has a **13px floor** (body, form instructions, validation and error
+messages, status descriptions, actionable labels, API-derived explanatory text). 12px is permitted
+only for genuinely secondary metadata that still passes 4.5:1.
 
 ---
 
@@ -142,12 +175,15 @@ finding rather than implementing the design.
 1. Only **approved** design checkpoints are committed here. Work in progress stays out.
 2. Planned or unbuilt UI must never be presented as implemented. Every surface carries a
    status strip reading `IMPLEMENTED`, `PARTIAL`,
-   `IMPLEMENTED IN BACKEND · ready for frontend`, or `PLANNED`. Marketplace, economic,
-   procurement, supplier, construction, contract and notification surfaces are design
-   specification only and are marked `PLANNED`. Order-cycle copy follows the temporary
-   decision recorded in `docs/24-open-questions.md` Q-11: a three-day confirmation
-   window, **no automatic confirmation**, and no settlement triggered merely because the
-   window expired.
+   `IMPLEMENTED IN BACKEND · ready for frontend`, or `PLANNED`. Procurement, supplier,
+   inventory, construction, contract and notification surfaces are design specification only
+   and are marked `PLANNED`. Order-cycle copy follows **ADR-043**, which resolved
+   `docs/24-open-questions.md` Q-11: two configurable windows (fulfilment 7 days, receipt
+   3 days — documented defaults, not rules), **no automatic confirmation and no automatic
+   cancellation**, and expiry that writes a reminder history row and a counter while the
+   order waits where it is. A capability with no service behind it is never drawn as
+   working: absent checks read `UNAVAILABLE`, never `false`, and zero commission reads
+   "no active rule matched", never "free".
 3. No caches, exports, session data, credentials, tokens or generated noise.
 4. A checkpoint is added, never silently rewritten — a new backend baseline means a new
    handoff entry naming the new commit.
