@@ -11,6 +11,8 @@ import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authority.consumer';
 import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer';
 import { AppModule } from '../src/app.module';
+import { PAYMENT_PROVIDER } from '../src/tokens';
+import type { PaymentProvider } from '../src/payment/provider';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl, PLATFORM_ORGANIZATION_ID } from './helpers';
 import { randomBytes } from 'node:crypto';
@@ -212,12 +214,37 @@ export function internalToken(
   );
 }
 
-export async function startApi(): Promise<ApiHarness> {
+export interface StartApiOptions {
+  /**
+   * Replaces the payment provider bound at `PAYMENT_PROVIDER`.
+   *
+   * The provider is the one genuinely external thing in this service — a
+   * network boundary to somebody else's system — and `PaymentProvider` is
+   * deliberately an interface for exactly that reason (ADR-024). Substituting
+   * it here does not weaken a test: everything behind it stays real, including
+   * the wallet row locks, the ledger triggers and `ck_wallet_balances`.
+   *
+   * What it makes reachable is the set of provider behaviours
+   * `MockPaymentProvider` cannot produce. That provider always attaches a
+   * failure code, so the service's defensive `?? 'PROVIDER_DECLINED'` — the
+   * branch that decides what a caller is told when a provider refuses without
+   * saying why — is unreachable through it, even though `failureCode` is
+   * optional on the interface and a real provider may omit it.
+   */
+  paymentProvider?: PaymentProvider;
+}
+
+export async function startApi(options: StartApiOptions = {}): Promise<ApiHarness> {
   applyEnvironment();
 
   const publisher = new InMemoryEventPublisher();
 
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+  let builder = Test.createTestingModule({ imports: [AppModule] });
+  if (options.paymentProvider) {
+    builder = builder.overrideProvider(PAYMENT_PROVIDER).useValue(options.paymentProvider);
+  }
+
+  const moduleRef = await builder
     .overrideProvider(KafkaEventPublisher)
     .useValue(publisher)
     .overrideProvider(SettlementAuthorityConsumer)

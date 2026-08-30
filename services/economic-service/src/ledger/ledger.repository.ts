@@ -80,10 +80,27 @@ export class LedgerRepository {
     );
     if (existing) return existing;
 
-    try {
-      return await runUnscoped(reason, () =>
-        tx.ledgerAccount.create({
-          data: {
+    // Insert-if-absent, then read back — rather than create-and-catch.
+    //
+    // This runs inside the caller's interactive transaction, and that is what
+    // rules the obvious shape out. A unique violation raised by `create` here
+    // does not just fail the statement: PostgreSQL aborts the whole
+    // transaction, and every later statement on it returns 25P02 "current
+    // transaction is aborted". So a `catch` that tried to recover by reading
+    // the winner's row could never succeed — the recovery query is one of the
+    // statements the abort refuses. The branch existed, was documented as
+    // handling the race, and turned a recoverable race into a hard failure
+    // for the caller who lost it.
+    //
+    // `skipDuplicates` compiles to `ON CONFLICT DO NOTHING`, which is not an
+    // error, so the transaction stays usable and the read below finds either
+    // the row we just wrote or the one the winner wrote. Semantics are
+    // unchanged from what the old code intended: first writer wins, and an
+    // existing account is never mutated.
+    await runUnscoped(reason, () =>
+      tx.ledgerAccount.createMany({
+        data: [
+          {
             id: input.id,
             organizationId: input.organizationId,
             accountType: input.accountType,
@@ -93,27 +110,23 @@ export class LedgerRepository {
             title: input.title ?? null,
             createdBy: input.createdBy,
           },
-          select: { id: true, organizationId: true, currency: true, accountType: true },
-        }),
-      );
-    } catch (error) {
-      if (!isUniqueViolation(error)) throw error;
-      // Someone else created it between the read and the write. Their row is
-      // as good as ours would have been.
-      const raced = await runUnscoped(reason, () =>
-        tx.ledgerAccount.findUniqueOrThrow({
-          where: {
-            organizationId_purpose_currency: {
-              organizationId: input.organizationId,
-              purpose: input.purpose,
-              currency: input.currency,
-            },
+        ],
+        skipDuplicates: true,
+      }),
+    );
+
+    return runUnscoped(reason, () =>
+      tx.ledgerAccount.findUniqueOrThrow({
+        where: {
+          organizationId_purpose_currency: {
+            organizationId: input.organizationId,
+            purpose: input.purpose,
+            currency: input.currency,
           },
-          select: { id: true, organizationId: true, currency: true, accountType: true },
-        }),
-      );
-      return raced;
-    }
+        },
+        select: { id: true, organizationId: true, currency: true, accountType: true },
+      }),
+    );
   }
 
   /** The caller's own accounts. Tenant-scoped by the guard. */
