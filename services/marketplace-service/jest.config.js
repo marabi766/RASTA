@@ -46,6 +46,23 @@ module.exports = {
   ],
   collectCoverageFrom,
   coverageDirectory: 'coverage',
+  // `docs/14` § 14.2 puts this service in the 75% band. Until now that number
+  // lived only in the document, so nothing failed when coverage fell below it
+  // — and it had, to 40% branches. The gate is set at the documented figure
+  // rather than at whatever the suite currently reaches, so it measures the
+  // requirement and not the status quo.
+  //
+  // `src/temporal/workflows.ts` is counted here and is largely unmeasurable:
+  // Temporal executes workflow code from a webpack bundle inside an isolated
+  // V8 context, where Istanbul's instrumentation does not reach. Its 31
+  // branches are therefore reported as uncovered even though
+  // `workflows.spec.ts` executes them against a real time-skipping Temporal
+  // server. It is deliberately **not** excluded: an exclusion would raise the
+  // number by hiding a tooling limit, and would also hide the workflow itself
+  // if its tests were ever deleted. The threshold is met with the file left in.
+  coverageThreshold: {
+    global: { branches: 75, functions: 75, lines: 75, statements: 75 },
+  },
   // Integration suites talk to a real database, a real broker and — for the
   // saga — a real Temporal test environment, which takes seconds to start.
   testTimeout: 120000,
