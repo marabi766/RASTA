@@ -186,6 +186,107 @@ describe('idempotency and outbox (real database)', () => {
       expect(hashRequestBody({ a: 1, b: 2 })).toBe(hashRequestBody({ b: 2, a: 1 }));
       expect(hashRequestBody({ a: 1 })).not.toBe(hashRequestBody({ a: 2 }));
     });
+
+    it('tells a client its own request is still running, rather than replaying nothing', async () => {
+      // The genuine double-submit: the same key arrives while the first call
+      // is still open. There is no response to replay yet, and proceeding
+      // would place the order twice. The caller is told to retry, and the
+      // status is a CONFLICT rather than a key-reuse — the key was not reused,
+      // the client was simply early.
+      const { offerId } = await publishOffer(wiring, org.supplier);
+      const idempotencyKey = key('inflight');
+      const body = { lines: [{ offerId, quantity: 1 }] };
+
+      // Claim without ever completing, which is exactly the state a request
+      // that is still in flight leaves behind.
+      await asBuyer(() => wiring.idempotency.claim('POST /v1/orders', idempotencyKey, body));
+
+      await expect(
+        asBuyer(() => wiring.idempotency.claim('POST /v1/orders', idempotencyKey, body)),
+      ).rejects.toThrow(expect.objectContaining({ code: 'CONFLICT' }));
+    });
+
+    it('treats an expired key as a fresh one rather than replaying stale work', async () => {
+      // The TTL is what stops the table growing without bound. Once a key has
+      // expired, the same key is a new request: replaying a week-old response
+      // to it would answer a question nobody asked.
+      const { offerId } = await publishOffer(wiring, org.supplier);
+      const idempotencyKey = key('expired');
+      const body = { lines: [{ offerId, quantity: 1 }] };
+
+      const first = await asBuyer(() =>
+        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () =>
+          wiring.orders.place(body, idempotencyKey),
+        ),
+      );
+
+      // Both timestamps move: `ck_idempotency_expiry` requires an expiry after
+      // the row was created, so backdating only the expiry would be refused —
+      // correctly, since such a row could never have been written.
+      await runUnscoped('the suite ages the key past its TTL', () =>
+        prisma.client.idempotencyKey.updateMany({
+          where: { key: idempotencyKey },
+          data: {
+            createdAt: new Date(Date.now() - 7_200_000),
+            expiresAt: new Date(Date.now() - 60_000),
+          },
+        }),
+      );
+
+      const second = await asBuyer(() =>
+        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () =>
+          wiring.orders.place(body, idempotencyKey),
+        ),
+      );
+
+      // A genuinely new order, not the old one handed back.
+      expect(second.id).not.toBe(first.id);
+    });
+
+    it('replays with the status the first call returned', async () => {
+      const { offerId } = await publishOffer(wiring, org.supplier);
+      const idempotencyKey = key('status');
+      const body = { lines: [{ offerId, quantity: 1 }] };
+
+      await asBuyer(() =>
+        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () =>
+          wiring.orders.place(body, idempotencyKey),
+        ),
+      );
+
+      const replay = await asBuyer(() =>
+        wiring.idempotency.claim('POST /v1/orders', idempotencyKey, body),
+      );
+      expect(replay).toMatchObject({ kind: 'REPLAY', status: 201 });
+    });
+
+    it('replays a recorded response that carried no status as a 200', async () => {
+      // A row written before the status column was populated, or by a path
+      // that recorded no status. Replaying `undefined` would hand the client a
+      // response with no status line at all; 200 is the honest default for a
+      // call that is known to have succeeded.
+      const { offerId } = await publishOffer(wiring, org.supplier);
+      const idempotencyKey = key('nostatus');
+      const body = { lines: [{ offerId, quantity: 1 }] };
+
+      await asBuyer(() =>
+        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () =>
+          wiring.orders.place(body, idempotencyKey),
+        ),
+      );
+
+      await runUnscoped('the suite clears the recorded status', () =>
+        prisma.client.idempotencyKey.updateMany({
+          where: { key: idempotencyKey },
+          data: { responseStatus: null },
+        }),
+      );
+
+      const replay = await asBuyer(() =>
+        wiring.idempotency.claim('POST /v1/orders', idempotencyKey, body),
+      );
+      expect(replay).toMatchObject({ kind: 'REPLAY', status: 200 });
+    });
   });
 
   describe('a committed change always publishes', () => {
