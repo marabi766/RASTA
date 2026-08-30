@@ -11,19 +11,28 @@ import type { OpenAPIObject } from '@nestjs/swagger';
  * it means this function is the last thing standing between the schemas and
  * every generated client.
  *
- * `api-operability.int-spec.ts` proves the document generates against the real
- * application. This file covers the shapes that application does not produce:
- * a document with no paths, an operation that is not one, a route that already
- * carries parameters, and the fallbacks for a route nobody registered.
+ * This file covers the enrichment itself, including the shapes the running
+ * application does not produce: a document with no paths, an operation that is
+ * not one, a route that already carries parameters, and the fallbacks for a
+ * route nobody registered.
+ *
+ * It does **not** prove the document generates against the real application —
+ * economic-service has an `api-operability.int-spec.ts` for that and this
+ * service has no equivalent, which an earlier version of this comment claimed
+ * it did. Stated plainly rather than removed, because the gap is real: nothing
+ * here would catch a decorator that stopped registering a route.
  */
 describe('enrichOpenApiDocument', () => {
   const emptyDocument = (): OpenAPIObject =>
     ({ openapi: '3.0.0', info: { title: 't', version: '1' } }) as OpenAPIObject;
 
+  /** The default the environment schema carries, unless a test names another. */
+  const OPTIONS = { idempotencyTtlHours: 24 };
+
   it('publishes the one error shape every service returns, even for an empty document', () => {
     // Referenced rather than inlined per response, so a client generates a
     // single error type instead of one per endpoint.
-    const document = enrichOpenApiDocument(emptyDocument());
+    const document = enrichOpenApiDocument(emptyDocument(), OPTIONS);
 
     expect(document.components?.schemas?.ApiError).toBeDefined();
     expect(JSON.stringify(document.components?.schemas?.ApiError)).toContain('correlationId');
@@ -33,7 +42,7 @@ describe('enrichOpenApiDocument', () => {
     const document = emptyDocument();
     document.components = { schemas: { Existing: { type: 'object' } } } as never;
 
-    const enriched = enrichOpenApiDocument(document);
+    const enriched = enrichOpenApiDocument(document, OPTIONS);
 
     expect(enriched.components?.schemas?.Existing).toBeDefined();
     expect(enriched.components?.schemas?.ApiError).toBeDefined();
@@ -52,7 +61,7 @@ describe('enrichOpenApiDocument', () => {
       },
     } as never;
 
-    const enriched = enrichOpenApiDocument(document);
+    const enriched = enrichOpenApiDocument(document, OPTIONS);
     const item = enriched.paths['/v1/orders'] as Record<string, unknown>;
 
     expect(item.summary).toBe('not an operation');
@@ -72,7 +81,7 @@ describe('enrichOpenApiDocument', () => {
       },
     } as never;
 
-    const enriched = enrichOpenApiDocument(document);
+    const enriched = enrichOpenApiDocument(document, OPTIONS);
     const operation = (enriched.paths['/v1/orders/{id}/cancel'] as Record<string, never>)
       .post as unknown as { parameters: { name: string; in: string; required: boolean }[] };
 
@@ -87,11 +96,53 @@ describe('enrichOpenApiDocument', () => {
     expect(key?.in).toBe('header');
   });
 
+  describe('the retention window the key description states', () => {
+    /** The `Idempotency-Key` parameter of `POST /v1/orders`, as published. */
+    function keyDescription(idempotencyTtlHours: number): string {
+      const document = emptyDocument();
+      document.paths = { '/v1/orders': { post: { responses: {} } } } as never;
+
+      const enriched = enrichOpenApiDocument(document, { idempotencyTtlHours });
+      const operation = (enriched.paths['/v1/orders'] as Record<string, never>).post as unknown as {
+        parameters: { name: string; description: string }[];
+      };
+      const parameter = operation.parameters.find((p) => p.name === 'Idempotency-Key');
+      if (!parameter) throw new Error('the Idempotency-Key parameter was not published');
+      return parameter.description;
+    }
+
+    it('is the configured one, not a number written beside the configuration', () => {
+      // `MARKETPLACE_IDEMPOTENCY_TTL_HOURS` accepts 1..168. A document that
+      // always claimed 24 would be wrong on every deployment that set anything
+      // else, and wrong in the direction that matters: a client reading it
+      // builds a retry policy around a window the service does not honour.
+      expect(keyDescription(72)).toContain('72 hours');
+      expect(keyDescription(1)).toContain('1 hour');
+      expect(keyDescription(168)).toContain('168 hours');
+    });
+
+    it('states no window the configuration did not produce', () => {
+      // The regression guard. A literal reintroduced anywhere in this
+      // description — 24, or any other fixed figure — shows up as a second
+      // number in a document generated with a different setting.
+      const description = keyDescription(72);
+      const numbers = description.match(/\b\d+\b/g) ?? [];
+
+      // 409 is the documented status; 72 is the configured window. Nothing else.
+      expect(numbers.sort()).toEqual(['409', '72']);
+      expect(description).not.toContain('24');
+    });
+
+    it('says the window is configured, so a reader does not take it for a constant', () => {
+      expect(keyDescription(24)).toMatch(/configured/i);
+    });
+  });
+
   it('flattens a query schema into one parameter each, carrying descriptions', () => {
     const document = emptyDocument();
     document.paths = { '/v1/orders': { get: { responses: {} } } } as never;
 
-    const enriched = enrichOpenApiDocument(document);
+    const enriched = enrichOpenApiDocument(document, OPTIONS);
     const operation = (enriched.paths['/v1/orders'] as Record<string, never>).get as unknown as {
       parameters: { name: string; in: string }[];
     };
@@ -114,7 +165,7 @@ describe('enrichOpenApiDocument', () => {
       '/v1/orders': { post: { responses: {} } },
     } as never;
 
-    const enriched = enrichOpenApiDocument(document);
+    const enriched = enrichOpenApiDocument(document, OPTIONS);
     const authorise = (
       enriched.paths['/v1/orders/{id}/authorise-settlement'] as Record<string, never>
     ).post as unknown as { responses: Record<string, unknown> };
@@ -130,7 +181,7 @@ describe('enrichOpenApiDocument', () => {
     const document = emptyDocument();
     document.paths = { '/v1/offers': { post: { responses: {} } } } as never;
 
-    const enriched = enrichOpenApiDocument(document);
+    const enriched = enrichOpenApiDocument(document, OPTIONS);
     const operation = (enriched.paths['/v1/offers'] as Record<string, never>).post as unknown as {
       responses: Record<string, { description: string; content: unknown }>;
     };
@@ -149,7 +200,7 @@ describe('enrichOpenApiDocument', () => {
     const document = emptyDocument();
     document.paths = { '/v1/not-a-real-route': { get: { responses: {} } } } as never;
 
-    const enriched = enrichOpenApiDocument(document);
+    const enriched = enrichOpenApiDocument(document, OPTIONS);
     const operation = (enriched.paths['/v1/not-a-real-route'] as Record<string, never>)
       .get as unknown as { responses: Record<string, unknown>; requestBody?: unknown };
 

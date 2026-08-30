@@ -123,7 +123,28 @@ const STATUS_TEXT: Record<number, string> = {
   500: 'Unexpected server error',
 };
 
-export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
+export interface OpenApiOptions {
+  /**
+   * How long a recorded idempotency key is replayed for, from the running
+   * configuration.
+   *
+   * Required rather than defaulted. `MARKETPLACE_IDEMPOTENCY_TTL_HOURS` accepts
+   * anything from 1 to 168, and a default here would be a second source of
+   * truth that silently disagrees with the deployment the reader is looking at
+   * — which is the bug this parameter exists to prevent, not a convenience it
+   * can afford. A published contract that names a retention window the service
+   * does not honour sends a client to build a retry policy around it.
+   */
+  idempotencyTtlHours: number;
+}
+
+export function enrichOpenApiDocument(
+  document: OpenAPIObject,
+  options: OpenApiOptions,
+): OpenAPIObject {
+  const ttl = options.idempotencyTtlHours;
+  const retention = `${ttl} ${ttl === 1 ? 'hour' : 'hours'}`;
+
   document.components ??= {};
   document.components.schemas ??= {};
   // The one error shape every Rasta service returns. Referenced rather than
@@ -160,7 +181,8 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
             description:
               'Required. A retry with the same key returns the first response without ' +
               'executing again; the same key with a different body is refused with 409 ' +
-              'IDEMPOTENCY_KEY_REUSED. Keys are honoured for 24 hours.',
+              `IDEMPOTENCY_KEY_REUSED. Keys are honoured for ${retention}, which is ` +
+              'this deployment’s configured retention window and not a platform constant.',
           },
         ];
       }
