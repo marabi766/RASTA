@@ -301,6 +301,26 @@ jobs:
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           REDIS_URL: redis://localhost:6379
 
+      - name: Economic coverage gate
+        # `docs/14` § 14.2 sets 90% branch coverage for this service — the
+        # highest band in the table, because an untested branch in a ledger is
+        # not a missing feature but an unbalanced journal nobody saw.
+        #
+        # The threshold has been in `jest.config.js` all along and was never
+        # evaluated: no job here ran jest with `--coverage`, and the manual
+        # command its own comment named did not exist as a script. A gate that
+        # nothing runs is documentation.
+        #
+        # Both projects in one run. The ledger triggers, the row locks and the
+        # settlement rollback exist only in the database, so a unit-only
+        # measurement would both understate the number and reward mocking the
+        # very things `docs/10` § 10.12 requires to be tested for real.
+        run: pnpm --filter @rasta/economic-service run test:coverage
+        env:
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+
       - name: Marketplace coverage gate
         # `docs/14` § 14.2 puts marketplace-service in the 75% band, and until
         # now nothing measured it: no job in this file ran jest with

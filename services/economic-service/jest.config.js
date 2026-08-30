@@ -79,7 +79,21 @@ module.exports = {
   // Measured across **both** projects: a wallet lock or a settlement rollback
   // has no unit-testable form, so a unit-only number would push the suite
   // towards mocking the database — which is precisely what docs/10 § 10.12
-  // forbids. Run it with `pnpm --filter @rasta/economic-service coverage`.
+  // forbids. Run it with:
+  //
+  //   pnpm --filter @rasta/economic-service run test:coverage
+  //
+  // That script did not exist until 2026-08-30, and neither did any CI step
+  // that ran jest here with `--coverage`. So this threshold — the one the
+  // comment above calls mandatory — was never evaluated by anything: not by a
+  // pipeline, and not by the hand-run command this comment used to name, which
+  // pointed at a script that was never defined. It is enforced now, in the
+  // integration job, where a real database and broker exist.
+  //
+  // `docs/14` § 14.2 sets **90% branch** coverage for this service. The other
+  // three metrics are held at 90 too, which is stricter than that table
+  // requires; they are kept because they already pass and lowering a threshold
+  // to match a minimum is how a gate erodes.
   coverageThreshold: {
     global: { branches: 90, functions: 90, lines: 90, statements: 90 },
   },
