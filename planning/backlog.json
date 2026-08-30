@@ -1,0 +1,934 @@
+{
+  "$schema": "./backlog.schema.json",
+  "version": 1,
+  "project": "RASTA",
+  "asOf": "2026-08-30",
+  "governance": {
+    "baselineState": "PROVISIONAL",
+    "approvedBy": null,
+    "pointScale": [1, 2, 3, 5, 8, 13, 21],
+    "earnedStatus": "ACCEPTED",
+    "cancelledStatus": "CANCELLED",
+    "minimumClosedIterationsForForecast": 2
+  },
+  "iterations": [],
+  "epics": [
+    {
+      "id": "EP-PLATFORM",
+      "title": "Platform foundation and engineering",
+      "scope": "MVP",
+      "owner": "platform"
+    },
+    {
+      "id": "EP-CORE",
+      "title": "Identity, organization and core fleet",
+      "scope": "MVP",
+      "owner": "core-platform"
+    },
+    {
+      "id": "EP-OPERATIONS",
+      "title": "Maintenance and field operations",
+      "scope": "MVP",
+      "owner": "operations"
+    },
+    {
+      "id": "EP-COMMERCE",
+      "title": "Economic, marketplace and supply chain",
+      "scope": "MVP",
+      "owner": "commerce"
+    },
+    {
+      "id": "EP-CONSTRUCTION",
+      "title": "Construction and contracts",
+      "scope": "MVP",
+      "owner": "construction"
+    },
+    {
+      "id": "EP-EXPERIENCE",
+      "title": "Web, mobile and user experience",
+      "scope": "MVP",
+      "owner": "web"
+    },
+    {
+      "id": "EP-OPERABILITY",
+      "title": "Operability, hardening and pilot",
+      "scope": "MVP",
+      "owner": "platform"
+    },
+    {
+      "id": "EP-INSURANCE",
+      "title": "Commercial insurance",
+      "scope": "POST_MVP",
+      "owner": "insurance"
+    },
+    {
+      "id": "EP-ENGAGEMENT",
+      "title": "Participation, reward and ranking",
+      "scope": "POST_MVP",
+      "owner": "reward"
+    },
+    {
+      "id": "EP-REVERSE",
+      "title": "Reverse logistics",
+      "scope": "POST_MVP",
+      "owner": "inventory-and-logistics"
+    },
+    {
+      "id": "EP-IOT",
+      "title": "IoT and telematics",
+      "scope": "POST_MVP",
+      "owner": "iot-telematics"
+    },
+    {
+      "id": "EP-EXPANSION",
+      "title": "National-scale product expansion",
+      "scope": "POST_MVP",
+      "owner": "platform"
+    }
+  ],
+  "items": [
+    {
+      "id": "PLAT-001",
+      "epicId": "EP-PLATFORM",
+      "title": "Monorepo and shared platform foundations",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 13,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        "Strict TypeScript monorepo builds, lints and type-checks",
+        "Shared contracts, configuration, logging and Nest infrastructure exist without shared business logic"
+      ],
+      "dependencies": [],
+      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۱-p0--demo-روز-۱۰"],
+      "evidence": [
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33313483658",
+          "note": "Main quality pipeline passed"
+        }
+      ]
+    },
+    {
+      "id": "PLAT-002",
+      "epicId": "EP-PLATFORM",
+      "title": "Local runtime infrastructure",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 13,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        "PostgreSQL, Redis, Kafka, Keycloak, MinIO and Temporal have reproducible local definitions",
+        "Service databases are independently provisioned"
+      ],
+      "dependencies": ["PLAT-001"],
+      "sourceRefs": ["docs/11-infrastructure-architecture.md"],
+      "evidence": [
+        {
+          "kind": "DOCUMENT",
+          "ref": "PROJECT_MEMORY.md",
+          "note": "Runtime and live-verification evidence is recorded"
+        }
+      ]
+    },
+    {
+      "id": "PLAT-003",
+      "epicId": "EP-PLATFORM",
+      "title": "Tenant isolation, authentication and authorization foundation",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 13,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        "JWT validation and tenant context are enforced",
+        "Positive and negative authorization and tenant-isolation paths are tested"
+      ],
+      "dependencies": ["PLAT-001"],
+      "sourceRefs": ["AGENTS.md", "docs/09-security-architecture.md"],
+      "evidence": [
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33313483658",
+          "note": "Security and tenant-isolation gates passed"
+        }
+      ]
+    },
+    {
+      "id": "PLAT-004",
+      "epicId": "EP-PLATFORM",
+      "title": "CI, security scans and container verification",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 13,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        "Quality, security, integration and E2E jobs run on main",
+        "Every current service image is built and scanned without Critical or High findings"
+      ],
+      "dependencies": ["PLAT-001"],
+      "sourceRefs": [".github/workflows/ci.yml", "docs/14-testing-strategy.md"],
+      "evidence": [
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33313483658",
+          "note": "All main jobs and seven image scans passed"
+        }
+      ]
+    },
+    {
+      "id": "PLAT-005",
+      "epicId": "EP-PLATFORM",
+      "title": "Formal backlog and Story Point progress control",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 5,
+      "status": "IN_PROGRESS",
+      "acceptanceCriteria": [
+        "A canonical validated backlog calculates MVP and full-product progress",
+        "CI rejects invalid or stale progress data",
+        "Governance prevents unverified work from earning points"
+      ],
+      "dependencies": ["PLAT-004"],
+      "sourceRefs": ["docs/25-progress-governance.md"],
+      "evidence": []
+    },
+    {
+      "id": "CORE-001",
+      "epicId": "EP-CORE",
+      "title": "Identity service core",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 13,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        "OIDC, membership, roles and active-organization flows meet the documented contracts",
+        "Identity isolation, authorization and API paths are tested"
+      ],
+      "dependencies": ["PLAT-003"],
+      "sourceRefs": ["docs/04-service-decomposition.md"],
+      "evidence": [
+        {
+          "kind": "DOCUMENT",
+          "ref": "PROJECT_MEMORY.md#۳-current-verified-state",
+          "note": "Implemented, tested and live-verified state"
+        }
+      ]
+    },
+    {
+      "id": "CORE-002",
+      "epicId": "EP-CORE",
+      "title": "Organization service core",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 8,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        "Organization hierarchy and membership-facing contracts are implemented",
+        "Tenant-scoped CRUD and subtree visibility are tested"
+      ],
+      "dependencies": ["CORE-001"],
+      "sourceRefs": ["docs/04-service-decomposition.md"],
+      "evidence": [
+        {
+          "kind": "DOCUMENT",
+          "ref": "PROJECT_MEMORY.md#۳-current-verified-state",
+          "note": "Implemented, tested and live-verified state"
+        }
+      ]
+    },
+    {
+      "id": "CORE-003",
+      "epicId": "EP-CORE",
+      "title": "API gateway core",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 8,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        "Authenticated routes proxy with correlation, tenant context and circuit breaking",
+        "Unavailable upstreams fail with the platform error contract"
+      ],
+      "dependencies": ["CORE-001"],
+      "sourceRefs": ["docs/06-api-architecture.md"],
+      "evidence": [
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33313483658",
+          "note": "Gateway unit and E2E paths passed"
+        }
+      ]
+    },
+    {
+      "id": "CORE-004",
+      "epicId": "EP-CORE",
+      "title": "Asset service core and dossier",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 13,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        "Assets have organization-agnostic identity and an explicit lifecycle",
+        "The dossier projection is idempotently built from events"
+      ],
+      "dependencies": ["CORE-002"],
+      "sourceRefs": ["docs/17-mvp-scope.md#دارایی-و-ناوگان"],
+      "evidence": [
+        {
+          "kind": "DOCUMENT",
+          "ref": "PROJECT_MEMORY.md#۳-current-verified-state",
+          "note": "Asset lifecycle and event projection are verified"
+        }
+      ]
+    },
+    {
+      "id": "CORE-005",
+      "epicId": "EP-CORE",
+      "title": "Fleet assignment, usage and availability core",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 13,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        "Assignment exclusivity is enforced by the database",
+        "Usage and availability flows are tenant-scoped and event-driven"
+      ],
+      "dependencies": ["CORE-004"],
+      "sourceRefs": [
+        "docs/adr/ADR-025-assignment-exclusivity.md",
+        "docs/adr/ADR-026-fleet-asset-boundary.md"
+      ],
+      "evidence": [
+        {
+          "kind": "DOCUMENT",
+          "ref": "PROJECT_MEMORY.md#۲-current-development-phase",
+          "note": "Fleet code, tests and live E2E verification completed"
+        }
+      ]
+    },
+    {
+      "id": "OPS-001",
+      "epicId": "EP-OPERATIONS",
+      "title": "Maintenance schedules, requests, repair orders and costs",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 21,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        "Due state is derived from time and usage triggers",
+        "Request and repair-order lifecycles, concurrency-safe costs and approval events are verified"
+      ],
+      "dependencies": ["CORE-004", "CORE-005"],
+      "sourceRefs": [
+        "docs/adr/ADR-027-maintenance-due-evaluation.md",
+        "docs/adr/ADR-028-maintenance-cost-provenance.md"
+      ],
+      "evidence": [
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33172549841",
+          "note": "Maintenance tests and image verification passed"
+        }
+      ]
+    },
+    {
+      "id": "COM-001",
+      "epicId": "EP-COMMERCE",
+      "title": "Economic core: wallet, ledger, payment abstraction, commission and reward",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 21,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        "Ledger journals remain balanced and immutable",
+        "Hold, settlement, mock payment, configurable commission and capped reward flows are idempotent"
+      ],
+      "dependencies": ["PLAT-003"],
+      "sourceRefs": ["docs/10-economic-architecture.md", "docs/adr/ADR-030-ledger-partitioning.md"],
+      "evidence": [
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33253629911",
+          "note": "Economic E2E, integration and 90 percent branch coverage passed"
+        }
+      ]
+    },
+    {
+      "id": "COM-002",
+      "epicId": "EP-COMMERCE",
+      "title": "Marketplace catalogue, offers, orders and Temporal saga",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 21,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        "Catalogue, offer and order lifecycles are tenant-safe and server-priced",
+        "Order saga integrates hold, confirmation, dispute and settlement without automatic confirmation"
+      ],
+      "dependencies": ["COM-001"],
+      "sourceRefs": [
+        "docs/adr/ADR-037-marketplace-aggregate-ownership.md",
+        "docs/adr/ADR-039-order-saga-temporal.md"
+      ],
+      "evidence": [
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33313483658",
+          "note": "Marketplace coverage, integration, E2E and image gates passed on main"
+        }
+      ]
+    },
+    {
+      "id": "COM-003",
+      "epicId": "EP-COMMERCE",
+      "title": "Activate the economic-service coverage gate in CI",
+      "scope": "MVP",
+      "priority": "P2",
+      "points": 3,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "The documented coverage command exists and measures a non-empty source set",
+        "CI enforces the existing economic thresholds without lowering them"
+      ],
+      "dependencies": ["COM-001", "PLAT-004"],
+      "sourceRefs": ["docs/14-testing-strategy.md#۱۴۲-حداقل-پوشش"],
+      "evidence": []
+    },
+    {
+      "id": "COM-004",
+      "epicId": "EP-COMMERCE",
+      "title": "Document service and secure object storage flows",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 13,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Uploads validate real content type and size before object storage",
+        "Tenant-scoped signed access and document metadata are audited"
+      ],
+      "dependencies": ["PLAT-003"],
+      "sourceRefs": ["docs/04-service-decomposition.md#document-service-p0"],
+      "evidence": []
+    },
+    {
+      "id": "COM-005",
+      "epicId": "EP-COMMERCE",
+      "title": "Supplier qualification and performance core",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 21,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Qualification and suspension are explicit, tenant-safe workflows",
+        "Configurable performance scoring supplies marketplace rating without invented verification"
+      ],
+      "dependencies": ["COM-004"],
+      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
+      "evidence": []
+    },
+    {
+      "id": "COM-006",
+      "epicId": "EP-COMMERCE",
+      "title": "Inventory, reservation and forward logistics core",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 21,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Stock movement and reservation are concurrency safe",
+        "Shipment state is visible without sharing another service database"
+      ],
+      "dependencies": ["COM-005"],
+      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
+      "evidence": []
+    },
+    {
+      "id": "COM-007",
+      "epicId": "EP-COMMERCE",
+      "title": "Procurement demand aggregation, RFQ and purchase orders",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 21,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Demand aggregation executes in the backend with configured windows and thresholds",
+        "RFQ confidentiality, evaluation and purchase-order issuance are auditable"
+      ],
+      "dependencies": ["COM-005", "COM-006"],
+      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
+      "evidence": []
+    },
+    {
+      "id": "COM-008",
+      "epicId": "EP-COMMERCE",
+      "title": "Notification service with in-app and email delivery",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 13,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Domain events produce idempotent in-app notifications",
+        "Email delivery respects user preferences and records delivery outcome"
+      ],
+      "dependencies": ["PLAT-003"],
+      "sourceRefs": ["docs/04-service-decomposition.md#notification-service-p0"],
+      "evidence": []
+    },
+    {
+      "id": "COM-009",
+      "epicId": "EP-COMMERCE",
+      "title": "Append-only audit service",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 13,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Every state-changing action can be traced to actor, time, origin and correlation",
+        "Audit records are append-only and object-authorized"
+      ],
+      "dependencies": ["PLAT-003"],
+      "sourceRefs": ["docs/04-service-decomposition.md#audit-service-p0"],
+      "evidence": []
+    },
+    {
+      "id": "COM-010",
+      "epicId": "EP-COMMERCE",
+      "title": "Base insurance registry and claim history",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 13,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Policy registry and expiry events are operational",
+        "A base claim has tenant-safe status history and documents without claiming insurer integration"
+      ],
+      "dependencies": ["CORE-004", "COM-004", "COM-008"],
+      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
+      "evidence": []
+    },
+    {
+      "id": "COM-011",
+      "epicId": "EP-COMMERCE",
+      "title": "Commission business-line policies",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 8,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Parts, insurance, maintenance, logistics, procurement, construction and marketplace service commissions use versioned configurable rules",
+        "No commission rate is hard-coded"
+      ],
+      "dependencies": ["COM-001"],
+      "sourceRefs": ["docs/adr/ADR-045-commission-business-lines.md"],
+      "evidence": []
+    },
+    {
+      "id": "COM-012",
+      "epicId": "EP-COMMERCE",
+      "title": "Participation breakdown and basic user levels",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 13,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "ParticipationScore is explained separately from spendable RewardPoints",
+        "Basic levels and badges use versioned rules and avoid coercive game mechanics"
+      ],
+      "dependencies": ["COM-001", "COM-009"],
+      "sourceRefs": ["docs/adr/ADR-047-participation-reward-ranking.md"],
+      "evidence": []
+    },
+    {
+      "id": "CON-001",
+      "epicId": "EP-CONSTRUCTION",
+      "title": "Construction project and configurable approval core",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 21,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Projects, needs and progress reports follow explicit lifecycles",
+        "Approval authorities come from configuration and never create a new legal authority"
+      ],
+      "dependencies": ["COM-004", "COM-009"],
+      "sourceRefs": ["docs/17-mvp-scope.md#رستا-عمران"],
+      "evidence": []
+    },
+    {
+      "id": "CON-002",
+      "epicId": "EP-CONSTRUCTION",
+      "title": "Tender publication, confidential bids and evaluation",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 21,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Tender deadlines survive restarts and late bids are rejected",
+        "Bid confidentiality and configurable evaluation are independently testable and auditable"
+      ],
+      "dependencies": ["CON-001", "COM-005"],
+      "sourceRefs": ["docs/17-mvp-scope.md#رستا-عمران"],
+      "evidence": []
+    },
+    {
+      "id": "CON-003",
+      "epicId": "EP-CONSTRUCTION",
+      "title": "Contract, statement and split approval lifecycle",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 21,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Tender award creates a contract draft through a contract boundary",
+        "Technical and financial approvals are separate and settlement remains financially consistent"
+      ],
+      "dependencies": ["CON-002", "COM-001"],
+      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
+      "evidence": []
+    },
+    {
+      "id": "EXP-001",
+      "epicId": "EP-EXPERIENCE",
+      "title": "Production web foundation and design system",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 13,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Production web uses documented tokens and accessible components",
+        "RTL, Persian dates and empty, loading and error states are verified"
+      ],
+      "dependencies": ["CORE-003"],
+      "sourceRefs": ["docs/16-ui-architecture.md"],
+      "evidence": []
+    },
+    {
+      "id": "EXP-002",
+      "epicId": "EP-EXPERIENCE",
+      "title": "Identity, organization, asset, fleet and maintenance web surfaces",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 21,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Core operational workflows are usable at documented permissions",
+        "Desktop and supported mobile viewports pass accessibility and tenant-isolation E2E"
+      ],
+      "dependencies": ["EXP-001", "OPS-001"],
+      "sourceRefs": ["docs/16-ui-architecture.md#۱۶۶-نقشه-صفحات"],
+      "evidence": []
+    },
+    {
+      "id": "EXP-003",
+      "epicId": "EP-EXPERIENCE",
+      "title": "Economic and marketplace web surfaces",
+      "scope": "MVP",
+      "priority": "P0",
+      "points": 21,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Wallet, order, dispute and settlement states match implemented backend contracts",
+        "No UI claims real banking, automatic confirmation or unimplemented supplier capabilities"
+      ],
+      "dependencies": ["EXP-001", "COM-001", "COM-002"],
+      "sourceRefs": ["docs/16-ui-architecture.md#۱۶۶-نقشه-صفحات"],
+      "evidence": []
+    },
+    {
+      "id": "EXP-004",
+      "epicId": "EP-EXPERIENCE",
+      "title": "Supply-chain and construction web surfaces",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 21,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Procurement, supplier, logistics, construction and contract screens follow real APIs",
+        "Permission, conflict, empty and degraded states are covered"
+      ],
+      "dependencies": ["EXP-001", "COM-007", "CON-003"],
+      "sourceRefs": ["docs/16-ui-architecture.md#۱۶۶-نقشه-صفحات"],
+      "evidence": []
+    },
+    {
+      "id": "EXP-005",
+      "epicId": "EP-EXPERIENCE",
+      "title": "PWA and offline usage queue",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 13,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Usage can be queued offline and synchronized idempotently",
+        "Conflict, retry and user-visible failure behavior are tested"
+      ],
+      "dependencies": ["EXP-002"],
+      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
+      "evidence": []
+    },
+    {
+      "id": "RUN-001",
+      "epicId": "EP-OPERABILITY",
+      "title": "Analytics read models and governed dashboards",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 21,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Analytics projections are event-driven and tenant-safe",
+        "Governance views are aggregate-only and missing baselines report INSUFFICIENT_BASELINE"
+      ],
+      "dependencies": ["COM-009"],
+      "sourceRefs": ["docs/04-service-decomposition.md#analytics-service-p1"],
+      "evidence": []
+    },
+    {
+      "id": "RUN-002",
+      "epicId": "EP-OPERABILITY",
+      "title": "Staging deployment and production-shaped security",
+      "scope": "MVP",
+      "priority": "P2",
+      "points": 21,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "A reproducible staging deployment uses default-deny network policy",
+        "Secrets, migrations, image provenance and rollback are operationally verified"
+      ],
+      "dependencies": ["PLAT-004"],
+      "sourceRefs": ["docs/12-deployment-architecture.md"],
+      "evidence": []
+    },
+    {
+      "id": "RUN-003",
+      "epicId": "EP-OPERABILITY",
+      "title": "Performance, observability, backup and restore hardening",
+      "scope": "MVP",
+      "priority": "P2",
+      "points": 21,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Load, trace, alert and runbook gates meet documented thresholds",
+        "A real restore proves data availability and ledger balance"
+      ],
+      "dependencies": ["RUN-002"],
+      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۳-p2--سختسازی-روز-۳۰"],
+      "evidence": []
+    },
+    {
+      "id": "RUN-004",
+      "epicId": "EP-OPERABILITY",
+      "title": "Controlled pilot and go/no-go decision",
+      "scope": "MVP",
+      "priority": "P2",
+      "points": 13,
+      "status": "BLOCKED",
+      "acceptanceCriteria": [
+        "Pilot scope and exit criteria are approved without invented numbers",
+        "Critical workflows, operational support and baseline KPIs are evaluated with real pilot users"
+      ],
+      "dependencies": ["RUN-003", "EXP-004"],
+      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۴-pilot-کنترلشده--پس-از-سختسازی"],
+      "evidence": []
+    },
+    {
+      "id": "RUN-005",
+      "epicId": "EP-OPERABILITY",
+      "title": "Base reverse-logistics workflow",
+      "scope": "MVP",
+      "priority": "P2",
+      "points": 13,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Return request, reverse transport, inspection and disposition use explicit states",
+        "Refund remains owned by economic-service and repeated events are idempotent"
+      ],
+      "dependencies": ["COM-006", "COM-001"],
+      "sourceRefs": ["docs/adr/ADR-048-reverse-logistics-boundary.md"],
+      "evidence": []
+    },
+    {
+      "id": "INS-001",
+      "epicId": "EP-INSURANCE",
+      "title": "Commercial insurance quotation, comparison and issuance",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 21,
+      "status": "PROPOSED",
+      "acceptanceCriteria": [
+        "Insurer integrations are isolated behind contracts and do not imply unapproved legal authority",
+        "Quotation, comparison, renewal and issuance are auditable"
+      ],
+      "dependencies": ["COM-010"],
+      "sourceRefs": ["docs/adr/ADR-046-insurance-commercial-boundary.md"],
+      "evidence": []
+    },
+    {
+      "id": "INS-002",
+      "epicId": "EP-INSURANCE",
+      "title": "Commercial claims and insurer settlement",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 21,
+      "status": "PROPOSED",
+      "acceptanceCriteria": [
+        "Claim assessment and settlement follow approved insurer and legal contracts",
+        "Commission and accounting entries remain configurable and auditable"
+      ],
+      "dependencies": ["INS-001", "COM-011"],
+      "sourceRefs": ["docs/adr/ADR-046-insurance-commercial-boundary.md"],
+      "evidence": []
+    },
+    {
+      "id": "ENG-001",
+      "epicId": "EP-ENGAGEMENT",
+      "title": "Peer-group ranking and transparent participation score",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 13,
+      "status": "PROPOSED",
+      "acceptanceCriteria": [
+        "Ranking compares only approved peer groups and exposes score reasoning",
+        "Low participation never removes essential product access"
+      ],
+      "dependencies": ["COM-012", "RUN-001"],
+      "sourceRefs": ["docs/adr/ADR-047-participation-reward-ranking.md"],
+      "evidence": []
+    },
+    {
+      "id": "ENG-002",
+      "epicId": "EP-ENGAGEMENT",
+      "title": "Reward benefits, campaigns and appeal workflow",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 21,
+      "status": "PROPOSED",
+      "acceptanceCriteria": [
+        "Benefits and campaigns use versioned rules with caps",
+        "Users can inspect and appeal scoring decisions with an audit trail"
+      ],
+      "dependencies": ["ENG-001", "COM-009"],
+      "sourceRefs": ["docs/adr/ADR-047-participation-reward-ranking.md"],
+      "evidence": []
+    },
+    {
+      "id": "REV-001",
+      "epicId": "EP-REVERSE",
+      "title": "Warranty, repair, replacement, recycling and disposal",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 21,
+      "status": "PROPOSED",
+      "acceptanceCriteria": [
+        "Disposition policies cover warranty, repair, replacement, recycling and disposal",
+        "Custody, inventory, refund and audit boundaries stay independently owned"
+      ],
+      "dependencies": ["RUN-005"],
+      "sourceRefs": ["docs/adr/ADR-048-reverse-logistics-boundary.md"],
+      "evidence": []
+    },
+    {
+      "id": "IOT-001",
+      "epicId": "EP-IOT",
+      "title": "Telematics ingestion and device management pilot",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 21,
+      "status": "PROPOSED",
+      "acceptanceCriteria": [
+        "Device identity and telemetry ingestion are tenant-safe and provider-neutral",
+        "Pilot hardware, retention and operational thresholds are approved before production use"
+      ],
+      "dependencies": ["RUN-004"],
+      "sourceRefs": ["docs/adr/ADR-044-target-service-topology.md"],
+      "evidence": []
+    },
+    {
+      "id": "IOT-002",
+      "epicId": "EP-IOT",
+      "title": "GPS, usage and approved fuel analytics",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 21,
+      "status": "PROPOSED",
+      "acceptanceCriteria": [
+        "Telemetry projections do not overwrite authoritative asset or fleet records",
+        "Fuel capability is absent unless explicitly approved"
+      ],
+      "dependencies": ["IOT-001", "RUN-001"],
+      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۵-p3--پس-از-mvp-و-pilot"],
+      "evidence": []
+    },
+    {
+      "id": "EXT-001",
+      "epicId": "EP-EXPANSION",
+      "title": "Real payment-provider integration",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 13,
+      "status": "BLOCKED",
+      "acceptanceCriteria": [
+        "A legally approved provider is implemented behind the existing abstraction",
+        "Reconciliation, failure recovery and financial-security controls are independently verified"
+      ],
+      "dependencies": ["COM-001", "RUN-004"],
+      "sourceRefs": ["docs/adr/ADR-024-payment-abstraction.md"],
+      "evidence": []
+    },
+    {
+      "id": "EXT-002",
+      "epicId": "EP-EXPANSION",
+      "title": "National-system integrations and digital signature",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 21,
+      "status": "BLOCKED",
+      "acceptanceCriteria": [
+        "Each approved external system has a versioned contract and failure-isolation policy",
+        "Digital-signature authority is legally approved before implementation"
+      ],
+      "dependencies": ["RUN-004"],
+      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۵-p3--پس-از-mvp-و-pilot"],
+      "evidence": []
+    },
+    {
+      "id": "EXT-003",
+      "epicId": "EP-EXPANSION",
+      "title": "Native mobile applications",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 21,
+      "status": "PROPOSED",
+      "acceptanceCriteria": [
+        "Native apps consume existing APIs without creating parallel business rules",
+        "Offline, accessibility, device security and release operations are verified"
+      ],
+      "dependencies": ["RUN-004", "EXP-005"],
+      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۵-p3--پس-از-mvp-و-pilot"],
+      "evidence": []
+    },
+    {
+      "id": "EXT-004",
+      "epicId": "EP-EXPANSION",
+      "title": "Conditional extraction of logical services",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 21,
+      "status": "PROPOSED",
+      "acceptanceCriteria": [
+        "Extraction occurs only after an ADR-044 trigger and migration ADR",
+        "Wallet, ledger, payment, commission, reward or insurance extraction preserves consistency and contracts"
+      ],
+      "dependencies": ["RUN-004"],
+      "sourceRefs": ["docs/adr/ADR-044-target-service-topology.md"],
+      "evidence": []
+    }
+  ],
+  "changeLog": [
+    {
+      "date": "2026-08-30",
+      "type": "BASELINE_CREATED",
+      "reason": "Create the first repository-backed roadmap baseline from documented scope and verified implementation evidence.",
+      "recordedBy": "Codex",
+      "approvalRef": null
+    }
+  ]
+}
