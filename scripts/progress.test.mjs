@@ -21,10 +21,14 @@ test('the repository baseline is valid and produces separate horizons', () => {
 
 test('accepted work without evidence cannot earn points', () => {
   const backlog = copy();
-  backlog.items.find((item) => item.id === 'PLAT-005').status = 'ACCEPTED';
+  const candidate = backlog.items.find((item) => item.status !== 'ACCEPTED');
+  candidate.status = 'ACCEPTED';
+  candidate.evidence = [];
   const errors = validateBacklog(backlog);
   assert.ok(
-    errors.some((error) => error.includes("item 'PLAT-005' is ACCEPTED but has no evidence")),
+    errors.some((error) =>
+      error.includes(`item '${candidate.id}' is ACCEPTED but has no evidence`),
+    ),
   );
 });
 
@@ -46,5 +50,5 @@ test('dependency cycles are rejected', () => {
 test('forecast remains unavailable without two real closed iterations', () => {
   const report = renderProgressReport(baseline);
   assert.match(report, /Forecast[\s\S]+Unavailable/);
-  assert.match(report, /PROVISIONAL/);
+  assert.match(report, new RegExp(`Baseline: \\*\\*${baseline.governance.baselineState}\\*\\*`));
 });

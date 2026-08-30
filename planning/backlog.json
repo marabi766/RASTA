@@ -4,8 +4,8 @@
   "project": "RASTA",
   "asOf": "2026-08-30",
   "governance": {
-    "baselineState": "PROVISIONAL",
-    "approvedBy": null,
+    "baselineState": "APPROVED",
+    "approvedBy": "Product Owner",
     "pointScale": [1, 2, 3, 5, 8, 13, 21],
     "earnedStatus": "ACCEPTED",
     "cancelledStatus": "CANCELLED",
@@ -182,7 +182,7 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 5,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "A canonical validated backlog calculates MVP and full-product progress",
         "CI rejects invalid or stale progress data",
@@ -190,7 +190,13 @@
       ],
       "dependencies": ["PLAT-004"],
       "sourceRefs": ["docs/25-progress-governance.md"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33315693378",
+          "note": "The backlog gate, progress tests, quality, security, integration, E2E and migration checks passed on PR #10"
+        }
+      ]
     },
     {
       "id": "CORE-001",
@@ -929,6 +935,13 @@
       "reason": "Create the first repository-backed roadmap baseline from documented scope and verified implementation evidence.",
       "recordedBy": "Codex",
       "approvalRef": null
+    },
+    {
+      "date": "2026-08-30",
+      "type": "BASELINE_APPROVED",
+      "reason": "The product owner explicitly approved the initial Story Point baseline after reviewing the generated MVP and full-product figures.",
+      "recordedBy": "Codex",
+      "approvalRef": "Product owner approval in the Codex project-management task on 2026-08-30"
     }
   ]
 }
