@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   authEnvSchema,
   baseEnvSchema,
+  booleanEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
@@ -43,7 +44,7 @@ export const documentEnvSchema = baseEnvSchema
      * MinIO addresses buckets by path; AWS S3 by subdomain. Wrong here and
      * every signed URL points at a host that does not exist.
      */
-    S3_FORCE_PATH_STYLE: z.coerce.boolean().default(true),
+    S3_FORCE_PATH_STYLE: booleanEnv(true),
 
     /**
      * How long a signed URL is valid, in seconds.
@@ -100,7 +101,7 @@ export const documentEnvSchema = baseEnvSchema
      * is the property that makes it safe to have at all. It is recorded in
      * `docs/24` under Q-18 rather than left as a surprise in a schema.
      */
-    DOCUMENT_ALLOW_UNSCANNED_DOWNLOAD: z.coerce.boolean().default(true),
+    DOCUMENT_ALLOW_UNSCANNED_DOWNLOAD: booleanEnv(true),
   });
 
 export type DocumentEnv = z.infer<typeof documentEnvSchema>;

@@ -52,6 +52,43 @@ export const postgresUrlSchema = urlWithProtocol(
 );
 export const redisUrlSchema = urlWithProtocol(['redis:', 'rediss:'], 'Redis URL');
 
+/**
+ * A boolean read from an environment variable.
+ *
+ * **Not `z.coerce.boolean()`.** That applies JavaScript's `Boolean()`, and
+ * every non-empty string is truthy — so `FLAG=false`, `FLAG=0` and `FLAG=no`
+ * all parse as `true`. A flag that cannot be turned off is worse than no flag:
+ * an operator sets it, reads it back from their own configuration, and
+ * believes the feature is disabled.
+ *
+ * This accepts the spellings people actually write, in either case, and
+ * refuses anything else rather than guessing — a typo in a security switch
+ * should fail at boot rather than silently pick a default.
+ *
+ * Existing schemas below still use `z.coerce.boolean()` and are therefore
+ * subject to that trap. They are left alone deliberately: changing them alters
+ * the runtime behaviour of four services, which belongs in its own change with
+ * its own tests rather than as a side effect of an unrelated one.
+ */
+export function booleanEnv(defaultValue: boolean) {
+  return z
+    .union([z.boolean(), z.string()])
+    .default(defaultValue)
+    .transform((value, ctx) => {
+      if (typeof value === 'boolean') return value;
+
+      const normalised = value.trim().toLowerCase();
+      if (['true', '1', 'yes', 'on'].includes(normalised)) return true;
+      if (['false', '0', 'no', 'off', ''].includes(normalised)) return false;
+
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Expected a boolean such as "true" or "false", received "${value}"`,
+      });
+      return z.NEVER;
+    });
+}
+
 /** Every Rasta service has these, without exception. */
 export const baseEnvSchema = z.object({
   NODE_ENV: z.enum(NODE_ENVS).default('development'),

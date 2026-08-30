@@ -2,6 +2,7 @@ export {
   NODE_ENVS,
   LOG_LEVELS,
   baseEnvSchema,
+  booleanEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
   redisEnvSchema,
