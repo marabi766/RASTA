@@ -2,7 +2,7 @@
   "$schema": "./backlog.schema.json",
   "version": 1,
   "project": "RASTA",
-  "asOf": "2026-08-30",
+  "asOf": "2026-08-31",
   "governance": {
     "baselineState": "APPROVED",
     "approvedBy": "Product Owner",
@@ -390,14 +390,40 @@
       "scope": "MVP",
       "priority": "P2",
       "points": 3,
-      "status": "READY",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "The documented coverage command exists and measures a non-empty source set",
         "CI enforces the existing economic thresholds without lowering them"
       ],
       "dependencies": ["COM-001", "PLAT-004"],
       "sourceRefs": ["docs/14-testing-strategy.md#۱۴۲-حداقل-پوشش"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/11",
+          "note": "Adds the missing test:coverage script and the CI step that runs it; no threshold lowered and no domain file excluded."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "69dbcc31eed834b156a3949ae09a00d749cc48d5",
+          "note": "Merge commit on main with two parents (750ad8c, 15a9f48); the PR head is an ancestor of main."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33329742223",
+          "note": "Full main pipeline green: quality, security, integration, end-to-end and all seven image builds with Trivy."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/economic-service run test:coverage",
+          "note": "Economic coverage 94.23% statements, 91.31% branches, 92.10% functions, 96.29% lines against the unchanged 90% threshold; identical locally and on CI."
+        },
+        {
+          "kind": "TEST",
+          "ref": "services/economic-service/jest.config.js",
+          "note": "615 passing tests across 40 suites, measured over both the unit and integration projects; the threshold was verified enforcing by raising it to 99 and observing a non-zero exit."
+        }
+      ]
     },
     {
       "id": "COM-004",

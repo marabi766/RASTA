@@ -2,7 +2,7 @@
 
 > Generated from `planning/backlog.json`. Do not edit this report directly.
 
-- As of: **2026-08-30**
+- As of: **2026-08-31**
 - Baseline: **APPROVED** — Approved by **Product Owner**.
 - Earned-points rule: only **ACCEPTED** items earn points; in-progress work earns zero.
 - Cancelled items are excluded from the denominator.
@@ -11,9 +11,9 @@
 
 | Horizon | Earned SP | Committed SP | Remaining SP | Progress | Accepted items | Active items |
 | --- | --- | --- | --- | --- | --- | --- |
-| MVP | 175 | 555 | 380 | 31.5% | 13 | 36 |
+| MVP | 178 | 555 | 377 | 32.1% | 14 | 36 |
 | Post-MVP only | 0 | 215 | 215 | 0% | 0 | 11 |
-| Full product | 175 | 770 | 595 | 22.7% | 13 | 47 |
+| Full product | 178 | 770 | 592 | 23.1% | 14 | 47 |
 
 ## Progress by epic
 
@@ -22,7 +22,7 @@
 | EP-PLATFORM | Platform foundation and engineering | MVP | 57 | 57 | 100% |
 | EP-CORE | Identity, organization and core fleet | MVP | 55 | 55 | 100% |
 | EP-OPERATIONS | Maintenance and field operations | MVP | 21 | 21 | 100% |
-| EP-COMMERCE | Economic, marketplace and supply chain | MVP | 42 | 181 | 23.2% |
+| EP-COMMERCE | Economic, marketplace and supply chain | MVP | 45 | 181 | 24.9% |
 | EP-CONSTRUCTION | Construction and contracts | MVP | 0 | 63 | 0% |
 | EP-EXPERIENCE | Web, mobile and user experience | MVP | 0 | 89 | 0% |
 | EP-OPERABILITY | Operability, hardening and pilot | MVP | 0 | 89 | 0% |
@@ -37,10 +37,10 @@
 | Status | Items | Story Points |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 22 | 367 |
+| READY | 21 | 364 |
 | IN_PROGRESS | 0 | 0 |
 | BLOCKED | 3 | 47 |
-| ACCEPTED | 13 | 175 |
+| ACCEPTED | 14 | 178 |
 | CANCELLED | 0 | 0 |
 
 ## Forecast
