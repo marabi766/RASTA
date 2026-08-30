@@ -8,34 +8,35 @@
 
 ---
 
-## ۲۴ سند مهندسی
+## ۲۵ سند مهندسی
 
-| #   | سند                                                              | پاسخ به چه پرسشی؟                                       |
-| --- | ---------------------------------------------------------------- | ------------------------------------------------------- |
-| 01  | [Executive Architecture](01-executive-architecture.md)           | تصویر کلان، اصول، Stack، تصمیم‌های بنیادین              |
-| 02  | [Product Context](02-product-context.md)                         | چه مسئله‌ای، برای چه کسی، در چه مقیاسی                  |
-| 03  | [Domain Model](03-domain-model.md)                               | Bounded Context، Aggregate، Ubiquitous Language         |
-| 04  | [Service Decomposition](04-service-decomposition.md)             | هر سرویس چه می‌کند و چه نمی‌کند                         |
-| 05  | [Data Architecture](05-data-architecture.md)                     | چه کسی مالک چه داده‌ای است، Index، Partition، Retention |
-| 06  | [API Architecture](06-api-architecture.md)                       | قرارداد HTTP، Versioning، Idempotency، خطا              |
-| 07  | [Event Architecture](07-event-architecture.md)                   | Envelope، Catalogue، Outbox، Retry/DLQ                  |
-| 08  | [Workflow Architecture](08-workflow-architecture.md)             | Temporal، Saga، State Machineها                         |
-| 09  | [Security Architecture](09-security-architecture.md)             | IAM، RBAC/ABAC، Zero Trust، Threat Model                |
-| 10  | [Economic Architecture](10-economic-architecture.md)             | Wallet، Ledger، Commission، Reward، Payment             |
-| 11  | [Infrastructure Architecture](11-infrastructure-architecture.md) | PostgreSQL، Redis، Kafka، Object Storage، Search        |
-| 12  | [Deployment Architecture](12-deployment-architecture.md)         | محیط‌ها، Kubernetes، CI/CD، Backup/DR                   |
-| 13  | [Observability](13-observability.md)                             | Log، Metric، Trace، SLO، هشدار                          |
-| 14  | [Testing Strategy](14-testing-strategy.md)                       | هرم تست، Contract Test، DoD هر سرویس                    |
-| 15  | [Repository Architecture](15-repository-architecture.md)         | Monorepo، بسته‌های مشترک، مرزهای وابستگی                |
-| 16  | [UI Architecture](16-ui-architecture.md)                         | Next.js، Design System، RTL، صفحات                      |
-| 17  | [MVP Scope](17-mvp-scope.md)                                     | P0..P3 با Acceptance Criteria                           |
-| 18  | [Day-10 Plan](18-day-10-plan.md)                                 | Vertical Slice و دو سناریوی Demo                        |
-| 19  | [Day-20 Plan](19-day-20-plan.md)                                 | Feature-Complete MVP                                    |
-| 20  | [Day-30 Plan](20-day-30-plan.md)                                 | Hardening و تحویل                                       |
-| 21  | [ADR List](21-adr-list.md)                                       | فهرست تصمیم‌های معماری                                  |
-| 22  | [Developer Handoff](22-developer-handoff.md)                     | تیم انسانی چطور پروژه را ادامه می‌دهد                   |
-| 23  | [Risks & Trade-offs](23-risks-and-tradeoffs.md)                  | چه چیزی را آگاهانه معاوضه کردیم                         |
-| 24  | [Open Questions](24-open-questions.md)                           | چه چیزی نیازمند تصمیم انسانی است                        |
+| #   | سند                                                              | پاسخ به چه پرسشی؟                                           |
+| --- | ---------------------------------------------------------------- | ----------------------------------------------------------- |
+| 01  | [Executive Architecture](01-executive-architecture.md)           | تصویر کلان، اصول، Stack، تصمیم‌های بنیادین                  |
+| 02  | [Product Context](02-product-context.md)                         | چه مسئله‌ای، برای چه کسی، در چه مقیاسی                      |
+| 03  | [Domain Model](03-domain-model.md)                               | Bounded Context، Aggregate، Ubiquitous Language             |
+| 04  | [Service Decomposition](04-service-decomposition.md)             | هر سرویس چه می‌کند و چه نمی‌کند                             |
+| 05  | [Data Architecture](05-data-architecture.md)                     | چه کسی مالک چه داده‌ای است، Index، Partition، Retention     |
+| 06  | [API Architecture](06-api-architecture.md)                       | قرارداد HTTP، Versioning، Idempotency، خطا                  |
+| 07  | [Event Architecture](07-event-architecture.md)                   | Envelope، Catalogue، Outbox، Retry/DLQ                      |
+| 08  | [Workflow Architecture](08-workflow-architecture.md)             | Temporal، Saga، State Machineها                             |
+| 09  | [Security Architecture](09-security-architecture.md)             | IAM، RBAC/ABAC، Zero Trust، Threat Model                    |
+| 10  | [Economic Architecture](10-economic-architecture.md)             | Wallet، Ledger، Commission، Reward، Payment                 |
+| 11  | [Infrastructure Architecture](11-infrastructure-architecture.md) | PostgreSQL، Redis، Kafka، Object Storage، Search            |
+| 12  | [Deployment Architecture](12-deployment-architecture.md)         | محیط‌ها، Kubernetes، CI/CD، Backup/DR                       |
+| 13  | [Observability](13-observability.md)                             | Log، Metric، Trace، SLO، هشدار                              |
+| 14  | [Testing Strategy](14-testing-strategy.md)                       | هرم تست، Contract Test، DoD هر سرویس                        |
+| 15  | [Repository Architecture](15-repository-architecture.md)         | Monorepo، بسته‌های مشترک، مرزهای وابستگی                    |
+| 16  | [UI Architecture](16-ui-architecture.md)                         | Next.js، Design System، RTL، صفحات                          |
+| 17  | [MVP Scope](17-mvp-scope.md)                                     | P0..P3 با Acceptance Criteria                               |
+| 18  | [Day-10 Plan](18-day-10-plan.md)                                 | Vertical Slice و دو سناریوی Demo                            |
+| 19  | [Day-20 Plan](19-day-20-plan.md)                                 | Feature-Complete MVP                                        |
+| 20  | [Day-30 Plan](20-day-30-plan.md)                                 | Hardening و تحویل                                           |
+| 21  | [ADR List](21-adr-list.md)                                       | فهرست تصمیم‌های معماری                                      |
+| 22  | [Developer Handoff](22-developer-handoff.md)                     | تیم انسانی چطور پروژه را ادامه می‌دهد                       |
+| 23  | [Risks & Trade-offs](23-risks-and-tradeoffs.md)                  | چه چیزی را آگاهانه معاوضه کردیم                             |
+| 24  | [Open Questions](24-open-questions.md)                           | چه چیزی نیازمند تصمیم انسانی است                            |
+| 25  | [Progress Governance](25-progress-governance.md)                 | Backlog، Story Point و درصد رسمی پیشرفت چگونه محاسبه می‌شود |
 
 ## پوشه‌های تکمیلی
 

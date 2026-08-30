@@ -45,6 +45,11 @@ jobs:
       # Prisma clients are generated artefacts that typecheck depends on.
       - run: pnpm run db:generate
 
+      - name: Product backlog and progress gate
+        run: |
+          pnpm run progress:check
+          pnpm run test:progress
+
       - name: Format check
         run: pnpm run format:check
 

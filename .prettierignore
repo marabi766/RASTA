@@ -7,3 +7,5 @@ coverage
 pnpm-lock.yaml
 **/src/generated
 docs/api/*.generated.json
+# Generated deterministically by `pnpm progress:report`; `progress:check` is its formatter gate.
+docs/25-project-progress.md
