@@ -319,6 +319,52 @@ describe('order lifecycle (real database)', () => {
     ).rejects.toThrow(/Key \(order_id\)=.* already exists/);
   });
 
+  it('cancels an order the saga never funded', async () => {
+    // `PENDING → CANCELLING` is legal (ADR-038): a buyer may cancel before the
+    // saga has created the obligation, and at that moment there is no
+    // transaction to name.
+    //
+    // `ck_order_held_has_transaction` refused exactly that until the
+    // `cancel_before_hold` migration: its exempt list held PENDING and FAILED
+    // but not the two cancellation states, so the write failed with a driver
+    // error the caller saw as a 500. Every earlier test cancelled *after*
+    // FUNDS_HELD, so none of them reached it.
+    const { offerId } = await publishOffer(wiring, org.supplier, { availableQuantity: 6 });
+    const order = await placeOrder(offerId, 2);
+    expect(order.status).toBe('PENDING');
+    expect(order.economicTransactionId).toBeNull();
+
+    await asBuyer(() => wiring.orders.cancel(order.id, { reason: 'changed our minds' }));
+    await asSaga(() => wiring.orders.markCancelled(order.id, 'changed our minds'));
+
+    const closed = await asBuyer(() => wiring.orders.get(order.id));
+    expect(closed.status).toBe('CANCELLED');
+    // Still no transaction, and the row is legal without one.
+    expect(closed.economicTransactionId).toBeNull();
+
+    // And what it reserved went back.
+    const offer = await runUnscoped('the suite reads the offer the cancellation released', () =>
+      prisma.client.offer.findUnique({ where: { id: offerId } }),
+    );
+    expect(offer?.availableQuantity).toBe(6);
+  });
+
+  it('still requires a transaction id once money is held', async () => {
+    // The widened constraint must not have become vacuous: a held order with no
+    // obligation behind it is the thing it exists to prevent.
+    const { offerId } = await publishOffer(wiring, org.supplier);
+    const order = await placeOrder(offerId, 1);
+
+    await expect(
+      runUnscoped('the suite attempts a held order with no obligation', () =>
+        prisma.client.$executeRawUnsafe(
+          `UPDATE "order" SET status='FUNDS_HELD' WHERE id = $1`,
+          order.id,
+        ),
+      ),
+    ).rejects.toThrow(/ck_order_held_has_transaction/);
+  });
+
   it('returns availability when an order is cancelled', async () => {
     const { offerId } = await publishOffer(wiring, org.supplier, { availableQuantity: 4 });
     const order = await placeOrder(offerId, 3);

@@ -89,7 +89,15 @@ async function bootstrap(): Promise<void> {
         .addBearerAuth()
         .build(),
     );
-    SwaggerModule.setup('docs', app, enrichOpenApiDocument(document));
+    SwaggerModule.setup(
+      'docs',
+      app,
+      enrichOpenApiDocument(document, {
+        // From the running configuration, so the contract states the retention
+        // this deployment honours rather than a number written beside it.
+        idempotencyTtlHours: env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS,
+      }),
+    );
   }
 
   app.enableShutdownHooks();

@@ -296,6 +296,23 @@ jobs:
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           REDIS_URL: redis://localhost:6379
 
+      - name: Marketplace coverage gate
+        # `docs/14` § 14.2 puts marketplace-service in the 75% band, and until
+        # now nothing measured it: no job in this file ran jest with
+        # `--coverage`, so the figure was whatever it happened to be. It had
+        # fallen to 40% branches.
+        #
+        # Both projects in one run, because most of this service's coverage
+        # comes from the integration suites — a unit-only run would report a
+        # number far below the truth and fail a gate that should pass. In band
+        # for the same reason every other integration step here is: the suites
+        # share one database.
+        run: pnpm --filter @rasta/marketplace-service run test:coverage
+        env:
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
+
       # These are called out separately from the rest of the suite so a failure
       # names itself in the job list. A tenant-isolation failure is a data
       # leak, not a flaky test, and must never be waved through (AGENTS.md §5).
