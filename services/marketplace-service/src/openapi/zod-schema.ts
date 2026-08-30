@@ -56,8 +56,16 @@ function convert(schema: z.ZodTypeAny, def: any): JsonSchema {
     case z.ZodFirstPartyTypeKind.ZodLiteral:
       return { const: def.value };
 
-    case z.ZodFirstPartyTypeKind.ZodArray:
-      return { type: 'array', items: toJsonSchema(def.type as z.ZodTypeAny) };
+    case z.ZodFirstPartyTypeKind.ZodArray: {
+      // Bounds are published for the same reason string and number bounds are:
+      // `createOrderSchema` caps an order at fifty lines and requires at least
+      // one, and a document that omits that sends a client to build a request
+      // the service answers with a 400 it could not have predicted.
+      const array: JsonSchema = { type: 'array', items: toJsonSchema(def.type as z.ZodTypeAny) };
+      if (def.minLength) array.minItems = def.minLength.value as number;
+      if (def.maxLength) array.maxItems = def.maxLength.value as number;
+      return array;
+    }
 
     case z.ZodFirstPartyTypeKind.ZodRecord:
       return { type: 'object', additionalProperties: toJsonSchema(def.valueType) };

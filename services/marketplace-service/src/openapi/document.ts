@@ -56,6 +56,34 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
 };
 
 /**
+ * Routes that will not accept a request without an `Idempotency-Key`.
+ *
+ * Every unsafe route on an order, because each either commits money or creates
+ * an effect that cannot be taken back in `docs/06` § 6.8's sense — confirming
+ * receipt is what lets settlement happen, and a dispute halts it indefinitely.
+ *
+ * It is also what the gateway enforces: `requiresIdempotencyKey` applies to the
+ * whole `orders` prefix, because teaching the routing layer which verb commits
+ * money would give it domain knowledge ADR-009 keeps out of it. A service that
+ * accepted a key on some of these and refused it on others would make the
+ * gateway's rule wrong rather than coarse.
+ *
+ * The catalogue routes are absent deliberately. Publishing an offer is
+ * repeatable and creates nothing irreversible, and demanding a key there would
+ * teach clients to send meaningless ones.
+ */
+const IDEMPOTENT_ROUTES = new Set([
+  'POST /v1/orders',
+  'POST /v1/orders/{id}/confirm',
+  'POST /v1/orders/{id}/fulfill',
+  'POST /v1/orders/{id}/confirm-receipt',
+  'POST /v1/orders/{id}/disputes',
+  'POST /v1/orders/{id}/disputes/resolve',
+  'POST /v1/orders/{id}/cancel',
+  'POST /v1/orders/{id}/reviews',
+]);
+
+/**
  * Which failures each route can actually produce.
  *
  * Listed rather than blanket-applied: publishing `409` on a read tells a
@@ -119,6 +147,22 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       const query = QUERY_SCHEMAS[key];
       if (query) {
         operation.parameters = [...(operation.parameters ?? []), ...toQueryParameters(query)];
+      }
+
+      if (IDEMPOTENT_ROUTES.has(key)) {
+        operation.parameters = [
+          ...(operation.parameters ?? []),
+          {
+            name: 'Idempotency-Key',
+            in: 'header',
+            required: true,
+            schema: { type: 'string', minLength: 8, maxLength: 128 },
+            description:
+              'Required. A retry with the same key returns the first response without ' +
+              'executing again; the same key with a different body is refused with 409 ' +
+              'IDEMPOTENCY_KEY_REUSED. Keys are honoured for 24 hours.',
+          },
+        ];
       }
 
       // A success body, unless the route genuinely returns none.
