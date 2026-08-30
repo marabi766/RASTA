@@ -234,32 +234,47 @@ export class CatalogueService {
             ? null
             : existing.publishedAt;
 
-      const updated = await tx.offer.update({
-        where: { id: offerId },
-        data: {
-          ...(repriced ? { unitPriceMinor: nextPrice, version: nextVersion } : {}),
-          ...(dto.availableQuantity !== undefined
-            ? { availableQuantity: dto.availableQuantity }
-            : {}),
-          ...(dto.leadTimeDays !== undefined ? { leadTimeDays: dto.leadTimeDays } : {}),
-          ...(dto.status ? { status: dto.status } : {}),
-          publishedAt,
-          updatedBy: actor,
-        },
-      });
+      // `assertOfferOwner` above has already decided who may write this row,
+      // and for a platform operator that decision is deliberately *not* the
+      // owning organization (access.ts, `hasPlatformScope`). The tenant guard
+      // cannot see that decision, so an operator's write would be scoped to
+      // their own organization, match nothing, and surface as a 500 — the
+      // exemption would exist in the check and be unreachable in practice.
+      // The crossing is narrow: one row, located by its own id, whose owner
+      // was checked a few lines above.
+      const updated = await runUnscoped('the offer owner was checked before this write', () =>
+        tx.offer.update({
+          where: { id: offerId },
+          data: {
+            ...(repriced ? { unitPriceMinor: nextPrice, version: nextVersion } : {}),
+            ...(dto.availableQuantity !== undefined
+              ? { availableQuantity: dto.availableQuantity }
+              : {}),
+            ...(dto.leadTimeDays !== undefined ? { leadTimeDays: dto.leadTimeDays } : {}),
+            ...(dto.status ? { status: dto.status } : {}),
+            publishedAt,
+            updatedBy: actor,
+          },
+        }),
+      );
 
       if (repriced) {
-        await tx.offerPriceHistory.create({
-          data: {
-            id: newId(ID_PREFIX.priceHistory),
-            organizationId: existing.organizationId,
-            offerId,
-            version: nextVersion,
-            unitPriceMinor: nextPrice,
-            currency: existing.currency,
-            changedBy: actor,
-          },
-        });
+        // Owned by the supplier whose offer it records, never by whoever
+        // changed it — the history is the offer's, and an operator correction
+        // must not file a row under the operator's organization.
+        await runUnscoped('the price history belongs to the offer, not to the editor', () =>
+          tx.offerPriceHistory.create({
+            data: {
+              id: newId(ID_PREFIX.priceHistory),
+              organizationId: existing.organizationId,
+              offerId,
+              version: nextVersion,
+              unitPriceMinor: nextPrice,
+              currency: existing.currency,
+              changedBy: actor,
+            },
+          }),
+        );
       }
 
       // Republished on any change that makes it visible or changes what a
