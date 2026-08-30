@@ -262,6 +262,19 @@ DemandAggregationWorkflow (procurement-service)  — یکی به‌ازای هر
 | `OutboxHealthWorkflow`        | هر ۵ دقیقه   | تشخیص Relay گیرکرده → هشدار                              |
 | `LedgerBalanceAuditWorkflow`  | روزانه ۰۲:۰۰ | **بررسی توازن همه Journalها** → هشدار بحرانی در صورت نقض |
 
+### Workflowهای مقصد محصول — PLANNED
+
+| Workflow / State Machine  | مالک هدف                | تصمیم معماری                                                                                                       |
+| ------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `InsuranceQuoteWorkflow`  | insurance               | فرآیند بلندمدت چند Provider؛ Timeout فقط پیشنهاد را منقضی می‌کند و خرید یا پرداخت خودکار ندارد                     |
+| `InsuranceClaimWorkflow`  | insurance               | جمع‌آوری سند، ارزیابی و تصمیم انسانی؛ مرجع و SLA از Q-32 می‌آید                                                    |
+| `ReturnLifecycleWorkflow` | marketplace + inventory | تصمیم تجاری نزد سفارش و حرکت/بازرسی نزد لجستیک؛ Refund فقط Activity صریح اقتصادی پس از تصمیم مجاز                  |
+| `ScoreAppealStateMachine` | reward                  | ماشین حالت صریح و معمولاً بدون Temporal؛ اگر SLA چندروزه و هماهنگی بیرونی لازم شد با ADR به Workflow ارتقا می‌یابد |
+
+هیچ Workflow برنامه‌ریزی‌شده‌ای پیش از Contract واقعی Producer یا Provider، Handler یا
+صف خالی نخواهد داشت. Timeout بیمه، اعتراض یا مرجوعی نیز رضایت، تصمیم یا حرکت پول را
+استنباط نمی‌کند.
+
 > نگهداری **کارکردمحور** رویدادمحور است (محرک `USAGE_RECORDED`)، نه زمان‌بندی‌شده.
 > فقط بخش **زمان‌محور** اسکن روزانه دارد.
 

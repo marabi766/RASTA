@@ -292,14 +292,14 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 | رویداد                              | Producer    | مصرف‌کنندگان اصلی                                             |
 | ----------------------------------- | ----------- | ------------------------------------------------------------- |
 | `OFFER_PUBLISHED`                   | marketplace | search · analytics                                            |
-| `ORDER_CREATED`                     | marketplace | **economic (Hold)** · inventory (رزرو) · notification         |
+| `ORDER_CREATED`                     | marketplace | inventory (رزرو) · notification · analytics                   |
 | `ORDER_CONFIRMED`                   | marketplace | notification · analytics                                      |
 | `ORDER_FULFILLED`                   | marketplace | notification · inventory                                      |
-| `ORDER_RECEIPT_CONFIRMED`           | marketplace | **economic (Release + تسویه + کارمزد)**                       |
-| `ORDER_COMPLETED`                   | marketplace | economic (پاداش) · supplier (امتیاز) · asset · analytics      |
-| `ORDER_CANCELLED`                   | marketplace | economic (بازگشت) · inventory (آزادسازی)                      |
-| `ORDER_DISPUTED`                    | marketplace | **economic (توقف تسویه)** · notification · supplier           |
-| `REVIEW_SUBMITTED`                  | marketplace | supplier (امتیاز) · economic (پاداش)                          |
+| `ORDER_RECEIPT_CONFIRMED`           | marketplace | notification · analytics                                      |
+| `ORDER_COMPLETED`                   | marketplace | supplier (امتیاز) · asset · analytics                         |
+| `ORDER_CANCELLED`                   | marketplace | inventory (آزادسازی) · notification                           |
+| `ORDER_DISPUTED`                    | marketplace | notification · supplier · analytics                           |
+| `REVIEW_SUBMITTED`                  | marketplace | supplier (امتیاز) · analytics                                 |
 | `DEMAND_SUBMITTED`                  | procurement | analytics                                                     |
 | `DEMAND_AGGREGATED`                 | procurement | notification · analytics                                      |
 | `RFQ_ISSUED`                        | procurement | **notification (دعوت تأمین‌کننده)**                           |
@@ -312,6 +312,11 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 | `STOCK_RESERVED` / `STOCK_RELEASED` | inventory   | marketplace (Saga سفارش)                                      |
 | `LOW_STOCK_DETECTED`                | inventory   | notification · procurement                                    |
 | `SHIPMENT_DELIVERED`                | inventory   | marketplace · notification                                    |
+
+**مرز مالی واقعی بازارگاه.** Hold، تأیید تسویه، Refund و Settlement با فرمان
+سرویس‌به‌سرویس احراز‌شده از Activityهای Temporal انجام می‌شوند؛ economic رویدادهای
+`ORDER_*` را برای حرکت پول مصرف نمی‌کند (ADR-040). ردیف‌های inventory، supplier،
+notification و analytics تا ساخته‌شدن Consumer مربوط، مقصد معماری‌اند نه ادعای اجرا.
 
 ### Construction · Contract
 
@@ -335,6 +340,24 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 | `STATEMENT_APPROVED`                     | contract     | **economic (پرداخت)** · analytics                       |
 | `STATEMENT_REJECTED`                     | contract     | notification                                            |
 | `CONTRACT_COMPLETED`                     | contract     | supplier (امتیاز) · analytics                           |
+
+### Insurance · Participation · Reverse Logistics — PLANNED
+
+این رویدادها مقصد Contract هستند و تا ساخته‌شدن سرویس مالک، Topic یا Handler خالی برایشان
+ایجاد نمی‌شود. Schema واقعی را همیشه Producer تعریف می‌کند.
+
+| رویداد                                                          | Producer هدف | Consumerهای هدف                                  |
+| --------------------------------------------------------------- | ------------ | ------------------------------------------------ |
+| `INSURANCE_QUOTE_REQUESTED`                                     | insurance    | notification · analytics                         |
+| `INSURANCE_OFFER_RECEIVED`                                      | insurance    | notification                                     |
+| `INSURANCE_POLICY_ISSUED` / `INSURANCE_POLICY_RENEWED`          | insurance    | asset · economic · notification · analytics      |
+| `INSURANCE_CLAIM_OPENED` / `INSURANCE_CLAIM_DECIDED`            | insurance    | asset · economic · notification · analytics      |
+| `PARTICIPATION_SCORE_UPDATED`                                   | reward       | notification · analytics                         |
+| `REWARD_BENEFIT_REDEEMED`                                       | reward       | economic · notification · analytics              |
+| `SCORE_APPEAL_OPENED` / `SCORE_APPEAL_DECIDED`                  | reward       | notification · audit                             |
+| `RETURN_REQUESTED` / `RETURN_AUTHORIZED`                        | marketplace  | inventory · supplier · notification              |
+| `RETURN_RECEIVED` / `RETURN_INSPECTED` / `RETURN_DISPOSITIONED` | inventory    | marketplace · supplier · economic · analytics    |
+| `WARRANTY_CLAIM_OPENED` / `WARRANTY_CLAIM_DECIDED`              | marketplace  | supplier · maintenance · economic · notification |
 
 ### Economic
 

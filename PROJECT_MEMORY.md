@@ -10,16 +10,29 @@
 > سرویس از حالت تمیز، تست زنده Auth/Tenant Isolation/Event Flow، و بررسی مستقیم
 > GitHub Actions.
 >
-> **آخرین به‌روزرسانی:** 2026-08-30 — **`marketplace-service` ساخته شد.**
+> **آخرین به‌روزرسانی:** 2026-08-30 — **`marketplace-service` روی `main` است؛
+> هم‌ترازی مقصد محصول در حال بازبینی است.**
 >
-> PR #6 (Q-26) با یک Merge Commit معمولی وارد `main` شد (`4ebdfc0`، هر ۴ Commit
-> اتمیک حفظ شد) و CI روی `main` کامل سبز بود — هر ۱۰ Job شامل Trivy روی هر شش
-> Image (Run `33267994013`). Branch ‏`fix/economic-event-ordering` محلی و Remote
-> حذف شد. پیش‌نیازهای اقتصادی **`READY_FOR_MARKETPLACE`** شدند.
+> PR #7 با Merge Commit معمولی وارد `main` شد (`34c37ed`) و شاخهٔ
+> `feat/marketplace-service` محلی و Remote حذف شد. CI روی خود `main` کامل سبز است:
+> کیفیت، امنیت، Integration، **۶۴ سناریوی E2E** و ساخت/Trivy هر هفت Image، از جمله
+> بازارگاه (Run `33278828355`).
 >
-> سپس `marketplace-service` ساخته شد: کاتالوگ، عرضه، سفارش، و **نخستین Workflow
-> واقعی Temporal در این پلتفرم** (ADR-039). چرخه کامل خرید تا تسویه روی Stack
-> واقعی آزموده شده. کار روی `feat/marketplace-service` است و **هنوز Merge نشده**.
+> `marketplace-service` کاتالوگ، عرضه، سفارش و **نخستین Workflow واقعی Temporal**
+> پلتفرم را دارد (ADR-039). پیش از Merge، ۴ Suite و ۴۴ تست یکپارچگی مخصوص بازارگاه
+> روی PostgreSQL واقعی سبز شد. E2E چرخهٔ خرید، اعتراض، لغو، جداسازی مستأجر، همبستگی
+> رویداد و تسویه را روی Gateway + economic + marketplace + PostgreSQL + Kafka +
+> Temporal + Keycloak واقعی اجرا می‌کند.
+>
+> **کار مستندات جاری — هنوز Feature نیست و Merge نشده:** ADR-044 تا ADR-048 مقصد
+> ۲۲سرویسی، خطوط کسب‌وکار کارمزد، بیمهٔ تجاری/Claim، نظام مشارکت/پاداش/رتبه‌بندی و
+> لجستیک معکوس را ثبت می‌کنند. هر API، Event یا Workflow تازه در این بخش **PLANNED**
+> است. وضعیت واقعی کد تغییر نکرده و `design/claude-design` دست‌نخورده است.
+>
+> ---
+>
+> **پیشین — 2026-08-30:** بازارگاه روی شاخهٔ موقت ساخته شده بود، اما هنوز Merge
+> نشده بود. این وضعیت با شواهد بالا جایگزین شد.
 >
 > ---
 >
@@ -141,7 +154,8 @@
 
 ## ۲. Current Development Phase
 
-**فاز:** پیاده‌سازی MVP، پس از تکمیل ۲۴ سند معماری و ۲۴ ADR.
+**فاز:** پیاده‌سازی MVP، با ۲۴ سند معماری و ۴۸ ADR ثبت‌شده؛ پنج ADR آخر روی شاخهٔ
+مستندات جاری‌اند و هنوز Merge نشده‌اند.
 
 **ترتیب واقعی ساخت تا امروز** (از Git History، نه از برنامه‌ریزی اولیه):
 
@@ -184,50 +198,51 @@
 | **NOT VERIFIED**  | شواهد غیرمستقیم داریم اما تأیید مثبت نداریم             |
 | **PLANNED**       | تصمیم گرفته شده، کد نوشته نشده                          |
 
-| Feature                                                      |                      Implemented                      | Automated Tests  | Live Verified (2026-08-27)                                                                                         |
-| ------------------------------------------------------------ | :---------------------------------------------------: | :--------------: | ------------------------------------------------------------------------------------------------------------------ |
-| Tenant Isolation (API)                                       |                          ✅                           |        ✅        | ✅ (403 TENANT_MISMATCH زنده گرفته شد)                                                                             |
-| Tenant Isolation (Database)                                  |                          ✅                           |        —         | ✅ (`permission denied for database` زنده گرفته شد)                                                                |
-| Cross-tenant read → 404                                      |                          ✅                           |        ✅        | ✅                                                                                                                 |
-| RBAC (Roles Guard)                                           |                          ✅                           |        ✅        | ✅ (Auditor → 403 روی POST)                                                                                        |
-| JWT verification (Keycloak/JWKS)                             |                          ✅                           |        ✅        | ✅ (۴ کاربر Seed، توکن واقعی گرفته شد)                                                                             |
-| Transactional Outbox → Kafka                                 |                          ✅                           |        ✅        | ✅ (Asset ساخته شد → Outbox → Kafka، Correlation تطبیق)                                                            |
-| Event Consumer / Dossier Projector                           |                          ✅                           |   ✅ (18 تست)    | ✅ (رویداد ساختگی maintenance → یک خط Timeline، Replay دوباره = بدون تکرار)                                        |
-| API Gateway routing + circuit breaker                        |                          ✅                           |   ✅ (21 تست)    | ✅ (مسیر به سرویس نساخته‌شده fleet → 503 تمیز)                                                                     |
-| Redis Rate Limiting (منطق)                                   |                          ✅                           |    ✅ (واحد)     | ⚠️ **مسدود شده توسط تداخل Port میزبان — بخش ۲۲.۳ D-006**                                                           |
-| Anonymous public endpoint (self-registration) از راه Gateway |                          ✅                           |   ✅ (17 تست)    | ✅ **`201` زنده گرفته شد — D-007 رفع شد**                                                                          |
-| CI/CD روی GitHub Actions                                     |                          ✅                           |        —         | ✅ **CI VERIFIED** — Run `33219920446`، Commit `a36a2cf`، هر **۹** Job سبز (فاز اقتصادی)                           |
-| Docker Build (identity, organization)                        |                          ✅                           |        —         | ✅ **CI VERIFIED** — Build + Trivy Scan هر دو Image روی Runner سبز                                                 |
-| Docker Build (asset, fleet, maintenance)                     |                  ✅ Dockerfile دارند                  |        —         | ✅ **CI VERIFIED** — Build + Trivy روی Runner برای هر سه؛ maintenance محلی هم اجرا شد (uid=100)                    |
-| Docker Build (economic)                                      |                  ✅ Dockerfile دارد                   |        —         | ✅ **CI VERIFIED** — Build + Trivy روی Runner سبز؛ محلی هم: `uid=100(rasta)`، `npm` حذف‌شده، Trivy ۰ CRITICAL/HIGH |
-| Docker Build (api-gateway)                                   |                  ❌ Dockerfile ندارد                  |        —         | ❌ باز (بخش ۲۲)                                                                                                    |
-| **fleet-service — Driver/Assignment/Usage/Availability**     |                          ✅                           |   ✅ (۸۸ تست)    | ✅ زنده + **CI VERIFIED**                                                                                          |
-| **Assignment Exclusivity (Partial Unique Index)**            |                          ✅                           | ✅ (Integration) | ✅ زنده: راننده مشغول → `422 DRIVER_ALREADY_ASSIGNED`                                                              |
-| **Fleet → Kafka → Asset Projector**                          |                          ✅                           |   ✅ (۳۲ تست)    | ✅ **زنده** — Timeline پر شد، وضعیت `IDLE→ASSIGNED→ACTIVE`                                                         |
-| **Idempotency (ثبت آفلاین + Replay مصرف‌کننده)**             |                          ✅                           |        ✅        | ✅ زنده: ارسال دوباره = همان رکورد؛ Replay کافکا = بدون اثر دوم                                                    |
-| **correlationId در کل زنجیره**                               |                          ✅                           |        ✅        | ✅ زنده: HTTP → Outbox → Header کافکا → Timeline، یکسان                                                            |
-| **maintenance — Schedule/Request/RepairOrder/Cost**          |                          ✅                           |   ✅ (۱۰۲ تست)   | ✅ زنده + **CI VERIFIED**                                                                                          |
-| **سررسید مشتق‌شده (نه Flag ذخیره‌شده)**                      |                          ✅                           |   ✅ (۱۴ تست)    | ✅ زنده: گریدر `OVERDUE on HOURS`، کنتور ۴۳۸۶٫۵۰ در برابر سررسید ۴۳۷۰٫۵۰                                           |
-| **منع درخواست تکراری (Partial Unique Index)**                |                          ✅                           | ✅ (Integration) | ✅ زنده: درخواست دوم → `422 DUPLICATE_OPEN_REQUEST`                                                                |
-| **اتمیک بودن هزینه زیر همروندی**                             |                          ✅                           | ✅ (Integration) | ✅ ده ثبت هم‌زمان → مجموع دقیقاً برابر `SUM` پایگاه داده                                                           |
-| **تأیید پیش از تسویه (کنترل سند محصول)**                     |                          ✅                           |        ✅        | ✅ زنده: تأیید زودهنگام `409`، مبلغ کهنه `422`، تأیید دوباره `409`                                                 |
-| **Fleet USAGE_RECORDED → Maintenance (مسیر مرده پیشین)**     |                          ✅                           |   ✅ (۴۱ تست)    | ✅ **زنده** — کنتور ۴۳۸۰٫۵۰ → ۴۳۸۶٫۵۰، سپس `MAINTENANCE_DUE`                                                       |
-| **Maintenance → Kafka → Asset Timeline + Fleet Replica**     |                          ✅                           |        ✅        | ✅ **زنده** — ۳ خط Timeline، `IN_MAINTENANCE` → `ACTIVE`، `inMaintenance` روشن و خاموش                             |
-| **economic — Wallet/Hold/Ledger/Journal/Transaction**        |                          ✅                           |   ✅ (۲۳۹ تست)   | ✅ زنده (۲۶ سناریو، بخش ۲۱-ج)                                                                                      |
-| **تغییرناپذیری دفتر کل (Trigger پایگاه داده)**               |                          ✅                           | ✅ (Integration) | ✅ **از SQL خام** — `UPDATE`/`DELETE` روی `ledger_entry` و `journal` هر دو رد شدند                                 |
-| **توازن هر Journal (Trigger معوق در COMMIT)**                |                          ✅                           | ✅ (Integration) | ✅ تراز آزمایشی زنده: `balanced: true`، ۱۳۶٬۰۰۰٬۰۰۰ = ۱۳۶٬۰۰۰٬۰۰۰                                                  |
-| **`available = ledger − pending` (CHECK پایگاه داده)**       |                          ✅                           | ✅ (Integration) | ✅ زنده: Hold ۱۲م → available ۷۶م، pending ۱۲م، مجموع ۸۸م                                                          |
-| **همروندی کیف پول — ۱۰۰ برداشت موازی**                       |                          ✅                           | ✅ (Integration) | ✅ دقیقاً ۱۰ موفق از ۱۰۰ برای موجودی ۱۰ واحدی؛ هرگز مانده منفی                                                     |
-| **Idempotency واقعی (کلید ذخیره‌شده + Hash بدنه)**           |                          ✅                           |   ✅ (۱۳ تست)    | ✅ زنده: کلید تکراری → همان پاسخ؛ بدنه متفاوت → `409`؛ بدون کلید → `400`                                           |
-| **تسویه اتمیک — شکست میانی چیزی باقی نمی‌گذارد**             |                          ✅                           | ✅ (Integration) | ✅ تزریق خطا پس از Post شدن Journal → صفر Journal، صفر تغییر مانده، وجه در Hold                                    |
-| **اعتراض → توقف کامل تسویه**                                 |                          ✅                           |        ✅        | ✅ زنده: تسویه پیش از تأیید `409`؛ ماشین حالت یال DISPUTED→SETTLED ندارد                                           |
-| **`AUDITOR` هیچ دسترسی اقتصادی ندارد**                       |                          ✅                           |        ✅        | ✅ زنده با توکن واقعی: کیف پول `403`، تراکنش `403`، تراز آزمایشی `403`                                             |
-| **Maintenance → Kafka → economic (مسیر مرده پیشین)**         |                          ✅                           |    ✅ (۹ تست)    | ✅ **زنده** — `MAINTENANCE_APPROVED` → تعهد `PENDING_SETTLEMENT`، و **صفر حرکت پول**                               |
-| **پرداخت شبیه‌سازی‌شده، با اعلام صریح**                      |                          ✅                           |        ✅        | ✅ زنده: `simulated: true` روی پاسخ، ردیف و رویداد؛ شکست قابل تحریک → `INSUFFICIENT_FUNDS`                         |
-| Frontend (`apps/web`, `apps/admin`)                          |                          ❌                           |        —         | NOT_STARTED — پوشه خالی                                                                                            |
-| Integration Tests (`*.int-spec.ts`)                          | ✅ ۳۰ Suite (fleet ۴، maintenance ۵، **economic ۲۱**) |        —         | ✅ **۳۲۸** — ۷۳ پیشین + ۲۵۵ economic                                                                               |
-| E2E Tests (`tests/e2e`, Playwright)                          |                          ✅                           |  ✅ (۳۷ سناریو)  | ✅ **زنده** — Gateway + economic + PostgreSQL + Kafka + توکن واقعی Keycloak (بخش ۱۹)                               |
-| marketplace/procurement/… (۹ سرویس)                          |                          ❌                           |        —         | NOT_STARTED                                                                                                        |
+| Feature                                                      |                      Implemented                      |      Automated Tests      | Live Verified (2026-08-27)                                                                                         |
+| ------------------------------------------------------------ | :---------------------------------------------------: | :-----------------------: | ------------------------------------------------------------------------------------------------------------------ |
+| Tenant Isolation (API)                                       |                          ✅                           |            ✅             | ✅ (403 TENANT_MISMATCH زنده گرفته شد)                                                                             |
+| Tenant Isolation (Database)                                  |                          ✅                           |             —             | ✅ (`permission denied for database` زنده گرفته شد)                                                                |
+| Cross-tenant read → 404                                      |                          ✅                           |            ✅             | ✅                                                                                                                 |
+| RBAC (Roles Guard)                                           |                          ✅                           |            ✅             | ✅ (Auditor → 403 روی POST)                                                                                        |
+| JWT verification (Keycloak/JWKS)                             |                          ✅                           |            ✅             | ✅ (۴ کاربر Seed، توکن واقعی گرفته شد)                                                                             |
+| Transactional Outbox → Kafka                                 |                          ✅                           |            ✅             | ✅ (Asset ساخته شد → Outbox → Kafka، Correlation تطبیق)                                                            |
+| Event Consumer / Dossier Projector                           |                          ✅                           |        ✅ (18 تست)        | ✅ (رویداد ساختگی maintenance → یک خط Timeline، Replay دوباره = بدون تکرار)                                        |
+| API Gateway routing + circuit breaker                        |                          ✅                           |        ✅ (21 تست)        | ✅ (مسیر به سرویس نساخته‌شده fleet → 503 تمیز)                                                                     |
+| Redis Rate Limiting (منطق)                                   |                          ✅                           |         ✅ (واحد)         | ⚠️ **مسدود شده توسط تداخل Port میزبان — بخش ۲۲.۳ D-006**                                                           |
+| Anonymous public endpoint (self-registration) از راه Gateway |                          ✅                           |        ✅ (17 تست)        | ✅ **`201` زنده گرفته شد — D-007 رفع شد**                                                                          |
+| CI/CD روی GitHub Actions                                     |                          ✅                           |             —             | ✅ **CI VERIFIED** — Run `33219920446`، Commit `a36a2cf`، هر **۹** Job سبز (فاز اقتصادی)                           |
+| Docker Build (identity, organization)                        |                          ✅                           |             —             | ✅ **CI VERIFIED** — Build + Trivy Scan هر دو Image روی Runner سبز                                                 |
+| Docker Build (asset, fleet, maintenance)                     |                  ✅ Dockerfile دارند                  |             —             | ✅ **CI VERIFIED** — Build + Trivy روی Runner برای هر سه؛ maintenance محلی هم اجرا شد (uid=100)                    |
+| Docker Build (economic)                                      |                  ✅ Dockerfile دارد                   |             —             | ✅ **CI VERIFIED** — Build + Trivy روی Runner سبز؛ محلی هم: `uid=100(rasta)`، `npm` حذف‌شده، Trivy ۰ CRITICAL/HIGH |
+| Docker Build (api-gateway)                                   |                  ❌ Dockerfile ندارد                  |             —             | ❌ باز (بخش ۲۲)                                                                                                    |
+| **fleet-service — Driver/Assignment/Usage/Availability**     |                          ✅                           |        ✅ (۸۸ تست)        | ✅ زنده + **CI VERIFIED**                                                                                          |
+| **Assignment Exclusivity (Partial Unique Index)**            |                          ✅                           |     ✅ (Integration)      | ✅ زنده: راننده مشغول → `422 DRIVER_ALREADY_ASSIGNED`                                                              |
+| **Fleet → Kafka → Asset Projector**                          |                          ✅                           |        ✅ (۳۲ تست)        | ✅ **زنده** — Timeline پر شد، وضعیت `IDLE→ASSIGNED→ACTIVE`                                                         |
+| **Idempotency (ثبت آفلاین + Replay مصرف‌کننده)**             |                          ✅                           |            ✅             | ✅ زنده: ارسال دوباره = همان رکورد؛ Replay کافکا = بدون اثر دوم                                                    |
+| **correlationId در کل زنجیره**                               |                          ✅                           |            ✅             | ✅ زنده: HTTP → Outbox → Header کافکا → Timeline، یکسان                                                            |
+| **maintenance — Schedule/Request/RepairOrder/Cost**          |                          ✅                           |       ✅ (۱۰۲ تست)        | ✅ زنده + **CI VERIFIED**                                                                                          |
+| **سررسید مشتق‌شده (نه Flag ذخیره‌شده)**                      |                          ✅                           |        ✅ (۱۴ تست)        | ✅ زنده: گریدر `OVERDUE on HOURS`، کنتور ۴۳۸۶٫۵۰ در برابر سررسید ۴۳۷۰٫۵۰                                           |
+| **منع درخواست تکراری (Partial Unique Index)**                |                          ✅                           |     ✅ (Integration)      | ✅ زنده: درخواست دوم → `422 DUPLICATE_OPEN_REQUEST`                                                                |
+| **اتمیک بودن هزینه زیر همروندی**                             |                          ✅                           |     ✅ (Integration)      | ✅ ده ثبت هم‌زمان → مجموع دقیقاً برابر `SUM` پایگاه داده                                                           |
+| **تأیید پیش از تسویه (کنترل سند محصول)**                     |                          ✅                           |            ✅             | ✅ زنده: تأیید زودهنگام `409`، مبلغ کهنه `422`، تأیید دوباره `409`                                                 |
+| **Fleet USAGE_RECORDED → Maintenance (مسیر مرده پیشین)**     |                          ✅                           |        ✅ (۴۱ تست)        | ✅ **زنده** — کنتور ۴۳۸۰٫۵۰ → ۴۳۸۶٫۵۰، سپس `MAINTENANCE_DUE`                                                       |
+| **Maintenance → Kafka → Asset Timeline + Fleet Replica**     |                          ✅                           |            ✅             | ✅ **زنده** — ۳ خط Timeline، `IN_MAINTENANCE` → `ACTIVE`، `inMaintenance` روشن و خاموش                             |
+| **economic — Wallet/Hold/Ledger/Journal/Transaction**        |                          ✅                           |       ✅ (۲۳۹ تست)        | ✅ زنده (۲۶ سناریو، بخش ۲۱-ج)                                                                                      |
+| **تغییرناپذیری دفتر کل (Trigger پایگاه داده)**               |                          ✅                           |     ✅ (Integration)      | ✅ **از SQL خام** — `UPDATE`/`DELETE` روی `ledger_entry` و `journal` هر دو رد شدند                                 |
+| **توازن هر Journal (Trigger معوق در COMMIT)**                |                          ✅                           |     ✅ (Integration)      | ✅ تراز آزمایشی زنده: `balanced: true`، ۱۳۶٬۰۰۰٬۰۰۰ = ۱۳۶٬۰۰۰٬۰۰۰                                                  |
+| **`available = ledger − pending` (CHECK پایگاه داده)**       |                          ✅                           |     ✅ (Integration)      | ✅ زنده: Hold ۱۲م → available ۷۶م، pending ۱۲م، مجموع ۸۸م                                                          |
+| **همروندی کیف پول — ۱۰۰ برداشت موازی**                       |                          ✅                           |     ✅ (Integration)      | ✅ دقیقاً ۱۰ موفق از ۱۰۰ برای موجودی ۱۰ واحدی؛ هرگز مانده منفی                                                     |
+| **Idempotency واقعی (کلید ذخیره‌شده + Hash بدنه)**           |                          ✅                           |        ✅ (۱۳ تست)        | ✅ زنده: کلید تکراری → همان پاسخ؛ بدنه متفاوت → `409`؛ بدون کلید → `400`                                           |
+| **تسویه اتمیک — شکست میانی چیزی باقی نمی‌گذارد**             |                          ✅                           |     ✅ (Integration)      | ✅ تزریق خطا پس از Post شدن Journal → صفر Journal، صفر تغییر مانده، وجه در Hold                                    |
+| **اعتراض → توقف کامل تسویه**                                 |                          ✅                           |            ✅             | ✅ زنده: تسویه پیش از تأیید `409`؛ ماشین حالت یال DISPUTED→SETTLED ندارد                                           |
+| **`AUDITOR` هیچ دسترسی اقتصادی ندارد**                       |                          ✅                           |            ✅             | ✅ زنده با توکن واقعی: کیف پول `403`، تراکنش `403`، تراز آزمایشی `403`                                             |
+| **Maintenance → Kafka → economic (مسیر مرده پیشین)**         |                          ✅                           |        ✅ (۹ تست)         | ✅ **زنده** — `MAINTENANCE_APPROVED` → تعهد `PENDING_SETTLEMENT`، و **صفر حرکت پول**                               |
+| **پرداخت شبیه‌سازی‌شده، با اعلام صریح**                      |                          ✅                           |            ✅             | ✅ زنده: `simulated: true` روی پاسخ، ردیف و رویداد؛ شکست قابل تحریک → `INSUFFICIENT_FUNDS`                         |
+| Frontend (`apps/web`, `apps/admin`)                          |                          ❌                           |             —             | NOT_STARTED — پوشه خالی                                                                                            |
+| Integration Tests (`*.int-spec.ts`)                          | ✅ ۳۰ Suite (fleet ۴، maintenance ۵، **economic ۲۱**) |             —             | ✅ **۳۲۸** — ۷۳ پیشین + ۲۵۵ economic                                                                               |
+| E2E Tests (`tests/e2e`, Playwright)                          |                          ✅                           |      ✅ (۶۴ سناریو)       | ✅ **زنده** — Gateway + economic + marketplace + PostgreSQL + Kafka + Temporal + توکن واقعی Keycloak               |
+| marketplace-service                                          |                          ✅                           | ✅ ۱۰۹ واحد + ۴۴ یکپارچگی | ✅ ۱۷ سناریوی E2E؛ روی `main` در PR #7                                                                             |
+| procurement/supplier/inventory/construction/…                |                          ❌                           |             —             | مطابق فازبندی؛ وضعیت هر قابلیت در `docs/17`                                                                        |
 
 ---
 
@@ -292,13 +307,13 @@ apps/
 
 tests/
   e2e/    IMPLEMENTED — @rasta/e2e: Playwright Config، Global Setup،
-          ۳۷ سناریو روی Stack واقعی (بدون Browser تا ساخته‌شدن apps/web)
+          ۶۴ سناریو روی Stack واقعی (بدون Browser تا ساخته‌شدن apps/web)
 
 infrastructure/
   docker/   Postgres Init، Kafka Topics، Keycloak Realm — IMPLEMENTED
   k8s/      NOT_STARTED — پوشه خالی
 
-docs/       ۲۴ سند + ۲۴ ADR + events/api/database/security/deployment/runbooks
+docs/       ۲۴ سند + ۴۸ ADR + events/api/database/security/deployment/runbooks
 scripts/
   copy-prisma-client.mjs   کپی Prisma Client تولیدشده به dist/
   prisma.mjs               Wrapper که DATABASE_URL_<SERVICE> را به Prisma CLI می‌دهد (این جلسه اضافه شد)

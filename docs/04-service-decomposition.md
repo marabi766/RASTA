@@ -1,6 +1,7 @@
 # ۰۴ — Service Decomposition
 
-> ۱۶ سرویس دامنه + یک API Gateway. برای هر سرویس: مأموریت، مسئولیت‌ها، **مالکیت داده**،
+> ۱۶ سرویس دامنهٔ قابل استقرار در برنامهٔ MVP + یک API Gateway؛ مقصد معماری ۲۲ سرویس
+> منطقی است (ADR-044). برای هر سرویس: مأموریت، مسئولیت‌ها، **مالکیت داده**،
 > **آنچه داخل آن نیست**، API، رویدادها، وابستگی‌ها، مرز امنیتی، مشخصات مقیاس و شکست.
 
 ---
@@ -29,18 +30,29 @@
 
 ### سرویس‌های تجمیع‌شده و دلیل
 
-سند اولیه ۲۲ دامنه فهرست کرده بود. سه تجمیع آگاهانه انجام شد. **هر سه با مرزبندی داخلی
+معماری هدف ۲۲ دامنه را فهرست می‌کند. سه تجمیع آگاهانه برای استقرار MVP انجام شد. **هر سه با مرزبندی داخلی
 کامل**: Schema جدا، ماژول Nest جدا، بدون Join میان‌ماژولی، Topic جدا. استخراج هرکدام یک
 تغییر استقرار است، نه بازنویسی.
 
-| سرویس مقصد          | ادغام‌شده                                       | چرا                                                                                                                                                         | محرک استخراج آتی                                     |
-| ------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| `economic-service`  | wallet · ledger · payment · commission · reward | مرز تراکنشی مشترک: تکمیل سفارش باید در **یک تراکنش ACID** کیف پول، دفتر کل و کارمزد را بزند. تقسیم = جایگزینی تراکنش با Saga پنج‌مرحله‌ای، بدون فایده مقیاس | حجم ورودی دفتر کل > ۱۰ میلیون/ماه → استخراج `ledger` |
-| `asset-service`     | insurance                                       | بیمه‌نامه و معاینه فنی، صفات چرخه عمر دارایی‌اند و با آن منقضی می‌شوند. Invariant «دارایی فعال باید بیمه معتبر داشته باشد» ثبات فوری می‌خواهد               | ورود ادعای خسارت (Claim) و اتصال PSP بیمه            |
-| `inventory-service` | logistics                                       | حرکت موجودی و حمل، یک جریان پیوسته‌اند؛ تقسیم آن‌ها یک Saga برای عملیاتی می‌سازد که ذاتاً یکی است                                                           | ورود شرکای حمل شخص ثالث با API مستقل                 |
+| سرویس مقصد          | ادغام‌شده                                       | چرا                                                                                                                                                         | محرک استخراج آتی                         |
+| ------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `economic-service`  | wallet · ledger · payment · commission · reward | مرز تراکنشی مشترک: تکمیل سفارش باید در **یک تراکنش ACID** کیف پول، دفتر کل و کارمزد را بزند. تقسیم = جایگزینی تراکنش با Saga پنج‌مرحله‌ای، بدون فایده مقیاس | محرک اختصاصی هر دامنه در ADR-044         |
+| `asset-service`     | insurance registry                              | ثبت بیمه‌نامه و هشدار انقضا بخشی از پروندهٔ دارایی است؛ چرخهٔ تجاری و Claim در مقصد نزد `insurance-service` خواهد بود                                       | استعلام/صدور، Claim واقعی یا چند بیمه‌گر |
+| `inventory-service` | logistics                                       | حرکت موجودی و حمل، یک جریان پیوسته‌اند؛ تقسیم آن‌ها یک Saga برای عملیاتی می‌سازد که ذاتاً یکی است                                                           | ورود شرکای حمل شخص ثالث با API مستقل     |
 
 **IoT / Telematics** ساخته نمی‌شود (فاز ۳). اما `UsageRecord.source` از امروز
 `MANUAL | TELEMATICS | IMPORTED` را می‌پذیرد تا ورود خودکار بعداً یک Consumer جدید باشد.
+
+### مقصد ۲۲سرویسی
+
+پنج ماژول اقتصادی و بیمه «حذف‌شده» نیستند؛ آن‌ها مقصد استخراج مستقل دارند. فهرست رسمی:
+`identity`، `organization`، `asset`، `fleet`، `maintenance`، `insurance`،
+`marketplace`، `procurement`، `supplier`، `inventory-and-logistics`، `construction`،
+`contract`، `wallet`، `ledger`، `payment`، `commission`، `reward`، `notification`،
+`document`، `audit`، `analytics` و `iot-telematics`.
+
+استخراج فقط پس از تحقق محرک، ADR مهاجرت و اثبات اینکه مرز تراکنشی جدید ایمن است انجام
+می‌شود. تا آن زمان وضعیت Deployment با وضعیت قابلیت اشتباه نمی‌شود.
 
 ---
 
@@ -373,7 +385,7 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 | **Queries**      | `GetWallet` · `GetBalance` · `ListTransactions` · `GetJournal` · `GetLedgerEntries` · `GetTrialBalance` · `GetCommissionRevenue` · `GetRewardBalance`                                                                                                                                                  |
 | **REST**         | `GET /wallets/me` · `POST /wallets/{id}/top-up` **(Idempotency-Key)** · `POST /transactions` **(Idempotency-Key)** · `GET /transactions/{id}` · `GET /transactions` · `GET /ledger/accounts/{id}/entries` · `GET /ledger/trial-balance` · `GET /commissions` · `GET /rewards/me` · `POST /settlements` |
 | **Publishes**    | `WALLET_OPENED` · `FUNDS_HELD` · `FUNDS_RELEASED` · `PAYMENT_AUTHORIZED` · `PAYMENT_COMPLETED` · `PAYMENT_FAILED` · `COMMISSION_APPLIED` · `REWARD_GRANTED` · `REWARD_LEVEL_CHANGED` · `SETTLEMENT_COMPLETED` · `JOURNAL_POSTED`                                                                       |
-| **Consumes**     | `ORDER_CREATED` (Hold) · `ORDER_RECEIPT_CONFIRMED` (Release + تسویه + کارمزد) · `ORDER_CANCELLED` (بازگشت) · `MAINTENANCE_APPROVED` · `STATEMENT_APPROVED` · `USAGE_RECORDED` / `MAINTENANCE_COMPLETED` (محرک پاداش)                                                                                   |
+| **Consumes**     | **واقعی:** `MAINTENANCE_APPROVED` · `USAGE_RECORDED` · `MAINTENANCE_COMPLETED`. **برنامه‌ریزی‌شده:** `STATEMENT_APPROVED` پس از تعریف Producer. اثرهای مالی سفارش با فرمان احراز‌شده از Temporal می‌آیند، نه Consumer رویداد (ADR-040).                                                                |
 | **Dependencies** | PostgreSQL · Kafka · Redis (قفل کیف پول) · Temporal (Saga تسویه)                                                                                                                                                                                                                                       |
 | **مرز امنیتی**   | **بالاترین.** هر عمل نیازمند Idempotency-Key. هر تغییر در Audit. **استانداری (`AUDITOR`) دسترسی ندارد** — فقط تجمیع در `analytics`.                                                                                                                                                                    |
 | **Scale**        | نوشتن‌سنگین در `ledger_entry` → پارتیشن ماهانه، فقط الحاقی.                                                                                                                                                                                                                                            |
@@ -461,6 +473,6 @@ REST و جهت دیگر Event است — یعنی حلقه زمانی وجود �
 | فاز                       | سرویس‌ها                                                                                                                                             |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **P0 — Day 10 Demo**      | gateway · identity · organization · asset · fleet · maintenance · marketplace · economic · construction · contract · document · audit · notification |
-| **P1 — Day 20 MVP**       | procurement · supplier · inventory · analytics + تکمیل ماژول‌های reward، insurance، logistics                                                        |
+| **P1 — MVP کامل**         | procurement · supplier · inventory · analytics + تکمیل ماژول‌های reward، insurance registry، logistics و لجستیک معکوس پایه                           |
 | **P2 — Day 30 Hardening** | بدون سرویس جدید. امنیت، تست، کارایی، پایایی، مستندسازی.                                                                                              |
-| **P3 — پس از MVP**        | iot-telematics · استخراج `ledger` · Marketplace عمومی · اتصال ملی                                                                                    |
+| **P3 — پس از MVP/Pilot**  | iot-telematics · استخراج‌های مشروط ADR-044 · بیمهٔ تجاری کامل · Marketplace عمومی · اتصال ملی                                                        |

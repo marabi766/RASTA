@@ -181,52 +181,61 @@ ErrorState   — پیام قابل فهم + دکمه تلاش دوباره + cor
 
 ### apps/web — پورتال کاربر نهایی
 
-| مسیر                       | صفحه                   | نقش‌ها                         | فاز |
-| -------------------------- | ---------------------- | ------------------------------ | --- |
-| `/login`                   | ورود (OIDC)            | همه                            | P0  |
-| `/`                        | داشبورد                | همه                            | P0  |
-| `/organizations`           | سازمان و اعضا          | ORGANIZATION_ADMIN             | P0  |
-| `/assets`                  | فهرست ماشین‌آلات       | FLEET_MANAGER، OPERATOR        | P0  |
-| `/assets/[id]`             | **پرونده الکترونیکی**  | FLEET_MANAGER، OPERATOR        | P0  |
-| `/assets/[id]/timeline`    | تاریخچه دارایی         | FLEET_MANAGER                  | P0  |
-| `/drivers`                 | راننده و تخصیص         | FLEET_MANAGER                  | P0  |
-| `/usage`                   | ثبت کارکرد             | OPERATOR، DRIVER               | P0  |
-| `/maintenance`             | نگهداری و تعمیرات      | FLEET_MANAGER، OPERATOR        | P0  |
-| `/maintenance/[id]`        | جزئیات درخواست تعمیر   | FLEET_MANAGER، WORKSHOP        | P0  |
-| `/marketplace`             | جست‌وجوی کالا و خدمت   | PROCUREMENT_USER               | P0  |
-| `/marketplace/[productId]` | مقایسه پیشنهادها       | PROCUREMENT_USER               | P0  |
-| `/orders`                  | سفارش‌ها               | PROCUREMENT_USER، SUPPLIER     | P0  |
-| `/orders/[id]`             | جزئیات سفارش + Stepper | PROCUREMENT_USER، SUPPLIER     | P0  |
-| `/procurement/demands`     | ثبت نیاز و تجمیع       | PROCUREMENT_USER               | P1  |
-| `/procurement/rfqs`        | استعلام‌ها             | PROCUREMENT_USER، SUPPLIER     | P1  |
-| `/suppliers`               | تأمین‌کنندگان          | PROCUREMENT_USER               | P1  |
-| `/projects`                | پروژه‌های عمرانی       | ORGANIZATION_ADMIN             | P0  |
-| `/projects/[id]`           | جزئیات + گردش موافقت   | ORGANIZATION_ADMIN             | P0  |
-| `/tenders`                 | مناقصه‌ها              | ORGANIZATION_ADMIN، CONTRACTOR | P0  |
-| `/tenders/[id]`            | جزئیات + ثبت پیشنهاد   | ORGANIZATION_ADMIN، CONTRACTOR | P0  |
-| `/contracts`               | قراردادها              | ORGANIZATION_ADMIN، CONTRACTOR | P0  |
-| `/contracts/[id]`          | جزئیات + صورت‌وضعیت    | ORGANIZATION_ADMIN، CONTRACTOR | P0  |
-| `/wallet`                  | کیف پول و تراکنش       | ORGANIZATION_ADMIN             | P0  |
-| `/rewards`                 | امتیاز و سطح           | همه                            | P1  |
-| `/notifications`           | اعلان‌ها               | همه                            | P0  |
-| `/reports`                 | گزارش‌ها               | ORGANIZATION_ADMIN             | P1  |
+| مسیر                       | صفحه                       | نقش‌ها                            | فاز   |
+| -------------------------- | -------------------------- | --------------------------------- | ----- |
+| `/login`                   | ورود (OIDC)                | همه                               | P0    |
+| `/`                        | داشبورد                    | همه                               | P0    |
+| `/organizations`           | سازمان و اعضا              | ORGANIZATION_ADMIN                | P0    |
+| `/assets`                  | فهرست ماشین‌آلات           | FLEET_MANAGER، OPERATOR           | P0    |
+| `/assets/[id]`             | **پرونده الکترونیکی**      | FLEET_MANAGER، OPERATOR           | P0    |
+| `/assets/[id]/timeline`    | تاریخچه دارایی             | FLEET_MANAGER                     | P0    |
+| `/drivers`                 | راننده و تخصیص             | FLEET_MANAGER                     | P0    |
+| `/usage`                   | ثبت کارکرد                 | OPERATOR، DRIVER                  | P0    |
+| `/maintenance`             | نگهداری و تعمیرات          | FLEET_MANAGER، OPERATOR           | P0    |
+| `/maintenance/[id]`        | جزئیات درخواست تعمیر       | FLEET_MANAGER، WORKSHOP           | P0    |
+| `/marketplace`             | جست‌وجوی کالا و خدمت       | PROCUREMENT_USER                  | P0    |
+| `/marketplace/[productId]` | مقایسه پیشنهادها           | PROCUREMENT_USER                  | P0    |
+| `/orders`                  | سفارش‌ها                   | PROCUREMENT_USER، SUPPLIER        | P0    |
+| `/orders/[id]`             | جزئیات سفارش + Stepper     | PROCUREMENT_USER، SUPPLIER        | P0    |
+| `/procurement/demands`     | ثبت نیاز و تجمیع           | PROCUREMENT_USER                  | P1    |
+| `/procurement/rfqs`        | استعلام‌ها                 | PROCUREMENT_USER، SUPPLIER        | P1    |
+| `/suppliers`               | تأمین‌کنندگان              | PROCUREMENT_USER                  | P1    |
+| `/projects`                | پروژه‌های عمرانی           | ORGANIZATION_ADMIN                | P0    |
+| `/projects/[id]`           | جزئیات + گردش موافقت       | ORGANIZATION_ADMIN                | P0    |
+| `/tenders`                 | مناقصه‌ها                  | ORGANIZATION_ADMIN، CONTRACTOR    | P0    |
+| `/tenders/[id]`            | جزئیات + ثبت پیشنهاد       | ORGANIZATION_ADMIN، CONTRACTOR    | P0    |
+| `/contracts`               | قراردادها                  | ORGANIZATION_ADMIN، CONTRACTOR    | P0    |
+| `/contracts/[id]`          | جزئیات + صورت‌وضعیت        | ORGANIZATION_ADMIN، CONTRACTOR    | P0    |
+| `/wallet`                  | کیف پول و تراکنش           | ORGANIZATION_ADMIN                | P0    |
+| `/rewards`                 | امتیاز و سطح               | همه                               | P1    |
+| `/rewards/history`         | Breakdown و نسخه قواعد     | همه                               | P1    |
+| `/rewards/ranking`         | جایگاه در گروه همتای مجاز  | همه                               | P2    |
+| `/rewards/benefits`        | مزایای مصوب و انتخاب       | همه                               | P2    |
+| `/rewards/appeals`         | اعتراض و پیگیری امتیاز     | همه                               | P2    |
+| `/insurance`               | بیمه‌نامه، تمدید و استعلام | ORGANIZATION_ADMIN، FLEET_MANAGER | P1/P2 |
+| `/insurance/claims`        | پرونده‌های خسارت           | ORGANIZATION_ADMIN، FLEET_MANAGER | P2    |
+| `/returns`                 | مرجوعی، ضمانت و حمل برگشت  | PROCUREMENT_USER، SUPPLIER        | P2    |
+| `/notifications`           | اعلان‌ها                   | همه                               | P0    |
+| `/reports`                 | گزارش‌ها                   | ORGANIZATION_ADMIN                | P1    |
 
 ### apps/admin — کنسول اپراتور
 
-| مسیر                        | صفحه                           | نقش‌ها       | فاز |
-| --------------------------- | ------------------------------ | ------------ | --- |
-| `/`                         | داشبورد عملیاتی پلتفرم         | UNION_ADMIN  | P0  |
-| `/organizations`            | مدیریت سازمان‌ها و سلسله‌مراتب | UNION_ADMIN  | P0  |
-| `/users`                    | کاربران، نقش‌ها، عضویت         | UNION_ADMIN  | P0  |
-| `/suppliers`                | احراز صلاحیت و تعلیق           | UNION_ADMIN  | P1  |
-| `/catalog`                  | مدیریت فهرست کالا              | UNION_ADMIN  | P1  |
-| `/financial`                | تراکنش، تسویه، کارمزد          | UNION_ADMIN  | P0  |
-| `/financial/ledger`         | دفتر کل و تراز آزمایشی         | UNION_ADMIN  | P1  |
-| `/config/commission-rules`  | **قواعد کارمزد**               | SYSTEM_ADMIN | P1  |
-| `/config/reward-rules`      | **قواعد پاداش**                | SYSTEM_ADMIN | P1  |
-| `/config/approval-policies` | **سیاست‌های موافقت**           | SYSTEM_ADMIN | P1  |
-| `/audit`                    | سوابق حسابرسی                  | UNION_ADMIN  | P0  |
-| `/governance`               | **داشبورد تجمیعی استانداری**   | AUDITOR      | P1  |
+| مسیر                        | صفحه                              | نقش‌ها       | فاز |
+| --------------------------- | --------------------------------- | ------------ | --- |
+| `/`                         | داشبورد عملیاتی پلتفرم            | UNION_ADMIN  | P0  |
+| `/organizations`            | مدیریت سازمان‌ها و سلسله‌مراتب    | UNION_ADMIN  | P0  |
+| `/users`                    | کاربران، نقش‌ها، عضویت            | UNION_ADMIN  | P0  |
+| `/suppliers`                | احراز صلاحیت و تعلیق              | UNION_ADMIN  | P1  |
+| `/catalog`                  | مدیریت فهرست کالا                 | UNION_ADMIN  | P1  |
+| `/financial`                | تراکنش، تسویه، کارمزد             | UNION_ADMIN  | P0  |
+| `/financial/ledger`         | دفتر کل و تراز آزمایشی            | UNION_ADMIN  | P1  |
+| `/config/commission-rules`  | **قواعد کارمزد**                  | SYSTEM_ADMIN | P1  |
+| `/config/reward-rules`      | **قواعد پاداش**                   | SYSTEM_ADMIN | P1  |
+| `/config/commission-lines`  | **خطوط کسب‌وکار کارمزد**          | SYSTEM_ADMIN | P1  |
+| `/config/reward-benefits`   | **مزایا، گروه همتا و قواعد رتبه** | SYSTEM_ADMIN | P2  |
+| `/config/approval-policies` | **سیاست‌های موافقت**              | SYSTEM_ADMIN | P1  |
+| `/audit`                    | سوابق حسابرسی                     | UNION_ADMIN  | P0  |
+| `/governance`               | **داشبورد تجمیعی استانداری**      | AUDITOR      | P1  |
 
 **CONSTRAINT.** نقش `AUDITOR` **فقط** به `/governance` دسترسی دارد. مسیرهای دیگر برای این
 نقش وجود ندارند — نه پنهان، بلکه Route Guard آن‌ها را رد می‌کند و API هم مجوز نمی‌دهد.
@@ -260,14 +269,20 @@ ErrorState   — پیام قابل فهم + دکمه تلاش دوباره + cor
 ✅ سطح کاربر به‌صورت نشان متنی ساده
 ✅ نوار پیشرفت آرام تا سطح بعد
 ✅ تمرکز پیام بر «کامل بودن داده» و «به‌موقع بودن»
+✅ نمایش علت هر تغییر، نسخه قاعده و مسیر اعتراض
+✅ مقایسهٔ شخص با بازهٔ گروه همتای هم‌نقش، بدون افشای دادهٔ ریز دیگران
+✅ تفکیک «امتیاز مشارکت» از «امتیاز قابل تبدیل به مزیت»
 
 ❌ Confetti، انیمیشن جشن، صدا
 ❌ نشان‌های کارتونی، شخصیت، آواتار بازی‌گونه
-❌ جدول رده‌بندی رقابتی میان دهیاری‌ها  (خطر انگیزه‌های ناسالم)
+❌ جدول رده‌بندی عمومی میان دهیاری‌ها یا نقش‌های نابرابر
 ❌ اصطلاحات بازی («امتیاز بگیر!»، «رکورد بزن!»)
 ```
 
 معیار موفقیت: **نرخ ثبت به‌موقع داده**، نه میزان تعامل ظاهری.
+
+مزایا، هدف گروهی و مشاهدهٔ رتبه فقط پس از پیکربندی مصوب فعال می‌شوند. حالت خالی باید
+بگوید «مزیتی برای این دوره تعریف نشده است»، نه اینکه وعدهٔ پاداشی خارج از قرارداد بدهد.
 
 ---
 
