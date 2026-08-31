@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { booleanEnv } from '@rasta/config';
 import { DOCUMENT_CLASSES } from '../content/policy';
 
 /**
@@ -89,8 +90,19 @@ export const listDocumentsQuerySchema = z
     documentClass: z.enum(DOCUMENT_CLASSES).optional(),
     ownerResourceType: z.string().min(1).max(64).optional(),
     ownerResourceId: identifier.optional(),
-    /** Deleted documents are excluded unless explicitly asked for. */
-    includeDeleted: z.coerce.boolean().default(false),
+    /**
+     * Deleted documents are excluded unless explicitly asked for.
+     *
+     * `booleanEnv` rather than `z.coerce.boolean()`. The coercion applies
+     * JavaScript's `Boolean()`, under which every non-empty string is true —
+     * so `?includeDeleted=false` would have *included* them, which is the
+     * opposite of what the caller asked for. The helper is named for where the
+     * defect was first found; the parsing problem is the same wherever a
+     * boolean arrives as a string. The same coercion is still used for the
+     * five platform environment flags listed in `PROJECT_MEMORY.md`, which are
+     * deliberately left for their own atomic change.
+     */
+    includeDeleted: booleanEnv(false),
     limit: z.coerce.number().int().min(1).max(100).default(25),
     cursor: identifier.optional(),
   })

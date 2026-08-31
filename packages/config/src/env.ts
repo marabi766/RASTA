@@ -65,10 +65,24 @@ export const redisUrlSchema = urlWithProtocol(['redis:', 'rediss:'], 'Redis URL'
  * refuses anything else rather than guessing — a typo in a security switch
  * should fail at boot rather than silently pick a default.
  *
- * Existing schemas below still use `z.coerce.boolean()` and are therefore
- * subject to that trap. They are left alone deliberately: changing them alters
- * the runtime behaviour of four services, which belongs in its own change with
- * its own tests rather than as a side effect of an unrelated one.
+ * Five platform environment flags still use `z.coerce.boolean()` and are
+ * therefore subject to that trap — every non-empty string, `"false"`
+ * included, parses as `true`:
+ *
+ *   - `OTEL_TRACES_ENABLED`            (`baseEnvSchema`, below)
+ *   - `KAFKA_SCHEMA_STRICT`            (`kafkaEnvSchema`, below)
+ *   - `GATEWAY_RATE_LIMIT_FAIL_OPEN`   (`services/api-gateway`)
+ *   - `KEYCLOAK_SYNC_ENABLED`          (`services/identity-service`)
+ *   - `MARKETPLACE_TEMPORAL_ENABLED`   (`services/marketplace-service`)
+ *
+ * They are left alone deliberately. Each one changes the runtime behaviour of
+ * a running service the moment it starts parsing correctly — an operator who
+ * wrote `OTEL_TRACES_ENABLED=false` has been running with tracing on, and
+ * fixing the parser turns it off. That is a deployment-affecting change and
+ * belongs in its own atomic task: inventory every boolean environment
+ * variable repository-wide, move them all to one tested parser, and assess
+ * each resulting behaviour change before it ships. Doing it as a side effect
+ * of an unrelated PR is how a silent configuration flip reaches production.
  */
 export function booleanEnv(defaultValue: boolean) {
   return z
