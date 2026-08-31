@@ -188,21 +188,34 @@ export class DocumentRepository {
     documentId: string,
     input: { deletedAt: Date; deletedBy: string; reason: string; expectedVersion: number },
   ) {
-    const changed = await tx.document.updateMany({
-      where: { id: documentId, status: 'REGISTERED', version: input.expectedVersion },
-      data: {
-        status: 'DELETED',
-        deletedAt: input.deletedAt,
-        deletedBy: input.deletedBy,
-        deletionReason: input.reason,
-        version: { increment: 1 },
+    // Unscoped for the same reason the id lookups above are: a platform
+    // operator may delete a document belonging to another organization
+    // (`assertDocumentWritable`, which admits platform scope), and that
+    // decision has already been made against the row before this runs. With
+    // the guard filtering by the caller's own organization, the operator's
+    // update would match zero rows and surface as an optimistic-lock failure
+    // — a wrong answer to a permitted act. The tenant that owns the row is
+    // still pinned by `id`, which is unique platform-wide.
+    return runUnscoped(
+      'a deletion the caller was already authorized for is applied to its row',
+      async () => {
+        const changed = await tx.document.updateMany({
+          where: { id: documentId, status: 'REGISTERED', version: input.expectedVersion },
+          data: {
+            status: 'DELETED',
+            deletedAt: input.deletedAt,
+            deletedBy: input.deletedBy,
+            deletionReason: input.reason,
+            version: { increment: 1 },
+          },
+        });
+
+        if (changed.count === 0) {
+          throw RastaError.optimisticLockFailed('Document', documentId);
+        }
+
+        return tx.document.findUniqueOrThrow({ where: { id: documentId } });
       },
-    });
-
-    if (changed.count === 0) {
-      throw RastaError.optimisticLockFailed('Document', documentId);
-    }
-
-    return tx.document.findUniqueOrThrow({ where: { id: documentId } });
+    );
   }
 }
