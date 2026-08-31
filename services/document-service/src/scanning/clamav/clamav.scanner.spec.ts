@@ -1,6 +1,6 @@
 import { Readable } from 'node:stream';
 import { ClamAvMalwareScanner } from './clamav.scanner';
-import { startFakeClamd, unusedPort, type FakeClamd } from './fake-clamd';
+import { startFakeClamd, unusedPort, type FakeClamd } from '../../../test/fake-clamd';
 import { LIMITS_EXCEEDED_PREFIX } from './protocol';
 
 /**

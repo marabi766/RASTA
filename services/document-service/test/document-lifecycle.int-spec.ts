@@ -56,6 +56,29 @@ describe('document lifecycle (real database and object storage)', () => {
   const asOrgB = <T>(fn: () => Promise<T>) =>
     asActor({ organizationId: org.b, roles: ['ORGANIZATION_ADMIN'], userId: 'USR-DOC-B' }, fn);
 
+  /**
+   * Runs `via`'s worker until that document has a verdict.
+   *
+   * One `tick()` claims at most a batch, oldest first, and this suite leaves
+   * plenty of documents parked in PENDING — so a single tick scans whichever
+   * were queued earliest rather than the one the test just uploaded. Ticking
+   * until *this* document settles is both deterministic and specific: a
+   * failure here means the worker could not reach a verdict, not that it was
+   * busy elsewhere.
+   */
+  async function settle(via: Wiring, documentId: string, maxTicks = 40): Promise<void> {
+    for (let i = 0; i < maxTicks; i += 1) {
+      const row = await wiring.repository.findById(documentId);
+      if (row && row.scanState !== 'PENDING') return;
+      if ((await via.worker.tick()) === 0) break;
+    }
+
+    const row = await wiring.repository.findById(documentId);
+    if (!row || row.scanState === 'PENDING') {
+      throw new Error(`The document never left PENDING after ${maxTicks} ticks`);
+    }
+  }
+
   /** Walks the whole flow and returns the registered document. */
   async function uploadDocument(
     options: {
@@ -122,15 +145,18 @@ describe('document lifecycle (real database and object storage)', () => {
       expect(serialised).not.toMatch(/X-Amz-Signature|http:\/\/localhost:9000/);
     });
 
-    it('reports honestly that nothing inspected the content', async () => {
-      // Q-18: the MVP stub records `NOT_SCANNED`, and the view says plainly
-      // that no engine looked — so an operator can see it from one document
-      // without reading configuration.
+    it('reports honestly that nothing has inspected the content yet', async () => {
+      // Scanning is asynchronous since ADR-049, so registration and clearance
+      // are separate moments: a document is `PENDING` from the instant it
+      // exists until a worker reaches it, and the view says plainly that no
+      // engine has looked. That is the fail-closed direction — the download
+      // path refuses `PENDING` exactly as it refuses every other non-CLEAN
+      // state.
       const { document } = await uploadDocument();
 
-      expect(document.scanState).toBe('NOT_SCANNED');
+      expect(document.scanState).toBe('PENDING');
       expect(document.scanInspectedContent).toBe(false);
-      expect(document.scanEngine).toBe('no-op-stub');
+      expect(document.scanEngine).toBeNull();
     });
 
     it('hands back the exact bytes that were uploaded, once a scanner cleared them', async () => {
@@ -140,10 +166,16 @@ describe('document lifecycle (real database and object storage)', () => {
       const bytes = FIXTURES.pdf();
       const { document } = await uploadDocument({ bytes, via: scanned });
 
+      // The document is registered `PENDING`; the verdict arrives when the
+      // worker runs. Driven explicitly rather than by its poll timer, so the
+      // assertion does not race a clock.
+      expect(document.scanState).toBe('PENDING');
+      await settle(scanned, document.id);
+
       const link = await asOrgA(() => scanned.documents.createDownloadUrl(document.id));
       const fetched = await getFromSignedUrl(link.downloadUrl);
 
-      expect(document.scanState).toBe('CLEAN');
+      expect((await asOrgA(() => scanned.documents.get(document.id))).scanState).toBe('CLEAN');
       expect(fetched.status).toBe(200);
       expect(Buffer.compare(fetched.body, bytes)).toBe(0);
     });
@@ -152,6 +184,7 @@ describe('document lifecycle (real database and object storage)', () => {
       // ADR-014: "فایل هرگز اجرا نمی‌شود و هرگز به‌عنوان HTML سرو نمی‌شود".
       // The response metadata is what enforces that at the storage boundary.
       const { document } = await uploadDocument({ via: scanned });
+      await settle(scanned, document.id);
       const link = await asOrgA(() => scanned.documents.createDownloadUrl(document.id));
       const fetched = await getFromSignedUrl(link.downloadUrl);
 
@@ -535,6 +568,12 @@ describe('document lifecycle (real database and object storage)', () => {
             scanEngine: 'test-engine',
             scanSignature: 'EICAR-Test-File',
             scannedAt: new Date(),
+            // The quarantine record is not optional: since ADR-049
+            // `ck_document_infected_is_quarantined` refuses an INFECTED row
+            // without one, so even a hand-written UPDATE cannot leave a
+            // document infected and undecided about.
+            quarantinedAt: new Date(),
+            quarantineReason: 'marked infected by the suite',
           },
         }),
       );
@@ -553,15 +592,16 @@ describe('document lifecycle (real database and object storage)', () => {
       );
     });
 
-    it('refuses a document nothing inspected — which is every document in MVP', async () => {
-      // The invariant this suite exists to hold. The MVP stub records
-      // `NOT_SCANNED`, ADR-014 keeps a file unavailable until scanning has
-      // completed, and there is no configuration that changes the answer:
-      // `canDownload` takes no policy argument and `DocumentEnv` carries no
-      // flag. Uploading and registering worked; handing the bytes back does
-      // not, and will not until Q-18 is answered with a real engine.
+    it('refuses a document nothing has inspected yet', async () => {
+      // The invariant this suite exists to hold. ADR-014 keeps a file
+      // unavailable until scanning has completed, and there is no
+      // configuration that changes the answer: `canDownload` takes no policy
+      // argument and `DocumentEnv` carries no flag. Since ADR-049 that window
+      // is the ordinary state of a new document rather than a permanent one —
+      // uploading and registering work, and handing the bytes back waits for
+      // the scan.
       const { document } = await uploadDocument();
-      expect(document.scanState).toBe('NOT_SCANNED');
+      expect(document.scanState).toBe('PENDING');
 
       const error = await asOrgA(() => wiring.documents.createDownloadUrl(document.id)).catch(
         (caught: unknown) => caught as { code?: string; internalContext?: { reason?: string } },
@@ -569,6 +609,33 @@ describe('document lifecycle (real database and object storage)', () => {
 
       expect(error.code).toBe('BUSINESS_RULE_VIOLATION');
       // The reason reaches the log, never the response body.
+      expect(error.internalContext?.reason).toBe('PENDING');
+    });
+
+    it('refuses a document a scanner looked at and did not clear', async () => {
+      // The historic state, which still exists on rows written while Q-18 was
+      // open and must keep meaning what it meant: nothing opened these bytes.
+      // It is not reachable through the worker any more — a scanner that
+      // inspects nothing is recorded as a failure now — so it is written here
+      // directly, which is exactly the shape of the rows a real deployment
+      // still holds.
+      const { document } = await uploadDocument();
+
+      await runUnscoped('the suite reproduces a pre-ADR-049 row', () =>
+        prisma.client.document.updateMany({
+          where: { id: document.id },
+          data: {
+            scanState: 'NOT_SCANNED',
+            scanEngine: 'no-op-stub',
+            scannedAt: new Date(),
+          },
+        }),
+      );
+
+      const error = await asOrgA(() => wiring.documents.createDownloadUrl(document.id)).catch(
+        (caught: unknown) => caught as { internalContext?: { reason?: string } },
+      );
+
       expect(error.internalContext?.reason).toBe('NOT_SCANNED');
     });
 
@@ -702,7 +769,11 @@ describe('document lifecycle (real database and object storage)', () => {
       );
 
       const payload = (uploaded?.payload as { payload: Record<string, unknown> }).payload;
-      expect(payload.scanState).toBe('NOT_SCANNED');
+      // `PENDING` since ADR-049: registration and verdict are separate facts,
+      // and the second arrives as its own `DOCUMENT_SCANNED` event. What the
+      // field is for has not changed — no consumer may read the existence of
+      // an upload event as a clean bill of health.
+      expect(payload.scanState).toBe('PENDING');
     });
 
     it('keys every event by the document, so its history stays in order', async () => {
@@ -723,8 +794,12 @@ describe('document lifecycle (real database and object storage)', () => {
     });
 
     it('never publishes VIRUS_DETECTED from a scanner that inspects nothing', async () => {
-      // The rule that keeps a fabricated security finding out of the log. Even
-      // if a stub somehow returned INFECTED, `inspectsContent` gates the event.
+      // The rule that keeps a fabricated security finding out of the log.
+      // `VIRUS_DETECTED` reaches notification-service, which treats it as
+      // critical and puts it in front of a person, so a finding from something
+      // that never opened the file is worse than silence. Even a stub that
+      // returned INFECTED is refused: the decision is gated on
+      // `inspectsContent`, not on which class happens to be bound.
       const lyingStub: MalwareScanner = {
         inspectsContent: false,
         name: 'no-op-stub',
@@ -733,33 +808,42 @@ describe('document lifecycle (real database and object storage)', () => {
             verdict: 'INFECTED',
             engine: 'no-op-stub',
             engineVersion: null,
+            signatureVersion: null,
+            signatureAgeSeconds: null,
             signature: 'FABRICATED',
+            failureReason: null,
+            retryable: false,
             scannedAt: new Date(),
+          };
+        },
+        async health() {
+          return {
+            available: true,
+            engine: 'no-op-stub',
+            engineVersion: null,
+            signatureVersion: null,
+            signatureAgeSeconds: null,
+            signaturesFresh: false,
+            detail: 'inspects nothing',
           };
         },
       };
 
       const withLyingStub = wire(prisma, { scanner: lyingStub });
-      const bytes = FIXTURES.pdf();
-
-      const intent = await asOrgA(() =>
-        withLyingStub.documents.requestUploadUrl({
-          documentClass: 'CONTRACT',
-          contentType: 'application/pdf',
-          sizeBytes: bytes.length,
-          filename: 'scanner-honesty.pdf',
-        }),
-      );
-      await putToSignedUrl(intent.uploadUrl, bytes, 'application/pdf');
-      const document = await asOrgA(() =>
-        withLyingStub.documents.finalize({ uploadIntentId: intent.uploadIntentId }),
-      );
+      const { document } = await uploadDocument({ via: withLyingStub, filename: 'honesty.pdf' });
+      await settle(withLyingStub, document.id);
 
       const events = await outboxFor(prisma, org.a);
       const virusEvents = events.filter(
         (row) => row.eventName === 'VIRUS_DETECTED' && row.aggregateId === document.id,
       );
       expect(virusEvents).toHaveLength(0);
+
+      // And the document is not merely un-announced — it is recorded as a
+      // failed scan and stays undownloadable.
+      const stored = await wiring.repository.findById(document.id);
+      expect(stored?.scanState).toBe('FAILED');
+      expect(stored?.scanFailureReason).toBe('SCANNER_DOES_NOT_INSPECT');
     });
 
     it('publishes VIRUS_DETECTED when an engine that really inspected content finds one', async () => {
@@ -773,27 +857,30 @@ describe('document lifecycle (real database and object storage)', () => {
             verdict: 'INFECTED',
             engine: 'test-engine',
             engineVersion: '1.2.3',
+            signatureVersion: '28108',
+            signatureAgeSeconds: 60,
             signature: 'EICAR-Test-Signature',
+            failureReason: null,
+            retryable: false,
             scannedAt: new Date(),
+          };
+        },
+        async health() {
+          return {
+            available: true,
+            engine: 'test-engine',
+            engineVersion: '1.2.3',
+            signatureVersion: '28108',
+            signatureAgeSeconds: 60,
+            signaturesFresh: true,
+            detail: null,
           };
         },
       };
 
       const withEngine = wire(prisma, { scanner: realEngine });
-      const bytes = FIXTURES.pdf();
-
-      const intent = await asOrgA(() =>
-        withEngine.documents.requestUploadUrl({
-          documentClass: 'CONTRACT',
-          contentType: 'application/pdf',
-          sizeBytes: bytes.length,
-          filename: 'infected.pdf',
-        }),
-      );
-      await putToSignedUrl(intent.uploadUrl, bytes, 'application/pdf');
-      const document = await asOrgA(() =>
-        withEngine.documents.finalize({ uploadIntentId: intent.uploadIntentId }),
-      );
+      const { document } = await uploadDocument({ via: withEngine, filename: 'infected.pdf' });
+      await settle(withEngine, document.id);
 
       const events = await outboxFor(prisma, org.a);
       const virusEvent = events.find(
@@ -805,7 +892,11 @@ describe('document lifecycle (real database and object storage)', () => {
       expect(payload.signature).toBe('EICAR-Test-Signature');
       expect(payload.engine).toBe('test-engine');
 
-      // And it is not downloadable.
+      // Quarantined in the same write as the verdict, and not downloadable.
+      const stored = await wiring.repository.findById(document.id);
+      expect(stored?.scanState).toBe('INFECTED');
+      expect(stored?.quarantinedAt).toBeInstanceOf(Date);
+
       await expect(
         asOrgA(() => withEngine.documents.createDownloadUrl(document.id)),
       ).rejects.toThrow();

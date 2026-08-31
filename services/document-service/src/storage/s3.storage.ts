@@ -146,20 +146,35 @@ export class S3ObjectStorage implements ObjectStorage {
   /**
    * The object as a stream, bounded (ADR-049).
    *
-   * Two ceilings, not one. The `Range` header asks storage for at most
-   * `maxBytes`, so an oversized object costs one range request rather than a
-   * full transfer; and the counting transform below refuses anything past the
-   * limit as it flows, because a `Range` is a request and the response is what
-   * actually arrives. A storage implementation that ignored the header — or a
-   * `Content-Length` that disagreed with the body — would otherwise stream
-   * without limit into a scanner that trusted the check upstream of it.
+   * ## One byte more than allowed, deliberately
+   *
+   * The `Range` asks for `maxBytes + 1`, not `maxBytes`. Asking for exactly
+   * the ceiling is the version of this that fails **open**: storage honours
+   * the range, hands back exactly `maxBytes` bytes of a much larger object,
+   * the byte count never exceeds the limit, and the scanner reads a truncated
+   * prefix and reports `OK` about a file it only saw the start of — recorded
+   * as `CLEAN` for content nothing examined.
+   *
+   * Asking for one byte past the ceiling makes "there is more than we allow"
+   * observable: an object at or under the limit arrives whole, and one over it
+   * delivers the extra byte, which trips the transform below and fails the
+   * scan closed. The oversized object still costs one bounded range request
+   * rather than a full transfer.
+   *
+   * The transform is the second ceiling, and it is not redundant with the
+   * range: a `Range` is a request, and the response is what actually arrives.
+   * Storage that ignored the header, or a `Content-Length` disagreeing with
+   * the body, would otherwise stream without limit into a scanner that trusted
+   * the check upstream of it.
    */
   async openReadStream(input: { objectKey: string; maxBytes: number }): Promise<Readable> {
     const response = await this.client.send(
       new GetObjectCommand({
         Bucket: this.options.bucket,
         Key: input.objectKey,
-        Range: `bytes=0-${Math.max(0, input.maxBytes - 1)}`,
+        // Inclusive end offset, so this requests bytes 0..maxBytes — that is
+        // maxBytes + 1 bytes in total.
+        Range: `bytes=0-${Math.max(0, input.maxBytes)}`,
       }),
     );
 

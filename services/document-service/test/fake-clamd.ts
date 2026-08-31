@@ -11,10 +11,17 @@ import { AddressInfo } from 'node:net';
  * mid-stream. None of those exist if the socket is a stub, and every one of
  * them is a way a scanner returns the wrong answer.
  *
- * It is in `src/` rather than `test/` because the unit project's roots are
- * `src/`, and it is excluded from the build by the `*.spec.ts` sibling that
- * uses it having no production importer — nothing in the composition root can
- * reach it, and `clamav.scanner.ts` does not know it exists.
+ * ## Why it lives in `test/`
+ *
+ * It started in `src/`, next to the spec that uses it, and that was wrong for
+ * a reason worth recording: `tsconfig.json` includes `src/**` and excludes
+ * only `*.spec.ts` and `test/**`, so a TCP server that answers whatever a test
+ * tells it to would have been compiled into `dist` and shipped inside the
+ * production image. It also counted towards the coverage figure, which a test
+ * double has no business influencing in either direction.
+ *
+ * Here it cannot reach a deployment even by accident, which is the same rule
+ * `clean-scanner.ts` follows and for the same reason.
  */
 
 export type FakeBehaviour =

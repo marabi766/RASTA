@@ -63,6 +63,28 @@ describe('the document API (real application, real database, real object storage
   const http = (harness: ApiHarness) => request(harness.app.getHttpServer());
 
   /**
+   * Runs the booted application's scan worker until that document has a
+   * verdict.
+   *
+   * The harness leaves the poll timer off, so nothing moves unless a test asks
+   * — which is what makes "this is not downloadable yet" assertable at all.
+   * One tick claims at most a batch, oldest first, and these suites leave
+   * plenty of documents parked in PENDING, so ticking until *this* one settles
+   * is both deterministic and specific.
+   */
+  async function settle(harness: ApiHarness, documentId: string, maxTicks = 40): Promise<void> {
+    for (let i = 0; i < maxTicks; i += 1) {
+      const row = await runUnscoped('the suite reads the scan state it is waiting on', () =>
+        harness.prisma.client.document.findUnique({ where: { id: documentId } }),
+      );
+      if (row && row.scanState !== 'PENDING') return;
+      if ((await harness.worker.tick()) === 0) break;
+    }
+
+    throw new Error(`The document never left PENDING after ${maxTicks} ticks`);
+  }
+
+  /**
    * The whole direct-upload flow over HTTP: intent, PUT to the signed URL,
    * then registration. No shortcut through the domain — a client could perform
    * every one of these calls.
@@ -116,12 +138,15 @@ describe('the document API (real application, real database, real object storage
   // =========================================================================
 
   describe('the application a deployment gets today', () => {
-    it('composes the honest stub, which inspects nothing', () => {
-      // Read off the booted graph rather than assumed. This is the assertion
-      // that would fail if somebody bound a scanner that claims to inspect.
+    it('composes ClamAV, which inspects content', () => {
+      // Read off the booted graph rather than assumed, and this is the
+      // assertion that closes Q-18 at the composition root: the port did what
+      // it was built for, and answering the question was binding a different
+      // class here (ADR-049). It is also the assertion that would fail if
+      // somebody put the no-op stub back into a deployment's composition.
       const scanner = scannerOf(mvp);
-      expect(scanner.name).toBe('no-op-stub');
-      expect(scanner.inspectsContent).toBe(false);
+      expect(scanner.name).toBe('clamav');
+      expect(scanner.inspectsContent).toBe(true);
     });
 
     it('accepts an upload and registers the metadata', async () => {
@@ -136,19 +161,23 @@ describe('the document API (real application, real database, real object storage
       expect(document.organizationId).toBe(org);
     });
 
-    it('says plainly that nothing examined the content', async () => {
+    it('says plainly that nothing has examined the content yet', async () => {
+      // Scanning is asynchronous (ADR-049), so a freshly registered document
+      // is `PENDING` and the view says so rather than implying a verdict. The
+      // engine is null because none has spoken about these bytes — not because
+      // none exists.
       const { document } = await upload(mvp);
 
-      expect(document.scanState).toBe('NOT_SCANNED');
+      expect(document.scanState).toBe('PENDING');
       expect(document.scanInspectedContent).toBe(false);
-      expect(document.scanEngine).toBe('no-op-stub');
+      expect(document.scanEngine).toBeNull();
     });
 
-    it('refuses the download, because no scan cleared it', async () => {
-      // The invariant, proven through the real application rather than
-      // against the pure function alone: ADR-014 keeps a file unavailable
-      // until scanning has completed, `NOT_SCANNED` means none did, and there
-      // is no configuration in this service that changes the answer.
+    it('refuses the download, because no scan has cleared it', async () => {
+      // The invariant, proven through the real application rather than against
+      // the pure function alone: ADR-014 keeps a file unavailable until
+      // scanning has completed, `PENDING` means it has not, and there is no
+      // configuration in this service that changes the answer.
       const { document, token } = await upload(mvp);
 
       const refusal = await http(mvp)
@@ -157,7 +186,7 @@ describe('the document API (real application, real database, real object storage
         .expect(422);
 
       expect(refusal.body.code).toBe('BUSINESS_RULE_VIOLATION');
-      expect(refusal.body.message).toMatch(/has not been scanned/i);
+      expect(refusal.body.message).toMatch(/until its security scan completes/i);
       expect(refusal.body).not.toHaveProperty('downloadUrl');
     });
 
@@ -194,7 +223,7 @@ describe('the document API (real application, real database, real object storage
         .expect(200);
 
       expect(read.body.id).toBe(document.id);
-      expect(read.body.scanState).toBe('NOT_SCANNED');
+      expect(read.body.scanState).toBe('PENDING');
     });
   });
 
@@ -205,7 +234,10 @@ describe('the document API (real application, real database, real object storage
   describe('when a scanner has cleared the document', () => {
     it('issues a signed URL that returns the exact bytes', async () => {
       const { document, token, bytes } = await upload(scanned);
-      expect(document.scanState).toBe('CLEAN');
+      // Registered PENDING; the verdict arrives when the worker runs. Driven
+      // explicitly because the harness leaves its poll timer off.
+      expect(document.scanState).toBe('PENDING');
+      await settle(scanned, document.id);
 
       const link = await http(scanned)
         .post(`/v1/documents/${document.id}/download-url`)
@@ -222,6 +254,7 @@ describe('the document API (real application, real database, real object storage
     it('serves it as an attachment, never as something a browser renders', async () => {
       // ADR-014: «فایل هرگز اجرا نمی‌شود و هرگز به‌عنوان HTML سرو نمی‌شود».
       const { document, token } = await upload(scanned);
+      await settle(scanned, document.id);
 
       const link = await http(scanned)
         .post(`/v1/documents/${document.id}/download-url`)
@@ -234,14 +267,24 @@ describe('the document API (real application, real database, real object storage
     });
 
     it('reports that an engine did inspect it', async () => {
-      const { document } = await upload(scanned);
+      const { document, token } = await upload(scanned);
+      await settle(scanned, document.id);
 
-      expect(document.scanInspectedContent).toBe(true);
-      expect(document.scanEngine).toBe('test-only-clean-scanner');
+      const read = await http(scanned)
+        .get(`/v1/documents/${document.id}`)
+        .set('authorization', `Bearer ${token}`)
+        .expect(200);
+
+      expect(read.body.scanState).toBe('CLEAN');
+      expect(read.body.scanInspectedContent).toBe(true);
+      expect(read.body.scanEngine).toBe('test-only-clean-scanner');
+      // The database that cleared it, so the claim can be dated later.
+      expect(read.body.scanSignatureVersion).toBe('test-signatures');
     });
 
     it('refuses once the document is deleted, and calls it absent', async () => {
       const { document, token } = await upload(scanned);
+      await settle(scanned, document.id);
 
       await http(scanned)
         .delete(`/v1/documents/${document.id}`)

@@ -97,11 +97,25 @@ export function decideTransition(input: DecisionInput): TransitionDecision {
     }
 
     case 'INFECTED': {
+      // A finding from something that never opened the file is a fabricated
+      // one, and fabricated is worse than absent: `VIRUS_DETECTED` reaches
+      // notification-service, which treats it as critical and puts it in front
+      // of a person who will act on it.
+      //
+      // Decided here rather than at publish time, and that placement is the
+      // point. The worker used to catch this while already inside the
+      // write transaction and throw, which rolled back the batch, left the
+      // document PENDING and had the worker pick it up again on the next poll
+      // — fail-closed, but permanently stuck and invisible. As a transition it
+      // becomes a recorded outcome instead: undownloadable, diagnosable, and
+      // out of the queue.
+      if (!scanner.inspectsContent) {
+        return { kind: 'FAILED', reason: 'SCANNER_DOES_NOT_INSPECT' };
+      }
+
       // An infection with no signature name is not a finding anybody can act
       // on, and `VIRUS_DETECTED` requires one. Recorded as a failed scan
-      // rather than as a nameless threat: it is still undownloadable, and it
-      // does not put a fabricated security finding on a Kafka topic that
-      // notification-service treats as critical.
+      // rather than as a nameless threat, for the same reason.
       if (!result.signature || result.signature.trim().length === 0) {
         return { kind: 'FAILED', reason: 'MALFORMED_RESPONSE' };
       }

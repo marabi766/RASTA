@@ -124,6 +124,20 @@ describe('deciding what a scan result means', () => {
       expect(decision).toEqual({ kind: 'INFECTED', signature: 'Eicar-Test-Signature' });
     });
 
+    it('is refused when the scanner does not inspect content', () => {
+      // A finding from something that never opened the file is fabricated, and
+      // fabricated is worse than absent: VIRUS_DETECTED reaches
+      // notification-service, which treats it as critical.
+      const decision = decideTransition({
+        result: result({ verdict: 'INFECTED', signature: 'FABRICATED' }),
+        scanner: NOT_INSPECTING,
+        previousAttempts: 0,
+        maxAttempts: 5,
+      });
+
+      expect(decision).toEqual({ kind: 'FAILED', reason: 'SCANNER_DOES_NOT_INSPECT' });
+    });
+
     it.each([
       ['no signature at all', null],
       ['an empty signature', ''],

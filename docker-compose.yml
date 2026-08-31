@@ -188,6 +188,101 @@ services:
         echo 'MinIO buckets ready'
     restart: 'no'
 
+  # ------------------------------------------------------------ malware scan
+  #
+  # ClamAV, pinned to an immutable digest (ADR-049, closes Q-18).
+  #
+  # `clamav/clamav:1.5.4` — the official Cisco-Talos image — resolved on
+  # 2026-08-31 to the digest below. Pinned by digest rather than by tag because
+  # a tag is a moving pointer: `1.5.4` is rebuilt whenever its base or its
+  # bundled signature set changes, so a tag reference means a different scanner
+  # engine on a different day with no commit to show for it. Bumping it is a
+  # deliberate, reviewable edit here.
+  #
+  # The non-`_base` variant, which ships the reviewed CVD set (main, daily,
+  # bytecode) inside the image. The `_base` variant carries none and downloads
+  # ~110 MB from the ClamAV mirrors before clamd will start.
+  #
+  # amd64 only. On Apple Silicon this runs under emulation and is slow but
+  # correct; there is no arm64 manifest to point at.
+  clamav:
+    <<: *restart
+    image: clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591
+    container_name: rasta-clamav
+    # `clamd` directly rather than the image's `/init`, which needs root at
+    # start to create /run/clamav and link /var/lock. Bypassing it lets the
+    # whole container run as the image's unprivileged `clamav` user (uid 100),
+    # which is the AGENTS.md posture rather than "the daemon drops privileges
+    # eventually". freshclam runs as its own container below for the same
+    # reason.
+    user: '100:101'
+    entrypoint: ['clamd']
+    read_only: true
+    tmpfs:
+      - /run/clamav:uid=100,gid=101,mode=0770
+      - /tmp:uid=100,gid=101,mode=0770
+    environment:
+      # The build date in `zVERSION` carries no zone designator, and
+      # document-service reads it as UTC. Pinned here so the two agree.
+      TZ: Etc/UTC
+    ports:
+      # **Loopback only.** clamd authenticates nobody — anything that can reach
+      # this port can submit a stream and enumerate the signature database — so
+      # it is bound to 127.0.0.1 and never to 0.0.0.0. Production does not use
+      # TCP at all: document-service refuses `DOCUMENT_CLAMAV_HOST` when
+      # NODE_ENV is production and uses a shared Unix socket instead (ADR-049).
+      - '127.0.0.1:${CLAMAV_PORT:-3310}:3310'
+    volumes:
+      # The local/CI config, which is `clamd.conf` plus the TCP listener. The
+      # production file beside it has no listener at all.
+      - ./infrastructure/docker/clamav/clamd.local.conf:/etc/clamav/clamd.conf:ro
+      - clamav-signatures:/var/lib/clamav
+    healthcheck:
+      # clamd's own protocol rather than a port check: the port is open while
+      # the 110 MB database is still loading, and a scan submitted then is
+      # refused. PING answers only once the engine is ready.
+      #
+      # `clamdscan --ping` rather than the image's bundled `clamdcheck.sh`.
+      # That script does `nc localhost 3310`, and Alpine's resolver answers
+      # `localhost` with ::1 first — which clamd, bound to 0.0.0.0, does not
+      # listen on. It reports "Unable to contact server" against a completely
+      # healthy daemon. `clamdscan` reads clamd.conf instead, so it finds the
+      # Unix socket and works for the production config too, which has no TCP
+      # listener at all for a port check to aim at.
+      test: ['CMD-SHELL', 'clamdscan --ping 1 || exit 1']
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      # The database load genuinely takes this long on a cold start.
+      start_period: 120s
+
+  # Keeps the signature database current, into the volume clamd reads.
+  #
+  # Its own container, non-root, sharing only the volume. clamd picks up a new
+  # database through its own `SelfCheck` rather than being notified, so this
+  # needs no access to clamd's socket.
+  #
+  # The named volume is seeded from the image on first creation, so the first
+  # run starts from the reviewed database inside the pinned digest and updates
+  # from there — rather than downloading the whole set before anything works.
+  clamav-freshclam:
+    <<: *restart
+    image: clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591
+    container_name: rasta-clamav-freshclam
+    user: '100:101'
+    entrypoint: ['freshclam', '--daemon', '--foreground']
+    read_only: true
+    tmpfs:
+      - /tmp:uid=100,gid=101,mode=0770
+    environment:
+      TZ: Etc/UTC
+    volumes:
+      - ./infrastructure/docker/clamav/freshclam.conf:/etc/clamav/freshclam.conf:ro
+      - clamav-signatures:/var/lib/clamav
+    depends_on:
+      clamav:
+        condition: service_healthy
+
   # --------------------------------------------------------- workflow engine
   temporal:
     <<: *restart
@@ -327,6 +422,11 @@ volumes:
   postgres-data:
   redis-data:
   minio-data:
+  # Persistent, and load-bearing. Without it every restart re-downloads roughly
+  # 110 MB from the ClamAV mirrors before clamd will start — slow, rude, and
+  # rate-limited. Docker seeds a named volume from the image path on first
+  # creation, so this starts as the reviewed database inside the pinned digest.
+  clamav-signatures:
   opensearch-data:
   prometheus-data:
   grafana-data:

@@ -1,4 +1,4 @@
-import type { MalwareScanner, ScanResult } from '../src/scanning/scanner.port';
+import type { MalwareScanner, ScanResult, ScannerHealth } from '../src/scanning/scanner.port';
 
 /**
  * A scanner that reports `CLEAN`, for tests only.
@@ -52,8 +52,30 @@ export class AlwaysCleanScanner implements MalwareScanner {
       verdict: 'CLEAN',
       engine: this.name,
       engineVersion: 'test',
+      // A signature version, because within the fiction of the test this
+      // scanner has a database. Omitting it would make every document it
+      // clears indistinguishable from one cleared by an engine that could not
+      // say which signatures it used — and `DOCUMENT_SCANNED` publishes the
+      // field, so a missing one is a contract failure at publish time rather
+      // than a quiet null.
+      signatureVersion: 'test-signatures',
+      signatureAgeSeconds: 0,
       signature: null,
+      failureReason: null,
+      retryable: false,
       scannedAt: new Date(),
+    };
+  }
+
+  async health(): Promise<ScannerHealth> {
+    return {
+      available: true,
+      engine: this.name,
+      engineVersion: 'test',
+      signatureVersion: 'test-signatures',
+      signatureAgeSeconds: 0,
+      signaturesFresh: true,
+      detail: null,
     };
   }
 }

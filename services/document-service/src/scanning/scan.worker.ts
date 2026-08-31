@@ -73,8 +73,21 @@ export class ScanWorker {
   private readonly owner = `scan-${ulid()}`;
 
   private timer?: NodeJS.Timeout;
+  /** A tick is in flight. Guards against overlapping polls. */
   private running = false;
-  private stopped = true;
+  /** The poll timer is armed. */
+  private polling = false;
+  /**
+   * `stop()` has been called and claimed work should be handed back.
+   *
+   * Deliberately **not** the inverse of `polling`. It started life as a
+   * `stopped` flag initialised to `true`, which meant a worker that was never
+   * `start()`ed — an operator draining the queue by hand, or a test driving
+   * `tick()` directly, both of which this class documents as supported —
+   * claimed a batch and immediately released every document without scanning
+   * it. The queue never moved and the claim/release churned forever.
+   */
+  private shuttingDown = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -87,7 +100,7 @@ export class ScanWorker {
   ) {}
 
   start(): void {
-    if (!this.stopped) return;
+    if (this.polling) return;
     if (!this.env.DOCUMENT_SCAN_WORKER_ENABLED) {
       this.logger.warn(
         { scanner: this.scanner.name },
@@ -96,16 +109,18 @@ export class ScanWorker {
       return;
     }
 
-    this.stopped = false;
+    this.polling = true;
+    this.shuttingDown = false;
     this.timer = setInterval(() => {
-      if (this.stopped) return;
+      if (this.shuttingDown) return;
       void this.tick();
     }, this.env.DOCUMENT_SCAN_POLL_INTERVAL_MS);
     this.timer.unref?.();
   }
 
   async stop(): Promise<void> {
-    this.stopped = true;
+    this.shuttingDown = true;
+    this.polling = false;
     if (this.timer) clearInterval(this.timer);
     // Let an in-flight batch finish rather than abandoning leases mid-scan.
     while (this.running) {
@@ -133,7 +148,7 @@ export class ScanWorker {
       });
 
       for (const document of batch) {
-        if (this.stopped) {
+        if (this.shuttingDown) {
           // Shutting down. Put the rest back rather than holding leases until
           // they expire, so a rolling deploy does not pause the queue.
           await this.scans.releaseIfHeld(document.id, this.owner);
@@ -305,8 +320,8 @@ export class ScanWorker {
         owner: this.owner,
         scanState,
         engine: result.engine,
-        engineVersion: result.engineVersion,
-        signatureVersion: result.signatureVersion,
+        engineVersion: result.engineVersion ?? null,
+        signatureVersion: result.signatureVersion ?? null,
         signature,
         failureReason,
         // Written with the verdict, never after it. The database refuses an
@@ -334,19 +349,28 @@ export class ScanWorker {
           documentClass: document.documentClass,
           scanState,
           engine: result.engine,
-          engineVersion: result.engineVersion,
-          signatureVersion: result.signatureVersion,
+          // `?? null` rather than passed through. The published contract makes
+          // these nullable, so "absent" and "null" mean the same thing — but
+          // Zod distinguishes them, and an implementation of the port that
+          // simply omitted an optional field would fail validation inside the
+          // transaction and take the whole tick down with it. A scanner is
+          // external code from this boundary's point of view; a field it left
+          // out should degrade to a recorded verdict, not to a stalled queue.
+          engineVersion: result.engineVersion ?? null,
+          signatureVersion: result.signatureVersion ?? null,
           failureReason,
           scannedAt: result.scannedAt.toISOString(),
         },
       });
 
       if (decision.kind === 'INFECTED') {
-        // Only a scanner that genuinely inspected content can conclude this.
-        // The guard is explicit rather than implied by which class is bound,
-        // because a fabricated security finding is worse than silence:
-        // notification-service treats this event as critical and somebody acts
-        // on it.
+        // `decideTransition` has already refused an infection reported by a
+        // scanner that inspects nothing, so by construction only a real
+        // finding reaches here. The assertion stays as the last thing between
+        // a fabricated security finding and a topic notification-service
+        // treats as critical — but it is deliberately not where the rule
+        // lives: a throw inside this transaction rolls back the batch and
+        // parks the document, which is why the decision was moved up.
         if (!this.scanner.inspectsContent) {
           throw new Error('An infection was reported by a scanner that inspects nothing');
         }
@@ -359,7 +383,7 @@ export class ScanWorker {
             documentId: document.id,
             organizationId: document.organizationId,
             engine: result.engine,
-            engineVersion: result.engineVersion,
+            engineVersion: result.engineVersion ?? null,
             signature: decision.signature,
             detectedAt: result.scannedAt.toISOString(),
           },
