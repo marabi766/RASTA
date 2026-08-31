@@ -564,11 +564,12 @@ describe('document lifecycle (real database and object storage)', () => {
       expect(document.scanState).toBe('NOT_SCANNED');
 
       const error = await asOrgA(() => wiring.documents.createDownloadUrl(document.id)).catch(
-        (caught: unknown) => caught as { code?: string; details?: { reason?: string } },
+        (caught: unknown) => caught as { code?: string; internalContext?: { reason?: string } },
       );
 
       expect(error.code).toBe('BUSINESS_RULE_VIOLATION');
-      expect(error.details?.reason).toBe('NOT_SCANNED');
+      // The reason reaches the log, never the response body.
+      expect(error.internalContext?.reason).toBe('NOT_SCANNED');
     });
 
     it('issues no signed URL at all when it refuses', async () => {
