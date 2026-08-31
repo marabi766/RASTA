@@ -603,9 +603,32 @@ describe('the document API (real application, real database, real object storage
       expect(response.body.status).toBeDefined();
     });
 
+    it('answers the startup probe once the database is reachable', async () => {
+      const response = await http(mvp).get('/health/startup').expect(200);
+      expect(response.body).toMatchObject({ status: 'ok', checks: { database: true } });
+    });
+
+    it('identifies the build without carrying business data', async () => {
+      // Reachable without a token, so it must say what it is and nothing else.
+      const response = await http(mvp).get('/health/version').expect(200);
+
+      expect(response.body.service).toBe('document-service');
+      expect(response.body.node).toMatch(/^v\d+/);
+      expect(JSON.stringify(response.body)).not.toMatch(/postgres|password|rasta_minio/i);
+    });
+
     it('exposes metrics for scraping', async () => {
       const response = await http(mvp).get('/metrics').expect(200);
       expect(response.text).toContain('document');
+    });
+
+    it('leaves the probes reachable without a token, and nothing else', async () => {
+      // S-02: open must be explicit. These four carry a stated `@Public`
+      // reason; every business endpoint answers 401.
+      for (const path of ['/health/live', '/health/ready', '/health/startup', '/health/version']) {
+        await http(mvp).get(path).expect(200);
+      }
+      await http(mvp).get('/v1/documents').expect(401);
     });
   });
 });
