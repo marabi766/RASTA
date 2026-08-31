@@ -84,10 +84,21 @@ export class GatewayController {
   ): Promise<void> {
     const context = getContext();
 
-    const rule = route.rateLimit ?? {
+    const platformDefault = {
       limit: this.env.GATEWAY_RATE_LIMIT_MAX,
       windowSeconds: Math.ceil(this.env.GATEWAY_RATE_LIMIT_WINDOW_MS / 1000),
     };
+
+    // A route override marked `unsafeMethodsOnly` caps the operations that
+    // create work and leaves reads on the platform default. `docs/06` § 6.9
+    // limits operations — twenty document *uploads* an hour — while the
+    // routing table matches on a prefix, so applying such a cap to GET as well
+    // would lock a user out of their own listing screen for an hour.
+    const override = route.rateLimit;
+    const rule =
+      override && !(override.unsafeMethodsOnly && isSafeMethod(request.method))
+        ? override
+        : platformDefault;
 
     // Anonymous traffic is limited by IP; there is no better identifier, and
     // this is the one surface reachable without a token.
@@ -137,7 +148,7 @@ export class GatewayController {
 
   private enforceIdempotencyKey(request: Request, route: RouteRule): void {
     if (!route.requiresIdempotencyKey) return;
-    if (['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase())) return;
+    if (isSafeMethod(request.method)) return;
 
     const key = request.headers['idempotency-key'];
     if (typeof key !== 'string' || key.trim().length === 0) {
@@ -172,4 +183,14 @@ export class GatewayController {
     const index = request.originalUrl.indexOf('?');
     return index === -1 ? '' : request.originalUrl.slice(index);
   }
+}
+
+/**
+ * Whether a method only reads.
+ *
+ * One definition, used by both the idempotency requirement and the rate-limit
+ * scoping, so the two cannot drift into disagreeing about what a write is.
+ */
+function isSafeMethod(method: string): boolean {
+  return ['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase());
 }

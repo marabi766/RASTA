@@ -66,6 +66,40 @@ describe('routing table integrity', () => {
     }
   });
 
+  it('routes the document prefix to document-service', () => {
+    const route = ROUTES.find((r) => r.prefix === 'documents');
+    expect(route?.service).toBe('document');
+  });
+
+  it('caps document writes at the documented twenty an hour', () => {
+    // `docs/06` § 6.9: «آپلود سند — ۲۰ فایل — ۱ ساعت». The cap is on the
+    // operations that put a file in the bucket, not on the prefix as a whole.
+    const route = ROUTES.find((r) => r.prefix === 'documents');
+    expect(route?.rateLimit).toEqual({ limit: 20, windowSeconds: 3600, unsafeMethodsOnly: true });
+  });
+
+  it('does not let the document upload cap throttle reading documents', () => {
+    // The defect this guards: a twenty-an-hour cap applied to GET as well
+    // would lock a user out of their own document list after one screen, and
+    // would look like an outage rather than a limit.
+    const route = ROUTES.find((r) => r.prefix === 'documents');
+    expect(route?.rateLimit?.unsafeMethodsOnly).toBe(true);
+  });
+
+  it('does not require an idempotency key on documents', () => {
+    // Nothing here moves money, and registration is already idempotent by
+    // upload intent: replaying it returns the same document. Demanding a
+    // header as well would be ceremony that teaches clients to send
+    // meaningless keys (docs/06 § 6.8).
+    expect(ROUTES.find((r) => r.prefix === 'documents')?.requiresIdempotencyKey).toBeUndefined();
+  });
+
+  it('does not open documents to an unauthenticated caller', () => {
+    // A document store holds other organizations' contracts and licences.
+    // There is no version of this prefix that should be public.
+    expect(ROUTES.find((r) => r.prefix === 'documents')?.publicReason).toBeUndefined();
+  });
+
   it('never routes AUDITOR to a row-level economic prefix', () => {
     // CONSTRAINT (product document, ch. 4): province oversight is aggregate
     // only. No route may hand AUDITOR individual transactions.
@@ -136,6 +170,21 @@ describe('resolveRoute', () => {
     for (const path of ['/orders', '/products', '/offers']) {
       expect(resolveRoute(path)?.roles ?? []).not.toContain('AUDITOR');
     }
+  });
+
+  it.each([
+    ['/documents', 'document'],
+    ['/documents/upload-url', 'document'],
+    ['/documents/DOC_01JBQ8/download-url', 'document'],
+  ])('routes %s to %s', (path, service) => {
+    expect(resolveRoute(path)?.service).toBe(service);
+  });
+
+  it('gives the oversight role no document prefix at all', () => {
+    // `docs/09` § 9.3: aggregate access only. An auditor who could reach
+    // documents could read every contract on the platform — refused here, at
+    // the controller's `@Roles`, and again in document-service's `access.ts`.
+    expect(resolveRoute('/documents')?.roles ?? []).not.toContain('AUDITOR');
   });
 
   it('keeps usage records with fleet, not with the asset they describe', () => {
