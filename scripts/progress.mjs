@@ -23,7 +23,7 @@ if (errors.length > 0) {
   fail(`Backlog validation failed (${errors.length}):\n- ${errors.join('\n- ')}`);
 } else if (command === 'validate') {
   process.stdout.write(
-    `Backlog valid: ${backlog.items.length} items, ${backlog.epics.length} epics.\n`,
+    `Backlog valid: ${backlog.items.length} features, ${backlog.stories.length} stories, ${backlog.epics.length} epics.\n`,
   );
 } else if (command === 'write') {
   await writeFile(reportPath, renderProgressReport(backlog), 'utf8');

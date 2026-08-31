@@ -1,6 +1,6 @@
 {
   "$schema": "./backlog.schema.json",
-  "version": 1,
+  "version": 2,
   "project": "RASTA",
   "asOf": "2026-08-31",
   "governance": {
@@ -439,33 +439,7 @@
       ],
       "dependencies": ["PLAT-003"],
       "sourceRefs": ["docs/04-service-decomposition.md#document-service-p0"],
-      "evidence": [
-        {
-          "kind": "COMMIT",
-          "ref": "feat/document-service",
-          "note": "Service, Prisma schema and reversible migration, S3 storage port, magic-number content policy, object-level access control, outbox events and the HTTP surface. Not yet merged; acceptance is the product owner call after review."
-        },
-        {
-          "kind": "TEST",
-          "ref": "pnpm --filter @rasta/document-service run test:coverage",
-          "note": "218 tests across 12 suites (122 unit, 96 integration); 88.70% statements, 79.75% branches, 84.56% functions, 90.00% lines against the documented 75% band, measured over both the unit and integration projects with a real PostgreSQL and a real MinIO."
-        },
-        {
-          "kind": "TEST",
-          "ref": "pnpm exec playwright test --project=document-api",
-          "note": "10 end-to-end scenarios green against a running stack: Keycloak token, api-gateway, document-service, PostgreSQL, MinIO and Kafka, with the file uploaded straight to object storage over a signed URL."
-        },
-        {
-          "kind": "TEST",
-          "ref": "node scripts/verify-migration-reversible.mjs document",
-          "note": "up to down to up against a throwaway schema in 14.2s, asserting the four tables and the seven invariant-carrying CHECK constraints are present, gone, and back."
-        },
-        {
-          "kind": "DOCUMENT",
-          "ref": "docs/24-open-questions.md#q-18",
-          "note": "Downloads are fail-closed until a real scanning provider is configured. Uploads and metadata registration work in MVP; the honest stub records NOT_SCANNED and only a CLEAN verdict authorizes download. This is an accepted limitation, not an unmet acceptance criterion, and it must be reviewed before the item is accepted."
-        }
-      ]
+      "evidence": []
     },
     {
       "id": "COM-005",
@@ -980,6 +954,395 @@
       "evidence": []
     }
   ],
+  "stories": [
+    {
+      "id": "DOC-001",
+      "parentItemId": "COM-004",
+      "title": "Issue a tenant-safe direct-upload intent",
+      "userStory": {
+        "asA": "tenant user who is permitted to attach evidence",
+        "iWant": "a short-lived URL for a direct upload to private object storage",
+        "soThat": "large files never pass through the application service or its database"
+      },
+      "points": 3,
+      "status": "IN_PROGRESS",
+      "acceptanceCriteria": [
+        {
+          "given": "an authenticated tenant user declares an allowed document class, content type and size",
+          "when": "the user requests an upload URL",
+          "then": "the service creates a tenant-scoped intent with a server-generated opaque key and returns a bounded short-lived signed PUT URL"
+        },
+        {
+          "given": "the request is unauthenticated, outside policy or attempts to supply an object key",
+          "when": "an upload intent is requested",
+          "then": "the request is refused without creating an intent or exposing storage credentials"
+        }
+      ],
+      "dependencies": ["PLAT-003"],
+      "sourceRefs": [
+        "docs/adr/ADR-014-object-storage.md",
+        "docs/11-infrastructure-architecture.md#۱۱۷-object-storage"
+      ],
+      "evidence": [
+        {
+          "kind": "COMMIT",
+          "ref": "c7962fb",
+          "note": "Scaffolds the service with a tenant-scoped UploadIntent, an S3 storage port and a server-generated opaque object key. The client never supplies or influences the storage path; src/storage/object-key.ts derives it, and the documents bucket is private with no anonymous policy."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "f09daff",
+          "note": "Binds the signed PUT URL to the declared Content-Type so the signature genuinely covers it. Before this fix the type was advisory and a URL issued for one type could be replayed for another."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'the signed URLs themselves'",
+          "note": "storage-and-outbox.int-spec.ts against a real MinIO: 'signs an upload URL to one content type, so it cannot be reused for another', 'refuses a URL whose expiry has passed' and 'never puts the secret key in the URL'. The URL is bounded, short-lived and genuinely type-bound."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'redeeming an upload intent'",
+          "note": "document-lifecycle.int-spec.ts: 'writes an object key the client never chose', 'cannot be redeemed by another organization' and 'refuses an expired intent and records the expiry'. Key substitution and cross-tenant redemption are both refused."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'what the boundary refuses'",
+          "note": "api-document.int-spec.ts: 'refuses an unknown document class', 'refuses a content type the class does not permit' and 'refuses an unknown field rather than dropping it'. The companion case 'refuses a declared size the class does not permit, before issuing anything' proves an out-of-policy request creates no intent."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:unit",
+          "note": "object-key.spec.ts proves the object key is server-generated and opaque, carrying no caller-supplied path segment. 122 unit tests pass."
+        },
+        {
+          "kind": "RUNTIME",
+          "ref": "pnpm exec playwright test --project=document-api",
+          "note": "E2E scenario 'carries the file to storage without it passing through the platform': the bytes travel straight from the client to MinIO over the signed URL, so the file never transits document-service or PostgreSQL. 'refuses an unauthenticated caller and the oversight role' covers the closed-by-default path. 10/10 green on 2026-08-31."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/14",
+          "note": "Pull request carrying the implementation; the reviewable diff for this story."
+        }
+      ]
+    },
+    {
+      "id": "DOC-002",
+      "parentItemId": "COM-004",
+      "title": "Finalize and validate a directly uploaded object",
+      "userStory": {
+        "asA": "tenant user who completed a direct upload",
+        "iWant": "the platform to verify and register the uploaded object",
+        "soThat": "document metadata refers only to the expected file and its real content"
+      },
+      "points": 3,
+      "status": "IN_PROGRESS",
+      "acceptanceCriteria": [
+        {
+          "given": "the expected object was uploaded for an active intent",
+          "when": "the user finalizes the document",
+          "then": "the service verifies object ownership, size and magic-number content type, persists tenant-scoped metadata and publishes DOCUMENT_UPLOADED through the transactional outbox"
+        },
+        {
+          "given": "the object is missing, empty, oversized, expired, substituted or has a declared and detected type mismatch",
+          "when": "finalization is attempted",
+          "then": "the service refuses registration and does not publish a successful upload fact"
+        }
+      ],
+      "dependencies": ["DOC-001"],
+      "sourceRefs": [
+        "docs/adr/ADR-014-object-storage.md",
+        "docs/04-service-decomposition.md#document-service-p0"
+      ],
+      "evidence": [
+        {
+          "kind": "COMMIT",
+          "ref": "c7962fb",
+          "note": "Adds finalization with magic-number content inspection (src/content/magic-number.ts, src/content/policy.ts), object-existence and intent-ownership verification, tenant-scoped metadata persistence, and an outbox row written inside the same transaction as the document."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "ec15ca1",
+          "note": "Exercises the HTTP surface through the real Nest application rather than a hand-built harness, so finalization is proven through the composition a deployment actually gets."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'what the bytes actually are'",
+          "note": "document-lifecycle.int-spec.ts against real PostgreSQL and real MinIO: 'refuses an HTML page uploaded as a PDF', 'refuses an executable whatever it is called', 'refuses a real file of the wrong type for its class', 'refuses an empty object' and 'refuses to finalize when nothing was uploaded at all'. Declared-versus-detected MIME mismatch and empty objects are refused on real content, not on the client's word."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'issues a URL, accepts a real upload, and registers what was actually stored'",
+          "note": "The happy path verifies the object exists and persists tenant-scoped metadata. 'returns the size storage actually holds, not what anyone declared' in storage-and-outbox.int-spec.ts proves the size is read back from the bucket rather than trusted from the request."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'registering twice'",
+          "note": "api-document.int-spec.ts: 'returns the same document rather than creating a second' and 'writes the outbox row inside the same transaction as the document'. DOCUMENT_UPLOADED is transactional, and 'publishes the upload event exactly once across a replay' proves no duplicate fact."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'cannot be redeemed by another organization'",
+          "note": "Object-key substitution and cross-tenant intent redemption are refused, so a rejected finalization never publishes a successful upload event."
+        },
+        {
+          "kind": "RUNTIME",
+          "ref": "pnpm exec playwright test --project=document-api",
+          "note": "E2E 'publishes DOCUMENT_UPLOADED carrying the honest scan state' reads the real Kafka topic, and 'refuses content that is not what the client declared' proves the mismatch refusal end to end through the gateway."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/14",
+          "note": "Pull request carrying the implementation; the reviewable diff for this story."
+        }
+      ]
+    },
+    {
+      "id": "DOC-003",
+      "parentItemId": "COM-004",
+      "title": "Authorize safe document metadata and download access",
+      "userStory": {
+        "asA": "user authorized for a specific document",
+        "iWant": "to read its metadata and obtain a short-lived download URL when it is clean",
+        "soThat": "private evidence is available without weakening tenant or object-level access"
+      },
+      "points": 3,
+      "status": "IN_PROGRESS",
+      "acceptanceCriteria": [
+        {
+          "given": "a clean active document and an authorized caller in its tenant",
+          "when": "metadata or a download URL is requested",
+          "then": "the service returns only authorized metadata or a bounded signed GET URL for that object"
+        },
+        {
+          "given": "a cross-tenant caller or a pending, not-scanned, infected, quarantined or deleted document",
+          "when": "metadata or download access is requested",
+          "then": "object-level authorization and the fail-closed scan policy refuse access without revealing storage details"
+        }
+      ],
+      "dependencies": ["DOC-002"],
+      "sourceRefs": [
+        "docs/adr/ADR-014-object-storage.md",
+        "docs/09-security-architecture.md",
+        "docs/24-open-questions.md#q-18-سرویس-اسکن-بدافزار"
+      ],
+      "evidence": [
+        {
+          "kind": "COMMIT",
+          "ref": "0273a6b",
+          "note": "Makes download fail-closed: only a genuine CLEAN verdict authorizes a signed GET URL. src/document/download-policy.ts refuses PENDING, NOT_SCANNED, INFECTED, FAILED, QUARANTINED and DELETED, and storage is never asked to sign a URL for a refused state."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "cb8d435",
+          "note": "Corrects the OpenAPI document so the download-URL endpoint publishes the HTTP success status it actually returns, instead of one it never emits."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'the application a deployment gets today'",
+          "note": "api-document.int-spec.ts on the production composition: 'composes the honest stub, which inspects nothing' (the MVP NoOpMalwareScanner reports NOT_SCANNED), 'refuses the download, because no scan cleared it' with HTTP 422, and 'leaks nothing about storage in the refusal'. 'still lists and reads the document it will not hand over' shows metadata stays available while the bytes do not."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'when a download is refused'",
+          "note": "document-lifecycle.int-spec.ts: 'refuses while the scan is pending, and issues no URL at all', 'refuses an infected document', 'refuses a deleted document as absent', 'refuses a document nothing inspected - which is every document in MVP' and 'issues no signed URL at all when it refuses'. Every non-CLEAN state is fail-closed."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'when a scanner has cleared the document'",
+          "note": "With the test-only AlwaysCleanScanner: 'issues a signed URL that returns the exact bytes' - the downloaded bytes match the upload exactly - plus 'serves it as an attachment, never as something a browser renders' and 'refuses once the document is deleted, and calls it absent'."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'tenant isolation'",
+          "note": "Cross-tenant and object-level authorization: 'reports another organization document as absent, not forbidden', 'does not issue a download URL to another organization', 'does not let another organization delete it', 'lists only the caller organization documents', 'refuses the oversight role outright', 'refuses a role with no business handling documents' and 'is not callable by another service at all, valid token or not'."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'the events this service publishes'",
+          "note": "'never publishes VIRUS_DETECTED from a scanner that inspects nothing' and 'publishes VIRUS_DETECTED when an engine that really inspected content finds one'. The infected fact is emitted only for a genuine result from a content-inspecting provider."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md#q-18-سرویس-اسکن-بدافزار",
+          "note": "Q-18 remains open: no scanning provider is selected, and neither ClamAV nor any cloud vendor is claimed. The MVP composes the honest NoOpMalwareScanner, so downloads are refused by default. AlwaysCleanScanner lives only under test/ and is excluded from the production build - verified as zero occurrences of AlwaysCleanScanner in services/document-service/dist."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/14",
+          "note": "Pull request carrying the implementation; the reviewable diff for this story."
+        }
+      ]
+    },
+    {
+      "id": "DOC-004",
+      "parentItemId": "COM-004",
+      "title": "Delete a document without erasing its audit trail",
+      "userStory": {
+        "asA": "tenant user authorized to remove a document",
+        "iWant": "to delete it with an explicit reason",
+        "soThat": "access ends while the platform retains factual audit evidence"
+      },
+      "points": 2,
+      "status": "IN_PROGRESS",
+      "acceptanceCriteria": [
+        {
+          "given": "an active tenant-owned document and an authorized caller with a reason",
+          "when": "deletion is requested",
+          "then": "the service records the actor, reason and time, prevents further download and publishes DOCUMENT_DELETED through the transactional outbox"
+        },
+        {
+          "given": "the same authorized deletion is retried",
+          "when": "the idempotent operation is repeated",
+          "then": "no second domain effect or contradictory audit fact is produced"
+        }
+      ],
+      "dependencies": ["DOC-002"],
+      "sourceRefs": [
+        "docs/04-service-decomposition.md#document-service-p0",
+        "docs/events/README.md"
+      ],
+      "evidence": [
+        {
+          "kind": "COMMIT",
+          "ref": "fe38b22",
+          "note": "Fixes the API Gateway so a DELETE request body is forwarded downstream instead of being silently dropped. Without it the caller's stated deletion reason never reached document-service."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "42fba7e",
+          "note": "Reads the includeDeleted query flag as written, so a tombstone is excluded from the default listing while the record itself is retained."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/api-gateway test",
+          "note": "proxy.service.spec.ts regression tests protecting the fix: 'forwards a DELETE body when the caller sent one' and 'sends no body on a DELETE that had none' - a plain DELETE stays a plain DELETE."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'deleting a document'",
+          "note": "document-lifecycle.int-spec.ts: 'records who, when and why rather than erasing the row' (actor, reason and timestamp), 'removes the object from storage', 'is idempotent, and does not overwrite the original actor or reason', 'publishes exactly one deletion event across repeated calls' and 'excludes a deleted document from the default listing'. DOCUMENT_DELETED goes through the transactional outbox and a repeat produces no second domain effect."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'refuses a deletion with no stated reason'",
+          "note": "api-document.int-spec.ts refuses a deletion that states no reason, 'refuses once the document is deleted, and calls it absent' proves it is no longer downloadable, and 'does not let another organization delete it' holds the tenant boundary on the destructive path."
+        },
+        {
+          "kind": "TEST",
+          "ref": "node scripts/verify-migration-reversible.mjs document",
+          "note": "ck_document_deleted_has_actor is one of the seven invariant-carrying CHECK constraints verified through up to down to up: a deletion with no recorded actor cannot exist at the database level."
+        },
+        {
+          "kind": "RUNTIME",
+          "ref": "pnpm exec playwright test --project=document-api",
+          "note": "E2E through the real gateway: 'records a deletion as a tombstone and reports it as absent afterwards' and 'excludes the tombstone from the default listing but keeps the record'. This exercises the DELETE-body forwarding fix end to end."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/14",
+          "note": "Pull request carrying the implementation; the reviewable diff for this story."
+        }
+      ]
+    },
+    {
+      "id": "DOC-005",
+      "parentItemId": "COM-004",
+      "title": "Operate and verify the Document Service boundary",
+      "userStory": {
+        "asA": "platform operator",
+        "iWant": "the Document Service, private object storage and gateway route to be observable and repeatably deployable",
+        "soThat": "document flows can be operated and verified without hidden infrastructure steps"
+      },
+      "points": 2,
+      "status": "IN_PROGRESS",
+      "acceptanceCriteria": [
+        {
+          "given": "the documented local or CI environment is started",
+          "when": "health, migration and end-to-end document checks run",
+          "then": "PostgreSQL, private MinIO buckets, gateway routing, service telemetry and the direct-upload lifecycle are reproducible with no real secrets"
+        },
+        {
+          "given": "the implementation is proposed for merge",
+          "when": "repository quality and security gates run",
+          "then": "reversible migrations, meaningful branch coverage, API and event contracts, image build and required security scans pass"
+        }
+      ],
+      "dependencies": ["DOC-001"],
+      "sourceRefs": [
+        "docs/11-infrastructure-architecture.md#۱۱۷-object-storage",
+        "docs/14-testing-strategy.md",
+        "AGENTS.md"
+      ],
+      "evidence": [
+        {
+          "kind": "COMMIT",
+          "ref": "1223c97",
+          "note": "Gives the CI pipeline a private MinIO bucket with deterministic setup, a dedicated PostgreSQL database and the coverage gate, so the document jobs run against real infrastructure rather than mocks."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "86e136d",
+          "note": "Puts the service on the coverage gate documented in docs/14 section 14.2 - 75% statements, branches, functions and lines - measured across both the unit and integration projects, with collectCoverageFrom anchored at the package root so no domain file is silently excluded."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "92f5d22",
+          "note": "Scopes the twenty-per-hour document upload cap (docs/06 section 6.9) to unsafe methods only, so listing and reading metadata run on the platform default and one screen of documents cannot lock a user out for an hour."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "bb51be3",
+          "note": "Adds the document-api Playwright project proving the direct-upload lifecycle against a running stack: Keycloak, api-gateway, document-service, PostgreSQL, MinIO and Kafka."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "7b044f2",
+          "note": "Adds a boolean environment parser that reads \"false\" correctly, so a flag explicitly disabled in configuration is not silently treated as enabled."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:coverage",
+          "note": "218 tests across 12 suites (122 unit, 96 integration), all passing against a real PostgreSQL and a real MinIO. Coverage 88.70% statements, 79.75% branches, 84.56% functions, 90.00% lines against the documented 75% gate on all four metrics. Measured 2026-08-31."
+        },
+        {
+          "kind": "TEST",
+          "ref": "node scripts/verify-migration-reversible.mjs document",
+          "note": "Reversible migration proven up to down to up against a throwaway schema: the four tables (upload_intent, document, access_grant, outbox_message) and seven critical invariant-carrying CHECK constraints are present, gone, and back. The migration defines 10 named domain ck_* CHECK constraints in total; the harness verifies the seven that carry the invariants."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/api-gateway test",
+          "note": "rate-limit-scope.spec.ts: the upload cap 'applies to a write', 'applies to a deletion', 'does not apply to a read' and 'does not apply to a HEAD or an OPTIONS either'. Reads do not consume the upload budget."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'the probes an orchestrator uses'",
+          "note": "Health and readiness against the real database: liveness without a token, readiness, the startup probe, a build identifier carrying no business data, metrics exposed for scraping, and 'leaves the probes reachable without a token, and nothing else'."
+        },
+        {
+          "kind": "RUNTIME",
+          "ref": "pnpm exec playwright test",
+          "note": "Full E2E suite green on 2026-08-31: 74/74 passing across economic-api, marketplace-api and document-api against the running stack, the document project contributing 10 scenarios. Gateway routing, the private bucket, the Kafka topic and service telemetry are all exercised with no real secrets."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/pull/14/checks",
+          "note": "Pipeline results for this branch: workspace integration, the document database and private bucket, the coverage gate, the reversible-migration check, the image build and the required security scans."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/25-progress-governance.md",
+          "note": "Operability and delivery evidence is recorded under the version-2 governance model; the service earns no Story Points until the product owner accepts it."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/14",
+          "note": "Pull request carrying the implementation; the reviewable diff for this story."
+        }
+      ]
+    }
+  ],
   "changeLog": [
     {
       "date": "2026-08-30",
@@ -997,10 +1360,11 @@
     },
     {
       "date": "2026-08-31",
-      "type": "STATUS_CHANGED",
-      "reason": "COM-004 moved from READY to IN_PROGRESS. The document service, its storage flows and its gates are implemented and green on a branch; it earns no points until the product owner accepts it, and acceptance must weigh the Q-18 limitation that downloads stay fail-closed until a scanning provider is chosen.",
-      "recordedBy": "Claude",
-      "approvalRef": null
+      "type": "ITEM_DECOMPOSED",
+      "reason": "Introduce a first-class User Story layer and decompose COM-004 into five independently acceptable stories without changing its approved 13-point estimate or product scope.",
+      "recordedBy": "Codex",
+      "approvalRef": "Product owner instruction in the Codex project-management task on 2026-08-31",
+      "recordIds": ["COM-004", "DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-005"]
     }
   ]
 }

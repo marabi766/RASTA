@@ -8,6 +8,16 @@ const VALID_STATUSES = new Set([
   'ACCEPTED',
   'CANCELLED',
 ]);
+const VALID_EVIDENCE_KINDS = new Set(['COMMIT', 'PR', 'CI', 'TEST', 'RUNTIME', 'DOCUMENT']);
+const VALID_CHANGE_TYPES = new Set([
+  'BASELINE_CREATED',
+  'SCOPE_ADDED',
+  'SCOPE_REMOVED',
+  'POINTS_CHANGED',
+  'STATUS_CORRECTED',
+  'BASELINE_APPROVED',
+  'ITEM_DECOMPOSED',
+]);
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0;
@@ -27,7 +37,7 @@ function uniqueErrors(values, label) {
   return errors;
 }
 
-function findDependencyCycles(itemsById) {
+function findDependencyCycles(recordsById) {
   const errors = [];
   const visiting = new Set();
   const visited = new Set();
@@ -41,14 +51,45 @@ function findDependencyCycles(itemsById) {
     if (visited.has(id)) return;
 
     visiting.add(id);
-    const item = itemsById.get(id);
-    for (const dependency of item?.dependencies ?? []) visit(dependency, [...path, id]);
+    const record = recordsById.get(id);
+    for (const dependency of record?.dependencies ?? []) visit(dependency, [...path, id]);
     visiting.delete(id);
     visited.add(id);
   }
 
-  for (const id of itemsById.keys()) visit(id, []);
+  for (const id of recordsById.keys()) visit(id, []);
   return [...new Set(errors)];
+}
+
+function validateEvidence(record, label, errors) {
+  if (!Array.isArray(record.evidence)) {
+    errors.push(`${label} evidence must be an array`);
+    return;
+  }
+  if (record.status === 'ACCEPTED' && record.evidence.length === 0) {
+    errors.push(`${label} is ACCEPTED but has no evidence`);
+  }
+  for (const evidence of record.evidence) {
+    if (!VALID_EVIDENCE_KINDS.has(evidence.kind)) {
+      errors.push(`${label} has invalid evidence kind`);
+    }
+    if (!isNonEmptyString(evidence.ref) || !isNonEmptyString(evidence.note)) {
+      errors.push(`${label} has incomplete evidence`);
+    }
+  }
+}
+
+function validateReferences(record, label, errors) {
+  if (
+    !Array.isArray(record.sourceRefs) ||
+    record.sourceRefs.length === 0 ||
+    record.sourceRefs.some((ref) => !isNonEmptyString(ref))
+  ) {
+    errors.push(`${label} requires at least one source reference`);
+  }
+  if (!Array.isArray(record.dependencies)) {
+    errors.push(`${label} dependencies must be an array`);
+  }
 }
 
 export function validateBacklog(backlog) {
@@ -57,7 +98,7 @@ export function validateBacklog(backlog) {
     return ['backlog must be an object'];
   }
 
-  if (backlog.version !== 1) errors.push('version must be 1');
+  if (backlog.version !== 2) errors.push('version must be 2');
   if (backlog.project !== 'RASTA') errors.push("project must be 'RASTA'");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(backlog.asOf ?? '')) errors.push('asOf must be YYYY-MM-DD');
 
@@ -82,14 +123,17 @@ export function validateBacklog(backlog) {
   }
 
   const epics = Array.isArray(backlog.epics) ? backlog.epics : [];
-  const items = Array.isArray(backlog.items) ? backlog.items : [];
+  const features = Array.isArray(backlog.items) ? backlog.items : [];
+  const stories = Array.isArray(backlog.stories) ? backlog.stories : [];
   const iterations = Array.isArray(backlog.iterations) ? backlog.iterations : [];
   const changeLog = Array.isArray(backlog.changeLog) ? backlog.changeLog : [];
   if (!Array.isArray(backlog.epics)) errors.push('epics must be an array');
   if (!Array.isArray(backlog.items)) errors.push('items must be an array');
+  if (!Array.isArray(backlog.stories)) errors.push('stories must be an array');
   if (!Array.isArray(backlog.iterations)) errors.push('iterations must be an array');
-  if (!Array.isArray(backlog.changeLog) || changeLog.length === 0)
+  if (!Array.isArray(backlog.changeLog) || changeLog.length === 0) {
     errors.push('changeLog must be a non-empty array');
+  }
 
   errors.push(
     ...uniqueErrors(
@@ -99,8 +143,20 @@ export function validateBacklog(backlog) {
   );
   errors.push(
     ...uniqueErrors(
-      items.map((item) => item.id),
-      'item id',
+      features.map((feature) => feature.id),
+      'feature id',
+    ),
+  );
+  errors.push(
+    ...uniqueErrors(
+      stories.map((story) => story.id),
+      'story id',
+    ),
+  );
+  errors.push(
+    ...uniqueErrors(
+      [...features.map((feature) => feature.id), ...stories.map((story) => story.id)],
+      'backlog record id',
     ),
   );
   errors.push(
@@ -111,7 +167,17 @@ export function validateBacklog(backlog) {
   );
 
   const epicsById = new Map(epics.map((epic) => [epic.id, epic]));
-  const itemsById = new Map(items.map((item) => [item.id, item]));
+  const featuresById = new Map(features.map((feature) => [feature.id, feature]));
+  const storiesByParent = new Map();
+  for (const story of stories) {
+    const siblings = storiesByParent.get(story.parentItemId) ?? [];
+    siblings.push(story);
+    storiesByParent.set(story.parentItemId, siblings);
+  }
+  const recordsById = new Map([
+    ...features.map((feature) => [feature.id, feature]),
+    ...stories.map((story) => [story.id, story]),
+  ]);
   const iterationsById = new Map(iterations.map((iteration) => [iteration.id, iteration]));
   const scale = new Set(governance.pointScale ?? []);
 
@@ -123,10 +189,12 @@ export function validateBacklog(backlog) {
   }
 
   for (const iteration of iterations) {
-    if (!/^IT-[A-Z0-9-]+$/.test(iteration.id ?? ''))
+    if (!/^IT-[A-Z0-9-]+$/.test(iteration.id ?? '')) {
       errors.push(`iteration '${iteration.id}' has an invalid id`);
-    if (!['PLANNED', 'ACTIVE', 'CLOSED'].includes(iteration.status))
+    }
+    if (!['PLANNED', 'ACTIVE', 'CLOSED'].includes(iteration.status)) {
       errors.push(`iteration '${iteration.id}' has an invalid status`);
+    }
     if (
       !/^\d{4}-\d{2}-\d{2}$/.test(iteration.startDate ?? '') ||
       !/^\d{4}-\d{2}-\d{2}$/.test(iteration.endDate ?? '')
@@ -137,86 +205,194 @@ export function validateBacklog(backlog) {
     }
   }
 
-  for (const item of items) {
-    const label = `item '${item.id}'`;
-    if (!/^[A-Z]+-[0-9]{3}$/.test(item.id ?? '')) errors.push(`${label} has an invalid id`);
-    if (!isNonEmptyString(item.title)) errors.push(`${label} requires a title`);
-    if (!VALID_SCOPES.has(item.scope)) errors.push(`${label} has an invalid scope`);
-    if (!VALID_PRIORITIES.has(item.priority)) errors.push(`${label} has an invalid priority`);
-    if (!VALID_STATUSES.has(item.status)) errors.push(`${label} has an invalid status`);
-    if (!scale.has(item.points))
+  for (const feature of features) {
+    const label = `feature '${feature.id}'`;
+    if (!/^[A-Z]+-[0-9]{3}$/.test(feature.id ?? '')) errors.push(`${label} has an invalid id`);
+    if (!isNonEmptyString(feature.title)) errors.push(`${label} requires a title`);
+    if (!VALID_SCOPES.has(feature.scope)) errors.push(`${label} has an invalid scope`);
+    if (!VALID_PRIORITIES.has(feature.priority)) errors.push(`${label} has an invalid priority`);
+    if (!VALID_STATUSES.has(feature.status)) errors.push(`${label} has an invalid status`);
+    if (!scale.has(feature.points)) {
       errors.push(`${label} points must use the configured Fibonacci scale`);
+    }
     if (
-      !Array.isArray(item.acceptanceCriteria) ||
-      item.acceptanceCriteria.length === 0 ||
-      item.acceptanceCriteria.some((criterion) => !isNonEmptyString(criterion))
+      !Array.isArray(feature.acceptanceCriteria) ||
+      feature.acceptanceCriteria.length === 0 ||
+      feature.acceptanceCriteria.some((criterion) => !isNonEmptyString(criterion))
     ) {
       errors.push(`${label} requires non-empty acceptance criteria`);
     }
-    if (
-      !Array.isArray(item.sourceRefs) ||
-      item.sourceRefs.length === 0 ||
-      item.sourceRefs.some((ref) => !isNonEmptyString(ref))
-    ) {
-      errors.push(`${label} requires at least one source reference`);
-    }
-    if (!Array.isArray(item.dependencies)) errors.push(`${label} dependencies must be an array`);
-    if (!Array.isArray(item.evidence)) errors.push(`${label} evidence must be an array`);
+    validateReferences(feature, label, errors);
+    validateEvidence(feature, label, errors);
 
-    const epic = epicsById.get(item.epicId);
-    if (!epic) errors.push(`${label} references missing epic '${item.epicId}'`);
-    else if (epic.scope !== item.scope)
+    const epic = epicsById.get(feature.epicId);
+    if (!epic) errors.push(`${label} references missing epic '${feature.epicId}'`);
+    else if (epic.scope !== feature.scope) {
       errors.push(`${label} scope does not match epic '${epic.id}'`);
+    }
 
-    if (item.scope === 'POST_MVP' && item.priority !== 'P3')
+    if (feature.scope === 'POST_MVP' && feature.priority !== 'P3') {
       errors.push(`${label} must use P3 in POST_MVP scope`);
-    if (item.scope === 'MVP' && item.priority === 'P3')
+    }
+    if (feature.scope === 'MVP' && feature.priority === 'P3') {
       errors.push(`${label} cannot use P3 in MVP scope`);
+    }
 
-    for (const dependency of item.dependencies ?? []) {
-      if (dependency === item.id) errors.push(`${label} cannot depend on itself`);
-      else if (!itemsById.has(dependency))
+    for (const dependency of feature.dependencies ?? []) {
+      if (dependency === feature.id) errors.push(`${label} cannot depend on itself`);
+      else if (!recordsById.has(dependency)) {
         errors.push(`${label} references missing dependency '${dependency}'`);
+      }
     }
-
-    if (item.targetIteration !== undefined && !iterationsById.has(item.targetIteration)) {
-      errors.push(`${label} references missing iteration '${item.targetIteration}'`);
-    }
-
-    if (item.status === 'ACCEPTED' && (item.evidence ?? []).length === 0) {
-      errors.push(`${label} is ACCEPTED but has no evidence`);
-    }
-    for (const evidence of item.evidence ?? []) {
-      if (!['COMMIT', 'PR', 'CI', 'TEST', 'RUNTIME', 'DOCUMENT'].includes(evidence.kind))
-        errors.push(`${label} has invalid evidence kind`);
-      if (!isNonEmptyString(evidence.ref) || !isNonEmptyString(evidence.note))
-        errors.push(`${label} has incomplete evidence`);
+    if (feature.targetIteration !== undefined && !iterationsById.has(feature.targetIteration)) {
+      errors.push(`${label} references missing iteration '${feature.targetIteration}'`);
     }
   }
 
-  errors.push(...findDependencyCycles(itemsById));
+  for (const story of stories) {
+    const label = `story '${story.id}'`;
+    if (!/^[A-Z]+-[0-9]{3}$/.test(story.id ?? '')) errors.push(`${label} has an invalid id`);
+    if (!isNonEmptyString(story.title)) errors.push(`${label} requires a title`);
+    if (!scale.has(story.points))
+      errors.push(`${label} points must use the configured Fibonacci scale`);
+    if (!VALID_STATUSES.has(story.status)) errors.push(`${label} has an invalid status`);
+
+    const parent = featuresById.get(story.parentItemId);
+    if (!parent) errors.push(`${label} references missing parent feature '${story.parentItemId}'`);
+
+    const userStory = story.userStory ?? {};
+    if (
+      !isNonEmptyString(userStory.asA) ||
+      !isNonEmptyString(userStory.iWant) ||
+      !isNonEmptyString(userStory.soThat)
+    ) {
+      errors.push(`${label} requires non-empty asA, iWant and soThat fields`);
+    }
+    if (
+      !Array.isArray(story.acceptanceCriteria) ||
+      story.acceptanceCriteria.length === 0 ||
+      story.acceptanceCriteria.some(
+        (scenario) =>
+          scenario === null ||
+          typeof scenario !== 'object' ||
+          !isNonEmptyString(scenario.given) ||
+          !isNonEmptyString(scenario.when) ||
+          !isNonEmptyString(scenario.then),
+      )
+    ) {
+      errors.push(`${label} requires non-empty Given/When/Then acceptance criteria`);
+    }
+    validateReferences(story, label, errors);
+    validateEvidence(story, label, errors);
+
+    for (const dependency of story.dependencies ?? []) {
+      if (dependency === story.id) errors.push(`${label} cannot depend on itself`);
+      else if (!recordsById.has(dependency)) {
+        errors.push(`${label} references missing dependency '${dependency}'`);
+      }
+    }
+    if (story.targetIteration !== undefined && !iterationsById.has(story.targetIteration)) {
+      errors.push(`${label} references missing iteration '${story.targetIteration}'`);
+    }
+  }
+
+  for (const [parentId, childStories] of storiesByParent) {
+    const parent = featuresById.get(parentId);
+    if (!parent) continue;
+
+    const childPoints = childStories.reduce((sum, story) => sum + story.points, 0);
+    if (childPoints !== parent.points) {
+      errors.push(
+        `feature '${parentId}' has ${parent.points} points but its stories total ${childPoints}`,
+      );
+    }
+
+    const activeStories = childStories.filter((story) => story.status !== 'CANCELLED');
+    if (
+      parent.status === 'ACCEPTED' &&
+      activeStories.some((story) => story.status !== 'ACCEPTED')
+    ) {
+      errors.push(`feature '${parentId}' is ACCEPTED before all active stories are ACCEPTED`);
+    }
+    if (
+      parent.status === 'CANCELLED' &&
+      childStories.some((story) => story.status !== 'CANCELLED')
+    ) {
+      errors.push(`feature '${parentId}' is CANCELLED but has an active story`);
+    }
+  }
+
+  for (const entry of changeLog) {
+    const label = `change log entry '${entry.type}' on '${entry.date}'`;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(entry.date ?? '')) {
+      errors.push(`${label} requires a YYYY-MM-DD date`);
+    }
+    if (!VALID_CHANGE_TYPES.has(entry.type)) errors.push(`${label} has an invalid type`);
+    if (!isNonEmptyString(entry.reason) || !isNonEmptyString(entry.recordedBy)) {
+      errors.push(`${label} requires a reason and recordedBy`);
+    }
+    if (entry.type === 'ITEM_DECOMPOSED') {
+      if (!isNonEmptyString(entry.approvalRef)) {
+        errors.push(`${label} requires an approvalRef`);
+      }
+      if (
+        !Array.isArray(entry.recordIds) ||
+        entry.recordIds.length < 2 ||
+        entry.recordIds.some((id) => !recordsById.has(id))
+      ) {
+        errors.push(`${label} requires existing parent and story recordIds`);
+      }
+    }
+  }
+
+  errors.push(...findDependencyCycles(recordsById));
 
   if (governance.baselineState === 'APPROVED') {
     const hasApproval = changeLog.some(
       (entry) => entry.type === 'BASELINE_APPROVED' && isNonEmptyString(entry.approvalRef),
     );
-    if (!hasApproval)
+    if (!hasApproval) {
       errors.push(
         'an APPROVED baseline requires a BASELINE_APPROVED change-log entry with approvalRef',
       );
+    }
   }
 
   return errors;
 }
 
-function summarize(items) {
-  const active = items.filter((item) => item.status !== 'CANCELLED');
-  const committed = active.reduce((sum, item) => sum + item.points, 0);
-  const accepted = active.filter((item) => item.status === 'ACCEPTED');
-  const earned = accepted.reduce((sum, item) => sum + item.points, 0);
+function toDeliveryUnits(backlog) {
+  const storiesByParent = new Map();
+  for (const story of backlog.stories) {
+    const siblings = storiesByParent.get(story.parentItemId) ?? [];
+    siblings.push(story);
+    storiesByParent.set(story.parentItemId, siblings);
+  }
+
+  return backlog.items.flatMap((feature) => {
+    const stories = storiesByParent.get(feature.id) ?? [];
+    if (stories.length === 0) return [{ ...feature, kind: 'FEATURE' }];
+    return stories.map((story) => ({
+      ...story,
+      kind: 'STORY',
+      epicId: feature.epicId,
+      scope: feature.scope,
+      priority: feature.priority,
+      parentStatus: feature.status,
+    }));
+  });
+}
+
+function summarize(units) {
+  const active = units.filter(
+    (unit) => unit.status !== 'CANCELLED' && unit.parentStatus !== 'CANCELLED',
+  );
+  const committed = active.reduce((sum, unit) => sum + unit.points, 0);
+  const accepted = active.filter((unit) => unit.status === 'ACCEPTED');
+  const earned = accepted.reduce((sum, unit) => sum + unit.points, 0);
   return {
-    items: active.length,
-    acceptedItems: accepted.length,
+    units: active.length,
+    acceptedUnits: accepted.length,
     committed,
     earned,
     remaining: committed - earned,
@@ -224,14 +400,26 @@ function summarize(items) {
   };
 }
 
+function countRecords(records) {
+  const active = records.filter((record) => record.status !== 'CANCELLED');
+  return {
+    active: active.length,
+    accepted: active.filter((record) => record.status === 'ACCEPTED').length,
+  };
+}
+
 export function calculateProgress(backlog) {
-  const activeItems = backlog.items.filter((item) => item.status !== 'CANCELLED');
+  const featureById = new Map(backlog.items.map((feature) => [feature.id, feature]));
+  const deliveryUnits = toDeliveryUnits(backlog);
+  const activeUnits = deliveryUnits.filter(
+    (unit) => unit.status !== 'CANCELLED' && unit.parentStatus !== 'CANCELLED',
+  );
   const closedIterations = backlog.iterations.filter((iteration) => iteration.status === 'CLOSED');
   const iterationVelocity = closedIterations.map((iteration) => ({
     id: iteration.id,
-    points: activeItems
-      .filter((item) => item.targetIteration === iteration.id && item.status === 'ACCEPTED')
-      .reduce((sum, item) => sum + item.points, 0),
+    points: activeUnits
+      .filter((unit) => unit.targetIteration === iteration.id && unit.status === 'ACCEPTED')
+      .reduce((sum, unit) => sum + unit.points, 0),
   }));
   const canForecast =
     closedIterations.length >= backlog.governance.minimumClosedIterationsForForecast;
@@ -247,19 +435,52 @@ export function calculateProgress(backlog) {
   const byStatus = Object.fromEntries(
     [...VALID_STATUSES].map((status) => [
       status,
-      summarize(activeItems.filter((item) => item.status === status)),
+      summarize(activeUnits.filter((unit) => unit.status === status)),
+    ]),
+  );
+  const featureByStatus = Object.fromEntries(
+    [...VALID_STATUSES].map((status) => [
+      status,
+      backlog.items.filter((feature) => feature.status === status),
+    ]),
+  );
+  const storyByStatus = Object.fromEntries(
+    [...VALID_STATUSES].map((status) => [
+      status,
+      backlog.stories.filter((story) => story.status === status),
     ]),
   );
   const byEpic = backlog.epics.map((epic) => ({
     ...epic,
-    ...summarize(activeItems.filter((item) => item.epicId === epic.id)),
+    ...summarize(activeUnits.filter((unit) => unit.epicId === epic.id)),
+    features: countRecords(backlog.items.filter((feature) => feature.epicId === epic.id)),
+    stories: countRecords(
+      backlog.stories.filter((story) => featureById.get(story.parentItemId)?.epicId === epic.id),
+    ),
   }));
 
+  function horizon(scope) {
+    return {
+      ...summarize(activeUnits.filter((unit) => scope === undefined || unit.scope === scope)),
+      features: countRecords(
+        backlog.items.filter((feature) => scope === undefined || feature.scope === scope),
+      ),
+      stories: countRecords(
+        backlog.stories.filter((story) => {
+          const parent = featureById.get(story.parentItemId);
+          return scope === undefined || parent?.scope === scope;
+        }),
+      ),
+    };
+  }
+
   return {
-    mvp: summarize(activeItems.filter((item) => item.scope === 'MVP')),
-    postMvp: summarize(activeItems.filter((item) => item.scope === 'POST_MVP')),
-    fullProduct: summarize(activeItems),
+    mvp: horizon('MVP'),
+    postMvp: horizon('POST_MVP'),
+    fullProduct: horizon(),
     byStatus,
+    featureByStatus,
+    storyByStatus,
     byEpic,
     forecast: {
       available: canForecast,
@@ -279,34 +500,20 @@ function markdownTable(headers, rows) {
 export function renderProgressReport(backlog) {
   const progress = calculateProgress(backlog);
   const scopeRows = [
-    [
-      'MVP',
-      progress.mvp.earned,
-      progress.mvp.committed,
-      progress.mvp.remaining,
-      `${progress.mvp.percent}%`,
-      progress.mvp.acceptedItems,
-      progress.mvp.items,
-    ],
-    [
-      'Post-MVP only',
-      progress.postMvp.earned,
-      progress.postMvp.committed,
-      progress.postMvp.remaining,
-      `${progress.postMvp.percent}%`,
-      progress.postMvp.acceptedItems,
-      progress.postMvp.items,
-    ],
-    [
-      'Full product',
-      progress.fullProduct.earned,
-      progress.fullProduct.committed,
-      progress.fullProduct.remaining,
-      `${progress.fullProduct.percent}%`,
-      progress.fullProduct.acceptedItems,
-      progress.fullProduct.items,
-    ],
-  ];
+    ['MVP', progress.mvp],
+    ['Post-MVP only', progress.postMvp],
+    ['Full product', progress.fullProduct],
+  ].map(([name, summary]) => [
+    name,
+    summary.earned,
+    summary.committed,
+    summary.remaining,
+    `${summary.percent}%`,
+    summary.acceptedUnits,
+    summary.units,
+    summary.features.active,
+    summary.stories.active,
+  ]);
   const epicRows = progress.byEpic.map((epic) => [
     epic.id,
     epic.title,
@@ -314,10 +521,20 @@ export function renderProgressReport(backlog) {
     epic.earned,
     epic.committed,
     `${epic.percent}%`,
+    epic.features.active,
+    epic.stories.active,
   ]);
-  const statusRows = [...VALID_STATUSES].map((status) => {
+  const deliveryStatusRows = [...VALID_STATUSES].map((status) => {
     const summary = progress.byStatus[status];
-    return [status, summary.items, summary.committed];
+    return [status, summary.units, summary.committed];
+  });
+  const featureStatusRows = [...VALID_STATUSES].map((status) => {
+    const features = progress.featureByStatus[status];
+    return [status, features.length, features.reduce((sum, feature) => sum + feature.points, 0)];
+  });
+  const storyStatusRows = [...VALID_STATUSES].map((status) => {
+    const stories = progress.storyByStatus[status];
+    return [status, stories.length, stories.reduce((sum, story) => sum + story.points, 0)];
   });
 
   const forecast = progress.forecast.available
@@ -328,5 +545,5 @@ export function renderProgressReport(backlog) {
       ? `Approved by **${backlog.governance.approvedBy}**.`
       : '**The product owner has not yet approved the initial estimates. Percentages are mechanically correct for this baseline, but the baseline itself is not yet a commitment.**';
 
-  return `# RASTA project progress\n\n> Generated from \`planning/backlog.json\`. Do not edit this report directly.\n\n- As of: **${backlog.asOf}**\n- Baseline: **${backlog.governance.baselineState}** — ${baselineWarning}\n- Earned-points rule: only **ACCEPTED** items earn points; in-progress work earns zero.\n- Cancelled items are excluded from the denominator.\n\n## Progress by product horizon\n\n${markdownTable(['Horizon', 'Earned SP', 'Committed SP', 'Remaining SP', 'Progress', 'Accepted items', 'Active items'], scopeRows)}\n\n## Progress by epic\n\n${markdownTable(['Epic', 'Title', 'Scope', 'Earned SP', 'Committed SP', 'Progress'], epicRows)}\n\n## Backlog state\n\n${markdownTable(['Status', 'Items', 'Story Points'], statusRows)}\n\n## Forecast\n\n${forecast}\n\n## Interpretation\n\nStory Points measure relative delivery effort and uncertainty; they are not hours. A percentage changes only when an item is accepted with evidence, or when an approved scope/estimate change is recorded in the backlog change log. Design artefacts, partially written code and a green test run without fulfilled acceptance criteria do not earn partial credit.\n`;
+  return `# RASTA project progress\n\n> Generated from \`planning/backlog.json\`. Do not edit this report directly.\n\n- As of: **${backlog.asOf}**\n- Baseline: **${backlog.governance.baselineState}** — ${baselineWarning}\n- Earned-points rule: only **ACCEPTED delivery units** earn points; in-progress work earns zero.\n- Decomposition rule: a decomposed Feature contributes its child Stories, never its own points again. An undecomposed Feature remains a legacy delivery unit.\n- Cancelled delivery units are excluded from the denominator.\n\n## Progress by product horizon\n\n${markdownTable(['Horizon', 'Earned SP', 'Committed SP', 'Remaining SP', 'Progress', 'Accepted units', 'Active units', 'Features', 'Stories'], scopeRows)}\n\n## Progress by epic\n\n${markdownTable(['Epic', 'Title', 'Scope', 'Earned SP', 'Committed SP', 'Progress', 'Features', 'Stories'], epicRows)}\n\n## Delivery-unit state\n\n${markdownTable(['Status', 'Delivery units', 'Story Points'], deliveryStatusRows)}\n\nA delivery unit is a User Story under a decomposed Feature, or the Feature itself while it has not yet been decomposed. This table is the accounting view and never double-counts parent and child points.\n\n## Feature state\n\n${markdownTable(['Status', 'Features', 'Baseline SP'], featureStatusRows)}\n\n## User Story state\n\n${markdownTable(['Status', 'Stories', 'Story Points'], storyStatusRows)}\n\n## Forecast\n\n${forecast}\n\n## Interpretation\n\nStory Points measure relative delivery effort and uncertainty; they are not hours. A percentage changes only when a delivery unit is accepted with evidence, or when an approved scope/estimate change is recorded in the backlog change log. Decomposing a Feature into Stories cannot change the approved denominator: child points must equal the parent estimate. Design artefacts, partially written code and a green test run without fulfilled acceptance criteria do not earn partial credit.\n`;
 }
