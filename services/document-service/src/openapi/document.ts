@@ -102,7 +102,7 @@ export function enrichOpenApiDocument(
           `${options.signedUrlTtlSeconds} seconds, from this deployment's configuration.`;
       }
 
-      const success = successStatus(method);
+      const success = successStatus(method, key);
       operation.responses ??= {};
       operation.responses[success] = {
         description: 'Success',
@@ -123,8 +123,21 @@ export function enrichOpenApiDocument(
   return document;
 }
 
-function successStatus(method: string): string {
-  return method.toUpperCase() === 'POST' ? '201' : '200';
+/**
+ * The status a successful call actually returns, where it is not the default.
+ *
+ * A POST usually creates something, so 201 is the right default — but issuing
+ * a download URL creates nothing and answers 200 (`@HttpCode` in the
+ * controller). Publishing 201 for it would be a contract that disagrees with
+ * the service, and a client checking `status === 201` would read every
+ * successful download-URL request as a failure.
+ */
+const SUCCESS_STATUS: Record<string, string> = {
+  'POST /v1/documents/{id}/download-url': '200',
+};
+
+function successStatus(method: string, key: string): string {
+  return SUCCESS_STATUS[key] ?? (method.toUpperCase() === 'POST' ? '201' : '200');
 }
 
 interface MutableOperation {

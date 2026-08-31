@@ -14,10 +14,17 @@ import { z } from 'zod';
  * (D-008), and `zod/v4`'s own `toJSONSchema` refuses a v3 schema — these are
  * built with the v3 API that the rest of the platform uses.
  *
- * Scope is deliberately the constructs the marketplace DTOs actually use. Anything
- * else returns an open `{}` rather than a wrong shape: an unconstrained
- * schema tells a reader "not described here", while a confidently wrong one
- * sends them to write code against a contract that does not hold.
+ * Scope is deliberately the constructs this service's DTOs actually use.
+ * Anything else returns an open `{}` rather than a wrong shape: an
+ * unconstrained schema tells a reader "not described here", while a
+ * confidently wrong one sends them to write code against a contract that does
+ * not hold.
+ *
+ * This file is byte-identical to the copies in economic-service and
+ * marketplace-service. It is a pure utility with no domain knowledge, so it
+ * belongs in `packages/` under AGENTS.md A-03 — extracting it means editing
+ * three services' imports at once, which is its own change. Recorded in
+ * `PROJECT_MEMORY.md` known issues.
  */
 
 /** JSON Schema is recursive and heterogeneous; this is its shape, honestly. */
