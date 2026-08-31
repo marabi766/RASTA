@@ -1328,7 +1328,7 @@
         {
           "kind": "CI",
           "ref": "https://github.com/marabi766/RASTA/pull/14/checks",
-          "note": "Pipeline results for this branch: workspace integration, the document database and private bucket, the coverage gate, the reversible-migration check, the image build and the required security scans."
+          "note": "CI run 33390350065 on merge commit d257fb3: success. The four pull-request jobs are green - Security scans (Gitleaks secret scan, pnpm audit at high, Semgrep), Lint/types/unit tests, Integration and security tests (document database and private bucket, coverage gate, reversible migration), and End-to-end. The 'Build and scan images' job, which builds the seven service images and runs Trivy, is main-only by pipeline design (if: github.ref == 'refs/heads/main' and event_name == 'push') and is therefore skipped on the pull request; it runs when this lands on main."
         },
         {
           "kind": "DOCUMENT",
