@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { RastaError, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
-import type { ScanResult } from '../scanning/scanner.port';
 import type { ListDocumentsQuery } from './dto';
 
 /**
@@ -109,7 +108,8 @@ export class DocumentRepository {
       sizeBytes: number;
       filename: string;
       checksum: string | null;
-      scan: ScanResult;
+      /** When it entered the scan queue. The row is written `PENDING`. */
+      scanQueuedAt: Date;
       ownerResourceType: string | null;
       ownerResourceId: string | null;
       uploadIntentId: string;
@@ -127,12 +127,12 @@ export class DocumentRepository {
         sizeBytes: input.sizeBytes,
         filename: input.filename,
         checksum: input.checksum,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        scanState: input.scan.verdict as any,
-        scanEngine: input.scan.engine,
-        scanVersion: input.scan.engineVersion,
-        scanSignature: input.scan.signature,
-        scannedAt: input.scan.scannedAt,
+        // Registered `PENDING`, always (ADR-049). No verdict is written here
+        // because nothing has looked at the bytes yet: `scan_state` defaults to
+        // PENDING and the worker fills in the engine, the versions and the
+        // outcome when it reaches one. Writing anything else here would be
+        // recording a scan that has not happened.
+        scanQueuedAt: input.scanQueuedAt,
         ownerResourceType: input.ownerResourceType,
         ownerResourceId: input.ownerResourceId,
         uploadIntentId: input.uploadIntentId,

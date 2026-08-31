@@ -13,8 +13,9 @@ import { metricsText, metricsContentType } from '@rasta/observability';
 import type { Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { KafkaEventPublisher } from '../outbox/kafka.publisher';
-import { OBJECT_STORAGE } from '../tokens';
+import { MALWARE_SCANNER, OBJECT_STORAGE } from '../tokens';
 import type { ObjectStorage } from '../storage/storage.port';
+import type { MalwareScanner } from '../scanning/scanner.port';
 import { SERVICE_NAME } from '../config/env';
 
 /**
@@ -42,6 +43,7 @@ export class HealthController {
     private readonly prisma: PrismaService,
     private readonly publisher: KafkaEventPublisher,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
+    @Inject(MALWARE_SCANNER) private readonly scanner: MalwareScanner,
   ) {}
 
   @Get('live')
@@ -68,21 +70,74 @@ export class HealthController {
     //
     // Kafka stays a degradation rather than a failure: the outbox retains what
     // has not gone out and the service still answers (ADR-021).
-    const [database, objectStorage] = await Promise.all([
+    const [database, objectStorage, scanner] = await Promise.all([
       this.prisma.isHealthy(),
       this.storage.isHealthy(),
+      this.scanner.health(),
     ]);
 
-    const checks = { database, objectStorage, kafka: await this.publisher.isHealthy() };
+    const kafka = await this.publisher.isHealthy();
+
+    // ## Why the scanner is a degradation and not a readiness failure
+    //
+    // It is reported separately from storage and the database because it is a
+    // genuinely different dependency with a genuinely different consequence,
+    // and collapsing the three into one boolean would hide which is which
+    // (ADR-049).
+    //
+    // A scanner outage does not stop this service from doing its job
+    // correctly. Uploads still work, metadata still reads, deletions still
+    // record, and documents queue as `PENDING` — undownloadable, which is the
+    // fail-closed direction and exactly what should happen. Failing readiness
+    // instead would take the whole service out of rotation and break the three
+    // things that still work perfectly, to no security benefit: a download is
+    // refused by `canDownload` whether or not this probe returns 503.
+    //
+    // What it must not do is go unnoticed, which is why it is in `checks`, in
+    // `degraded`, and behind two metrics (`rasta_document_scanner_up`,
+    // `rasta_document_scan_signature_age_seconds`). A stale signature database
+    // is called out on its own: scanning still works and still answers, so the
+    // only symptom is documents quietly failing to clear.
+    const scannerHealthy = scanner.available && scanner.signaturesFresh;
+
+    const checks = {
+      database,
+      objectStorage,
+      kafka,
+      scanner: {
+        available: scanner.available,
+        engine: scanner.engine,
+        engineVersion: scanner.engineVersion,
+        signatureVersion: scanner.signatureVersion,
+        signatureAgeSeconds: scanner.signatureAgeSeconds,
+        signaturesFresh: scanner.signaturesFresh,
+        // A reason code or a short sentence, never an exception message: this
+        // endpoint is unauthenticated and a socket error carries the address
+        // (AGENTS.md S-09).
+        detail: scanner.detail,
+      },
+    };
+
     const ready = database && objectStorage;
 
     response.status(ready ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE);
+
+    const degraded: string[] = [];
+    if (ready && !kafka) degraded.push('kafka');
+    if (ready && !scanner.available) degraded.push('scanner');
+    else if (ready && !scanner.signaturesFresh) degraded.push('scanner-signatures');
 
     return {
       status: ready ? 'ok' : 'unavailable',
       service: SERVICE_NAME,
       checks,
-      degraded: ready && !checks.kafka ? ['kafka'] : [],
+      degraded,
+      // Stated rather than left to be inferred from `scanner.available`. An
+      // operator reading this probe during an incident should not have to know
+      // that `canDownload` allows only CLEAN to work out whether an outage has
+      // opened anything up. It has not, and this says so.
+      downloadsRequireCleanScan: true,
+      scannerHealthy,
     };
   }
 

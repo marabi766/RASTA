@@ -10,10 +10,17 @@ import type { DocumentEventName } from './events';
  *
  * Everything this service publishes is *about* one document and must stay in
  * order with the other events about that same document: an `UPLOADED` and the
- * `DELETED` that follows it, or an `UPLOADED` and a later `VIRUS_DETECTED`. A
- * consumer that saw the deletion before the upload would hold a reference to a
- * document it believes still exists. Keying by `documentId` puts all of them
- * on one partition, which is the only place Kafka guarantees order.
+ * `DELETED` that follows it, or an `UPLOADED` and the `SCANNED` that resolves
+ * it. A consumer that saw the deletion before the upload would hold a
+ * reference to a document it believes still exists; one that saw `SCANNED`
+ * before `UPLOADED` would learn a verdict about a document it has never heard
+ * of. Keying by `documentId` puts all of them on one partition, which is the
+ * only place Kafka guarantees order.
+ *
+ * That ordering became load-bearing with ADR-049. Scanning is asynchronous, so
+ * `DOCUMENT_UPLOADED` now always carries `PENDING` and the outcome arrives
+ * later as its own fact — a sequence that is only meaningful if it stays a
+ * sequence.
  *
  * Keying by organization instead would be the tempting alternative and is
  * wrong: it would order every document in a tenant against every other,
@@ -22,6 +29,7 @@ import type { DocumentEventName } from './events';
 
 export const AGGREGATE_OF = {
   DOCUMENT_UPLOADED: 'Document',
+  DOCUMENT_SCANNED: 'Document',
   DOCUMENT_DELETED: 'Document',
   VIRUS_DETECTED: 'Document',
 } as const satisfies Record<DocumentEventName, string>;

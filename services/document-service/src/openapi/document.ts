@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { toJsonSchema } from './zod-schema';
 import {
   deleteDocumentSchema,
+  documentViewSchema,
   finalizeDocumentSchema,
   listDocumentsQuerySchema,
   requestUploadUrlSchema,
@@ -26,6 +27,29 @@ const apiErrorSchema = z
   })
   .strict();
 
+/**
+ * Which endpoints return a document, and in what shape.
+ *
+ * Published as a real schema rather than the empty `{}` that stood here
+ * before, because a success response nobody described is a contract a client
+ * has to reverse-engineer from a live call. It matters most for `scanState`:
+ * ADR-049 made scanning asynchronous, so a freshly registered document is
+ * `PENDING` and undownloadable, and a client that has not been told the states
+ * exist will show a download control that always fails.
+ *
+ * Derived from `documentViewSchema`, which the service's own return type is
+ * inferred from — so this cannot advertise a field the service does not send.
+ */
+const RESPONSE_BODIES: Record<string, z.ZodTypeAny> = {
+  'POST /v1/documents': documentViewSchema,
+  'GET /v1/documents/{id}': documentViewSchema,
+  'DELETE /v1/documents/{id}': documentViewSchema,
+  'GET /v1/documents': z.object({
+    items: z.array(documentViewSchema),
+    nextCursor: z.string().nullable(),
+  }),
+};
+
 const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/documents/upload-url': requestUploadUrlSchema,
   'POST /v1/documents': finalizeDocumentSchema,
@@ -42,7 +66,7 @@ const ERROR_DESCRIPTIONS: Record<number, string> = {
   403: 'Authenticated, but the role or the requested organization is not permitted',
   404: 'Not found — also returned for a document owned by another organization, so its existence is never disclosed',
   409: 'Conflict: the resource already exists or another request changed it first',
-  422: 'The request is well-formed but a business rule refuses it (see `code`) — an unsupported content type, a size over the limit, a mismatch between the declared and actual content, an expired upload intent, or a document whose scan state does not permit download',
+  422: 'The request is well-formed but a business rule refuses it (see `code`) — an unsupported content type, a size over the limit, a mismatch between the declared and actual content, an expired upload intent, or a document whose scan state does not permit download. Scanning is asynchronous (ADR-049), so a document registered moments ago is `PENDING` and a download request for it is refused here until the scan clears it; the refusal carries the scan state as `reason`.',
   500: 'Unexpected server error',
 };
 
@@ -103,10 +127,13 @@ export function enrichOpenApiDocument(
       }
 
       const success = successStatus(method, key);
+      const responseBody = RESPONSE_BODIES[key];
       operation.responses ??= {};
       operation.responses[success] = {
         description: 'Success',
-        content: { 'application/json': { schema: {} } },
+        content: {
+          'application/json': { schema: responseBody ? toJsonSchema(responseBody) : {} },
+        },
       };
 
       for (const [status, description] of Object.entries(ERROR_DESCRIPTIONS)) {

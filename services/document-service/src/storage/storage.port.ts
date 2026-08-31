@@ -1,3 +1,5 @@
+import type { Readable } from 'node:stream';
+
 /**
  * The object-storage boundary (ADR-014).
  *
@@ -9,8 +11,13 @@
  * Note what is **absent**: there is no `put`, no `upload`, no stream in.
  * The service cannot write an object even if somebody later wanted it to,
  * because the port gives it no way to. That is the ADR-014 rule — the file
- * never passes through the service — expressed as a type rather than as a
- * comment somebody has to remember.
+ * never passes through the service on its way *to* storage — expressed as a
+ * type rather than as a comment somebody has to remember.
+ *
+ * Reading is now asymmetric with writing, and deliberately so.
+ * {@link ObjectStorage.openReadStream} was added for the malware scanner
+ * (ADR-049) because clamd has to see the bytes; it is used by the background
+ * worker and by nothing in the request path.
  */
 
 export interface ObjectMetadata {
@@ -57,6 +64,31 @@ export interface ObjectStorage {
    * even here.
    */
   readPrefix(objectKey: string, length: number): Promise<Uint8Array>;
+
+  /**
+   * The object as a stream, for the malware scanner (ADR-049).
+   *
+   * ## The one place bytes leave storage in bulk, and why it is allowed
+   *
+   * ADR-014 says the file never passes through this service, and the request
+   * path still honours that absolutely: upload and download are signed URLs
+   * between the client and storage, and no HTTP handler in this service ever
+   * holds document content. This method exists for the **asynchronous scan
+   * worker**, which is out of band, and which has no alternative — clamd's
+   * INSTREAM protocol requires the bytes, and a self-hosted engine cannot read
+   * an S3 object on the service's behalf. ADR-049 records the amendment
+   * explicitly rather than letting a method appear here quietly.
+   *
+   * What is preserved is the property the rule was protecting: the object is
+   * **streamed**, in bounded frames, and never accumulated. Scanning a 25 MB
+   * document costs one frame of memory, not 25 MB, and no request is waiting
+   * on it.
+   *
+   * `maxBytes` is a hard stop enforced while reading, not a hint checked
+   * against metadata beforehand. Storage reports a size; a stream is what
+   * actually arrives, and the ceiling has to apply to the second one.
+   */
+  openReadStream(input: { objectKey: string; maxBytes: number }): Promise<Readable>;
 
   /** Removes the object. Used only after the metadata row records the deletion. */
   remove(objectKey: string): Promise<void>;

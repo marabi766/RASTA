@@ -3,10 +3,9 @@ import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { DOCUMENT_EVENTS } from '../events/events';
-import { ENV, OBJECT_STORAGE, MALWARE_SCANNER } from '../tokens';
+import { ENV, OBJECT_STORAGE } from '../tokens';
 import { SERVICE_NAME, type DocumentEnv } from '../config/env';
 import type { ObjectStorage } from '../storage/storage.port';
-import type { MalwareScanner, ScanResult } from '../scanning/scanner.port';
 import { buildObjectKey, isWellFormedKey, keyBelongsTo } from '../storage/object-key';
 import { MAGIC_PREFIX_BYTES, declarationMatches, detectMime } from '../content/magic-number';
 import {
@@ -31,6 +30,7 @@ import {
 } from '../observability/metrics';
 import type {
   DeleteDocumentDto,
+  DocumentView,
   FinalizeDocumentDto,
   ListDocumentsQuery,
   RequestUploadUrlDto,
@@ -67,7 +67,9 @@ export class DocumentService {
     private readonly events: EventPublisher,
     @Inject(ENV) private readonly env: DocumentEnv,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
-    @Inject(MALWARE_SCANNER) private readonly scanner: MalwareScanner,
+    // No scanner here any more. Scanning left the request path with ADR-049,
+    // and the view now derives "was this inspected" from the row rather than
+    // from whichever implementation happens to be bound today.
   ) {}
 
   // =========================================================================
@@ -176,7 +178,7 @@ export class DocumentService {
       }
       const existing = await this.repository.findById(intent.consumedDocumentId);
       if (!existing) throw RastaError.internal('The document this intent produced is missing');
-      return toView(existing, this.scanner);
+      return toView(existing);
     }
 
     if (intent.state === 'EXPIRED' || intent.expiresAt.getTime() <= Date.now()) {
@@ -234,16 +236,20 @@ export class DocumentService {
       this.env.DOCUMENT_MAX_BYTES,
     );
 
-    // Scanning happens before the row is written, so the state stored is the
-    // state that was actually reached. In the MVP this records `NOT_SCANNED`
-    // (Q-18) — an honest verdict, not a clean one.
-    const scan = await this.scanner.scan({
-      objectKey: intent.objectKey,
-      sizeBytes: metadata.sizeBytes,
-      contentType: detected,
-    });
-
+    // Scanning does **not** happen here (ADR-014 step 4, ADR-049).
+    //
+    // It used to, and that was only tolerable while the scanner did nothing.
+    // ClamAV means streaming the object through clamd, so doing it inline
+    // would hold this HTTP request open for the length of the scan queue, make
+    // every registration as slow as the largest object ahead of it, and lose
+    // the verdict entirely if the client hung up.
+    //
+    // So the document is registered `PENDING` and the worker reaches it out of
+    // band. The consequence is deliberate and it is the fail-closed direction:
+    // a document is undownloadable from the instant it is registered until a
+    // scan clears it, and a scanner outage extends that rather than lifting it.
     const documentId = newId(ID_PREFIX.document);
+    const queuedAt = new Date();
 
     const created = await this.prisma.transaction(async (tx) => {
       const document = await this.repository.createDocument(tx, {
@@ -255,7 +261,7 @@ export class DocumentService {
         sizeBytes: metadata.sizeBytes,
         filename: intent.declaredFilename,
         checksum: metadata.etag,
-        scan,
+        scanQueuedAt: queuedAt,
         ownerResourceType: dto.ownerResourceType ?? null,
         ownerResourceId: dto.ownerResourceId ?? null,
         uploadIntentId: intent.id,
@@ -275,10 +281,11 @@ export class DocumentService {
           contentType: detected,
           sizeBytes: metadata.sizeBytes,
           filename: intent.declaredFilename,
-          // Carried so no consumer reads the event's existence as a clean
-          // bill of health: DOCUMENT_UPLOADED means "confirmed and
-          // registered", and in MVP this field says `NOT_SCANNED`.
-          scanState: scanStateOf(scan),
+          // Carried so no consumer reads the event's existence as a clean bill
+          // of health. Since ADR-049 it is always `PENDING`: registration and
+          // verdict are separate facts now, and the second arrives as
+          // `DOCUMENT_SCANNED`.
+          scanState: 'PENDING',
           ownerResourceType: dto.ownerResourceType ?? null,
           ownerResourceId: dto.ownerResourceId ?? null,
           uploadedBy: actor,
@@ -286,25 +293,10 @@ export class DocumentService {
         },
       });
 
-      // Only a real engine that inspected content can conclude infection, so
-      // this cannot fire from the MVP stub. The guard is explicit rather than
-      // implied by the stub's behaviour, because the stub is replaceable and
-      // this rule is not.
-      if (scan.verdict === 'INFECTED' && this.scanner.inspectsContent && scan.signature) {
-        await this.events.enqueue(tx, {
-          eventName: DOCUMENT_EVENTS.VIRUS_DETECTED,
-          aggregateId: documentId,
-          organizationId,
-          payload: {
-            documentId,
-            organizationId,
-            engine: scan.engine,
-            engineVersion: scan.engineVersion,
-            signature: scan.signature,
-            detectedAt: scan.scannedAt.toISOString(),
-          },
-        });
-      }
+      // No VIRUS_DETECTED here any more, and there cannot be: nothing has
+      // looked at the bytes at this point in the flow. The scan worker
+      // publishes it when an engine that genuinely inspected content finds
+      // something (`scan.worker.ts`).
 
       return document;
     });
@@ -312,10 +304,10 @@ export class DocumentService {
     documentsFinalizedTotal.inc({
       service: SERVICE_NAME,
       document_class: intent.documentClass,
-      scan_state: scanStateOf(scan),
+      scan_state: 'PENDING',
     });
 
-    return toView(created, this.scanner);
+    return toView(created);
   }
 
   // =========================================================================
@@ -327,7 +319,7 @@ export class DocumentService {
     if (!document) throw RastaError.notFound('Document', documentId);
 
     assertDocumentReadable(document);
-    return toView(document, this.scanner);
+    return toView(document);
   }
 
   async list(
@@ -336,7 +328,7 @@ export class DocumentService {
     assertCanHandleDocuments();
 
     const rows = await this.repository.list(getOrganizationId(), query);
-    const items = rows.slice(0, query.limit).map((row) => toView(row, this.scanner));
+    const items = rows.slice(0, query.limit).map((row) => toView(row));
     const nextCursor = rows.length > query.limit ? (rows[query.limit - 1]?.id ?? null) : null;
 
     return { items, nextCursor };
@@ -367,9 +359,11 @@ export class DocumentService {
     assertDocumentReadable(document);
 
     // No policy argument, and no configuration reaches this call. Only a
-    // `CLEAN` verdict authorizes a download (ADR-014); with the MVP stub
-    // recording `NOT_SCANNED`, that means an MVP deployment refuses every
-    // download until a real scanner is bound behind `MALWARE_SCANNER` (Q-18).
+    // `CLEAN` verdict authorizes a download (ADR-014, ADR-049) — a verdict a
+    // worker writes only after an engine that genuinely inspected the bytes
+    // returned a validated pass on a signature database within its freshness
+    // window. Every other state, including the `PENDING` every document is
+    // registered in, is refused here.
     const decision = canDownload(document);
 
     if (!decision.allowed) {
@@ -422,7 +416,7 @@ export class DocumentService {
     assertDocumentWritable(document);
 
     if (document.status === 'DELETED') {
-      return toView(document, this.scanner);
+      return toView(document);
     }
 
     const actor = getContext().userId ?? SERVICE_NAME;
@@ -466,7 +460,7 @@ export class DocumentService {
       document_class: document.documentClass,
     });
 
-    return toView(tombstoned, this.scanner);
+    return toView(tombstoned);
   }
 
   // =========================================================================
@@ -491,44 +485,33 @@ export class DocumentService {
 // Views
 // ---------------------------------------------------------------------------
 
-export interface DocumentView {
-  id: string;
-  organizationId: string;
-  documentClass: string;
-  status: string;
-  contentType: string;
-  sizeBytes: number;
-  filename: string;
-  scanState: string;
-  /**
-   * Whether anything actually looked at the bytes.
-   *
-   * Reported rather than inferred from `scanState`, so an operator reading one
-   * document can see that the platform's scanner is a stub without reading
-   * configuration — the same disclosure principle ADR-024 applies to
-   * simulated payments.
-   */
-  scanInspectedContent: boolean;
-  scanEngine: string | null;
-  scannedAt: string | null;
-  ownerResourceType: string | null;
-  ownerResourceId: string | null;
-  createdAt: string;
-  createdBy: string;
-  deletedAt: string | null;
-  deletionReason: string | null;
-}
+/**
+ * The shape a caller sees.
+ *
+ * Re-exported from `dto.ts`, where it is inferred from the very Zod schema the
+ * OpenAPI document publishes — so the contract and the return value are one
+ * definition rather than two that agree until somebody edits one of them.
+ */
+export type { DocumentView };
 
 interface DocumentRow {
   id: string;
   organizationId: string;
   documentClass: string;
-  status: string;
+  // The two enum columns are typed as their literal unions rather than as
+  // `string`, so `toView` cannot widen them past what `documentViewSchema`
+  // publishes. A row whose state is outside the union is a schema change the
+  // compiler should stop, not one the view should pass through.
+  status: DocumentView['status'];
   contentType: string;
   sizeBytes: number;
   filename: string;
-  scanState: string;
+  scanState: DocumentView['scanState'];
   scanEngine: string | null;
+  scanSignatureVersion: string | null;
+  scanSignature: string | null;
+  scanFailureReason: string | null;
+  quarantinedAt: Date | null;
   scannedAt: Date | null;
   ownerResourceType: string | null;
   ownerResourceId: string | null;
@@ -538,6 +521,9 @@ interface DocumentRow {
   deletionReason: string | null;
 }
 
+/** States in which an engine reached a conclusion about the content. */
+const INSPECTED_STATES: readonly DocumentView['scanState'][] = ['CLEAN', 'INFECTED'];
+
 /**
  * The shape a caller sees.
  *
@@ -546,7 +532,7 @@ interface DocumentRow {
  * with credentials obtained elsewhere, bypassing every check above — so the
  * key never crosses the API boundary at all (AGENTS.md S-09).
  */
-function toView(row: DocumentRow, scanner: MalwareScanner): DocumentView {
+function toView(row: DocumentRow): DocumentView {
   return {
     id: row.id,
     organizationId: row.organizationId,
@@ -556,8 +542,12 @@ function toView(row: DocumentRow, scanner: MalwareScanner): DocumentView {
     sizeBytes: row.sizeBytes,
     filename: row.filename,
     scanState: row.scanState,
-    scanInspectedContent: scanner.inspectsContent && row.scanState !== 'PENDING',
+    scanInspectedContent: INSPECTED_STATES.includes(row.scanState),
     scanEngine: row.scanEngine,
+    scanSignatureVersion: row.scanSignatureVersion,
+    scanSignature: row.scanSignature,
+    scanFailureReason: row.scanFailureReason,
+    quarantinedAt: row.quarantinedAt?.toISOString() ?? null,
     scannedAt: row.scannedAt?.toISOString() ?? null,
     ownerResourceType: row.ownerResourceType,
     ownerResourceId: row.ownerResourceId,
@@ -566,10 +556,6 @@ function toView(row: DocumentRow, scanner: MalwareScanner): DocumentView {
     deletedAt: row.deletedAt?.toISOString() ?? null,
     deletionReason: row.deletionReason,
   };
-}
-
-function scanStateOf(scan: ScanResult): 'NOT_SCANNED' | 'CLEAN' | 'INFECTED' | 'FAILED' {
-  return scan.verdict;
 }
 
 /**

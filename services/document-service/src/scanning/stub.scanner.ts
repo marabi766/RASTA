@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { MalwareScanner, ScanResult } from './scanner.port';
+import type { MalwareScanner, ScanResult, ScannerHealth } from './scanner.port';
 
 /**
  * The MVP scanner, which does not scan.
@@ -67,8 +67,37 @@ export class NoOpMalwareScanner implements MalwareScanner {
       verdict: 'NOT_SCANNED',
       engine: this.name,
       engineVersion: null,
+      signatureVersion: null,
+      signatureAgeSeconds: null,
       signature: null,
+      failureReason: null,
+      retryable: false,
       scannedAt: new Date(),
+    };
+  }
+
+  /**
+   * Available, and honest about what that means.
+   *
+   * `available: true` because the stub cannot fail — there is nothing to
+   * reach. It would be wrong to report it unavailable, which an operator would
+   * read as an outage to fix rather than as the configuration they chose. What
+   * `detail` says instead is what is actually true: this deployment inspects
+   * nothing, so no document in it will ever become downloadable.
+   *
+   * `signaturesFresh` is `false`, and that is not pessimism. There is no
+   * signature database, so there is nothing fresh about it, and the readiness
+   * probe's freshness field must not be able to read as reassuring here.
+   */
+  async health(): Promise<ScannerHealth> {
+    return {
+      available: true,
+      engine: this.name,
+      engineVersion: null,
+      signatureVersion: null,
+      signatureAgeSeconds: null,
+      signaturesFresh: false,
+      detail: 'no content is inspected; every document stays undownloadable',
     };
   }
 }
