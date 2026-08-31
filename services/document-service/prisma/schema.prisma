@@ -52,11 +52,24 @@ enum DocumentStatus {
   DELETED
 }
 
-/// What malware scanning concluded (Q-18).
+/// What malware scanning concluded (Q-18, closed by ADR-049).
 ///
-/// `NOT_SCANNED` is a real, recorded outcome and not an absence: the MVP stub
-/// inspects nothing, and "we did not look" must never be stored the same way
-/// as "we looked and it was clean".
+/// `PENDING` is the state every document is registered in, because scanning is
+/// asynchronous (ADR-014 step 4): the object is confirmed and the metadata
+/// stored, and a worker reaches the bytes afterwards. It covers queued, in
+/// flight, delayed and awaiting-retry alike — all of them non-downloadable, so
+/// there is nothing a caller could do with the distinction that they cannot do
+/// with the state itself. The retry bookkeeping lives in columns, not in a
+/// state a consumer would have to interpret.
+///
+/// `NOT_SCANNED` is a real, recorded outcome and not an absence: it is what
+/// the no-op stub records, and "we did not look" must never be stored the same
+/// way as "we looked and it was clean". ClamAV never produces it, and it is
+/// kept because rows written before ADR-049 carry it and must keep saying
+/// exactly what happened to them.
+///
+/// `FAILED` is terminal and is reached only after the retry budget is spent or
+/// on a failure a retry cannot fix. It is not "probably fine".
 enum ScanState {
   PENDING
   NOT_SCANNED
@@ -134,12 +147,62 @@ model Document {
   filename    String
   checksum    String? @map("checksum")
 
-  // ---- Scanning (Q-18) --------------------------------------------------
+  // ---- Scanning (Q-18, ADR-049) -----------------------------------------
   scanState     ScanState @default(PENDING) @map("scan_state")
   scanEngine    String?   @map("scan_engine")
   scanVersion   String?   @map("scan_version")
   scanSignature String?   @map("scan_signature")
   scannedAt     DateTime? @map("scanned_at")
+
+  /// The signature database the verdict was reached with.
+  ///
+  /// Separate from `scanVersion`, which is the engine. A CLEAN reached with a
+  /// three-week-old database and one reached this morning are different
+  /// claims, and only this column lets anybody tell them apart afterwards —
+  /// which is what makes a re-scan campaign targetable rather than total.
+  scanSignatureVersion String? @map("scan_signature_version")
+
+  // ---- Scan queue bookkeeping -------------------------------------------
+  //
+  // Columns rather than states. A consumer branching on `scanState` should not
+  // have to learn the difference between "queued", "being scanned" and "failed
+  // twice, waiting to try again": all three are PENDING and all three are
+  // undownloadable. The worker needs the difference; nobody else does.
+
+  /// When this document entered the scan queue. Drives the pending-age metric.
+  scanQueuedAt DateTime? @map("scan_queued_at")
+
+  /// Completed attempts. Bounded by configuration; at the ceiling the document
+  /// goes to `FAILED` rather than retrying forever.
+  scanAttempts Int @default(0) @map("scan_attempts")
+
+  /// Why the last attempt did not reach a verdict — a fixed reason code from
+  /// `ScanFailureReason`, never an engine message. An engine message can echo
+  /// file content, and this column is read, logged and surfaced (S-09).
+  scanFailureReason String? @map("scan_failure_reason")
+
+  /// Not before this instant. The backoff between retries, as data.
+  scanNextAttemptAt DateTime? @map("scan_next_attempt_at")
+
+  /// The worker holding this document, and until when.
+  ///
+  /// The lease is what keeps two replicas from scanning one object and writing
+  /// contradictory verdicts. A worker claims by writing its own id here, and
+  /// every write-back is conditional on still holding it — so a worker that
+  /// stalled past its lease finds its result refused rather than overwriting
+  /// the verdict the worker that took over already reached.
+  scanLeaseOwner     String?   @map("scan_lease_owner")
+  scanLeaseExpiresAt DateTime? @map("scan_lease_expires_at")
+
+  // ---- Quarantine (ADR-049) ---------------------------------------------
+  //
+  // The disposition applied to an infected document. The object is **not**
+  // deleted: the deletion path is an audited act by a person, and silently
+  // destroying the one artefact an investigation would need is not a security
+  // control. It simply becomes unreachable — no signed URL is ever issued for
+  // it, because `canDownload` allows CLEAN and nothing else.
+  quarantinedAt     DateTime? @map("quarantined_at")
+  quarantineReason  String?   @map("quarantine_reason")
 
   // ---- Ownership by another service's resource --------------------------
   //
@@ -167,6 +230,10 @@ model Document {
   @@index([organizationId, status], map: "ix_document_org_status")
   @@index([organizationId, documentClass], map: "ix_document_org_class")
   @@index([ownerResourceType, ownerResourceId], map: "ix_document_owner_resource")
+  /// The scan worker's claim query, which runs on every poll of every replica.
+  /// Without it that is a sequential scan of the whole document table several
+  /// times a second, growing with the platform rather than with the backlog.
+  @@index([scanState, scanNextAttemptAt], map: "ix_document_scan_queue")
   @@map("document")
 }
 

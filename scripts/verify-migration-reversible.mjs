@@ -162,6 +162,99 @@ const MARKETPLACE_DATA_ROLLBACK = {
 };
 
 /**
+ * An infected document as the **init** schema permitted one: no quarantine
+ * record, because the columns did not exist yet.
+ *
+ * Every column the init CHECK constraints demand is populated, so the row is
+ * one the service of that era could genuinely have written.
+ */
+const INFECTED_WITHOUT_QUARANTINE = (id) => `
+INSERT INTO "document" (
+  "id", "organization_id", "object_key", "document_class", "status",
+  "content_type", "size_bytes", "filename",
+  "scan_state", "scan_engine", "scan_version", "scan_signature", "scanned_at",
+  "upload_intent_id", "created_by", "updated_at"
+) VALUES (
+  '${id}', 'ORG-MIGCHECK-DOC', 'ORG-MIGCHECK-DOC/CONTRACT/${id}', 'CONTRACT', 'REGISTERED',
+  'application/pdf', 4096, 'infected.pdf',
+  'INFECTED', 'clamav', '1.5.4', 'Eicar-Test-Signature', NOW(),
+  'UPI_MIGCHECK_${id}', 'USR-MIGCHECK', NOW()
+);`;
+
+/**
+ * The forward migration applied over data the schema it upgrades allowed.
+ *
+ * `ck_document_infected_is_quarantined` is validated against every existing
+ * row the moment it is added, and the init schema permitted an `INFECTED`
+ * document with no quarantine record. Nothing ever produced one — the only
+ * scanner was a stub that inspects nothing — but "no deployment happens to
+ * hold that row" is a different claim from "this migration is safe", and the
+ * difference only surfaces on the deployment that does hold one.
+ *
+ * The whole-chain reversal below cannot test this. It runs against a schema
+ * created seconds earlier holding no rows, so a forward migration that works
+ * on an empty table and aborts halfway on a populated one passes it — leaving
+ * the columns added and the constraints missing, which is the worst of the
+ * three possible outcomes.
+ *
+ * The steps run in the order the harness executes them: roll this migration
+ * back to the init schema, seed the row that schema allowed, re-apply, and
+ * assert the row came back **quarantined** rather than merely surviving.
+ */
+const DOCUMENT_DATA_ROLLBACK = {
+  migration: '20260831180000_document_scan_lifecycle',
+  label: 'an infected document registered before quarantine was recorded',
+  steps: [
+    {
+      // Run alone rather than as part of the chain: the init down script drops
+      // the table, and this probe needs the init schema still standing.
+      label: 'down: the rollback succeeds and leaves the init schema behind',
+      runDownScript: true,
+    },
+    {
+      label: 'down: the init schema accepts an infected document with no quarantine',
+      sql: INFECTED_WITHOUT_QUARANTINE('DOC_MIGCHECK_INFECTED'),
+    },
+    { label: 'up again: the forward migration applies over that row', reapply: true },
+    {
+      label: 'up again: the row survived and was quarantined rather than left mid-policy',
+      sql: `
+        DO $$
+        DECLARE row_count INT;
+        BEGIN
+          SELECT count(*) INTO row_count FROM "document"
+           WHERE id = 'DOC_MIGCHECK_INFECTED'
+             AND scan_state = 'INFECTED'
+             AND scan_signature = 'Eicar-Test-Signature'
+             AND quarantined_at IS NOT NULL
+             AND quarantine_reason IS NOT NULL;
+          IF row_count <> 1 THEN
+            RAISE EXCEPTION
+              'the infected document was not carried through and quarantined (found %)', row_count;
+          END IF;
+        END
+        $$;`,
+    },
+    {
+      label: 'up again: a new infected document with no quarantine is refused',
+      sql: INFECTED_WITHOUT_QUARANTINE('DOC_MIGCHECK_REFUSED'),
+      mustFail: 'ck_document_infected_is_quarantined',
+    },
+    {
+      label: 'up again: a worker lease cannot be attached to a document that is not pending',
+      sql: `UPDATE "document" SET scan_lease_owner = 'worker-1',
+              scan_lease_expires_at = NOW() + INTERVAL '1 minute'
+             WHERE id = 'DOC_MIGCHECK_INFECTED';`,
+      mustFail: 'ck_document_scan_lease_only_when_pending',
+    },
+    {
+      label: 'cleanup: the probe rows are removed before the chain reversal',
+      sql: `DELETE FROM "document" WHERE id LIKE 'DOC_MIGCHECK_%';`,
+    },
+  ],
+};
+
+/**
  * What each service's schema must contain after `up`, and must not contain
  * after `down`.
  *
@@ -221,7 +314,18 @@ const EXPECTED = {
       'ck_document_owner_reference_complete',
       'ck_upload_intent_consumed_complete',
       'ck_grant_revoked_has_actor',
+      // Added by 20260831180000_document_scan_lifecycle (ADR-049). The first
+      // two are the quarantine policy expressed as a rule the database keeps:
+      // an infection is held, and a hold belongs to an infection. The third
+      // stops a FAILED scan from being undiagnosable, and the last two stop a
+      // worker lease from outliving the work it claims.
+      'ck_document_quarantine_complete',
+      'ck_document_infected_is_quarantined',
+      'ck_document_failure_reason_only_when_failed',
+      'ck_document_scan_lease_complete',
+      'ck_document_scan_lease_only_when_pending',
     ],
+    dataRollback: DOCUMENT_DATA_ROLLBACK,
   },
 };
 
