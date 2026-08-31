@@ -50,6 +50,16 @@ jobs:
           pnpm run progress:check
           pnpm run test:progress
 
+      - name: Image scan coverage gate
+        # Runs here, in a job that fires on pull requests, rather than beside
+        # the `containers` job it protects — that one only runs on a push to
+        # main, so it cannot catch a service being added without an image
+        # build until the omission has already merged. Three services have
+        # landed unscanned this way (PROJECT_MEMORY § 22).
+        run: |
+          pnpm run ci:image-matrix
+          pnpm run test:image-matrix
+
       - name: Format check
         run: pnpm run format:check
 
@@ -841,10 +851,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # asset-service and fleet-service were absent until fleet landed, so
-        # two images we ship were never built or scanned by CI
-        # (PROJECT_MEMORY § 22). Adding them here is what makes the scan gate
-        # cover what we actually deploy.
+        # asset-service, fleet-service and document-service were each absent
+        # from this list for one or more releases after they landed, so their
+        # images went unbuilt and unscanned by CI (PROJECT_MEMORY § 22).
+        # Every service with a Dockerfile belongs here — that is what makes
+        # the scan gate cover what we actually deploy.
         service:
           [
             identity-service,
@@ -854,6 +865,7 @@ jobs:
             maintenance-service,
             economic-service,
             marketplace-service,
+            document-service,
           ]
 
     steps:
