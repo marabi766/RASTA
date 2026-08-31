@@ -282,6 +282,19 @@ services:
     depends_on:
       clamav:
         condition: service_healthy
+    healthcheck:
+      # Disabled, not forgotten. The image's own HEALTHCHECK runs
+      # `clamdcheck.sh`, which pings clamd — and this container is freshclam,
+      # which is not clamd and never will be. Inherited, it reports
+      # `unhealthy` forever while the updater works perfectly, and an operator
+      # scanning `docker ps` learns to ignore the column.
+      #
+      # A real check would have to decide what "healthy" means for a process
+      # that sleeps between updates, and the honest signal for that already
+      # exists: `rasta_document_scan_signature_age_seconds`, which climbs when
+      # this container stops doing its job. See
+      # `docs/runbooks/malware-scanner-down.md` § 4.
+      disable: true
 
   # --------------------------------------------------------- workflow engine
   temporal:
