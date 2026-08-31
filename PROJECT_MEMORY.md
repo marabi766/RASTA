@@ -10,8 +10,34 @@
 > سرویس از حالت تمیز، تست زنده Auth/Tenant Isolation/Event Flow، و بررسی مستقیم
 > GitHub Actions.
 >
-> **آخرین به‌روزرسانی:** 2026-08-30 — **بازارگاه و دروازه Coverage آن روی
-> `main` هستند؛ سنجش رسمی پیشرفت Repositoryمحور شده است.**
+> **آخرین به‌روزرسانی:** 2026-08-31 — **Q-18 بسته شد: ClamAV اسکنر بدافزار پلتفرم
+> است، و دانلود سند برای نخستین بار کار می‌کند.**
+>
+> شاخهٔ `feat/document-clamav-scanner` روی `main` (`3b4df26`) ساخته شد و
+> **CI هنوز رویش اجرا نشده**. ADR-049 ClamAV خودمیزبان را به‌عنوان Sidecar انتخاب
+> می‌کند — پین‌شده به Digest تغییرناپذیر، غیر-root، پشت همان `MALWARE_SCANNER` Port که
+> از روز اول برای همین ساخته شده بود.
+>
+> پیش از این، `NoOpMalwareScanner` هیچ محتوایی باز نمی‌کرد و `NOT_SCANNED` ثبت می‌کرد،
+> و `canDownload` فقط `CLEAN` را مجاز می‌شمرد — پس **هیچ سندی در هیچ استقراری قابل
+> دانلود نبود**. آن محدودیت عمدی بود، و آنچه هرگز رخ نداد ثبت یک `CLEAN` دروغین بود.
+> اکنون اسکن ناهمزمان است (ADR-014 گام ۴): سند `PENDING` ثبت می‌شود، یک Worker شیء را
+> از MinIO به clamd جریان می‌دهد، و تنها یک `CLEAN` معتبر دانلود را مجاز می‌کند.
+>
+> **۳۸۴ تست** در ۱۸ Suite (۲۵۵ واحد + ۱۲۹ یکپارچگی)، Coverage **۹۰٫۲۳٪ Statement /
+> ۸۱٫۹۶٪ Branch** در برابر دروازهٔ **بدون‌تغییر** ۷۵٪. EICAR روی **ClamAV واقعی**
+> تشخیص داده می‌شود و غیرقابل‌دانلود می‌ماند. E2E محلی **۷۵/۷۵** سبز.
+>
+> **سه نقص واقعی را همین تست‌ها پیدا کردند** — یکی از آن‌ها Fail-Open بود: خواندن
+> محدودشده دقیقاً `maxBytes` می‌خواست، پس یک شیء بزرگ‌تر پیشوند بریده‌ای می‌داد که
+> اسکنر `OK` اش می‌کرد. جزئیات در بخش ۷-د.
+>
+> **یک نقص جدا هم پیدا شد و رفع شد (D-022):** نگهبان تنانت `document-service` نام
+> مدل‌های marketplace را داشت، پس هیچ‌چیز را Scope نمی‌کرد. هیچ نشتی از این راه قابل
+> دسترس نبود — بررسی‌های صریح پوشش می‌دادند — اما لایه‌ای که A-04 می‌خواهد بی‌اثر بود.
+>
+> **پیشین (2026-08-30):** بازارگاه و دروازه Coverage آن روی `main`؛ سنجش رسمی پیشرفت
+> Repositoryمحور شد.
 >
 > PR #7 با Merge Commit معمولی وارد `main` شد (`34c37ed`) و شاخهٔ
 > `feat/marketplace-service` محلی و Remote حذف شد. CI روی خود `main` کامل سبز است:
@@ -176,7 +202,7 @@
 
 ## ۲. Current Development Phase
 
-**فاز:** پیاده‌سازی MVP، با ۲۴ سند معماری و ۴۸ ADR ثبت‌شده؛ پنج ADR آخر روی شاخهٔ
+**فاز:** پیاده‌سازی MVP، با ۲۴ سند معماری و ۴۹ ADR ثبت‌شده؛ پنج ADR آخر روی شاخهٔ
 مستندات جاری‌اند و هنوز Merge نشده‌اند.
 
 **ترتیب واقعی ساخت تا امروز** (از Git History، نه از برنامه‌ریزی اولیه):
@@ -222,56 +248,56 @@
 | **NOT VERIFIED**  | شواهد غیرمستقیم داریم اما تأیید مثبت نداریم             |
 | **PLANNED**       | تصمیم گرفته شده، کد نوشته نشده                          |
 
-| Feature                                                      |                      Implemented                      |      Automated Tests       | Live Verified (2026-08-27)                                                                                         |
-| ------------------------------------------------------------ | :---------------------------------------------------: | :------------------------: | ------------------------------------------------------------------------------------------------------------------ |
-| Tenant Isolation (API)                                       |                          ✅                           |             ✅             | ✅ (403 TENANT_MISMATCH زنده گرفته شد)                                                                             |
-| Tenant Isolation (Database)                                  |                          ✅                           |             —              | ✅ (`permission denied for database` زنده گرفته شد)                                                                |
-| Cross-tenant read → 404                                      |                          ✅                           |             ✅             | ✅                                                                                                                 |
-| RBAC (Roles Guard)                                           |                          ✅                           |             ✅             | ✅ (Auditor → 403 روی POST)                                                                                        |
-| JWT verification (Keycloak/JWKS)                             |                          ✅                           |             ✅             | ✅ (۴ کاربر Seed، توکن واقعی گرفته شد)                                                                             |
-| Transactional Outbox → Kafka                                 |                          ✅                           |             ✅             | ✅ (Asset ساخته شد → Outbox → Kafka، Correlation تطبیق)                                                            |
-| Event Consumer / Dossier Projector                           |                          ✅                           |        ✅ (18 تست)         | ✅ (رویداد ساختگی maintenance → یک خط Timeline، Replay دوباره = بدون تکرار)                                        |
-| API Gateway routing + circuit breaker                        |                          ✅                           |        ✅ (21 تست)         | ✅ (مسیر به سرویس نساخته‌شده fleet → 503 تمیز)                                                                     |
-| Redis Rate Limiting (منطق)                                   |                          ✅                           |         ✅ (واحد)          | ⚠️ **مسدود شده توسط تداخل Port میزبان — بخش ۲۲.۳ D-006**                                                           |
-| Anonymous public endpoint (self-registration) از راه Gateway |                          ✅                           |        ✅ (17 تست)         | ✅ **`201` زنده گرفته شد — D-007 رفع شد**                                                                          |
-| CI/CD روی GitHub Actions                                     |                          ✅                           |             —              | ✅ **CI VERIFIED** — Run `33219920446`، Commit `a36a2cf`، هر **۹** Job سبز (فاز اقتصادی)                           |
-| Docker Build (identity, organization)                        |                          ✅                           |             —              | ✅ **CI VERIFIED** — Build + Trivy Scan هر دو Image روی Runner سبز                                                 |
-| Docker Build (asset, fleet, maintenance)                     |                  ✅ Dockerfile دارند                  |             —              | ✅ **CI VERIFIED** — Build + Trivy روی Runner برای هر سه؛ maintenance محلی هم اجرا شد (uid=100)                    |
-| Docker Build (economic)                                      |                  ✅ Dockerfile دارد                   |             —              | ✅ **CI VERIFIED** — Build + Trivy روی Runner سبز؛ محلی هم: `uid=100(rasta)`، `npm` حذف‌شده، Trivy ۰ CRITICAL/HIGH |
-| Docker Build (api-gateway)                                   |                  ❌ Dockerfile ندارد                  |             —              | ❌ باز (بخش ۲۲)                                                                                                    |
-| **fleet-service — Driver/Assignment/Usage/Availability**     |                          ✅                           |        ✅ (۸۸ تست)         | ✅ زنده + **CI VERIFIED**                                                                                          |
-| **Assignment Exclusivity (Partial Unique Index)**            |                          ✅                           |      ✅ (Integration)      | ✅ زنده: راننده مشغول → `422 DRIVER_ALREADY_ASSIGNED`                                                              |
-| **Fleet → Kafka → Asset Projector**                          |                          ✅                           |        ✅ (۳۲ تست)         | ✅ **زنده** — Timeline پر شد، وضعیت `IDLE→ASSIGNED→ACTIVE`                                                         |
-| **Idempotency (ثبت آفلاین + Replay مصرف‌کننده)**             |                          ✅                           |             ✅             | ✅ زنده: ارسال دوباره = همان رکورد؛ Replay کافکا = بدون اثر دوم                                                    |
-| **correlationId در کل زنجیره**                               |                          ✅                           |             ✅             | ✅ زنده: HTTP → Outbox → Header کافکا → Timeline، یکسان                                                            |
-| **maintenance — Schedule/Request/RepairOrder/Cost**          |                          ✅                           |        ✅ (۱۰۲ تست)        | ✅ زنده + **CI VERIFIED**                                                                                          |
-| **سررسید مشتق‌شده (نه Flag ذخیره‌شده)**                      |                          ✅                           |        ✅ (۱۴ تست)         | ✅ زنده: گریدر `OVERDUE on HOURS`، کنتور ۴۳۸۶٫۵۰ در برابر سررسید ۴۳۷۰٫۵۰                                           |
-| **منع درخواست تکراری (Partial Unique Index)**                |                          ✅                           |      ✅ (Integration)      | ✅ زنده: درخواست دوم → `422 DUPLICATE_OPEN_REQUEST`                                                                |
-| **اتمیک بودن هزینه زیر همروندی**                             |                          ✅                           |      ✅ (Integration)      | ✅ ده ثبت هم‌زمان → مجموع دقیقاً برابر `SUM` پایگاه داده                                                           |
-| **تأیید پیش از تسویه (کنترل سند محصول)**                     |                          ✅                           |             ✅             | ✅ زنده: تأیید زودهنگام `409`، مبلغ کهنه `422`، تأیید دوباره `409`                                                 |
-| **Fleet USAGE_RECORDED → Maintenance (مسیر مرده پیشین)**     |                          ✅                           |        ✅ (۴۱ تست)         | ✅ **زنده** — کنتور ۴۳۸۰٫۵۰ → ۴۳۸۶٫۵۰، سپس `MAINTENANCE_DUE`                                                       |
-| **Maintenance → Kafka → Asset Timeline + Fleet Replica**     |                          ✅                           |             ✅             | ✅ **زنده** — ۳ خط Timeline، `IN_MAINTENANCE` → `ACTIVE`، `inMaintenance` روشن و خاموش                             |
-| **economic — Wallet/Hold/Ledger/Journal/Transaction**        |                          ✅                           |        ✅ (۲۳۹ تست)        | ✅ زنده (۲۶ سناریو، بخش ۲۱-ج)                                                                                      |
-| **تغییرناپذیری دفتر کل (Trigger پایگاه داده)**               |                          ✅                           |      ✅ (Integration)      | ✅ **از SQL خام** — `UPDATE`/`DELETE` روی `ledger_entry` و `journal` هر دو رد شدند                                 |
-| **توازن هر Journal (Trigger معوق در COMMIT)**                |                          ✅                           |      ✅ (Integration)      | ✅ تراز آزمایشی زنده: `balanced: true`، ۱۳۶٬۰۰۰٬۰۰۰ = ۱۳۶٬۰۰۰٬۰۰۰                                                  |
-| **`available = ledger − pending` (CHECK پایگاه داده)**       |                          ✅                           |      ✅ (Integration)      | ✅ زنده: Hold ۱۲م → available ۷۶م، pending ۱۲م، مجموع ۸۸م                                                          |
-| **همروندی کیف پول — ۱۰۰ برداشت موازی**                       |                          ✅                           |      ✅ (Integration)      | ✅ دقیقاً ۱۰ موفق از ۱۰۰ برای موجودی ۱۰ واحدی؛ هرگز مانده منفی                                                     |
-| **Idempotency واقعی (کلید ذخیره‌شده + Hash بدنه)**           |                          ✅                           |        ✅ (۱۳ تست)         | ✅ زنده: کلید تکراری → همان پاسخ؛ بدنه متفاوت → `409`؛ بدون کلید → `400`                                           |
-| **تسویه اتمیک — شکست میانی چیزی باقی نمی‌گذارد**             |                          ✅                           |      ✅ (Integration)      | ✅ تزریق خطا پس از Post شدن Journal → صفر Journal، صفر تغییر مانده، وجه در Hold                                    |
-| **اعتراض → توقف کامل تسویه**                                 |                          ✅                           |             ✅             | ✅ زنده: تسویه پیش از تأیید `409`؛ ماشین حالت یال DISPUTED→SETTLED ندارد                                           |
-| **`AUDITOR` هیچ دسترسی اقتصادی ندارد**                       |                          ✅                           |             ✅             | ✅ زنده با توکن واقعی: کیف پول `403`، تراکنش `403`، تراز آزمایشی `403`                                             |
-| **Maintenance → Kafka → economic (مسیر مرده پیشین)**         |                          ✅                           |         ✅ (۹ تست)         | ✅ **زنده** — `MAINTENANCE_APPROVED` → تعهد `PENDING_SETTLEMENT`، و **صفر حرکت پول**                               |
-| **پرداخت شبیه‌سازی‌شده، با اعلام صریح**                      |                          ✅                           |             ✅             | ✅ زنده: `simulated: true` روی پاسخ، ردیف و رویداد؛ شکست قابل تحریک → `INSUFFICIENT_FUNDS`                         |
-| Frontend (`apps/web`, `apps/admin`)                          |                          ❌                           |             —              | NOT_STARTED — پوشه خالی                                                                                            |
-| Integration Tests (`*.int-spec.ts`)                          | ✅ ۳۰ Suite (fleet ۴، maintenance ۵، **economic ۲۱**) |             —              | ✅ **۳۲۸** — ۷۳ پیشین + ۲۵۵ economic                                                                               |
-| E2E Tests (`tests/e2e`, Playwright)                          |                          ✅                           |       ✅ (۶۴ سناریو)       | ✅ **زنده** — Gateway + economic + marketplace + PostgreSQL + Kafka + Temporal + توکن واقعی Keycloak               |
-| marketplace-service                                          |                          ✅                           | ✅ ۲۲۴ واحد + ۱۴۱ یکپارچگی | ✅ ۱۷ سناریوی E2E؛ Branch Coverage ۷۷٫۶۲٪ با دروازه ۷۵٪ در CI                                                      |
-| **document-service — Upload Intent/Document/AccessGrant**    |                          ✅                           | ✅ ۱۲۲ واحد + ۹۶ یکپارچگی  | ✅ زنده (۱۰ سناریوی E2E روی Stack واقعی)؛ Coverage ۸۸٫۷۰٪ Statement با دروازه ۷۵٪ — CI هنوز روی این شاخه اجرا نشده |
-| **آپلود مستقیم: فایل هرگز از سرویس عبور نمی‌کند (ADR-014)**  |                          ✅                           |             ✅             | ✅ **زنده** — `PUT` از کلاینت مستقیم به MinIO، بدون هیچ Credential پلتفرمی                                         |
-| **دانلود Fail-Closed: فقط `CLEAN` مجاز است**                 |                          ✅                           |             ✅             | ✅ **زنده** — Stub تولیدی `NOT_SCANNED` می‌دهد و دانلود `422` می‌گیرد؛ هیچ متغیر محیطی این را عوض نمی‌کند (Q-18)   |
-| **بررسی Magic Number روی بایت‌های واقعی**                    |                          ✅                           |             ✅             | ✅ زنده: HTML آپلودشده زیر ادعای PDF → `422`                                                                       |
-| **اسکن بدافزار واقعی**                                       |                          ❌                           |             —              | **NOT_STARTED — Q-18 باز.** Port هست، پیاده‌سازی نیست؛ تا آن زمان دانلود بسته است                                  |
-| procurement/supplier/inventory/construction/…                |                          ❌                           |             —              | مطابق فازبندی؛ وضعیت هر قابلیت در `docs/17`                                                                        |
+| Feature                                                          |                      Implemented                      |      Automated Tests       | Live Verified (2026-08-27)                                                                                                                                        |
+| ---------------------------------------------------------------- | :---------------------------------------------------: | :------------------------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tenant Isolation (API)                                           |                          ✅                           |             ✅             | ✅ (403 TENANT_MISMATCH زنده گرفته شد)                                                                                                                            |
+| Tenant Isolation (Database)                                      |                          ✅                           |             —              | ✅ (`permission denied for database` زنده گرفته شد)                                                                                                               |
+| Cross-tenant read → 404                                          |                          ✅                           |             ✅             | ✅                                                                                                                                                                |
+| RBAC (Roles Guard)                                               |                          ✅                           |             ✅             | ✅ (Auditor → 403 روی POST)                                                                                                                                       |
+| JWT verification (Keycloak/JWKS)                                 |                          ✅                           |             ✅             | ✅ (۴ کاربر Seed، توکن واقعی گرفته شد)                                                                                                                            |
+| Transactional Outbox → Kafka                                     |                          ✅                           |             ✅             | ✅ (Asset ساخته شد → Outbox → Kafka، Correlation تطبیق)                                                                                                           |
+| Event Consumer / Dossier Projector                               |                          ✅                           |        ✅ (18 تست)         | ✅ (رویداد ساختگی maintenance → یک خط Timeline، Replay دوباره = بدون تکرار)                                                                                       |
+| API Gateway routing + circuit breaker                            |                          ✅                           |        ✅ (21 تست)         | ✅ (مسیر به سرویس نساخته‌شده fleet → 503 تمیز)                                                                                                                    |
+| Redis Rate Limiting (منطق)                                       |                          ✅                           |         ✅ (واحد)          | ⚠️ **مسدود شده توسط تداخل Port میزبان — بخش ۲۲.۳ D-006**                                                                                                          |
+| Anonymous public endpoint (self-registration) از راه Gateway     |                          ✅                           |        ✅ (17 تست)         | ✅ **`201` زنده گرفته شد — D-007 رفع شد**                                                                                                                         |
+| CI/CD روی GitHub Actions                                         |                          ✅                           |             —              | ✅ **CI VERIFIED** — Run `33219920446`، Commit `a36a2cf`، هر **۹** Job سبز (فاز اقتصادی)                                                                          |
+| Docker Build (identity, organization)                            |                          ✅                           |             —              | ✅ **CI VERIFIED** — Build + Trivy Scan هر دو Image روی Runner سبز                                                                                                |
+| Docker Build (asset, fleet, maintenance)                         |                  ✅ Dockerfile دارند                  |             —              | ✅ **CI VERIFIED** — Build + Trivy روی Runner برای هر سه؛ maintenance محلی هم اجرا شد (uid=100)                                                                   |
+| Docker Build (economic)                                          |                  ✅ Dockerfile دارد                   |             —              | ✅ **CI VERIFIED** — Build + Trivy روی Runner سبز؛ محلی هم: `uid=100(rasta)`، `npm` حذف‌شده، Trivy ۰ CRITICAL/HIGH                                                |
+| Docker Build (api-gateway)                                       |                  ❌ Dockerfile ندارد                  |             —              | ❌ باز (بخش ۲۲)                                                                                                                                                   |
+| **fleet-service — Driver/Assignment/Usage/Availability**         |                          ✅                           |        ✅ (۸۸ تست)         | ✅ زنده + **CI VERIFIED**                                                                                                                                         |
+| **Assignment Exclusivity (Partial Unique Index)**                |                          ✅                           |      ✅ (Integration)      | ✅ زنده: راننده مشغول → `422 DRIVER_ALREADY_ASSIGNED`                                                                                                             |
+| **Fleet → Kafka → Asset Projector**                              |                          ✅                           |        ✅ (۳۲ تست)         | ✅ **زنده** — Timeline پر شد، وضعیت `IDLE→ASSIGNED→ACTIVE`                                                                                                        |
+| **Idempotency (ثبت آفلاین + Replay مصرف‌کننده)**                 |                          ✅                           |             ✅             | ✅ زنده: ارسال دوباره = همان رکورد؛ Replay کافکا = بدون اثر دوم                                                                                                   |
+| **correlationId در کل زنجیره**                                   |                          ✅                           |             ✅             | ✅ زنده: HTTP → Outbox → Header کافکا → Timeline، یکسان                                                                                                           |
+| **maintenance — Schedule/Request/RepairOrder/Cost**              |                          ✅                           |        ✅ (۱۰۲ تست)        | ✅ زنده + **CI VERIFIED**                                                                                                                                         |
+| **سررسید مشتق‌شده (نه Flag ذخیره‌شده)**                          |                          ✅                           |        ✅ (۱۴ تست)         | ✅ زنده: گریدر `OVERDUE on HOURS`، کنتور ۴۳۸۶٫۵۰ در برابر سررسید ۴۳۷۰٫۵۰                                                                                          |
+| **منع درخواست تکراری (Partial Unique Index)**                    |                          ✅                           |      ✅ (Integration)      | ✅ زنده: درخواست دوم → `422 DUPLICATE_OPEN_REQUEST`                                                                                                               |
+| **اتمیک بودن هزینه زیر همروندی**                                 |                          ✅                           |      ✅ (Integration)      | ✅ ده ثبت هم‌زمان → مجموع دقیقاً برابر `SUM` پایگاه داده                                                                                                          |
+| **تأیید پیش از تسویه (کنترل سند محصول)**                         |                          ✅                           |             ✅             | ✅ زنده: تأیید زودهنگام `409`، مبلغ کهنه `422`، تأیید دوباره `409`                                                                                                |
+| **Fleet USAGE_RECORDED → Maintenance (مسیر مرده پیشین)**         |                          ✅                           |        ✅ (۴۱ تست)         | ✅ **زنده** — کنتور ۴۳۸۰٫۵۰ → ۴۳۸۶٫۵۰، سپس `MAINTENANCE_DUE`                                                                                                      |
+| **Maintenance → Kafka → Asset Timeline + Fleet Replica**         |                          ✅                           |             ✅             | ✅ **زنده** — ۳ خط Timeline، `IN_MAINTENANCE` → `ACTIVE`، `inMaintenance` روشن و خاموش                                                                            |
+| **economic — Wallet/Hold/Ledger/Journal/Transaction**            |                          ✅                           |        ✅ (۲۳۹ تست)        | ✅ زنده (۲۶ سناریو، بخش ۲۱-ج)                                                                                                                                     |
+| **تغییرناپذیری دفتر کل (Trigger پایگاه داده)**                   |                          ✅                           |      ✅ (Integration)      | ✅ **از SQL خام** — `UPDATE`/`DELETE` روی `ledger_entry` و `journal` هر دو رد شدند                                                                                |
+| **توازن هر Journal (Trigger معوق در COMMIT)**                    |                          ✅                           |      ✅ (Integration)      | ✅ تراز آزمایشی زنده: `balanced: true`، ۱۳۶٬۰۰۰٬۰۰۰ = ۱۳۶٬۰۰۰٬۰۰۰                                                                                                 |
+| **`available = ledger − pending` (CHECK پایگاه داده)**           |                          ✅                           |      ✅ (Integration)      | ✅ زنده: Hold ۱۲م → available ۷۶م، pending ۱۲م، مجموع ۸۸م                                                                                                         |
+| **همروندی کیف پول — ۱۰۰ برداشت موازی**                           |                          ✅                           |      ✅ (Integration)      | ✅ دقیقاً ۱۰ موفق از ۱۰۰ برای موجودی ۱۰ واحدی؛ هرگز مانده منفی                                                                                                    |
+| **Idempotency واقعی (کلید ذخیره‌شده + Hash بدنه)**               |                          ✅                           |        ✅ (۱۳ تست)         | ✅ زنده: کلید تکراری → همان پاسخ؛ بدنه متفاوت → `409`؛ بدون کلید → `400`                                                                                          |
+| **تسویه اتمیک — شکست میانی چیزی باقی نمی‌گذارد**                 |                          ✅                           |      ✅ (Integration)      | ✅ تزریق خطا پس از Post شدن Journal → صفر Journal، صفر تغییر مانده، وجه در Hold                                                                                   |
+| **اعتراض → توقف کامل تسویه**                                     |                          ✅                           |             ✅             | ✅ زنده: تسویه پیش از تأیید `409`؛ ماشین حالت یال DISPUTED→SETTLED ندارد                                                                                          |
+| **`AUDITOR` هیچ دسترسی اقتصادی ندارد**                           |                          ✅                           |             ✅             | ✅ زنده با توکن واقعی: کیف پول `403`، تراکنش `403`، تراز آزمایشی `403`                                                                                            |
+| **Maintenance → Kafka → economic (مسیر مرده پیشین)**             |                          ✅                           |         ✅ (۹ تست)         | ✅ **زنده** — `MAINTENANCE_APPROVED` → تعهد `PENDING_SETTLEMENT`، و **صفر حرکت پول**                                                                              |
+| **پرداخت شبیه‌سازی‌شده، با اعلام صریح**                          |                          ✅                           |             ✅             | ✅ زنده: `simulated: true` روی پاسخ، ردیف و رویداد؛ شکست قابل تحریک → `INSUFFICIENT_FUNDS`                                                                        |
+| Frontend (`apps/web`, `apps/admin`)                              |                          ❌                           |             —              | NOT_STARTED — پوشه خالی                                                                                                                                           |
+| Integration Tests (`*.int-spec.ts`)                              | ✅ ۳۰ Suite (fleet ۴، maintenance ۵، **economic ۲۱**) |             —              | ✅ **۳۲۸** — ۷۳ پیشین + ۲۵۵ economic                                                                                                                              |
+| E2E Tests (`tests/e2e`, Playwright)                              |                          ✅                           |       ✅ (۶۴ سناریو)       | ✅ **زنده** — Gateway + economic + marketplace + PostgreSQL + Kafka + Temporal + توکن واقعی Keycloak                                                              |
+| marketplace-service                                              |                          ✅                           | ✅ ۲۲۴ واحد + ۱۴۱ یکپارچگی | ✅ ۱۷ سناریوی E2E؛ Branch Coverage ۷۷٫۶۲٪ با دروازه ۷۵٪ در CI                                                                                                     |
+| **document-service — Upload Intent/Document/AccessGrant/ClamAV** |                          ✅                           | ✅ ۲۵۵ واحد + ۱۲۹ یکپارچگی | ✅ زنده (۱۱ سناریوی E2E روی Stack واقعی + ClamAV واقعی)؛ Coverage ۹۰٫۲۳٪ Statement / ۸۱٫۹۶٪ Branch با دروازهٔ بدون‌تغییر ۷۵٪ — CI هنوز روی شاخهٔ ClamAV اجرا نشده |
+| **آپلود مستقیم: فایل هرگز از سرویس عبور نمی‌کند (ADR-014)**      |                          ✅                           |             ✅             | ✅ **زنده** — `PUT` از کلاینت مستقیم به MinIO، بدون هیچ Credential پلتفرمی                                                                                        |
+| **دانلود Fail-Closed: فقط `CLEAN` مجاز است**                     |                          ✅                           |             ✅             | ✅ **زنده** — سند تازه `PENDING` است و `422` می‌گیرد؛ پس از یک `CLEAN` معتبر بایت‌ها بازمی‌گردند. هیچ متغیر محیطی این را عوض نمی‌کند                              |
+| **بررسی Magic Number روی بایت‌های واقعی**                        |                          ✅                           |             ✅             | ✅ زنده: HTML آپلودشده زیر ادعای PDF → `422`                                                                                                                      |
+| **اسکن بدافزار واقعی (ClamAV)**                                  |                          ✅                           |  ✅ واحد + یکپارچگی + E2E  | ✅ **زنده** — ClamAV 1.5.4 پین‌شده، ناهمزمان، EICAR روی موتور واقعی تشخیص داده شد (ADR-049، Q-18 بسته)                                                            |
+| procurement/supplier/inventory/construction/…                    |                          ❌                           |             —              | مطابق فازبندی؛ وضعیت هر قابلیت در `docs/17`                                                                                                                       |
 
 ---
 
@@ -342,7 +368,7 @@ infrastructure/
   docker/   Postgres Init، Kafka Topics، Keycloak Realm — IMPLEMENTED
   k8s/      NOT_STARTED — پوشه خالی
 
-docs/       ۲۴ سند + ۴۸ ADR + events/api/database/security/deployment/runbooks
+docs/       ۲۴ سند + ۴۹ ADR + events/api/database/security/deployment/runbooks
 scripts/
   copy-prisma-client.mjs   کپی Prisma Client تولیدشده به dist/
   prisma.mjs               Wrapper که DATABASE_URL_<SERVICE> را به Prisma CLI می‌دهد (این جلسه اضافه شد)
@@ -361,7 +387,7 @@ scripts/
 | `fleet-service`        | 3104        | IMPLEMENTED · TESTED · LIVE VERIFIED · **CI VERIFIED**   | `rasta_fleet`        | **88 Unit + 32 Integration**            | ✅ **در CI Matrix**، Build+Trivy سبز                            |
 | `maintenance-service`  | 3105        | IMPLEMENTED · TESTED · LIVE VERIFIED · **CI VERIFIED**   | `rasta_maintenance`  | **102 Unit + 41 Integration**           | ✅ **در CI Matrix**، Build+Trivy سبز                            |
 | `economic-service`     | **3112**    | IMPLEMENTED · TESTED · LIVE VERIFIED · **CI VERIFIED**   | `rasta_economic`     | **308 Unit + 255 Integration + 37 E2E** | ✅ **در CI Matrix**، Build+Trivy سبز (۰ CRITICAL/HIGH، uid=100) |
-| `document-service`     | **3114**    | IMPLEMENTED · TESTED · LIVE VERIFIED (CI هنوز اجرا نشده) | `rasta_document`     | **۱۲۲ Unit + ۹۶ Integration + ۱۰ E2E**  | ✅ Dockerfile دارد (هنوز در CI Matrix نیست)                     |
+| `document-service`     | **3114**    | IMPLEMENTED · TESTED · LIVE VERIFIED (CI هنوز اجرا نشده) | `rasta_document`     | **۲۵۵ Unit + ۱۲۹ Integration + ۱۱ E2E** | ✅ Dockerfile در CI Matrix (هشت Image) · ClamAV Sidecar بیرونی  |
 | ۸ سرویس دیگر           | 3106–3116   | NOT_STARTED                                              | —                    | ۰                                       | —                                                               |
 
 \* پورت داکیومنت‌شده در `CLAUDE.md`/`docs` **۳۰۰۰** است؛ در `.env` محلی فعلی
@@ -782,19 +808,26 @@ HTTP → economic-service → PostgreSQL + Outbox (یک تراکنش) → Outbox
 
 ## ۷-د. document-service — ورودی کامل حافظه
 
-> **وضعیت:** IMPLEMENTED · TESTED · LIVE VERIFIED (2026-08-31) · CI هنوز روی این
-> شاخه اجرا نشده. پورت **۳۱۱۴**، پایگاه داده `rasta_document`.
+> **وضعیت:** IMPLEMENTED · TESTED · LIVE VERIFIED (2026-08-31) · CI هنوز روی شاخهٔ
+> `feat/document-clamav-scanner` اجرا نشده. پورت **۳۱۱۴**، پایگاه داده
+> `rasta_document`.
+>
+> **به‌روزرسانی 2026-08-31 — Q-18 بسته شد (ADR-049).** اسکن بدافزار دیگر Stub نیست:
+> **ClamAV** خودمیزبان به‌صورت Sidecar، پین‌شده به Digest تغییرناپذیر، پشت همان
+> `MALWARE_SCANNER` Port. دانلود سند برای **نخستین بار در تاریخ پلتفرم** ممکن شد —
+> و فقط پس از یک `CLEAN` معتبر. جزئیات در بخش «اسکن بدافزار» پایین‌تر.
 
 ### آنچه واقعاً کار می‌کند
 
-| عملیات                                  |              وضعیت               |
-| --------------------------------------- | :------------------------------: |
-| `POST /v1/documents/upload-url`         |                ✅                |
-| آپلود مستقیم کلاینت → Object Storage    |                ✅                |
-| `POST /v1/documents` (ثبت فراداده)      |                ✅                |
-| `GET /v1/documents` و `GET /…/{id}`     |                ✅                |
-| `DELETE /v1/documents/{id}` (Tombstone) |                ✅                |
-| `POST /v1/documents/{id}/download-url`  | ❌ در MVP همیشه رد می‌شود — Q-18 |
+| عملیات                                  |           وضعیت           |
+| --------------------------------------- | :-----------------------: |
+| `POST /v1/documents/upload-url`         |            ✅             |
+| آپلود مستقیم کلاینت → Object Storage    |            ✅             |
+| `POST /v1/documents` (ثبت فراداده)      |            ✅             |
+| `GET /v1/documents` و `GET /…/{id}`     |            ✅             |
+| `DELETE /v1/documents/{id}` (Tombstone) |            ✅             |
+| `POST /v1/documents/{id}/download-url`  | ✅ پس از یک `CLEAN` معتبر |
+| اسکن بدافزار ناهمزمان (ClamAV)          |            ✅             |
 
 ### فایل هرگز از سرویس عبور نمی‌کند
 
@@ -813,17 +846,69 @@ HTTP → economic-service → PostgreSQL + Outbox (یک تراکنش) → Outbox
 `NOT_SCANNED`، `INFECTED`، `FAILED`، `QUARANTINED` و سند حذف‌شده رد می‌شوند؛
 هر وضعیتی که بعداً به Enum اضافه شود، به‌صورت پیش‌فرض بسته است.
 
-اسکنر MVP (`NoOpMalwareScanner`) هیچ محتوایی بازرسی نمی‌کند و `NOT_SCANNED`
-ثبت می‌کند. نتیجه مستقیم: **در یک استقرار MVP هیچ سندی قابل دانلود نیست.**
-
 **هیچ متغیر محیطی این را عوض نمی‌کند.** `DOCUMENT_ALLOW_UNSCANNED_DOWNLOAD` که
 پیش‌فرضش `true` بود حذف شد — نه اینکه `false` شود. `canDownload` هیچ آرگومان
-پیکربندی نمی‌گیرد و `DocumentEnv` هیچ فیلد اسکن ندارد. جزئیات کامل و مسیر بستن
-در `docs/24` ذیل Q-18.
+پیکربندی نمی‌گیرد، و **هیچ‌یک از سیزده تنظیم اسکن که ADR-049 اضافه کرد آن را
+بازنمی‌گرداند**: همه تنظیم می‌کنند اسکن _چگونه_ انجام شود.
 
-مسیر دانلود موفق با `AlwaysCleanScanner` تست می‌شود — یک پیاده‌سازی **فقط-تستی**
-در `test/`، که `tsconfig.json` آن پوشه را از Build خارج می‌کند، پس هرگز به
-`AppModule` نمی‌رسد.
+### اسکن بدافزار — ClamAV (ADR-049، بستن Q-18)
+
+**پیش از این:** `NoOpMalwareScanner` هیچ محتوایی باز نمی‌کرد و `NOT_SCANNED` ثبت
+می‌کرد، پس **در هیچ استقرار MVP هیچ سندی قابل دانلود نبود**. محدودیت عمدی بود، نه نقص:
+آنچه هرگز رخ نداد، ثبت یک `CLEAN` دروغین بود.
+
+**اکنون:**
+
+```
+finalize  → سند PENDING ثبت می‌شود؛ DOCUMENT_UPLOADED با scanState=PENDING
+ScanWorker → Claim (FOR UPDATE SKIP LOCKED + Lease) → Stream از MinIO → clamd INSTREAM
+          → CLEAN | INFECTED | FAILED | PENDING(retry با Backoff نمایی)
+          → DOCUMENT_SCANNED (+ VIRUS_DETECTED برای عفونت)
+```
+
+| موضوع         | واقعیت                                                                                  |
+| ------------- | --------------------------------------------------------------------------------------- |
+| Image         | `clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591` |
+| نسخه          | ClamAV 1.5.4، Alpine 3.24.1، amd64، ~۴۰۰MB                                              |
+| امضا در Image | `main.cvd` v63 · `daily.cvd` v28108 · `bytecode.cvd` v339                               |
+| Production    | Unix Socket؛ `DOCUMENT_CLAMAV_HOST` در Production **رد می‌شود و فرآیند خارج** (S-08)    |
+| Local/CI      | TCP فقط روی `127.0.0.1`؛ CI روی لینوکس از Socket استفاده می‌کند                         |
+| freshclam     | Container جداگانه، غیر-root، Volume ماندگار — **محلی تأیید شد: 28108 → 28109**          |
+| تازگی امضا    | سقف ۴۸ ساعت؛ فراتر از آن اسکن **انجام نمی‌شود** و `STALE_SIGNATURES` ثبت می‌شود         |
+| RAM           | ~۱ گیگابایت در حالت پایدار (پایگاه امضا در حافظه)                                       |
+
+**تنها یک مسیر به `CLEAN` وجود دارد** و همه‌چیز را با هم می‌خواهد: پاسخی که Parse شده،
+به‌صورت `OK`، از موتوری که نسخه‌اش خوانده شده، روی پایگاه امضایی درون پنجرهٔ تازگی.
+Timeout، اتصال ردشده، پاسخ ناقص، خطای موتور، سقف اندازه، `Heuristics.Limits.Exceeded`
+و امضای کهنه — همه `FAILED` با کد دلیل.
+
+**سه نقص واقعی که تست‌ها پیدا کردند** (هر سه در همین شاخه رفع شد):
+
+1. `openReadStream` دقیقاً `maxBytes` می‌خواست. این به سمت **باز** شکست می‌خورد: شیء
+   بزرگ‌تر دقیقاً سقف را برمی‌گرداند، شمارنده هرگز رد نمی‌شود، و اسکنر یک پیشوند بریده
+   را می‌خواند و دربارهٔ فایلی که فقط ابتدایش را دیده `OK` می‌گوید. حالا یک بایت **بیش
+   از** سقف می‌خواهد تا «بیشتر از آنچه مجاز است وجود دارد» قابل مشاهده باشد.
+2. Flag خاموشی Worker با `true` مقداردهی اولیه شده بود، پس Worker ای که با `tick()`
+   رانده می‌شد — اپراتوری که صف را دستی تخلیه می‌کند — یک دسته Claim می‌کرد و همه را
+   بدون اسکن رها می‌کرد.
+3. رأی `INFECTED` از اسکنری که چیزی بازرسی نمی‌کند، درون تراکنش نوشتن `throw` می‌کرد و
+   کل دسته را Rollback و سند را برای همیشه در `PENDING` پارک می‌کرد.
+
+**سیاست قرنطینه.** شیء **حذف نمی‌شود** — مدرک است. `quarantined_at` و
+`quarantine_reason` در همان نوشتنِ `INFECTED` ثبت می‌شوند و
+`ck_document_infected_is_quarantined` این را از یک وعده به یک ویژگی سطر تبدیل می‌کند.
+
+**آنچه ClamAV نمی‌دهد.** تشخیص کامل یا تضمین‌شده. `CLEAN` یعنی «چیزی که این پایگاه
+می‌شناسد تطبیق نکرد» — نه «امن است». فهرست کامل محدودیت‌ها در ADR-049.
+
+**EICAR.** آرتیفکت استاندارد و بی‌ضرر، **داخل یک DOCX**. تلاش نخست آن را در PDF جاسازی
+کرد و ClamAV به‌درستی `OK` گفت: امضا فایل را به‌عنوان یک کل تطبیق می‌دهد. بایت‌ها در
+حافظه از دو قطعهٔ base64 ساخته می‌شوند و **هرگز روی فایل‌سیستم میزبان نوشته نمی‌شوند**.
+
+مسیر دانلود موفق در Suite های غیر-ClamAV با `AlwaysCleanScanner` تست می‌شود — یک
+پیاده‌سازی **فقط-تستی** در `test/`، که `tsconfig.json` آن پوشه را از Build خارج می‌کند.
+`fake-clamd.ts` هم به همان دلیل از `src/` به `test/` منتقل شد: زیر این tsconfig در
+`dist` کامپایل می‌شد و درون Image تولیدی می‌رفت.
 
 ### کنترل‌های محتوا
 
@@ -871,7 +956,9 @@ Migration با `node scripts/verify-migration-reversible.mjs document` واقع�
 
 ### آنچه ساخته نشده — صادقانه
 
-- **اسکن بدافزار واقعی** (Q-18) — مهم‌ترین مورد. Port هست، پیاده‌سازی نیست.
+- ~~**اسکن بدافزار واقعی** (Q-18)~~ — **ساخته شد (2026-08-31، ADR-049).** ClamAV
+  خودمیزبان، ناهمزمان، پین‌شده به Digest. آنچه باقی می‌ماند یک محدودیت است نه یک شکاف:
+  ClamAV تک‌موتوره است و بدافزار بدون امضا را نمی‌یابد.
 - **اشتراک‌گذاری میان‌مستأجری** (Q-36) — جدول `AccessGrant` وجود دارد اما فقط
   Subjectهای **درون** سازمان مالک را می‌پذیرد. تأمین‌کننده‌ای که مجوزش باید برای
   خریدار دیده شود، هنوز طراحی ندارد؛ اختراعش یعنی اختراع قاعده کسب‌وکار.
@@ -1151,8 +1238,17 @@ Database خالی، بدون Schema) — منتظر سرویس‌های نساخ
 
 ## ۱۷. Infrastructure
 
-`docker-compose.yml` — پیش‌فرض (`pnpm infra:up`) این ۷ را بالا می‌آورد:
-`postgres, redis, kafka, kafka-init, keycloak, minio, minio-init, temporal`.
+`docker-compose.yml` — پیش‌فرض (`pnpm infra:up`) این‌ها را بالا می‌آورد:
+`postgres, redis, kafka, kafka-init, keycloak, minio, minio-init, temporal,`
+**`clamav, clamav-freshclam`** (ADR-049، افزوده‌شده 2026-08-31).
+
+**ClamAV:** پین‌شده به Digest تغییرناپذیر، غیر-root (uid 100)، Rootfs فقط-خواندنی،
+TCP فقط روی `127.0.0.1:3310`. `clamav-freshclam` Container جداگانه‌ای است که روی Volume
+ماندگار `clamav-signatures` می‌نویسد؛ Docker آن Volume را در نخستین ساخت از خود Image
+پُر می‌کند، پس شروع سرد ۱۱۰ مگابایت دانلود نمی‌کند. **Healthcheck از `clamdscan --ping`
+استفاده می‌کند نه از `clamdcheck.sh` خود Image**: آن اسکریپت `nc localhost 3310` می‌زند
+و Resolver آلپاین اول `::1` را جواب می‌دهد، که clamd (روی `0.0.0.0`) گوش نمی‌دهد — یعنی
+روی یک Daemon کاملاً سالم «Unable to contact server» گزارش می‌کرد.
 دو Profile اختیاری: `tools` (kafka-ui, temporal-ui, mailpit) و
 `observability` (otel-collector, prometheus, grafana) + `search`
 (opensearch) — همگی پیاده‌سازی‌شده اما پیش‌فرض بالا نمی‌آیند.
@@ -1688,6 +1784,34 @@ live-verify-17  WALLET_OPENED         actor=USR-SEED-DEHYARI-ADMIN
 | —     | `InsuranceClaim` جدول بدون API                                                   | پایین                           | داده قابل‌ثبت نیست از راه سرویس                                                                  | Controller/Service لازم است، هروقت claim-flow اولویت شد                                                     |
 | —     | `mission` و رویدادهای `MISSION_*` پیاده نشدند                                    | پایین                           | تحلیل «ناوگان داخلی در برابر برون‌سپاری» هنوز داده مأموریت ندارد                                 | عمدی — به `construction-service` گره خورده که وجود ندارد؛ ADR-026 § Consequences                            |
 
+### D-022 — نگهبان تنانت `document-service` نام مدل‌های سرویس دیگری را داشت — رفع شد (2026-08-31) ✅
+
+`TENANT_SCOPED_MODELS` در `document-service` نام مدل‌های **marketplace** را داشت —
+`Product`، `Offer`، `Order`، `OrderLine`، `Fulfillment`، `Review` — که هیچ‌کدام در آن
+پایگاه داده وجود ندارند. `createTenantGuardExtension` هر مدلی را که نمی‌شناسد
+دست‌نخورده رد می‌کند، پس نگهبان نصب بود، چیزی Log نمی‌کرد و **هیچ‌چیز را Scope
+نمی‌کرد**: هر Query روی `Document`، `UploadIntent` و `AccessGrant` بدون فیلتر اجرا
+می‌شد، و هر `runUnscoped(...)` در Repository عبور از مرزی را علامت می‌زد که وجود نداشت.
+
+**هیچ خواندن میان‌مستأجری از این راه قابل دسترس نبود** — `list` خودش در Query با
+`organizationId` فیلتر می‌کند و جست‌وجوهای شناسه‌محور سطر را مستقیم به `access.ts`
+می‌دهند که برای بیگانه `404` می‌گوید. به همین دلیل هر ۹۶ تست یکپارچگی، چه با نگهبان
+فعال و چه بدون آن، سبز بودند.
+
+آنچه غایب بود، همان لایه‌ای است که A-04 می‌خواهد: Scope **اعمال‌شده**، نه به‌خاطر
+سپرده‌شده. دفاعی که بی‌اثر است ولی حاضر به نظر می‌رسد، از دفاع غایب بدتر است — چون
+Query بعدی که اینجا نوشته شود توسط هیچ‌کس بررسی نمی‌شد.
+
+**رفع:** فهرست به مدل‌های خود این سرویس اصلاح شد. `markDeleted` حالا صریحاً از نگهبان
+عبور می‌کند — اپراتور پلتفرم می‌تواند سند سازمان دیگری را حذف کند
+(`assertDocumentWritable` که Scope پلتفرمی را می‌پذیرد)، و با فیلتر شدن بر اساس سازمان
+خودِ فراخوان، آن `UPDATE` صفر سطر می‌گرفت و به‌صورت شکست قفل خوش‌بینانه ظاهر می‌شد —
+پاسخ اشتباه به عملی مجاز.
+
+**و نمی‌تواند دوباره رخ دهد:** `tenant-scope.spec.ts` مجموعهٔ درست را از خود
+`schema.prisma` **مشتق می‌کند** به‌جای تکرار کردنش. هر مدلی که `organizationId` دارد یا
+باید محافظت شود یا به‌عنوان استثنا نوشته شود.
+
 ### D-020 — پنج Flag محیطی که خاموش نمی‌شوند (2026-08-31) 🔴 باز
 
 `z.coerce.boolean()` تابع `Boolean()` جاوااسکریپت را اعمال می‌کند، و در آن
@@ -1969,18 +2093,20 @@ un\` — فایل‌های صفر-بایتی از نوع ReparsePoint که از
   میان‌تنانتی، که این پلتفرم ندارد. تصمیم موقت: پورتال به تعویق؛ نقش `WORKSHOP` در
   باریک‌سازی می‌افتد و هیچ نمی‌بیند.
 
-**یک پرسش از فاز اسناد — 🟡 و بازِ باز:**
+**یک پرسش از فاز اسناد — ✅ بسته شد (2026-08-31):**
 
-- **Q-18 — سرویس اسکن بدافزار.** ClamAV خودمیزبان یا سرویس ابری؟ **هیچ‌کدام
-  انتخاب نشده**، و این Task هم انتخاب نکرد. برخلاف پرسش‌های بالا، پاسخ‌دادنش
-  «یک درج رکورد» **نیست**: یک کلاس تازه پشت `MalwareScanner` و یک خط در
-  `app.module.ts` لازم است — که هنوز تغییر کد است، هرچند Domain دست نمی‌خورد.
+- **Q-18 — سرویس اسکن بدافزار.** پاسخ: **ClamAV خودمیزبان** (ADR-049). دقیقاً همان
+  شکلی را داشت که این سند پیش‌بینی کرده بود — یک کلاس پشت `MalwareScanner` و یک خط در
+  `app.module.ts`، بدون هیچ تغییری در Domain.
 
-  **تصمیم موقت، و هزینه‌اش:** Stub هیچ محتوایی بازرسی نمی‌کند و `NOT_SCANNED`
-  ثبت می‌کند؛ `canDownload` فقط `CLEAN` را مجاز می‌شمارد. یعنی **در MVP آپلود و
-  ثبت فراداده کار می‌کنند و دانلود کار نمی‌کند** — تا وقتی یک ارائه‌دهنده اسکن
-  واقعی پیکربندی شود. این یک محدودیت صادقانه و پذیرفته‌شده است، نه نقصی که
-  فراموش شده باشد.
+  **آنچه عوض شد:** اسناد دیگر `NOT_SCANNED` نمی‌گیرند؛ `PENDING` ثبت می‌شوند و یک
+  Worker ناهمزمان آن‌ها را به `CLEAN`، `INFECTED` یا `FAILED` می‌برد. **دانلود سند برای
+  نخستین بار در تاریخ پلتفرم کار می‌کند** — و فقط پس از یک `CLEAN` معتبر.
+
+  **آنچه عوض نشد:** `canDownload` هنوز فقط `CLEAN` را مجاز می‌شمارد و هیچ آرگومان
+  پیکربندی نمی‌گیرد. سطرهای `NOT_SCANNED` دست‌نخورده ماندند — «هیچ‌چیز به این بایت‌ها
+  نگاه نکرد» با «منتظر نگاه‌کردن است» یکی نیست، و بازبینی دوباره‌شان یک Backfill صریح
+  اپراتور است (`docs/runbooks/malware-scanner-down.md` § ۷).
 
   اگر مالکیت محصول پیش از وجود اسکنر به فایل قابل‌دانلود نیاز دارد، آن یک تصمیم
   صریح محصول و امنیت است و به **اصلاحیه ADR-014** نیاز دارد. از راه یک پیش‌فرض
