@@ -112,3 +112,83 @@ describe('ProxyService — the internal token it mints', () => {
     expect(headers['x-organization-id']).toBeUndefined();
   });
 });
+
+/**
+ * What the gateway forwards as a body.
+ *
+ * The failure this guards is silent: a body the gateway drops produces a
+ * downstream 400 that names a missing field the client demonstrably sent, and
+ * nothing anywhere says where it went. That is exactly what happened to
+ * document-service's deletion reason.
+ */
+async function forwardAndCaptureBody(
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+  body: unknown,
+): Promise<string | undefined> {
+  let sent: string | undefined;
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    sent = init.body as string | undefined;
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof globalThis.fetch;
+
+  try {
+    await runWithContext(
+      {
+        correlationId: 'COR_BODY',
+        requestId: 'REQ_BODY',
+        startedAt: Date.now(),
+        roles: ['ORGANIZATION_ADMIN'],
+        authType: 'USER',
+        userId: 'USR_1',
+      },
+      () =>
+        proxy().forward({
+          service: 'identity',
+          method,
+          path: '/v1/users/USR_1',
+          query: '',
+          headers: { authorization: 'Bearer caller-token' },
+          ...(body !== undefined ? { body } : {}),
+        }),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  return sent;
+}
+
+describe('ProxyService — the body it forwards', () => {
+  it('sends no body on a read', async () => {
+    expect(await forwardAndCaptureBody('GET', undefined)).toBeUndefined();
+  });
+
+  it('sends the body on a write', async () => {
+    expect(await forwardAndCaptureBody('POST', { name: 'a' })).toBe('{"name":"a"}');
+  });
+
+  it('sends an empty object for a write with no body', async () => {
+    // Long-standing behaviour, pinned rather than changed: a downstream schema
+    // that requires fields should answer 400, not fail parsing an empty stream.
+    expect(await forwardAndCaptureBody('POST', undefined)).toBe('{}');
+  });
+
+  it('forwards a DELETE body when the caller sent one', async () => {
+    // document-service requires a stated reason on every deletion, because a
+    // tombstone answering "who and when" but not "why" is not the audit record
+    // it exists to be. The gateway used to drop it, so the service received an
+    // empty object and answered 400 while the client had sent the reason.
+    expect(await forwardAndCaptureBody('DELETE', { reason: 'superseded by a revision' })).toBe(
+      '{"reason":"superseded by a revision"}',
+    );
+  });
+
+  it('sends no body on a DELETE that had none', async () => {
+    // A plain DELETE stays a plain DELETE. fleet-service's assignment alias
+    // takes no body and must not start receiving `{}`.
+    expect(await forwardAndCaptureBody('DELETE', undefined)).toBeUndefined();
+    expect(await forwardAndCaptureBody('DELETE', {})).toBeUndefined();
+  });
+});

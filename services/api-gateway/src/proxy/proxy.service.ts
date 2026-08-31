@@ -124,7 +124,7 @@ export class ProxyService {
       const response = await fetch(target, {
         method: request.method,
         headers,
-        body: this.hasBody(request.method) ? JSON.stringify(request.body ?? {}) : undefined,
+        body: this.bodyFor(request.method, request.body),
         signal: controller.signal,
       });
 
@@ -247,8 +247,36 @@ export class ProxyService {
     return result;
   }
 
-  private hasBody(method: string): boolean {
-    return !['GET', 'HEAD', 'DELETE', 'OPTIONS'].includes(method.toUpperCase());
+  /**
+   * The body to forward, if any.
+   *
+   * `GET`, `HEAD` and `OPTIONS` never carry one.
+   *
+   * `DELETE` forwards a body **only when the caller actually sent one**, and
+   * that is a fix rather than a nicety. The gateway used to drop it
+   * unconditionally, so document-service — which requires a stated reason on
+   * every deletion, because a tombstone answering "who and when" but not "why"
+   * is not the audit record it exists to be — received an empty object and
+   * answered 400. The client had sent the reason; nothing told it where the
+   * reason went. RFC 9110 leaves DELETE content's semantics undefined, which
+   * means undefined *by the specification* — this platform defines them in its
+   * own API contract.
+   *
+   * Only when non-empty, so a plain `DELETE` stays a plain `DELETE`:
+   * fleet-service's assignment alias takes no body and must not start
+   * receiving `{}`.
+   */
+  private bodyFor(method: string, body: unknown): string | undefined {
+    const verb = method.toUpperCase();
+    if (['GET', 'HEAD', 'OPTIONS'].includes(verb)) return undefined;
+
+    if (verb === 'DELETE') {
+      if (body === undefined || body === null) return undefined;
+      if (typeof body === 'object' && Object.keys(body as object).length === 0) return undefined;
+      return JSON.stringify(body);
+    }
+
+    return JSON.stringify(body ?? {});
   }
 
   private parseJson(text: string): unknown {
