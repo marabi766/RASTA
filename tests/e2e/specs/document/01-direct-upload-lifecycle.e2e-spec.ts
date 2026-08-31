@@ -81,8 +81,6 @@ async function uploadDocument(
   status: number;
   document: Record<string, unknown>;
   correlationId: string;
-  /** The bytes that were uploaded, for a download that must match them. */
-  bytes: Buffer;
 }> {
   const bytes = options.bytes ?? pdfBytes();
   const declaredType = options.declaredType ?? 'application/pdf';
@@ -108,7 +106,6 @@ async function uploadDocument(
     status: registered.status,
     document: registered.body as Record<string, unknown>,
     correlationId: registered.correlationId,
-    bytes,
   };
 }
 
@@ -209,6 +206,28 @@ test.describe.serial('the document direct-upload lifecycle', () => {
     // client declared.
     expect(document.sizeBytes).toBe(bytes.length);
     expect(document.contentType).toBe('application/pdf');
+
+    // Registered PENDING, and refused while it is (ADR-014, ADR-049). Asserted
+    // here rather than in a test of its own because that test would need an
+    // unscanned document, and obtaining one costs another upload — which is
+    // what pushed this serial suite past the gateway's twenty-per-hour
+    // document cap (`docs/06` § 6.9). The instant after registration is the
+    // one moment a PENDING document is guaranteed to exist.
+    expect(document.scanState).toBe('PENDING');
+
+    const tooEarly = await tenantA.post(`/v1/documents/${documentId}/download-url`);
+
+    // The worker could clear it between the two calls, so both outcomes are
+    // accepted and only the *unsafe* one is ruled out: a URL is never issued
+    // while the state is not CLEAN.
+    if (tooEarly.status === 422) {
+      expect(errorCode(tooEarly.body)).toBe('BUSINESS_RULE_VIOLATION');
+      expect(JSON.stringify(tooEarly.body)).toMatch(/until its security scan completes/i);
+      expect(tooEarly.body).not.toHaveProperty('downloadUrl');
+    } else {
+      const cleared = await tenantA.get(`/v1/documents/${documentId}`);
+      expect((cleared.body as Record<string, unknown>).scanState).toBe('CLEAN');
+    }
   });
 
   test('is scanned by a real engine, and becomes downloadable only then', async ({ tenantA }) => {
@@ -227,6 +246,19 @@ test.describe.serial('the document direct-upload lifecycle', () => {
     expect(document.scanEngine).toBe('clamav');
     // The engine and the database that cleared it, so the claim can be dated.
     expect(String(document.scanSignatureVersion)).toMatch(/^\d+$/);
+
+    // And now the bytes come back — the capability the whole ADR exists to
+    // deliver, reachable for the first time here. Before ADR-049 no document
+    // in any deployment could be downloaded, because nothing ever issued a
+    // CLEAN verdict.
+    const link = await tenantA.post(`/v1/documents/${documentId}/download-url`);
+    expect(link.status).toBe(200);
+
+    const fetched = await fetch(String((link.body as Record<string, unknown>).downloadUrl));
+    expect(fetched.status).toBe(200);
+    expect(Buffer.from(await fetched.arrayBuffer()).equals(pdfBytes())).toBe(true);
+    // Never rendered: ADR-014 forbids serving stored content as HTML.
+    expect(fetched.headers.get('content-disposition')).toContain('attachment');
   });
 
   test('never returns the object key, the bucket or a URL in metadata', async ({ tenantA }) => {
@@ -237,58 +269,6 @@ test.describe.serial('the document direct-upload lifecycle', () => {
     const serialised = JSON.stringify(read.body);
     expect(serialised).not.toContain('rasta-documents');
     expect(serialised).not.toMatch(/X-Amz-Signature|documents\/ORG-/);
-  });
-
-  test('refuses the download until the scan has cleared it', async ({ tenantA }) => {
-    // The invariant, end to end, against the stack a deployment actually runs.
-    // ADR-014 keeps a file unavailable until malware scanning has completed,
-    // and since ADR-049 that window is the ordinary state of a new document
-    // rather than a permanent one.
-    //
-    // A fresh upload, deliberately: the document the tests above cleared is no
-    // longer in this state, and asserting the refusal needs one that is.
-    //
-    // There is no environment variable that changes the answer. The one that
-    // used to — `DOCUMENT_ALLOW_UNSCANNED_DOWNLOAD`, which defaulted to
-    // allowing it — was removed rather than re-defaulted, so there is nothing
-    // to set.
-    const fresh = await uploadDocument(tenantA, { filename: 'not-yet-scanned.pdf' });
-    expect(fresh.status).toBe(201);
-    expect(fresh.document.scanState).toBe('PENDING');
-
-    const refusal = await tenantA.post(`/v1/documents/${fresh.document.id}/download-url`);
-
-    // A race is possible in principle — the worker could clear it between the
-    // two calls — so both outcomes are accepted and only the *unsafe* one is
-    // ruled out: a URL is never issued while the state is not CLEAN.
-    if (refusal.status === 422) {
-      expect(errorCode(refusal.body)).toBe('BUSINESS_RULE_VIOLATION');
-      expect(JSON.stringify(refusal.body)).toMatch(/until its security scan completes/i);
-      expect(refusal.body).not.toHaveProperty('downloadUrl');
-    } else {
-      const cleared = await tenantA.get(`/v1/documents/${fresh.document.id}`);
-      expect((cleared.body as Record<string, unknown>).scanState).toBe('CLEAN');
-    }
-  });
-
-  test('hands back the exact bytes once the scan has cleared it', async ({ tenantA }) => {
-    // The capability the whole ADR exists to deliver, and it is reachable for
-    // the first time here: before ADR-049 no document in any deployment could
-    // be downloaded, because nothing ever issued a CLEAN verdict.
-    const uploaded = await uploadDocument(tenantA, { filename: 'downloadable.pdf' });
-    const id = String(uploaded.document.id);
-    await awaitScanned(tenantA, id);
-
-    const link = await tenantA.post(`/v1/documents/${id}/download-url`);
-    expect(link.status).toBe(200);
-
-    const body = link.body as Record<string, unknown>;
-    const fetched = await fetch(String(body.downloadUrl));
-
-    expect(fetched.status).toBe(200);
-    expect(Buffer.from(await fetched.arrayBuffer()).equals(uploaded.bytes)).toBe(true);
-    // Never rendered: ADR-014 forbids serving stored content as HTML.
-    expect(fetched.headers.get('content-disposition')).toContain('attachment');
   });
 
   test('does not let another organization see it, or ask for it', async ({ tenantB }) => {
