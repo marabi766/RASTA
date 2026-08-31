@@ -33,13 +33,19 @@
     "test": {
       "dependsOn": ["^build", "db:generate"],
       "outputs": ["coverage/**"],
-      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL"]
+      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "S3_*"]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
     "test:integration": {
       "cache": false,
       "dependsOn": ["^build"],
-      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "KAFKA_BROKERS"]
+      // S3_* is here for the same reason DATABASE_URL_* is: document-service's
+      // suites talk to a real bucket, and turbo's strict environment means a
+      // variable it is not told about simply is not there. Locally the
+      // defaults point at the compose MinIO; in CI the credentials differ, and
+      // without this the suite would authenticate with the wrong ones and fail
+      // as though the bucket were missing (D-005, same trap).
+      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "KAFKA_BROKERS", "S3_*"]
     },
     // Turbo runs tasks in a strict environment, so anything the E2E harness
     // reads has to be declared here or it simply is not there — and the

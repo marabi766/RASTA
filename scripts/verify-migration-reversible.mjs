@@ -197,6 +197,32 @@ const EXPECTED = {
     ],
     dataRollback: MARKETPLACE_DATA_ROLLBACK,
   },
+  /**
+   * The constraints listed carry the claims a reader would otherwise have to
+   * take on trust.
+   *
+   * `ck_document_scan_attributable` is what makes "we know which engine said
+   * this" true of the row: any state but `PENDING` must name an engine and a
+   * time. `ck_document_signature_only_when_infected` stops a clean document
+   * from carrying a signature a consumer would act on.
+   * `ck_document_deleted_has_actor` is the tombstone rule — a deletion with no
+   * actor, time or reason is not an audit record. A down script that dropped
+   * any of them without the forward migration restoring it would leave a
+   * document table that enforces nothing while looking untouched.
+   */
+  document: {
+    tables: ['upload_intent', 'document', 'access_grant', 'outbox_message'],
+    triggers: [],
+    constraints: [
+      'ck_document_scan_attributable',
+      'ck_document_signature_only_when_infected',
+      'ck_document_deleted_has_actor',
+      'ck_document_size_positive',
+      'ck_document_owner_reference_complete',
+      'ck_upload_intent_consumed_complete',
+      'ck_grant_revoked_has_actor',
+    ],
+  },
 };
 
 function usage(message) {
