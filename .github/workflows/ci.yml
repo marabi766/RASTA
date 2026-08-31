@@ -375,13 +375,47 @@ jobs:
             if docker exec rasta-ci-clamav clamdscan --ping 1 >/dev/null 2>&1; then
               echo "clamd ready after ${attempt} attempt(s)"
               docker exec rasta-ci-clamav clamdscan --version
-              exit 0
+              break
+            fi
+            if [ "${attempt}" -eq 60 ]; then
+              echo 'clamd did not become ready'
+              docker logs --tail 100 rasta-ci-clamav
+              exit 1
             fi
             sleep 5
           done
-          echo 'clamd did not become ready'
-          docker logs --tail 100 rasta-ci-clamav
-          exit 1
+
+          # Widen the socket so the runner can open it.
+          #
+          # clamd creates it 0660 owned by uid 100 / gid 101, which is right:
+          # in production the two containers share a Pod and a group, and
+          # `fsGroup` makes filesystem permissions the access control
+          # (ADR-049, docs/deployment). A GitHub runner has no group in common
+          # with the container, so the same socket is unopenable to it and
+          # every document suite fails with CONNECTION_FAILED — which is what
+          # happened on the first run of this job.
+          #
+          # This widening is CI-only and applied *after* startup, so the
+          # production config file keeps its 0660 and nothing about the
+          # deployment posture changes. The socket lives on a runner-local tmp
+          # path for the length of one job.
+          docker exec rasta-ci-clamav chmod 0666 /run/clamav/clamd.sock
+
+          # Prove the runner itself can speak to it, rather than discovering
+          # it 60 test failures later. A setup step that only checks the
+          # container has checked the wrong side of the boundary.
+          node -e '
+            const net = require("node:net");
+            const s = net.connect({ path: "/tmp/clamav-socket/clamd.sock" });
+            s.on("connect", () => s.write("zPING" + String.fromCharCode(0)));
+            s.on("data", (d) => {
+              const reply = d.toString().split(String.fromCharCode(0)).join("").trim();
+              console.log("clamd answered the runner:", reply);
+              process.exit(reply === "PONG" ? 0 : 1);
+            });
+            s.on("error", (e) => { console.error("runner cannot reach clamd:", e.code); process.exit(1); });
+            setTimeout(() => { console.error("clamd did not answer the runner"); process.exit(1); }, 15000);
+          '
 
       - name: Apply migrations
         run: pnpm run db:migrate
@@ -820,13 +854,34 @@ jobs:
           for attempt in $(seq 1 60); do
             if docker exec rasta-e2e-clamav clamdscan --ping 1 >/dev/null 2>&1; then
               echo "clamd ready after ${attempt} attempt(s)"
-              exit 0
+              break
+            fi
+            if [ "${attempt}" -eq 60 ]; then
+              echo 'clamd did not become ready'
+              docker logs --tail 100 rasta-e2e-clamav
+              exit 1
             fi
             sleep 5
           done
-          echo 'clamd did not become ready'
-          docker logs --tail 100 rasta-e2e-clamav
-          exit 1
+
+          # See the integration job for why this is needed and why it changes
+          # nothing about the production posture: the runner shares no group
+          # with the container, so the 0660 socket clamd creates is unopenable
+          # to the document-service process this job starts.
+          docker exec rasta-e2e-clamav chmod 0666 /run/clamav/clamd.sock
+
+          node -e '
+            const net = require("node:net");
+            const s = net.connect({ path: "/tmp/clamav-socket/clamd.sock" });
+            s.on("connect", () => s.write("zPING" + String.fromCharCode(0)));
+            s.on("data", (d) => {
+              const reply = d.toString().split(String.fromCharCode(0)).join("").trim();
+              console.log("clamd answered the runner:", reply);
+              process.exit(reply === "PONG" ? 0 : 1);
+            });
+            s.on("error", (e) => { console.error("runner cannot reach clamd:", e.code); process.exit(1); });
+            setTimeout(() => { console.error("clamd did not answer the runner"); process.exit(1); }, 15000);
+          '
 
       - name: Start economic-service, marketplace-service, document-service and api-gateway
         # From `dist`, the same artefact the container image runs, rather than
