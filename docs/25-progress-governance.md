@@ -6,7 +6,7 @@
 
 ## ۲۵٫۱ اصل اندازه‌گیری
 
-واحد سنجش، **Story Point پذیرفته‌شده** است. Story Point زمان یا نفر-ساعت نیست؛ اندازه نسبی پیچیدگی، ریسک، ابهام و تلاش لازم برای رسیدن به معیار پذیرش است.
+واحد سنجش، **Story Point پذیرفته‌شده در واحد تحویل** است. واحد تحویل برای Feature شکسته‌شده، User Story و برای Feature قدیمی که هنوز شکسته نشده، خود Feature است. Story Point زمان یا نفر-ساعت نیست؛ اندازه نسبی پیچیدگی، ریسک، ابهام و تلاش لازم برای رسیدن به معیار پذیرش است.
 
 ```text
 Progress = accepted story points / active committed story points × 100
@@ -14,6 +14,8 @@ Progress = accepted story points / active committed story points × 100
 
 - فقط وضعیت `ACCEPTED` امتیاز کسب می‌کند.
 - `IN_PROGRESS` حتی اگر «تقریباً تمام» باشد، صفر امتیاز کسب می‌کند.
+- Feature دارای Story دیگر مستقیماً Point وارد محاسبه نمی‌کند؛ فقط Storyهای آن شمرده می‌شوند.
+- مجموع Point تمام Storyهای یک Feature باید دقیقاً برابر Point مصوب Feature باشد؛ بنابراین شکستن کار درصد را تغییر نمی‌دهد.
 - `CANCELLED` از صورت و مخرج حذف می‌شود؛ حذف Scope باید در Change Log دلیل و مرجع تصویب داشته باشد.
 - Design، Code، Test یا CI به‌تنهایی Done نیستند؛ همه معیارهای پذیرش آیتم و Definition of Done در `AGENTS.md` باید برقرار باشند.
 - MVP فقط آیتم‌های `scope=MVP` را می‌سنجد. Full Product تمام آیتم‌های فعال MVP و Post-MVP را می‌سنجد.
@@ -38,23 +40,36 @@ Progress = accepted story points / active committed story points × 100
 ```text
 Product horizon (MVP / POST_MVP)
 └── Epic
-    └── Backlog item
-        ├── Story Points
-        ├── Priority (P0..P3)
-        ├── Acceptance Criteria
-        ├── Dependencies
-        ├── Source references
-        └── Evidence
+    └── Feature / Capability (`items`)
+        ├── Feature-level acceptance and approved estimate
+        └── User Story (`stories`)
+            ├── As a / I want / So that
+            ├── Story Points
+            ├── Given / When / Then acceptance scenarios
+            ├── Dependencies
+            ├── Source references
+            └── Evidence
 ```
 
-هر Backlog Item باید:
+هر Feature باید:
 
 1. یک خروجی قابل‌پذیرش داشته باشد، نه فعالیت مبهمی مانند «کار روی Supplier»؛
 2. حداقل یک معیار پذیرش قابل آزمون داشته باشد؛
 3. به سند Scope، ADR یا الزام Repository ارجاع دهد؛
 4. فقط از مقیاس Fibonacci یعنی `1, 2, 3, 5, 8, 13, 21` استفاده کند؛
-5. اگر بزرگ‌تر از ۲۱ است، پیش از Ready شدن شکسته شود؛
+5. اگر بزرگ‌تر از ۲۱ است، پیش از Ready شدن به Featureهای کوچک‌تر شکسته شود؛
 6. وابستگی‌ها را صریح و بدون چرخه ثبت کند.
+
+هر User Story باید:
+
+1. دقیقاً یک Feature والد داشته باشد؛ Scope، Epic و Priority را از والد به ارث ببرد؛
+2. سه جزء `asA`، `iWant` و `soThat` غیرخالی داشته باشد؛
+3. حداقل یک سناریوی پذیرش ساختاریافته `given/when/then` داشته باشد؛
+4. به‌تنهایی قابل آزمون و قابل پذیرش باشد؛
+5. Point آن از مقیاس Fibonacci باشد؛
+6. در مجموع با Storyهای هم‌والد، Point مصوب Feature را بدون کم‌وزیاد بازتولید کند.
+
+برای مهاجرت تدریجی، Featureهایی که هنوز Story ندارند «واحد تحویل Legacy» هستند و تا زمان شکستن، مانند قبل محاسبه می‌شوند. به محض افزودن نخستین Story، مجموع Storyها باید کل Point والد را پوشش دهد و Feature از محاسبه مستقیم کنار می‌رود؛ Parent و Child هرگز هم‌زمان شمرده نمی‌شوند.
 
 ## ۲۵٫۴ گردش وضعیت
 
@@ -75,7 +90,7 @@ PROPOSED → READY → IN_PROGRESS → ACCEPTED
                    BLOCKED
 ```
 
-بازگرداندن `ACCEPTED` به وضعیت دیگر فقط برای اصلاح یک پذیرش اشتباه مجاز است و باید با `STATUS_CORRECTED` در Change Log ثبت شود.
+بازگرداندن `ACCEPTED` به وضعیت دیگر فقط برای اصلاح یک پذیرش اشتباه مجاز است و باید با `STATUS_CORRECTED` در Change Log ثبت شود. Feature دارای Story فقط وقتی `ACCEPTED` می‌شود که تمام Storyهای فعال آن `ACCEPTED` باشند؛ پذیرش هر Story می‌تواند مستقل و همراه Evidence خودش انجام شود.
 
 ## ۲۵٫۵ Definition of Ready و Definition of Accepted
 
@@ -86,6 +101,7 @@ PROPOSED → READY → IN_PROGRESS → ACCEPTED
 - مالک دامنه، Scope و Priority مشخص‌اند؛
 - وابستگی و Open Question مسدودکننده نام‌گذاری شده است؛
 - Story Point در جلسه برآورد تعیین شده است.
+- اگر Feature شکسته شده، همه Storyهای لازم تعریف شده و مجموع Point آن‌ها با Feature برابر است.
 
 ### Accepted
 
@@ -112,10 +128,12 @@ Baseline نخست از Scope رسمی `docs/17` و ADR-044 تا ADR-048 ساخت
 
 افزودن یا حذف Scope نیز باید `SCOPE_ADDED` یا `SCOPE_REMOVED` داشته باشد. آیتم حذف‌شده پاک نمی‌شود؛ `CANCELLED` می‌شود تا Audit Trail باقی بماند.
 
+شکستن Feature مصوب به Story، تغییر Scope یا Estimate نیست؛ با `ITEM_DECOMPOSED` ثبت می‌شود و باید آزمون برابری Point والد و فرزندان را پاس کند. اگر مجموع Storyها با Point والد برابر نشود، ابتدا تصمیم برآورد و `POINTS_CHANGED` با Approval Reference لازم است.
+
 ## ۲۵٫۷ Iteration، Velocity و پیش‌بینی
 
-- برنامه هر Iteration در آرایه `iterations` ثبت می‌شود و آیتم هدف `targetIteration` می‌گیرد.
-- Velocity هر Iteration فقط مجموع Point آیتم‌هایی است که در همان Iteration به `ACCEPTED` رسیده‌اند.
+- برنامه هر Iteration در آرایه `iterations` ثبت می‌شود و واحد تحویل هدف `targetIteration` می‌گیرد.
+- Velocity هر Iteration فقط مجموع Point واحدهای تحویلی است که در همان Iteration به `ACCEPTED` رسیده‌اند.
 - تا کمتر از دو Iteration واقعی بسته شده باشد، سیستم عمداً Velocity و تاریخ پایان ارائه نمی‌کند.
 - پس از آن نیز Average Velocity «تعهد زمانی» نیست؛ فقط throughput تاریخی است.
 - Story Point تیم‌های متفاوت مستقیماً با هم مقایسه نمی‌شود. Baseline فعلی در سطح یک تیم/جریان محصول واحد تعریف شده است.
@@ -131,7 +149,7 @@ Baseline نخست از Scope رسمی `docs/17` و ADR-044 تا ADR-048 ساخت
 
 در هر PR مرتبط با قابلیت:
 
-1. شناسه Backlog Item در توضیح PR ذکر می‌شود؛
+1. شناسه Feature و در صورت وجود شناسه User Story در توضیح PR ذکر می‌شود؛
 2. Status و Evidence هم‌زمان با واقعیت تغییر می‌کند؛
 3. `asOf` به تاریخ تغییر Backlog به‌روزرسانی می‌شود؛
 4. گزارش دوباره تولید می‌شود؛
@@ -150,6 +168,6 @@ pnpm test:progress      # آزمون موتور محاسبه و قواعد ضد 
 
 ## ۲۵٫۱۰ Baseline آغازین
 
-Baseline مورخ ۲۰۲۶-۰۸-۳۰ شامل ۴۷ آیتم و ۱۲ Epic است. قابلیت‌های پیاده‌شده فقط زمانی `ACCEPTED` شده‌اند که در `PROJECT_MEMORY.md` یا CI اصلی شاهد قابل‌ردیابی دارند. موارد طراحی‌شده اما فاقد UI تولیدی، و سرویس‌های برنامه‌ریزی‌شده، امتیاز کسب نکرده‌اند.
+Baseline مورخ ۲۰۲۶-۰۸-۳۰ شامل ۴۷ Feature و ۱۲ Epic است. لایه User Story در ۲۰۲۶-۰۸-۳۱ بدون تغییر مجموع Scope یا Estimate افزوده شد و Feature فعال `COM-004` نخستین تجزیه رسمی را دریافت کرد. قابلیت‌های پیاده‌شده فقط زمانی `ACCEPTED` شده‌اند که در `PROJECT_MEMORY.md` یا CI اصلی شاهد قابل‌ردیابی دارند. موارد طراحی‌شده اما فاقد UI تولیدی، و سرویس‌های برنامه‌ریزی‌شده، امتیاز کسب نکرده‌اند.
 
 عدد جاری همیشه از [گزارش تولیدشده](25-project-progress.md) خوانده می‌شود. این بخش عمداً درصد ثابت ندارد تا با تغییر Backlog stale نشود.

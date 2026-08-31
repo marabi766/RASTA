@@ -1,6 +1,6 @@
 {
   "$schema": "./backlog.schema.json",
-  "version": 1,
+  "version": 2,
   "project": "RASTA",
   "asOf": "2026-08-31",
   "governance": {
@@ -432,7 +432,7 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 13,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Uploads validate real content type and size before object storage",
         "Tenant-scoped signed access and document metadata are audited"
@@ -954,6 +954,160 @@
       "evidence": []
     }
   ],
+  "stories": [
+    {
+      "id": "DOC-001",
+      "parentItemId": "COM-004",
+      "title": "Issue a tenant-safe direct-upload intent",
+      "userStory": {
+        "asA": "tenant user who is permitted to attach evidence",
+        "iWant": "a short-lived URL for a direct upload to private object storage",
+        "soThat": "large files never pass through the application service or its database"
+      },
+      "points": 3,
+      "status": "IN_PROGRESS",
+      "acceptanceCriteria": [
+        {
+          "given": "an authenticated tenant user declares an allowed document class, content type and size",
+          "when": "the user requests an upload URL",
+          "then": "the service creates a tenant-scoped intent with a server-generated opaque key and returns a bounded short-lived signed PUT URL"
+        },
+        {
+          "given": "the request is unauthenticated, outside policy or attempts to supply an object key",
+          "when": "an upload intent is requested",
+          "then": "the request is refused without creating an intent or exposing storage credentials"
+        }
+      ],
+      "dependencies": ["PLAT-003"],
+      "sourceRefs": [
+        "docs/adr/ADR-014-object-storage.md",
+        "docs/11-infrastructure-architecture.md#۱۱۷-object-storage"
+      ],
+      "evidence": []
+    },
+    {
+      "id": "DOC-002",
+      "parentItemId": "COM-004",
+      "title": "Finalize and validate a directly uploaded object",
+      "userStory": {
+        "asA": "tenant user who completed a direct upload",
+        "iWant": "the platform to verify and register the uploaded object",
+        "soThat": "document metadata refers only to the expected file and its real content"
+      },
+      "points": 3,
+      "status": "IN_PROGRESS",
+      "acceptanceCriteria": [
+        {
+          "given": "the expected object was uploaded for an active intent",
+          "when": "the user finalizes the document",
+          "then": "the service verifies object ownership, size and magic-number content type, persists tenant-scoped metadata and publishes DOCUMENT_UPLOADED through the transactional outbox"
+        },
+        {
+          "given": "the object is missing, empty, oversized, expired, substituted or has a declared and detected type mismatch",
+          "when": "finalization is attempted",
+          "then": "the service refuses registration and does not publish a successful upload fact"
+        }
+      ],
+      "dependencies": ["DOC-001"],
+      "sourceRefs": [
+        "docs/adr/ADR-014-object-storage.md",
+        "docs/04-service-decomposition.md#document-service-p0"
+      ],
+      "evidence": []
+    },
+    {
+      "id": "DOC-003",
+      "parentItemId": "COM-004",
+      "title": "Authorize safe document metadata and download access",
+      "userStory": {
+        "asA": "user authorized for a specific document",
+        "iWant": "to read its metadata and obtain a short-lived download URL when it is clean",
+        "soThat": "private evidence is available without weakening tenant or object-level access"
+      },
+      "points": 3,
+      "status": "IN_PROGRESS",
+      "acceptanceCriteria": [
+        {
+          "given": "a clean active document and an authorized caller in its tenant",
+          "when": "metadata or a download URL is requested",
+          "then": "the service returns only authorized metadata or a bounded signed GET URL for that object"
+        },
+        {
+          "given": "a cross-tenant caller or a pending, not-scanned, infected, quarantined or deleted document",
+          "when": "metadata or download access is requested",
+          "then": "object-level authorization and the fail-closed scan policy refuse access without revealing storage details"
+        }
+      ],
+      "dependencies": ["DOC-002"],
+      "sourceRefs": [
+        "docs/adr/ADR-014-object-storage.md",
+        "docs/09-security-architecture.md",
+        "docs/24-open-questions.md#q-18-سرویس-اسکن-بدافزار"
+      ],
+      "evidence": []
+    },
+    {
+      "id": "DOC-004",
+      "parentItemId": "COM-004",
+      "title": "Delete a document without erasing its audit trail",
+      "userStory": {
+        "asA": "tenant user authorized to remove a document",
+        "iWant": "to delete it with an explicit reason",
+        "soThat": "access ends while the platform retains factual audit evidence"
+      },
+      "points": 2,
+      "status": "IN_PROGRESS",
+      "acceptanceCriteria": [
+        {
+          "given": "an active tenant-owned document and an authorized caller with a reason",
+          "when": "deletion is requested",
+          "then": "the service records the actor, reason and time, prevents further download and publishes DOCUMENT_DELETED through the transactional outbox"
+        },
+        {
+          "given": "the same authorized deletion is retried",
+          "when": "the idempotent operation is repeated",
+          "then": "no second domain effect or contradictory audit fact is produced"
+        }
+      ],
+      "dependencies": ["DOC-002"],
+      "sourceRefs": [
+        "docs/04-service-decomposition.md#document-service-p0",
+        "docs/events/README.md"
+      ],
+      "evidence": []
+    },
+    {
+      "id": "DOC-005",
+      "parentItemId": "COM-004",
+      "title": "Operate and verify the Document Service boundary",
+      "userStory": {
+        "asA": "platform operator",
+        "iWant": "the Document Service, private object storage and gateway route to be observable and repeatably deployable",
+        "soThat": "document flows can be operated and verified without hidden infrastructure steps"
+      },
+      "points": 2,
+      "status": "READY",
+      "acceptanceCriteria": [
+        {
+          "given": "the documented local or CI environment is started",
+          "when": "health, migration and end-to-end document checks run",
+          "then": "PostgreSQL, private MinIO buckets, gateway routing, service telemetry and the direct-upload lifecycle are reproducible with no real secrets"
+        },
+        {
+          "given": "the implementation is proposed for merge",
+          "when": "repository quality and security gates run",
+          "then": "reversible migrations, meaningful branch coverage, API and event contracts, image build and required security scans pass"
+        }
+      ],
+      "dependencies": ["DOC-001"],
+      "sourceRefs": [
+        "docs/11-infrastructure-architecture.md#۱۱۷-object-storage",
+        "docs/14-testing-strategy.md",
+        "AGENTS.md"
+      ],
+      "evidence": []
+    }
+  ],
   "changeLog": [
     {
       "date": "2026-08-30",
@@ -968,6 +1122,14 @@
       "reason": "The product owner explicitly approved the initial Story Point baseline after reviewing the generated MVP and full-product figures.",
       "recordedBy": "Codex",
       "approvalRef": "Product owner approval in the Codex project-management task on 2026-08-30"
+    },
+    {
+      "date": "2026-08-31",
+      "type": "ITEM_DECOMPOSED",
+      "reason": "Introduce a first-class User Story layer and decompose COM-004 into five independently acceptable stories without changing its approved 13-point estimate or product scope.",
+      "recordedBy": "Codex",
+      "approvalRef": "Product owner instruction in the Codex project-management task on 2026-08-31",
+      "recordIds": ["COM-004", "DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-005"]
     }
   ]
 }

@@ -12,10 +12,11 @@
     "iterations",
     "epics",
     "items",
+    "stories",
     "changeLog"
   ],
   "properties": {
-    "version": { "const": 1 },
+    "version": { "const": 2 },
     "project": { "const": "RASTA" },
     "asOf": { "type": "string", "format": "date" },
     "governance": {
@@ -123,6 +124,78 @@
         }
       }
     },
+    "stories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "parentItemId",
+          "title",
+          "userStory",
+          "points",
+          "status",
+          "acceptanceCriteria",
+          "dependencies",
+          "sourceRefs",
+          "evidence"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Z]+-[0-9]{3}$" },
+          "parentItemId": { "type": "string", "pattern": "^[A-Z]+-[0-9]{3}$" },
+          "title": { "type": "string", "minLength": 1 },
+          "userStory": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["asA", "iWant", "soThat"],
+            "properties": {
+              "asA": { "type": "string", "minLength": 1 },
+              "iWant": { "type": "string", "minLength": 1 },
+              "soThat": { "type": "string", "minLength": 1 }
+            }
+          },
+          "points": { "enum": [1, 2, 3, 5, 8, 13, 21] },
+          "status": {
+            "enum": ["PROPOSED", "READY", "IN_PROGRESS", "BLOCKED", "ACCEPTED", "CANCELLED"]
+          },
+          "acceptanceCriteria": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["given", "when", "then"],
+              "properties": {
+                "given": { "type": "string", "minLength": 1 },
+                "when": { "type": "string", "minLength": 1 },
+                "then": { "type": "string", "minLength": 1 }
+              }
+            }
+          },
+          "dependencies": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+          "sourceRefs": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "targetIteration": { "type": "string" },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "ref", "note"],
+              "properties": {
+                "kind": { "enum": ["COMMIT", "PR", "CI", "TEST", "RUNTIME", "DOCUMENT"] },
+                "ref": { "type": "string", "minLength": 1 },
+                "note": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
+    },
     "changeLog": {
       "type": "array",
       "minItems": 1,
@@ -139,13 +212,32 @@
               "SCOPE_REMOVED",
               "POINTS_CHANGED",
               "STATUS_CORRECTED",
-              "BASELINE_APPROVED"
+              "BASELINE_APPROVED",
+              "ITEM_DECOMPOSED"
             ]
           },
           "reason": { "type": "string", "minLength": 1 },
           "recordedBy": { "type": "string", "minLength": 1 },
-          "approvalRef": { "type": ["string", "null"] }
-        }
+          "approvalRef": { "type": ["string", "null"] },
+          "recordIds": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^[A-Z]+-[0-9]{3}$" }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "type": { "const": "ITEM_DECOMPOSED" } },
+              "required": ["type"]
+            },
+            "then": {
+              "required": ["recordIds"],
+              "properties": { "approvalRef": { "type": "string", "minLength": 1 } }
+            }
+          }
+        ]
       }
     }
   }
