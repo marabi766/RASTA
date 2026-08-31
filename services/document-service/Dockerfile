@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # =============================================================================
-# marketplace-service
+# document-service
 #
 # Built from the repository root, because a pnpm workspace resolves through the
 # root lockfile and the linked @rasta/* packages. Building from the service
@@ -45,7 +45,7 @@ WORKDIR /app
 
 # Generates the Prisma client, then compiles this service and its dependencies
 # in dependency order.
-RUN pnpm --filter @rasta/marketplace-service... build
+RUN pnpm --filter @rasta/document-service... build
 
 # `pnpm deploy` rather than `prune`, and the difference matters.
 #
@@ -62,7 +62,7 @@ RUN pnpm --filter @rasta/marketplace-service... build
 # scripts, and re-downloading the engine binary makes the build depend on a
 # CDN staying up.
 RUN --mount=type=cache,id=prisma-engines,target=/root/.cache/prisma \
-    CI=true pnpm --filter @rasta/marketplace-service deploy --prod --legacy /deploy
+    CI=true pnpm --filter @rasta/document-service deploy --prod --legacy /deploy
 
 # ---- runtime ----------------------------------------------------------------
 FROM node:22-alpine AS runtime
@@ -91,11 +91,11 @@ COPY --from=build --chown=rasta:rasta /deploy ./
 
 USER rasta
 
-EXPOSE 3106
+EXPOSE 3114
 
 # Probes readiness, not liveness: an unhealthy database should mark the
 # container unhealthy rather than leave it in rotation answering 500s.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3106)+'/health/ready',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3114)+'/health/ready',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
 CMD ["node", "dist/main.js"]
