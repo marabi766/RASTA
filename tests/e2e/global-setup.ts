@@ -53,6 +53,22 @@ export default async function globalSetup(): Promise<void> {
       120_000,
     );
 
+    // ---- document-service ---------------------------------------------------
+    // Its readiness probe reports the database and object storage separately.
+    // ADR-014 puts the file outside the service, so a bucket that is not there
+    // makes every upload scenario fail at the PUT — a failure that names MinIO
+    // here rather than looking like a broken signed URL later.
+    await waitFor(
+      `document-service to be ready at ${config.documentUrl}/health/ready`,
+      async () => {
+        const response = await context.get(`${config.documentUrl}/health/ready`, {
+          failOnStatusCode: false,
+        });
+        return response.status() === 200;
+      },
+      120_000,
+    );
+
     // ---- Keycloak -----------------------------------------------------------
     await waitFor(
       `Keycloak realm ${config.realm} to be reachable`,
@@ -88,12 +104,14 @@ export default async function globalSetup(): Promise<void> {
     await admin.connect();
     try {
       const topics = await admin.listTopics();
-      if (!topics.includes(config.economicTopic)) {
-        throw new Error(
-          `Topic ${config.economicTopic} does not exist on ${config.kafkaBrokers.join(', ')}. ` +
-            'Auto-creation is off by design (ADR-006); create it with ' +
-            'infrastructure/docker/kafka/create-topics.sh.',
-        );
+      for (const topic of [config.economicTopic, config.documentTopic]) {
+        if (!topics.includes(topic)) {
+          throw new Error(
+            `Topic ${topic} does not exist on ${config.kafkaBrokers.join(', ')}. ` +
+              'Auto-creation is off by design (ADR-006); create it with ' +
+              'infrastructure/docker/kafka/create-topics.sh.',
+          );
+        }
       }
     } finally {
       await admin.disconnect();

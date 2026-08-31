@@ -45,6 +45,15 @@ export interface E2eConfig {
   economicTopic: string;
   /** Topic marketplace-service publishes to. */
   marketplaceTopic: string;
+  /** Topic document-service publishes to. */
+  documentTopic: string;
+  /**
+   * document-service directly.
+   *
+   * The document scenarios go through the **gateway**, like every other
+   * scenario here. This URL exists only for health gating before the run.
+   */
+  documentUrl: string;
   /** Keycloak admin, used once to reconcile the E2E users into an imported realm. */
   keycloakAdmin: { username: string; password: string };
   /**
@@ -72,6 +81,10 @@ export function e2eConfig(): E2eConfig {
       'E2E_MARKETPLACE_URL',
       `http://localhost:${process.env.PORT_MARKETPLACE?.trim() || '3106'}`,
     ).replace(/\/+$/, ''),
+    documentUrl: required(
+      'E2E_DOCUMENT_URL',
+      `http://localhost:${process.env.PORT_DOCUMENT?.trim() || '3114'}`,
+    ).replace(/\/+$/, ''),
     keycloakUrl: required('KEYCLOAK_URL', 'http://localhost:8080').replace(/\/+$/, ''),
     realm: required('KEYCLOAK_REALM', 'rasta'),
     clientId: required('KEYCLOAK_WEB_CLIENT_ID', 'rasta-web'),
@@ -81,6 +94,7 @@ export function e2eConfig(): E2eConfig {
       .filter(Boolean),
     economicTopic: 'rasta.economic.v1',
     marketplaceTopic: 'rasta.marketplace.v1',
+    documentTopic: 'rasta.document.v1',
     keycloakAdmin: {
       username: required('KEYCLOAK_ADMIN', 'admin'),
       password: required('KEYCLOAK_ADMIN_PASSWORD', 'admin_dev_password'),

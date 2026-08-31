@@ -255,7 +255,7 @@ jobs:
             rasta.asset.v1 rasta.insurance.v1 \
             rasta.maintenance.v1 rasta.maintenance.v1.retry rasta.maintenance.v1.dlq \
             rasta.marketplace.v1 rasta.marketplace.v1.retry rasta.marketplace.v1.dlq \
-            rasta.economic.v1 rasta.economic.v1.retry rasta.economic.v1.dlq; do
+            rasta.economic.v1 rasta.economic.v1.retry rasta.economic.v1.dlq             rasta.document.v1; do
             create "$topic"
           done
 
@@ -276,6 +276,39 @@ jobs:
             /opt/kafka/bin/kafka-consumer-groups.sh \
             --bootstrap-server localhost:9092 --list
 
+      - name: Start MinIO and create the document bucket
+        # `docker run` rather than a `services:` container, and not by
+        # preference: a service container cannot override the image's command,
+        # and `minio/minio` needs `server /data` to start at all. The e2e job
+        # below starts Keycloak and Temporal the same way for the same reason.
+        #
+        # document-service's suites talk to a real bucket. ADR-014 puts the
+        # file outside the service entirely — signed URLs, magic-number
+        # inspection on bytes read back from storage, an attachment
+        # disposition set at the storage boundary — and none of that exists in
+        # a mock. A suite that stubbed S3 would prove the mock.
+        run: |
+          set -euo pipefail
+          docker run -d --name rasta-ci-minio --network host             -e MINIO_ROOT_USER=rasta_minio_admin             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password             minio/minio:RELEASE.2025-04-22T22-12-26Z server /data --address ':9000'
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
+              echo 'MinIO is live'
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://localhost:9000/minio/health/live >/dev/null
+
+          # Private bucket, explicitly. ADR-014 requires it: every read goes
+          # through a signed URL, and an anonymous policy here would make the
+          # download tests pass for the wrong reason.
+          docker run --rm --network host --entrypoint sh             minio/mc:RELEASE.2025-04-16T18-13-26Z -c "
+              mc alias set rasta http://localhost:9000 rasta_minio_admin rasta_minio_ci_password
+              mc mb --ignore-existing rasta/rasta-documents
+              mc anonymous set none rasta/rasta-documents
+            "
+
       - name: Apply migrations
         run: pnpm run db:migrate
         env:
@@ -286,6 +319,7 @@ jobs:
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
 
       - name: Integration tests
         run: pnpm run test:integration
@@ -299,6 +333,13 @@ jobs:
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
+          S3_ENDPOINT: http://localhost:9000
+          S3_REGION: us-east-1
+          S3_ACCESS_KEY: rasta_minio_admin
+          S3_SECRET_KEY: rasta_minio_ci_password
+          S3_BUCKET_DOCUMENTS: rasta-documents
+          S3_FORCE_PATH_STYLE: 'true'
           REDIS_URL: redis://localhost:6379
 
       - name: Economic coverage gate
@@ -337,6 +378,28 @@ jobs:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
+
+      - name: Document coverage gate
+        # `docs/14` § 14.2 puts document-service in the 75% band. The number
+        # has been in `jest.config.js` since the service was scaffolded and,
+        # like economic's and marketplace's before it, nothing evaluated it.
+        #
+        # Both projects in one run: the download refusal, the magic-number
+        # inspection and the signed-URL round trip only exist against a real
+        # database and a real bucket, so a unit-only measurement would report a
+        # number far below the truth and reward mocking exactly the systems
+        # ADR-014 is about.
+        run: pnpm --filter @rasta/document-service run test:coverage
+        env:
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
+          S3_ENDPOINT: http://localhost:9000
+          S3_REGION: us-east-1
+          S3_ACCESS_KEY: rasta_minio_admin
+          S3_SECRET_KEY: rasta_minio_ci_password
+          S3_BUCKET_DOCUMENTS: rasta-documents
+          S3_FORCE_PATH_STYLE: 'true'
 
       # These are called out separately from the rest of the suite so a failure
       # names itself in the job list. A tenant-isolation failure is a data
@@ -378,6 +441,13 @@ jobs:
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
+          S3_ENDPOINT: http://localhost:9000
+          S3_REGION: us-east-1
+          S3_ACCESS_KEY: rasta_minio_admin
+          S3_SECRET_KEY: rasta_minio_ci_password
+          S3_BUCKET_DOCUMENTS: rasta-documents
+          S3_FORCE_PATH_STYLE: 'true'
 
       - name: Migration reversibility
         # AGENTS.md § 7 requires every migration to be reversible, and until
@@ -390,6 +460,7 @@ jobs:
         env:
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
 
   # ---------------------------------------------------------------------------
   # End-to-end. The economic critical path through the whole stack.
@@ -525,7 +596,8 @@ jobs:
             rasta.maintenance.v1 rasta.maintenance.v1.retry rasta.maintenance.v1.dlq \
             rasta.marketplace.v1 rasta.marketplace.v1.retry rasta.marketplace.v1.dlq \
             rasta.fleet.v1 rasta.fleet.v1.retry rasta.fleet.v1.dlq \
-            rasta.asset.v1 rasta.insurance.v1; do
+            rasta.asset.v1 rasta.insurance.v1 \
+            rasta.document.v1; do
             docker run --rm --network host apache/kafka:3.9.0 \
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
               --create --if-not-exists --partitions 3 --replication-factor 1 \
@@ -541,9 +613,11 @@ jobs:
         run: |
           pnpm --filter @rasta/economic-service run db:migrate
           pnpm --filter @rasta/marketplace-service run db:migrate
+          pnpm --filter @rasta/document-service run db:migrate
         env:
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
 
       - name: Build
         run: pnpm run build
@@ -589,7 +663,28 @@ jobs:
           docker logs rasta-e2e-temporal
           exit 1
 
-      - name: Start economic-service, marketplace-service and api-gateway
+      - name: Start MinIO and create the document bucket
+        # ADR-014 puts the file outside the platform entirely, so the document
+        # scenario's upload is a PUT straight to this bucket carrying no Rasta
+        # credential at all. Without it the suite fails at the first upload,
+        # which is the step the whole ADR exists to make observable.
+        run: |
+          set -euo pipefail
+          docker run -d --name rasta-e2e-minio --network host             -e MINIO_ROOT_USER=rasta_minio_admin             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password             minio/minio:RELEASE.2025-04-22T22-12-26Z server /data --address ':9000'
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl -fsS http://localhost:9000/minio/health/live >/dev/null
+
+          docker run --rm --network host --entrypoint sh             minio/mc:RELEASE.2025-04-16T18-13-26Z -c "
+              mc alias set rasta http://localhost:9000 rasta_minio_admin rasta_minio_ci_password
+              mc mb --ignore-existing rasta/rasta-documents
+              mc anonymous set none rasta/rasta-documents
+            "
+
+      - name: Start economic-service, marketplace-service, document-service and api-gateway
         # From `dist`, the same artefact the container image runs, rather than
         # from a watch-mode dev server. Started here rather than by Playwright's
         # `webServer` because three processes have to come up in order and their
@@ -617,6 +712,13 @@ jobs:
           # by accident. Nothing expires into a settlement (ADR-043).
           MARKETPLACE_FULFILLMENT_WINDOW_DAYS: '7'
           MARKETPLACE_RECEIPT_WINDOW_DAYS: '3'
+          PORT_DOCUMENT: '3114'
+          S3_ENDPOINT: http://localhost:9000
+          S3_REGION: us-east-1
+          S3_ACCESS_KEY: rasta_minio_admin
+          S3_SECRET_KEY: rasta_minio_ci_password
+          S3_BUCKET_DOCUMENTS: rasta-documents
+          S3_FORCE_PATH_STYLE: 'true'
           # api-gateway validates every service URL at boot, including the
           # fourteen services that do not exist yet. They are unreachable and
           # unrouted-to by this suite; the values only have to parse.
@@ -649,6 +751,11 @@ jobs:
             DATABASE_URL=postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public \
             node dist/main.js > /tmp/rasta-logs/marketplace.log 2>&1 & )
 
+          ( cd services/document-service && \
+            PORT=3114 SERVICE_NAME=document-service \
+            DATABASE_URL=postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public \
+            node dist/main.js > /tmp/rasta-logs/document.log 2>&1 & )
+
           ( cd services/api-gateway && \
             PORT=3000 SERVICE_NAME=api-gateway \
             node dist/main.js > /tmp/rasta-logs/gateway.log 2>&1 & )
@@ -658,18 +765,22 @@ jobs:
               http://localhost:3112/health/ready || true)"
             marketplace="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3106/health/ready || true)"
+            document="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3114/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/wallets/me || true)"
-            if [ "$economic" = "200" ] && [ "$marketplace" = "200" ] && [ "$gateway" = "401" ]; then
+            if [ "$economic" = "200" ] && [ "$marketplace" = "200" ] \
+               && [ "$document" = "200" ] && [ "$gateway" = "401" ]; then
               echo "stack up after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 3
           done
 
-          echo "the stack did not come up (economic=${economic}, marketplace=${marketplace}, gateway=${gateway})"
+          echo "the stack did not come up (economic=${economic}, marketplace=${marketplace}, document=${document}, gateway=${gateway})"
           cat /tmp/rasta-logs/economic.log
           cat /tmp/rasta-logs/marketplace.log
+          cat /tmp/rasta-logs/document.log
           cat /tmp/rasta-logs/gateway.log
           exit 1
 
@@ -682,6 +793,7 @@ jobs:
           E2E_GATEWAY_URL: http://localhost:3000
           E2E_ECONOMIC_URL: http://localhost:3112
           E2E_MARKETPLACE_URL: http://localhost:3106
+          E2E_DOCUMENT_URL: http://localhost:3114
           KEYCLOAK_URL: http://localhost:8080
           KEYCLOAK_REALM: rasta
           KEYCLOAK_WEB_CLIENT_ID: rasta-web
@@ -695,10 +807,14 @@ jobs:
           tail -n 200 /tmp/rasta-logs/economic.log || true
           echo '--- marketplace-service ---'
           tail -n 200 /tmp/rasta-logs/marketplace.log || true
+          echo '--- document-service ---'
+          tail -n 200 /tmp/rasta-logs/document.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-logs/gateway.log || true
           echo '--- keycloak ---'
           docker logs --tail 200 rasta-e2e-keycloak || true
+          echo '--- minio ---'
+          docker logs --tail 100 rasta-e2e-minio || true
 
       - name: Playwright report
         if: failure()

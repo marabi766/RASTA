@@ -1,0 +1,235 @@
+// document-service — document metadata, access grants and scan results.
+//
+// **The file is never here.** ADR-014 forbids storing content in PostgreSQL,
+// so every row below describes an object that lives in S3-compatible storage
+// and is addressed by an opaque, server-generated key.
+//
+// Nothing here has a foreign key to another service's database, and no row is
+// a copy of another service's data: `ownerResourceType` and `ownerResourceId`
+// are plain strings naming an asset, contract or supplier that this service
+// deliberately does not resolve (AGENTS.md A-01).
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../src/generated/prisma"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// What a document is, for validation purposes only.
+///
+/// The class decides which formats and sizes are acceptable. It deliberately
+/// carries no retention period, legal effect or approval authority: those are
+/// product decisions this service has not been given.
+enum DocumentClass {
+  CONTRACT
+  INSURANCE_POLICY
+  TENDER_DOCUMENT
+  STATEMENT
+  SUPPLIER_CREDENTIAL
+  INSPECTION_REPORT
+  DAMAGE_PHOTO
+  PROGRESS_REPORT
+  OTHER
+}
+
+/// The document's own lifecycle, distinct from its scan state.
+///
+/// A document is `REGISTERED` the moment its object is confirmed and its
+/// metadata stored. `DELETED` is a tombstone rather than a row removal: the
+/// audit question "who deleted this, when and why" has no answer if the row is
+/// gone (AGENTS.md S-06).
+enum DocumentStatus {
+  REGISTERED
+  DELETED
+}
+
+/// What malware scanning concluded (Q-18).
+///
+/// `NOT_SCANNED` is a real, recorded outcome and not an absence: the MVP stub
+/// inspects nothing, and "we did not look" must never be stored the same way
+/// as "we looked and it was clean".
+enum ScanState {
+  PENDING
+  NOT_SCANNED
+  CLEAN
+  INFECTED
+  FAILED
+}
+
+/// Why an upload intent is no longer usable.
+enum UploadIntentState {
+  ISSUED
+  CONSUMED
+  EXPIRED
+}
+
+// ---------------------------------------------------------------------------
+// Upload intents
+// ---------------------------------------------------------------------------
+
+/// Permission to upload one object, issued before the client has it.
+///
+/// The intent is what makes finalize safe. Without it, `POST /v1/documents`
+/// would have to trust a client-supplied object key, and any caller could
+/// register a key belonging to somebody else. With it, the key was minted by
+/// this service, for this organization, for this class, and can be redeemed
+/// exactly once.
+model UploadIntent {
+  id             String @id
+  organizationId String @map("organization_id")
+
+  /// The server-generated key. Never derived from a client filename.
+  objectKey     String        @unique @map("object_key")
+  documentClass DocumentClass @map("document_class")
+
+  /// What the client said it would upload. A claim, checked against reality at
+  /// finalize — kept so the two can be compared and the mismatch reported.
+  declaredContentType String @map("declared_content_type")
+  declaredSizeBytes   Int    @map("declared_size_bytes")
+  /// Sanitised at issue time. Display metadata only; never part of the key.
+  declaredFilename    String @map("declared_filename")
+
+  state     UploadIntentState @default(ISSUED)
+  expiresAt DateTime          @map("expires_at")
+
+  /// Set when redeemed, so a replay is distinguishable from a first use.
+  consumedAt         DateTime? @map("consumed_at")
+  consumedDocumentId String?   @map("consumed_document_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+
+  @@index([organizationId, state], map: "ix_upload_intent_org_state")
+  @@index([expiresAt], map: "ix_upload_intent_expiry")
+  @@map("upload_intent")
+}
+
+// ---------------------------------------------------------------------------
+// Documents
+// ---------------------------------------------------------------------------
+
+model Document {
+  id             String @id
+  organizationId String @map("organization_id")
+
+  /// Opaque, server-owned, unique platform-wide.
+  objectKey     String        @unique @map("object_key")
+  documentClass DocumentClass @map("document_class")
+  status        DocumentStatus @default(REGISTERED)
+
+  /// What the bytes actually are, established by magic number at finalize.
+  contentType String @map("content_type")
+  /// What storage reported. Never what the client claimed.
+  sizeBytes   Int    @map("size_bytes")
+  /// Sanitised client filename, for display and `Content-Disposition` only.
+  filename    String
+  checksum    String? @map("checksum")
+
+  // ---- Scanning (Q-18) --------------------------------------------------
+  scanState     ScanState @default(PENDING) @map("scan_state")
+  scanEngine    String?   @map("scan_engine")
+  scanVersion   String?   @map("scan_version")
+  scanSignature String?   @map("scan_signature")
+  scannedAt     DateTime? @map("scanned_at")
+
+  // ---- Ownership by another service's resource --------------------------
+  //
+  // A reference this service records and never resolves. asset-service owns
+  // assets; this row only remembers that somebody said this document belongs
+  // to one.
+  ownerResourceType String? @map("owner_resource_type")
+  ownerResourceId   String? @map("owner_resource_id")
+
+  // ---- Deletion tombstone ------------------------------------------------
+  deletedAt     DateTime? @map("deleted_at")
+  deletedBy     String?   @map("deleted_by")
+  deletionReason String?  @map("deletion_reason")
+
+  uploadIntentId String @unique @map("upload_intent_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  /// Optimistic concurrency for the grant and deletion paths.
+  version   Int      @default(1)
+
+  grants AccessGrant[]
+
+  @@index([organizationId, status], map: "ix_document_org_status")
+  @@index([organizationId, documentClass], map: "ix_document_org_class")
+  @@index([ownerResourceType, ownerResourceId], map: "ix_document_owner_resource")
+  @@map("document")
+}
+
+// ---------------------------------------------------------------------------
+// Object-level access
+// ---------------------------------------------------------------------------
+
+/// A grant of access to **one** document, to one subject.
+///
+/// Object-level, never tenant-level: `subjectId` names a user or a role within
+/// the owning organization, and a grant carries no meaning outside it. Cross
+/// tenant sharing is deliberately not modelled — no accepted document defines
+/// how it would work, and inventing it would be inventing a business rule
+/// (recorded as Q-36 in `docs/24`).
+model AccessGrant {
+  id             String @id
+  organizationId String @map("organization_id")
+  documentId     String @map("document_id")
+
+  /// `USER` or `ROLE`, within the owning organization.
+  subjectType String @map("subject_type")
+  subjectId   String @map("subject_id")
+
+  grantedAt DateTime  @default(now()) @map("granted_at")
+  grantedBy String    @map("granted_by")
+  revokedAt DateTime? @map("revoked_at")
+  revokedBy String?   @map("revoked_by")
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, subjectType, subjectId], map: "uq_grant_document_subject")
+  @@index([organizationId, subjectId], map: "ix_grant_org_subject")
+  @@map("access_grant")
+}
+
+// ---------------------------------------------------------------------------
+// Platform plumbing
+// ---------------------------------------------------------------------------
+
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic String
+  /// What the message is ordered by — the document id for every document
+  /// event (ADR-036 applied to this domain).
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  publishedAt DateTime? @map("published_at")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  @@index([publishedAt, createdAt], map: "ix_outbox_pending")
+  @@map("outbox_message")
+}

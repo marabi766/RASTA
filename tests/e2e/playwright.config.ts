@@ -89,5 +89,12 @@ export default defineConfig({
       // that never completed.
       dependencies: ['economic-api'],
     },
+    {
+      name: 'document-api',
+      testDir: './specs/document',
+      // No dependency on the other two. document-service shares no data with
+      // them and settles no money, so ordering it behind a financial suite
+      // would only mean a ledger failure hid a storage one.
+    },
   ],
 });

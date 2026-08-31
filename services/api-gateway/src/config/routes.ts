@@ -37,8 +37,21 @@ export interface RouteRule {
    * effect (docs/06 § 6.8).
    */
   requiresIdempotencyKey?: boolean;
-  /** Overrides the default per-user rate limit for expensive endpoints. */
-  rateLimit?: { limit: number; windowSeconds: number };
+  /**
+   * Overrides the default per-user rate limit for expensive endpoints.
+   *
+   * `unsafeMethodsOnly` narrows the override to the methods that create work,
+   * leaving reads on the platform default. It exists because `docs/06` § 6.9
+   * limits *operations* — "۲۰ فایل در ساعت" is a cap on uploading documents —
+   * while this table matches on a path prefix, so without it an upload cap
+   * silently becomes a cap on listing and reading too. Twenty requests an hour
+   * would make a documents screen unusable after one page.
+   *
+   * Method-awareness is not new knowledge for the gateway: it already applies
+   * `requiresIdempotencyKey` to unsafe methods only. It still knows nothing
+   * about the domain — only that writes cost more than reads (ADR-009).
+   */
+  rateLimit?: { limit: number; windowSeconds: number; unsafeMethodsOnly?: boolean };
 }
 
 export const SERVICE_NAMES = [
@@ -146,7 +159,16 @@ export const ROUTES: readonly RouteRule[] = [
   // ---- platform ----------------------------------------------------------
   { prefix: 'notifications', service: 'notification' },
   { prefix: 'preferences', service: 'notification' },
-  { prefix: 'documents', service: 'document', rateLimit: { limit: 20, windowSeconds: 3600 } },
+  // `docs/06` § 6.9: twenty document uploads an hour. Unsafe methods only —
+  // requesting an upload URL, registering the result, issuing a download URL
+  // and deleting are the operations that cap; listing and reading metadata run
+  // on the platform default, or a user would be locked out for an hour by one
+  // screen of documents.
+  {
+    prefix: 'documents',
+    service: 'document',
+    rateLimit: { limit: 20, windowSeconds: 3600, unsafeMethodsOnly: true },
+  },
   {
     prefix: 'audit-events',
     service: 'audit',
