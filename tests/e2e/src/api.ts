@@ -85,8 +85,19 @@ export class Actor {
     return this.call('PATCH', path, options);
   }
 
+  /**
+   * Deletion, which on this platform is a tombstone rather than a removal.
+   *
+   * It carries a body — document-service requires a stated reason, because a
+   * tombstone that answers "who and when" but not "why" is not the audit
+   * record it exists to be.
+   */
+  delete(path: string, options: CallOptions = {}): Promise<ApiResponse<unknown>> {
+    return this.call('DELETE', path, options);
+  }
+
   async call(
-    method: 'GET' | 'POST' | 'PATCH',
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     path: string,
     options: CallOptions = {},
   ): Promise<ApiResponse<unknown>> {

@@ -63,6 +63,7 @@
         "PORT_API_GATEWAY",
         "PORT_ECONOMIC",
         "PORT_MARKETPLACE",
+        "PORT_DOCUMENT",
         "PLAYWRIGHT_*"
       ]
     },
