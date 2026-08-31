@@ -436,11 +436,31 @@ Schema رسمی در `services/economic-service/src/events/events.ts` و اعت�
 
 ## Document — `rasta.document.v1`
 
-| رویداد              | مصرف‌کنندگان                      | Payload کلیدی                                             |
-| ------------------- | --------------------------------- | --------------------------------------------------------- |
-| `DOCUMENT_UPLOADED` | مالک منبع · audit                 | `documentId`, `resourceType`, `resourceId`, `contentType` |
-| `DOCUMENT_DELETED`  | audit                             | `documentId`, `reason`                                    |
-| `VIRUS_DETECTED`    | **notification (بحرانی)** · audit | `documentId`, `signature`                                 |
+| رویداد              | مصرف‌کنندگان                      | Payload کلیدی                                                               |
+| ------------------- | --------------------------------- | --------------------------------------------------------------------------- |
+| `DOCUMENT_UPLOADED` | مالک منبع · audit                 | `documentId`, `documentClass`, `contentType`, `scanState` (همیشه `PENDING`) |
+| `DOCUMENT_SCANNED`  | مالک منبع · audit                 | `documentId`, `scanState`, `engine`, `signatureVersion`, `failureReason`    |
+| `DOCUMENT_DELETED`  | audit                             | `documentId`, `reason`                                                      |
+| `VIRUS_DETECTED`    | **notification (بحرانی)** · audit | `documentId`, `engine`, `signature`                                         |
+
+**همه با `documentId` کلید می‌خورند**، پس تاریخچهٔ یک سند روی یک Partition مرتب می‌ماند.
+این از ADR-049 به بعد باربر است: اسکن ناهمزمان شد، پس `DOCUMENT_UPLOADED` همیشه
+`PENDING` حمل می‌کند و نتیجه بعداً به‌عنوان `DOCUMENT_SCANNED` می‌رسد — دنباله‌ای که فقط
+اگر دنباله بماند معنا دارد. مصرف‌کننده‌ای که `SCANNED` را پیش از `UPLOADED` ببیند دربارهٔ
+سندی رأی می‌شنود که هرگز نشنیده وجود دارد.
+
+**`DOCUMENT_SCANNED` برای هر نتیجهٔ نهایی منتشر می‌شود، نه فقط برای خبر خوب.** یک اسکن
+`FAILED` دقیقاً همان چیزی است که مصرف‌کننده پیش از گفتن «پیوست شما آماده است» باید بداند،
+و جریانی که فقط موفقیت‌ها را حمل کند سکوت را دومعنا می‌کند.
+
+**`VIRUS_DETECTED` جدا می‌ماند** و در کنار یک نتیجهٔ `INFECTED` منتشر می‌شود، نه به‌جای
+آن: اولی تغییر وضعیتی است که هر مصرف‌کنندهٔ علاقه‌مند می‌خواند و دومی یافته‌ای امنیتی است
+که notification-service بحرانی می‌داندش. تنها از موتوری که واقعاً محتوا را بازرسی کرده
+منتشر می‌شود — یافتهٔ ساختگی بدتر از سکوت است، چون کسی رویش عمل می‌کند.
+
+**هیچ‌کدام کلید شیء، Bucket، Endpoint یا URL امضاشده حمل نمی‌کنند.** رویداد هفت روز در
+Log ای می‌ماند که هر سرویسی می‌خواندش. تست `events.spec.ts` این را روی **همهٔ** Schema ها
+با هم بررسی می‌کند، نه فقط روی آنکه اول نوشته شد.
 
 ## Notification — `rasta.notification.v1`
 

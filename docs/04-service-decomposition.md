@@ -410,14 +410,14 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 
 ### document-service (P0)
 
-| بُعد            | مشخصات                                                                                                                                                 |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Mission**     | فراداده و کنترل دسترسی اسناد. **فایل هرگز در پایگاه داده نمی‌رود.**                                                                                    |
-| **مالکیت داده** | `document` · `document_version` · `access_grant` · `virus_scan_result` — فایل در S3                                                                    |
-| **REST**        | `POST /documents/upload-url` (URL امضاشده) · `POST /documents` · `GET /documents/{id}` · `GET /documents/{id}/download-url` · `DELETE /documents/{id}` |
-| **Publishes**   | `DOCUMENT_UPLOADED` · `DOCUMENT_DELETED` · `VIRUS_DETECTED`                                                                                            |
-| **مرز امنیتی**  | بررسی نوع واقعی محتوا (Magic Number، نه پسوند) · محدودیت اندازه · URL امضاشده کوتاه‌عمر (۵ دقیقه) · دسترسی سطح Object · فایل هرگز اجرا نمی‌شود         |
-| **MVP → PROD**  | اسکن بدافزار در MVP یک Stub است که نتیجه را ثبت می‌کند؛ در Production ClamAV یا سرویس معادل. **OPEN QUESTION**                                         |
+| بُعد             | مشخصات                                                                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Mission**      | فراداده و کنترل دسترسی اسناد. **فایل هرگز در پایگاه داده نمی‌رود.**                                                                                    |
+| **مالکیت داده**  | `document` · `document_version` · `access_grant` · `virus_scan_result` — فایل در S3                                                                    |
+| **REST**         | `POST /documents/upload-url` (URL امضاشده) · `POST /documents` · `GET /documents/{id}` · `GET /documents/{id}/download-url` · `DELETE /documents/{id}` |
+| **Publishes**    | `DOCUMENT_UPLOADED` · `DOCUMENT_SCANNED` · `DOCUMENT_DELETED` · `VIRUS_DETECTED`                                                                       |
+| **مرز امنیتی**   | بررسی نوع واقعی محتوا (Magic Number، نه پسوند) · محدودیت اندازه · URL امضاشده کوتاه‌عمر (۵ دقیقه) · دسترسی سطح Object · فایل هرگز اجرا نمی‌شود         |
+| **اسکن بدافزار** | **ClamAV** خودمیزبان به‌صورت Sidecar، ناهمزمان (ADR-049). سند `PENDING` ثبت می‌شود و تنها یک `CLEAN` معتبر دانلود را مجاز می‌کند. Q-18 بسته شد.        |
 
 ### audit-service (P0)
 
