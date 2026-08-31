@@ -37,8 +37,8 @@
 | Status | Items | Story Points |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 21 | 364 |
-| IN_PROGRESS | 0 | 0 |
+| READY | 20 | 351 |
+| IN_PROGRESS | 1 | 13 |
 | BLOCKED | 3 | 47 |
 | ACCEPTED | 14 | 178 |
 | CANCELLED | 0 | 0 |

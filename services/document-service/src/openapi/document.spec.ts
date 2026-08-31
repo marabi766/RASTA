@@ -38,13 +38,15 @@ function nestDocument(): OpenAPIObject {
   } as unknown as OpenAPIObject;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const op = (document: OpenAPIObject, path: string, method: string): any =>
-  // JUSTIFIED-ANY: OpenAPIObject's path-item type is a union of every method,
-  // and narrowing it here would restate the spec's own types without making
-  // the assertions safer.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (document.paths as any)[path][method];
+// JUSTIFIED-ANY: OpenAPIObject's path-item type is a union of every HTTP
+// method, and narrowing it here would restate the spec's own types without
+// making a single assertion below safer. `no-explicit-any` is already off for
+// spec files (eslint.config.mjs), so no directive is needed — the reason is
+// recorded because AGENTS.md § 3 asks for one wherever `any` appears.
+type Operation = any;
+
+const op = (document: OpenAPIObject, path: string, method: string): Operation =>
+  (document.paths as Record<string, Record<string, Operation>>)[path][method];
 
 describe('request bodies', () => {
   it('publishes a body for every write endpoint that takes one', () => {

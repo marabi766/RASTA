@@ -56,12 +56,7 @@
  */
 
 export type RefusalReason =
-  | 'PENDING'
-  | 'NOT_SCANNED'
-  | 'INFECTED'
-  | 'FAILED'
-  | 'QUARANTINED'
-  | 'DELETED';
+  'PENDING' | 'NOT_SCANNED' | 'INFECTED' | 'FAILED' | 'QUARANTINED' | 'DELETED';
 
 export type DownloadDecision =
   | { allowed: true }
@@ -108,7 +103,11 @@ export function canDownload(document: DownloadCandidate): DownloadDecision {
       return refuse(document, 'FAILED', 'The security scan for this document did not complete');
 
     case 'QUARANTINED':
-      return refuse(document, 'QUARANTINED', 'This document is quarantined and cannot be downloaded');
+      return refuse(
+        document,
+        'QUARANTINED',
+        'This document is quarantined and cannot be downloaded',
+      );
 
     default:
       // An unrecognised state is refused rather than allowed. A state added to

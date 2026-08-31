@@ -1,8 +1,4 @@
-import {
-  DOCUMENT_EVENTS,
-  documentUploadedPayload,
-  validateDocumentPayload,
-} from './events';
+import { DOCUMENT_EVENTS, documentUploadedPayload, validateDocumentPayload } from './events';
 
 /**
  * The published event contract, checked at runtime.

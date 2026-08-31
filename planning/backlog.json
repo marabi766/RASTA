@@ -432,14 +432,40 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 13,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Uploads validate real content type and size before object storage",
         "Tenant-scoped signed access and document metadata are audited"
       ],
       "dependencies": ["PLAT-003"],
       "sourceRefs": ["docs/04-service-decomposition.md#document-service-p0"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "COMMIT",
+          "ref": "feat/document-service",
+          "note": "Service, Prisma schema and reversible migration, S3 storage port, magic-number content policy, object-level access control, outbox events and the HTTP surface. Not yet merged; acceptance is the product owner call after review."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:coverage",
+          "note": "218 tests across 12 suites (122 unit, 96 integration); 88.70% statements, 79.75% branches, 84.56% functions, 90.00% lines against the documented 75% band, measured over both the unit and integration projects with a real PostgreSQL and a real MinIO."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm exec playwright test --project=document-api",
+          "note": "10 end-to-end scenarios green against a running stack: Keycloak token, api-gateway, document-service, PostgreSQL, MinIO and Kafka, with the file uploaded straight to object storage over a signed URL."
+        },
+        {
+          "kind": "TEST",
+          "ref": "node scripts/verify-migration-reversible.mjs document",
+          "note": "up to down to up against a throwaway schema in 14.2s, asserting the four tables and the seven invariant-carrying CHECK constraints are present, gone, and back."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md#q-18",
+          "note": "Downloads are fail-closed until a real scanning provider is configured. Uploads and metadata registration work in MVP; the honest stub records NOT_SCANNED and only a CLEAN verdict authorizes download. This is an accepted limitation, not an unmet acceptance criterion, and it must be reviewed before the item is accepted."
+        }
+      ]
     },
     {
       "id": "COM-005",
@@ -968,6 +994,13 @@
       "reason": "The product owner explicitly approved the initial Story Point baseline after reviewing the generated MVP and full-product figures.",
       "recordedBy": "Codex",
       "approvalRef": "Product owner approval in the Codex project-management task on 2026-08-30"
+    },
+    {
+      "date": "2026-08-31",
+      "type": "STATUS_CHANGED",
+      "reason": "COM-004 moved from READY to IN_PROGRESS. The document service, its storage flows and its gates are implemented and green on a branch; it earns no points until the product owner accepts it, and acceptance must weigh the Q-18 limitation that downloads stay fail-closed until a scanning provider is chosen.",
+      "recordedBy": "Claude",
+      "approvalRef": null
     }
   ]
 }
