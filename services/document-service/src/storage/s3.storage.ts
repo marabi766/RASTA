@@ -59,17 +59,29 @@ export class S3ObjectStorage implements ObjectStorage {
     contentType: string;
     expiresInSeconds: number;
   }): Promise<string> {
-    // `ContentType` is part of what gets signed, so the URL only works for an
-    // upload declaring the same type. It is not a substitute for inspecting
-    // the bytes afterwards — a client can send matching headers and different
-    // content — but it does stop the URL being reused for something else.
     const command = new PutObjectCommand({
       Bucket: this.options.bucket,
       Key: input.objectKey,
       ContentType: input.contentType,
     });
 
-    return getSignedUrl(this.client, command, { expiresIn: input.expiresInSeconds });
+    // `signableHeaders` is what makes the content type binding, and it is not
+    // optional decoration. Setting `ContentType` on the command alone signs
+    // nothing: the presigner puts only `host` in `X-Amz-SignedHeaders`, so the
+    // URL accepted an upload declaring any type at all. That was the behaviour
+    // here until a test PUT a `text/html` header to a URL signed for
+    // `application/pdf` and storage answered 200 — while the comment above it
+    // claimed the opposite.
+    //
+    // With the header signed, a mismatch fails the signature check at storage.
+    // It is still not a substitute for inspecting the bytes afterwards — a
+    // client can send a matching header and different content, which is why
+    // `finalize` reads the magic number — but it does stop one URL from being
+    // reused to store something else entirely.
+    return getSignedUrl(this.client, command, {
+      expiresIn: input.expiresInSeconds,
+      signableHeaders: new Set(['content-type']),
+    });
   }
 
   async createDownloadUrl(input: {
