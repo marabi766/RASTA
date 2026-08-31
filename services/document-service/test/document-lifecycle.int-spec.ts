@@ -8,12 +8,12 @@ import {
   outboxFor,
   putToSignedUrl,
   tenants,
-  testEnv,
   wire,
   type Wiring,
 } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import type { MalwareScanner, ScanResult } from '../src/scanning/scanner.port';
+import { AlwaysCleanScanner } from './clean-scanner';
 
 /**
  * The direct-upload lifecycle, against a real PostgreSQL and a real MinIO.
@@ -27,11 +27,22 @@ import type { MalwareScanner, ScanResult } from '../src/scanning/scanner.port';
 describe('document lifecycle (real database and object storage)', () => {
   let prisma: PrismaService;
   let wiring: Wiring;
+  /**
+   * The same domain, wired to a scanner that reports `CLEAN`.
+   *
+   * `canDownload` allows `CLEAN` and nothing else, and the MVP stub records
+   * `NOT_SCANNED`, so the successful-download path is unreachable through
+   * `wiring`. Reaching it requires a scanner that inspected something — which
+   * is what a real engine will be, and what `AlwaysCleanScanner` stands in for
+   * until Q-18 is answered. Everything else here is the real thing.
+   */
+  let scanned: Wiring;
   const org = tenants();
 
   beforeAll(() => {
     prisma = newPrisma();
     wiring = wire(prisma);
+    scanned = wire(prisma, { scanner: new AlwaysCleanScanner() });
   });
 
   afterAll(async () => {
@@ -53,15 +64,18 @@ describe('document lifecycle (real database and object storage)', () => {
       contentType?: string;
       filename?: string;
       organizationId?: string;
+      /** Which wiring performs the upload. Defaults to the real MVP stub. */
+      via?: Wiring;
     } = {},
   ) {
     const bytes = options.bytes ?? FIXTURES.pdf();
     const contentType = options.contentType ?? 'application/pdf';
     const documentClass = options.documentClass ?? 'CONTRACT';
     const act = options.organizationId === org.b ? asOrgB : asOrgA;
+    const via = options.via ?? wiring;
 
     const intent = await act(() =>
-      wiring.documents.requestUploadUrl({
+      via.documents.requestUploadUrl({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         documentClass: documentClass as any,
         contentType,
@@ -74,7 +88,7 @@ describe('document lifecycle (real database and object storage)', () => {
     expect(status).toBe(200);
 
     const document = await act(() =>
-      wiring.documents.finalize({ uploadIntentId: intent.uploadIntentId }),
+      via.documents.finalize({ uploadIntentId: intent.uploadIntentId }),
     );
 
     return { intent, document };
@@ -119,13 +133,17 @@ describe('document lifecycle (real database and object storage)', () => {
       expect(document.scanEngine).toBe('no-op-stub');
     });
 
-    it('hands back the exact bytes that were uploaded', async () => {
+    it('hands back the exact bytes that were uploaded, once a scanner cleared them', async () => {
+      // Through `scanned`, because only a `CLEAN` verdict authorizes a
+      // download. With the MVP stub this document would be `NOT_SCANNED` and
+      // this call would be refused — which is a separate test below.
       const bytes = FIXTURES.pdf();
-      const { document } = await uploadDocument({ bytes });
+      const { document } = await uploadDocument({ bytes, via: scanned });
 
-      const link = await asOrgA(() => wiring.documents.createDownloadUrl(document.id));
+      const link = await asOrgA(() => scanned.documents.createDownloadUrl(document.id));
       const fetched = await getFromSignedUrl(link.downloadUrl);
 
+      expect(document.scanState).toBe('CLEAN');
       expect(fetched.status).toBe(200);
       expect(Buffer.compare(fetched.body, bytes)).toBe(0);
     });
@@ -133,8 +151,8 @@ describe('document lifecycle (real database and object storage)', () => {
     it('serves the download as an attachment, never as something a browser renders', async () => {
       // ADR-014: "فایل هرگز اجرا نمی‌شود و هرگز به‌عنوان HTML سرو نمی‌شود".
       // The response metadata is what enforces that at the storage boundary.
-      const { document } = await uploadDocument();
-      const link = await asOrgA(() => wiring.documents.createDownloadUrl(document.id));
+      const { document } = await uploadDocument({ via: scanned });
+      const link = await asOrgA(() => scanned.documents.createDownloadUrl(document.id));
       const fetched = await getFromSignedUrl(link.downloadUrl);
 
       expect(fetched.contentDisposition).toMatch(/^attachment/);
@@ -535,16 +553,35 @@ describe('document lifecycle (real database and object storage)', () => {
       );
     });
 
-    it('refuses an unscanned document where the deployment forbids it', async () => {
-      // The Q-18 setting, proven to be a real switch rather than a comment.
-      const strict = wire(prisma, {
-        env: testEnv({ DOCUMENT_ALLOW_UNSCANNED_DOWNLOAD: 'false' }),
-      });
+    it('refuses a document nothing inspected — which is every document in MVP', async () => {
+      // The invariant this suite exists to hold. The MVP stub records
+      // `NOT_SCANNED`, ADR-014 keeps a file unavailable until scanning has
+      // completed, and there is no configuration that changes the answer:
+      // `canDownload` takes no policy argument and `DocumentEnv` carries no
+      // flag. Uploading and registering worked; handing the bytes back does
+      // not, and will not until Q-18 is answered with a real engine.
       const { document } = await uploadDocument();
+      expect(document.scanState).toBe('NOT_SCANNED');
 
-      await expect(asOrgA(() => strict.documents.createDownloadUrl(document.id))).rejects.toThrow(
-        expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }) as unknown as Error,
+      const error = await asOrgA(() => wiring.documents.createDownloadUrl(document.id)).catch(
+        (caught: unknown) => caught as { code?: string; details?: { reason?: string } },
       );
+
+      expect(error.code).toBe('BUSINESS_RULE_VIOLATION');
+      expect(error.details?.reason).toBe('NOT_SCANNED');
+    });
+
+    it('issues no signed URL at all when it refuses', async () => {
+      // The refusal has to happen *before* signing. A URL that was minted and
+      // then discarded is still a bearer credential that existed, and the
+      // storage layer would have been asked to create one.
+      const { document } = await uploadDocument();
+      const spy = jest.spyOn(wiring.storage, 'createDownloadUrl');
+
+      await expect(asOrgA(() => wiring.documents.createDownloadUrl(document.id))).rejects.toThrow();
+
+      expect(spy).not.toHaveBeenCalled();
+      spy.mockRestore();
     });
   });
 

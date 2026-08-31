@@ -276,8 +276,9 @@ export class DocumentService {
           sizeBytes: metadata.sizeBytes,
           filename: intent.declaredFilename,
           // Carried so no consumer reads the event's existence as a clean
-          // bill of health.
-          scanState: scan.verdict === 'NOT_SCANNED' ? 'NOT_SCANNED' : scanStateOf(scan),
+          // bill of health: DOCUMENT_UPLOADED means "confirmed and
+          // registered", and in MVP this field says `NOT_SCANNED`.
+          scanState: scanStateOf(scan),
           ownerResourceType: dto.ownerResourceType ?? null,
           ownerResourceId: dto.ownerResourceId ?? null,
           uploadedBy: actor,
@@ -365,9 +366,11 @@ export class DocumentService {
 
     assertDocumentReadable(document);
 
-    const decision = canDownload(document, {
-      allowUnscanned: this.env.DOCUMENT_ALLOW_UNSCANNED_DOWNLOAD,
-    });
+    // No policy argument, and no configuration reaches this call. Only a
+    // `CLEAN` verdict authorizes a download (ADR-014); with the MVP stub
+    // recording `NOT_SCANNED`, that means an MVP deployment refuses every
+    // download until a real scanner is bound behind `MALWARE_SCANNER` (Q-18).
+    const decision = canDownload(document);
 
     if (!decision.allowed) {
       downloadUrlsRefusedTotal.inc({ service: SERVICE_NAME, reason: decision.reason });

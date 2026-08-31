@@ -19,19 +19,27 @@ import type { MalwareScanner, ScanResult } from './scanner.port';
  *
  * So the verdict is `NOT_SCANNED`, the engine is named for what it is, and
  * `inspectsContent` is `false`. Nothing downstream can mistake this for a
- * scan: `DocumentService` refuses downloads for anything that is not `CLEAN`,
- * which means **every document in an MVP deployment is undownloadable until a
- * real scanner exists**. That is the correct and deliberate consequence, and
- * it is far better than the alternative of serving unexamined bytes while a
- * status column says they were checked.
+ * scan: `canDownload` allows `CLEAN` and nothing else, which means **every
+ * document in an MVP deployment is undownloadable until a real scanner
+ * exists**. That is the correct and deliberate consequence, and it is far
+ * better than the alternative of serving unexamined bytes while a status
+ * column says they were checked. Uploading and registering metadata still
+ * work; only handing the bytes back waits.
  *
  * ## What must not be done to this class
  *
- * It must not be made to return `CLEAN` to unblock a demo. If a demo needs a
- * downloadable document, the answer is a real scanner behind
- * {@link MalwareScanner}, or an explicit, configured, documented decision to
- * accept unscanned downloads in that environment — not a stub that
- * misreports.
+ * It must not be made to return `CLEAN` to unblock a demo, and no
+ * configuration may be added that lets `NOT_SCANNED` through. There is no
+ * environment variable for it and there must not be one: ADR-014 keeps a file
+ * unavailable until scanning completes, and a flag that switches an invariant
+ * off is a bypass however carefully it is documented. If product ownership
+ * wants downloadable files before a scanner exists, that is an explicit
+ * product and security decision recorded as an ADR amendment.
+ *
+ * The one legitimate substitution is a different implementation of
+ * {@link MalwareScanner}: a real engine in production, and — in tests that
+ * need to reach the download path — a test-only fake that returns `CLEAN`,
+ * bound in the test's own composition and never in `AppModule`.
  */
 @Injectable()
 export class NoOpMalwareScanner implements MalwareScanner {

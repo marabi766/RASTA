@@ -79,29 +79,23 @@ export const documentEnvSchema = baseEnvSchema
       .max(200 * 1024 * 1024)
       .default(25 * 1024 * 1024),
 
-    /**
-     * Whether a document whose scan **completed without inspecting anything**
-     * may be downloaded.
-     *
-     * This is the temporary decision Q-18 forces, and it is narrow on purpose.
-     * It does **not** relax the two rules ADR-014 actually states: a `PENDING`
-     * document — one no scan pass has reached — and an `INFECTED` one are
-     * refused unconditionally and are not configurable at all.
-     *
-     * What it governs is only `NOT_SCANNED`: the verdict the MVP stub records
-     * because Q-18 is open and no scanner exists to bind. With this `false`,
-     * an MVP deployment can store contracts and licences and never hand any of
-     * them back, which makes the platform's document capability inert. With it
-     * `true`, downloads work and every response says plainly that the content
-     * was not examined.
-     *
-     * The default is `true` **only** because no scanner exists yet. The moment
-     * a real one is wired in, its verdicts become `CLEAN` or `INFECTED`,
-     * `NOT_SCANNED` stops occurring, and this setting stops mattering — which
-     * is the property that makes it safe to have at all. It is recorded in
-     * `docs/24` under Q-18 rather than left as a surprise in a schema.
-     */
-    DOCUMENT_ALLOW_UNSCANNED_DOWNLOAD: booleanEnv(true),
+    // ---- Scanning (ADR-014, Q-18) ----------------------------------------
+    //
+    // There is deliberately no `DOCUMENT_ALLOW_UNSCANNED_DOWNLOAD` here.
+    //
+    // It existed and defaulted to `true`, which turned the MVP stub's
+    // `NOT_SCANNED` verdict into a download. ADR-014 requires that a file stay
+    // unavailable until scanning has completed, so that default contradicted
+    // an accepted ADR and made the platform's out-of-the-box posture the
+    // permissive one. It was removed rather than re-defaulted to `false`: a
+    // setting whose only purpose is to switch off a security invariant is a
+    // runtime bypass, and the deployment that flips it will not be the one
+    // that reads this comment.
+    //
+    // Which scanner to bind is still open (Q-18), and that is a composition
+    // decision — a class behind `MalwareScanner` — not an environment
+    // variable. Until one exists, uploads and metadata registration work and
+    // downloads are refused. `docs/24` records the consequence.
   });
 
 export type DocumentEnv = z.infer<typeof documentEnvSchema>;
