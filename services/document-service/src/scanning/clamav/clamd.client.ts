@@ -28,6 +28,25 @@ import {
  * the correctness of "a hung scan holds one socket and releases it on its own
  * deadline". Each call connects, speaks, and closes.
  *
+ * ## Who owns cancellation
+ *
+ * One `AbortController` per exchange, created here and passed down. It is the
+ * single thing that ends an exchange, whoever noticed first: the deadline
+ * timer, the caller's own signal, a socket error, a peer that hung up, or a
+ * reply that grew past what a reply may be. Everything that can block —
+ * connecting, iterating the source, waiting for backpressure, waiting for the
+ * answer — is tied to it.
+ *
+ * That centralisation is a correction, not a preference. The timer used to
+ * destroy the clamd socket and reject the reply promise, and neither of those
+ * unblocks a `for await` parked on an object stream that has stopped
+ * producing: the stream was destroyed in the loop's `finally`, which cannot
+ * run until the loop resumes. A stalled MinIO connection therefore outlived
+ * `DOCUMENT_SCAN_TIMEOUT_MS` indefinitely — holding a worker slot, delaying
+ * shutdown and letting the document's lease drift towards expiry — while the
+ * configuration and this comment both claimed a deadline. The deadline is now
+ * one, and `clamav.scanner.spec.ts` proves it by stalling a source on purpose.
+ *
  * ## Where the transport is decided, and where it is refused
  *
  * This class connects to whatever address it is given. It does **not** decide
@@ -41,15 +60,35 @@ export type ClamdAddress =
   | { readonly transport: 'unix'; readonly socketPath: string }
   | { readonly transport: 'tcp'; readonly host: string; readonly port: number };
 
+/**
+ * The most a single clamd reply may weigh before it is refused.
+ *
+ * A healthy clamd answers in well under a hundred bytes: `stream: OK`, a
+ * signature name bounded by the database's own naming, a version line. Even
+ * `zSTATS`, which this client does not use, is a few hundred. Eight kilobytes
+ * is therefore enormous for a legitimate reply and small enough to be a real
+ * bound.
+ *
+ * It exists because without one, a peer that is broken or hostile decides how
+ * much memory this process holds — and the accumulator concatenated everything
+ * received on every packet, so the cost of being fed grew quadratically with
+ * what was sent. The refusal reports the limit and never the content: this
+ * string reaches logs and metrics, and echoing an unbounded reply from an
+ * untrusted peer into either is the second bug rather than the fix (S-09).
+ */
+export const MAX_REPLY_BYTES = 8 * 1024;
+
 export interface ClamdClientOptions {
   readonly address: ClamdAddress;
   /**
    * The whole-exchange deadline, in milliseconds.
    *
-   * One deadline for connect, write and reply together rather than three. A
-   * per-phase timeout can be satisfied forever by a peer that sends one byte
-   * before each expiry, which is precisely the shape of a scanner that is
-   * struggling rather than dead.
+   * One deadline for connect, streaming, backpressure and reply together
+   * rather than four. A per-phase timeout can be satisfied forever by a peer
+   * that sends one byte before each expiry, which is precisely the shape of a
+   * scanner that is struggling rather than dead — and a deadline that covers
+   * only the reply is satisfied forever by a *source* that has gone quiet,
+   * which is the defect this now closes.
    */
   readonly timeoutMs: number;
   /** Bytes per INSTREAM frame. Bounds how much of the object is ever resident. */
@@ -75,15 +114,21 @@ export class ClamdError extends Error {
   }
 }
 
+/** What `speak` is given: the socket, the pending reply, and the exchange's life. */
+interface Exchange {
+  readonly socket: net.Socket;
+  readonly reply: Promise<string>;
+  /**
+   * Aborted when the exchange ends for any reason but success.
+   *
+   * `signal.reason` is the {@link ClamdError} that ended it, so a consumer can
+   * propagate the *kind* rather than flattening every ending into a timeout.
+   */
+  readonly signal: AbortSignal;
+}
+
 export class ClamdClient {
   constructor(private readonly options: ClamdClientOptions) {}
-
-  /** A short, safe description of where this client points. Carries no secret. */
-  describeAddress(): string {
-    return this.options.address.transport === 'unix'
-      ? `unix:${this.options.address.socketPath}`
-      : `tcp:${this.options.address.host}:${this.options.address.port}`;
-  }
 
   async ping(): Promise<boolean> {
     const reply = await this.exchange(PING_COMMAND);
@@ -112,17 +157,35 @@ export class ClamdClient {
    * object read and a slow scanner turn into an unbounded write queue inside
    * the process — the same memory this method exists to avoid, moved from the
    * stream to the socket.
+   *
+   * ## The source belongs to the exchange
+   *
+   * Destroying it is how a deadline reaches a loop that is parked waiting for
+   * bytes. Checking a flag between chunks cannot: there is no "between" while
+   * the next chunk never arrives. So the source is destroyed *with the
+   * exchange's own error*, which makes the iterator reject with that error and
+   * the failure keep its kind instead of becoming a generic one.
    */
   async scanStream(source: Readable, signal?: AbortSignal): Promise<ClamdReply> {
-    return this.withSocket(async (socket, reply) => {
+    return this.withSocket(async ({ socket, reply, signal: exchange }) => {
+      // Registered before the first read, so a deadline that expires during
+      // the very first chunk still reaches the stream.
+      const abandonSource = (): void => {
+        source.destroy(errorOf(exchange, 'the scan ended before the object was fully read'));
+      };
+      exchange.addEventListener('abort', abandonSource, { once: true });
+
       socket.write(INSTREAM_COMMAND);
 
       let sent = 0;
 
       try {
         for await (const piece of source) {
-          if (signal?.aborted) {
-            throw new ClamdError('TIMEOUT', 'the scan was cancelled by its caller');
+          // A cheap fast path only. The interruption that matters is
+          // `abandonSource` above — this check cannot run while the loop is
+          // waiting, which is exactly when it would be needed.
+          if (exchange.aborted) {
+            throw errorOf(exchange, 'the scan was cancelled');
           }
 
           const bytes = piece as Buffer;
@@ -142,19 +205,22 @@ export class ClamdClient {
             }
 
             if (!socket.write(frameChunk(frame))) {
-              await once(socket, 'drain');
+              await once(socket, 'drain', exchange);
             }
           }
         }
       } finally {
-        // Always, including on the size refusal above. Leaving a half-written
-        // stream open holds a clamd thread until its own ReadTimeout fires.
+        exchange.removeEventListener('abort', abandonSource);
+        // Always, including on the size refusal above and on a deadline that
+        // already destroyed it. Leaving a half-written stream open holds a
+        // clamd thread until its own ReadTimeout fires, and leaves the S3
+        // connection behind it open until the SDK's.
         source.destroy();
       }
 
       socket.write(INSTREAM_TERMINATOR);
       return parseInstreamReply(await reply);
-    });
+    }, signal);
   }
 
   // -------------------------------------------------------------------------
@@ -163,71 +229,146 @@ export class ClamdClient {
 
   /** A command with no body. */
   private async exchange(command: string): Promise<string> {
-    return this.withSocket(async (socket, reply) => {
+    return this.withSocket(async ({ socket, reply }) => {
       socket.write(command);
       return reply;
     });
   }
 
   /**
-   * Opens a connection, runs `speak`, and closes it under one deadline.
+   * Opens a connection, runs `speak`, and ends the whole thing under one
+   * deadline.
    *
    * The reply promise is created **before** `speak` runs, so a scanner that
    * answers before the last frame is written — which clamd does when it
    * matches early — is not a race that loses the reply.
+   *
+   * Every await inside is raced against the exchange's cancellation, so this
+   * method returns when the deadline says so even if `speak` is still
+   * unwinding. `speak` is cancelled as well as raced: the race decides when
+   * *this* returns, and the abort decides that nothing keeps reading after it.
    */
   private async withSocket<T>(
-    speak: (socket: net.Socket, reply: Promise<string>) => Promise<T>,
+    speak: (exchange: Exchange) => Promise<T>,
+    callerSignal?: AbortSignal,
   ): Promise<T> {
     const socket = this.connect();
-    const chunks: Buffer[] = [];
+    const cancellation = new AbortController();
 
-    let settle!: (value: string) => void;
-    let reject!: (error: Error) => void;
-    const reply = new Promise<string>((resolve, rejectReply) => {
-      settle = resolve;
-      reject = rejectReply;
+    /**
+     * The one reason this exchange ended, recorded once.
+     *
+     * Latched, so the first cause wins: destroying the socket on a timeout
+     * makes it emit `close`, and without the latch that second event would
+     * relabel a deadline as a protocol failure.
+     */
+    let failure: ClamdError | null = null;
+
+    let settleReply!: (value: string) => void;
+    let rejectReply!: (error: Error) => void;
+    const reply = new Promise<string>((resolve, reject) => {
+      settleReply = resolve;
+      rejectReply = reject;
     });
     // Nothing awaits `reply` on the failure paths below, and an unhandled
     // rejection would take the process down rather than the scan.
     reply.catch(() => undefined);
 
-    const deadline = setTimeout(() => {
+    const fail = (error: ClamdError): void => {
+      if (failure) return;
+      failure = error;
+      cancellation.abort(error);
+      rejectReply(error);
+      // Released here rather than only in the `finally`, so a peer holding a
+      // scanning thread for us is let go the moment we stop waiting.
       socket.destroy();
-      reject(new ClamdError('TIMEOUT', 'the scanner did not answer within the deadline'));
-    }, this.options.timeoutMs);
+    };
+
+    // Rejects when the exchange is cancelled, so an await that cannot be
+    // interrupted any other way still ends.
+    let onCancelled!: () => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      onCancelled = () => reject(errorOf(cancellation.signal, 'the exchange was cancelled'));
+      cancellation.signal.addEventListener('abort', onCancelled, { once: true });
+    });
+    cancelled.catch(() => undefined);
+
+    const deadline = setTimeout(
+      () => fail(new ClamdError('TIMEOUT', 'the exchange did not complete within the deadline')),
+      this.options.timeoutMs,
+    );
     deadline.unref?.();
 
-    socket.on('data', (chunk: Buffer) => {
-      chunks.push(chunk);
-      // clamd answers one NUL-terminated message per exchange and then waits;
-      // it does not close first. Resolving on the terminator rather than on
-      // `end` is the difference between a reply and a timeout.
-      const seen = Buffer.concat(chunks).toString('latin1');
-      if (seen.includes('\0')) settle(seen);
-    });
+    const onCallerAbort = (): void =>
+      fail(new ClamdError('TIMEOUT', 'the scan was cancelled by its caller'));
+    if (callerSignal?.aborted) onCallerAbort();
+    else callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
 
-    socket.on('error', (error) => {
-      reject(
+    // ---- Reply accumulation, bounded ------------------------------------
+    let received = 0;
+    let answered = false;
+    const chunks: Buffer[] = [];
+
+    const onData = (chunk: Buffer): void => {
+      if (answered) return;
+      received += chunk.length;
+      chunks.push(chunk);
+
+      // A terminator is one byte, so it cannot straddle two arrivals: checking
+      // each chunk is complete, and avoids re-joining everything per packet.
+      if (chunk.includes(0)) {
+        answered = true;
+        settleReply(Buffer.concat(chunks).toString('latin1'));
+        return;
+      }
+
+      if (received > MAX_REPLY_BYTES) {
+        // Dropped rather than kept, and named by size rather than by content.
+        chunks.length = 0;
+        fail(
+          new ClamdError(
+            'PROTOCOL_ERROR',
+            `the scanner sent more than ${MAX_REPLY_BYTES} bytes without terminating its reply`,
+          ),
+        );
+      }
+    };
+
+    const onError = (error: Error): void =>
+      fail(
         error instanceof ClamdError
           ? error
           : new ClamdError('CONNECTION_FAILED', safeSocketError(error)),
       );
-    });
 
-    socket.on('close', () => {
+    const onClose = (): void =>
       // A close with nothing received is a refusal or a reset. A close after a
-      // complete reply has already settled the promise and this is a no-op.
-      reject(
-        new ClamdError('PROTOCOL_ERROR', 'the scanner closed the connection without answering'),
-      );
-    });
+      // complete reply, or after a failure already latched, is a no-op.
+      fail(new ClamdError('PROTOCOL_ERROR', 'the scanner closed the connection without answering'));
+
+    socket.on('data', onData);
+    socket.on('error', onError);
+    socket.on('close', onClose);
 
     try {
-      await once(socket, 'connect');
-      return await speak(socket, reply);
+      await Promise.race([once(socket, 'connect', cancellation.signal), cancelled]);
+
+      const work = speak({ socket, reply, signal: cancellation.signal });
+      // The race may settle from `cancelled` first, leaving this rejection
+      // with nobody to receive it.
+      work.catch(() => undefined);
+
+      return await Promise.race([work, cancelled]);
     } finally {
       clearTimeout(deadline);
+      callerSignal?.removeEventListener('abort', onCallerAbort);
+      cancellation.signal.removeEventListener('abort', onCancelled);
+      socket.off('data', onData);
+      socket.off('error', onError);
+      socket.off('close', onClose);
+      // A destroyed socket can still emit, and an `error` with no listener is
+      // an uncaught exception rather than a scan failure.
+      socket.on('error', () => undefined);
       socket.destroy();
     }
   }
@@ -247,12 +388,25 @@ export class ClamdClient {
 }
 
 /**
- * Awaits one event, rejecting if the socket fails first.
+ * The error an abort carried, or a timeout if it carried none.
+ *
+ * Keeps a size refusal a size refusal and a refused connection a refused
+ * connection, instead of flattening every ending into the one that happened to
+ * stop the waiting.
+ */
+function errorOf(signal: AbortSignal, fallback: string): ClamdError {
+  return signal.reason instanceof ClamdError ? signal.reason : new ClamdError('TIMEOUT', fallback);
+}
+
+/**
+ * Awaits one event, rejecting if the socket fails or the exchange ends first.
  *
  * `events.once` would hang on `connect` for a socket that emitted `error`,
- * because the error listener registered above does not settle this promise.
+ * because the error listener registered by the caller does not settle this
+ * promise — and it would hang on `drain` forever against a peer that stopped
+ * reading, which is the backpressure half of the same deadline problem.
  */
-function once(socket: net.Socket, event: 'connect' | 'drain'): Promise<void> {
+function once(socket: net.Socket, event: 'connect' | 'drain', signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const onEvent = (): void => {
       cleanup();
@@ -270,15 +424,26 @@ function once(socket: net.Socket, event: 'connect' | 'drain'): Promise<void> {
       cleanup();
       reject(new ClamdError('CONNECTION_FAILED', 'the connection closed before it was ready'));
     };
+    const onAbort = (): void => {
+      cleanup();
+      reject(errorOf(signal as AbortSignal, 'the exchange ended while waiting on the socket'));
+    };
     const cleanup = (): void => {
       socket.off(event, onEvent);
       socket.off('error', onError);
       socket.off('close', onClose);
+      signal?.removeEventListener('abort', onAbort);
     };
+
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
 
     socket.once(event, onEvent);
     socket.once('error', onError);
     socket.once('close', onClose);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 

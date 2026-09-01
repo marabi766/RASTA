@@ -16,6 +16,7 @@ import { LIMITS_EXCEEDED_PREFIX } from './protocol';
  * database, becomes `CLEAN`.** Everything else is `FAILED` with a reason.
  */
 
+const NUL = String.fromCharCode(0);
 const NOW = new Date('2026-08-31T12:00:00.000Z');
 /** Two hours old — comfortably fresh under any threshold used below. */
 const FRESH_VERSION = `ClamAV 1.5.4/28108/Sun Aug 31 10:00:00 2026\0`;
@@ -57,6 +58,29 @@ function makeOptions(input: {
     versionCacheSeconds: input.versionCacheSeconds ?? 60,
     now: input.now ?? (() => NOW),
   };
+}
+
+/**
+ * A stream that yields one chunk and then stalls forever.
+ *
+ * The shape of a MinIO connection that has gone quiet: TCP is up, some bytes
+ * arrived, and the next read will never be answered. `Readable.from` cannot
+ * express it — an array iterator always ends — so this is a real `Readable`
+ * whose `_read` deliberately does nothing after the first push.
+ *
+ * The distinction matters: a source that *ends* lets the scan finish, and a
+ * source that *errors* lets it fail. Only a source that neither ends nor
+ * errors can prove the deadline is a deadline.
+ */
+function stalledSource(first = Buffer.alloc(1024, 0x41)): Readable {
+  let sent = false;
+  return new Readable({
+    read() {
+      if (sent) return; // and never again
+      sent = true;
+      this.push(first);
+    },
+  });
 }
 
 /** A request whose bytes come from memory, as an object stream would. */
@@ -416,7 +440,7 @@ describe('the version cache', () => {
 });
 
 describe('cancellation', () => {
-  it('abandons a scan whose caller aborted', async () => {
+  it('abandons a scan whose caller aborted before it began', async () => {
     const controller = new AbortController();
     controller.abort();
 
@@ -429,5 +453,230 @@ describe('cancellation', () => {
 
     expect(result.verdict).toBe('FAILED');
     expect(result.failureReason).toBe('TIMEOUT');
+  });
+
+  it('interrupts a source that is waiting for its next chunk', async () => {
+    // The case the previous implementation could not handle. The abort is
+    // raised *after* the first chunk has been consumed, while the loop is
+    // parked on the next one — so a check between chunks never runs again, and
+    // only something that reaches into the stream itself can end the scan.
+    const controller = new AbortController();
+    const source = stalledSource();
+
+    const started = Date.now();
+    const scanning = scanner({ timeoutMs: 60_000 }).scan({
+      open: async () => source,
+      sizeBytes: 4096,
+      contentType: 'application/pdf',
+      signal: controller.signal,
+    });
+
+    // Long enough for the first chunk to be consumed and the loop to be
+    // waiting, short enough that the 60s deadline cannot be what ends this.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    controller.abort();
+
+    const result = await scanning;
+
+    expect(result.verdict).toBe('FAILED');
+    expect(result.failureReason).toBe('TIMEOUT');
+    expect(source.destroyed).toBe(true);
+    // Ended by the abort, not by the deadline it never reached.
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+});
+
+/**
+ * The deadline, as a deadline rather than as a claim.
+ *
+ * `DOCUMENT_SCAN_TIMEOUT_MS` is documented as covering the whole exchange —
+ * connection, streaming, backpressure and reply. It did not: the timer
+ * destroyed the clamd socket and rejected the reply promise, and neither of
+ * those unblocks a `for await` parked on a source that has stopped producing.
+ * The stream was destroyed in the loop's `finally`, which cannot run until the
+ * loop resumes, so a stalled MinIO connection held the worker slot
+ * indefinitely while the configuration said sixty seconds.
+ *
+ * These tests fail against that implementation by hanging, which is the point:
+ * a deadline that cannot be observed to fire is not one.
+ */
+describe('the whole-exchange deadline', () => {
+  it('returns within the deadline when the object stream stalls', async () => {
+    const source = stalledSource();
+    const started = Date.now();
+
+    const result = await scanner({ timeoutMs: 700 }).scan({
+      open: async () => source,
+      sizeBytes: 4096,
+      contentType: 'application/pdf',
+    });
+
+    expect(result.verdict).toBe('FAILED');
+    expect(result.failureReason).toBe('TIMEOUT');
+    expect(result.retryable).toBe(true);
+    // Generously bounded, but far below "never".
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  it('destroys the stalled source rather than leaving it reading', async () => {
+    const source = stalledSource();
+
+    await scanner({ timeoutMs: 700 }).scan({
+      open: async () => source,
+      sizeBytes: 4096,
+      contentType: 'application/pdf',
+    });
+
+    // Not merely abandoned: a stream left readable keeps its S3 connection
+    // open until the SDK's own timeout, which is the leak this ceiling exists
+    // to prevent.
+    expect(source.destroyed).toBe(true);
+  });
+
+  it('closes the clamd connection rather than leaving a scanning thread held', async () => {
+    const before = clamd.connections();
+
+    await scanner({ timeoutMs: 700 }).scan({
+      open: async () => stalledSource(),
+      sizeBytes: 4096,
+      contentType: 'application/pdf',
+    });
+
+    // A scan that returns while its socket is still open has not finished; it
+    // has stopped waiting, and clamd holds a thread for it until ReadTimeout.
+    await clamd.waitForAllClosed();
+    expect(clamd.connections().opened).toBeGreaterThan(before.opened);
+  });
+
+  it('returns within the deadline when the scanner stops reading', async () => {
+    // The backpressure half, and the third place an exchange can block. A peer
+    // that accepts and then stops consuming fills both kernel buffers, after
+    // which `socket.write` returns false and the client waits for `drain` — a
+    // wait this peer will never satisfy.
+    //
+    // Distinct from a silent scanner, which keeps reading: that one blocks on
+    // the reply and the old timer did reach it. This one blocks *inside* the
+    // send loop, where the old timer could not.
+    clamd.behaviours.instream = { kind: 'blackhole' };
+
+    // Four megabytes, reused rather than allocated per iteration. Enough to
+    // close the send window several times over on any platform's default
+    // socket buffers, and light enough that this test is not the reason a
+    // parallel run runs out of room.
+    const block = Buffer.alloc(256 * 1024, 0x41);
+    const source = Readable.from(
+      (function* () {
+        for (let i = 0; i < 16; i += 1) yield block;
+      })(),
+    );
+
+    const started = Date.now();
+    const result = await scanner({ timeoutMs: 900, maxBytes: 64 * 1024 * 1024 }).scan({
+      open: async () => source,
+      sizeBytes: 4 * 1024 * 1024,
+      contentType: 'application/pdf',
+    });
+
+    expect(result.verdict).toBe('FAILED');
+    expect(result.failureReason).toBe('TIMEOUT');
+    expect(source.destroyed).toBe(true);
+    expect(Date.now() - started).toBeLessThan(15_000);
+  });
+
+  it('never opens the object at all when the scanner cannot be reached', async () => {
+    // Nothing to leak, because nothing is fetched. The version read happens
+    // before the object is opened precisely so an unreachable scanner costs no
+    // S3 request — the same ordering that makes an oversize refusal free.
+    let opened = false;
+
+    const result = await scanner({ port: await unusedPort(), timeoutMs: 5_000 }).scan({
+      open: async () => {
+        opened = true;
+        return stalledSource();
+      },
+      sizeBytes: 4096,
+      contentType: 'application/pdf',
+    });
+
+    expect(result.failureReason).toBe('CONNECTION_FAILED');
+    expect(opened).toBe(false);
+  });
+
+  it('closes the object stream when the caller had already cancelled', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const source = stalledSource();
+
+    const result = await scanner().scan({
+      open: async () => source,
+      sizeBytes: 4096,
+      contentType: 'application/pdf',
+      signal: controller.signal,
+    });
+
+    expect(result.failureReason).toBe('TIMEOUT');
+    expect(source.destroyed).toBe(true);
+  });
+
+  it('still distinguishes a size refusal from a deadline', async () => {
+    // The deadline must not swallow the other failure kinds. This source is
+    // healthy and simply too large; the answer is a policy refusal, not a
+    // timeout, and it is not retryable.
+    const result = await scanner({ maxBytes: 1024, timeoutMs: 10_000 }).scan({
+      open: async () => Readable.from([Buffer.alloc(8192, 0x41)]),
+      sizeBytes: 100,
+      contentType: 'application/pdf',
+    });
+
+    expect(result.failureReason).toBe('SIZE_LIMIT_EXCEEDED');
+    expect(result.retryable).toBe(false);
+  });
+
+  it('still distinguishes a refused connection from a deadline', async () => {
+    const result = await scanner({ port: await unusedPort(), timeoutMs: 10_000 }).scan(
+      request(Buffer.from('x')),
+    );
+
+    expect(result.failureReason).toBe('CONNECTION_FAILED');
+  });
+});
+
+describe('the reply size bound', () => {
+  it('refuses a reply that never terminates, rather than buffering it', async () => {
+    // A healthy clamd answers in under a hundred bytes and always terminates.
+    // Without a bound, a peer that is broken or hostile can make this process
+    // hold whatever it chooses to send — and the accumulator concatenated the
+    // whole buffer on every packet, so the cost grew quadratically as it did.
+    clamd.behaviours.instream = { kind: 'flood', bytes: 64 * 1024 };
+
+    const result = await scanner({ timeoutMs: 10_000 }).scan(request(Buffer.from('x')));
+
+    expect(result.verdict).toBe('FAILED');
+    // A protocol failure, not a timeout: the scanner answered, and what it
+    // said was not a reply.
+    expect(result.failureReason).toBe('PROTOCOL_ERROR');
+  });
+
+  it('says how much it refused without repeating any of it', async () => {
+    // The refusal reaches logs and metrics. Echoing an unbounded reply from an
+    // untrusted peer into either is the second bug, not the fix (S-09).
+    clamd.behaviours.instream = { kind: 'flood', bytes: 64 * 1024 };
+
+    const result = await scanner({ timeoutMs: 10_000 }).scan(request(Buffer.from('x')));
+
+    const serialised = JSON.stringify(result);
+    expect(serialised).not.toContain('AAAA');
+    expect(result.failureReason).toBe('PROTOCOL_ERROR');
+  });
+
+  it('accepts a reply comfortably inside the bound', async () => {
+    clamd.behaviours.instream = {
+      kind: 'reply',
+      text: 'stream: ' + 'S'.repeat(200) + ' FOUND' + NUL,
+    };
+
+    const result = await scanner().scan(request(Buffer.from('x')));
+
+    expect(result.verdict).toBe('INFECTED');
   });
 });

@@ -32,7 +32,25 @@ export type FakeBehaviour =
   /** Accept the connection and never say anything. */
   | { kind: 'silent' }
   /** Accept and close without answering. */
-  | { kind: 'close' };
+  | { kind: 'close' }
+  /**
+   * Send `bytes` of filler with **no** terminator, and keep sending.
+   *
+   * The reply accumulator's bound is not otherwise reachable: a healthy clamd
+   * answers in under a hundred bytes and always terminates, so a client that
+   * buffered without limit would look correct until something on the other end
+   * was broken or hostile.
+   */
+  | { kind: 'flood'; bytes: number }
+  /**
+   * Accept the connection, then never read from it and never answer.
+   *
+   * The backpressure stall. Once the kernel buffers on both sides fill, the
+   * client's `socket.write` returns false and it waits for `drain` — a wait
+   * that a peer in this state will never satisfy. Distinct from `silent`,
+   * which keeps reading and so never applies backpressure at all.
+   */
+  | { kind: 'blackhole' };
 
 export interface FakeClamd {
   readonly port: number;
@@ -42,6 +60,17 @@ export interface FakeClamd {
   lastStreamBytes(): Buffer;
   /** How many frames the client sent, which is how chunking is observed. */
   lastFrameCount(): number;
+  /**
+   * Connections opened and closed since the server started.
+   *
+   * The only way a test can assert that the client actually let a socket go.
+   * A scan that returns while its connection is still open has not finished —
+   * it has stopped waiting, and clamd is still holding a scanning thread for
+   * it until its own ReadTimeout fires.
+   */
+  connections(): { opened: number; closed: number };
+  /** Resolves once every connection this server accepted has closed. */
+  waitForAllClosed(timeoutMs?: number): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -57,8 +86,15 @@ export async function startFakeClamd(
 
   let streamBytes = Buffer.alloc(0);
   let frameCount = 0;
+  let opened = 0;
+  let closed = 0;
 
   const server = net.createServer((socket) => {
+    opened += 1;
+    socket.on('close', () => {
+      closed += 1;
+    });
+
     let buffer = Buffer.alloc(0);
     let mode: 'command' | 'stream' | null = null;
     let received = Buffer.alloc(0);
@@ -81,6 +117,21 @@ export async function startFakeClamd(
         case 'close':
           socket.destroy();
           break;
+        case 'blackhole':
+          // Stop consuming. The socket stays open and the send window closes.
+          socket.pause();
+          break;
+        case 'flood': {
+          // Deliberately unterminated. Written in one go so the client's
+          // accumulator sees it as a single oversized arrival, and again on a
+          // timer so a client that ignored the first is still not left waiting
+          // on a peer that has gone quiet.
+          const filler = Buffer.alloc(behaviour.bytes, 0x41);
+          socket.write(filler);
+          const again = setInterval(() => socket.write(filler), 50);
+          socket.on('close', () => clearInterval(again));
+          break;
+        }
       }
     };
 
@@ -101,6 +152,12 @@ export async function startFakeClamd(
           answer(behaviours.ping);
         } else if (command === 'zINSTREAM') {
           mode = 'stream';
+          if (behaviours.instream.kind === 'blackhole') {
+            // Applied on the command rather than after the body, because the
+            // whole point is that the body never finishes arriving.
+            socket.pause();
+            return;
+          }
         } else {
           socket.write(Buffer.from('UNKNOWN COMMAND\0', 'latin1'));
         }
@@ -136,6 +193,16 @@ export async function startFakeClamd(
     behaviours,
     lastStreamBytes: () => streamBytes,
     lastFrameCount: () => frameCount,
+    connections: () => ({ opened, closed }),
+    waitForAllClosed: async (timeoutMs = 5_000) => {
+      const deadline = Date.now() + timeoutMs;
+      while (closed < opened && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      if (closed < opened) {
+        throw new Error(`${opened - closed} connection(s) were still open after ${timeoutMs}ms`);
+      }
+    },
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());

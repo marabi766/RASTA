@@ -176,6 +176,17 @@ export class ClamAvMalwareScanner implements MalwareScanner {
       }
     } catch (error) {
       return this.failed(reasonOf(error), startedAt, version, retryableOf(error));
+    } finally {
+      // The object stream belongs to this method, so this method closes it —
+      // including on the paths where `scanStream` never got as far as reading
+      // it. A connection refused, or a caller signal already aborted, used to
+      // return here with the S3 response still open behind an object nobody
+      // was going to read: `scanStream` destroys what it consumed, and could
+      // not destroy what it was never handed.
+      //
+      // Idempotent, so the ordinary path where the stream is already destroyed
+      // costs nothing.
+      source.destroy();
     }
   }
 
