@@ -43,6 +43,16 @@ export type FakeBehaviour =
    */
   | { kind: 'flood'; bytes: number }
   /**
+   * Write `text` and close in the same breath.
+   *
+   * How a clamd that is shutting down, or being cycled by an orchestrator,
+   * ends an exchange it has already answered. `socket.end(payload)` sends the
+   * bytes and the FIN together, so the client is very likely to see `data` and
+   * `close` inside one event-loop turn — which is the ordering that used to
+   * let the close overwrite a valid verdict.
+   */
+  | { kind: 'reply-then-close'; text: string }
+  /**
    * Accept the connection, then never read from it and never answer.
    *
    * The backpressure stall. Once the kernel buffers on both sides fill, the
@@ -116,6 +126,12 @@ export async function startFakeClamd(
           break;
         case 'close':
           socket.destroy();
+          break;
+        case 'reply-then-close':
+          // `end` rather than `write` + `destroy`: destroy can discard a write
+          // that has not flushed, which would make this a test of a dropped
+          // reply rather than of a reply followed by a close.
+          socket.end(Buffer.from(behaviour.text, 'latin1'));
           break;
         case 'blackhole':
           // Stop consuming. The socket stays open and the send window closes.

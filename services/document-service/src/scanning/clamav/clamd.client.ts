@@ -72,9 +72,16 @@ export type ClamdAddress =
  * It exists because without one, a peer that is broken or hostile decides how
  * much memory this process holds — and the accumulator concatenated everything
  * received on every packet, so the cost of being fed grew quadratically with
- * what was sent. The refusal reports the limit and never the content: this
- * string reaches logs and metrics, and echoing an unbounded reply from an
- * untrusted peer into either is the second bug rather than the fix (S-09).
+ * what was sent.
+ *
+ * Measured against the cumulative size **through the first terminator**, which
+ * is the only measurement a peer cannot step around: bounding only
+ * unterminated data leaves an oversized reply acceptable as long as it ends
+ * with a NUL, which is exactly what the first version of this check allowed.
+ *
+ * The refusal reports the limit and never the content: this string reaches
+ * logs and metrics, and echoing an unbounded reply from an untrusted peer into
+ * either is the second bug rather than the fix (S-09).
  */
 export const MAX_REPLY_BYTES = 8 * 1024;
 
@@ -305,46 +312,101 @@ export class ClamdClient {
     else callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
 
     // ---- Reply accumulation, bounded ------------------------------------
+    //
+    // `received` counts only bytes that belong to the reply — everything up to
+    // and including the first terminator. The bound is measured against that
+    // count rather than against whatever arrived, because the question it
+    // answers is "how large is this reply", not "how much did the peer send".
     let received = 0;
     let answered = false;
     const chunks: Buffer[] = [];
 
-    const onData = (chunk: Buffer): void => {
-      if (answered) return;
-      received += chunk.length;
-      chunks.push(chunk);
+    /** Drops what has been buffered and ends the exchange. Never quotes it. */
+    const refuseReply = (why: string): void => {
+      chunks.length = 0;
+      fail(new ClamdError('PROTOCOL_ERROR', why));
+    };
 
-      // A terminator is one byte, so it cannot straddle two arrivals: checking
-      // each chunk is complete, and avoids re-joining everything per packet.
-      if (chunk.includes(0)) {
-        answered = true;
-        settleReply(Buffer.concat(chunks).toString('latin1'));
+    const onData = (chunk: Buffer): void => {
+      // Once a reply is complete this exchange is over; anything further is
+      // not part of it and must not disturb it.
+      if (answered || failure) return;
+
+      // A terminator is one byte, so it cannot straddle two arrivals: finding
+      // it per chunk is complete, and avoids re-joining everything per packet.
+      const terminator = chunk.indexOf(0);
+      const belongsToReply = terminator === -1 ? chunk.length : terminator + 1;
+
+      // Checked **before** the reply is accepted, not after.
+      //
+      // This test used to sit behind an early return on the terminator, so a
+      // peer that ended an oversized reply with a NUL had it accepted and
+      // concatenated in full: the bound was documented and not enforced. The
+      // limit now applies to the cumulative size through the first terminator,
+      // which is the only measurement that cannot be stepped around by
+      // terminating late.
+      if (received + belongsToReply > MAX_REPLY_BYTES) {
+        refuseReply(`the scanner sent more than ${MAX_REPLY_BYTES} bytes for one reply`);
         return;
       }
 
-      if (received > MAX_REPLY_BYTES) {
-        // Dropped rather than kept, and named by size rather than by content.
-        chunks.length = 0;
-        fail(
-          new ClamdError(
-            'PROTOCOL_ERROR',
-            `the scanner sent more than ${MAX_REPLY_BYTES} bytes without terminating its reply`,
-          ),
-        );
+      if (terminator === -1) {
+        received += chunk.length;
+        chunks.push(chunk);
+        return;
       }
+
+      // Bytes after the terminator are a second message on an exchange that
+      // carries exactly one. Refused rather than truncated to the first: a
+      // peer able to append after a valid reply would otherwise choose what
+      // this client reads and what it silently discards.
+      if (belongsToReply < chunk.length) {
+        refuseReply('the scanner sent more than one message on one exchange');
+        return;
+      }
+
+      received += belongsToReply;
+      chunks.push(chunk);
+      answered = true;
+      settleReply(Buffer.concat(chunks).toString('latin1'));
+      // Handed over as a string; retaining the buffers past that point keeps
+      // the reply resident for the life of the exchange for no reason.
+      chunks.length = 0;
     };
 
-    const onError = (error: Error): void =>
+    const onError = (error: Error): void => {
+      // A complete reply is already in hand, so a socket error while the peer
+      // tears the connection down is how some exchanges end rather than a scan
+      // failure. See `onClose` for why `fail` alone does not cover this.
+      if (answered) return;
       fail(
         error instanceof ClamdError
           ? error
           : new ClamdError('CONNECTION_FAILED', safeSocketError(error)),
       );
+    };
 
-    const onClose = (): void =>
-      // A close with nothing received is a refusal or a reset. A close after a
-      // complete reply, or after a failure already latched, is a no-op.
+    const onClose = (): void => {
+      // A close *after* a complete reply is how a well-behaved clamd ends an
+      // exchange, and must not be reported as one failing.
+      //
+      // The comment here used to say that was already a no-op. It was not:
+      // `fail` is latched against a second *failure*, not against a success,
+      // so nothing but scheduling stopped a close from aborting an exchange
+      // that had already answered. Today the reply's continuation is a
+      // microtask and the close is a macrotask, so the verdict always wins
+      // that race — which is why removing this guard does not currently fail a
+      // test. That is an accident of ordering rather than an invariant: any
+      // future `speak` that awaits something after the reply, or a transport
+      // that delivers both in one turn, loses a valid verdict — and for an
+      // `INFECTED` reply that means a real finding recorded as an unexplained
+      // protocol error.
+      //
+      // The guard makes the rule explicit instead of implied.
+      if (answered) return;
+      // A close with nothing complete received is a refusal or a reset.
       fail(new ClamdError('PROTOCOL_ERROR', 'the scanner closed the connection without answering'));
+    };
 
     socket.on('data', onData);
     socket.on('error', onError);

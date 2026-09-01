@@ -1,6 +1,7 @@
 import { Readable } from 'node:stream';
 import { ClamAvMalwareScanner } from './clamav.scanner';
 import { startFakeClamd, unusedPort, type FakeClamd } from '../../../test/fake-clamd';
+import { MAX_REPLY_BYTES } from './clamd.client';
 import { LIMITS_EXCEEDED_PREFIX } from './protocol';
 
 /**
@@ -641,6 +642,60 @@ describe('the whole-exchange deadline', () => {
   });
 });
 
+/**
+ * A close is not a verdict.
+ *
+ * `fail()` is latched against a second *failure*, not against a success, so
+ * `onClose` firing after a complete reply could still abort the exchange —
+ * turning a valid verdict into `PROTOCOL_ERROR`, which for an `INFECTED` reply
+ * means losing a real finding and recording an unexplained failure instead.
+ *
+ * **These three do not fail without the `answered` guard, and that is stated
+ * rather than glossed.** On the current path the reply's continuation is a
+ * microtask and the close is a macrotask, so the verdict wins the race by
+ * scheduling. What they pin is the behaviour itself — a reply followed by a
+ * close is the verdict, a partial reply followed by a close is a failure — so
+ * that a future change to either ordering is caught here rather than in
+ * production. The guard makes the rule explicit; these make it observable.
+ */
+describe('a reply followed immediately by a close', () => {
+  it('keeps a clean verdict when the scanner hangs up straight after answering', async () => {
+    clamd.behaviours.instream = { kind: 'reply-then-close', text: 'stream: OK' + NUL };
+
+    const result = await scanner({ timeoutMs: 10_000 }).scan(request(Buffer.from('x')));
+
+    expect(result.verdict).toBe('CLEAN');
+    expect(result.failureReason).toBeNull();
+  });
+
+  it('keeps an infected verdict when the scanner hangs up straight after answering', async () => {
+    // The case with something to lose. A finding turned into a failure is not
+    // merely a wrong label: the document still refuses to download, but
+    // `VIRUS_DETECTED` is never published and nobody is told.
+    clamd.behaviours.instream = {
+      kind: 'reply-then-close',
+      text: 'stream: Eicar-Test-Signature FOUND' + NUL,
+    };
+
+    const result = await scanner({ timeoutMs: 10_000 }).scan(request(Buffer.from('x')));
+
+    expect(result.verdict).toBe('INFECTED');
+    expect(result.signature).toBe('Eicar-Test-Signature');
+  });
+
+  it('still fails when the scanner hangs up before terminating its reply', async () => {
+    // The other side of the guard: `answered` is only true for a *complete*
+    // reply, so a close over a partial one remains a protocol failure rather
+    // than being read as whatever had arrived so far.
+    clamd.behaviours.instream = { kind: 'reply-then-close', text: 'stream: OK' };
+
+    const result = await scanner({ timeoutMs: 10_000 }).scan(request(Buffer.from('x')));
+
+    expect(result.verdict).toBe('FAILED');
+    expect(result.failureReason).toBe('PROTOCOL_ERROR');
+  });
+});
+
 describe('the reply size bound', () => {
   it('refuses a reply that never terminates, rather than buffering it', async () => {
     // A healthy clamd answers in under a hundred bytes and always terminates.
@@ -667,6 +722,56 @@ describe('the reply size bound', () => {
     const serialised = JSON.stringify(result);
     expect(serialised).not.toContain('AAAA');
     expect(result.failureReason).toBe('PROTOCOL_ERROR');
+  });
+
+  it('refuses an oversized reply even when it is properly terminated', async () => {
+    // The bypass. The size check used to sit behind an early return on the
+    // terminator, so a peer that ended an oversized reply with a NUL had it
+    // accepted and concatenated in full — the bound was documented and not
+    // enforced. Terminating late must not buy more room.
+    clamd.behaviours.instream = { kind: 'reply', text: 'A'.repeat(16 * 1024) + NUL };
+
+    const result = await scanner({ timeoutMs: 10_000 }).scan(request(Buffer.from('x')));
+
+    expect(result.verdict).toBe('FAILED');
+    expect(result.failureReason).toBe('PROTOCOL_ERROR');
+    expect(JSON.stringify(result)).not.toContain('AAAA');
+  });
+
+  it('refuses a reply whose terminator arrives in the chunk that crosses the limit', async () => {
+    // The boundary case, made deterministic by splitting either side of it:
+    // everything before the terminator fits, and the arrival that carries it
+    // is what takes the reply past the bound. A check applied only to
+    // unterminated data would accept this one.
+    clamd.behaviours.instream = {
+      kind: 'split',
+      first: 'A'.repeat(MAX_REPLY_BYTES - 10),
+      second: 'B'.repeat(40) + NUL,
+      delayMs: 20,
+    };
+
+    const result = await scanner({ timeoutMs: 10_000 }).scan(request(Buffer.from('x')));
+
+    expect(result.verdict).toBe('FAILED');
+    expect(result.failureReason).toBe('PROTOCOL_ERROR');
+  });
+
+  it('accepts a fragmented reply that stays inside the bound', async () => {
+    // The property the bound must not cost: a real reply split across packets
+    // is still a real reply. Sized close enough to the limit that an
+    // off-by-one in the accounting would refuse it.
+    const signature = 'S'.repeat(200);
+    clamd.behaviours.instream = {
+      kind: 'split',
+      first: 'stream: ' + signature.slice(0, 100),
+      second: signature.slice(100) + ' FOUND' + NUL,
+      delayMs: 20,
+    };
+
+    const result = await scanner({ timeoutMs: 10_000 }).scan(request(Buffer.from('x')));
+
+    expect(result.verdict).toBe('INFECTED');
+    expect(result.signature).toBe(signature);
   });
 
   it('accepts a reply comfortably inside the bound', async () => {
