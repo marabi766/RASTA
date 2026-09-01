@@ -127,6 +127,50 @@ describe('operability', () => {
     expect(serialised).not.toContain('"grossAmountMinor":{"type":"number"');
   });
 
+  it('publishes both listing booleans as booleans, in the document it serves', () => {
+    // Asserted on the finished document rather than on `toJsonSchema`, because
+    // the defect this closes lived in the gap between them: `?incoming=false`
+    // was parsed correctly and *described* as accepting arbitrary strings.
+    //
+    // A query boolean's runtime type is `boolean | string` — that is how a
+    // boolean crosses a query string — and published literally it reads
+    // `anyOf: [boolean, string]`. To a generated client that is a `string`
+    // parameter with no default, when the parser accepts eight spellings and
+    // answers 400 to everything else. OpenAPI already defines how a boolean is
+    // carried in a query string, so `type: boolean` is both true and enough.
+    const document = enrichOpenApiDocument(
+      SwaggerModule.createDocument(
+        harness.app,
+        new DocumentBuilder().setTitle('t').setVersion('0.0.0').build(),
+      ),
+    );
+
+    const parameter = (path: string, name: string) =>
+      ((document.paths?.[path]?.get?.parameters ?? []) as Record<string, unknown>[]).find(
+        (candidate) => candidate.name === name,
+      );
+
+    for (const [path, name] of [
+      ['/v1/transactions', 'includeIncoming'],
+      ['/v1/settlements', 'incoming'],
+    ] as const) {
+      const published = parameter(path, name);
+
+      expect(published).toMatchObject({
+        name,
+        in: 'query',
+        required: false,
+        schema: { type: 'boolean', default: false },
+      });
+
+      // No string anywhere in the parameter's schema, in any wrapper.
+      const schema = published?.schema as Record<string, unknown>;
+      expect(schema.anyOf).toBeUndefined();
+      expect(schema.oneOf).toBeUndefined();
+      expect(JSON.stringify(schema)).not.toContain('string');
+    }
+  });
+
   // -------------------------------------------------------------------------
   // Reconciliation
   // -------------------------------------------------------------------------

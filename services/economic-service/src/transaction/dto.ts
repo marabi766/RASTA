@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { amountMinorSchema, currencySchema, organizationIdSchema } from '@rasta/contracts';
-import { booleanEnv } from '@rasta/config';
+import { queryBoolean } from '@rasta/config';
 
 /**
  * Request and response shapes for transactions.
@@ -87,7 +87,7 @@ export const listTransactionsQuerySchema = z
      * it is owed opts in, and that read crosses the tenant guard with a
      * written reason, narrowed to the caller's own id.
      *
-     * `booleanEnv` rather than `z.coerce.boolean()`. The coercion applies
+     * `queryBoolean` rather than `z.coerce.boolean()`. The coercion applies
      * JavaScript's `Boolean()`, under which every non-empty string is true, so
      * `?includeIncoming=false` opted the caller *into* the guard-crossing
      * payee view. The crossing was always narrowed to the caller's own id and
@@ -95,7 +95,7 @@ export const listTransactionsQuerySchema = z
      * happen because someone asked for it, not because the parser could not
      * read the word "false".
      */
-    includeIncoming: booleanEnv(false),
+    includeIncoming: queryBoolean(false),
     cursor: z.string().optional(),
     limit: z.coerce.number().int().min(1).max(100).default(25),
   })

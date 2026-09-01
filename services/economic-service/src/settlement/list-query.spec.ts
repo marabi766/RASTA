@@ -1,5 +1,5 @@
 import { RastaError, zodPipe } from '@rasta/nest-common';
-import { listSettlementsQuerySchema } from './settlement.controller';
+import { listSettlementsQuerySchema } from './dto';
 
 /**
  * `incoming` at the boundary the HTTP request actually crosses.

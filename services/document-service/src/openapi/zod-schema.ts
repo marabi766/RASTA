@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { queryBooleanDefault } from '@rasta/config';
 
 /**
  * Converts the Zod schemas this service validates with into JSON Schema, so
@@ -39,7 +40,22 @@ type AnyZod = z.ZodTypeAny & { _def: any };
 export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
   const def = (schema as AnyZod)._def;
   const description = def.description as string | undefined;
-  const base = convert(schema, def);
+
+  // Checked before anything is unwrapped. A `queryBoolean` accepts
+  // `boolean | string` at runtime because that is how a boolean arrives in a
+  // query string, but publishing that union literally would emit
+  // `anyOf: [boolean, string]` — telling a generated client the parameter
+  // takes arbitrary strings, when the parser rejects every string but eight,
+  // and costing it a `boolean` in its typed signature. OpenAPI already defines
+  // how a boolean is carried in a query string, so `type: boolean` is both
+  // true and enough. The marker travels on the schema itself, so the accepted
+  // input and the published output come from one call and cannot drift.
+  const queryBooleanDefaultValue = queryBooleanDefault(schema);
+  const base =
+    queryBooleanDefaultValue === undefined
+      ? convert(schema, def)
+      : { type: 'boolean', default: queryBooleanDefaultValue };
+
   return description ? { ...base, description } : base;
 }
 
