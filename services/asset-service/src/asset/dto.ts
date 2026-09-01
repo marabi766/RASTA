@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { booleanEnv } from '@rasta/config';
+import { queryBoolean } from '@rasta/config';
 import {
   cursorPaginationSchema,
   seedIdSchema,
@@ -223,13 +223,13 @@ export const nearbyQuerySchema = z
     /**
      * Only assets that could actually be dispatched.
      *
-     * `booleanEnv` rather than `z.coerce.boolean()`. The coercion applies
+     * `queryBoolean` rather than `z.coerce.boolean()`. The coercion applies
      * JavaScript's `Boolean()`, under which every non-empty string is true, so
      * `?availableOnly=false` narrowed the search to dispatchable assets —
      * the opposite of what the caller asked for, and invisible, because the
      * response is a plausible shorter list rather than an error.
      */
-    availableOnly: booleanEnv(false),
+    availableOnly: queryBoolean(false),
     limit: z.coerce.number().int().min(1).max(100).default(25),
   })
   .strict();

@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
+import { ApiQueryFromSchema } from '../openapi/query-parameters';
 import { AssetService } from './asset.service';
 import { InsuranceService } from '../insurance/insurance.service';
 import {
@@ -62,6 +63,7 @@ export class AssetController {
 
   @Get('nearby')
   @ApiOperation({ summary: 'Assets within a radius, nearest first' })
+  @ApiQueryFromSchema(nearbyQuerySchema)
   nearby(@Query(zodPipe(nearbyQuerySchema)) query: NearbyQuery) {
     return this.assets.nearby(query);
   }
