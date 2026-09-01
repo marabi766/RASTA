@@ -20,6 +20,112 @@ import type { PrismaService } from '../prisma/prisma.service';
  * So the exact query is asserted here, where it is deterministic, and the
  * integration suite asserts what it can genuinely own: its own rows.
  */
+/**
+ * Column mapping, against a controlled raw row.
+ *
+ * `claimPending` is raw SQL selecting snake_case columns, and `toOutboxRow`
+ * renames every one of them. A slip there — `partition_key` landing nowhere,
+ * `headers` arriving as null — publishes an event with a missing field, and
+ * the relay does not care: it hands whatever it got to Kafka.
+ *
+ * This used to be asserted in the integration suite by seeding a row and
+ * finding it in `claimPending(100)`. That only worked while the shared
+ * database held fewer than a hundred older pending rows, because the query
+ * deliberately returns the *oldest* hundred — so the assertion depended on the
+ * whole platform's outbox being nearly empty (D-025). The mapping does not
+ * need a database to be proven, so it is proven here, and the integration
+ * suite asserts the window properties that do.
+ */
+describe('claimPending', () => {
+  const queryRaw = jest.fn();
+  const claiming = new PrismaOutboxStore({
+    client: { $queryRaw: queryRaw },
+  } as unknown as PrismaService);
+
+  /** Every column the query selects, each with a value only it could produce. */
+  const RAW = {
+    id: 'OBX_MAPPING',
+    aggregate_type: 'Document',
+    aggregate_id: 'DOC_MAPPING',
+    event_name: 'DOCUMENT_UPLOADED',
+    event_version: 3,
+    topic: 'rasta.document.v1',
+    partition_key: 'DOC_MAPPING',
+    payload: { documentId: 'DOC_MAPPING' },
+    headers: { 'x-correlation-id': 'COR-MAPPING' },
+    organization_id: 'ORG-MAPPING',
+    correlation_id: 'COR-MAPPING',
+    created_at: new Date('2026-01-02T03:04:05.000Z'),
+    published_at: null,
+    attempts: 2,
+    last_error: 'broker refused the write',
+  };
+
+  it('maps every selected column onto the field the relay reads', async () => {
+    queryRaw.mockResolvedValue([RAW]);
+
+    expect(await claiming.claimPending(10)).toEqual([
+      {
+        id: 'OBX_MAPPING',
+        aggregateType: 'Document',
+        aggregateId: 'DOC_MAPPING',
+        eventName: 'DOCUMENT_UPLOADED',
+        eventVersion: 3,
+        topic: 'rasta.document.v1',
+        partitionKey: 'DOC_MAPPING',
+        payload: { documentId: 'DOC_MAPPING' },
+        headers: { 'x-correlation-id': 'COR-MAPPING' },
+        organizationId: 'ORG-MAPPING',
+        correlationId: 'COR-MAPPING',
+        createdAt: new Date('2026-01-02T03:04:05.000Z'),
+        publishedAt: null,
+        attempts: 2,
+        lastError: 'broker refused the write',
+      },
+    ]);
+  });
+
+  it('turns absent headers into an empty object rather than null', async () => {
+    // The publisher spreads these into the Kafka message headers; null there
+    // is a crash at the point of sending, which is the worst place for one.
+    queryRaw.mockResolvedValue([{ ...RAW, headers: null }]);
+
+    expect((await claiming.claimPending(10))[0]?.headers).toEqual({});
+  });
+
+  it('returns nothing when the backlog is empty', async () => {
+    queryRaw.mockResolvedValue([]);
+
+    expect(await claiming.claimPending(10)).toEqual([]);
+  });
+
+  it('asks the database for the oldest unpublished rows, up to the limit', async () => {
+    // The four clauses that define the window, pinned so none can be dropped:
+    // an unpublished filter, an oldest-first ordering, a bound, and the
+    // skip-locked claim that lets several replicas relay at once without any
+    // two of them publishing the same row (ADR-006).
+    queryRaw.mockResolvedValue([]);
+    await claiming.claimPending(25);
+
+    const [fragments, ...values] = queryRaw.mock.calls.at(-1) as [string[], ...unknown[]];
+    const sql = fragments.join('?').replace(/\s+/g, ' ');
+
+    expect(sql).toContain('FROM outbox_message');
+    expect(sql).toContain('WHERE published_at IS NULL');
+    expect(sql).toContain('ORDER BY created_at');
+    expect(sql).toContain('LIMIT');
+    expect(sql).toContain('FOR UPDATE SKIP LOCKED');
+
+    // Platform plumbing: the relay serves every organization, so the claim is
+    // unscoped by design. A tenant filter here would strand another tenant's
+    // events unpublished for as long as nobody noticed.
+    expect(sql).not.toContain('organization_id =');
+
+    // The limit is a bound parameter, not interpolated text.
+    expect(values).toEqual([25]);
+  });
+});
+
 describe('pendingCount', () => {
   const count = jest.fn();
   const store = new PrismaOutboxStore({
