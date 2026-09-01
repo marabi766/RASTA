@@ -231,6 +231,28 @@ describe('the outbox store, against a real database', () => {
       prisma.client.outboxMessage.findMany({ where: { id: { in: ids } } }),
     );
 
+  /**
+   * How many of exactly these rows are still outstanding.
+   *
+   * The same predicate `pendingCount()` applies, narrowed to rows one test
+   * created — which is the only part any test can assert exactly. Scoping by
+   * `organizationId` alone is not enough and repeating the original mistake
+   * one level down: every test in this file seeds under the same organization,
+   * so "my organization's pending rows" already counts rows the earlier tests
+   * left behind. The ids are unique per insert; the organization is asserted
+   * alongside them so the rows are provably this suite's.
+   *
+   * The production gauge stays unscoped. This narrowing exists only in the
+   * test, so that "how many of mine are pending" has a deterministic answer
+   * against a database every suite shares.
+   */
+  const pendingAmong = (ids: string[]) =>
+    runUnscoped('the suite counts its own pending rows', () =>
+      prisma.client.outboxMessage.count({
+        where: { id: { in: ids }, organizationId, publishedAt: null },
+      }),
+    );
+
   it('claims pending rows and maps every column the relay needs', async () => {
     const [id] = await seed(1);
 
@@ -286,10 +308,106 @@ describe('the outbox store, against a real database', () => {
     expect(row?.lastError).toBe('broker refused the write again');
   });
 
-  it('counts what is still pending', async () => {
-    const before = await store.pendingCount();
-    await seed(2);
-    expect(await store.pendingCount()).toBe(before + 2);
+  /**
+   * `pendingCount()` is a platform-wide gauge, and this suite does not own the
+   * table.
+   *
+   * The assertion that used to live here took two global counts around two
+   * inserts and required the difference to be exactly two. That is not a
+   * property of the implementation. It is a property of nobody else writing to
+   * `outbox_message` in between, which nothing establishes: the count is
+   * deliberately unscoped, every suite sharing this database contributes to
+   * it, and a relay publishing, a suite cleaning up, or another insert all
+   * move it. `repro` in the commit message records all three reproduced
+   * deterministically — a concurrent create, publish and delete each break the
+   * old assertion while `pendingCount()` behaves perfectly correctly.
+   *
+   * What this suite can own is its own rows, so that is what is asserted
+   * exactly. The global gauge gets a lower bound, which is genuinely all that
+   * holds; the predicate it applies is pinned precisely — and deterministically
+   * — in `src/outbox/outbox.store.spec.ts`, so an implementation that counted
+   * published rows or filtered by tenant still fails, just not here.
+   */
+  it('counts this suite’s unpublished rows, and never its published ones', async () => {
+    const unpublished = await seed(3);
+    const published = await seed(2, new Date());
+
+    // Exact, because it names the rows: these three ids, under this suite's
+    // organization, still unpublished.
+    expect(await pendingAmong(unpublished)).toBe(3);
+    expect(await pendingAmong(published)).toBe(0);
+
+    // The published rows exist and are excluded by the predicate rather than
+    // absent from the table — the difference between "not counted" and "not
+    // there", which is what makes this an assertion about `publishedAt`.
+    expect(await rowsOf(published)).toHaveLength(2);
+    expect((await rowsOf(published)).every((row) => row.publishedAt !== null)).toBe(true);
+
+    // All this suite's unpublished rows are outstanding somewhere in the
+    // global backlog. A count that dropped them would break this; a count that
+    // included the published two would not — that case is the unit test's.
+    expect(await store.pendingCount()).toBeGreaterThanOrEqual(3);
+    expect(await store.pendingCount()).toBeGreaterThanOrEqual(await pendingAmong(unpublished));
+
+    // Publishing moves a row out of the pending set, exactly and by name.
+    await store.markPublished(unpublished.slice(0, 2));
+    expect(await pendingAmong(unpublished)).toBe(1);
+  });
+
+  it('is a platform gauge, not a tenant one', async () => {
+    // The reason the old assertion was unsound, stated as the property it
+    // actually is. `rasta_outbox_pending_total` reports the whole relay
+    // backlog: the outbox is platform plumbing and a per-tenant gauge would
+    // hide the outage it exists to reveal (ADR-006). This also fixes that
+    // meaning in place — an `organizationId` filter added to the production
+    // metric would fail here as well as in the unit test.
+    const foreign = `ORG-OUTBOXTEST-OTHER-${ulid().slice(-10)}`;
+    const foreignId = `OBX_${ulid()}`;
+
+    try {
+      await runUnscoped('another organization writes to the shared outbox', () =>
+        prisma.client.outboxMessage.create({
+          data: {
+            id: foreignId,
+            aggregateType: 'Document',
+            aggregateId: `DOC_${ulid()}`,
+            eventName: 'DOCUMENT_UPLOADED',
+            eventVersion: 1,
+            topic: 'rasta.document.v1',
+            partitionKey: 'DOC_FOREIGN',
+            payload: { probe: true },
+            headers: {},
+            organizationId: foreign,
+            correlationId: `COR-${ulid()}`,
+            publishedAt: null,
+          },
+        }),
+      );
+
+      // The store's own predicate, applied to this one foreign row: it
+      // matches. Nothing about the row's owner excludes it.
+      //
+      // Deliberately not `pendingCount() === before + 1`. That is the exact
+      // global delta this whole change exists to remove — it would be just as
+      // unsound here as it was in the test it replaces, and it would fail the
+      // moment anything else wrote to the table. That the store issues exactly
+      // this predicate, with no `organizationId` alongside it, is asserted
+      // where it can be proven exactly: `src/outbox/outbox.store.spec.ts`.
+      const matchesThePredicate = await runUnscoped(
+        'the suite applies the gauge’s predicate to the foreign row',
+        () =>
+          prisma.client.outboxMessage.count({
+            where: { id: foreignId, publishedAt: null },
+          }),
+      );
+
+      expect(matchesThePredicate).toBe(1);
+      expect(await store.pendingCount()).toBeGreaterThanOrEqual(1);
+    } finally {
+      await runUnscoped('remove only the row this test created', () =>
+        prisma.client.outboxMessage.deleteMany({ where: { organizationId: foreign } }),
+      );
+    }
   });
 
   it('reports the age of the oldest pending row', async () => {
