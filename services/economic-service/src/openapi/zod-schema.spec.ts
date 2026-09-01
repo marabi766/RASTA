@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { toJsonSchema } from './zod-schema';
+import { listTransactionsQuerySchema } from '../transaction/dto';
 
 /**
  * The Zod → JSON Schema walk that produces the published contract.
@@ -152,5 +153,33 @@ describe('toJsonSchema', () => {
     // down at boot, and one unknown field is a smaller problem than that. It
     // is asserted so the fallback is a known behaviour rather than a surprise.
     expect(toJsonSchema(z.unknown())).toEqual({});
+  });
+});
+
+/**
+ * The published shape of `GET /v1/transactions`.
+ *
+ * `includeIncoming` moved from `z.coerce.boolean()` to `booleanEnv`, which is
+ * a union of boolean and string. The published schema therefore widens from
+ * `{type:'boolean'}` to `anyOf:[boolean,string]` — which is what the endpoint
+ * genuinely accepts, since a query parameter arrives as a string and a
+ * programmatic caller may pass a real boolean. It matches what
+ * document-service already publishes for `includeDeleted`.
+ *
+ * The default is the part a client depends on, so it is pinned here: omitting
+ * the parameter is the payer view, and that must not drift.
+ */
+describe('the transaction listing contract', () => {
+  it('publishes includeIncoming as a boolean-or-string defaulting to false', () => {
+    const properties = toJsonSchema(listTransactionsQuerySchema).properties as Record<
+      string,
+      Record<string, unknown>
+    >;
+
+    expect(properties.includeIncoming).toMatchObject({ default: false });
+    expect(properties.includeIncoming.anyOf).toEqual([{ type: 'boolean' }, { type: 'string' }]);
+
+    // Untouched by this change, and asserted so the blast radius is visible.
+    expect(properties.limit).toMatchObject({ type: 'integer', default: 25, maximum: 100 });
   });
 });

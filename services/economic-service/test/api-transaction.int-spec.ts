@@ -489,4 +489,105 @@ describe('transaction and settlement API', () => {
       .send({ transactionId: 'TXN_0000000000000000000000000' })
       .expect(404);
   });
+
+  // ---------------------------------------------------------------------------
+  // `?flag=false` over real HTTP.
+  //
+  // Both listings take a boolean that decides whether the read stays inside
+  // the tenant guard or crosses it, and both used `z.coerce.boolean()` —
+  // JavaScript's `Boolean()`, under which every non-empty string is true. So
+  // `?includeIncoming=false` and `?incoming=false` selected the crossing
+  // branch: the caller spelled out the default and got the other view.
+  //
+  // Nothing leaked. Both crossings are narrowed to the caller's own id, so a
+  // third organization's rows were never reachable, and the assertions below
+  // pin that down rather than assume it. What was wrong is that a read which
+  // widens scope happened because the parser could not read the word "false".
+  //
+  // These run over the real HTTP surface because that is the only place the
+  // string "false" exists; by the time a unit test hands the service an
+  // object, the bug has already been parsed away. Every `false` case here
+  // fails against the coercion.
+  // ---------------------------------------------------------------------------
+  describe('a listing flag spelled out as false', () => {
+    it('keeps /v1/transactions on the payer view', async () => {
+      const omitted = await request(http)
+        .get('/v1/transactions?limit=20')
+        .set('authorization', asPayee())
+        .expect(200);
+      const explicit = await request(http)
+        .get('/v1/transactions?includeIncoming=false&limit=20')
+        .set('authorization', asPayee())
+        .expect(200);
+
+      // Identical decisions, so identical pages.
+      expect(explicit.body.items.map((row: { id: string }) => row.id)).toEqual(
+        omitted.body.items.map((row: { id: string }) => row.id),
+      );
+
+      // And it is genuinely the payer view: every row is one this caller owes.
+      for (const item of explicit.body.items) expect(item.organizationId).toBe(payee);
+    });
+
+    it('keeps /v1/settlements on the payer view', async () => {
+      const omitted = await request(http)
+        .get('/v1/settlements?limit=20')
+        .set('authorization', asPayee())
+        .expect(200);
+      const explicit = await request(http)
+        .get('/v1/settlements?incoming=false&limit=20')
+        .set('authorization', asPayee())
+        .expect(200);
+
+      expect(explicit.body.items.map((row: { id: string }) => row.id)).toEqual(
+        omitted.body.items.map((row: { id: string }) => row.id),
+      );
+      for (const item of explicit.body.items) expect(item.payerOrganizationId).toBe(payee);
+    });
+
+    it('still lets true reach the payee view, and only the caller’s own rows', async () => {
+      const incoming = await request(http)
+        .get('/v1/settlements?incoming=true&limit=20')
+        .set('authorization', asPayee())
+        .expect(200);
+
+      // The crossing is narrowed to the caller's own id: every row names this
+      // organization as payee, and none of them names it as payer.
+      expect(incoming.body.items.length).toBeGreaterThan(0);
+      for (const item of incoming.body.items) {
+        expect(item.payeeOrganizationId).toBe(payee);
+        expect(item.payerOrganizationId).not.toBe(payee);
+      }
+
+      const transactions = await request(http)
+        .get('/v1/transactions?includeIncoming=true&limit=20')
+        .set('authorization', asPayee())
+        .expect(200);
+      for (const item of transactions.body.items) {
+        expect([item.organizationId, item.counterpartyOrganizationId]).toContain(payee);
+      }
+    });
+
+    it('shows a third organization nothing either way', async () => {
+      // The stranger was party to none of these settlements. Neither view may
+      // hand it a row — least of all the one that crosses the tenant guard.
+      for (const query of ['', '?incoming=false', '?incoming=true']) {
+        const response = await request(http)
+          .get(`/v1/settlements${query}${query ? '&' : '?'}limit=50`)
+          .set('authorization', asStranger())
+          .expect(200);
+        expect(response.body.items).toHaveLength(0);
+      }
+    });
+
+    it.each([
+      ['/v1/transactions?includeIncoming=maybe', 'includeIncoming'],
+      ['/v1/settlements?incoming=maybe', 'incoming'],
+    ])('answers 400 for %s rather than guessing', async (path, field) => {
+      const response = await request(http).get(path).set('authorization', asPayee()).expect(400);
+
+      expect(response.body.code).toBe('VALIDATION_FAILED');
+      expect(response.body.details?.[0]?.path).toBe(field);
+    });
+  });
 });
