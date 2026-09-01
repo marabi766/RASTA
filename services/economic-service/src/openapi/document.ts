@@ -7,6 +7,7 @@ import {
   trialBalanceQuerySchema,
 } from '../ledger/dto';
 import { listHoldsQuerySchema, walletQuerySchema } from '../wallet/dto';
+import { listSettlementsQuerySchema } from '../settlement/dto';
 import { listPaymentsQuerySchema, refundPaymentSchema, topUpSchema } from '../payment/dto';
 import {
   cancelTransactionSchema,
@@ -68,6 +69,7 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
   'GET /v1/wallets/me': toJsonSchema(walletQuerySchema),
   'GET /v1/wallets/{id}/holds': toJsonSchema(listHoldsQuerySchema),
   'GET /v1/transactions': toJsonSchema(listTransactionsQuerySchema),
+  'GET /v1/settlements': toJsonSchema(listSettlementsQuerySchema),
   'GET /v1/ledger/accounts/{id}/entries': toJsonSchema(listEntriesQuerySchema),
   'GET /v1/ledger/trial-balance': toJsonSchema(trialBalanceQuerySchema),
   'GET /v1/commissions': toJsonSchema(listCommissionsQuerySchema),

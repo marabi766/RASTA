@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { amountMinorSchema, currencySchema, organizationIdSchema } from '@rasta/contracts';
+import { queryBoolean } from '@rasta/config';
 
 /**
  * Request and response shapes for transactions.
@@ -85,8 +86,16 @@ export const listTransactionsQuerySchema = z
      * Off by default: the common view is "what I owe". A supplier asking what
      * it is owed opts in, and that read crosses the tenant guard with a
      * written reason, narrowed to the caller's own id.
+     *
+     * `queryBoolean` rather than `z.coerce.boolean()`. The coercion applies
+     * JavaScript's `Boolean()`, under which every non-empty string is true, so
+     * `?includeIncoming=false` opted the caller *into* the guard-crossing
+     * payee view. The crossing was always narrowed to the caller's own id and
+     * so never leaked another tenant's rows, but a read that widens scope must
+     * happen because someone asked for it, not because the parser could not
+     * read the word "false".
      */
-    includeIncoming: z.coerce.boolean().default(false),
+    includeIncoming: queryBoolean(false),
     cursor: z.string().optional(),
     limit: z.coerce.number().int().min(1).max(100).default(25),
   })

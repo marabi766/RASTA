@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { booleanEnv } from '@rasta/config';
+import { queryBoolean } from '@rasta/config';
 import { DOCUMENT_CLASSES } from '../content/policy';
 
 /**
@@ -152,7 +152,7 @@ export const listDocumentsQuerySchema = z
     /**
      * Deleted documents are excluded unless explicitly asked for.
      *
-     * `booleanEnv` rather than `z.coerce.boolean()`. The coercion applies
+     * `queryBoolean` rather than `z.coerce.boolean()`. The coercion applies
      * JavaScript's `Boolean()`, under which every non-empty string is true —
      * so `?includeDeleted=false` would have *included* them, which is the
      * opposite of what the caller asked for. The helper is named for where the
@@ -162,7 +162,7 @@ export const listDocumentsQuerySchema = z
      * three query parameters in `asset-service` and `economic-service`, which
      * change an API response and so want their own atomic change.
      */
-    includeDeleted: booleanEnv(false),
+    includeDeleted: queryBoolean(false),
     limit: z.coerce.number().int().min(1).max(100).default(25),
     cursor: identifier.optional(),
   })

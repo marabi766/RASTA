@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { toJsonSchema } from './zod-schema';
+import { listTransactionsQuerySchema } from '../transaction/dto';
+import { listSettlementsQuerySchema } from '../settlement/dto';
 
 /**
  * The Zod → JSON Schema walk that produces the published contract.
@@ -152,5 +154,45 @@ describe('toJsonSchema', () => {
     // down at boot, and one unknown field is a smaller problem than that. It
     // is asserted so the fallback is a known behaviour rather than a surprise.
     expect(toJsonSchema(z.unknown())).toEqual({});
+  });
+});
+
+/**
+ * The published shape of the two listing booleans.
+ *
+ * A `queryBoolean` accepts `boolean | string` at runtime, because that is how
+ * a boolean crosses a query string. Publishing that union literally is a
+ * contract defect, not a nuance: `anyOf: [boolean, string]` tells a generated
+ * client the parameter takes arbitrary strings — when the parser accepts eight
+ * spellings and answers 400 to everything else — and costs it a `boolean` in
+ * its typed signature. OpenAPI already defines how a boolean is carried in a
+ * query string.
+ *
+ * So the converter publishes the logical type, and the marker it reads rides
+ * on the schema `queryBoolean` returns. That is what keeps this honest: the
+ * accepted input and the published output come from one call, not from two
+ * definitions that agree until somebody edits one of them.
+ */
+describe('the listing contracts', () => {
+  it.each([
+    ['includeIncoming', listTransactionsQuerySchema],
+    ['incoming', listSettlementsQuerySchema],
+  ])('publishes %s as a boolean defaulting to false', (name, schema) => {
+    const properties = toJsonSchema(schema).properties as Record<string, Record<string, unknown>>;
+
+    expect(properties[name]).toEqual({ type: 'boolean', default: false });
+    expect(properties[name].anyOf).toBeUndefined();
+    expect(JSON.stringify(properties[name])).not.toContain('string');
+  });
+
+  it('leaves the neighbouring filters alone', () => {
+    // The blast radius, made visible.
+    const properties = toJsonSchema(listTransactionsQuerySchema).properties as Record<
+      string,
+      Record<string, unknown>
+    >;
+
+    expect(properties.limit).toMatchObject({ type: 'integer', default: 25, maximum: 100 });
+    expect(properties.status).toMatchObject({ type: 'string' });
   });
 });

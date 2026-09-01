@@ -175,6 +175,12 @@ describe('the real document DTOs', () => {
     >;
 
     expect(properties.limit).toMatchObject({ type: 'integer', default: 25, maximum: 100 });
-    expect(properties.includeDeleted).toMatchObject({ default: false });
+
+    // A logical boolean, not the `boolean | string` union the parser accepts.
+    // This once asserted only the default, which let the union through: a
+    // generated client saw a string parameter for a flag that answers 400 to
+    // every string but eight (D-023).
+    expect(properties.includeDeleted).toEqual({ type: 'boolean', default: false });
+    expect(JSON.stringify(properties.includeDeleted)).not.toContain('string');
   });
 });

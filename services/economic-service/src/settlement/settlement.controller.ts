@@ -9,7 +9,7 @@ import {
   runUnscoped,
   zodPipe,
 } from '@rasta/nest-common';
-import { z } from 'zod';
+
 import { SettlementService } from './settlement.service';
 import { TransactionService } from '../transaction/transaction.service';
 import { RewardService } from '../reward/reward.service';
@@ -18,18 +18,8 @@ import { IdempotencyStore } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor, canCommitOrganization } from '../access/access';
 import { settleTransactionSchema, type SettleTransactionDto } from '../transaction/dto';
+import { listSettlementsQuerySchema, type ListSettlementsQuery } from './dto';
 import { SERVICE_NAME } from '../config/env';
-
-const listSettlementsQuerySchema = z
-  .object({
-    cursor: z.string().optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(25),
-    /** The payee view: settlements that paid this organization. */
-    incoming: z.coerce.boolean().default(false),
-  })
-  .strict();
-
-type ListSettlementsQuery = z.infer<typeof listSettlementsQuerySchema>;
 
 /**
  * The settlement API (docs/04 § 4.14, docs/10 § 10.10).
