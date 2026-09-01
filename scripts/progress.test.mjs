@@ -15,11 +15,11 @@ test('the repository baseline is valid and preserves the approved horizons', () 
   assert.deepEqual(validateBacklog(baseline), []);
   const progress = calculateProgress(baseline);
   assert.equal(progress.mvp.committed, 555);
-  assert.equal(progress.mvp.earned, 178);
-  assert.equal(progress.mvp.percent, 32.1);
+  assert.equal(progress.mvp.earned, 191);
+  assert.equal(progress.mvp.percent, 34.4);
   assert.equal(progress.fullProduct.committed, 770);
-  assert.equal(progress.fullProduct.earned, 178);
-  assert.equal(progress.fullProduct.percent, 23.1);
+  assert.equal(progress.fullProduct.earned, 191);
+  assert.equal(progress.fullProduct.percent, 24.8);
 });
 
 test('decomposed features contribute child stories exactly once', () => {
@@ -35,17 +35,34 @@ test('decomposed features contribute child stories exactly once', () => {
 });
 
 test('an accepted story earns its own points before feature-level acceptance', () => {
+  // Measured as a delta rather than against a pinned total, so the rule stays
+  // under test no matter which stories the baseline has already accepted. The
+  // earlier form asserted a fixed 178 -> 181 and silently stopped exercising
+  // anything the moment DOC-001 was genuinely accepted: the mutation became a
+  // no-op and the assertion held for the wrong reason.
   const backlog = copy();
   const story = backlog.stories.find((candidate) => candidate.id === 'DOC-001');
+  const parent = backlog.items.find((candidate) => candidate.id === story.parentItemId);
+
+  // A decomposed parent cannot be ACCEPTED while a child is not, so the parent
+  // is withdrawn alongside the child to keep the intermediate state legal.
+  story.status = 'IN_PROGRESS';
+  parent.status = 'IN_PROGRESS';
+  assert.deepEqual(validateBacklog(backlog), []);
+  const before = calculateProgress(backlog);
+
   story.status = 'ACCEPTED';
   story.evidence = [
     { kind: 'TEST', ref: 'DOC-001 acceptance', note: 'All story scenarios are verified.' },
   ];
   assert.deepEqual(validateBacklog(backlog), []);
-  const progress = calculateProgress(backlog);
-  assert.equal(progress.mvp.earned, 181);
-  assert.equal(progress.mvp.committed, 555);
-  assert.equal(progress.mvp.percent, 32.6);
+  const after = calculateProgress(backlog);
+
+  // The story earns exactly its own points, and the still-unaccepted parent
+  // contributes none of its own on top of them.
+  assert.equal(after.mvp.earned - before.mvp.earned, story.points);
+  assert.equal(after.mvp.committed, before.mvp.committed);
+  assert.equal(after.mvp.committed, 555);
 });
 
 test('accepted feature or story work without evidence cannot earn points', () => {
@@ -113,6 +130,10 @@ test('an accepted feature cannot contain an unfinished active story', () => {
   const feature = backlog.items.find((candidate) => candidate.id === 'COM-004');
   feature.status = 'ACCEPTED';
   feature.evidence = [{ kind: 'DOCUMENT', ref: 'acceptance', note: 'Feature-level acceptance.' }];
+  // The unfinished child is created here rather than assumed. Once every DOC
+  // story was accepted this test passed a feature with nothing outstanding and
+  // proved nothing; the violating state has to be constructed to be detected.
+  backlog.stories.find((story) => story.id === 'DOC-001').status = 'IN_PROGRESS';
   assert.ok(
     validateBacklog(backlog).some((error) =>
       error.includes("feature 'COM-004' is ACCEPTED before all active stories are ACCEPTED"),
