@@ -8,6 +8,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { Transform, pipeline, type Readable } from 'node:stream';
 import type { ObjectMetadata, ObjectStorage } from './storage.port';
 
 export interface S3StorageOptions {
@@ -140,6 +141,68 @@ export class S3ObjectStorage implements ObjectStorage {
     // `transformToByteArray` is bounded by the range above, so this holds a
     // few kilobytes at most — never the object.
     return body.transformToByteArray();
+  }
+
+  /**
+   * The object as a stream, bounded (ADR-049).
+   *
+   * ## One byte more than allowed, deliberately
+   *
+   * The `Range` asks for `maxBytes + 1`, not `maxBytes`. Asking for exactly
+   * the ceiling is the version of this that fails **open**: storage honours
+   * the range, hands back exactly `maxBytes` bytes of a much larger object,
+   * the byte count never exceeds the limit, and the scanner reads a truncated
+   * prefix and reports `OK` about a file it only saw the start of — recorded
+   * as `CLEAN` for content nothing examined.
+   *
+   * Asking for one byte past the ceiling makes "there is more than we allow"
+   * observable: an object at or under the limit arrives whole, and one over it
+   * delivers the extra byte, which trips the transform below and fails the
+   * scan closed. The oversized object still costs one bounded range request
+   * rather than a full transfer.
+   *
+   * The transform is the second ceiling, and it is not redundant with the
+   * range: a `Range` is a request, and the response is what actually arrives.
+   * Storage that ignored the header, or a `Content-Length` disagreeing with
+   * the body, would otherwise stream without limit into a scanner that trusted
+   * the check upstream of it.
+   */
+  async openReadStream(input: { objectKey: string; maxBytes: number }): Promise<Readable> {
+    const response = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.options.bucket,
+        Key: input.objectKey,
+        // Inclusive end offset, so this requests bytes 0..maxBytes — that is
+        // maxBytes + 1 bytes in total.
+        Range: `bytes=0-${Math.max(0, input.maxBytes)}`,
+      }),
+    );
+
+    const body = response.Body;
+    if (!body) {
+      throw new Error('Object storage returned no body for a ranged read');
+    }
+
+    const source = body as unknown as Readable;
+    let seen = 0;
+
+    const bounded = new Transform({
+      transform(chunk: Buffer, _encoding, callback): void {
+        seen += chunk.length;
+        if (seen > input.maxBytes) {
+          // Destroying rather than truncating. Handing the scanner a prefix
+          // would get a verdict about part of a file and record it as a
+          // verdict about the file.
+          callback(new Error('The object exceeded the byte ceiling for a scan read'));
+          return;
+        }
+        callback(null, chunk);
+      },
+    });
+
+    // Without this, destroying the transform leaves the S3 socket open until
+    // the SDK's own timeout — one leaked connection per oversized object.
+    return pipeline(source, bounded, () => undefined);
   }
 
   async remove(objectKey: string): Promise<void> {

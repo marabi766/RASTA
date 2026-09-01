@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { RastaError, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
-import type { ScanResult } from '../scanning/scanner.port';
 import type { ListDocumentsQuery } from './dto';
 
 /**
@@ -109,7 +108,8 @@ export class DocumentRepository {
       sizeBytes: number;
       filename: string;
       checksum: string | null;
-      scan: ScanResult;
+      /** When it entered the scan queue. The row is written `PENDING`. */
+      scanQueuedAt: Date;
       ownerResourceType: string | null;
       ownerResourceId: string | null;
       uploadIntentId: string;
@@ -127,12 +127,12 @@ export class DocumentRepository {
         sizeBytes: input.sizeBytes,
         filename: input.filename,
         checksum: input.checksum,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        scanState: input.scan.verdict as any,
-        scanEngine: input.scan.engine,
-        scanVersion: input.scan.engineVersion,
-        scanSignature: input.scan.signature,
-        scannedAt: input.scan.scannedAt,
+        // Registered `PENDING`, always (ADR-049). No verdict is written here
+        // because nothing has looked at the bytes yet: `scan_state` defaults to
+        // PENDING and the worker fills in the engine, the versions and the
+        // outcome when it reaches one. Writing anything else here would be
+        // recording a scan that has not happened.
+        scanQueuedAt: input.scanQueuedAt,
         ownerResourceType: input.ownerResourceType,
         ownerResourceId: input.ownerResourceId,
         uploadIntentId: input.uploadIntentId,
@@ -188,21 +188,34 @@ export class DocumentRepository {
     documentId: string,
     input: { deletedAt: Date; deletedBy: string; reason: string; expectedVersion: number },
   ) {
-    const changed = await tx.document.updateMany({
-      where: { id: documentId, status: 'REGISTERED', version: input.expectedVersion },
-      data: {
-        status: 'DELETED',
-        deletedAt: input.deletedAt,
-        deletedBy: input.deletedBy,
-        deletionReason: input.reason,
-        version: { increment: 1 },
+    // Unscoped for the same reason the id lookups above are: a platform
+    // operator may delete a document belonging to another organization
+    // (`assertDocumentWritable`, which admits platform scope), and that
+    // decision has already been made against the row before this runs. With
+    // the guard filtering by the caller's own organization, the operator's
+    // update would match zero rows and surface as an optimistic-lock failure
+    // — a wrong answer to a permitted act. The tenant that owns the row is
+    // still pinned by `id`, which is unique platform-wide.
+    return runUnscoped(
+      'a deletion the caller was already authorized for is applied to its row',
+      async () => {
+        const changed = await tx.document.updateMany({
+          where: { id: documentId, status: 'REGISTERED', version: input.expectedVersion },
+          data: {
+            status: 'DELETED',
+            deletedAt: input.deletedAt,
+            deletedBy: input.deletedBy,
+            deletionReason: input.reason,
+            version: { increment: 1 },
+          },
+        });
+
+        if (changed.count === 0) {
+          throw RastaError.optimisticLockFailed('Document', documentId);
+        }
+
+        return tx.document.findUniqueOrThrow({ where: { id: documentId } });
       },
-    });
-
-    if (changed.count === 0) {
-      throw RastaError.optimisticLockFailed('Document', documentId);
-    }
-
-    return tx.document.findUniqueOrThrow({ where: { id: documentId } });
+    );
   }
 }

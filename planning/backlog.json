@@ -1168,6 +1168,56 @@
           "note": "Q-18 remains open: no scanning provider is selected, and neither ClamAV nor any cloud vendor is claimed. The MVP composes the honest NoOpMalwareScanner, so downloads are refused by default. AlwaysCleanScanner lives only under test/ and is excluded from the production build - verified as zero occurrences of AlwaysCleanScanner in services/document-service/dist."
         },
         {
+          "kind": "COMMIT",
+          "ref": "d11d148",
+          "note": "Answers Q-18 at the composition root: a real ClamAV behind the existing MALWARE_SCANNER port, so a document can be cleared for download for the first time. There is one path to CLEAN and it requires all of a reply that parsed, as OK, from an engine whose version was read, on a signature database inside the freshness window. Timeout, refused connection, malformed reply, engine error, oversize object, a scan that stopped at a limit and a stale database are all FAILED with a reason code."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "7918e81",
+          "note": "Adds the quarantine record as a property of the row rather than a promise in a document. ck_document_infected_is_quarantined refuses an INFECTED row with no quarantine, so there is no instant in which a document is known infected and undecided about - not even through a hand-written UPDATE."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "768cad5",
+          "note": "Fixes a fail-open defect the tests found: openReadStream asked storage for exactly maxBytes, so a larger object returned exactly the ceiling, the byte counter never tripped, and the scanner read a truncated prefix and reported OK about a file it had only seen the start of. It now asks for one byte past the ceiling, which makes 'there is more than we allow' observable."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service exec jest --selectProjects integration -t 'the EICAR test artefact'",
+          "note": "clamav-scan.int-spec.ts against a real ClamAV, real PostgreSQL and real MinIO: 'is detected by the engine, from bytes that reached storage over a signed URL', 'is quarantined in the same write as the verdict, never after it', 'stays non-downloadable, and is refused without revealing storage', 'keeps the object as evidence rather than destroying it' and 'publishes VIRUS_DETECTED exactly once, carrying the signature and no bytes'. EICAR is assembled in memory from two base64 fragments and never written to the host filesystem."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service exec jest --selectProjects integration -t 'a file the engine finds nothing in'",
+          "note": "The clean path end to end: a document is registered PENDING and refused, then becomes CLEAN attributed to the engine and signature database that cleared it, then receives a bounded signed URL whose bytes match the upload exactly and which is served as an attachment. This path was unreachable before ADR-049 - nothing ever issued a CLEAN verdict."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service exec jest --selectProjects integration -t 'when the scanner is unavailable'",
+          "note": "Fail-closed proven rather than described: with the scanner unreachable the document stays PENDING and undownloadable, the failure is visible through readiness and telemetry with a reason code and no address, and once the retry budget is spent it becomes FAILED - still refused, and still attributable to an engine that never answered."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service exec jest --selectProjects integration -t 'what a pending or infected document reveals'",
+          "note": "'shows no object key, bucket, endpoint or credential in its metadata' and 'issues no signed URL at all when it refuses' - the second spies on the storage port and fails if a URL is created and then discarded, because a credential that existed is a credential that existed."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:unit",
+          "note": "protocol.spec.ts enumerates nine malformed clamd replies - truncated, unterminated, two messages on one connection, a signature named Doc.Dropper.OK-Agent - and proves none parses as CLEAN. transitions.spec.ts enumerates every allowed and forbidden state transition and proves no failure reason the port defines can reach CLEAN. env.spec.ts proves a production deployment refuses an unauthenticated TCP scanner and exits. 255 unit tests pass."
+        },
+        {
+          "kind": "RUNTIME",
+          "ref": "pnpm exec playwright test --project=document-api",
+          "note": "11/11 green on 2026-08-31 against the running stack with a real ClamAV: 'is scanned by a real engine, and becomes downloadable only then' polls the asynchronous verdict through the gateway, and 'hands back the exact bytes once the scan has cleared it' completes the capability ADR-014 has described since day one."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/adr/ADR-049-malware-scanning-clamav.md",
+          "note": "Q-18 is closed with the implemented decision, the image source and pinned digest, the FreshClam mechanism, the resource cost and the replacement path - and with an explicit statement of what ClamAV does not give: a CLEAN means 'nothing this database knows about matched', not 'safe'. No claim of complete or guaranteed detection appears anywhere."
+        },
+        {
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/14",
           "note": "Pull request carrying the implementation; the reviewable diff for this story."
@@ -1334,6 +1384,61 @@
           "kind": "DOCUMENT",
           "ref": "docs/25-progress-governance.md",
           "note": "Operability and delivery evidence is recorded under the version-2 governance model; the service earns no Story Points until the product owner accepts it."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "3b23eb3",
+          "note": "Provisions the pinned ClamAV image in the integration and E2E jobs over a Unix socket - the production transport, so CI proves what a deployment uses rather than only what a laptop can reach. freshclam is off in both for determinism; that updating works is proven by a separate clamav-signatures job that runs it for real against the mirrors."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "768cad5",
+          "note": "Adds the ClamAV and freshclam services to docker-compose with a persistent signature volume, a non-root read-only container and a loopback-only port. Also moves fake-clamd.ts out of src/: under this tsconfig it would have been compiled into dist and shipped inside the production image."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "0f47b37",
+          "note": "Fixes a tenant-guard misconfiguration found while reading the service: TENANT_SCOPED_MODELS named marketplace-service's models, so the guard scoped nothing. No cross-tenant read was reachable through it - the explicit checks covered every path - but the layer A-04 asks for was inert. tenant-scope.spec.ts now derives the expected set from schema.prisma so it cannot drift again."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service run test:coverage",
+          "note": "384 tests across 18 suites (255 unit, 129 integration), all passing against real PostgreSQL, real MinIO and real ClamAV. Coverage 90.23% statements, 81.96% branches, 87.75% functions, 91.68% lines against the unchanged documented 75% gate on all four - up from 88.70/79.75/84.56/90.00. No domain file is excluded and collectCoverageFrom is still anchored at the package root. Measured 2026-08-31."
+        },
+        {
+          "kind": "TEST",
+          "ref": "node scripts/verify-migration-reversible.mjs document",
+          "note": "up to down to up in 33.2s across both migrations, with a data-rollback probe the empty-schema reversal cannot make: the init schema permitted an INFECTED document with no quarantine record, so the forward migration is applied over a seeded one and asserted to carry it through quarantined rather than aborting halfway. Twelve invariant-carrying CHECK constraints verified present, gone, and back."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm run ci:image-matrix && pnpm run test:image-matrix",
+          "note": "The eight-service image matrix is unchanged and its guard passes with all four negative controls. ClamAV is an external sidecar dependency, not a ninth Rasta service, so it is scanned by its own CI job rather than added to a matrix derived from services/*/Dockerfile."
+        },
+        {
+          "kind": "TEST",
+          "ref": "trivy image --severity CRITICAL,HIGH --ignore-unfixed clamav/clamav@sha256:f0954d6790",
+          "note": "0 CRITICAL/HIGH findings against the pinned digest, scanned locally on 2026-08-31 before making the gate blocking. The CI job uses the same severity and the same exit-code 1 as every Rasta image - the threshold is not relaxed because the image is somebody else's."
+        },
+        {
+          "kind": "RUNTIME",
+          "ref": "docker compose up -d clamav clamav-freshclam",
+          "note": "freshclam verified live with persistent signature storage: the named volume was seeded from the pinned image at daily-28108 and freshclam updated it to 28109 incrementally, rather than re-downloading ~110 MB. clamd runs as uid 100 with a read-only rootfs and answers clamdscan --ping."
+        },
+        {
+          "kind": "RUNTIME",
+          "ref": "curl -s http://localhost:3114/health/ready",
+          "note": "Readiness distinguishes scanner health from storage and database health, reporting engine version, signature version, signature age and freshness separately, plus downloadsRequireCleanScan so an operator reading the probe during an incident does not have to know canDownload's rule to see that nothing has opened up. A scanner outage is a degraded entry, not a 503 - uploads, metadata and deletion still work and downloads are already fail-closed."
+        },
+        {
+          "kind": "RUNTIME",
+          "ref": "pnpm exec playwright test",
+          "note": "75/75 E2E green on 2026-08-31 against the running stack, up from 74 - the added scenario is the byte-for-byte download after a real scan. Five marketplace failures on a first attempt were a Temporal gRPC transport limitation of Docker Desktop on this Windows host, not a repository defect; with Temporal started the way CI starts it, the whole suite is green."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/runbooks/malware-scanner-down.md",
+          "note": "Operational runbook for the three alert conditions, whose first section is 'nothing has opened up': a scanner outage makes new documents unavailable, never available. Includes the backfill SQL for documents that FAILED during an outage, with an explicit warning never to include INFECTED or NOT_SCANNED in it."
         },
         {
           "kind": "PR",

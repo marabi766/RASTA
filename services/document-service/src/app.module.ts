@@ -30,9 +30,13 @@ import { DocumentService } from './document/document.service';
 import { DocumentController } from './document/document.controller';
 import { S3ObjectStorage } from './storage/s3.storage';
 import { NoOpMalwareScanner } from './scanning/stub.scanner';
+import { ClamAvMalwareScanner } from './scanning/clamav/clamav.scanner';
+import { ScanRepository } from './scanning/scan.repository';
+import { ScanWorker } from './scanning/scan.worker';
+import type { MalwareScanner } from './scanning/scanner.port';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER, MALWARE_SCANNER, OBJECT_STORAGE } from './tokens';
-import { loadDocumentEnv, SERVICE_NAME, type DocumentEnv } from './config/env';
+import { clamdAddress, loadDocumentEnv, SERVICE_NAME, type DocumentEnv } from './config/env';
 
 /**
  * document-service wiring.
@@ -108,12 +112,41 @@ import { loadDocumentEnv, SERVICE_NAME, type DocumentEnv } from './config/env';
     },
 
     {
-      // The MVP stub (Q-18). It inspects nothing and records `NOT_SCANNED`,
-      // which is the honest verdict for a scanner that does not exist yet.
-      // Replacing it with a real engine is this one line.
+      /**
+       * The scanner (ADR-049, closing Q-18).
+       *
+       * Q-18 asked which provider, and the answer is self-hosted ClamAV. The
+       * port did what it was built for: closing the question was adding a
+       * class and choosing it here, with nothing in the domain changing.
+       *
+       * `disabled` binds the no-op stub, which inspects nothing and records
+       * `NOT_SCANNED` — a development setting for working on upload and
+       * metadata without a scanner running. It is not a bypass: `NOT_SCANNED`
+       * is refused by `canDownload` exactly as it always was, so a deployment
+       * configured this way hands back nothing. `documentEnvSchema` refuses it
+       * in production regardless, because discovering that from a support
+       * ticket is worse than discovering it from a failed boot.
+       */
       provide: MALWARE_SCANNER,
-      useClass: NoOpMalwareScanner,
+      inject: [ENV],
+      useFactory: (env: DocumentEnv): MalwareScanner => {
+        if (env.DOCUMENT_SCANNER_DRIVER === 'disabled') {
+          return new NoOpMalwareScanner();
+        }
+
+        return new ClamAvMalwareScanner({
+          address: clamdAddress(env),
+          timeoutMs: env.DOCUMENT_SCAN_TIMEOUT_MS,
+          chunkBytes: env.DOCUMENT_SCAN_CHUNK_BYTES,
+          maxBytes: env.DOCUMENT_SCAN_MAX_BYTES,
+          signatureMaxAgeSeconds: env.DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS * 3600,
+          versionCacheSeconds: env.DOCUMENT_SCAN_VERSION_CACHE_SECONDS,
+        });
+      },
     },
+
+    ScanRepository,
+    ScanWorker,
 
     PrismaOutboxStore,
     EventPublisher,
@@ -177,6 +210,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly relay: OutboxRelay,
     private readonly store: PrismaOutboxStore,
+    private readonly scanWorker: ScanWorker,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -187,6 +221,10 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   onModuleInit(): void {
     this.relay.start();
+    // Started here rather than lazily on the first document, so a scanner that
+    // is unreachable shows up in the metrics of an idle deployment instead of
+    // waiting for a user to upload something to discover it (ADR-049).
+    this.scanWorker.start();
 
     const sample = async () => {
       try {
@@ -199,6 +237,10 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
         // Upkeep must never take the service down. The relay's own logging
         // covers a persistent database problem.
       }
+      // Its own call, and it swallows its own failures: a scanner that is down
+      // must not stop the outbox gauges from being reported, which is exactly
+      // when somebody is looking at them.
+      await this.scanWorker.sampleGauges();
     };
 
     void sample();
@@ -208,6 +250,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
+    // The worker first: it releases the claims it has not started, so a rolling
+    // deploy does not park those documents until their leases expire.
+    await this.scanWorker.stop();
     await this.relay.stop();
   }
 }

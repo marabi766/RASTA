@@ -33,7 +33,7 @@
     "test": {
       "dependsOn": ["^build", "db:generate"],
       "outputs": ["coverage/**"],
-      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "S3_*"]
+      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "S3_*", "DOCUMENT_*"]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
     "test:integration": {
@@ -45,7 +45,16 @@
       // defaults point at the compose MinIO; in CI the credentials differ, and
       // without this the suite would authenticate with the wrong ones and fail
       // as though the bucket were missing (D-005, same trap).
-      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "KAFKA_BROKERS", "S3_*"]
+      //
+      // DOCUMENT_* is the third instance of it, caught before merge rather than
+      // after (ADR-049). Those suites scan against a real ClamAV, and the CI
+      // job passes `DOCUMENT_CLAMAV_SOCKET_PATH` and
+      // `DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS` in the step environment.
+      // Undeclared, turbo drops both: the service then loads its configuration
+      // with no scanner address at all and every document suite fails at
+      // startup — on a developer machine the same command passes, because the
+      // shell exported them directly.
+      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "KAFKA_BROKERS", "S3_*", "DOCUMENT_*"]
     },
     // Turbo runs tasks in a strict environment, so anything the E2E harness
     // reads has to be declared here or it simply is not there — and the

@@ -25,18 +25,23 @@ import { z } from 'zod';
  *
  * That an object was confirmed to exist, its real content type was established
  * from its bytes, and metadata was registered. **It does not mean the document
- * was scanned, approved, or is safe to open.** The scan state is carried on
- * the event precisely so no consumer has to guess, and so a consumer cannot
- * read the event's existence as a clean bill of health.
+ * was scanned, approved, or is safe to open.** Since ADR-049 made scanning
+ * asynchronous it always carries `PENDING`, and the outcome arrives afterwards
+ * as `DOCUMENT_SCANNED`. The scan state is on the event precisely so no
+ * consumer has to guess, and so the event's existence cannot be read as a
+ * clean bill of health.
  *
  * ## Version
  *
- * `eventVersion` is 1 for all three: new contracts, nothing to be compatible
- * with yet.
+ * `eventVersion` is 1 for all four. `DOCUMENT_SCANNED` is new rather than a
+ * second version of `DOCUMENT_UPLOADED`: registration and verdict are separate
+ * facts that now happen at separate times, and folding them together would
+ * mean a consumer could not tell which one it was holding.
  */
 
 export const DOCUMENT_EVENTS = {
   DOCUMENT_UPLOADED: 'DOCUMENT_UPLOADED',
+  DOCUMENT_SCANNED: 'DOCUMENT_SCANNED',
   DOCUMENT_DELETED: 'DOCUMENT_DELETED',
   VIRUS_DETECTED: 'VIRUS_DETECTED',
 } as const;
@@ -95,6 +100,57 @@ export const documentDeletedPayload = z
   .strict();
 
 /**
+ * The scan outcome, published when the worker reaches one (ADR-049).
+ *
+ * ## Why this event had to exist
+ *
+ * Scanning is asynchronous, so `DOCUMENT_UPLOADED` now always says `PENDING`.
+ * Without a second fact, a consumer holding a document reference would have no
+ * way to learn that it became downloadable except by polling this service, and
+ * the most security-relevant transition on the platform would be the one thing
+ * the event log did not record.
+ *
+ * It is published for **every** terminal outcome, not only for good news. A
+ * `FAILED` scan is exactly what a consumer needs to know before telling a user
+ * their attachment is ready, and an event stream that carried only successes
+ * would let silence mean two different things.
+ *
+ * `VIRUS_DETECTED` is still published alongside an `INFECTED` outcome rather
+ * than folded into this one. They have different audiences and different
+ * urgency: this is a state change every interested consumer reads, and that is
+ * a security finding notification-service treats as critical.
+ *
+ * The failure reason is a closed code from `ScanFailureReason` — never engine
+ * text, which can echo file content.
+ */
+export const documentScannedPayload = z
+  .object({
+    documentId: identifier,
+    organizationId: identifier,
+    documentClass: z.string().min(1).max(64),
+    /** Terminal only. `PENDING` never appears here — a retry is not an outcome. */
+    scanState: z.enum(['CLEAN', 'INFECTED', 'FAILED']),
+    /** The engine that reached it. Attribution, so the claim is checkable. */
+    engine: z.string().min(1).max(64),
+    engineVersion: z.string().min(1).max(64).nullable(),
+    /**
+     * The signature database that answered.
+     *
+     * On the wire because a consumer re-evaluating after a signature release
+     * needs to know which documents were cleared by which database, and asking
+     * this service per document would not scale.
+     */
+    signatureVersion: z.string().min(1).max(64).nullable(),
+    /** A fixed reason code, present only for `FAILED`. */
+    failureReason: z.string().min(1).max(64).nullable(),
+    scannedAt: isoTimestamp,
+  })
+  .strict()
+  .refine((value) => (value.scanState === 'FAILED') === (value.failureReason !== null), {
+    message: 'A failed scan states why, and a successful one states no reason',
+  });
+
+/**
  * Published **only** for a real infected verdict from an engine that inspected
  * content.
  *
@@ -118,6 +174,7 @@ export const virusDetectedPayload = z
 
 export const DOCUMENT_EVENT_SCHEMAS = {
   DOCUMENT_UPLOADED: documentUploadedPayload,
+  DOCUMENT_SCANNED: documentScannedPayload,
   DOCUMENT_DELETED: documentDeletedPayload,
   VIRUS_DETECTED: virusDetectedPayload,
 } as const satisfies Record<DocumentEventName, z.ZodTypeAny>;

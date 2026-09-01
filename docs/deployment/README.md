@@ -72,6 +72,86 @@ helm upgrade --install rasta infrastructure/k8s/charts/rasta \
 
 **`--atomic`** در صورت شکست Health Check، خودکار Rollback می‌کند.
 
+### Sidecar اسکنر بدافزار برای `document-service` — ADR-049
+
+`document-service` **تنها Pod پلتفرم با یک Container دوم** است. ClamAV درون Image
+سرویس جاسازی نشده: پایگاه امضا چند بار در روز به‌روز می‌شود و کد سرویس در هر Release،
+پس جاسازی هر به‌روزرسانی امضا را به یک Build و Deploy تبدیل می‌کرد.
+
+```yaml
+# طرح Pod — مقادیر واقعی در Chart
+spec:
+  securityContext:
+    # هر دو Container باید مالک Socket مشترک باشند. اگر این عوض شود،
+    # document-service با EACCES مواجه می‌شود و اسکن Fail-Closed می‌کند.
+    fsGroup: 101
+
+  volumes:
+    - name: clamav-socket
+      emptyDir: {} # عمر یک Pod، دیده‌نشدنی از بیرون آن
+    - name: clamav-signatures
+      persistentVolumeClaim:
+        claimName: clamav-signatures # وگرنه هر Restart ۱۱۰ مگابایت دانلود می‌کند
+
+  containers:
+    - name: document-service
+      env:
+        # مرز Production. هیچ DOCUMENT_CLAMAV_HOST ای اینجا نیست و اگر بود،
+        # فرآیند در بوت خارج می‌شد (S-08).
+        - name: DOCUMENT_CLAMAV_SOCKET_PATH
+          value: /run/clamav/clamd.sock
+      volumeMounts:
+        - { name: clamav-socket, mountPath: /run/clamav }
+
+    - name: clamav
+      image: clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591
+      command: ['clamd'] # نه /init، که برای ساخت /run/clamav به root نیاز دارد
+      securityContext:
+        runAsUser: 100
+        runAsGroup: 101
+        runAsNonRoot: true
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ['ALL'] }
+      resources:
+        requests: { memory: 1200Mi, cpu: 200m }
+        limits: { memory: 1800Mi, cpu: '1' } # پایگاه امضا در حافظه بارگذاری می‌شود
+      startupProbe:
+        # شروع سرد ده‌ها ثانیه طول می‌کشد و Socket پیش از آمادگی موتور وجود دارد.
+        # بررسی پورت یا وجود فایل، Pod را زودتر از موعد آماده اعلام می‌کند.
+        exec: { command: ['clamdscan', '--ping', '1'] }
+        failureThreshold: 30
+        periodSeconds: 10
+      volumeMounts:
+        - { name: clamav-socket, mountPath: /run/clamav }
+        - { name: clamav-signatures, mountPath: /var/lib/clamav, readOnly: true }
+        - { name: clamd-config, mountPath: /etc/clamav/clamd.conf, subPath: clamd.conf }
+
+    - name: clamav-freshclam
+      image: clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591
+      command: ['freshclam', '--daemon', '--foreground']
+      securityContext: { runAsUser: 100, runAsGroup: 101, runAsNonRoot: true }
+      volumeMounts:
+        - { name: clamav-signatures, mountPath: /var/lib/clamav } # نوشتنی
+```
+
+**نکته‌های استقرار، هرکدام یک دلیل دارند:**
+
+- **`clamd.conf` تولیدی هیچ `TCPSocket` ندارد.** فایل `clamd.local.conf` که TCP دارد
+  فقط برای توسعه و CI است و **نباید** در Production Mount شود. اگر شد، هیچ اتفاقی
+  نمی‌افتد جز اینکه یک کانال فرمان بدون احراز هویت باز می‌شود — و NetworkPolicy تنها
+  چیزی است که جلویش را می‌گیرد، که همان اتکایی است که S-08 ممنوع می‌کند.
+- **`clamd` پایگاه امضا را فقط می‌خواند؛ freshclam می‌نویسد.** Mount یکی
+  `readOnly: true` است.
+- **بدون `NotifyClamd`.** `SelfCheck` خود clamd تغییر روی دیسک را می‌بیند، به قیمت
+  حداکثر ده دقیقه تأخیر و به سود یک وابستگی میان‌کانتینری کمتر.
+- **NetworkPolicy خروجی برای freshclam** به `database.clamav.net` لازم است. بدون آن
+  به‌روزرسانی بی‌صدا شکست می‌خورد و تنها نشانه‌اش بالا رفتن
+  `rasta_document_scan_signature_age_seconds` است.
+- **Rollout ترتیب دارد.** `readinessProbe` سرویس، اسکنر را در `checks` گزارش می‌کند اما
+  به‌خاطر آن `503` نمی‌دهد: قطعی اسکنر آپلود، فراداده و حذف را نمی‌شکند و دانلود از پیش
+  Fail-Closed است. خارج کردن کل سرویس از Rotation سه چیز سالم را بی‌دلیل می‌شکست.
+
 ## ترتیب استقرار
 
 ```

@@ -165,7 +165,9 @@ Admin API با Keycloak همگام می‌کند تا در توکن بنشینن
 ۱. کلاینت: POST /documents/upload-url  → سرویس URL امضاشده PUT می‌دهد (۵ دقیقه)
 ۲. کلاینت: PUT مستقیم به Object Storage
 ۳. کلاینت: POST /documents  → ثبت فراداده، تأیید وجود شیء
-۴. سرویس: انتشار DOCUMENT_UPLOADED → اسکن بدافزار ناهمزمان
+۴. سرویس: انتشار DOCUMENT_UPLOADED (scanState = PENDING) → اسکن بدافزار ناهمزمان
+۵. Worker: Stream شیء → clamd (Sidecar، Unix Socket) → DOCUMENT_SCANNED
+۶. دانلود تنها پس از یک CLEAN معتبر (ADR-049)
 ```
 
 **چرا؟** فایل بزرگ از حافظه و پهنای باند سرویس عبور نمی‌کند، و Timeout آپلود مسئله سرویس نیست.

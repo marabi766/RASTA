@@ -5,17 +5,18 @@
 
 ## فهرست
 
-| Runbook                                       | هشدار محرک                                  | شدت        | وضعیت     |
-| --------------------------------------------- | ------------------------------------------- | ---------- | --------- |
-| [ledger-imbalance](ledger-imbalance.md)       | Journal نامتوازن · انحراف کیف پول و دفتر کل | 🔴 بحرانی  | ✅ آماده  |
-| [outbox-stuck](outbox-stuck.md)               | `rasta_outbox_pending_age_seconds > 60`     | 🟠 هشدار   | ✅ آماده  |
-| [replay-dlq](replay-dlq.md)                   | `rasta_dlq_messages_total` افزایش یافت      | 🟠 هشدار   | ✅ آماده  |
-| [database-bootstrap](database-bootstrap.md)   | راه‌اندازی محیط جدید                        | ⚪ عملیاتی | ✅ آماده  |
-| [failed-settlement](failed-settlement.md)     | Workflow شکست‌خورده در `rasta-settlement`   | 🔴 بحرانی  | 📅 روز ۲۷ |
-| [restore-database](restore-database.md)       | از دست رفتن داده                            | 🔴 بحرانی  | 📅 روز ۲۷ |
-| [disaster-recovery](disaster-recovery.md)     | از دست رفتن منطقه                           | 🔴 بحرانی  | 📅 روز ۲۷ |
-| [secret-leak](secret-leak.md)                 | اسکن Secret یافته پیدا کرد                  | 🔴 بحرانی  | 📅 روز ۲۳ |
-| [rollback-deployment](rollback-deployment.md) | شکست Smoke Test پس از استقرار               | 🟠 هشدار   | 📅 روز ۲۸ |
+| Runbook                                         | هشدار محرک                                    | شدت        | وضعیت     |
+| ----------------------------------------------- | --------------------------------------------- | ---------- | --------- |
+| [ledger-imbalance](ledger-imbalance.md)         | Journal نامتوازن · انحراف کیف پول و دفتر کل   | 🔴 بحرانی  | ✅ آماده  |
+| [outbox-stuck](outbox-stuck.md)                 | `rasta_outbox_pending_age_seconds > 60`       | 🟠 هشدار   | ✅ آماده  |
+| [replay-dlq](replay-dlq.md)                     | `rasta_dlq_messages_total` افزایش یافت        | 🟠 هشدار   | ✅ آماده  |
+| [database-bootstrap](database-bootstrap.md)     | راه‌اندازی محیط جدید                          | ⚪ عملیاتی | ✅ آماده  |
+| [malware-scanner-down](malware-scanner-down.md) | `rasta_document_scanner_up == 0` · امضای کهنه | 🟠 هشدار   | ✅ آماده  |
+| [failed-settlement](failed-settlement.md)       | Workflow شکست‌خورده در `rasta-settlement`     | 🔴 بحرانی  | 📅 روز ۲۷ |
+| [restore-database](restore-database.md)         | از دست رفتن داده                              | 🔴 بحرانی  | 📅 روز ۲۷ |
+| [disaster-recovery](disaster-recovery.md)       | از دست رفتن منطقه                             | 🔴 بحرانی  | 📅 روز ۲۷ |
+| [secret-leak](secret-leak.md)                   | اسکن Secret یافته پیدا کرد                    | 🔴 بحرانی  | 📅 روز ۲۳ |
+| [rollback-deployment](rollback-deployment.md)   | شکست Smoke Test پس از استقرار                 | 🟠 هشدار   | 📅 روز ۲۸ |
 
 **📅 = برنامه‌ریزی‌شده، هنوز نوشته نشده.** این وضعیت صادقانه ثبت شده تا کسی روی
 Runbook ناموجود حساب نکند. تاریخ‌ها از [`../20-day-30-plan.md`](../20-day-30-plan.md).

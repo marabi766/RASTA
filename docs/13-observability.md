@@ -111,27 +111,38 @@ Logهای مالی).
 
 ### متریک‌های کسب‌وکاری
 
-| متریک                                            | چرا اهمیت دارد                                                                                                |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| `rasta_orders_created_total`                     | حجم Marketplace                                                                                               |
-| `rasta_order_cycle_duration_seconds`             | «گزارش زمان چرخه سفارش» سند محصول                                                                             |
-| `rasta_maintenance_requests_created_total`       | برچسب `type=PREVENTIVE\|CORRECTIVE` → **نسبت اجتناب از هزینه** — پیاده‌شده                                    |
-| `rasta_maintenance_requests_awaiting_approval`   | صف تأییدنشده — تسویه پشت آن متوقف است؛ بی‌صدا رشد می‌کند — پیاده‌شده                                          |
-| `rasta_maintenance_due_announcements_total`      | برچسب `basis` و `state` — ناوگانی که بیشتر `OVERDUE` می‌گیرد تا `DUE_SOON`، مهلت هشدارش کوتاه است — پیاده‌شده |
-| `rasta_maintenance_downtime_hours`               | Histogram — میانگین توقف ناوگان از توزیعش بسیار کم‌فایده‌تر است — پیاده‌شده                                   |
-| `rasta_maintenance_usage_readings_applied_total` | باید نزدیک شمارنده کارکرد fleet بماند؛ فاصله پایدار یعنی رویدادهای سررسید گم می‌شوند — پیاده‌شده              |
-| `rasta_maintenance_response_seconds`             | «گزارش زمان پاسخ‌دهی» سند محصول — **هنوز نه**                                                                 |
-| `rasta_transactions_total`                       | برچسب `status`                                                                                                |
-| `rasta_commission_amount_minor_total`            | **درآمد پلتفرم** — مستقیماً منطق اقتصادی سوم                                                                  |
-| `rasta_wallet_balance_minor`                     | مجموع موجودی (تجمیعی، بدون تفکیک سازمان)                                                                      |
-| `rasta_rewards_granted_total`                    | سلامت موتور انگیزشی                                                                                           |
-| `rasta_tenders_published_total`                  | فعالیت رستا عمران                                                                                             |
-| `rasta_bids_per_tender`                          | Histogram — سلامت رقابت                                                                                       |
-| `rasta_data_completeness_ratio`                  | **معیار موفقیت Gamification طبق سند محصول**                                                                   |
+| متریک                                            | چرا اهمیت دارد                                                                                                   |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `rasta_orders_created_total`                     | حجم Marketplace                                                                                                  |
+| `rasta_order_cycle_duration_seconds`             | «گزارش زمان چرخه سفارش» سند محصول                                                                                |
+| `rasta_maintenance_requests_created_total`       | برچسب `type=PREVENTIVE\|CORRECTIVE` → **نسبت اجتناب از هزینه** — پیاده‌شده                                       |
+| `rasta_maintenance_requests_awaiting_approval`   | صف تأییدنشده — تسویه پشت آن متوقف است؛ بی‌صدا رشد می‌کند — پیاده‌شده                                             |
+| `rasta_maintenance_due_announcements_total`      | برچسب `basis` و `state` — ناوگانی که بیشتر `OVERDUE` می‌گیرد تا `DUE_SOON`، مهلت هشدارش کوتاه است — پیاده‌شده    |
+| `rasta_maintenance_downtime_hours`               | Histogram — میانگین توقف ناوگان از توزیعش بسیار کم‌فایده‌تر است — پیاده‌شده                                      |
+| `rasta_maintenance_usage_readings_applied_total` | باید نزدیک شمارنده کارکرد fleet بماند؛ فاصله پایدار یعنی رویدادهای سررسید گم می‌شوند — پیاده‌شده                 |
+| `rasta_maintenance_response_seconds`             | «گزارش زمان پاسخ‌دهی» سند محصول — **هنوز نه**                                                                    |
+| `rasta_transactions_total`                       | برچسب `status`                                                                                                   |
+| `rasta_commission_amount_minor_total`            | **درآمد پلتفرم** — مستقیماً منطق اقتصادی سوم                                                                     |
+| `rasta_wallet_balance_minor`                     | مجموع موجودی (تجمیعی، بدون تفکیک سازمان)                                                                         |
+| `rasta_rewards_granted_total`                    | سلامت موتور انگیزشی                                                                                              |
+| `rasta_tenders_published_total`                  | فعالیت رستا عمران                                                                                                |
+| `rasta_bids_per_tender`                          | Histogram — سلامت رقابت                                                                                          |
+| `rasta_data_completeness_ratio`                  | **معیار موفقیت Gamification طبق سند محصول**                                                                      |
+| `rasta_document_scan_verdicts_total`             | برچسب `verdict` — رشد `INFECTED` یک حادثه است، نه یک روند — پیاده‌شده (ADR-049)                                  |
+| `rasta_document_scan_failures_total`             | برچسب `reason` — هر دلیل به یک آدم متفاوت می‌رسد؛ یک شمارنده بی‌فایده بود — پیاده‌شده                            |
+| `rasta_document_scan_duration_seconds`           | Histogram با برچسب `verdict` — توزیع `CLEAN` و `FAILED` دوقله‌ای است و میانگین هر دو را پنهان می‌کند — پیاده‌شده |
+| `rasta_document_scan_pending_oldest_age_seconds` | **عددی که باید رویش هشدار گذاشت** — عمق صف حادثه را از شلوغی سالم جدا نمی‌کند؛ این می‌کند — پیاده‌شده            |
+| `rasta_document_scan_signature_age_seconds`      | freshclam بی‌صدا شکست می‌خورد: اسکن کار می‌کند و `OK` می‌دهد، و تنها نشانه بالا رفتن این عدد است — پیاده‌شده     |
+| `rasta_document_scanner_up`                      | `1` وقتی اسکنر به آخرین Health Check پاسخ داد — پیاده‌شده                                                        |
 
 **CONSTRAINT.** متریک کسب‌وکاری هرگز برچسب با Cardinality بالا نمی‌گیرد (`userId`,
 `orderId`, `assetId`). این Prometheus را منفجر می‌کند. تفکیک سازمانی فقط در
 `analytics-service` و روی پایگاه داده انجام می‌شود، نه در متریک.
+
+این قاعده در متریک‌های اسکن **بیش از هر جای دیگر** می‌گزد: متریکی که با نام فایل برچسب
+بخورد، _نام هر قرارداد آلودهٔ پلتفرم_ را به هرکسی که به `/metrics` می‌رسد منتشر می‌کند —
+نشتی‌ای که به یک بایت محتوا هم نیاز ندارد. برچسب‌های مجاز آنجا سه تاست: یک Enum ثابت
+Verdict، یک Enum ثابت دلیل شکست، و نام سرویس.
 
 ---
 

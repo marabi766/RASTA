@@ -77,7 +77,11 @@ async function putToSignedUrl(url: string, body: Buffer, contentType: string): P
 async function uploadDocument(
   actor: Actor,
   options: { bytes?: Buffer; declaredType?: string; filename?: string } = {},
-): Promise<{ status: number; document: Record<string, unknown>; correlationId: string }> {
+): Promise<{
+  status: number;
+  document: Record<string, unknown>;
+  correlationId: string;
+}> {
   const bytes = options.bytes ?? pdfBytes();
   const declaredType = options.declaredType ?? 'application/pdf';
 
@@ -103,6 +107,43 @@ async function uploadDocument(
     document: registered.body as Record<string, unknown>,
     correlationId: registered.correlationId,
   };
+}
+
+/**
+ * Waits for the scan worker to reach a verdict on one document.
+ *
+ * Polling rather than a fixed sleep, and it is the honest shape of the
+ * assertion: scanning is asynchronous by design (ADR-014 step 4, ADR-049), so
+ * "it becomes downloadable" is a statement about a state that changes on its
+ * own, and a test that slept for a guessed interval would be asserting the
+ * guess.
+ *
+ * Generous, because the real work behind it is a 110 MB signature database in
+ * a container that may have started moments ago. Fails with the state it
+ * actually saw, so a timeout here names the problem rather than reading as a
+ * flaky wait.
+ */
+async function awaitScanned(
+  actor: Actor,
+  documentId: string,
+  timeoutMs = 120_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  let last: Record<string, unknown> = {};
+
+  while (Date.now() < deadline) {
+    const read = await actor.get(`/v1/documents/${documentId}`);
+    expect(read.status).toBe(200);
+    last = read.body as Record<string, unknown>;
+
+    if (last.scanState !== 'PENDING') return last;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+
+  throw new Error(
+    `The document was still ${String(last.scanState)} after ${timeoutMs}ms. ` +
+      'Is the ClamAV sidecar reachable from document-service?',
+  );
 }
 
 test.describe.serial('the document direct-upload lifecycle', () => {
@@ -165,18 +206,59 @@ test.describe.serial('the document direct-upload lifecycle', () => {
     // client declared.
     expect(document.sizeBytes).toBe(bytes.length);
     expect(document.contentType).toBe('application/pdf');
+
+    // Registered PENDING, and refused while it is (ADR-014, ADR-049). Asserted
+    // here rather than in a test of its own because that test would need an
+    // unscanned document, and obtaining one costs another upload — which is
+    // what pushed this serial suite past the gateway's twenty-per-hour
+    // document cap (`docs/06` § 6.9). The instant after registration is the
+    // one moment a PENDING document is guaranteed to exist.
+    expect(document.scanState).toBe('PENDING');
+
+    const tooEarly = await tenantA.post(`/v1/documents/${documentId}/download-url`);
+
+    // The worker could clear it between the two calls, so both outcomes are
+    // accepted and only the *unsafe* one is ruled out: a URL is never issued
+    // while the state is not CLEAN.
+    if (tooEarly.status === 422) {
+      expect(errorCode(tooEarly.body)).toBe('BUSINESS_RULE_VIOLATION');
+      expect(JSON.stringify(tooEarly.body)).toMatch(/until its security scan completes/i);
+      expect(tooEarly.body).not.toHaveProperty('downloadUrl');
+    } else {
+      const cleared = await tenantA.get(`/v1/documents/${documentId}`);
+      expect((cleared.body as Record<string, unknown>).scanState).toBe('CLEAN');
+    }
   });
 
-  test('says plainly that nothing examined the content', async ({ tenantA }) => {
-    // Q-18, stated on every document rather than buried in configuration, so
-    // an operator can see it from one record.
-    const read = await tenantA.get(`/v1/documents/${documentId}`);
-    expect(read.status).toBe(200);
+  test('is scanned by a real engine, and becomes downloadable only then', async ({ tenantA }) => {
+    // Q-18 answered end to end (ADR-049). Scanning is asynchronous, so this
+    // polls rather than asserting once: the document is registered `PENDING`,
+    // a background worker streams the object through clamd, and only a
+    // validated CLEAN verdict makes it downloadable.
+    //
+    // The two things this proves that no unit test can: that a real ClamAV is
+    // reachable from a real document-service in the running stack, and that
+    // the state a caller sees moves on its own without anybody asking it to.
+    const document = await awaitScanned(tenantA, documentId);
 
-    const document = read.body as Record<string, unknown>;
-    expect(document.scanState).toBe('NOT_SCANNED');
-    expect(document.scanInspectedContent).toBe(false);
-    expect(document.scanEngine).toBe('no-op-stub');
+    expect(document.scanState).toBe('CLEAN');
+    expect(document.scanInspectedContent).toBe(true);
+    expect(document.scanEngine).toBe('clamav');
+    // The engine and the database that cleared it, so the claim can be dated.
+    expect(String(document.scanSignatureVersion)).toMatch(/^\d+$/);
+
+    // And now the bytes come back — the capability the whole ADR exists to
+    // deliver, reachable for the first time here. Before ADR-049 no document
+    // in any deployment could be downloaded, because nothing ever issued a
+    // CLEAN verdict.
+    const link = await tenantA.post(`/v1/documents/${documentId}/download-url`);
+    expect(link.status).toBe(200);
+
+    const fetched = await fetch(String((link.body as Record<string, unknown>).downloadUrl));
+    expect(fetched.status).toBe(200);
+    expect(Buffer.from(await fetched.arrayBuffer()).equals(pdfBytes())).toBe(true);
+    // Never rendered: ADR-014 forbids serving stored content as HTML.
+    expect(fetched.headers.get('content-disposition')).toContain('attachment');
   });
 
   test('never returns the object key, the bucket or a URL in metadata', async ({ tenantA }) => {
@@ -187,23 +269,6 @@ test.describe.serial('the document direct-upload lifecycle', () => {
     const serialised = JSON.stringify(read.body);
     expect(serialised).not.toContain('rasta-documents');
     expect(serialised).not.toMatch(/X-Amz-Signature|documents\/ORG-/);
-  });
-
-  test('refuses the download, because nothing scanned it', async ({ tenantA }) => {
-    // The invariant, end to end, against the stack a deployment actually runs.
-    // ADR-014 keeps a file unavailable until malware scanning has completed;
-    // the MVP stub completes without inspecting anything, so the honest state
-    // is `NOT_SCANNED` and the honest answer is no.
-    //
-    // There is no environment variable that changes this. The one that used to
-    // — `DOCUMENT_ALLOW_UNSCANNED_DOWNLOAD`, which defaulted to allowing it —
-    // was removed rather than re-defaulted, so there is nothing to set.
-    const refusal = await tenantA.post(`/v1/documents/${documentId}/download-url`);
-
-    expect(refusal.status).toBe(422);
-    expect(errorCode(refusal.body)).toBe('BUSINESS_RULE_VIOLATION');
-    expect(JSON.stringify(refusal.body)).toMatch(/has not been scanned/i);
-    expect(refusal.body).not.toHaveProperty('downloadUrl');
   });
 
   test('does not let another organization see it, or ask for it', async ({ tenantB }) => {
@@ -236,8 +301,9 @@ test.describe.serial('the document direct-upload lifecycle', () => {
 
       // The event means "confirmed and registered", not "scanned and safe" —
       // and it says so, so no consumer has to read its existence as a clean
-      // bill of health.
-      expect(event.payload.scanState).toBe('NOT_SCANNED');
+      // bill of health. Since ADR-049 it is always `PENDING`: the outcome is a
+      // separate fact that arrives later as `DOCUMENT_SCANNED`.
+      expect(event.payload.scanState).toBe('PENDING');
 
       // Seven days in a log every service can read. A key or a signed URL here
       // would be a durable bypass of every check above.

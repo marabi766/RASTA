@@ -6,6 +6,10 @@ import { DocumentRepository } from '../src/document/document.repository';
 import { DocumentService } from '../src/document/document.service';
 import { S3ObjectStorage } from '../src/storage/s3.storage';
 import { NoOpMalwareScanner } from '../src/scanning/stub.scanner';
+import { ClamAvMalwareScanner } from '../src/scanning/clamav/clamav.scanner';
+import type { ClamdAddress } from '../src/scanning/clamav/clamd.client';
+import { ScanRepository } from '../src/scanning/scan.repository';
+import { ScanWorker } from '../src/scanning/scan.worker';
 import { loadDocumentEnv, type DocumentEnv } from '../src/config/env';
 import type { ObjectStorage } from '../src/storage/storage.port';
 import type { MalwareScanner } from '../src/scanning/scanner.port';
@@ -84,6 +88,9 @@ export interface Wiring {
   events: EventPublisher;
   repository: DocumentRepository;
   documents: DocumentService;
+  scans: ScanRepository;
+  /** The scan worker, driven by `tick()` rather than by its timer. */
+  worker: ScanWorker;
 }
 
 /**
@@ -92,6 +99,12 @@ export interface Wiring {
  * Not through Nest: booting the container would start the outbox relay, which
  * drains every pending row and makes the outbox assertions in these suites
  * depend on a timer. economic-service learned that one under `--coverage`.
+ *
+ * The scan worker is constructed but **not started** for the same reason. A
+ * running poll timer would race every assertion about a PENDING document, and
+ * a test that has to sleep to be right is a test that is flaky on a slow CI
+ * runner. Each suite calls `worker.tick()` where it wants the queue to move,
+ * which is also how an operator drains it by hand during an incident.
  */
 export function wire(
   prisma: PrismaService,
@@ -102,9 +115,103 @@ export function wire(
   const scanner = options.scanner ?? new NoOpMalwareScanner();
   const events = new EventPublisher(env);
   const repository = new DocumentRepository(prisma);
-  const documents = new DocumentService(prisma, repository, events, env, storage, scanner);
+  const documents = new DocumentService(prisma, repository, events, env, storage);
+  const scans = new ScanRepository(prisma);
+  const worker = new ScanWorker(prisma, scans, events, env, storage, scanner, silentLogger());
 
-  return { prisma, env, storage, scanner, events, repository, documents };
+  return { prisma, env, storage, scanner, events, repository, documents, scans, worker };
+}
+
+/**
+ * A logger that records nothing.
+ *
+ * These suites deliberately provoke scanner outages, timeouts and infections,
+ * each of which logs at `warn` or `error`. Left on, one run prints several
+ * hundred structured records and buries the assertion that actually failed.
+ * `VERBOSE_TEST_LOGS=1` brings them back, which is what to do when diagnosing
+ * a scan that took the wrong branch.
+ */
+function silentLogger() {
+  if (process.env.VERBOSE_TEST_LOGS) {
+    // eslint-disable-next-line no-console
+    const emit =
+      (level: string) =>
+      (...args: unknown[]) =>
+        console.log(level, ...args);
+    return {
+      debug: emit('debug'),
+      info: emit('info'),
+      warn: emit('warn'),
+      error: emit('error'),
+      // JUSTIFIED-ANY: a structural stand-in for @rasta/logging's Logger,
+      // which carries child-logger and serializer members no suite calls.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+  }
+  const noop = () => undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return { debug: noop, info: noop, warn: noop, error: noop } as any;
+}
+
+// ---------------------------------------------------------------------------
+// ClamAV
+// ---------------------------------------------------------------------------
+
+/**
+ * Where clamd is, for the suites that need a real one.
+ *
+ * A socket when one is configured — which is what CI on Linux uses, so the
+ * production transport is the one proven there — and TCP otherwise, which is
+ * the only option on a Windows host where a Linux container's socket cannot be
+ * reached.
+ */
+export function clamdAddressForTests(): ClamdAddress {
+  const socketPath = process.env.DOCUMENT_CLAMAV_SOCKET_PATH;
+  if (socketPath) return { transport: 'unix', socketPath };
+
+  return {
+    transport: 'tcp',
+    host: process.env.DOCUMENT_CLAMAV_HOST ?? '127.0.0.1',
+    port: Number(process.env.DOCUMENT_CLAMAV_PORT ?? 3310),
+  };
+}
+
+/**
+ * A real ClamAV scanner pointed at the local or CI clamd.
+ *
+ * The freshness window is deliberately wide here and only here. CI runs the
+ * pinned image with freshclam **off** so test execution is deterministic and
+ * no suite downloads 110 MB, which means the database is frozen at whatever
+ * the digest carries and ages with the pin. Enforcing the production 48-hour
+ * window against a frozen database would turn every scan into
+ * `STALE_SIGNATURES` on a schedule nobody chose.
+ *
+ * The freshness rule itself is not weakened by this: it is proven directly in
+ * `clamav.scanner.spec.ts` against a controlled clock, the production default
+ * is asserted in `env.spec.ts`, and that freshclam genuinely updates is proven
+ * by its own CI job rather than by these suites.
+ */
+export function realClamAvScanner(overrides: Partial<ClamAvOptions> = {}) {
+  return new ClamAvMalwareScanner({
+    address: clamdAddressForTests(),
+    timeoutMs: 60_000,
+    chunkBytes: 65_536,
+    maxBytes: 32 * 1024 * 1024,
+    signatureMaxAgeSeconds: 365 * 24 * 3600,
+    versionCacheSeconds: 60,
+    ...overrides,
+  });
+}
+
+type ClamAvOptions = ConstructorParameters<typeof ClamAvMalwareScanner>[0];
+
+/**
+ * Whether a real clamd is reachable, so a suite can say so rather than fail
+ * with a timeout that names the wrong thing.
+ */
+export async function clamdIsReachable(): Promise<boolean> {
+  const health = await realClamAvScanner({ timeoutMs: 5_000 }).health();
+  return health.available;
 }
 
 /**

@@ -319,6 +319,104 @@ jobs:
               mc anonymous set none rasta/rasta-documents
             "
 
+      - name: Start ClamAV on a Unix socket
+        # The production transport, proven here rather than only described.
+        #
+        # ADR-049 makes a Unix domain socket on a volume shared inside one Pod
+        # the production boundary, because the clamd protocol authenticates
+        # nobody and a TCP listener's only protection would be "nothing else is
+        # on this network" — the assumption AGENTS.md S-08 forbids.
+        # `document-service` refuses `DOCUMENT_CLAMAV_HOST` outright when
+        # NODE_ENV is production.
+        #
+        # A Linux runner can share a socket with a container through a bind
+        # mount, so CI exercises the transport a deployment uses. A developer
+        # machine on Windows cannot, and falls back to the loopback TCP
+        # listener `docker-compose.yml` publishes.
+        #
+        # Pinned by digest, not by tag: `clamav/clamav:1.5.4` is rebuilt
+        # whenever its base or bundled signature set changes, so a tag means a
+        # different scanner on a different day with no commit to show for it.
+        # Bumping it is a reviewable edit to this line and to the compose file.
+        #
+        # `--user 100:101` with the entrypoint overridden to `clamd`: the
+        # image's own `/init` needs root at start to create /run/clamav and
+        # link /var/lock, and running the whole container as root to get that
+        # is a poor trade.
+        #
+        # **freshclam is deliberately not running here.** The image ships the
+        # reviewed CVD set inside the pinned digest, so the suites start from a
+        # known database and no test downloads ~110 MB from the ClamAV mirrors.
+        # That is what makes these runs deterministic and fast; that updating
+        # actually works is proven by the `clamav-signatures` job below, which
+        # runs freshclam for real and is separate on purpose.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/clamav-socket
+          # World-writable, because the runner's user and the container's
+          # `clamav` (uid 100) are different and CI has no shared group to hang
+          # the permission on. In production the socket sits on a Pod-local
+          # emptyDir shared by exactly two containers and is mode 0660 with a
+          # shared group — see docs/12-deployment-architecture.md.
+          chmod 0777 /tmp/clamav-socket
+
+          docker run -d --name rasta-ci-clamav \
+            --user 100:101 \
+            -e TZ=Etc/UTC \
+            -v /tmp/clamav-socket:/run/clamav \
+            -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
+            --entrypoint clamd \
+            clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591
+
+          # Loading ~110 MB of signatures takes a while, and the socket exists
+          # before the engine is ready — so this asks clamd itself, which
+          # answers PING only once it can scan.
+          for attempt in $(seq 1 60); do
+            if docker exec rasta-ci-clamav clamdscan --ping 1 >/dev/null 2>&1; then
+              echo "clamd ready after ${attempt} attempt(s)"
+              docker exec rasta-ci-clamav clamdscan --version
+              break
+            fi
+            if [ "${attempt}" -eq 60 ]; then
+              echo 'clamd did not become ready'
+              docker logs --tail 100 rasta-ci-clamav
+              exit 1
+            fi
+            sleep 5
+          done
+
+          # Widen the socket so the runner can open it.
+          #
+          # clamd creates it 0660 owned by uid 100 / gid 101, which is right:
+          # in production the two containers share a Pod and a group, and
+          # `fsGroup` makes filesystem permissions the access control
+          # (ADR-049, docs/deployment). A GitHub runner has no group in common
+          # with the container, so the same socket is unopenable to it and
+          # every document suite fails with CONNECTION_FAILED — which is what
+          # happened on the first run of this job.
+          #
+          # This widening is CI-only and applied *after* startup, so the
+          # production config file keeps its 0660 and nothing about the
+          # deployment posture changes. The socket lives on a runner-local tmp
+          # path for the length of one job.
+          docker exec rasta-ci-clamav chmod 0666 /run/clamav/clamd.sock
+
+          # Prove the runner itself can speak to it, rather than discovering
+          # it 60 test failures later. A setup step that only checks the
+          # container has checked the wrong side of the boundary.
+          node -e '
+            const net = require("node:net");
+            const s = net.connect({ path: "/tmp/clamav-socket/clamd.sock" });
+            s.on("connect", () => s.write("zPING" + String.fromCharCode(0)));
+            s.on("data", (d) => {
+              const reply = d.toString().split(String.fromCharCode(0)).join("").trim();
+              console.log("clamd answered the runner:", reply);
+              process.exit(reply === "PONG" ? 0 : 1);
+            });
+            s.on("error", (e) => { console.error("runner cannot reach clamd:", e.code); process.exit(1); });
+            setTimeout(() => { console.error("clamd did not answer the runner"); process.exit(1); }, 15000);
+          '
+
       - name: Apply migrations
         run: pnpm run db:migrate
         env:
@@ -350,6 +448,18 @@ jobs:
           S3_SECRET_KEY: rasta_minio_ci_password
           S3_BUCKET_DOCUMENTS: rasta-documents
           S3_FORCE_PATH_STYLE: 'true'
+          # ADR-049. The socket is the production transport; document-service
+          # refuses a TCP scanner when NODE_ENV is production, so proving it
+          # here is proving what a deployment uses.
+          DOCUMENT_CLAMAV_SOCKET_PATH: /tmp/clamav-socket/clamd.sock
+          # The pinned image's database is frozen at its digest and freshclam is
+          # off here for determinism, so it ages with the pin. Raised with a
+          # written reason rather than left to fail every scan on a schedule
+          # nobody chose. The production default is 48 hours and is asserted in
+          # `env.spec.ts`; the rule itself is proven against a controlled clock
+          # in `clamav.scanner.spec.ts`; and that freshclam updates at all is
+          # proven by the `clamav-signatures` job.
+          DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: '8760'
           REDIS_URL: redis://localhost:6379
 
       - name: Economic coverage gate
@@ -410,6 +520,18 @@ jobs:
           S3_SECRET_KEY: rasta_minio_ci_password
           S3_BUCKET_DOCUMENTS: rasta-documents
           S3_FORCE_PATH_STYLE: 'true'
+          # ADR-049. The socket is the production transport; document-service
+          # refuses a TCP scanner when NODE_ENV is production, so proving it
+          # here is proving what a deployment uses.
+          DOCUMENT_CLAMAV_SOCKET_PATH: /tmp/clamav-socket/clamd.sock
+          # The pinned image's database is frozen at its digest and freshclam is
+          # off here for determinism, so it ages with the pin. Raised with a
+          # written reason rather than left to fail every scan on a schedule
+          # nobody chose. The production default is 48 hours and is asserted in
+          # `env.spec.ts`; the rule itself is proven against a controlled clock
+          # in `clamav.scanner.spec.ts`; and that freshclam updates at all is
+          # proven by the `clamav-signatures` job.
+          DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: '8760'
 
       # These are called out separately from the rest of the suite so a failure
       # names itself in the job list. A tenant-isolation failure is a data
@@ -458,6 +580,18 @@ jobs:
           S3_SECRET_KEY: rasta_minio_ci_password
           S3_BUCKET_DOCUMENTS: rasta-documents
           S3_FORCE_PATH_STYLE: 'true'
+          # ADR-049. The socket is the production transport; document-service
+          # refuses a TCP scanner when NODE_ENV is production, so proving it
+          # here is proving what a deployment uses.
+          DOCUMENT_CLAMAV_SOCKET_PATH: /tmp/clamav-socket/clamd.sock
+          # The pinned image's database is frozen at its digest and freshclam is
+          # off here for determinism, so it ages with the pin. Raised with a
+          # written reason rather than left to fail every scan on a schedule
+          # nobody chose. The production default is 48 hours and is asserted in
+          # `env.spec.ts`; the rule itself is proven against a controlled clock
+          # in `clamav.scanner.spec.ts`; and that freshclam updates at all is
+          # proven by the `clamav-signatures` job.
+          DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: '8760'
 
       - name: Migration reversibility
         # AGENTS.md § 7 requires every migration to be reversible, and until
@@ -694,6 +828,61 @@ jobs:
               mc anonymous set none rasta/rasta-documents
             "
 
+      - name: Start ClamAV on a Unix socket
+        # The document scenario ends with a downloadable file, and only a
+        # CLEAN verdict authorizes one (ADR-014, ADR-049). Without a scanner
+        # here every document would sit PENDING and the download step would be
+        # correctly refused — so this container is what makes the end-to-end
+        # path reachable at all, rather than a convenience.
+        #
+        # Same pinned digest, same non-root entrypoint and same socket
+        # transport as the integration job. See that job for why each of those
+        # is the way it is.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/clamav-socket
+          chmod 0777 /tmp/clamav-socket
+
+          docker run -d --name rasta-e2e-clamav \
+            --user 100:101 \
+            -e TZ=Etc/UTC \
+            -v /tmp/clamav-socket:/run/clamav \
+            -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
+            --entrypoint clamd \
+            clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591
+
+          for attempt in $(seq 1 60); do
+            if docker exec rasta-e2e-clamav clamdscan --ping 1 >/dev/null 2>&1; then
+              echo "clamd ready after ${attempt} attempt(s)"
+              break
+            fi
+            if [ "${attempt}" -eq 60 ]; then
+              echo 'clamd did not become ready'
+              docker logs --tail 100 rasta-e2e-clamav
+              exit 1
+            fi
+            sleep 5
+          done
+
+          # See the integration job for why this is needed and why it changes
+          # nothing about the production posture: the runner shares no group
+          # with the container, so the 0660 socket clamd creates is unopenable
+          # to the document-service process this job starts.
+          docker exec rasta-e2e-clamav chmod 0666 /run/clamav/clamd.sock
+
+          node -e '
+            const net = require("node:net");
+            const s = net.connect({ path: "/tmp/clamav-socket/clamd.sock" });
+            s.on("connect", () => s.write("zPING" + String.fromCharCode(0)));
+            s.on("data", (d) => {
+              const reply = d.toString().split(String.fromCharCode(0)).join("").trim();
+              console.log("clamd answered the runner:", reply);
+              process.exit(reply === "PONG" ? 0 : 1);
+            });
+            s.on("error", (e) => { console.error("runner cannot reach clamd:", e.code); process.exit(1); });
+            setTimeout(() => { console.error("clamd did not answer the runner"); process.exit(1); }, 15000);
+          '
+
       - name: Start economic-service, marketplace-service, document-service and api-gateway
         # From `dist`, the same artefact the container image runs, rather than
         # from a watch-mode dev server. Started here rather than by Playwright's
@@ -729,6 +918,18 @@ jobs:
           S3_SECRET_KEY: rasta_minio_ci_password
           S3_BUCKET_DOCUMENTS: rasta-documents
           S3_FORCE_PATH_STYLE: 'true'
+          # ADR-049. The socket is the production transport; document-service
+          # refuses a TCP scanner when NODE_ENV is production, so proving it
+          # here is proving what a deployment uses.
+          DOCUMENT_CLAMAV_SOCKET_PATH: /tmp/clamav-socket/clamd.sock
+          # The pinned image's database is frozen at its digest and freshclam is
+          # off here for determinism, so it ages with the pin. Raised with a
+          # written reason rather than left to fail every scan on a schedule
+          # nobody chose. The production default is 48 hours and is asserted in
+          # `env.spec.ts`; the rule itself is proven against a controlled clock
+          # in `clamav.scanner.spec.ts`; and that freshclam updates at all is
+          # proven by the `clamav-signatures` job.
+          DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: '8760'
           # api-gateway validates every service URL at boot, including the
           # fourteen services that do not exist yet. They are unreachable and
           # unrouted-to by this suite; the values only have to parse.
@@ -825,6 +1026,8 @@ jobs:
           docker logs --tail 200 rasta-e2e-keycloak || true
           echo '--- minio ---'
           docker logs --tail 100 rasta-e2e-minio || true
+          echo '--- clamav ---'
+          docker logs --tail 100 rasta-e2e-clamav || true
 
       - name: Playwright report
         if: failure()
@@ -833,6 +1036,87 @@ jobs:
           name: playwright-report
           path: tests/e2e/playwright-report
           retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # The malware scanner's own supply chain (ADR-049).
+  #
+  # Separate from `integration` on purpose, and the separation is the point.
+  # Those suites run the pinned image with freshclam **off**, so they start
+  # from the reviewed database inside the digest, download nothing, and produce
+  # the same result on every run. That determinism is bought by not exercising
+  # signature updating at all — so updating is proven here instead, once, where
+  # a failure names itself rather than surfacing as a flaky scan.
+  #
+  # It also scans the image. `document-service` does not embed ClamAV, so the
+  # eight-service `containers` matrix below neither builds nor scans it: that
+  # matrix is derived from `services/*/Dockerfile` and ClamAV is an external
+  # sidecar dependency, not a ninth Rasta service. Left there, a pinned image
+  # we deploy alongside the platform would be the one container nobody looked
+  # at.
+  # ---------------------------------------------------------------------------
+  clamav-signatures:
+    name: ClamAV image scan and signature freshness
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Pull the pinned image
+        # By digest, so this job scans exactly what the integration job, the
+        # E2E job and `docker-compose.yml` run. A tag here would scan a
+        # different image than the one deployed and report on it confidently.
+        run: |
+          set -euo pipefail
+          docker pull clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591
+          docker tag clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591 \
+            rasta/clamav-pinned:ci
+
+      - name: Scan the image
+        # The same severity and the same `exit-code: 1` as every Rasta image
+        # below — the threshold is not relaxed because the image is somebody
+        # else's. When it fires, the fix is to bump the pinned digest, which is
+        # a reviewable edit rather than a silent drift.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: rasta/clamav-pinned:ci
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Record the engine and signature versions the pin carries
+        # Evidence rather than decoration: ADR-049 requires the image source
+        # and version to be recorded, and a run log that names the engine and
+        # the database build is what makes a later "which signatures cleared
+        # this document" question answerable.
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh rasta/clamav-pinned:ci -c \
+            'clamd --version; ls -l /var/lib/clamav/'
+
+      - name: Verify freshclam can update the database
+        # The check the deterministic suites deliberately do not make.
+        #
+        # A failing updater is silent by nature: scanning keeps working with an
+        # old database and keeps answering `OK`, and the only symptom is the
+        # signature age climbing until `document-service` stops issuing clean
+        # verdicts. So this runs freshclam for real against the mirrors, from
+        # the image's own database, and fails if it cannot.
+        #
+        # `--no-warnings` is not passed and the output is kept: "up to date" is
+        # a pass, and so is a downloaded increment. What is not a pass is a
+        # non-zero exit.
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e TZ=Etc/UTC \
+            -v "$PWD/infrastructure/docker/clamav/freshclam.conf:/etc/clamav/freshclam.conf:ro" \
+            --entrypoint freshclam \
+            rasta/clamav-pinned:ci 2>&1 | tee /tmp/freshclam.log
+
+          # freshclam exits 0 both when it updated and when nothing was newer,
+          # so the log is checked for evidence it actually reached a mirror
+          # rather than failing quietly into a success.
+          grep -Eq 'is up-to-date|updated \(version' /tmp/freshclam.log
 
   # ---------------------------------------------------------------------------
   # Container build and image scan. Only on main, because it is the slowest

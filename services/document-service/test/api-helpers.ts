@@ -13,6 +13,7 @@ import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { MALWARE_SCANNER } from '../src/tokens';
+import { ScanWorker } from '../src/scanning/scan.worker';
 import type { MalwareScanner } from '../src/scanning/scanner.port';
 import { databaseUrl } from './helpers';
 
@@ -66,6 +67,16 @@ export interface ApiHarness {
   app: INestApplication;
   prisma: PrismaService;
   publisher: InMemoryEventPublisher;
+  /**
+   * The scan worker from the booted graph, for driving the queue by hand.
+   *
+   * Its poll timer is off (`DOCUMENT_SCAN_WORKER_ENABLED=false` below), so a
+   * document stays `PENDING` until a test asks for it to move. That is the
+   * only way these assertions can be deterministic: a running timer would race
+   * every "this is not downloadable yet" check, and a suite that has to sleep
+   * to be right is one that is flaky on a slow runner.
+   */
+  worker: ScanWorker;
   close(): Promise<void>;
 }
 
@@ -193,6 +204,23 @@ function applyEnvironment(): void {
   process.env.S3_SECRET_KEY ??= 'rasta_minio_dev_password';
   process.env.S3_BUCKET_DOCUMENTS ??= 'rasta-documents';
   process.env.S3_FORCE_PATH_STYLE = 'true';
+
+  // Real ClamAV, because `AppModule` composes it and this file's whole point
+  // is booting the composition a deployment actually gets (ADR-049). CI sets
+  // the socket path; a developer machine falls back to the loopback TCP
+  // listener `docker compose` publishes, which is the only transport a Linux
+  // container can offer a Node process on Windows.
+  if (!process.env.DOCUMENT_CLAMAV_SOCKET_PATH) {
+    process.env.DOCUMENT_CLAMAV_HOST ??= '127.0.0.1';
+    process.env.DOCUMENT_CLAMAV_PORT ??= '3310';
+  }
+  // Frozen at the pinned image's digest in CI, where freshclam is off for
+  // determinism. The freshness rule itself is proven in
+  // `clamav.scanner.spec.ts` against a controlled clock and its production
+  // default in `env.spec.ts`.
+  process.env.DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS ??= '8760';
+  // The timer stays off; tests call `worker.tick()`. See `ApiHarness.worker`.
+  process.env.DOCUMENT_SCAN_WORKER_ENABLED = 'false';
 }
 
 const inertRelay = { start: () => undefined, stop: async () => undefined };
@@ -202,10 +230,11 @@ export interface StartApiOptions {
    * A scanner to bind instead of the one `AppModule` composes.
    *
    * Omit it — and every suite testing production behaviour must omit it — to
-   * run the real `NoOpMalwareScanner`. Pass `AlwaysCleanScanner` only where
-   * the point of the test is the download path itself, which is otherwise
-   * unreachable: `canDownload` allows `CLEAN` and the MVP stub records
-   * `NOT_SCANNED`.
+   * run the real `ClamAvMalwareScanner` the composition root selects.
+   * `AlwaysCleanScanner` is for the tests whose subject is the download path
+   * and its HTTP surface rather than the engine, so that they do not depend on
+   * a scanner container being reachable; the engine itself, including EICAR,
+   * is exercised for real in `clamav-scan.int-spec.ts`.
    *
    * This override exists in `test/` and nowhere else. There is no environment
    * variable and no production code path that can produce the same effect.
@@ -269,6 +298,7 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
     app,
     prisma: moduleRef.get(PrismaService),
     publisher,
+    worker: moduleRef.get(ScanWorker),
     close: async () => {
       await app.close();
     },

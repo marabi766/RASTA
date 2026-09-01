@@ -85,6 +85,65 @@ export const deleteDocumentSchema = z
 
 export type DeleteDocumentDto = z.infer<typeof deleteDocumentSchema>;
 
+/**
+ * The document as a caller sees it, and the schema the OpenAPI document
+ * publishes.
+ *
+ * One definition, not two. `DocumentView` is inferred from this rather than
+ * declared beside it, so the shape the service returns and the shape the
+ * contract advertises cannot drift — the failure that put a `201` in the
+ * published document for an endpoint that answers `200` (commit cb8d435).
+ *
+ * ## What is missing, deliberately
+ *
+ * No object key, no bucket, no endpoint, no signed URL. A caller who could
+ * read the key could try to reach the object with credentials obtained
+ * elsewhere, bypassing every check this service makes, so the key never
+ * crosses the API boundary at all (AGENTS.md S-09, ADR-014).
+ *
+ * ## What the scan fields mean
+ *
+ * `scanState` is the real lifecycle state (ADR-049) and a client must treat
+ * everything but `CLEAN` as undownloadable — the download endpoint enforces
+ * it, and a client that assumed otherwise would show a download button that
+ * always fails. `PENDING` is what every document is registered in, because
+ * scanning is asynchronous.
+ */
+export const documentViewSchema = z.object({
+  id: z.string(),
+  organizationId: z.string(),
+  documentClass: z.string(),
+  status: z.enum(['REGISTERED', 'DELETED']),
+  contentType: z.string(),
+  sizeBytes: z.number().int(),
+  filename: z.string(),
+
+  /** The only value that permits a download is `CLEAN`. */
+  scanState: z.enum(['PENDING', 'NOT_SCANNED', 'CLEAN', 'INFECTED', 'FAILED']),
+  /** Whether an engine reached a conclusion about these bytes. */
+  scanInspectedContent: z.boolean(),
+  /** The engine that reached it — `clamav`, or `no-op-stub` for a historic row. */
+  scanEngine: z.string().nullable(),
+  /** The signature database that answered, so a clean verdict can be dated. */
+  scanSignatureVersion: z.string().nullable(),
+  /** The signature name, for an infection. A database entry name, not a message. */
+  scanSignature: z.string().nullable(),
+  /** A fixed reason code when scanning failed. Never engine text. */
+  scanFailureReason: z.string().nullable(),
+  /** When the quarantine policy was applied. Infections only. */
+  quarantinedAt: z.string().nullable(),
+  scannedAt: z.string().nullable(),
+
+  ownerResourceType: z.string().nullable(),
+  ownerResourceId: z.string().nullable(),
+  createdAt: z.string(),
+  createdBy: z.string(),
+  deletedAt: z.string().nullable(),
+  deletionReason: z.string().nullable(),
+});
+
+export type DocumentView = z.infer<typeof documentViewSchema>;
+
 export const listDocumentsQuerySchema = z
   .object({
     documentClass: z.enum(DOCUMENT_CLASSES).optional(),
