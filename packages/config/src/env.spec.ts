@@ -1,4 +1,10 @@
-import { baseEnvSchema, databaseEnvSchema, loadEnv, EnvValidationError } from './env';
+import {
+  baseEnvSchema,
+  databaseEnvSchema,
+  kafkaEnvSchema,
+  loadEnv,
+  EnvValidationError,
+} from './env';
 
 describe('loadEnv', () => {
   const validBase = {
@@ -68,5 +74,78 @@ describe('loadEnv', () => {
 
     expect(env.DATABASE_POOL_SIZE).toBe(10);
     expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBe(15_000);
+  });
+});
+
+/**
+ * The two boolean flags the shared schemas own (D-020).
+ *
+ * Both read through `booleanEnv`. They used `z.coerce.boolean()`, under which
+ * every non-empty string is `true` — so an operator who wrote
+ * `OTEL_TRACES_ENABLED=false` kept exporting spans, and one who wrote
+ * `KAFKA_SCHEMA_STRICT=false` to ship past a schema mismatch stayed strict.
+ * Neither flag could be turned off, and nothing said so.
+ *
+ * These assertions fail against the coercion: that is what makes them a
+ * regression test rather than a description.
+ */
+describe('boolean flags in the shared schemas', () => {
+  const base = { SERVICE_NAME: 'asset-service', PORT: '3103' } as NodeJS.ProcessEnv;
+  const kafka = { KAFKA_BROKERS: 'localhost:9092', KAFKA_CLIENT_ID: 'asset' } as NodeJS.ProcessEnv;
+
+  describe('OTEL_TRACES_ENABLED', () => {
+    const load = (value?: string) =>
+      loadEnv(baseEnvSchema, {
+        ...base,
+        ...(value === undefined ? {} : { OTEL_TRACES_ENABLED: value }),
+      });
+
+    it('is true when absent — tracing is opt-out, so an unconfigured service stays visible', () => {
+      expect(load().OTEL_TRACES_ENABLED).toBe(true);
+    });
+
+    it('reads "true" as true', () => {
+      expect(load('true').OTEL_TRACES_ENABLED).toBe(true);
+    });
+
+    it('reads "false" as false', () => {
+      expect(load('false').OTEL_TRACES_ENABLED).toBe(false);
+    });
+
+    it.each(['FALSE', '0', 'no', 'off', ' false '])('reads %p as false', (value) => {
+      expect(load(value).OTEL_TRACES_ENABLED).toBe(false);
+    });
+
+    it.each(['maybe', 'enabled', '2'])('refuses %p rather than guessing', (value) => {
+      expect(() => load(value)).toThrow(EnvValidationError);
+    });
+  });
+
+  describe('KAFKA_SCHEMA_STRICT', () => {
+    const load = (value?: string) =>
+      loadEnv(kafkaEnvSchema, {
+        ...kafka,
+        ...(value === undefined ? {} : { KAFKA_SCHEMA_STRICT: value }),
+      });
+
+    it('is true when absent — an unvalidated event contract is not a contract', () => {
+      expect(load().KAFKA_SCHEMA_STRICT).toBe(true);
+    });
+
+    it('reads "true" as true', () => {
+      expect(load('true').KAFKA_SCHEMA_STRICT).toBe(true);
+    });
+
+    it('reads "false" as false', () => {
+      expect(load('false').KAFKA_SCHEMA_STRICT).toBe(false);
+    });
+
+    it.each(['FALSE', '0', 'no', 'off'])('reads %p as false', (value) => {
+      expect(load(value).KAFKA_SCHEMA_STRICT).toBe(false);
+    });
+
+    it.each(['maybe', 'strict', '2'])('refuses %p rather than guessing', (value) => {
+      expect(() => load(value)).toThrow(EnvValidationError);
+    });
   });
 });

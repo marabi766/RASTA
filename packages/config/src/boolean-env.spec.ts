@@ -14,13 +14,12 @@ import { booleanEnv } from './env';
  * `?includeDeleted=false` asked for deleted documents to be excluded and
  * included them.
  *
- * Five platform environment flags — `OTEL_TRACES_ENABLED`,
- * `KAFKA_SCHEMA_STRICT`, `GATEWAY_RATE_LIMIT_FAIL_OPEN`,
- * `KEYCLOAK_SYNC_ENABLED` and `MARKETPLACE_TEMPORAL_ENABLED` — still use the
- * coercion and are still subject to this. They are deliberately not changed
- * here: each one alters the runtime behaviour of a running service, and that
- * belongs in its own atomic change with its own assessment rather than as a
- * side effect of a document-service PR. `PROJECT_MEMORY.md` records it.
+ * Every boolean environment flag on the platform now reads through this
+ * parser (D-020) — the five that used `z.coerce.boolean()` and the three that
+ * had hand-rolled `z.string().transform(...)` equivalents, which accepted one
+ * spelling each and silently guessed at the rest. Each flag is additionally
+ * asserted at its own service's configuration boundary, because that is where
+ * an operator's value actually arrives.
  */
 
 const schema = z.object({ FLAG: booleanEnv(true) });

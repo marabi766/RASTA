@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   authEnvSchema,
   baseEnvSchema,
+  booleanEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
@@ -69,10 +70,7 @@ export const economicEnvSchema = baseEnvSchema
      * than silently ignored — a rule that exists and does nothing is a control
      * that claims something it does not have.
      */
-    ECONOMIC_REWARD_CASHBACK_ENABLED: z
-      .string()
-      .default('false')
-      .transform((value) => value === 'true'),
+    ECONOMIC_REWARD_CASHBACK_ENABLED: booleanEnv(false),
 
     /** How long a stored idempotency key is honoured (docs/06 § 6.8). */
     ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
@@ -88,10 +86,7 @@ export const economicEnvSchema = baseEnvSchema
      * with the ledger is an incident for a human, not a number to quietly
      * correct.
      */
-    ECONOMIC_BALANCE_AUDIT_ENABLED: z
-      .string()
-      .default('true')
-      .transform((value) => value !== 'false'),
+    ECONOMIC_BALANCE_AUDIT_ENABLED: booleanEnv(true),
 
     /** How often the reconciliation runs, in seconds. */
     ECONOMIC_BALANCE_AUDIT_INTERVAL_SECONDS: z.coerce

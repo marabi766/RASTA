@@ -65,24 +65,20 @@ export const redisUrlSchema = urlWithProtocol(['redis:', 'rediss:'], 'Redis URL'
  * refuses anything else rather than guessing — a typo in a security switch
  * should fail at boot rather than silently pick a default.
  *
- * Five platform environment flags still use `z.coerce.boolean()` and are
- * therefore subject to that trap — every non-empty string, `"false"`
- * included, parses as `true`:
+ * This is the single boolean environment parser for the platform (D-020).
+ * Every boolean environment flag reads through it; a service that hand-rolls
+ * `z.string().transform((v) => v !== 'false')` reintroduces the same class of
+ * defect one spelling at a time — `FLAG=0`, `FLAG=off` and `FLAG=FALSE` all
+ * come back `true` under that transform.
  *
- *   - `OTEL_TRACES_ENABLED`            (`baseEnvSchema`, below)
- *   - `KAFKA_SCHEMA_STRICT`            (`kafkaEnvSchema`, below)
- *   - `GATEWAY_RATE_LIMIT_FAIL_OPEN`   (`services/api-gateway`)
- *   - `KEYCLOAK_SYNC_ENABLED`          (`services/identity-service`)
- *   - `MARKETPLACE_TEMPORAL_ENABLED`   (`services/marketplace-service`)
+ * The accepted spellings, trimmed and case-insensitive:
  *
- * They are left alone deliberately. Each one changes the runtime behaviour of
- * a running service the moment it starts parsing correctly — an operator who
- * wrote `OTEL_TRACES_ENABLED=false` has been running with tracing on, and
- * fixing the parser turns it off. That is a deployment-affecting change and
- * belongs in its own atomic task: inventory every boolean environment
- * variable repository-wide, move them all to one tested parser, and assess
- * each resulting behaviour change before it ships. Doing it as a side effect
- * of an unrelated PR is how a silent configuration flip reaches production.
+ *   - true:  `true`, `1`, `yes`, `on`
+ *   - false: `false`, `0`, `no`, `off`, and an empty value
+ *
+ * An empty value is `false`, not "unset": `FLAG=` in a `.env` file is an
+ * operator writing something deliberate, and it must not fall through to a
+ * `true` default. Anything else is a validation error.
  */
 export function booleanEnv(defaultValue: boolean) {
   return z
@@ -115,7 +111,7 @@ export const baseEnvSchema = z.object({
   // Observability — tracing is opt-out rather than opt-in so that a service
   // deployed without OTel config is still visible, just without a collector.
   OTEL_EXPORTER_OTLP_ENDPOINT: httpUrlSchema.optional(),
-  OTEL_TRACES_ENABLED: z.coerce.boolean().default(true),
+  OTEL_TRACES_ENABLED: booleanEnv(true),
   OTEL_SERVICE_NAMESPACE: z.string().default('rasta'),
 });
 
@@ -133,7 +129,7 @@ export const kafkaEnvSchema = z.object({
   KAFKA_BROKERS: z.string().min(1),
   KAFKA_CLIENT_ID: z.string().min(1),
   KAFKA_CONSUMER_GROUP: z.string().min(1).optional(),
-  KAFKA_SCHEMA_STRICT: z.coerce.boolean().default(true),
+  KAFKA_SCHEMA_STRICT: booleanEnv(true),
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(50).default(500),
   OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
 });

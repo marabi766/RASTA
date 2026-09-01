@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   baseEnvSchema,
+  booleanEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
   authEnvSchema,
@@ -29,7 +30,7 @@ export const identityEnvSchema = baseEnvSchema
      * call is skipped. Lets unit and API tests run without an identity
      * provider; never true in a deployed environment.
      */
-    KEYCLOAK_SYNC_ENABLED: z.coerce.boolean().default(true),
+    KEYCLOAK_SYNC_ENABLED: booleanEnv(true),
 
     CORS_ORIGINS: z.string().default(''),
   });

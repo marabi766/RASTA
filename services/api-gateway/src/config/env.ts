@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { authEnvSchema, baseEnvSchema, redisEnvSchema, loadEnv } from '@rasta/config';
+import { authEnvSchema, baseEnvSchema, booleanEnv, redisEnvSchema, loadEnv } from '@rasta/config';
 import { serviceUrlEnvSchema } from './routes';
 
 /**
@@ -38,7 +38,7 @@ export const gatewayEnvSchema = baseEnvSchema
      * degradation into a full outage, so the default is to let traffic
      * through and alert. Set false where abuse risk outweighs availability.
      */
-    GATEWAY_RATE_LIMIT_FAIL_OPEN: z.coerce.boolean().default(true),
+    GATEWAY_RATE_LIMIT_FAIL_OPEN: booleanEnv(true),
   });
 
 export type GatewayEnv = z.infer<typeof gatewayEnvSchema>;

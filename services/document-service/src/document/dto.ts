@@ -157,9 +157,10 @@ export const listDocumentsQuerySchema = z
      * so `?includeDeleted=false` would have *included* them, which is the
      * opposite of what the caller asked for. The helper is named for where the
      * defect was first found; the parsing problem is the same wherever a
-     * boolean arrives as a string. The same coercion is still used for the
-     * five platform environment flags listed in `PROJECT_MEMORY.md`, which are
-     * deliberately left for their own atomic change.
+     * boolean arrives as a string. Every boolean *environment* flag on the
+     * platform now reads through it too (D-020); the coercion survives only on
+     * three query parameters in `asset-service` and `economic-service`, which
+     * change an API response and so want their own atomic change.
      */
     includeDeleted: booleanEnv(false),
     limit: z.coerce.number().int().min(1).max(100).default(25),
