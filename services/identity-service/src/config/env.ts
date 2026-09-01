@@ -27,8 +27,9 @@ export const identityEnvSchema = baseEnvSchema
 
     /**
      * When false, account provisioning is recorded locally and the Keycloak
-     * call is skipped. Lets unit and API tests run without an identity
-     * provider; never true in a deployed environment.
+     * call is skipped. That is for isolated unit and API test environments
+     * that have no identity provider. A deployed environment must never
+     * disable synchronisation — hence the default of true.
      */
     KEYCLOAK_SYNC_ENABLED: booleanEnv(true),
 
