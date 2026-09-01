@@ -2,7 +2,7 @@
   "$schema": "./backlog.schema.json",
   "version": 2,
   "project": "RASTA",
-  "asOf": "2026-08-31",
+  "asOf": "2026-09-01",
   "governance": {
     "baselineState": "APPROVED",
     "approvedBy": "Product Owner",
@@ -432,14 +432,45 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 13,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
-        "Uploads validate real content type and size before object storage",
+        "Direct-upload intents validate the declared document class, content type and size before a signed upload URL is issued; finalization validates the stored object's actual size and magic-number content type before metadata registration, DOCUMENT_UPLOADED publication, or clean-download eligibility",
         "Tenant-scoped signed access and document metadata are audited"
       ],
       "dependencies": ["PLAT-003"],
       "sourceRefs": ["docs/04-service-decomposition.md#document-service-p0"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/adr/ADR-014-object-storage.md",
+          "note": "The first criterion was corrected on acceptance because it contradicted the approved architecture it was meant to describe. ADR-014 has the client PUT straight to private object storage, so bytes reach storage before this platform can read them: no validation of \"real content type\" can precede that by construction. What the platform actually guarantees is two checks at two moments — declared class, type and size before a credential is issued, and the stored object's actual size and magic-number type before it is registered, announced or downloadable. No scope or estimate changed; COM-004 remains 13 points."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service exec jest --selectProjects integration -t 'what the bytes actually are'",
+          "note": "The corrected criterion, proven on real bytes in real storage: an HTML page uploaded as a PDF, an executable whatever it is called, a real file of the wrong type for its class, an empty object and a finalize with nothing uploaded are all refused. The declared/detected mismatch is reported as a mismatch rather than silently corrected, and the size persisted is the one storage reports."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service exec jest --selectProjects integration -t 'what the boundary refuses'",
+          "note": "The pre-credential half: an unknown document class, a content type the class does not permit and a declared size over the class limit are each refused before any upload URL exists, and an unknown field is refused rather than dropped."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service exec jest --selectProjects integration -t 'tenant isolation'",
+          "note": "The second criterion: another organization's document is reported absent rather than forbidden, receives no download URL and cannot be deleted; listings are scoped; the oversight role and roles with no document business are refused outright. Every state change is recorded — DOCUMENT_UPLOADED, DOCUMENT_SCANNED, DOCUMENT_DELETED and VIRUS_DETECTED carry the actor and correlation id through the transactional outbox, and deletion is a tombstone the database refuses to accept without an actor, time and reason."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "4464e95",
+          "note": "Merge commit on main with exactly two parents — 3b4df26 (previous main) and 928710e (PR #16 head) — created with a normal merge commit rather than a squash or rebase, so the eleven implementation commits remain individually reviewable. `git merge-base --is-ancestor 928710e origin/main` confirms the head is an ancestor of main."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33484616100",
+          "note": "Main CI run 33484616100 on 4464e95: success, 13/13 jobs. Lint/types/unit, Security scans (Gitleaks no leaks, pnpm audit at high clean, Semgrep 156 rules over 569 files with 0 findings), ClamAV image scan and signature freshness, Integration and security tests, End-to-end 73/73, and Build and scan images for all eight Rasta services. This is the first main run in which the image matrix executed with the scanner in the tree."
+        }
+      ]
     },
     {
       "id": "COM-005",
@@ -965,7 +996,7 @@
         "soThat": "large files never pass through the application service or its database"
       },
       "points": 3,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         {
           "given": "an authenticated tenant user declares an allowed document class, content type and size",
@@ -1012,7 +1043,7 @@
         {
           "kind": "TEST",
           "ref": "pnpm --filter @rasta/document-service run test:unit",
-          "note": "object-key.spec.ts proves the object key is server-generated and opaque, carrying no caller-supplied path segment. 122 unit tests pass."
+          "note": "object-key.spec.ts proves the object key is server-generated and opaque, carrying no caller-supplied path segment, and dto.spec.ts proves the request schema has no field a client could supply one through. 273 unit tests pass on the merged implementation."
         },
         {
           "kind": "RUNTIME",
@@ -1023,6 +1054,11 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/14",
           "note": "Pull request carrying the implementation; the reviewable diff for this story."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/16",
+          "note": "PR #16 is the second implementation pull request for this service. It did not change the intent path, and its integration suites re-prove it unchanged against the merged composition."
         }
       ]
     },
@@ -1036,7 +1072,7 @@
         "soThat": "document metadata refers only to the expected file and its real content"
       },
       "points": 3,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         {
           "given": "the expected object was uploaded for an active intent",
@@ -1094,6 +1130,16 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/14",
           "note": "Pull request carrying the implementation; the reviewable diff for this story."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/16",
+          "note": "PR #16 moved scanning out of finalization: a document is now registered PENDING and DOCUMENT_UPLOADED carries that state. Object verification, magic-number detection and the single-transaction outbox write are unchanged, and are re-proven by the same integration suites."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33484616100",
+          "note": "Main CI run 33484616100 on 4464e95: success, 13/13 jobs. Lint/types/unit, Security scans (Gitleaks no leaks, pnpm audit at high clean, Semgrep 156 rules over 569 files with 0 findings), ClamAV image scan and signature freshness, Integration and security tests, End-to-end 73/73, and Build and scan images for all eight Rasta services. This is the first main run in which the image matrix executed with the scanner in the tree."
         }
       ]
     },
@@ -1107,7 +1153,7 @@
         "soThat": "private evidence is available without weakening tenant or object-level access"
       },
       "points": 3,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         {
           "given": "a clean active document and an authorized caller in its tenant",
@@ -1140,7 +1186,7 @@
         {
           "kind": "TEST",
           "ref": "pnpm --filter @rasta/document-service run test:integration -- -t 'the application a deployment gets today'",
-          "note": "api-document.int-spec.ts on the production composition: 'composes the honest stub, which inspects nothing' (the MVP NoOpMalwareScanner reports NOT_SCANNED), 'refuses the download, because no scan cleared it' with HTTP 422, and 'leaks nothing about storage in the refusal'. 'still lists and reads the document it will not hand over' shows metadata stays available while the bytes do not."
+          "note": "api-document.int-spec.ts on the production composition, which is now ClamAV: 'composes ClamAV, which inspects content' reads the bound scanner off the booted AppModule, 'says plainly that nothing has examined the content yet' covers the PENDING window a document is registered in, and 'refuses the download, because no scan has cleared it' returns HTTP 422 while leaking nothing about storage. Superseded the earlier stub-based assertions, which described a composition this service no longer ships."
         },
         {
           "kind": "TEST",
@@ -1164,8 +1210,8 @@
         },
         {
           "kind": "DOCUMENT",
-          "ref": "docs/24-open-questions.md#q-18-سرویس-اسکن-بدافزار",
-          "note": "Q-18 remains open: no scanning provider is selected, and neither ClamAV nor any cloud vendor is claimed. The MVP composes the honest NoOpMalwareScanner, so downloads are refused by default. AlwaysCleanScanner lives only under test/ and is excluded from the production build - verified as zero occurrences of AlwaysCleanScanner in services/document-service/dist."
+          "ref": "docs/adr/ADR-049-malware-scanning-clamav.md",
+          "note": "Q-18 is CLOSED (2026-08-31) by ADR-049: self-hosted ClamAV, pinned to an immutable digest, bound behind the same MalwareScanner port. The production composition inspects content, so a CLEAN verdict is reachable and this story's first criterion — a bounded signed GET URL for a clean document — is satisfiable for the first time. NOT_SCANNED is retained only as the honest record of rows written while the question was open, and is still refused. AlwaysCleanScanner and fake-clamd live under test/, which tsconfig excludes from the build."
         },
         {
           "kind": "COMMIT",
@@ -1221,6 +1267,26 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/14",
           "note": "Pull request carrying the implementation; the reviewable diff for this story."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/document-service exec jest --selectProjects integration -t 'a file the engine finds nothing in'",
+          "note": "The first criterion, now reachable end to end: a document is registered PENDING and refused, a real ClamAV clears it, and it then receives a bounded signed GET URL whose bytes match the upload exactly and which is served as an attachment. The companion EICAR block proves an infected document is detected, quarantined in the same write as the verdict, and still refused."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/16",
+          "note": "Second implementation pull request, merged 2026-09-01. PR #14 delivered the service; PR #16 delivered the scanner that made its download path reachable, and is the reviewable diff for everything ClamAV-related."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "4464e95",
+          "note": "Merge commit on main with exactly two parents — 3b4df26 (previous main) and 928710e (PR #16 head) — created with a normal merge commit rather than a squash or rebase, so the eleven implementation commits remain individually reviewable. `git merge-base --is-ancestor 928710e origin/main` confirms the head is an ancestor of main."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33484616100",
+          "note": "Main CI run 33484616100 on 4464e95: success, 13/13 jobs. Lint/types/unit, Security scans (Gitleaks no leaks, pnpm audit at high clean, Semgrep 156 rules over 569 files with 0 findings), ClamAV image scan and signature freshness, Integration and security tests, End-to-end 73/73, and Build and scan images for all eight Rasta services. This is the first main run in which the image matrix executed with the scanner in the tree."
         }
       ]
     },
@@ -1234,7 +1300,7 @@
         "soThat": "access ends while the platform retains factual audit evidence"
       },
       "points": 2,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         {
           "given": "an active tenant-owned document and an authorized caller with a reason",
@@ -1292,6 +1358,11 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/14",
           "note": "Pull request carrying the implementation; the reviewable diff for this story."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/16",
+          "note": "PR #16 did not change the deletion path. Its integration suites re-prove the tombstone, the single DOCUMENT_DELETED fact and the idempotent repeat against the merged composition, and the ck_document_deleted_has_actor invariant is re-verified by the migration reversibility harness across both migrations."
         }
       ]
     },
@@ -1305,7 +1376,7 @@
         "soThat": "document flows can be operated and verified without hidden infrastructure steps"
       },
       "points": 2,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         {
           "given": "the documented local or CI environment is started",
@@ -1353,7 +1424,7 @@
         {
           "kind": "TEST",
           "ref": "pnpm --filter @rasta/document-service run test:coverage",
-          "note": "218 tests across 12 suites (122 unit, 96 integration), all passing against a real PostgreSQL and a real MinIO. Coverage 88.70% statements, 79.75% branches, 84.56% functions, 90.00% lines against the documented 75% gate on all four metrics. Measured 2026-08-31."
+          "note": "402 tests across 18 suites (273 unit, 129 integration) against real PostgreSQL, real MinIO and a real ClamAV. Coverage 90.15% statements, 81.83% branches, 88.28% functions, 91.77% lines against the documented 75% gate on all four, unchanged. collectCoverageFrom stays anchored at the package root, so no domain file is excluded. Re-measured on merged main 2026-09-01; the same figures are produced by the Document coverage gate in CI."
         },
         {
           "kind": "TEST",
@@ -1373,12 +1444,12 @@
         {
           "kind": "RUNTIME",
           "ref": "pnpm exec playwright test",
-          "note": "Full E2E suite green on 2026-08-31: 74/74 passing across economic-api, marketplace-api and document-api against the running stack, the document project contributing 10 scenarios. Gateway routing, the private bucket, the Kafka topic and service telemetry are all exercised with no real secrets."
+          "note": "Full E2E suite green: 73/73 across economic-api, marketplace-api and document-api against the running stack, the document project contributing 9 scenarios including a real ClamAV scan and a byte-for-byte download. The count moved from 74 to 73 because two added scenarios were folded into the uploads that already existed rather than performing their own — the gateway caps document writes at twenty per hour (docs/06 § 6.9), and a suite that needed that relaxed would be testing something the platform does not do."
         },
         {
           "kind": "CI",
           "ref": "https://github.com/marabi766/RASTA/pull/14/checks",
-          "note": "CI run 33390350065 on merge commit d257fb3: success. The four pull-request jobs are green - Security scans (Gitleaks secret scan, pnpm audit at high, Semgrep), Lint/types/unit tests, Integration and security tests (document database and private bucket, coverage gate, reversible migration), and End-to-end. The 'Build and scan images' job, which builds the seven service images and runs Trivy, is main-only by pipeline design (if: github.ref == 'refs/heads/main' and event_name == 'push') and is therefore skipped on the pull request; it runs when this lands on main."
+          "note": "CI run 33390350065 on merge commit d257fb3 (PR #14): success. The four pull-request jobs were green. The image build and Trivy scan is main-only by pipeline design and was skipped there; it has since executed on main for this service — see the merge-run evidence below."
         },
         {
           "kind": "DOCUMENT",
@@ -1403,7 +1474,7 @@
         {
           "kind": "TEST",
           "ref": "pnpm --filter @rasta/document-service run test:coverage",
-          "note": "384 tests across 18 suites (255 unit, 129 integration), all passing against real PostgreSQL, real MinIO and real ClamAV. Coverage 90.23% statements, 81.96% branches, 87.75% functions, 91.68% lines against the unchanged documented 75% gate on all four - up from 88.70/79.75/84.56/90.00. No domain file is excluded and collectCoverageFrom is still anchored at the package root. Measured 2026-08-31."
+          "note": "The coverage gate ran on every pull-request revision and on merged main, rising from 88.70/79.75/84.56/90.00 at PR #14 to 90.15/81.83/88.28/91.77 at merge, against a 75% gate that was never moved."
         },
         {
           "kind": "TEST",
@@ -1444,6 +1515,36 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/14",
           "note": "Pull request carrying the implementation; the reviewable diff for this story."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/16",
+          "note": "Second implementation pull request, merged 2026-09-01. PR #14 delivered the service; PR #16 delivered the scanner that made its download path reachable, and is the reviewable diff for everything ClamAV-related."
+        },
+        {
+          "kind": "COMMIT",
+          "ref": "4464e95",
+          "note": "Merge commit on main with exactly two parents — 3b4df26 (previous main) and 928710e (PR #16 head) — created with a normal merge commit rather than a squash or rebase, so the eleven implementation commits remain individually reviewable. `git merge-base --is-ancestor 928710e origin/main` confirms the head is an ancestor of main."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33484616100",
+          "note": "Main CI run 33484616100 on 4464e95: success, 13/13 jobs. Lint/types/unit, Security scans (Gitleaks no leaks, pnpm audit at high clean, Semgrep 156 rules over 569 files with 0 findings), ClamAV image scan and signature freshness, Integration and security tests, End-to-end 73/73, and Build and scan images for all eight Rasta services. This is the first main run in which the image matrix executed with the scanner in the tree."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33484616100#build-and-scan-images",
+          "note": "All eight Rasta service images built and Trivy-scanned on main: identity, organization, asset, fleet, maintenance, economic, marketplace and document. Every job ran both a Build image and a Scan image step at CRITICAL/HIGH with exit-code 1 and ignore-unfixed, so a pass is a scan that found nothing rather than one that was skipped. document-service reported 0 vulnerabilities."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/33484616100#clamav-image-scan-and-signature-freshness",
+          "note": "The ClamAV dependency has its own gate, because the eight-image matrix is derived from services/*/Dockerfile and an external sidecar would otherwise be the one container we deploy that nobody scanned. It Trivy-scans the pinned digest at the same CRITICAL/HIGH threshold, records the engine and signature versions the pin carries (ClamAV 1.5.4, main-63, daily-28108, bytecode-339), and proves freshclam genuinely updates — it reached the mirrors and moved daily to 28110. Kept separate from the deterministic suites, which run with freshclam off on purpose."
+        },
+        {
+          "kind": "TEST",
+          "ref": "node scripts/verify-migration-reversible.mjs document",
+          "note": "Both migrations reversed up to down to up against a throwaway schema, including a data-rollback probe the empty-schema reversal cannot make: an INFECTED document with no quarantine record — which the init schema permitted — is seeded, the forward migration is applied over it, and it is asserted to come through quarantined rather than aborting halfway. Twelve invariant-carrying CHECK constraints verified present, gone and back."
         }
       ]
     }
