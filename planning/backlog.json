@@ -1424,7 +1424,7 @@
         {
           "kind": "TEST",
           "ref": "pnpm --filter @rasta/document-service run test:coverage",
-          "note": "402 tests across 18 suites (273 unit, 129 integration) against real PostgreSQL, real MinIO and a real ClamAV. Coverage 90.15% statements, 81.83% branches, 88.28% functions, 91.77% lines against the documented 75% gate on all four, unchanged. collectCoverageFrom stays anchored at the package root, so no domain file is excluded. Re-measured on merged main 2026-09-01; the same figures are produced by the Document coverage gate in CI."
+          "note": "402 tests across 18 suites (273 unit, 129 integration) against real PostgreSQL, real MinIO and a real ClamAV. The authoritative CI measurement in main run 33484616100 and PR #17 run 33491369897 is 90.15% statements, 82.07% branches, 88.28% functions and 91.77% lines against the documented 75% gate on all four, unchanged. collectCoverageFrom stays anchored at the package root, so no domain file is excluded."
         },
         {
           "kind": "TEST",
@@ -1474,7 +1474,7 @@
         {
           "kind": "TEST",
           "ref": "pnpm --filter @rasta/document-service run test:coverage",
-          "note": "The coverage gate ran on every pull-request revision and on merged main, rising from 88.70/79.75/84.56/90.00 at PR #14 to 90.15/81.83/88.28/91.77 at merge, against a 75% gate that was never moved."
+          "note": "The coverage gate ran on every pull-request revision and on merged main, rising from 88.70/79.75/84.56/90.00 at PR #14 to the authoritative CI measurement of 90.15/82.07/88.28/91.77 in main run 33484616100 and PR #17 run 33491369897, against a 75% gate that was never moved."
         },
         {
           "kind": "TEST",
