@@ -81,6 +81,18 @@ export const redisUrlSchema = urlWithProtocol(['redis:', 'rediss:'], 'Redis URL'
  * `true` default. Anything else is a validation error.
  */
 export function booleanEnv(defaultValue: boolean) {
+  return booleanish(defaultValue);
+}
+
+/**
+ * The accepted spellings, in one place.
+ *
+ * `booleanEnv` and `queryBoolean` are the same parser wearing two labels, and
+ * they have to stay that way: the moment an environment flag and a query
+ * parameter disagree about what `"off"` means, one of them is a defect waiting
+ * to be found.
+ */
+function booleanish(defaultValue: boolean) {
   return z
     .union([z.boolean(), z.string()])
     .default(defaultValue)
@@ -97,6 +109,62 @@ export function booleanEnv(defaultValue: boolean) {
       });
       return z.NEVER;
     });
+}
+
+/**
+ * Marks a schema as "logically a boolean", carrying the default it publishes.
+ *
+ * Read with `queryBooleanDefault` by the OpenAPI converters. A symbol rather
+ * than a wrapper type so the schema stays an ordinary Zod schema everywhere
+ * else — nothing downstream has to know this exists to keep working.
+ */
+const QUERY_BOOLEAN = Symbol.for('rasta.openapi.queryBoolean');
+
+/**
+ * A boolean read from an HTTP query parameter.
+ *
+ * The runtime half is `booleanEnv`'s, unchanged: a query string carries the
+ * same problem an environment variable does, because in both a boolean
+ * arrives as text. `?flag=false` under `z.coerce.boolean()` is `true`, and the
+ * caller gets the opposite of what they asked for with no error to notice
+ * (D-023).
+ *
+ * The half `booleanEnv` cannot do alone is the **published** contract. Its
+ * runtime shape is a `boolean | string` union, and a converter that publishes
+ * that shape literally emits `anyOf: [boolean, string]` — which tells a
+ * generated client the parameter takes arbitrary strings when the parser
+ * rejects every string but eight, and costs it a `boolean` in its typed
+ * signature. OpenAPI already defines how a boolean is carried in a query
+ * string; saying `type: boolean` is both true and enough.
+ *
+ * So the accepted-input shape and the published-output shape come from this
+ * one call, and cannot drift apart the way two hand-maintained definitions do.
+ */
+export function queryBoolean(defaultValue: boolean) {
+  const schema = booleanish(defaultValue);
+
+  Object.defineProperty(schema, QUERY_BOOLEAN, {
+    value: defaultValue,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+
+  return schema;
+}
+
+/**
+ * The default a `queryBoolean` publishes, or `undefined` for anything else.
+ *
+ * The OpenAPI converters consult this before unwrapping a schema, so a query
+ * boolean is published as `{ type: 'boolean', default }` rather than as the
+ * union its runtime accepts.
+ */
+export function queryBooleanDefault(schema: unknown): boolean | undefined {
+  if (typeof schema !== 'object' || schema === null) return undefined;
+
+  const marker = (schema as Record<symbol, unknown>)[QUERY_BOOLEAN];
+  return typeof marker === 'boolean' ? marker : undefined;
 }
 
 /** Every Rasta service has these, without exception. */

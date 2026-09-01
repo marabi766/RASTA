@@ -3,6 +3,8 @@ export {
   LOG_LEVELS,
   baseEnvSchema,
   booleanEnv,
+  queryBoolean,
+  queryBooleanDefault,
   databaseEnvSchema,
   kafkaEnvSchema,
   redisEnvSchema,
