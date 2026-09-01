@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   authEnvSchema,
   baseEnvSchema,
+  booleanEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
@@ -45,10 +46,7 @@ export const maintenanceEnvSchema = baseEnvSchema
      * and it is switchable so that turning the Temporal workflow on later is a
      * configuration change followed by a deletion, not a migration.
      */
-    MAINTENANCE_DUE_SCAN_ENABLED: z
-      .string()
-      .default('true')
-      .transform((value) => value !== 'false'),
+    MAINTENANCE_DUE_SCAN_ENABLED: booleanEnv(true),
 
     /** How often the time-based scan runs, in seconds. */
     MAINTENANCE_DUE_SCAN_INTERVAL_SECONDS: z.coerce.number().int().min(30).max(86_400).default(900),

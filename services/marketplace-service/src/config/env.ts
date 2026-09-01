@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   authEnvSchema,
   baseEnvSchema,
+  booleanEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
@@ -52,7 +53,7 @@ export const marketplaceEnvSchema = baseEnvSchema
      * visible state rather than a silent failure. A developer running the API
      * without Temporal gets that, and knows it.
      */
-    MARKETPLACE_TEMPORAL_ENABLED: z.coerce.boolean().default(true),
+    MARKETPLACE_TEMPORAL_ENABLED: booleanEnv(true),
 
     // ---- Order windows (ADR-043, Q-11) -----------------------------------
 
