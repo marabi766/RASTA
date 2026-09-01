@@ -1783,7 +1783,7 @@ live-verify-17  WALLET_OPENED         actor=USR-SEED-DEHYARI-ADMIN
 | —     | `InsuranceClaim` جدول بدون API                                                   | پایین                           | داده قابل‌ثبت نیست از راه سرویس                                                                  | Controller/Service لازم است، هروقت claim-flow اولویت شد                                                     |
 | —     | `mission` و رویدادهای `MISSION_*` پیاده نشدند                                    | پایین                           | تحلیل «ناوگان داخلی در برابر برون‌سپاری» هنوز داده مأموریت ندارد                                 | عمدی — به `construction-service` گره خورده که وجود ندارد؛ ADR-026 § Consequences                            |
 
-### D-023 — سه پارامتر Query که `"false"` را `true` می‌خواندند — رفع شد (2026-09-01) ✅
+### D-023 — سه پارامتر Query که `"false"` را `true` می‌خواندند — رفع شد (2026-09-02) ✅
 
 آخرین بازماندگان همان نقص D-020، اما روی مرز HTTP. `z.coerce.boolean()` تابع
 `Boolean()` را اعمال می‌کند و هر رشته ناتهی `true` است، پس `?flag=false` دقیقاً
@@ -1796,10 +1796,10 @@ live-verify-17  WALLET_OPENED         actor=USR-SEED-DEHYARI-ADMIN
 | `incoming`        | `GET /v1/settlements`   | `false` | نمای Payee به‌جای نمای Payer سرو می‌شد     |
 | `includeIncoming` | `GET /v1/transactions`  | `false` | خواندن از نگهبان تنانت عبور می‌کرد         |
 
-**رفع:** هر سه به `booleanEnv` منتقل شدند — همان Parser که
-`document-service` برای `includeDeleted` استفاده می‌کند. پیش‌فرض هر سه `false`
-بود و `false` ماند. مقدار نامعتبر اکنون `400 VALIDATION_FAILED` با نام فیلد
-برمی‌گرداند، نه یک حدس.
+**رفع:** هر سه به `queryBoolean` منتقل شدند — همان Parser زمان اجرای
+`booleanEnv`، با یک نشانه‌گذاری اضافه برای OpenAPI (پایین‌تر). پیش‌فرض هر سه
+`false` بود و `false` ماند. مقدار نامعتبر اکنون `400 VALIDATION_FAILED` با نام
+فیلد برمی‌گرداند، نه یک حدس.
 
 **نشت داده رخ نداده بود.** دو عبور از نگهبان تنانت (`incoming` و
 `includeIncoming`) همیشه به شناسه خودِ فراخوان محدود بودند، پس ردیف مستأجر
@@ -1817,11 +1817,45 @@ live-verify-17  WALLET_OPENED         actor=USR-SEED-DEHYARI-ADMIN
 (`asset-service/test/nearby.int-spec.ts` — نخستین آزمون Integration این
 سرویس؛ Project آن تا امروز تهی بود).
 
-**تغییر قرارداد OpenAPI:** `includeIncoming` در
-`GET /v1/transactions` منتشر می‌شود و شکلش از `{type:'boolean'}` به
-`anyOf:[boolean,string]` گسترده شد — همان چیزی که `booleanEnv` واقعاً
-می‌پذیرد و همان شکلی که `includeDeleted` از قبل منتشر می‌کرد. پیش‌فرض `false`
-با آزمون تثبیت شد. `availableOnly` و `incoming` از Schema منتشر نمی‌شوند.
+**نقص دوم، در قرارداد منتشرشده — یافته بازبینی محصول (2026-09-02).** نخستین
+اصلاح، زمان اجرا را درست کرد و قرارداد را خراب گذاشت. `queryBoolean` در زمان
+اجرا `boolean | string` می‌پذیرد — چون Boolean در Query String به‌صورت متن
+می‌رسد — و Converter این Union را عیناً منتشر می‌کرد:
+`anyOf: [boolean, string]`. یعنی سند به Client می‌گفت پارامتر هر رشته‌ای را
+می‌پذیرد، درحالی‌که Parser جز هشت املا همه را با `400` رد می‌کند؛ و Client
+تولیدشده به‌جای `boolean` یک `string` می‌گرفت. OpenAPI خودش تعریف کرده Boolean
+چگونه در Query String حمل می‌شود، پس `type: boolean` هم درست است هم کافی.
+
+بدتر از خودِ Union، توجیه اولیه بود: «`includeDeleted` هم همین را منتشر
+می‌کند.» یک نقص موجود، مجوز نقص تازه نیست. `includeDeleted` همان نقص را داشت و
+در همین تغییر اصلاح شد، نه ثبت به‌عنوان بدهی.
+
+**رفع:** `queryBoolean` علاوه بر Parser، یک نشانه (Symbol) روی خود Schema
+می‌گذارد که می‌گوید «منطقاً Boolean، با این پیش‌فرض». Converterها آن را
+می‌خوانند و `{ type: 'boolean', default }` منتشر می‌کنند. ورودی پذیرفته‌شده و
+خروجی منتشرشده از **یک فراخوان** می‌آیند، پس مثل دو تعریف دست‌نویس از هم دور
+نمی‌افتند.
+
+**هر سه پارامتر اکنون در سند نهایی منتشر می‌شوند:**
+
+| Endpoint                | پارامتر           | Schema منتشرشده                     |
+| ----------------------- | ----------------- | ----------------------------------- |
+| `GET /v1/assets/nearby` | `availableOnly`   | `{ type: boolean, default: false }` |
+| `GET /v1/settlements`   | `incoming`        | `{ type: boolean, default: false }` |
+| `GET /v1/transactions`  | `includeIncoming` | `{ type: boolean, default: false }` |
+
+`GET /v1/settlements` اصلاً در هیچ Query Map نبود، پس `incoming` روی هر
+درخواست Parse می‌شد و هیچ‌جا توصیف نشده بود؛ Schema آن از Controller به
+`settlement/dto.ts` منتقل شد. `asset-service` سند خود را فقط از Decoratorها
+می‌سازد و جست‌وجوی شعاعی هیچ پارامتری اعلام نکرده بود — `ApiQueryFromSchema`
+آن‌ها را از همان Schema‌ای می‌سازد که `zodPipe` اعتبارسنجی می‌کند، تا دو توصیف
+از یک پارامتر وجود نداشته باشد.
+
+**آزمون‌ها روی سند نهایی، نه روی `toJsonSchema`.** فاصله میان این دو، دقیقاً
+جایی بود که نقص زندگی می‌کرد. برای `economic` در
+`api-operability.int-spec.ts` روی سندی که از اپلیکیشن واقعی ساخته می‌شود، و
+برای `asset` روی خروجی `SwaggerModule.createDocument` — همان فراخوانی که
+`main.ts` می‌زند.
 
 ### D-022 — نگهبان تنانت `document-service` نام مدل‌های سرویس دیگری را داشت — رفع شد (2026-08-31) ✅
 
