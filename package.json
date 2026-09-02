@@ -19,7 +19,7 @@
     "test:unit": "turbo run test:unit",
     "test:integration": "turbo run test:integration",
     "test:e2e": "turbo run test:e2e",
-    "test:migration": "node scripts/verify-migration-reversible.mjs economic && node scripts/verify-migration-reversible.mjs marketplace && node scripts/verify-migration-reversible.mjs document",
+    "test:migration": "node scripts/verify-migration-reversible.mjs economic && node scripts/verify-migration-reversible.mjs marketplace && node scripts/verify-migration-reversible.mjs document && node scripts/verify-outbox-claim-migration.mjs --in-place",
     "test:progress": "node --test scripts/progress.test.mjs",
     "test:image-matrix": "node --test scripts/ci-image-matrix.test.mjs",
     "ci:image-matrix": "node scripts/ci-image-matrix.mjs",

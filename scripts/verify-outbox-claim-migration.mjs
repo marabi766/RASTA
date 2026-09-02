@@ -1,0 +1,412 @@
+#!/usr/bin/env node
+// -----------------------------------------------------------------------------
+// Proves the ADR-050 outbox claim migration is reversible on all eight
+// service-owned databases, by actually reversing it.
+//
+// Why this exists beside `verify-migration-reversible.mjs`:
+//
+// That script reverses a service's **whole** migration chain, which needs a
+// `down.sql` for every migration in it. Only three services have one for their
+// init migration (economic, marketplace, document); the other five have never
+// had one. Writing five init rollbacks — dropping every table those services
+// own — is a different change from this one, and doing it here would put a
+// schema-wide rewrite inside an outbox commit.
+//
+// So this verifies what ADR-050 actually adds: deploy the full chain, reverse
+// **only** `20260902120000_outbox_durable_claim`, prove all thirteen objects
+// are gone, deploy again, prove they are back. That is the up → down → up the
+// ADR requires, for every one of the eight databases.
+//
+// It also exercises each CHECK constraint against rows rather than only
+// asserting the constraint exists. A CHECK that is present and vacuous passes
+// an existence test and stops nothing.
+//
+// Two modes:
+//
+//   default      a throwaway schema, replaying the service's whole chain.
+//                Nothing it does can reach the real schema. Six of the eight
+//                support it; asset and organization cannot, for the PostGIS
+//                reason documented on `inPlace` below.
+//   --in-place   the service's real database. Covers all eight, and is what
+//                CI runs. Development and CI databases only.
+//
+// Usage:
+//
+//   node scripts/verify-outbox-claim-migration.mjs --in-place  # all eight
+//   node scripts/verify-outbox-claim-migration.mjs document    # one, scratch
+// -----------------------------------------------------------------------------
+import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+
+const REPO_ROOT = resolve(import.meta.dirname, '..');
+const MIGRATION = '20260902120000_outbox_durable_claim';
+
+const SERVICES = [
+  'identity',
+  'organization',
+  'asset',
+  'fleet',
+  'maintenance',
+  'economic',
+  'marketplace',
+  'document',
+];
+
+const COLUMNS = [
+  'claim_token',
+  'claim_owner',
+  'claim_expires_at',
+  'claim_count',
+  'next_attempt_at',
+];
+
+const CONSTRAINTS = [
+  'ck_outbox_claim_triple',
+  'ck_outbox_claim_count_nonneg',
+  'ck_outbox_attempts_nonneg',
+  'ck_outbox_published_is_clean',
+  'ck_outbox_next_attempt_requires_failure',
+];
+
+const INDEXES = ['ix_outbox_claimable', 'ix_outbox_claim_expiry', 'ix_outbox_next_attempt'];
+
+/**
+ * The claim query's index, asserted by definition rather than by name.
+ *
+ * An index with the right name and the wrong columns or predicate is worse
+ * than a missing one: the migration's `IF NOT EXISTS` passes straight over it
+ * and the hot query silently keeps sequential-scanning. Normalised whitespace,
+ * because PostgreSQL's own rendering is not byte-stable across versions.
+ */
+const CLAIMABLE_INDEXDEF =
+  'CREATE INDEX ix_outbox_claimable ON public.outbox_message ' +
+  'USING btree (created_at, id) WHERE (published_at IS NULL)';
+
+/** A minimal, valid unpublished row. Every NOT NULL column the table has. */
+const insertRow = (id, extra = '') => `
+INSERT INTO "outbox_message" (
+  "id", "aggregate_type", "aggregate_id", "event_name", "event_version",
+  "topic", "partition_key", "payload", "headers", "correlation_id",
+  "created_at", "attempts"${extra ? ', ' + extra.split('=')[0].trim() : ''}
+) VALUES (
+  '${id}', 'Probe', '${id}', 'PROBE', 1,
+  't.probe', '${id}', '{}'::jsonb, '{}'::jsonb, 'COR-${id}',
+  now(), 0${extra ? ', ' + extra.split('=').slice(1).join('=').trim() : ''}
+);`;
+
+const args = process.argv.slice(2);
+const only = args.find((a) => !a.startsWith('--'));
+const targets = only ? [only] : SERVICES;
+if (only && !SERVICES.includes(only)) {
+  console.error(`Unknown service "${only}". Known: ${SERVICES.join(', ')}`);
+  process.exit(1);
+}
+
+/**
+ * `--in-place` reverses the migration on the service's real database instead
+ * of a throwaway schema.
+ *
+ * The scratch-schema mode replays the service's whole migration chain, which
+ * asset and organization cannot do here: both declare PostGIS `geography`
+ * columns, the extension's types live in `public`, and Prisma pins the
+ * connection's search_path to the scratch schema alone — so their *init*
+ * migration fails on a type that plainly exists. That is an artefact of
+ * replaying unrelated migrations, not a property of ADR-050's, which mentions
+ * no PostGIS type at all.
+ *
+ * In-place mode tests exactly the claim that matters and tests it on all
+ * eight: the objects are there, `down.sql` removes every one of them, and
+ * `migrate deploy` puts them all back. It mutates the real database, so it is
+ * for development and CI databases — never a production one.
+ */
+const inPlace = args.includes('--in-place');
+
+const schemaFlag = args.indexOf('--schema');
+const scratchSchema = schemaFlag >= 0 ? args[schemaFlag + 1] : 'outbox_claim_check';
+if (!/^[a-z_][a-z0-9_]*$/.test(scratchSchema)) {
+  console.error(`--schema must be a plain lowercase identifier, received "${scratchSchema}".`);
+  process.exit(1);
+}
+
+let failures = 0;
+const startedAt = Date.now();
+
+for (const service of targets) {
+  try {
+    verify(service);
+  } catch (error) {
+    failures += 1;
+    console.error(`\n✗ ${service}: ${error.message}\n`);
+  }
+}
+
+console.log(
+  failures === 0
+    ? `\n✓ ${targets.length}/${targets.length} databases: ${MIGRATION} is reversible ` +
+        `(up → down → up) in ${Date.now() - startedAt}ms`
+    : `\n✗ ${failures} of ${targets.length} databases failed`,
+);
+process.exit(failures === 0 ? 0 : 1);
+
+// ---------------------------------------------------------------------------
+
+function verify(service) {
+  const serviceDir = join(REPO_ROOT, 'services', `${service}-service`);
+  if (!existsSync(serviceDir)) throw new Error(`no such service directory: ${serviceDir}`);
+
+  const migrationDir = join(serviceDir, 'prisma', 'migrations', MIGRATION);
+  if (!existsSync(join(migrationDir, 'migration.sql'))) {
+    throw new Error(`${MIGRATION}/migration.sql is missing`);
+  }
+  if (!existsSync(join(migrationDir, 'down.sql'))) {
+    throw new Error(`${MIGRATION}/down.sql is missing — the migration is not reversible`);
+  }
+
+  const envKey = `DATABASE_URL_${service.toUpperCase()}`;
+  const baseUrl = process.env[envKey] ?? process.env.DATABASE_URL;
+  if (!baseUrl) throw new Error(`${envKey} is not set`);
+
+  const url = new URL(baseUrl);
+  if (!inPlace) url.searchParams.set('schema', scratchSchema);
+  const scratchUrl = url.toString();
+
+  const require = createRequire(join(serviceDir, 'package.json'));
+  const prismaCli = join(require.resolve('prisma/package.json'), '..', 'build', 'index.js');
+
+  const run = (argv, stdin) => {
+    const result = spawnSync(process.execPath, [prismaCli, ...argv], {
+      cwd: serviceDir,
+      input: stdin,
+      encoding: 'utf8',
+    });
+    return {
+      ok: result.status === 0,
+      output: `${result.stdout ?? ''}${result.stderr ?? ''}`,
+    };
+  };
+
+  const sql = (script) => run(['db', 'execute', '--url', scratchUrl, '--stdin'], script);
+  // `migrate deploy` reads the datasource url from the environment, so it has
+  // to be set on the child rather than passed as a flag.
+  const deployScratch = () => {
+    const result = spawnSync(process.execPath, [prismaCli, 'migrate', 'deploy'], {
+      cwd: serviceDir,
+      env: { ...process.env, DATABASE_URL: scratchUrl, [envKey]: scratchUrl },
+      encoding: 'utf8',
+    });
+    return {
+      ok: result.status === 0,
+      output: `${result.stdout ?? ''}${result.stderr ?? ''}`,
+    };
+  };
+  const mustRun = (label, script) => {
+    const result = sql(script);
+    if (!result.ok) throw new Error(`${label}:\n${result.output}`);
+  };
+
+  const mustFail = (label, script, expected) => {
+    const result = sql(script);
+    if (result.ok) throw new Error(`${label}: the database accepted what it must refuse`);
+    if (expected && !result.output.includes(expected)) {
+      throw new Error(
+        `${label}: refused, but not for the expected reason ` +
+          `(wanted "${expected}"):\n${result.output}`,
+      );
+    }
+  };
+
+  const cleanup = () =>
+    inPlace ? { ok: true } : sql(`DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE;`);
+
+  console.log(`\n${service}:${inPlace ? ' (in place)' : ''}`);
+  if (!inPlace) {
+    cleanup();
+    mustRun('create scratch schema', `CREATE SCHEMA IF NOT EXISTS "${scratchSchema}";`);
+    // A misconfigured url would otherwise let this script's DROP statements
+    // land on real tables. Refuse to continue unless the session's current
+    // schema really is the throwaway one.
+    mustRun(
+      'the session is pointed at the scratch schema',
+      `DO $$
+       BEGIN
+         IF current_schema() <> '${scratchSchema}' THEN
+           RAISE EXCEPTION 'refusing to run: current_schema() is %, not %',
+             current_schema(), '${scratchSchema}';
+         END IF;
+       END
+       $$;`,
+    );
+  }
+
+  try {
+    // --- up ------------------------------------------------------------------
+    // In place, the migration is already deployed; `migrate deploy` is a no-op
+    // that still proves the chain is consistent before anything is reversed.
+    let result = deployScratch();
+    if (!result.ok) throw new Error(`up: migrate deploy failed:\n${result.output}`);
+    mustRun('up: every claim object exists', assertObjects(true));
+    mustRun('up: the claim index has the exact definition ADR-050 specifies', assertIndexDef());
+    console.log('  ✓ up: 5 columns, 5 constraints, 3 indexes');
+
+    // --- the constraints actually refuse things ------------------------------
+    assertConstraintsBite(mustRun, mustFail);
+    console.log('  ✓ up: all five CHECK constraints reject invalid states');
+
+    // --- down ----------------------------------------------------------------
+    mustRun('cleanup probe rows', `DELETE FROM "outbox_message" WHERE id LIKE 'OBXCHK_%';`);
+    const down = sql(readDown(migrationDir));
+    if (!down.ok) throw new Error(`down: down.sql failed:\n${down.output}`);
+    mustRun('down: every claim object is gone', assertObjects(false));
+    console.log('  ✓ down: all thirteen objects removed');
+
+    // --- up again ------------------------------------------------------------
+    result = deployScratch();
+    if (!result.ok) throw new Error(`up again: migrate deploy failed:\n${result.output}`);
+    if (/No pending migrations|already in sync/i.test(result.output)) {
+      throw new Error(
+        'up again: applied nothing — down.sql left the _prisma_migrations row ' +
+          'behind, so a real rollback could never be rolled forward again.',
+      );
+    }
+    mustRun('up again: every claim object is back', assertObjects(true));
+    mustRun('up again: the claim index definition is back', assertIndexDef());
+    console.log('  ✓ up again: all thirteen objects restored');
+  } finally {
+    cleanup();
+  }
+}
+
+function readDown(migrationDir) {
+  return readFileSync(join(migrationDir, 'down.sql'), 'utf8');
+}
+
+/**
+ * Asserts presence (or absence) of all thirteen objects in one statement.
+ *
+ * A `DO` block rather than a query, because `prisma db execute` reports only
+ * whether the script succeeded — so the assertion has to be the thing that
+ * fails.
+ */
+function assertObjects(present) {
+  const want = present ? 'must exist' : 'must be gone';
+  return `
+DO $$
+DECLARE n INT;
+BEGIN
+  SELECT count(*) INTO n FROM information_schema.columns
+   WHERE table_schema = current_schema()
+     AND table_name = 'outbox_message'
+     AND column_name IN (${COLUMNS.map((c) => `'${c}'`).join(', ')});
+  IF n <> ${present ? COLUMNS.length : 0} THEN
+    RAISE EXCEPTION 'claim columns ${want}: found % of ${COLUMNS.length}', n;
+  END IF;
+
+  SELECT count(*) INTO n FROM pg_constraint
+   WHERE conrelid = (current_schema() || '.outbox_message')::regclass
+     AND contype = 'c'
+     AND conname IN (${CONSTRAINTS.map((c) => `'${c}'`).join(', ')});
+  IF n <> ${present ? CONSTRAINTS.length : 0} THEN
+    RAISE EXCEPTION 'claim constraints ${want}: found % of ${CONSTRAINTS.length}', n;
+  END IF;
+
+  SELECT count(*) INTO n FROM pg_indexes
+   WHERE schemaname = current_schema()
+     AND tablename = 'outbox_message'
+     AND indexname IN (${INDEXES.map((i) => `'${i}'`).join(', ')});
+  IF n <> ${present ? INDEXES.length : 0} THEN
+    RAISE EXCEPTION 'claim indexes ${want}: found % of ${INDEXES.length}', n;
+  END IF;
+END
+$$;`;
+}
+
+function assertIndexDef() {
+  return `
+DO $$
+DECLARE actual TEXT;
+BEGIN
+  SELECT regexp_replace(indexdef, '\\s+', ' ', 'g') INTO actual
+    FROM pg_indexes
+   WHERE schemaname = current_schema()
+     AND tablename = 'outbox_message'
+     AND indexname = 'ix_outbox_claimable';
+  IF actual IS NULL THEN
+    RAISE EXCEPTION 'ix_outbox_claimable is missing';
+  END IF;
+  -- Compare against the definition with the scratch schema normalised away.
+  IF replace(actual, current_schema() || '.', 'public.') <> '${CLAIMABLE_INDEXDEF}' THEN
+    RAISE EXCEPTION 'ix_outbox_claimable has the wrong definition: %', actual;
+  END IF;
+END
+$$;`;
+}
+
+/**
+ * Each CHECK, against rows the constraint is supposed to refuse.
+ *
+ * Presence is not the property that matters. A constraint can exist and permit
+ * everything, and an existence test cannot tell the difference.
+ */
+function assertConstraintsBite(mustRun, mustFail) {
+  mustRun('seed: a valid unpublished row', insertRow('OBXCHK_VALID'));
+
+  // ck_outbox_claim_triple — two of three is not a claim.
+  mustFail(
+    'ck_outbox_claim_triple refuses a token with no expiry',
+    `UPDATE "outbox_message" SET "claim_token" = 't', "claim_owner" = 'o'
+      WHERE id = 'OBXCHK_VALID';`,
+    'ck_outbox_claim_triple',
+  );
+  mustRun(
+    'ck_outbox_claim_triple accepts all three together',
+    `UPDATE "outbox_message"
+        SET "claim_token" = 't', "claim_owner" = 'o',
+            "claim_expires_at" = now() + interval '60 seconds'
+      WHERE id = 'OBXCHK_VALID';`,
+  );
+
+  // ck_outbox_published_is_clean — a published row holds no claim metadata.
+  mustFail(
+    'ck_outbox_published_is_clean refuses a published row that still holds a claim',
+    `UPDATE "outbox_message" SET "published_at" = now() WHERE id = 'OBXCHK_VALID';`,
+    'ck_outbox_published_is_clean',
+  );
+
+  // ck_outbox_claim_count_nonneg
+  mustFail(
+    'ck_outbox_claim_count_nonneg refuses a negative claim count',
+    `UPDATE "outbox_message" SET "claim_count" = -1 WHERE id = 'OBXCHK_VALID';`,
+    'ck_outbox_claim_count_nonneg',
+  );
+
+  // ck_outbox_attempts_nonneg
+  mustFail(
+    'ck_outbox_attempts_nonneg refuses negative attempts',
+    `UPDATE "outbox_message" SET "attempts" = -1 WHERE id = 'OBXCHK_VALID';`,
+    'ck_outbox_attempts_nonneg',
+  );
+
+  // ck_outbox_next_attempt_requires_failure — a retry with no prior attempt.
+  mustFail(
+    'ck_outbox_next_attempt_requires_failure refuses a retry scheduled with zero attempts',
+    `UPDATE "outbox_message" SET "next_attempt_at" = now() + interval '5 seconds'
+      WHERE id = 'OBXCHK_VALID';`,
+    'ck_outbox_next_attempt_requires_failure',
+  );
+  mustRun(
+    'ck_outbox_next_attempt_requires_failure accepts one after a real failure',
+    `UPDATE "outbox_message"
+        SET "attempts" = 1, "next_attempt_at" = now() + interval '5 seconds'
+      WHERE id = 'OBXCHK_VALID';`,
+  );
+  mustFail(
+    'ck_outbox_next_attempt_requires_failure refuses a retry on a published row',
+    `UPDATE "outbox_message"
+        SET "claim_token" = NULL, "claim_owner" = NULL, "claim_expires_at" = NULL,
+            "published_at" = now()
+      WHERE id = 'OBXCHK_VALID';`,
+    'ck_outbox_next_attempt_requires_failure',
+  );
+}

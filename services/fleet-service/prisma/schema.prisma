@@ -405,6 +405,19 @@ model OutboxMessage {
   attempts    Int       @default(0)
   lastError   String?   @map("last_error")
 
+  /// ADR-050 durable claim. `claimToken` is the only fence: every mutation
+  /// matches on it exactly. `claimOwner` is diagnostic metadata and no
+  /// decision reads it. `claimExpiresAt` decides eligibility for reclamation
+  /// and nothing else — an expired claimant whose row nobody took back may
+  /// still acknowledge with its token.
+  claimToken     String?   @map("claim_token")
+  claimOwner     String?   @map("claim_owner")
+  claimExpiresAt DateTime? @map("claim_expires_at")
+  claimCount     Int       @default(0) @map("claim_count")
+  /// Set only by a failure, cleared by an acknowledgement. Computed with the
+  /// database clock so replica skew cannot move it.
+  nextAttemptAt  DateTime? @map("next_attempt_at")
+
   @@index([createdAt], map: "idx_outbox_pending")
   @@map("outbox_message")
 }
