@@ -98,7 +98,7 @@ Envelope می‌آید تا یک Topic بتواند در طول یک Rollout ج�
                    ▼
         ┌──────────────────────┐
         │  Outbox Relay        │  هر ۵۰۰ میلی‌ثانیه Poll
-        │  FOR UPDATE SKIP LOCKED │  (رزرو بادوام نیست — D-026)
+        │  UPDATE … RETURNING     │  Claim بادوام با claim_token (ADR-050)
         └──────────┬───────────┘
                    │ produce (acks=all, idempotent producer)
                    ▼
@@ -106,6 +106,7 @@ Envelope می‌آید تا یک Topic بتواند در طول یک Rollout ج�
                    │
                    ▼
         UPDATE outbox_message SET published_at = now()
+        WHERE claim_token = $token   ← هر Mutation روی Token مهر می‌شود
 ```
 
 **تضمین: At-Least-Once.** ممکن است یک رویداد دو بار منتشر شود (اگر Crash بین Produce و

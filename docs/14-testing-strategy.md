@@ -171,6 +171,36 @@ describe('AssetRepository (integration)', () => {
 **پوشش الزامی:** هر Repository (شامل Scope مستأجر) · هر Consumer رویداد (شامل Idempotency)
 · هر Activity ی Temporal · هر Migration (اجرا و بازگشت) · Outbox Relay.
 
+### ۱۴٫۳٫۱ پروتکل Claim بادوام Outbox — ADR-050
+
+`services/document-service/test/outbox-durable-claim.int-spec.ts` — بیست‌وچهار
+آزمون الزامی ADR-050 روی PostgreSQL واقعی.
+
+**چرا Mock جواب نمی‌دهد.** Fence همان `claim_token = $token` **درون** جملهٔ
+`UPDATE` است، Backoff همان `now()` **درون** `SET` است، و مقایسهٔ انقضا مال خود
+PostgreSQL است. هر سهٔ این‌ها در SQL زندگی می‌کنند، پس آزمون در برابر یک Fake
+فقط خودِ Fake را اثبات می‌کند.
+
+**همه قطعی — بدون Sleep و بدون رقابت با ساعت دیوار.** انقضا با
+`leaseSeconds = 0` یا با بردن `claim_expires_at` به گذشته ساخته می‌شود؛ انتشار
+طولانی با Publisher ای که تا آزادسازی صریح برنمی‌گردد.
+
+**Schema اختصاصی، نه `public`.** `claimPending` عمداً بدون Scope مستأجر است و
+**قدیمی‌ترین** ردیف‌های جدول را برمی‌گرداند. روی Schema مشترک، «دو مدعی Batch
+مجزا می‌گیرند» یا «دقیقاً `limit` ردیف برمی‌گردد» ادعایی دربارهٔ باقی‌ماندهٔ
+Suiteهای دیگر می‌شد، نه دربارهٔ پروتکل — دقیقاً همان وابستگی‌ای که
+[`AGENTS.md § 5`](../AGENTS.md) ممنوع می‌کند. جدول با
+`LIKE public.outbox_message INCLUDING ALL` ساخته می‌شود تا همان Index ها و
+CHECK هایی را داشته باشد که Migration واقعاً ساخت.
+
+**آزمون ۱۵ چیزی را ادعا می‌کند که ADR تضمین می‌کند**، نه بیشتر: مجموعهٔ
+شناسه‌های یکتای رسیده به Broker برابر مجموعهٔ ورودی است و **صفر** گم‌شده — در حالی
+که تعداد کل تلاش‌ها می‌تواند از N بیشتر باشد. «دقیقاً N منتشر شد» با تضمین
+At-Least-Once خودِ ADR در تناقض بود.
+
+**بازگشت‌پذیری Migration:** `node scripts/verify-outbox-claim-migration.mjs --in-place`
+روی هر هشت پایگاه داده، بخشی از `pnpm test:migration`.
+
 ---
 
 ## ۱۴٫۴ تست قرارداد
