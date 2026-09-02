@@ -388,10 +388,22 @@ describe('idempotency and outbox (real database)', () => {
         }),
       );
 
-      await store.markFailed(id, 'broker unreachable');
-      await store.markFailed(id, 'broker unreachable again');
+      // Each mutation is fenced on the claim token, and each failure releases
+      // the claim — so the row is re-claimed for the second failure, exactly as
+      // the relay does on its next tick (ADR-050). A zero lease keeps this
+      // suite from parking rows for any other.
+      const claimOwned = () =>
+        store.claimPending({ limit: 500, owner: 'mkt-int-spec', leaseSeconds: 0 });
+      const noBackoff = { baseSeconds: 0, maxSeconds: 0 };
 
-      const claimed = (await store.claimPending(500)).find((row) => row.id === id);
+      const first = await claimOwned();
+      expect(await store.markFailed(id, first.token!, 'broker unreachable', noBackoff)).toBe(1);
+      const second = await claimOwned();
+      expect(await store.markFailed(id, second.token!, 'broker unreachable again', noBackoff)).toBe(
+        1,
+      );
+
+      const claimed = (await claimOwned()).rows.find((row) => row.id === id);
 
       expect(claimed).toBeDefined();
       expect(claimed?.attempts).toBe(2);
