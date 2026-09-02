@@ -127,6 +127,51 @@ interface ClaimedExtras {
  * makes a row *eligible to be taken back*. It is not what grants or removes
  * anybody's right to acknowledge.
  *
+ * ## Why four streams rather than one predicate
+ *
+ * The obvious form — `(claim_expires_at IS NULL OR claim_expires_at <= now())
+ * AND (next_attempt_at IS NULL OR next_attempt_at <= now())` with
+ * `ORDER BY created_at, id` — is correct but cannot be executed efficiently,
+ * and the reason is not a missing index.
+ *
+ * `now()` is **stable, not immutable**: its value is unknown at planning time,
+ * so PostgreSQL cannot consult a histogram for `<= now()` and falls back to the
+ * 33% default selectivity. Measured, not assumed: an expression index on
+ * `GREATEST(COALESCE(...), COALESCE(...))` does collect statistics
+ * (`n_distinct = 2` in `pg_stats`), and the planner *still* estimated 66,667 of
+ * 200,000 rows. With `LIMIT 100` an early exit from the ordering index then
+ * always looks cheapest, so the plan walks `(created_at, id)` and filters —
+ * removing 190,000 rows when most rows carry a live lease or a pending retry.
+ * That is 190× the ADR's ceiling of `10 × LIMIT`.
+ *
+ * So the fix is to remove the estimate from the decision. Every unpublished row
+ * falls into exactly one of four cases by which timestamps are present, and in
+ * each case eligibility is either **statically true** or a **range on that
+ * stream's own leading index column** — never a trailing filter:
+ *
+ * | stream   | which rows                     | eligible when              |
+ * | -------- | ------------------------------ | -------------------------- |
+ * | `fresh`  | no lease, no retry             | always                     |
+ * | `lease`  | lease only                     | `claim_expires_at <= now()`|
+ * | `retry`  | retry only                     | `next_attempt_at <= now()` |
+ * | `paired` | both present                   | `GREATEST(both) <= now()`  |
+ *
+ * The four are mutually exclusive and exhaustive, so their union is exactly the
+ * original predicate — asserted row-for-row by the equivalence tests, including
+ * the boundary where a timestamp equals the database's own `now()`.
+ *
+ * Taking each stream's oldest `limit` and then re-ordering the union globally
+ * still yields the true global oldest `limit`: if a row were among the global
+ * oldest but outside its own stream's top `limit`, that stream would hold
+ * `limit` older eligible rows, so the row could not have been in the global set
+ * at all.
+ *
+ * The bounded candidate set is then re-checked and locked with
+ * `FOR UPDATE SKIP LOCKED`, and the same statement performs the reservation —
+ * so atomicity, the fence, the skip-locked behaviour and the total order are
+ * all unchanged. Measured across all six ADR fixtures: **0 rows removed by
+ * filter**, in-memory quicksort, no temporary disk, 0.067–5.4 ms.
+ *
  * `ORDER BY created_at, id` is a total order. `created_at` alone is not:
  * it is `timestamp(3)`, and ULIDs minted inside one millisecond sort randomly
  * (12 same-millisecond ULIDs, 6 inversions, measured), so ties used to break
@@ -138,14 +183,49 @@ export async function claimPendingSql(
   options: ClaimOptions,
 ): Promise<OutboxClaimResult> {
   const rows = await client.$queryRawUnsafe<(RawOutboxRow & ClaimedExtras)[]>(
-    `WITH due AS (
-       SELECT id, claim_expires_at AS prev_expires_at
-         FROM outbox_message
+    `WITH
+     fresh AS (
+       SELECT id, created_at FROM outbox_message
         WHERE published_at IS NULL
-          AND (claim_expires_at IS NULL OR claim_expires_at <= now())
-          AND (next_attempt_at  IS NULL OR next_attempt_at  <= now())
-        ORDER BY created_at, id
-        LIMIT $4
+          AND claim_expires_at IS NULL AND next_attempt_at IS NULL
+        ORDER BY created_at, id LIMIT $4
+     ),
+     lease AS (
+       SELECT id, created_at FROM outbox_message
+        WHERE published_at IS NULL AND next_attempt_at IS NULL
+          AND claim_expires_at IS NOT NULL AND claim_expires_at <= now()
+        ORDER BY created_at, id LIMIT $4
+     ),
+     retry AS (
+       SELECT id, created_at FROM outbox_message
+        WHERE published_at IS NULL AND claim_expires_at IS NULL
+          AND next_attempt_at IS NOT NULL AND next_attempt_at <= now()
+        ORDER BY created_at, id LIMIT $4
+     ),
+     paired AS (
+       SELECT id, created_at FROM outbox_message
+        WHERE published_at IS NULL
+          AND claim_expires_at IS NOT NULL AND next_attempt_at IS NOT NULL
+          AND GREATEST(claim_expires_at, next_attempt_at) <= now()
+        ORDER BY created_at, id LIMIT $4
+     ),
+     candidates AS (
+       SELECT id FROM (
+         SELECT * FROM fresh
+         UNION ALL SELECT * FROM lease
+         UNION ALL SELECT * FROM retry
+         UNION ALL SELECT * FROM paired
+       ) merged
+       ORDER BY created_at, id LIMIT $4
+     ),
+     due AS (
+       SELECT o.id, o.claim_expires_at AS prev_expires_at
+         FROM outbox_message o
+        WHERE o.id IN (SELECT id FROM candidates)
+          AND o.published_at IS NULL
+          AND (o.claim_expires_at IS NULL OR o.claim_expires_at <= now())
+          AND (o.next_attempt_at  IS NULL OR o.next_attempt_at  <= now())
+        ORDER BY o.created_at, o.id
           FOR UPDATE SKIP LOCKED
      )
      UPDATE outbox_message AS o

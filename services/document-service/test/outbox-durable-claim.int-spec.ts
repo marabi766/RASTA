@@ -758,6 +758,163 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     expect((await claim(storeB, 10, LEASE, 'worker-b')).rows).toHaveLength(0);
   });
 
+  // -- eligibility equivalence ----------------------------------------------
+  //
+  // The claim query no longer asks the original single predicate. It asks four
+  // mutually exclusive streams, because `now()` is stable rather than immutable
+  // and PostgreSQL therefore cannot estimate `<= now()` — it applies a flat 33%
+  // and, under `LIMIT`, always prefers an early exit from the ordering index,
+  // filtering out 190,000 rows in the states ADR-050 measures.
+  //
+  // Rewriting a predicate for the planner's benefit is exactly the kind of
+  // change that silently claims the wrong rows, so equivalence is proven here
+  // rather than argued. Every case ADR-050 names gets a row, and the two forms
+  // must agree on all of them — including the boundary where a timestamp is
+  // exactly the database's own `now()`.
+
+  describe('the four-stream eligibility equals the original predicate', () => {
+    /** The predicate ADR-050 specifies, unchanged. */
+    const ORIGINAL = `
+      SELECT id FROM outbox_message
+       WHERE published_at IS NULL
+         AND (claim_expires_at IS NULL OR claim_expires_at <= now())
+         AND (next_attempt_at  IS NULL OR next_attempt_at  <= now())`;
+
+    /** The four streams the claim query actually walks. */
+    const STREAMS = `
+      SELECT id FROM outbox_message
+       WHERE published_at IS NULL AND claim_expires_at IS NULL AND next_attempt_at IS NULL
+      UNION ALL
+      SELECT id FROM outbox_message
+       WHERE published_at IS NULL AND next_attempt_at IS NULL
+         AND claim_expires_at IS NOT NULL AND claim_expires_at <= now()
+      UNION ALL
+      SELECT id FROM outbox_message
+       WHERE published_at IS NULL AND claim_expires_at IS NULL
+         AND next_attempt_at IS NOT NULL AND next_attempt_at <= now()
+      UNION ALL
+      SELECT id FROM outbox_message
+       WHERE published_at IS NULL
+         AND claim_expires_at IS NOT NULL AND next_attempt_at IS NOT NULL
+         AND GREATEST(claim_expires_at, next_attempt_at) <= now()`;
+
+    /** One row per case ADR-050 enumerates, oldest first so the order is fixed. */
+    const CASES: Array<{ id: string; sql: string; eligible: boolean }> = [
+      { id: 'EQ1_BOTH_NULL', sql: `NULL, NULL, NULL, NULL, NULL`, eligible: true },
+      {
+        id: 'EQ2_LIVE_LEASE',
+        sql: `'tk', 'ow', now() + interval '5 min', NULL, NULL`,
+        eligible: false,
+      },
+      {
+        id: 'EQ3_EXPIRED_LEASE',
+        sql: `'tk', 'ow', now() - interval '5 min', NULL, NULL`,
+        eligible: true,
+      },
+      {
+        id: 'EQ4_FUTURE_BACKOFF',
+        sql: `NULL, NULL, NULL, now() + interval '5 min', NULL`,
+        eligible: false,
+      },
+      {
+        id: 'EQ5_DUE_BACKOFF',
+        sql: `NULL, NULL, NULL, now() - interval '5 min', NULL`,
+        eligible: true,
+      },
+      {
+        id: 'EQ6_EXPIRED_LEASE_FUTURE_BACKOFF',
+        sql: `'tk', 'ow', now() - interval '5 min', now() + interval '5 min', NULL`,
+        eligible: false,
+      },
+      {
+        id: 'EQ7_LIVE_LEASE_DUE_BACKOFF',
+        sql: `'tk', 'ow', now() + interval '5 min', now() - interval '5 min', NULL`,
+        eligible: false,
+      },
+      {
+        id: 'EQ8_PUBLISHED',
+        sql: `NULL, NULL, NULL, NULL, now() - interval '1 min'`,
+        eligible: false,
+      },
+      // The boundary. Written as exactly `now()`, which by the time the query
+      // runs is in the past, so `<= now()` holds — and both forms must agree.
+      { id: 'EQ9_BOUNDARY_NOW', sql: `'tk', 'ow', now(), NULL, NULL`, eligible: true },
+    ];
+
+    const ids = async (query: string): Promise<string[]> => {
+      const rows = await a.client.$queryRawUnsafe<{ id: string }[]>(
+        `SELECT id FROM (${query}) q WHERE id LIKE 'EQ%' ORDER BY id`,
+      );
+      return rows.map((row) => row.id);
+    };
+
+    beforeEach(async () => {
+      for (const [index, testCase] of CASES.entries()) {
+        await a.client.$executeRawUnsafe(
+          `INSERT INTO outbox_message
+             (id, aggregate_type, aggregate_id, event_name, event_version, topic,
+              partition_key, payload, headers, correlation_id, created_at, attempts,
+              claim_count, claim_token, claim_owner, claim_expires_at, next_attempt_at,
+              published_at)
+           VALUES ($1,'Probe',$1,'PROBE',1,'t.probe',$1,'{}'::jsonb,'{}'::jsonb,$1,
+                   now() - make_interval(mins => ${20 - index}), 1, 0, ${testCase.sql})`,
+          testCase.id,
+        );
+      }
+    });
+
+    it('agrees with the original predicate on every enumerated case', async () => {
+      expect(await ids(STREAMS)).toEqual(await ids(ORIGINAL));
+    });
+
+    it('selects exactly the rows ADR-050 says are eligible', async () => {
+      const expected = CASES.filter((c) => c.eligible)
+        .map((c) => c.id)
+        .sort();
+
+      expect(await ids(ORIGINAL)).toEqual(expected);
+      expect(await ids(STREAMS)).toEqual(expected);
+    });
+
+    it('has an empty symmetric difference, in both directions', async () => {
+      const rows = await a.client.$queryRawUnsafe<{ side: string; id: string }[]>(
+        `WITH orig AS (${ORIGINAL}), streams AS (${STREAMS})
+         SELECT 'only_in_original' AS side, id FROM (SELECT id FROM orig EXCEPT SELECT id FROM streams) x
+         UNION ALL
+         SELECT 'only_in_streams', id FROM (SELECT id FROM streams EXCEPT SELECT id FROM orig) y`,
+      );
+
+      expect(rows).toEqual([]);
+    });
+
+    it('keeps the streams mutually exclusive, so no row is claimed twice', async () => {
+      // The union is `UNION ALL`, so an overlap would put one row in a batch
+      // twice and hand Kafka a duplicate from a single claim.
+      const rows = await a.client.$queryRawUnsafe<{ id: string }[]>(
+        `SELECT id FROM (${STREAMS}) s GROUP BY id HAVING count(*) > 1`,
+      );
+
+      expect(rows).toEqual([]);
+    });
+
+    it('claims exactly the eligible rows through the real claim query', async () => {
+      // Not the predicate in isolation: the statement the relay actually runs,
+      // including the candidate merge, the re-check and the reservation.
+      const claimed = await claim(storeA, 100);
+
+      expect(
+        claimed.rows
+          .map((row) => row.id)
+          .filter((id) => id.startsWith('EQ'))
+          .sort(),
+      ).toEqual(
+        CASES.filter((c) => c.eligible)
+          .map((c) => c.id)
+          .sort(),
+      );
+    });
+  });
+
   it('the backoff is computed with the database clock, not the process clock', async () => {
     // A JavaScript `Date.now()` here would let clock skew between replicas
     // bring a retry forward or push it back.

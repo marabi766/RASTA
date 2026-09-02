@@ -126,12 +126,30 @@ describe('claimPending', () => {
 
     expect(sql).toContain('FROM outbox_message');
     expect(sql).toContain('WHERE published_at IS NULL');
-    // Eligibility: no live lease, and no retry that is not yet due.
-    expect(sql).toContain('claim_expires_at IS NULL OR claim_expires_at <= now()');
-    expect(sql).toContain('next_attempt_at IS NULL OR next_attempt_at <= now()');
+
+    // The four eligibility streams. Each is present by name, because the
+    // reason they exist is not stylistic: `now()` is stable rather than
+    // immutable, so a single `<= now()` predicate is estimated at a flat 33%
+    // and, under LIMIT, always loses to an early exit from the ordering index
+    // — which is what removed 190,000 rows by filter. Collapsing these back
+    // into one predicate would silently restore that.
+    for (const stream of ['fresh AS (', 'lease AS (', 'retry AS (', 'paired AS (']) {
+      expect(sql).toContain(stream);
+    }
+    expect(sql).toContain('claim_expires_at IS NULL AND next_attempt_at IS NULL');
+    expect(sql).toContain('claim_expires_at IS NOT NULL AND claim_expires_at <= now()');
+    expect(sql).toContain('next_attempt_at IS NOT NULL AND next_attempt_at <= now()');
+    expect(sql).toContain('GREATEST(claim_expires_at, next_attempt_at) <= now()');
+
+    // The bounded candidate set is re-checked against the original predicate
+    // before it is locked, so the rewrite cannot widen what gets claimed.
+    expect(sql).toContain('o.claim_expires_at IS NULL OR o.claim_expires_at <= now()');
+    expect(sql).toContain('o.next_attempt_at IS NULL OR o.next_attempt_at <= now()');
+
     // The total order. `created_at` alone leaves same-millisecond ties
     // arbitrary, which is what made claim windows non-deterministic.
     expect(sql).toContain('ORDER BY created_at, id');
+    expect(sql).toContain('ORDER BY o.created_at, o.id');
     expect(sql).toContain('LIMIT');
     expect(sql).toContain('FOR UPDATE SKIP LOCKED');
     // The fence is written by the claiming statement and returned by it.

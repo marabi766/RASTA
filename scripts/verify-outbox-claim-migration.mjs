@@ -41,7 +41,16 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
-const MIGRATION = '20260902120000_outbox_durable_claim';
+/**
+ * Both ADR-050 migrations, oldest first. The second adds the four
+ * eligibility-stream indexes the claim query plans against; reversing only the
+ * first would leave them behind and report a clean rollback that is not one.
+ */
+const MIGRATIONS = [
+  '20260902120000_outbox_durable_claim',
+  '20260902130000_outbox_claim_stream_indexes',
+];
+const MIGRATION = MIGRATIONS[0];
 
 const SERVICES = [
   'identity',
@@ -70,7 +79,18 @@ const CONSTRAINTS = [
   'ck_outbox_next_attempt_requires_failure',
 ];
 
-const INDEXES = ['ix_outbox_claimable', 'ix_outbox_claim_expiry', 'ix_outbox_next_attempt'];
+const INDEXES = [
+  'ix_outbox_claimable',
+  'ix_outbox_claim_expiry',
+  'ix_outbox_next_attempt',
+  // The four eligibility streams (20260902130000). Each carries the whole
+  // eligibility test on its own leading column, which is what keeps the claim
+  // query off a trailing filter.
+  'ix_outbox_due_fresh',
+  'ix_outbox_due_lease',
+  'ix_outbox_due_retry',
+  'ix_outbox_due_both',
+];
 
 /**
  * The claim query's index, asserted by definition rather than by name.
@@ -159,13 +179,16 @@ function verify(service) {
   const serviceDir = join(REPO_ROOT, 'services', `${service}-service`);
   if (!existsSync(serviceDir)) throw new Error(`no such service directory: ${serviceDir}`);
 
-  const migrationDir = join(serviceDir, 'prisma', 'migrations', MIGRATION);
-  if (!existsSync(join(migrationDir, 'migration.sql'))) {
-    throw new Error(`${MIGRATION}/migration.sql is missing`);
+  const migrationDirs = MIGRATIONS.map((name) => join(serviceDir, 'prisma', 'migrations', name));
+  for (const [i, dir] of migrationDirs.entries()) {
+    if (!existsSync(join(dir, 'migration.sql'))) {
+      throw new Error(`${MIGRATIONS[i]}/migration.sql is missing`);
+    }
+    if (!existsSync(join(dir, 'down.sql'))) {
+      throw new Error(`${MIGRATIONS[i]}/down.sql is missing — the migration is not reversible`);
+    }
   }
-  if (!existsSync(join(migrationDir, 'down.sql'))) {
-    throw new Error(`${MIGRATION}/down.sql is missing — the migration is not reversible`);
-  }
+  const migrationDir = migrationDirs[0];
 
   const envKey = `DATABASE_URL_${service.toUpperCase()}`;
   const baseUrl = process.env[envKey] ?? process.env.DATABASE_URL;
@@ -251,7 +274,7 @@ function verify(service) {
     if (!result.ok) throw new Error(`up: migrate deploy failed:\n${result.output}`);
     mustRun('up: every claim object exists', assertObjects(true));
     mustRun('up: the claim index has the exact definition ADR-050 specifies', assertIndexDef());
-    console.log('  ✓ up: 5 columns, 5 constraints, 3 indexes');
+    console.log('  ✓ up: 5 columns, 5 constraints, 7 indexes');
 
     // --- the constraints actually refuse things ------------------------------
     assertConstraintsBite(mustRun, mustFail);
@@ -259,10 +282,16 @@ function verify(service) {
 
     // --- down ----------------------------------------------------------------
     mustRun('cleanup probe rows', PROBE_CLEANUP);
-    const down = sql(readDown(migrationDir));
-    if (!down.ok) throw new Error(`down: down.sql failed:\n${down.output}`);
+    // Newest first. Reversing only the older one drops the columns, which
+    // cascades the newer migration's indexes away while leaving its
+    // `_prisma_migrations` row behind — so the re-deploy skips it and restores
+    // three of seven indexes while reporting success.
+    for (const [i, dir] of [...migrationDirs.entries()].reverse()) {
+      const down = sql(readDown(dir));
+      if (!down.ok) throw new Error(`down: ${MIGRATIONS[i]}/down.sql failed:\n${down.output}`);
+    }
     mustRun('down: every claim object is gone', assertObjects(false));
-    console.log('  ✓ down: all thirteen objects removed');
+    console.log('  ✓ down: all seventeen objects removed');
 
     // --- up again ------------------------------------------------------------
     result = deployScratch();
@@ -275,7 +304,7 @@ function verify(service) {
     }
     mustRun('up again: every claim object is back', assertObjects(true));
     mustRun('up again: the claim index definition is back', assertIndexDef());
-    console.log('  ✓ up again: all thirteen objects restored');
+    console.log('  ✓ up again: all seventeen objects restored');
   } finally {
     cleanup();
   }
