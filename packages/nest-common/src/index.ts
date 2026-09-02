@@ -98,7 +98,14 @@ export type {
 } from './consumer/event-consumer';
 
 // Outbox ---------------------------------------------------------------------
-export { buildOutboxRow, OutboxRelay } from './outbox/outbox';
+export {
+  buildOutboxRow,
+  OutboxRelay,
+  renewalIntervalMs,
+  renewalDeadlineMs,
+  RENEWAL_INTERVAL_DIVISOR,
+  RENEWAL_DEADLINE_CEILING_MS,
+} from './outbox/outbox';
 export type {
   OutboxMessageInput,
   OutboxRow,
@@ -106,12 +113,24 @@ export type {
   EventPublisher,
   OutboxRelayOptions,
   BuildOutboxOptions,
+  OutboxClaim,
+  ClaimRequest,
+  RetryBackoff,
 } from './outbox/outbox';
 export {
   claimPendingSql,
   markPublishedSql,
   markFailedSql,
+  releaseSql,
+  renewSql,
   oldestPendingAgeSecondsSql,
+  activeLeaseCountSql,
   toOutboxRow,
 } from './outbox/outbox-sql';
-export type { OutboxSqlClient, RawOutboxRow } from './outbox/outbox-sql';
+export type {
+  OutboxSqlClient,
+  RawOutboxRow,
+  OutboxClaimResult,
+  ClaimOptions,
+  OutboxTxRunner,
+} from './outbox/outbox-sql';
