@@ -192,6 +192,20 @@ describe('the outbox store, against a real database', () => {
   let store: PrismaOutboxStore;
   const organizationId = `ORG-OUTBOXTEST-${ulid().slice(-10)}`;
 
+  /**
+   * The claim window, without the fencing protocol.
+   *
+   * These assertions are about which rows the query returns; the token
+   * mechanics have their own suite against an isolated schema
+   * (`outbox-durable-claim.int-spec.ts`). A zero lease is used so a claim here
+   * never parks rows for another suite.
+   */
+  const claimRows = async (limit: number) =>
+    (await store.claimPending({ limit, owner: 'int-spec', leaseSeconds: 0 })).rows;
+
+  const claimWithToken = (limit: number) =>
+    store.claimPending({ limit, owner: 'int-spec', leaseSeconds: 0 });
+
   beforeAll(() => {
     prisma = newPrisma();
     store = new PrismaOutboxStore(prisma);
@@ -280,7 +294,7 @@ describe('the outbox store, against a real database', () => {
   it('returns a bounded, unpublished, oldest-first window', async () => {
     await seed(3);
 
-    const claimed = await store.claimPending(10);
+    const claimed = await claimRows(10);
 
     // Bounded by the limit. Not "exactly 10" — the table may hold fewer.
     expect(claimed.length).toBeLessThanOrEqual(10);
@@ -316,28 +330,31 @@ describe('the outbox store, against a real database', () => {
 
     // A limit smaller than the number of pending rows this suite alone just
     // created, so the bound is doing work rather than being vacuously true.
-    expect((await store.claimPending(1)).length).toBe(1);
-    expect((await store.claimPending(2)).length).toBe(2);
+    expect((await claimRows(1)).length).toBe(1);
+    expect((await claimRows(2)).length).toBe(2);
   });
 
   it('does not claim a row that was already published', async () => {
     const ids = await seed(1, new Date());
-    const claimed = await store.claimPending(100);
+    const claimed = await claimRows(100);
     expect(claimed.map((row) => row.id)).not.toContain(ids[0]);
   });
 
   it('honours the limit', async () => {
     await seed(3);
-    expect((await store.claimPending(2)).length).toBeLessThanOrEqual(2);
+    expect((await claimRows(2)).length).toBeLessThanOrEqual(2);
   });
 
   it('marks rows published, and does nothing at all for an empty list', async () => {
     const ids = await seed(2);
 
-    await store.markPublished([]);
+    const claimed = await claimWithToken(100);
+    const token = claimed.token!;
+
+    expect(await store.markPublished([], token)).toBe(0);
     expect((await rowsOf(ids)).every((row) => row.publishedAt === null)).toBe(true);
 
-    await store.markPublished(ids);
+    expect(await store.markPublished(ids, token)).toBe(ids.length);
     expect((await rowsOf(ids)).every((row) => row.publishedAt !== null)).toBe(true);
   });
 
@@ -346,8 +363,16 @@ describe('the outbox store, against a real database', () => {
     // available when a topic has been rejecting a row for an hour.
     const [id] = await seed(1);
 
-    await store.markFailed(id, 'broker refused the write');
-    await store.markFailed(id, 'broker refused the write again');
+    // Each failure releases the claim, so the row is re-claimed for the second
+    // one — which is exactly what the relay does on the next tick.
+    const backoff = { baseSeconds: 0, maxSeconds: 0 };
+    const first = await claimWithToken(100);
+    expect(await store.markFailed(id, first.token!, 'broker refused the write', backoff)).toBe(1);
+
+    const second = await claimWithToken(100);
+    expect(
+      await store.markFailed(id, second.token!, 'broker refused the write again', backoff),
+    ).toBe(1);
 
     const [row] = await rowsOf([id]);
     expect(row?.attempts).toBe(2);
@@ -396,7 +421,8 @@ describe('the outbox store, against a real database', () => {
     expect(await store.pendingCount()).toBeGreaterThanOrEqual(await pendingAmong(unpublished));
 
     // Publishing moves a row out of the pending set, exactly and by name.
-    await store.markPublished(unpublished.slice(0, 2));
+    const owned = await claimWithToken(500);
+    await store.markPublished(unpublished.slice(0, 2), owned.token!);
     expect(await pendingAmong(unpublished)).toBe(1);
   });
 
@@ -534,7 +560,7 @@ describe('the outbox store, against a real database', () => {
     });
 
     it('fills the window from the oldest rows, and stops at the limit', async () => {
-      const claimed = await store.claimPending(100);
+      const claimed = await claimRows(100);
 
       // Exactly the limit: this fixture alone supplies twelve times as many
       // candidates as the window holds.
@@ -566,13 +592,13 @@ describe('the outbox store, against a real database', () => {
     it('honours a smaller limit against the same backlog', async () => {
       // Exact, because more than a thousand pending rows are available: a
       // short limit can always be filled.
-      expect(await store.claimPending(1)).toHaveLength(1);
-      expect(await store.claimPending(7)).toHaveLength(7);
+      expect(await claimRows(1)).toHaveLength(1);
+      expect(await claimRows(7)).toHaveLength(7);
 
       // And a smaller window is a prefix of a larger one — the ordering is
       // total, so asking for fewer rows returns the same oldest rows, not a
       // different selection.
-      const seven = (await store.claimPending(7)).map((row) => row.createdAt.getTime());
+      const seven = (await claimRows(7)).map((row) => row.createdAt.getTime());
       expect([...seven].sort((a, b) => a - b)).toEqual(seven);
       expect(seven[0]).toBeLessThanOrEqual(seven[6] as number);
     });
@@ -584,7 +610,7 @@ describe('the outbox store, against a real database', () => {
       // query behaving exactly as specified.
       const [fresh] = await seed(1);
 
-      const claimed = await store.claimPending(100);
+      const claimed = await claimRows(100);
 
       expect(claimed.map((row) => row.id)).not.toContain(fresh);
       expect(claimed).toHaveLength(100);
