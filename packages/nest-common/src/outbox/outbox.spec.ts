@@ -1,4 +1,11 @@
-import { buildOutboxRow, OutboxRelay, type OutboxRow, type OutboxStore } from './outbox';
+import {
+  buildOutboxRow,
+  OutboxRelay,
+  type ClaimRequest,
+  type OutboxClaim,
+  type OutboxRow,
+  type OutboxStore,
+} from './outbox';
 import { runWithContext, type RequestContext } from '../context/request-context';
 
 const ORG_A = 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YA';
@@ -93,22 +100,65 @@ function makeRow(id: string): OutboxRow {
   };
 }
 
+/**
+ * An in-memory store that honours the fence.
+ *
+ * It is not a stand-in for the database tests — those must run against real
+ * PostgreSQL, because the fencing lives in SQL. It exists so the relay's own
+ * logic (which rows it acknowledges, when it stops, what it releases) can be
+ * exercised deterministically, and it enforces the token so a relay bug that
+ * mutates rows it no longer owns fails here rather than silently passing.
+ */
 class FakeStore implements OutboxStore {
   pending: OutboxRow[] = [];
   published: string[] = [];
   failed: Array<{ id: string; error: string }> = [];
+  released: string[] = [];
+  /** id -> the token that currently owns it. */
+  tokens = new Map<string, string>();
+  claims = 0;
 
-  async claimPending(limit: number): Promise<OutboxRow[]> {
-    return this.pending.splice(0, limit);
+  async claimPending(request: ClaimRequest): Promise<OutboxClaim> {
+    this.claims += 1;
+    const rows = this.pending.splice(0, request.limit);
+    if (rows.length === 0) return { token: null, rows: [], reclaimed: 0 };
+    const token = `token-${this.claims}`;
+    for (const row of rows) this.tokens.set(row.id, token);
+    return { token, rows, reclaimed: 0 };
   }
-  async markPublished(ids: readonly string[]): Promise<void> {
-    this.published.push(...ids);
+
+  async markPublished(ids: readonly string[], token: string): Promise<number> {
+    const mine = ids.filter((id) => this.tokens.get(id) === token);
+    this.published.push(...mine);
+    for (const id of mine) this.tokens.delete(id);
+    return mine.length;
   }
-  async markFailed(id: string, error: string): Promise<void> {
+
+  async markFailed(id: string, token: string, error: string): Promise<number> {
+    if (this.tokens.get(id) !== token) return 0;
     this.failed.push({ id, error });
+    this.tokens.delete(id);
+    return 1;
   }
+
+  async release(ids: readonly string[], token: string): Promise<number> {
+    const mine = ids.filter((id) => this.tokens.get(id) === token);
+    this.released.push(...mine);
+    for (const id of mine) this.tokens.delete(id);
+    return mine.length;
+  }
+
+  async renew(ids: readonly string[], token: string): Promise<string[]> {
+    return ids.filter((id) => this.tokens.get(id) === token);
+  }
+
   async oldestPendingAgeSeconds(): Promise<number> {
     return this.pending.length === 0 ? 0 : 60;
+  }
+
+  /** Simulates another claimant taking rows back. */
+  reclaim(ids: readonly string[], token = 'stolen'): void {
+    for (const id of ids) this.tokens.set(id, token);
   }
 }
 
