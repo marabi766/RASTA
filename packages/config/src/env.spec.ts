@@ -148,4 +148,58 @@ describe('boolean flags in the shared schemas', () => {
       expect(() => load(value)).toThrow(EnvValidationError);
     });
   });
+  /**
+   * ADR-050 picks these bounds for stated reasons, and the reasons only hold
+   * at the bounds. Pinned here so a later "just lower it for a test" changes
+   * a failing assertion rather than a durability guarantee silently.
+   */
+  describe('outbox durable claim (ADR-050)', () => {
+    const load = (overrides: Record<string, string> = {}) =>
+      loadEnv(kafkaEnvSchema, { ...kafka, ...overrides } as NodeJS.ProcessEnv);
+
+    it('defaults to the values the ADR chose', () => {
+      const env = load();
+
+      expect(env.OUTBOX_CLAIM_LEASE_SECONDS).toBe(60);
+      expect(env.OUTBOX_CLAIM_BACKOFF_SECONDS).toBe(5);
+      expect(env.OUTBOX_CLAIM_BACKOFF_MAX_SECONDS).toBe(3600);
+      expect(env.OUTBOX_SHUTDOWN_GRACE_SECONDS).toBe(30);
+    });
+
+    it('accepts a 20-second lease, the lowest the renewal schedule tolerates', () => {
+      expect(load({ OUTBOX_CLAIM_LEASE_SECONDS: '20' }).OUTBOX_CLAIM_LEASE_SECONDS).toBe(20);
+    });
+
+    it.each(['19', '10', '0', '-1'])(
+      'refuses a %p-second lease: below 20 the interval drops under five seconds and the ' +
+        'last renewal lands on the expiry instant, leaving no tolerance at all',
+      (value) => {
+        expect(() => load({ OUTBOX_CLAIM_LEASE_SECONDS: value })).toThrow(EnvValidationError);
+      },
+    );
+
+    it('refuses a lease above an hour', () => {
+      expect(() => load({ OUTBOX_CLAIM_LEASE_SECONDS: '3601' })).toThrow(EnvValidationError);
+    });
+
+    it('refuses a zero backoff base, which would retry a poisoned row without pause', () => {
+      expect(() => load({ OUTBOX_CLAIM_BACKOFF_SECONDS: '0' })).toThrow(EnvValidationError);
+    });
+
+    it('refuses a backoff ceiling above a day', () => {
+      expect(() => load({ OUTBOX_CLAIM_BACKOFF_MAX_SECONDS: '86401' })).toThrow(EnvValidationError);
+    });
+
+    it('allows a zero shutdown grace — abandon immediately is a valid choice', () => {
+      expect(load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '0' }).OUTBOX_SHUTDOWN_GRACE_SECONDS).toBe(0);
+    });
+
+    it('refuses a shutdown grace above five minutes, so a pod cannot hang in Terminating', () => {
+      expect(() => load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '301' })).toThrow(EnvValidationError);
+    });
+
+    it.each(['abc', '1.5', ''])('refuses %p as a lease rather than coercing it', (value) => {
+      expect(() => load({ OUTBOX_CLAIM_LEASE_SECONDS: value })).toThrow(EnvValidationError);
+    });
+  });
 });
