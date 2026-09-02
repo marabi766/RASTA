@@ -19,9 +19,14 @@ import type { S3ObjectStorage } from '../src/storage/s3.storage';
  * These paths are reached only incidentally by the lifecycle suites — a
  * missing object, a ranged read, a relay claiming rows — and each is a place
  * where "it worked in the happy path" says nothing useful. What a bucket does
- * when the key is not there, and what `FOR UPDATE SKIP LOCKED` does when two
- * relays run at once, are properties of PostgreSQL and S3 rather than of this
- * code, so a mock would assert the mock.
+ * when the key is not there, and what the claim query returns against a real
+ * table, are properties of PostgreSQL and S3 rather than of this code, so a
+ * mock would assert the mock.
+ *
+ * Note what `FOR UPDATE SKIP LOCKED` does *not* do here. Its lock lives only
+ * as long as the transaction holding it, and the claim is a standalone
+ * SELECT — so two relays running at once can claim the same rows, and do
+ * (D-026). Nothing in this file should be read as proving otherwise.
  */
 describe('object storage, against a real bucket', () => {
   const env = testEnv();
@@ -253,25 +258,66 @@ describe('the outbox store, against a real database', () => {
       }),
     );
 
-  it('claims pending rows and maps every column the relay needs', async () => {
-    const [id] = await seed(1);
+  /**
+   * `claimPending(limit)` returns a *window*, and this suite does not own the
+   * ordering that decides it.
+   *
+   * The assertion that used to live here seeded one row, claimed 100, and
+   * required its own row to be among them. That is not a property of the
+   * implementation. The query takes the **oldest** hundred unpublished rows
+   * across the whole table, so a freshly inserted row — the newest pending row
+   * there is — belongs in the window only while the shared database holds
+   * fewer than a hundred older ones. With more, its absence is the query
+   * working, not failing. D-024 was the same mistake on `COUNT`; this was it
+   * on `LIMIT` and `ORDER BY`.
+   *
+   * What is asserted instead are the guarantees the query actually makes, on
+   * the rows it actually returned. Column mapping moved to
+   * `src/outbox/outbox.store.spec.ts`, where a controlled raw row proves every
+   * snake_case field lands in the right place without needing any particular
+   * row to be in the window.
+   */
+  it('returns a bounded, unpublished, oldest-first window', async () => {
+    await seed(3);
 
-    const claimed = await store.claimPending(100);
-    const row = claimed.find((candidate) => candidate.id === id);
+    const claimed = await store.claimPending(10);
 
-    expect(row).toBeDefined();
-    expect(row).toMatchObject({
-      aggregateType: 'Document',
-      eventName: 'DOCUMENT_UPLOADED',
-      topic: 'rasta.document.v1',
-      organizationId,
-      publishedAt: null,
-      attempts: 0,
-    });
-    // The raw query selects snake_case columns; a mapping slip here would
-    // publish an event with an undefined topic and no test would say so.
-    expect(row?.headers).toEqual({});
-    expect(row?.createdAt).toBeInstanceOf(Date);
+    // Bounded by the limit. Not "exactly 10" — the table may hold fewer.
+    expect(claimed.length).toBeLessThanOrEqual(10);
+    expect(claimed.length).toBeGreaterThan(0);
+
+    // `WHERE published_at IS NULL`, on every row that came back.
+    expect(claimed.every((row) => row.publishedAt === null)).toBe(true);
+
+    // `ORDER BY created_at`, on every row that came back.
+    const times = claimed.map((row) => row.createdAt.getTime());
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+
+    // The mapper ran on real rows: every column the relay needs is present and
+    // of the right type. This is the shape check; the field-by-field mapping is
+    // pinned against a controlled raw row in the unit test.
+    for (const row of claimed) {
+      expect(typeof row.id).toBe('string');
+      expect(typeof row.aggregateType).toBe('string');
+      expect(typeof row.aggregateId).toBe('string');
+      expect(typeof row.eventName).toBe('string');
+      expect(typeof row.eventVersion).toBe('number');
+      expect(typeof row.topic).toBe('string');
+      expect(typeof row.partitionKey).toBe('string');
+      expect(typeof row.correlationId).toBe('string');
+      expect(row.createdAt).toBeInstanceOf(Date);
+      expect(row.headers).toBeDefined();
+      expect(typeof row.attempts).toBe('number');
+    }
+  });
+
+  it('asks for no more rows than it was given room for', async () => {
+    await seed(3);
+
+    // A limit smaller than the number of pending rows this suite alone just
+    // created, so the bound is doing work rather than being vacuously true.
+    expect((await store.claimPending(1)).length).toBe(1);
+    expect((await store.claimPending(2)).length).toBe(2);
   });
 
   it('does not claim a row that was already published', async () => {
@@ -427,6 +473,126 @@ describe('the outbox store, against a real database', () => {
     // An unpublished row is an event nobody has received yet. Deleting it
     // would lose it silently, which is worse than keeping it forever.
     expect(await rowsOf(unpublished)).toHaveLength(1);
+  });
+
+  /**
+   * The window, proven against a backlog bigger than it.
+   *
+   * This is the condition the old assertion could not survive, kept as a test
+   * rather than as a note. The fixture inserts more than a thousand pending
+   * rows dated in the year 2000 — far enough back that they sort ahead of
+   * anything a normal run produces, and numerous enough that the window is
+   * always full.
+   *
+   * What the assertions below claim about them is carefully limited. The
+   * fixture is not assumed to *own* the oldest hundred rows on the platform:
+   * another suite may hold rows just as old, and an assertion that failed in
+   * that case would be this defect all over again, one level up. What holds
+   * regardless is that the fixture's rows *inside* the window are its own
+   * oldest ones, contiguously — a row can only be there if every row older
+   * than it is there too. Nothing outside the fixture is read, deleted or
+   * depended upon.
+   *
+   * A backlog this size is also the real operational case: a relay that has
+   * been down for an hour comes back to exactly this, and "the oldest hundred
+   * first" is the property that lets it drain in order instead of starving the
+   * events that have waited longest.
+   */
+  describe('with more than a thousand older pending rows', () => {
+    const backlogOrg = `ORG-OUTBOXTEST-BACKLOG-${ulid().slice(-10)}`;
+    const ANCIENT = new Date('2000-01-01T00:00:00.000Z');
+    const BACKLOG = 1200;
+
+    beforeAll(async () => {
+      await runUnscoped('the fixture seeds an older backlog', () =>
+        prisma.client.outboxMessage.createMany({
+          data: Array.from({ length: BACKLOG }, (_, index) => ({
+            id: `OBX_${ulid()}`,
+            aggregateType: 'Document',
+            aggregateId: `DOC_${ulid()}`,
+            eventName: 'DOCUMENT_UPLOADED',
+            eventVersion: 1,
+            topic: 'rasta.document.v1',
+            partitionKey: `BACKLOG_${index}`,
+            payload: { backlog: true },
+            headers: {},
+            organizationId: backlogOrg,
+            correlationId: `COR-${ulid()}`,
+            // One second apart, so the ordering is total and no tie-break is
+            // needed to know which row comes first.
+            createdAt: new Date(ANCIENT.getTime() + index * 1000),
+            publishedAt: null,
+          })),
+        }),
+      );
+    });
+
+    afterAll(async () => {
+      await runUnscoped('the fixture removes only its own rows', () =>
+        prisma.client.outboxMessage.deleteMany({ where: { organizationId: backlogOrg } }),
+      );
+    });
+
+    it('fills the window from the oldest rows, and stops at the limit', async () => {
+      const claimed = await store.claimPending(100);
+
+      // Exactly the limit: this fixture alone supplies twelve times as many
+      // candidates as the window holds.
+      expect(claimed).toHaveLength(100);
+      expect(claimed.every((row) => row.publishedAt === null)).toBe(true);
+
+      const times = claimed.map((row) => row.createdAt.getTime());
+      expect([...times].sort((a, b) => a - b)).toEqual(times);
+
+      // If any of the fixture's rows are in the window, they are its *oldest*
+      // ones with no gaps — row n can only be there if every row older than it
+      // is too.
+      //
+      // Conditional on purpose. Requiring even one fixture row to appear would
+      // be the same defect this change exists to remove: the window is global
+      // and another suite may hold a hundred rows older than every one of
+      // ours, in which case none of the fixture's belong in it and the query
+      // is behaving perfectly. Verified deterministically — with 1,200 foreign
+      // rows dated 1990 ahead of the fixture's year 2000, `mine` is empty and
+      // this still holds, because an empty list trivially equals its own
+      // prefix.
+      const mine = claimed
+        .filter((row) => row.organizationId === backlogOrg)
+        .map((row) => row.createdAt.getTime());
+
+      expect(mine).toEqual(mine.map((_, index) => ANCIENT.getTime() + index * 1000));
+    });
+
+    it('honours a smaller limit against the same backlog', async () => {
+      // Exact, because more than a thousand pending rows are available: a
+      // short limit can always be filled.
+      expect(await store.claimPending(1)).toHaveLength(1);
+      expect(await store.claimPending(7)).toHaveLength(7);
+
+      // And a smaller window is a prefix of a larger one — the ordering is
+      // total, so asking for fewer rows returns the same oldest rows, not a
+      // different selection.
+      const seven = (await store.claimPending(7)).map((row) => row.createdAt.getTime());
+      expect([...seven].sort((a, b) => a - b)).toEqual(seven);
+      expect(seven[0]).toBeLessThanOrEqual(seven[6] as number);
+    });
+
+    it('correctly leaves a newly written row outside the window', async () => {
+      // The old assertion, restated as the property it actually is. A row
+      // written now is the newest pending row in the table; with a thousand
+      // older ones ahead of it, its absence from the first hundred is the
+      // query behaving exactly as specified.
+      const [fresh] = await seed(1);
+
+      const claimed = await store.claimPending(100);
+
+      expect(claimed.map((row) => row.id)).not.toContain(fresh);
+      expect(claimed).toHaveLength(100);
+
+      // And it is genuinely pending — outside the window, not published and
+      // not missing. The difference is the whole point.
+      expect(await pendingAmong([fresh])).toBe(1);
+    });
   });
 });
 
