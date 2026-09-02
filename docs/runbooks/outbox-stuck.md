@@ -123,7 +123,10 @@ pnpm --filter @rasta/<service> dev
 ```
 ۱. OUTBOX_BATCH_SIZE را افزایش بده (پیش‌فرض ۱۰۰)
 ۲. OUTBOX_POLL_INTERVAL_MS را کاهش بده (پیش‌فرض ۵۰۰)
-۳. Replica سرویس را افزایش بده — FOR UPDATE SKIP LOCKED چند Instance را ایمن می‌کند
+۳. Replica سرویس را افزایش بده — اما بدان که تا پیاده‌سازی ADR-050،
+   `FOR UPDATE SKIP LOCKED` چند Instance را ایمن **نمی‌کند**: قفلش با پایان
+   همان جمله تمام می‌شود و دو رله می‌توانند یک ردیف را منتشر کنند (D-026).
+   بیشتر کردن Replica یعنی بیشتر شدن انتشار تکراری، نه فقط بیشتر شدن سرعت.
 ```
 
 ---

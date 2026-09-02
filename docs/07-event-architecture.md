@@ -98,7 +98,7 @@ Envelope می‌آید تا یک Topic بتواند در طول یک Rollout ج�
                    ▼
         ┌──────────────────────┐
         │  Outbox Relay        │  هر ۵۰۰ میلی‌ثانیه Poll
-        │  FOR UPDATE SKIP LOCKED │  (چند Instance ایمن)
+        │  FOR UPDATE SKIP LOCKED │  (رزرو بادوام نیست — D-026)
         └──────────┬───────────┘
                    │ produce (acks=all, idempotent producer)
                    ▼

@@ -136,8 +136,13 @@ export interface OutboxStore {
   /**
    * Claims up to `limit` unpublished rows.
    *
-   * Implementations must use `FOR UPDATE SKIP LOCKED` so several service
-   * replicas can relay concurrently without publishing the same row twice.
+   * `FOR UPDATE SKIP LOCKED` keeps two claimers off the same row only while
+   * the selecting statement runs. Its lock ends with that statement's own
+   * transaction, and the relay publishes to Kafka afterwards, so between the
+   * claim and `markPublished` the rows are reserved by nothing and two
+   * replicas can publish the same row. Measured: 10 of 10 overlap (D-026).
+   *
+   * ADR-050 replaces this with a token-fenced durable claim.
    */
   claimPending(limit: number): Promise<OutboxRow[]>;
   markPublished(ids: readonly string[]): Promise<void>;
