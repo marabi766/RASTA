@@ -39,7 +39,7 @@ import type { PrismaService } from '../prisma/prisma.service';
 describe('claimPending', () => {
   const queryRaw = jest.fn();
   const claiming = new PrismaOutboxStore({
-    client: { $queryRaw: queryRaw },
+    client: { $queryRawUnsafe: queryRaw },
   } as unknown as PrismaService);
 
   /** Every column the query selects, each with a value only it could produce. */
@@ -120,8 +120,8 @@ describe('claimPending', () => {
     queryRaw.mockResolvedValue([]);
     await claiming.claimPending(25);
 
-    const [fragments, ...values] = queryRaw.mock.calls.at(-1) as [string[], ...unknown[]];
-    const sql = fragments.join('?').replace(/\s+/g, ' ');
+    const [statement, ...values] = queryRaw.mock.calls.at(-1) as [string, ...unknown[]];
+    const sql = statement.replace(/\s+/g, ' ');
 
     expect(sql).toContain('FROM outbox_message');
     expect(sql).toContain('WHERE published_at IS NULL');

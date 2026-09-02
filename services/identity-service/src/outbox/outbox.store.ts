@@ -1,59 +1,43 @@
 import { Injectable } from '@nestjs/common';
-import type { OutboxRow, OutboxStore } from '@rasta/nest-common';
+import {
+  claimPendingSql,
+  markFailedSql,
+  markPublishedSql,
+  oldestPendingAgeSecondsSql,
+  type OutboxRow,
+  type OutboxStore,
+} from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 
 /**
  * Outbox persistence backed by this service's own database.
  *
- * The interesting part is {@link claimPending}: it uses
- * `FOR UPDATE SKIP LOCKED`, which lets several service replicas relay
- * concurrently without any of them publishing the same row twice. Without
- * `SKIP LOCKED`, replicas would serialise on the same rows and the relay would
- * scale to exactly one instance.
+ * The statements live in `@rasta/nest-common` because all eight services need
+ * exactly the same ones; this class only binds them to this service's client.
+ *
+ * `claimPending` uses `FOR UPDATE SKIP LOCKED` so two replicas do not serialise
+ * on the same row. That is all it does: the row lock ends with the statement's
+ * own transaction, so it is **not** a durable reservation and two replicas can
+ * still claim and publish the same row (D-026, ADR-050).
  */
 @Injectable()
 export class PrismaOutboxStore implements OutboxStore {
   constructor(private readonly prisma: PrismaService) {}
 
   async claimPending(limit: number): Promise<OutboxRow[]> {
-    // Raw SQL because Prisma has no expression for SKIP LOCKED, and the whole
-    // correctness of concurrent relaying rests on it.
-    const rows = await this.prisma.client.$queryRaw<RawOutboxRow[]>`
-      SELECT id, aggregate_type, aggregate_id, event_name, event_version,
-             topic, partition_key, payload, headers, organization_id,
-             correlation_id, created_at, published_at, attempts, last_error
-      FROM outbox_message
-      WHERE published_at IS NULL
-      ORDER BY created_at
-      LIMIT ${limit}
-      FOR UPDATE SKIP LOCKED
-    `;
-
-    return rows.map(toOutboxRow);
+    return claimPendingSql(this.prisma.client, limit);
   }
 
   async markPublished(ids: readonly string[]): Promise<void> {
-    if (ids.length === 0) return;
-    await this.prisma.client.outboxMessage.updateMany({
-      where: { id: { in: [...ids] } },
-      data: { publishedAt: new Date() },
-    });
+    await markPublishedSql(this.prisma.client, ids, new Date());
   }
 
   async markFailed(id: string, error: string): Promise<void> {
-    await this.prisma.client.outboxMessage.update({
-      where: { id },
-      data: { attempts: { increment: 1 }, lastError: error },
-    });
+    await markFailedSql(this.prisma.client, id, error);
   }
 
   async oldestPendingAgeSeconds(): Promise<number> {
-    const result = await this.prisma.client.$queryRaw<{ age: number | null }[]>`
-      SELECT EXTRACT(EPOCH FROM (now() - MIN(created_at)))::float8 AS age
-      FROM outbox_message
-      WHERE published_at IS NULL
-    `;
-    return result[0]?.age ?? 0;
+    return oldestPendingAgeSecondsSql(this.prisma.client);
   }
 
   async pendingCount(): Promise<number> {
@@ -73,42 +57,4 @@ export class PrismaOutboxStore implements OutboxStore {
     });
     return result.count;
   }
-}
-
-interface RawOutboxRow {
-  id: string;
-  aggregate_type: string;
-  aggregate_id: string;
-  event_name: string;
-  event_version: number;
-  topic: string;
-  partition_key: string;
-  payload: unknown;
-  headers: unknown;
-  organization_id: string | null;
-  correlation_id: string;
-  created_at: Date;
-  published_at: Date | null;
-  attempts: number;
-  last_error: string | null;
-}
-
-function toOutboxRow(row: RawOutboxRow): OutboxRow {
-  return {
-    id: row.id,
-    aggregateType: row.aggregate_type,
-    aggregateId: row.aggregate_id,
-    eventName: row.event_name,
-    eventVersion: row.event_version,
-    topic: row.topic,
-    partitionKey: row.partition_key,
-    payload: row.payload,
-    headers: (row.headers ?? {}) as Record<string, string>,
-    organizationId: row.organization_id,
-    correlationId: row.correlation_id,
-    createdAt: row.created_at,
-    publishedAt: row.published_at,
-    attempts: row.attempts,
-    lastError: row.last_error,
-  };
 }

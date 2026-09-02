@@ -107,3 +107,11 @@ export type {
   OutboxRelayOptions,
   BuildOutboxOptions,
 } from './outbox/outbox';
+export {
+  claimPendingSql,
+  markPublishedSql,
+  markFailedSql,
+  oldestPendingAgeSecondsSql,
+  toOutboxRow,
+} from './outbox/outbox-sql';
+export type { OutboxSqlClient, RawOutboxRow } from './outbox/outbox-sql';
