@@ -83,6 +83,60 @@ export const outboxPendingAgeSeconds = new Gauge({
   registers: [registry],
 });
 
+// ---- Outbox durable claim (ADR-050) ---------------------------------------
+//
+// What these measure, and what they deliberately do not.
+//
+// Duplicate delivery is **not observable producer-side**. The relay cannot
+// tell whether a `sendBatch` that timed out reached the broker, so no counter
+// here reports duplicates. `ack_fenced_total` is a lower-bound indicator: any
+// non-zero value means a duplicate *may* have happened. Alert text must say
+// exactly that and no more.
+
+/**
+ * Rows a mutation could not touch because the claim token no longer matched.
+ *
+ * A fencing event, not a duplicate. It counts the times this relay discovered
+ * it had lost ownership — which is the moment a duplicate becomes possible,
+ * not proof that one occurred.
+ */
+export const outboxAckFencedTotal = new Counter({
+  name: 'rasta_outbox_ack_fenced_total',
+  help: 'Outbox rows a mutation could not touch because the claim token no longer matched',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/** Rows claimed back from a lease that had already expired. */
+export const outboxLeaseReclaimedTotal = new Counter({
+  name: 'rasta_outbox_lease_reclaimed_total',
+  help: 'Outbox rows re-claimed from an expired lease',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/** Total rows claimed — the sum of every increment to `claim_count`. */
+export const outboxClaimAttemptsTotal = new Counter({
+  name: 'rasta_outbox_claim_attempts_total',
+  help: 'Outbox rows claimed',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/**
+ * Rows under a live lease.
+ *
+ * Sampled with a `SELECT count(*)`, never maintained by `inc`/`dec`. A gauge
+ * kept by arithmetic drifts on every restart and every missed error path, and
+ * drifts in the direction that hides the incident it exists to reveal.
+ */
+export const outboxLeasesActive = new Gauge({
+  name: 'rasta_outbox_leases_active',
+  help: 'Outbox rows currently held under a live claim lease',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
 export const eventsPublishedTotal = new Counter({
   name: 'rasta_events_published_total',
   help: 'Domain events published',

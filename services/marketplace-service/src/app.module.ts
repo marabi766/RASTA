@@ -20,7 +20,14 @@ import {
   type AuthGuardOptions,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
-import { outboxPendingAgeSeconds, outboxPendingTotal } from '@rasta/observability';
+import {
+  outboxAckFencedTotal,
+  outboxClaimAttemptsTotal,
+  outboxLeaseReclaimedTotal,
+  outboxLeasesActive,
+  outboxPendingAgeSeconds,
+  outboxPendingTotal,
+} from '@rasta/observability';
 import { PrismaService } from './prisma/prisma.service';
 import { PrismaOutboxStore } from './outbox/outbox.store';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
@@ -134,8 +141,19 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
           publisher,
           pollIntervalMs: env.OUTBOX_POLL_INTERVAL_MS,
           batchSize: env.OUTBOX_BATCH_SIZE,
+          leaseSeconds: env.OUTBOX_CLAIM_LEASE_SECONDS,
+          backoff: {
+            baseSeconds: env.OUTBOX_CLAIM_BACKOFF_SECONDS,
+            maxSeconds: env.OUTBOX_CLAIM_BACKOFF_MAX_SECONDS,
+          },
+          shutdownGraceSeconds: env.OUTBOX_SHUTDOWN_GRACE_SECONDS,
           logger,
-          onBatchPublished: (count) => outboxPendingTotal.dec({ service: SERVICE_NAME }, count),
+          // Counters only. Both outbox gauges are sampled from the database
+          // below, never maintained by inc/dec — an arithmetic gauge drifts on
+          // every restart and every missed error path (ADR-050).
+          onFenced: (count) => outboxAckFencedTotal.inc({ service: SERVICE_NAME }, count),
+          onReclaimed: (count) => outboxLeaseReclaimedTotal.inc({ service: SERVICE_NAME }, count),
+          onClaimAttempt: (count) => outboxClaimAttemptsTotal.inc({ service: SERVICE_NAME }, count),
         }),
     },
 
@@ -184,6 +202,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     const sample = async () => {
       try {
         outboxPendingTotal.set({ service: SERVICE_NAME }, await this.store.pendingCount());
+        outboxLeasesActive.set({ service: SERVICE_NAME }, await this.store.activeLeaseCount());
         outboxPendingAgeSeconds.set(
           { service: SERVICE_NAME },
           await this.store.oldestPendingAgeSeconds(),
