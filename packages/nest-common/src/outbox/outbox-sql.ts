@@ -178,9 +178,21 @@ export async function claimPendingSql(
 
   return {
     token: written,
-    rows: rows.map(toOutboxRow),
+    // Re-sorted, because `UPDATE ... RETURNING` does not preserve the ordering
+    // of the CTE it selected from. The `ORDER BY` inside `due` decides *which*
+    // rows are claimed — that part is deterministic — but PostgreSQL is free to
+    // emit the updated rows in any order, and it does. Without this the relay
+    // would hand Kafka a batch in an arbitrary order on every poll, which is
+    // the ordering guarantee G6 exists to provide.
+    rows: rows.map(toOutboxRow).sort(byCreatedAtThenId),
     reclaimed: rows.filter((row) => row.reclaimed).length,
   };
+}
+
+/** The same total order the claim query selects with. */
+function byCreatedAtThenId(a: OutboxRow, b: OutboxRow): number {
+  const byTime = a.createdAt.getTime() - b.createdAt.getTime();
+  return byTime !== 0 ? byTime : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
 /**
