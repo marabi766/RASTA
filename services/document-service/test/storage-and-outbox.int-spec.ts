@@ -19,9 +19,14 @@ import type { S3ObjectStorage } from '../src/storage/s3.storage';
  * These paths are reached only incidentally by the lifecycle suites — a
  * missing object, a ranged read, a relay claiming rows — and each is a place
  * where "it worked in the happy path" says nothing useful. What a bucket does
- * when the key is not there, and what `FOR UPDATE SKIP LOCKED` does when two
- * relays run at once, are properties of PostgreSQL and S3 rather than of this
- * code, so a mock would assert the mock.
+ * when the key is not there, and what the claim query returns against a real
+ * table, are properties of PostgreSQL and S3 rather than of this code, so a
+ * mock would assert the mock.
+ *
+ * Note what `FOR UPDATE SKIP LOCKED` does *not* do here. Its lock lives only
+ * as long as the transaction holding it, and the claim is a standalone
+ * SELECT — so two relays running at once can claim the same rows, and do
+ * (D-026). Nothing in this file should be read as proving otherwise.
  */
 describe('object storage, against a real bucket', () => {
   const env = testEnv();
@@ -539,19 +544,22 @@ describe('the outbox store, against a real database', () => {
       const times = claimed.map((row) => row.createdAt.getTime());
       expect([...times].sort((a, b) => a - b)).toEqual(times);
 
-      // The fixture's own rows inside the window are its *oldest* ones, with
-      // no gaps — row n can only be there if every row older than it is too.
+      // If any of the fixture's rows are in the window, they are its *oldest*
+      // ones with no gaps — row n can only be there if every row older than it
+      // is too.
       //
-      // Deliberately not "every returned row is the fixture's". That would
-      // claim the fixture owns the oldest hundred rows on the platform, which
-      // is the same assumption this whole change exists to remove: another
-      // suite may hold rows just as old, and then it would fail while the
-      // query was behaving perfectly.
+      // Conditional on purpose. Requiring even one fixture row to appear would
+      // be the same defect this change exists to remove: the window is global
+      // and another suite may hold a hundred rows older than every one of
+      // ours, in which case none of the fixture's belong in it and the query
+      // is behaving perfectly. Verified deterministically — with 1,200 foreign
+      // rows dated 1990 ahead of the fixture's year 2000, `mine` is empty and
+      // this still holds, because an empty list trivially equals its own
+      // prefix.
       const mine = claimed
         .filter((row) => row.organizationId === backlogOrg)
         .map((row) => row.createdAt.getTime());
 
-      expect(mine.length).toBeGreaterThan(0);
       expect(mine).toEqual(mine.map((_, index) => ANCIENT.getTime() + index * 1000));
     });
 

@@ -100,10 +100,23 @@ describe('claimPending', () => {
   });
 
   it('asks the database for the oldest unpublished rows, up to the limit', async () => {
-    // The four clauses that define the window, pinned so none can be dropped:
-    // an unpublished filter, an oldest-first ordering, a bound, and the
-    // skip-locked claim that lets several replicas relay at once without any
-    // two of them publishing the same row (ADR-006).
+    // The clauses that define the window, pinned so none can be dropped: an
+    // unpublished filter, an oldest-first ordering, and a bound.
+    //
+    // `FOR UPDATE SKIP LOCKED` is asserted as the SQL that is currently there,
+    // and nothing more is claimed for it. Its lock lasts only while the
+    // transaction holding it is open, and this SELECT stands alone: by the
+    // time `claimPending` returns, the transaction has ended and every lock
+    // with it. The relay then publishes to Kafka and calls `markPublished`
+    // afterwards, in a separate statement, so between those two points the
+    // rows are reserved by nothing.
+    //
+    // Two relay instances therefore can and do claim the same rows. Measured,
+    // not reasoned about: two stores on independent connections, the second
+    // claiming after the first returned and before it marked, produced an
+    // intersection of 10 rows out of 10 — a complete overlap. What actually
+    // excludes a row from a later claim is `published_at`, and only once it is
+    // set. Recorded as D-026; a durable claim needs an ADR, not a comment.
     queryRaw.mockResolvedValue([]);
     await claiming.claimPending(25);
 
