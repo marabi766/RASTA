@@ -96,6 +96,9 @@ INSERT INTO "outbox_message" (
   now(), 0${extra ? ', ' + extra.split('=').slice(1).join('=').trim() : ''}
 );`;
 
+/** Probe rows this script writes, removed before and after the constraint checks. */
+const PROBE_CLEANUP = `DELETE FROM "outbox_message" WHERE id LIKE 'OBXCHK%';`;
+
 const args = process.argv.slice(2);
 const only = args.find((a) => !a.startsWith('--'));
 const targets = only ? [only] : SERVICES;
@@ -255,7 +258,7 @@ function verify(service) {
     console.log('  ✓ up: all five CHECK constraints reject invalid states');
 
     // --- down ----------------------------------------------------------------
-    mustRun('cleanup probe rows', `DELETE FROM "outbox_message" WHERE id LIKE 'OBXCHK_%';`);
+    mustRun('cleanup probe rows', PROBE_CLEANUP);
     const down = sql(readDown(migrationDir));
     if (!down.ok) throw new Error(`down: down.sql failed:\n${down.output}`);
     mustRun('down: every claim object is gone', assertObjects(false));
@@ -350,6 +353,10 @@ $$;`;
  * everything, and an existence test cannot tell the difference.
  */
 function assertConstraintsBite(mustRun, mustFail) {
+  // Clear first, not only at the end. A run that aborts mid-way — a dropped
+  // connection, an assertion failure — leaves its probe row behind, and the
+  // next run then fails on the primary key instead of on what it came to test.
+  mustRun('clear any probe rows a previous run left behind', PROBE_CLEANUP);
   mustRun('seed: a valid unpublished row', insertRow('OBXCHK_VALID'));
 
   // ck_outbox_claim_triple — two of three is not a claim.

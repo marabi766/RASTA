@@ -42,6 +42,15 @@ describe('claimPending', () => {
     client: { $queryRawUnsafe: queryRaw },
   } as unknown as PrismaService);
 
+  /** The store mints its own token, so the fake database must echo it back. */
+  const echoToken = (rows: Record<string, unknown>[]) =>
+    queryRaw.mockImplementation((_sql: string, token: string) =>
+      Promise.resolve(rows.map((row) => ({ claim_token: token, reclaimed: false, ...row }))),
+    );
+
+  const claim = (limit: number) =>
+    claiming.claimPending({ limit, owner: 'spec', leaseSeconds: 60 });
+
   /** Every column the query selects, each with a value only it could produce. */
   const RAW = {
     id: 'OBX_MAPPING',
@@ -62,9 +71,9 @@ describe('claimPending', () => {
   };
 
   it('maps every selected column onto the field the relay reads', async () => {
-    queryRaw.mockResolvedValue([RAW]);
+    echoToken([RAW]);
 
-    expect(await claiming.claimPending(10)).toEqual([
+    expect((await claim(10)).rows).toEqual([
       {
         id: 'OBX_MAPPING',
         aggregateType: 'Document',
@@ -88,54 +97,61 @@ describe('claimPending', () => {
   it('turns absent headers into an empty object rather than null', async () => {
     // The publisher spreads these into the Kafka message headers; null there
     // is a crash at the point of sending, which is the worst place for one.
-    queryRaw.mockResolvedValue([{ ...RAW, headers: null }]);
+    echoToken([{ ...RAW, headers: null }]);
 
-    expect((await claiming.claimPending(10))[0]?.headers).toEqual({});
+    expect((await claim(10)).rows[0]?.headers).toEqual({});
   });
 
   it('returns nothing when the backlog is empty', async () => {
     queryRaw.mockResolvedValue([]);
 
-    expect(await claiming.claimPending(10)).toEqual([]);
+    // No rows means no fence to hold: the token is null rather than a value
+    // the relay could mistakenly mutate with.
+    expect(await claim(10)).toEqual({ token: null, rows: [], reclaimed: 0 });
   });
 
   it('asks the database for the oldest unpublished rows, up to the limit', async () => {
     // The clauses that define the window, pinned so none can be dropped: an
     // unpublished filter, an oldest-first ordering, and a bound.
     //
-    // `FOR UPDATE SKIP LOCKED` is asserted as the SQL that is currently there,
-    // and nothing more is claimed for it. Its lock lasts only while the
-    // transaction holding it is open, and this SELECT stands alone: by the
-    // time `claimPending` returns, the transaction has ended and every lock
-    // with it. The relay then publishes to Kafka and calls `markPublished`
-    // afterwards, in a separate statement, so between those two points the
-    // rows are reserved by nothing.
-    //
-    // Two relay instances therefore can and do claim the same rows. Measured,
-    // not reasoned about: two stores on independent connections, the second
-    // claiming after the first returned and before it marked, produced an
-    // intersection of 10 rows out of 10 — a complete overlap. What actually
-    // excludes a row from a later claim is `published_at`, and only once it is
-    // set. Recorded as D-026; a durable claim needs an ADR, not a comment.
+    // `FOR UPDATE SKIP LOCKED` remains in the subquery, but it is no longer
+    // asked to reserve anything: its lock ends with this statement. What
+    // reserves the row is `claim_token`, written by the same statement that
+    // selects it (ADR-050). Both are pinned here so neither can be dropped.
     queryRaw.mockResolvedValue([]);
-    await claiming.claimPending(25);
+    await claim(25);
 
     const [statement, ...values] = queryRaw.mock.calls.at(-1) as [string, ...unknown[]];
     const sql = statement.replace(/\s+/g, ' ');
 
     expect(sql).toContain('FROM outbox_message');
     expect(sql).toContain('WHERE published_at IS NULL');
-    expect(sql).toContain('ORDER BY created_at');
+    // Eligibility: no live lease, and no retry that is not yet due.
+    expect(sql).toContain('claim_expires_at IS NULL OR claim_expires_at <= now()');
+    expect(sql).toContain('next_attempt_at IS NULL OR next_attempt_at <= now()');
+    // The total order. `created_at` alone leaves same-millisecond ties
+    // arbitrary, which is what made claim windows non-deterministic.
+    expect(sql).toContain('ORDER BY created_at, id');
     expect(sql).toContain('LIMIT');
     expect(sql).toContain('FOR UPDATE SKIP LOCKED');
+    // The fence is written by the claiming statement and returned by it.
+    expect(sql).toContain('SET claim_token');
+    expect(sql).toContain('RETURNING');
 
     // Platform plumbing: the relay serves every organization, so the claim is
     // unscoped by design. A tenant filter here would strand another tenant's
     // events unpublished for as long as nobody noticed.
     expect(sql).not.toContain('organization_id =');
 
-    // The limit is a bound parameter, not interpolated text.
-    expect(values).toEqual([25]);
+    // Every value is bound, never interpolated: token, owner, lease, limit.
+    expect(values).toHaveLength(4);
+    expect(values[1]).toBe('spec');
+    expect(values[2]).toBe(60);
+    expect(values[3]).toBe(25);
+    // A fresh, unguessable token per attempt — not the process identity.
+    expect(values[0]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
   });
 });
 
