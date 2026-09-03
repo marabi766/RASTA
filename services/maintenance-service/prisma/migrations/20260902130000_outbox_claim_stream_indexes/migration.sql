@@ -25,10 +25,31 @@
 -- already applied and verified, and the rolling sequence wants the indexes in
 -- place before the query that needs them ships.
 --
--- Cost, measured on a 200,000-row fixture: about 10.4 MB of additional index
--- against a 27 MB table (total index size 21 MB -> 31 MB). Every claim and
--- every renewal writes claim_expires_at, so those writes now maintain more
--- index; that is the trade recorded for review in the implementation plan.
+-- Each stream also takes FOR UPDATE SKIP LOCKED before its own LIMIT, so a
+-- claimant meeting a contended prefix keeps scanning and still fills its
+-- batch. Locking only after the candidate merge starved: two claimants build
+-- the same pre-limited window, and the second found every candidate held.
+-- Measured before the fix — 300 eligible rows, oldest 100 locked elsewhere,
+-- claimPending(100) returned 0.
+--
+-- Cost, measured once on a 200,000-row fixture with all four streams
+-- populated (194,000 fresh / 2,000 lease / 2,000 retry / 2,000 paired):
+--
+--   table                       18 MB   (18,653,184 bytes)
+--   indexes before this file    27.8 MB (29,106,176 bytes)
+--   indexes after this file     35.6 MB (37,355,520 bytes)
+--   these four indexes           7.87 MB (8,249,344 bytes)  -> +28.3%
+--
+-- of which ix_outbox_due_fresh is 7696 kB and the other three are 120 kB
+-- each, because almost every unpublished row is in the fresh stream. Every
+-- claim and every renewal writes claim_expires_at, so those writes now
+-- maintain more index; that is the trade recorded for review in the
+-- implementation plan.
+--
+-- Lock amplification is the other cost: four streams can each lock up to
+-- LIMIT, so up to 4 x LIMIT rows are locked while only LIMIT are claimed —
+-- measured at 400 locked / 100 claimed with every stream populated. The locks
+-- are held for this one statement only.
 SET LOCAL lock_timeout = '3s';
 
 CREATE INDEX IF NOT EXISTS "ix_outbox_due_fresh"
