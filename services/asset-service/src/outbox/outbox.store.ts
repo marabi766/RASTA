@@ -1,63 +1,93 @@
+import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import type { OutboxRow, OutboxStore } from '@rasta/nest-common';
+import {
+  activeLeaseCountSql,
+  claimPendingSql,
+  markFailedSql,
+  markPublishedSql,
+  oldestPendingAgeSecondsSql,
+  releaseSql,
+  renewSql,
+  type ClaimRequest,
+  type OutboxClaim,
+  type OutboxStore,
+  type RetryBackoff,
+} from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 
 /**
  * Outbox persistence backed by this service's own database.
  *
- * The interesting part is {@link claimPending}: it uses
- * `FOR UPDATE SKIP LOCKED`, which lets several service replicas relay
- * concurrently without any of them publishing the same row twice. Without
- * `SKIP LOCKED`, replicas would serialise on the same rows and the relay would
- * scale to exactly one instance.
+ * The statements live in `@rasta/nest-common` because all eight services need
+ * exactly the same ones; this class binds them to this service's client and
+ * mints the fencing token.
+ *
+ * A fresh, unguessable token per claim attempt is the whole mechanism
+ * (ADR-050). `claim_owner` records which process holds a row and is read by
+ * nobody making a decision; `claim_expires_at` says only when somebody else
+ * may take the row back. Neither is a fence — the first draft of ADR-050
+ * proposed both and was wrong on both counts.
  */
 @Injectable()
 export class PrismaOutboxStore implements OutboxStore {
   constructor(private readonly prisma: PrismaService) {}
 
-  async claimPending(limit: number): Promise<OutboxRow[]> {
-    // Raw SQL because Prisma has no expression for SKIP LOCKED, and the whole
-    // correctness of concurrent relaying rests on it.
-    const rows = await this.prisma.client.$queryRaw<RawOutboxRow[]>`
-      SELECT id, aggregate_type, aggregate_id, event_name, event_version,
-             topic, partition_key, payload, headers, organization_id,
-             correlation_id, created_at, published_at, attempts, last_error
-      FROM outbox_message
-      WHERE published_at IS NULL
-      ORDER BY created_at
-      LIMIT ${limit}
-      FOR UPDATE SKIP LOCKED
-    `;
-
-    return rows.map(toOutboxRow);
-  }
-
-  async markPublished(ids: readonly string[]): Promise<void> {
-    if (ids.length === 0) return;
-    await this.prisma.client.outboxMessage.updateMany({
-      where: { id: { in: [...ids] } },
-      data: { publishedAt: new Date() },
+  async claimPending(request: ClaimRequest): Promise<OutboxClaim> {
+    return claimPendingSql(this.prisma.client, {
+      limit: request.limit,
+      // A new token every attempt. The same process claiming twice must not be
+      // able to acknowledge its first claim with its second token, which is
+      // exactly what a process-scoped owner id would have allowed.
+      token: randomUUID(),
+      owner: request.owner,
+      leaseSeconds: request.leaseSeconds,
     });
   }
 
-  async markFailed(id: string, error: string): Promise<void> {
-    await this.prisma.client.outboxMessage.update({
-      where: { id },
-      data: { attempts: { increment: 1 }, lastError: error },
-    });
+  async markPublished(ids: readonly string[], token: string): Promise<number> {
+    return markPublishedSql(this.prisma.client, ids, token);
+  }
+
+  async markFailed(
+    id: string,
+    token: string,
+    error: string,
+    backoff: RetryBackoff,
+  ): Promise<number> {
+    return markFailedSql(this.prisma.client, id, token, error, backoff);
+  }
+
+  async release(ids: readonly string[], token: string): Promise<number> {
+    return releaseSql(this.prisma.client, ids, token);
+  }
+
+  async renew(
+    ids: readonly string[],
+    token: string,
+    leaseSeconds: number,
+    deadlineMs: number,
+  ): Promise<string[]> {
+    return renewSql(
+      (fn, timeoutMs) =>
+        this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
+      ids,
+      token,
+      leaseSeconds,
+      deadlineMs,
+    );
   }
 
   async oldestPendingAgeSeconds(): Promise<number> {
-    const result = await this.prisma.client.$queryRaw<{ age: number | null }[]>`
-      SELECT EXTRACT(EPOCH FROM (now() - MIN(created_at)))::float8 AS age
-      FROM outbox_message
-      WHERE published_at IS NULL
-    `;
-    return result[0]?.age ?? 0;
+    return oldestPendingAgeSecondsSql(this.prisma.client);
   }
 
   async pendingCount(): Promise<number> {
     return this.prisma.client.outboxMessage.count({ where: { publishedAt: null } });
+  }
+
+  /** Rows under a live lease right now. Sampled for the gauge, never inferred. */
+  async activeLeaseCount(): Promise<number> {
+    return activeLeaseCountSql(this.prisma.client);
   }
 
   /**
@@ -65,6 +95,8 @@ export class PrismaOutboxStore implements OutboxStore {
    *
    * Only published rows, and only old ones: an unpublished row is an event
    * that has not reached anybody yet, and deleting it would lose it silently.
+   * `ck_outbox_published_is_clean` guarantees a published row holds no live
+   * claim, so this can never delete a row somebody is still publishing.
    */
   async purgePublished(retentionDays = 7): Promise<number> {
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
@@ -73,42 +105,4 @@ export class PrismaOutboxStore implements OutboxStore {
     });
     return result.count;
   }
-}
-
-interface RawOutboxRow {
-  id: string;
-  aggregate_type: string;
-  aggregate_id: string;
-  event_name: string;
-  event_version: number;
-  topic: string;
-  partition_key: string;
-  payload: unknown;
-  headers: unknown;
-  organization_id: string | null;
-  correlation_id: string;
-  created_at: Date;
-  published_at: Date | null;
-  attempts: number;
-  last_error: string | null;
-}
-
-function toOutboxRow(row: RawOutboxRow): OutboxRow {
-  return {
-    id: row.id,
-    aggregateType: row.aggregate_type,
-    aggregateId: row.aggregate_id,
-    eventName: row.event_name,
-    eventVersion: row.event_version,
-    topic: row.topic,
-    partitionKey: row.partition_key,
-    payload: row.payload,
-    headers: (row.headers ?? {}) as Record<string, string>,
-    organizationId: row.organization_id,
-    correlationId: row.correlation_id,
-    createdAt: row.created_at,
-    publishedAt: row.published_at,
-    attempts: row.attempts,
-    lastError: row.last_error,
-  };
 }

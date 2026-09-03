@@ -104,10 +104,36 @@ Logهای مالی).
 | `kafka_consumer_processing_duration`    | Histogram | topic, group, event_name             |
 | `rasta_outbox_pending_total`            | Gauge     | service                              |
 | `rasta_outbox_pending_age_seconds`      | Gauge     | service                              |
+| `rasta_outbox_ack_fenced_total`         | Counter   | service                              |
+| `rasta_outbox_lease_reclaimed_total`    | Counter   | service                              |
+| `rasta_outbox_claim_attempts_total`     | Counter   | service                              |
+| `rasta_outbox_leases_active`            | Gauge     | service                              |
 | `rasta_dlq_messages_total`              | Counter   | topic, reason                        |
 | `rasta_event_validation_failures_total` | Counter   | topic, event_name                    |
 | `temporal_workflow_completed_total`     | Counter   | workflow_type, task_queue            |
 | `temporal_activity_retries_total`       | Counter   | activity_type                        |
+
+#### متریک‌های Claim بادوام Outbox (ADR-050)
+
+| متریک                                | دقیقاً چه چیزی را می‌شمارد                                                             |
+| ------------------------------------ | -------------------------------------------------------------------------------------- |
+| `rasta_outbox_ack_fenced_total`      | ردیف‌هایی که یک Mutation به‌دلیل عدم تطابق `claim_token` لمس نکرد — **رویداد Fencing** |
+| `rasta_outbox_lease_reclaimed_total` | ردیف‌هایی که با Lease منقضی دوباره Claim شدند                                          |
+| `rasta_outbox_claim_attempts_total`  | تعداد ردیف‌های Claimشده                                                                |
+| `rasta_outbox_leases_active`         | ردیف‌های دارای Lease زنده                                                              |
+
+**تحویل تکراری در سمت Producer قابل مشاهده نیست.** رله نمی‌داند یک `sendBatch`
+که Timeout خورد به Broker رسید یا نه، پس هیچ متریکی اینجا «تکرار» را گزارش
+نمی‌کند. `ack_fenced_total` یک **نشانگر کران‌پایین** است: هر مقدار غیرصفر یعنی یک
+انتشار تکراری _ممکن_ است رخ داده باشد. متن هشدار باید همین را بگوید:
+
+> «Fencing در Outbox رخ داد: N ردیف پس از ازدست‌رفتن مالکیت Ack نشدند. ممکن است
+> تحویل تکراری رخ داده باشد؛ در سمت Producer قابل تأیید نیست.»
+
+**هر دو Gauge با `SELECT count(*)` نمونه‌برداری می‌شوند، نه با `inc`/`dec`.**
+الگوی قبلی — `onBatchPublished: (count) => outboxPendingTotal.dec(...)` — پس از
+هر Restart و هر مسیر خطای ازدست‌رفته Drift می‌کرد، و **رو به پایین**: یعنی یک
+رلهٔ متوقف را بی‌کار نشان می‌داد، دقیقاً همان عددی که نباید اشتباه باشد.
 
 ### متریک‌های کسب‌وکاری
 

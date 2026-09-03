@@ -32,7 +32,9 @@ await kafka.produce('ORDER_COMPLETED', payload); // ← نقطه شکست
                    │ COMMIT
                    ▼
       Outbox Relay (Poll هر ۵۰۰ms)
-      SELECT ... FOR UPDATE SKIP LOCKED
+      UPDATE ... RETURNING claim_token   ← ADR-050؛ رزرو بادوام
+      (نسخهٔ اول این ADR فقط SELECT ... FOR UPDATE SKIP LOCKED داشت،
+       که رزرو نمی‌ساخت — D-026)
                    ▼
               Kafka Topic
                    ▼

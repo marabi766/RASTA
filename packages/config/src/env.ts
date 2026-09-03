@@ -200,6 +200,41 @@ export const kafkaEnvSchema = z.object({
   KAFKA_SCHEMA_STRICT: booleanEnv(true),
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(50).default(500),
   OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
+
+  /**
+   * How long a claim owns its rows before another relay may take them back
+   * (ADR-050).
+   *
+   * The floor is 20 rather than 10 seconds, and that is load-bearing. The
+   * renewal interval is `lease / 4`, so three renewals are attempted before a
+   * lease expires and two may be lost without losing ownership. At a 10-second
+   * lease the interval would be 2.5s and the last attempt would land on the
+   * expiry instant itself — zero tolerance, which is what the first draft of
+   * this ADR claimed to have and did not.
+   *
+   * 60 is chosen after that analysis, not before it: with renewal the lease no
+   * longer has to outlast the worst publish (measured at up to 379 seconds for
+   * a single `sendBatch`), it only has to hold three renewal intervals and stay
+   * shorter than an acceptable recovery delay.
+   */
+  OUTBOX_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(20).max(3600).default(60),
+
+  /** Base of the capped exponential retry backoff: `min(2^min(n,10) × base, max)`. */
+  OUTBOX_CLAIM_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).default(5),
+
+  /** Ceiling of that backoff, so a poisoned row is retried eventually. */
+  OUTBOX_CLAIM_BACKOFF_MAX_SECONDS: z.coerce.number().int().min(1).max(86_400).default(3600),
+
+  /**
+   * How long shutdown keeps renewing a lease whose publish is still in flight.
+   *
+   * Bounded, so a pod cannot sit in `Terminating` behind a Kafka request that
+   * KafkaJS gives no way to cancel. When it elapses the relay stops renewing
+   * and abandons the row *without releasing it* — releasing a row that may
+   * already have reached the broker guarantees a replay, whereas letting the
+   * lease lapse replays only if it genuinely has to.
+   */
+  OUTBOX_SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().min(0).max(300).default(30),
 });
 
 /** Services that use cache, distributed locks or rate limiting. */

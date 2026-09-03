@@ -348,18 +348,30 @@ describe('transactional outbox (real database)', () => {
   });
 
   describe('the relay claim', () => {
+    /**
+     * The claim window, without the fencing protocol.
+     *
+     * The token mechanics have their own suite against an isolated schema
+     * (document-service, `outbox-durable-claim.int-spec.ts`). A zero lease is
+     * used here so a claim never parks rows for another suite.
+     */
+    const claimOwned = (limit: number) =>
+      store.claimPending({ limit, owner: 'econ-int-spec', leaseSeconds: 0 });
+
+    const NO_BACKOFF = { baseSeconds: 0, maxSeconds: 0 };
+
     it('claims only unpublished rows, oldest first', async () => {
       const organizationId = `${org.a}-OUTBOX-CLAIM`;
       await fundWallet(wiring, organizationId, 100_000n);
 
-      const claimed = await store.claimPending(100);
-      expect(claimed.length).toBeGreaterThan(0);
-      for (const row of claimed) {
+      const claimed = await claimOwned(100);
+      expect(claimed.rows.length).toBeGreaterThan(0);
+      for (const row of claimed.rows) {
         expect(row.publishedAt).toBeNull();
       }
 
-      const ids = claimed.map((row) => row.id);
-      await store.markPublished(ids);
+      const ids = claimed.rows.map((row) => row.id);
+      expect(await store.markPublished(ids, claimed.token!)).toBe(ids.length);
 
       const afterPublish = await runUnscoped('the outbox audit reads platform plumbing', () =>
         prisma.client.outboxMessage.findMany({ where: { id: { in: ids } } }),
@@ -392,7 +404,8 @@ describe('transactional outbox (real database)', () => {
         }),
       );
 
-      await store.markFailed(id, 'broker unreachable');
+      const owned = await claimOwned(500);
+      expect(await store.markFailed(id, owned.token!, 'broker unreachable', NO_BACKOFF)).toBe(1);
 
       const row = await runUnscoped('the outbox audit reads platform plumbing', () =>
         prisma.client.outboxMessage.findUnique({ where: { id } }),
@@ -427,10 +440,16 @@ describe('transactional outbox (real database)', () => {
         }),
       );
 
-      await store.markFailed(id, 'broker unreachable');
-      await store.markFailed(id, 'broker unreachable again');
+      // Each failure releases the claim, so the row is re-claimed for the
+      // second one — which is exactly what the relay does on its next tick.
+      const first = await claimOwned(500);
+      expect(await store.markFailed(id, first.token!, 'broker unreachable', NO_BACKOFF)).toBe(1);
+      const second = await claimOwned(500);
+      expect(
+        await store.markFailed(id, second.token!, 'broker unreachable again', NO_BACKOFF),
+      ).toBe(1);
 
-      const retried = (await store.claimPending(500)).find((row) => row.id === id);
+      const retried = (await claimOwned(500)).rows.find((row) => row.id === id);
 
       expect(retried).toBeDefined();
       expect(retried?.attempts).toBe(2);

@@ -78,17 +78,27 @@ describe('economic internals', () => {
       return rowId;
     }
 
+    // Every mutation is fenced on a claim token (ADR-050), so the suite claims
+    // before it mutates — the same order the relay uses. A zero lease keeps
+    // these rows from being parked for any other suite.
+    const claimOwned = () =>
+      store.claimPending({ limit: 500, owner: 'econ-internals', leaseSeconds: 0 });
+    const noBackoff = { baseSeconds: 0, maxSeconds: 0 };
+
     it('does nothing when asked to publish an empty batch', async () => {
       // The relay calls this with whatever it read, and an empty read is the
       // ordinary steady state. An UPDATE with an empty `IN ()` would be a
       // pointless round trip on every poll.
-      await expect(store.markPublished([])).resolves.toBeUndefined();
+      await expect(store.markPublished([], 'any-token')).resolves.toBe(0);
     });
 
     it('records a failure against the row rather than losing it', async () => {
       const rowId = await writeRow();
 
-      await store.markFailed(rowId, 'the broker refused the batch');
+      const claimed = await claimOwned();
+      expect(
+        await store.markFailed(rowId, claimed.token!, 'the broker refused the batch', noBackoff),
+      ).toBe(1);
 
       const row = await runUnscoped('the suite reads back the row it wrote', () =>
         prisma.client.outboxMessage.findUnique({ where: { id: rowId } }),
@@ -109,7 +119,8 @@ describe('economic internals', () => {
       // stopped, which no error anywhere else would say.
       expect(await store.oldestPendingAgeSeconds()).toBeGreaterThanOrEqual(0);
 
-      await store.markPublished([rowId]);
+      const owned = await claimOwned();
+      expect(await store.markPublished([rowId], owned.token!)).toBe(1);
       const published = await runUnscoped('the suite reads back the row it published', () =>
         prisma.client.outboxMessage.findUnique({ where: { id: rowId } }),
       );
