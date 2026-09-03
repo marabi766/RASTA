@@ -137,22 +137,71 @@ A-09 مصرف‌کننده ایدمپوتنت می‌خواهد و آن **اثر
 
 ### شکل SQL اتمیک — Claim
 
+شکل نهایی، **چهار جریان واجد شرایط بودن** است که یکدیگر را قطع نمی‌کنند. هر
+ردیف منتشرنشده دقیقاً در یکی می‌افتد، بسته به اینکه کدام مهرهای زمانی حاضرند.
+SQL زیر برای خوانایی خلاصه شده؛ جملهٔ کامل تولیدی و اندازه‌گیری‌هایش در
+[طرح اجرا](ADR-050-implementation-plan.md) است.
+
 ```sql
+WITH
+  -- نه Lease، نه Retry → همیشه واجد شرایط. شرط ایستاست.
+  fresh AS (
+    SELECT id, created_at FROM outbox_message
+     WHERE published_at IS NULL
+       AND claim_expires_at IS NULL AND next_attempt_at IS NULL
+     ORDER BY created_at, id LIMIT $limit
+       FOR UPDATE SKIP LOCKED
+  ),
+  -- فقط Lease → بازه روی ستون پیشروی Index خودش.
+  lease AS (
+    SELECT id, created_at FROM outbox_message
+     WHERE published_at IS NULL AND next_attempt_at IS NULL
+       AND claim_expires_at IS NOT NULL AND claim_expires_at <= now()
+     ORDER BY created_at, id LIMIT $limit
+       FOR UPDATE SKIP LOCKED
+  ),
+  -- فقط Retry.
+  retry AS (
+    SELECT id, created_at FROM outbox_message
+     WHERE published_at IS NULL AND claim_expires_at IS NULL
+       AND next_attempt_at IS NOT NULL AND next_attempt_at <= now()
+     ORDER BY created_at, id LIMIT $limit
+       FOR UPDATE SKIP LOCKED
+  ),
+  -- هر دو.
+  paired AS (
+    SELECT id, created_at FROM outbox_message
+     WHERE published_at IS NULL
+       AND claim_expires_at IS NOT NULL AND next_attempt_at IS NOT NULL
+       AND GREATEST(claim_expires_at, next_attempt_at) <= now()
+     ORDER BY created_at, id LIMIT $limit
+       FOR UPDATE SKIP LOCKED
+  ),
+  -- ترتیب قطعی سراسری روی اجتماع کران‌دار، سپس کران سراسری.
+  candidates AS (
+    SELECT id FROM (
+      SELECT * FROM fresh UNION ALL SELECT * FROM lease
+      UNION ALL SELECT * FROM retry UNION ALL SELECT * FROM paired
+    ) merged
+    ORDER BY created_at, id LIMIT $limit
+  ),
+  -- بازبینی دوباره با همان شرط اصلی، پیش از هر تغییر.
+  due AS (
+    SELECT o.id, o.claim_expires_at AS prev_expires_at
+      FROM outbox_message o
+     WHERE o.id IN (SELECT id FROM candidates)
+       AND o.published_at IS NULL
+       AND (o.claim_expires_at IS NULL OR o.claim_expires_at <= now())
+       AND (o.next_attempt_at  IS NULL OR o.next_attempt_at  <= now())
+     ORDER BY o.created_at, o.id
+       FOR UPDATE SKIP LOCKED
+  )
 UPDATE outbox_message AS o
    SET claim_token      = $token,
        claim_owner      = $owner,
        claim_expires_at = now() + make_interval(secs => $leaseSeconds::double precision),
        claim_count      = o.claim_count + 1
-  FROM (
-    SELECT id
-      FROM outbox_message
-     WHERE published_at IS NULL
-       AND (claim_expires_at IS NULL OR claim_expires_at <= now())
-       AND (next_attempt_at IS NULL OR next_attempt_at <= now())
-     ORDER BY created_at, id
-     LIMIT $limit
-     FOR UPDATE SKIP LOCKED
-  ) AS due
+  FROM due
  WHERE o.id = due.id
 RETURNING o.id, o.aggregate_type, ..., o.claim_token;
 ```
@@ -161,8 +210,27 @@ RETURNING o.id, o.aggregate_type, ..., o.claim_token;
 رله دقیقاً همان Fenceای را در دست دارد که پایگاه داده نوشت — نه چیزی که خودش
 تولید و امیدوار بوده بنشیند.
 
-`FOR UPDATE SKIP LOCKED` در زیرپرسش می‌ماند، اما **نه به‌عنوان رزرو** — فقط
-برای اینکه دو Claimکننده هم‌زمان روی یک ردیف سریالی نشوند. رزرو کار Token است.
+**چرا قفل درون هر جریان است، نه پس از ادغام.** اگر قفل فقط بعد از `candidates`
+گرفته شود، دو مدعی هم‌زمان **همان** پنجرهٔ پیش‌محدودشده را از خواندن‌های
+بی‌قفل می‌سازند؛ هرکدام دیرتر قفل کند، همهٔ نامزدها را گرفته می‌بیند و Batch
+خالی یا ناقص برمی‌گرداند — در حالی که ردیف‌های واجد شرایطِ بی‌قفلِ فراوانی
+درست بعد از آن پنجره ایستاده‌اند. **اندازه‌گیری‌شده پیش از اصلاح:** ۳۰۰ ردیف
+واجد شرایط، صد ردیف قدیمی‌تر قفل‌شده توسط Session دیگر، `claimPending(100)`
+→ **۰ ردیف**.
+
+با قفل درون جریان، PostgreSQL نقشهٔ `Limit → LockRows → Index Scan` می‌سازد:
+پیمایش حین حرکت قفل می‌کند، آنچه را تراکنش دیگری نگه داشته رد می‌کند، و وقتی
+`limit` ردیفِ بی‌قفل جمع شد می‌ایستد. پس Batch کامل می‌شود هر وقت `limit` ردیف
+واجد شرایط بی‌قفل — هرجا پس از پیشوند درگیر — وجود داشته باشد.
+
+**چرا `limit` از هر جریان، `limit` سراسری قدیمی‌ترین را می‌دهد:** اگر ردیفی در
+مجموعهٔ سراسری بود اما در `limit` اول جریان خودش نبود، آن جریان `limit` ردیف
+قدیمی‌تر و واجد شرایط دارد، پس آن ردیف اصلاً در مجموعهٔ سراسری نبود.
+
+**تفکیکی که نباید مخدوش شود:** `FOR UPDATE SKIP LOCKED` فقط مانع می‌شود دو
+مدعی روی ردیف‌های همین‌الان‌قفل‌شده منتظر بمانند یا سریالی شوند. **رزرو کار
+Token است**، نه کار قفل: قفل با پایان همین جمله می‌میرد، و از آن لحظه به بعد
+تنها چیزی که مالکیت را نگه می‌دارد `claim_token` است.
 
 ### Ack، شکست، آزادسازی و تمدید — همه مشروط بر Token
 
@@ -411,12 +479,29 @@ Batch را اشغال نمی‌کند؛ الگو با ADR-049 هم‌خانوا�
 
 **منفی:**
 
-- پنج ستون، سه Index و پنج CHECK در **هشت** پایگاه داده.
-- G3 حل نمی‌شود و ادعا هم نمی‌شود. At-Least-Once باقی است؛ A-09 الزامی است.
-- G5 حل نمی‌شود (D-027).
+- **پنج ستون، پنج CHECK و در مجموع هفت Index تازه** در **هشت** پایگاه داده،
+  از دو Migration:
+
+  | Migration                                    | چه چیزی                                                                                                         |
+  | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+  | `20260902120000_outbox_durable_claim`        | پنج ستون، پنج CHECK، و **سه** Index: `ix_outbox_claimable`، `ix_outbox_claim_expiry`، `ix_outbox_next_attempt`  |
+  | `20260902130000_outbox_claim_stream_indexes` | **چهار** Index جریان: `ix_outbox_due_fresh`، `ix_outbox_due_lease`، `ix_outbox_due_retry`، `ix_outbox_due_both` |
+
+- **هزینهٔ ذخیره‌سازی چهار Index جریان، روی Fixture مستندشدهٔ ۲۰۰٬۰۰۰ ردیفی:**
+  `۸٬۲۴۹٬۳۴۴` بایت (`7.87 MB`)، یعنی رشد **`۲۸٫۳٪`** حجم Index همان Fixture.
+  این عدد مربوط به همان Fixture است و **اندازهٔ Production نیست**؛ توزیع دقیقش
+  در [طرح اجرا](ADR-050-implementation-plan.md) آمده.
+- **تقویت قفل در بدترین حالت `۴ × limit`** — اندازه‌گیری‌شده: **۴۰۰ قفل برای
+  ۱۰۰ ردیف Claimشده**، وقتی هر چهار جریان پر باشند. این قفل‌های اضافه **فقط تا
+  پایان همان جملهٔ Claim** زنده‌اند.
+- G3 حل نمی‌شود و ادعا هم نمی‌شود. **تحویل At-Least-Once باقی است**؛ A-09
+  الزامی است.
+- G5 حل نمی‌شود؛ **D-027 باز می‌ماند**.
 - در طول Rolling Deployment، G1 برقرار نیست.
 - Heartbeat تمدید یعنی نوشتن اضافه روی پایگاه داده در طول هر انتشار.
-- Claim از `SELECT` به `UPDATE` تبدیل می‌شود؛ بار WAL بالا می‌رود.
+- Claim از `SELECT` به `UPDATE` تبدیل می‌شود؛ بار WAL بالا می‌رود. هر Claim و
+  هر تمدید `claim_expires_at` را می‌نویسد، پس اکنون Index بیشتری نگه‌داری
+  می‌شود.
 - ردیفی که مدعی‌اش مرده تا انقضای Lease معطل می‌ماند.
 - تحویل تکراری هنگام ازدست‌رفتن مالکیت با درخواست در پرواز، **باقی می‌ماند**.
 

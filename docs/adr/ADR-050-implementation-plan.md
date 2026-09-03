@@ -241,8 +241,9 @@ SELECT indexdef FROM pg_indexes
 --   USING btree (created_at, id) WHERE (published_at IS NULL)
 ```
 
-هر سه Index به همین شکل و با مقایسهٔ متن نرمال‌شدهٔ `pg_get_indexdef` تأیید
-می‌شوند — ستون‌ها، ترتیبشان، و Predicate.
+هر **هفت** Index (سه Index این Migration و چهار Index جریان در
+`20260902130000_outbox_claim_stream_indexes`) به همین شکل و با مقایسهٔ متن
+نرمال‌شدهٔ `pg_get_indexdef` تأیید می‌شوند — ستون‌ها، ترتیبشان، و Predicate.
 
 ## پذیرش کارایی پرس‌وجو
 
@@ -600,9 +601,10 @@ Backoff سررسیده، ردیف منتشرشده، و مرز دقیق براب
 ## Migration — `up → down → up`
 
 `node scripts/verify-outbox-claim-migration.mjs --in-place` روی **هر هشت**
-پایگاه داده سبز: سیزده شیء (پنج ستون، پنج CHECK، سه Index) ساخته، همه حذف، و
-همه بازگردانده شدند. هر پنج CHECK علاوه بر وجود، **در برابر ردیف‌هایی که باید رد
-کنند** آزموده شد.
+پایگاه داده سبز: **هفده شیء** (پنج ستون، پنج CHECK، و هفت Index — سه Index
+`20260902120000` به‌علاوهٔ چهار Index جریان `20260902130000`) ساخته، همه حذف، و
+همه بازگردانده شدند. هر دو Migration معکوس می‌شوند، تازه‌تر اول. هر پنج CHECK
+علاوه بر وجود، **در برابر ردیف‌هایی که باید رد کنند** آزموده شد.
 
 مسیر Schema جداگانه (Replay کل زنجیره) برای شش سرویس سبز است. `asset` و
 `organization` از آن مسیر رد می‌شوند چون Migration **init** خودشان ستون
