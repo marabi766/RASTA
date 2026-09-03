@@ -166,11 +166,35 @@ interface ClaimedExtras {
  * `limit` older eligible rows, so the row could not have been in the global set
  * at all.
  *
- * The bounded candidate set is then re-checked and locked with
- * `FOR UPDATE SKIP LOCKED`, and the same statement performs the reservation —
- * so atomicity, the fence, the skip-locked behaviour and the total order are
- * all unchanged. Measured across all six ADR fixtures: **0 rows removed by
- * filter**, in-memory quicksort, no temporary disk, 0.067–5.4 ms.
+ * ## Where the locking happens, and why it is inside each stream
+ *
+ * Each stream takes `FOR UPDATE SKIP LOCKED` **before** its own `LIMIT`, not
+ * after the candidate merge. Locking only at the end looks equivalent and is
+ * not: two claimants build the *same* pre-limited candidate window from
+ * unlocked reads, and whichever locks second finds every candidate taken and
+ * returns an empty batch while thousands of eligible rows sit just past the
+ * window. Measured before the fix — 300 eligible rows, oldest 100 held by
+ * another session, `claimPending(100)` returned **0**.
+ *
+ * With the lock inside the stream, PostgreSQL plans `Limit -> LockRows ->
+ * Index Scan`: the scan locks as it goes, skips what another transaction
+ * holds, and stops once `limit` unlocked rows are in hand. So each stream
+ * locks exactly the rows it returns, and a full batch is produced whenever
+ * `limit` unlocked eligible rows exist anywhere past the contended prefix.
+ *
+ * The cost is lock amplification: four streams can each lock up to `limit`,
+ * so up to `4 x limit` rows are locked while only `limit` are claimed —
+ * measured at 400 locked / 100 claimed with every stream populated. Those
+ * locks are held only for this one statement, so they clear in milliseconds,
+ * and the alternative is the starvation above.
+ *
+ * The merged candidate set is then re-checked against the original predicate
+ * before the reservation, so the rewrite cannot widen what gets claimed, and
+ * the same statement performs the update — atomicity, the fence, the
+ * skip-locked behaviour and the total order all unchanged.
+ *
+ * Measured across all six ADR fixtures: **0 rows removed by filter**,
+ * in-memory quicksort, no temporary disk, warm medians 0.108–5.1 ms.
  *
  * `ORDER BY created_at, id` is a total order. `created_at` alone is not:
  * it is `timestamp(3)`, and ULIDs minted inside one millisecond sort randomly
@@ -189,18 +213,21 @@ export async function claimPendingSql(
         WHERE published_at IS NULL
           AND claim_expires_at IS NULL AND next_attempt_at IS NULL
         ORDER BY created_at, id LIMIT $4
+          FOR UPDATE SKIP LOCKED
      ),
      lease AS (
        SELECT id, created_at FROM outbox_message
         WHERE published_at IS NULL AND next_attempt_at IS NULL
           AND claim_expires_at IS NOT NULL AND claim_expires_at <= now()
         ORDER BY created_at, id LIMIT $4
+          FOR UPDATE SKIP LOCKED
      ),
      retry AS (
        SELECT id, created_at FROM outbox_message
         WHERE published_at IS NULL AND claim_expires_at IS NULL
           AND next_attempt_at IS NOT NULL AND next_attempt_at <= now()
         ORDER BY created_at, id LIMIT $4
+          FOR UPDATE SKIP LOCKED
      ),
      paired AS (
        SELECT id, created_at FROM outbox_message
@@ -208,6 +235,7 @@ export async function claimPendingSql(
           AND claim_expires_at IS NOT NULL AND next_attempt_at IS NOT NULL
           AND GREATEST(claim_expires_at, next_attempt_at) <= now()
         ORDER BY created_at, id LIMIT $4
+          FOR UPDATE SKIP LOCKED
      ),
      candidates AS (
        SELECT id FROM (

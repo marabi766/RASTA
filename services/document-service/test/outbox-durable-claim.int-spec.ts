@@ -5,6 +5,7 @@ import {
   dropProtocolSchema,
   expireLease,
   GatedPublisher,
+  holdLockOnOldest,
   newProtocolPrisma,
   readRow,
   seedRow,
@@ -756,6 +757,232 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     expect(await storeA.markPublished(['DONE'], claimed.token!)).toBe(1);
 
     expect((await claim(storeB, 10, LEASE, 'worker-b')).rows).toHaveLength(0);
+  });
+
+  // -- contention ------------------------------------------------------------
+  //
+  // `SKIP LOCKED` only earns its name if a claimant that meets locked rows
+  // keeps going and still fills its batch. The sequential test above proves no
+  // duplicate claim after a committed lease; it cannot prove this, because
+  // nothing is ever locked while it runs.
+  //
+  // The risk is specific to the four-stream shape. Each stream picks its oldest
+  // `limit` candidates, the union is cut to `limit`, and only then are rows
+  // locked. Two claimants therefore build the *same* candidate window, and
+  // whichever locks second finds every candidate taken — returning an empty or
+  // short batch while thousands of eligible rows sit just past the window.
+  //
+  // These tests are deterministic by construction: one connection takes exactly
+  // the locks the scenario calls for and holds them across the claim under
+  // test. No sleeps, no timing, no polling.
+
+  describe('under lock contention', () => {
+    /** Distinct, ordered ids so assertions can name the exact expected batch. */
+    const seedFresh = async (count: number, prefix = 'CT') => {
+      const base = Date.now() - count * 1000;
+      const ids: string[] = [];
+      for (let i = 0; i < count; i += 1) {
+        const id = `${prefix}${String(i).padStart(4, '0')}`;
+        await seedRow(a, id, { createdAt: new Date(base + i * 1000) });
+        ids.push(id);
+      }
+      return ids;
+    };
+
+    it('fills a full batch from past a locked prefix, in order', async () => {
+      // Well over 2 x limit, so a short batch cannot be blamed on an empty
+      // table: after the locked prefix there are still 200 eligible rows.
+      const ids = await seedFresh(300);
+      const limit = 100;
+
+      const held = await holdLockOnOldest(b, limit);
+      expect(held.ids).toEqual(ids.slice(0, limit));
+
+      try {
+        const claimed = await claim(storeA, limit);
+
+        // Exactly `limit`, not fewer: this is the property the four-stream
+        // shape put at risk.
+        expect(claimed.rows).toHaveLength(limit);
+        // The next window, in `created_at, id` order — no gaps, no reordering.
+        expect(claimed.rows.map((row) => row.id)).toEqual(ids.slice(limit, limit * 2));
+        // And nothing from the locked prefix.
+        expect(claimed.rows.filter((row) => held.ids.includes(row.id))).toEqual([]);
+      } finally {
+        await held.release();
+      }
+    });
+
+    it('claims nothing twice when the locked prefix is released and claimed again', async () => {
+      const ids = await seedFresh(300);
+      const limit = 100;
+
+      const held = await holdLockOnOldest(b, limit);
+      const skipped = await claim(storeA, limit);
+      await held.release();
+
+      // The prefix was never claimed by anybody — the holder only locked it —
+      // so it is still eligible and must come back now.
+      const afterRelease = await claim(storeB, limit, LEASE, 'worker-b');
+
+      expect(afterRelease.rows.map((row) => row.id)).toEqual(ids.slice(0, limit));
+      const overlap = afterRelease.rows.filter((row) =>
+        skipped.rows.some((other) => other.id === row.id),
+      );
+      expect(overlap).toEqual([]);
+    });
+
+    it('returns a short batch only when the unlocked remainder is genuinely short', async () => {
+      // The honest negative: 130 rows, 100 locked, so exactly 30 remain.
+      const ids = await seedFresh(130);
+      const limit = 100;
+
+      const held = await holdLockOnOldest(b, limit);
+      try {
+        const claimed = await claim(storeA, limit);
+
+        expect(claimed.rows).toHaveLength(30);
+        expect(claimed.rows.map((row) => row.id)).toEqual(ids.slice(100, 130));
+      } finally {
+        await held.release();
+      }
+    });
+
+    it('fills a full batch when the locked prefix spans all four streams', async () => {
+      // Contention is not confined to one stream in a running system: a batch
+      // mixes fresh rows, reclaimed leases and due retries. Each stream must
+      // skip its own locked rows independently.
+      const limit = 20;
+      const base = Date.now() - 400 * 1000;
+      let n = 0;
+      const seed = async (
+        kind: 'fresh' | 'lease' | 'retry' | 'paired',
+        count: number,
+      ): Promise<string[]> => {
+        const made: string[] = [];
+        for (let i = 0; i < count; i += 1) {
+          const id = `MX_${kind.toUpperCase()}_${String(n).padStart(4, '0')}`;
+          await seedRow(a, id, {
+            createdAt: new Date(base + n * 1000),
+            attempts: kind === 'retry' || kind === 'paired' ? 1 : 0,
+          });
+          if (kind === 'lease') {
+            await a.client.$executeRawUnsafe(
+              `UPDATE outbox_message
+                  SET claim_token='old', claim_owner='old',
+                      claim_expires_at = now() - interval '1 minute'
+                WHERE id = $1`,
+              id,
+            );
+          }
+          if (kind === 'retry') {
+            await a.client.$executeRawUnsafe(
+              `UPDATE outbox_message SET next_attempt_at = now() - interval '1 minute'
+                WHERE id = $1`,
+              id,
+            );
+          }
+          if (kind === 'paired') {
+            await a.client.$executeRawUnsafe(
+              `UPDATE outbox_message
+                  SET claim_token='old', claim_owner='old',
+                      claim_expires_at = now() - interval '1 minute',
+                      next_attempt_at  = now() - interval '1 minute'
+                WHERE id = $1`,
+              id,
+            );
+          }
+          made.push(id);
+          n += 1;
+        }
+        return made;
+      };
+
+      // Interleaved in time, so the oldest `limit` genuinely spans all four.
+      const order: Array<'fresh' | 'lease' | 'retry' | 'paired'> = [
+        'fresh',
+        'lease',
+        'retry',
+        'paired',
+      ];
+      const all: string[] = [];
+      for (let round = 0; round < 25; round += 1) {
+        for (const kind of order) all.push(...(await seed(kind, 1)));
+      }
+
+      const held = await holdLockOnOldest(b, limit);
+      expect(held.ids).toEqual(all.slice(0, limit));
+      // The locked prefix really does cover every stream, or the test would
+      // prove less than it claims.
+      for (const kind of ['FRESH', 'LEASE', 'RETRY', 'PAIRED']) {
+        expect(held.ids.some((id) => id.includes(kind))).toBe(true);
+      }
+
+      try {
+        const claimed = await claim(storeA, limit);
+
+        expect(claimed.rows).toHaveLength(limit);
+        expect(claimed.rows.map((row) => row.id)).toEqual(all.slice(limit, limit * 2));
+        expect(claimed.rows.filter((row) => held.ids.includes(row.id))).toEqual([]);
+        // Reclaimed leases are counted as such even when they arrive through a
+        // contended claim.
+        expect(claimed.reclaimed).toBeGreaterThan(0);
+      } finally {
+        await held.release();
+      }
+    });
+
+    it('admits no ineligible or published row while skipping locked ones', async () => {
+      const limit = 10;
+      const base = Date.now() - 100 * 1000;
+      const eligible: string[] = [];
+      for (let i = 0; i < 40; i += 1) {
+        const id = `EL${String(i).padStart(3, '0')}`;
+        await seedRow(a, id, { createdAt: new Date(base + i * 1000) });
+        eligible.push(id);
+      }
+      // Interleaved rows that must never be claimed, whatever the contention.
+      await seedRow(a, 'NO_PUBLISHED', { createdAt: new Date(base + 5_500) });
+      await a.client.$executeRawUnsafe(
+        `UPDATE outbox_message SET published_at = now() WHERE id = 'NO_PUBLISHED'`,
+      );
+      await seedRow(a, 'NO_LIVE_LEASE', { createdAt: new Date(base + 6_500) });
+      await a.client.$executeRawUnsafe(
+        `UPDATE outbox_message
+            SET claim_token='live', claim_owner='live',
+                claim_expires_at = now() + interval '10 minutes'
+          WHERE id = 'NO_LIVE_LEASE'`,
+      );
+      await seedRow(a, 'NO_FUTURE_RETRY', { createdAt: new Date(base + 7_500), attempts: 1 });
+      await a.client.$executeRawUnsafe(
+        `UPDATE outbox_message SET next_attempt_at = now() + interval '10 minutes'
+          WHERE id = 'NO_FUTURE_RETRY'`,
+      );
+
+      const held = await holdLockOnOldest(b, limit);
+      try {
+        const claimed = await claim(storeA, limit);
+        const got = claimed.rows.map((row) => row.id);
+
+        expect(got).toHaveLength(limit);
+        expect(got).not.toContain('NO_PUBLISHED');
+        expect(got).not.toContain('NO_LIVE_LEASE');
+        expect(got).not.toContain('NO_FUTURE_RETRY');
+        expect(got.every((id) => eligible.includes(id))).toBe(true);
+      } finally {
+        await held.release();
+      }
+    });
+
+    it('stays bounded: never returns more than the limit, however large the backlog', async () => {
+      await seedFresh(500, 'BD');
+      const held = await holdLockOnOldest(b, 50);
+      try {
+        expect((await claim(storeA, 100)).rows).toHaveLength(100);
+      } finally {
+        await held.release();
+      }
+    });
   });
 
   // -- eligibility equivalence ----------------------------------------------

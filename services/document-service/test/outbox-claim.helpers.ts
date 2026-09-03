@@ -161,3 +161,70 @@ export async function expireLease(prisma: PrismaService, id: string): Promise<vo
     id,
   );
 }
+
+/** A lock held open on one connection until the test lets it go. */
+export interface HeldLock {
+  /** The ids this connection has locked and is still holding. */
+  ids: string[];
+  /** Ends the holding transaction. Await it before the suite tears down. */
+  release: () => Promise<unknown>;
+}
+
+/**
+ * Locks rows on `prisma` and keeps holding them until `release()` is called.
+ *
+ * This is what makes the contention tests deterministic rather than racy: a
+ * real second claimant would hold its locks for an unpredictable window, so
+ * instead one connection takes exactly the locks the scenario calls for and
+ * holds them while the claim under test runs. No sleeps, no timing.
+ *
+ * `FOR UPDATE` without `SKIP LOCKED` on purpose — this connection is standing
+ * in for the claimant that got there first.
+ */
+export async function holdLockOnOldest(
+  prisma: PrismaService,
+  limit: number,
+  where = `published_at IS NULL
+             AND (claim_expires_at IS NULL OR claim_expires_at <= now())
+             AND (next_attempt_at  IS NULL OR next_attempt_at  <= now())`,
+): Promise<HeldLock> {
+  let letGo!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    letGo = resolve;
+  });
+
+  let publishIds!: (ids: string[]) => void;
+  const locked = new Promise<string[]>((resolve) => {
+    publishIds = resolve;
+  });
+
+  const holding = prisma.client.$transaction(
+    async (tx) => {
+      const rows = await tx.$queryRawUnsafe<{ id: string }[]>(
+        `SELECT id FROM outbox_message
+          WHERE ${where}
+          ORDER BY created_at, id
+          LIMIT ${Math.trunc(limit)}
+            FOR UPDATE`,
+      );
+      publishIds(rows.map((row) => row.id));
+      await gate;
+      return rows.length;
+    },
+    // Long enough that the claim under test always runs inside the window;
+    // the test releases explicitly, so this is a backstop, not a wait.
+    { timeout: 120_000, maxWait: 120_000 },
+  );
+
+  // Surfaces as a test failure rather than an unhandled rejection if the
+  // holding transaction dies early.
+  holding.catch(() => undefined);
+
+  return {
+    ids: await locked,
+    release: () => {
+      letGo();
+      return holding;
+    },
+  };
+}
