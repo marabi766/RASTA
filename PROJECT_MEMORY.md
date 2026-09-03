@@ -1821,10 +1821,11 @@ await store.markPublished(batch.map((r) => r.id)); // عملیات جدا
 ردیف را از Claim بعدی خارج می‌کند `published_at` است، آن هم فقط پس از
 نوشته‌شدنش.
 
-**دامنه:** **هر هشت** Outbox Store پیاده‌شده دقیقاً همین الگوی SELECT مستقل را
-دارند — `asset`، `document`، `economic`، `fleet`، `identity`، `maintenance`،
-`marketplace`، `organization`. هیچ‌کدام `$transaction` ندارند و هیچ مدل
-`OutboxMessage` ستون Lease/Claim ندارد. (برای مقایسه: مسیر Scan در
+**دامنه (وضعیت هنگام کشف، پیش از Phase B):** **هر هشت** Outbox Store
+پیاده‌شده دقیقاً همین الگوی SELECT مستقل را داشتند — `asset`، `document`،
+`economic`، `fleet`، `identity`، `maintenance`، `marketplace`،
+`organization`. هیچ‌کدام `$transaction` نداشتند و هیچ مدل `OutboxMessage`
+ستون Lease/Claim نداشت. **Phase B هر هشت را اصلاح کرد** (بالا). (برای مقایسه: مسیر Scan در
 `document-service` عمداً Lease بادوام دارد — `scan_lease_owner` و
 `scan_lease_expires_at` — پس پلتفرم این الگو را بلد است و اینجا انتخاب نکرده.)
 
