@@ -14,12 +14,20 @@
 | ------------ | ----------------------------------------------------------------------- |
 | نام          | `SCREAMING_SNAKE_CASE`، **فعل گذشته** — رویداد چیزی است که اتفاق افتاده |
 | Topic        | `rasta.<domain>.v1` + `.retry` + `.dlq`                                 |
-| کلید پارتیشن | پیش‌فرض `aggregateId`؛ انحراف صریح و مستند (ADR-036، `docs/07` § ۷٫۷)   |
+| کلید پارتیشن | پیش‌فرض `aggregateId`؛ انحراف صریح و مستند (ADR-036، `docs/07` § ۷٫۷)¹  |
 | انتشار       | **همیشه از راه Transactional Outbox** (ADR-021)                         |
 | مصرف         | **همیشه Idempotent** با جدول `processed_event`                          |
 | Payload      | **شناسه حمل می‌کند، نه داده شخصی**                                      |
 | پول          | `{ amountMinor: string, currency: string }`                             |
 | زمان         | ISO-8601 با UTC                                                         |
+
+> ¹ **کلید پارتیشن رویدادها را هم‌Partition می‌کند؛ امروز مرتب‌بودنشان را تضمین
+> نمی‌کند.** هر جا در این سند «مرتب می‌ماند» آمده، نیتِ آن کلید توصیف شده است. چند
+> Replica از Relay می‌توانند ردیف‌های مجزای یک کلید را هم‌زمان منتشر کنند، و Backoff،
+> Lease زنده و بازپخش دستی DLQ می‌توانند رویداد بعدیِ همان کلید را جلو بیندازند —
+> اندازه‌گیری‌شده با Kafka واقعی: ۸ وارونگی از ۲۰ آزمون با دو Relay روی یک Partition.
+> این **D-027** است و باز می‌ماند؛ طرح پیشنهادی در
+> [ADR-051](../adr/ADR-051-outbox-semantic-ordering.md) (`Proposed`).
 
 ## Envelope
 
@@ -443,7 +451,8 @@ Schema رسمی در `services/economic-service/src/events/events.ts` و اعت�
 | `DOCUMENT_DELETED`  | audit                             | `documentId`, `reason`                                                      |
 | `VIRUS_DETECTED`    | **notification (بحرانی)** · audit | `documentId`, `engine`, `signature`                                         |
 
-**همه با `documentId` کلید می‌خورند**، پس تاریخچهٔ یک سند روی یک Partition مرتب می‌ماند.
+**همه با `documentId` کلید می‌خورند**، پس تاریخچهٔ یک سند روی **یک** Partition می‌نشیند
+— شرط لازمِ مرتب‌ماندن، و امروز نه شرط کافی‌اش (¹ بالا، D-027).
 این از ADR-049 به بعد باربر است: اسکن ناهمزمان شد، پس `DOCUMENT_UPLOADED` همیشه
 `PENDING` حمل می‌کند و نتیجه بعداً به‌عنوان `DOCUMENT_SCANNED` می‌رسد — دنباله‌ای که فقط
 اگر دنباله بماند معنا دارد. مصرف‌کننده‌ای که `SCANNED` را پیش از `UPLOADED` ببیند دربارهٔ
