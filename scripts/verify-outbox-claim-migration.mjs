@@ -1,7 +1,20 @@
 #!/usr/bin/env node
 // -----------------------------------------------------------------------------
-// Proves the ADR-050 outbox claim migration is reversible on all eight
-// service-owned databases, by actually reversing it.
+// Proves the outbox migrations are reversible on all eight service-owned
+// databases, by actually reversing them.
+//
+// Covers two ADRs, and keeps their evidence distinguishable in the output:
+//
+//   ADR-050  the durable claim protocol — 5 columns, 5 CHECK constraints,
+//            7 indexes. Constraints are exercised against rows, not just
+//            asserted to exist.
+//   ADR-051  Phase B1, the additive stream-ordering schema — the
+//            `outbox_stream_sequence` counter table, 2 inert `outbox_message`
+//            columns, and 5 indexes. Every one is asserted by **definition**,
+//            because all three B1 migrations use `IF NOT EXISTS` and would
+//            pass silently over an object of the wrong shape. B1 is also
+//            asserted to be inert: it must set no head, allocate no sequence
+//            and write no counter row.
 //
 // Why this exists beside `verify-migration-reversible.mjs`:
 //
@@ -39,16 +52,32 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import {
+  assertB1Definitions,
+  assertB1Inert,
+  assertB1Objects,
+  B1_INDEXES,
+  B1_OUTBOX_COLUMNS,
+} from './verify-outbox-b1-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 /**
- * Both ADR-050 migrations, oldest first. The second adds the four
- * eligibility-stream indexes the claim query plans against; reversing only the
- * first would leave them behind and report a clean rollback that is not one.
+ * Every reversible outbox migration, oldest first — two from ADR-050, three
+ * from ADR-051 Phase B1.
+ *
+ * The order matters twice. Forward, B1's columns depend on the table ADR-050
+ * created. Backward, this list is walked in reverse, so B1 unwinds before
+ * ADR-050 does: reversing an older migration first would drop columns whose
+ * indexes belong to a newer migration, cascading them away while leaving that
+ * migration's `_prisma_migrations` row behind — a re-deploy then skips it and
+ * reports success having restored only part of the schema.
  */
 const MIGRATIONS = [
   '20260902120000_outbox_durable_claim',
   '20260902130000_outbox_claim_stream_indexes',
+  '20260905090000_outbox_stream_sequence',
+  '20260905090100_outbox_stream_seq_columns',
+  '20260905090200_outbox_stream_head_indexes',
 ];
 const MIGRATION = MIGRATIONS[0];
 
@@ -274,11 +303,24 @@ function verify(service) {
     if (!result.ok) throw new Error(`up: migrate deploy failed:\n${result.output}`);
     mustRun('up: every claim object exists', assertObjects(true));
     mustRun('up: the claim index has the exact definition ADR-050 specifies', assertIndexDef());
-    console.log('  ✓ up: 5 columns, 5 constraints, 7 indexes');
+    console.log('  ✓ up  ADR-050: 5 columns, 5 constraints, 7 indexes');
+
+    mustRun('up: every B1 stream-ordering object exists', assertB1Objects(true));
+    mustRun(
+      'up: every B1 object has the exact definition ADR-051 specifies',
+      assertB1Definitions(),
+    );
+    console.log(
+      '  ✓ up  ADR-051 B1: sequence table (4 columns, composite PK), ' +
+        '2 outbox columns, 5 indexes — all asserted by definition',
+    );
+
+    mustRun('up: B1 changed no data', assertB1Inert());
+    console.log('  ✓ up  ADR-051 B1: inert — no head set, no sequence allocated, no counter row');
 
     // --- the constraints actually refuse things ------------------------------
     assertConstraintsBite(mustRun, mustFail);
-    console.log('  ✓ up: all five CHECK constraints reject invalid states');
+    console.log('  ✓ up  ADR-050: all five CHECK constraints reject invalid states');
 
     // --- down ----------------------------------------------------------------
     mustRun('cleanup probe rows', PROBE_CLEANUP);
@@ -291,7 +333,8 @@ function verify(service) {
       if (!down.ok) throw new Error(`down: ${MIGRATIONS[i]}/down.sql failed:\n${down.output}`);
     }
     mustRun('down: every claim object is gone', assertObjects(false));
-    console.log('  ✓ down: all seventeen objects removed');
+    mustRun('down: every B1 stream-ordering object is gone', assertB1Objects(false));
+    console.log('  ✓ down: all seventeen ADR-050 objects and all eight B1 objects removed');
 
     // --- up again ------------------------------------------------------------
     result = deployScratch();
@@ -304,7 +347,10 @@ function verify(service) {
     }
     mustRun('up again: every claim object is back', assertObjects(true));
     mustRun('up again: the claim index definition is back', assertIndexDef());
-    console.log('  ✓ up again: all seventeen objects restored');
+    mustRun('up again: every B1 stream-ordering object is back', assertB1Objects(true));
+    mustRun('up again: every B1 definition is back', assertB1Definitions());
+    mustRun('up again: B1 is still inert', assertB1Inert());
+    console.log('  ✓ up again: all seventeen ADR-050 objects and all eight B1 objects restored');
   } finally {
     cleanup();
   }
