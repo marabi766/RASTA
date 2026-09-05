@@ -629,12 +629,19 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
       mutated: false,
       elapsedMs: now() - startedAt,
     });
-    return { plan, batches: [], applied: false };
+    return { plan, batches: [], applied: false, mutated: false };
   }
 
   const batches = [];
   let batchNumber = 0;
   let remaining = plan.pending_unsequenced;
+  // Observed writes, counted as they are committed. `mutated` is derived from
+  // these three and from nothing else — not from `options.apply`, not from the
+  // rows a batch selected, not from elapsed time. An operator reading the
+  // evidence needs "the database changed", and the mode was never that.
+  let assigned = 0;
+  let counterWrites = 0;
+  let headWrites = 0;
 
   while (remaining > 0 && batchNumber < options.maxBatches) {
     batchNumber += 1;
@@ -654,6 +661,7 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
     });
 
     batches.push(result);
+    assigned += result.updated;
     remaining -= result.updated;
     event('batch', {
       batch: batchNumber,
@@ -700,22 +708,30 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
   // both fields are still inert in B2, so the intermediate state is safe.
   if (!truncated) {
     const [counters] = (await db.query(counterUpsertSql())).map(mapRow);
+    counterWrites = counters.written;
     event('counters', counters);
 
     const [heads] = (await db.query(headMaintenanceSql())).map(mapRow);
+    headWrites = heads.changed;
     event('heads', heads);
   }
+
+  // Three ways an apply can write, and all three count. A run that assigns no
+  // sequence can still be a real mutation: finalisation repairs a counter or
+  // moves a head when an earlier run was interrupted or the relay published
+  // the previous head. Reading only `assigned` would report that as untouched.
+  const mutated = assigned > 0 || counterWrites > 0 || headWrites > 0;
 
   const [verified] = (await db.query(verifySql())).map(mapRow);
   event('verify', verified);
   event('done', {
     mode: 'apply',
-    mutated: true,
+    mutated,
     batches: batchNumber,
     truncated,
     converged: !truncated && verified.remaining === 0,
     elapsedMs: now() - startedAt,
   });
 
-  return { plan, batches, verified, applied: true, truncated };
+  return { plan, batches, verified, applied: true, truncated, mutated };
 }
