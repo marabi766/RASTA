@@ -49,8 +49,12 @@
 //                  `--max-batches` budget ran out, or rows remain unsequenced.
 //                  Everything already assigned is committed and a re-run
 //                  resumes from it. Counted in `summary.incomplete`.
-//   `refused`      a precondition, guard or maintenance failure. Counted in
-//                  `summary.refused`.
+//   `refused`      that service could not be run or could not finish safely:
+//                  its `DATABASE_URL_<SERVICE>` is unset, a B1 precondition
+//                  failed, the ordering guard tripped, or VACUUM failed.
+//                  Counted in `summary.refused`. A refusal is scoped to the
+//                  one service — every later selected service is still
+//                  attempted and the summary is still emitted.
 //
 // **Exit status.** 0 only when every selected service finished what it was
 // asked to do: a dry run always converges by definition, and an apply
@@ -96,9 +100,15 @@ async function main() {
   let refused = 0;
 
   for (const service of options.services) {
-    const url = resolveDatabaseUrl(service, process.env);
     let db;
     try {
+      // Inside the boundary, not above it. Resolving the URL can refuse — a
+      // missing `DATABASE_URL_<SERVICE>` is the ordinary case — and a throw
+      // from here used to escape to the outer catch, which ended the process
+      // before the later selected services were attempted and before any
+      // summary was emitted. One service's missing connection is that
+      // service's refusal, not the whole run's.
+      const url = resolveDatabaseUrl(service, process.env);
       db = prismaPort(service, url);
       const result = await runServiceBackfill({ service, db, options, emit });
       if (converged(result)) {
@@ -123,8 +133,11 @@ async function main() {
       }
     } catch (error) {
       refused += 1;
-      // The message, never the stack and never the URL: a stack from a Prisma
-      // client can carry the datasource in it.
+      // Every way one service can fail lands here: an unresolvable connection,
+      // a B1 precondition, the ordering guard, a failed VACUUM. The message,
+      // never the stack and never the URL — a stack from a Prisma client can
+      // carry the datasource in it, and `resolveDatabaseUrl` deliberately
+      // names the environment variable rather than its value.
       emit({
         type: 'refused',
         service,
@@ -134,7 +147,8 @@ async function main() {
       await db?.close();
     }
     // No `break`: every explicitly selected service is attempted, so one
-    // bounded or refused service never silently skips the rest.
+    // bounded or refused service never silently skips the rest, and the
+    // summary below is always reached.
   }
 
   emit({

@@ -135,10 +135,17 @@ const fingerprint = async (db) => (await db.query(FINGERPRINT))[0].f;
  * value — an operator's shell sees this number and nothing else.
  */
 function runCli(argv, env = {}) {
+  const childEnv = { ...process.env, NODE_ENV: 'test', DATABASE_URL: '', ...env };
+  // An explicit `undefined` *removes* the variable rather than setting it to
+  // the string "undefined". That is how a test omits one service's connection
+  // while the repo-root .env has supplied all eight to this process.
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete childEnv[key];
+  }
   const result = spawnSync(process.execPath, [CLI, ...argv], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
-    env: { ...process.env, NODE_ENV: 'test', DATABASE_URL: '', ...env },
+    env: childEnv,
   });
   const events = result.stdout.trim()
     ? result.stdout
@@ -835,6 +842,99 @@ test('an incomplete service does not stop the CLI attempting the next one', asyn
         0,
       );
     });
+  });
+});
+
+test('a service whose connection cannot be resolved does not skip the services after it', async () => {
+  await withOutbox('document', async ({ db, url }) => {
+    await db.execute(insertRowsSql({ prefix: 'A', topic: 't.a', partitionKey: 'K1', count: 5 }));
+    await db.execute(insertRowsSql({ prefix: 'B', topic: 't.a', partitionKey: 'K2', count: 4 }));
+
+    // economic is named FIRST and its DATABASE_URL_ECONOMIC is removed
+    // outright. Resolution happens per service inside the error boundary, so
+    // the refusal belongs to economic alone and document still runs.
+    const run = runCli(['--service', 'economic', '--service', 'document', '--apply'], {
+      DATABASE_URL_ECONOMIC: undefined,
+      DATABASE_URL_DOCUMENT: url,
+    });
+
+    assert.equal(
+      run.status,
+      1,
+      `an unresolvable connection must make the run exit non-zero:\n${run.stdout}${run.stderr}`,
+    );
+
+    // Exactly one refusal, and it names only the service that caused it.
+    assert.equal(run.of('refused').length, 1);
+    const [refusal] = run.of('refused');
+    assert.equal(refusal.service, 'economic');
+    assert.match(refusal.reason, /DATABASE_URL_ECONOMIC is not set/);
+    assert.match(refusal.reason, /never through a shared DATABASE_URL/);
+
+    // Redaction: the variable is named, its value never is — and no stack
+    // frame, payload or credential rides along on the event or on stdout.
+    assert.equal(refusal.stack, undefined);
+    assert.doesNotMatch(refusal.reason, /postgresql:|@localhost|rasta_service_dev_password/);
+    assert.doesNotMatch(refusal.reason, /\n\s+at /);
+    assert.doesNotMatch(run.stdout, /postgresql:|@localhost|rasta_service_dev_password/);
+    assert.doesNotMatch(run.stdout, /"stack"/);
+
+    // The aggregate summary is still emitted, and it is still the last line.
+    assert.equal(run.events.at(-1).type, 'summary');
+    assert.deepEqual(
+      {
+        services: run.summary.services,
+        ok: run.summary.ok,
+        incomplete: run.summary.incomplete,
+        refused: run.summary.refused,
+      },
+      { services: 2, ok: 1, incomplete: 0, refused: 1 },
+    );
+
+    // document — named after the refusal — really ran, and converged.
+    assert.equal(run.of('incomplete').length, 0);
+    const done = run.events.find((event) => event.type === 'done' && event.service === 'document');
+    assert.equal(done.converged, true);
+    assert.equal(
+      await scalar(
+        db,
+        `SELECT count(*) FROM "outbox_message"
+          WHERE "published_at" IS NULL AND "stream_seq" IS NULL`,
+      ),
+      0,
+      'the service named after a refused one was never processed',
+    );
+    assert.equal(
+      await scalar(db, `SELECT count(*) FROM "outbox_message" WHERE "stream_seq" IS NOT NULL`),
+      9,
+    );
+
+    // Counter and head state is the ordinary converged shape: one counter row
+    // and exactly one head per stream, both derived from the rows.
+    const counters = await rows(
+      db,
+      `SELECT "partition_key", "next_seq"::int AS n, "published_seq"::int AS p
+         FROM "outbox_stream_sequence" ORDER BY "partition_key"`,
+    );
+    assert.deepEqual(
+      counters.map((counter) => [counter.partition_key, counter.n, counter.p]),
+      [
+        ['K1', 6, 0],
+        ['K2', 5, 0],
+      ],
+    );
+    const heads = await rows(
+      db,
+      `SELECT "partition_key", "stream_seq"::int AS s
+         FROM "outbox_message" WHERE "is_stream_head" ORDER BY "partition_key"`,
+    );
+    assert.deepEqual(
+      heads.map((head) => [head.partition_key, head.s]),
+      [
+        ['K1', 1],
+        ['K2', 1],
+      ],
+    );
   });
 });
 
