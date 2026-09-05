@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { buildOutboxRow, runUnscoped } from '@rasta/nest-common';
+import { allocateStreamSeqSql, buildOutboxRow, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { ENV } from '../tokens';
@@ -26,6 +26,14 @@ import { AGGREGATE_OF, resolvePartitionKey } from './routing';
  * is platform plumbing written by a relay that has no request context, and it
  * carries its own `organization_id` for filtering. The crossing is declared
  * with a written reason so an auditor can enumerate it.
+ *
+ * ## ADR-051 Phase B3 — the sequence is allocated here, and only here
+ *
+ * Every event this service produces passes through `enqueue`, so this is the
+ * one place a stream position can be handed out, and the one place it can be
+ * lost. The order below is the contract: validate, resolve routing, allocate
+ * against the *resolved* key, then build and insert. Allocating before routing
+ * is settled would number the event against a stream it does not belong to.
  */
 @Injectable()
 export class EventPublisher {
@@ -47,6 +55,18 @@ export class EventPublisher {
     // what the consumer sees cannot disagree (the Q-26 failure).
     const partition = resolvePartitionKey(input.eventName, payload);
 
+    // ADR-051 B3. Allocated *after* routing is final and *before* the row is
+    // built, inside the caller's transaction: the counter row lock is held to
+    // that transaction's commit, so allocation order equals commit order, and a
+    // rollback returns the number rather than leaving a gap a consumer could
+    // not tell from a lost event.
+    //
+    // No fallback. If the allocator throws, the throw leaves this method and
+    // rolls back the caller's transaction with it — the decision and its
+    // announcement are still atomic (A-08), and no unsequenced event is
+    // written to stand in for a sequenced one.
+    const streamSeq = await allocateStreamSeqSql(tx, SUPPLIER_TOPIC, partition.key);
+
     const row = buildOutboxRow(
       {
         aggregateType: AGGREGATE_OF[input.eventName],
@@ -56,6 +76,12 @@ export class EventPublisher {
         payload,
         organizationId: input.organizationId,
         partitionKey: partition.key,
+        streamSeq,
+        // The same key the sequence was allocated against, passed explicitly.
+        // `buildOutboxRow` refuses a `streamKey` that differs from the
+        // partition key, so the envelope cannot label a stream the counter
+        // never counted.
+        streamKey: partition.key,
         ...(input.causationId ? { causationId: input.causationId } : {}),
       },
       { producer: SERVICE_NAME, producerVersion: this.env.SERVICE_VERSION },
@@ -76,10 +102,13 @@ export class EventPublisher {
           organizationId: row.organizationId,
           correlationId: row.correlationId,
           createdAt: row.createdAt,
-          // `streamSeq` and `isStreamHead` are deliberately not set. ADR-051
-          // B3 allocates the sequence and B4 maintains the head; neither is
-          // merged, and writing either from here would fabricate an ordering
-          // guarantee that does not exist (D-027).
+          // The persisted column, taken from the row `buildOutboxRow` returned
+          // rather than from the local variable, so the column and the envelope
+          // are the same value by construction and cannot drift apart.
+          streamSeq: row.streamSeq,
+          // `isStreamHead` is still deliberately unset: maintaining the head is
+          // B4, it is not merged, and writing it here would claim a head-of-line
+          // guarantee no relay yet enforces.
         },
       }),
     );
