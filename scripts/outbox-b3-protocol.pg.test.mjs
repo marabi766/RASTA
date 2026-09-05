@@ -132,11 +132,16 @@ function rawClient(service, url) {
  * waiting on threw, which turns a test failure into a hang. This yields to the
  * event loop rather than sleeping, so it still decides nothing by duration.
  */
-async function waitFor(read, describe, guard = () => {}) {
-  for (let i = 0; i < 20_000; i += 1) {
+async function waitFor(read, describe) {
+  // Bounded by wall clock rather than by a turn count: a cold Prisma client
+  // connecting and opening a transaction outruns any reasonable number of
+  // `setImmediate` turns, and an earlier turn-based bound failed on exactly
+  // that. This still decides nothing by duration — it only refuses to hang
+  // forever when the thing being waited on has already failed.
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
     const value = read();
     if (value !== undefined) return value;
-    guard();
     await new Promise(setImmediate);
   }
   throw new Error(`timed out waiting for ${describe}`);
@@ -285,6 +290,10 @@ test('a second transaction on one stream blocks on the counter row until the fir
     const a = rawClient('fleet', url);
     const b = rawClient('fleet', url);
     try {
+      // Connect both before the race, so the "is B still blocked?" observation
+      // is about the row lock and not about connection setup.
+      await Promise.all([a.query('SELECT 1'), b.query('SELECT 1')]);
+
       let firstAllocated;
       let secondAllocated;
       let secondSettled = false;
@@ -658,6 +667,8 @@ for (const [service, topic] of [
       const a = rawClient(service, url);
       const b = rawClient(service, url);
       try {
+        await Promise.all([a.query('SELECT 1'), b.query('SELECT 1')]);
+
         let firstAllocated;
         let secondSettled = false;
         let releaseA;
