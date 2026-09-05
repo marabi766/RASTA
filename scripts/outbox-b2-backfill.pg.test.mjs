@@ -695,6 +695,141 @@ test('a VACUUM failure stops the run and says so', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// `mutated` means the database changed, not that writing was authorised.
+//
+// The field used to be hard-coded `true` on every apply. The local-development
+// operational gate then reported `mutated: true` on all eight services while
+// provably changing nothing — zero batches, zero counter writes, zero head
+// changes, byte-identical fingerprints. The value said "apply mode was
+// authorised", which is what `mode` already says.
+//
+// It is now derived from the three write counts the run actually observes:
+// rows assigned across committed batches, `counters.written`, and
+// `heads.changed`. These tests pin every path, against real PostgreSQL and
+// real counts — nothing here mocks a write result.
+// ---------------------------------------------------------------------------
+
+test('mutated is false for a dry run and for an apply that writes nothing', async () => {
+  await withOutbox('document', async ({ db }) => {
+    // --- a dry run over real pending rows -----------------------------------
+    await db.execute(insertRowsSql({ prefix: 'A', topic: 't.a', partitionKey: 'K1', count: 6 }));
+    const before = await fingerprint(db);
+
+    const dry = await backfill(db, []);
+    assert.equal(dry.event('done').mutated, false);
+    assert.equal(dry.result.mutated, false, 'the result disagrees with the event');
+    assert.equal(await fingerprint(db), before, 'the dry run changed the database');
+
+    // --- an apply against a service with nothing to do ----------------------
+    // Publish everything first, so the apply is authorised but finds no work:
+    // no batch, no counter row to write, no head to move.
+    await db.execute(publishSql('^A-'));
+    const empty = await fingerprint(db);
+
+    const zeroWork = await backfill(db, ['--apply']);
+    assert.equal(zeroWork.event('done').mode, 'apply', 'the mode must still say apply');
+    assert.equal(zeroWork.event('done').converged, true);
+    assert.deepEqual(
+      {
+        batches: zeroWork.result.batches.length,
+        counters: zeroWork.event('counters').written,
+        heads: zeroWork.event('heads').changed,
+      },
+      { batches: 0, counters: 0, heads: 0 },
+      'the fixture did work — this case must be a genuine no-op',
+    );
+    assert.equal(
+      zeroWork.event('done').mutated,
+      false,
+      'a zero-work apply reported the database as mutated',
+    );
+    assert.equal(zeroWork.result.mutated, false);
+    assert.equal(await fingerprint(db), empty, 'the zero-work apply changed the database');
+  });
+});
+
+test('mutated is true whenever a run assigns, counts or moves anything', async () => {
+  await withOutbox('document', async ({ db }) => {
+    await db.execute(insertRowsSql({ prefix: 'A', topic: 't.a', partitionKey: 'K1', count: 7 }));
+    await db.execute(insertRowsSql({ prefix: 'B', topic: 't.a', partitionKey: 'K2', count: 7 }));
+
+    // --- a bounded apply that assigns rows and then reports incomplete ------
+    const bounded = await backfill(db, ['--apply', '--batch-size', '4', '--max-batches', '1']);
+    assert.equal(bounded.result.truncated, true);
+    assert.equal(bounded.event('batch').updated, 4);
+    assert.equal(bounded.event('counters'), undefined, 'a truncated run must not finalise');
+    assert.equal(
+      bounded.event('done').mutated,
+      true,
+      'a truncated run that committed four sequences reported nothing changed',
+    );
+    assert.equal(bounded.result.mutated, true);
+    const afterBounded = await fingerprint(db);
+
+    // --- the resume that finishes the remaining rows ------------------------
+    const resumed = await backfill(db, ['--apply', '--batch-size', '4']);
+    assert.equal(resumed.event('done').converged, true);
+    assert.ok(resumed.result.batches.length > 0);
+    assert.equal(resumed.event('done').mutated, true);
+    assert.equal(resumed.result.mutated, true);
+    assert.notEqual(await fingerprint(db), afterBounded, 'the resume wrote nothing');
+    const converged = await fingerprint(db);
+
+    // --- an immediate rerun writes nothing ----------------------------------
+    const rerun = await backfill(db, ['--apply', '--batch-size', '4']);
+    assert.deepEqual(
+      {
+        batches: rerun.result.batches.length,
+        counters: rerun.event('counters').written,
+        heads: rerun.event('heads').changed,
+      },
+      { batches: 0, counters: 0, heads: 0 },
+    );
+    assert.equal(rerun.event('done').mutated, false, 'an idempotent rerun claimed a mutation');
+    assert.equal(rerun.result.mutated, false);
+    assert.equal(await fingerprint(db), converged, 'the idempotent rerun changed the database');
+
+    // --- finalisation-only work still counts as a mutation ------------------
+    // The relay publishes the current head. No new sequence is needed, but the
+    // counter must advance and the head must move to the next row. Reading only
+    // `batch.updated` would report this real change as untouched.
+    await db.execute(publishSql('^A-00000001$'));
+    const beforeRepair = await fingerprint(db);
+
+    const repair = await backfill(db, ['--apply', '--batch-size', '4']);
+    assert.equal(repair.result.batches.length, 0, 'the repair case must assign no sequence');
+    assert.ok(
+      repair.event('counters').written > 0 || repair.event('heads').changed > 0,
+      'the fixture needed no repair — the case proves nothing',
+    );
+    assert.equal(
+      repair.event('done').mutated,
+      true,
+      'counter/head repair with no batch was reported as no mutation',
+    );
+    assert.equal(repair.result.mutated, true);
+    assert.notEqual(await fingerprint(db), beforeRepair);
+
+    // And the repair landed where D-4 expects it.
+    const [counter] = await rows(
+      db,
+      `SELECT "published_seq"::int AS p FROM "outbox_stream_sequence"
+        WHERE "partition_key" = 'K1'`,
+    );
+    assert.equal(counter.p, 1, 'published_seq did not advance past the published head');
+    assert.equal(
+      await scalar(
+        db,
+        `SELECT count(*) FROM "outbox_message"
+          WHERE "partition_key" = 'K1' AND "is_stream_head" AND "stream_seq" = 2`,
+      ),
+      1,
+      'the head did not move to the next unpublished sequence',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The CLI's exit status is the completion contract.
 //
 // These run the process, not the library. The library has always returned
@@ -718,6 +853,7 @@ test('the CLI exit status separates a dry run, a bounded slice and a converged a
     assert.deepEqual(tally(dry), { ok: 1, incomplete: 0, refused: 0 });
     assert.equal(dry.of('incomplete').length, 0);
     assert.equal(dry.summary.mode, 'dry-run');
+    assert.equal(dry.events.find((e) => e.type === 'done').mutated, false);
     assert.equal(await fingerprint(db), untouched, 'the dry run mutated the database');
 
     // --- a bounded slice: exit 1, `incomplete`, and no `refused` -------------
@@ -745,6 +881,9 @@ test('the CLI exit status separates a dry run, a bounded slice and a converged a
     );
     assert.match(incomplete.reason, /re-run this service without --max-batches/);
     assert.deepEqual(tally(bounded), { ok: 0, incomplete: 1, refused: 0 });
+    // `mutated` survives to the process boundary: four sequences were committed
+    // even though the run is reported incomplete.
+    assert.equal(bounded.events.find((e) => e.type === 'done').mutated, true);
 
     // Resumability: the one batch is committed, and the counters and heads are
     // deliberately left unfinalised for the run that converges.
@@ -774,6 +913,7 @@ test('the CLI exit status separates a dry run, a bounded slice and a converged a
     assert.equal(resumed.of('incomplete').length, 0);
     assert.equal(resumed.of('refused').length, 0);
     assert.equal(resumed.events.find((e) => e.type === 'done').converged, true);
+    assert.equal(resumed.events.find((e) => e.type === 'done').mutated, true);
     assert.equal(resumed.events.find((e) => e.type === 'verify').remaining, 0);
 
     const after = new Map(
