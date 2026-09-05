@@ -142,12 +142,6 @@ export class AssignmentService {
           eventName: FLEET_EVENTS.ASSET_ASSIGNED,
           topic: FLEET_TOPIC,
           organizationId,
-          // Keyed by asset rather than by assignment id. asset-service builds
-          // the machine's dossier from this stream and moves it to ASSIGNED;
-          // if the assign and the later release landed on different
-          // partitions, Kafka would guarantee nothing about their order and a
-          // released machine could end up stuck in ASSIGNED (docs/07 § 7.7).
-          partitionKey: dto.assetId,
           payload: validateFleetPayload(FLEET_EVENTS.ASSET_ASSIGNED, {
             assignmentId: id,
             assetId: dto.assetId,
@@ -230,7 +224,6 @@ export class AssignmentService {
         eventName: FLEET_EVENTS.ASSIGNMENT_ENDED,
         topic: FLEET_TOPIC,
         organizationId: assignment.organizationId,
-        partitionKey: assignment.assetId,
         payload: validateFleetPayload(FLEET_EVENTS.ASSIGNMENT_ENDED, {
           assignmentId: id,
           assetId: assignment.assetId,

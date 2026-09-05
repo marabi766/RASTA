@@ -617,6 +617,28 @@ jobs:
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
 
+      - name: Outbox stream-sequence protocol (ADR-051 B3)
+        # The producer-side allocation protocol: strictly increasing sequences
+        # on one stream, two transactions serializing on the counter row, a
+        # rollback consuming no number, independent counters per key and per
+        # topic, and the negative test that fleet and maintenance share nothing
+        # for one asset. It runs here rather than in its own job because it
+        # needs real service databases, which this job already has.
+        #
+        # Every url the suite touches is passed explicitly. Skipping a service
+        # because its variable is missing would turn a missing gate into a
+        # green one, which is the failure `pnpm test:e2e` used to have.
+        run: pnpm run test:outbox-b3
+        env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
+
   # ---------------------------------------------------------------------------
   # End-to-end. The economic critical path through the whole stack.
   #

@@ -1,3 +1,5 @@
+import { toStreamSeq } from '@rasta/contracts';
+
 import type { OutboxRow } from './outbox';
 
 /**
@@ -86,6 +88,101 @@ export function toOutboxRow(row: RawOutboxRow): OutboxRow {
     attempts: row.attempts,
     lastError: row.last_error,
   };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-051 Phase B3 — per-stream sequence allocation
+// ---------------------------------------------------------------------------
+
+/** The service-local counter table B1 created. One row per ordered stream. */
+export const STREAM_SEQUENCE_TABLE = 'outbox_stream_sequence';
+
+/**
+ * Allocates this event's position in its stream, inside the caller's
+ * transaction.
+ *
+ * ADR-051 § D-2, implemented exactly as the ADR specifies:
+ *
+ * ```sql
+ * INSERT INTO outbox_stream_sequence AS s (topic, partition_key, next_seq)
+ * VALUES ($1, $2, 2)
+ * ON CONFLICT (topic, partition_key)
+ * DO UPDATE SET next_seq = s.next_seq + 1
+ * RETURNING next_seq - 1 AS allocated;
+ * ```
+ *
+ * A fresh stream inserts `next_seq = 2` and is handed **1**; an existing one
+ * increments and is handed the value it had. Both branches leave
+ * `next_seq = allocated + 1`, so B2's initialisation — `next_seq =
+ * max(stream_seq) + 1` — continues seamlessly and the first event after a
+ * backfill gets the number immediately after the last backfilled row.
+ *
+ * `published_seq` is never touched here. It moves in `markPublished`, which is
+ * B4's work and is not part of B3.
+ *
+ * ## Three properties this shape has and a `BIGSERIAL` does not
+ *
+ * 1. **No gap on rollback.** `nextval()` is not transactional: a rolled-back
+ *    transaction burns the number permanently and leaves a hole a consumer
+ *    cannot distinguish from a lost event. This is an ordinary row, so it
+ *    rolls back with the transaction and the next successful event receives
+ *    the same number.
+ * 2. **Allocation order equals commit order.** `ON CONFLICT DO UPDATE` takes a
+ *    row lock and PostgreSQL holds it until the transaction ends. A second
+ *    transaction on the same stream blocks on that lock rather than racing
+ *    ahead. **This is the only mechanism that closes the divergence measured
+ *    in ADR-051 § R4**, where the relay published the later event first
+ *    because `created_at` is taken in JavaScript before COMMIT — and it is the
+ *    serialisation point for `fleet` and `maintenance`, which § R4 measured as
+ *    having no domain lock on the `assetId` boundary at all.
+ * 3. **The right boundary.** `(topic, partition_key)`, not the aggregate
+ *    (§ C-7): under ADR-036 several aggregates deliberately share one key, and
+ *    a counter keyed by aggregate would not cover the streams ADR-036 built.
+ *
+ * ## Contract for the caller
+ *
+ * `tx` **must** be the caller's already-open domain transaction. Allocation,
+ * the domain write and the `outbox_message` insert commit together or roll
+ * back together; there is no partial outcome in which a number is consumed
+ * and no row exists, and none in which a row exists without a number.
+ *
+ * The returned value is a `number`, converted at this boundary and checked:
+ * the column is `BIGINT`, and a value beyond the safe integer range is refused
+ * rather than silently rounded (see `toStreamSeq`).
+ *
+ * Service-local by construction (A-01): the statement names only this
+ * service's own table, through the client the caller supplied. This package
+ * imports no service Prisma client and opens no transaction of its own.
+ */
+export async function allocateStreamSeqSql(
+  tx: OutboxSqlClient,
+  topic: string,
+  partitionKey: string,
+): Promise<number> {
+  if (!topic) throw new Error('allocateStreamSeqSql: topic must not be empty');
+  if (!partitionKey) throw new Error('allocateStreamSeqSql: partitionKey must not be empty');
+
+  const rows = await tx.$queryRawUnsafe<{ allocated: bigint | number }[]>(
+    `INSERT INTO "${STREAM_SEQUENCE_TABLE}" AS s ("topic", "partition_key", "next_seq")
+     VALUES ($1, $2, 2)
+     ON CONFLICT ("topic", "partition_key")
+     DO UPDATE SET "next_seq" = s."next_seq" + 1
+     RETURNING s."next_seq" - 1 AS allocated`,
+    topic,
+    partitionKey,
+  );
+
+  const allocated = rows[0]?.allocated;
+  if (allocated === undefined) {
+    // An upsert with RETURNING always yields a row. No row means the statement
+    // did not do what it says, and continuing would insert an outbox row with
+    // no position in its stream.
+    throw new Error(
+      `allocateStreamSeqSql: no sequence returned for topic="${topic}". ` +
+        'Refusing to write an unsequenced event.',
+    );
+  }
+  return toStreamSeq(allocated);
 }
 
 /** What a claim attempt got: the fence the database wrote, and the rows it covers. */

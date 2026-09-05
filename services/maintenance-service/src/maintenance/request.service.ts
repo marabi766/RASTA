@@ -182,7 +182,6 @@ export class RequestService {
             eventName: MAINTENANCE_EVENTS.BREAKDOWN_REPORTED,
             topic: MAINTENANCE_TOPIC,
             organizationId,
-            partitionKey: dto.assetId,
             payload: validateMaintenancePayload(MAINTENANCE_EVENTS.BREAKDOWN_REPORTED, {
               requestId: id,
               assetId: dto.assetId,
@@ -200,13 +199,6 @@ export class RequestService {
           eventName: MAINTENANCE_EVENTS.MAINTENANCE_CREATED,
           topic: MAINTENANCE_TOPIC,
           organizationId,
-          // Keyed by asset rather than by request id. asset-service builds the
-          // machine's dossier from this stream and moves it in and out of
-          // IN_MAINTENANCE; if the created, started and completed events for
-          // one machine landed on different partitions, Kafka would guarantee
-          // nothing about their order and a repaired machine could stay
-          // withdrawn for ever (docs/07 § 7.7).
-          partitionKey: dto.assetId,
           payload: validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_CREATED, {
             requestId: id,
             assetId: dto.assetId,
@@ -303,7 +295,6 @@ export class RequestService {
         eventName: MAINTENANCE_EVENTS.MAINTENANCE_APPROVED,
         topic: MAINTENANCE_TOPIC,
         organizationId: request.organizationId,
-        partitionKey: request.assetId,
         payload: validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_APPROVED, {
           requestId: id,
           assetId: request.assetId,
@@ -392,7 +383,6 @@ export class RequestService {
         eventName: MAINTENANCE_EVENTS.MAINTENANCE_CANCELLED,
         topic: MAINTENANCE_TOPIC,
         organizationId: request.organizationId,
-        partitionKey: request.assetId,
         payload: validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_CANCELLED, {
           requestId: id,
           assetId: request.assetId,

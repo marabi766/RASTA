@@ -223,11 +223,6 @@ export class DriverService {
             eventName: FLEET_EVENTS.ASSIGNMENT_ENDED,
             topic: FLEET_TOPIC,
             organizationId: driver.organizationId,
-            // Keyed by asset, not by assignment: asset-service's projector
-            // needs this event ordered against the ASSET_ASSIGNED that opened
-            // it, and ordering is only guaranteed within a partition
-            // (docs/07 § 7.7).
-            partitionKey: assignment.assetId,
             payload: validateFleetPayload(FLEET_EVENTS.ASSIGNMENT_ENDED, {
               assignmentId: assignment.id,
               assetId: assignment.assetId,

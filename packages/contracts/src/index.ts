@@ -68,5 +68,9 @@ export {
   DLQ_REASONS,
   NEVER_AUTO_REPLAY,
   isAutoReplayable,
+  MAX_STREAM_SEQ,
+  toStreamSeq,
+  assertSafeStreamSeq,
+  formatStreamSeq,
 } from './events/envelope';
 export type { ActorType, EventActor, EventEnvelope, DlqReason } from './events/envelope';

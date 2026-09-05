@@ -146,10 +146,6 @@ export class UsageService {
           eventName: FLEET_EVENTS.USAGE_RECORDED,
           topic: FLEET_TOPIC,
           organizationId,
-          // Keyed by asset: every consumer of this event — the dossier, the
-          // maintenance schedule — reasons about one machine's readings in
-          // order, and ordering is only guaranteed within a partition.
-          partitionKey: dto.assetId,
           payload: validateFleetPayload(FLEET_EVENTS.USAGE_RECORDED, {
             usageRecordId: id,
             assetId: dto.assetId,
