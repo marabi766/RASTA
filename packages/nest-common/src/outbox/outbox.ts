@@ -1,5 +1,10 @@
 import { ulid } from 'ulid';
-import { EVENT_HEADERS, type EventEnvelope } from '@rasta/contracts';
+import {
+  EVENT_HEADERS,
+  assertSafeStreamSeq,
+  formatStreamSeq,
+  type EventEnvelope,
+} from '@rasta/contracts';
 import { tryGetContext } from '../context/request-context';
 
 /**
@@ -34,6 +39,27 @@ export interface OutboxMessageInput<TPayload = unknown> {
   /** The event that caused this one, for causal tracing. */
   causationId?: string;
   occurredAt?: Date;
+  /**
+   * ADR-051 Phase B3 — this event's position in its stream, **already
+   * allocated** by `allocateStreamSeqSql` inside the caller's transaction.
+   *
+   * Deliberately an input rather than something this function obtains.
+   * `buildOutboxRow` is pure and does no I/O, which is what lets it be called
+   * inside a transaction callback and unit-tested without a database; hiding
+   * an allocation in here would need a client, would break that, and would put
+   * the counter write somewhere a reader would not look for it.
+   *
+   * Optional, and it must stay optional: a legacy call site that has not been
+   * migrated still produces a valid envelope with no stream fields, which is
+   * exactly the mixed-version behaviour ADR-051 § 4 requires.
+   */
+  streamSeq?: number;
+  /**
+   * The stream this sequence belongs to — `partitionKey`, under the name the
+   * envelope uses. Supplied explicitly rather than derived, so a caller cannot
+   * allocate against one key and label the envelope with another.
+   */
+  streamKey?: string;
 }
 
 export interface OutboxRow {
@@ -52,6 +78,14 @@ export interface OutboxRow {
   publishedAt: Date | null;
   attempts: number;
   lastError: string | null;
+  /**
+   * ADR-051 — the persisted `outbox_message.stream_seq`.
+   *
+   * `null` for every row written before B3 and for any producer not yet
+   * migrated. Nothing in the relay or the claim protocol reads it: selection,
+   * retry and acknowledgement are unchanged, and head-of-line claiming is B4.
+   */
+  streamSeq?: number | null;
 }
 
 export interface BuildOutboxOptions {
@@ -68,6 +102,32 @@ export function buildOutboxRow<TPayload>(
   options: BuildOutboxOptions,
 ): Omit<OutboxRow, 'publishedAt' | 'attempts' | 'lastError'> {
   const context = tryGetContext();
+  const partitionKey = input.partitionKey ?? input.aggregateId;
+
+  // Both stream fields travel together or not at all. A sequence without the
+  // key it was allocated against is unusable to a consumer, and a key without
+  // a sequence implies an ordering that was never established — so a caller
+  // that supplies one and not the other has a bug, and finds out here rather
+  // than in somebody's dead-letter topic.
+  if ((input.streamSeq === undefined) !== (input.streamKey === undefined)) {
+    throw new Error(
+      'buildOutboxRow: streamSeq and streamKey must be supplied together. ' +
+        `Received streamSeq=${String(input.streamSeq)}, streamKey=${String(input.streamKey)}.`,
+    );
+  }
+  if (input.streamSeq !== undefined) {
+    assertSafeStreamSeq(input.streamSeq);
+    if (input.streamKey !== partitionKey) {
+      // The stream is `topic + partitionKey`. Labelling the envelope with a
+      // different key than the row was allocated and partitioned by would put
+      // the consumer's view of the stream out of step with the producer's.
+      throw new Error(
+        'buildOutboxRow: streamKey must equal the partition key the sequence was ' +
+          `allocated against. Received streamKey="${input.streamKey}", ` +
+          `partitionKey="${partitionKey}".`,
+      );
+    }
+  }
   const eventId = ulid();
   const occurredAt = input.occurredAt ?? new Date();
   const correlationId = context?.correlationId ?? eventId;
@@ -94,6 +154,9 @@ export function buildOutboxRow<TPayload>(
       : context?.callerService
         ? { actor: { type: 'SERVICE' as const, id: context.callerService } }
         : {}),
+    ...(input.streamSeq !== undefined && input.streamKey !== undefined
+      ? { streamSeq: input.streamSeq, streamKey: input.streamKey }
+      : {}),
     payload: input.payload,
   };
 
@@ -104,12 +167,15 @@ export function buildOutboxRow<TPayload>(
     eventName: input.eventName,
     eventVersion: envelope.eventVersion,
     topic: input.topic,
-    partitionKey: input.partitionKey ?? input.aggregateId,
+    partitionKey,
     payload: envelope,
     headers: buildHeaders(envelope),
     organizationId,
     correlationId,
     createdAt: occurredAt,
+    // The persisted column, kept identical to the envelope by construction:
+    // both read the same input, so the row and the wire cannot disagree.
+    streamSeq: input.streamSeq ?? null,
   };
 }
 
@@ -124,6 +190,12 @@ function buildHeaders(envelope: EventEnvelope): Record<string, string> {
   if (envelope.tenantId) headers[EVENT_HEADERS.tenantId] = envelope.tenantId;
   if (envelope.causationId) headers[EVENT_HEADERS.causationId] = envelope.causationId;
   if (envelope.traceparent) headers[EVENT_HEADERS.traceparent] = envelope.traceparent;
+  // ADR-051 § D-5: the sequence only. There is no `x-stream-key` header —
+  // the partition key is already the Kafka message key, and a second copy
+  // could disagree with it.
+  if (envelope.streamSeq !== undefined) {
+    headers[EVENT_HEADERS.streamSeq] = formatStreamSeq(envelope.streamSeq);
+  }
   return headers;
 }
 

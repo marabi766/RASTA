@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { buildOutboxRow, runUnscoped } from '@rasta/nest-common';
+import { allocateStreamSeqSql, buildOutboxRow, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { ENV } from '../tokens';
@@ -37,6 +37,12 @@ export class EventPublisher {
     const payload = validateDocumentPayload(input.eventName, input.payload);
     const partition = resolvePartitionKey(input.eventName, payload);
 
+    // ADR-051 B3. Allocated *after* routing is final and *before* the row is
+    // built, inside the caller's transaction: the counter row lock is held to
+    // that transaction's commit, so allocation order equals commit order and a
+    // rollback returns the number instead of leaving a gap.
+    const streamSeq = await allocateStreamSeqSql(tx, DOCUMENT_TOPIC, partition.key);
+
     const row = buildOutboxRow(
       {
         aggregateType: AGGREGATE_OF[input.eventName],
@@ -46,6 +52,8 @@ export class EventPublisher {
         payload,
         organizationId: input.organizationId,
         partitionKey: partition.key,
+        streamSeq,
+        streamKey: partition.key,
         ...(input.causationId ? { causationId: input.causationId } : {}),
       },
       { producer: SERVICE_NAME, producerVersion: this.env.SERVICE_VERSION },
@@ -66,6 +74,7 @@ export class EventPublisher {
           organizationId: row.organizationId,
           correlationId: row.correlationId,
           createdAt: row.createdAt,
+          streamSeq: row.streamSeq,
         },
       }),
     );

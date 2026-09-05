@@ -151,9 +151,6 @@ export class AvailabilityService {
         eventName: FLEET_EVENTS.AVAILABILITY_CHANGED,
         topic: FLEET_TOPIC,
         organizationId,
-        // Keyed by asset, like every other event about a machine, so
-        // construction-service sees a machine's availability changes in order.
-        partitionKey: dto.assetId,
         payload: validateFleetPayload(FLEET_EVENTS.AVAILABILITY_CHANGED, {
           assetId: dto.assetId,
           organizationId,
@@ -206,7 +203,6 @@ export class AvailabilityService {
         eventName: FLEET_EVENTS.AVAILABILITY_CHANGED,
         topic: FLEET_TOPIC,
         organizationId: window.organizationId,
-        partitionKey: window.assetId,
         payload: validateFleetPayload(FLEET_EVENTS.AVAILABILITY_CHANGED, {
           assetId: window.assetId,
           organizationId: window.organizationId,
