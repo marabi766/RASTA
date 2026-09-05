@@ -440,8 +440,47 @@ model OutboxMessage {
   /// database clock so replica skew cannot move it.
   nextAttemptAt  DateTime? @map("next_attempt_at")
 
+  /// ADR-051 Phase B1 — inert until B3/B4. `streamSeq` is the position of this
+  /// row within its ordered stream (`topic + partitionKey`, never the
+  /// aggregate — ADR-051 § C-7). Nullable because rows written before
+  /// sequencing exist and stay valid; the B2 backfill fills them in batches.
+  /// `isStreamHead` is the materialised head flag: true only for the lowest
+  /// unpublished `streamSeq` of a stream, so the four partial head indexes
+  /// answer "is this the head?" without joining the counter table — the JOIN
+  /// form was measured at 1091 ms against 0.012 ms (ADR-051 § R9/R10).
+  ///
+  /// Nothing sets either field in B1: no allocation, no head maintenance, no
+  /// ordering guarantee. D-027 stays open until B2–B6 ship and are accepted.
+  streamSeq      BigInt?   @map("stream_seq")
+  isStreamHead   Boolean   @default(false) @map("is_stream_head")
+
   @@index([publishedAt, createdAt], map: "ix_outbox_pending")
   @@map("outbox_message")
+}
+
+/// ADR-051 Phase B1 — one row per ordered stream (`topic + partitionKey`).
+///
+/// A table rather than a BIGSERIAL: `nextval()` is non-transactional, so a
+/// rollback burns a number and leaves a gap indistinguishable from a lost
+/// event. A row rolls back with its transaction, and its row lock is held to
+/// commit — the only mechanism that closes the commit-order divergence
+/// measured in ADR-051 § R4.
+///
+/// Service-local (A-01): no shared table, no global counter, no cross-service
+/// read. **Inert in B1** — allocation arrives in B3.
+model OutboxStreamSequence {
+  topic        String
+  partitionKey String @map("partition_key")
+
+  /// Next value to hand out. B3 allocates with an upsert that returns
+  /// `next_seq - 1`.
+  nextSeq      BigInt @default(1) @map("next_seq")
+  /// Highest contiguously published position. B4 advances it inside the same
+  /// transaction as the acknowledgement.
+  publishedSeq BigInt @default(0) @map("published_seq")
+
+  @@id([topic, partitionKey])
+  @@map("outbox_stream_sequence")
 }
 
 /// Consumer idempotency (A-09).
