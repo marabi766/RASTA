@@ -24,6 +24,11 @@ describe('asset stream sequencing', () => {
   beforeAll(async () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
+    // Warm the connection and the query engine before the first transaction.
+    // Prisma's interactive transactions time out at 5s, and under a loaded
+    // full-suite run the first one was paying engine start-up inside that
+    // budget — measuring cold start rather than anything about sequencing.
+    await prisma.client.$queryRawUnsafe('SELECT 1');
     assets = new AssetService(new AssetRepository(prisma));
   });
 
