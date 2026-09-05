@@ -126,6 +126,43 @@ SELECT md5(coalesce(string_agg(line, '|' ORDER BY line), '')) AS f FROM (
 
 const fingerprint = async (db) => (await db.query(FINGERPRINT))[0].f;
 
+/**
+ * Run the real CLI as a child process.
+ *
+ * The exit status *is* the contract these tests exist to pin down, so it is
+ * read from the process itself. Nothing here stubs `process.exitCode`,
+ * substitutes a stand-in binary, or infers success from the library's return
+ * value — an operator's shell sees this number and nothing else.
+ */
+function runCli(argv, env = {}) {
+  const result = spawnSync(process.execPath, [CLI, ...argv], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, NODE_ENV: 'test', DATABASE_URL: '', ...env },
+  });
+  const events = result.stdout.trim()
+    ? result.stdout
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+    : [];
+  return {
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    events,
+    of: (type) => events.filter((event) => event.type === type),
+    summary: events.at(-1),
+  };
+}
+
+/** The three summary counters, as one comparable object. */
+const tally = (run) => ({
+  ok: run.summary.ok,
+  incomplete: run.summary.incomplete,
+  refused: run.summary.refused,
+});
+
 // ---------------------------------------------------------------------------
 // Deterministic ordering
 // ---------------------------------------------------------------------------
@@ -651,6 +688,157 @@ test('a VACUUM failure stops the run and says so', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// The CLI's exit status is the completion contract.
+//
+// These run the process, not the library. The library has always returned
+// `truncated` honestly; what these pin down is that the CLI acts on it, so a
+// bounded slice cannot be mistaken for a finished backfill by anything reading
+// only the exit status.
+// ---------------------------------------------------------------------------
+
+test('the CLI exit status separates a dry run, a bounded slice and a converged apply', async () => {
+  await withOutbox('document', async ({ db, url }) => {
+    // 18 rows over two streams. At `--batch-size 4` that is five batches, so
+    // `--max-batches 1` necessarily leaves work behind.
+    await db.execute(insertRowsSql({ prefix: 'A', topic: 't.a', partitionKey: 'K1', count: 9 }));
+    await db.execute(insertRowsSql({ prefix: 'B', topic: 't.a', partitionKey: 'K2', count: 9 }));
+    const env = { DATABASE_URL_DOCUMENT: url };
+    const untouched = await fingerprint(db);
+
+    // --- a dry run: exit 0, and provably nothing written ---------------------
+    const dry = runCli(['--service', 'document'], env);
+    assert.equal(dry.status, 0, `a dry run exited ${dry.status}:\n${dry.stdout}${dry.stderr}`);
+    assert.deepEqual(tally(dry), { ok: 1, incomplete: 0, refused: 0 });
+    assert.equal(dry.of('incomplete').length, 0);
+    assert.equal(dry.summary.mode, 'dry-run');
+    assert.equal(await fingerprint(db), untouched, 'the dry run mutated the database');
+
+    // --- a bounded slice: exit 1, `incomplete`, and no `refused` -------------
+    const bounded = runCli(
+      ['--service', 'document', '--apply', '--batch-size', '4', '--max-batches', '1'],
+      env,
+    );
+    assert.equal(
+      bounded.status,
+      1,
+      `a bounded partial backfill exited ${bounded.status} — it must not look finished:` +
+        `\n${bounded.stdout}${bounded.stderr}`,
+    );
+    assert.equal(bounded.of('refused').length, 0, 'a bounded slice was reported as a failure');
+    assert.equal(bounded.of('incomplete').length, 1);
+    const [incomplete] = bounded.of('incomplete');
+    assert.deepEqual(
+      {
+        service: incomplete.service,
+        batches: incomplete.batches,
+        truncated: incomplete.truncated,
+        remaining: incomplete.remaining,
+      },
+      { service: 'document', batches: 1, truncated: true, remaining: 14 },
+    );
+    assert.match(incomplete.reason, /re-run this service without --max-batches/);
+    assert.deepEqual(tally(bounded), { ok: 0, incomplete: 1, refused: 0 });
+
+    // Resumability: the one batch is committed, and the counters and heads are
+    // deliberately left unfinalised for the run that converges.
+    assert.equal(
+      await scalar(db, `SELECT count(*) FROM "outbox_message" WHERE "stream_seq" IS NOT NULL`),
+      4,
+    );
+    assert.equal(await scalar(db, 'SELECT count(*) FROM "outbox_stream_sequence"'), 0);
+    assert.equal(
+      await scalar(db, `SELECT count(*) FROM "outbox_message" WHERE "is_stream_head"`),
+      0,
+    );
+    const assigned = await rows(
+      db,
+      `SELECT "id", "stream_seq"::int AS s FROM "outbox_message"
+        WHERE "stream_seq" IS NOT NULL ORDER BY "id"`,
+    );
+
+    // --- the unbounded resume: exit 0, converged, nothing renumbered ---------
+    const resumed = runCli(['--service', 'document', '--apply', '--batch-size', '4'], env);
+    assert.equal(
+      resumed.status,
+      0,
+      `the resumed run exited ${resumed.status}:\n${resumed.stdout}${resumed.stderr}`,
+    );
+    assert.deepEqual(tally(resumed), { ok: 1, incomplete: 0, refused: 0 });
+    assert.equal(resumed.of('incomplete').length, 0);
+    assert.equal(resumed.of('refused').length, 0);
+    assert.equal(resumed.events.find((e) => e.type === 'done').converged, true);
+    assert.equal(resumed.events.find((e) => e.type === 'verify').remaining, 0);
+
+    const after = new Map(
+      (
+        await rows(db, `SELECT "id", "stream_seq"::int AS s FROM "outbox_message" ORDER BY "id"`)
+      ).map((row) => [row.id, row.s]),
+    );
+    for (const row of assigned) {
+      assert.equal(after.get(row.id), row.s, `${row.id} was renumbered by the resume`);
+    }
+    assert.equal(await scalar(db, 'SELECT count(*) FROM "outbox_stream_sequence"'), 2);
+
+    // Redaction holds on both of the writing runs.
+    assert.doesNotMatch(
+      `${bounded.stdout}${resumed.stdout}`,
+      /postgresql:|rasta_service_dev_password|@localhost/,
+    );
+  });
+});
+
+test('an incomplete service does not stop the CLI attempting the next one', async () => {
+  await withOutbox('document', async (documentScratch) => {
+    await withOutbox('economic', async (economicScratch) => {
+      // document cannot finish inside one batch; economic can.
+      await documentScratch.db.execute(
+        insertRowsSql({ prefix: 'A', topic: 't.a', partitionKey: 'K1', count: 9 }),
+      );
+      await economicScratch.db.execute(
+        insertRowsSql({ prefix: 'E', topic: 't.a', partitionKey: 'K1', count: 3 }),
+      );
+
+      const run = runCli(
+        [
+          '--service',
+          'document',
+          '--service',
+          'economic',
+          '--apply',
+          '--batch-size',
+          '4',
+          '--max-batches',
+          '1',
+        ],
+        {
+          DATABASE_URL_DOCUMENT: documentScratch.url,
+          DATABASE_URL_ECONOMIC: economicScratch.url,
+        },
+      );
+
+      assert.equal(run.status, 1, 'one incomplete service must make the whole run exit non-zero');
+      assert.deepEqual(tally(run), { ok: 1, incomplete: 1, refused: 0 });
+      assert.deepEqual(
+        run.of('incomplete').map((event) => event.service),
+        ['document'],
+      );
+      // economic was reached and converged — the loop did not stop at document.
+      assert.equal(
+        await scalar(economicScratch.db, 'SELECT count(*) FROM "outbox_stream_sequence"'),
+        1,
+      );
+      assert.equal(
+        await scalar(
+          economicScratch.db,
+          `SELECT count(*) FROM "outbox_message" WHERE "published_at" IS NULL AND "stream_seq" IS NULL`,
+        ),
+        0,
+      );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Tenant and service isolation — through the CLI, so the resolution path that
 // picks a database is the one under test.
 // ---------------------------------------------------------------------------
@@ -693,7 +881,14 @@ test('a backfill of one service database cannot reach another', async () => {
         .map((line) => JSON.parse(line));
       const done = events.find((e) => e.type === 'done');
       assert.equal(done.converged, true);
-      assert.equal(events.at(-1).failures, 0);
+      assert.deepEqual(
+        {
+          ok: events.at(-1).ok,
+          incomplete: events.at(-1).incomplete,
+          refused: events.at(-1).refused,
+        },
+        { ok: 1, incomplete: 0, refused: 0 },
+      );
 
       // Redaction: nothing on stdout carries a credential or a URL.
       assert.doesNotMatch(result.stdout, /postgresql:|rasta_service_dev_password|@localhost/);
