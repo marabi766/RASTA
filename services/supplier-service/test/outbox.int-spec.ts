@@ -153,11 +153,12 @@ describe('the transactional outbox', () => {
     });
   });
 
-  describe('ADR-051 Phase B1 is present and inert', () => {
-    it('leaves stream_seq null and is_stream_head false on every row', async () => {
-      // B3 allocates the sequence and B4 maintains the head. Neither is merged,
-      // and writing either from this service would fabricate an ordering
-      // guarantee that does not exist (D-027).
+  describe('ADR-051: B3 allocates, B4 does not', () => {
+    it('gives every row a sequence and leaves is_stream_head false', async () => {
+      // B3 allocates the sequence, so `stream_seq` is no longer null — that is
+      // the whole change. B4 maintains the head and is not merged, so the flag
+      // stays false: setting it here would claim a head-of-line guarantee no
+      // relay enforces (D-027 remains open until B4–B6 ship).
       const org = organization();
       await asSupplier(org, () =>
         w.suppliers.register({ displayName: 'A supplier', capabilities: ['GOODS_SUPPLY'] }),
@@ -165,16 +166,28 @@ describe('the transactional outbox', () => {
 
       const [row] = await outboxFor(w.prisma, org);
 
-      expect(row.streamSeq).toBeNull();
+      expect(row.streamSeq).not.toBeNull();
       expect(row.isStreamHead).toBe(false);
     });
 
-    it('has the counter table, unused', async () => {
-      const count = await runUnscoped('B1 verification reads the counter table', () =>
-        w.prisma.client.outboxStreamSequence.count(),
+    it('writes the counter row the allocation came from', async () => {
+      const org = organization();
+      const supplier = await asSupplier(org, () =>
+        w.suppliers.register({ displayName: 'A supplier', capabilities: ['GOODS_SUPPLY'] }),
       );
 
-      expect(count).toBe(0);
+      const counter = await runUnscoped('B3 verification reads the counter table', () =>
+        w.prisma.client.outboxStreamSequence.findUnique({
+          where: {
+            topic_partitionKey: { topic: 'rasta.supplier.v1', partitionKey: supplier.id },
+          },
+        }),
+      );
+
+      // One event allocated, so the counter has handed out 1 and points at 2.
+      expect(counter?.nextSeq).toBe(2n);
+      // `published_seq` is B4's to advance. B3 never touches it.
+      expect(counter?.publishedSeq).toBe(0n);
     });
   });
 
