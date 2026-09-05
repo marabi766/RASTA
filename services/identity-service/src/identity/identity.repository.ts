@@ -1,10 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import {
+  allocateStreamSeqSql,
   buildOutboxRow,
   getContext,
   runUnscoped,
   type OutboxMessageInput,
 } from '@rasta/nest-common';
+import { resolvePartitionKey } from './routing';
+import type { IdentityEventName } from './events';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
 import type { ListUsersQuery } from './dto';
@@ -41,10 +44,22 @@ export class IdentityRepository {
    * outside the transaction that produced it (ADR-021).
    */
   async enqueueEvent(tx: ExtendedPrismaClient, input: OutboxMessageInput): Promise<string> {
-    const row = buildOutboxRow(input, {
-      producer: SERVICE_NAME,
-      producerVersion: process.env.SERVICE_VERSION ?? '0.1.0',
-    });
+    // ADR-051 B3, in the order the ADR requires: routing is final *first*, the
+    // sequence is allocated against that exact `(topic, partitionKey)` pair
+    // *second*, and only then is the row built and inserted. All three happen
+    // inside the caller's transaction, so the counter row lock is held to its
+    // commit — which is what makes allocation order equal commit order, and is
+    // this service's only serialisation point on the stream boundary.
+    const partition = resolvePartitionKey(input.eventName as IdentityEventName, input.aggregateId);
+    const streamSeq = await allocateStreamSeqSql(tx, input.topic, partition.key);
+
+    const row = buildOutboxRow(
+      { ...input, partitionKey: partition.key, streamSeq, streamKey: partition.key },
+      {
+        producer: SERVICE_NAME,
+        producerVersion: process.env.SERVICE_VERSION ?? '0.1.0',
+      },
+    );
 
     await tx.outboxMessage.create({
       data: {
@@ -60,6 +75,7 @@ export class IdentityRepository {
         organizationId: row.organizationId,
         correlationId: row.correlationId,
         createdAt: row.createdAt,
+        streamSeq: row.streamSeq,
       },
     });
 
