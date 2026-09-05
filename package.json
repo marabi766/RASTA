@@ -24,6 +24,7 @@
     "test:image-matrix": "node --test scripts/ci-image-matrix.test.mjs",
     "test:outbox-b1": "node --test scripts/verify-outbox-b1-lib.test.mjs",
     "test:outbox-b2": "node --test scripts/outbox-b2-lib.test.mjs",
+    "test:outbox-b2-pg": "node --env-file=.env --test scripts/outbox-b2-backfill.pg.test.mjs",
     "ci:image-matrix": "node scripts/ci-image-matrix.mjs",
     "progress:validate": "node scripts/progress.mjs validate",
     "progress:report": "node scripts/progress.mjs write",

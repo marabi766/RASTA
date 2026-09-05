@@ -325,10 +325,17 @@ test('the backfill CLI is in no automated gate', async () => {
   }
 });
 
-test('the pure B2 tests are in the gate and run a test file, not the tool', async () => {
+test('neither B2 test script is the backfill, and the PostgreSQL one is not in verify', async () => {
   const { scripts } = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+
+  // The pure tests belong in the gate; the PostgreSQL ones need a live
+  // database, so `verify` must not depend on infrastructure being up.
   assert.match(scripts.verify, /pnpm run test:outbox-b2 &&/);
+  assert.doesNotMatch(scripts.verify, /test:outbox-b2-pg/);
+
+  // Both test scripts run a test file. Neither runs the tool.
   assert.match(scripts['test:outbox-b2'], /--test scripts\/outbox-b2-lib\.test\.mjs$/);
+  assert.match(scripts['test:outbox-b2-pg'], /--test scripts\/outbox-b2-backfill\.pg\.test\.mjs$/);
 });
 
 test('no Prisma migration contains B2 DML', async () => {
