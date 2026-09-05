@@ -40,30 +40,59 @@
 // the service name and numbers, and the errors name environment variables
 // rather than their values.
 //
-// Per service the run ends in exactly one of three terminal events, and the
-// last line is always a `summary`:
+// A run takes exactly one of two paths, and they emit different things.
 //
-//   (none)         the service is done — a plan, or an apply that converged.
-//                  Counted in `summary.ok`.
-//   `incomplete`   an apply that stopped with work still to do: the
-//                  `--max-batches` budget ran out, or rows remain unsequenced.
-//                  Everything already assigned is committed and a re-run
-//                  resumes from it. Counted in `summary.incomplete`.
-//   `refused`      that service could not be run or could not finish safely:
-//                  its `DATABASE_URL_<SERVICE>` is unset, a B1 precondition
-//                  failed, the ordering guard tripped, or VACUUM failed.
-//                  Counted in `summary.refused`. A refusal is scoped to the
-//                  one service — every later selected service is still
-//                  attempted and the summary is still emitted.
+// ## 1. Global preflight refusal
 //
-// **Exit status.** 0 only when every selected service finished what it was
-// asked to do: a dry run always converges by definition, and an apply
-// converges when nothing was truncated and no unsequenced pending row is
-// left. Any `incomplete` or any `refused` makes the exit status 1 — a bounded
-// slice (`--apply --max-batches N`) that leaves work behind therefore exits
-// non-zero *by design*, so an operator's script cannot mistake a partial
-// backfill for a finished one. Every selected service is still attempted; one
-// service stopping never skips the next.
+// Target selection, option parsing or the environment check fails, before any
+// service is iterated: no target, an unknown or repeated service, `--dry-run`
+// with `--apply`, a bad or out-of-range numeric option, an unknown option,
+// `NODE_ENV=production`, or an unrecognised `NODE_ENV`.
+//
+//   Output:  exactly one `refused` event, and nothing else.
+//   Scope:   **unscoped** — it carries no `service` field, because no valid
+//            service plan exists yet to attribute it to.
+//   Summary: **none.** There is nothing to aggregate.
+//   Exit:    1.
+//
+// ## 2. Validated service run
+//
+// Options and environment are good, so every selected service is attempted in
+// order and the aggregate `summary` is the final line. Per service:
+//
+//   `plan`         the counts a run would act on. First event for a service
+//                  that got as far as opening its database.
+//   `batch`,       one pair per batch of an apply: rows assigned, then the
+//   `vacuum`       maintenance between batches.
+//   `counters`,    written once, only when the run converged.
+//   `heads`
+//   `verify`       the post-run counts, read back from the database.
+//   `done`         emitted by the service backfill for any attempt that ran to
+//                  the end — a dry run or an apply — carrying `converged`.
+//
+// and then exactly one CLI-level outcome for that service:
+//
+//   (none)         it converged. `done.converged` is true, and the service is
+//                  counted in `summary.ok`.
+//   `incomplete`   emitted *after* `done` when an apply did not converge: the
+//                  `--max-batches` budget ran out, or unsequenced pending rows
+//                  remain. Everything already assigned is committed and a
+//                  re-run resumes from it. Counted in `summary.incomplete`.
+//   `refused`      emitted *instead of* `done` when the attempt failed:
+//                  `DATABASE_URL_<SERVICE>` unset, a B1 precondition failed,
+//                  the ordering guard tripped, or VACUUM failed. Scoped to
+//                  that one service — every later selected service is still
+//                  attempted and the summary is still emitted. Counted in
+//                  `summary.refused`.
+//
+//   Summary: always, as the last line, with `services`, `ok`, `incomplete`
+//            and `refused`.
+//   Exit:    0 only when `incomplete` and `refused` are both zero — a dry run
+//            converges by definition, and an apply converges when nothing was
+//            truncated and no unsequenced pending row is left. A bounded slice
+//            (`--apply --max-batches N`) that leaves work behind therefore
+//            exits non-zero *by design*, so an operator's script cannot
+//            mistake a partial backfill for a finished one.
 // -----------------------------------------------------------------------------
 import {
   B2RefusalError,

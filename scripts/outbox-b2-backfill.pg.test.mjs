@@ -1014,52 +1014,104 @@ test('a backfill of one service database cannot reach another', async () => {
   });
 });
 
-test('the CLI refuses an unknown service and touches nothing', async () => {
+// ---------------------------------------------------------------------------
+// Global preflight refusal — the other path.
+//
+// Target selection, option parsing and the environment check all happen in one
+// `parseOptions` call before any service is iterated. A failure there is not a
+// service's refusal: there is no valid service plan yet to attribute it to, so
+// the event is unscoped and there is no aggregate to summarise. The header and
+// the runbook used to claim the last line is always `summary`; it is not, and
+// these tests hold both documents to what the process actually emits.
+// ---------------------------------------------------------------------------
+
+/** Every event type that only a validated service run can produce. */
+const SERVICE_SCOPED_EVENTS = [
+  'plan',
+  'batch',
+  'vacuum',
+  'counters',
+  'heads',
+  'verify',
+  'done',
+  'incomplete',
+];
+
+test('a global preflight refusal emits one unscoped refused, no summary and no service event', async () => {
   await withOutbox('document', async ({ db, url }) => {
-    await db.execute(insertRowsSql({ prefix: 'A', topic: 't.a', partitionKey: 'K1', count: 3 }));
+    // Real pending rows and a real, correctly resolvable database. Nothing may
+    // touch them: each case must be refused before any service is opened.
+    await db.execute(insertRowsSql({ prefix: 'A', topic: 't.a', partitionKey: 'K1', count: 4 }));
     const before = await fingerprint(db);
 
-    const result = spawnSync(process.execPath, [CLI, '--service', 'supplier', '--apply'], {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-      env: { ...process.env, NODE_ENV: 'test', DATABASE_URL_DOCUMENT: url },
-    });
-    assert.equal(result.status, 1);
-    assert.match(result.stdout, /Unknown service/);
-    assert.equal(await fingerprint(db), before);
+    const cases = [
+      {
+        name: 'no target',
+        argv: ['--apply'],
+        env: { DATABASE_URL_DOCUMENT: url },
+        reason: /No target selected/,
+      },
+      {
+        name: 'unknown service',
+        argv: ['--service', 'supplier', '--apply'],
+        env: { DATABASE_URL_DOCUMENT: url },
+        reason: /Unknown service\(s\): supplier/,
+      },
+      {
+        name: 'NODE_ENV=production',
+        argv: ['--service', 'document', '--apply'],
+        env: { NODE_ENV: 'production', DATABASE_URL_DOCUMENT: url },
+        reason: /Refusing to run with NODE_ENV=production/,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const run = runCli(testCase.argv, testCase.env);
+      const where = `${testCase.name}:`;
+
+      assert.equal(run.status, 1, `${where} exited ${run.status}\n${run.stdout}${run.stderr}`);
+
+      // Exactly one event, and it is the refusal.
+      assert.equal(run.events.length, 1, `${where} expected one event, got ${run.events.length}`);
+      const [event] = run.events;
+      assert.equal(event.type, 'refused', `${where} the one event is not a refusal`);
+      assert.match(event.reason, testCase.reason);
+
+      // Unscoped: no service was ever chosen, so none can be named.
+      assert.equal(event.service, undefined, `${where} the preflight refusal named a service`);
+
+      // No aggregate, and nothing a validated service run would have produced.
+      assert.equal(run.of('summary').length, 0, `${where} emitted a summary`);
+      for (const type of SERVICE_SCOPED_EVENTS) {
+        assert.equal(run.of(type).length, 0, `${where} emitted a service-scoped "${type}"`);
+      }
+
+      // Redaction: the reason may name an environment variable or an option,
+      // never a URL, a credential, a payload or a stack frame.
+      assert.equal(event.stack, undefined, `${where} the event carried a stack`);
+      assert.doesNotMatch(event.reason, /\n\s+at /);
+      assert.doesNotMatch(run.stdout, /postgresql:|@localhost|rasta_service_dev_password/);
+      assert.doesNotMatch(run.stdout, /"stack"|"payload"/);
+
+      // The database it could have reached did not move.
+      assert.equal(await fingerprint(db), before, `${where} the database changed`);
+    }
   });
 });
 
-test('the CLI refuses to run without a target and without --apply writes nothing', async () => {
+test('a plan run through the CLI exits 0, emits a summary and writes nothing', async () => {
   await withOutbox('document', async ({ db, url }) => {
     await db.execute(insertRowsSql({ prefix: 'A', topic: 't.a', partitionKey: 'K1', count: 3 }));
     const before = await fingerprint(db);
 
-    const noTarget = spawnSync(process.execPath, [CLI, '--apply'], {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-      env: { ...process.env, NODE_ENV: 'test', DATABASE_URL_DOCUMENT: url },
-    });
-    assert.equal(noTarget.status, 1);
-    assert.match(noTarget.stdout, /No target selected/);
-
-    const plan = spawnSync(process.execPath, [CLI, '--service', 'document'], {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-      env: { ...process.env, NODE_ENV: 'test', DATABASE_URL_DOCUMENT: url },
-    });
+    // The counterpart to the test above: options validate, so the run takes the
+    // service path and the summary *is* the last line.
+    const plan = runCli(['--service', 'document'], { DATABASE_URL_DOCUMENT: url });
     assert.equal(plan.status, 0, `${plan.stdout}${plan.stderr}`);
-    assert.match(plan.stdout, /"mode":"dry-run"/);
+    assert.equal(plan.summary.type, 'summary');
+    assert.equal(plan.summary.mode, 'dry-run');
+    assert.deepEqual(tally(plan), { ok: 1, incomplete: 0, refused: 0 });
+    assert.equal(plan.events.find((event) => event.type === 'done').mutated, false);
     assert.equal(await fingerprint(db), before, 'a plan run mutated the database');
   });
-});
-
-test('the CLI refuses NODE_ENV=production', async () => {
-  const result = spawnSync(process.execPath, [CLI, '--service', 'document', '--apply'], {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-    env: { ...process.env, NODE_ENV: 'production' },
-  });
-  assert.equal(result.status, 1);
-  assert.match(result.stdout, /Refusing to run with NODE_ENV=production/);
 });
