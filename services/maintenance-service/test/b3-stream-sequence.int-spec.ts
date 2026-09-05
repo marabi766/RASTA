@@ -77,10 +77,7 @@ describe('maintenance stream sequencing', () => {
     expect(request.id).toBeDefined();
 
     const rows = await outboxFor(assetId);
-    expect(rows.map((row) => row.eventName)).toEqual([
-      'BREAKDOWN_REPORTED',
-      'MAINTENANCE_CREATED',
-    ]);
+    expect(rows.map((row) => row.eventName)).toEqual(['BREAKDOWN_REPORTED', 'MAINTENANCE_CREATED']);
 
     // Both on the asset stream, from `routing.ts` rather than the call site,
     // and numbered 1 then 2 with no gap between them.
