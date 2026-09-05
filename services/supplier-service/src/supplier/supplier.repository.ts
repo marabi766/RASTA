@@ -11,7 +11,7 @@ import type { SupplierStatusName } from './suspension.state-machine';
  *
  * ## Where the tenant guard is crossed, and why
  *
- * Three places, each with a written reason, and they fall into two kinds:
+ * Each crossing carries a written reason, and they fall into three kinds:
  *
  *   **id lookups.** A row has to be located *before* anybody can decide whether
  *   the caller may see it. A scoped read would return `null` for another
@@ -27,9 +27,27 @@ import type { SupplierStatusName } from './suspension.state-machine';
  *   These are contained by the projection (`views.ts`) and by the role checks in
  *   `access.ts`, not by the query.
  *
- * Nothing else crosses. The listing of a supplier's own qualifications is
- * reached only through a located-and-checked supplier row, so it inherits that
- * check rather than making its own.
+ *   **the three decision writes.** `recordDecision`, `openSuspension` and
+ *   `closeSuspension` are the only writes in this service made by somebody from
+ *   another organization, and they are that by rule rather than by accident:
+ *   `assertCanDecideAbout` refuses a platform operator who belongs to the
+ *   supplier's own organization, so on every path that reaches them the row's
+ *   `organizationId` is guaranteed **not** to be the caller's. Left scoped, the
+ *   guard would rewrite each predicate with the deciding operator's tenant and
+ *   match nothing — every approval and every suspension would answer "somebody
+ *   else decided this first", and a `SYSTEM_ADMIN` acting platform-wide, who has
+ *   no tenant at all, would get a 500 from `getOrganizationId()` instead.
+ *   `supplier.repository.spec.ts` holds each of these open.
+ *
+ *   What contains them is the object-level check the service has already made,
+ *   not the query: every one of the three is reached only after
+ *   `assertCanDecideAbout` has passed on the located supplier row, and each
+ *   matches on a primary key or on the `supplierId` that check was made against.
+ *
+ * Nothing else crosses. The supplier-side writes — registration, capability
+ * declaration, a qualification submission and its evidence — stay scoped, so the
+ * guard both stamps them with the registering organization and refuses one
+ * written for anybody else's.
  */
 
 /**
@@ -167,6 +185,12 @@ export class SupplierRepository {
    *
    * Returns the number of rows changed rather than the row, because "did I win"
    * is the only question the caller has at this point.
+   *
+   * Unscoped: the decider is a platform operator from another organization by
+   * rule (`assertCanDecideAbout`), so scoping this to the caller's tenant would
+   * make every decision lose its own race. The qualification is addressed by
+   * primary key and the caller has already been checked against the supplier
+   * that owns it.
    */
   async recordDecision(
     tx: ExtendedPrismaClient,
@@ -179,16 +203,21 @@ export class SupplierRepository {
       decisionNote: string | null;
     },
   ): Promise<number> {
-    const changed = await tx.qualification.updateMany({
-      where: { id: input.qualificationId, state: 'SUBMITTED' },
-      data: {
-        state: input.state,
-        decidedBy: input.decidedBy,
-        decidedAt: input.decidedAt,
-        decidedCorrelationId: input.decidedCorrelationId,
-        decisionNote: input.decisionNote,
-      },
-    });
+    const changed = await runUnscoped(
+      'a qualification is decided by a platform operator from another organization, ' +
+        'after assertCanDecideAbout has checked the caller against the supplier that owns it',
+      () =>
+        tx.qualification.updateMany({
+          where: { id: input.qualificationId, state: 'SUBMITTED' },
+          data: {
+            state: input.state,
+            decidedBy: input.decidedBy,
+            decidedAt: input.decidedAt,
+            decidedCorrelationId: input.decidedCorrelationId,
+            decisionNote: input.decisionNote,
+          },
+        }),
+    );
 
     return changed.count;
   }
@@ -199,6 +228,12 @@ export class SupplierRepository {
    * The `status: 'ACTIVE'` predicate makes the pair atomic against a concurrent
    * suspension: only one caller can move the supplier out of `ACTIVE`, so only
    * one episode is ever opened. `ux_suspension_open` is the backstop underneath.
+   *
+   * Unscoped for both statements, and the episode is stamped with the
+   * **supplier's** organization rather than the operator's — a suspension is the
+   * supplier's own record, and a guard acting for the caller would either match
+   * no supplier or refuse the episode outright as an implicit cross-tenant
+   * write.
    */
   async openSuspension(
     tx: ExtendedPrismaClient,
@@ -211,23 +246,31 @@ export class SupplierRepository {
       suspendedCorrelationId: string;
     },
   ): Promise<number> {
-    const changed = await tx.supplier.updateMany({
-      where: { id: input.supplierId, status: 'ACTIVE' },
-      data: { status: 'SUSPENDED' },
-    });
+    const reason =
+      'a supplier is suspended by a platform operator from another organization, ' +
+      'after assertCanDecideAbout has checked the caller against this supplier';
+
+    const changed = await runUnscoped(reason, () =>
+      tx.supplier.updateMany({
+        where: { id: input.supplierId, status: 'ACTIVE' },
+        data: { status: 'SUSPENDED' },
+      }),
+    );
 
     if (changed.count === 0) return 0;
 
-    await tx.suspension.create({
-      data: {
-        id: input.id,
-        supplierId: input.supplierId,
-        organizationId: input.organizationId,
-        reason: input.reason,
-        suspendedBy: input.suspendedBy,
-        suspendedCorrelationId: input.suspendedCorrelationId,
-      },
-    });
+    await runUnscoped(reason, () =>
+      tx.suspension.create({
+        data: {
+          id: input.id,
+          supplierId: input.supplierId,
+          organizationId: input.organizationId,
+          reason: input.reason,
+          suspendedBy: input.suspendedBy,
+          suspendedCorrelationId: input.suspendedCorrelationId,
+        },
+      }),
+    );
 
     return changed.count;
   }
@@ -239,6 +282,10 @@ export class SupplierRepository {
    * suspension history" applies to the ordinary path too, and a reinstatement
    * that removed the row would erase exactly the record somebody will later ask
    * about.
+   *
+   * Unscoped for the same reason `openSuspension` is: the operator lifting the
+   * suspension belongs to another organization by rule, and the episode being
+   * closed is the supplier's.
    */
   async closeSuspension(
     tx: ExtendedPrismaClient,
@@ -250,29 +297,39 @@ export class SupplierRepository {
       reinstatementNote: string;
     },
   ): Promise<{ changed: number; suspensionId: string | null }> {
-    const changed = await tx.supplier.updateMany({
-      where: { id: input.supplierId, status: 'SUSPENDED' },
-      data: { status: 'ACTIVE' },
-    });
+    const reason =
+      'a suspension is lifted by a platform operator from another organization, ' +
+      'after assertCanDecideAbout has checked the caller against this supplier';
+
+    const changed = await runUnscoped(reason, () =>
+      tx.supplier.updateMany({
+        where: { id: input.supplierId, status: 'SUSPENDED' },
+        data: { status: 'ACTIVE' },
+      }),
+    );
 
     if (changed.count === 0) return { changed: 0, suspensionId: null };
 
-    const open = await tx.suspension.findFirst({
-      where: { supplierId: input.supplierId, reinstatedAt: null },
-      orderBy: { suspendedAt: 'desc' },
-    });
+    const open = await runUnscoped(reason, () =>
+      tx.suspension.findFirst({
+        where: { supplierId: input.supplierId, reinstatedAt: null },
+        orderBy: { suspendedAt: 'desc' },
+      }),
+    );
 
     if (!open) return { changed: 0, suspensionId: null };
 
-    await tx.suspension.updateMany({
-      where: { id: open.id, reinstatedAt: null },
-      data: {
-        reinstatedBy: input.reinstatedBy,
-        reinstatedAt: input.reinstatedAt,
-        reinstatedCorrelationId: input.reinstatedCorrelationId,
-        reinstatementNote: input.reinstatementNote,
-      },
-    });
+    await runUnscoped(reason, () =>
+      tx.suspension.updateMany({
+        where: { id: open.id, reinstatedAt: null },
+        data: {
+          reinstatedBy: input.reinstatedBy,
+          reinstatedAt: input.reinstatedAt,
+          reinstatedCorrelationId: input.reinstatedCorrelationId,
+          reinstatementNote: input.reinstatementNote,
+        },
+      }),
+    );
 
     return { changed: 1, suspensionId: open.id };
   }
