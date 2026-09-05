@@ -12,6 +12,7 @@
 | [replay-dlq](replay-dlq.md)                     | `rasta_dlq_messages_total` افزایش یافت        | 🟠 هشدار   | ✅ آماده  |
 | [database-bootstrap](database-bootstrap.md)     | راه‌اندازی محیط جدید                          | ⚪ عملیاتی | ✅ آماده  |
 | [malware-scanner-down](malware-scanner-down.md) | `rasta_document_scanner_up == 0` · امضای کهنه | 🟠 هشدار   | ✅ آماده  |
+| [outbox-b2-backfill](outbox-b2-backfill.md)     | ندارد — با دستور صریح اپراتور                 | ⚪ عملیاتی | ✅ آماده  |
 | [failed-settlement](failed-settlement.md)       | Workflow شکست‌خورده در `rasta-settlement`     | 🔴 بحرانی  | 📅 روز ۲۷ |
 | [restore-database](restore-database.md)         | از دست رفتن داده                              | 🔴 بحرانی  | 📅 روز ۲۷ |
 | [disaster-recovery](disaster-recovery.md)       | از دست رفتن منطقه                             | 🔴 بحرانی  | 📅 روز ۲۷ |
