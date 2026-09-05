@@ -12,7 +12,7 @@ import { ENV, LOGGER } from '../tokens';
 import { ECONOMIC_TOPIC, SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { ECONOMIC_EVENTS, validateEconomicPayload, type EconomicEventName } from '../events/events';
 import { AGGREGATE_OF, resolvePartitionKey } from '../events/routing';
-import { buildOutboxRow } from '@rasta/nest-common';
+import { allocateStreamSeqSql, buildOutboxRow } from '@rasta/nest-common';
 import type { Logger as StructuredLogger } from '@rasta/logging';
 import type { AccountPurpose, JournalType } from '../generated/prisma';
 
@@ -427,6 +427,12 @@ export class LedgerService {
     // that may or may not still mean the same thing.
     const partition = resolvePartitionKey(input.eventName, payload);
 
+    // ADR-051 B3. Allocated *after* routing is final and *before* the row is
+    // built, inside the caller's transaction: the counter row lock is held to
+    // that transaction's commit, so allocation order equals commit order and a
+    // rollback returns the number instead of leaving a gap.
+    const streamSeq = await allocateStreamSeqSql(tx, ECONOMIC_TOPIC, partition.key);
+
     const row = buildOutboxRow(
       {
         aggregateType: AGGREGATE_OF[input.eventName],
@@ -436,6 +442,8 @@ export class LedgerService {
         payload,
         organizationId: input.organizationId,
         partitionKey: partition.key,
+        streamSeq,
+        streamKey: partition.key,
         ...(input.causationId ? { causationId: input.causationId } : {}),
       },
       { producer: SERVICE_NAME, producerVersion: this.env.SERVICE_VERSION },
@@ -456,6 +464,7 @@ export class LedgerService {
           organizationId: row.organizationId,
           correlationId: row.correlationId,
           createdAt: row.createdAt,
+          streamSeq: row.streamSeq,
         },
       }),
     );

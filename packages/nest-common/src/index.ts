@@ -126,6 +126,8 @@ export {
   oldestPendingAgeSecondsSql,
   activeLeaseCountSql,
   toOutboxRow,
+  allocateStreamSeqSql,
+  STREAM_SEQUENCE_TABLE,
 } from './outbox/outbox-sql';
 export type {
   OutboxSqlClient,

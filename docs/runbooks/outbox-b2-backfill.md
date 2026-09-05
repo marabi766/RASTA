@@ -137,12 +137,36 @@ node --env-file=.env scripts/outbox-b2-backfill.mjs --service economic --apply -
 { "type": "verify", "service": "document", "remaining": 0, "sequenced": 216, "heads": 41,
   "streams": 41, "counter_rows": 41, "counter_next_mismatch": 0,
   "counter_published_mismatch": 0, "head_mismatch": 0 }
-{ "type": "done", "service": "document", "mode": "apply", "batches": 1,
+{ "type": "done", "service": "document", "mode": "apply", "mutated": true, "batches": 1,
   "truncated": false, "converged": true }
 ```
 
 **همگرایی یعنی این سه با هم:** `converged: true` · `remaining: 0` · و هر سه
 شمارندهٔ `*_mismatch` برابر صفر.
+
+#### `mode` و `mutated` یکی نیستند
+
+این تفکیک برای شواهد عملیاتی مهم است:
+
+- **`mode: "apply"`** یعنی نوشتن **مجاز شد** — یعنی `--apply` داده شده بود.
+- **`mutated`** یعنی پایگاه داده **واقعاً عوض شد**. فقط وقتی `true` است که همین
+  اجرا دست‌کم یکی از این سه را انجام داده باشد: یک توالی تخصیص داده
+  (`batch.updated > 0`)، یک ردیف شمارنده نوشته یا به‌روز کرده
+  (`counters.written > 0`)، یا یک سرصف را عوض کرده (`heads.changed > 0`).
+
+پس یک Apply همگرا روی سرویسی که کاری برای انجام ندارد،
+`mode: "apply", mutated: false` می‌دهد — و این پاسخ درست است، نه یک خطا:
+
+```json
+{ "type": "counters", "service": "identity", "streams": 0, "written": 0 }
+{ "type": "heads", "service": "identity", "changed": 0, "heads": 0 }
+{ "type": "done", "service": "identity", "mode": "apply", "mutated": false,
+  "batches": 0, "truncated": false, "converged": true }
+```
+
+توجه: اجرایی که هیچ توالی تازه‌ای تخصیص نمی‌دهد هم می‌تواند `mutated: true`
+باشد — وقتی مرحلهٔ نهایی‌سازی، شمارنده یا سرصفی را که از اجرای قطع‌شدهٔ قبلی یا
+از انتشار سرصف قبلی عقب مانده بود اصلاح می‌کند.
 
 ### دو مسیر اجرا، و رویدادهای هرکدام
 
@@ -170,13 +194,13 @@ node --env-file=.env scripts/outbox-b2-backfill.mjs --service economic --apply -
 گزینه‌ها و محیط سالم‌اند، پس **هر سرویس انتخاب‌شده به‌ترتیب امتحان می‌شود** و
 آخرین خط، `summary` تجمیعی است. به‌ازای هر سرویس:
 
-| رویداد               | چه وقت                                                               |
-| -------------------- | -------------------------------------------------------------------- |
-| `plan`               | شمارش‌هایی که اجرا رویشان کار می‌کند؛ نخستین رویداد هر سرویس         |
-| `batch` و `vacuum`   | یک جفت به‌ازای هر دستهٔ Apply                                        |
-| `counters` و `heads` | فقط وقتی اجرا همگرا شد                                               |
-| `verify`             | شمارش‌های پس از اجرا، خوانده‌شده از پایگاه داده                      |
-| `done`               | برای هر تلاشی که تا آخر رفت — Dry-Run یا Apply — با فیلد `converged` |
+| رویداد               | چه وقت                                                                      |
+| -------------------- | --------------------------------------------------------------------------- |
+| `plan`               | شمارش‌هایی که اجرا رویشان کار می‌کند؛ نخستین رویداد هر سرویس                |
+| `batch` و `vacuum`   | یک جفت به‌ازای هر دستهٔ Apply                                               |
+| `counters` و `heads` | فقط وقتی اجرا همگرا شد                                                      |
+| `verify`             | شمارش‌های پس از اجرا، خوانده‌شده از پایگاه داده                             |
+| `done`               | برای هر تلاشی که تا آخر رفت — Dry-Run یا Apply — با `converged` و `mutated` |
 
 و سپس **دقیقاً یک نتیجهٔ سطح CLI** برای همان سرویس:
 

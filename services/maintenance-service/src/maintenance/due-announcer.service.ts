@@ -88,10 +88,6 @@ export class DueAnnouncerService {
             eventName: MAINTENANCE_EVENTS.MAINTENANCE_DUE,
             topic: MAINTENANCE_TOPIC,
             organizationId: schedule.organizationId,
-            // Keyed by asset like every other event on this topic, so a
-            // machine's whole maintenance story stays in one partition and in
-            // order.
-            partitionKey: schedule.assetId,
             payload: validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_DUE, {
               scheduleId: schedule.id,
               assetId: schedule.assetId,

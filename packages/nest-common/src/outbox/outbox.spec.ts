@@ -162,6 +162,115 @@ class FakeStore implements OutboxStore {
   }
 }
 
+// ---------------------------------------------------------------------------
+// ADR-051 Phase B3 — stream metadata on the envelope, the header and the row
+//
+// `buildOutboxRow` stays pure: it receives an already-allocated sequence and
+// places it, and it never obtains one. These tests hold that contract and the
+// two ways a caller can get it wrong.
+// ---------------------------------------------------------------------------
+
+describe('buildOutboxRow stream metadata', () => {
+  const input = {
+    aggregateType: 'Order',
+    aggregateId: 'ORD_1',
+    eventName: 'ORDER_CREATED',
+    topic: 'rasta.marketplace.v1',
+    partitionKey: 'ORD_1',
+    payload: { orderId: 'ORD_1' },
+  };
+  const options = { producer: 'marketplace-service', producerVersion: '0.3.1' };
+
+  it('places the sequence in the envelope, the header and the persisted column', () => {
+    const row = buildOutboxRow({ ...input, streamSeq: 7, streamKey: 'ORD_1' }, options);
+    const envelope = row.payload as Record<string, unknown>;
+
+    // All three agree, because all three read the same input.
+    expect(envelope.streamSeq).toBe(7);
+    expect(envelope.streamKey).toBe('ORD_1');
+    expect(row.headers['x-stream-seq']).toBe('7');
+    expect(row.streamSeq).toBe(7);
+  });
+
+  it('writes the header as canonical decimal, not as a JavaScript number literal', () => {
+    const row = buildOutboxRow({ ...input, streamSeq: 1234567, streamKey: 'ORD_1' }, options);
+    expect(row.headers['x-stream-seq']).toBe('1234567');
+    expect(typeof row.headers['x-stream-seq']).toBe('string');
+  });
+
+  it('emits neither field when no sequence was allocated — the legacy call site', () => {
+    const row = buildOutboxRow(input, options);
+    const envelope = row.payload as Record<string, unknown>;
+
+    expect(Object.hasOwn(envelope, 'streamSeq')).toBe(false);
+    expect(Object.hasOwn(envelope, 'streamKey')).toBe(false);
+    expect(row.headers['x-stream-seq']).toBeUndefined();
+    expect(row.streamSeq).toBeNull();
+  });
+
+  it('leaves every pre-existing header untouched either way', () => {
+    const without = buildOutboxRow(input, options);
+    const withStream = buildOutboxRow({ ...input, streamSeq: 2, streamKey: 'ORD_1' }, options);
+
+    const { 'x-stream-seq': added, ...rest } = withStream.headers;
+    expect(added).toBe('2');
+    // Only `x-event-id` and `x-correlation-id` differ, and only because each
+    // call mints a new ULID.
+    expect(Object.keys(rest).sort()).toEqual(Object.keys(without.headers).sort());
+  });
+
+  it('adds no x-stream-key header', () => {
+    const row = buildOutboxRow({ ...input, streamSeq: 3, streamKey: 'ORD_1' }, options);
+    expect(row.headers['x-stream-key']).toBeUndefined();
+  });
+
+  it('refuses a sequence without its key, and a key without its sequence', () => {
+    expect(() => buildOutboxRow({ ...input, streamSeq: 1 }, options)).toThrow(
+      /must be supplied together/,
+    );
+    expect(() => buildOutboxRow({ ...input, streamKey: 'ORD_1' }, options)).toThrow(
+      /must be supplied together/,
+    );
+  });
+
+  it('refuses a streamKey that is not the partition key it was allocated against', () => {
+    // The stream is `topic + partitionKey`. A mismatch here would put the
+    // consumer's view of the stream out of step with the producer's.
+    expect(() =>
+      buildOutboxRow({ ...input, streamSeq: 1, streamKey: 'SOMETHING_ELSE' }, options),
+    ).toThrow(/streamKey must equal the partition key/);
+  });
+
+  it('checks the streamKey against the defaulted partition key too', () => {
+    const withoutExplicitKey = { ...input, partitionKey: undefined };
+    // partitionKey defaults to aggregateId, so ORD_1 is right and DRV_1 is not.
+    expect(() =>
+      buildOutboxRow({ ...withoutExplicitKey, streamSeq: 1, streamKey: 'ORD_1' }, options),
+    ).not.toThrow();
+    expect(() =>
+      buildOutboxRow({ ...withoutExplicitKey, streamSeq: 1, streamKey: 'DRV_1' }, options),
+    ).toThrow(/streamKey must equal the partition key/);
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['fractional', 2.5],
+    ['unsafe', Number.MAX_SAFE_INTEGER + 2],
+  ])('refuses a %s sequence', (_label, streamSeq) => {
+    expect(() => buildOutboxRow({ ...input, streamSeq, streamKey: 'ORD_1' }, options)).toThrow(
+      /positive safe integer/,
+    );
+  });
+
+  it('produces an envelope that survives JSON without a bigint', () => {
+    const row = buildOutboxRow({ ...input, streamSeq: 5, streamKey: 'ORD_1' }, options);
+    const revived = JSON.parse(JSON.stringify(row.payload)) as Record<string, unknown>;
+    expect(revived.streamSeq).toBe(5);
+    expect(typeof revived.streamSeq).toBe('number');
+  });
+});
+
 describe('OutboxRelay', () => {
   it('publishes a batch and marks it published', async () => {
     const store = new FakeStore();

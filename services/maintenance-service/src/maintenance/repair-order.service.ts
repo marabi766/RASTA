@@ -185,7 +185,6 @@ export class RepairOrderService {
           eventName: MAINTENANCE_EVENTS.WORKSHOP_ASSIGNED,
           topic: MAINTENANCE_TOPIC,
           organizationId: request.organizationId,
-          partitionKey: request.assetId,
           causationId: requestId,
           payload: validateMaintenancePayload(MAINTENANCE_EVENTS.WORKSHOP_ASSIGNED, {
             requestId,
@@ -290,7 +289,6 @@ export class RepairOrderService {
         eventName: MAINTENANCE_EVENTS.MAINTENANCE_STARTED,
         topic: MAINTENANCE_TOPIC,
         organizationId: order.organizationId,
-        partitionKey: order.assetId,
         causationId: id,
         payload: validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_STARTED, {
           requestId: request.id,
@@ -420,7 +418,6 @@ export class RepairOrderService {
         eventName: MAINTENANCE_EVENTS.REPAIR_COMPLETED,
         topic: MAINTENANCE_TOPIC,
         organizationId: order.organizationId,
-        partitionKey: order.assetId,
         payload: validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_COMPLETED, {
           repairOrderId: id,
           requestId: request.id,
@@ -439,7 +436,6 @@ export class RepairOrderService {
         eventName: MAINTENANCE_EVENTS.MAINTENANCE_COMPLETED,
         topic: MAINTENANCE_TOPIC,
         organizationId: order.organizationId,
-        partitionKey: order.assetId,
         causationId: id,
         payload: validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_COMPLETED, {
           requestId: request.id,

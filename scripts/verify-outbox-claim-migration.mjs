@@ -315,8 +315,19 @@ function verify(service) {
         '2 outbox columns, 5 indexes — all asserted by definition',
     );
 
-    mustRun('up: B1 changed no data', assertB1Inert());
-    console.log('  ✓ up  ADR-051 B1: inert — no head set, no sequence allocated, no counter row');
+    // The inertness assertion deliberately does **not** run here.
+    //
+    // It asks whether the *migration* allocates anything, and until B3 it could
+    // ask that at this point because nothing else ever wrote a sequence. B3
+    // changed that: producers now allocate on every event, so an in-place
+    // database that has served any traffic legitimately has non-NULL
+    // `stream_seq` values and counter rows. Asserting emptiness here would stop
+    // testing the migration and start failing on ordinary application data.
+    //
+    // The question is still asked, and asked where it is answerable: after the
+    // down → up cycle below, which drops the columns and re-adds them. Whatever
+    // the application had written is gone by then, so anything found there came
+    // from the migration itself — which is the only thing this file is about.
 
     // --- the constraints actually refuse things ------------------------------
     assertConstraintsBite(mustRun, mustFail);
@@ -349,8 +360,15 @@ function verify(service) {
     mustRun('up again: the claim index definition is back', assertIndexDef());
     mustRun('up again: every B1 stream-ordering object is back', assertB1Objects(true));
     mustRun('up again: every B1 definition is back', assertB1Definitions());
-    mustRun('up again: B1 is still inert', assertB1Inert());
+    // The real inertness check: the columns were just dropped and re-created,
+    // so a non-NULL sequence or a counter row here could only have been written
+    // by the migration.
+    mustRun('up again: the migration itself allocates nothing', assertB1Inert());
     console.log('  ✓ up again: all seventeen ADR-050 objects and all eight B1 objects restored');
+    console.log(
+      '  ✓ up again: ADR-051 B1 is inert — the migration sets no head, allocates no ' +
+        'sequence and writes no counter row',
+    );
   } finally {
     cleanup();
   }

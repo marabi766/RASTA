@@ -68,7 +68,16 @@
 //   `heads`
 //   `verify`       the post-run counts, read back from the database.
 //   `done`         emitted by the service backfill for any attempt that ran to
-//                  the end — a dry run or an apply — carrying `converged`.
+//                  the end — a dry run or an apply — carrying `converged` and
+//                  `mutated`.
+//
+// **`mode` and `mutated` are not the same thing, and the difference matters
+// for evidence.** `mode: "apply"` says writing was *authorised*. `mutated`
+// says the database actually *changed*: it is true only when this run assigned
+// at least one sequence, wrote or updated at least one counter row, or changed
+// at least one head flag — the three write counts the `batch`, `counters` and
+// `heads` events report. A converged apply against a service with nothing to
+// do reports `mode: "apply", mutated: false`, and that is the honest answer.
 //
 // and then exactly one CLI-level outcome for that service:
 //
