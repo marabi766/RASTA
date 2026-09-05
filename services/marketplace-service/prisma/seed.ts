@@ -56,13 +56,25 @@ import { PrismaClient } from '../src/generated/prisma';
  *
  * ## Idempotency
  *
- * Every row has a fixed id and is written with an upsert, so a second run
- * creates nothing. Offers and price-history rows are written **once** and then
- * left alone (`update: {}`): price, version and publication state are
- * supplier-owned, and a seed that rewrote them could reset a version — or
- * worse, walk one forward — every time someone ran it. Product text is
- * refreshed, because a catalogue description is not state anybody edits
- * through this seed's rows.
+ * Every row has a fixed id and is inserted with `skipDuplicates`, so a second
+ * run writes nothing at all: no INSERT, and — this is the point — no UPDATE
+ * either. Every catalogue row here is a create-once demo fixture.
+ *
+ * That is stricter than the upsert it replaces, and deliberately so. The
+ * product upsert used to carry a non-empty `update`, which rewrote the row —
+ * and so moved `product.updated_at`, since `@updatedAt` is stamped by Prisma
+ * on any update — every single run. An empty `update` branch would be milder
+ * but not an answer: it is still an update operation, and whether Prisma
+ * stamps `@updatedAt` on one is Prisma's decision rather than this file's.
+ * Skipping the row removes the question instead of betting on it. A demo
+ * database that drifts each time someone runs the seed cannot be compared
+ * against itself, and an audit column that records a change nobody made is
+ * worse than one that records nothing.
+ *
+ * Skipping the row outright also means the seed never overwrites a live edit:
+ * a description someone corrected, a price a supplier moved, a version that
+ * walked forward, or a publication state that changed all survive a re-run
+ * untouched, because the seed does not write to rows that already exist.
  */
 
 /**
@@ -74,24 +86,42 @@ import { PrismaClient } from '../src/generated/prisma';
  * monorepo where every service has its own, is a real way to write a
  * marketplace catalogue into identity-service.
  */
-function resolveDatabaseUrl(): string {
-  const generic = process.env.DATABASE_URL;
-  const specific = process.env.DATABASE_URL_MARKETPLACE;
+export type DatabaseUrlEnv = {
+  DATABASE_URL?: string | undefined;
+  DATABASE_URL_MARKETPLACE?: string | undefined;
+};
 
-  const url = generic ?? specific;
-  if (!url) {
+export function resolveDatabaseUrl(env: DatabaseUrlEnv = process.env): string {
+  // An empty variable is an unset one. `DATABASE_URL=` in a .env file is how
+  // a shell says "not configured", not how it names a database.
+  const generic = env.DATABASE_URL || undefined;
+  const specific = env.DATABASE_URL_MARKETPLACE || undefined;
+
+  // Both set and disagreeing is not a preference to resolve, it is a question
+  // this seed cannot answer: one of the two is another service's database, and
+  // which one is not knowable from here. The previous version picked the
+  // generic variable and printed a warning, which is a description of the
+  // damage rather than a guard against it — by the time anyone reads it the
+  // catalogue is already in the wrong database. Thrown before `PrismaClient`
+  // is constructed, so no connection is opened on the ambiguous path.
+  if (generic && specific && generic !== specific) {
     throw new Error(
-      'Set DATABASE_URL or DATABASE_URL_MARKETPLACE. ' +
-        'Run via `pnpm --filter @rasta/marketplace-service db:seed`, which loads the repo-root .env.',
+      'DATABASE_URL and DATABASE_URL_MARKETPLACE are both set and name different targets. ' +
+        'Refusing to seed: this catalogue belongs in the marketplace database, and which of ' +
+        'the two that is cannot be decided here. Unset DATABASE_URL, or set the two to the ' +
+        'same value. Neither value is shown — a connection string carries credentials.',
     );
   }
 
-  // DATABASE_URL wins, because that is the documented precedence everywhere
-  // else. When both are set and disagree, say so: the generic one is usually
-  // left over from another service's command, and the failure it causes
-  // otherwise is a catalogue in the wrong database rather than an error.
-  if (generic && specific && generic !== specific) {
-    console.warn('  ! DATABASE_URL and DATABASE_URL_MARKETPLACE differ; using DATABASE_URL.');
+  // DATABASE_URL_MARKETPLACE is the canonical target for this seed; the
+  // generic variable is accepted alone for compatibility with the documented
+  // single-database setup.
+  const url = specific ?? generic;
+  if (!url) {
+    throw new Error(
+      'Set DATABASE_URL_MARKETPLACE (or, for a single-database setup, DATABASE_URL). ' +
+        'Run via `pnpm --filter @rasta/marketplace-service db:seed`, which loads the repo-root .env.',
+    );
   }
 
   return url;
@@ -476,8 +506,14 @@ async function main(): Promise<void> {
   console.warn('  all catalogue data below is illustrative, not an agreed commercial offer.');
 
   try {
-    for (const product of SEED_PRODUCTS) {
-      const data = {
+    // Create-once. `createMany` with `skipDuplicates` is one
+    // `INSERT ... ON CONFLICT DO NOTHING`: a row that already exists is not
+    // touched, so a second run issues no UPDATE for it and `updated_at`
+    // cannot move. That is the whole point — see the idempotency note at the
+    // top of this file for why an upsert cannot say the same.
+    const products = await prisma.product.createMany({
+      data: SEED_PRODUCTS.map((product) => ({
+        id: product.id,
         organizationId: product.organizationId,
         sku: product.sku,
         name: product.name,
@@ -487,48 +523,41 @@ async function main(): Promise<void> {
         unit: product.unit,
         status: 'ACTIVE' as const,
         searchText: seedSearchText(product),
-      };
-      await prisma.product.upsert({
-        where: { id: product.id },
-        create: {
-          id: product.id,
-          ...data,
-          createdAt: CREATED_AT,
-          createdBy: product.createdBy,
-        },
-        // Catalogue text is not state a supplier edits through these rows, so
-        // re-running restores it. No new row, no new id.
-        update: { ...data, updatedBy: 'SEED' },
-      });
-    }
+        createdAt: CREATED_AT,
+        createdBy: product.createdBy,
+      })),
+      skipDuplicates: true,
+    });
     const goods = SEED_PRODUCTS.filter((product) => product.kind === 'GOOD').length;
     console.warn(
-      `  products: ${SEED_PRODUCTS.length} (${goods} GOOD, ${SEED_PRODUCTS.length - goods} SERVICE)`,
+      `  products: ${SEED_PRODUCTS.length} (${goods} GOOD, ${SEED_PRODUCTS.length - goods} SERVICE)` +
+        ` — ${products.count} created, ${SEED_PRODUCTS.length - products.count} already present`,
     );
 
+    // Create-once, for the same reason and now with the same guarantee:
+    // price, version and publication state belong to the supplier, so an
+    // offer this seed wrote once is never written again.
+    const offers = await prisma.offer.createMany({
+      data: SEED_OFFERS.map((offer) => ({
+        id: offer.id,
+        organizationId: offer.organizationId,
+        productId: offer.productId,
+        unitPriceMinor: offer.unitPriceMinor,
+        currency: CURRENCY,
+        availableQuantity: offer.availableQuantity,
+        leadTimeDays: offer.leadTimeDays,
+        minimumQuantity: offer.minimumQuantity,
+        status: offer.status,
+        version: offer.version,
+        publishedAt: offer.publishedAt,
+        createdAt: CREATED_AT,
+        createdBy: offer.createdBy,
+      })),
+      skipDuplicates: true,
+    });
+    // The dataset, listed. These lines describe what the seed defines; the
+    // counts below say what this run actually wrote.
     for (const offer of SEED_OFFERS) {
-      await prisma.offer.upsert({
-        where: { id: offer.id },
-        create: {
-          id: offer.id,
-          organizationId: offer.organizationId,
-          productId: offer.productId,
-          unitPriceMinor: offer.unitPriceMinor,
-          currency: CURRENCY,
-          availableQuantity: offer.availableQuantity,
-          leadTimeDays: offer.leadTimeDays,
-          minimumQuantity: offer.minimumQuantity,
-          status: offer.status,
-          version: offer.version,
-          publishedAt: offer.publishedAt,
-          createdAt: CREATED_AT,
-          createdBy: offer.createdBy,
-        },
-        // Left alone once it exists. Price, version and publication state
-        // belong to the supplier, and a seed that rewrote them on every run
-        // would be the one thing this file must never do.
-        update: {},
-      });
       const label = offer.note ? `  — ${offer.note}` : '';
       console.warn(
         `    ${offer.id} ${offer.status} v${offer.version} ` +
@@ -537,16 +566,17 @@ async function main(): Promise<void> {
     }
     const published = SEED_OFFERS.filter((offer) => offer.status === 'PUBLISHED').length;
     console.warn(
-      `  offers: ${SEED_OFFERS.length} (${published} published, ${SEED_OFFERS.length - published} draft)`,
+      `  offers: ${SEED_OFFERS.length} (${published} published, ${SEED_OFFERS.length - published} draft)` +
+        ` — ${offers.count} created, ${SEED_OFFERS.length - offers.count} already present`,
     );
 
-    for (const row of SEED_PRICE_HISTORY) {
-      const offer = SEED_OFFERS.find((candidate) => candidate.id === row.offerId);
-      if (!offer) throw new Error(`unreachable: ${row.offerId} was validated above`);
+    // Append-only in production, append-only here.
+    const priceHistory = await prisma.offerPriceHistory.createMany({
+      data: SEED_PRICE_HISTORY.map((row) => {
+        const offer = SEED_OFFERS.find((candidate) => candidate.id === row.offerId);
+        if (!offer) throw new Error(`unreachable: ${row.offerId} was validated above`);
 
-      await prisma.offerPriceHistory.upsert({
-        where: { id: row.id },
-        create: {
+        return {
           id: row.id,
           // From the offer, never restated: the history is the offer's.
           organizationId: offer.organizationId,
@@ -556,12 +586,15 @@ async function main(): Promise<void> {
           currency: CURRENCY,
           changedAt: row.changedAt,
           changedBy: row.changedBy,
-        },
-        // Append-only in production, append-only here.
-        update: {},
-      });
-    }
-    console.warn(`  price history: ${SEED_PRICE_HISTORY.length}`);
+        };
+      }),
+      skipDuplicates: true,
+    });
+    console.warn(
+      `  price history: ${SEED_PRICE_HISTORY.length}` +
+        ` — ${priceHistory.count} created,` +
+        ` ${SEED_PRICE_HISTORY.length - priceHistory.count} already present`,
+    );
 
     console.warn('  orders, fulfilments, disputes, reviews: 0 — see the note at the top of this');
     console.warn('    file. Their facts belong to services that have not produced them.');
