@@ -6,6 +6,7 @@ import {
   tryGetContext,
   upgradeContext,
   type RequestContext,
+  isMemberOfOrganization,
 } from './request-context';
 import { RastaError } from '../errors/rasta-error';
 
@@ -142,5 +143,109 @@ describe('the request context itself', () => {
     expect(() => runWithContext(withoutTenant, () => getOrganizationId())).toThrow(
       expect.objectContaining({ code: 'SERVICE_TENANT_CONTEXT_INVALID' }),
     );
+  });
+});
+
+/**
+ * D-2 — the membership set, and why it is a separate field from the tenant.
+ *
+ * `organizationId` is which organization a request *acts for*; the caller
+ * chooses it per request with `X-Organization-Id`. `organizationIds` is which
+ * organizations they *belong to*, which the identity provider decides. A
+ * conflict-of-interest rule must ask the second question, and asking the first
+ * is what let a supplier-service operator approve their own submission by
+ * selecting a different tenant.
+ */
+describe('organization memberships', () => {
+  const base = {
+    correlationId: 'COR_M',
+    requestId: 'REQ_M',
+    roles: ['UNION_ADMIN'],
+    authType: 'USER' as const,
+    startedAt: Date.now(),
+  };
+
+  it('reports membership from the set, not only from the selected tenant', () => {
+    const context = { ...base, organizationId: 'ORG-UNION', organizationIds: ['ORG-UNION', 'ORG-SUP'] };
+
+    runWithContext(context, () => {
+      expect(isMemberOfOrganization('ORG-UNION')).toBe(true);
+      // The one the caller did not select — and the whole point.
+      expect(isMemberOfOrganization('ORG-SUP')).toBe(true);
+      expect(isMemberOfOrganization('ORG-STRANGER')).toBe(false);
+    });
+  });
+
+  it('folds the selected tenant in, so it can never be weaker than the old check', () => {
+    // A context built without memberships — a consumer, a background job, an
+    // older call site. The selected tenant alone must still match.
+    const context = { ...base, organizationId: 'ORG-A', organizationIds: [] };
+    runWithContext(context, () => {
+      expect(isMemberOfOrganization('ORG-A')).toBe(true);
+      expect(isMemberOfOrganization('ORG-B')).toBe(false);
+    });
+  });
+
+  it('treats an unknown or absent organization as no match', () => {
+    const context = { ...base, organizationIds: ['ORG-A'] };
+    runWithContext(context, () => {
+      expect(isMemberOfOrganization(undefined)).toBe(false);
+      expect(isMemberOfOrganization('')).toBe(false);
+    });
+    // Outside a request there is no caller to be a member of anything.
+    expect(isMemberOfOrganization('ORG-A')).toBe(false);
+  });
+
+  it('freezes the membership set, so nothing downstream can add one', () => {
+    const mutable = ['ORG-A'];
+    const context = { ...base, organizationId: 'ORG-A', organizationIds: mutable };
+
+    runWithContext(context, () => {
+      const current = getContext();
+      expect(Object.isFrozen(current.organizationIds)).toBe(true);
+      expect(() => {
+        (current.organizationIds as string[]).push('ORG-INJECTED');
+      }).toThrow();
+      expect(isMemberOfOrganization('ORG-INJECTED')).toBe(false);
+    });
+
+    // The caller's own array is copied, so mutating it afterwards changes
+    // nothing that was authenticated.
+    mutable.push('ORG-LATER');
+    runWithContext(context, () => {
+      expect(isMemberOfOrganization('ORG-LATER')).toBe(true);
+    });
+  });
+
+  it('keeps the set across an upgrade, and lets the guard replace it', () => {
+    const anonymous = { ...base, roles: [], authType: 'ANONYMOUS' as const, organizationIds: [] };
+
+    runWithContext(anonymous, () => {
+      expect(isMemberOfOrganization('ORG-A')).toBe(false);
+
+      upgradeContext({
+        authType: 'USER',
+        organizationId: 'ORG-A',
+        organizationIds: ['ORG-A', 'ORG-B'],
+        roles: ['UNION_ADMIN'],
+      });
+
+      expect(isMemberOfOrganization('ORG-B')).toBe(true);
+      expect(Object.isFrozen(getContext().organizationIds)).toBe(true);
+    });
+  });
+
+  it('gives background work no memberships at all', () => {
+    // Empty means *unknown*, not *any*. A relay or consumer must never satisfy
+    // a membership check, and must never be exempted from one either.
+    const system = createSystemContext({ correlationId: 'COR_S', organizationId: 'ORG-A' });
+    expect(system.organizationIds).toEqual([]);
+
+    runWithContext(system, () => {
+      // Acting for ORG-A still counts as ORG-A, which is what the fold gives
+      // us; it belongs to nothing else.
+      expect(isMemberOfOrganization('ORG-A')).toBe(true);
+      expect(isMemberOfOrganization('ORG-B')).toBe(false);
+    });
   });
 });

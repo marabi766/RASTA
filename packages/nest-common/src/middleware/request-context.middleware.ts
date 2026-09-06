@@ -43,6 +43,10 @@ export class RequestContextMiddleware implements NestMiddleware {
       traceId,
       spanId,
       roles: [],
+      // An unauthenticated request asserts no memberships. The auth guard
+      // replaces this with the token's set once it has verified one; until
+      // then "no memberships" is the honest answer, and the safe one.
+      organizationIds: [],
       authType: 'ANONYMOUS',
       ip: req.ip ?? req.socket?.remoteAddress,
       userAgent: readHeader(req, 'user-agent'),
