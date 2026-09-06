@@ -622,12 +622,18 @@ jobs:
         # a migrated database already exists.
         run: pnpm run test:migration
         env:
-          # All eight, not the three the whole-chain checks cover. ADR-050 adds
-          # its claim columns to every service-owned database, and
+          # All nine, not only the four the whole-chain checks cover. ADR-050
+          # adds its claim columns to every service-owned database, and
           # `verify-outbox-claim-migration.mjs --in-place` reverses that one
           # migration on each of them — so a missing url here is a database
           # whose rollback is never exercised, which is the failure this step
           # exists to prevent.
+          #
+          # supplier is the exception that proves it: it folds ADR-050 and B1
+          # into its initial migration, so the by-name verifier cannot reach it
+          # and `verify-migration-reversible.mjs supplier` covers it instead —
+          # which is why that command is now in `test:migration` rather than
+          # only being available to run by hand.
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
