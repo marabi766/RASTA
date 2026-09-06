@@ -1,8 +1,12 @@
+import { ulid } from 'ulid';
+import { runUnscoped } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { canDownload } from '../src/document/download-policy';
 import { NoOpMalwareScanner } from '../src/scanning/stub.scanner';
 import { ClamAvMalwareScanner } from '../src/scanning/clamav/clamav.scanner';
 import { DOCUMENT_EVENTS } from '../src/events/events';
+import { buildObjectKey } from '../src/storage/object-key';
+import type { ClaimedDocument } from '../src/scanning/scan.repository';
 import {
   FIXTURES,
   asActor,
@@ -54,6 +58,32 @@ describe('malware scanning with a real ClamAV', () => {
   let wiring: Wiring;
   const org = tenants();
 
+  /**
+   * This run's lease identity, carried by every owner string the suite claims
+   * under.
+   *
+   * The owner is the only fence the write-back paths have: `releaseIfHeld`,
+   * `completeIfHeld` and `rescheduleIfHeld` all match on
+   * `(id, scan_state = 'PENDING', scan_lease_owner = $owner)`. A fixed literal
+   * such as `worker-holding-it` is therefore an identity two concurrent runs
+   * share, and one run's cleanup would release the other run's lease — which
+   * the other run observes as its own claim silently evaporating.
+   */
+  const runId = ulid().slice(-10);
+  const owner = (role: string) => `itest-${role}-${runId}`;
+
+  /**
+   * An organization this suite never acts as.
+   *
+   * It stands in for somebody else's tenant in the dirty-queue controls below.
+   * Run-tagged like the others so two runs cannot plant rows on each other,
+   * and torn down with them.
+   */
+  const foreignOrg = `ORG-DOCTEST-FOREIGN-${runId}`;
+
+  /** Every document this suite registered. `drain()` waits on these. */
+  const ownDocuments = new Set<string>();
+
   beforeAll(async () => {
     // Checked once, loudly. Without it every assertion below fails with a
     // socket timeout that names the wrong component, and a reader would look
@@ -66,7 +96,7 @@ describe('malware scanning with a real ClamAV', () => {
 
   afterAll(async () => {
     // Removes the EICAR object from the bucket along with everything else.
-    await cleanup(prisma, [org.a, org.b, org.platform], wiring.storage);
+    await cleanup(prisma, [org.a, org.b, org.platform, foreignOrg], wiring.storage);
     await prisma.onModuleDestroy();
   });
 
@@ -109,6 +139,10 @@ describe('malware scanning with a real ClamAV', () => {
       via.documents.finalize({ uploadIntentId: intent.uploadIntentId }),
     );
 
+    // Recorded here rather than at each call site, so `drain()` knows what
+    // this suite is actually waiting for however the document was registered.
+    ownDocuments.add(document.id);
+
     return { intent, document };
   }
 
@@ -149,7 +183,36 @@ describe('malware scanning with a real ClamAV', () => {
     (event?.payload as { payload?: Record<string, unknown> } | undefined)?.payload;
 
   /**
-   * Runs the worker until it finds nothing left to claim.
+   * Whether any document *this suite* registered is still claimable.
+   *
+   * The predicate is `ScanRepository.claim`'s, evaluated against the
+   * database's `now()` rather than this process's clock, so the answer cannot
+   * disagree with what the next claim will actually select.
+   */
+  async function ownWorkRemains(): Promise<boolean> {
+    if (ownDocuments.size === 0) return false;
+
+    const ids = [...ownDocuments];
+    const rows = await runUnscoped(
+      'the suite asks about its own rows across the tenants it created',
+      () =>
+        prisma.client.$queryRaw<{ claimable: number }[]>`
+        SELECT count(*)::int AS claimable
+          FROM "document"
+         WHERE "id" = ANY(${ids}::text[])
+           AND "scan_state" = 'PENDING'
+           AND "status" = 'REGISTERED'
+           AND ("scan_next_attempt_at" IS NULL OR "scan_next_attempt_at" <= now())
+           AND ("scan_lease_expires_at" IS NULL OR "scan_lease_expires_at" <= now())
+      `,
+    );
+
+    return (rows[0]?.claimable ?? 0) > 0;
+  }
+
+  /**
+   * Runs the worker until the documents this suite registered have been dealt
+   * with.
    *
    * One `tick()` claims at most `DOCUMENT_SCAN_BATCH_SIZE` documents, and this
    * suite deliberately leaves several parked in PENDING — an outage's backlog,
@@ -158,15 +221,191 @@ describe('malware scanning with a real ClamAV', () => {
    * uploaded, and the assertion would fail for a reason that has nothing to do
    * with what it is checking.
    *
+   * The exit condition used to be `tick() === 0` alone. That is a statement
+   * about the **whole** queue rather than about this suite: the scan queue is
+   * global by design — `ScanRepository` claims unscoped, because a worker
+   * scanning only its own organization's documents would scan nothing — so it
+   * read as "no document belonging to anybody is claimable right now". Against
+   * a database that also holds another suite's or another tenant's backlog
+   * that is neither true nor this suite's business, and the loop spent its
+   * budget on rows it does not own before reporting a scanner failure it never
+   * observed. It now waits on this suite's own rows and keeps `tick() === 0`
+   * only as the "nothing can progress" stop — so it returns no later than it
+   * used to, under the same bound.
+   *
+   * Always at least one tick, so the callers that drain a queue their document
+   * has already left — the idempotency test's three extra passes — still
+   * exercise the worker instead of returning without having done anything.
+   *
    * Bounded, because a worker that claims the same document forever is a bug
    * this should surface as a failure rather than as a hung suite.
    */
   async function drain(via: Wiring = wiring, maxTicks = 30): Promise<void> {
     for (let i = 0; i < maxTicks; i += 1) {
-      if ((await via.worker.tick()) === 0) return;
+      const claimed = await via.worker.tick();
+      if (!(await ownWorkRemains())) return;
+      // Nothing anywhere is claimable, so another tick cannot move this on.
+      if (claimed === 0) return;
     }
     throw new Error(`The scan queue did not drain in ${maxTicks} ticks`);
   }
+
+  // =========================================================================
+  // Claims made by hand
+  // =========================================================================
+
+  /**
+   * A ledger of the claims a test made, and why every one of them goes
+   * through it.
+   *
+   * `ScanRepository.claim` runs unscoped and selects across the whole
+   * `document` table, oldest first. That is the production contract and the
+   * worker depends on it — but it means a test calling it with `limit: 200`
+   * against shared infrastructure leases **every** claimable document there
+   * is, other suites' and other tenants' included, for `leaseSeconds`. A
+   * leased document is unclaimable, so the suite that owns it watches its own
+   * worker return 0 and reports that its document "never left PENDING": a
+   * scanner failure that never happened, in a file that names no scanner.
+   *
+   * This file used to claim two batches of 200 rows on a 300-second lease and
+   * give exactly one back. The ledger records what each claim actually
+   * returned, before any assertion runs, and hands all of it back afterwards.
+   * Two properties make that safe:
+   *
+   *   - **Token-fenced.** `releaseIfHeld(id, owner)` matches on this run's
+   *     owner *and* on the row still being `PENDING`, so a row that was
+   *     completed, rescheduled or reclaimed in between matches nothing and is
+   *     left exactly as whoever owns it now left it.
+   *   - **Complete.** A release that throws does not skip the ones after it;
+   *     the failures are collected and reported once the rest are back.
+   *
+   * What no ledger can cover is a claim whose result never reached this
+   * process — a crash between the `UPDATE` and its `RETURNING`. Nothing
+   * outside the database can; that is what the lease expiry is for.
+   */
+  interface LeaseLedger {
+    /** Claims under `itest-<role>-<runId>` and records every row returned. */
+    claim(role: string, limit: number, leaseSeconds: number): Promise<ClaimedDocument[]>;
+  }
+
+  interface OwnedLeases extends LeaseLedger {
+    /** Releases everything still held. Never throws; returns what failed. */
+    release(): Promise<unknown[]>;
+  }
+
+  function newLeaseLedger(): OwnedLeases {
+    const held = new Map<string, Set<string>>();
+
+    return {
+      async claim(role, limit, leaseSeconds) {
+        const leaseOwner = owner(role);
+        const batch = await wiring.scans.claim({ owner: leaseOwner, limit, leaseSeconds });
+
+        const ids = held.get(leaseOwner) ?? new Set<string>();
+        for (const document of batch) ids.add(document.id);
+        held.set(leaseOwner, ids);
+
+        return batch;
+      },
+
+      async release() {
+        const failures: unknown[] = [];
+        for (const [leaseOwner, ids] of held) {
+          for (const id of ids) {
+            try {
+              await wiring.scans.releaseIfHeld(id, leaseOwner);
+            } catch (error) {
+              failures.push(error);
+            }
+          }
+        }
+        held.clear();
+        return failures;
+      },
+    };
+  }
+
+  /**
+   * Runs `body` with a ledger and gives back every lease it took.
+   *
+   * The release is in the `finally`, which is the whole point: the assertion
+   * between the two claims is exactly where this file used to leave four
+   * hundred documents parked, and a cleanup that only runs on the happy path
+   * is not a cleanup.
+   *
+   * Nothing is thrown from inside that `finally`. A `finally` that throws
+   * replaces the failure a reader needs to see with one about the cleanup, so
+   * `release()` reports rather than raises and a release failure is turned
+   * into an error only once the body itself has succeeded.
+   */
+  async function underLeases<T>(body: (leases: LeaseLedger) => Promise<T>): Promise<T> {
+    const ledger = newLeaseLedger();
+    let failures: unknown[] = [];
+    let result: T;
+
+    try {
+      result = await body(ledger);
+    } finally {
+      failures = await ledger.release();
+    }
+
+    if (failures.length > 0) {
+      throw new Error(
+        `${failures.length} scan lease(s) could not be released: ` +
+          failures.map((failure) => String(failure)).join('; '),
+      );
+    }
+
+    return result;
+  }
+
+  /**
+   * Registers documents under an organization this suite never acts as.
+   *
+   * Written straight to the table rather than uploaded: what the controls need
+   * is a row in `PENDING` that a claim will pick up, and giving it real bytes
+   * would add a MinIO round trip to a control that never runs the scanner.
+   *
+   * Queued an hour in the past so `claim`'s oldest-first ordering puts them at
+   * the front of any batch. A control the fix could miss by landing outside
+   * the limit would prove nothing, so both controls assert the claim took them.
+   */
+  async function seedForeignPending(count: number): Promise<string[]> {
+    const ids = Array.from({ length: count }, () => `DOC_${ulid()}`);
+    const queuedAt = new Date(Date.now() - 3_600_000);
+
+    await runUnscoped('the control plants rows for a tenant this suite never acts as', () =>
+      prisma.client.document.createMany({
+        data: ids.map((id) => ({
+          id,
+          organizationId: foreignOrg,
+          objectKey: buildObjectKey(foreignOrg, 'CONTRACT'),
+          documentClass: 'CONTRACT' as const,
+          contentType: 'application/pdf',
+          sizeBytes: 1024,
+          filename: 'someone-elses-contract.pdf',
+          uploadIntentId: `UPI_${ulid()}`,
+          createdBy: 'USR-DOCTEST-FOREIGN',
+          createdAt: queuedAt,
+          scanQueuedAt: queuedAt,
+        })),
+      }),
+    );
+
+    return ids;
+  }
+
+  /** A row this suite planted but does not own, as the database holds it. */
+  const foreignRow = (id: string) =>
+    runUnscoped('the control reads back the rows it planted', () =>
+      prisma.client.document.findUnique({ where: { id } }),
+    );
+
+  /** Bounded by the ids the control created, never by organization or state. */
+  const removeForeign = (ids: string[]) =>
+    runUnscoped('the control removes the rows it planted', () =>
+      prisma.client.document.deleteMany({ where: { id: { in: ids } } }),
+    );
 
   // =========================================================================
   // 1. A clean file
@@ -572,24 +811,26 @@ describe('malware scanning with a real ClamAV', () => {
     it('does not hand a leased document to a second worker', async () => {
       const { document } = await upload();
 
-      // A limit past anything this suite leaves parked, so the assertion is
-      // about the lease rather than about which five rows were oldest.
-      const held = await wiring.scans.claim({
-        owner: 'worker-holding-it',
-        limit: 200,
-        leaseSeconds: 300,
-      });
-      expect(held.map((d) => d.id)).toContain(document.id);
+      await underLeases(async (leases) => {
+        // A limit past anything this suite leaves parked, so the assertion is
+        // about the lease rather than about which five rows were oldest. It is
+        // also far past anything this suite *owns*, which is why both claims
+        // go through the ledger: everything else the limit swallows belongs to
+        // somebody, and the release below is what gives it back.
+        const held = await leases.claim('holding-it', 200, 300);
+        expect(held.map((d) => d.id)).toContain(document.id);
 
-      const second = await wiring.scans.claim({
-        owner: 'worker-arriving-second',
-        limit: 200,
-        leaseSeconds: 300,
+        const second = await leases.claim('arriving-second', 200, 300);
+        expect(second.map((d) => d.id)).not.toContain(document.id);
       });
-      expect(second.map((d) => d.id)).not.toContain(document.id);
 
-      // Released, so the suite's later assertions are not blocked behind it.
-      await wiring.scans.releaseIfHeld(document.id, 'worker-holding-it');
+      // Back in the queue under nobody, so the suite's later assertions are
+      // not blocked behind it — asserted rather than assumed, because the
+      // release used to happen for this one row and no other.
+      const released = await row(document.id);
+      expect(released?.scanState).toBe('PENDING');
+      expect(released?.scanLeaseOwner).toBeNull();
+      expect(released?.scanLeaseExpiresAt).toBeNull();
     });
 
     it('scans on a tick even though it was never started', async () => {
@@ -610,30 +851,126 @@ describe('malware scanning with a real ClamAV', () => {
     it('reclaims a document whose lease expired, so a dead worker cannot park it', async () => {
       const { document } = await upload();
 
-      const claimed = await wiring.scans.claim({
-        owner: 'worker-that-died',
-        limit: 200,
-        leaseSeconds: 300,
-      });
-      expect(claimed.map((d) => d.id)).toContain(document.id);
+      await underLeases(async (leases) => {
+        const claimed = await leases.claim('that-died', 200, 300);
+        expect(claimed.map((d) => d.id)).toContain(document.id);
 
-      // Both lease columns, because `ck_document_scan_lease_complete` refuses a
-      // half-written lease — an expiry with no owner never expires from
-      // anybody's point of view.
-      await prisma.client.$executeRaw`
-        UPDATE "document"
-           SET "scan_lease_owner" = 'worker-that-died',
-               "scan_lease_expires_at" = now() - interval '1 minute'
-         WHERE "id" = ${document.id}`;
+        // Both lease columns, because `ck_document_scan_lease_complete` refuses a
+        // half-written lease — an expiry with no owner never expires from
+        // anybody's point of view.
+        //
+        // Bounded to the one row this test registered. Expiring leases by owner
+        // or by state would expire whatever else the claim above swallowed.
+        await prisma.client.$executeRaw`
+          UPDATE "document"
+             SET "scan_lease_owner" = ${owner('that-died')},
+                 "scan_lease_expires_at" = now() - interval '1 minute'
+           WHERE "id" = ${document.id}`;
 
-      const reclaimed = await wiring.scans.claim({
-        owner: 'worker-taking-over',
-        limit: 200,
-        leaseSeconds: 300,
+        const reclaimed = await leases.claim('taking-over', 200, 300);
+        expect(reclaimed.map((d) => d.id)).toContain(document.id);
       });
 
-      expect(reclaimed.map((d) => d.id)).toContain(document.id);
-      await wiring.scans.releaseIfHeld(document.id, 'worker-taking-over');
+      // Both owners are in the ledger and both are tried; the fence is what
+      // makes the stale one a no-op rather than a release of somebody's row.
+      const released = await row(document.id);
+      expect(released?.scanState).toBe('PENDING');
+      expect(released?.scanLeaseOwner).toBeNull();
+      expect(released?.scanLeaseExpiresAt).toBeNull();
+    });
+  });
+
+  // =========================================================================
+  // 4b. A queue that is not this suite's alone (N7)
+  // =========================================================================
+
+  /**
+   * The dirty-queue control.
+   *
+   * `claim` is global by design, so the only thing between a wide claim made
+   * here and another suite's documents parked for the length of a lease is
+   * this file's cleanup. These two tests are what make that cleanup a tested
+   * property rather than a convention: they plant `PENDING` documents under a
+   * tenant this suite never acts as, run a claim wide enough to swallow them,
+   * and require the rows to come back untouched *and* claimable — once on the
+   * ordinary path, and once on a path where an assertion between the claim and
+   * the release throws.
+   *
+   * Both fail if `underLeases` stops releasing, or releases only the row the
+   * test named. Deliberately: a control that still passes with its guard
+   * removed is not a control.
+   *
+   * No worker runs here. The rows are planted, claimed, released and removed
+   * within the test, so nothing it does depends on timing and nothing it
+   * leaves behind depends on a later suite.
+   */
+  describe('a wide claim over a queue that holds documents of other tenants', () => {
+    it('leaves every foreign PENDING document unleased, unchanged and claimable', async () => {
+      const foreign = await seedForeignPending(3);
+
+      try {
+        await underLeases(async (leases) => {
+          const held = await leases.claim('wide-claim', 200, 300);
+          // The control is only worth something if the claim genuinely took
+          // them: one that missed them proves nothing about the release.
+          expect(held.map((d) => d.id)).toEqual(expect.arrayContaining(foreign));
+        });
+
+        for (const id of foreign) {
+          const after = await foreignRow(id);
+          expect(after?.scanState).toBe('PENDING');
+          expect(after?.status).toBe('REGISTERED');
+          expect(after?.scanLeaseOwner).toBeNull();
+          expect(after?.scanLeaseExpiresAt).toBeNull();
+          // Unchanged, not merely unleased. A release that spent an attempt or
+          // wrote a backoff would have moved a queue this suite does not own.
+          expect(after?.scanAttempts).toBe(0);
+          expect(after?.scanNextAttemptAt).toBeNull();
+          expect(after?.scanEngine).toBeNull();
+        }
+
+        // Availability rather than column values: the worker that owns them can
+        // take them again now, which is the property F-09 actually removed.
+        await underLeases(async (leases) => {
+          const claimable = await leases.claim('foreign-owner-probe', 200, 30);
+          expect(claimable.map((d) => d.id)).toEqual(expect.arrayContaining(foreign));
+        });
+      } finally {
+        await removeForeign(foreign);
+      }
+    });
+
+    it('releases them even when an assertion between the claim and the release fails', async () => {
+      const foreign = await seedForeignPending(3);
+      const injected = new Error('an assertion failing where the release used to be skipped');
+
+      try {
+        let raised: unknown;
+        try {
+          await underLeases(async (leases) => {
+            const held = await leases.claim('wide-claim-that-fails', 200, 300);
+            expect(held.map((d) => d.id)).toEqual(expect.arrayContaining(foreign));
+            throw injected;
+          });
+        } catch (error) {
+          raised = error;
+        }
+
+        // Reported, not swallowed by its own cleanup: a `finally` that throws
+        // would replace the failure a reader needs to see.
+        expect(raised).toBe(injected);
+
+        for (const id of foreign) {
+          const after = await foreignRow(id);
+          expect(after?.scanState).toBe('PENDING');
+          expect(after?.status).toBe('REGISTERED');
+          expect(after?.scanLeaseOwner).toBeNull();
+          expect(after?.scanLeaseExpiresAt).toBeNull();
+          expect(after?.scanAttempts).toBe(0);
+        }
+      } finally {
+        await removeForeign(foreign);
+      }
     });
   });
 
