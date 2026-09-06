@@ -445,7 +445,6 @@ jobs:
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
-          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
@@ -541,6 +540,21 @@ jobs:
       # These are called out separately from the rest of the suite so a failure
       # names itself in the job list. A tenant-isolation failure is a data
       # leak, not a flaky test, and must never be waved through (AGENTS.md §5).
+      - name: Supplier coverage gate
+        # `docs/14` § 14.2 puts supplier-service in the 75% band. Measured here
+        # rather than in the unit job for the same reason as the three gates
+        # above: most of this service's coverage comes from the integration
+        # suites — the CHECK constraints, the conditional `updateMany` that
+        # decides a race, the ADR-050 claim protocol, the B3 allocator and the
+        # HTTP surface only exist against a real database, and a unit-only
+        # measurement would both report a number far below the truth and reward
+        # mocking exactly the systems this service's correctness rests on.
+        run: pnpm --filter @rasta/supplier-service run test:coverage
+        env:
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
+
       - name: Tenant isolation and authorization tests
         # Called out separately from the rest of the suite so a failure names
         # itself in the job list. A tenant-isolation failure is a data leak,
