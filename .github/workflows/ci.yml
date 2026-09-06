@@ -1192,6 +1192,7 @@ jobs:
             economic-service,
             marketplace-service,
             document-service,
+            supplier-service,
           ]
 
     steps:
