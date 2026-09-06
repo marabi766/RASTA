@@ -82,6 +82,16 @@ export interface CreateSupplierInput {
   displayName: string;
   registeredBy: string;
   registeredCorrelationId: string;
+  /**
+   * The database's own instant for this transaction (D-5).
+   *
+   * Passed explicitly rather than left to `@default(now())` so the caller holds
+   * the same value it puts in the event. The default would produce the same
+   * instant — `now()` is transaction start either way — but the service could
+   * not then name it, and would go back to reading its own clock to fill the
+   * payload.
+   */
+  registeredAt: Date;
   capabilities: { id: string; capability: SupplierCapability }[];
 }
 
@@ -130,6 +140,7 @@ export class SupplierRepository {
         organizationId: input.organizationId,
         displayName: input.displayName,
         registeredBy: input.registeredBy,
+        registeredAt: input.registeredAt,
         registeredCorrelationId: input.registeredCorrelationId,
       },
     });
@@ -141,6 +152,10 @@ export class SupplierRepository {
         organizationId: input.organizationId,
         capability: row.capability,
         declaredBy: input.registeredBy,
+        // The same instant as the profile it belongs to. A capability declared
+        // "later" than the registration that declared it is not a fact anybody
+        // meant to record.
+        declaredAt: input.registeredAt,
       })),
     });
   }
@@ -243,6 +258,8 @@ export class SupplierRepository {
       organizationId: string;
       reason: string;
       suspendedBy: string;
+      /** The database's instant for this transaction (D-5). */
+      suspendedAt: Date;
       suspendedCorrelationId: string;
     },
   ): Promise<number> {
@@ -267,6 +284,7 @@ export class SupplierRepository {
           organizationId: input.organizationId,
           reason: input.reason,
           suspendedBy: input.suspendedBy,
+          suspendedAt: input.suspendedAt,
           suspendedCorrelationId: input.suspendedCorrelationId,
         },
       }),

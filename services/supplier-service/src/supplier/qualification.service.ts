@@ -9,6 +9,7 @@ import {
   assertCanReviewQualifications,
 } from '../access/access';
 import { isUniqueViolation } from '../shared/prisma-errors';
+import { transactionNow } from '../shared/clock';
 import { SupplierRepository } from './supplier.repository';
 import { page, requireActor } from './supplier.service';
 import {
@@ -189,9 +190,12 @@ export class QualificationService {
 
     const context = getContext();
     const actor = requireActor();
-    const decidedAt = new Date();
 
     await this.prisma.transaction(async (tx) => {
+      // D-5: the database's instant, so `decided_at >= submitted_at` compares
+      // two readings of one clock rather than two clocks.
+      const decidedAt = await transactionNow(tx);
+
       const changed = await this.repository.recordDecision(tx, {
         qualificationId,
         state,
@@ -224,6 +228,7 @@ export class QualificationService {
             decidedBy: actor,
             decidedAt: decidedAt.toISOString(),
           },
+          occurredAt: decidedAt,
         });
       } else {
         await this.events.enqueue(tx, {
@@ -242,6 +247,7 @@ export class QualificationService {
             decidedBy: actor,
             decidedAt: decidedAt.toISOString(),
           },
+          occurredAt: decidedAt,
         });
       }
     });

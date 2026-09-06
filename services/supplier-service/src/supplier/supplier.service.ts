@@ -8,6 +8,7 @@ import {
   assertCanRegisterSupplier,
   assertSupplierReadable,
 } from '../access/access';
+import { transactionNow } from '../shared/clock';
 import { isUniqueViolation } from '../shared/prisma-errors';
 import { SupplierRepository } from './supplier.repository';
 import { toDetailView, toDirectoryView, type SupplierRow } from './views';
@@ -58,13 +59,16 @@ export class SupplierService {
     const actor = requireActor();
 
     const supplierId = newId(ID_PREFIX.supplier);
-    const registeredAt = new Date();
 
     try {
       await this.prisma.transaction(async (tx) => {
+        // D-5: one instant, from the database, for the row and the event alike.
+        const registeredAt = await transactionNow(tx);
+
         await this.repository.createSupplier(tx, {
           id: supplierId,
           organizationId,
+          registeredAt,
           displayName: dto.displayName,
           registeredBy: actor,
           registeredCorrelationId: context.correlationId,
@@ -86,6 +90,7 @@ export class SupplierService {
             registeredBy: actor,
             registeredAt: registeredAt.toISOString(),
           },
+          occurredAt: registeredAt,
         });
       });
     } catch (error) {

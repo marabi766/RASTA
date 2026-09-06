@@ -3,6 +3,7 @@ import { RastaError, getContext } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { assertCanDecideAbout } from '../access/access';
+import { transactionNow } from '../shared/clock';
 import { SupplierRepository } from './supplier.repository';
 import { requireActor } from './supplier.service';
 import { toDetailView, type SupplierRow } from './views';
@@ -63,15 +64,18 @@ export class SuspensionService {
     const context = getContext();
     const actor = requireActor();
     const suspensionId = newId(ID_PREFIX.suspension);
-    const suspendedAt = new Date();
 
     await this.prisma.transaction(async (tx) => {
+      // D-5: one instant from the database for the episode and its event.
+      const suspendedAt = await transactionNow(tx);
+
       const changed = await this.repository.openSuspension(tx, {
         id: suspensionId,
         supplierId,
         organizationId: supplier.organizationId,
         reason: dto.reason,
         suspendedBy: actor,
+        suspendedAt,
         suspendedCorrelationId: context.correlationId,
       });
 
@@ -101,6 +105,7 @@ export class SuspensionService {
           suspendedBy: actor,
           suspendedAt: suspendedAt.toISOString(),
         },
+        occurredAt: suspendedAt,
       });
     });
 
@@ -137,10 +142,12 @@ export class SuspensionService {
     const actor = requireActor();
 
     await this.prisma.transaction(async (tx) => {
+      // D-5: `reinstated_at >= suspended_at` is a CHECK, and both sides must
+      // come from the clock that evaluates it.
       const result = await this.repository.closeSuspension(tx, {
         supplierId,
         reinstatedBy: actor,
-        reinstatedAt: new Date(),
+        reinstatedAt: await transactionNow(tx),
         reinstatedCorrelationId: context.correlationId,
         reinstatementNote: dto.reason,
       });

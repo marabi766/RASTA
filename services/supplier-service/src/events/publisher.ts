@@ -48,6 +48,17 @@ export class EventPublisher {
       organizationId: string;
       payload: unknown;
       causationId?: string;
+      /**
+       * The instant the fact this event announces was persisted (D-5).
+       *
+       * Required rather than optional, and deliberately so: `buildOutboxRow`
+       * falls back to `new Date()` when it is absent, which is the application
+       * clock this service no longer uses for anything it stores. Making the
+       * caller pass it means the event and the row it announces carry one
+       * instant taken from one clock inside one transaction — see
+       * `src/shared/clock.ts`.
+       */
+      occurredAt: Date;
     },
   ): Promise<void> {
     const payload = validateSupplierPayload(input.eventName, input.payload);
@@ -82,6 +93,9 @@ export class EventPublisher {
         // partition key, so the envelope cannot label a stream the counter
         // never counted.
         streamKey: partition.key,
+        // The database's instant, not Node's. Without this `buildOutboxRow`
+        // would stamp `new Date()` and the event would disagree with the row.
+        occurredAt: input.occurredAt,
         ...(input.causationId ? { causationId: input.causationId } : {}),
       },
       { producer: SERVICE_NAME, producerVersion: this.env.SERVICE_VERSION },
