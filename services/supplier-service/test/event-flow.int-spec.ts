@@ -147,8 +147,7 @@ describeWithKafka('supplier event flow over Kafka', () => {
   /** Every message this run delivered for one supplier, in arrival order. */
   const deliveredFor = (supplierId: string): Delivered[] =>
     received.filter(
-      (message) =>
-        (message.envelope.payload as { supplierId?: string }).supplierId === supplierId,
+      (message) => (message.envelope.payload as { supplierId?: string }).supplierId === supplierId,
     );
 
   it('carries all four events to the topic, keyed by supplierId and in order', async () => {

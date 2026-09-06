@@ -166,7 +166,11 @@ describe('organization memberships', () => {
   };
 
   it('reports membership from the set, not only from the selected tenant', () => {
-    const context = { ...base, organizationId: 'ORG-UNION', organizationIds: ['ORG-UNION', 'ORG-SUP'] };
+    const context = {
+      ...base,
+      organizationId: 'ORG-UNION',
+      organizationIds: ['ORG-UNION', 'ORG-SUP'],
+    };
 
     runWithContext(context, () => {
       expect(isMemberOfOrganization('ORG-UNION')).toBe(true);

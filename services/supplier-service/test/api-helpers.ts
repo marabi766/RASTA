@@ -108,11 +108,7 @@ export function actor(organizationId: string, roles: string[]): string {
  * says they belong to, which is what the platform must consider before letting
  * them decide anybody's case.
  */
-export function multiMemberActor(
-  active: string,
-  memberships: string[],
-  roles: string[],
-): string {
+export function multiMemberActor(active: string, memberships: string[], roles: string[]): string {
   return bearer({
     sub: `sub-${ulid()}`,
     rastaUserId: `USR-APITEST-${ulid().slice(-8)}`,

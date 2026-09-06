@@ -785,5 +785,4 @@ describe('database invariants', () => {
       ).rejects.toThrow(/ck_suspension_text_not_blank|check constraint/i);
     });
   });
-
 });

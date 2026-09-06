@@ -3,14 +3,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { QualificationService } from '../src/supplier/qualification.service';
 import { SupplierService } from '../src/supplier/supplier.service';
 import { SuspensionService } from '../src/supplier/suspension.service';
-import {
-  asOperator,
-  asSupplier,
-  cleanup,
-  newOrganizationId,
-  outboxFor,
-  wire,
-} from './helpers';
+import { asOperator, asSupplier, cleanup, newOrganizationId, outboxFor, wire } from './helpers';
 
 /**
  * D-5 — one fact must not carry two clocks.
@@ -188,9 +181,7 @@ describe('D-5 — the database is the only clock a persisted fact uses', () => {
 
     const behind = new Date((await databaseNow()).getTime() - 5_000);
     await withApplicationClockAt(behind, async () => {
-      await asOperator(() =>
-        suspensions.suspend(supplier.id, { reason: 'clock probe' } as never),
-      );
+      await asOperator(() => suspensions.suspend(supplier.id, { reason: 'clock probe' } as never));
       await asOperator(() =>
         suspensions.reinstate(supplier.id, { reason: 'clock probe lifted' } as never),
       );

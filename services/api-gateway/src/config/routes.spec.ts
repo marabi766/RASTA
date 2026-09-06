@@ -325,4 +325,3 @@ describe('the suppliers prefix', () => {
     }
   });
 });
-

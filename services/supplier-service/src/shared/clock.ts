@@ -54,7 +54,9 @@ export async function transactionNow(tx: ExtendedPrismaClient): Promise<Date> {
     // Unreachable against PostgreSQL, and deliberately loud rather than a
     // silent `new Date()` fallback: falling back to the application clock is
     // the exact defect this function exists to remove.
-    throw new Error('SELECT now() did not return a timestamp; refusing to fall back to the application clock');
+    throw new Error(
+      'SELECT now() did not return a timestamp; refusing to fall back to the application clock',
+    );
   }
   return now;
 }

@@ -421,7 +421,10 @@ describe('D-2 — the self-judgement rule reads memberships, not the selected te
     ]) {
       expect(
         codeOf(() =>
-          as({ organizationId: OTHER_ORG, organizationIds: memberships, roles: ['UNION_ADMIN'] }, decide),
+          as(
+            { organizationId: OTHER_ORG, organizationIds: memberships, roles: ['UNION_ADMIN'] },
+            decide,
+          ),
         ),
       ).toBe('FORBIDDEN');
     }
@@ -455,7 +458,11 @@ describe('D-2 — the self-judgement rule reads memberships, not the selected te
     expect(
       codeOf(() =>
         as(
-          { organizationId: OTHER_ORG, organizationIds: [OTHER_ORG, 'ORG-THIRD'], roles: ['UNION_ADMIN'] },
+          {
+            organizationId: OTHER_ORG,
+            organizationIds: [OTHER_ORG, 'ORG-THIRD'],
+            roles: ['UNION_ADMIN'],
+          },
           decide,
         ),
       ),
@@ -489,7 +496,10 @@ describe('D-2 — the self-judgement rule reads memberships, not the selected te
   it('gives an unknown role no authority', () => {
     expect(
       codeOf(() =>
-        as({ organizationId: OTHER_ORG, organizationIds: [OTHER_ORG], roles: ['SOMETHING_NEW'] }, decide),
+        as(
+          { organizationId: OTHER_ORG, organizationIds: [OTHER_ORG], roles: ['SOMETHING_NEW'] },
+          decide,
+        ),
       ),
     ).toBe('FORBIDDEN');
   });

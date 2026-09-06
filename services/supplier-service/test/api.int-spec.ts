@@ -149,9 +149,9 @@ describe('supplier HTTP API', () => {
       // service call at all — it is a malformed user token, and answered 401.
       const token = await internalToken('marketplace-service');
       for (const [method, path] of routes) {
-        const response = await (http() as never as Record<string, (p: string) => never>)[method](
-          path,
-        ).set('x-internal-token', token);
+        const response = await (http() as never as Record<string, (p: string) => never>)
+          [method](path)
+          .set('x-internal-token', token);
         expect({ path, status: (response as { status: number }).status }).toEqual({
           path,
           status: 403,
@@ -275,7 +275,15 @@ describe('supplier HTTP API', () => {
 
       const mine = response.body.items.find((item: { id: string }) => item.id === supplierId);
       expect(Object.keys(mine).sort()).toEqual(
-        ['capabilities', 'displayName', 'id', 'organizationId', 'qualifiedFor', 'registeredAt', 'status'].sort(),
+        [
+          'capabilities',
+          'displayName',
+          'id',
+          'organizationId',
+          'qualifiedFor',
+          'registeredAt',
+          'status',
+        ].sort(),
       );
       // Claimed two, approved for one. The distinction is the point of the
       // directory: claiming is not qualification.
