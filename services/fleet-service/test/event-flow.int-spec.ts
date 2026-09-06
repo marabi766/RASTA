@@ -178,14 +178,33 @@ describeWithKafka('fleet event flow over Kafka', () => {
     expect(payload.organizationId).toBe(org.a);
   }, 90_000);
 
-  it('keeps one correlation id across the whole chain', async () => {
-    // § 40: HTTP → fleet-service → outbox → Kafka must stay traceable.
-    const envelope = received.find((e) => e.eventName === 'ASSET_ASSIGNED');
-    expect(envelope).toBeDefined();
-
+  /**
+   * This run's own `ASSET_ASSIGNED`, and the outbox row that produced it.
+   *
+   * `received` is appended to for every message that lands on the shared topic
+   * from the moment the group joins, so a predicate naming only the event is a
+   * predicate any other producer can satisfy — an overlapping CI shard, a
+   * second developer, a live `pnpm dev`. The row is selected first because
+   * `buildOutboxRow` writes the envelope's `eventId` as the row's primary key
+   * (`packages/nest-common/src/outbox/outbox.ts`), so a row this run owns names
+   * its own envelope exactly. Nothing here depends on arrival order, array
+   * position or a sleep.
+   *
+   * This is test observation only. It says nothing about cross-topic ordering,
+   * which is D-027's separate question.
+   */
+  async function ownAssetAssigned() {
     const outbox = await prisma.client.outboxMessage.findFirstOrThrow({
+      // org.a is generated per run by `tenants()`, so this row is this run's.
       where: { organizationId: org.a, eventName: 'ASSET_ASSIGNED' },
     });
+    return { outbox, envelope: received.find((e) => e.eventId === outbox.id) };
+  }
+
+  it('keeps one correlation id across the whole chain', async () => {
+    // § 40: HTTP → fleet-service → outbox → Kafka must stay traceable.
+    const { outbox, envelope } = await ownAssetAssigned();
+    expect(envelope).toBeDefined();
 
     expect(envelope!.correlationId).toBe(outbox.correlationId);
     // The header carries it too, so a consumer can filter without parsing the
@@ -193,6 +212,56 @@ describeWithKafka('fleet event flow over Kafka', () => {
     expect((outbox.headers as Record<string, string>)['x-correlation-id']).toBe(
       outbox.correlationId,
     );
+  });
+
+  // N2 — foreign-message control. Deterministic: the stale envelope is placed
+  // directly into `received`, so the control needs no second producer, no
+  // broker timing and no shared infrastructure.
+  it('resolves its own ASSET_ASSIGNED when a stale one shares the collection', async () => {
+    const { outbox } = await ownAssetAssigned();
+
+    const foreignId = id('ASG');
+    const foreign: EventEnvelope = {
+      eventId: id('EVT'),
+      eventName: 'ASSET_ASSIGNED',
+      eventVersion: 1,
+      occurredAt: new Date().toISOString(),
+      producer: 'fleet-service',
+      producerVersion: '0.1.0',
+      aggregateType: 'Assignment',
+      aggregateId: foreignId,
+      tenantId: 'ORG-FOREIGN-CONTROL',
+      correlationId: `itest-foreign-${id('COR')}`,
+      payload: {
+        assignmentId: foreignId,
+        assetId: id('AST'),
+        driverId: id('DRV'),
+        organizationId: 'ORG-FOREIGN-CONTROL',
+      },
+    };
+
+    // Index 0 is where a foreign message lands when it is published before
+    // this run's — the case F-15 describes.
+    received.unshift(foreign);
+
+    try {
+      // The control is only meaningful if the stale envelope would in fact
+      // have been selected. Asserting that first is what stops this test from
+      // passing vacuously if the collection is ever ordered differently.
+      expect(received.find((e) => e.eventName === 'ASSET_ASSIGNED')).toBe(foreign);
+
+      const { envelope } = await ownAssetAssigned();
+      expect(envelope).toBeDefined();
+      expect(envelope).not.toBe(foreign);
+      expect(envelope!.eventId).toBe(outbox.id);
+      expect(envelope!.tenantId).toBe(org.a);
+      expect(envelope!.correlationId).toBe(outbox.correlationId);
+      expect(envelope!.correlationId).not.toBe(foreign.correlationId);
+    } finally {
+      // Later tests read the same array; leave it as it was found.
+      const at = received.indexOf(foreign);
+      if (at >= 0) received.splice(at, 1);
+    }
   });
 
   it('emits ASSIGNMENT_ENDED with the assetId the projector needs', async () => {
