@@ -327,6 +327,70 @@ const EXPECTED = {
     ],
     dataRollback: DOCUMENT_DATA_ROLLBACK,
   },
+  /**
+   * supplier-service, and the reason it is verified **here** rather than by the
+   * outbox verifiers.
+   *
+   * This service ships one initial migration that folds the domain schema,
+   * ADR-050's durable claim and ADR-051 Phase B1 together, because it had no
+   * previous deployed state to stay compatible with.
+   * `verify-outbox-claim-migration.mjs` and `verify-outbox-b1-lib.test.mjs`
+   * both address migrations *by name* — five separately named files — so adding
+   * `supplier` to their service lists does not weaken them, it makes them throw
+   * `20260902120000_outbox_durable_claim/migration.sql is missing`. They are
+   * left alone deliberately, and each now carries an explicit exclusion entry
+   * naming this service so the omission is a recorded decision rather than a
+   * service nobody noticed was unverified.
+   *
+   * That means the outbox objects have to be verified somewhere, and this is
+   * that somewhere: the constraint list below carries ADR-050's claim triple
+   * and the published-row rule alongside the domain invariants, so a down
+   * script that dropped any of them without the forward migration restoring it
+   * fails here.
+   *
+   * The domain constraints listed are the ones carrying a claim a reader would
+   * otherwise take on trust. `ck_qualification_decision_complete` is what makes
+   * "a decision names its actor and its time" true of the row rather than of
+   * the service that happens to write it; `ck_qualification_decided_after_submitted`
+   * and `ck_suspension_reinstated_after_suspended` are what stop a decision from
+   * predating the thing it decides.
+   */
+  supplier: {
+    tables: [
+      'supplier',
+      'supplier_capability',
+      'qualification',
+      'qualification_evidence',
+      'suspension',
+      'outbox_message',
+      'outbox_stream_sequence',
+      'processed_event',
+    ],
+    triggers: [],
+    constraints: [
+      // Domain invariants.
+      'ck_supplier_display_name_not_blank',
+      'ck_supplier_actor_recorded',
+      'ck_supplier_capability_actor_recorded',
+      'ck_qualification_decision_complete',
+      'ck_qualification_decided_after_submitted',
+      'ck_qualification_note_requires_decision',
+      'ck_qualification_text_not_blank',
+      'ck_evidence_document_id_not_blank',
+      'ck_evidence_text_not_blank',
+      'ck_suspension_reinstatement_complete',
+      'ck_suspension_reinstated_after_suspended',
+      'ck_suspension_note_requires_reinstatement',
+      'ck_suspension_text_not_blank',
+      // ADR-050 / ADR-051 B1, folded into the initial migration and therefore
+      // out of reach of the by-name outbox verifiers.
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_next_attempt_requires_failure',
+      'ck_outbox_published_is_clean',
+    ],
+  },
 };
 
 function usage(message) {
