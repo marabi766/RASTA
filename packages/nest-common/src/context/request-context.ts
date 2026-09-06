@@ -30,6 +30,37 @@ export interface RequestContext {
    */
   readonly organizationId?: string;
 
+  /**
+   * **Every** organization the verified token says this caller belongs to.
+   *
+   * `organizationId` above is the one they are *acting for* — chosen per
+   * request, by the `X-Organization-Id` header, from this set. This is who they
+   * *are*, which is not the same question and cannot be answered from the
+   * selected tenant alone.
+   *
+   * The distinction is the D-2 security defect. supplier-service refuses to let
+   * an organization decide its own qualification, and asked that question of
+   * `organizationId`: a platform operator who belonged to both the union and a
+   * supplier simply sent `X-Organization-Id: <the union>` and approved their own
+   * submission. Every role check passed, every tenant check passed, and the one
+   * control that existed to stop self-judgement was reading a field the caller
+   * chooses.
+   *
+   * Populated from the token's own claims and frozen with the rest of the
+   * context, so nothing downstream can add a membership the identity provider
+   * did not assert. It always contains `organizationId` when there is one, so a
+   * check written against this set can never be weaker than one written against
+   * the selected tenant.
+   *
+   * **Empty is not "trusted".** A service token and an anonymous request both
+   * carry no memberships; that means *unknown*, and a caller with no
+   * memberships is refused authority by role checks, not granted it by this
+   * field. Use {@link isMemberOfOrganization} to ask the question rather than
+   * reading the array, so the union with `organizationId` is applied
+   * consistently.
+   */
+  readonly organizationIds: readonly string[];
+
   /** The platform's user id — what domain rows reference. */
   readonly userId?: string;
   /** The identity provider's subject, kept for correlating with IdP logs. */
@@ -65,7 +96,23 @@ const storage = new AsyncLocalStorage<ContextHolder>();
 
 /** Runs `fn` with `context` visible to everything it awaits. */
 export function runWithContext<T>(context: RequestContext, fn: () => T): T {
-  return storage.run({ current: Object.freeze({ ...context }) }, fn);
+  return storage.run({ current: freezeContext(context) }, fn);
+}
+
+/**
+ * Freezes the context **and** its membership set.
+ *
+ * `Object.freeze` is shallow, so without this the array inside a frozen context
+ * would still be mutable — and a membership set that downstream code can push
+ * onto is not an authenticated fact, it is a suggestion. The array is copied
+ * before freezing so a caller holding the original cannot mutate it afterwards
+ * either.
+ */
+function freezeContext(context: RequestContext): RequestContext {
+  return Object.freeze({
+    ...context,
+    organizationIds: Object.freeze([...(context.organizationIds ?? [])]),
+  });
 }
 
 /**
@@ -80,7 +127,7 @@ export function upgradeContext(patch: Partial<RequestContext>): RequestContext {
   if (!holder) {
     throw new Error('upgradeContext() called outside a request context');
   }
-  const next = Object.freeze({ ...holder.current, ...patch });
+  const next = freezeContext({ ...holder.current, ...patch });
   holder.current = next;
   return next;
 }
@@ -150,6 +197,32 @@ export function getOrganizationId(): string {
   return context.organizationId;
 }
 
+/**
+ * Whether the caller belongs to `organizationId`, by any of their memberships.
+ *
+ * The question a conflict-of-interest rule must ask. Reading
+ * `context.organizationId` answers "which hat are they wearing right now",
+ * which the caller chooses per request; this answers "is this one of their
+ * organizations at all", which the identity provider decided.
+ *
+ * The selected tenant is folded in as well as the membership set, so this can
+ * never be weaker than the check it replaces even if a context is constructed
+ * with an empty `organizationIds` — a background job, a consumer, an older
+ * caller. Fail-closed by composition rather than by everyone remembering.
+ *
+ * An empty argument is not a match: "belongs to no organization" is not the
+ * same as "belongs to this one", and returning true would turn an unknown into
+ * a refusal for everybody.
+ */
+export function isMemberOfOrganization(
+  organizationId: string | undefined,
+  context: RequestContext | undefined = tryGetContext(),
+): boolean {
+  if (!organizationId || !context) return false;
+  if (context.organizationId === organizationId) return true;
+  return context.organizationIds.includes(organizationId);
+}
+
 export function hasRole(role: string): boolean {
   return tryGetContext()?.roles.includes(role) ?? false;
 }
@@ -188,6 +261,11 @@ export function createSystemContext(
     requestId: overrides.correlationId,
     roles: ['SYSTEM'],
     authType: 'SERVICE',
+    // Background work belongs to no organization. Empty means *unknown*, and
+    // `isMemberOfOrganization` therefore reports no membership — which is the
+    // safe answer for a relay or a consumer, neither of which should ever be
+    // deciding anybody's case.
+    organizationIds: [],
     startedAt: Date.now(),
     ...overrides,
   };

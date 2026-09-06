@@ -50,7 +50,7 @@
 // -----------------------------------------------------------------------------
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import {
   assertB1Definitions,
@@ -91,6 +91,54 @@ const SERVICES = [
   'marketplace',
   'document',
 ];
+
+/**
+ * Services that own an outbox but are deliberately not verified here, and why.
+ *
+ * This verifier addresses migrations **by name**. A service that folded the
+ * outbox into a single initial migration has no file called
+ * `20260902120000_outbox_durable_claim`, so adding it to `SERVICES` would not
+ * check it more thoroughly — it would throw "migration.sql is missing" on a
+ * service whose outbox is in fact complete.
+ *
+ * The entry below is what stops that from becoming a silent gap. A service
+ * listed here is one somebody decided to verify elsewhere, and the guard under
+ * it fails the run if a service owning an outbox appears in neither list — so
+ * the next service to fold its migrations is refused rather than skipped.
+ */
+const FOLDED_INITIAL_MIGRATION = {
+  supplier:
+    'Folds the domain schema, ADR-050 and ADR-051 B1 into 20260905120000_init_supplier. ' +
+    'Its outbox objects are verified by scripts/verify-migration-reversible.mjs supplier, ' +
+    'whose EXPECTED.supplier constraint list carries the claim triple and the published-row rule.',
+};
+
+/**
+ * Refuses to run if a service owns an outbox and is in neither list.
+ *
+ * Without this, adding a tenth service is enough to leave its outbox
+ * unverified by every gate here, with nothing failing to say so.
+ */
+function assertEveryOutboxServiceIsAccountedFor() {
+  const servicesDir = join(REPO_ROOT, 'services');
+  const unaccounted = readdirSync(servicesDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.endsWith('-service'))
+    .map((entry) => entry.name.replace(/-service$/, ''))
+    .filter((name) => !SERVICES.includes(name) && !(name in FOLDED_INITIAL_MIGRATION))
+    .filter((name) => {
+      const schema = join(servicesDir, `${name}-service`, 'prisma', 'schema.prisma');
+      if (!existsSync(schema)) return false;
+      return /model\s+OutboxMessage\b/.test(readFileSync(schema, 'utf8'));
+    });
+
+  if (unaccounted.length > 0) {
+    throw new Error(
+      `These services own an outbox but are verified by nothing here: ${unaccounted.join(', ')}. ` +
+        'Add each to SERVICES, or to FOLDED_INITIAL_MIGRATION with the gate that does verify it. ' +
+        'A missing outbox migration must never skip silently.',
+    );
+  }
+}
 
 const COLUMNS = [
   'claim_token',
@@ -147,6 +195,8 @@ INSERT INTO "outbox_message" (
 
 /** Probe rows this script writes, removed before and after the constraint checks. */
 const PROBE_CLEANUP = `DELETE FROM "outbox_message" WHERE id LIKE 'OBXCHK%';`;
+
+assertEveryOutboxServiceIsAccountedFor();
 
 const args = process.argv.slice(2);
 const only = args.find((a) => !a.startsWith('--'));

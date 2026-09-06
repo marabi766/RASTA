@@ -265,7 +265,9 @@ jobs:
             rasta.asset.v1 rasta.insurance.v1 \
             rasta.maintenance.v1 rasta.maintenance.v1.retry rasta.maintenance.v1.dlq \
             rasta.marketplace.v1 rasta.marketplace.v1.retry rasta.marketplace.v1.dlq \
-            rasta.economic.v1 rasta.economic.v1.retry rasta.economic.v1.dlq             rasta.document.v1; do
+            rasta.economic.v1 rasta.economic.v1.retry rasta.economic.v1.dlq \
+            rasta.supplier.v1 rasta.supplier.v1.retry rasta.supplier.v1.dlq \
+            rasta.document.v1; do
             create "$topic"
           done
 
@@ -428,6 +430,7 @@ jobs:
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
 
       - name: Integration tests
         run: pnpm run test:integration
@@ -442,6 +445,7 @@ jobs:
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
@@ -536,6 +540,21 @@ jobs:
       # These are called out separately from the rest of the suite so a failure
       # names itself in the job list. A tenant-isolation failure is a data
       # leak, not a flaky test, and must never be waved through (AGENTS.md §5).
+      - name: Supplier coverage gate
+        # `docs/14` § 14.2 puts supplier-service in the 75% band. Measured here
+        # rather than in the unit job for the same reason as the three gates
+        # above: most of this service's coverage comes from the integration
+        # suites — the CHECK constraints, the conditional `updateMany` that
+        # decides a race, the ADR-050 claim protocol, the B3 allocator and the
+        # HTTP surface only exist against a real database, and a unit-only
+        # measurement would both report a number far below the truth and reward
+        # mocking exactly the systems this service's correctness rests on.
+        run: pnpm --filter @rasta/supplier-service run test:coverage
+        env:
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
+
       - name: Tenant isolation and authorization tests
         # Called out separately from the rest of the suite so a failure names
         # itself in the job list. A tenant-isolation failure is a data leak,
@@ -574,6 +593,7 @@ jobs:
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
@@ -602,12 +622,18 @@ jobs:
         # a migrated database already exists.
         run: pnpm run test:migration
         env:
-          # All eight, not the three the whole-chain checks cover. ADR-050 adds
-          # its claim columns to every service-owned database, and
+          # All nine, not only the four the whole-chain checks cover. ADR-050
+          # adds its claim columns to every service-owned database, and
           # `verify-outbox-claim-migration.mjs --in-place` reverses that one
           # migration on each of them — so a missing url here is a database
           # whose rollback is never exercised, which is the failure this step
           # exists to prevent.
+          #
+          # supplier is the exception that proves it: it folds ADR-050 and B1
+          # into its initial migration, so the by-name verifier cannot reach it
+          # and `verify-migration-reversible.mjs supplier` covers it instead —
+          # which is why that command is now in `test:migration` rather than
+          # only being available to run by hand.
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
@@ -616,6 +642,7 @@ jobs:
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
 
       - name: Outbox stream-sequence protocol (ADR-051 B3)
         # The producer-side allocation protocol: strictly increasing sequences
@@ -638,6 +665,7 @@ jobs:
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
 
   # ---------------------------------------------------------------------------
   # End-to-end. The economic critical path through the whole stack.
@@ -795,6 +823,7 @@ jobs:
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
 
       - name: Build
         run: pnpm run build
@@ -1183,6 +1212,7 @@ jobs:
             economic-service,
             marketplace-service,
             document-service,
+            supplier-service,
           ]
 
     steps:
