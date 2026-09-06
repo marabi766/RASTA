@@ -1,0 +1,362 @@
+// supplier-service — supplier, workshop and contractor profiles, and the
+// explicit human qualification and suspension decisions taken over them
+// (docs/04 § 4.10).
+//
+// Everything here is owned by this service alone (AGENTS.md A-01). There is no
+// foreign key into any other service's database and no replicated copy of
+// another service's rows: `organizationId` is a plain external identifier whose
+// authority is the verified token, and `documentId` on a piece of evidence is
+// an opaque Document Service identifier this service never resolves.
+//
+// ## What this schema deliberately does not model
+//
+// `docs/04` § 4.10 also names `supplier_license`, `performance_score` and
+// `performance_event`. None of the three is here, and each is absent for a
+// reason rather than by omission:
+//
+//   supplier_license    A licence has an issuing authority, a validity period
+//                       and a renewal rule. The product document names none of
+//                       them, and inventing them would be inventing regulatory
+//                       fact (AGENTS.md § 9). Qualification evidence carries an
+//                       opaque document reference instead, which claims
+//                       nothing about validity.
+//   performance_score   Q-12 — the formula and its weights — is open. "Equal
+//                       weights" is the temporary note in `docs/24`, not an
+//                       approved production policy, so no column stores a
+//                       number nobody has agreed how to compute.
+//   performance_event   Its only purpose is feeding that formula.
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../src/generated/prisma"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// What an organization offers, as a bounded vocabulary.
+///
+/// Exactly the three kinds of counterparty the product document names for this
+/// service — "تأمین‌کنندگان، تعمیرگاه‌ها و پیمانکاران" (docs/04 § 4.10) — and
+/// the three roles docs/09 § 9.3 gives a Supplier Org: SUPPLIER, WORKSHOP,
+/// CONTRACTOR.
+///
+/// A closed enum rather than free text, because ListQualifiedFor is a question
+/// asked by another service about a value it has to be able to name. Free text
+/// would make "qualified for what?" unanswerable across a service boundary.
+///
+/// One organization may hold all three. There is no separate platform identity
+/// for a workshop: a capability is a fact about the one supplier profile that
+/// organization already has.
+enum SupplierCapabilityKind {
+  GOODS_SUPPLY
+  WORKSHOP_SERVICE
+  CONTRACTING
+}
+
+/// The supplier's own operating state — not its qualification state.
+///
+/// The two are separate facts and collapsing them would lose one: a supplier
+/// may be qualified and suspended at the same time, and reinstating it must
+/// restore the qualification it already had rather than require a new decision
+/// nobody asked for.
+enum SupplierStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+/// The qualification lifecycle. Documented in full beside the transition table
+/// in src/supplier/qualification.state-machine.ts.
+///
+/// Three states, derived from the three approved commands and nothing else:
+/// SubmitQualification, ApproveQualification, RejectQualification.
+///
+/// What is absent is the point. There is no EXPIRED, no RENEWAL_DUE, no
+/// PROVISIONAL and no AUTO_APPROVED: each would encode a rule about validity
+/// periods or automatic approval that no accepted document states.
+enum QualificationState {
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+// ---------------------------------------------------------------------------
+// Domain
+// ---------------------------------------------------------------------------
+
+/// One supplier profile per organization.
+///
+/// `organizationId` is unique: an organization is either on this directory or
+/// it is not, and two profiles for one organization would make ListQualifiedFor
+/// return the same counterparty twice with two different answers.
+model Supplier {
+  id String @id
+
+  /// The organization this profile represents.
+  ///
+  /// An external identifier owned by organization-service. Never a foreign key
+  /// and never resolved from here (A-01): this service knows the id the
+  /// verified token carried, and nothing else about it.
+  organizationId String @unique @map("organization_id")
+
+  /// Display name as the registering organization stated it.
+  displayName String @map("display_name")
+
+  status SupplierStatus @default(ACTIVE)
+
+  registeredBy String   @map("registered_by")
+  registeredAt DateTime @default(now()) @map("registered_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  /// Correlation id of the request that created the row (AGENTS.md S-06).
+  registeredCorrelationId String @map("registered_correlation_id")
+
+  capabilities   SupplierCapability[]
+  qualifications Qualification[]
+  suspensions    Suspension[]
+
+  @@index([status], map: "ix_supplier_status")
+  @@map("supplier")
+}
+
+/// A capability the supplier claims. Claiming is not qualification.
+///
+/// `(supplierId, capability)` is unique, so "duplicate capabilities for one
+/// supplier are impossible" is a property of the database rather than of the
+/// DTO that happens to guard the only current write path.
+model SupplierCapability {
+  id String @id
+
+  supplierId String   @map("supplier_id")
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  /// Denormalised so the tenant guard, which scopes by this column alone, can
+  /// see it without a join.
+  organizationId String @map("organization_id")
+
+  capability SupplierCapabilityKind
+
+  declaredBy String   @map("declared_by")
+  declaredAt DateTime @default(now()) @map("declared_at")
+
+  @@unique([supplierId, capability], map: "ux_supplier_capability")
+  @@index([capability], map: "ix_supplier_capability_kind")
+  @@map("supplier_capability")
+}
+
+/// One submission and, once somebody decides, its decision.
+///
+/// The decision lives on the same row as the submission rather than in a second
+/// table, because a decision without its submission is not a thing that can
+/// exist and two rows would let one be written without the other. The
+/// `ck_qualification_decision_complete` CHECK is what makes "decision records
+/// cannot omit actor or timestamp" true at the storage layer rather than in the
+/// service that happens to write it today.
+model Qualification {
+  id String @id
+
+  supplierId String   @map("supplier_id")
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  organizationId String @map("organization_id")
+
+  /// What is being qualified for. One capability per submission, so an approval
+  /// is never partially true.
+  capability SupplierCapabilityKind
+
+  state QualificationState @default(SUBMITTED)
+
+  /// What the supplier said about itself when submitting. Their words.
+  statement String?
+
+  submittedBy            String   @map("submitted_by")
+  submittedAt            DateTime @default(now()) @map("submitted_at")
+  submittedCorrelationId String   @map("submitted_correlation_id")
+
+  /// The human who approved or rejected. Never this service, never a timer.
+  decidedBy            String?   @map("decided_by")
+  decidedAt            DateTime? @map("decided_at")
+  decidedCorrelationId String?   @map("decided_correlation_id")
+
+  /// The reviewer's own words. **Private** — it never leaves through a
+  /// directory projection, and src/supplier/views.ts is where that is enforced
+  /// and tested.
+  decisionNote String? @map("decision_note")
+
+  evidence QualificationEvidence[]
+
+  @@index([supplierId, state], map: "ix_qualification_supplier_state")
+  @@index([state, capability], map: "ix_qualification_review_queue")
+  @@index([organizationId, state], map: "ix_qualification_org_state")
+  @@map("qualification")
+}
+
+/// A pointer to a document held by document-service. Nothing more.
+///
+/// This service stores the identifier and never fetches, opens, scans or
+/// validates the object behind it. Phase 1 does not call document-service at
+/// all — there is no service-to-service metadata endpoint suitable for this, and
+/// that gap is an Integration Handoff item — so a reviewer reading a
+/// qualification sees an identifier they must resolve themselves.
+///
+/// Nothing here may be read as "the document exists", "the document is
+/// authentic", "the document is current" or "the document is legally valid".
+model QualificationEvidence {
+  id String @id
+
+  qualificationId String        @map("qualification_id")
+  qualification   Qualification @relation(fields: [qualificationId], references: [id], onDelete: Restrict)
+
+  organizationId String @map("organization_id")
+
+  /// An opaque document-service identifier. Never a URL, never an object key.
+  documentId String @map("document_id")
+
+  /// What the submitter says this document is. Their words, not a verdict.
+  label String?
+
+  attachedBy String   @map("attached_by")
+  attachedAt DateTime @default(now()) @map("attached_at")
+
+  @@unique([qualificationId, documentId], map: "ux_qualification_evidence_document")
+  @@map("qualification_evidence")
+}
+
+/// One suspension episode, and its reinstatement if it has been reinstated.
+///
+/// History, not a flag. `Supplier.status` is the fast answer; this table is the
+/// auditable one, and it is never deleted or overwritten — a reinstatement
+/// closes an episode by stamping it, so "who suspended this supplier in March
+/// and who lifted it" stays answerable afterwards.
+model Suspension {
+  id String @id
+
+  supplierId String   @map("supplier_id")
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  organizationId String @map("organization_id")
+
+  /// Why, in the deciding operator's words. Required.
+  reason String
+
+  suspendedBy            String   @map("suspended_by")
+  suspendedAt            DateTime @default(now()) @map("suspended_at")
+  suspendedCorrelationId String   @map("suspended_correlation_id")
+
+  /// Null while the episode is open. An open episode *is* the suspension.
+  reinstatedBy            String?   @map("reinstated_by")
+  reinstatedAt            DateTime? @map("reinstated_at")
+  reinstatedCorrelationId String?   @map("reinstated_correlation_id")
+  reinstatementNote       String?   @map("reinstatement_note")
+
+  @@index([supplierId, suspendedAt], map: "ix_suspension_supplier")
+  @@map("suspension")
+}
+
+// ---------------------------------------------------------------------------
+// Platform plumbing
+// ---------------------------------------------------------------------------
+
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic        String
+  /// What the message is ordered by — `supplierId` for every event this service
+  /// publishes. Stream identity, kept deliberately distinct from the aggregate
+  /// identity above (docs/07 § 7.7, ADR-051 § C-7).
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  publishedAt DateTime? @map("published_at")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  /// ADR-050 durable claim. `claimToken` is the only fence: every mutation
+  /// matches on it exactly. `claimOwner` is diagnostic metadata and no decision
+  /// reads it. `claimExpiresAt` decides eligibility for reclamation and nothing
+  /// else — an expired claimant whose row nobody took back may still
+  /// acknowledge with its token.
+  claimToken     String?   @map("claim_token")
+  claimOwner     String?   @map("claim_owner")
+  claimExpiresAt DateTime? @map("claim_expires_at")
+  claimCount     Int       @default(0) @map("claim_count")
+  /// Set only by a failure, cleared by an acknowledgement. Computed with the
+  /// database clock so replica skew cannot move it.
+  nextAttemptAt  DateTime? @map("next_attempt_at")
+
+  /// ADR-051 Phase B1 — inert until B3/B4. `streamSeq` is this row's position
+  /// within its ordered stream (`topic + partitionKey`, never the aggregate —
+  /// ADR-051 § C-7). Nullable for the same reason it is nullable in the eight
+  /// services that predate this one: nothing allocates a value until B3, and a
+  /// NOT NULL column would demand the allocator this phase must not build.
+  /// `isStreamHead` is the materialised head flag B4 maintains.
+  ///
+  /// Nothing in this service sets either field. No allocation, no head
+  /// maintenance, no ordering guarantee. D-027 stays open.
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
+
+  @@index([publishedAt, createdAt], map: "ix_outbox_pending")
+  @@map("outbox_message")
+}
+
+/// ADR-051 Phase B1 — one row per ordered stream (`topic + partitionKey`).
+///
+/// A table rather than a BIGSERIAL: `nextval()` is non-transactional, so a
+/// rollback burns a number and leaves a gap indistinguishable from a lost
+/// event. A row rolls back with its transaction, and its row lock is held to
+/// commit — the only mechanism that closes the commit-order divergence measured
+/// in ADR-051 § R4.
+///
+/// Service-local (A-01). **Inert** — allocation arrives in B3, which this
+/// service does not implement and must not anticipate.
+model OutboxStreamSequence {
+  topic        String
+  partitionKey String @map("partition_key")
+
+  nextSeq      BigInt @default(1) @map("next_seq")
+  publishedSeq BigInt @default(0) @map("published_seq")
+
+  @@id([topic, partitionKey])
+  @@map("outbox_stream_sequence")
+}
+
+/// Consumer idempotency (A-09).
+///
+/// The table exists and no handler is registered. docs/04 § 4.10 lists six
+/// consumed events — REVIEW_SUBMITTED, ORDER_COMPLETED, ORDER_DISPUTED,
+/// REPAIR_COMPLETED, CONTRACT_COMPLETED, CONTRACTOR_RATED — and every one of
+/// them exists to feed the performance score, which Q-12 has not defined. A
+/// handler that consumed them and computed nothing would leave a row here
+/// saying "processed" for an event whose effect was never applied, which is
+/// exactly the failure ADR-032 refuses.
+///
+/// The table is created now so the first real consumer does not also have to
+/// build its own infrastructure — the arrangement marketplace-service made
+/// under ADR-041 § 4.
+model ProcessedEvent {
+  eventId      String   @map("event_id")
+  consumerName String   @map("consumer_name")
+  processedAt  DateTime @default(now()) @map("processed_at")
+
+  @@id([eventId, consumerName])
+  @@map("processed_event")
+}
