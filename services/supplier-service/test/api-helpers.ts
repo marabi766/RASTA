@@ -4,6 +4,7 @@ import {
   AUTH_OPTIONS,
   InternalTokenService,
   OutboxRelay,
+  RastaError,
   type AuthGuardOptions,
 } from '@rasta/nest-common';
 import { randomBytes } from 'node:crypto';
@@ -156,7 +157,12 @@ export function auditorActor(organizationId: string): string {
 const decodeClaims = (token: string): TestClaims => {
   const [prefix, encoded] = token.split('.');
   if (prefix !== 'test' || !encoded) {
-    throw new Error('This harness only accepts tokens minted by `bearer()`');
+    // A `RastaError`, not a bare `Error`, because that is what the real
+    // verifier does: `mapJoseError` turns every malformed or unverifiable token
+    // into a 401. A bare throw here surfaces as a 500 and makes a test's own
+    // mistake look like a service defect — which is exactly what happened the
+    // first time this suite sent an internal token in the wrong header.
+    throw RastaError.unauthenticated('Malformed token');
   }
   return JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as TestClaims;
 };

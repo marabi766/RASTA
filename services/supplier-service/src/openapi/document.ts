@@ -129,6 +129,18 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       const key = `${method.toUpperCase()} ${path}`;
 
+      // Every operation requires a bearer token, stated on the operation
+      // rather than only in `components.securitySchemes`.
+      //
+      // `DocumentBuilder.addBearerAuth()` *declares* the scheme; it does not
+      // apply it. Without this the published contract describes a service whose
+      // endpoints are open, while the guard refuses every one of them with 401
+      // — and "closed by default" is a property of the contract a client reads
+      // as much as of the code that enforces it. A generated client would omit
+      // the header and a reviewer would have no way to see the endpoint was
+      // ever meant to be protected.
+      operation.security ??= [{ bearer: [] }];
+
       const body = REQUEST_BODIES[key];
       if (body) {
         operation.requestBody = {
@@ -171,6 +183,7 @@ interface MutableOperation {
   parameters?: unknown[];
   responses?: Record<string, unknown>;
   description?: string;
+  security?: Record<string, string[]>[];
 }
 
 function isOperation(value: unknown): value is MutableOperation {
