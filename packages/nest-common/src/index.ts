@@ -13,6 +13,7 @@ export {
   tryGetContext,
   getContext,
   getOrganizationId,
+  isMemberOfOrganization,
   hasRole,
   hasAnyRole,
   toLogContext,

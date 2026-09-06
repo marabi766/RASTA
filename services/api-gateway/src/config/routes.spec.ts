@@ -237,3 +237,91 @@ describe('serviceUrl', () => {
     }
   });
 });
+
+/**
+ * supplier-service, whose Phase 1 endpoints reach the platform through this
+ * prefix.
+ *
+ * The routing row and `SUPPLIER_SERVICE_URL` both predate the service: the
+ * table was written from `docs/04` and pointed at something that did not exist
+ * yet, which answered nothing. Now that it does exist, these assertions pin the
+ * three properties the edge is responsible for — that the prefix resolves to
+ * the right service, that it is closed, and that the gateway does not impose a
+ * requirement the service will not honour.
+ *
+ * They are not the authorization decision. supplier-service re-checks every one
+ * of these independently, including object-level ownership, because the edge
+ * cannot see the row.
+ */
+describe('the suppliers prefix', () => {
+  const urls = Object.fromEntries(
+    SERVICE_NAMES.map((name) => [`${name.toUpperCase()}_SERVICE_URL`, `http://${name}:3000`]),
+  ) as ServiceUrls;
+
+  it('resolves to supplier-service', () => {
+    const route = resolveRoute('suppliers');
+    expect(route).toBeDefined();
+    expect(route!.service).toBe('supplier');
+  });
+
+  it('resolves every one of the ten Phase 1 paths to the same service', () => {
+    // `resolveRoute` matches on the first path segment, so a nested path must
+    // not fall through to a different row — or, worse, to none.
+    for (const path of [
+      'suppliers',
+      'suppliers/qualified',
+      'suppliers/qualifications',
+      'suppliers/SUP_1',
+      'suppliers/SUP_1/qualifications',
+      'suppliers/SUP_1/qualifications/QLF_1/approve',
+      'suppliers/SUP_1/qualifications/QLF_1/reject',
+      'suppliers/SUP_1/suspend',
+      'suppliers/SUP_1/reinstate',
+    ]) {
+      const route = resolveRoute(path);
+      expect({ path, service: route?.service }).toEqual({ path, service: 'supplier' });
+    }
+  });
+
+  it('sends it to the configured SUPPLIER_SERVICE_URL', () => {
+    // A typo in the key is a runtime 500 rather than a build error, which is
+    // why this is asserted rather than assumed.
+    expect(serviceUrl(urls, 'supplier')).toBe('http://supplier:3000');
+  });
+
+  it('is closed — no supplier data is reachable without a token', () => {
+    const route = resolveRoute('suppliers');
+    expect(route!.publicReason).toBeUndefined();
+  });
+
+  it('requires no idempotency key', () => {
+    // Nothing behind this prefix moves money or creates a payable obligation.
+    // Requiring a key the service does not read would make the edge refuse
+    // requests the service would have accepted.
+    expect(resolveRoute('suppliers')!.requiresIdempotencyKey).toBeFalsy();
+  });
+
+  it('imposes no route-level role list the service would contradict', () => {
+    // If the edge ever narrows this, it must stay a superset of what
+    // `access.ts` allows: a coarse filter that rejects obvious mismatches, not
+    // a second, divergent policy. Today it names none, so every refusal comes
+    // from the service that can see the row.
+    const route = resolveRoute('suppliers')!;
+    if (route.roles) {
+      for (const role of [
+        'SYSTEM_ADMIN',
+        'UNION_ADMIN',
+        'ORGANIZATION_ADMIN',
+        'SUPPLIER',
+        'WORKSHOP',
+        'CONTRACTOR',
+        'PROCUREMENT_USER',
+        'FLEET_MANAGER',
+      ]) {
+        expect(route.roles).toContain(role);
+      }
+    } else {
+      expect(route.roles).toBeUndefined();
+    }
+  });
+});

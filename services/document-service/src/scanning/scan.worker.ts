@@ -208,6 +208,10 @@ export class ScanWorker {
       correlationId: `scan-${ulid()}`,
       requestId: `scan-${ulid()}`,
       organizationId: document.organizationId,
+      // The scanner acts *for* a tenant; it is not a *member* of one. Empty is
+      // the honest answer, and it is what keeps a background worker outside
+      // every membership-based check (see `isMemberOfOrganization`).
+      organizationIds: [],
       userId: SERVICE_NAME,
       roles: [],
       authType: 'SERVICE',

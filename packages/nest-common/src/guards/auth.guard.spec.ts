@@ -1,4 +1,4 @@
-import { resolveOrganization } from './auth.guard';
+import { mergeMemberships, resolveOrganization } from './auth.guard';
 import { RastaError } from '../errors/rasta-error';
 
 /**
@@ -67,5 +67,55 @@ describe('resolveOrganization', () => {
       // It is still available server-side for the audit log.
       expect((error as RastaError).internalContext).toMatchObject({ requested: ORG_C });
     }
+  });
+});
+
+/**
+ * D-2 — what the guard carries into `RequestContext` beyond the selected tenant.
+ *
+ * Discarding the membership set here is what let a supplier-service operator
+ * approve their own submission by sending a different `X-Organization-Id`. The
+ * union below is the fix, and these assertions are what stop it being narrowed
+ * back to one value.
+ */
+describe('mergeMemberships', () => {
+  const ORG_A = 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YA';
+  const ORG_B = 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YB';
+  const ORG_C = 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YC';
+
+  it('keeps every organization the token asserts, not only the selected one', () => {
+    expect(mergeMemberships(ORG_B, ORG_A, [ORG_A, ORG_B, ORG_C]).sort()).toEqual(
+      [ORG_A, ORG_B, ORG_C].sort(),
+    );
+  });
+
+  it('includes the resolved tenant even when the claim omits it', () => {
+    expect(mergeMemberships(ORG_A, undefined, [])).toEqual([ORG_A]);
+  });
+
+  it('includes the active organization even when it is not the selected one', () => {
+    // The operator selected B; they are still a member of A, and a
+    // conflict-of-interest rule has to see it.
+    expect(mergeMemberships(ORG_B, ORG_A, [ORG_B]).sort()).toEqual([ORG_A, ORG_B].sort());
+  });
+
+  it('deduplicates, so a repeated claim is one membership', () => {
+    expect(mergeMemberships(ORG_A, ORG_A, [ORG_A, ORG_A])).toEqual([ORG_A]);
+  });
+
+  it('does not depend on the order the identity provider used', () => {
+    const one = mergeMemberships(ORG_A, ORG_B, [ORG_C, ORG_A]);
+    const two = mergeMemberships(ORG_A, ORG_B, [ORG_A, ORG_C]);
+    expect([...one].sort()).toEqual([...two].sort());
+  });
+
+  it('drops blank and whitespace-only entries rather than storing them', () => {
+    expect(mergeMemberships(undefined, undefined, ['', '   ', ORG_A])).toEqual([ORG_A]);
+  });
+
+  it('is empty for a caller who asserts nothing', () => {
+    // A service token, or a SYSTEM_ADMIN with no tenant. Empty means unknown,
+    // and every membership check therefore reports no membership.
+    expect(mergeMemberships(undefined, undefined, undefined)).toEqual([]);
   });
 });
