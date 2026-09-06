@@ -1,4 +1,9 @@
-import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
+import {
+  RastaError,
+  getContext,
+  getOrganizationId,
+  isMemberOfOrganization,
+} from '@rasta/nest-common';
 
 /**
  * Object-level authorization for supplier-service (AGENTS.md S-03, BOLA).
@@ -257,6 +262,12 @@ export function assertActingAsSupplier(supplier: SupplierOwnership): void {
  * a person who legitimately holds `UNION_ADMIN` **and** belongs to the supplier
  * organization in question. Every role check they face passes.
  *
+ * Enforced against their **whole membership set** rather than the tenant they
+ * selected for the request. Which organization a request acts for is the
+ * caller's choice; which organizations they belong to is not. Asking the first
+ * question was the D-2 bypass — `test/d2-self-judgement.int-spec.ts` reproduces
+ * it end to end, and it returned 200.
+ *
  * `403` rather than `404`: they can already read this profile and they know it
  * exists, so hiding it would be theatre. What they are told is that the
  * decision is not theirs to make.
@@ -266,10 +277,25 @@ export function assertActingAsSupplier(supplier: SupplierOwnership): void {
  * self-judgement acceptable.
  */
 export function assertNotDecidingOwnCase(supplier: SupplierOwnership): void {
-  const context = getContext();
-  const caller = context.organizationId;
-
-  if (caller && caller === supplier.organizationId) {
+  // Asked of **every** organization the token asserts, not of the one this
+  // request happens to be acting for.
+  //
+  // This is the D-2 fix. The check used to read `context.organizationId`, which
+  // is the *selected* tenant — a value the caller chooses per request with the
+  // `X-Organization-Id` header. A platform operator who belonged to both the
+  // union and a supplier organization simply selected the union and approved
+  // their own submission: every role check passed, the tenant guard passed
+  // (the union really is one of their organizations), and the one control that
+  // exists to stop self-judgement was comparing against a field they picked.
+  //
+  // `isMemberOfOrganization` folds the selected tenant into the membership set,
+  // so this is strictly stronger than the check it replaces — a context built
+  // without memberships still refuses on the selected tenant alone.
+  //
+  // A caller who belongs to no organization — a `SYSTEM_ADMIN` with no active
+  // tenant — is unaffected, and deliberately so. Belonging to nothing is not
+  // the conflict; belonging to *this supplier* is.
+  if (isMemberOfOrganization(supplier.organizationId)) {
     throw RastaError.forbidden(
       'A supplier organization may not decide its own qualification, suspension or reinstatement',
     );

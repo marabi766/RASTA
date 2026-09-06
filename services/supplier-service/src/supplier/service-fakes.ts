@@ -83,10 +83,27 @@ export class FakePrisma {
   readonly committed: EnqueuedEvent[] = [];
   pending: EnqueuedEvent[] = [];
 
+  /**
+   * The instant `SELECT now()` returns inside a fake transaction.
+   *
+   * Fixed rather than `new Date()`, and settable, so a unit test can assert
+   * what the D-5 change actually guarantees: that the row and the event it
+   * announces carry **one** value taken once per transaction. A moving clock
+   * here would make "the same instant" pass by luck.
+   */
+  transactionInstant = new Date('2026-03-01T12:00:00.000Z');
+
   async transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
     this.pending = [];
     try {
-      const result = await fn({} as ExtendedPrismaClient);
+      // `transactionNow()` reads the database clock, so the fake transaction
+      // has to answer that query. Returning a Date rather than nothing keeps
+      // the unit suites exercising the real service code path (D-5) instead of
+      // a branch that only exists for tests.
+      const tx = {
+        $queryRawUnsafe: async () => [{ now: this.transactionInstant }],
+      } as unknown as ExtendedPrismaClient;
+      const result = await fn(tx);
       this.committed.push(...this.pending);
       return result;
     } finally {

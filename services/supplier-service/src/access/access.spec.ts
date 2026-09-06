@@ -379,3 +379,129 @@ describe('a supplier cannot reach its own decision by another door', () => {
     expect(decision).toBe('FORBIDDEN');
   });
 });
+
+/**
+ * D-2 — self-judgement is decided by who the caller *is*, not which tenant they
+ * selected.
+ *
+ * `assertNotDecidingOwnCase` used to compare the supplier's organization
+ * against `context.organizationId`, the selected tenant. A platform operator
+ * who belonged to both the union and the supplier sent
+ * `X-Organization-Id: <the union>` and approved their own submission — every
+ * role check passed, the tenant guard passed, and the only control against
+ * self-judgement was reading a field the caller chooses.
+ *
+ * The rule now reads the whole authenticated membership set.
+ * `test/d2-self-judgement.int-spec.ts` proves the same thing through the real
+ * guard over HTTP; these are the unit-level pins.
+ */
+describe('D-2 — the self-judgement rule reads memberships, not the selected tenant', () => {
+  const decide = () => assertCanDecideAbout(SUPPLIER);
+
+  it('refuses when the supplier is a membership the caller did not select', () => {
+    expect(
+      codeOf(() =>
+        as(
+          {
+            organizationId: OTHER_ORG,
+            organizationIds: [OTHER_ORG, SUPPLIER.organizationId],
+            roles: ['UNION_ADMIN'],
+          },
+          decide,
+        ),
+      ),
+    ).toBe('FORBIDDEN');
+  });
+
+  it('refuses regardless of where the membership sits in the claim', () => {
+    for (const memberships of [
+      [SUPPLIER.organizationId, OTHER_ORG],
+      [OTHER_ORG, SUPPLIER.organizationId],
+      [OTHER_ORG, SUPPLIER.organizationId, 'ORG-THIRD'],
+    ]) {
+      expect(
+        codeOf(() =>
+          as({ organizationId: OTHER_ORG, organizationIds: memberships, roles: ['UNION_ADMIN'] }, decide),
+        ),
+      ).toBe('FORBIDDEN');
+    }
+  });
+
+  it('refuses a SYSTEM_ADMIN who holds the membership — no role is exempt', () => {
+    expect(
+      codeOf(() =>
+        as(
+          {
+            organizationId: OTHER_ORG,
+            organizationIds: [OTHER_ORG, SUPPLIER.organizationId],
+            roles: ['SYSTEM_ADMIN'],
+          },
+          decide,
+        ),
+      ),
+    ).toBe('FORBIDDEN');
+  });
+
+  it('still refuses on the selected tenant alone, if memberships are absent', () => {
+    // A context built without the set — an older call site, a consumer. The
+    // new check folds the selected tenant in, so it cannot be weaker than the
+    // one it replaced.
+    expect(
+      codeOf(() => as({ organizationId: SUPPLIER.organizationId, roles: ['UNION_ADMIN'] }, decide)),
+    ).toBe('FORBIDDEN');
+  });
+
+  it('allows an operator who belongs to several organizations, none the supplier', () => {
+    expect(
+      codeOf(() =>
+        as(
+          { organizationId: OTHER_ORG, organizationIds: [OTHER_ORG, 'ORG-THIRD'], roles: ['UNION_ADMIN'] },
+          decide,
+        ),
+      ),
+    ).toBe('NO_ERROR');
+  });
+
+  it('allows a SYSTEM_ADMIN with no tenant and no memberships', () => {
+    // The justified platform case, pinned so a later tightening cannot remove
+    // it: belonging to nothing is not a conflict.
+    expect(codeOf(() => as({ organizationIds: [], roles: ['SYSTEM_ADMIN'] }, decide))).toBe(
+      'NO_ERROR',
+    );
+  });
+
+  it('gives a SERVICE caller no authority, memberships or not', () => {
+    expect(
+      codeOf(() =>
+        as(
+          {
+            authType: 'SERVICE',
+            organizationId: OTHER_ORG,
+            organizationIds: [OTHER_ORG],
+            roles: ['SYSTEM_ADMIN'],
+          },
+          decide,
+        ),
+      ),
+    ).toBe('FORBIDDEN');
+  });
+
+  it('gives an unknown role no authority', () => {
+    expect(
+      codeOf(() =>
+        as({ organizationId: OTHER_ORG, organizationIds: [OTHER_ORG], roles: ['SOMETHING_NEW'] }, decide),
+      ),
+    ).toBe('FORBIDDEN');
+  });
+
+  it('refuses the bare rule directly, so it does not depend on its caller', () => {
+    expect(
+      codeOf(() =>
+        as(
+          { organizationId: OTHER_ORG, organizationIds: [SUPPLIER.organizationId], roles: [] },
+          () => assertNotDecidingOwnCase(SUPPLIER),
+        ),
+      ),
+    ).toBe('FORBIDDEN');
+  });
+});
