@@ -301,6 +301,14 @@ describe('database invariants', () => {
 
       await raw(() => prisma.client.qualification.update({ where: { id }, data: rejected }));
 
+      // The second submission is stamped explicitly rather than left to
+      // `@default(now())`. Reusing the first decision's timestamp beside a
+      // defaulted `submitted_at` builds a row whose decision predates its own
+      // submission, which `ck_qualification_decided_after_submitted` rightly
+      // refuses — a fact about the constructed row rather than about repeated
+      // rejection, and it hid the property this test exists to prove.
+      const submittedAt = new Date(rejected.decidedAt.getTime() - 60_000);
+
       await expect(
         raw(() =>
           prisma.client.qualification.create({
@@ -310,6 +318,7 @@ describe('database invariants', () => {
               organizationId: supplier.organizationId,
               capability: 'WORKSHOP_SERVICE',
               submittedBy: `USR_${ulid()}`,
+              submittedAt,
               submittedCorrelationId: ulid(),
               ...rejected,
             },
@@ -578,4 +587,203 @@ describe('database invariants', () => {
       ).rejects.toThrow();
     });
   });
+
+  /**
+   * The whitespace hole the first run of this suite found.
+   *
+   * The initial migration wrote every "not blank" rule as
+   * `length(btrim(x)) > 0`. PostgreSQL's one-argument `btrim(text)` strips
+   * **spaces only**, so a value made entirely of tabs or newlines satisfied all
+   * seven of them: a tab was a valid display name, a valid actor id, a valid
+   * correlation id and — worst — a valid `document_id`, which is the handle a
+   * reviewer must resolve in document-service.
+   *
+   * `20260906090000_supplier_blank_text_hardening` replaced the idiom with
+   * `x ~ '[^[:space:]]'`, which states the property directly instead of
+   * trimming and measuring. Asserted here across every table that had it,
+   * because the defect was in the idiom rather than in one column: a spot fix
+   * on `document_id` would have left the same hole in six other constraints.
+   */
+  describe('no text column accepts a value that is only whitespace', () => {
+    const TAB = '\t';
+
+    it.each([
+      ['a tab', '\t'],
+      ['a newline', '\n'],
+      ['a carriage return', '\r'],
+      ['a form feed', '\f'],
+      ['a vertical tab', '\v'],
+      ['mixed whitespace', ' \t\n\r '],
+    ])('refuses a document identifier made only of %s', async (_label, blank) => {
+      const supplier = await seedSupplier();
+      const qualificationId = `QLF_${ulid()}`;
+
+      await raw(() =>
+        prisma.client.qualification.create({
+          data: {
+            id: qualificationId,
+            supplierId: supplier.id,
+            organizationId: supplier.organizationId,
+            capability: 'WORKSHOP_SERVICE',
+            submittedBy: `USR_${ulid()}`,
+            submittedCorrelationId: ulid(),
+          },
+        }),
+      );
+
+      await expect(
+        raw(() =>
+          prisma.client.qualificationEvidence.create({
+            data: {
+              id: `QEV_${ulid()}`,
+              qualificationId,
+              organizationId: supplier.organizationId,
+              documentId: blank,
+              attachedBy: `USR_${ulid()}`,
+            },
+          }),
+        ),
+      ).rejects.toThrow(/ck_evidence_document_id_not_blank|check constraint/i);
+    });
+
+    it('refuses a tab-only supplier display name', async () => {
+      const organizationId = newOrganizationId();
+      organizations.push(organizationId);
+
+      await expect(
+        raw(() =>
+          prisma.client.supplier.create({
+            data: {
+              id: `SUP_${ulid()}`,
+              organizationId,
+              displayName: TAB,
+              registeredBy: `USR_${ulid()}`,
+              registeredCorrelationId: ulid(),
+            },
+          }),
+        ),
+      ).rejects.toThrow(/ck_supplier_display_name_not_blank|check constraint/i);
+    });
+
+    it('refuses a tab-only registering actor or correlation id', async () => {
+      const organizationId = newOrganizationId();
+      organizations.push(organizationId);
+
+      await expect(
+        raw(() =>
+          prisma.client.supplier.create({
+            data: {
+              id: `SUP_${ulid()}`,
+              organizationId,
+              displayName: 'A supplier',
+              registeredBy: TAB,
+              registeredCorrelationId: ulid(),
+            },
+          }),
+        ),
+      ).rejects.toThrow(/ck_supplier_actor_recorded|check constraint/i);
+
+      await expect(
+        raw(() =>
+          prisma.client.supplier.create({
+            data: {
+              id: `SUP_${ulid()}`,
+              organizationId,
+              displayName: 'A supplier',
+              registeredBy: `USR_${ulid()}`,
+              registeredCorrelationId: TAB,
+            },
+          }),
+        ),
+      ).rejects.toThrow(/ck_supplier_actor_recorded|check constraint/i);
+    });
+
+    it('refuses a tab-only declaring actor on a capability', async () => {
+      const supplier = await seedSupplier();
+
+      await expect(
+        raw(() =>
+          prisma.client.supplierCapability.create({
+            data: {
+              id: `SCP_${ulid()}`,
+              supplierId: supplier.id,
+              organizationId: supplier.organizationId,
+              capability: 'CONTRACTING',
+              declaredBy: TAB,
+            },
+          }),
+        ),
+      ).rejects.toThrow(/ck_supplier_capability_actor_recorded|check constraint/i);
+    });
+
+    it('refuses a tab-only submitter or statement on a qualification', async () => {
+      const supplier = await seedSupplier();
+
+      await expect(
+        raw(() =>
+          prisma.client.qualification.create({
+            data: {
+              id: `QLF_${ulid()}`,
+              supplierId: supplier.id,
+              organizationId: supplier.organizationId,
+              capability: 'GOODS_SUPPLY',
+              submittedBy: TAB,
+              submittedCorrelationId: ulid(),
+            },
+          }),
+        ),
+      ).rejects.toThrow(/ck_qualification_text_not_blank|check constraint/i);
+
+      await expect(
+        raw(() =>
+          prisma.client.qualification.create({
+            data: {
+              id: `QLF_${ulid()}`,
+              supplierId: supplier.id,
+              organizationId: supplier.organizationId,
+              capability: 'GOODS_SUPPLY',
+              statement: TAB,
+              submittedBy: `USR_${ulid()}`,
+              submittedCorrelationId: ulid(),
+            },
+          }),
+        ),
+      ).rejects.toThrow(/ck_qualification_text_not_blank|check constraint/i);
+    });
+
+    it('refuses a tab-only suspension reason or actor', async () => {
+      const supplier = await seedSupplier();
+
+      await expect(
+        raw(() =>
+          prisma.client.suspension.create({
+            data: {
+              id: `SSP_${ulid()}`,
+              supplierId: supplier.id,
+              organizationId: supplier.organizationId,
+              reason: TAB,
+              suspendedBy: `USR_${ulid()}`,
+              suspendedCorrelationId: ulid(),
+            },
+          }),
+        ),
+      ).rejects.toThrow(/ck_suspension_text_not_blank|check constraint/i);
+
+      await expect(
+        raw(() =>
+          prisma.client.suspension.create({
+            data: {
+              id: `SSP_${ulid()}`,
+              supplierId: supplier.id,
+              organizationId: supplier.organizationId,
+              reason: 'a real reason',
+              suspendedBy: TAB,
+              suspendedCorrelationId: ulid(),
+            },
+          }),
+        ),
+      ).rejects.toThrow(/ck_suspension_text_not_blank|check constraint/i);
+    });
+  });
+
 });
