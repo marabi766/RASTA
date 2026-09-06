@@ -168,3 +168,43 @@ export async function outboxFor(prisma: PrismaService, organizationId: string) {
     }),
   );
 }
+
+/**
+ * The broker list, or `undefined` when none is configured.
+ *
+ * Returned rather than thrown so the Kafka suite can *skip* visibly on a
+ * machine without a broker, while the database suites still run. A silent pass
+ * would be worse than either.
+ */
+export function brokers(): string[] | undefined {
+  const raw = process.env.KAFKA_BROKERS?.trim();
+  if (!raw) return undefined;
+  const list = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return list.length > 0 ? list : undefined;
+}
+
+/**
+ * Waits for `predicate` to hold, bounded by wall clock rather than by turns.
+ *
+ * A turn-based bound looks deterministic and is not: a cold Kafka connection
+ * can take longer than any fixed number of `setImmediate` turns, and the test
+ * then fails on a limit that has nothing to do with what it is measuring.
+ */
+export async function waitFor<T>(
+  predicate: () => T | undefined,
+  describe: string,
+  timeoutMs = 30_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = predicate();
+    if (value) return value;
+    if (Date.now() > deadline) {
+      throw new Error(`Timed out after ${timeoutMs}ms waiting for ${describe}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
