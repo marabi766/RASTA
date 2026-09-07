@@ -53,7 +53,7 @@
 
 - `infrastructure/docker/postgres/00-init-databases.sh:14-31` — `audit` در فهرست `SERVICES` است، پس `rasta_audit` و نقش آن با
   `REVOKE ALL … FROM PUBLIC` ساخته می‌شوند.
-- `infrastructure/docker/kafka/create-topics.sh:22-38, 76-79` — `rasta.audit.v1`، `.retry`، `.dlq` و
+- `infrastructure/docker/kafka/create-topics.sh:22-39, 76-79` — `rasta.audit.v1`، `.retry`، `.dlq` و
   **`rasta.audit.trail.v1`** (نگهداشت ۳۰ روز محلی) ساخته می‌شوند، با این توضیح در خود فایل که در استقرار واقعی هرگز نباید منقضی
   شود.
 - `services/api-gateway/src/config/routes.ts:72, 172-176` — پیشوند `audit-events` با `roles: ['SYSTEM_ADMIN', 'UNION_ADMIN']` از
@@ -340,7 +340,7 @@ actorId      = <انسانی که اصلاح را دستور داد>
 گرفته می‌شود، پس ترتیب Commit را هم نمایندگی نمی‌کند.
 
 **بازپخش.** `fromBeginning: true` برای هر دو گروه امن است، چون بازخوانی Log ردیف‌های Idempotent می‌نویسد. **اما بازسازی کامل به
-نگهداشت Kafka محدود است:** Topicهای دامنه‌ای ۷ روز نگه می‌دارند (`create-topics.sh:21`). پس «بازسازی از Log» حداکثر **یک هفته**
+نگهداشت Kafka محدود است:** Topicهای دامنه‌ای ۷ روز نگه می‌دارند (`create-topics.sh:20`). پس «بازسازی از Log» حداکثر **یک هفته**
 برمی‌گرداند، نه سال‌ها. **پایگاه دادهٔ حسابرسی به‌همراه پشتیبان‌های `docs/05` § ۵٫۱۰ رکورد بادوام است.** هرکس Log کافکا را
 پشتیبان حسابرسی بداند، به اندازهٔ سال‌ها اشتباه می‌کند.
 
