@@ -60,7 +60,7 @@ function baseUrl(service) {
 const admins = new Map();
 
 before(() => {
-  for (const service of ['fleet', 'maintenance']) {
+  for (const service of ['fleet', 'maintenance', 'supplier']) {
     admins.set(service, prismaPort(service, baseUrl(service)));
   }
 });
@@ -149,6 +149,18 @@ async function waitFor(read, describe) {
 
 const FLEET_TOPIC = 'rasta.fleet.v1';
 const MAINTENANCE_TOPIC = 'rasta.maintenance.v1';
+/**
+ * supplier-service, added when it landed.
+ *
+ * Included deliberately rather than by extending a loop: this service folds
+ * ADR-050 and ADR-051 B1 into one initial migration, so its outbox reaches the
+ * B1 shape by a different route from the eight that were migrated into it. That
+ * makes it the one service where "the allocator behaves identically" is worth
+ * asserting rather than assuming, and the shared fixture — which builds the
+ * outbox DDL from the definitions the platform agreed, not from this service's
+ * files — is what makes the comparison meaningful.
+ */
+const SUPPLIER_TOPIC = 'rasta.supplier.v1';
 
 /**
  * Writes one outbox row the way a producer does: allocate against the resolved
@@ -650,19 +662,25 @@ test('an old envelope with no stream fields still parses and still stores', asyn
 });
 
 // ---------------------------------------------------------------------------
-// 7. Fleet and maintenance each serialize on the counter row for one asset
+// 7. Each producer serializes on the counter row for one stream key
 // ---------------------------------------------------------------------------
 
 for (const [service, topic] of [
   ['fleet', FLEET_TOPIC],
   ['maintenance', MAINTENANCE_TOPIC],
+  ['supplier', SUPPLIER_TOPIC],
 ]) {
-  test(`${service}: two concurrent transactions on one assetId serialize on the counter row`, async () => {
-    // ADR-051 § R4 measured that neither domain holds a lock on the assetId
-    // boundary — maintenance locks `repair_order`, and fleet has no explicit
-    // asset lock at all. So the counter row is the *only* serialisation point
-    // these two have, and each needs its own evidence rather than inheriting
-    // the shared helper's.
+  test(`${service}: two concurrent transactions on one stream key serialize on the counter row`, async () => {
+    // ADR-051 § R4 measured that neither fleet nor maintenance holds a lock on
+    // the assetId boundary — maintenance locks `repair_order`, and fleet has no
+    // explicit asset lock at all. So the counter row is the *only*
+    // serialisation point they have, and each needs its own evidence rather
+    // than inheriting the shared helper's.
+    //
+    // supplier is here for the same reason and one more: its decisions are
+    // guarded by a conditional `updateMany`, which serialises the *domain* row
+    // but says nothing about the order two events reach one stream in. The
+    // counter row is what does that, here as everywhere else.
     await withOutbox(service, async ({ url }) => {
       const a = rawClient(service, url);
       const b = rawClient(service, url);
@@ -708,3 +726,118 @@ for (const [service, topic] of [
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// 8. supplier-service: its own database, its own counter, keyed by supplierId
+// ---------------------------------------------------------------------------
+
+test('supplier: every event on one supplier is one dense stream keyed by supplierId', async () => {
+  // The four events this service produces all key on `supplierId` (ADR-036),
+  // which is deliberately not the aggregate: a qualification decision is about
+  // a qualification, and a suspension about a suspension, but a consumer
+  // rebuilding one supplier's standing needs them in one order.
+  await withOutbox('supplier', async ({ db }) => {
+    const SUPPLIER = 'SUP-STREAM-01';
+    const names = [
+      ['SUPPLIER_REGISTERED', 'SUP-STREAM-01'],
+      ['SUPPLIER_QUALIFIED', 'QLF-1'],
+      ['SUPPLIER_SUSPENDED', 'SSP-1'],
+      ['SUPPLIER_REJECTED', 'QLF-2'],
+    ];
+
+    const produced = [];
+    for (const [eventName, aggregateId] of names) {
+      produced.push(
+        await produce(db, {
+          topic: SUPPLIER_TOPIC,
+          partitionKey: SUPPLIER,
+          eventName,
+          aggregateId,
+        }),
+      );
+    }
+
+    // Dense and strictly increasing from 1. A gap is indistinguishable, to a
+    // consumer, from a lost event.
+    assert.deepEqual(
+      produced.map((row) => row.streamSeq),
+      [1, 2, 3, 4],
+    );
+
+    // Four different aggregates, one stream — the property that would be lost
+    // if the key were the aggregate id.
+    assert.equal(new Set(produced.map((row) => row.aggregateId)).size, 4);
+    assert.equal(new Set(produced.map((row) => row.partitionKey)).size, 1);
+
+    const persisted = await rows(
+      db,
+      `SELECT "stream_seq", "partition_key", "payload"->>'streamKey' AS envelope_key,
+              "payload"->>'streamSeq' AS envelope_seq,
+              "headers"->>'${EVENT_HEADERS.streamSeq}' AS header_seq
+         FROM "outbox_message" ORDER BY "stream_seq"`,
+    );
+    for (const [index, row] of persisted.entries()) {
+      const expected = index + 1;
+      assert.equal(Number(row.stream_seq), expected);
+      assert.equal(Number(row.envelope_seq), expected);
+      assert.equal(row.header_seq, String(expected));
+      assert.equal(row.envelope_key, SUPPLIER);
+      assert.equal(row.partition_key, SUPPLIER);
+    }
+
+    // `published_seq` is untouched: advancing a head is B4, which is not merged.
+    const publishedSeq = await scalar(
+      db,
+      `SELECT "published_seq" FROM "outbox_stream_sequence"
+        WHERE "topic" = '${SUPPLIER_TOPIC}' AND "partition_key" = '${SUPPLIER}'`,
+    );
+    assert.equal(publishedSeq, 0);
+  });
+});
+
+test('supplier and fleet share no sequence for the same identifier — the negative test', async () => {
+  // The same shape as the fleet/maintenance negative test, and here for the
+  // same reason: supplier-service is a new topic, and nobody should later infer
+  // that an identifier appearing in two topics implies an order between them.
+  // Two databases, two counter tables, no shared lock, no shared transaction
+  // (ADR-051 § C-7).
+  await withOutbox('supplier', async (supplier) => {
+    await withOutbox('fleet', async (fleet) => {
+      const SHARED = 'ID-SHARED-ACROSS-TOPICS';
+
+      const first = await produce(supplier.db, {
+        topic: SUPPLIER_TOPIC,
+        partitionKey: SHARED,
+        eventName: 'SUPPLIER_REGISTERED',
+        aggregateId: SHARED,
+      });
+      const second = await produce(fleet.db, {
+        topic: FLEET_TOPIC,
+        partitionKey: SHARED,
+        eventName: 'USAGE_RECORDED',
+        aggregateId: SHARED,
+      });
+
+      // Both are 1. Not "the second continued the first" — they are unrelated
+      // streams that happen to share a key, and each counted from the start.
+      assert.equal(first.streamSeq, 1);
+      assert.equal(second.streamSeq, 1);
+
+      // And neither database has heard of the other's topic.
+      assert.equal(
+        await scalar(
+          supplier.db,
+          `SELECT count(*) FROM "outbox_stream_sequence" WHERE "topic" = '${FLEET_TOPIC}'`,
+        ),
+        0,
+      );
+      assert.equal(
+        await scalar(
+          fleet.db,
+          `SELECT count(*) FROM "outbox_stream_sequence" WHERE "topic" = '${SUPPLIER_TOPIC}'`,
+        ),
+        0,
+      );
+    });
+  });
+});

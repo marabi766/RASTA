@@ -479,7 +479,7 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 21,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Qualification and suspension are explicit, tenant-safe workflows",
         "Configurable performance scoring supplies marketplace rating without invented verification"

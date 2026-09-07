@@ -86,6 +86,12 @@ export class AuthGuard implements CanActivate {
       claims.organizationIds,
     );
 
+    const organizationIds = mergeMemberships(
+      organizationId,
+      claims.organizationId,
+      claims.organizationIds,
+    );
+
     const state: AuthState = {
       authType: 'USER',
       // Prefer the platform id. Falling back to the IdP subject keeps an
@@ -93,6 +99,7 @@ export class AuthGuard implements CanActivate {
       userId: claims.rastaUserId ?? claims.sub,
       subject: claims.sub,
       organizationId,
+      organizationIds,
       roles: claims.roles,
       username: claims.username,
     };
@@ -103,6 +110,9 @@ export class AuthGuard implements CanActivate {
       userId: state.userId,
       subject: state.subject,
       organizationId: state.organizationId,
+      // The whole membership set, not only the tenant this request selected.
+      // Discarding it here is what made the D-2 self-judgement bypass possible.
+      organizationIds: state.organizationIds,
       roles: state.roles,
     });
 
@@ -209,11 +219,48 @@ export function resolveOrganization(
   throw RastaError.tenantMismatch(requested, active ? [active, ...memberships] : memberships);
 }
 
+/**
+ * Every organization a verified token asserts membership of (D-2).
+ *
+ * The union of three things the guard already knows: the tenant resolved for
+ * this request, the token's active organization, and its membership claim. All
+ * three are token-derived — the resolved tenant is only ever a value
+ * `resolveOrganization` accepted *from* the claims — so nothing a caller
+ * asserts unilaterally can enter this set.
+ *
+ * Deduplicated, and blank entries dropped: a conflict-of-interest check must
+ * not depend on how the identity provider happened to order or pad the claim.
+ *
+ * Exported so the union is testable on its own. It is the whole substance of
+ * the D-2 fix, and it would otherwise only be reachable through a booted
+ * application.
+ */
+export function mergeMemberships(
+  resolved: string | undefined,
+  active: string | undefined,
+  claimed: readonly string[] | undefined,
+): string[] {
+  return [
+    ...new Set(
+      [resolved, active, ...(claimed ?? [])].filter(
+        (id): id is string => typeof id === 'string' && id.trim().length > 0,
+      ),
+    ),
+  ];
+}
+
 export interface AuthState {
   authType: RequestContext['authType'];
   userId?: string;
   subject?: string;
   organizationId?: string;
+  /**
+   * Every organization the verified token asserts membership of (D-2).
+   *
+   * Absent for anonymous and service callers, which assert none — and absence
+   * means unknown, never "any".
+   */
+  organizationIds?: string[];
   roles: string[];
   username?: string;
   callerService?: string;
