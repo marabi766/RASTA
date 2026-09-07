@@ -48,16 +48,72 @@ describe('the economic suite mutates only what it owns', () => {
    *
    * Deliberately not a synthetic minimum: the rules carry a `created_by` of
    * `USR-ITEST-…`, which is the exact string the two dropped disjuncts matched
-   * on, and the journal is written with no entries, which is the exact shape
-   * the two unbounded `DELETE FROM journal` statements removed.
+   * on, and one journal is written with no entries at all, which is the exact
+   * shape the two unbounded `DELETE FROM journal` statements removed.
+   *
+   * ## Why the journal is posted between `WALLET` and `ESCROW`
+   *
+   * Both are tenant-owned purposes (`accounts.ts` `TENANT_OWNED`, ADR-034:
+   * escrowed money is still the payer's), so every leg of this journal belongs
+   * to `organizationId` and to nothing else. That is what makes "this tenant
+   * owns all of it" a statement the test can actually make.
+   *
+   * A funded wallet would not be. `fundWallet` credits against
+   * `PAYMENT_CLEARING`, which `ownerOf` maps to the **platform** organization,
+   * so a top-up journal always has one leg under `ORG-ITEST-PLATFORM` — a
+   * tenant every run shares. The case at the bottom of this file is about
+   * exactly that, and it is the reason this seed does not use `fundWallet`.
    */
   async function seedTenant(organizationId: string) {
-    // A wallet, its two ledger accounts, a balanced journal and its entries —
-    // through the real posting path, so the rows have the shape production
-    // writes rather than one this file invented.
-    const { walletId } = await fundWallet(wiring, organizationId, 25_000n);
+    // The wallet and its accounts, through the controlled path.
+    const wallet = await asActor({ organizationId }, () => wiring.wallets.getOrOpen('IRR'));
+    const walletId = wallet.id;
 
-    const emptyJournalId = `JRN_CONTROL_${ulid()}`;
+    const accounts = await asActor({ organizationId }, () =>
+      prisma.transaction(async (tx) => {
+        const walletAccount = await wiring.ledger.resolveAccount(
+          tx,
+          'WALLET',
+          organizationId,
+          'IRR',
+          'itest',
+        );
+        const escrow = await wiring.ledger.resolveAccount(
+          tx,
+          'ESCROW',
+          organizationId,
+          'IRR',
+          'itest',
+        );
+        return { debit: walletAccount.id, credit: escrow.id };
+      }),
+    );
+
+    // A balanced journal whose every leg is this tenant's. Written raw so both
+    // sides can be tenant-owned; `trg_journal_balanced` is deferred to COMMIT
+    // and both legs arrive in one statement, so it is checked and passes.
+    const ownJournalId = `JRN_CONTROL_${ulid()}`;
+    await runUnscoped('the control seeds a journal owned entirely by one tenant', async () => {
+      await prisma.client.$executeRawUnsafe(
+        `INSERT INTO journal (id, organization_id, journal_type, description, posted_at, posted_by, correlation_id, created_at)
+         VALUES ($1, $2, 'FUNDS_HELD', 'isolation control', now(), 'itest', 'itest', now())`,
+        ownJournalId,
+        organizationId,
+      );
+      await prisma.client.$executeRawUnsafe(
+        `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
+         VALUES ($1, $2, $3, $4, 'DEBIT', 5000, 'IRR', now()),
+                ($5, $2, $6, $4, 'CREDIT', 5000, 'IRR', now())`,
+        `${ownJournalId}_E1`,
+        ownJournalId,
+        accounts.debit,
+        organizationId,
+        `${ownJournalId}_E2`,
+        accounts.credit,
+      );
+    });
+
+    const emptyJournalId = `JRN_CONTROL_EMPTY_${ulid()}`;
     await runUnscoped('the control seeds an entry-less journal on purpose', () =>
       prisma.client.$executeRawUnsafe(
         `INSERT INTO journal (id, organization_id, journal_type, description, posted_at, posted_by, correlation_id, created_at)
@@ -107,6 +163,7 @@ describe('the economic suite mutates only what it owns', () => {
     return {
       organizationId,
       walletId,
+      ownJournalId,
       emptyJournalId,
       commissionRuleId: commissionRule.id,
       rewardRuleId: rewardRule.id,
@@ -116,7 +173,10 @@ describe('the economic suite mutates only what it owns', () => {
   }
 
   /** What of a seeded tenant is still in the database. */
-  async function census(organizationId: string, seeded: { emptyJournalId: string }) {
+  async function census(
+    organizationId: string,
+    seeded: { emptyJournalId: string; ownJournalId: string },
+  ) {
     return runUnscoped('the control counts the rows it seeded', async () => {
       const client = prisma.client;
       return {
@@ -124,6 +184,10 @@ describe('the economic suite mutates only what it owns', () => {
         accounts: await client.ledgerAccount.count({ where: { organizationId } }),
         journals: await client.journal.count({ where: { organizationId } }),
         entryLessJournal: await client.journal.count({ where: { id: seeded.emptyJournalId } }),
+        ownJournal: await client.journal.count({ where: { id: seeded.ownJournalId } }),
+        ownJournalEntries: await client.ledgerEntry.count({
+          where: { journalId: seeded.ownJournalId },
+        }),
         entries: await client.ledgerEntry.count({ where: { organizationId } }),
         commissionRules: await client.commissionRule.count({ where: { organizationId } }),
         rewardRules: await client.rewardRule.count({ where: { organizationId } }),
@@ -181,9 +245,10 @@ describe('the economic suite mutates only what it owns', () => {
       const before = await census(foreign, theirs);
       expect(before.wallets).toBe(1);
       expect(before.entryLessJournal).toBe(1);
+      expect(before.ownJournal).toBe(1);
+      expect(before.ownJournalEntries).toBe(2);
       expect(before.commissionRules).toBe(1);
       expect(before.rewardRules).toBe(1);
-      expect(before.entries).toBeGreaterThan(0);
       expect((await census(mine, ours)).wallets).toBe(1);
 
       // The suite's own tenants, and only those — exactly what every
@@ -199,6 +264,8 @@ describe('the economic suite mutates only what it owns', () => {
         accounts: 0,
         journals: 0,
         entryLessJournal: 0,
+        ownJournal: 0,
+        ownJournalEntries: 0,
         entries: 0,
         commissionRules: 0,
         rewardRules: 0,
@@ -251,5 +318,60 @@ describe('the economic suite mutates only what it owns', () => {
 
     const after = await integrityControls();
     expect(after).toEqual(before);
+  });
+
+  /**
+   * The hole this task does **not** close, pinned so it cannot be forgotten.
+   *
+   * `cleanup` always appends `PLATFORM_ORGANIZATION_ID` — the fixed constant
+   * `ORG-ITEST-PLATFORM` — to the organizations it was given, and every run
+   * uses the same one. `ownerOf` files `PAYMENT_CLEARING`, `COMMISSION_REVENUE`
+   * and `REWARD_EXPENSE` under it, so **every top-up, settlement and commission
+   * journal has one leg in a tenant every run shares**. Ownership resolved from
+   * the legs therefore claims a foreign run's journal through that leg, and the
+   * journal is deleted along with the rest of its entries.
+   *
+   * That is audit finding F-07, and it is assigned to T-9 (the per-run schema),
+   * not to this task: closing it means the platform tenant getting a run
+   * identity, which is an architectural change well outside a cleanup-scoping
+   * fix. Scoping the leg-side lookup alone would not do it either — the very
+   * next statement deletes the platform's own `ledger_account` rows, and a
+   * foreign run's surviving legs would then block that delete on the
+   * `ON DELETE RESTRICT` foreign key, turning silent destruction into a broken
+   * suite.
+   *
+   * So it is asserted as it actually behaves, not as it should. This test is a
+   * description of a defect, and the assertion is deliberately the wrong way
+   * round: **when T-9 lands, this fails**, and whoever lands it should replace
+   * the body with `toBe(1)` and delete this comment. A known gap that no test
+   * mentions is a gap that gets rediscovered from a symptom in another service.
+   */
+  it('still claims a foreign journal through the shared platform tenant (F-07, open)', async () => {
+    const foreign = foreignTenant();
+
+    try {
+      // Funded, so the journal has a `PAYMENT_CLEARING` leg under the platform
+      // organization — the entanglement this case is about.
+      await fundWallet(wiring, foreign, 25_000n);
+
+      const before = await runUnscoped('the control counts the foreign top-up journal', () =>
+        prisma.client.journal.count({
+          where: { organizationId: foreign, journalType: 'WALLET_TOP_UP' },
+        }),
+      );
+      expect(before).toBe(1);
+
+      await cleanup(prisma, [org.a, org.b, org.c]);
+
+      const after = await runUnscoped('the control counts it again', () =>
+        prisma.client.journal.count({
+          where: { organizationId: foreign, journalType: 'WALLET_TOP_UP' },
+        }),
+      );
+      // Gone — taken by a cleanup that was never given this tenant. See above.
+      expect(after).toBe(0);
+    } finally {
+      await cleanup(prisma, [foreign]);
+    }
   });
 });
