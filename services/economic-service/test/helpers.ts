@@ -180,12 +180,23 @@ export function wire(prisma: PrismaService): Wiring {
 }
 
 /**
- * Two organizations plus a platform, generated fresh per run.
+ * Three organizations, generated fresh per run.
  *
  * Generated rather than fixed so a re-run cannot collide with rows an earlier
  * run left behind, and so the tenant-isolation tests prove isolation between
  * two tenants that genuinely exist rather than between a tenant and an empty
  * set.
+ *
+ * **No `platform` key, deliberately.** This said "two organizations plus a
+ * platform" while returning `{ a, b, c }`, and `wallet-races.int-spec.ts` read
+ * the sentence rather than the code: it passed `org.platform` to `cleanup`,
+ * which is `undefined`. document-service's `tenants()` does return a
+ * `platform`, which is where the shape was copied from.
+ *
+ * The platform organization here is a constant, not a per-run tenant —
+ * `PLATFORM_ORGANIZATION_ID`, which `cleanup` appends itself. Callers must not
+ * pass it, and `cleanup` now refuses an argument that is not a real
+ * identifier.
  */
 export function tenants() {
   const suffix = ulid().slice(-10);
@@ -315,6 +326,37 @@ export async function cleanup(
   //
   // The suffix is a ULID, so a prefix can only ever match this run's own
   // organizations.
+  // Every identifier has to be a real one before any of them becomes a LIKE
+  // prefix.
+  //
+  // `wallet-races.int-spec.ts` passed `org.platform`, which `tenants()` does
+  // not return. The `${id}%` below turned that `undefined` into the prefix
+  // `'undefined%'` and the run carried on: no error, no failed test, just a
+  // delete predicate carrying a term that can never match. A cleanup argument
+  // that silently means nothing is the worst of the three outcomes — worse
+  // than a throw, and worse than deleting too much, because it looks like
+  // coverage. Suites are transpiled by `@swc/jest`, which strips types
+  // without checking them, so nothing else on the path would have said so.
+  //
+  // This validates the **arguments**, and only that. It is not an isolation
+  // guarantee: F-07 is still open, the platform tenant below is still shared
+  // between concurrent runs, and a well-formed identifier naming someone
+  // else's tenant would pass this check unchallenged.
+  const invalid = organizationIds
+    .map((id, index) => ({ id, index }))
+    .filter(({ id }) => typeof id !== 'string' || id.trim() === '');
+
+  if (invalid.length > 0) {
+    throw new Error(
+      `cleanup() was given ${invalid.length} invalid organization identifier(s): ` +
+        invalid
+          .map(({ id, index }) => `[${index}] = ${JSON.stringify(id) ?? String(id)}`)
+          .join(', ') +
+        '. Every entry must be a non-empty organization id owned by this run. ' +
+        'The platform organization is added by this helper and must not be passed in.',
+    );
+  }
+
   const orgs = [...organizationIds, PLATFORM_ORGANIZATION_ID].map((id) => `${id}%`);
   const client = prisma.client;
 

@@ -24,7 +24,20 @@ describe('wallet races and refusals (real database)', () => {
   });
 
   afterAll(async () => {
-    await cleanup(prisma, [org.a, org.b, org.platform]);
+    // Only the organizations this suite actually created.
+    //
+    // This read `[org.a, org.b, org.platform]`, and `tenants()` here returns
+    // `{ a, b, c }` — there is no `platform`. The third argument was
+    // `undefined`, which `cleanup` interpolated into the LIKE prefix
+    // `'undefined%'`: a pattern matching no organization this platform can
+    // mint, so it deleted nothing and quietly widened the delete predicate by
+    // one meaningless term. The shape was copied from document-service, whose
+    // `tenants()` genuinely does return a `platform`.
+    //
+    // Nothing is lost by dropping it. `cleanup` appends the canonical
+    // `PLATFORM_ORGANIZATION_ID` itself, so the platform tenant was, and
+    // still is, cleaned — by the helper, not by this argument.
+    await cleanup(prisma, [org.a, org.b]);
     await prisma.onModuleDestroy();
   });
 

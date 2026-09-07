@@ -14,7 +14,17 @@ import { UsageConsumer } from '../src/consumers/usage.consumer';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
 import { MAINTENANCE_TOPIC } from '../src/config/env';
 import type { MaintenanceEnv } from '../src/config/env';
-import { asActor, brokers, cleanup, id, newPrisma, seedAsset, tenants, waitFor } from './helpers';
+import {
+  asActor,
+  brokers,
+  cleanup,
+  id,
+  newPrisma,
+  seedAsset,
+  seedMeter,
+  tenants,
+  waitFor,
+} from './helpers';
 
 /**
  * The event path, end to end, over a real broker.
@@ -147,10 +157,104 @@ describeWithKafka('maintenance event flow over Kafka', () => {
   }, 60_000);
 
   // -------------------------------------------------------------------------
+  // Run-owned fixtures
+  //
+  // Every `it()` below establishes the state it reads through one of these,
+  // rather than through a sibling having run first. Five of the eight tests
+  // used to read rows another test created, so `jest -t` -- which CI uses to
+  // re-run a single failure, and which a developer uses all day -- selected a
+  // test into a database that had none of its prerequisites. The failure
+  // surfaced as `findFirstOrThrow` raising "No record was found for a query",
+  // naming the query rather than the missing setup (F-25).
+  // -------------------------------------------------------------------------
+
+  /** A fresh asset for this run, under this run's tenant. */
+  async function ownAsset(): Promise<string> {
+    const asset = id('AST');
+    await seedAsset(prisma, asset, org.a);
+    return asset;
+  }
+
+  /**
+   * A repair this caller owns, driven to IN_PROGRESS and published.
+   *
+   * Returns identifiers rather than rows: every caller below needs to name its
+   * own request when it queries, and taking the ids from here is what stops a
+   * query from matching a sibling test's repair.
+   *
+   * `awaitEnvelope` is opt-in, and deliberately not the default. Self-seeding
+   * means the work the first repair test used to do for everyone is now done
+   * per caller, so a wait placed here is a wait three tests pay. Only the two
+   * that read `received` need the envelope in hand; the completion test drives
+   * its own relay and waits on its own `MAINTENANCE_COMPLETED`, so making it
+   * block on `MAINTENANCE_STARTED` would buy nothing and would triple this
+   * file's exposure to the broker stalls F-27 tracks.
+   */
+  async function startedRepair({ awaitEnvelope = false } = {}): Promise<{
+    assetId: string;
+    requestId: string;
+    orderId: string;
+  }> {
+    const asset = await ownAsset();
+
+    const request = await asActor({ organizationId: org.a, userId: 'USR-ITEST-MANAGER' }, () =>
+      requests.create({
+        assetId: asset,
+        type: 'CORRECTIVE',
+        severity: 'HIGH',
+        title: 'REPAIR-FIXTURE',
+      }),
+    );
+
+    const order = await asActor({ organizationId: org.a, userId: 'USR-ITEST-MANAGER' }, () =>
+      repairOrders.assign(request.id, {
+        workshopOrganizationId: 'ORG-ITEST-WORKSHOP',
+        workshopName: 'WORKSHOP-FIXTURE',
+      }),
+    );
+
+    await asActor({ organizationId: org.a, userId: 'USR-ITEST-MANAGER' }, () =>
+      repairOrders.start(order.id, {}),
+    );
+
+    // Published unconditionally: the outbox row has to leave the table either
+    // way, or a later `relay.tick()` in this run would republish it.
+    await relay.tick();
+
+    // Awaited only when the caller reads `received`, so it finds the envelope
+    // rather than racing the relay.
+    //
+    // 60s rather than `waitFor`'s default 30s, and it is a tolerance for
+    // delivery latency rather than a hope that a wrong assertion will come
+    // good. Under local contention the consumer's 30s session expires, the
+    // coordinator removes the member — "removing member … on heartbeat
+    // expiration" in the broker log, `read ECONNRESET` on this side — and the
+    // group rebalances. Committed offsets survive that, so the envelope is
+    // delivered late rather than lost, and the old deadline could expire
+    // while it was still in flight. Charged against a 120s test timeout, so
+    // an envelope that never comes still fails rather than hangs. The
+    // contention itself is F-27 and is not addressed here.
+    if (awaitEnvelope) {
+      await waitFor(
+        `MAINTENANCE_STARTED for ${request.id} to arrive`,
+        async () =>
+          received.find(
+            (e) =>
+              e.eventName === 'MAINTENANCE_STARTED' &&
+              (e.payload as { requestId?: string }).requestId === request.id,
+          ),
+        60_000,
+      );
+    }
+
+    return { assetId: asset, requestId: request.id, orderId: order.id };
+  }
+
+  // -------------------------------------------------------------------------
   // FLOW A — fleet-service → Kafka → maintenance-service
   // -------------------------------------------------------------------------
 
-  it('folds a real USAGE_RECORDED message from the fleet topic into the meter', async () => {
+  it('folds a real USAGE_RECORDED message once, and ignores its redelivery', async () => {
     // The schedule is due at 4 560 hours; the reading below takes the machine
     // past it, which is what makes this an end-to-end test of the trigger
     // rather than of message delivery.
@@ -257,14 +361,22 @@ describeWithKafka('maintenance event flow over Kafka', () => {
     expect(payload.state).toBe('OVERDUE');
     expect(payload.dueAtMeter).toBe('4560.00');
     expect(payload.assetId).toBe(assetId);
-  }, 120_000);
 
-  it('does not count a redelivered reading twice', async () => {
+    // --- the same reading, delivered again ---------------------------------
+    //
     // At-least-once delivery means this happens in normal operation. Counting
     // it twice would add hours the machine never ran and defer a service that
     // is actually due — the failure fleet-service's own event contract warns
     // about.
-    const before = await repository.findMeter(assetId);
+    //
+    // Asserted here rather than in a sibling `it()`. It was one until F-25:
+    // it read both the meter *and* the `usageConsumer` this test constructs,
+    // so selecting it alone consumed nothing and compared a meter that did not
+    // exist. The two halves are one delivery — "folded once" and "not folded
+    // twice" are the same fact observed either side of a redelivery — and
+    // separating them would mean standing up a second consumer group only to
+    // re-establish the first half.
+    const before = meter;
 
     const duplicate = {
       eventId: `${before?.lastUsageRecordId}`.replace('USG_', ''),
@@ -300,18 +412,35 @@ describeWithKafka('maintenance event flow over Kafka', () => {
     const after = await repository.findMeter(assetId);
     expect(after?.hourMeter.toString()).toBe('4570');
     expect(after?.recordCount).toBe(1);
-  }, 60_000);
+  }, 180_000);
 
   it('announces a due schedule exactly once per cycle', async () => {
     // A machine working daily would otherwise announce on every reading until
     // someone acts. The guard is `WHERE due_announced_at IS NULL`, which is
     // also what makes the scan safe on every replica at once (ADR-027).
+    //
+    // Its own asset, meter and schedule. It used to read the schedule the
+    // delivery test creates, which also meant the single announcement it
+    // counted had been published by that test rather than by either call
+    // below — so the guard being asserted was never exercised here at all.
+    const scheduledAsset = await ownAsset();
+    await seedMeter(prisma, scheduledAsset, org.a, '4570.00');
     const schedule = await asActor({ organizationId: org.a }, () =>
-      repository.client.maintenanceSchedule.findFirstOrThrow({ where: { assetId } }),
+      schedules.create({
+        assetId: scheduledAsset,
+        title: 'SCHEDULE-FIXTURE',
+        maintenanceType: 'PREVENTIVE',
+        recurrence: 'RECURRING',
+        intervalHours: '250.00',
+        leadHours: '25.00',
+        lastServicedHourMeter: '4310.00',
+      }),
     );
 
-    await announcer.announceIfDue(schedule as never, new Date());
-    await announcer.announceIfDue(schedule as never, new Date());
+    // The first call finds it due and claims the marker; the second finds the
+    // marker already set. Exactly one event either way.
+    expect(await announcer.announceIfDue(schedule as never, new Date())).toBe(true);
+    expect(await announcer.announceIfDue(schedule as never, new Date())).toBe(false);
 
     const announcements = await asActor({ organizationId: org.a }, () =>
       repository.client.outboxMessage.findMany({
@@ -399,19 +528,31 @@ describeWithKafka('maintenance event flow over Kafka', () => {
    *
    * This is test observation only. It says nothing about cross-topic ordering,
    * which is D-027's separate question.
+   *
+   * `requestId` narrows the row within the run. It is not a relaxation of the
+   * above: the envelope is still resolved by `eventId`, which is still the
+   * only link a foreign producer cannot satisfy. It is needed because each
+   * caller now starts its own repair, so this run's tenant owns several
+   * `MAINTENANCE_STARTED` rows and the tenant alone no longer names one.
    */
-  async function ownMaintenanceStarted() {
+  async function ownMaintenanceStarted(requestId: string) {
     const outbox = await asActor({ organizationId: org.a }, () =>
       prisma.client.outboxMessage.findFirstOrThrow({
-        // org.a is generated per run by `tenants()`, so this row is this run's.
-        where: { organizationId: org.a, eventName: 'MAINTENANCE_STARTED' },
+        // org.a is generated per run by `tenants()`, so this row is this run's;
+        // aggregateId picks out the repair the caller just started.
+        where: {
+          organizationId: org.a,
+          eventName: 'MAINTENANCE_STARTED',
+          aggregateId: requestId,
+        },
       }),
     );
     return { outbox, envelope: received.find((e) => e.eventId === outbox.id) };
   }
 
   it('keeps one correlation id across the whole chain', async () => {
-    const { outbox, envelope } = await ownMaintenanceStarted();
+    const { requestId } = await startedRepair({ awaitEnvelope: true });
+    const { outbox, envelope } = await ownMaintenanceStarted(requestId);
     expect(envelope).toBeDefined();
 
     expect(envelope?.correlationId).toBe(outbox.correlationId);
@@ -420,13 +561,14 @@ describeWithKafka('maintenance event flow over Kafka', () => {
     expect((outbox.headers as Record<string, string>)['x-correlation-id']).toBe(
       outbox.correlationId,
     );
-  });
+  }, 120_000);
 
   // N2 — foreign-message control. Deterministic: the stale envelope is placed
   // directly into `received`, so the control needs no second producer, no
   // broker timing and no shared infrastructure.
   it('resolves its own MAINTENANCE_STARTED when a stale one shares the collection', async () => {
-    const { outbox } = await ownMaintenanceStarted();
+    const { requestId } = await startedRepair({ awaitEnvelope: true });
+    const { outbox } = await ownMaintenanceStarted(requestId);
 
     const foreignRequestId = id('MRQ');
     const foreign: EventEnvelope = {
@@ -458,7 +600,7 @@ describeWithKafka('maintenance event flow over Kafka', () => {
       // passing vacuously if the collection is ever ordered differently.
       expect(received.find((e) => e.eventName === 'MAINTENANCE_STARTED')).toBe(foreign);
 
-      const { envelope } = await ownMaintenanceStarted();
+      const { envelope } = await ownMaintenanceStarted(requestId);
       expect(envelope).toBeDefined();
       expect(envelope).not.toBe(foreign);
       expect(envelope?.eventId).toBe(outbox.id);
@@ -470,22 +612,16 @@ describeWithKafka('maintenance event flow over Kafka', () => {
       const at = received.indexOf(foreign);
       if (at >= 0) received.splice(at, 1);
     }
-  });
+  }, 120_000);
 
   it('publishes the completion and the approval the dossier and settlement need', async () => {
-    const request = await asActor({ organizationId: org.a }, () =>
-      repository.client.maintenanceRequest.findFirstOrThrow({
-        where: { assetId, status: 'IN_PROGRESS' },
-      }),
-    );
-    const order = await asActor({ organizationId: org.a }, () =>
-      repository.client.repairOrder.findFirstOrThrow({
-        where: { maintenanceRequestId: request.id, status: 'IN_PROGRESS' },
-      }),
-    );
+    // Its own repair. It used to read whichever IN_PROGRESS request happened
+    // to sit against the shared asset, which is the row the publish test
+    // creates — nothing but run order made that true.
+    const { assetId: repairAssetId, requestId, orderId } = await startedRepair();
 
     await asActor({ organizationId: org.a, userId: 'USR-ITEST-MANAGER' }, () =>
-      repairOrders.recordPart(order.id, {
+      repairOrders.recordPart(orderId, {
         partName: 'شیلنگ هیدرولیک',
         quantity: '1',
         unit: 'عدد',
@@ -495,35 +631,35 @@ describeWithKafka('maintenance event flow over Kafka', () => {
     );
 
     await asActor({ organizationId: org.a, userId: 'USR-ITEST-MANAGER' }, () =>
-      repairOrders.complete(order.id, { workPerformed: 'شیلنگ تعویض شد' }),
+      repairOrders.complete(orderId, { workPerformed: 'شیلنگ تعویض شد' }),
     );
 
     await asActor({ organizationId: org.a, userId: 'USR-ITEST-OWNER' }, () =>
-      requests.approve(request.id, { expectedTotalCostMinor: '4800000' }),
+      requests.approve(requestId, { expectedTotalCostMinor: '4800000' }),
     );
 
     await relay.tick();
 
-    const completed = await waitFor(`MAINTENANCE_COMPLETED for ${request.id}`, async () =>
+    const completed = await waitFor(`MAINTENANCE_COMPLETED for ${requestId}`, async () =>
       received.find(
         (e) =>
           e.eventName === 'MAINTENANCE_COMPLETED' &&
-          (e.payload as { requestId?: string }).requestId === request.id,
+          (e.payload as { requestId?: string }).requestId === requestId,
       ),
     );
 
     const completedPayload = completed.payload as Record<string, unknown>;
-    expect(completedPayload.assetId).toBe(assetId);
+    expect(completedPayload.assetId).toBe(repairAssetId);
     // A flat minor-unit string, because that is what asset-service's timeline
     // projector reads. A nested money object would record the repair as free.
     expect(completedPayload.totalCostMinor).toBe('4800000');
     expect(typeof completedPayload.downtimeMinutes).toBe('number');
 
-    const approved = await waitFor(`MAINTENANCE_APPROVED for ${request.id}`, async () =>
+    const approved = await waitFor(`MAINTENANCE_APPROVED for ${requestId}`, async () =>
       received.find(
         (e) =>
           e.eventName === 'MAINTENANCE_APPROVED' &&
-          (e.payload as { requestId?: string }).requestId === request.id,
+          (e.payload as { requestId?: string }).requestId === requestId,
       ),
     );
 
