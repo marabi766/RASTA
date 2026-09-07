@@ -223,13 +223,27 @@ describeWithKafka('maintenance event flow over Kafka', () => {
 
     // Awaited only when the caller reads `received`, so it finds the envelope
     // rather than racing the relay.
+    //
+    // 60s rather than `waitFor`'s default 30s, and it is a tolerance for
+    // delivery latency rather than a hope that a wrong assertion will come
+    // good. Under local contention the consumer's 30s session expires, the
+    // coordinator removes the member — "removing member … on heartbeat
+    // expiration" in the broker log, `read ECONNRESET` on this side — and the
+    // group rebalances. Committed offsets survive that, so the envelope is
+    // delivered late rather than lost, and the old deadline could expire
+    // while it was still in flight. Charged against a 120s test timeout, so
+    // an envelope that never comes still fails rather than hangs. The
+    // contention itself is F-27 and is not addressed here.
     if (awaitEnvelope) {
-      await waitFor(`MAINTENANCE_STARTED for ${request.id} to arrive`, async () =>
-        received.find(
-          (e) =>
-            e.eventName === 'MAINTENANCE_STARTED' &&
-            (e.payload as { requestId?: string }).requestId === request.id,
-        ),
+      await waitFor(
+        `MAINTENANCE_STARTED for ${request.id} to arrive`,
+        async () =>
+          received.find(
+            (e) =>
+              e.eventName === 'MAINTENANCE_STARTED' &&
+              (e.payload as { requestId?: string }).requestId === request.id,
+          ),
+        60_000,
       );
     }
 

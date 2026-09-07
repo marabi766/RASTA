@@ -166,14 +166,46 @@ console.log(`== pass 2: each test on its own ==\n`);
 
 const failures = [];
 
+/**
+ * An order dependency is deterministic; a broker stall is not.
+ *
+ * A test that reads a row a sibling wrote fails on *every* attempt when
+ * selected alone — the row is simply not there, and all five of the original
+ * F-25 tests failed on every run. An integration suite on shared local
+ * infrastructure also fails occasionally for reasons that have nothing to do
+ * with ordering: a consumer whose session expires under load is removed from
+ * its group on heartbeat expiration, and the envelope arrives after the
+ * deadline. Locally that hit a different test each run, including one that is
+ * provably self-seeding.
+ *
+ * So a failure is retried once. Two failures is a dependency; one is a blip,
+ * and it is reported as such rather than passed over in silence. This does not
+ * soften the gate — the negative control against the pre-fix file still names
+ * all five, because none of them can pass on any attempt.
+ */
+const ATTEMPTS = 2;
+
 for (const fullName of names) {
-  const single = runJest([`--testPathPattern=${testPathPattern}`, '-t', toPattern(fullName)]);
-  const report = parseReport(single.stdout ?? '');
+  let single;
+  let report;
+  let ran = 0;
+  let ok = false;
+  let attempt = 0;
 
-  const ran = report ? report.numPassedTests + report.numFailedTests : 0;
-  const ok = single.status === 0 && report && report.numFailedTests === 0 && ran === 1;
+  while (attempt < ATTEMPTS && !ok) {
+    attempt += 1;
+    single = runJest([`--testPathPattern=${testPathPattern}`, '-t', toPattern(fullName)]);
+    report = parseReport(single.stdout ?? '');
+    ran = report ? report.numPassedTests + report.numFailedTests : 0;
+    // `ran !== 1` is never retried: it means the pattern selected the wrong
+    // number of tests, which is a defect in this gate's own selection rather
+    // than anything the broker can affect.
+    if (report && ran !== 1) break;
+    ok = single.status === 0 && !!report && report.numFailedTests === 0 && ran === 1;
+  }
 
-  console.log(`   ${ok ? 'PASS' : 'FAIL'}  ${fullName}`);
+  const note = ok && attempt > 1 ? `  (passed on attempt ${attempt} — see F-27)` : '';
+  console.log(`   ${ok ? 'PASS' : 'FAIL'}  ${fullName}${note}`);
 
   if (!ok) {
     failures.push({
@@ -187,7 +219,7 @@ for (const fullName of names) {
           ? 'the name pattern selected no test'
           : ran > 1
             ? `the name pattern selected ${ran} tests, so none ran alone`
-            : 'the test failed when selected on its own',
+            : `the test failed when selected on its own, on ${attempt} attempt(s)`,
       stderr: single.stderr ?? '',
     });
   }
