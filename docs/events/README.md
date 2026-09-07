@@ -474,12 +474,20 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 
 ## Notification — `rasta.notification.v1`
 
+> **هیچ تولیدکننده‌ای امروز وجود ندارد** — `notification-service` ساخته نشده. قرارداد در
+> [ADR-054](../adr/ADR-054-notification-service-delivery.md) (`Proposed`). Payload هیچ نشانی و هیچ متن پیامی حمل
+> نمی‌کند.
+
 | رویداد                | مصرف‌کنندگان | Payload کلیدی                              |
 | --------------------- | ------------ | ------------------------------------------ |
 | `NOTIFICATION_SENT`   | analytics    | `notificationId`, `channel`, `recipientId` |
 | `NOTIFICATION_FAILED` | analytics    | `notificationId`, `channel`, `reason`      |
 
 ## Audit — `rasta.audit.trail.v1`
+
+> **هیچ تولیدکننده و هیچ مصرف‌کننده‌ای امروز وجود ندارد** — `audit-service` ساخته نشده. قرارداد در
+> [ADR-053](../adr/ADR-053-audit-service-append-only-evidence.md) (`Proposed`)، که این Topic را **مسیر دوم** ورودی
+> می‌نامد: مسیر نخست، Projector روی هر ده Topic دامنه‌ای است (`docs/07` § ۷٫۱۰).
 
 **همه سرویس‌ها** روی این Topic می‌نویسند. تنها مصرف‌کننده `audit-service` است.
 
