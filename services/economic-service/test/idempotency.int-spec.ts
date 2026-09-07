@@ -336,8 +336,17 @@ describe('idempotency (real database)', () => {
 
   describe('expiry', () => {
     it('purges records past their retention window', async () => {
+      // The key carries this run's tenant, and the back-dating below names
+      // both. It used to be the literal `key-expire-01` matched on `key`
+      // alone: every concurrent run writes that same string, and a row is a
+      // key *per organization*, so the statement reached back through every
+      // other run's records and expired them too. `purgeExpired` then deleted
+      // them — it is deliberately platform-wide upkeep, deleting by age and
+      // never by tenant, so it does exactly what it is told.
+      const key = `key-expire-01-${org.a}`;
+
       await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /itest', 'key-expire-01', {}, 201, async () => ({})),
+        idempotency.run('POST /itest', key, {}, 201, async () => ({})),
       );
 
       // Both columns are moved back together, because `ck_idempotency_expiry`
@@ -349,7 +358,9 @@ describe('idempotency (real database)', () => {
           `UPDATE idempotency_key
               SET created_at = now() - interval '48 hours',
                   expires_at = now() - interval '24 hours'
-            WHERE key = 'key-expire-01'`,
+            WHERE key = $1 AND organization_id = $2`,
+          key,
+          org.a,
         ),
       );
 

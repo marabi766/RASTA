@@ -108,9 +108,26 @@ describe('ledger immutability (real database)', () => {
       // The shape a "quick fix" actually takes. It fails on the first row.
       await postRawJournal(3_000n);
 
+      // Deliberately unbounded — the statement being refused is the whole
+      // property, and adding a `WHERE` would test something else.
+      //
+      // It runs inside a transaction that is never allowed to commit, because
+      // of what this test does *when it fails*. If the trigger is ever absent
+      // or disabled, the UPDATE succeeds and rewrites the currency of every
+      // ledger entry in the database — every tenant, every concurrent run. The
+      // assertion below would report that correctly and far too late. Forcing
+      // a rollback makes the failure a red test rather than a rewritten
+      // ledger, and costs nothing on the path where the trigger works.
       await expect(
         runUnscoped('the immutability suite attempts a forbidden write', () =>
-          prisma.client.$executeRawUnsafe(`UPDATE ledger_entry SET currency = 'USD'`),
+          prisma.client.$transaction(async (tx) => {
+            // ISOLATION-ALLOW-UNBOUNDED: the unbounded statement is the
+            // subject of the test; this transaction is what bounds its effect.
+            await tx.$executeRawUnsafe(`UPDATE ledger_entry SET currency = 'USD'`);
+            throw new Error(
+              'ledger_entry accepted a mass UPDATE: trg_ledger_entry_immutable is missing or disabled',
+            );
+          }),
         ),
       ).rejects.toThrow(/append-only/i);
     });
