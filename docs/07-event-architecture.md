@@ -334,10 +334,22 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 | `GOODS_RECEIVED`                    | procurement | inventory · economic                                          |
 | `SUPPLIER_QUALIFIED`                | supplier    | marketplace · procurement · construction                      |
 | `SUPPLIER_SUSPENDED`                | supplier    | marketplace (پنهان‌سازی پیشنهاد) · procurement · construction |
-| `PERFORMANCE_SCORE_UPDATED`         | supplier    | marketplace (رتبه‌بندی) · search                              |
+| `PERFORMANCE_SCORE_UPDATED` ❌      | supplier    | marketplace (رتبه‌بندی) · search — **پیاده نشده**، ADR-052    |
 | `STOCK_RESERVED` / `STOCK_RELEASED` | inventory   | marketplace (Saga سفارش)                                      |
 | `LOW_STOCK_DETECTED`                | inventory   | notification · procurement                                    |
 | `SHIPMENT_DELIVERED`                | inventory   | marketplace · notification                                    |
+
+> **`PERFORMANCE_SCORE_UPDATED` هنوز منتشر نمی‌شود.** فرمول امتیاز در
+> 2026-09-07 تصویب شد ([ADR-052](adr/ADR-052-supplier-performance-scoring.md)،
+> بستن Q-12) اما Supplier Phase 2 شروع نشده. تا آن روز هیچ تولیدکننده‌ای این
+> رویداد را منتشر نمی‌کند و marketplace تأمین‌کننده را `UNRATED` نشان می‌دهد —
+> **هیچ رتبه‌ای اختراع نمی‌شود**.
+>
+> در جهت مخالف هم: از شش رویدادی که کاتالوگ برای مصرف supplier نام می‌برد،
+> `CONTRACT_COMPLETED` و `CONTRACTOR_RATED` هیچ تولیدکننده‌ای ندارند
+> (`contract-service` و `construction-service` وجود ندارند)، و
+> `ORDER_DISPUTED`/`ORDER_CANCELLED` انتساب ساخت‌یافتهٔ مسئولیت ندارند، پس زیر
+> قاعدهٔ ۱۳ ADR-052 قابل شمارش نیستند. جزئیات در ADR-052 § ۲.
 
 **مرز مالی واقعی بازارگاه.** Hold، تأیید تسویه، Refund و Settlement با فرمان
 سرویس‌به‌سرویس احراز‌شده از Activityهای Temporal انجام می‌شوند؛ economic رویدادهای
