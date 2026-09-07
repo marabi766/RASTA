@@ -445,7 +445,7 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 | **Consumes**    | **همه Topicهای دامنه.** نگاشت رویداد→قالب یک جدول پیکربندی است.                                      |
 | **کانال‌ها**    | In-App (P0) · Email (P0، Mailpit در dev) · SMS (P1، **OPEN QUESTION** — ارائه‌دهنده) · Push (P2)     |
 | **Failure**     | افت آن اعلان را به تأخیر می‌اندازد، نه از بین می‌برد (Kafka Offset حفظ می‌شود).                      |
-| **ADR**         | [ADR-054](adr/ADR-054-notification-service-delivery.md) — `Proposed`، پیاده نشده.                     |
+| **ADR**         | [ADR-054](adr/ADR-054-notification-service-delivery.md) — `Proposed`، پیاده نشده.                    |
 
 > **CONSTRAINT.** «Email (P0، Mailpit در dev)» بالا یک **Adapter توسعه** را توصیف می‌کند، نه یک مسیر تحویل واقعی.
 > **هیچ ارائه‌دهندهٔ ایمیل Production و هیچ هویت فرستنده‌ای انتخاب نشده است** — [Q-37](24-open-questions.md). این
@@ -465,22 +465,22 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 
 ### audit-service (P0)
 
-| بُعد            | مشخصات                                                                                     |
-| --------------- | ------------------------------------------------------------------------------------------ |
-| **Mission**     | سابقه تغییرناپذیر «چه کسی، چه کرد، کِی، از کجا، با چه نتیجه‌ای».                           |
-| **مالکیت داده** | `audit_event` — **فقط الحاقی**؛ بدون UPDATE و بدون DELETE                                  |
-| **REST**        | `GET /audit-events` (فیلتر بر actor، resource، action، بازه) · `GET /audit-events/{id}`    |
-| **Consumes**    | **دو مسیر:** هر ده Topic دامنه‌ای (Projector) + `rasta.audit.trail.v1` (قرارداد صریح). ADR-053 |
+| بُعد            | مشخصات                                                                                                 |
+| --------------- | ------------------------------------------------------------------------------------------------------ |
+| **Mission**     | سابقه تغییرناپذیر «چه کسی، چه کرد، کِی، از کجا، با چه نتیجه‌ای».                                       |
+| **مالکیت داده** | `audit_event` — **فقط الحاقی**؛ بدون UPDATE و بدون DELETE                                              |
+| **REST**        | `GET /audit-events` (فیلتر بر actor، resource، action، بازه) · `GET /audit-events/{id}`                |
+| **Consumes**    | **دو مسیر:** هر ده Topic دامنه‌ای (Projector) + `rasta.audit.trail.v1` (قرارداد صریح). ADR-053         |
 | **مرز امنیتی**  | نوشتن فقط از Kafka (بدون API نوشتن). خواندن `SYSTEM_ADMIN` و `UNION_ADMIN`؛ صادرات فقط `SYSTEM_ADMIN`. |
-| **ADR**         | [ADR-053](adr/ADR-053-audit-service-append-only-evidence.md) — `Proposed`، پیاده نشده.      |
+| **ADR**         | [ADR-053](adr/ADR-053-audit-service-append-only-evidence.md) — `Proposed`، پیاده نشده.                 |
 
 > **اصلاح 2026-09-07.** این جدول پیش‌تر خواندن را به «`SYSTEM_ADMIN`، `UNION_ADMIN` و **مالک منبع**» می‌داد، در حالی که
 > `docs/09` § ۹٫۸ و جدول Gateway (`services/api-gateway/src/config/routes.ts:172-176`) فقط دو نقش مدیر را می‌دهند.
 > «مالک منبع» هیچ‌جا تعریف نشده و پیاده‌سازی‌اش نیازمند یک جست‌وجوی مالکیت میان‌سرویسی است که A-01 ممنوع می‌کند. قرائت
 > باریک‌تر (کمینهٔ امتیاز) گرفته شد و پرسش باز به‌عنوان [Q-39](24-open-questions.md) ثبت است. `AUDITOR` **هیچ دسترسی‌ای
 > به این سرویس ندارد** — تنها سرویسی که به آن می‌رسد `analytics-service` است، و فقط Endpointهای تجمیعی.
-| **Scale**       | فقط الحاقی، پارتیشن ماهانه. نگهداشت: **OPEN QUESTION** (پیش‌فرض موقت ۷ سال).               |
-| **MVP → PROD**  | در Production زنجیره Hash برای اثبات دست‌نخوردگی افزوده می‌شود.                            |
+> | **Scale** | فقط الحاقی، پارتیشن ماهانه. نگهداشت: **OPEN QUESTION** (پیش‌فرض موقت ۷ سال). |
+> | **MVP → PROD** | در Production زنجیره Hash برای اثبات دست‌نخوردگی افزوده می‌شود. |
 
 ### analytics-service (P1)
 

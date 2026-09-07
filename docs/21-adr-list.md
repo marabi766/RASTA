@@ -10,62 +10,62 @@
 
 ## فهرست
 
-| ADR                                                    | عنوان                                          | وضعیت    | تأثیر                                |
-| ------------------------------------------------------ | ---------------------------------------------- | -------- | ------------------------------------ |
-| [001](adr/ADR-001-microservices.md)                    | معماری Microservices                           | Accepted | ساختار کل سیستم                      |
-| [002](adr/ADR-002-backend-stack.md)                    | TypeScript + NestJS                            | Accepted | همه سرویس‌ها                         |
-| [003](adr/ADR-003-frontend-stack.md)                   | Next.js + React + Tailwind                     | Accepted | هر دو Frontend                       |
-| [004](adr/ADR-004-database.md)                         | PostgreSQL + PostGIS + Prisma                  | Accepted | لایه داده                            |
-| [005](adr/ADR-005-database-ownership.md)               | مالکیت پایگاه داده به‌ازای سرویس               | Accepted | **قاعده بنیادین**                    |
-| [006](adr/ADR-006-kafka.md)                            | Kafka به‌عنوان Event Backbone                  | Accepted | همه ارتباط ناهمزمان                  |
-| [007](adr/ADR-007-redis.md)                            | Redis برای Cache، قفل و Rate Limit             | Accepted | کارایی و همزمانی                     |
-| [008](adr/ADR-008-identity-keycloak.md)                | Keycloak + OIDC/OAuth2                         | Accepted | احراز هویت                           |
-| [009](adr/ADR-009-api-gateway.md)                      | API Gateway اختصاصی NestJS                     | Accepted | **انحراف آگاهانه از Kong/APISIX**    |
-| [010](adr/ADR-010-workflow-temporal.md)                | Temporal برای گردش‌کار                         | Accepted | فرآیندهای بلندمدت                    |
-| [011](adr/ADR-011-multi-tenancy.md)                    | راهبرد Multi-Tenancy                           | Accepted | **قاعده بنیادین امنیتی**             |
-| [012](adr/ADR-012-asset-centric.md)                    | مدل Asset-Centric و شناسه سراسری               | Accepted | **قاعده بنیادین دامنه**              |
-| [013](adr/ADR-013-wallet-ledger.md)                    | تفکیک Wallet و Ledger؛ یک economic-service     | Accepted | **یکپارچگی مالی**                    |
-| [014](adr/ADR-014-object-storage.md)                   | Object Storage سازگار با S3                    | Accepted | مدیریت اسناد                         |
-| [015](adr/ADR-015-kubernetes.md)                       | Kubernetes + Helm                              | Accepted | استقرار Production                   |
-| [016](adr/ADR-016-search.md)                           | OpenSearch برای جست‌وجو                        | Accepted | جست‌وجوی چندوجهی                     |
-| [017](adr/ADR-017-observability.md)                    | OpenTelemetry + Prometheus + Grafana           | Accepted | مشاهده‌پذیری                         |
-| [018](adr/ADR-018-monorepo.md)                         | Monorepo با pnpm + Turborepo                   | Accepted | ساختار Repository                    |
-| [019](adr/ADR-019-testing-stack.md)                    | Jest + @swc/jest + Testcontainers + Playwright | Accepted | راهبرد تست                           |
-| [020](adr/ADR-020-service-to-service-auth.md)          | احراز هویت سرویس‌به‌سرویس و Zero Trust         | Accepted | امنیت داخلی                          |
-| [021](adr/ADR-021-outbox-pattern.md)                   | Transactional Outbox                           | Accepted | **تضمین تحویل رویداد**               |
-| [022](adr/ADR-022-money-representation.md)             | نمایش پول با bigint و Basis Point              | Accepted | **دقت مالی**                         |
-| [023](adr/ADR-023-configurable-governance.md)          | حکمرانی پیکربندی‌پذیر                          | Accepted | **CONSTRAINT حقوقی سند محصول**       |
-| [024](adr/ADR-024-payment-abstraction.md)              | Abstraction پرداخت و Mock Provider             | Accepted | **CONSTRAINT مقرراتی سند محصول**     |
-| [025](adr/ADR-025-assignment-exclusivity.md)           | انحصار تخصیص و کنترل همروندی                   | Accepted | یکپارچگی داده عملیاتی، ایمنی         |
-| [026](adr/ADR-026-fleet-asset-boundary.md)             | مرز fleet ↔ asset و مالکیت در دسترس بودن       | Accepted | مرز سرویس، صحت معماری                |
-| [027](adr/ADR-027-maintenance-due-evaluation.md)       | ارزیابی سررسید نگهداری — مشتق در خواندن        | Accepted | صحت عملیاتی، ایمنی                   |
-| [028](adr/ADR-028-maintenance-cost-provenance.md)      | مبدأ هزینه نگهداری و درز اقتصادی               | Accepted | **یکپارچگی مالی، مرز سرویس**         |
-| [029](adr/ADR-029-maintenance-workshop-access.md)      | دسترسی تعمیرگاه و مجوزدهی سطح Object           | Accepted | **امنیت، ایمنی عملیاتی**             |
-| [030](adr/ADR-030-ledger-partitioning.md)              | پارتیشن‌بندی `ledger_entry` — موکول با شرط     | Accepted | یکپارچگی مالی، عملیات پایگاه داده    |
-| [031](adr/ADR-031-settlement-orchestration.md)         | هماهنگی تسویه بدون Temporal و بدون قفل Redis   | Accepted | **یکپارچگی مالی، همروندی**           |
-| [032](adr/ADR-032-economic-consumption-boundary.md)    | مرز مصرف رویداد در economic و مدل تعهد         | Accepted | **یکپارچگی مالی، مرز سرویس**         |
-| [033](adr/ADR-033-reward-monetisation.md)              | پولی‌سازی پاداش — امتیاز در برابر اعتبار       | Accepted | **CONSTRAINT حکمرانی، مالی**         |
-| [034](adr/ADR-034-escrow-account-ownership.md)         | مالکیت حساب امانی به‌ازای سازمان               | Accepted | **یکپارچگی مالی**                    |
-| [035](adr/ADR-035-signed-internal-tenant-context.md)   | Context مستأجر امضاشده برای فراخوان داخلی      | Accepted | **امنیت، جداسازی مستأجر**            |
-| [036](adr/ADR-036-economic-event-partition-keys.md)    | کلید پارتیشن رویدادهای اقتصادی                 | Accepted | **ترتیب رویداد مالی**                |
-| [037](adr/ADR-037-marketplace-aggregate-ownership.md)  | مالکیت Aggregate و مرزهای marketplace          | Accepted | مرز سرویس، مالکیت داده               |
-| [038](adr/ADR-038-order-lifecycle.md)                  | چرخه‌عمر سفارش — ماشین حالت صریح               | Accepted | **یکپارچگی مالی، صحت دامنه**         |
-| [039](adr/ADR-039-order-saga-temporal.md)              | هماهنگی سفارش با Temporal                      | Accepted | **نخستین Workflow واقعی پلتفرم**     |
-| [040](adr/ADR-040-marketplace-economic-boundary.md)    | مرز marketplace ↔ economic — فرمان، نه رویداد  | Accepted | **یکپارچگی مالی، مرز سرویس**         |
-| [041](adr/ADR-041-marketplace-missing-dependencies.md) | مرز موقت نبودِ supplier/inventory/notification | Accepted | **صداقت قرارداد**                    |
-| [042](adr/ADR-042-marketplace-search.md)               | جست‌وجو در PostgreSQL — OpenSearch موکول       | Accepted | تصمیم Stack                          |
-| [043](adr/ADR-043-order-timeout-policy.md)             | مهلت‌های سفارش — انقضا پول را حرکت نمی‌دهد     | Accepted | **یکپارچگی مالی، رضایت صریح**        |
-| [044](adr/ADR-044-target-service-topology.md)          | توپولوژی هدف ۲۲سرویسی و استخراج مرحله‌ای       | Accepted | نقشه راه معماری                      |
-| [045](adr/ADR-045-commission-business-lines.md)        | کارمزد اتحادیه بر پایه خط کسب‌وکار             | Accepted | **مدل درآمد، حسابرسی**               |
-| [046](adr/ADR-046-insurance-commercial-boundary.md)    | مرز تجاری بیمه و رسیدگی به خسارت               | Accepted | مرز سرویس، مالکیت داده               |
-| [047](adr/ADR-047-participation-reward-ranking.md)     | نظام مشارکت حرفه‌ای، پاداش و رتبه‌بندی         | Accepted | کیفیت داده، انصاف                    |
-| [048](adr/ADR-048-reverse-logistics-boundary.md)       | مرز لجستیک معکوس، مرجوعی و ضمانت               | Accepted | چرخه پس از تحویل                     |
-| [049](adr/ADR-049-malware-scanning-clamav.md)          | اسکن بدافزار با ClamAV خودمیزبان               | Accepted | **Fail-Closed، S-08، بستن Q-18**     |
-| [050](adr/ADR-050-outbox-durable-claim.md)             | Claim بادوام برای Outbox Relay                 | Accepted | **بستن D-026**، انتشار تکراری رویداد |
-| [051](adr/ADR-051-outbox-semantic-ordering.md)         | ترتیب معنایی هر جریان در Outbox                | Accepted | **D-027 (باز)**، بستن Q-36           |
-| [052](adr/ADR-052-supplier-performance-scoring.md)     | امتیاز عملکرد تأمین‌کننده                      | Accepted | **بستن Q-12**، Phase 2 پیاده نشده    |
+| ADR                                                      | عنوان                                          | وضعیت        | تأثیر                                |
+| -------------------------------------------------------- | ---------------------------------------------- | ------------ | ------------------------------------ |
+| [001](adr/ADR-001-microservices.md)                      | معماری Microservices                           | Accepted     | ساختار کل سیستم                      |
+| [002](adr/ADR-002-backend-stack.md)                      | TypeScript + NestJS                            | Accepted     | همه سرویس‌ها                         |
+| [003](adr/ADR-003-frontend-stack.md)                     | Next.js + React + Tailwind                     | Accepted     | هر دو Frontend                       |
+| [004](adr/ADR-004-database.md)                           | PostgreSQL + PostGIS + Prisma                  | Accepted     | لایه داده                            |
+| [005](adr/ADR-005-database-ownership.md)                 | مالکیت پایگاه داده به‌ازای سرویس               | Accepted     | **قاعده بنیادین**                    |
+| [006](adr/ADR-006-kafka.md)                              | Kafka به‌عنوان Event Backbone                  | Accepted     | همه ارتباط ناهمزمان                  |
+| [007](adr/ADR-007-redis.md)                              | Redis برای Cache، قفل و Rate Limit             | Accepted     | کارایی و همزمانی                     |
+| [008](adr/ADR-008-identity-keycloak.md)                  | Keycloak + OIDC/OAuth2                         | Accepted     | احراز هویت                           |
+| [009](adr/ADR-009-api-gateway.md)                        | API Gateway اختصاصی NestJS                     | Accepted     | **انحراف آگاهانه از Kong/APISIX**    |
+| [010](adr/ADR-010-workflow-temporal.md)                  | Temporal برای گردش‌کار                         | Accepted     | فرآیندهای بلندمدت                    |
+| [011](adr/ADR-011-multi-tenancy.md)                      | راهبرد Multi-Tenancy                           | Accepted     | **قاعده بنیادین امنیتی**             |
+| [012](adr/ADR-012-asset-centric.md)                      | مدل Asset-Centric و شناسه سراسری               | Accepted     | **قاعده بنیادین دامنه**              |
+| [013](adr/ADR-013-wallet-ledger.md)                      | تفکیک Wallet و Ledger؛ یک economic-service     | Accepted     | **یکپارچگی مالی**                    |
+| [014](adr/ADR-014-object-storage.md)                     | Object Storage سازگار با S3                    | Accepted     | مدیریت اسناد                         |
+| [015](adr/ADR-015-kubernetes.md)                         | Kubernetes + Helm                              | Accepted     | استقرار Production                   |
+| [016](adr/ADR-016-search.md)                             | OpenSearch برای جست‌وجو                        | Accepted     | جست‌وجوی چندوجهی                     |
+| [017](adr/ADR-017-observability.md)                      | OpenTelemetry + Prometheus + Grafana           | Accepted     | مشاهده‌پذیری                         |
+| [018](adr/ADR-018-monorepo.md)                           | Monorepo با pnpm + Turborepo                   | Accepted     | ساختار Repository                    |
+| [019](adr/ADR-019-testing-stack.md)                      | Jest + @swc/jest + Testcontainers + Playwright | Accepted     | راهبرد تست                           |
+| [020](adr/ADR-020-service-to-service-auth.md)            | احراز هویت سرویس‌به‌سرویس و Zero Trust         | Accepted     | امنیت داخلی                          |
+| [021](adr/ADR-021-outbox-pattern.md)                     | Transactional Outbox                           | Accepted     | **تضمین تحویل رویداد**               |
+| [022](adr/ADR-022-money-representation.md)               | نمایش پول با bigint و Basis Point              | Accepted     | **دقت مالی**                         |
+| [023](adr/ADR-023-configurable-governance.md)            | حکمرانی پیکربندی‌پذیر                          | Accepted     | **CONSTRAINT حقوقی سند محصول**       |
+| [024](adr/ADR-024-payment-abstraction.md)                | Abstraction پرداخت و Mock Provider             | Accepted     | **CONSTRAINT مقرراتی سند محصول**     |
+| [025](adr/ADR-025-assignment-exclusivity.md)             | انحصار تخصیص و کنترل همروندی                   | Accepted     | یکپارچگی داده عملیاتی، ایمنی         |
+| [026](adr/ADR-026-fleet-asset-boundary.md)               | مرز fleet ↔ asset و مالکیت در دسترس بودن       | Accepted     | مرز سرویس، صحت معماری                |
+| [027](adr/ADR-027-maintenance-due-evaluation.md)         | ارزیابی سررسید نگهداری — مشتق در خواندن        | Accepted     | صحت عملیاتی، ایمنی                   |
+| [028](adr/ADR-028-maintenance-cost-provenance.md)        | مبدأ هزینه نگهداری و درز اقتصادی               | Accepted     | **یکپارچگی مالی، مرز سرویس**         |
+| [029](adr/ADR-029-maintenance-workshop-access.md)        | دسترسی تعمیرگاه و مجوزدهی سطح Object           | Accepted     | **امنیت، ایمنی عملیاتی**             |
+| [030](adr/ADR-030-ledger-partitioning.md)                | پارتیشن‌بندی `ledger_entry` — موکول با شرط     | Accepted     | یکپارچگی مالی، عملیات پایگاه داده    |
+| [031](adr/ADR-031-settlement-orchestration.md)           | هماهنگی تسویه بدون Temporal و بدون قفل Redis   | Accepted     | **یکپارچگی مالی، همروندی**           |
+| [032](adr/ADR-032-economic-consumption-boundary.md)      | مرز مصرف رویداد در economic و مدل تعهد         | Accepted     | **یکپارچگی مالی، مرز سرویس**         |
+| [033](adr/ADR-033-reward-monetisation.md)                | پولی‌سازی پاداش — امتیاز در برابر اعتبار       | Accepted     | **CONSTRAINT حکمرانی، مالی**         |
+| [034](adr/ADR-034-escrow-account-ownership.md)           | مالکیت حساب امانی به‌ازای سازمان               | Accepted     | **یکپارچگی مالی**                    |
+| [035](adr/ADR-035-signed-internal-tenant-context.md)     | Context مستأجر امضاشده برای فراخوان داخلی      | Accepted     | **امنیت، جداسازی مستأجر**            |
+| [036](adr/ADR-036-economic-event-partition-keys.md)      | کلید پارتیشن رویدادهای اقتصادی                 | Accepted     | **ترتیب رویداد مالی**                |
+| [037](adr/ADR-037-marketplace-aggregate-ownership.md)    | مالکیت Aggregate و مرزهای marketplace          | Accepted     | مرز سرویس، مالکیت داده               |
+| [038](adr/ADR-038-order-lifecycle.md)                    | چرخه‌عمر سفارش — ماشین حالت صریح               | Accepted     | **یکپارچگی مالی، صحت دامنه**         |
+| [039](adr/ADR-039-order-saga-temporal.md)                | هماهنگی سفارش با Temporal                      | Accepted     | **نخستین Workflow واقعی پلتفرم**     |
+| [040](adr/ADR-040-marketplace-economic-boundary.md)      | مرز marketplace ↔ economic — فرمان، نه رویداد  | Accepted     | **یکپارچگی مالی، مرز سرویس**         |
+| [041](adr/ADR-041-marketplace-missing-dependencies.md)   | مرز موقت نبودِ supplier/inventory/notification | Accepted     | **صداقت قرارداد**                    |
+| [042](adr/ADR-042-marketplace-search.md)                 | جست‌وجو در PostgreSQL — OpenSearch موکول       | Accepted     | تصمیم Stack                          |
+| [043](adr/ADR-043-order-timeout-policy.md)               | مهلت‌های سفارش — انقضا پول را حرکت نمی‌دهد     | Accepted     | **یکپارچگی مالی، رضایت صریح**        |
+| [044](adr/ADR-044-target-service-topology.md)            | توپولوژی هدف ۲۲سرویسی و استخراج مرحله‌ای       | Accepted     | نقشه راه معماری                      |
+| [045](adr/ADR-045-commission-business-lines.md)          | کارمزد اتحادیه بر پایه خط کسب‌وکار             | Accepted     | **مدل درآمد، حسابرسی**               |
+| [046](adr/ADR-046-insurance-commercial-boundary.md)      | مرز تجاری بیمه و رسیدگی به خسارت               | Accepted     | مرز سرویس، مالکیت داده               |
+| [047](adr/ADR-047-participation-reward-ranking.md)       | نظام مشارکت حرفه‌ای، پاداش و رتبه‌بندی         | Accepted     | کیفیت داده، انصاف                    |
+| [048](adr/ADR-048-reverse-logistics-boundary.md)         | مرز لجستیک معکوس، مرجوعی و ضمانت               | Accepted     | چرخه پس از تحویل                     |
+| [049](adr/ADR-049-malware-scanning-clamav.md)            | اسکن بدافزار با ClamAV خودمیزبان               | Accepted     | **Fail-Closed، S-08، بستن Q-18**     |
+| [050](adr/ADR-050-outbox-durable-claim.md)               | Claim بادوام برای Outbox Relay                 | Accepted     | **بستن D-026**، انتشار تکراری رویداد |
+| [051](adr/ADR-051-outbox-semantic-ordering.md)           | ترتیب معنایی هر جریان در Outbox                | Accepted     | **D-027 (باز)**، بستن Q-36           |
+| [052](adr/ADR-052-supplier-performance-scoring.md)       | امتیاز عملکرد تأمین‌کننده                      | Accepted     | **بستن Q-12**، Phase 2 پیاده نشده    |
 | [053](adr/ADR-053-audit-service-append-only-evidence.md) | سرویس حسابرسی — شواهد فقط‌الحاقی               | **Proposed** | **بستن نقض S-06**، پیاده نشده        |
-| [054](adr/ADR-054-notification-service-delivery.md)    | سرویس اعلان — تحویل و ترجیحات                  | **Proposed** | Q-37 انتشار ایمیل را مسدود می‌کند    |
+| [054](adr/ADR-054-notification-service-delivery.md)      | سرویس اعلان — تحویل و ترجیحات                  | **Proposed** | Q-37 انتشار ایمیل را مسدود می‌کند    |
 
 ---
 
