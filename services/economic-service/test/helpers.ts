@@ -261,9 +261,14 @@ export async function readBalances(prisma: PrismaService, walletId: string) {
  * Removes everything the test tenants wrote.
  *
  * Ordered so a foreign key never blocks a delete, and the ledger triggers are
- * suspended for the duration — they exist to stop *the application* mutating
- * history, and a test fixture that could not clean up after itself would leave
- * every subsequent run reading someone else's rows.
+ * suspended for the three statements that need them off — they exist to stop
+ * *the application* mutating history, and a test fixture that could not clean
+ * up after itself would leave every subsequent run reading someone else's rows.
+ *
+ * Every statement here is bound to this run: by the organization prefixes the
+ * caller passes, or by the journal ids resolved from them. Nothing in this
+ * function may delete or alter a row it cannot show it owns —
+ * `isolation-controls.int-spec.ts` seeds a foreign tenant and proves it.
  */
 export async function cleanup(
   prisma: PrismaService,
@@ -284,124 +289,189 @@ export async function cleanup(
   const client = prisma.client;
 
   await runUnscoped('integration cleanup spans the tenants the suite created', async () => {
-    await client.$executeRawUnsafe(
-      'ALTER TABLE ledger_entry DISABLE TRIGGER trg_ledger_entry_immutable',
+    // The journals this run owns, resolved **before** anything is deleted.
+    //
+    // Two sources, because a journal and its legs need not name the same
+    // tenant: a settlement journal is filed under the organization that
+    // initiated it, while its legs belong to the payer, the payee and the
+    // platform. The union covers every journal this run is about to orphan
+    // and — this is the whole point — nothing else.
+    //
+    // The two journal deletes below used to carry **no predicate at all**:
+    // they removed every entry-less journal in the database. In a database
+    // every run shares, that is a
+    // concurrent run's ledger history, removed by a suite that never wrote
+    // it — and `journal` is the one table in this platform whose contents are
+    // supposed to be impossible to lose.
+    const ownedJournals = await client.$queryRawUnsafe<{ id: string }[]>(
+      `SELECT id FROM journal
+        WHERE organization_id LIKE ANY($1::text[])
+       UNION
+       SELECT DISTINCT journal_id AS id FROM ledger_entry
+        WHERE organization_id LIKE ANY($1::text[])`,
+      orgs,
     );
-    await client.$executeRawUnsafe('ALTER TABLE journal DISABLE TRIGGER trg_journal_immutable');
-    await client.$executeRawUnsafe('ALTER TABLE ledger_entry DISABLE TRIGGER trg_journal_balanced');
+    const journalIds = ownedJournals.map((row) => row.id);
 
-    try {
-      // Entries are removed by **journal**, never by organization.
-      //
-      // A settlement journal has legs belonging to the payer, the payee and the
-      // platform. Deleting only the legs whose organization is in this list
-      // leaves the journal behind with the rest of its legs — permanently
-      // unbalanced, and picked up by the "every journal balances" assertion in
-      // the next suite. That is exactly how this helper first failed.
-      await client.$executeRawUnsafe(
-        `DELETE FROM ledger_entry
-          WHERE journal_id IN (
-            SELECT DISTINCT journal_id FROM ledger_entry
-             WHERE organization_id LIKE ANY($1::text[])
-          )`,
-        orgs,
-      );
-      // Legs first, and by *transaction* rather than by organization: a leg
-      // belongs to the payer or the payee, so clearing by organization alone
-      // leaves the counterparty's leg behind and the foreign key then blocks
-      // the transaction delete.
-      await client.$executeRawUnsafe(
-        `DELETE FROM transaction_leg
-          WHERE transaction_id IN (
-            SELECT id FROM "transaction"
-             WHERE organization_id LIKE ANY($1::text[])
-                OR counterparty_organization_id LIKE ANY($1::text[])
-          )
-          OR organization_id LIKE ANY($1::text[])`,
-        orgs,
-      );
-
-      await client.$executeRawUnsafe(
-        `DELETE FROM settlement WHERE transaction_id IN (
-           SELECT id FROM "transaction"
-            WHERE organization_id LIKE ANY($1::text[])
-               OR counterparty_organization_id LIKE ANY($1::text[]))`,
-        orgs,
-      );
-      await client.$executeRawUnsafe(
-        `DELETE FROM commission WHERE transaction_id IN (
-           SELECT id FROM "transaction"
-            WHERE organization_id LIKE ANY($1::text[])
-               OR counterparty_organization_id LIKE ANY($1::text[]))`,
-        orgs,
-      );
-
-      for (const table of [
-        'settlement',
-        'commission',
-        'reward',
-        'reward_balance',
-        'payment_intent',
-        'wallet_hold',
-        'idempotency_key',
-      ]) {
-        await client.$executeRawUnsafe(
-          `DELETE FROM ${table} WHERE organization_id LIKE ANY($1::text[])`,
-          orgs,
+    // The three financial invariants are suspended for three statements, and
+    // inside one transaction.
+    //
+    // `ALTER TABLE ... DISABLE TRIGGER` is DDL: it takes ACCESS EXCLUSIVE, it
+    // is visible to **every** session, and it persists in the catalogue.
+    // Re-enabling in a `finally` covers a thrown assertion and nothing else —
+    // a SIGKILL, a Jest worker torn down on `testTimeout`, or a cancelled CI
+    // job (`ci.yml` sets `cancel-in-progress`, so cancellation is routine)
+    // all skip it, and the database is then left with ledger immutability
+    // off, silently, until someone re-runs migrations.
+    //
+    // A transaction has no such exit. Committing re-enables the triggers;
+    // dying rolls the catalogue change back. There is no path that ends with
+    // them disabled, which is a stronger statement than any `finally` can
+    // make. It also holds the ACCESS EXCLUSIVE lock *across* the disabled
+    // window rather than releasing it into it, so a concurrent
+    // `ledger-immutability.int-spec.ts` waits for the lock instead of
+    // observing a ledger it is able to rewrite — a false negative on the most
+    // important control in the platform.
+    //
+    // Everything that does not need the triggers off is kept outside, so the
+    // window is three statements rather than fifteen.
+    if (journalIds.length > 0) {
+      await prisma.transaction(async (tx) => {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE. It is bounded
+        // instead by this transaction, which reverts it on every exit path.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE ledger_entry DISABLE TRIGGER trg_ledger_entry_immutable',
         );
-      }
-      // Reversals first: `journal.reverses_id` is a self-referencing foreign
-      // key with ON DELETE RESTRICT, so a reversal has to go before the journal
-      // it points at.
-      await client.$executeRawUnsafe(
-        `DELETE FROM journal
-          WHERE reverses_id IS NOT NULL
-            AND id NOT IN (SELECT DISTINCT journal_id FROM ledger_entry)`,
-      );
-      await client.$executeRawUnsafe(
-        `DELETE FROM journal
-          WHERE id NOT IN (SELECT DISTINCT journal_id FROM ledger_entry)`,
-      );
-      await client.$executeRawUnsafe(
-        `DELETE FROM "transaction" WHERE organization_id LIKE ANY($1::text[])
-           OR counterparty_organization_id LIKE ANY($1::text[])`,
-        orgs,
-      );
-      await client.$executeRawUnsafe(
-        `DELETE FROM wallet WHERE organization_id LIKE ANY($1::text[])`,
-        orgs,
-      );
-      await client.$executeRawUnsafe(
-        `DELETE FROM ledger_account WHERE organization_id LIKE ANY($1::text[])`,
-        orgs,
-      );
-      await client.$executeRawUnsafe(
-        `DELETE FROM commission_rule
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe('ALTER TABLE journal DISABLE TRIGGER trg_journal_immutable');
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe('ALTER TABLE ledger_entry DISABLE TRIGGER trg_journal_balanced');
+
+        // Entries are removed by **journal**, never by organization.
+        //
+        // A settlement journal has legs belonging to the payer, the payee and
+        // the platform. Deleting only the legs whose organization is in this
+        // list leaves the journal behind with the rest of its legs —
+        // permanently unbalanced, and picked up by the "every journal
+        // balances" assertion in the next suite. That is exactly how this
+        // helper first failed.
+        await tx.$executeRawUnsafe(
+          `DELETE FROM ledger_entry WHERE journal_id = ANY($1::text[])`,
+          journalIds,
+        );
+        // Reversals first: `journal.reverses_id` is a self-referencing foreign
+        // key with ON DELETE RESTRICT, so a reversal has to go before the
+        // journal it points at.
+        //
+        // The `NOT IN` guard is kept as a safety net — a journal that somehow
+        // still has legs is left alone rather than dragged out from under
+        // them — but the delete is now bound to this run's own journal ids,
+        // which is what makes it safe in a database every run shares.
+        await tx.$executeRawUnsafe(
+          `DELETE FROM journal
+            WHERE id = ANY($1::text[])
+              AND reverses_id IS NOT NULL
+              AND id NOT IN (SELECT DISTINCT journal_id FROM ledger_entry)`,
+          journalIds,
+        );
+        await tx.$executeRawUnsafe(
+          `DELETE FROM journal
+            WHERE id = ANY($1::text[])
+              AND id NOT IN (SELECT DISTINCT journal_id FROM ledger_entry)`,
+          journalIds,
+        );
+
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE ledger_entry ENABLE TRIGGER trg_ledger_entry_immutable',
+        );
+        await tx.$executeRawUnsafe('ALTER TABLE journal ENABLE TRIGGER trg_journal_immutable');
+        await tx.$executeRawUnsafe('ALTER TABLE ledger_entry ENABLE TRIGGER trg_journal_balanced');
+      });
+    }
+
+    // Legs first, and by *transaction* rather than by organization: a leg
+    // belongs to the payer or the payee, so clearing by organization alone
+    // leaves the counterparty's leg behind and the foreign key then blocks
+    // the transaction delete.
+    await client.$executeRawUnsafe(
+      `DELETE FROM transaction_leg
+        WHERE transaction_id IN (
+          SELECT id FROM "transaction"
+           WHERE organization_id LIKE ANY($1::text[])
+              OR counterparty_organization_id LIKE ANY($1::text[])
+        )
+        OR organization_id LIKE ANY($1::text[])`,
+      orgs,
+    );
+
+    await client.$executeRawUnsafe(
+      `DELETE FROM settlement WHERE transaction_id IN (
+         SELECT id FROM "transaction"
           WHERE organization_id LIKE ANY($1::text[])
-             OR created_by = 'itest'
-             OR created_by LIKE 'USR-ITEST-%'`,
-        orgs,
-      );
-      await client.$executeRawUnsafe(
-        `DELETE FROM reward_rule
+             OR counterparty_organization_id LIKE ANY($1::text[]))`,
+      orgs,
+    );
+    await client.$executeRawUnsafe(
+      `DELETE FROM commission WHERE transaction_id IN (
+         SELECT id FROM "transaction"
           WHERE organization_id LIKE ANY($1::text[])
-             OR created_by = 'itest'
-             OR created_by LIKE 'USR-ITEST-%'`,
+             OR counterparty_organization_id LIKE ANY($1::text[]))`,
+      orgs,
+    );
+
+    for (const table of [
+      'settlement',
+      'commission',
+      'reward',
+      'reward_balance',
+      'payment_intent',
+      'wallet_hold',
+      'idempotency_key',
+    ]) {
+      await client.$executeRawUnsafe(
+        `DELETE FROM ${table} WHERE organization_id LIKE ANY($1::text[])`,
         orgs,
-      );
-      await client.$executeRawUnsafe(
-        `DELETE FROM outbox_message WHERE organization_id LIKE ANY($1::text[])`,
-        orgs,
-      );
-    } finally {
-      await client.$executeRawUnsafe(
-        'ALTER TABLE ledger_entry ENABLE TRIGGER trg_ledger_entry_immutable',
-      );
-      await client.$executeRawUnsafe('ALTER TABLE journal ENABLE TRIGGER trg_journal_immutable');
-      await client.$executeRawUnsafe(
-        'ALTER TABLE ledger_entry ENABLE TRIGGER trg_journal_balanced',
       );
     }
+    await client.$executeRawUnsafe(
+      `DELETE FROM "transaction" WHERE organization_id LIKE ANY($1::text[])
+         OR counterparty_organization_id LIKE ANY($1::text[])`,
+      orgs,
+    );
+    await client.$executeRawUnsafe(
+      `DELETE FROM wallet WHERE organization_id LIKE ANY($1::text[])`,
+      orgs,
+    );
+    await client.$executeRawUnsafe(
+      `DELETE FROM ledger_account WHERE organization_id LIKE ANY($1::text[])`,
+      orgs,
+    );
+    // Bound by organization alone.
+    //
+    // The `created_by = 'itest' OR created_by LIKE 'USR-ITEST-%'` disjuncts
+    // that used to be here were unbounded by organization *and* by run: they
+    // deleted every concurrent run's commission and reward rules too. A rule
+    // that vanishes mid-run reprices a transaction, and the suite that then
+    // fails is the one whose rule was taken, not the one that took it.
+    //
+    // Dropping them costs nothing, because no integration test in this
+    // service writes a rule without an organization: every `createRule` call
+    // passes one of the suite's own tenants, and the prefix below matches
+    // each of them. A platform-wide rule (`organization_id IS NULL`,
+    // ADR-023) is deliberately *not* matched — deleting one would be deleting
+    // governance configuration this suite did not write.
+    await client.$executeRawUnsafe(
+      `DELETE FROM commission_rule WHERE organization_id LIKE ANY($1::text[])`,
+      orgs,
+    );
+    await client.$executeRawUnsafe(
+      `DELETE FROM reward_rule WHERE organization_id LIKE ANY($1::text[])`,
+      orgs,
+    );
+    await client.$executeRawUnsafe(
+      `DELETE FROM outbox_message WHERE organization_id LIKE ANY($1::text[])`,
+      orgs,
+    );
   });
 }
 

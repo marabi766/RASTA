@@ -258,23 +258,117 @@ describe('a system actor', () => {
   // Upkeep with nothing to do
   // -------------------------------------------------------------------------
 
-  it('reports a zero outbox age when nothing is pending', async () => {
-    const store = new PrismaOutboxStore(prisma);
-
-    await runUnscoped('the suite publishes every pending row so the queue is empty', () =>
-      prisma.client.outboxMessage.updateMany({
-        where: { publishedAt: null },
-        data: { publishedAt: new Date() },
+  /** An unpublished outbox row, under whichever tenant is named. */
+  async function writeOutboxRow(organizationId: string): Promise<string> {
+    const rowId = `OBX_${ulid()}`;
+    await runUnscoped('the system-actor suite writes an outbox row directly', () =>
+      prisma.client.outboxMessage.create({
+        data: {
+          id: rowId,
+          aggregateType: 'Wallet',
+          aggregateId: `WLT_${rowId}`,
+          eventName: 'WALLET_OPENED',
+          eventVersion: 1,
+          topic: 'rasta.economic.v1',
+          partitionKey: `WLT_${rowId}`,
+          payload: { walletId: `WLT_${rowId}` },
+          headers: {},
+          organizationId,
+          correlationId: `system-itest-${rowId}`,
+        },
       }),
     );
+    return rowId;
+  }
 
-    // Zero rather than null: the gauge is scraped every fifteen seconds, and a
-    // null would render as a gap in a graph an operator reads as "the exporter
-    // is down" rather than "the queue is empty".
-    expect(await store.oldestPendingAgeSeconds()).toBe(0);
-    expect(await store.pendingCount()).toBe(0);
-    // The default retention, taken rather than passed.
-    expect(await store.purgePublished()).toBeGreaterThanOrEqual(0);
+  /**
+   * How many of exactly these rows are still outstanding.
+   *
+   * The predicate `pendingCount()` applies, narrowed to rows this test wrote.
+   * That narrowing exists only here: the production gauge is deliberately
+   * platform-wide, because the outbox is plumbing and a per-tenant backlog
+   * gauge would hide the outage it exists to reveal (ADR-006).
+   */
+  const pendingAmong = (ids: string[]) =>
+    runUnscoped('the suite counts its own pending rows', () =>
+      prisma.client.outboxMessage.count({ where: { id: { in: ids }, publishedAt: null } }),
+    );
+
+  /**
+   * The upkeep gauges, asserted over rows this test owns.
+   *
+   * What used to stand here stamped `published_at = now()` on **every**
+   * unpublished row in the database — no organization, no id list, no bound —
+   * and then asserted the global queue was empty. The rows were not sent to
+   * Kafka; they were simply made unclaimable, because `claimPendingSql`
+   * selects on `published_at IS NULL`. A concurrent or later suite waiting for
+   * one of those events then failed with a timeout naming the broker, which is
+   * a "message never arrived" diagnosis whose true cause was this line.
+   *
+   * The queue being globally empty was never a property of the code under
+   * test. It was a property of nobody else using the database. So the exact
+   * assertions are made about named rows, and the platform gauges get the
+   * bounds that genuinely hold — including a lower bound proved by a row this
+   * suite deliberately does not own.
+   */
+  it('publishes only the rows it owns, and reads the gauges over them', async () => {
+    const store = new PrismaOutboxStore(prisma);
+
+    // A row belonging to nobody in this run. It is the negative control: if
+    // the publish below is unbounded again, this row is the one that shows it.
+    const foreignOrg = `ORG-FOREIGN-CONTROL-${ulid().slice(-10)}`;
+    const foreignId = await writeOutboxRow(foreignOrg);
+
+    try {
+      const mine = [
+        await writeOutboxRow(org.a),
+        await writeOutboxRow(org.a),
+        await writeOutboxRow(org.b),
+      ];
+
+      expect(await pendingAmong(mine)).toBe(3);
+
+      // Exactly these ids. The relay is not involved — this test is about the
+      // gauges, and nothing here claims to have delivered anything.
+      await runUnscoped('the suite publishes the rows it created, by id', () =>
+        prisma.client.outboxMessage.updateMany({
+          where: { id: { in: mine } },
+          data: { publishedAt: new Date() },
+        }),
+      );
+
+      // Exact, because it names the rows.
+      expect(await pendingAmong(mine)).toBe(0);
+
+      // And the row this suite does not own is untouched: still there, still
+      // unpublished, still claimable by whoever wrote it.
+      const foreign = await runUnscoped('the suite reads the row it must not have touched', () =>
+        prisma.client.outboxMessage.findUnique({ where: { id: foreignId } }),
+      );
+      expect(foreign).not.toBeNull();
+      expect(foreign?.publishedAt).toBeNull();
+
+      // The platform gauge counts rows this suite does not own — which is the
+      // whole reason it cannot be asserted to be zero. One such row is pending
+      // right now, by construction, so this bound is exact rather than vacuous.
+      expect(await store.pendingCount()).toBeGreaterThanOrEqual(1);
+
+      // Zero rather than null, which is the property an operator depends on:
+      // the gauge is scraped every fifteen seconds and a null would render as
+      // a gap in a graph, read as "the exporter is down" rather than "the
+      // queue is empty". A number is what makes those two distinguishable.
+      const age = await store.oldestPendingAgeSeconds();
+      expect(age).not.toBeNull();
+      expect(Number.isFinite(age)).toBe(true);
+      expect(age).toBeGreaterThanOrEqual(0);
+
+      // The default retention, taken rather than passed.
+      expect(await store.purgePublished()).toBeGreaterThanOrEqual(0);
+    } finally {
+      await runUnscoped('the suite removes the control row it seeded', () =>
+        prisma.client.outboxMessage.deleteMany({ where: { id: foreignId } }),
+      );
+    }
   });
 
   it('finds a wallet whose three stored balances disagree with each other', async () => {
@@ -285,39 +379,66 @@ describe('a system actor', () => {
     // the reconciliation exists to notice. The audit must not depend on the
     // constraint being present — a dropped constraint is one of the things it
     // is there to catch.
-    await runUnscoped('the suite writes a row the constraint would refuse', async () => {
-      await prisma.client.$executeRawUnsafe(
-        'ALTER TABLE wallet DROP CONSTRAINT ck_wallet_balances',
+    //
+    // Three things about the recovery path, each of which was wrong here:
+    //
+    //   - The restore is in a `finally`. It used to run only after the
+    //     assertions below, so a failing assertion left the constraint off.
+    //   - The row is repaired *before* the constraint comes back, so the
+    //     constraint can be added fully validated. It used to be re-added
+    //     `NOT VALID` with the `VALIDATE` a separate statement further down —
+    //     enforced for new writes, not for existing rows — and a failure in
+    //     between left it permanently unvalidated. A later suite's
+    //     reconciliation then finds deviations it did not create.
+    //   - The definition restored is the **original** one. The old text
+    //     re-added only `available = ledger - pending` and silently dropped
+    //     the three `>= 0` clauses, so a suite that ran this test left the
+    //     database with a weaker invariant than the migration installed.
+    //
+    // Each half is one transaction, so a crash inside either rolls it back. A
+    // kill in the gap between them still leaves the constraint absent — that
+    // gap closes only with a per-run schema, and until then
+    // `isolation-controls.int-spec.ts` is what notices.
+    try {
+      await runUnscoped('the suite writes a row the constraint would refuse', () =>
+        prisma.transaction(async (tx) => {
+          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE. The row it
+          // exists for is named on the next line, and the `finally` below
+          // restores the constraint on every path out of this test.
+          await tx.$executeRawUnsafe('ALTER TABLE wallet DROP CONSTRAINT ck_wallet_balances');
+          await tx.$executeRawUnsafe(
+            `UPDATE wallet SET available_balance_minor = available_balance_minor + 7 WHERE id = $1`,
+            walletId,
+          );
+        }),
       );
-      try {
-        await prisma.client.$executeRawUnsafe(
-          `UPDATE wallet SET available_balance_minor = available_balance_minor + 7 WHERE id = $1`,
-          walletId,
-        );
-      } finally {
-        await prisma.client.$executeRawUnsafe(
-          `ALTER TABLE wallet ADD CONSTRAINT ck_wallet_balances
-             CHECK (available_balance_minor = ledger_balance_minor - pending_balance_minor)
-             NOT VALID`,
-        );
-      }
-    });
 
-    const audit = new LedgerBalanceAudit(wiring.walletRepository, wiring.ledger, testEnv());
-    const deviations = await audit.run();
+      const audit = new LedgerBalanceAudit(wiring.walletRepository, wiring.ledger, testEnv());
+      const deviations = await audit.run();
 
-    const found = deviations.find((row) => row.walletId === walletId);
-    expect(found?.kind).toBe('INTERNAL_INCONSISTENCY');
-
-    await runUnscoped('the suite restores the row and revalidates the constraint', async () => {
-      await prisma.client.$executeRawUnsafe(
-        `UPDATE wallet SET available_balance_minor = available_balance_minor - 7 WHERE id = $1`,
-        walletId,
+      const found = deviations.find((row) => row.walletId === walletId);
+      expect(found?.kind).toBe('INTERNAL_INCONSISTENCY');
+    } finally {
+      await runUnscoped('the suite restores the row and the constraint together', () =>
+        prisma.transaction(async (tx) => {
+          await tx.$executeRawUnsafe(
+            `UPDATE wallet SET available_balance_minor = available_balance_minor - 7 WHERE id = $1`,
+            walletId,
+          );
+          // ISOLATION-ALLOW-UNBOUNDED: the restore half of the DDL above,
+          // word for word as `20260828202043_init_economic` installs it.
+          await tx.$executeRawUnsafe(
+            `ALTER TABLE wallet ADD CONSTRAINT ck_wallet_balances
+               CHECK (
+                 "ledger_balance_minor"    >= 0 AND
+                 "pending_balance_minor"   >= 0 AND
+                 "available_balance_minor" >= 0 AND
+                 "available_balance_minor" = "ledger_balance_minor" - "pending_balance_minor"
+               )`,
+          );
+        }),
       );
-      await prisma.client.$executeRawUnsafe(
-        'ALTER TABLE wallet VALIDATE CONSTRAINT ck_wallet_balances',
-      );
-    });
+    }
   });
   it('supplies the currency when a caller that bypasses the schema omits it', async () => {
     // The Zod schema defaults `currency` at the HTTP boundary, so this branch
