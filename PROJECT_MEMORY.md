@@ -10,7 +10,26 @@
 > سرویس از حالت تمیز، تست زنده Auth/Tenant Isolation/Event Flow، و بررسی مستقیم
 > GitHub Actions.
 >
-> **آخرین به‌روزرسانی:** 2026-08-31 — **Q-18 بسته شد: ClamAV اسکنر بدافزار پلتفرم
+> **آخرین به‌روزرسانی:** 2026-09-07 — **بستهٔ تصمیم اعلان و حسابرسی: ADR-053 و ADR-054 نوشته شدند، هر دو `Proposed`.**
+>
+> شاخهٔ `docs/notification-audit-adrs` از `main` (`93b1873`). **هیچ کدی نوشته نشد؛ Diff فقط سند است.**
+> بازرسی مستقیم مخزن سه واقعیت را تثبیت کرد که برنامه‌ریزی بعدی باید بر آن‌ها بنشیند:
+>
+> ۱. **هیچ رکورد حسابرسی قابل Queryای در پلتفرم تولید نمی‌شود.** `AUDIT_TRAIL_TOPIC` در کل مخزن دقیقاً دو رخداد دارد
+> (تعریف در `envelope.ts:166` و صادرشدن در `index.ts:65`)؛ هیچ `schema.prisma` مدل حسابرسی ندارد؛ `services/audit-service/`
+> وجود ندارد. یعنی **`AGENTS.md` S-06 امروز توسط هر نُه سرویس Merge‌شده نقض می‌شود.** ADR-053 مسیر بستنش را تعیین می‌کند.
+>
+> ۲. **هیچ ارائه‌دهندهٔ ایمیل Production و هیچ هویت فرستنده‌ای انتخاب نشده** و تا امروز هیچ پرسش بازی پوششش نمی‌داد (Q-15
+> دربارهٔ پیامک است). اکنون **Q-37**. این **انتشار ایمیل واقعی** را مسدود می‌کند، نه پیاده‌سازی و نه نیمهٔ In-App را.
+>
+> ۳. **کامنت `insurance.service.ts:239-243` غلط است.** ادعا می‌کند تکرار هشدار «با Dedupe خودِ Outbox» جلوگیری می‌شود؛
+> `enqueueEvent` یک `create` ساده با ULID تازه می‌زند و `OutboxMessage` هیچ محدودیت یکتایی روی `(aggregateId, eventName)`
+> ندارد. Sweep هر ۶ ساعت روی پنجرهٔ ۳۰ روزه یعنی حدود **۱۲۰ `eventId` متمایز برای یک واقعیت**. ADR-054 Dedupe محتوامحور را
+> به همین دلیل یک الزام صحت می‌داند، نه یک سخت‌سازی.
+>
+> `COM-008` و `COM-009` هر دو `READY` با **۱۳ امتیاز** ماندند؛ `planning/backlog.json` و درصدهای پیشرفت دست نخوردند.
+>
+> **پیشین (2026-08-31):** **Q-18 بسته شد: ClamAV اسکنر بدافزار پلتفرم
 > است، و دانلود سند برای نخستین بار کار می‌کند.**
 >
 > شاخهٔ `feat/document-clamav-scanner` روی `main` (`3b4df26`) ساخته شد و
@@ -2818,7 +2837,32 @@ un\` — فایل‌های صفر-بایتی از نوع ReparsePoint که از
 
 ## ۲۵. Architecture Decisions
 
-**۳۴** ADR موجود (`docs/adr/ADR-001` تا `ADR-034`)، فهرست کامل در
+**به‌روزرسانی 2026-09-07 — ۵۴ ADR موجود (`ADR-001` تا `ADR-054`).** شمارش پایین‌تر در این بخش کهنه است و به فاز اقتصادی
+تعلق دارد؛ فهرست معتبر همیشه `docs/21-adr-list.md` است.
+
+دو ADR تازه، هر دو **`Proposed`** و هیچ‌کدام پیاده نشده:
+
+- **ADR-053 — سرویس حسابرسی، شواهد فقط‌الحاقی.** دو مسیر ورودی (Projector روی هر ده Topic دامنه‌ای + قرارداد صریح
+  `AUDIT_EVENT_RECORDED` روی `rasta.audit.trail.v1`)؛ فقط‌الحاقی با سه لایه (REVOKE، Trigger، زنجیرهٔ Hash به‌ازای
+  `(organizationId, ماه)`)؛ حسابرسی ردها از راه یک `security_event_outbox` محلی و ناهمزمان، پس مسیر مجوزدهی هرگز به
+  حسابرسی وابسته نمی‌شود؛ اصلاح فقط با رکورد جبرانی؛ بدون API نوشتن؛ امضای رمزنگارانه موکول، چون مدیریت کلید لازمش در این
+  مخزن وجود ندارد.
+- **ADR-054 — سرویس اعلان، تحویل و ترجیحات.** حل گیرنده از راه `GET /v1/users` با Token داخلی `SERVICE` و `org_id`
+  امضاشده، سپس **Snapshot**؛ Dedupe **محتوامحور** با باندبندی `daysRemaining` به `{30, 14, 7, 3, 1}`؛ نردبان ترجیحات با
+  سیاست اعلان الزامی بالای آن و رد صریح `422` به‌جای پذیرشِ خاموش؛ ساعات سکوت **تعویق** می‌اندازند نه حذف و `CRITICAL` از
+  آن‌ها عبور می‌کند؛ کانال پشت Port با Adapter توسعهٔ Mailpit.
+
+**آنچه ادعا نمی‌شود:** هیچ کدی نوشته نشده، هیچ ایمیلی ارسال نشده، هیچ رکورد حسابرسی وجود ندارد، و پوشش حسابرسی حتی پس از
+پیاده‌سازی **کامل نخواهد بود** — یک تغییر وضعیت که رویدادی منتشر نمی‌کند نامرئی می‌ماند تا جداگانه اصلاح شود.
+
+**یک تغییر مشترک که باید اتمیک و پیش از هر دو فرود بیاید:** ثبت هر دو سرویس در `.github/workflows/ci.yml`،
+`scripts/verify-outbox-claim-migration.mjs` و زنجیرهٔ `test:migration` در ریشهٔ `package.json`. `scripts/ci-image-matrix.mjs`
+مجموعهٔ منتظر را از `git ls-files services/*/Dockerfile` استخراج می‌کند و اگر ماتریس Workflow نخواند Job را می‌شکند، پس
+Dockerfile و ردیف ماتریسش نمی‌توانند جدا فرود بیایند. **آن PR در این Task ساخته نشد.**
+
+---
+
+**پیشین (فاز اقتصادی).** **۳۴** ADR موجود (`docs/adr/ADR-001` تا `ADR-034`)، فهرست کامل در
 `docs/21-adr-list.md`. پنج تای آخر از فاز اقتصادی‌اند: **۰۳۰** (پارتیشن‌بندی
 دفتر کل، موکول با شرط عددی)، **۰۳۱** (تسویه بدون Temporal و بدون Redis)،
 **۰۳۲** (مرز مصرف رویداد، و اینکه یک تأیید پول را حرکت نمی‌دهد)، **۰۳۳**
@@ -2873,14 +2917,21 @@ ADR-001 (Microservices)، ADR-004/005 (Database + Ownership)، ADR-006
 
 ## ۲۷. Not Yet Implemented
 
-> **به‌روزرسانی 2026-08-29.** `economic-service` از این فهرست خارج شد. باقی‌مانده:
-> `marketplace` · `procurement` · `supplier` · `inventory` · `construction` ·
-> `contract` · `notification` · `document` · `audit` · `analytics`، و هر دو
-> Frontend.
+> **به‌روزرسانی 2026-09-07.** فهرست پیشین کهنه بود: `marketplace`، `document` و `supplier` از آن زمان Merge شده‌اند.
+> **باقی‌ماندهٔ درست: `procurement` · `inventory` · `construction` · `contract` · `notification` · `audit` ·
+> `analytics`**، و هر دو Frontend.
+>
+> این تصحیح برای برنامه‌ریزی ADR-053 لازم بود: مجموعهٔ سرویس‌هایی که **امروز رویداد منتشر می‌کنند** تعیین می‌کند
+> Projector حسابرسی در روز نخست چه چیزی می‌تواند مصرف کند — **ده Topic دامنه‌ای و ۷۵ نام رویداد**، شمرده از ده مجموعهٔ
+> `*_EVENTS` در کد.
+>
+> **پیشین (2026-08-29):** `economic-service` از این فهرست خارج شد.
 
 - Frontend (`apps/web`, `apps/admin`) — پوشه خالی، هیچ خط کدی نیست
-- ۱۰ سرویس Backend باقی‌مانده (`marketplace, procurement, supplier, inventory,
-construction, contract, notification, document, audit, analytics`)
+- ۷ سرویس Backend باقی‌مانده: `procurement`، `inventory`، `construction`،
+  `contract`، `notification`، `audit`، `analytics`
+- `notification-service` و `audit-service` — تصمیم معماری‌شان ثبت شد (ADR-054 و
+  ADR-053، هر دو `Proposed`)؛ **هیچ کدی نوشته نشده**
 - E2E **Browser** (Playwright هست و ۳۷ سناریو API اجرا می‌شود؛ Project ‏`web`
   وقتی `apps/web` ساخته شود اضافه می‌شود — `tests/e2e/playwright.config.ts`)
 - `mission` و رویدادهای `MISSION_*` در fleet — عمداً موکول شد (ADR-026)
@@ -2934,7 +2985,27 @@ construction, contract, notification, document, audit, analytics`)
 
 ## ۲۹. Immediate Next Task
 
-### فاز اقتصادی — **READY_FOR_NEXT_PHASE**
+### به‌روزرسانی 2026-09-07 — گام بعدیِ توصیه‌شده
+
+**۱. PR ثبت مشترک (`chore/`، بدون Story Point، باید اتمیک باشد).** هر دو سرویس را در `.github/workflows/ci.yml`،
+`scripts/verify-outbox-claim-migration.mjs` و زنجیرهٔ `test:migration` ثبت می‌کند و دو پوشهٔ خالی سرویس با Dockerfile
+می‌سازد. **در این Task ساخته نشد** و باید پیش از هر شاخهٔ Feature فرود بیاید، وگرنه دو شاخه در یک Script گیت‌کنندهٔ Build
+تصادم می‌کنند.
+
+**۲. `COM-009` (`audit-service`) نخست.** سه دلیل، همه از خود مخزن: S-06 امروز برآورده نمی‌شود و این آن را می‌بندد؛
+حسابرسی هیچ وابستگی بیرونی ندارد؛ و حسابرسی وابستهٔ هیچ‌چیز نیست، پس ساختنش کار پایین‌دستی تحمیل نمی‌کند. برنامه در
+[ADR-053 implementation plan](docs/adr/ADR-053-implementation-plan.md).
+
+**۳. `COM-008` (`notification-service`) موازی، در شاخهٔ جدا.** پس از گام ثبت مشترک، دو دامنه هیچ جدول، Topic، گروه
+مصرف‌کننده یا مفهوم مشترکی ندارند. برنامه در
+[ADR-054 implementation plan](docs/adr/ADR-054-implementation-plan.md).
+
+**پیش از پذیرش، دو پاسخ محصول لازم است:** Q-38 (بازنویسی اعلان الزامی) پیش از پذیرش داستان ترجیحات، و Q-37
+(ارائه‌دهندهٔ ایمیل) پیش از هرگونه انتشار ایمیل واقعی.
+
+---
+
+### پیشین — فاز اقتصادی — **READY_FOR_NEXT_PHASE**
 
 > **این بخش پیش‌تر `READY_FOR_NEXT_PHASE` می‌گفت در حالی که `tests/e2e` پوشه‌ای
 > خالی بود و `AGENTS.md` § ۷ برای این دامنه E2E سبز می‌خواهد.** آن شکاف بسته

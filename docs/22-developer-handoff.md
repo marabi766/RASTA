@@ -170,7 +170,7 @@ async archive(
    ├─ Handler با درج processed_event برای Idempotency
    └─ پردازش در همان تراکنش
 
-۴. docs/events/catalog.md — Producer، Consumer، Schema، Retry، DLQ
+۴. docs/events/README.md — Producer، Consumer، Schema، Retry، DLQ
 
 ۵. تست قرارداد — Payload تولیدشده با Schema مطابقت دارد
 ۶. تست Idempotency — پردازش دو باره اثر دوم ندارد
