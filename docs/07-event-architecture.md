@@ -274,7 +274,7 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 ## ۷٫۹ کاتالوگ رویدادها
 
 > فهرست کامل با Schema، Producer، Consumer، ترتیب، Retry و DLQ:
-> [`events/catalog.md`](events/catalog.md)
+> [`events/README.md`](events/README.md)
 
 ### Identity · Organization
 

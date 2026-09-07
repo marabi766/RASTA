@@ -274,7 +274,7 @@ mkdir -p services/<name>-service/{src,prisma,test}
 - [ ] Topic در `infrastructure/docker/kafka/create-topics.sh`
 - [ ] `DATABASE_URL_<NAME>` و `PORT_<NAME>` در `.env.example`
 - [ ] سرویس در `docs/04-service-decomposition.md`
-- [ ] رویدادها در `docs/events/catalog.md`
+- [ ] رویدادها در `docs/events/README.md`
 - [ ] ورودی در جدول Service Map در `CLAUDE.md`
 - [ ] ماژول Health، ماژول Outbox، مصرف‌کننده Kafka
 - [ ] **تست Tenant Isolation** پیش از نخستین Endpoint
