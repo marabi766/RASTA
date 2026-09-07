@@ -1,6 +1,15 @@
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
-import { asActor, cleanup, fundWallet, newPrisma, tenants, wire, type Wiring } from './helpers';
+import {
+  asActor,
+  cleanup,
+  fundWallet,
+  newPrisma,
+  PLATFORM_ORGANIZATION_ID,
+  tenants,
+  wire,
+  type Wiring,
+} from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -433,5 +442,96 @@ describe('the economic suite mutates only what it owns', () => {
     } finally {
       await cleanup(prisma, [foreign]);
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // The cleanup contract itself.
+  //
+  // These are about the *arguments* `cleanup` accepts, not about which rows it
+  // reaches. F-07 above stays open and stays failing-by-documentation: a
+  // well-formed identifier naming a tenant this run does not own still passes
+  // every check below.
+  // ---------------------------------------------------------------------------
+
+  it('refuses an organization identifier that is undefined or empty', async () => {
+    // `wallet-races.int-spec.ts` passed `org.platform`, which `tenants()` here
+    // does not return. `${id}%` turned that `undefined` into the LIKE prefix
+    // `'undefined%'` — a term matching nothing, added to the delete predicate
+    // in silence. `@swc/jest` strips types without checking them, so the run
+    // reported nothing at all.
+    const cases: { label: string; ids: unknown[] }[] = [
+      { label: 'undefined', ids: [org.a, undefined] },
+      { label: 'a missing property', ids: [(tenants() as Record<string, unknown>).platform] },
+      { label: 'an empty string', ids: [''] },
+      { label: 'whitespace only', ids: ['   '] },
+      { label: 'null', ids: [null] },
+    ];
+
+    for (const { label, ids } of cases) {
+      await expect(
+        // JUSTIFIED-ANY: the point of the check is what happens when a caller
+        // supplies something the signature already forbids, which is exactly
+        // what the untyped suites did.
+        cleanup(prisma, ids as string[]),
+      ).rejects.toThrow(/invalid organization identifier/i);
+    }
+
+    // The message names the position, so a caller with five arguments is told
+    // which one — the diagnostic the original defect never produced.
+    await expect(cleanup(prisma, [org.a, undefined as unknown as string])).rejects.toThrow(/\[1\]/);
+  });
+
+  it('rejects before deleting anything', async () => {
+    // A guard that threw halfway through would be worse than none: the suite
+    // would see an error and the database would have lost part of a tenant.
+    await seedTenant(org.c);
+
+    const countJournals = () =>
+      runUnscoped('the control counts the seeded tenant’s journals', () =>
+        prisma.client.journal.count({ where: { organizationId: org.c } }),
+      );
+
+    const before = await countJournals();
+    expect(before).toBeGreaterThan(0);
+
+    await expect(cleanup(prisma, [org.c, undefined as unknown as string])).rejects.toThrow(
+      /invalid organization identifier/i,
+    );
+
+    expect(await countJournals()).toBe(before);
+
+    // And the same tenant cleans normally once the argument is valid, so the
+    // guard is refusing the argument rather than the tenant.
+    await cleanup(prisma, [org.c]);
+    expect(await countJournals()).toBe(0);
+  });
+
+  it('still cleans the canonical platform tenant without being passed it', async () => {
+    // The argument removed from `wallet-races` was never what cleaned the
+    // platform organization — `cleanup` appends `PLATFORM_ORGANIZATION_ID`
+    // itself. This is the assertion that removing it took nothing away.
+    //
+    // `fundWallet` credits against `PAYMENT_CLEARING`, which `ownerOf` maps to
+    // the platform organization, so the top-up journal below has a leg under
+    // `ORG-ITEST-PLATFORM` and none of this run's own tenants.
+    const tenant = `${org.a}-PLATFORM-LEG`;
+    await fundWallet(wiring, tenant, 30_000n);
+
+    const platformLegsBefore = await runUnscoped('the control counts the platform legs', () =>
+      prisma.client.ledgerEntry.count({
+        where: { organizationId: PLATFORM_ORGANIZATION_ID, journal: { organizationId: tenant } },
+      }),
+    );
+    expect(platformLegsBefore).toBeGreaterThan(0);
+
+    // Note the argument list: this run's tenant, and nothing else.
+    await cleanup(prisma, [tenant]);
+
+    const platformLegsAfter = await runUnscoped('the control counts them again', () =>
+      prisma.client.ledgerEntry.count({
+        where: { organizationId: PLATFORM_ORGANIZATION_ID, journal: { organizationId: tenant } },
+      }),
+    );
+    expect(platformLegsAfter).toBe(0);
   });
 });
