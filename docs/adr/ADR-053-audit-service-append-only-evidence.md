@@ -4,7 +4,7 @@
 - **تاریخ:** 2026-09-07
 - **اهمیت:** امروز هیچ رکورد حسابرسی قابل Queryای در پلتفرم تولید نمی‌شود؛ این ADR مسیر بستن یک نقض ایستادهٔ `AGENTS.md` S-06 را تعیین می‌کند.
 - **مربوط به:** `COM-009` (`READY`، ۱۳ امتیاز — **بدون تغییر**)
-- **پیش‌نیاز:** [ADR-005](ADR-005-database-ownership.md) · [ADR-011](ADR-011-multi-tenancy.md) · [ADR-020](ADR-020-service-to-service-auth.md) · [ADR-021](ADR-021-outbox-pattern.md) · [ADR-030](ADR-030-ledger-partitioning.md) · [ADR-050](ADR-050-outbox-durable-claim.md) · [ADR-051](ADR-051-outbox-semantic-ordering.md)
+- **پیش‌نیاز:** [ADR-005](ADR-005-database-ownership.md) · [ADR-011](ADR-011-multi-tenancy.md) · [ADR-013](ADR-013-wallet-ledger.md) · [ADR-020](ADR-020-service-to-service-auth.md) · [ADR-021](ADR-021-outbox-pattern.md) · [ADR-030](ADR-030-ledger-partitioning.md) · [ADR-050](ADR-050-outbox-durable-claim.md) · [ADR-051](ADR-051-outbox-semantic-ordering.md)
 - **همراه:** [ADR-054](ADR-054-notification-service-delivery.md) — سرویس اعلان. دو سرویس، دو پایگاه داده، دو Topic. هیچ ماژول یا پایگاه دادهٔ مشترکی.
 - **برنامهٔ اجرا:** [ADR-053 implementation plan](ADR-053-implementation-plan.md)
 
@@ -23,7 +23,7 @@
 | ۱   | **دو مسیر ورودی** — Projector روی ده Topic دامنه‌ای، به‌علاوهٔ قرارداد صریح `rasta.audit.trail.v1` |
 | ۲   | **فقط‌الحاقی با سه لایه** — REVOKE سطح PostgreSQL، Trigger، و زنجیرهٔ Hash                         |
 | ۳   | **حسابرسیِ ردها بدون قرار گرفتن حسابرسی روی مسیر مجوزدهی** — Outbox محلیِ رد، ناهمزمان             |
-| ۴   | **اصلاح فقط با رکورد جبرانی** — همان انضباطی که ADR-006/A-06 به دفتر کل تحمیل می‌کند               |
+| ۴   | **اصلاح فقط با رکورد جبرانی** — همان انضباطی که ADR-013/A-06 به دفتر کل تحمیل می‌کند               |
 | ۵   | **بدون API نوشتن** — تنها مسیر نوشتن، مصرف Kafka است                                               |
 
 **و یک محدودیت که پنهان نمی‌شود:** مسیر A هر رویداد **منتشرشده** را ثبت می‌کند. یک تغییر وضعیت که هیچ رویدادی منتشر نمی‌کند،
@@ -307,7 +307,7 @@ actorId      = <انسانی که اصلاح را دستور داد>
 ```
 
 خواندن، اصل **و** اصلاحیه‌هایش را برمی‌گرداند؛ API میدان‌های `correctionOf` و `correctedBy[]` را نمایان می‌کند تا کلاینت بتواند
-زنجیره را نمایش دهد. همان انضباطی که ADR-006/A-06 از پیش بر دفتر کل تحمیل می‌کنند — «اصلاح فقط با Reversal Entry» — این‌بار بر
+زنجیره را نمایش دهد. همان انضباطی که ADR-013/A-06 از پیش بر دفتر کل تحمیل می‌کنند — «اصلاح فقط با Reversal Entry» — این‌بار بر
 شواهد به‌جای پول، به همان دلیل.
 
 اصلاح **فقط `SYSTEM_ADMIN`** است و خودش حسابرسی می‌شود. اصلاحی که بی‌ردپا ممکن باشد، همان `UPDATE`ای است که § ۶ برای منعش سه
