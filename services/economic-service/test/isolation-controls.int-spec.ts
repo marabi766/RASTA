@@ -160,24 +160,52 @@ describe('the economic suite mutates only what it owns', () => {
     });
   }
 
-  it('leaves another organization’s rows exactly where they were', async () => {
+  it('removes the rows it is given and leaves another organization’s alone', async () => {
+    // Both directions in one case, on purpose.
+    //
+    // A cleanup that deleted nothing at all would satisfy every "the foreign
+    // rows survived" assertion perfectly, so the positive half is not optional.
+    // And the negative half is only evidence if the destructive path actually
+    // ran: `cleanup` resolves the journals it owns first and skips the whole
+    // trigger-disabled transaction when there are none, so a foreign journal
+    // seeded against an empty suite would survive a delete that never
+    // executed. Seeding both tenants is what makes the two halves the same
+    // run of the same code.
     const foreign = foreignTenant();
-    const seeded = await seedTenant(foreign);
+    const mine = `${org.a}-CONTROL`;
+
+    const theirs = await seedTenant(foreign);
+    const ours = await seedTenant(mine);
 
     try {
-      const before = await census(foreign, seeded);
+      const before = await census(foreign, theirs);
       expect(before.wallets).toBe(1);
       expect(before.entryLessJournal).toBe(1);
       expect(before.commissionRules).toBe(1);
       expect(before.rewardRules).toBe(1);
       expect(before.entries).toBeGreaterThan(0);
+      expect((await census(mine, ours)).wallets).toBe(1);
 
       // The suite's own tenants, and only those — exactly what every
       // `afterAll` in this directory passes. The foreign tenant is never
       // named, and shares no prefix with any of them.
       await cleanup(prisma, [org.a, org.b, org.c]);
 
-      const after = await census(foreign, seeded);
+      // Positive: what it was given is gone, so the scoping did not turn the
+      // function off.
+      const ourAfter = await census(mine, ours);
+      expect(ourAfter).toEqual({
+        wallets: 0,
+        accounts: 0,
+        journals: 0,
+        entryLessJournal: 0,
+        entries: 0,
+        commissionRules: 0,
+        rewardRules: 0,
+      });
+
+      // Negative: what it was not given is untouched, down to the counts.
+      const after = await census(foreign, theirs);
       expect(after).toEqual(before);
 
       // The row the outbox publish used to reach: still there, and still
@@ -185,7 +213,7 @@ describe('the economic suite mutates only what it owns', () => {
       // so this assertion is about an event that would otherwise be lost
       // rather than merely a row that would be changed.
       const outbox = await runUnscoped('the control reads its outbox row', () =>
-        prisma.client.outboxMessage.findUnique({ where: { id: seeded.outboxId } }),
+        prisma.client.outboxMessage.findUnique({ where: { id: theirs.outboxId } }),
       );
       expect(outbox).not.toBeNull();
       expect(outbox?.publishedAt).toBeNull();
@@ -194,7 +222,7 @@ describe('the economic suite mutates only what it owns', () => {
       // delete across every tenant. The author here matches `USR-ITEST-%`
       // exactly, so this fails if either disjunct comes back.
       const rules = await runUnscoped('the control reads its rules by author', () =>
-        prisma.client.commissionRule.count({ where: { createdBy: seeded.author } }),
+        prisma.client.commissionRule.count({ where: { createdBy: theirs.author } }),
       );
       expect(rules).toBe(1);
     } finally {
@@ -212,36 +240,16 @@ describe('the economic suite mutates only what it owns', () => {
     expect(before.constraints).toHaveLength(1);
     expect(before.constraints[0]?.convalidated).toBe(true);
 
-    await cleanup(prisma, [org.a, org.b, org.c]);
-
-    const after = await integrityControls();
-    expect(after).toEqual(before);
-  });
-
-  it('still removes the rows it is given', async () => {
-    // The control on the controls. Every assertion above is satisfied by a
-    // `cleanup` that does nothing at all, and a cleanup that quietly stopped
-    // working would leave a shared database filling with debris from every
-    // run — which is the problem the function was written to solve.
-    const mine = `${org.c}-CONTROL`;
-    const seeded = await seedTenant(mine);
-
-    expect((await census(mine, seeded)).wallets).toBe(1);
+    // Seeded so the cleanup below has journals to delete. Without them it
+    // takes the early exit and never opens the transaction that disables the
+    // triggers — and a control that asserts the triggers survive a statement
+    // that did not run has proved nothing.
+    const mine = `${org.b}-CONTROL`;
+    await seedTenant(mine);
 
     await cleanup(prisma, [mine]);
 
-    const after = await census(mine, seeded);
-    expect(after.wallets).toBe(0);
-    expect(after.accounts).toBe(0);
-    expect(after.journals).toBe(0);
-    expect(after.entryLessJournal).toBe(0);
-    expect(after.entries).toBe(0);
-    expect(after.commissionRules).toBe(0);
-    expect(after.rewardRules).toBe(0);
-
-    const outbox = await runUnscoped('the control reads its outbox row', () =>
-      prisma.client.outboxMessage.findUnique({ where: { id: seeded.outboxId } }),
-    );
-    expect(outbox).toBeNull();
+    const after = await integrityControls();
+    expect(after).toEqual(before);
   });
 });
