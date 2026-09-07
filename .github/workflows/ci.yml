@@ -555,6 +555,33 @@ jobs:
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
 
+      - name: Test independence (F-25)
+        # Runs every test in maintenance's event-flow suite on its own and
+        # requires it to pass alone.
+        #
+        # The step above this one re-runs single tests by name
+        # (`--testNamePattern`), and that is only meaningful if a test selected
+        # by name still has the state it asserts against. Five of the eight
+        # tests in that file did not: they read rows an earlier `it()` had
+        # written, so the file passed whole while `jest -t` failed four of them
+        # with `findFirstOrThrow` raising "No record was found for a query" — a
+        # message that names the query and says nothing about the missing
+        # setup. That is F-25.
+        #
+        # A prose comment saying "each test must own its state" would not have
+        # caught the regression, because the file kept passing. This executes
+        # the claim instead: the script runs the file whole, takes the test
+        # names from that run rather than from the source, and re-runs each one
+        # alone, failing if a name selects zero tests or more than one.
+        #
+        # Scoped to the one file the defect was found in. Widening it is a
+        # deliberate act, not a default, because each name costs a jest start.
+        run: pnpm run test:independence
+        env:
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
+
       - name: Tenant isolation and authorization tests
         # Called out separately from the rest of the suite so a failure names
         # itself in the job list. A tenant-isolation failure is a data leak,
