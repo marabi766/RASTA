@@ -1,6 +1,6 @@
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
-import { asActor, cleanup, newPrisma, tenants, wire, type Wiring } from './helpers';
+import { asActor, cleanup, ITEST_ACTOR, newPrisma, tenants, wire, type Wiring } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -29,16 +29,24 @@ describe('reward lifecycle', () => {
 
   const org = tenants();
   /**
-   * Prefixed `USR-ITEST-` deliberately.
+   * Built from `ITEST_ACTOR` deliberately, and the reason is the same one the
+   * fixed `USR-ITEST-REWARD-LIFECYCLE` was written for — with the half that
+   * was missing.
    *
-   * A platform-wide rule has `organization_id = NULL`, so `cleanup` cannot
-   * find it by tenant — it matches `created_by LIKE 'USR-ITEST-%'` instead.
-   * Without that prefix this suite would leave an active platform-wide reward
-   * rule behind on every run, and it would grant points in every later suite:
-   * exactly the debris the helper's own comment says once made a leftover
-   * commission rule reprice another test.
+   * A platform-wide rule has `organization_id = NULL` (ADR-023), so `cleanup`
+   * cannot find it by tenant and matches the author instead. Without a
+   * recognisable author this suite leaves an active platform-wide reward rule
+   * behind on every run, and it grants points in every later suite: the debris
+   * the helper's own comment says once made a leftover commission rule reprice
+   * another test.
+   *
+   * The author has to be unique to the **run** as well as to this suite. The
+   * old fixed string was matched as `created_by LIKE 'USR-ITEST-%'`, which
+   * cleaned this rule and every concurrent run's governance rules with it.
+   * `ITEST_ACTOR` carries the run tag, so the match is narrow in both
+   * directions — and `isolation-controls.int-spec.ts` proves both.
    */
-  const USER = 'USR-ITEST-REWARD-LIFECYCLE';
+  const USER = `${ITEST_ACTOR}-REWARD-LIFECYCLE`;
 
   const asAdmin = <T>(fn: () => Promise<T>, organizationId = org.a): Promise<T> =>
     asActor({ organizationId, roles: ['SYSTEM_ADMIN'], userId: USER }, fn);

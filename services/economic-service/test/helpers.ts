@@ -28,6 +28,36 @@ import type { Logger } from '@rasta/logging';
 
 export const PLATFORM_ORGANIZATION_ID = 'ORG-ITEST-PLATFORM';
 
+/**
+ * One identifier per run, minted when this module is first loaded.
+ *
+ * It exists for the rows that carry no organization at all. A commission or
+ * reward rule may be **platform-wide** (`organization_id IS NULL`, ADR-023),
+ * which is the whole point of it — a rule that applies to every tenant — and
+ * `organization_id LIKE ANY(...)` cannot match NULL. So the tenant prefixes
+ * `cleanup` is given cannot reach a platform-wide rule, and a run that left one
+ * behind would reprice or re-grant in every run after it. `reward-lifecycle`
+ * writes one deliberately, and a leaked one made `consumers` and
+ * `reward-lifecycle` grant three rewards where the test expects two.
+ *
+ * The author is what identifies those rows, and it has to be unique to the
+ * run: matching `created_by LIKE 'USR-ITEST-%'` — which is what stood here —
+ * deletes every *concurrent* run's governance rules too.
+ *
+ * Jest gives each test file its own module registry, so this is per file,
+ * which is the scope `cleanup` is called at.
+ */
+export const RUN_TAG = ulid().slice(-10);
+
+/**
+ * The author every actor in this run writes, unless a test names its own.
+ *
+ * A test that does name its own should build it from this, so its rules are
+ * still recognisable as this run's — `reward-lifecycle.int-spec.ts` is the
+ * worked example.
+ */
+export const ITEST_ACTOR = `USR-ITEST-${RUN_TAG}`;
+
 export function databaseUrl(): string {
   const url = process.env.DATABASE_URL ?? process.env.DATABASE_URL_ECONOMIC;
   if (!url) {
@@ -192,7 +222,7 @@ export function asActor<T>(options: ActorOptions, fn: () => Promise<T>): Promise
     correlationId: `itest-${ulid()}`,
     requestId: `itest-${ulid()}`,
     organizationId: options.organizationId,
-    userId: options.userId ?? `USR-ITEST-${ulid().slice(-8)}`,
+    userId: options.userId ?? `${ITEST_ACTOR}-${ulid().slice(-8)}`,
     roles: options.roles ?? ['ORGANIZATION_ADMIN'],
     authType: options.authType ?? 'USER',
     startedAt: Date.now(),
@@ -446,27 +476,40 @@ export async function cleanup(
       `DELETE FROM ledger_account WHERE organization_id LIKE ANY($1::text[])`,
       orgs,
     );
-    // Bound by organization alone.
+    // Bound by organization, or by this run's author.
     //
-    // The `created_by = 'itest' OR created_by LIKE 'USR-ITEST-%'` disjuncts
-    // that used to be here were unbounded by organization *and* by run: they
-    // deleted every concurrent run's commission and reward rules too. A rule
-    // that vanishes mid-run reprices a transaction, and the suite that then
-    // fails is the one whose rule was taken, not the one that took it.
+    // What stood here was `created_by = 'itest' OR created_by LIKE
+    // 'USR-ITEST-%'`, unbounded by organization *and* by run: it deleted every
+    // concurrent run's commission and reward rules too. A rule that vanishes
+    // mid-run reprices a transaction, and the suite that then fails is the one
+    // whose rule was taken, not the one that took it.
     //
-    // Dropping them costs nothing, because no integration test in this
-    // service writes a rule without an organization: every `createRule` call
-    // passes one of the suite's own tenants, and the prefix below matches
-    // each of them. A platform-wide rule (`organization_id IS NULL`,
-    // ADR-023) is deliberately *not* matched — deleting one would be deleting
-    // governance configuration this suite did not write.
+    // The author disjunct cannot simply be dropped, though, and this is the
+    // part that is easy to get wrong — it was got wrong here first. These two
+    // tables are the only ones in the service where `organization_id` is
+    // **nullable**: a platform-wide rule (ADR-023) applies to every tenant and
+    // is stored with no tenant at all. `organization_id LIKE ANY(...)` does not
+    // match NULL, so the prefixes above cannot reach one, and a leaked
+    // platform-wide reward rule grants points in every run that follows —
+    // which is exactly what CI caught, as a third reward in two suites that
+    // expected two.
+    //
+    // So the disjunct stays and is bound to the run instead, which is what
+    // `ITEST_ACTOR` exists for.
+    const author = `${ITEST_ACTOR}-%`;
     await client.$executeRawUnsafe(
-      `DELETE FROM commission_rule WHERE organization_id LIKE ANY($1::text[])`,
+      `DELETE FROM commission_rule
+        WHERE organization_id LIKE ANY($1::text[])
+           OR created_by LIKE $2`,
       orgs,
+      author,
     );
     await client.$executeRawUnsafe(
-      `DELETE FROM reward_rule WHERE organization_id LIKE ANY($1::text[])`,
+      `DELETE FROM reward_rule
+        WHERE organization_id LIKE ANY($1::text[])
+           OR created_by LIKE $2`,
       orgs,
+      author,
     );
     await client.$executeRawUnsafe(
       `DELETE FROM outbox_message WHERE organization_id LIKE ANY($1::text[])`,

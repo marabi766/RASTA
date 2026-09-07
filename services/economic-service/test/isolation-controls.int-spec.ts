@@ -321,6 +321,66 @@ describe('the economic suite mutates only what it owns', () => {
   });
 
   /**
+   * The rules that carry no tenant at all, in both directions.
+   *
+   * `commission_rule` and `reward_rule` are the only tables here whose
+   * `organization_id` is nullable: a platform-wide rule (ADR-023) applies to
+   * every tenant and is stored with none. So neither direction is covered by
+   * anything above — the tenant prefixes cannot match NULL, and this is the
+   * case that would have caught the regression CI found, where dropping the
+   * author predicate outright left a platform-wide reward rule behind and it
+   * granted points in every run that followed.
+   *
+   * Both halves matter and they pull against each other, which is why the old
+   * predicate was wrong in the first place: matching `USR-ITEST-%` cleaned this
+   * run's rule and every concurrent run's with it.
+   */
+  it('removes its own platform-wide rules, and only its own', async () => {
+    // Ours: authored by this run, no organization.
+    const ours = await asActor({ organizationId: org.a }, () =>
+      wiring.rewards.createRule({
+        triggerEvent: 'USAGE_RECORDED',
+        points: 9,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any),
+    );
+
+    // Theirs: the same shape, authored the way a *different* run's actor would
+    // author it — `USR-ITEST-…`, which is exactly what the old predicate
+    // matched on and took.
+    const theirs = await asActor(
+      { organizationId: org.a, userId: `USR-ITEST-${ulid().slice(-10)}-FOREIGN-RUN` },
+      () =>
+        wiring.rewards.createRule({
+          triggerEvent: 'USAGE_RECORDED',
+          points: 9,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any),
+    );
+
+    const exists = (id: string) =>
+      runUnscoped('the control looks for a platform-wide rule', () =>
+        prisma.client.rewardRule.count({ where: { id, organizationId: null } }),
+      );
+
+    try {
+      expect(await exists(ours.id)).toBe(1);
+      expect(await exists(theirs.id)).toBe(1);
+
+      await cleanup(prisma, [org.a, org.b, org.c]);
+
+      // Ours is gone even though no tenant prefix could ever have matched it.
+      expect(await exists(ours.id)).toBe(0);
+      // Theirs is not, even though it is a `USR-ITEST-…` author too.
+      expect(await exists(theirs.id)).toBe(1);
+    } finally {
+      await runUnscoped('the control removes the rule it seeded for another run', () =>
+        prisma.client.rewardRule.deleteMany({ where: { id: theirs.id } }),
+      );
+    }
+  });
+
+  /**
    * The hole this task does **not** close, pinned so it cannot be forgotten.
    *
    * `cleanup` always appends `PLATFORM_ORGANIZATION_ID` — the fixed constant
