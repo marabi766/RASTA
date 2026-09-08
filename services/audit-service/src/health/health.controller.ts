@@ -1,31 +1,48 @@
-import { Controller, Get, VERSION_NEUTRAL } from '@nestjs/common';
+import { Controller, Get, HttpStatus, Res, VERSION_NEUTRAL } from '@nestjs/common';
 import { Public } from '@rasta/nest-common';
+import type { Response } from 'express';
+import { PrismaService } from '../prisma/prisma.service';
+import { DomainProjectorConsumer } from '../consumers/domain-projector.consumer';
 import { SERVICE_NAME } from '../config/env';
 
 /**
  * Liveness and readiness.
  *
- * ## Why `ready` checks nothing, and why that is honest rather than lazy
+ * The distinction matters operationally:
  *
- * Every other service in this repository checks a database here, and several
- * report a broker as a degradation. This one checks neither, because it has
- * neither: the scaffold owns no schema, opens no Prisma client and registers no
- * consumer (ADR-053 is `Proposed`; AUD-001 has not started).
+ *   live   — is the process up? If this fails, the orchestrator restarts us, so
+ *            it must never depend on anything external or one flaky dependency
+ *            becomes a restart loop across every replica.
  *
- * The alternative would be a probe that returns `checks: { database: true }`
- * from a constant, and that is the failure mode this comment exists to prevent.
- * A readiness probe is read during an incident by someone deciding whether a
- * dependency is at fault, and one that reports a healthy database this process
- * never opened is worse than no probe at all.
+ *   ready  — can this service do its job? For a projector that means two
+ *            things, and both are checked.
  *
- * So `ready` answers the only question the process can actually answer — the
- * HTTP listener is up and serving — and `dependencies` is empty, which is the
- * true set. When AUD-001 adds the schema and the consumer group, each becomes a
- * real check here, and readiness starts being able to fail.
+ * ## Why the database check asks about INSERT specifically
+ *
+ * `SELECT 1` proves the socket is open. It does not prove this role can still
+ * write, and writing is the entire job. A botched grant or a role change would
+ * leave a connection that reads perfectly while every ingestion fails, and the
+ * probe would keep reporting ready throughout. So readiness asks the catalogue
+ * whether `current_user` still holds INSERT on `audit_event`.
+ *
+ * ## Why a stopped consumer is not ready
+ *
+ * A projector with no consumer is a service that answers health checks while
+ * the evidence stops accumulating — the exact failure ADR-053 exists to
+ * prevent, and the one nobody notices because nothing errors.
+ *
+ * Kafka connectivity itself is deliberately *not* a readiness failure: the
+ * broker being briefly unreachable is what consumer retries are for, and
+ * failing readiness would take a recovering service out of rotation.
  */
 @Controller({ path: 'health', version: VERSION_NEUTRAL })
 export class HealthController {
   private readonly startedAt = Date.now();
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly projector: DomainProjectorConsumer,
+  ) {}
 
   @Get('live')
   @Public('Liveness probe; exposed only on the internal network')
@@ -39,21 +56,28 @@ export class HealthController {
 
   @Get('ready')
   @Public('Readiness probe; exposed only on the internal network')
-  ready(): {
+  async ready(@Res({ passthrough: true }) response: Response): Promise<{
     status: string;
     service: string;
-    dependencies: Record<string, never>;
-    implemented: false;
-  } {
+    checks: { database: boolean; projector: boolean };
+    ingests: true;
+    queryApi: false;
+  }> {
+    const database = await this.prisma.isHealthy();
+    const projector = this.projector.isRunning();
+
+    const ready = database && projector;
+    response.status(ready ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE);
+
     return {
-      status: 'ok',
+      status: ready ? 'ok' : 'unavailable',
       service: SERVICE_NAME,
-      // Empty because it is empty, not because nothing was checked.
-      dependencies: {},
-      // Stated in the payload, not only in a comment. Anything that discovers
-      // this service by probing it should be told plainly that no audit
-      // evidence is ingested, stored or queryable here yet.
-      implemented: false,
+      checks: { database, projector },
+      // Said in the payload rather than only in a doc. AUD-001 records
+      // evidence; it cannot yet be asked for any. Anything discovering this
+      // service by probing it should not conclude an audit query exists.
+      ingests: true,
+      queryApi: false,
     };
   }
 }

@@ -64,12 +64,12 @@ async function bootstrap(): Promise<void> {
 
   await app.listen(env.PORT, '0.0.0.0');
 
-  // Says what it is. A service answering health checks and nothing else is easy
-  // to mistake for a working one, and this line is where an operator looks
-  // first (ADR-053 is Proposed; AUD-001 has not started).
+  // Says what it does and what it does not. AUD-001 records evidence; it
+  // cannot yet be asked for any, and this line is where an operator looks
+  // first.
   console.warn(
     `[${SERVICE_NAME}] listening on :${env.PORT} (${env.NODE_ENV}) — ` +
-      'bootstrap scaffold: health probes only, no audit ingestion or query',
+      'domain projector: ingesting 10 domain topics; no query API yet (AUD-002)',
   );
 }
 
