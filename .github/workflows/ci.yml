@@ -1273,6 +1273,8 @@ jobs:
             marketplace-service,
             document-service,
             supplier-service,
+            notification-service,
+            audit-service,
           ]
 
     steps:
