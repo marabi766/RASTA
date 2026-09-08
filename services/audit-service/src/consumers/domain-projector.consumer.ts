@@ -2,7 +2,10 @@ import { Injectable, type OnModuleDestroy } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
 import type { EventConsumer, EventDelivery } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
-import { AuditRepository } from '../audit/audit.repository';
+// Type-only, like `Logger` above: this provider is built by an explicit
+// `useFactory` in `app.module.ts`, so Nest never reads `design:paramtypes` for
+// it and no constructor parameter here doubles as an injection token.
+import type { AuditRepository } from '../audit/audit.repository';
 import {
   DOMAIN_PROJECTOR_CONSUMER,
   describePayloadKeys,
@@ -55,13 +58,36 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
     await this.consumer.start();
   }
 
+  /**
+   * Nest calls this once, on `app.close()`, because `main.ts` enables shutdown
+   * hooks. The consumer is stopped but deliberately **not** discarded: keeping
+   * the reference is what lets `isRunning()` keep telling the truth afterwards,
+   * and `EventConsumer.stop()` is idempotent, so a second call — a test, or a
+   * framework that closed twice — disconnects nothing a second time.
+   */
   async onModuleDestroy(): Promise<void> {
     await this.consumer?.stop();
   }
 
-  /** Exposed for the readiness probe: a projector that is not running is not ready. */
+  /**
+   * Exposed for the readiness probe: a projector that is not running is not
+   * ready.
+   *
+   * Delegated to the consumer's own state rather than answered from "a consumer
+   * object was assigned", and the difference is two real failures. `start()`
+   * assigns before it awaits, so a broker that refuses the subscription — a
+   * missing topic under `allowAutoTopicCreation: false`, which is exactly the
+   * loud failure this service wants — would leave a consumer assigned and never
+   * started. And a completed `onModuleDestroy()` leaves the reference in place.
+   * Under the old answer both reported `projector: true` while nothing was
+   * being ingested, which is precisely the silent gap ADR-053 § 3 names as the
+   * risk that matters more than an outage.
+   *
+   * `EventConsumer` sets its flag only after `consumer.run()` resolves and
+   * clears it in `stop()`, so that flag is the one fact worth reporting.
+   */
   isRunning(): boolean {
-    return this.consumer !== undefined;
+    return this.consumer?.isRunning() ?? false;
   }
 
   async handle(envelope: EventEnvelope, delivery: EventDelivery): Promise<void> {
