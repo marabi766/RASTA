@@ -179,3 +179,166 @@ describe('EventConsumer delivery metadata', () => {
     expect(calls).toEqual([]);
   });
 });
+
+/**
+ * Startup has to give back everything a successful `connect()` took.
+ *
+ * `start()` connects first and only then subscribes and runs, so the window
+ * between them owns a real socket and a real group membership that nothing else
+ * holds a reference to. Failing in that window is the *designed* behaviour of
+ * `allowAutoTopicCreation: false` — a missing topic is meant to fail loudly
+ * rather than create itself — which makes it the likeliest failure this class
+ * has, not an exotic one. A leak there is invisible in the way that costs most:
+ * the service still reports the missing topic, so the visible error is right,
+ * while every supervisor retry adds another connected member to the group until
+ * the broker's limit becomes the symptom and the real cause is far behind.
+ *
+ * Everything below drives the real `EventConsumer` against a fake kafkajs
+ * consumer, so the assertions are about this class's own bookkeeping — how many
+ * times it disconnects, and what it reports — rather than about a broker.
+ */
+describe('EventConsumer startup failure', () => {
+  const SUBSCRIBE_FAILURE = 'This server does not host this topic-partition';
+  const RUN_FAILURE = 'The group is rebalancing';
+  const DISCONNECT_FAILURE = 'Connection already closed';
+
+  const TOPICS = ['rasta.identity.v1', 'rasta.asset.v1'];
+
+  const startupOptions: EventConsumerOptions = {
+    brokers: ['localhost:9092'],
+    clientId: 'nest-common-startup-spec',
+    groupId: 'nest-common-startup-spec.group',
+    topics: TOPICS,
+  };
+
+  /** Where in the startup sequence the broker refuses. */
+  type FailurePoint = 'none' | 'subscribe' | 'run';
+
+  class FakeKafkaConsumer {
+    connects = 0;
+    disconnects = 0;
+    runs = 0;
+    readonly subscribed: string[] = [];
+
+    constructor(
+      private readonly failAt: FailurePoint = 'none',
+      private readonly failDisconnect = false,
+    ) {}
+
+    async connect(): Promise<void> {
+      this.connects += 1;
+    }
+
+    async subscribe(config: { topic: string }): Promise<void> {
+      if (this.failAt === 'subscribe') throw new Error(SUBSCRIBE_FAILURE);
+      this.subscribed.push(config.topic);
+    }
+
+    async run(): Promise<void> {
+      if (this.failAt === 'run') throw new Error(RUN_FAILURE);
+      this.runs += 1;
+    }
+
+    async disconnect(): Promise<void> {
+      this.disconnects += 1;
+      if (this.failDisconnect) throw new Error(DISCONNECT_FAILURE);
+    }
+  }
+
+  /** The one private member these tests replace, named rather than cast to `any`. */
+  interface PrivateKafka {
+    kafka: { consumer(config: unknown): unknown };
+  }
+
+  function capturingLogger(lines: string[]): ConsumerLogger {
+    return {
+      log: (message) => lines.push(message),
+      warn: (message) => lines.push(message),
+      error: (message, trace) => lines.push(trace ? `${message} ${String(trace)}` : message),
+    };
+  }
+
+  /**
+   * Builds the real consumer with its Kafka client swapped for the fake.
+   *
+   * The client is created in the constructor, so it is replaced on the instance
+   * rather than through a module mock — the delivery-metadata suite above shares
+   * this file and must keep exercising the untouched class.
+   */
+  function build(fake: FakeKafkaConsumer, logger: ConsumerLogger): EventConsumer {
+    const consumer = new EventConsumer(startupOptions, async () => undefined, logger);
+    (consumer as unknown as PrivateKafka).kafka = { consumer: () => fake };
+    return consumer;
+  }
+
+  it('disconnects the consumer that a refused subscription left connected', async () => {
+    const lines: string[] = [];
+    const fake = new FakeKafkaConsumer('subscribe');
+    const consumer = build(fake, capturingLogger(lines));
+
+    await expect(consumer.start()).rejects.toThrow(SUBSCRIBE_FAILURE);
+
+    expect(fake.connects).toBe(1);
+    expect(fake.disconnects).toBe(1);
+    expect(consumer.isRunning()).toBe(false);
+
+    // And nothing stale is left behind for `stop()` to disconnect a second
+    // time — a double disconnect on a member the broker has already dropped is
+    // how orderly shutdown turns into a crash on the way out.
+    await consumer.stop();
+    expect(fake.disconnects).toBe(1);
+  });
+
+  it('disconnects the consumer when run() fails after the subscriptions succeeded', async () => {
+    const lines: string[] = [];
+    const fake = new FakeKafkaConsumer('run');
+    const consumer = build(fake, capturingLogger(lines));
+
+    await expect(consumer.start()).rejects.toThrow(RUN_FAILURE);
+
+    // The later failure point: every subscription was accepted, so the group
+    // membership is fully established by the time this fails.
+    expect(fake.subscribed).toEqual(TOPICS);
+    expect(fake.disconnects).toBe(1);
+    expect(consumer.isRunning()).toBe(false);
+
+    await consumer.stop();
+    expect(fake.disconnects).toBe(1);
+  });
+
+  it('rethrows the startup error, not the cleanup error, when the disconnect also fails', async () => {
+    // The error that reaches the caller must stay the one that explains why the
+    // service will not come up. A cleanup failure replacing it would hide a
+    // missing topic behind its own tidying, so it is logged instead — with the
+    // original named alongside it, so neither is lost.
+    const lines: string[] = [];
+    const fake = new FakeKafkaConsumer('subscribe', true);
+    const consumer = build(fake, capturingLogger(lines));
+
+    await expect(consumer.start()).rejects.toThrow(SUBSCRIBE_FAILURE);
+
+    expect(fake.disconnects).toBe(1);
+    expect(consumer.isRunning()).toBe(false);
+    expect(
+      lines.some((line) => line.includes(DISCONNECT_FAILURE) && line.includes(SUBSCRIBE_FAILURE)),
+    ).toBe(true);
+  });
+
+  it('disconnects exactly once however often stop is called after a successful start', async () => {
+    const lines: string[] = [];
+    const fake = new FakeKafkaConsumer();
+    const consumer = build(fake, capturingLogger(lines));
+
+    await consumer.start();
+
+    expect(fake.subscribed).toEqual(TOPICS);
+    expect(fake.runs).toBe(1);
+    expect(consumer.isRunning()).toBe(true);
+
+    await consumer.stop();
+    await consumer.stop();
+
+    expect(fake.disconnects).toBe(1);
+    expect(consumer.isRunning()).toBe(false);
+  });
+});
