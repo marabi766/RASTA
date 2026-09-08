@@ -83,11 +83,15 @@ WORKDIR /app
 # CI still fails the build if anything fixed remains.
 RUN apk --no-cache upgrade
 
-# Non-root, owning nothing it does not need to write. The uid is pinned to 100
-# rather than left to `adduser -S` to allocate, so the number in the image is
-# the number the deployment manifest can assert against — an auto-allocated id
-# silently changes the day the base image adds a system user.
-RUN addgroup -S -g 100 rasta && adduser -S -u 100 -G rasta rasta
+# Non-root, owning nothing it does not need to write.
+#
+# The uid is stated rather than left to `adduser -S` to allocate. It lands on
+# 100 either way on this base image — which is what the other nine services
+# get — but an allocated id silently moves the day the base image adds a system
+# user, and 100 is the number a deployment manifest asserts against. The *gid*
+# is deliberately not pinned: 100 is already `users` in node:22-alpine, so
+# forcing it fails the build with `addgroup: gid '100' in use`.
+RUN addgroup -S rasta && adduser -S -u 100 -G rasta rasta
 
 # The runtime runs exactly one command: `node dist/main.js`. It has no use for a
 # package manager, and shipping one costs twice — npm's own bundled dependencies
