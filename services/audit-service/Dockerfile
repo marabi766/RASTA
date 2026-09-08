@@ -16,10 +16,9 @@
 # (PROJECT_MEMORY § 22). `pnpm run ci:image-matrix` fails the build if the two
 # ever drift apart again.
 #
-# What this image runs is a health-probe process and nothing else. ADR-053 is
-# Proposed and AUD-001 has not started: no schema, no consumer, no query API.
-# The image exists so the build and scan gates are real from the first commit,
-# not to suggest the service does anything yet.
+# What this image runs is the AUD-001 domain projector: a consumer over the ten
+# produced domain topics writing append-only rows. It exposes no query API --
+# that is AUD-002 -- so the only HTTP routes are the two health probes.
 # =============================================================================
 
 # ---- deps -------------------------------------------------------------------
@@ -54,9 +53,9 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 FROM deps AS build
 WORKDIR /app
 
-# Compiles this service and its workspace dependencies in dependency order.
-# There is no `prisma generate` step, unlike every other service here: this one
-# owns no schema and pulls in no Prisma client.
+# Generates the Prisma client, then compiles this service and its workspace
+# dependencies in dependency order. The client is generated into `src/generated`
+# and copied into `dist` by the package's own build script.
 RUN pnpm --filter @rasta/audit-service... build
 
 # `pnpm deploy` rather than `prune`, and the difference matters.
@@ -70,7 +69,10 @@ RUN pnpm --filter @rasta/audit-service... build
 # `deploy` produces a self-contained directory with a complete, flattened
 # node_modules — workspace dependencies included — which is exactly what a
 # runtime image needs.
-RUN CI=true pnpm --filter @rasta/audit-service deploy --prod --legacy /deploy
+# The Prisma engine cache is mounted here too: `deploy` re-runs postinstall
+# scripts, and re-downloading the engine binary would make the build depend on
+# a CDN staying up.
+RUN --mount=type=cache,id=prisma-engines,target=/root/.cache/prisma     CI=true pnpm --filter @rasta/audit-service deploy --prod --legacy /deploy
 
 # ---- runtime ----------------------------------------------------------------
 FROM node:22-alpine AS runtime

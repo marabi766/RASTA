@@ -465,14 +465,24 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 
 ### audit-service (P0)
 
-| بُعد            | مشخصات                                                                                                 |
-| --------------- | ------------------------------------------------------------------------------------------------------ |
-| **Mission**     | سابقه تغییرناپذیر «چه کسی، چه کرد، کِی، از کجا، با چه نتیجه‌ای».                                       |
-| **مالکیت داده** | `audit_event` — **فقط الحاقی**؛ بدون UPDATE و بدون DELETE                                              |
-| **REST**        | `GET /audit-events` (فیلتر بر actor، resource، action، بازه) · `GET /audit-events/{id}`                |
-| **Consumes**    | **دو مسیر:** هر ده Topic دامنه‌ای (Projector) + `rasta.audit.trail.v1` (قرارداد صریح). ADR-053         |
-| **مرز امنیتی**  | نوشتن فقط از Kafka (بدون API نوشتن). خواندن `SYSTEM_ADMIN` و `UNION_ADMIN`؛ صادرات فقط `SYSTEM_ADMIN`. |
-| **ADR**         | [ADR-053](adr/ADR-053-audit-service-append-only-evidence.md) — `Proposed`، پیاده نشده.                 |
+> **وضعیت پیاده‌سازی — 2026-09-08 (AUD-001).** فقط **مسیر A** ساخته شده: گروه `audit-service.domain-projector` روی ده Topic
+> دامنه‌ای، با `fromBeginning: true`، که به‌ازای هر Envelope یک ردیف `audit_event` می‌نویسد. جدول ماهانه بر `occurred_at`
+> پارتیشن‌بندی شده (۱۸ ماه + `DEFAULT`) و فقط‌الحاقی است در دو لایه: Schema `audit` را نقش `rasta_audit_migrator` مالک است و
+> `rasta_audit` فقط `SELECT` و `INSERT` دارد، به‌علاوهٔ Triggerهای `BEFORE UPDATE OR DELETE` و `BEFORE TRUNCATE` روی والد و
+> **روی هر پارتیشن** (PostgreSQL Trigger سطح‌جمله را به پارتیشن‌ها Clone نمی‌کند).
+>
+> **آنچه هنوز نیست:** هیچ Endpoint خواندنی (`GET /audit-events` — AUD-002)، هیچ زنجیرهٔ Hash (`record_hash`/`previous_hash`
+> ستون‌اند و هرگز نوشته نمی‌شوند — AUD-003)، هیچ رکورد جبرانی، هیچ تجمیع ردها، و هیچ مصرف‌کنندهٔ
+> `rasta.audit.trail.v1` (مسیر B — AUD-004). `COM-009` همچنان `READY` است و ۱۳ امتیازش داده نشده.
+
+| بُعد            | مشخصات                                                                                                    |
+| --------------- | --------------------------------------------------------------------------------------------------------- |
+| **Mission**     | سابقه تغییرناپذیر «چه کسی، چه کرد، کِی، از کجا، با چه نتیجه‌ای».                                          |
+| **مالکیت داده** | `audit_event` — **فقط الحاقی**؛ بدون UPDATE و بدون DELETE                                                 |
+| **REST**        | `GET /audit-events` (فیلتر بر actor، resource، action، بازه) · `GET /audit-events/{id}`                   |
+| **Consumes**    | **دو مسیر:** هر ده Topic دامنه‌ای (Projector) + `rasta.audit.trail.v1` (قرارداد صریح). ADR-053            |
+| **مرز امنیتی**  | نوشتن فقط از Kafka (بدون API نوشتن). خواندن `SYSTEM_ADMIN` و `UNION_ADMIN`؛ صادرات فقط `SYSTEM_ADMIN`.    |
+| **ADR**         | [ADR-053](adr/ADR-053-audit-service-append-only-evidence.md) — `Proposed`. **AUD-001 پیاده شد؛ بقیه نه.** |
 
 > **اصلاح 2026-09-07.** این جدول پیش‌تر خواندن را به «`SYSTEM_ADMIN`، `UNION_ADMIN` و **مالک منبع**» می‌داد، در حالی که
 > `docs/09` § ۹٫۸ و جدول Gateway (`services/api-gateway/src/config/routes.ts:172-176`) فقط دو نقش مدیر را می‌دهند.

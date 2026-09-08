@@ -16,7 +16,8 @@
 > بازرسی مستقیم مخزن سه واقعیت را تثبیت کرد که برنامه‌ریزی بعدی باید بر آن‌ها بنشیند:
 >
 > ۱. **هیچ رکورد حسابرسی قابل Queryای در پلتفرم تولید نمی‌شود.** `AUDIT_TRAIL_TOPIC` در کل مخزن دقیقاً دو رخداد دارد
-> (تعریف در `envelope.ts:166` و صادرشدن در `index.ts:65`)؛ هیچ `schema.prisma` مدل حسابرسی ندارد؛ `services/audit-service/`
+> (تعریف در `envelope.ts:166` و صادرشدن در `index.ts:65`). **به‌روزرسانی 2026-09-08:** `services/audit-service/prisma/schema.prisma`
+> اکنون `audit_event` را دارد و AUD-001 آن را پر می‌کند؛ جملهٔ زیر وضعیت پیش از آن را توصیف می‌کند. `services/audit-service/`
 > وجود ندارد. یعنی **`AGENTS.md` S-06 امروز توسط هر نُه سرویس Merge‌شده نقض می‌شود.** ADR-053 مسیر بستنش را تعیین می‌کند.
 >
 > ۲. **هیچ ارائه‌دهندهٔ ایمیل Production و هیچ هویت فرستنده‌ای انتخاب نشده** و تا امروز هیچ پرسش بازی پوششش نمی‌داد (Q-15
@@ -1556,7 +1557,7 @@ not available» می‌گیرد و در پس‌زمینه Retry می‌کند �
 | Input Validation (Zod در مرز)         |     ✅      |   ✅   |                       ✅                        |                                                                                                                                                                                                                                                                                                        |
 | **Object-level Authorization (BOLA)** |     ✅      |   ✅   |                       ✅                        | **IMPLEMENTED در fleet و maintenance.** fleet (`src/fleet/access.ts`): `DRIVER`/`OPERATOR` فقط رکورد خود و دستگاهی که در دست دارند. maintenance (`src/maintenance/access.ts`): اپراتور فقط گزارش‌های خودش — **باریک‌تر از قاعده مستند، و در جهت امن** (ADR-029، Q-24/Q-25). سه سرویس دیگر هنوز ندارند. |
 | **Non-disclosure میان تنانتی**        |     ✅      |   ✅   |                       ✅                        | زنده: منبع تنانت دیگر → **`404`**، هرگز `403` — روی Driver، Assignment و UsageRecord آزموده شد                                                                                                                                                                                                         |
-| Audit Trail                           |   ⚠️ جزئی   |   —    |                       نشد                       | `audit-service` نساخته؛ Event های تولید می‌شوند اما جایی ذخیره نمی‌شوند                                                                                                                                                                                                                                |
+| Audit Trail                           |   ⚠️ جزئی   |   —    |                       نشد                       | **AUD-001:** Projector مسیر A ساخته شد — ده Topic دامنه‌ای در `audit_event` فقط‌الحاقی ذخیره می‌شوند. هنوز بدون API خواندن (AUD-002)، بدون زنجیرهٔ Hash (AUD-003) و بدون مصرف‌کنندهٔ `rasta.audit.trail.v1` (AUD-004)                                                                                  |
 | Secrets فقط از Env                    |     ✅      |   —    | ✅ (`.env` بررسی شد؛ Secret واقعی در Repo نیست) |                                                                                                                                                                                                                                                                                                        |
 | Security Headers (helmet)             |     ✅      |   —    |                       ✅                        | CSP، HSTS، Referrer-Policy                                                                                                                                                                                                                                                                             |
 | mTLS بین سرویس‌ها                     |     ❌      |   —    |                        —                        | **PLANNED** — صفر ارجاع در کد (`grep` تأیید شد). Production-only                                                                                                                                                                                                                                       |
@@ -1574,17 +1575,17 @@ not available» می‌گیرد و در پس‌زمینه Retry می‌کند �
 
 **تفکیک IMPLEMENTED از PLANNED — تأییدشده با بازرسی کد، نه با سند:**
 
-| کنترل                                              | وضعیت واقعی                                                                                    |
-| -------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Keycloak / OIDC / JWKS                             | **IMPLEMENTED** + LIVE VERIFIED                                                                |
-| اعتبارسنجی JWT (`iss`, `exp`)                      | **IMPLEMENTED** + LIVE VERIFIED — Container توکن با `iss` نامنطبق را رد کرد                    |
-| Tenant Isolation سطح Application                   | **IMPLEMENTED** + LIVE VERIFIED + CI VERIFIED                                                  |
-| Object-level Authorization                         | **IMPLEMENTED** در fleet و maintenance؛ سه سرویس دیگر **NOT IMPLEMENTED**                      |
-| پورتال `WORKSHOP` (میان‌تنانتی)                    | **DEFERRED** — مدل دسترسی میان‌تنانتی وجود ندارد؛ نقش `WORKSHOP` هیچ نمی‌بیند (ADR-029)        |
-| احراز صلاحیت تعمیرگاه                              | **NOT IMPLEMENTED** — `supplier-service` نیست؛ Port نام‌گذاری‌شده که نبودِ بررسی را Log می‌کند |
-| Database RLS                                       | **PLANNED** — صفر Migration                                                                    |
-| mTLS سرویس‌به‌سرویس                                | **PLANNED** — صفر ارجاع در کد                                                                  |
-| Audit Trail ماندگار                                | **PLANNED** — `audit-service` وجود ندارد؛ رویدادها تولید می‌شوند اما مصرف‌کننده‌ای ندارند      |
+| کنترل                                              | وضعیت واقعی                                                                                                                |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Keycloak / OIDC / JWKS                             | **IMPLEMENTED** + LIVE VERIFIED                                                                                            |
+| اعتبارسنجی JWT (`iss`, `exp`)                      | **IMPLEMENTED** + LIVE VERIFIED — Container توکن با `iss` نامنطبق را رد کرد                                                |
+| Tenant Isolation سطح Application                   | **IMPLEMENTED** + LIVE VERIFIED + CI VERIFIED                                                                              |
+| Object-level Authorization                         | **IMPLEMENTED** در fleet و maintenance؛ سه سرویس دیگر **NOT IMPLEMENTED**                                                  |
+| پورتال `WORKSHOP` (میان‌تنانتی)                    | **DEFERRED** — مدل دسترسی میان‌تنانتی وجود ندارد؛ نقش `WORKSHOP` هیچ نمی‌بیند (ADR-029)                                    |
+| احراز صلاحیت تعمیرگاه                              | **NOT IMPLEMENTED** — `supplier-service` نیست؛ Port نام‌گذاری‌شده که نبودِ بررسی را Log می‌کند                             |
+| Database RLS                                       | **PLANNED** — صفر Migration                                                                                                |
+| mTLS سرویس‌به‌سرویس                                | **PLANNED** — صفر ارجاع در کد                                                                                              |
+| Audit Trail ماندگار                                | **PARTIAL** — AUD-001: Projector ده Topic دامنه‌ای را در `audit_event` می‌نویسد؛ خواندن، زنجیرهٔ Hash و مسیر B هنوز نیستند |
 | ریشه، خرابی محیط Docker بود (D-010)، نه نقص Image. |
 
 ---
