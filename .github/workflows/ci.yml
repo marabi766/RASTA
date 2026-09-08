@@ -475,6 +475,7 @@ jobs:
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
@@ -669,6 +670,7 @@ jobs:
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
