@@ -1,9 +1,10 @@
 import type { EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
-import { PrismaService } from '../src/prisma/prisma.service';
+import { SENSITIVE_KEYS } from '@rasta/logging';
+import type { PrismaService } from '../src/prisma/prisma.service';
 import { AuditRepository } from '../src/audit/audit.repository';
 import { DOMAIN_PROJECTOR_CONSUMER, toAuditEventRecord } from '../src/audit/audit.mapper';
-import { cleanupRun, id, newMigratorPrisma, newPrisma } from './helpers';
+import { cleanupRun, id, newMigratorPrisma, newPrisma, RUN_TAG } from './helpers';
 
 /**
  * What actually lands in the database when an envelope is ingested.
@@ -102,6 +103,59 @@ describe('domain-event ingestion (real PostgreSQL)', () => {
     expect(asText).not.toContain('eyJ');
   });
 
+  it('retains an undeclared event name while storing none of its sensitive values', async () => {
+    // The acceptance sentence AUD-001 actually satisfies (ADR-053
+    // implementation plan § 2.1). Both halves matter and they pull in opposite
+    // directions: the event must be *kept* even though nothing declares its
+    // name, and its payload must *not* be — path A cannot build the bounded
+    // redacted delta ADR-053 § 5 permits, and a raw blob would put sealed bid
+    // data into the one table nobody may delete from (S-09, "no raw payload").
+    //
+    // Built from **every** entry in `SENSITIVE_KEYS`, one distinct sentinel
+    // each, so a key added to `@rasta/logging` tomorrow is covered here the
+    // moment it is declared rather than quietly going untested. The unit suite
+    // asserts the same invariant on the mapped record; this asserts it on the
+    // row PostgreSQL actually holds.
+    const secrets = Object.fromEntries(
+      SENSITIVE_KEYS.map((key): [string, string] => [key, `SECRET-${key}-${RUN_TAG}`]),
+    );
+    expect(Object.keys(secrets)).toEqual([...SENSITIVE_KEYS]);
+    // ADR-053 § 5 names the sealed-bid fields by hand.
+    for (const key of ['bidAmount', 'bidContent', 'quotationAmount', 'sealedPayload']) {
+      expect(secrets[key]).toBe(`SECRET-${key}-${RUN_TAG}`);
+    }
+
+    const source = envelope({
+      eventName: 'A_NAME_NO_SERVICE_HAS_DECLARED',
+      payload: { ...secrets, note: 'ordinary' },
+    });
+
+    expect(
+      await repository.ingest(
+        toAuditEventRecord(source, delivery('rasta.supplier.v1')),
+        DOMAIN_PROJECTOR_CONSUMER,
+      ),
+    ).toBe('WRITTEN');
+
+    const row = await prisma.client.auditEvent.findFirstOrThrow({
+      where: { sourceEventId: source.eventId },
+    });
+
+    // Kept, under its own name.
+    expect(row.sourceEventName).toBe('A_NAME_NO_SERVICE_HAS_DECLARED');
+    expect(row.action).toBe('A_NAME_NO_SERVICE_HAS_DECLARED');
+    // And no payload anywhere in it. `changes` stays null until path B.
+    expect(row.changes).toBeNull();
+
+    const asText = JSON.stringify(row, (_key, value) =>
+      typeof value === 'bigint' ? value.toString() : value,
+    );
+    for (const secret of Object.values(secrets)) {
+      expect(asText).not.toContain(secret);
+    }
+    expect(asText).not.toContain('SECRET-');
+  });
+
   it('leaves the AUD-003 hash columns unwritten', async () => {
     // A null here means "no chain yet", not "verified". Asserted so a future
     // change that starts writing them cannot do so unnoticed.
@@ -197,11 +251,16 @@ describe('domain-event ingestion (real PostgreSQL)', () => {
 
   it('projects the organization without reading another service database', async () => {
     const source = envelope();
+    const { tenantId } = source;
+    // Narrowed rather than asserted: `tenantId` is optional on the envelope,
+    // and a factory change that dropped it would otherwise turn this test into
+    // a lookup for `undefined` that quietly stopped proving anything.
+    if (tenantId === undefined) throw new Error('this test needs a tenant-scoped envelope');
+
     await repository.ingest(toAuditEventRecord(source, delivery()), DOMAIN_PROJECTOR_CONSUMER);
 
     const ref = await prisma.client.organizationRef.findUnique({
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      where: { organizationId: source.tenantId! },
+      where: { organizationId: tenantId },
     });
     expect(ref).not.toBeNull();
   });
