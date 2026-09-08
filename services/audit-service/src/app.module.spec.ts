@@ -85,11 +85,6 @@ describe('audit-service composition root', () => {
     const logger = providerFor(LOGGER).useFactory?.(env);
     const repository = new AuditRepository({} as PrismaService);
 
-    let capturedTopics: string[] = [];
-    let capturedGroup = '';
-    let capturedFromBeginning: boolean | undefined;
-    let capturedDlq: string | undefined;
-
     const projector = providerFor(DomainProjectorConsumer).useFactory?.(
       env,
       logger,
@@ -101,7 +96,7 @@ describe('audit-service composition root', () => {
     const built = (
       projector as unknown as {
         createConsumer: (handler: () => Promise<void>) => {
-          options?: {
+          options: {
             topics: string[];
             groupId: string;
             fromBeginning?: boolean;
@@ -111,23 +106,14 @@ describe('audit-service composition root', () => {
       }
     ).createConsumer(async () => undefined);
 
-    const options = (built as unknown as { options: NonNullable<unknown> }).options as NonNullable<{
-      topics: string[];
-      groupId: string;
-      fromBeginning?: boolean;
-      deadLetterTopic?: string;
-    }>;
-    capturedTopics = options.topics;
-    capturedGroup = options.groupId;
-    capturedFromBeginning = options.fromBeginning;
-    capturedDlq = options.deadLetterTopic;
+    const { topics, groupId, fromBeginning, deadLetterTopic } = built.options;
 
-    expect(capturedTopics).toEqual([...DOMAIN_TOPICS]);
-    expect(capturedGroup).toBe(DOMAIN_PROJECTOR_CONSUMER);
+    expect(topics).toEqual([...DOMAIN_TOPICS]);
+    expect(groupId).toBe(DOMAIN_PROJECTOR_CONSUMER);
     // Replay must be safe and must be on: the store rebuilds from the log.
-    expect(capturedFromBeginning).toBe(true);
+    expect(fromBeginning).toBe(true);
     // Without this a malformed message is logged and dropped.
-    expect(capturedDlq).toBe('rasta.audit.v1.dlq');
+    expect(deadLetterTopic).toBe('rasta.audit.v1.dlq');
     expect(projector.isRunning()).toBe(false);
   });
 
