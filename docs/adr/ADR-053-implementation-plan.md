@@ -54,10 +54,58 @@
 ۱. `.github/workflows/ci.yml` — `DATABASE_URL_NOTIFICATION` و `DATABASE_URL_AUDIT` در هر بلوک Step مربوط؛
 `rasta.notification.v1{,.retry,.dlq}`، `rasta.audit.v1{,.retry,.dlq}` و `rasta.audit.trail.v1` در هر دو خط ساخت Topic؛
 `notification-service` و `audit-service` در ماتریس `containers`.
-۲. `scripts/verify-outbox-claim-migration.mjs` — ثبت `notification`. **بدون ثبت `audit`**، با یک کامنت که چرا.
-۳. ریشهٔ `package.json` — هر دو به زنجیرهٔ `test:migration` افزوده شوند.
-۴. `services/notification-service/` و `services/audit-service/` خالی با `package.json`، `tsconfig.json`، `jest.config.js` و
-`Dockerfile` (غیر-root، `uid=100`).
+۲. `scripts/verify-outbox-claim-migration.mjs` — **هیچ تغییری. اصلاح‌شده در 2026-09-08؛ بند «اصلاح مکانیک ثبت» پایین را ببین.**
+۳. ریشهٔ `package.json` — **هیچ تغییری. اصلاح‌شده در 2026-09-08؛ همان بند.**
+۴. `services/notification-service/` و `services/audit-service/` با `package.json`، `tsconfig.json`، `jest.config.js`،
+`eslint.config.mjs`، Schema پیکربندی، Bootstrap کمینهٔ Nest، `/health/live` و `/health/ready` و `Dockerfile` (غیر-root،
+`uid=100`). **نه «خالی» — اصلاح‌شده در 2026-09-08؛ همان بند.**
+
+### اصلاح مکانیک ثبت (2026-09-08) — تصمیم معماری دست‌نخورده
+
+بندهای ۲ و ۳ بالا **اجراشدنی نبودند**. این اصلاح فقط مکانیک ثبتِ زودهنگام را تصحیح می‌کند؛ هیچ تصمیم معماری ADR-053 یا
+ADR-054 تغییر نمی‌کند و هر دو ADR `Proposed` می‌مانند. شواهد از اجرای واقعی روی همین مخزن:
+
+**بند ۳ — ثبت در `test:migration` بلافاصله شکست می‌خورد.** `scripts/verify-migration-reversible.mjs` یک نگاشت `EXPECTED`
+کدشده دارد و سرویس ناشناخته را رد می‌کند:
+
+```
+$ node scripts/verify-migration-reversible.mjs audit         ; echo $?
+No expected-object list for "audit".
+Known services: economic, marketplace, document, supplier
+1
+$ node scripts/verify-migration-reversible.mjs notification  ; echo $?
+No expected-object list for "notification".
+1
+```
+
+حتی با یک ورودی `EXPECTED`، اسکریپت روی `No migrations found under …/prisma/migrations` می‌ایستد. تنها راه‌های سبز کردنش
+یک ورودی `EXPECTED` تهی (که **پوچ** سبز می‌شود) یا یک Migration ساختگی است؛ هر دو ممنوع‌اند
+(`AGENTS.md` § ۸ و بند «اعلام Done بدون سبز بودن دروازه کیفیت»). پس ثبت تا زمانی که Migration واقعی وجود داشته باشد به تعویق
+می‌افتد.
+
+**بند ۲ — ثبت در نگهبان Outbox هم شکست می‌خورد و هم لازم نیست.** با افزودن `notification` به `SERVICES` روی همین مخزن:
+
+```
+✗ notification: 20260902120000_outbox_durable_claim/migration.sql is missing
+✗ 1 of 1 databases failed        (exit 1)
+```
+
+و لازم هم نیست، چون `assertEveryOutboxServiceIsAccountedFor()` **از پیش کشف‌محور است**: پوشه‌ای که
+`prisma/schema.prisma` ندارد را نادیده می‌گیرد، و به‌محض پیدا شدن `model OutboxMessage` ثبت‌نشده خودش اجرا را رد می‌کند.
+هر دو رفتار اجرا و تأیید شدند — با هر دو اسکلت روی دیسک `✓ 8/8 databases` گذشت، و با یک `schema.prisma` آزمایشی حاوی
+`model OutboxMessage`:
+
+```
+Error: These services own an outbox but are verified by nothing here: notification.
+```
+
+یعنی نگهبانِ خودکارِ موردنظر **از پیش هست**. افزودن `notification` امروز آن را تقویت نمی‌کند؛ فقط دروازه را قرمز می‌کند.
+`audit` عمداً بدون Outbox مشخص شده (ADR-053 § ۴) و هرگز اینجا ثبت نمی‌شود.
+
+**بند ۴ — «خالی» با Dockerfile سازگار نیست.** `Dockerfile` هر سرویس `pnpm --filter @rasta/<svc>... build` را اجرا و
+`node dist/main.js` را CMD می‌کند و `HEALTHCHECK` روی `/health/ready` می‌زند. یک پوشهٔ TypeScript خالی نه `dist/main.js`
+تولید می‌کند و نه آن Endpoint را دارد، پس Image ساخته نمی‌شود و اگر بشود، ناسالم می‌ماند. اسکلت باید واقعاً Bootstrap و
+`/health/live` و `/health/ready` داشته باشد — و **فقط** همان‌ها.
 
 **هیچ Story Pointی نمی‌گیرد**، چون هیچ نتیجهٔ قابل پذیرشِ کاربری تحویل نمی‌دهد — سازگار با `docs/25-progress-governance.md`
 § ۲۵٫۱ که واحد تحویل را نتیجه می‌داند، نه فعالیت.

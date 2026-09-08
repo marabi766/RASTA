@@ -267,6 +267,9 @@ jobs:
             rasta.marketplace.v1 rasta.marketplace.v1.retry rasta.marketplace.v1.dlq \
             rasta.economic.v1 rasta.economic.v1.retry rasta.economic.v1.dlq \
             rasta.supplier.v1 rasta.supplier.v1.retry rasta.supplier.v1.dlq \
+            rasta.notification.v1 rasta.notification.v1.retry rasta.notification.v1.dlq \
+            rasta.audit.v1 rasta.audit.v1.retry rasta.audit.v1.dlq \
+            rasta.audit.trail.v1 \
             rasta.document.v1; do
             create "$topic"
           done
@@ -420,6 +423,27 @@ jobs:
           '
 
       - name: Apply migrations
+        # `notification` and `audit` are registered in the three steps that
+        # iterate **every** workspace service — this one, `Integration tests`
+        # and `Tenant isolation` — so the branch that adds either service's
+        # first migration does not also have to edit this workflow, which is
+        # the three-way collision the shared-registration step exists to avoid
+        # (ADR-053 plan, Step Zero).
+        #
+        # They are deliberately absent from three other multi-service steps,
+        # because none of those would use them:
+        #
+        #   Migration reversibility  runs `pnpm test:migration`, and neither
+        #                            service is registered there — it has no
+        #                            real migration to reverse yet, and a
+        #                            vacuous entry is worse than none.
+        #   Outbox B3                passes every url it touches explicitly and
+        #                            neither service owns an outbox today.
+        #   E2E `Apply migrations`   carries only the four services that job
+        #                            actually starts.
+        #
+        # A url present in a step that cannot use it reads as registration that
+        # has happened. It has not.
         run: pnpm run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
@@ -431,6 +455,8 @@ jobs:
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=public
 
       - name: Integration tests
         run: pnpm run test:integration
@@ -446,6 +472,8 @@ jobs:
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=public
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
@@ -621,6 +649,8 @@ jobs:
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=public
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
@@ -829,6 +859,9 @@ jobs:
             rasta.marketplace.v1 rasta.marketplace.v1.retry rasta.marketplace.v1.dlq \
             rasta.fleet.v1 rasta.fleet.v1.retry rasta.fleet.v1.dlq \
             rasta.asset.v1 rasta.insurance.v1 \
+            rasta.notification.v1 rasta.notification.v1.retry rasta.notification.v1.dlq \
+            rasta.audit.v1 rasta.audit.v1.retry rasta.audit.v1.dlq \
+            rasta.audit.trail.v1 \
             rasta.document.v1; do
             docker run --rm --network host apache/kafka:3.9.0 \
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
@@ -1240,6 +1273,8 @@ jobs:
             marketplace-service,
             document-service,
             supplier-service,
+            notification-service,
+            audit-service,
           ]
 
     steps:
