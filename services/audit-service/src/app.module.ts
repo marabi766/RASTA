@@ -108,6 +108,17 @@ import { brokersOf, loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/e
                 // The database and its backups are the durable record
                 // (ADR § 8).
                 fromBeginning: true,
+                // Without this the shared consumer logs a malformed message
+                // and drops it — an audit service losing the one message it
+                // could not parse, which is the message most worth keeping.
+                //
+                // One DLQ for all ten source topics, and it is audit's own
+                // rather than each producer's: a message that failed *this*
+                // service's validation is this service's problem to replay,
+                // and routing it back to `rasta.asset.v1.dlq` would put it in
+                // front of a team that has nothing to fix. The original topic
+                // rides along in the `x-dlq-topic` header.
+                deadLetterTopic: 'rasta.audit.v1.dlq',
                 // `allowAutoTopicCreation: false` is not passed here because
                 // the platform `EventConsumer` already hard-codes it
                 // (`event-consumer.ts`). Restating it as an option would imply
