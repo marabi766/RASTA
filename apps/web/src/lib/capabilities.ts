@@ -3,29 +3,29 @@ import { REGISTERED_ADAPTERS, type AdapterId } from './api/adapter-registry';
 /**
  * The single source of truth for what this application claims to do.
  *
- * Navigation, the dashboard cards and the route guards all read this file, so
- * there is exactly one place where a capability's status can be stated — and
- * exactly one place to audit before a demo.
+ * Navigation, the dashboard, the guided walkthrough and the route guards all
+ * read this file, so there is exactly one place where a capability's status can
+ * be stated — and exactly one place to audit before a demo.
  *
  * ## Why the states are what they are
  *
  * The temptation in an investor build is a binary: things that work and things
- * that do not. That binary forces a lie in both directions. `asset-service` is
- * implemented, tested and live-verified upstream, so calling its screen
- * "planned" understates the platform; but this milestone ships no screen for
- * it, so calling it "live" overstates the frontend. `BACKEND_READY` is the
- * honest third answer, and it is the state most of the platform is in today.
+ * that do not. That binary forces a lie in both directions. A service can be
+ * implemented, tested and live-verified upstream while this application ships
+ * no screen for it — calling that "planned" understates the platform, and
+ * calling it "live" overstates the frontend. So the states describe *this*
+ * application's relationship to a backend capability, not the backend alone.
  *
- * `LIVE` is the only state that makes a claim about *this* application, and it
- * is the only one with a machine-checkable precondition: a registered adapter
- * that talks to a real gateway route (`assertManifestIntegrity`).
+ * `LIVE` and `BETA` are the only states that make a claim about a network call,
+ * and both carry a machine-checkable precondition: a registered adapter that
+ * reaches a real gateway route (`assertManifestIntegrity`).
  */
 
 export const CAPABILITY_STATES = [
   /** An implemented backend route, reached by a registered adapter in this app. */
   'LIVE',
   /**
-   * Implemented and merged upstream, but the domain phase is not finished.
+   * Reached by a real adapter, but the domain phase behind it is unfinished.
    * Supplier Phase 1 shipped; performance scoring (COM-005) is `IN_PROGRESS`.
    */
   'BETA',
@@ -36,7 +36,7 @@ export const CAPABILITY_STATES = [
   'BACKEND_READY',
   /**
    * A visual or product preview. Nothing is operational and every surface
-   * carrying it must say so — «PREVIEW — داده نمایشی، عملیات واقعی نیست».
+   * carrying it says so, in the exact required wording.
    */
   'PREVIEW',
   /** No implementation anywhere. A gateway route, a topic or a design is not one. */
@@ -45,7 +45,10 @@ export const CAPABILITY_STATES = [
 
 export type CapabilityState = (typeof CAPABILITY_STATES)[number];
 
-/** Why a capability is not `LIVE`. Shown verbatim on the «در حال ساخت» screen. */
+/** The states permitted to issue a network request. */
+const NETWORK_STATES: ReadonlySet<CapabilityState> = new Set<CapabilityState>(['LIVE', 'BETA']);
+
+/** Why a capability is not fully `LIVE`. Shown verbatim on its screen. */
 export type ReadinessReason =
   /** Backend contracts exist and are verified; the screen is the missing part. */
   | 'ARCHITECTURE_READY'
@@ -56,8 +59,11 @@ export type ReadinessReason =
   /** Part of the domain shipped; the rest has not started. */
   | 'PARTIAL';
 
+/** Which business area a capability belongs to, for the executive dashboard. */
+export type DomainKey = 'fleet' | 'commerce' | 'finance' | 'civil' | 'platform';
+
 export interface Capability {
-  /** Stable key. Used by routes, tests and the dashboard. */
+  /** Stable key. Used by routes, tests, the walkthrough and the dashboard. */
   readonly key: string;
   /** The route this capability owns. Always a real, resolvable path. */
   readonly href: string;
@@ -66,18 +72,66 @@ export interface Capability {
   readonly state: CapabilityState;
   /** Which backend service owns the data, or `null` where none exists yet. */
   readonly service: string | null;
-  /** Required when — and only when — the state is `LIVE`. */
+  /** Required for `LIVE` and `BETA`, forbidden otherwise. */
   readonly adapter?: AdapterId;
-  /** Absent for `LIVE`, required otherwise. */
+  /** Forbidden for `LIVE`, required otherwise. */
   readonly readiness?: ReadinessReason;
   /**
    * Where the claim comes from. A status with no citation is an opinion, and
    * this is the field a reviewer checks first.
    */
   readonly evidence: string;
-  /** Grouping for the navigation rail. */
-  readonly group: 'operations' | 'commerce' | 'finance' | 'platform';
+  readonly domain: DomainKey;
+  /** Hidden from the navigation rail; still routable and still in the map. */
+  readonly secondary?: boolean;
 }
+
+export interface Domain {
+  readonly key: DomainKey;
+  readonly title: string;
+  /** What this area of the product is for, in one sentence. */
+  readonly proposition: string;
+}
+
+/**
+ * The five product areas.
+ *
+ * Ordered the way the platform is actually built up: an asset exists, it is
+ * operated, it is maintained, it is bought for and paid for, and the whole
+ * thing is governed. That is also the order the guided walkthrough follows.
+ */
+export const DOMAINS: readonly Domain[] = [
+  {
+    key: 'fleet',
+    title: 'ناوگان و دارایی',
+    proposition:
+      'دارایی — نه کاربر — موجودیت مرکزی است. هر ماشین یک پروندهٔ الکترونیکی دارد که می‌گوید چیست، امروز قابل اعزام هست یا نه، چقدر هزینه برداشته و چه بر سرش آمده.',
+  },
+  {
+    key: 'commerce',
+    title: 'بازار و تأمین',
+    proposition:
+      'خرید مشترک کالا و خدمت از فهرست چندتأمین‌کننده، با چرخهٔ سفارشی که وجه را پیش از تحویل نگه می‌دارد و تنها با تأیید خریدار آزاد می‌کند.',
+  },
+  {
+    key: 'finance',
+    title: 'مالی و حسابداری',
+    proposition:
+      'دفتر کل دوطرفهٔ تغییرناپذیر به‌عنوان مرجع حقیقت مالی، و کیف پول به‌عنوان نمای عملیاتی آن. پرداخت در MVP شبیه‌سازی‌شده و پشت Abstraction است.',
+  },
+  {
+    key: 'civil',
+    title: 'عملیات عمرانی',
+    proposition:
+      'پروژه، نیاز، گردش موافقت، مناقصه و قرارداد. هنوز ساخته نشده؛ مرزهای آن در ADRها ثبت شده است.',
+  },
+  {
+    key: 'platform',
+    title: 'پلتفرم و حکمرانی',
+    proposition:
+      'هویت، سازمان چندسطحی، اسناد، حسابرسی و اعلان — لایه‌ای که چندمستأجری بودن و قابل‌ممیزی بودن بقیهٔ پلتفرم را ممکن می‌کند.',
+  },
+];
 
 /**
  * The manifest.
@@ -88,150 +142,205 @@ export interface Capability {
  * which are implementations.
  */
 export const CAPABILITIES: readonly Capability[] = [
-  {
-    key: 'marketplace',
-    href: '/marketplace',
-    title: 'بازار و مقایسه پیشنهادها',
-    summary: 'جست‌وجوی فهرست کالا و خدمت، و مقایسه پیشنهادهای منتشرشدهٔ تأمین‌کنندگان.',
-    state: 'LIVE',
-    service: 'marketplace-service',
-    adapter: 'marketplace.catalogue',
-    evidence:
-      'services/marketplace-service/src/offer/catalogue.controller.ts — GET /v1/products، GET /v1/products/{id}/offers',
-    group: 'commerce',
-  },
-  {
-    key: 'organizations',
-    href: '/organizations',
-    title: 'سازمان و انتخاب مستأجر',
-    summary: 'سازمان‌های قابل مشاهده، و انتخاب سازمان فعال از میان عضویت‌های واقعی کاربر.',
-    state: 'LIVE',
-    service: 'organization-service',
-    adapter: 'organization.directory',
-    evidence:
-      'services/organization-service/src/organization/organization.controller.ts — GET /v1/organizations',
-    group: 'platform',
-  },
-  {
-    key: 'wallet-disclosure',
-    href: '/wallet',
-    title: 'افشای ارائه‌دهندهٔ پرداخت',
-    summary: 'اینکه کدام ارائه‌دهندهٔ پرداخت پیکربندی شده و آیا پول واقعی جابه‌جا می‌کند.',
-    state: 'LIVE',
-    service: 'economic-service',
-    adapter: 'economic.paymentProvider',
-    evidence:
-      'services/economic-service/src/wallet/wallet.controller.ts — GET /v1/wallets/provider (ADR-024)',
-    group: 'finance',
-  },
-
-  // ---- implemented upstream, no screen in this milestone -------------------
+  // ---- fleet ---------------------------------------------------------------
   {
     key: 'assets',
     href: '/assets',
     title: 'ماشین‌آلات و پروندهٔ الکترونیکی',
-    summary: 'ثبت دارایی، اسناد، بیمه‌نامه و بازدید؛ به‌همراه خط زمانی دارایی.',
-    state: 'BACKEND_READY',
+    summary:
+      'فهرست و جست‌وجوی دارایی، و پروندهٔ الکترونیکی هر ماشین: هویت، انطباق، هزینهٔ انباشته و خط زمانی رویدادها.',
+    state: 'LIVE',
     service: 'asset-service',
-    readiness: 'ARCHITECTURE_READY',
-    evidence: 'PROJECT_MEMORY.md § ۷ — asset-service: IMPLEMENTED، ۷۴ تست واحد، در CI Matrix',
-    group: 'operations',
+    adapter: 'asset.registry',
+    evidence:
+      'services/asset-service/src/asset/asset.controller.ts — GET /v1/assets، /{id}/dossier، /{id}/timeline',
+    domain: 'fleet',
   },
   {
     key: 'fleet',
     href: '/fleet',
-    title: 'راننده، تخصیص و ثبت کارکرد',
-    summary: 'راننده، تخصیص انحصاری، رکورد کارکرد و دسترس‌پذیری ناوگان.',
-    state: 'BACKEND_READY',
+    title: 'ناوگان: آمادگی، راننده و کارکرد',
+    summary:
+      'اینکه کدام ماشین امروز قابل اعزام است و چرا نیست، به‌همراه راننده، تخصیص و رکورد کارکرد.',
+    state: 'LIVE',
     service: 'fleet-service',
-    readiness: 'ARCHITECTURE_READY',
-    evidence: 'PROJECT_MEMORY.md § ۷-الف — IMPLEMENTED · TESTED · LIVE VERIFIED · CI VERIFIED',
-    group: 'operations',
+    adapter: 'fleet.operations',
+    evidence:
+      'services/fleet-service/src/fleet/*.controller.ts — GET /v1/fleet/availability، /utilization، /v1/drivers، /v1/assignments، /v1/usage-records',
+    domain: 'fleet',
   },
   {
     key: 'maintenance',
     href: '/maintenance',
     title: 'نگهداری و تعمیرات',
-    summary: 'برنامهٔ سرویس، درخواست تعمیر، دستور کار و هزینهٔ تأییدشده.',
-    state: 'BACKEND_READY',
+    summary:
+      'سررسید سرویس که در هر فراخوانی محاسبه می‌شود، درخواست‌های تعمیر و دستور کار تعمیرگاه با هزینهٔ تفکیک‌شده.',
+    state: 'LIVE',
     service: 'maintenance-service',
-    readiness: 'ARCHITECTURE_READY',
-    evidence: 'PROJECT_MEMORY.md § ۷-ب — IMPLEMENTED · TESTED · LIVE VERIFIED · CI VERIFIED',
-    group: 'operations',
+    adapter: 'maintenance.operations',
+    evidence:
+      'services/maintenance-service/src/maintenance/*.controller.ts — GET /v1/maintenance-schedules/due، /v1/maintenance-requests، /v1/repair-orders',
+    domain: 'fleet',
+  },
+
+  // ---- commerce ------------------------------------------------------------
+  {
+    key: 'marketplace',
+    href: '/marketplace',
+    title: 'بازار و مقایسه پیشنهادها',
+    summary: 'جست‌وجوی فهرست کالا و خدمت، و مقایسهٔ پیشنهادهای منتشرشدهٔ تأمین‌کنندگان.',
+    state: 'LIVE',
+    service: 'marketplace-service',
+    adapter: 'marketplace.catalogue',
+    evidence:
+      'services/marketplace-service/src/offer/catalogue.controller.ts — GET /v1/products، GET /v1/products/{id}/offers',
+    domain: 'commerce',
   },
   {
     key: 'orders',
     href: '/orders',
-    title: 'سفارش‌ها',
-    summary: 'چرخهٔ عمر سفارش از ثبت تا تسویه، با گردش‌کار Temporal و تأیید دریافت.',
-    state: 'BACKEND_READY',
+    title: 'سفارش‌ها و چرخهٔ عمر',
+    summary:
+      'یازده وضعیت واقعی سفارش از ثبت تا تسویه، با ماشین حالتی که نبودِ دو یال در آن، کل مدل ایمنی مالی است.',
+    state: 'LIVE',
     service: 'marketplace-service',
-    readiness: 'ARCHITECTURE_READY',
+    adapter: 'marketplace.orders',
     evidence:
-      'services/marketplace-service/src/order/order.controller.ts؛ PROJECT_MEMORY.md § ۳ — ۱۷ سناریوی E2E',
-    group: 'commerce',
+      'services/marketplace-service/src/order/order.controller.ts و order/state-machine.ts — GET /v1/orders، GET /v1/orders/{id}',
+    domain: 'commerce',
   },
-  {
-    key: 'documents',
-    href: '/documents',
-    title: 'اسناد',
-    summary: 'آپلود مستقیم به Object Storage، اسکن بدافزار و دانلود Fail-Closed.',
-    state: 'BACKEND_READY',
-    service: 'document-service',
-    readiness: 'ARCHITECTURE_READY',
-    evidence: 'PROJECT_MEMORY.md § ۷-د — IMPLEMENTED · TESTED · LIVE VERIFIED (ADR-049)',
-    group: 'platform',
-  },
-  {
-    key: 'identity',
-    href: '/users',
-    title: 'کاربران، نقش و عضویت',
-    summary: 'کاربر، اعتبارنامه، عضویت سازمانی و نقش‌های دامنه‌ای.',
-    state: 'BACKEND_READY',
-    service: 'identity-service',
-    readiness: 'ARCHITECTURE_READY',
-    evidence: 'PROJECT_MEMORY.md § ۷ — identity-service: IMPLEMENTED، در CI Matrix',
-    group: 'platform',
-  },
-  {
-    key: 'wallet-ledger',
-    href: '/wallet/ledger',
-    title: 'کیف پول، تراکنش و دفتر کل',
-    summary: 'مانده، تعهد، تسویه و دفتر کل دوطرفهٔ تغییرناپذیر.',
-    state: 'BACKEND_READY',
-    service: 'economic-service',
-    readiness: 'ARCHITECTURE_READY',
-    evidence: 'PROJECT_MEMORY.md § ۷-ج — ۳۰۸ واحد + ۲۵۵ یکپارچگی + ۳۷ E2E، LIVE VERIFIED',
-    group: 'finance',
-  },
-
-  // ---- partially shipped ---------------------------------------------------
   {
     key: 'suppliers',
     href: '/suppliers',
     title: 'تأمین‌کنندگان',
     summary:
-      'فاز ۱ (پروفایل، احراز صلاحیت، تعلیق، فهرست) روی main است. امتیاز عملکرد پیاده نشده؛ COM-005 هنوز IN_PROGRESS است.',
+      'فهرست عمومی تأمین‌کنندگان با قابلیت‌های اعلامی و صلاحیت‌های تأییدشده. امتیاز عملکرد وجود ندارد.',
     state: 'BETA',
     service: 'supplier-service',
+    adapter: 'supplier.directory',
     readiness: 'PARTIAL',
     evidence:
-      'PROJECT_MEMORY.md § ۳ — supplier-service فاز ۱ Merge شد (36d718cf)؛ Phase 2 شروع نشده، COM-005 IN_PROGRESS',
-    group: 'commerce',
+      'فاز ۱ روی main (36d718cf). Phase 2 شروع نشده و COM-005 هنوز IN_PROGRESS است — services/supplier-service/src/supplier/supplier.controller.ts، GET /v1/suppliers',
+    domain: 'commerce',
   },
 
-  // ---- not implemented -----------------------------------------------------
+  // ---- finance -------------------------------------------------------------
+  {
+    key: 'wallet',
+    href: '/wallet',
+    title: 'کیف پول و تراکنش',
+    summary: 'مانده، تعهد و مانده قابل استفاده، فهرست تراکنش‌ها، و افشای رسمی ارائه‌دهندهٔ پرداخت.',
+    state: 'LIVE',
+    service: 'economic-service',
+    adapter: 'economic.wallet',
+    evidence:
+      'services/economic-service/src/wallet/wallet.controller.ts و transaction/transaction.controller.ts — GET /v1/wallets/me، /v1/wallets/provider، /v1/transactions',
+    domain: 'finance',
+  },
+  {
+    key: 'ledger',
+    href: '/wallet/ledger',
+    title: 'دفتر کل و تراز آزمایشی',
+    summary:
+      'حساب‌های سازمان و اثبات توازن دوطرفه. مقدار `balanced: false` یک هشدار بحرانی است، نه یک گزارش.',
+    state: 'LIVE',
+    service: 'economic-service',
+    adapter: 'economic.ledger',
+    evidence:
+      'services/economic-service/src/ledger/ledger.controller.ts — GET /v1/ledger/accounts، GET /v1/ledger/trial-balance (فقط SYSTEM_ADMIN و UNION_ADMIN)',
+    domain: 'finance',
+  },
+  {
+    key: 'rewards',
+    href: '/rewards',
+    title: 'امتیاز مشارکت',
+    summary:
+      'موتور پاداش در Backend پیاده شده، اما نردبان سطح و ارزش‌گذاری ریالی هنوز تصمیم محصولی ندارند.',
+    state: 'BACKEND_READY',
+    service: 'economic-service',
+    readiness: 'BLOCKED_BY_PRODUCT_DECISION',
+    evidence:
+      'GET /v1/rewards/me پیاده است، اما Q-09 (سهم کارمزد از پاداش) و Q-13 (نردبان سطح) باز‌اند و RewardBalanceView.level برابر null است.',
+    domain: 'finance',
+    secondary: true,
+  },
+  {
+    key: 'commissions',
+    href: '/commissions',
+    title: 'کارمزد و قواعد آن',
+    summary: 'محاسبهٔ کارمزد پیاده شده است، اما نرخ آن هنوز مصوب نشده (Q-08).',
+    state: 'BACKEND_READY',
+    service: 'economic-service',
+    readiness: 'BLOCKED_BY_PRODUCT_DECISION',
+    evidence:
+      'GET /v1/commissions و /commissions/rules پیاده‌اند؛ createCommissionRuleSchema.rateBasisPoints بدون مقدار پیش‌فرض است و Q-08 در docs/24 باز است.',
+    domain: 'finance',
+    secondary: true,
+  },
+
+  // ---- platform ------------------------------------------------------------
+  {
+    key: 'profile',
+    href: '/profile',
+    title: 'حساب کاربری و عضویت‌ها',
+    summary:
+      'کاربر احراز هویت‌شده، عضویت‌های سازمانی او و نقش‌های مؤثر در سازمان فعال، از سرویس هویت.',
+    state: 'LIVE',
+    service: 'identity-service',
+    adapter: 'identity.me',
+    evidence: 'services/identity-service/src/identity/identity.controller.ts — GET /v1/users/me',
+    domain: 'platform',
+  },
+  {
+    key: 'organizations',
+    href: '/organizations',
+    title: 'سازمان و انتخاب مستأجر',
+    summary: 'سازمان‌های قابل مشاهده، و تفاوت میان «دیدن» یک سازمان و «عمل کردن به‌نام» آن.',
+    state: 'LIVE',
+    service: 'organization-service',
+    adapter: 'organization.directory',
+    evidence:
+      'services/organization-service/src/organization/organization.controller.ts — GET /v1/organizations',
+    domain: 'platform',
+  },
+  {
+    key: 'users',
+    href: '/users',
+    title: 'کاربران سازمان',
+    summary: 'کاربران سازمان فعال و نقش‌هایشان. تنها برای مدیر سازمان و مدیر اتحادیه باز است.',
+    state: 'LIVE',
+    service: 'identity-service',
+    adapter: 'identity.directory',
+    evidence:
+      'services/identity-service/src/identity/identity.controller.ts — GET /v1/users با نقش‌های ORGANIZATION_ADMIN و UNION_ADMIN',
+    domain: 'platform',
+  },
+  {
+    key: 'documents',
+    href: '/documents',
+    title: 'اسناد و وضعیت اسکن',
+    summary:
+      'فراداده اسناد و معنای دقیق هر وضعیت اسکن بدافزار. دانلود Fail-Closed است: تنها CLEAN تحویل داده می‌شود.',
+    state: 'LIVE',
+    service: 'document-service',
+    adapter: 'document.registry',
+    evidence:
+      'services/document-service/src/document/document.controller.ts — GET /v1/documents (ADR-049، ADR-014)',
+    domain: 'platform',
+  },
+
+  // ---- not built -----------------------------------------------------------
   {
     key: 'procurement',
     href: '/procurement',
     title: 'تأمین، تجمیع تقاضا و استعلام',
-    summary: 'ثبت نیاز، تجمیع، استعلام و سفارش خرید.',
+    summary: 'ثبت نیاز، تجمیع میان سازمان‌ها، استعلام بها و سفارش خرید.',
     state: 'PLANNED',
     service: null,
     readiness: 'PLANNED',
     evidence:
-      'services/ ندارد. مسیر `demand-requests` در جدول Gateway هست اما سرویسی پشت آن ساخته نشده.',
-    group: 'commerce',
+      'services/procurement-service وجود ندارد. مسیر `demand-requests` در جدول Gateway هست اما سرویسی پشت آن ساخته نشده.',
+    domain: 'commerce',
   },
   {
     key: 'inventory',
@@ -242,19 +351,30 @@ export const CAPABILITIES: readonly Capability[] = [
     service: null,
     readiness: 'PLANNED',
     evidence:
-      'ADR-041 § 2 — رزرو موجودی وجود ندارد؛ `availableQuantity` اعلام تأمین‌کننده است، نه موجودی انبار.',
-    group: 'commerce',
+      'ADR-041 § ۲ — رزرو موجودی وجود ندارد؛ availableQuantity روی هر پیشنهاد، اعلام تأمین‌کننده است نه موجودی انبار.',
+    domain: 'commerce',
+  },
+  {
+    key: 'returns',
+    href: '/returns',
+    title: 'مرجوعی و لجستیک معکوس',
+    summary: 'مرجوعی، ضمانت و حمل برگشت.',
+    state: 'PLANNED',
+    service: null,
+    readiness: 'BLOCKED_BY_PRODUCT_DECISION',
+    evidence: 'ADR-048 مرز لجستیک معکوس را ثبت کرده، اما هیچ سرویسی آن را پیاده نکرده است.',
+    domain: 'commerce',
   },
   {
     key: 'construction',
     href: '/projects',
     title: 'پروژه‌های عمرانی و مناقصه',
-    summary: 'پروژه، نیاز، گردش موافقت، مناقصه، پیشنهاد و پیشرفت.',
+    summary: 'پروژه، نیاز، گردش موافقت، مناقصه، پیشنهاد و پیشرفت کار.',
     state: 'PLANNED',
     service: null,
     readiness: 'PLANNED',
     evidence: 'PROJECT_MEMORY.md § ۷ — construction-service: NOT_STARTED',
-    group: 'operations',
+    domain: 'civil',
   },
   {
     key: 'contracts',
@@ -265,7 +385,7 @@ export const CAPABILITIES: readonly Capability[] = [
     service: null,
     readiness: 'PLANNED',
     evidence: 'PROJECT_MEMORY.md § ۷ — contract-service: NOT_STARTED',
-    group: 'operations',
+    domain: 'civil',
   },
   {
     key: 'notifications',
@@ -277,18 +397,18 @@ export const CAPABILITIES: readonly Capability[] = [
     readiness: 'PLANNED',
     evidence:
       'در main فقط Bootstrap سرویس Merge شده (PR #38). هیچ دامنه‌ای پیاده نشده و هیچ اعلانی تحویل نمی‌شود.',
-    group: 'platform',
+    domain: 'platform',
   },
   {
     key: 'audit',
     href: '/audit',
     title: 'سوابق حسابرسی',
-    summary: 'رویداد حسابرسی، فقط الحاقی.',
+    summary: 'رویداد حسابرسی، فقط الحاقی و غیرقابل تغییر.',
     state: 'PLANNED',
     service: null,
     readiness: 'PLANNED',
     evidence: 'در main فقط Bootstrap سرویس Merge شده (PR #38). AuditEvent پیاده نشده.',
-    group: 'platform',
+    domain: 'platform',
   },
   {
     key: 'analytics',
@@ -300,18 +420,7 @@ export const CAPABILITIES: readonly Capability[] = [
     readiness: 'PLANNED',
     evidence:
       'PROJECT_MEMORY.md § ۷ — analytics-service: NOT_STARTED. هیچ KPI عملیاتی در این نسخه محاسبه نمی‌شود.',
-    group: 'platform',
-  },
-  {
-    key: 'returns',
-    href: '/returns',
-    title: 'مرجوعی و لجستیک معکوس',
-    summary: 'مرجوعی، ضمانت و حمل برگشت.',
-    state: 'PLANNED',
-    service: null,
-    readiness: 'BLOCKED_BY_PRODUCT_DECISION',
-    evidence: 'ADR-048 — مرز لجستیک معکوس ثبت شده اما هیچ سرویسی آن را پیاده نکرده است.',
-    group: 'commerce',
+    domain: 'platform',
   },
 ];
 
@@ -339,40 +448,44 @@ export function assertManifestIntegrity(
 ): void {
   const violations: string[] = [];
   const seen = new Set<string>();
+  const hrefs = new Set<string>();
 
   for (const capability of capabilities) {
     if (seen.has(capability.key)) violations.push(`duplicate capability key "${capability.key}"`);
     seen.add(capability.key);
 
+    if (hrefs.has(capability.href)) violations.push(`duplicate href "${capability.href}"`);
+    hrefs.add(capability.href);
+
     if (!capability.href.startsWith('/')) {
       violations.push(`"${capability.key}" has a non-absolute href "${capability.href}"`);
     }
 
-    if (capability.state === 'LIVE') {
+    if (NETWORK_STATES.has(capability.state)) {
       if (!capability.adapter) {
-        violations.push(`"${capability.key}" is LIVE with no adapter named`);
+        violations.push(`"${capability.key}" is ${capability.state} with no adapter named`);
       } else if (!registered.has(capability.adapter)) {
         violations.push(
-          `"${capability.key}" is LIVE and names adapter "${capability.adapter}", ` +
-            'which is not registered — nothing in this application calls it',
+          `"${capability.key}" is ${capability.state} and names adapter ` +
+            `"${capability.adapter}", which is not registered — nothing in this ` +
+            'application calls it',
         );
       }
       if (!capability.service) {
-        violations.push(`"${capability.key}" is LIVE with no owning service`);
+        violations.push(`"${capability.key}" is ${capability.state} with no owning service`);
       }
-      if (capability.readiness) {
-        violations.push(`"${capability.key}" is LIVE and also carries a readiness reason`);
-      }
-    } else {
-      if (capability.adapter) {
-        violations.push(
-          `"${capability.key}" is ${capability.state} but names adapter "${capability.adapter}"; ` +
-            'a non-live capability must not reach the network',
-        );
-      }
-      if (!capability.readiness) {
-        violations.push(`"${capability.key}" is ${capability.state} with no readiness reason`);
-      }
+    } else if (capability.adapter) {
+      violations.push(
+        `"${capability.key}" is ${capability.state} but names adapter "${capability.adapter}"; ` +
+          'a capability in this state must not reach the network',
+      );
+    }
+
+    if (capability.state === 'LIVE' && capability.readiness) {
+      violations.push(`"${capability.key}" is LIVE and also carries a readiness reason`);
+    }
+    if (capability.state !== 'LIVE' && !capability.readiness) {
+      violations.push(`"${capability.key}" is ${capability.state} with no readiness reason`);
     }
 
     if (!capability.evidence.trim()) {
@@ -396,7 +509,14 @@ export function capabilityByHref(href: string): Capability | undefined {
   return BY_HREF.get(href);
 }
 
-/** Whether this capability may issue a network request. Only `LIVE` may. */
+/** Whether this capability may issue a network request. */
 export function mayCallNetwork(capability: Capability): boolean {
-  return capability.state === 'LIVE';
+  return NETWORK_STATES.has(capability.state);
 }
+
+export function capabilitiesInDomain(domain: DomainKey): Capability[] {
+  return CAPABILITIES.filter((capability) => capability.domain === domain);
+}
+
+/** The exact disclosure any non-operational surface must carry. */
+export const PREVIEW_DISCLOSURE = 'PREVIEW — داده نمایشی است و عملیات واقعی انجام نمی‌شود';

@@ -1,7 +1,12 @@
 import type { ReactNode } from 'react';
-import { UnderConstruction } from '@/components/under-construction';
+import { RequireSession } from '@/components/require-session';
+import { SuppliersView } from '@/components/suppliers/suppliers-view';
 
-/** Generated from the capability manifest entry `suppliers`. Reads nothing, calls nothing. */
+/** LIVE — BETA — `GET /v1/suppliers`. Phase 1 only; performance scoring does not exist. */
 export default function Page(): ReactNode {
-  return <UnderConstruction capabilityKey="suppliers" />;
+  return (
+    <RequireSession requireOrganization>
+      <SuppliersView />
+    </RequireSession>
+  );
 }

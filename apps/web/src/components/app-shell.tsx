@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import type { ReactNode } from 'react';
-import { CAPABILITIES, type Capability } from '@/lib/capabilities';
+import { CAPABILITIES, DOMAINS, type Capability, type DomainKey } from '@/lib/capabilities';
 import { useSession } from '@/lib/auth/session';
 import { Button, cx } from './ui/primitives';
 import { CapabilityBadge } from './capability';
@@ -24,14 +24,13 @@ import { OrganizationSwitcher } from './org-switcher';
  * an architectural requirement, not a preference.
  */
 
-const GROUP_LABELS: Record<Capability['group'], string> = {
-  operations: 'عملیات و ناوگان',
-  commerce: 'بازار و تأمین',
-  finance: 'مالی',
-  platform: 'پلتفرم',
-};
-
-const GROUP_ORDER: Capability['group'][] = ['operations', 'commerce', 'finance', 'platform'];
+/**
+ * Grouped by product domain, in the order the platform is built up: an asset
+ * exists, it is operated and maintained, it is bought for and paid for, and the
+ * whole thing is governed. The guided walkthrough follows the same order, so a
+ * viewer who wandered off the tour still recognises where they are.
+ */
+const DOMAIN_ORDER: DomainKey[] = ['fleet', 'commerce', 'finance', 'civil', 'platform'];
 
 export function AppShell({ children }: { children: ReactNode }): ReactNode {
   const pathname = usePathname();
@@ -51,8 +50,9 @@ export function AppShell({ children }: { children: ReactNode }): ReactNode {
       >
         <BrandMark />
         <nav className="flex flex-row gap-2 lg:flex-col lg:gap-0" aria-label="قابلیت‌ها">
-          {GROUP_ORDER.map((group) => (
-            <NavGroup key={group} group={group} pathname={pathname} />
+          <PresentLink pathname={pathname} />
+          {DOMAIN_ORDER.map((domain) => (
+            <NavGroup key={domain} domain={domain} pathname={pathname} />
           ))}
         </nav>
       </aside>
@@ -91,20 +91,49 @@ function BrandMark(): ReactNode {
   );
 }
 
-function NavGroup({
-  group,
-  pathname,
-}: {
-  group: Capability['group'];
-  pathname: string;
-}): ReactNode {
-  const items = CAPABILITIES.filter((capability) => capability.group === group);
+/**
+ * The walkthrough entry point, pinned above the domains.
+ *
+ * A presenter should never have to remember a URL, and an investor who clicks
+ * away mid-tour needs one obvious way back — which is also why this link is in
+ * the rail rather than only on the dashboard.
+ */
+function PresentLink({ pathname }: { pathname: string }): ReactNode {
+  const active = pathname.startsWith('/present');
+
+  return (
+    <div className="flex flex-none lg:mb-4 lg:block">
+      <Link
+        href="/present"
+        aria-current={active ? 'page' : undefined}
+        className={cx(
+          'flex min-h-[var(--tap)] flex-none items-center gap-2 whitespace-nowrap rounded-[var(--radius-md)] border px-3 text-sm font-bold lg:w-full',
+          active
+            ? 'border-[var(--pri)] bg-[var(--pri)] text-white'
+            : 'border-[var(--pri)] text-[var(--pri-tx)] hover:bg-[var(--pri-soft)]',
+        )}
+      >
+        <span aria-hidden="true">▸</span>
+        روایت هدایت‌شده
+      </Link>
+    </div>
+  );
+}
+
+function NavGroup({ domain, pathname }: { domain: DomainKey; pathname: string }): ReactNode {
+  // `secondary` capabilities stay routable and stay in the capability map, but
+  // a rail listing every one of them stops being a map and becomes a list.
+  const items = CAPABILITIES.filter(
+    (capability) => capability.domain === domain && !capability.secondary,
+  );
   if (items.length === 0) return null;
+
+  const label = DOMAINS.find((entry) => entry.key === domain)?.title ?? domain;
 
   return (
     <div className="flex flex-none flex-row gap-2 lg:mb-4 lg:flex-col lg:gap-0.5">
       <p className="hidden px-2 pb-1 text-xs font-bold uppercase tracking-wide text-[var(--tx3)] lg:block">
-        {GROUP_LABELS[group]}
+        {label}
       </p>
       {items.map((capability) => (
         <NavItem key={capability.key} capability={capability} pathname={pathname} />

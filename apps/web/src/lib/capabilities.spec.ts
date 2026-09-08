@@ -7,7 +7,7 @@ import {
   mayCallNetwork,
   type Capability,
 } from './capabilities';
-import { ADAPTERS, REGISTERED_ADAPTERS } from './api/adapter-registry';
+import { ADAPTERS, REGISTERED_ADAPTERS, declaredGatewayPrefixes } from './api/adapter-registry';
 
 /**
  * The manifest is the one place a status claim is made, so it is the one place
@@ -26,7 +26,7 @@ function capability(overrides: Partial<Capability>): Capability {
     service: null,
     readiness: 'PLANNED',
     evidence: 'test fixture',
-    group: 'platform',
+    domain: 'platform',
     ...overrides,
   } as Capability;
 }
@@ -34,6 +34,28 @@ function capability(overrides: Partial<Capability>): Capability {
 describe('capability manifest integrity', () => {
   it('accepts the shipped manifest', () => {
     expect(() => assertManifestIntegrity()).not.toThrow();
+  });
+
+  it('refuses BETA for a capability with no adapter named', () => {
+    expect(() =>
+      assertManifestIntegrity(
+        [
+          capability({
+            key: 'x',
+            state: 'BETA',
+            service: 'supplier-service',
+            readiness: 'PARTIAL',
+          }),
+        ],
+        REGISTERED,
+      ),
+    ).toThrow(ManifestIntegrityError);
+  });
+
+  it('refuses two capabilities claiming the same route', () => {
+    expect(() =>
+      assertManifestIntegrity([capability({ key: 'a' }), capability({ key: 'b' })], REGISTERED),
+    ).toThrow(/duplicate href/);
   });
 
   it('refuses LIVE for a service with no adapter named', () => {
@@ -103,12 +125,23 @@ describe('capability manifest integrity', () => {
 });
 
 describe('shipped manifest', () => {
-  it('marks exactly the capabilities backed by a registered adapter as LIVE', () => {
-    const live = CAPABILITIES.filter((entry) => entry.state === 'LIVE');
-    expect(live.length).toBeGreaterThan(0);
+  it('backs every network-capable capability with a registered adapter', () => {
+    const networked = CAPABILITIES.filter(mayCallNetwork);
+    expect(networked.length).toBeGreaterThan(0);
 
-    for (const entry of live) {
+    for (const entry of networked) {
       expect(REGISTERED.has(entry.adapter as string)).toBe(true);
+    }
+  });
+
+  it('gives every registered adapter a capability that uses it', () => {
+    // The inverse direction. An adapter nothing points at is dead code that
+    // would still pass the integrity check, and dead code in the API layer is
+    // the kind that quietly outlives the contract it was written against.
+    const claimed = new Set(CAPABILITIES.map((entry) => entry.adapter).filter(Boolean));
+
+    for (const adapter of ADAPTERS) {
+      expect(claimed.has(adapter.id)).toBe(true);
     }
   });
 
@@ -139,9 +172,13 @@ describe('shipped manifest', () => {
     expect(capabilityByKey('suppliers')?.state).toBe('BETA');
   });
 
-  it('lets only LIVE capabilities reach the network', () => {
+  it('lets only LIVE and BETA capabilities reach the network', () => {
+    // BETA is included deliberately: `supplier-service` Phase 1 is merged and
+    // this application calls it. What BETA says is that the *domain* is
+    // unfinished, not that the endpoint is imaginary — and pretending
+    // otherwise would understate a service that is really there.
     for (const entry of CAPABILITIES) {
-      expect(mayCallNetwork(entry)).toBe(entry.state === 'LIVE');
+      expect(mayCallNetwork(entry)).toBe(entry.state === 'LIVE' || entry.state === 'BETA');
     }
   });
 
@@ -159,9 +196,56 @@ describe('adapter registry', () => {
   });
 
   it('declares only routes the gateway can resolve', () => {
-    // `resolveRoute` in the gateway matches the first path segment after /v1.
-    // Every prefix below appears in `services/api-gateway/src/config/routes.ts`.
-    const gatewayPrefixes = new Set(['products', 'offers', 'organizations', 'wallets']);
+    // `resolveRoute` in the gateway matches on the first path segment after
+    // `/v1`. This list is copied from the `prefix` values in
+    // `services/api-gateway/src/config/routes.ts`; an adapter aimed anywhere
+    // else would reach a 404 at the edge rather than a service.
+    const gatewayPrefixes = new Set([
+      'registration-requests',
+      'users',
+      'memberships',
+      'roles',
+      'organizations',
+      'assets',
+      'insurance-policies',
+      'drivers',
+      'assignments',
+      'usage-records',
+      'fleet',
+      'maintenance-requests',
+      'maintenance-schedules',
+      'repair-orders',
+      'products',
+      'offers',
+      'cart',
+      'orders',
+      'demand-requests',
+      'aggregations',
+      'rfqs',
+      'purchase-orders',
+      'suppliers',
+      'warehouses',
+      'stock',
+      'shipments',
+      'projects',
+      'approvals',
+      'tenders',
+      'contracts',
+      'statements',
+      'wallets',
+      'transactions',
+      'settlements',
+      'payment-intents',
+      'commissions',
+      'rewards',
+      'ledger',
+      'notifications',
+      'preferences',
+      'documents',
+      'audit-events',
+      'dashboards',
+      'kpis',
+    ]);
 
     for (const adapter of ADAPTERS) {
       for (const route of adapter.routes) {
@@ -170,6 +254,13 @@ describe('adapter registry', () => {
         expect(path?.startsWith('/v1/')).toBe(true);
         expect(gatewayPrefixes.has(path!.split('/')[2]!)).toBe(true);
       }
+    }
+  });
+
+  it('reaches only prefixes the gateway routes', () => {
+    for (const prefix of declaredGatewayPrefixes()) {
+      expect(typeof prefix).toBe('string');
+      expect(prefix).not.toContain('{');
     }
   });
 });

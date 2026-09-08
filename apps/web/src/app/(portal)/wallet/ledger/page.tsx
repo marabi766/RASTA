@@ -1,7 +1,12 @@
 import type { ReactNode } from 'react';
-import { UnderConstruction } from '@/components/under-construction';
+import { RequireSession } from '@/components/require-session';
+import { LedgerView } from '@/components/wallet/ledger-view';
 
-/** Generated from the capability manifest entry `wallet-ledger`. Reads nothing, calls nothing. */
+/** LIVE — `GET /v1/ledger/accounts` and `/v1/ledger/trial-balance`. */
 export default function Page(): ReactNode {
-  return <UnderConstruction capabilityKey="wallet-ledger" />;
+  return (
+    <RequireSession requireOrganization>
+      <LedgerView />
+    </RequireSession>
+  );
 }

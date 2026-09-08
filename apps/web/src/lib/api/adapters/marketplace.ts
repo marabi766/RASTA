@@ -122,3 +122,164 @@ export async function offersForProduct(
 
   return result.data.items;
 }
+
+// ---------------------------------------------------------------------------
+// Orders
+// ---------------------------------------------------------------------------
+
+/**
+ * The order lifecycle.
+ *
+ * Read-only in this milestone. Placing an order is a write with a financial
+ * effect behind it — it holds funds through `economic-service` — and an
+ * investor preview has no business creating obligations on a shared dataset.
+ *
+ * `ORDER_TRANSITIONS` is copied from `order/state-machine.ts` so the stepper
+ * renders the real graph rather than a drawing of it. Two absent edges carry
+ * the whole safety model and the UI says so:
+ *
+ *  - `DISPUTED` has **no** edge to `SETTLING`. A dispute stopping settlement is
+ *    a missing edge, not a check somebody has to remember.
+ *  - `COMPLETED`, `CANCELLED` and `FAILED` have no outgoing edges at all, so a
+ *    replayed command on a finished order cannot produce a second financial
+ *    effect.
+ */
+export const MARKETPLACE_ORDERS_ADAPTER = {
+  id: 'marketplace.orders',
+  service: 'marketplace-service',
+  routes: ['GET /v1/orders', 'GET /v1/orders/{id}'],
+} as const satisfies AdapterDescriptor;
+
+export const ORDER_STATUSES = [
+  'PENDING',
+  'FUNDS_HELD',
+  'CONFIRMED',
+  'AWAITING_RECEIPT_CONFIRMATION',
+  'RECEIPT_CONFIRMED',
+  'SETTLING',
+  'COMPLETED',
+  'DISPUTED',
+  'CANCELLING',
+  'CANCELLED',
+  'FAILED',
+] as const;
+
+export type OrderStatus = (typeof ORDER_STATUSES)[number];
+
+export const ORDER_STATUS_LABELS: Record<string, string> = {
+  PENDING: 'در انتظار',
+  FUNDS_HELD: 'وجه نگه‌داشته شد',
+  CONFIRMED: 'تأیید تأمین‌کننده',
+  AWAITING_RECEIPT_CONFIRMATION: 'در انتظار تأیید دریافت',
+  RECEIPT_CONFIRMED: 'دریافت تأیید شد',
+  SETTLING: 'در حال تسویه',
+  COMPLETED: 'تکمیل‌شده',
+  DISPUTED: 'در اعتراض',
+  CANCELLING: 'در حال لغو',
+  CANCELLED: 'لغوشده',
+  FAILED: 'ناموفق',
+};
+
+/** The happy path, in order. Used to draw the stepper. */
+export const ORDER_HAPPY_PATH: readonly OrderStatus[] = [
+  'PENDING',
+  'FUNDS_HELD',
+  'CONFIRMED',
+  'AWAITING_RECEIPT_CONFIRMATION',
+  'RECEIPT_CONFIRMED',
+  'SETTLING',
+  'COMPLETED',
+];
+
+/** Verbatim from `order/state-machine.ts`. */
+export const ORDER_TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatus[]>> = {
+  PENDING: ['FUNDS_HELD', 'FAILED', 'CANCELLING'],
+  FUNDS_HELD: ['CONFIRMED', 'CANCELLING', 'DISPUTED'],
+  CONFIRMED: ['AWAITING_RECEIPT_CONFIRMATION', 'CANCELLING', 'DISPUTED'],
+  AWAITING_RECEIPT_CONFIRMATION: ['RECEIPT_CONFIRMED', 'CANCELLING', 'DISPUTED'],
+  RECEIPT_CONFIRMED: ['SETTLING', 'DISPUTED'],
+  SETTLING: ['COMPLETED', 'RECEIPT_CONFIRMED'],
+  DISPUTED: ['RECEIPT_CONFIRMED', 'CANCELLING'],
+  CANCELLING: ['CANCELLED'],
+  COMPLETED: [],
+  CANCELLED: [],
+  FAILED: [],
+};
+
+export const orderLineSchema = z.object({
+  offerId: z.string(),
+  productId: z.string(),
+  productName: z.string(),
+  quantity: z.number().int(),
+  unitPriceMinor: amountMinorSchema,
+  lineTotalMinor: amountMinorSchema,
+  currency: currencySchema,
+  offerVersion: z.number().int(),
+});
+
+export const orderViewSchema = z.object({
+  id: z.string(),
+  status: z.string(),
+  buyerOrganizationId: z.string(),
+  supplierOrganizationId: z.string(),
+  totalAmountMinor: amountMinorSchema,
+  currency: currencySchema,
+  lines: z.array(orderLineSchema),
+  economicTransactionId: z.string().nullable(),
+  economicSettlementId: z.string().nullable(),
+  supplierQualification: z.literal('UNAVAILABLE'),
+  reminderCount: z.number().int(),
+  lastReminderAt: z.string().nullable(),
+  confirmedAt: z.string().nullable(),
+  fulfilledAt: z.string().nullable(),
+  receiptConfirmedAt: z.string().nullable(),
+  completedAt: z.string().nullable(),
+  cancelledAt: z.string().nullable(),
+  cancellationReason: z.string().nullable(),
+  failureReason: z.string().nullable(),
+  createdAt: z.string(),
+  placedBy: z.string(),
+});
+
+export type OrderView = z.infer<typeof orderViewSchema>;
+
+export type OrderSide = 'BUYER' | 'SUPPLIER';
+
+/**
+ * `role` is explicit rather than inferred from the caller's roles.
+ *
+ * An organization can be both a buyer and a supplier, and guessing which list
+ * was meant would silently return the wrong one.
+ */
+export async function listOrders(
+  client: ApiClient,
+  role: OrderSide = 'BUYER',
+  signal?: AbortSignal,
+): Promise<OrderView[]> {
+  const result = await client.request({
+    // `GET /v1/orders` returns `{ items, nextCursor }` — no `hasMore`.
+    path: '/v1/orders',
+    schema: z.object({
+      items: z.array(orderViewSchema),
+      nextCursor: z.string().nullable(),
+    }),
+    signal,
+    query: { role, limit: 50 },
+  });
+
+  return result.data.items;
+}
+
+export async function fetchOrder(
+  client: ApiClient,
+  orderId: string,
+  signal?: AbortSignal,
+): Promise<OrderView> {
+  const result = await client.request({
+    path: `/v1/orders/${encodeURIComponent(orderId)}`,
+    schema: orderViewSchema,
+    signal,
+  });
+
+  return result.data;
+}

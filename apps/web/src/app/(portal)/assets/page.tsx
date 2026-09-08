@@ -1,7 +1,12 @@
 import type { ReactNode } from 'react';
-import { UnderConstruction } from '@/components/under-construction';
+import { RequireSession } from '@/components/require-session';
+import { AssetsView } from '@/components/assets/assets-view';
 
-/** Generated from the capability manifest entry `assets`. Reads nothing, calls nothing. */
+/** LIVE — `GET /v1/assets` through the API Gateway. */
 export default function Page(): ReactNode {
-  return <UnderConstruction capabilityKey="assets" />;
+  return (
+    <RequireSession requireOrganization>
+      <AssetsView />
+    </RequireSession>
+  );
 }

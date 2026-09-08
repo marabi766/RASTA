@@ -1,7 +1,12 @@
 import type { ReactNode } from 'react';
-import { UnderConstruction } from '@/components/under-construction';
+import { RequireSession } from '@/components/require-session';
+import { UsersView } from '@/components/identity/users-view';
 
-/** Generated from the capability manifest entry `identity`. Reads nothing, calls nothing. */
+/** LIVE — `GET /v1/users`. Route roles are ORGANIZATION_ADMIN and UNION_ADMIN. */
 export default function Page(): ReactNode {
-  return <UnderConstruction capabilityKey="identity" />;
+  return (
+    <RequireSession requireOrganization>
+      <UsersView />
+    </RequireSession>
+  );
 }

@@ -1,7 +1,12 @@
 import type { ReactNode } from 'react';
-import { UnderConstruction } from '@/components/under-construction';
+import { RequireSession } from '@/components/require-session';
+import { DocumentsView } from '@/components/documents/documents-view';
 
-/** Generated from the capability manifest entry `documents`. Reads nothing, calls nothing. */
+/** LIVE — `GET /v1/documents` through the API Gateway. */
 export default function Page(): ReactNode {
-  return <UnderConstruction capabilityKey="documents" />;
+  return (
+    <RequireSession requireOrganization>
+      <DocumentsView />
+    </RequireSession>
+  );
 }

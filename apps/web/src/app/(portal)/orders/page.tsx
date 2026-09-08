@@ -1,7 +1,12 @@
 import type { ReactNode } from 'react';
-import { UnderConstruction } from '@/components/under-construction';
+import { RequireSession } from '@/components/require-session';
+import { OrdersView } from '@/components/orders/orders-view';
 
-/** Generated from the capability manifest entry `orders`. Reads nothing, calls nothing. */
+/** LIVE — `GET /v1/orders` through the API Gateway. */
 export default function Page(): ReactNode {
-  return <UnderConstruction capabilityKey="orders" />;
+  return (
+    <RequireSession requireOrganization>
+      <OrdersView />
+    </RequireSession>
+  );
 }

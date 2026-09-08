@@ -1,7 +1,12 @@
 import type { ReactNode } from 'react';
-import { UnderConstruction } from '@/components/under-construction';
+import { RequireSession } from '@/components/require-session';
+import { MaintenanceView } from '@/components/maintenance/maintenance-view';
 
-/** Generated from the capability manifest entry `maintenance`. Reads nothing, calls nothing. */
+/** LIVE — `GET /v1/maintenance-schedules/due`, `/v1/maintenance-requests`, `/v1/repair-orders`. */
 export default function Page(): ReactNode {
-  return <UnderConstruction capabilityKey="maintenance" />;
+  return (
+    <RequireSession requireOrganization>
+      <MaintenanceView />
+    </RequireSession>
+  );
 }

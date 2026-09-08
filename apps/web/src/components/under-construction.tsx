@@ -1,28 +1,39 @@
 import type { ReactNode } from 'react';
-import { capabilityByKey } from '@/lib/capabilities';
+import { DOMAINS, PREVIEW_DISCLOSURE, capabilityByKey } from '@/lib/capabilities';
 import { Card, PageHeader } from './ui/primitives';
+import { Code, DescriptionList, Section } from './ui/data-view';
 import { CapabilityBadge, READINESS_PRESENTATION, STATE_PRESENTATION } from './capability';
 
 /**
- * The «در حال ساخت» screen.
+ * The screen behind every capability this application does not operate.
  *
- * Every capability that is not `LIVE` routes here, and this component is the
- * reason those routes are safe to show an investor: it has no form, no chart,
- * no rating, no figure and no success toast. There is nothing here that could
- * be mistaken for a working feature, because there is nothing here that does
- * anything.
+ * ## What it may and may not contain
  *
- * It also does not call `fetch`. That is asserted by a test rather than left to
- * inspection — a placeholder that quietly probed an endpoint would be claiming,
- * in the network tab, exactly what the page says it is not doing.
+ * It explains: the roadmap position, the architectural state, and what the
+ * capability is *for* — because "not built" is a poor answer to an investor and
+ * "here is exactly where it sits and what has to happen first" is a good one.
  *
- * What it does say is the part that is actually useful to a reader: which of
- * the three reasons applies. "Architecture-ready" and "waiting on a product
- * decision" are very different answers to "when will this work", and
- * collapsing both into «به‌زودی» throws away the only information the screen
- * has.
+ * It does not contain: a form, an input, a chart, a rating, a figure, a success
+ * toast, or a button that looks like it does something. A test asserts each of
+ * those absences, and another asserts the page never calls `fetch` — a
+ * placeholder that quietly probed an endpoint would be doing, in the network
+ * tab, exactly what it tells the reader it is not doing.
+ *
+ * The required disclosure is rendered unconditionally, in the exact wording,
+ * because a screenshot of this page will travel further than the room it was
+ * shown in.
  */
-export function UnderConstruction({ capabilityKey }: { capabilityKey: string }): ReactNode {
+export function UnderConstruction({
+  capabilityKey,
+  /** Why this capability is worth building. Optional; omitted rather than invented. */
+  value,
+  /** What must be true before it can start. Optional. */
+  prerequisites,
+}: {
+  capabilityKey: string;
+  value?: readonly string[];
+  prerequisites?: readonly string[];
+}): ReactNode {
   const capability = capabilityByKey(capabilityKey);
 
   if (!capability) {
@@ -32,6 +43,7 @@ export function UnderConstruction({ capabilityKey }: { capabilityKey: string }):
   }
 
   const state = STATE_PRESENTATION[capability.state];
+  const domain = DOMAINS.find((entry) => entry.key === capability.domain);
 
   return (
     <>
@@ -41,9 +53,16 @@ export function UnderConstruction({ capabilityKey }: { capabilityKey: string }):
         actions={<CapabilityBadge state={capability.state} />}
       />
 
+      <div
+        role="note"
+        className="mb-6 rounded-[var(--radius-md)] border border-[var(--warn)] bg-[var(--warn-soft)] px-4 py-3 text-sm font-bold text-[var(--warn-tx)]"
+      >
+        {PREVIEW_DISCLOSURE}
+      </div>
+
       <div className="grid gap-4 lg:grid-cols-3">
         <Card className="lg:col-span-2">
-          <h2 className="text-lg font-bold text-[var(--tx)]">این بخش در حال ساخت است</h2>
+          <h2 className="text-lg font-bold text-[var(--tx)]">وضعیت این بخش</h2>
           <p className="mt-3 text-sm text-[var(--tx2)]">{state.description}</p>
 
           {capability.readiness ? (
@@ -63,22 +82,69 @@ export function UnderConstruction({ capabilityKey }: { capabilityKey: string }):
             {capability.evidence}
           </p>
 
-          <dl className="mt-4 space-y-2 text-xs">
-            <div className="flex items-baseline justify-between gap-2">
-              <dt className="text-[var(--tx3)]">وضعیت</dt>
-              <dd dir="ltr" className="rasta-code text-[var(--tx)]">
-                {capability.state}
-              </dd>
-            </div>
-            <div className="flex items-baseline justify-between gap-2">
-              <dt className="text-[var(--tx3)]">سرویس مالک داده</dt>
-              <dd dir="ltr" className="rasta-code text-[var(--tx)]">
-                {capability.service ?? '—'}
-              </dd>
-            </div>
-          </dl>
+          <div className="mt-4">
+            <DescriptionList
+              columns={1}
+              items={[
+                { term: 'وضعیت', value: <Code>{capability.state}</Code> },
+                { term: 'حوزهٔ محصول', value: domain?.title ?? capability.domain },
+                {
+                  term: 'سرویس مالک داده',
+                  value: capability.service ? (
+                    <Code>{capability.service}</Code>
+                  ) : (
+                    <span className="text-[var(--tx3)]">سرویسی وجود ندارد</span>
+                  ),
+                },
+              ]}
+            />
+          </div>
         </Card>
       </div>
+
+      {domain ? (
+        <Section id="domain" title={`جای این بخش در «${domain.title}»`}>
+          <Card>
+            <p className="text-sm text-[var(--tx2)]">{domain.proposition}</p>
+          </Card>
+        </Section>
+      ) : null}
+
+      {value && value.length > 0 ? (
+        <Section
+          id="value"
+          title="این قابلیت چه مشکلی را حل می‌کند"
+          description="شرح مسئله، نه ادعای قابلیت. هیچ‌کدام از موارد زیر امروز کار نمی‌کند."
+        >
+          <Card>
+            <ul className="space-y-2 text-sm text-[var(--tx2)]">
+              {value.map((item) => (
+                <li key={item} className="border-s-2 border-[var(--bd2)] ps-3" dir="auto">
+                  {item}
+                </li>
+              ))}
+            </ul>
+          </Card>
+        </Section>
+      ) : null}
+
+      {prerequisites && prerequisites.length > 0 ? (
+        <Section
+          id="prerequisites"
+          title="پیش‌نیازهای شروع"
+          description="آنچه باید پیش از نوشتن نخستین خط کد این بخش روشن یا آماده باشد."
+        >
+          <Card>
+            <ul className="space-y-2 text-sm text-[var(--tx2)]">
+              {prerequisites.map((item) => (
+                <li key={item} className="border-s-2 border-[var(--bd2)] ps-3" dir="auto">
+                  {item}
+                </li>
+              ))}
+            </ul>
+          </Card>
+        </Section>
+      ) : null}
     </>
   );
 }

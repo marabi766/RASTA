@@ -1,20 +1,28 @@
 import { render, screen } from '@testing-library/react';
 import { UnderConstruction } from './under-construction';
-import { CAPABILITIES } from '@/lib/capabilities';
+import { CAPABILITIES, PREVIEW_DISCLOSURE } from '@/lib/capabilities';
 import { expectNoAxeViolations } from '@/test/harness';
 
 /**
- * The «در حال ساخت» screen has one job: make no claim.
+ * The screens behind every capability this application does not operate.
  *
- * The `fetch` assertion is the important one. A placeholder that quietly probed
- * an endpoint would be doing, in the network tab, exactly what the page tells
- * the reader it is not doing — and that is the kind of discrepancy an investor
- * demo cannot survive being caught on.
+ * These pages are allowed to be rich — roadmap, architectural state, the
+ * problem the capability would solve — and that richness is exactly why the
+ * assertions below matter. A page that explains a feature well is one keystroke
+ * away from looking like a page that *has* the feature.
+ *
+ * The `fetch` assertion is the load-bearing one. A placeholder that quietly
+ * probed an endpoint would be doing, in the network tab, precisely what it tells
+ * the reader it is not doing — and that is the discrepancy an investor demo
+ * cannot survive being caught on.
  */
 
 const NON_LIVE = CAPABILITIES.filter((capability) => capability.state !== 'LIVE');
 
-describe('planned and not-yet-built capabilities', () => {
+/** A rendered amount, as opposed to the word "rial" appearing in prose. */
+const MONEY_FIGURE = /[۰-۹][۰-۹٬]*\s*ریال/;
+
+describe('capabilities this application does not operate', () => {
   it('has non-live capabilities to render', () => {
     expect(NON_LIVE.length).toBeGreaterThan(0);
   });
@@ -40,11 +48,13 @@ describe('planned and not-yet-built capabilities', () => {
   );
 
   it.each(NON_LIVE.map((capability) => [capability.key, capability] as const))(
-    '%s states that no real transaction happens',
+    '%s carries the exact required disclosure',
     (_key, capability) => {
       render(<UnderConstruction capabilityKey={capability.key} />);
 
-      expect(screen.getByText('این بخش در حال ساخت است')).toBeInTheDocument();
+      // Verbatim, not paraphrased. A screenshot of this page travels further
+      // than the room it was shown in.
+      expect(screen.getByText(PREVIEW_DISCLOSURE)).toBeInTheDocument();
       expect(
         screen.getByText(/هیچ تراکنش واقعی انجام نمی‌شود و هیچ داده‌ای ثبت یا ارسال نمی‌گردد/),
       ).toBeInTheDocument();
@@ -60,16 +70,34 @@ describe('planned and not-yet-built capabilities', () => {
 
       expect(container.querySelector('form')).toBeNull();
       expect(container.querySelector('input')).toBeNull();
+      expect(container.querySelector('select')).toBeNull();
+      expect(container.querySelector('textarea')).toBeNull();
       expect(container.querySelector('svg')).toBeNull();
       expect(container.querySelector('canvas')).toBeNull();
       expect(screen.queryByRole('button')).not.toBeInTheDocument();
-      // No amount, in either digit system.
-      expect(container.textContent).not.toMatch(/ریال|[۰-۹]{3}٬/);
+      expect(container.textContent).not.toMatch(MONEY_FIGURE);
     },
   );
 
+  it('renders roadmap detail without turning it into a claim', () => {
+    render(
+      <UnderConstruction
+        capabilityKey="procurement"
+        value={['یک مسئلهٔ واقعی که هنوز حل نشده است.']}
+        prerequisites={['یک تصمیم محصولی که هنوز گرفته نشده است.']}
+      />,
+    );
+
+    expect(screen.getByText('یک مسئلهٔ واقعی که هنوز حل نشده است.')).toBeInTheDocument();
+    expect(screen.getByText('یک تصمیم محصولی که هنوز گرفته نشده است.')).toBeInTheDocument();
+    // Framed as a problem statement, never as a capability the platform has.
+    expect(screen.getByText(/هیچ‌کدام از موارد زیر امروز کار نمی‌کند/)).toBeInTheDocument();
+  });
+
   it('has no accessibility violations', async () => {
-    const { container } = render(<UnderConstruction capabilityKey="procurement" />);
+    const { container } = render(
+      <UnderConstruction capabilityKey="procurement" value={['نمونه']} prerequisites={['نمونه']} />,
+    );
     await expectNoAxeViolations(container);
   });
 

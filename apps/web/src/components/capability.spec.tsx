@@ -4,6 +4,12 @@ import { CapabilityCard } from './capability';
 import { CAPABILITIES } from '@/lib/capabilities';
 import { expectNoAxeViolations } from '@/test/harness';
 
+/** A rendered amount: Persian digits, optional grouping, then the currency. */
+const MONEY_FIGURE = /[۰-۹][۰-۹٬]*\s*ریال/;
+
+/** A rendered percentage. */
+const PERCENTAGE_FIGURE = /[۰-۹]\s*[٪%]/;
+
 /**
  * The dashboard is the surface an investor looks at first, so it is the surface
  * most exposed to the temptation this whole milestone is written against:
@@ -24,10 +30,12 @@ describe('dashboard', () => {
     expect(sections).not.toBe('');
     // Nothing computes any of these — `analytics-service` is not built.
     expect(sections).not.toMatch(/حجم تراکنش|درآمد|نرخ بهره‌برداری|آپ‌تایم|میلیون|میلیارد/);
-    // No currency figure and no percentage — the two shapes a fabricated KPI
-    // takes on a dashboard.
-    expect(sections).not.toMatch(/ریال/);
-    expect(sections).not.toMatch(/[٪%]/);
+    // The two shapes a fabricated KPI takes: an amount and a percentage. Matched
+    // as *figures* rather than as words, so prose that mentions rial pricing as a
+    // thing that does not exist yet does not trip the assertion — that sentence
+    // is the honesty, not a violation of it.
+    expect(sections).not.toMatch(MONEY_FIGURE);
+    expect(sections).not.toMatch(PERCENTAGE_FIGURE);
   });
 
   it('says out loud that it reports build status, not operations', () => {
@@ -68,7 +76,8 @@ describe('capability card', () => {
   it('carries no figure of any kind', () => {
     for (const capability of CAPABILITIES) {
       const { container, unmount } = render(<CapabilityCard capability={capability} />);
-      expect(container.textContent).not.toMatch(/ریال|[٪%]/);
+      expect(container.textContent).not.toMatch(MONEY_FIGURE);
+      expect(container.textContent).not.toMatch(PERCENTAGE_FIGURE);
       unmount();
     }
   });

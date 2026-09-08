@@ -1,7 +1,12 @@
 import type { ReactNode } from 'react';
-import { UnderConstruction } from '@/components/under-construction';
+import { RequireSession } from '@/components/require-session';
+import { FleetView } from '@/components/fleet/fleet-view';
 
-/** Generated from the capability manifest entry `fleet`. Reads nothing, calls nothing. */
+/** LIVE — `GET /v1/fleet/availability`, `/utilization`, `/v1/drivers`, `/v1/assignments`, `/v1/usage-records`. */
 export default function Page(): ReactNode {
-  return <UnderConstruction capabilityKey="fleet" />;
+  return (
+    <RequireSession requireOrganization>
+      <FleetView />
+    </RequireSession>
+  );
 }

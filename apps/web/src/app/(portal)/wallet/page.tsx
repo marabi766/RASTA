@@ -1,19 +1,12 @@
 import type { ReactNode } from 'react';
 import { RequireSession } from '@/components/require-session';
-import { ProviderDisclosureView } from '@/components/wallet/provider-disclosure-view';
+import { WalletView } from '@/components/wallet/wallet-view';
 
-/**
- * LIVE — `GET /v1/wallets/provider` through the API Gateway.
- *
- * A safe method, so the gateway's `Idempotency-Key` requirement on the
- * `wallets` prefix does not apply; it covers unsafe methods only. The route's
- * roles are `SYSTEM_ADMIN`, `UNION_ADMIN` and `ORGANIZATION_ADMIN`, so other
- * roles are refused — and refused is rendered as "no access", not as an error.
- */
-export default function WalletDisclosurePage(): ReactNode {
+/** LIVE — `GET /v1/wallets/me`, `/v1/wallets/provider`, `/v1/transactions`. */
+export default function Page(): ReactNode {
   return (
     <RequireSession requireOrganization>
-      <ProviderDisclosureView />
+      <WalletView />
     </RequireSession>
   );
 }
