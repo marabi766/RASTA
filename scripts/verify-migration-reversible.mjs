@@ -267,6 +267,70 @@ const DOCUMENT_DATA_ROLLBACK = {
  * against **rows**, not just against an empty schema.
  */
 const EXPECTED = {
+  /**
+   * audit-service, registered here the moment it had a real migration to
+   * verify and not before.
+   *
+   * PR #38 deliberately left it out: `verify-migration-reversible.mjs` refuses
+   * a service with no `EXPECTED` entry, and the only ways to make it pass then
+   * were an empty entry that succeeds vacuously or a fabricated migration.
+   * This is the entry that debt was waiting for.
+   *
+   * The tables list names every partition, not just the parent. `DROP TABLE
+   * audit_event` would take all nineteen with it, so a down script that
+   * dropped only the parent would still pass a parent-only check while leaving
+   * nothing behind to notice — and, more to the point, a *forward* migration
+   * that quietly stopped creating `audit_event_2028_02` would go unseen. The
+   * eighteen months plus DEFAULT are the capacity claim ADR-053 § 11 makes, so
+   * they are the thing asserted.
+   *
+   * The triggers list carries both halves of the append-only control, and the
+   * second one is not redundant. PostgreSQL clones a row-level BEFORE UPDATE
+   * OR DELETE trigger to every partition but does **not** clone a
+   * statement-level BEFORE TRUNCATE trigger, so `audit_event_append_only`
+   * alone leaves `TRUNCATE audit_event_2026_09` working. Both names must
+   * survive a down/up cycle or the store is append-only in name only.
+   *
+   * The constraints are the ones that make a row evidence rather than a shape:
+   * a blank source event id is not an idempotency key, a blank correlation id
+   * joins to nothing, and `audit_event_changes_is_array` is what stops a
+   * future writer putting a raw object where ADR-053 § 5 requires a bounded
+   * array of redacted deltas.
+   */
+  audit: {
+    tables: [
+      'audit_event',
+      'audit_event_2026_09',
+      'audit_event_2026_10',
+      'audit_event_2026_11',
+      'audit_event_2026_12',
+      'audit_event_2027_01',
+      'audit_event_2027_02',
+      'audit_event_2027_03',
+      'audit_event_2027_04',
+      'audit_event_2027_05',
+      'audit_event_2027_06',
+      'audit_event_2027_07',
+      'audit_event_2027_08',
+      'audit_event_2027_09',
+      'audit_event_2027_10',
+      'audit_event_2027_11',
+      'audit_event_2027_12',
+      'audit_event_2028_01',
+      'audit_event_2028_02',
+      'audit_event_default',
+      'processed_event',
+      'organization_ref',
+    ],
+    triggers: ['audit_event_append_only', 'audit_event_append_only_truncate'],
+    constraints: [
+      'audit_event_source_event_id_not_blank',
+      'audit_event_source_topic_not_blank',
+      'audit_event_correlation_id_not_blank',
+      'audit_event_occurrence_count_positive',
+      'audit_event_changes_is_array',
+    ],
+  },
   economic: {
     tables: ['wallet', 'ledger_account', 'journal', 'ledger_entry', 'transaction', 'settlement'],
     triggers: ['trg_ledger_entry_immutable', 'trg_journal_immutable', 'trg_journal_balanced'],

@@ -93,6 +93,7 @@ export type { TenantGuardOptions } from './tenancy/tenant-guard.extension';
 export { EventConsumer } from './consumer/event-consumer';
 export type {
   EventConsumerOptions,
+  EventDelivery,
   EventHandler,
   HandlerOutcome,
   ConsumerLogger,

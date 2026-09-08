@@ -166,7 +166,7 @@ Error: These services own an outbox but are verified by nothing here: notificati
 | رویدادی روی هر یک از ده Topic دامنه‌ای منتشر شود | `audit-service` مصرفش کند                              | یک ردیف `audit_event` با Actor، مستأجر، منبع، Timestamp و Correlation وجود دارد؛ و Actor غایب به‌صورت `SYSTEM` با تولیدکننده به‌عنوان `actorId` ثبت می‌شود |
 | رکورد حسابرسی موجود باشد                         | `UPDATE`، `DELETE` یا `TRUNCATE` با نقش سرویس تلاش شود | پایگاه داده ردش می‌کند (`42501`)، **مستقلاً هم زیر لایهٔ امتیاز و هم زیر لایهٔ Trigger**                                                                   |
 | همان رویداد دوبار تحویل شود                      | دوباره مصرف شود                                        | دقیقاً یک ردیف وجود دارد                                                                                                                                   |
-| رویدادی با نام ناشناخته برسد                     | مصرف شود                                               | یک رکورد ساخته می‌شود؛ `action` به `eventName` بازمی‌گردد و Payload به‌صورت Blob مات و Redact‌شده ذخیره می‌شود                                             |
+| رویدادی با نام ناشناخته برسد                     | مصرف شود                                               | یک رکورد ساخته و **نگه داشته** می‌شود با `action = eventName`؛ **هیچ مقدار خامی از Payload ذخیره نمی‌شود و `changes` همچنان `null` است** (§ ۲٫۱)           |
 
 **دامنه.** اسکلت سرویس روی شکل `supplier-service`؛ `audit_event` با ۱۸ پارتیشن ماهانه + `DEFAULT`؛ REVOKE + Trigger؛ گروه
 `audit-service.domain-projector` روی ده Topic با `fromBeginning: true`؛ Replica `organization_ref`؛ `processed_event`؛
@@ -176,6 +176,38 @@ Error: These services own an outbox but are verified by nothing here: notificati
 **نکتهٔ راه‌اندازی که باید رعایت شود:** `allowAutoTopicCreation: false` است (`event-consumer.ts:103`)، پس اشتراک روی Topicی که
 وجود ندارد در Boot با صدا شکست می‌خورد. فهرست Topic باید دقیقاً همان‌هایی باشد که `create-topics.sh` می‌سازد — یعنی ده Topic
 دامنه‌ای امروز، و نه `procurement`/`inventory`/`construction`/`contract` که هیچ تولیدکننده‌ای ندارند.
+
+### ۲٫۱ اصلاح یک جملهٔ پذیرش ناسازگار (2026-09-09) — نه سست‌کردن یک الزام امنیتی
+
+ردیف چهارم جدول پذیرش بالا پیش‌تر می‌گفت «Payload به‌صورت Blob مات و Redact‌شده ذخیره می‌شود». آن جمله با **تصمیم‌های خودِ
+ADR-053** ناسازگار بود، نه با پیاده‌سازی. سه جای مرجع تصمیم، هر سه صریح:
+
+| مرجع                             | می‌گوید                                                                                                |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| ADR-053 § Context، جدول Envelope | `changes` **روی Envelope نیست**؛ مسیر A ورودی‌ای برای ساختنش ندارد                                     |
+| ADR-053 § ۱ (مسیر A)             | مسیر A `actorRoles`، `sourceIp`، `sourceUserAgent`، `outcome` و **Delta ساخت‌یافته** را نمی‌تواند بدهد |
+| ADR-053 § ۵ و ماتریس `S-09`      | «`changes` هرگز Dump خام ردیف نیست»؛ فقط میدان‌های اعلام‌شده؛ **«بدون Payload خام»**                   |
+
+یعنی ذخیرهٔ Payload به‌صورت Blob — حتی «مات» — دقیقاً همان کاری است که § ۵ یک بخش کامل صرف منعش می‌کند: مسیر A نمی‌تواند یک
+Delta راستینِ before/after بسازد، و بدنهٔ خام رویداد می‌تواند `bidAmount`، `bidContent`، `quotationAmount`، `sealedPayload` و
+شناسه‌های شخصی داشته باشد — آن هم در تنها جدولی که هیچ‌کس اجازهٔ حذف از آن را ندارد و پشتیبانش سال‌ها می‌ماند.
+
+**این اصلاحِ یک جملهٔ پذیرشِ درون‌ناسازگار است، نه سست‌کردن یک الزام امنیتی.** آنچه AUD-001 باید بدهد و می‌دهد: رویداد
+ناشناخته **گم نمی‌شود** — ردیفش با `source_event_name` و `action = eventName` ساخته می‌شود — و هیچ مقداری از Payload جایی
+ذخیره نمی‌شود؛ `changes` همچنان `null` است. مسیر تشخیصی (`describePayloadKeys`) فقط **نامِ** کلیدها را برمی‌گرداند و نام حساس
+را هم Mask می‌کند.
+
+**Delta محدود و Redact‌شده حذف نشده؛ سرِ جای خودش برگشته:** مسیر B آن را می‌آورد — AUD-004، ردیف سوم جدول § ۵ — با
+`actorRoles`، `outcome` و «مقدار حساس علامت‌خوردهٔ Redact به‌جای ذخیره‌شده». ستون `changes` از همین Migration وجود دارد و
+`CHECK (changes IS NULL OR jsonb_typeof(changes) = 'array')` از پیش جلوی نوشتن یک شیء خام در آن را می‌گیرد.
+
+**کنترل بازگشتی:** رویدادی با نام اعلام‌نشده که **هر ورودیِ `SENSITIVE_KEYS`** را با یک مقدار نشانهٔ یکتا حمل می‌کند، ردیف
+می‌سازد و **هیچ‌یک از آن مقادیر در رکورد ذخیره‌شده، در ردیف واقعیِ PostgreSQL، یا در Log ظاهر نمی‌شود**. Payload آزمون از
+خودِ فهرست ساخته می‌شود، نه از نمونه‌ای دستچین‌شده؛ پس کلیدی که فردا به `@rasta/logging` افزوده شود همان لحظه پوشش می‌گیرد و
+سکوت نمی‌کند. کلیدهای پیشنهاد سربستهٔ § ۵ (`bidAmount`، `bidContent`، `quotationAmount`، `sealedPayload`) جداگانه هم به نام
+بررسی می‌شوند. مسیر تشخیصیِ Envelopeِ نگاشت‌ناپذیر جداگانه اثبات می‌شود که فقط نام Mask‌شده را می‌نویسد، و مسیر موفق هیچ Log
+تولید نمی‌کند — `services/audit-service/src/consumers/domain-projector.consumer.spec.ts` و
+`services/audit-service/test/ingestion.int-spec.ts`.
 
 ## ۳. AUD-002 — جست‌وجو و بازرسی امنِ مستأجر
 

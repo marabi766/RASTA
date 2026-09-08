@@ -67,7 +67,43 @@ export interface ConsumerLogger {
 /** Return value of a handler, so the consumer can report what it did. */
 export type HandlerOutcome = void | 'SKIPPED';
 
-export type EventHandler = (envelope: EventEnvelope) => Promise<HandlerOutcome>;
+/**
+ * Where a message was actually delivered from.
+ *
+ * The envelope deliberately does not carry this. `producer` names the service
+ * that emitted the event, which is not the same fact: one service publishes to
+ * several topics, a retry arrives on `<topic>.retry`, and a replayed message
+ * can be re-published anywhere. A consumer that needs to record *which topic a
+ * row came from* — audit-service does, to tell its domain-projector rows apart
+ * from its explicit-trail rows (ADR-053 § 1) — can only get that from the
+ * broker.
+ *
+ * Passed as a second argument rather than merged into the envelope, and that
+ * choice is the whole point: the envelope is a producer-signed contract shared
+ * across nine services, and adding a consumer-side field to it would let a
+ * producer set a topic it did not publish to. Delivery metadata is observed by
+ * the consumer, never asserted by the sender.
+ *
+ * `readonly` throughout so a handler cannot hand a mutated copy to something
+ * downstream and have it read as what the broker said.
+ */
+export interface EventDelivery {
+  readonly topic: string;
+  readonly partition: number;
+}
+
+/**
+ * A handler may ignore the second argument entirely.
+ *
+ * TypeScript assigns a function of fewer parameters to a type of more, so every
+ * existing `(envelope) => …` handler in the repository still satisfies this
+ * unchanged, and passing an extra argument at runtime is inert for them. That
+ * is what makes this additive rather than a breaking change.
+ */
+export type EventHandler = (
+  envelope: EventEnvelope,
+  delivery: EventDelivery,
+) => Promise<HandlerOutcome>;
 
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_BACKOFF_MS = 500;
@@ -104,22 +140,59 @@ export class EventConsumer {
     });
 
     await consumer.connect();
-    for (const topic of this.options.topics) {
-      await consumer.subscribe({ topic, fromBeginning: this.options.fromBeginning ?? false });
-    }
 
-    await consumer.run({
-      // Sequential per partition. Ordering within an aggregate is the whole
-      // reason the producer sets a partition key; processing concurrently
-      // inside a partition would throw it away.
-      eachMessage: async ({ topic, partition, message }) => {
-        await this.handleMessage(topic, partition, message.value, message.headers);
-      },
-    });
+    // Everything past `connect()` runs against a consumer that already holds a
+    // socket and a group membership, and `this.consumer` is assigned only once
+    // startup has fully succeeded — so between here and there, `stop()` cannot
+    // reach it. A subscription the broker refuses is not hypothetical: it is
+    // the designed behaviour of `allowAutoTopicCreation: false`, which is how a
+    // missing topic fails loudly instead of silently creating itself. Without
+    // this guard that loud failure would also leak the connection, and a
+    // supervisor retrying `start()` would leak another one per attempt until
+    // the broker's connection limit, not the missing topic, became the visible
+    // problem.
+    try {
+      for (const topic of this.options.topics) {
+        await consumer.subscribe({ topic, fromBeginning: this.options.fromBeginning ?? false });
+      }
+
+      await consumer.run({
+        // Sequential per partition. Ordering within an aggregate is the whole
+        // reason the producer sets a partition key; processing concurrently
+        // inside a partition would throw it away.
+        eachMessage: async ({ topic, partition, message }) => {
+          await this.handleMessage(topic, partition, message.value, message.headers);
+        },
+      });
+    } catch (error) {
+      await this.discardAfterFailedStart(consumer, error);
+      throw error;
+    }
 
     this.consumer = consumer;
     this.running = true;
     this.logger.log(`Consuming ${this.options.topics.join(', ')} as group ${this.options.groupId}`);
+  }
+
+  /**
+   * Hands back the connection a failed `start()` opened.
+   *
+   * The disconnect failure is logged and swallowed on purpose. The caller is
+   * about to receive the error that actually broke startup, and that is the one
+   * an operator needs: replacing it with "disconnect failed" would hide the
+   * missing topic behind its own cleanup. Only the key facts of the original
+   * error are logged alongside — never a payload, because nothing was consumed
+   * yet and nothing here has any.
+   */
+  private async discardAfterFailedStart(consumer: Consumer, cause: unknown): Promise<void> {
+    try {
+      await consumer.disconnect();
+    } catch (cleanupError) {
+      this.logger.error(
+        `Could not disconnect ${this.options.groupId} after a failed start ` +
+          `(${describe(cause)}): ${describe(cleanupError)}`,
+      );
+    }
   }
 
   private async handleMessage(
@@ -159,7 +232,9 @@ export class EventConsumer {
             ...(envelope.tenantId ? { organizationId: envelope.tenantId } : {}),
             callerService: envelope.producer,
           }),
-          () => this.handler(envelope),
+          // Frozen so a handler cannot mutate what the broker reported and pass
+          // it on as fact.
+          () => this.handler(envelope, Object.freeze({ topic, partition })),
         );
         return;
       } catch (error) {

@@ -1,46 +1,57 @@
-import { Module, type MiddlewareConsumer, type NestModule } from '@nestjs/common';
+import {
+  Module,
+  type MiddlewareConsumer,
+  type NestModule,
+  type OnApplicationShutdown,
+  type OnModuleInit,
+} from '@nestjs/common';
 import { APP_FILTER } from '@nestjs/core';
 import {
   AllExceptionsFilter,
+  EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   RequestContextMiddleware,
   toLogContext,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { HealthController } from './health/health.controller';
+import { PrismaService } from './prisma/prisma.service';
+import { AuditRepository } from './audit/audit.repository';
+import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
+import { DOMAIN_PROJECTOR_CONSUMER, DOMAIN_TOPICS } from './audit/audit.mapper';
+import { auditPartitionRows } from './observability/metrics';
 import { ENV, LOGGER } from './tokens';
-import { loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/env';
+import { brokersOf, loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/env';
 
 /**
- * audit-service wiring — bootstrap only.
+ * audit-service wiring — AUD-001, the domain projector.
  *
- * ## What is absent, and why absence is the correct state
+ * ## What is here
  *
- * ADR-053 specifies an append-only evidence store fed by a consumer on every
- * domain topic. None of it is here: no Prisma client, no consumer, no
- * repository, no query API. The ADR is `Proposed` and AUD-001 has not started,
- * so a port, a stub or an empty handler would be scaffolding that reads as
- * work — and a registered consumer that wrote a `processed_event` row while
- * computing nothing is precisely the failure ADR-032 refuses.
+ * One consumer group over the ten produced domain topics, a repository that
+ * writes the audit row and its idempotency marker in a single transaction, and
+ * the ingestion metrics. That is the whole of path A (ADR-053 § 1).
  *
- * ## No AuthGuard is registered, and that is not a hole
+ * ## What is deliberately still absent
  *
- * Every other service binds `AuthGuard` and `RolesGuard` globally so an
- * endpoint is closed unless it opts out with `@Public` (AGENTS.md S-02). Here
- * the only two routes are the health probes, which are `@Public` in every
- * service on the platform — so a global guard would have nothing to protect,
- * while `authEnvSchema` would demand a JWKS endpoint this process never calls.
+ *   query API      AUD-002. No endpoint returns an audit row, which is also why
+ *                  no `AuthGuard` is registered: the only routes are the two
+ *                  `@Public` health probes, so a global guard would protect
+ *                  nothing while `authEnvSchema` demanded a JWKS endpoint this
+ *                  process never calls.
+ *   hash chain     AUD-003. `record_hash` and `previous_hash` exist as columns
+ *                  and are never written. A null there means "no chain yet".
+ *   trail consumer AUD-004. `rasta.audit.trail.v1` is path B. Consuming it here
+ *                  would have this service auditing its own writes.
+ *   outbox         Never. audit-service is a terminal sink (ADR § 14), which is
+ *                  why it owns no `OutboxMessage` model and the discovery guard
+ *                  in `verify-outbox-claim-migration.mjs` correctly ignores it.
  *
- * The guard belongs with the first non-public endpoint, which is AUD-002's
- * query API. Registering it there is a change to this file; registering it now
- * would mean shipping auth configuration that verifies no token.
+ * ## `allowAutoTopicCreation: false`, and why a missing topic must be fatal
  *
- * ## Audit does not own an outbox
- *
- * Deliberate, and specified (ADR-053 § 4): this service is a terminal sink. It
- * is therefore never registered in `scripts/verify-outbox-claim-migration.mjs`,
- * whose discovery guard correctly ignores a service with no `OutboxMessage`
- * model.
+ * If the broker silently created a missing topic, this service would subscribe
+ * to an empty one and report perfect health while recording nothing. Startup
+ * failing loudly is the only outcome that cannot be mistaken for working.
  */
 @Module({
   controllers: [HealthController],
@@ -64,14 +75,109 @@ import { loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/env';
     },
     { provide: EXCEPTION_FILTER_LOGGER, inject: [LOGGER], useFactory: (l: Logger): Logger => l },
 
+    {
+      provide: PrismaService,
+      inject: [ENV],
+      useFactory: (env: AuditEnv): PrismaService => new PrismaService(env.DATABASE_URL),
+    },
+
+    AuditRepository,
+
+    {
+      provide: DomainProjectorConsumer,
+      inject: [ENV, LOGGER, AuditRepository],
+      useFactory: (
+        env: AuditEnv,
+        logger: Logger,
+        repository: AuditRepository,
+      ): DomainProjectorConsumer =>
+        new DomainProjectorConsumer(
+          (handler) =>
+            new EventConsumer(
+              {
+                brokers: brokersOf(env),
+                clientId: env.KAFKA_CLIENT_ID,
+                groupId: DOMAIN_PROJECTOR_CONSUMER,
+                topics: [...DOMAIN_TOPICS],
+                // The audit store must be able to reconstruct from the start of
+                // whatever the broker still holds. Safe because every write is
+                // idempotent on `(eventId, consumerName)`.
+                //
+                // It is not a backup: domain topics retain seven days
+                // (`create-topics.sh`), so replay recovers a week, not years.
+                // The database and its backups are the durable record
+                // (ADR § 8).
+                fromBeginning: true,
+                // Without this the shared consumer logs a malformed message
+                // and drops it — an audit service losing the one message it
+                // could not parse, which is the message most worth keeping.
+                //
+                // One DLQ for all ten source topics, and it is audit's own
+                // rather than each producer's: a message that failed *this*
+                // service's validation is this service's problem to replay,
+                // and routing it back to `rasta.asset.v1.dlq` would put it in
+                // front of a team that has nothing to fix. The original topic
+                // rides along in the `x-dlq-topic` header.
+                deadLetterTopic: 'rasta.audit.v1.dlq',
+                // `allowAutoTopicCreation: false` is not passed here because
+                // the platform `EventConsumer` already hard-codes it
+                // (`event-consumer.ts`). Restating it as an option would imply
+                // a caller could turn it back on. Subscribing to a topic that
+                // does not exist therefore fails at startup, which is the only
+                // outcome that cannot be mistaken for working: an
+                // auto-created empty topic would leave this service reporting
+                // perfect health while recording nothing.
+              },
+              handler,
+              {
+                log: (message: string) => logger.info(message),
+                warn: (message: string) => logger.warn(message),
+                error: (message: string) => logger.error(message),
+              },
+            ),
+          repository,
+          logger,
+        ),
+    },
+
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
 })
-export class AppModule implements NestModule {
+export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdown {
+  private gaugeTimer?: NodeJS.Timeout;
+
+  constructor(
+    private readonly projector: DomainProjectorConsumer,
+    private readonly repository: AuditRepository,
+  ) {}
+
   configure(consumer: MiddlewareConsumer): void {
-    // Stamps the correlation id every structured log line carries. Applied even
-    // though only health routes exist, so the first real endpoint inherits a
-    // context that is already there rather than discovering it is missing.
     consumer.apply(RequestContextMiddleware).forRoutes('*');
+  }
+
+  async onModuleInit(): Promise<void> {
+    await this.projector.start();
+
+    // Sampled from the catalogue, never maintained by inc/dec: an arithmetic
+    // gauge drifts on every restart, and a drifting capacity number is worse
+    // than no capacity number.
+    const sample = async (): Promise<void> => {
+      try {
+        for (const { partition, rows } of await this.repository.partitionRowCounts()) {
+          auditPartitionRows.set({ partition }, rows);
+        }
+      } catch {
+        // Upkeep must never take the service down; ingestion failures have
+        // their own counter and the relay's logging covers a persistent fault.
+      }
+    };
+
+    void sample();
+    this.gaugeTimer = setInterval(() => void sample(), 60_000);
+    this.gaugeTimer.unref?.();
+  }
+
+  async onApplicationShutdown(): Promise<void> {
+    if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }
 }

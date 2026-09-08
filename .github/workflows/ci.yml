@@ -261,6 +261,8 @@ jobs:
               --topic "$1"
           }
           for topic in \
+            rasta.identity.v1 rasta.identity.v1.retry rasta.identity.v1.dlq \
+            rasta.organization.v1 rasta.organization.v1.retry rasta.organization.v1.dlq \
             rasta.fleet.v1 rasta.fleet.v1.retry rasta.fleet.v1.dlq \
             rasta.asset.v1 rasta.insurance.v1 \
             rasta.maintenance.v1 rasta.maintenance.v1.retry rasta.maintenance.v1.dlq \
@@ -456,7 +458,8 @@ jobs:
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
-          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
 
       - name: Integration tests
         run: pnpm run test:integration
@@ -473,7 +476,8 @@ jobs:
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
-          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
@@ -583,6 +587,23 @@ jobs:
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
 
+      - name: Audit coverage gate
+        # `docs/14` § 14.2 puts audit-service in the 75% band, unchanged by
+        # AUD-001. Measured across both projects because the append-only
+        # guarantee lives in PostgreSQL privileges and triggers and the
+        # projector's behaviour lives against a real broker -- a unit-only
+        # number would reward mocking exactly the systems this service's
+        # correctness rests on.
+        run: pnpm --filter @rasta/audit-service run test:coverage
+        env:
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          # The append-only suites need the owner connection to disable one
+          # control while testing the other, and to clean up rows the runtime
+          # role genuinely cannot delete.
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+
       - name: Test independence (F-25)
         # Runs every test in maintenance's event-flow suite on its own and
         # requires it to pass alone.
@@ -650,7 +671,8 @@ jobs:
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
-          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
@@ -700,6 +722,8 @@ jobs:
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
 
       - name: Outbox stream-sequence protocol (ADR-051 B3)
         # The producer-side allocation protocol: strictly increasing sequences
