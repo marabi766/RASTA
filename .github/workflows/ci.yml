@@ -584,6 +584,23 @@ jobs:
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
 
+      - name: Audit coverage gate
+        # `docs/14` § 14.2 puts audit-service in the 75% band, unchanged by
+        # AUD-001. Measured across both projects because the append-only
+        # guarantee lives in PostgreSQL privileges and triggers and the
+        # projector's behaviour lives against a real broker -- a unit-only
+        # number would reward mocking exactly the systems this service's
+        # correctness rests on.
+        run: pnpm --filter @rasta/audit-service run test:coverage
+        env:
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          # The append-only suites need the owner connection to disable one
+          # control while testing the other, and to clean up rows the runtime
+          # role genuinely cannot delete.
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+
       - name: Test independence (F-25)
         # Runs every test in maintenance's event-flow suite on its own and
         # requires it to pass alone.
