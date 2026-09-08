@@ -261,6 +261,8 @@ jobs:
               --topic "$1"
           }
           for topic in \
+            rasta.identity.v1 rasta.identity.v1.retry rasta.identity.v1.dlq \
+            rasta.organization.v1 rasta.organization.v1.retry rasta.organization.v1.dlq \
             rasta.fleet.v1 rasta.fleet.v1.retry rasta.fleet.v1.dlq \
             rasta.asset.v1 rasta.insurance.v1 \
             rasta.maintenance.v1 rasta.maintenance.v1.retry rasta.maintenance.v1.dlq \
