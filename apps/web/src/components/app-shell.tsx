@@ -128,16 +128,18 @@ function NavItem({
       aria-current={active ? 'page' : undefined}
       className={cx(
         'flex min-h-[var(--tap)] flex-none items-center justify-between gap-2 whitespace-nowrap rounded-[var(--radius-md)] px-3 text-sm',
-        'border border-[var(--control-border)] lg:border-transparent',
+        'border border-[var(--control-border)] lg:w-full lg:border-transparent lg:whitespace-normal',
         active
           ? 'bg-[var(--pri-soft)] font-bold text-[var(--pri-tx)]'
           : 'text-[var(--tx2)] hover:bg-[var(--sunken)] hover:text-[var(--tx)]',
       )}
     >
-      <span>{capability.title}</span>
+      {/* `min-w-0` plus `truncate` is what keeps a long Persian title from
+          pushing the badge out of a 262px rail and off the visible edge. */}
+      <span className="min-w-0 lg:truncate">{capability.title}</span>
       {capability.state === 'LIVE' ? null : (
-        <span className="hidden lg:inline">
-          <CapabilityBadge state={capability.state} />
+        <span className="hidden shrink-0 lg:inline">
+          <CapabilityBadge state={capability.state} compact />
         </span>
       )}
     </Link>

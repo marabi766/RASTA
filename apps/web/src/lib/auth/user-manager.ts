@@ -42,6 +42,29 @@ import { oidcAuthority, type PublicEnv } from '../env';
  * frontend at this scale. Until that is resolved, session continuity comes from
  * Keycloak's own SSO cookie via a silent renew — recorded as a gap rather than
  * papered over with `localStorage`.
+ *
+ * ## Known blocker: silent renew is refused by the realm's CSP
+ *
+ * Measured against the running Keycloak on 2026-09-08, not inferred. The
+ * `prompt=none` request reaches the authorize endpoint and the browser then
+ * refuses to render it:
+ *
+ *   Framing 'http://localhost:8080/' violates the following Content Security
+ *   Policy directive: "frame-ancestors 'self'".
+ *
+ * `infrastructure/docker/keycloak/rasta-realm.json` sets no
+ * `browserSecurityHeaders`, so Keycloak applies its default
+ * `frame-ancestors 'self'` and no other origin may frame it. The consequence is
+ * narrow but real: **automatic session restore on reload does not work**, and
+ * the application falls back to anonymous after the timeout above. Interactive
+ * sign-in is a full-page redirect and is unaffected; so is the token this
+ * session already holds.
+ *
+ * The fix is one realm setting — adding the portal origin to the realm's
+ * `frame-ancestors` — and it belongs to whoever owns that configuration. It is
+ * deliberately not made here: changing the identity provider's security headers
+ * to make a demo smoother is exactly the kind of "just for the demo" exception
+ * AGENTS.md A-12 forbids, and this branch must not weaken the real boundary.
  */
 
 /** Kept as constants so a stray route can never become a redirect target. */
@@ -70,6 +93,10 @@ export function buildSettings(
     // slightly ahead keeps a long screen from failing mid-read.
     automaticSilentRenew: true,
     accessTokenExpiringNotificationTimeInSeconds: 90,
+    // Shortened from the ten-second default because of a real, measured
+    // blocker — see the note below. A blocked iframe never errors, it just
+    // never loads, so this timeout is the only thing that ends the attempt.
+    silentRequestTimeoutInSeconds: 5,
     // The session-status iframe polls Keycloak on an interval and is a common
     // source of spurious sign-outs behind a proxy. Expiry is handled by the
     // renew above and by the gateway answering 401.

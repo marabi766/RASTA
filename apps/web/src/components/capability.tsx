@@ -52,14 +52,32 @@ export const READINESS_PRESENTATION: Record<ReadinessReason, string> = {
   PARTIAL: 'بخشی از دامنه تحویل شده و بخش دیگر هنوز شروع نشده است.',
 };
 
-export function CapabilityBadge({ state }: { state: CapabilityState }): ReactNode {
+/**
+ * `compact` drops the Latin state name.
+ *
+ * The full badge carries both because the enum is what a reviewer greps for in
+ * this repository. In the navigation rail there is no room for it: the rail is
+ * 262px, and a full badge next to a Persian title overflowed and clipped, which
+ * left an item reading «...READY Backend آمادهٔ». A truncated status is worse
+ * than a short one.
+ */
+export function CapabilityBadge({
+  state,
+  compact = false,
+}: {
+  state: CapabilityState;
+  compact?: boolean;
+}): ReactNode {
   const presentation = STATE_PRESENTATION[state];
+
   return (
-    <Badge tone={presentation.tone} title={presentation.description}>
-      <span>{presentation.label}</span>
-      <span dir="ltr" className="rasta-code opacity-70">
-        {state}
-      </span>
+    <Badge tone={presentation.tone} title={`${state} — ${presentation.description}`}>
+      <span className="whitespace-nowrap">{presentation.label}</span>
+      {compact ? null : (
+        <span dir="ltr" className="rasta-code whitespace-nowrap opacity-70">
+          {state}
+        </span>
+      )}
     </Badge>
   );
 }
@@ -75,12 +93,16 @@ export function CapabilityBadge({ state }: { state: CapabilityState }): ReactNod
 export function CapabilityCard({ capability }: { capability: Capability }): ReactNode {
   return (
     <Card as="li" className="flex h-full flex-col gap-3">
-      <div className="flex items-start justify-between gap-3">
-        <h3 className="text-base font-bold text-[var(--tx)]">
-          <Link href={capability.href} className="hover:text-[var(--pri)] hover:underline">
-            {capability.title}
-          </Link>
-        </h3>
+      {/* Badge on its own row rather than beside the title. A three-column grid
+          leaves roughly 330px per card, and a full status badge next to a
+          Persian title squeezed both into ragged multi-line text. */}
+      <h3 className="text-base font-bold text-[var(--tx)]">
+        <Link href={capability.href} className="hover:text-[var(--pri)] hover:underline">
+          {capability.title}
+        </Link>
+      </h3>
+
+      <div>
         <CapabilityBadge state={capability.state} />
       </div>
 
