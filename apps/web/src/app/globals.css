@@ -1,0 +1,246 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens.
+ *
+ * Values are the approved palette from the design checkpoint on
+ * `design/claude-design` (`design/source/RASTA-Web-Portal.dc.html`), copied
+ * rather than re-picked so that the shipped application and the approved
+ * design are the same colours and not merely similar ones.
+ *
+ * docs/16 § 16.4: no component hard-codes a colour, a spacing or a size.
+ * Everything is a token, and dark mode is a token redefinition rather than a
+ * branch inside a component.
+ */
+
+@theme {
+  /* Typography. `next/font` binds --font-vazirmatn in the root layout; the
+     rest of the stack is the portable Persian fallback the design checkpoint
+     settled on when the licensed binaries could not be redistributed. */
+  --font-sans:
+    var(--font-vazirmatn), 'Vazirmatn', 'Vazir', 'Estedad', 'Noto Naskh Arabic', 'Segoe UI', Tahoma,
+    system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Roboto Mono', monospace;
+
+  /* docs/16 § 16.9: no body text below 13px. --text-xs is the floor, and it is
+     13px rather than Tailwind's default 12px for exactly that reason. */
+  --text-xs: 0.8125rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --text-3xl: 2rem;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+:root {
+  color-scheme: light;
+
+  --bg: #f5f8f7;
+  --surf: #ffffff;
+  --raised: #ffffff;
+  --sunken: #edf2f1;
+
+  --bd: #e1e7e6;
+  --bd2: #c9d3d1;
+  --control-border: #73837f;
+
+  --tx: #101a19;
+  --tx2: #576765;
+  --tx3: #697775;
+
+  --pri: #0e6e64;
+  --pri-h: #0a564e;
+  --pri-soft: #e6f2f0;
+  --pri-tx: #0a564e;
+
+  --omran: #a6602c;
+  --omran-soft: #f8efe7;
+  --omran-tx: #8a4e22;
+
+  --ok: #1a7a4b;
+  --ok-soft: #e6f4ec;
+  --ok-tx: #14603a;
+
+  --warn: #96650a;
+  --warn-soft: #faf1de;
+  --warn-tx: #7a5208;
+
+  --dgr: #ac2a20;
+  --dgr-soft: #faeae8;
+  --dgr-tx: #8e211a;
+
+  --info: #1b6698;
+  --info-soft: #e8f1f8;
+  --info-tx: #14507a;
+
+  --neu-soft: #edf1f0;
+
+  --sh1: 0 1px 2px rgb(0 0 0 / 0.06);
+  --sh2: 0 8px 24px -8px rgb(0 0 0 / 0.18);
+
+  /* Minimum interactive target, docs/16 § 16.9. */
+  --tap: 44px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    --bg: #0b1211;
+    --surf: #121a19;
+    --raised: #182221;
+    --sunken: #0e1615;
+
+    --bd: #26312f;
+    --bd2: #3a4745;
+    --control-border: #6b7d7b;
+
+    --tx: #e7eeed;
+    --tx2: #9daeab;
+    --tx3: #7e908f;
+
+    --pri: #2a9d8f;
+    --pri-h: #38b3a4;
+    --pri-soft: #10302c;
+    --pri-tx: #7fd6c9;
+
+    --omran: #c98a52;
+    --omran-soft: #2a1d12;
+    --omran-tx: #dfa875;
+
+    --ok: #3fa372;
+    --ok-soft: #0f2618;
+    --ok-tx: #7fcca3;
+
+    --warn: #c99327;
+    --warn-soft: #291f0c;
+    --warn-tx: #e0b75e;
+
+    --dgr: #d2564a;
+    --dgr-soft: #2b1311;
+    --dgr-tx: #ee9089;
+
+    --info: #4a93c9;
+    --info-soft: #0e2130;
+    --info-tx: #8fc3e6;
+
+    --neu-soft: #1b2524;
+
+    --sh1: 0 1px 2px rgb(0 0 0 / 0.4);
+    --sh2: 0 8px 24px -8px rgb(0 0 0 / 0.6);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #0b1211;
+  --surf: #121a19;
+  --raised: #182221;
+  --sunken: #0e1615;
+  --bd: #26312f;
+  --bd2: #3a4745;
+  --control-border: #6b7d7b;
+  --tx: #e7eeed;
+  --tx2: #9daeab;
+  --tx3: #7e908f;
+  --pri: #2a9d8f;
+  --pri-h: #38b3a4;
+  --pri-soft: #10302c;
+  --pri-tx: #7fd6c9;
+  --omran: #c98a52;
+  --omran-soft: #2a1d12;
+  --omran-tx: #dfa875;
+  --ok: #3fa372;
+  --ok-soft: #0f2618;
+  --ok-tx: #7fcca3;
+  --warn: #c99327;
+  --warn-soft: #291f0c;
+  --warn-tx: #e0b75e;
+  --dgr: #d2564a;
+  --dgr-soft: #2b1311;
+  --dgr-tx: #ee9089;
+  --info: #4a93c9;
+  --info-soft: #0e2130;
+  --info-tx: #8fc3e6;
+  --neu-soft: #1b2524;
+  --sh1: 0 1px 2px rgb(0 0 0 / 0.4);
+  --sh2: 0 8px 24px -8px rgb(0 0 0 / 0.6);
+}
+
+* {
+  box-sizing: border-box;
+  min-inline-size: 0;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--tx);
+  font-family: var(--font-sans);
+  font-feature-settings: 'ss01';
+  -webkit-font-smoothing: antialiased;
+  font-size: var(--text-sm);
+  line-height: 1.7;
+}
+
+/* docs/16 § 16.9: a visible focus ring, never `outline: none` without a
+   replacement. `:focus-visible` keeps it off pointer interactions. */
+:focus-visible {
+  outline: 2px solid var(--pri);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+::selection {
+  background: var(--pri-soft);
+  color: var(--pri-tx);
+}
+
+/* docs/16 § 16.9 — respect the user's motion preference. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@keyframes rasta-skeleton {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/*
+ * Latin identifiers inside Persian prose.
+ *
+ * An order id or an enum name rendered inside an RTL paragraph without its own
+ * direction reorders its punctuation. `dir="auto"` on the element is the fix;
+ * this class carries the monospace face that goes with it.
+ */
+.rasta-code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0;
+  unicode-bidi: isolate;
+}
