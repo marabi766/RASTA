@@ -49,3 +49,5 @@ Thumbs.db
 
 # Next.js build metadata generated per-app
 apps/*/next-env.d.ts
+# Claude Code local launch configuration (machine-specific, not part of the app)
+.claude/
