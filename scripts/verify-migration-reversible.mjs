@@ -329,6 +329,16 @@ const EXPECTED = {
       'audit_event_correlation_id_not_blank',
       'audit_event_occurrence_count_positive',
       'audit_event_changes_is_array',
+      // AUD-002. The hierarchy projection is what `UNION_ADMIN` scoping is
+      // decided from, so its integrity rules are listed for the same reason the
+      // evidence table's are: a rollback that dropped them while the forward
+      // migration forgot to restore them would leave a projection that can hold
+      // a self-parented row -- a cycle the subtree walk would meet -- and a
+      // PROJECTED row with no observation behind it, which accepts every stale
+      // event that arrives after it.
+      'organization_ref_parent_not_self',
+      'organization_ref_projected_has_observation',
+      'organization_ref_parent_not_blank',
     ],
   },
   economic: {

@@ -174,17 +174,76 @@ model ProcessedEvent {
   @@map("processed_event")
 }
 
-/// A local note of which organizations have been seen.
+/// How much this service knows about one organization's place in the hierarchy.
+enum OrganizationRelationState {
+  /// Seen only as the tenant of an audit event. The identifier is real; its
+  /// parent is unknown. Never a subtree member and never a subtree root.
+  UNKNOWN
+  /// Described by an `ORGANIZATION_CREATED` or `ORGANIZATION_MOVED` event, so
+  /// the parent link on this row came from the service that owns it.
+  PROJECTED
+
+  @@map("organization_relation_state")
+}
+
+/// The local hierarchy projection `UNION_ADMIN` scoping is decided from.
 ///
-/// Exists only so AUD-002's object-scoped queries have something to filter and
-/// display against without a cross-service call on the read path. It is a
-/// projection, not a replica: it holds an identifier and the window it was
-/// observed in, never organization-service's rows (AGENTS.md A-01, A-02).
+/// A projection, not a replica: it holds identifiers and the parent link the
+/// owning service published, never organization-service's rows, and it is never
+/// read from that service's database (AGENTS.md A-01, A-02).
+///
+/// ## Adjacency is the authority; the path is a note
+///
+/// `ORGANIZATION_MOVED` rewrites the path of every descendant upstream but is
+/// published once, for the organization that moved. Authorising from
+/// `hierarchyPath` would therefore leave every descendant's stored path wrong
+/// after the first move, in the broadening direction ADR-053 § 10 forbids. A
+/// descendant's **parent** does not change when its ancestor moves, so
+/// `parentOrganizationId` is what the subtree check walks, and `hierarchyPath`
+/// and `hierarchyDepth` are diagnostics that no authorization decision reads.
+///
+/// ## `relationState` is the fail-closed switch
+///
+/// The projector upserts a row here for the tenant of every audit event. Such a
+/// row is a bare identifier with a null parent, and must never be mistaken for
+/// a hierarchy root. Only `PROJECTED` rows take part in a subtree decision;
+/// `UNKNOWN` ones are invisible to it, so an organization this service has
+/// never seen an organization event for can only ever produce a **missing**
+/// result, never an extra one.
 model OrganizationRef {
   organizationId String   @id @map("organization_id") @db.VarChar(128)
   firstSeenAt    DateTime @default(now()) @map("first_seen_at") @db.Timestamptz(6)
   lastSeenAt     DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
 
+  /// From `ORGANIZATION_CREATED.parentId` and `ORGANIZATION_MOVED.newParentId`.
+  /// Null on a genuine hierarchy root — and also on every `UNKNOWN` row, which
+  /// is why `relationState` and not this column decides membership.
+  parentOrganizationId String? @map("parent_organization_id") @db.VarChar(128)
+
+  /// Last observed materialised path. Diagnostics only: goes stale for every
+  /// descendant of a moved organization and is never read by an authorization
+  /// decision.
+  hierarchyPath String? @map("hierarchy_path") @db.VarChar(2048)
+
+  /// Depth as the owning service reported it at the time. Diagnostics only,
+  /// for the same reason as `hierarchyPath`.
+  hierarchyDepth Int? @map("hierarchy_depth")
+
+  /// From `ORGANIZATION_CREATED.status` and
+  /// `ORGANIZATION_STATUS_CHANGED.newStatus`. A free string rather than an enum
+  /// because the value belongs to another service's vocabulary and this one
+  /// must not fail to record a status it has not heard of.
+  status String? @map("status") @db.VarChar(64)
+
+  relationState OrganizationRelationState @default(UNKNOWN) @map("relation_state")
+
+  /// `occurredAt` of the newest organization event applied to this row. Makes
+  /// the projection monotonic: an older event replayed after a newer one is
+  /// ignored rather than winding the hierarchy back.
+  relationObservedAt DateTime? @map("relation_observed_at") @db.Timestamptz(6)
+
   @@index([lastSeenAt(sort: Desc)], map: "organization_ref_last_seen_idx")
+  @@index([parentOrganizationId], map: "organization_ref_parent_idx")
+  @@index([relationState], map: "organization_ref_relation_state_idx")
   @@map("organization_ref")
 }
