@@ -1,7 +1,7 @@
-import { Kafka, type Producer } from 'kafkajs';
+import { Kafka, type Consumer, type Producer } from 'kafkajs';
 import { ulid } from 'ulid';
 import { EventConsumer } from '@rasta/nest-common';
-import type { EventEnvelope } from '@rasta/contracts';
+import { DLQ_HEADERS, type EventEnvelope } from '@rasta/contracts';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { AuditRepository } from '../src/audit/audit.repository';
 import { DomainProjectorConsumer } from '../src/consumers/domain-projector.consumer';
@@ -27,6 +27,77 @@ import { brokers, cleanupRun, id, newMigratorPrisma, newPrisma, RUN_TAG, waitFor
  */
 const brokerList = brokers();
 const describeWithKafka = brokerList ? describe : describe.skip;
+
+/**
+ * How long a consumer group may take to join before the wait gives up.
+ *
+ * Finite on purpose. A broker that never assigns a partition is a real
+ * failure, and a test that waits forever for it reports nothing.
+ */
+const GROUP_JOIN_TIMEOUT_MS = 45_000;
+
+/**
+ * How long a message may take to reach the dead-letter topic, or the store.
+ *
+ * The projector consumes with a 60-second session timeout, so a connection lost
+ * mid-flight can cost a whole session before the partition is reassigned and
+ * the message is delivered at all. A bound shorter than that cannot tell a slow
+ * rejoin from a broken projector, which would make the failure it reports a
+ * lie. It is a deadline and not a sleep: the passing path costs a few seconds.
+ */
+const DELIVERY_TIMEOUT_MS = 120_000;
+
+/**
+ * Pins a consumer to a fixed start offset, re-applied on every group join.
+ *
+ * `fromBeginning: false` is honoured only while a group has nothing committed,
+ * and it resolves to *the end of the topic at the instant of the join*. That
+ * makes it useless as a synchronisation point on a broker that drops
+ * connections: the member joins, is reset, rejoins with still nothing
+ * committed, and silently restarts past a message produced in between — after
+ * which no amount of waiting can deliver it. The local docker broker does
+ * exactly this, and no sleep in front of `run()`, of any length, covers it.
+ *
+ * Seeking to offsets captured *before* the message was produced removes the
+ * question. Every join — the first, and every recovery after it — starts from
+ * the same recorded position, so a message published after that position is
+ * delivered however often the connection is lost. Re-delivery is harmless here:
+ * the caller searches what it collected rather than counting it.
+ *
+ * `consumer.seek` needs `run()` to have created the consumer group; kafkajs
+ * emits `GROUP_JOIN` from inside the join that follows, and applies pending
+ * seeks at the top of the next fetch, so a seek issued from this listener lands
+ * before the first record is read.
+ *
+ * `stop()` removes the listener. The wait holds no timer of its own beyond the
+ * poll interval `waitFor` already awaits, so nothing is left open.
+ */
+function pinToOffsets(
+  consumer: Consumer,
+  topic: string,
+  startAt: ReadonlyMap<number, string>,
+): { joined: (timeoutMs?: number) => Promise<number>; stop: () => void } {
+  let joins = 0;
+
+  const stop = consumer.on(consumer.events.GROUP_JOIN, ({ payload }) => {
+    for (const partition of payload.memberAssignment[topic] ?? []) {
+      const offset = startAt.get(partition);
+      if (offset !== undefined) consumer.seek({ topic, partition, offset });
+    }
+    joins += 1;
+  });
+
+  return {
+    joined: (timeoutMs = GROUP_JOIN_TIMEOUT_MS) =>
+      waitFor(
+        `the dlq reader to join its group and take its start offsets on ${topic}`,
+        async () => (joins > 0 ? joins : null),
+        timeoutMs,
+        100,
+      ),
+    stop,
+  };
+}
 
 if (!brokerList) {
   console.warn('[audit] KAFKA_BROKERS is not set — skipping the projector tests');
@@ -281,33 +352,60 @@ describeWithKafka('domain projector over Kafka', () => {
   }, 120_000);
 
   it('dead-letters a malformed envelope without leaking its body, and keeps consuming', async () => {
+    const dlqTopic = 'rasta.audit.v1.dlq';
     const dlq = new Kafka({
       clientId: 'audit-itest-dlq-reader',
       brokers: brokerList as string[],
       logLevel: 1,
     });
     const dlqConsumer = dlq.consumer({ groupId: `${groupId}-dlq` });
-    const dlqMessages: { reason?: string; originalTopic?: string; body: string }[] = [];
+    const dlqMessages: {
+      reason?: string;
+      originalTopic?: string;
+      error?: string;
+      body: string;
+    }[] = [];
 
-    await dlqConsumer.connect();
-    await dlqConsumer.subscribe({ topic: 'rasta.audit.v1.dlq', fromBeginning: false });
-    await dlqConsumer.run({
-      eachMessage: async ({ message }) => {
-        dlqMessages.push({
-          reason: message.headers?.['x-dlq-reason']?.toString(),
-          originalTopic: message.headers?.['x-dlq-original-topic']?.toString(),
-          body: message.value?.toString('utf8') ?? '',
-        });
-      },
-    });
-    // Give the DLQ group time to join before the bad message is published.
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    // The end of the dead-letter topic *before* anything below is published.
+    // Every join the reader makes starts from here, so nothing produced after
+    // this line can be skipped past by a reconnect.
+    const admin = dlq.admin();
+    await admin.connect();
+    let startAt: ReadonlyMap<number, string>;
+    try {
+      startAt = new Map(
+        (await admin.fetchTopicOffsets(dlqTopic)).map(({ partition, offset }) => [
+          partition,
+          offset,
+        ]),
+      );
+    } finally {
+      await admin.disconnect();
+    }
+
+    // Attached before `run()`, because the first join happens inside it.
+    const reader = pinToOffsets(dlqConsumer, dlqTopic, startAt);
 
     try {
+      await dlqConsumer.connect();
+      await dlqConsumer.subscribe({ topic: dlqTopic, fromBeginning: false });
+      await dlqConsumer.run({
+        eachMessage: async ({ message }) => {
+          dlqMessages.push({
+            reason: message.headers?.[DLQ_HEADERS.reason]?.toString(),
+            originalTopic: message.headers?.[DLQ_HEADERS.originalTopic]?.toString(),
+            error: message.headers?.[DLQ_HEADERS.error]?.toString(),
+            body: message.value?.toString('utf8') ?? '',
+          });
+        },
+      });
+      await reader.joined();
+
       const secret = `SECRET-${RUN_TAG}`;
       // Structurally invalid: `eventName` must be SCREAMING_SNAKE_CASE and
-      // `correlationId` is required. Carries a secret so the leak check means
-      // something.
+      // `correlationId` is required. It carries a run-unique secret, which does
+      // two jobs — it makes the leak check below mean something, and it stops a
+      // concurrent run's malformed message from satisfying the wait.
       await publish('rasta.document.v1', {
         eventId: id('EVT'),
         eventName: 'not a valid name',
@@ -318,23 +416,34 @@ describeWithKafka('domain projector over Kafka', () => {
         payload: { password: secret },
       });
 
-      const dead = await waitFor('the malformed message on the dlq', async () =>
-        dlqMessages.find((m) => m.body.includes('not a valid name')),
+      const dead = await waitFor(
+        'the malformed message on the dlq',
+        async () => dlqMessages.find((message) => message.body.includes(secret)),
+        DELIVERY_TIMEOUT_MS,
       );
       expect(dead.reason).toBe('VALIDATION_FAILED');
       // The original topic rides along, so a replay knows where it came from.
       expect(dead.originalTopic).toBe('rasta.document.v1');
+      // The triage headers explain the failure without repeating the payload.
+      // Only the untouched body carries it, for whoever replays the message.
+      expect(dead.error).toBeDefined();
+      expect(dead.error).not.toContain(secret);
 
       // A valid message on the same topic afterwards still lands, which is the
       // real assertion: one bad message must not stop the partition.
       const good = envelope({ producer: 'document-service', aggregateType: 'Document' });
       await publish('rasta.document.v1', good);
-      const row = await waitFor('the following valid row', rowFor(good.eventId));
+      const row = await waitFor(
+        'the following valid row',
+        rowFor(good.eventId),
+        DELIVERY_TIMEOUT_MS,
+      );
       expect(row.sourceTopic).toBe('rasta.document.v1');
     } finally {
+      reader.stop();
       await dlqConsumer.disconnect();
     }
-  }, 180_000);
+  }, 300_000);
 
   it('never marks an event processed when the write fails', async () => {
     // The invariant that matters most: an event marked processed without its
