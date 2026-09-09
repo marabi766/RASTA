@@ -75,6 +75,22 @@ export function id(prefix: string): string {
  * Cleanup runs as the migrator because the runtime role genuinely cannot do
  * this. That asymmetry is the design working.
  */
+/**
+ * Interactive-transaction bounds for the cleanup above.
+ *
+ * Prisma defaults to a 5s ceiling, which the five statements clear comfortably
+ * in a plain run and do not clear under `--coverage`: istanbul instruments
+ * every module in the process, and the suite failed to run at 5490ms with
+ * "Transaction already closed". Splitting the work would fit the default, but
+ * it would also mean an exit path that leaves `audit_event_append_only`
+ * disabled — the one thing this transaction exists to make impossible. So the
+ * bound is raised instead of the atomicity being given up.
+ *
+ * Still a bound and not a removal: a cleanup that genuinely hangs should fail
+ * the suite rather than hold the trigger down indefinitely.
+ */
+const CLEANUP_TRANSACTION = { maxWait: 10_000, timeout: 60_000 } as const;
+
 export async function cleanupRun(migrator: PrismaService, tag: string = RUN_TAG): Promise<void> {
   if (!/^[0-9A-Z]{6,26}$/.test(tag)) {
     throw new Error(`refusing to clean up with a suspicious tag: ${JSON.stringify(tag)}`);
@@ -90,7 +106,7 @@ export async function cleanupRun(migrator: PrismaService, tag: string = RUN_TAG)
     await tx.$executeRawUnsafe('ALTER TABLE audit_event ENABLE TRIGGER audit_event_append_only');
     await tx.$executeRawUnsafe(`DELETE FROM processed_event WHERE event_id LIKE $1`, like);
     await tx.$executeRawUnsafe(`DELETE FROM organization_ref WHERE organization_id LIKE $1`, like);
-  });
+  }, CLEANUP_TRANSACTION);
 }
 
 /** Waits for `check` to become truthy, or gives up with a readable failure. */
