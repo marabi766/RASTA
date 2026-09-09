@@ -66,6 +66,34 @@ describe('routing table integrity', () => {
     }
   });
 
+  it('gives the audit prefix exactly two roles, and never the oversight one', () => {
+    // The first of the three layers ADR-053 § 10 requires: no gateway prefix
+    // grants it, no `@Roles` in audit-service names it, and `assertNotAuditor()`
+    // refuses it even if both were edited.
+    //
+    // `arrayContaining` above would pass a route that granted these two *and*
+    // AUDITOR, which is exactly the edit this test exists to catch. So the set
+    // is pinned exactly, and the oversight role is named in its own assertion
+    // so a failure says which rule broke.
+    const route = ROUTES.find((r) => r.prefix === 'audit-events');
+
+    expect(route?.service).toBe('audit');
+    expect([...(route?.roles ?? [])].sort()).toEqual(['SYSTEM_ADMIN', 'UNION_ADMIN']);
+    expect(route?.roles ?? []).not.toContain('AUDITOR');
+    expect(route?.roles ?? []).not.toContain('ORGANIZATION_ADMIN');
+    // Audit records are row-level tenant data, so the prefix is never public.
+    expect(route?.publicReason).toBeUndefined();
+  });
+
+  it('routes no audit prefix at all to the oversight role', () => {
+    // Written over the whole table rather than over the one prefix, so a second
+    // audit prefix added later — an export route, a verification route — cannot
+    // be the one that grants it.
+    for (const route of ROUTES.filter((r) => r.service === 'audit')) {
+      expect(route.roles ?? []).not.toContain('AUDITOR');
+    }
+  });
+
   it('routes the document prefix to document-service', () => {
     const route = ROUTES.find((r) => r.prefix === 'documents');
     expect(route?.service).toBe('document');
