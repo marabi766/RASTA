@@ -886,6 +886,7 @@ jobs:
             rasta.notification.v1 rasta.notification.v1.retry rasta.notification.v1.dlq \
             rasta.audit.v1 rasta.audit.v1.retry rasta.audit.v1.dlq \
             rasta.audit.trail.v1 \
+            rasta.identity.v1 rasta.organization.v1 rasta.supplier.v1 \
             rasta.document.v1; do
             docker run --rm --network host apache/kafka:3.9.0 \
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
@@ -903,11 +904,17 @@ jobs:
           pnpm --filter @rasta/economic-service run db:migrate
           pnpm --filter @rasta/marketplace-service run db:migrate
           pnpm --filter @rasta/document-service run db:migrate
+          pnpm --filter @rasta/audit-service run db:migrate
         env:
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
+          # The audit migration runs as the schema owner, never as the runtime
+          # role. ADR-053 § 6: a privilege the runtime role could hand back to
+          # itself is not a barrier, so `rasta_audit` owns nothing it writes to.
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
 
       - name: Build
         run: pnpm run build
@@ -1029,11 +1036,11 @@ jobs:
             setTimeout(() => { console.error("clamd did not answer the runner"); process.exit(1); }, 15000);
           '
 
-      - name: Start economic-service, marketplace-service, document-service and api-gateway
+      - name: Start economic, marketplace, document and audit services and api-gateway
         # From `dist`, the same artefact the container image runs, rather than
         # from a watch-mode dev server. Started here rather than by Playwright's
-        # `webServer` because three processes have to come up in order and their
-        # logs must survive the job for a failure to be diagnosable.
+        # `webServer` because several processes have to come up in order and
+        # their logs must survive the job for a failure to be diagnosable.
         env:
           NODE_ENV: test
           DATABASE_URL: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
@@ -1113,6 +1120,13 @@ jobs:
             DATABASE_URL=postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public \
             node dist/main.js > /tmp/rasta-logs/document.log 2>&1 & )
 
+          # The runtime role, never the migrator: audit-service must not be able
+          # to alter or drop what it writes (ADR-053 § 6).
+          ( cd services/audit-service && \
+            PORT=3115 SERVICE_NAME=audit-service \
+            DATABASE_URL=postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit \
+            node dist/main.js > /tmp/rasta-logs/audit.log 2>&1 & )
+
           ( cd services/api-gateway && \
             PORT=3000 SERVICE_NAME=api-gateway \
             node dist/main.js > /tmp/rasta-logs/gateway.log 2>&1 & )
@@ -1124,20 +1138,28 @@ jobs:
               http://localhost:3106/health/ready || true)"
             document="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3114/health/ready || true)"
+            # 200 only once the domain projector has actually joined its
+            # consumer group: a readiness answer that ignored the projector
+            # would let the audit scenario start before anything could be
+            # recorded, and it would time out blaming the query API.
+            audit="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3115/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/wallets/me || true)"
             if [ "$economic" = "200" ] && [ "$marketplace" = "200" ] \
-               && [ "$document" = "200" ] && [ "$gateway" = "401" ]; then
+               && [ "$document" = "200" ] && [ "$audit" = "200" ] \
+               && [ "$gateway" = "401" ]; then
               echo "stack up after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 3
           done
 
-          echo "the stack did not come up (economic=${economic}, marketplace=${marketplace}, document=${document}, gateway=${gateway})"
+          echo "the stack did not come up (economic=${economic}, marketplace=${marketplace}, document=${document}, audit=${audit}, gateway=${gateway})"
           cat /tmp/rasta-logs/economic.log
           cat /tmp/rasta-logs/marketplace.log
           cat /tmp/rasta-logs/document.log
+          cat /tmp/rasta-logs/audit.log
           cat /tmp/rasta-logs/gateway.log
           exit 1
 
@@ -1151,6 +1173,7 @@ jobs:
           E2E_ECONOMIC_URL: http://localhost:3112
           E2E_MARKETPLACE_URL: http://localhost:3106
           E2E_DOCUMENT_URL: http://localhost:3114
+          E2E_AUDIT_URL: http://localhost:3115
           KEYCLOAK_URL: http://localhost:8080
           KEYCLOAK_REALM: rasta
           KEYCLOAK_WEB_CLIENT_ID: rasta-web
@@ -1166,6 +1189,8 @@ jobs:
           tail -n 200 /tmp/rasta-logs/marketplace.log || true
           echo '--- document-service ---'
           tail -n 200 /tmp/rasta-logs/document.log || true
+          echo '--- audit-service ---'
+          tail -n 200 /tmp/rasta-logs/audit.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-logs/gateway.log || true
           echo '--- keycloak ---'

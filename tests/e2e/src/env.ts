@@ -54,6 +54,17 @@ export interface E2eConfig {
    * scenario here. This URL exists only for health gating before the run.
    */
   documentUrl: string;
+  /**
+   * audit-service directly.
+   *
+   * The audit scenarios go through the **gateway**, like every other scenario
+   * here. This URL exists only for health gating before the run — and gating on
+   * it matters more than for the others, because audit-service's readiness
+   * answer includes whether its domain projector has joined its consumer group.
+   * A suite that started before it had would look for a record nothing could
+   * have written yet.
+   */
+  auditUrl: string;
   /** Keycloak admin, used once to reconcile the E2E users into an imported realm. */
   keycloakAdmin: { username: string; password: string };
   /**
@@ -84,6 +95,10 @@ export function e2eConfig(): E2eConfig {
     documentUrl: required(
       'E2E_DOCUMENT_URL',
       `http://localhost:${process.env.PORT_DOCUMENT?.trim() || '3114'}`,
+    ).replace(/\/+$/, ''),
+    auditUrl: required(
+      'E2E_AUDIT_URL',
+      `http://localhost:${process.env.PORT_AUDIT?.trim() || '3115'}`,
     ).replace(/\/+$/, ''),
     keycloakUrl: required('KEYCLOAK_URL', 'http://localhost:8080').replace(/\/+$/, ''),
     realm: required('KEYCLOAK_REALM', 'rasta'),
