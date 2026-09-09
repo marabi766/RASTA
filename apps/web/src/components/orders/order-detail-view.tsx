@@ -122,14 +122,16 @@ export function OrderDetailView({ orderId }: { orderId: string }): ReactNode {
                   یک فرمان روی سفارش تمام‌شده نمی‌تواند اثر مالی دوم بگذارد.
                 </p>
               ) : (
-                <div className="flex flex-wrap gap-2">
+                <ul aria-label="گذارهای مجاز از وضعیت فعلی" className="flex flex-wrap gap-2">
                   {(ORDER_TRANSITIONS[order.status as OrderStatus] ?? []).map((next) => (
-                    <Badge key={next} tone="info">
-                      {ORDER_STATUS_LABELS[next] ?? next}
-                      <Code>{next}</Code>
-                    </Badge>
+                    <li key={next}>
+                      <Badge tone="info">
+                        {ORDER_STATUS_LABELS[next] ?? next}
+                        <Code>{next}</Code>
+                      </Badge>
+                    </li>
                   ))}
-                </div>
+                </ul>
               )}
 
               <p className="mt-4 text-xs text-[var(--tx2)]">

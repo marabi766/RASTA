@@ -96,6 +96,33 @@ export function respondError(status: number, code: string): () => Promise<Respon
   return () => Promise.resolve(errorResponse(status, code));
 }
 
+/**
+ * A `fetch` that answers per gateway path.
+ *
+ * Several screens read from four or five endpoints at once, and a single
+ * `mockResolvedValue` would hand the same body to all of them — which passes
+ * for a while and then quietly stops testing anything. Routing by pathname
+ * keeps each read honest, and an unrouted path fails loudly rather than
+ * returning an empty page that looks like a legitimate empty state.
+ */
+export function renderRoute(
+  routes: Record<string, unknown>,
+  status = 200,
+): (input: string) => Promise<Response> {
+  return (input: string) => {
+    const { pathname } = new URL(input);
+    const body = routes[pathname];
+
+    if (body === undefined) {
+      throw new Error(
+        `No fixture for ${pathname}. Add it to the route map, or the test is asserting on an empty state it did not intend.`,
+      );
+    }
+
+    return Promise.resolve(jsonResponse(body, status));
+  };
+}
+
 export function jsonResponse(body: unknown, status = 200, headers: HeadersInit = {}): Response {
   return new Response(JSON.stringify(body), {
     status,

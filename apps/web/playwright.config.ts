@@ -27,9 +27,10 @@ const BASE_URL = `http://localhost:${PORT}`;
 
 export default defineConfig({
   testDir: './e2e',
-  // Screenshot capture has no assertions; a green tick against it would mean
-  // nothing. Run it deliberately with `pnpm screens`.
-  testIgnore: ['**/screenshots.spec.ts'],
+  // Screenshot capture has no assertions, and a green tick against it would
+  // mean nothing, so it is excluded from the normal run by tag rather than by
+  // path — `pnpm screens` opts back in with `--grep @screenshot`.
+  grepInvert: /@screenshot/,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,

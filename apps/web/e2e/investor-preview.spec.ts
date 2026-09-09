@@ -72,12 +72,16 @@ test.describe('the dashboard', () => {
   test('states build status without inventing an operational figure', async ({ page }) => {
     await page.goto('/');
 
-    await expect(page.getByRole('heading', { name: 'وضعیت قابلیت‌های پلتفرم' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'رستا — نمای کلی پلتفرم' })).toBeVisible();
 
-    const sections = await page.locator('main section').allTextContents();
-    const text = sections.join('\n');
-    expect(text).not.toMatch(/ریال/);
-    expect(text).not.toMatch(/[٪%]/);
+    const text = (await page.locator('main section').allTextContents()).join('\n');
+    expect(text).not.toBe('');
+
+    // Matched as rendered *figures* rather than as words. The capability map
+    // legitimately contains prose saying that rial valuation does not exist
+    // yet, and that sentence is the honesty rather than a breach of it.
+    expect(text).not.toMatch(/[۰-۹][۰-۹٬]*\s*ریال/);
+    expect(text).not.toMatch(/[۰-۹]\s*[٪%]/);
   });
 
   test('shows a status for every capability', async ({ page }) => {
@@ -96,11 +100,16 @@ test.describe('capabilities that are not built', () => {
 
     await page.goto('/procurement');
 
-    await expect(page.getByRole('heading', { name: 'این بخش در حال ساخت است' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'وضعیت این بخش' })).toBeVisible();
     await expect(
       page.getByText(
         'در این صفحه هیچ تراکنش واقعی انجام نمی‌شود و هیچ داده‌ای ثبت یا ارسال نمی‌گردد.',
       ),
+    ).toBeVisible();
+
+    // The exact required wording, verbatim.
+    await expect(
+      page.getByText('PREVIEW — داده نمایشی است و عملیات واقعی انجام نمی‌شود'),
     ).toBeVisible();
 
     expect(gatewayCalls).toEqual([]);
@@ -115,12 +124,22 @@ test.describe('capabilities that are not built', () => {
     await expect(page.locator('main')).not.toContainText('ریال');
   });
 
-  test('distinguishes architecture-ready from not-planned', async ({ page }) => {
-    await page.goto('/fleet');
-    await expect(page.getByText(/از نظر معماری آماده است/)).toBeVisible();
+  test('distinguishes the reasons rather than collapsing them', async ({ page }) => {
+    // Three different answers to "when will this work", and the screen gives
+    // the specific one rather than «به‌زودی».
+    await page.goto('/rewards');
+    await expect(page.getByText(/منتظر یک تصمیم محصولی یا حاکمیتی است/)).toBeVisible();
 
     await page.goto('/notifications');
     await expect(page.getByText(/برنامه‌ریزی‌شده اما ساخته نشده/)).toBeVisible();
+  });
+
+  test('explains the roadmap without claiming the capability', async ({ page }) => {
+    await page.goto('/procurement');
+
+    await expect(page.getByText('این قابلیت چه مشکلی را حل می‌کند')).toBeVisible();
+    await expect(page.getByText(/هیچ‌کدام از موارد زیر امروز کار نمی‌کند/)).toBeVisible();
+    await expect(page.getByText('پیش‌نیازهای شروع')).toBeVisible();
   });
 });
 

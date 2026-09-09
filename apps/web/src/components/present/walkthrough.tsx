@@ -85,8 +85,18 @@ export function Walkthrough(): ReactNode {
 
       <Card className="flex-1">
         <p className="text-xs font-semibold text-[var(--tx3)]">
-          گام {formatInteger(index + 1)} از {formatInteger(WALKTHROUGH.length)} ·{' '}
-          {formatInteger(step.minutes)} دقیقه
+          {/* Two separate spans rather than one string joined by a middot. A
+              neutral character sitting between two numbers in an RTL paragraph
+              is reordered by the bidi algorithm — «گام ۱ از ۸ · ۲ دقیقه»
+              rendered as «گام ۱ از ۲ ۰۸ دقیقه». Splitting the runs removes the
+              ambiguity rather than papering over it with an embedding mark. */}
+          <span>
+            گام {formatInteger(index + 1)} از {formatInteger(WALKTHROUGH.length)}
+          </span>
+          <span className="mx-2 text-[var(--bd2)]" aria-hidden="true">
+            |
+          </span>
+          <span>زمان پیشنهادی: {formatInteger(step.minutes)} دقیقه</span>
         </p>
 
         <h2
