@@ -24,8 +24,11 @@ initTelemetry({
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { VersioningType } from '@nestjs/common';
+import { SwaggerModule } from '@nestjs/swagger';
+import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { buildAuditOpenApiDocument } from './openapi/document';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -55,21 +58,32 @@ async function bootstrap(): Promise<void> {
     });
   }
 
-  // Nothing here accepts a body — the only routes are two GET probes. The limit
-  // is set anyway so the first endpoint that does accept one inherits a bound
-  // rather than the framework default.
+  // Nothing here accepts a body: every route is a GET, and `docs/04` § 4.15
+  // makes that permanent — writing to the audit store is from Kafka only. The
+  // limit is kept so a body sent to a GET is refused at the parser rather than
+  // read into memory first.
   app.useBodyParser('json', { limit: '64kb' });
+
+  if (allowsDeveloperTooling(env)) {
+    // Nest derives paths, methods and security from the decorators but cannot
+    // see a Zod schema, so the parameter and response shapes are filled in
+    // afterwards from the very schemas the service validates and serialises
+    // with. Built by the same function `test/openapi.int-spec.ts` calls: a
+    // contract generated one way and tested another is two contracts.
+    SwaggerModule.setup('docs', app, buildAuditOpenApiDocument(app, env.SERVICE_VERSION));
+  }
 
   app.enableShutdownHooks();
 
   await app.listen(env.PORT, '0.0.0.0');
 
-  // Says what it does and what it does not. AUD-001 records evidence; it
-  // cannot yet be asked for any, and this line is where an operator looks
-  // first.
+  // Says what it does and what it does not, because this line is where an
+  // operator looks first.
   console.warn(
     `[${SERVICE_NAME}] listening on :${env.PORT} (${env.NODE_ENV}) — ` +
-      'domain projector: ingesting 10 domain topics; no query API yet (AUD-002)',
+      'domain projector: ingesting 10 domain topics; read API: search and detail ' +
+      '(no export, no integrity verification yet)' +
+      (allowsDeveloperTooling(env) ? ` — docs at http://localhost:${env.PORT}/docs` : ''),
   );
 }
 

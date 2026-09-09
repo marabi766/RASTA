@@ -1,4 +1,4 @@
-import { Counter, Gauge, registry } from '@rasta/observability';
+import { Counter, Gauge, Histogram, registry } from '@rasta/observability';
 
 /**
  * AUD-001 ingestion telemetry.
@@ -87,7 +87,86 @@ export const INGESTION_FAILURE_REASONS = {
   UNMAPPABLE_ENVELOPE: 'unmappable_envelope',
   /** The database refused or was unreachable. */
   DATABASE_ERROR: 'database_error',
+  /**
+   * An organization event this service projects for authorization did not
+   * match the fields the projection depends on (AUD-002).
+   *
+   * Separate from `unmappable_envelope` because the two need different
+   * responses: an envelope this store cannot map is a producer contract
+   * problem, while this one means the hierarchy behind `UNION_ADMIN` scoping
+   * has stopped advancing, and a subtree decision that stops advancing is a
+   * security control that stops advancing.
+   */
+  UNMAPPABLE_ORGANIZATION_EVENT: 'unmappable_organization_event',
 } as const;
 
 export type IngestionFailureReason =
   (typeof INGESTION_FAILURE_REASONS)[keyof typeof INGESTION_FAILURE_REASONS];
+
+// ---------------------------------------------------------------------------
+// AUD-002 query telemetry
+//
+// Same rule as above, and it bites harder here: these labels describe a
+// *search*, and a search is about somebody. `organization`, `actor`,
+// `resource` and `correlation` are absent from every label set below, and the
+// closed sets that remain are fixed at deploy time -- two endpoints, two scope
+// widths, three outcomes, three subtree decisions.
+// ---------------------------------------------------------------------------
+
+/** The two read endpoints. A closed set, so a safe label. */
+export const QUERY_ENDPOINTS = {
+  SEARCH: 'search',
+  DETAIL: 'detail',
+} as const;
+
+/** What a query did. Never an error message, which can carry a value. */
+export const QUERY_OUTCOMES = {
+  OK: 'ok',
+  NOT_FOUND: 'not_found',
+} as const;
+
+/** How a subtree request was decided. */
+export const SUBTREE_DECISIONS = {
+  /** The target is the caller's own organization; the token settled it. */
+  OWN_ORGANIZATION: 'own_organization',
+  /** The projection proved the target is a descendant of the caller's root. */
+  DESCENDANT: 'descendant',
+  /**
+   * Refused. Deliberately one bucket for every reason -- sibling, stranger,
+   * moved out, deactivated, no projection at all. Splitting them would publish
+   * the shape of the hierarchy to anyone who can read a dashboard, and would
+   * let a caller distinguish "does not exist" from "exists elsewhere" by
+   * watching a counter move.
+   */
+  REFUSED: 'refused',
+} as const;
+
+export const auditQueriesTotal = new Counter({
+  name: 'rasta_audit_queries_total',
+  help: 'Audit read requests that reached the query service',
+  labelNames: ['endpoint', 'scope', 'outcome'] as const,
+  registers: [registry],
+});
+
+/**
+ * How many rows a search returned.
+ *
+ * A histogram rather than a counter of rows: the operational question is
+ * whether somebody is paging the store out in maximum-sized pages, and a
+ * distribution answers that while a total does not. Buckets stop at the
+ * configured page maximum, because nothing can exceed it.
+ */
+export const auditQueryRowsReturned = new Histogram({
+  name: 'rasta_audit_query_rows_returned',
+  help: 'Rows returned by one audit search',
+  labelNames: ['endpoint'] as const,
+  buckets: [0, 1, 5, 25, 50, 100, 200],
+  registers: [registry],
+});
+
+export const auditSubtreeDecisionsTotal = new Counter({
+  name: 'rasta_audit_subtree_decisions_total',
+  help: 'Subtree authorization decisions taken from the local organization projection',
+  labelNames: ['decision'] as const,
+  registers: [registry],
+});

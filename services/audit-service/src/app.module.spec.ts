@@ -1,9 +1,21 @@
 import 'reflect-metadata';
+import { APP_GUARD } from '@nestjs/core';
+import {
+  AuthGuard,
+  AUTH_OPTIONS,
+  InternalTokenService,
+  RolesGuard,
+  TokenVerifier,
+} from '@rasta/nest-common';
 import { AppModule } from './app.module';
 import { PrismaService } from './prisma/prisma.service';
 import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
 import { AuditRepository } from './audit/audit.repository';
+import { AuditController } from './audit/audit.controller';
+import { AuditEventDetailQueryPipe, AuditEventQueryPipe } from './audit/audit.query.pipes';
+import { HealthController } from './health/health.controller';
 import { ENV, LOGGER } from './tokens';
+import type { AuditEnv } from './config/env';
 import { DOMAIN_PROJECTOR_CONSUMER, DOMAIN_TOPICS } from './audit/audit.mapper';
 
 /**
@@ -23,18 +35,36 @@ interface FactoryProvider {
   inject?: unknown[];
 }
 
-const providers = (Reflect.getMetadata('providers', AppModule) ?? []) as FactoryProvider[];
+// Heterogeneous on purpose: most providers are factory objects, but the two
+// query pipes are registered as bare classes because a class-referenced
+// enhancer is the only form Nest resolves from a route decorator.
+const providers = (Reflect.getMetadata('providers', AppModule) ?? []) as unknown[];
 
 function providerFor(token: unknown): FactoryProvider {
-  const found = providers.find((p) => p.provide === token);
+  const found = providers.find(
+    (p): p is FactoryProvider =>
+      typeof p === 'object' && p !== null && (p as FactoryProvider).provide === token,
+  );
   if (!found) throw new Error(`no provider registered for ${String(token)}`);
   return found;
 }
+
+/**
+ * What Nest hands a query pipe. Only `type` is read by these pipes, but the
+ * shape is stated in full so it is the real contract and not a cast.
+ */
+const QUERY_ARGUMENT = { type: 'query' } as const;
 
 const ENVIRONMENT = {
   DATABASE_URL_AUDIT: 'postgresql://rasta_audit:pw@localhost:5433/rasta_audit?schema=audit',
   KAFKA_BROKERS: 'localhost:9092',
   NODE_ENV: 'test',
+  // Required as of AUD-002: the service now serves two private endpoints behind
+  // a global `AuthGuard`, so it verifies tokens and must be configured to.
+  OIDC_ISSUER_URL: 'http://auth.invalid/realms/rasta',
+  OIDC_JWKS_URI: 'http://auth.invalid/realms/rasta/protocol/openid-connect/certs',
+  OIDC_AUDIENCE: 'rasta-api',
+  INTERNAL_TOKEN_SECRET: 'x'.repeat(48),
 };
 
 describe('audit-service composition root', () => {
@@ -48,11 +78,77 @@ describe('audit-service composition root', () => {
     process.env = originalEnv;
   });
 
-  it('registers the health controller and nothing that could return an audit row', () => {
-    // AUD-001 exposes no query API. A second controller appearing here is the
-    // change that would need AUD-002's guard, so the absence is pinned.
+  it('registers exactly the health probes and the read API', () => {
+    // Two controllers, and the count is pinned rather than left open: a third
+    // one appearing here is either a write surface `docs/04` § 4.15 forbids or
+    // an export route AUD-002 does not build, and both should have to change
+    // this line before they ship.
     const controllers = (Reflect.getMetadata('controllers', AppModule) ?? []) as unknown[];
-    expect(controllers).toHaveLength(1);
+    expect(controllers).toEqual([HealthController, AuditController]);
+  });
+
+  it('registers the guards globally, authentication before authorization', () => {
+    // The order is the security property: `RolesGuard` reads a context that
+    // only `AuthGuard` populates, so a graph that ran them the other way round
+    // would judge roles nobody had verified. Nest runs `APP_GUARD` providers in
+    // registration order.
+    const guards = providers.filter((p) => p.provide === APP_GUARD).map((p) => p.useClass);
+    expect(guards).toEqual([AuthGuard, RolesGuard]);
+  });
+
+  it('builds the auth options from the validated environment', () => {
+    const env = providerFor(ENV).useFactory?.() as Record<string, unknown>;
+    const internalTokens = providerFor(InternalTokenService).useFactory?.(env);
+    const options = providerFor(AUTH_OPTIONS).useFactory?.(env, internalTokens) as {
+      serviceName: string;
+      tokenVerifier: unknown;
+      internalTokens: unknown;
+    };
+
+    expect(options.serviceName).toBe('audit-service');
+    expect(options.tokenVerifier).toBeInstanceOf(TokenVerifier);
+    // Verifiable and deliberately never sufficient: no route carries
+    // `@AllowService`, so a valid internal token is refused by `RolesGuard` and
+    // again by `assertNotServiceCaller()`.
+    expect(options.internalTokens).toBeInstanceOf(InternalTokenService);
+  });
+
+  it('registers both query pipes as classes the injector can construct', () => {
+    // The controller reaches these as `@Query(AuditEventQueryPipe)`. Nest
+    // resolves a class-referenced enhancer from the metatype it scanned off the
+    // route and never consults a same-token `useFactory`, so registering them
+    // as factory providers left the container constructing the class itself
+    // against an unresolvable `number` parameter — the service failed to boot.
+    // Registered as classes, with `ENV` as a real injected dependency, it does
+    // not.
+    expect(providers).toContain(AuditEventQueryPipe);
+    expect(providers).toContain(AuditEventDetailQueryPipe);
+
+    // `@Inject(ENV)` is what gives the parameter a token to resolve. Asserted
+    // on the metadata Nest actually reads, so removing the decorator fails here
+    // rather than at boot.
+    for (const pipe of [AuditEventQueryPipe, AuditEventDetailQueryPipe]) {
+      expect(Reflect.getMetadata('self:paramtypes', pipe)).toEqual([{ index: 0, param: ENV }]);
+    }
+  });
+
+  it('builds both query pipes at the configured window ceiling', () => {
+    // The 400 for an over-wide window must name the value this deployment runs,
+    // not the default — so the ceiling has to come from the injected
+    // environment. Proved behaviourally: a pipe built at a seven-day ceiling
+    // refuses a thirty-day window that the default ceiling would accept.
+    const env = providerFor(ENV).useFactory?.() as AuditEnv;
+    expect(env.AUDIT_MAX_QUERY_WINDOW_DAYS).toBe(90);
+
+    const window = { from: '2026-01-01T00:00:00.000Z', to: '2026-01-31T00:00:00.000Z' };
+
+    expect(() => new AuditEventQueryPipe(env).transform(window, QUERY_ARGUMENT)).not.toThrow();
+    expect(() =>
+      new AuditEventQueryPipe({ ...env, AUDIT_MAX_QUERY_WINDOW_DAYS: 7 }).transform(
+        window,
+        QUERY_ARGUMENT,
+      ),
+    ).toThrow();
   });
 
   it('builds the environment', () => {

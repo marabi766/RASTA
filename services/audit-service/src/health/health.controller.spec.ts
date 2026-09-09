@@ -42,9 +42,11 @@ describe('audit-service health probes', () => {
   });
 
   it('is not ready when the database check fails', async () => {
-    // The check is `has_table_privilege(current_user, 'audit_event', 'INSERT')`,
+    // The check is a `has_table_privilege` conjunction over both paths — INSERT
+    // and SELECT on `audit_event`, SELECT/INSERT/UPDATE on `organization_ref` —
     // not `SELECT 1`. A connection that reads but has lost INSERT fails every
-    // ingestion while looking perfectly healthy.
+    // ingestion while looking perfectly healthy, and one that has lost SELECT
+    // on `organization_ref` refuses every union administrator their subtree.
     const { controller, response, statusOf } = build(false, true);
 
     const ready = await controller.ready(response);
@@ -66,15 +68,16 @@ describe('audit-service health probes', () => {
     expect(statusOf()).toBe(HttpStatus.SERVICE_UNAVAILABLE);
   });
 
-  it('states that it ingests but exposes no query api', async () => {
-    // Said in the payload, not only in a doc. Anything discovering this
-    // service by probing it must not conclude an audit query exists: that is
-    // AUD-002, and claiming it early is how a gap gets missed.
+  it('states that it both ingests and serves a query api', async () => {
+    // Said in the payload, not only in a doc, and it has to match the router.
+    // While AUD-002 was unbuilt this read `queryApi: false` and that was the
+    // truth; the read API exists now, so a probe that still said `false` would
+    // be a readiness payload disagreeing with the routes the service serves.
     const { controller, response } = build(true, true);
 
     const ready = await controller.ready(response);
 
     expect(ready.ingests).toBe(true);
-    expect(ready.queryApi).toBe(false);
+    expect(ready.queryApi).toBe(true);
   });
 });
