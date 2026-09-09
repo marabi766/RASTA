@@ -39,6 +39,8 @@
     "infra:down": "docker compose down",
     "infra:reset": "docker compose down -v && docker compose up -d",
     "infra:logs": "docker compose logs -f",
+    "demo:preflight": "node scripts/demo-preflight.mjs",
+    "demo:web": "pnpm --filter @rasta/web dev",
     "db:migrate": "turbo run db:migrate",
     "db:generate": "turbo run db:generate",
     "db:seed": "turbo run db:seed"
