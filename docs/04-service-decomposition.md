@@ -471,18 +471,33 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 > `rasta_audit` فقط `SELECT` و `INSERT` دارد، به‌علاوهٔ Triggerهای `BEFORE UPDATE OR DELETE` و `BEFORE TRUNCATE` روی والد و
 > **روی هر پارتیشن** (PostgreSQL Trigger سطح‌جمله را به پارتیشن‌ها Clone نمی‌کند).
 >
-> **آنچه هنوز نیست:** هیچ Endpoint خواندنی (`GET /audit-events` — AUD-002)، هیچ زنجیرهٔ Hash (`record_hash`/`previous_hash`
-> ستون‌اند و هرگز نوشته نمی‌شوند — AUD-003)، هیچ رکورد جبرانی، هیچ تجمیع ردها، و هیچ مصرف‌کنندهٔ
-> `rasta.audit.trail.v1` (مسیر B — AUD-004). `COM-009` همچنان `READY` است و ۱۳ امتیازش داده نشده.
+> **افزودهٔ 2026-09-09 (AUD-002) — API خواندنِ مستأجر-امن.** `GET /v1/audit-events` و `GET /v1/audit-events/{id}` پشت
+> `AuthGuard` و `RolesGuard` سراسری. `from`/`to` اجباری‌اند و پنجره سقف پیکربندی‌شده دارد
+> (`AUDIT_MAX_QUERY_WINDOW_DAYS`، پیش‌فرض ۹۰)؛ بیش از آن `400 VALIDATION_FAILED` است که حد را نام می‌برد، **پیش از اجرای هر
+> Query**. صفحه‌بندی Cursor (پیش‌فرض ۲۵، حداکثر ۲۰۰) بر `occurredAt DESC, id DESC`؛ Cursor مبهم است و **هیچ دامنه‌ای حمل
+> نمی‌کند** — دامنه در هر درخواست از Token تأییدشده بازمحاسبه می‌شود. خواندن یک رکورد خارج از دامنه همان `404` شناسهٔ ناموجود
+> را می‌گیرد.
+>
+> زیردرختِ `UNION_ADMIN` از یک Projection محلی تصمیم گرفته می‌شود که `organization_ref` را با
+> `parent_organization_id`، `status` و `relation_state` گسترش می‌دهد (Migration افزایشی
+> `20260909093000_audit_org_hierarchy_projection`) و از `ORGANIZATION_CREATED` / `_MOVED` / `_STATUS_CHANGED` روی
+> `rasta.organization.v1` پر می‌شود. تصمیم از **پیوند والد** گرفته می‌شود نه از مسیر ذخیره‌شده — یک جابه‌جایی، مسیرِ هر فرزند
+> را کهنه می‌کند و کهنگی در جهت گسترش، همان چیزی است که ADR-053 § ۱۰ ممنوع می‌کند. رابطهٔ غایب، ناشناخته یا شکسته **هرگز**
+> نتیجه را گسترده نمی‌کند.
+>
+> **آنچه هنوز نیست:** هیچ زنجیرهٔ Hash (`record_hash`/`previous_hash` ستون‌اند و هرگز نوشته نمی‌شوند — AUD-003)، هیچ
+> Endpoint تأیید، هیچ رکورد جبرانی، هیچ **صادرات**، هیچ تجمیع ردها، و هیچ مصرف‌کنندهٔ `rasta.audit.trail.v1`
+> (مسیر B — AUD-004؛ به همین دلیل یک جست‌وجوی ردشده هنوز خودش رکورد `REFUSED` نمی‌سازد). `COM-009` همچنان `READY` است و
+> ۱۳ امتیازش داده نشده.
 
-| بُعد            | مشخصات                                                                                                    |
-| --------------- | --------------------------------------------------------------------------------------------------------- |
-| **Mission**     | سابقه تغییرناپذیر «چه کسی، چه کرد، کِی، از کجا، با چه نتیجه‌ای».                                          |
-| **مالکیت داده** | `audit_event` — **فقط الحاقی**؛ بدون UPDATE و بدون DELETE                                                 |
-| **REST**        | `GET /audit-events` (فیلتر بر actor، resource، action، بازه) · `GET /audit-events/{id}`                   |
-| **Consumes**    | **دو مسیر:** هر ده Topic دامنه‌ای (Projector) + `rasta.audit.trail.v1` (قرارداد صریح). ADR-053            |
-| **مرز امنیتی**  | نوشتن فقط از Kafka (بدون API نوشتن). خواندن `SYSTEM_ADMIN` و `UNION_ADMIN`؛ صادرات فقط `SYSTEM_ADMIN`.    |
-| **ADR**         | [ADR-053](adr/ADR-053-audit-service-append-only-evidence.md) — `Proposed`. **AUD-001 پیاده شد؛ بقیه نه.** |
+| بُعد            | مشخصات                                                                                                                             |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| **Mission**     | سابقه تغییرناپذیر «چه کسی، چه کرد، کِی، از کجا، با چه نتیجه‌ای».                                                                   |
+| **مالکیت داده** | `audit_event` — **فقط الحاقی**؛ بدون UPDATE و بدون DELETE                                                                          |
+| **REST**        | `GET /audit-events` (فیلتر بر actor، resource، action، بازه) · `GET /audit-events/{id}`                                            |
+| **Consumes**    | **دو مسیر:** هر ده Topic دامنه‌ای (Projector) + `rasta.audit.trail.v1` (قرارداد صریح). ADR-053                                     |
+| **مرز امنیتی**  | نوشتن فقط از Kafka (بدون API نوشتن). خواندن `SYSTEM_ADMIN` و `UNION_ADMIN`؛ صادرات فقط `SYSTEM_ADMIN`.                             |
+| **ADR**         | [ADR-053](adr/ADR-053-audit-service-append-only-evidence.md) — `Proposed`. **AUD-001 و AUD-002 پیاده شدند؛ AUD-003 و AUD-004 نه.** |
 
 > **اصلاح 2026-09-07.** این جدول پیش‌تر خواندن را به «`SYSTEM_ADMIN`، `UNION_ADMIN` و **مالک منبع**» می‌داد، در حالی که
 > `docs/09` § ۹٫۸ و جدول Gateway (`services/api-gateway/src/config/routes.ts:172-176`) فقط دو نقش مدیر را می‌دهند.

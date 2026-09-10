@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import { DOMAIN_PROJECTOR_CONSUMER } from '../audit/audit.mapper';
-import { baseEnvSchema, databaseEnvSchema, kafkaEnvSchema, loadEnv } from '@rasta/config';
+import {
+  authEnvSchema,
+  baseEnvSchema,
+  databaseEnvSchema,
+  kafkaEnvSchema,
+  loadEnv,
+} from '@rasta/config';
+import { DEFAULT_MAX_QUERY_WINDOW_DAYS } from '../audit/audit.query.dto';
 
 export const SERVICE_NAME = 'audit-service';
 
@@ -23,16 +30,40 @@ export const DEFAULT_PORT = '3115';
  * service exactly the powers ADR-053 § 6 exists to withhold, and it would fail
  * open — silently, and only in the environment nobody watches.
  *
- * `authEnvSchema` is still not merged, and still deliberately. The only routes
- * are the two health probes, which are `@Public`, so there is no token to
- * verify. AUD-002 brings the first private endpoint and its guard, and this
- * schema grows then.
+ * `authEnvSchema` is merged as of AUD-002. The service now serves two private
+ * read endpoints behind a global `AuthGuard` and `RolesGuard`, so it verifies
+ * JWTs against the platform JWKS and mints nothing it cannot verify. The
+ * scaffold comment that said it was absent because no route needed a token was
+ * true of AUD-001 and is not true any more.
  */
 export const auditEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),
+
+    /**
+     * The widest `from`..`to` an audit query may cover, in days.
+     *
+     * `audit_event` is partitioned monthly across years, so an unbounded range
+     * scans every partition — which ADR-053 § 10 names as an accidental denial
+     * of service, not merely a slow query. The ceiling is what makes partition
+     * pruning effective, and exceeding it is a `400 VALIDATION_FAILED` that
+     * quotes this value rather than a silent truncation (`docs/06` § 6.5).
+     *
+     * Configurable because retention windows and investigation practice are an
+     * operator's decision, not a constant. Bounded at both ends so a
+     * misconfiguration cannot disable the control: below one day no
+     * investigation is possible, and 366 keeps the widest permitted query
+     * inside a year of partitions.
+     */
+    AUDIT_MAX_QUERY_WINDOW_DAYS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(366)
+      .default(DEFAULT_MAX_QUERY_WINDOW_DAYS),
   });
 
 export type AuditEnv = z.infer<typeof auditEnvSchema>;

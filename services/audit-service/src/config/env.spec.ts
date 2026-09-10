@@ -1,12 +1,29 @@
 import { corsOrigins, brokersOf, DEFAULT_PORT, loadAuditEnv, SERVICE_NAME } from './env';
+import { DEFAULT_MAX_QUERY_WINDOW_DAYS } from '../audit/audit.query.dto';
 
 const RUNTIME_URL = 'postgresql://rasta_audit:pw@localhost:5433/rasta_audit?schema=audit';
 const MIGRATOR_URL = 'postgresql://rasta_audit_migrator:pw@localhost:5433/rasta_audit?schema=audit';
+
+/**
+ * The identity settings every service needs, and this one needs as of AUD-002.
+ *
+ * Generated rather than written down: a 32-character literal assigned to
+ * something called a secret is indistinguishable from a real one to a scanner,
+ * and a scanner taught to ignore this file has been taught to ignore the next
+ * one (AGENTS.md S-01).
+ */
+const AUTH = {
+  OIDC_ISSUER_URL: 'http://auth.invalid/realms/rasta',
+  OIDC_JWKS_URI: 'http://auth.invalid/realms/rasta/protocol/openid-connect/certs',
+  OIDC_AUDIENCE: 'rasta-api',
+  INTERNAL_TOKEN_SECRET: 'x'.repeat(48),
+} as const;
 
 function base(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
     DATABASE_URL_AUDIT: RUNTIME_URL,
     KAFKA_BROKERS: 'localhost:9092',
+    ...AUTH,
     ...overrides,
   };
 }
@@ -39,9 +56,12 @@ describe('audit-service configuration', () => {
       // fallback "so it works in development" would hand the service exactly
       // the powers ADR-053 § 6 withholds — and would fail open, silently, in
       // the environment nobody watches.
+      // Everything else valid, so the only thing this can be failing on is the
+      // database url. A bare object would also throw, for four other reasons.
       expect(() =>
         loadAuditEnv({
           KAFKA_BROKERS: 'localhost:9092',
+          ...AUTH,
           DATABASE_URL_AUDIT_MIGRATOR: MIGRATOR_URL,
         }),
       ).toThrow();
@@ -57,12 +77,12 @@ describe('audit-service configuration', () => {
     it('refuses to start with no database url at all', () => {
       // AUD-001 opens a client and writes on every message. Starting without a
       // database would mean answering health checks while recording nothing.
-      expect(() => loadAuditEnv({ KAFKA_BROKERS: 'localhost:9092' })).toThrow();
+      expect(() => loadAuditEnv({ KAFKA_BROKERS: 'localhost:9092', ...AUTH })).toThrow();
     });
   });
 
   it('requires a broker list, because the projector is the whole service', () => {
-    expect(() => loadAuditEnv({ DATABASE_URL_AUDIT: RUNTIME_URL })).toThrow();
+    expect(() => loadAuditEnv({ DATABASE_URL_AUDIT: RUNTIME_URL, ...AUTH })).toThrow();
   });
 
   it('defaults the consumer group to the one ADR-053 names', () => {
@@ -92,5 +112,51 @@ describe('audit-service configuration', () => {
     expect(
       corsOrigins(loadAuditEnv(base({ GATEWAY_CORS_ORIGINS: 'https://portal.test' }))),
     ).toEqual(['https://portal.test']);
+  });
+
+  describe('identity, which AUD-002 made mandatory', () => {
+    // AUD-001 deliberately omitted `authEnvSchema`: the only routes were two
+    // `@Public` probes, so there was no token to verify. AUD-002 adds two
+    // private read endpoints behind global guards, and a service that could
+    // start without a JWKS endpoint would be a service whose guard fails at the
+    // first request rather than at boot.
+    it.each([['OIDC_ISSUER_URL'], ['OIDC_JWKS_URI'], ['OIDC_AUDIENCE'], ['INTERNAL_TOKEN_SECRET']])(
+      'refuses to start without %s',
+      (missing) => {
+        const env = base();
+        delete env[missing];
+        expect(() => loadAuditEnv(env)).toThrow();
+      },
+    );
+
+    it('refuses an internal token secret too short to be meaningful', () => {
+      expect(() => loadAuditEnv(base({ INTERNAL_TOKEN_SECRET: 'short' }))).toThrow();
+    });
+  });
+
+  describe('the mandatory query window ceiling', () => {
+    it('defaults to the documented ninety days', () => {
+      // ADR-053 § 10 names 90 and `.env.example` publishes it. Pinned against
+      // the constant the schema builder also uses, so the default cannot drift
+      // between the configuration and the message a 400 quotes.
+      expect(loadAuditEnv(base()).AUDIT_MAX_QUERY_WINDOW_DAYS).toBe(DEFAULT_MAX_QUERY_WINDOW_DAYS);
+      expect(DEFAULT_MAX_QUERY_WINDOW_DAYS).toBe(90);
+    });
+
+    it('accepts an operator-chosen ceiling', () => {
+      const env = loadAuditEnv(base({ AUDIT_MAX_QUERY_WINDOW_DAYS: '7' }));
+
+      expect(env.AUDIT_MAX_QUERY_WINDOW_DAYS).toBe(7);
+    });
+
+    it.each([['0'], ['-1'], ['367'], ['30.5'], ['unbounded']])(
+      'refuses %s rather than disabling the control',
+      (value) => {
+        // Below one day no investigation is possible; above a year the widest
+        // permitted query stops pruning to a useful set of partitions. A
+        // misconfiguration must not be able to turn the ceiling off.
+        expect(() => loadAuditEnv(base({ AUDIT_MAX_QUERY_WINDOW_DAYS: value }))).toThrow();
+      },
+    );
   });
 });

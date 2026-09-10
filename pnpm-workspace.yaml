@@ -26,6 +26,15 @@ overrides:
   # only through @prisma/config, which the Prisma CLI uses at build time; the
   # newest Prisma 6 still resolves 7.x, so the fix has to be pinned here.
   deepmerge-ts: '^8.0.0'
+  # GHSA-2883-xcg3-v3hh — unbounded CPU use on empty merge sources. Reached
+  # through the Jest coverage chain (js-yaml 3.x) and the ESLint config loader
+  # (js-yaml 4.x); both parents still ask for a vulnerable release.
+  'js-yaml@>=3.0.0 <3.15.2': '3.15.2'
+  'js-yaml@>=4.0.0 <4.3.2': '4.3.2'
+  # GHSA-535w-7cp7-47q4, GHSA-qfvm-cv95-jqjf, GHSA-wc9g-mqfw-jrwm — multipart
+  # denial of service. @nestjs/platform-express pins multer 2.2.0 exactly, so
+  # the patched release has to come from here.
+  'multer@<2.3.0': '2.3.0'
 
 # A transitive dependency may not arrive from a git URL or a tarball over
 # http. Everything here comes from the registry, and a sub-dependency that

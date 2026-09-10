@@ -5,18 +5,27 @@ import {
   type OnApplicationShutdown,
   type OnModuleInit,
 } from '@nestjs/common';
-import { APP_FILTER } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import {
   AllExceptionsFilter,
+  AuthGuard,
+  AUTH_OPTIONS,
   EventConsumer,
   EXCEPTION_FILTER_LOGGER,
+  InternalTokenService,
   RequestContextMiddleware,
+  RolesGuard,
+  TokenVerifier,
   toLogContext,
+  type AuthGuardOptions,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { HealthController } from './health/health.controller';
 import { PrismaService } from './prisma/prisma.service';
 import { AuditRepository } from './audit/audit.repository';
+import { AuditController } from './audit/audit.controller';
+import { AuditQueryService } from './audit/audit.query.service';
+import { AuditEventDetailQueryPipe, AuditEventQueryPipe } from './audit/audit.query.pipes';
 import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
 import { DOMAIN_PROJECTOR_CONSUMER, DOMAIN_TOPICS } from './audit/audit.mapper';
 import { auditPartitionRows } from './observability/metrics';
@@ -24,23 +33,36 @@ import { ENV, LOGGER } from './tokens';
 import { brokersOf, loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/env';
 
 /**
- * audit-service wiring — AUD-001, the domain projector.
+ * audit-service wiring — the domain projector (AUD-001) and the read API
+ * (AUD-002).
  *
  * ## What is here
  *
  * One consumer group over the ten produced domain topics, a repository that
- * writes the audit row and its idempotency marker in a single transaction, and
- * the ingestion metrics. That is the whole of path A (ADR-053 § 1).
+ * writes the audit row, its idempotency marker and the organization hierarchy
+ * projection in a single transaction, the ingestion metrics — that is path A
+ * (ADR-053 § 1) — and two authenticated read endpoints behind the platform's
+ * global guards.
+ *
+ * ## The guards are global, and the health probes are the only exception
+ *
+ * `AuthGuard` then `RolesGuard`, in that order: authenticate, then authorize.
+ * Registered globally so an endpoint is closed unless it says otherwise
+ * (AGENTS.md S-02), which is why the two probes carry `@Public` with a stated
+ * reason and nothing else does.
  *
  * ## What is deliberately still absent
  *
- *   query API      AUD-002. No endpoint returns an audit row, which is also why
- *                  no `AuthGuard` is registered: the only routes are the two
- *                  `@Public` health probes, so a global guard would protect
- *                  nothing while `authEnvSchema` demanded a JWKS endpoint this
- *                  process never calls.
+ *   write API      Never. `docs/04` § 4.15: writing is from Kafka only. There
+ *                  is no `POST /v1/audit-events` and a caller that tries one
+ *                  gets a router `404`, which is a structural proof rather than
+ *                  a promise.
+ *   export         AUD-002 stops at search and read. Export is asynchronous,
+ *                  `SYSTEM_ADMIN`-only and audited in its own right
+ *                  (ADR-053 § 10), and belongs with the work that builds it.
  *   hash chain     AUD-003. `record_hash` and `previous_hash` exist as columns
- *                  and are never written. A null there means "no chain yet".
+ *                  and are never written. A null there means "no chain yet",
+ *                  which is why no read publishes them.
  *   trail consumer AUD-004. `rasta.audit.trail.v1` is path B. Consuming it here
  *                  would have this service auditing its own writes.
  *   outbox         Never. audit-service is a terminal sink (ADR § 14), which is
@@ -54,7 +76,7 @@ import { brokersOf, loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/e
  * failing loudly is the only outcome that cannot be mistaken for working.
  */
 @Module({
-  controllers: [HealthController],
+  controllers: [HealthController, AuditController],
   providers: [
     { provide: ENV, useFactory: (): AuditEnv => loadAuditEnv() },
 
@@ -82,6 +104,47 @@ import { brokersOf, loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/e
     },
 
     AuditRepository,
+    AuditQueryService,
+
+    // Registered as classes, not as factory providers, because the controller
+    // reaches them as `@Query(AuditEventQueryPipe)`. Nest resolves a
+    // class-referenced enhancer from the metatype it scanned off the route and
+    // never consults a same-token `useFactory`, so a factory here would be
+    // silently ignored and the container would try to construct the class with
+    // an unresolvable parameter. Each pipe injects `ENV` instead and reads
+    // `AUDIT_MAX_QUERY_WINDOW_DAYS` itself, so the 400 for an over-wide window
+    // still names the ceiling this deployment runs (`audit.query.pipes.ts`).
+    AuditEventQueryPipe,
+    AuditEventDetailQueryPipe,
+
+    {
+      provide: InternalTokenService,
+      inject: [ENV],
+      useFactory: (env: AuditEnv): InternalTokenService =>
+        new InternalTokenService(
+          env.INTERNAL_TOKEN_SECRET,
+          env.INTERNAL_TOKEN_ISSUER,
+          env.INTERNAL_TOKEN_TTL_SECONDS,
+        ),
+    },
+
+    {
+      provide: AUTH_OPTIONS,
+      inject: [ENV, InternalTokenService],
+      useFactory: (env: AuditEnv, internalTokens: InternalTokenService): AuthGuardOptions => ({
+        serviceName: SERVICE_NAME,
+        tokenVerifier: new TokenVerifier({
+          jwksUri: env.OIDC_JWKS_URI,
+          issuer: env.OIDC_ISSUER_URL,
+          audience: env.OIDC_AUDIENCE,
+        }),
+        // Verifiable, and deliberately never sufficient. No route here carries
+        // `@AllowService`, so a valid internal token authenticates a caller who
+        // is then refused by `RolesGuard` and again by `assertNotServiceCaller()`
+        // — ADR-053 § 10: nothing in MVP reads audit programmatically.
+        internalTokens,
+      }),
+    },
 
     {
       provide: DomainProjectorConsumer,
@@ -140,6 +203,10 @@ import { brokersOf, loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/e
         ),
     },
 
+    // Authenticate, then authorize. Global, so an endpoint is closed unless it
+    // opts out with `@Public` (AGENTS.md A-12, S-02).
+    { provide: APP_GUARD, useClass: AuthGuard },
+    { provide: APP_GUARD, useClass: RolesGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
 })

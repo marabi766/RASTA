@@ -12,6 +12,10 @@ import {
   toAuditEventRecord,
 } from '../audit/audit.mapper';
 import {
+  toOrganizationProjection,
+  type OrganizationProjection,
+} from '../audit/organization-projection';
+import {
   auditIngestionFailuresTotal,
   auditIngestionLagSeconds,
   auditRecordsIngestedTotal,
@@ -106,8 +110,32 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
       throw error;
     }
 
+    // AUD-002. Three organization events also carry the hierarchy facts
+    // `UNION_ADMIN` scoping is decided from, and a malformed one fails the
+    // whole delivery rather than being skipped. That is the fail-closed choice:
+    // recording the audit row and quietly dropping the hierarchy update would
+    // leave the projection permanently wrong with nothing to notice, and a
+    // wrong hierarchy is a cross-tenant read. Failing here retries and then
+    // dead-letters — which alerts (ADR-053 § 9) — and leaves the event
+    // unmarked, so a fixed producer replays it.
+    let projection: OrganizationProjection | null;
     try {
-      const outcome = await this.repository.ingest(record, DOMAIN_PROJECTOR_CONSUMER);
+      projection = toOrganizationProjection(envelope, delivery);
+    } catch (error) {
+      auditIngestionFailuresTotal.inc({
+        reason: INGESTION_FAILURE_REASONS.UNMAPPABLE_ORGANIZATION_EVENT,
+      });
+      // Key names only, exactly as above. A rejected organization payload is
+      // still a payload, and its values never reach a log line.
+      this.logger.error(
+        `Cannot project ${envelope.eventName} ${envelope.eventId} from ${delivery.topic} ` +
+          `into the organization hierarchy (payload keys: ${describePayloadKeys(envelope.payload)})`,
+      );
+      throw error;
+    }
+
+    try {
+      const outcome = await this.repository.ingest(record, DOMAIN_PROJECTOR_CONSUMER, projection);
 
       if (outcome === 'DUPLICATE') {
         // Not a failure and not counted as one. At-least-once delivery plus
