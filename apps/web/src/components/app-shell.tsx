@@ -7,6 +7,8 @@ import { CAPABILITIES, DOMAINS, type Capability, type DomainKey } from '@/lib/ca
 import { useSession } from '@/lib/auth/session';
 import { Button, cx } from './ui/primitives';
 import { CapabilityBadge } from './capability';
+import { DemoModeBanner } from './demo/mode-banner';
+import { TourOverlay } from './demo/tour-overlay';
 import { OrganizationSwitcher } from './org-switcher';
 
 /**
@@ -58,11 +60,17 @@ export function AppShell({ children }: { children: ReactNode }): ReactNode {
       </aside>
 
       <div className="flex min-w-0 flex-col">
+        {/* Above the top bar, so it is the first thing on the page rather than
+            something a viewer scrolls past. It renders nothing in live mode. */}
+        <DemoModeBanner />
         <TopBar />
         <main id="main" className="min-w-0 flex-1 p-4 sm:p-6 lg:p-8">
           {children}
         </main>
         <Footer />
+        {/* Sticky to the bottom edge, so it never covers the screen it is
+            describing. Renders nothing unless the tour is running. */}
+        <TourOverlay />
       </div>
     </div>
   );
@@ -99,24 +107,43 @@ function BrandMark(): ReactNode {
  * the rail rather than only on the dashboard.
  */
 function PresentLink({ pathname }: { pathname: string }): ReactNode {
-  const active = pathname.startsWith('/present');
+  return (
+    <div className="flex flex-none gap-2 lg:mb-4 lg:flex-col lg:gap-1">
+      <RailAction href="/demo" pathname={pathname} label="ارائهٔ سرمایه‌گذار" primary />
+      <RailAction href="/present" pathname={pathname} label="متن ارائه" />
+    </div>
+  );
+}
+
+function RailAction({
+  href,
+  pathname,
+  label,
+  primary = false,
+}: {
+  href: string;
+  pathname: string;
+  label: string;
+  primary?: boolean;
+}): ReactNode {
+  const active = pathname === href || pathname.startsWith(`${href}/`);
 
   return (
-    <div className="flex flex-none lg:mb-4 lg:block">
-      <Link
-        href="/present"
-        aria-current={active ? 'page' : undefined}
-        className={cx(
-          'flex min-h-[var(--tap)] flex-none items-center gap-2 whitespace-nowrap rounded-[var(--radius-md)] border px-3 text-sm font-bold lg:w-full',
-          active
-            ? 'border-[var(--pri)] bg-[var(--pri)] text-white'
-            : 'border-[var(--pri)] text-[var(--pri-tx)] hover:bg-[var(--pri-soft)]',
-        )}
-      >
-        <span aria-hidden="true">▸</span>
-        روایت هدایت‌شده
-      </Link>
-    </div>
+    <Link
+      href={href}
+      aria-current={active ? 'page' : undefined}
+      className={cx(
+        'flex min-h-[var(--tap)] flex-none items-center gap-2 whitespace-nowrap rounded-[var(--radius-md)] border px-3 text-sm font-bold lg:w-full',
+        active
+          ? 'border-[var(--pri)] bg-[var(--pri)] text-white'
+          : primary
+            ? 'border-[var(--pri)] text-[var(--pri-tx)] hover:bg-[var(--pri-soft)]'
+            : 'border-[var(--control-border)] text-[var(--tx2)] hover:bg-[var(--sunken)]',
+      )}
+    >
+      {primary ? <span aria-hidden="true">▸</span> : null}
+      {label}
+    </Link>
   );
 }
 

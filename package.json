@@ -41,6 +41,8 @@
     "infra:logs": "docker compose logs -f",
     "demo:preflight": "node scripts/demo-preflight.mjs",
     "demo:web": "pnpm --filter @rasta/web dev",
+    "demo:web:fixture": "node scripts/run-demo-web.mjs --mode fixture",
+    "demo:web:live": "node scripts/run-demo-web.mjs --mode live",
     "db:migrate": "turbo run db:migrate",
     "db:generate": "turbo run db:generate",
     "db:seed": "turbo run db:seed"

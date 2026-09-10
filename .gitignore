@@ -22,6 +22,9 @@ playwright-report/
 .env
 .env.*
 !.env.example
+# The investor-preview browser template. `NEXT_PUBLIC_*` only, so every value in
+# it is published to visitors anyway and none of it can be a secret.
+!.env.demo.example
 *.pem
 *.key
 !infrastructure/**/*.example.key

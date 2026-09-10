@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { DOMAINS, PREVIEW_DISCLOSURE, capabilityByKey } from '@/lib/capabilities';
+import { TourContinue } from './demo/tour-continue';
 import { Card, PageHeader } from './ui/primitives';
 import { Code, DescriptionList, Section } from './ui/data-view';
 import { CapabilityBadge, READINESS_PRESENTATION, STATE_PRESENTATION } from './capability';
@@ -145,6 +146,8 @@ export function UnderConstruction({
           </Card>
         </Section>
       ) : null}
+
+      <TourContinue />
     </>
   );
 }
