@@ -1,4 +1,4 @@
-import { render, type RenderResult } from '@testing-library/react';
+import { act, render, type RenderResult } from '@testing-library/react';
 import { axe } from 'jest-axe';
 import type { ReactElement, ReactNode } from 'react';
 import { ApiClient } from '@/lib/api/client';
@@ -141,6 +141,22 @@ export function errorResponse(status: number, code: string): Response {
     },
     status,
   );
+}
+
+/**
+ * Lets whatever the render scheduled finish, inside `act`.
+ *
+ * `next/link` probes visibility through `requestIdleCallback`, which jsdom does
+ * not implement — Next falls back to a 1ms timer, so the `setState` it performs
+ * lands after a synchronous test has already returned. React reports that as an
+ * "update not wrapped in act" warning: harmless to the assertion, and two dozen
+ * stack traces across the suite output, which is exactly enough noise to hide a
+ * real one.
+ */
+export async function settle(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  });
 }
 
 /**

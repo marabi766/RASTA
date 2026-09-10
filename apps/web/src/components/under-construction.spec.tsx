@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import { UnderConstruction } from './under-construction';
 import { CAPABILITIES, PREVIEW_DISCLOSURE } from '@/lib/capabilities';
-import { expectNoAxeViolations } from '@/test/harness';
+import { expectNoAxeViolations, settle } from '@/test/harness';
 
 /**
  * The screens behind every capability this application does not operate.
@@ -37,8 +37,7 @@ describe('capabilities this application does not operate', () => {
       try {
         render(<UnderConstruction capabilityKey={capability.key} />);
         // Anything asynchronous the component might have started has had a turn.
-        await Promise.resolve();
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await settle();
 
         expect(fetchSpy).not.toHaveBeenCalled();
       } finally {
@@ -49,8 +48,9 @@ describe('capabilities this application does not operate', () => {
 
   it.each(NON_LIVE.map((capability) => [capability.key, capability] as const))(
     '%s carries the exact required disclosure',
-    (_key, capability) => {
+    async (_key, capability) => {
       render(<UnderConstruction capabilityKey={capability.key} />);
+      await settle();
 
       // Verbatim, not paraphrased. A screenshot of this page travels further
       // than the room it was shown in.
@@ -65,8 +65,9 @@ describe('capabilities this application does not operate', () => {
 
   it.each(NON_LIVE.map((capability) => [capability.key] as const))(
     '%s shows no form, no chart, no rating and no money',
-    (key) => {
+    async (key) => {
       const { container } = render(<UnderConstruction capabilityKey={key} />);
+      await settle();
 
       expect(container.querySelector('form')).toBeNull();
       expect(container.querySelector('input')).toBeNull();
@@ -79,7 +80,7 @@ describe('capabilities this application does not operate', () => {
     },
   );
 
-  it('renders roadmap detail without turning it into a claim', () => {
+  it('renders roadmap detail without turning it into a claim', async () => {
     render(
       <UnderConstruction
         capabilityKey="procurement"
@@ -87,6 +88,7 @@ describe('capabilities this application does not operate', () => {
         prerequisites={['یک تصمیم محصولی که هنوز گرفته نشده است.']}
       />,
     );
+    await settle();
 
     expect(screen.getByText('یک مسئلهٔ واقعی که هنوز حل نشده است.')).toBeInTheDocument();
     expect(screen.getByText('یک تصمیم محصولی که هنوز گرفته نشده است.')).toBeInTheDocument();
@@ -98,6 +100,7 @@ describe('capabilities this application does not operate', () => {
     const { container } = render(
       <UnderConstruction capabilityKey="procurement" value={['نمونه']} prerequisites={['نمونه']} />,
     );
+    await settle();
     await expectNoAxeViolations(container);
   });
 
