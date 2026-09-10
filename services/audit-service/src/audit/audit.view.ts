@@ -14,18 +14,37 @@ import { z } from 'zod';
  *
  * ## What is not published, and why that is not an oversight
  *
- *   recordHash, previousHash   AUD-003. The columns exist and are never
- *                              written. Publishing two permanently null fields would tell
- *                              a client that integrity verification exists here
- *                              and returned "nothing wrong".
- *   correctionOf               AUD-007. Same reasoning: a null correction link
- *                              reads as "not corrected", which is a claim this
- *                              phase cannot make.
+ *   recordHash, previousHash   Written since AUD-003, and still not published.
+ *                              A digest is not the useful part of a chain — the
+ *                              useful part is whether a *range* recomputes, and
+ *                              that is what `GET /v1/audit-events/verify`
+ *                              answers. Handing every reader a per-row hash
+ *                              invites exactly the wrong check: comparing one
+ *                              record's stored hash against itself proves
+ *                              nothing, because a forger who rewrote the row
+ *                              rewrote the hash beside it. What is published
+ *                              instead is `integrity`, below.
+ *   correctionOf               AUD-007, and still never written. ADR-053 § 7
+ *                              routes a correction through path B, which is
+ *                              AUD-004, so a null correction link would read as
+ *                              "not corrected" — a claim this phase cannot make.
  *   changes                    Published, and always null in path A. Unlike the
  *                              two above, its absence is *itself* the documented
  *                              contract (ADR-053 § 2.1: a projector row stores
  *                              no payload value), so a client that sees null
  *                              learns the true thing.
+ *
+ * ## `integrity` says which of two true things this row is, and nothing more
+ *
+ *   CHAINED     the row carries a chain link, so it is *covered* by
+ *               `GET /v1/audit-events/verify`. It does **not** say the row
+ *               verified: nothing here recomputes a chain, and a field that
+ *               implied it had would be the single most misleading value this
+ *               service could publish.
+ *   UNCHAINED   the row was written before AUD-003 and has no link. Nothing
+ *               backfills it, so it stays honestly outside the chain forever
+ *               and any range containing it is reported as unverifiable rather
+ *               than as valid.
  */
 
 export const auditEventViewSchema = z
@@ -74,6 +93,16 @@ export const auditEventViewSchema = z
     sourceStreamSeq: z.string().nullable(),
     /** 64-bit, so a string. Monotonic **within one partition** only. */
     sequenceNo: z.string(),
+
+    /**
+     * Whether this record carries a hash-chain link — not whether it verified.
+     *
+     * `UNCHAINED` is a pre-AUD-003 row. See the header: the distinction is
+     * published because a client that cannot tell the two apart would read
+     * every old record as covered by an integrity guarantee that did not exist
+     * when it was written.
+     */
+    integrity: z.enum(['CHAINED', 'UNCHAINED']),
   })
   .strict();
 
@@ -119,6 +148,9 @@ export interface AuditEventRow {
   traceparent: string | null;
   sourceStreamSeq: bigint | null;
   sequenceNo: bigint;
+  /** Null on every row written before AUD-003; never backfilled. */
+  recordHash: Uint8Array | null;
+  previousHash: Uint8Array | null;
 }
 
 export function toAuditEventView(row: AuditEventRow): AuditEventView {
@@ -162,5 +194,9 @@ export function toAuditEventView(row: AuditEventRow): AuditEventView {
 
     sourceStreamSeq: row.sourceStreamSeq === null ? null : row.sourceStreamSeq.toString(),
     sequenceNo: row.sequenceNo.toString(),
+
+    // Derived from the presence of a link, never from a recomputation. See the
+    // header: this field states which of two true things the row is.
+    integrity: row.recordHash === null ? 'UNCHAINED' : 'CHAINED',
   };
 }

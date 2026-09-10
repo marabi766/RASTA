@@ -85,6 +85,11 @@ function auditRow(overrides: Partial<AuditEventRow> = {}): AuditEventRow {
     traceparent: null,
     sourceStreamSeq: null,
     sequenceNo: 42n,
+    // Selected on every read since AUD-003, and what `integrity` is derived
+    // from. Stated on the fixture so these rows have the shape the repository
+    // actually returns.
+    recordHash: new Uint8Array(32).fill(0x2a),
+    previousHash: null,
     ...overrides,
   };
 }

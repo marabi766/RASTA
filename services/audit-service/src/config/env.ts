@@ -7,7 +7,10 @@ import {
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
-import { DEFAULT_MAX_QUERY_WINDOW_DAYS } from '../audit/audit.query.dto';
+import {
+  DEFAULT_MAX_QUERY_WINDOW_DAYS,
+  DEFAULT_MAX_VERIFICATION_RECORDS,
+} from '../audit/audit.query.dto';
 
 export const SERVICE_NAME = 'audit-service';
 
@@ -64,6 +67,39 @@ export const auditEnvSchema = baseEnvSchema
       .min(1)
       .max(366)
       .default(DEFAULT_MAX_QUERY_WINDOW_DAYS),
+
+    /**
+     * The most chain records one verification may walk (AUD-003).
+     *
+     * The window ceiling above bounds the *time* a verification covers; it does
+     * not bound the work, because a busy tenant can write more records in a day
+     * than a quiet one writes in a quarter. Verification recomputes a SHA-256
+     * per record, so an unbounded walk is the most expensive operation this
+     * service offers and therefore the easiest way to take it down.
+     *
+     * Exceeding it is a `400 VALIDATION_FAILED` naming the configured value,
+     * decided from row counts **before** the walk begins — the same discipline
+     * ADR-053 § 10 applies to the window, and for the same reason: a control
+     * that fires after the work has already paid for the denial of service it
+     * exists to prevent.
+     *
+     * What is counted is the **contiguous chain interval** the walk will read,
+     * not the number of records whose `occurredAt` lands inside the window.
+     * Those differ whenever events arrived out of order, which ADR-053 § 8
+     * tolerates by design: two records an hour apart can sit at opposite ends
+     * of a month's chain, and preflighting the smaller number would let exactly
+     * the most expensive request through the control.
+     *
+     * Bounded at both ends so a misconfiguration cannot disable the control:
+     * below a thousand no useful range can be verified, and the upper bound
+     * keeps the worst case to a walk a request timeout can survive.
+     */
+    AUDIT_MAX_VERIFICATION_RECORDS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(5_000_000)
+      .default(DEFAULT_MAX_VERIFICATION_RECORDS),
   });
 
 export type AuditEnv = z.infer<typeof auditEnvSchema>;

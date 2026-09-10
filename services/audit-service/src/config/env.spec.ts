@@ -1,5 +1,8 @@
 import { corsOrigins, brokersOf, DEFAULT_PORT, loadAuditEnv, SERVICE_NAME } from './env';
-import { DEFAULT_MAX_QUERY_WINDOW_DAYS } from '../audit/audit.query.dto';
+import {
+  DEFAULT_MAX_QUERY_WINDOW_DAYS,
+  DEFAULT_MAX_VERIFICATION_RECORDS,
+} from '../audit/audit.query.dto';
 
 const RUNTIME_URL = 'postgresql://rasta_audit:pw@localhost:5433/rasta_audit?schema=audit';
 const MIGRATOR_URL = 'postgresql://rasta_audit_migrator:pw@localhost:5433/rasta_audit?schema=audit';
@@ -156,6 +159,42 @@ describe('audit-service configuration', () => {
         // permitted query stops pruning to a useful set of partitions. A
         // misconfiguration must not be able to turn the ceiling off.
         expect(() => loadAuditEnv(base({ AUDIT_MAX_QUERY_WINDOW_DAYS: value }))).toThrow();
+      },
+    );
+  });
+
+  describe('the verification record ceiling (AUD-003)', () => {
+    it('defaults to the documented hundred thousand records', () => {
+      expect(loadAuditEnv(base()).AUDIT_MAX_VERIFICATION_RECORDS).toBe(
+        DEFAULT_MAX_VERIFICATION_RECORDS,
+      );
+      expect(DEFAULT_MAX_VERIFICATION_RECORDS).toBe(100_000);
+    });
+
+    it('is a second control, not the window ceiling under another name', () => {
+      // The window bounds the *time* a verification covers and says nothing
+      // about the work: a busy tenant writes more records in a day than a quiet
+      // one writes in a quarter, and verification recomputes a SHA-256 per
+      // record.
+      const env = loadAuditEnv(base({ AUDIT_MAX_QUERY_WINDOW_DAYS: '7' }));
+
+      expect(env.AUDIT_MAX_VERIFICATION_RECORDS).toBe(DEFAULT_MAX_VERIFICATION_RECORDS);
+    });
+
+    it('accepts an operator-chosen ceiling', () => {
+      expect(
+        loadAuditEnv(base({ AUDIT_MAX_VERIFICATION_RECORDS: '25000' }))
+          .AUDIT_MAX_VERIFICATION_RECORDS,
+      ).toBe(25_000);
+    });
+
+    it.each([['0'], ['-1'], ['999'], ['5000001'], ['1000.5'], ['unbounded']])(
+      'refuses %s rather than disabling the control',
+      (value) => {
+        // Below a thousand no useful range can be verified at all; above five
+        // million the worst case outruns any request timeout. Both ends are
+        // bounded so a misconfiguration cannot turn the control off.
+        expect(() => loadAuditEnv(base({ AUDIT_MAX_VERIFICATION_RECORDS: value }))).toThrow();
       },
     );
   });

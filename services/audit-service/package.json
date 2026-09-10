@@ -2,7 +2,7 @@
   "name": "@rasta/audit-service",
   "version": "0.1.0",
   "private": true,
-  "description": "Append-only audit evidence store. AUD-001 (domain projector) and AUD-002 (tenant-safe read API). No write endpoint by design, no hash chain, no corrections, no explicit audit-trail consumer, no export.",
+  "description": "Append-only audit evidence store. AUD-001 (domain projector), AUD-002 (tenant-safe read API) and AUD-003's tamper-evidence half (per tenant-month hash chain plus GET /v1/audit-events/verify). No write endpoint by design, no corrections, no explicit audit-trail consumer, no export, and the chain is unsigned.",
   "main": "dist/main.js",
   "scripts": {
     "build": "prisma generate && tsc -p tsconfig.json && node ../../scripts/copy-prisma-client.mjs",

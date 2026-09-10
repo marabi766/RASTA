@@ -12,7 +12,12 @@ import { PrismaService } from './prisma/prisma.service';
 import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
 import { AuditRepository } from './audit/audit.repository';
 import { AuditController } from './audit/audit.controller';
-import { AuditEventDetailQueryPipe, AuditEventQueryPipe } from './audit/audit.query.pipes';
+import {
+  AuditEventDetailQueryPipe,
+  AuditEventQueryPipe,
+  AuditVerifyQueryPipe,
+} from './audit/audit.query.pipes';
+import { AuditVerificationService } from './audit/audit.verification.service';
 import { HealthController } from './health/health.controller';
 import { ENV, LOGGER } from './tokens';
 import type { AuditEnv } from './config/env';
@@ -123,13 +128,46 @@ describe('audit-service composition root', () => {
     // not.
     expect(providers).toContain(AuditEventQueryPipe);
     expect(providers).toContain(AuditEventDetailQueryPipe);
+    expect(providers).toContain(AuditVerifyQueryPipe);
 
     // `@Inject(ENV)` is what gives the parameter a token to resolve. Asserted
     // on the metadata Nest actually reads, so removing the decorator fails here
     // rather than at boot.
-    for (const pipe of [AuditEventQueryPipe, AuditEventDetailQueryPipe]) {
+    for (const pipe of [AuditEventQueryPipe, AuditEventDetailQueryPipe, AuditVerifyQueryPipe]) {
       expect(Reflect.getMetadata('self:paramtypes', pipe)).toEqual([{ index: 0, param: ENV }]);
     }
+  });
+
+  it('registers the verification service the third route depends on', () => {
+    // Registered as a class, like the two query services: the controller
+    // reaches it by constructor injection, and a missing registration is a
+    // container error at boot rather than a failing request.
+    expect(providers).toContain(AuditVerificationService);
+  });
+
+  it('builds the verification pipe at the configured window ceiling', () => {
+    // The verification endpoint carries the same mandatory window as search,
+    // and the 400 must name the value this deployment runs rather than the
+    // default.
+    const env = providerFor(ENV).useFactory?.() as AuditEnv;
+    const window = { from: '2026-01-01T00:00:00.000Z', to: '2026-01-31T00:00:00.000Z' };
+
+    expect(() => new AuditVerifyQueryPipe(env).transform(window, QUERY_ARGUMENT)).not.toThrow();
+    expect(() =>
+      new AuditVerifyQueryPipe({ ...env, AUDIT_MAX_QUERY_WINDOW_DAYS: 7 }).transform(
+        window,
+        QUERY_ARGUMENT,
+      ),
+    ).toThrow();
+  });
+
+  it('gives the verification service the record ceiling from the environment', () => {
+    // The walk ceiling is configuration, and the refusal names the configured
+    // number. A service that read a constant would quote a number the operator
+    // did not choose.
+    const env = providerFor(ENV).useFactory?.() as AuditEnv;
+
+    expect(env.AUDIT_MAX_VERIFICATION_RECORDS).toBe(100_000);
   });
 
   it('builds both query pipes at the configured window ceiling', () => {

@@ -19,19 +19,25 @@
 //   changes      null. A structured delta needs before/after values the
 //                envelope does not carry.
 //
-// ## Columns present but inert in AUD-001
+// ## What AUD-003 added, and what it deliberately did not
 //
-// `recordHash`, `previousHash` (ADR § 6 layer 3) and `correctionOf` (§ 7) are
-// declared because the ADR requires schema compatibility for the later phases,
-// and adding a column to a partitioned table with eighteen partitions is a
-// migration nobody wants to run twice. **They are never written by AUD-001 and
-// no hash behaviour is claimed.** A reader must not mistake a null
-// `recordHash` for a verified one — AUD-003 fills them and brings the
-// verification endpoint that makes them mean anything. Until then the chain is
-// absent, not broken.
+// `recordHash` and `previousHash` (ADR § 6 layer 3) are **written** as of
+// AUD-003, together with `AuditChainHead` below and
+// `GET /v1/audit-events/verify`. Rows written before that migration keep both
+// columns null and are never backfilled — a null there means "written before
+// the chain existed", never "verified", and the verification endpoint reports
+// such a range as `UNVERIFIABLE_LEGACY` rather than as valid.
 //
-// `sequenceNo` is a per-partition `BIGSERIAL`, which is monotonic within a
-// partition and says nothing about global order. Read ordering is by
+// `correctionOf` (§ 7) is still declared and still **never written**. The ADR
+// requires a correction to arrive through path B (`rasta.audit.trail.v1`), and
+// path B is AUD-004: this service has no producer, no outbox and no write API,
+// so there is no honest way to record one yet. The column stays inert rather
+// than being filled by a shortcut that would make audit-service audit its own
+// writes.
+//
+// `sequenceNo` is a `BIGSERIAL`, still meaningless across partitions. Within
+// one chain it is now chain order, because the writer draws it while holding
+// that chain's head lock. Read ordering for the query API is unchanged: by
 // `occurredAt`, never `recordedAt` (ADR § 8).
 //
 // ## Ownership
@@ -86,9 +92,17 @@ model AuditEvent {
   /// When it happened in the domain — from `envelope.occurredAt`.
   occurredAt DateTime @map("occurred_at") @db.Timestamptz(6)
 
-  /// When this row was written. Database-generated, never supplied by the
-  /// application: the gap between the two is consumer lag, and a value the
+  /// When this row was written. Still the **database's** clock and never this
+  /// process's: the gap between the two is consumer lag, and a value the
   /// application chose would measure nothing.
+  ///
+  /// Since AUD-003 the value is read as `now()` from inside the writing
+  /// transaction and passed back in the same statement that writes the row,
+  /// rather than being left to the column default. `now()` is
+  /// `transaction_timestamp()`, so it is the identical value the default would
+  /// have produced — read one statement earlier so the record hash can cover
+  /// it. A timestamp the chain does not cover is a timestamp somebody can move
+  /// without the chain noticing.
   recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
 
   actorType AuditActorType @map("actor_type")
@@ -124,7 +138,7 @@ model AuditEvent {
   sourceEventName String @map("source_event_name") @db.VarChar(128)
   /// The topic the message actually arrived on, from broker delivery metadata
   /// rather than from the envelope — a producer must not be able to assert it.
-  sourceTopic String @map("source_topic") @db.VarChar(256)
+  sourceTopic     String @map("source_topic") @db.VarChar(256)
 
   sourceIp        String? @map("source_ip") @db.VarChar(64)
   sourceUserAgent String? @map("source_user_agent") @db.VarChar(512)
@@ -138,11 +152,29 @@ model AuditEvent {
   /// it is processed normally.
   sourceStreamSeq BigInt? @map("source_stream_seq")
 
-  /// Reserved for AUD-003. Never written by AUD-001 — see the header.
+  /// The SHA-256 link, written since AUD-003 (ADR-053 § 6 layer 3).
+  ///
+  /// `recordHash` is `SHA256(canonical(row without these two columns) ||
+  /// previousHash)`; `previousHash` is the `recordHash` of the record before
+  /// this one in the same `(organizationId, UTC month)` chain, and is null on
+  /// the record that starts a chain segment.
+  ///
+  /// **Null on both means the row predates AUD-003, not that it verified.**
+  /// Nothing backfills them: computing a chain over rows nobody chained at the
+  /// time and then calling the result evidence is the one operation this store
+  /// must never perform. The verification endpoint reports such a row as an
+  /// explicit `UNVERIFIABLE_LEGACY` boundary.
   recordHash   Bytes? @map("record_hash")
   previousHash Bytes? @map("previous_hash")
 
-  /// Monotonic within a partition only.
+  /// Chain order within one partition, and the verification walk's sort key.
+  ///
+  /// Still a `BIGSERIAL`, and still meaningless across partitions. What changed
+  /// in AUD-003 is *when* the value is drawn: the writer allocates it from the
+  /// sequence while holding the chain head's row lock, so within one chain,
+  /// allocation order and chain order are the same order by construction. The
+  /// application supplies the value explicitly for that reason, and because a
+  /// value the hash does not cover is a value somebody can change unnoticed.
   sequenceNo BigInt @default(autoincrement()) @map("sequence_no")
 
   /// Reserved for AUD-007 corrections. Never written by AUD-001.
@@ -158,6 +190,9 @@ model AuditEvent {
   @@index([resourceType, resourceId, occurredAt(sort: Desc)], map: "audit_event_resource_idx")
   @@index([correlationId], map: "audit_event_correlation_idx")
   @@index([sourceTopic, occurredAt(sort: Desc)], map: "audit_event_topic_time_idx")
+  /// The chain-order access path: one tenant's rows inside one month
+  /// partition, in the order the chain was built (AUD-003).
+  @@index([organizationId, sequenceNo], map: "audit_event_chain_idx")
   @@map("audit_event")
 }
 
@@ -246,4 +281,89 @@ model OrganizationRef {
   @@index([parentOrganizationId], map: "organization_ref_parent_idx")
   @@index([relationState], map: "organization_ref_relation_state_idx")
   @@map("organization_ref")
+}
+
+/// Which chain family a head belongs to (AUD-003, ADR-053 § 6).
+enum AuditChainScope {
+  /// One tenant's month. `organizationId` is that tenant's identifier.
+  ORGANIZATION
+  /// The platform's own month — the rows whose `organizationId` is null.
+  /// `organizationId` here is the empty string, which no tenant can hold.
+  PLATFORM
+
+  @@map("audit_chain_scope")
+}
+
+/// The tip of one `(organization, UTC month)` hash chain.
+///
+/// ## Why a table and not `max(sequenceNo)` over the evidence
+///
+/// The next record has to be linked to the current tip *before* it exists, and
+/// two concurrent writers must not both read the same tip. An aggregate over
+/// `AuditEvent` locks nothing, so both would read the same value and write two
+/// records claiming the same predecessor — a forked chain, produced silently
+/// under exactly the load the store matters most under. One head row per chain,
+/// taken with `SELECT … FOR UPDATE` inside the writing transaction, is what
+/// makes the assignment atomic (`AuditRepository.ingest`).
+///
+/// ## The key, and the platform chain that must not collide with a tenant
+///
+/// `organizationId` on `AuditEvent` is nullable for genuinely platform-scoped
+/// actions, and a nullable column can be neither a primary key nor an
+/// unambiguous unique key — PostgreSQL treats two nulls as distinct, so keying
+/// on it directly would permit two platform heads for the same month, which is
+/// a fork by construction. So the key carries an explicit `chainScope`
+/// discriminator and a non-null `organizationId` whose value on the platform
+/// chain is the empty string. A blank organization identifier is refused by
+/// `audit_event_organization_id_not_blank` and by
+/// `audit_chain_head_scope_shape`, so the marker can never be a real tenant.
+///
+/// ## This table is a pointer, not evidence
+///
+/// It is the only object in this service the runtime role may `UPDATE`, and
+/// that is precisely why it is separate from `AuditEvent`: the evidence keeps
+/// its "no UPDATE at all" grant untouched. A database trigger refuses `DELETE`
+/// and `TRUNCATE` outright and refuses any `UPDATE` that does not advance
+/// `chainLength` by exactly one, so a head cannot be rewound to make the next
+/// legitimate insert re-link onto an older tip.
+model AuditChainHead {
+  chainScope     AuditChainScope @map("chain_scope")
+  organizationId String          @map("organization_id") @db.VarChar(128)
+
+  /// Always the first day of a UTC month.
+  chainMonth DateTime @map("chain_month") @db.Date
+
+  /// Zero means "this chain exists and is empty" — a real state, because the
+  /// first writer creates the row before it knows its own hash so that the lock
+  /// it needs has something to lock.
+  chainLength BigInt @default(0) @map("chain_length")
+
+  /// The `recordHash` of the newest record in this chain. SHA-256, so 32 bytes.
+  headHash       Bytes?    @map("head_hash")
+  headEventId    String?   @map("head_event_id") @db.VarChar(64)
+  headOccurredAt DateTime? @map("head_occurred_at") @db.Timestamptz(6)
+  headSequenceNo BigInt?   @map("head_sequence_no")
+
+  /// Where this chain's verifiable segment begins — the `sequenceNo` of the
+  /// first record ever linked into it.
+  ///
+  /// Written once, on the `chainLength` 0 → 1 transition, and immutable
+  /// afterwards; the database trigger refuses any other value, so this is a
+  /// structural fact rather than an application convention.
+  ///
+  /// It exists because a null `recordHash` means two opposite things. A row
+  /// written before AUD-003 was never chained and is honestly unverifiable; a
+  /// row written after it whose link was stripped is integrity damage. Every
+  /// pre-migration row drew a lower `sequenceNo` than any post-migration one,
+  /// so "below the segment start" is provably "written before this chain was
+  /// chained". Verification reads a null hash below this value as
+  /// `UNVERIFIABLE_LEGACY` and a null hash at or above it as `DIVERGENT`.
+  firstSequenceNo BigInt? @map("first_sequence_no")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@id([chainScope, organizationId, chainMonth])
+  @@index([chainMonth, chainScope], map: "audit_chain_head_month_idx")
+  @@map("audit_chain_head")
 }

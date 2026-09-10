@@ -3,13 +3,19 @@ import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { AUDIT_READER_ROLES } from '../access/access';
 import { AuditQueryService } from './audit.query.service';
+import { AuditVerificationService } from './audit.verification.service';
 import { auditEventIdSchema } from './audit.query.dto';
-import { AuditEventDetailQueryPipe, AuditEventQueryPipe } from './audit.query.pipes';
-import type { AuditEventDetailQuery, AuditEventQuery } from './audit.query.dto';
+import {
+  AuditEventDetailQueryPipe,
+  AuditEventQueryPipe,
+  AuditVerifyQueryPipe,
+} from './audit.query.pipes';
+import type { AuditEventDetailQuery, AuditEventQuery, AuditVerifyQuery } from './audit.query.dto';
 import type { AuditEventPage, AuditEventView } from './audit.view';
+import type { AuditChainVerification } from './audit.verification.view';
 
 /**
- * The read surface of the evidence store — two endpoints, and no third.
+ * The read surface of the evidence store — three endpoints, and no fourth.
  *
  * ## There is no write endpoint, and its absence is the contract
  *
@@ -19,6 +25,21 @@ import type { AuditEventPage, AuditEventView } from './audit.view';
  * proof rather than a promise — `test/authorization.int-spec.ts` asserts it,
  * because "we did not add one" is a fact that stops being true the first time
  * somebody adds one for a migration script.
+ *
+ * **AUD-003 does not change that, and specifically adds no correction route.**
+ * ADR-053 § 7 requires a correction to enter through path B
+ * (`rasta.audit.trail.v1`), which is AUD-004: this service has no producer, no
+ * outbox and no write API, so the only way to record one today would be a
+ * direct insert — the thing § 7 exists to forbid. `correctionOf` therefore
+ * stays an inert column, and the correction half of AUD-003 is openly pending.
+ *
+ * ## Route order is load-bearing
+ *
+ * `verify` is declared **before** `:id`. Nest matches in declaration order, so
+ * a static path declared after a parameter of the same depth is unreachable —
+ * every request to `/v1/audit-events/verify` would be a lookup for a record
+ * whose id happens to be the word "verify", and would answer `404` while
+ * looking like the endpoint simply did not work.
  *
  * ## `@Roles` names exactly two roles
  *
@@ -39,7 +60,10 @@ import type { AuditEventPage, AuditEventView } from './audit.view';
 @Controller({ path: 'audit-events', version: '1' })
 @Roles(...AUDIT_READER_ROLES)
 export class AuditController {
-  constructor(private readonly queries: AuditQueryService) {}
+  constructor(
+    private readonly queries: AuditQueryService,
+    private readonly verification: AuditVerificationService,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -58,6 +82,35 @@ export class AuditController {
   })
   search(@Query(AuditEventQueryPipe) query: AuditEventQuery): Promise<AuditEventPage> {
     return this.queries.search(query);
+  }
+
+  // Declared before `:id`. See the note on route order in the class comment —
+  // moving this below the parameterised route makes it unreachable, and the
+  // failure looks like a 404 rather than like a routing mistake.
+  @Get('verify')
+  @ApiOperation({
+    summary: 'Recompute a range of one audit hash chain and report the first divergence',
+    description:
+      'Walks one `(organization, UTC month)` chain — or the platform chain with ' +
+      '`scope=PLATFORM` — in chain order and recomputes every link ' +
+      '(ADR-053 § 6). `from` and `to` are mandatory and capped by ' +
+      '`AUDIT_MAX_QUERY_WINDOW_DAYS`; a window whose contiguous chain walk would ' +
+      'exceed `AUDIT_MAX_VERIFICATION_RECORDS` records is refused from row ' +
+      'counts, before any record is read. Where a record exists before the ' +
+      'window, the first link is checked ' +
+      'against it, and `seededFromPredecessor` says whether that happened. ' +
+      'Four outcomes: `VALID`, `DIVERGENT` (with `firstDivergence`), `EMPTY`, ' +
+      'and `UNVERIFIABLE_LEGACY` for a window containing records written before ' +
+      'the chain existed — those are never backfilled and never report valid. ' +
+      'A `UNION_ADMIN` may verify their own organization or one the local ' +
+      'hierarchy projection proves is beneath it; `scope=PLATFORM` is ' +
+      '`SYSTEM_ADMIN` only, and a `SYSTEM_ADMIN` verifying a tenant must name ' +
+      'it, because there is no chain that spans tenants. **This detects ' +
+      'divergence; it is not a signature and not protection against a database ' +
+      'superuser** (`docs/runbooks/audit-chain-divergence.md`).',
+  })
+  verify(@Query(AuditVerifyQueryPipe) query: AuditVerifyQuery): Promise<AuditChainVerification> {
+    return this.verification.verify(query);
   }
 
   @Get(':id')
