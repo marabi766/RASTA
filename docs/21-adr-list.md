@@ -64,7 +64,7 @@
 | [050](adr/ADR-050-outbox-durable-claim.md)               | Claim بادوام برای Outbox Relay                 | Accepted     | **بستن D-026**، انتشار تکراری رویداد |
 | [051](adr/ADR-051-outbox-semantic-ordering.md)           | ترتیب معنایی هر جریان در Outbox                | Accepted     | **D-027 (باز)**، بستن Q-36           |
 | [052](adr/ADR-052-supplier-performance-scoring.md)       | امتیاز عملکرد تأمین‌کننده                      | Accepted     | **بستن Q-12**، Phase 2 پیاده نشده    |
-| [053](adr/ADR-053-audit-service-append-only-evidence.md) | سرویس حسابرسی — شواهد فقط‌الحاقی               | **Proposed** | **بستن نقض S-06**، پیاده نشده        |
+| [053](adr/ADR-053-audit-service-append-only-evidence.md) | سرویس حسابرسی — شواهد فقط‌الحاقی               | **Proposed** | **بستن نقض S-06**، تا AUD-003 پیاده  |
 | [054](adr/ADR-054-notification-service-delivery.md)      | سرویس اعلان — تحویل و ترجیحات                  | **Proposed** | Q-37 انتشار ایمیل را مسدود می‌کند    |
 
 ---

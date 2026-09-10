@@ -485,19 +485,39 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 > را کهنه می‌کند و کهنگی در جهت گسترش، همان چیزی است که ADR-053 § ۱۰ ممنوع می‌کند. رابطهٔ غایب، ناشناخته یا شکسته **هرگز**
 > نتیجه را گسترده نمی‌کند.
 >
-> **آنچه هنوز نیست:** هیچ زنجیرهٔ Hash (`record_hash`/`previous_hash` ستون‌اند و هرگز نوشته نمی‌شوند — AUD-003)، هیچ
-> Endpoint تأیید، هیچ رکورد جبرانی، هیچ **صادرات**، هیچ تجمیع ردها، و هیچ مصرف‌کنندهٔ `rasta.audit.trail.v1`
-> (مسیر B — AUD-004؛ به همین دلیل یک جست‌وجوی ردشده هنوز خودش رکورد `REFUSED` نمی‌سازد). `COM-009` همچنان `READY` است و
-> ۱۳ امتیازش داده نشده.
+> **افزودهٔ 2026-09-10 (AUD-003، نیمهٔ شواهد دست‌نخوردگی) — پیاده و روی PostgreSQL واقعی اثبات‌شده.** `record_hash` و
+> `previous_hash` اکنون در همان تراکنشِ درج نوشته می‌شوند:
+> `recordHash = SHA256( canonical(record بدون میدان‌های Hash) || previousHash )`، با دامنهٔ **یک زنجیره به‌ازای
+> `(organizationId, ماه UTC)`** و یک زنجیرهٔ جدا برای ردیف‌های بدون مستأجر. جدول تازهٔ `audit_chain_head` (Migration افزایشی
+> `20260910120000_audit_chain_head`) نوکِ هر زنجیره را نگه می‌دارد؛ نویسنده آن را با `FOR UPDATE` قفل می‌کند و `sequence_no`
+> را زیر همان قفل می‌کشد، پس ترتیب Sequence با ترتیب زنجیره یکی است. Trigger `audit_chain_head_forward_only` عقب بردن Head،
+> تغییر هویت و پرش طول را رد می‌کند، و `first_sequence_no` **یک بار** نوشته و از آن پس تغییرناپذیر می‌شود.
+>
+> `GET /v1/audit-events/verify` یک بازه از **یک** زنجیره را بازمحاسبه می‌کند و نخستین واگرایی را برمی‌گرداند. چهار وضعیت:
+> `VALID`، `EMPTY`، `UNVERIFIABLE_LEGACY` (پنجره ردیف پیش از AUD-003 دارد — هرگز Backfill نمی‌شود و هرگز `valid` نیست) و
+> `DIVERGENT` با شش دلیل: `RECORD_HASH_MISMATCH`، `PREVIOUS_HASH_MISMATCH`، `MISSING_CHAIN_LINK`، `CHAIN_HEAD_MISMATCH`،
+> `CHAIN_TAIL_MISSING`، `CHAIN_LENGTH_MISMATCH`. `scope=PLATFORM` فقط `SYSTEM_ADMIN` است و یک `SYSTEM_ADMIN` که مستأجری را
+> تأیید می‌کند باید نامش را ببرد، چون زنجیره‌ای که چند مستأجر را بپوشاند وجود ندارد. سقف دوم `AUDIT_MAX_VERIFICATION_RECORDS`
+> (پیش‌فرض ۱۰۰۰۰۰) روی بازهٔ **پیوستهٔ** زنجیره — نه شمار رکوردهای داخل پنجره — و **پیش از خواندن هر ردیف** اعمال می‌شود.
+> متریک `rasta_audit_chain_verification_failures_total{reason,scope}` تنها برای واگرایی واقعی حرکت می‌کند.
+> Runbook: [`runbooks/audit-chain-divergence.md`](runbooks/audit-chain-divergence.md).
+>
+> **زنجیره Tamper-Evident است، نه Tamper-Proof: هیچ امضایی وجود ندارد و یک Superuser پایگاه داده می‌تواند شواهد و Head را
+> با هم بازنویسی کند** (ADR-053 § ۶، `AGENTS.md` S-10).
+>
+> **آنچه هنوز نیست:** هیچ رکورد جبرانی (`audit.correction`) — ADR-053 § ۷ اصلاح را از **مسیر B** لازم می‌داند و این سرویس نه
+> Producer دارد، نه Outbox، نه API نوشتن، پس `correctionOf` ستونی بی‌اثر است که همیشه `null` نوشته می‌شود؛ هیچ **صادرات**؛
+> هیچ انتشار Digest بیرونی؛ هیچ امضا؛ هیچ تجمیع ردها؛ و هیچ مصرف‌کنندهٔ `rasta.audit.trail.v1` (مسیر B — AUD-004؛ به همین
+> دلیل یک جست‌وجوی ردشده هنوز خودش رکورد `REFUSED` نمی‌سازد). `COM-009` همچنان `READY` است و ۱۳ امتیازش داده نشده.
 
-| بُعد            | مشخصات                                                                                                                             |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| **Mission**     | سابقه تغییرناپذیر «چه کسی، چه کرد، کِی، از کجا، با چه نتیجه‌ای».                                                                   |
-| **مالکیت داده** | `audit_event` — **فقط الحاقی**؛ بدون UPDATE و بدون DELETE                                                                          |
-| **REST**        | `GET /audit-events` (فیلتر بر actor، resource، action، بازه) · `GET /audit-events/{id}`                                            |
-| **Consumes**    | **دو مسیر:** هر ده Topic دامنه‌ای (Projector) + `rasta.audit.trail.v1` (قرارداد صریح). ADR-053                                     |
-| **مرز امنیتی**  | نوشتن فقط از Kafka (بدون API نوشتن). خواندن `SYSTEM_ADMIN` و `UNION_ADMIN`؛ صادرات فقط `SYSTEM_ADMIN`.                             |
-| **ADR**         | [ADR-053](adr/ADR-053-audit-service-append-only-evidence.md) — `Proposed`. **AUD-001 و AUD-002 پیاده شدند؛ AUD-003 و AUD-004 نه.** |
+| بُعد            | مشخصات                                                                                                                                                                                                                                   |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Mission**     | سابقه تغییرناپذیر «چه کسی، چه کرد، کِی، از کجا، با چه نتیجه‌ای».                                                                                                                                                                         |
+| **مالکیت داده** | `audit_event` — **فقط الحاقی**؛ بدون UPDATE و بدون DELETE                                                                                                                                                                                |
+| **REST**        | `GET /audit-events` (فیلتر بر actor، resource، action، بازه) · `GET /audit-events/{id}` · `GET /audit-events/verify`                                                                                                                     |
+| **Consumes**    | **دو مسیر:** هر ده Topic دامنه‌ای (Projector) + `rasta.audit.trail.v1` (قرارداد صریح). ADR-053                                                                                                                                           |
+| **مرز امنیتی**  | نوشتن فقط از Kafka (بدون API نوشتن). خواندن `SYSTEM_ADMIN` و `UNION_ADMIN`؛ صادرات فقط `SYSTEM_ADMIN`.                                                                                                                                   |
+| **ADR**         | [ADR-053](adr/ADR-053-audit-service-append-only-evidence.md) — `Proposed`. **AUD-001 و AUD-002 پیاده شدند؛ از AUD-003 نیمهٔ شواهد دست‌نخوردگی (زنجیرهٔ Hash + `verify`) پیاده شد و نیمهٔ اصلاح نه — وابسته به مسیر B؛ AUD-004 هنوز نه.** |
 
 > **اصلاح 2026-09-07.** این جدول پیش‌تر خواندن را به «`SYSTEM_ADMIN`، `UNION_ADMIN` و **مالک منبع**» می‌داد، در حالی که
 > `docs/09` § ۹٫۸ و جدول Gateway (`services/api-gateway/src/config/routes.ts:172-176`) فقط دو نقش مدیر را می‌دهند.
