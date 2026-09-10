@@ -10,9 +10,48 @@ import {
 } from './organization-projection';
 import type { AuditEventRow } from './audit.view';
 import type { AuditCursor } from './audit.cursor';
+import type { HashableAuditRecord } from './audit.canonical';
+import {
+  chainKeyOf,
+  computeRecordHash,
+  monthBounds,
+  toStorableHash,
+  type AuditChainKey,
+  type AuditChainScope,
+} from './audit.chain';
 
 /** What one ingestion attempt did. */
 export type IngestOutcome = 'WRITTEN' | 'DUPLICATE';
+
+/**
+ * The bounds on one ingestion transaction, stated rather than inherited.
+ *
+ * Prisma's defaults are two seconds to acquire a connection and five seconds to
+ * run the transaction. Five seconds is a sensible default for a transaction
+ * that contends with nobody, and AUD-003 made this one contend by design:
+ * `ingest` takes the chain head's row lock **inside** the transaction, so every
+ * concurrent writer on the same `(organization, month)` spends its wait on the
+ * clock the ceiling is measured against. The queue is the feature — it is what
+ * makes `previous_hash` unforkable — and the default ceiling turns a deep
+ * enough queue into a driver-level `Transaction already closed`, which is a
+ * failure the design predicts and does not want.
+ *
+ * Measured on this workstation (PostgreSQL 16 in Docker Desktop): a write
+ * transaction costs ~85ms, nearly all of it the commit's WAL flush, and the
+ * cost does not fall with concurrency because one chain's writers are
+ * serialised on purpose. Twelve writers meeting at one head therefore queue for
+ * roughly a second — comfortably inside five, until the database is also
+ * checkpointing, at which point `test/concurrency.int-spec.ts` measured 5047ms
+ * against a 5000ms ceiling and the whole storm failed.
+ *
+ * So the bound is stated at a value the queue can actually use, and it is still
+ * a bound: thirty seconds is far below the consumer's `max.poll.interval.ms`,
+ * so a genuinely stuck writer fails its poll and is retried by Kafka's
+ * at-least-once delivery rather than holding a connection indefinitely. Raising
+ * it does not weaken any guarantee — the lock, the trigger and the unique index
+ * are what refuse a fork, and none of them is a timeout.
+ */
+const INGEST_TRANSACTION = { maxWait: 5_000, timeout: 30_000 } as const;
 
 /**
  * The organization status that removes a node from every `UNION_ADMIN` subtree.
@@ -83,9 +122,118 @@ const AUDIT_EVENT_SELECT = {
   traceparent: true,
   sourceStreamSeq: true,
   sequenceNo: true,
-  // recordHash, previousHash and correctionOf are deliberately absent: they are
-  // never written in this phase and no read publishes them (`audit.view.ts`).
+  // Selected since AUD-003 so the view can state an honest integrity flag.
+  // `recordHash` is what `integrity` is derived from; `previousHash` comes with
+  // it so the internal row type describes the whole link rather than half of
+  // it. Neither is serialised — `audit.view.ts` publishes the flag, not the
+  // digest.
+  recordHash: true,
+  previousHash: true,
+  // `correctionOf` stays absent: it is never written (corrections need path B,
+  // which is AUD-004), and publishing a permanently null correction link would
+  // read as "not corrected", which is a claim this phase cannot make.
 } as const;
+
+/**
+ * The columns the chain covers, which is every column except the two hash
+ * columns themselves plus the two hash columns so a walk can compare.
+ *
+ * Listed separately from `AUDIT_EVENT_SELECT` rather than reusing it, because
+ * the two answer different questions and must be free to diverge: this one is
+ * the *input to a hash* and is therefore tied to `CANONICAL_FIELDS`, while that
+ * one is the input to a public view. A column added to the view must not
+ * silently change what the chain covers, and vice versa.
+ */
+const AUDIT_CHAIN_SELECT = {
+  id: true,
+  occurredAt: true,
+  recordedAt: true,
+  actorType: true,
+  actorId: true,
+  actorRoles: true,
+  organizationId: true,
+  action: true,
+  resourceType: true,
+  resourceId: true,
+  outcome: true,
+  errorCode: true,
+  reason: true,
+  changes: true,
+  occurrenceCount: true,
+  sourceService: true,
+  sourceServiceVersion: true,
+  sourceEventId: true,
+  sourceEventName: true,
+  sourceTopic: true,
+  sourceIp: true,
+  sourceUserAgent: true,
+  correlationId: true,
+  causationId: true,
+  traceparent: true,
+  sourceStreamSeq: true,
+  sequenceNo: true,
+  correctionOf: true,
+  recordHash: true,
+  previousHash: true,
+} as const;
+
+/**
+ * One record as the chain walk sees it: everything the hash covers, plus the
+ * stored link it is checked against.
+ */
+export interface AuditChainRow extends HashableAuditRecord {
+  readonly recordHash: Uint8Array | null;
+  readonly previousHash: Uint8Array | null;
+}
+
+/** The tip of one chain, or `null` when no record has ever opened it. */
+export interface AuditChainHeadRow {
+  readonly chainLength: bigint;
+  readonly headHash: Uint8Array | null;
+  readonly headEventId: string | null;
+  readonly headSequenceNo: bigint | null;
+  /**
+   * Where this chain's verifiable segment begins. Null only on a head that has
+   * never carried a record. Immutable once written, enforced by the database.
+   */
+  readonly firstSequenceNo: bigint | null;
+}
+
+/**
+ * Where one month's requested slice starts and ends in chain order, and what
+ * each of the two counts it implies actually costs.
+ *
+ * The two numbers are genuinely different and both are needed:
+ *
+ *   `recordsInRange`  how many records the caller asked about — rows whose
+ *                     `occurredAt` falls inside the window. This is the
+ *                     truthful figure the response reports.
+ *   `walkLength`      how many records the verification will actually read —
+ *                     every row in the contiguous `sequence_no` interval
+ *                     between the first and last of those, including any that
+ *                     arrived out of order and fall outside the window. This is
+ *                     the figure the ceiling has to be checked against, because
+ *                     it is the work.
+ *
+ * A sparse out-of-order window makes them differ by orders of magnitude: two
+ * records an hour apart in `occurredAt` can sit at opposite ends of a month's
+ * chain. Preflighting the smaller number would let exactly that request past
+ * the control and then pay for the whole month.
+ */
+export interface AuditChainSegment {
+  readonly firstSequenceNo: bigint;
+  readonly lastSequenceNo: bigint;
+  readonly recordsInRange: number;
+  readonly walkLength: number;
+}
+
+/** One record named by position, for the bounded head and tail checks. */
+export interface AuditChainMarker {
+  readonly id: string;
+  readonly sequenceNo: bigint;
+  readonly recordHash: Uint8Array | null;
+  readonly previousHash: Uint8Array | null;
+}
 
 /**
  * The tenant bound of one already-authorised read.
@@ -126,7 +274,8 @@ export class AuditRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Writes the audit row and its idempotency marker in one transaction.
+   * Writes the audit row, its chain link and its idempotency marker in one
+   * transaction.
    *
    * The ordering matters and is asserted by a test: the audit row goes in
    * first, then `processed_event`. Both are in the same transaction, so the
@@ -143,7 +292,27 @@ export class AuditRepository {
    *
    * Duplicate delivery is a no-op rather than an error. Kafka is at-least-once
    * and `fromBeginning: true` means a rebalance can replay the whole log, so a
-   * second delivery is normal operation, not a fault.
+   * second delivery is normal operation, not a fault. The duplicate check runs
+   * **before** the chain is touched, so a replay neither takes a chain lock nor
+   * advances a head — a chain that grew on redelivery would report a length no
+   * set of records could reproduce.
+   *
+   * ## The chain assignment is inside this transaction, and has to be
+   *
+   * ADR-053 § 6 links each record to the previous one in its
+   * `(organizationId, UTC month)` chain. Reading the tip outside the
+   * transaction and inserting inside it is a race: two workers would read the
+   * same tip and write two records claiming the same predecessor, forking the
+   * chain with nothing raising. So the tip is read with `SELECT … FOR UPDATE`
+   * *in this transaction*, and the row lock is held until commit. Rolling back
+   * therefore leaves neither an advanced head, nor a processed marker, nor a
+   * row: PostgreSQL releases the lock and the next writer reads the same tip it
+   * would have read had this attempt never started.
+   *
+   * Only one `(organization, month)` head is held at a time. Two tenants, or
+   * one tenant in two months, are separate rows and block none of each other's
+   * writes — which is why ADR-053 scopes the chain per tenant-month rather than
+   * globally.
    */
   async ingest(
     record: AuditEventRecord,
@@ -164,33 +333,160 @@ export class AuditRepository {
         });
         if (already) return 'DUPLICATE';
 
+        const key = chainKeyOf(record.organizationId, record.occurredAt);
+
+        // Opens the chain if this is its first record. `ON CONFLICT DO NOTHING`
+        // is idempotent and, under PostgreSQL's speculative-insertion protocol,
+        // waits for a concurrent creator to commit or abort before returning —
+        // so the row the next statement locks is guaranteed to be there.
+        // Nothing ever deletes a head, so it stays there.
+        await tx.$executeRaw`
+          INSERT INTO audit_chain_head (chain_scope, organization_id, chain_month)
+          VALUES (
+            ${key.scope}::audit_chain_scope,
+            ${key.organizationKey},
+            ${key.chainMonth}::date
+          )
+          ON CONFLICT (chain_scope, organization_id, chain_month) DO NOTHING
+        `;
+
+        // The lock. Everything after this line is serialised per chain.
+        //
+        // `recorded_at` and `sequence_no` are drawn here rather than left to
+        // their column defaults, for one reason: the record hash covers them,
+        // and a value the hash does not cover is a value somebody can change
+        // without the chain noticing. `now()` is `transaction_timestamp()`, so
+        // it is the identical value `DEFAULT now()` would have produced — the
+        // database's clock, never this process's. `nextval` is drawn under the
+        // lock, which is what makes `sequence_no` ascending equal to chain
+        // order within one chain.
+        const locked = await tx.$queryRaw<
+          { head_hash: Uint8Array | null; recorded_at: Date; sequence_no: bigint }[]
+        >`
+          SELECT head_hash,
+                 now() AS recorded_at,
+                 nextval('audit_event_sequence_no_seq') AS sequence_no
+            FROM audit_chain_head
+           WHERE chain_scope = ${key.scope}::audit_chain_scope
+             AND organization_id = ${key.organizationKey}
+             AND chain_month = ${key.chainMonth}::date
+             FOR UPDATE
+        `;
+
+        const tip = locked[0];
+        if (!tip) {
+          // Unreachable while the head table keeps its no-DELETE grant and its
+          // trigger. Thrown rather than defaulted to "start a new chain",
+          // because silently restarting a chain is the outcome the chain exists
+          // to make impossible.
+          throw new Error('audit chain head vanished between insert and lock');
+        }
+
+        // Copied out of the driver's buffer once, here, rather than at each
+        // of the two places it is used. `toStorableHash` returns a
+        // `ChainHash` — a view over an `ArrayBuffer` this process owns — which
+        // is what both `computeRecordHash` and the Prisma `Bytes` input
+        // require, and which guarantees the bytes hashed and the bytes stored
+        // are the same bytes rather than two reads of a pooled buffer.
+        const previousHash = tip.head_hash === null ? null : toStorableHash(tip.head_hash);
+
+        // One object, used for the hash *and* for the insert, so the two can
+        // never describe different rows. The columns path A does not populate
+        // are written as explicit nulls here rather than omitted: the hash
+        // covers them, and "absent" and "null" must not be able to mean two
+        // different things.
+        const stored: HashableAuditRecord = {
+          id: record.id,
+          occurredAt: record.occurredAt,
+          recordedAt: tip.recorded_at,
+          actorType: record.actorType,
+          actorId: record.actorId,
+          actorRoles: record.actorRoles,
+          organizationId: record.organizationId,
+          action: record.action,
+          resourceType: record.resourceType,
+          resourceId: record.resourceId,
+          outcome: record.outcome,
+          errorCode: null,
+          reason: null,
+          changes: null,
+          occurrenceCount: record.occurrenceCount,
+          sourceService: record.sourceService,
+          sourceServiceVersion: record.sourceServiceVersion,
+          sourceEventId: record.sourceEventId,
+          sourceEventName: record.sourceEventName,
+          sourceTopic: record.sourceTopic,
+          sourceIp: null,
+          sourceUserAgent: null,
+          correlationId: record.correlationId,
+          causationId: record.causationId,
+          traceparent: record.traceparent,
+          sourceStreamSeq: record.sourceStreamSeq,
+          sequenceNo: tip.sequence_no,
+          correctionOf: null,
+        };
+
+        const recordHash = computeRecordHash(stored, previousHash);
+
         await tx.auditEvent.create({
           data: {
-            id: record.id,
-            occurredAt: record.occurredAt,
+            id: stored.id,
+            occurredAt: stored.occurredAt,
+            recordedAt: stored.recordedAt,
             actorType: record.actorType,
-            actorId: record.actorId,
-            actorRoles: record.actorRoles,
-            organizationId: record.organizationId,
-            action: record.action,
-            resourceType: record.resourceType,
-            resourceId: record.resourceId,
+            actorId: stored.actorId,
+            actorRoles: [...stored.actorRoles],
+            organizationId: stored.organizationId,
+            action: stored.action,
+            resourceType: stored.resourceType,
+            resourceId: stored.resourceId,
             outcome: record.outcome,
-            occurrenceCount: record.occurrenceCount,
-            sourceService: record.sourceService,
-            sourceServiceVersion: record.sourceServiceVersion,
-            sourceEventId: record.sourceEventId,
-            sourceEventName: record.sourceEventName,
-            sourceTopic: record.sourceTopic,
-            correlationId: record.correlationId,
-            causationId: record.causationId,
-            traceparent: record.traceparent,
-            sourceStreamSeq: record.sourceStreamSeq,
-            // recordedAt is left to the database default on purpose: the gap
-            // between it and occurredAt is consumer lag, and a value chosen
-            // here would measure this process's clock instead.
+            errorCode: stored.errorCode,
+            reason: stored.reason,
+            occurrenceCount: stored.occurrenceCount,
+            sourceService: stored.sourceService,
+            sourceServiceVersion: stored.sourceServiceVersion,
+            sourceEventId: stored.sourceEventId,
+            sourceEventName: stored.sourceEventName,
+            sourceTopic: stored.sourceTopic,
+            sourceIp: stored.sourceIp,
+            sourceUserAgent: stored.sourceUserAgent,
+            correlationId: stored.correlationId,
+            causationId: stored.causationId,
+            traceparent: stored.traceparent,
+            sourceStreamSeq: stored.sourceStreamSeq,
+            sequenceNo: stored.sequenceNo,
+            correctionOf: stored.correctionOf,
+            recordHash,
+            previousHash,
           },
         });
+
+        // Advances the tip the lock was taken on. The trigger refuses any
+        // update that does not move `chain_length` forward by exactly one, so a
+        // rewind is refused by the database rather than by this line staying
+        // correct.
+        //
+        // `first_sequence_no` is written with `COALESCE`, which is the whole
+        // set-once rule in one expression: on the first record of a chain the
+        // column is null and takes this record's position, and on every later
+        // record it already holds a value and keeps it. The trigger refuses
+        // any other outcome, so a future edit that dropped the `COALESCE`
+        // fails in the database rather than silently moving the boundary
+        // between "legacy" and "damaged" forward.
+        await tx.$executeRaw`
+          UPDATE audit_chain_head
+             SET chain_length      = chain_length + 1,
+                 head_hash         = ${recordHash},
+                 head_event_id     = ${stored.id},
+                 head_occurred_at  = ${stored.occurredAt},
+                 head_sequence_no  = ${stored.sequenceNo},
+                 first_sequence_no = COALESCE(first_sequence_no, ${stored.sequenceNo}),
+                 updated_at        = now()
+           WHERE chain_scope = ${key.scope}::audit_chain_scope
+             AND organization_id = ${key.organizationKey}
+             AND chain_month = ${key.chainMonth}::date
+        `;
 
         await tx.processedEvent.create({
           data: { eventId: record.sourceEventId, consumerName },
@@ -211,7 +507,7 @@ export class AuditRepository {
         if (projection !== null) await applyOrganizationProjection(tx, projection);
 
         return 'WRITTEN';
-      });
+      }, INGEST_TRANSACTION);
     } catch (error) {
       // P2002 is the unique index doing its job: the same event arriving on the
       // same topic twice, close enough together that both transactions passed
@@ -432,6 +728,210 @@ export class AuditRepository {
     });
 
     return (row as AuditEventRow | null) ?? null;
+  }
+
+  // -------------------------------------------------------------------------
+  // AUD-003 — the chain read side
+  //
+  // Every method below takes an `AuditChainKey`, which is resolved from the
+  // caller's authority before the verification service reaches this class. A
+  // chain is always exactly one tenant-month or exactly the platform month, so
+  // there is no shape here that can widen: the platform chain is
+  // `organization_id IS NULL` and a tenant chain is `organization_id = $1`, and
+  // the two are separate branches rather than one predicate with an `OR`
+  // (ADR-053 § 10).
+  // -------------------------------------------------------------------------
+
+  /** The month-and-tenant bound every chain read shares. */
+  private chainWhere(key: AuditChainKey): Prisma.AuditEventWhereInput {
+    const { start, end } = monthBounds(key.chainMonth);
+    return {
+      // `null` is Prisma's `IS NULL`, and it is reachable only from a
+      // `PLATFORM` key, which only a platform-authority caller can produce.
+      organizationId: key.scope === 'PLATFORM' ? null : key.organizationKey,
+      occurredAt: { gte: start, lt: end },
+    };
+  }
+
+  /** The stored tip of one chain, or `null` if no record ever opened it. */
+  async chainHead(key: AuditChainKey): Promise<AuditChainHeadRow | null> {
+    const row = await this.prisma.client.auditChainHead.findUnique({
+      where: {
+        chainScope_organizationId_chainMonth: {
+          chainScope: key.scope as AuditChainScope,
+          organizationId: key.organizationKey,
+          chainMonth: new Date(`${key.chainMonth}T00:00:00.000Z`),
+        },
+      },
+      select: {
+        chainLength: true,
+        headHash: true,
+        headEventId: true,
+        headSequenceNo: true,
+        firstSequenceNo: true,
+      },
+    });
+
+    return row === null
+      ? null
+      : {
+          chainLength: row.chainLength,
+          headHash: row.headHash,
+          headEventId: row.headEventId,
+          headSequenceNo: row.headSequenceNo,
+          firstSequenceNo: row.firstSequenceNo,
+        };
+  }
+
+  /**
+   * Where the requested window lands in one month's chain, in chain order.
+   *
+   * Returns the first and last chain positions the window touches — not the
+   * rows. A window is expressed in `occurredAt` and a chain is ordered by
+   * `sequenceNo`, and the two orders are genuinely different: an event that
+   * occurred earlier can be consumed later, which ADR-053 § 8 designs for
+   * rather than prevents. So the walk covers the **contiguous** chain segment
+   * between the two extremes, which necessarily includes any record that landed
+   * between them out of order. Verifying a non-contiguous subsequence would be
+   * verifying links that do not exist.
+   */
+  async chainSegment(key: AuditChainKey, from: Date, to: Date): Promise<AuditChainSegment | null> {
+    const { start } = monthBounds(key.chainMonth);
+    const where = this.chainWhere(key);
+    const lower = from.getTime() > start.getTime() ? from : start;
+
+    const aggregate = await this.prisma.client.auditEvent.aggregate({
+      where: {
+        ...where,
+        occurredAt: { ...(where.occurredAt as Prisma.DateTimeFilter), gte: lower, lte: to },
+      },
+      _min: { sequenceNo: true },
+      _max: { sequenceNo: true },
+      _count: { _all: true },
+    });
+
+    const first = aggregate._min.sequenceNo;
+    const last = aggregate._max.sequenceNo;
+    if (first === null || last === null) return null;
+
+    // The second count, and the reason this method returns two. `_count` above
+    // counts what the caller asked about; this counts what verifying it costs.
+    // They are equal only when the window's records happen to be contiguous in
+    // chain order, and ADR-053 § 8 explicitly tolerates arrival out of order,
+    // so the difference is a designed-for case rather than a pathological one.
+    //
+    // Still one index range scan over one tenant-month — `audit_event_chain_idx`
+    // is `(organization_id, sequence_no)` and the month partition is already
+    // pruned — so the preflight costs a count, never a read of the rows.
+    const walkLength = await this.prisma.client.auditEvent.count({
+      where: { ...where, sequenceNo: { gte: first, lte: last } },
+    });
+
+    return {
+      firstSequenceNo: first,
+      lastSequenceNo: last,
+      recordsInRange: aggregate._count._all,
+      walkLength,
+    };
+  }
+
+  /**
+   * The record immediately before a chain position — the seed a mid-range
+   * verification recomputes from.
+   *
+   * Without it a window that starts mid-chain could only ever say "these links
+   * agree with each other", which a forger who rewrote a whole run of records
+   * would also satisfy. With it, the first record in the window is checked
+   * against a hash that was written by a transaction the window does not
+   * contain.
+   */
+  async chainPredecessor(
+    key: AuditChainKey,
+    firstSequenceNo: bigint,
+  ): Promise<{ sequenceNo: bigint; recordHash: Uint8Array | null } | null> {
+    const row = await this.prisma.client.auditEvent.findFirst({
+      where: { ...this.chainWhere(key), sequenceNo: { lt: firstSequenceNo } },
+      orderBy: { sequenceNo: 'desc' },
+      select: { sequenceNo: true, recordHash: true },
+    });
+
+    return row ?? null;
+  }
+
+  /**
+   * One page of a chain, in chain order.
+   *
+   * Paged rather than read whole. A month of a busy tenant is an unbounded
+   * result set, and materialising it to verify it would make the verification
+   * endpoint the most expensive thing this service does — and the easiest way
+   * to take it down (ADR-053 § 10 makes the same argument for the query
+   * window).
+   */
+  async chainPage(
+    key: AuditChainKey,
+    bounds: { firstSequenceNo: bigint; lastSequenceNo: bigint },
+    afterSequenceNo: bigint | null,
+    limit: number,
+  ): Promise<AuditChainRow[]> {
+    const lower = afterSequenceNo === null ? bounds.firstSequenceNo : afterSequenceNo + 1n;
+
+    const rows = await this.prisma.client.auditEvent.findMany({
+      where: {
+        ...this.chainWhere(key),
+        sequenceNo: { gte: lower, lte: bounds.lastSequenceNo },
+      },
+      orderBy: { sequenceNo: 'asc' },
+      take: limit,
+      select: AUDIT_CHAIN_SELECT,
+    });
+
+    return rows;
+  }
+
+  /**
+   * The record a chain head claims to be its tip, read by position.
+   *
+   * One row, by the same `(organization_id, sequence_no)` index the walk uses.
+   * It exists so a verification can ask whether the head names something real:
+   * the head is the only row in this service the runtime may `UPDATE`, so it is
+   * the cheapest thing to point at a record that was deleted — and a head
+   * naming a row that is gone would otherwise read as "the chain simply
+   * continues past your window".
+   */
+  async chainRecordAt(key: AuditChainKey, sequenceNo: bigint): Promise<AuditChainMarker | null> {
+    const row = await this.prisma.client.auditEvent.findFirst({
+      where: { ...this.chainWhere(key), sequenceNo },
+      select: { id: true, sequenceNo: true, recordHash: true, previousHash: true },
+    });
+
+    return row ?? null;
+  }
+
+  /**
+   * The next record in a chain after a position — the window's tail check.
+   *
+   * `take: 1` on the chain index, so it is a single index seek regardless of
+   * how far the chain runs past the window. A head that names a position beyond
+   * the verified window is only legitimate if a record actually stands between
+   * the two; without this the verifier would accept "the head is ahead of you"
+   * as an explanation for a tail that had been deleted.
+   *
+   * `previousHash` comes back with it so the successor's link to the window's
+   * last record can be checked in the same read — which is what proves nothing
+   * was removed immediately after the window rather than merely that *something*
+   * exists later.
+   */
+  async chainSuccessor(
+    key: AuditChainKey,
+    afterSequenceNo: bigint,
+  ): Promise<AuditChainMarker | null> {
+    const row = await this.prisma.client.auditEvent.findFirst({
+      where: { ...this.chainWhere(key), sequenceNo: { gt: afterSequenceNo } },
+      orderBy: { sequenceNo: 'asc' },
+      select: { id: true, sequenceNo: true, recordHash: true, previousHash: true },
+    });
+
+    return row ?? null;
   }
 }
 

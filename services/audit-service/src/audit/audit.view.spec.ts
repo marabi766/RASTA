@@ -48,6 +48,11 @@ function row(overrides: Partial<AuditEventRow> = {}): AuditEventRow {
     traceparent: null,
     sourceStreamSeq: null,
     sequenceNo: 1n,
+    // Written since AUD-003. Present on the fixture because the repository
+    // selects both columns on every read, so a row that omitted them would be
+    // a shape this service never produces.
+    recordHash: new Uint8Array(32).fill(0x7f),
+    previousHash: null,
     ...overrides,
   };
 }
@@ -119,14 +124,50 @@ describe('the audit record a caller receives', () => {
     expect(toAuditEventView(row({ organizationId: null })).organizationId).toBeNull();
   });
 
-  it('publishes no integrity or correction field', () => {
-    // AUD-003 and AUD-007. Two permanently null fields would tell a client that
-    // verification exists here and returned "nothing wrong".
+  it('publishes no digest and no correction field', () => {
+    // The digests stay internal even though AUD-003 writes them. A per-row hash
+    // invites the wrong check — comparing a record's stored hash against itself
+    // proves nothing, because a forger who rewrote the row rewrote the hash
+    // beside it — and `correctionOf` is still never written (AUD-004).
     const view = toAuditEventView(row()) as Record<string, unknown>;
 
     expect(view).not.toHaveProperty('recordHash');
     expect(view).not.toHaveProperty('previousHash');
     expect(view).not.toHaveProperty('correctionOf');
+  });
+
+  describe('the integrity flag says which of two true things a row is', () => {
+    it('reports a linked record as CHAINED', () => {
+      // "Covered by GET /v1/audit-events/verify", never "verified": nothing
+      // here recomputes a chain, and a flag that implied it had would be the
+      // most misleading value this service could publish.
+      expect(toAuditEventView(row()).integrity).toBe('CHAINED');
+    });
+
+    it('reports a record written before the chain existed as UNCHAINED', () => {
+      // A pre-AUD-003 row. Nothing backfills it, so it stays honestly outside
+      // the chain forever and any range containing it verifies as
+      // UNVERIFIABLE_LEGACY rather than as valid.
+      expect(toAuditEventView(row({ recordHash: null, previousHash: null })).integrity).toBe(
+        'UNCHAINED',
+      );
+    });
+
+    it('reads the flag from the record link alone, not from the predecessor', () => {
+      // The first record of a chain segment has no predecessor and is fully
+      // chained; treating a null `previousHash` as unchained would report every
+      // segment start as legacy.
+      expect(toAuditEventView(row({ previousHash: null })).integrity).toBe('CHAINED');
+    });
+
+    it('keeps the flag inside the published schema', () => {
+      const view = toAuditEventView(row({ recordHash: null }));
+
+      expect(auditEventViewSchema.safeParse(view).success).toBe(true);
+      expect(auditEventViewSchema.safeParse({ ...view, integrity: 'VERIFIED' }).success).toBe(
+        false,
+      );
+    });
   });
 });
 

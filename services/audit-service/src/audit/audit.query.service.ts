@@ -6,13 +6,12 @@ import { resolveCallerAuthority, type AuditCallerAuthority } from '../access/acc
 import { encodeAuditCursor } from './audit.cursor';
 import type { AuditEventDetailQuery, AuditEventQuery } from './audit.query.dto';
 import { toAuditEventView, type AuditEventPage, type AuditEventView } from './audit.view';
+import { resolveSubtreeTarget } from './audit.scope';
 import {
   auditQueriesTotal,
   auditQueryRowsReturned,
-  auditSubtreeDecisionsTotal,
   QUERY_ENDPOINTS,
   QUERY_OUTCOMES,
-  SUBTREE_DECISIONS,
 } from '../observability/metrics';
 import { LOGGER } from '../tokens';
 
@@ -156,26 +155,15 @@ export class AuditQueryService {
       return { kind: 'PLATFORM', organizationId: requestedOrganizationId };
     }
 
-    const root = authority.rootOrganizationId as string;
-    const target = requestedOrganizationId ?? root;
-
-    if (target === root) {
-      auditSubtreeDecisionsTotal.inc({ decision: SUBTREE_DECISIONS.OWN_ORGANIZATION });
-      return { kind: 'ORGANIZATION', organizationId: root };
-    }
-
-    if (await this.repository.isWithinProjectedSubtree(root, target)) {
-      auditSubtreeDecisionsTotal.inc({ decision: SUBTREE_DECISIONS.DESCENDANT });
-      return { kind: 'ORGANIZATION', organizationId: target };
-    }
-
-    auditSubtreeDecisionsTotal.inc({ decision: SUBTREE_DECISIONS.REFUSED });
-    // The same refusal whether the organization is a sibling, a stranger, one
-    // that has moved out, or one this service holds no projection for. Telling
-    // them apart would let a caller map the hierarchy by probing identifiers.
-    throw RastaError.forbidden(
-      'That organization is not within the subtree this request is authorised for',
+    // The subtree rule lives in `audit.scope.ts` because the verification
+    // endpoint (AUD-003) has to make the identical decision, and an
+    // authorization rule with two copies is a rule with two chances to drift.
+    const organizationId = await resolveSubtreeTarget(
+      this.repository,
+      authority,
+      requestedOrganizationId,
     );
+    return { kind: 'ORGANIZATION', organizationId };
   }
 
   /**
