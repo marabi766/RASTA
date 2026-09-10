@@ -2,8 +2,13 @@ import type { INestApplication } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { z } from 'zod';
 import { toJsonSchema } from './zod-schema';
-import { auditEventDetailQuerySchema, auditEventQuerySchema } from '../audit/audit.query.dto';
+import {
+  auditEventDetailQuerySchema,
+  auditEventQuerySchema,
+  auditVerifyQuerySchema,
+} from '../audit/audit.query.dto';
 import { auditEventPageSchema, auditEventViewSchema } from '../audit/audit.view';
+import { auditChainVerificationSchema } from '../audit/audit.verification.view';
 
 /**
  * Fills in what Nest cannot see.
@@ -48,11 +53,13 @@ const apiErrorSchema = z
  */
 const RESPONSE_BODIES: Record<string, { status: '200'; schema: z.ZodTypeAny }> = {
   'GET /v1/audit-events': { status: '200', schema: auditEventPageSchema },
+  'GET /v1/audit-events/verify': { status: '200', schema: auditChainVerificationSchema },
   'GET /v1/audit-events/{id}': { status: '200', schema: auditEventViewSchema },
 };
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/audit-events': auditEventQuerySchema,
+  'GET /v1/audit-events/verify': auditVerifyQuerySchema,
   'GET /v1/audit-events/{id}': auditEventDetailQuerySchema,
 };
 
@@ -64,9 +71,9 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
  * service reads, and a read has no state to disagree with.
  */
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
-  400: 'The request does not match the published schema. `from` and `to` are mandatory, `to` may not precede `from`, and the window may not exceed `AUDIT_MAX_QUERY_WINDOW_DAYS` (default 90) — the message names the configured limit. `resourceId` requires `resourceType`. Unknown parameters are refused rather than ignored, so a misspelled filter is a 400 and never a silently narrower answer. An invalid or unparseable `cursor` lands here too.',
+  400: 'The request does not match the published schema. `from` and `to` are mandatory, `to` may not precede `from`, and the window may not exceed `AUDIT_MAX_QUERY_WINDOW_DAYS` (default 90) — the message names the configured limit. `resourceId` requires `resourceType`. Unknown parameters are refused rather than ignored, so a misspelled filter is a 400 and never a silently narrower answer. An invalid or unparseable `cursor` lands here too. On `/verify`: `organizationId` may not be combined with `scope=PLATFORM`, a `SYSTEM_ADMIN` verifying a tenant must name exactly one `organizationId`, and a window whose contiguous chain walk would exceed `AUDIT_MAX_VERIFICATION_RECORDS` records is refused from row counts, before any record is read.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
-  403: 'Authenticated, but not permitted. Only `SYSTEM_ADMIN` and `UNION_ADMIN` reach audit records; `AUDITOR`, `ORGANIZATION_ADMIN`, every unlisted role and every service token are refused. Also returned to a `UNION_ADMIN` who names an `organizationId` the local hierarchy projection does not prove is beneath their own — including one that has moved out and one no projection exists for.',
+  403: 'Authenticated, but not permitted. Only `SYSTEM_ADMIN` and `UNION_ADMIN` reach audit records; `AUDITOR`, `ORGANIZATION_ADMIN`, every unlisted role and every service token are refused. Also returned to a `UNION_ADMIN` who names an `organizationId` the local hierarchy projection does not prove is beneath their own — including one that has moved out and one no projection exists for — and to any non-`SYSTEM_ADMIN` asking `/verify` for `scope=PLATFORM`.',
   404: 'Not found. Also returned for a record that exists under another tenant, or outside the supplied `from`..`to` window, so a record’s existence is never disclosed by the difference between two statuses.',
   500: 'Unexpected server error.',
 };
@@ -89,8 +96,15 @@ const DESCRIPTION =
   'service at all. Every query must state a bounded from..to window. Records produced ' +
   'by the domain projector carry no actor roles, no source address and no field-level ' +
   'delta, because a domain event does not carry them: those arrive with the explicit ' +
-  'audit trail (AUD-004). No integrity chain is computed or verified yet (AUD-003), so ' +
-  'no response asserts that a record is unaltered.';
+  'audit trail (AUD-004). Every record written since AUD-003 carries a SHA-256 link ' +
+  'into a per-(organization, UTC month) chain, and GET /v1/audit-events/verify ' +
+  'recomputes a range of one chain and reports the first divergence. That chain is ' +
+  'tamper-evident and unsigned: it makes an alteration visible to anyone who compares ' +
+  'against an independent copy of the head, and it is not protection against a database ' +
+  'superuser who can rewrite the records and the head together. Records written before ' +
+  'AUD-003 carry no link, are never backfilled, and any range containing one is reported ' +
+  'as UNVERIFIABLE_LEGACY rather than as valid. Corrections are not implemented: ' +
+  'ADR-053 § 7 routes them through the explicit audit trail, which is AUD-004.';
 
 /** Builds the finished document for a booted application. */
 export function buildAuditOpenApiDocument(

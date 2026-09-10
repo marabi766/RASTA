@@ -170,3 +170,80 @@ export const auditSubtreeDecisionsTotal = new Counter({
   labelNames: ['decision'] as const,
   registers: [registry],
 });
+
+// ---------------------------------------------------------------------------
+// AUD-003 chain telemetry
+//
+// The same rule again, and here it needs restating rather than assuming: a
+// divergence metric is the one place where somebody will be tempted to add an
+// organization label, because the first question during an incident is "whose
+// chain". It is still refused. A counter naming the tenant whose evidence looks
+// altered publishes both the tenant list and an accusation to everyone who can
+// read the dashboard, and the answer belongs in the verification response,
+// behind the authorization that response already carries (ADR-053 § 13).
+// ---------------------------------------------------------------------------
+
+/** How a verification ended. A closed set, so a safe label. */
+export const VERIFICATION_OUTCOMES = {
+  VALID: 'valid',
+  DIVERGENT: 'divergent',
+  EMPTY: 'empty',
+  UNVERIFIABLE_LEGACY: 'unverifiable_legacy',
+} as const;
+
+/** Which chain family was verified. Two values, fixed at compile time. */
+export const VERIFICATION_SCOPE_LABELS = {
+  ORGANIZATION: 'organization',
+  PLATFORM: 'platform',
+} as const;
+
+/**
+ * Integrity divergences found by verification — the metric ADR-053 § 6 names.
+ *
+ * **Incremented only for a real divergence.** Not for an empty window, not for
+ * a window that turned out to hold pre-AUD-003 records, and not for a refusal:
+ * each of those is a normal answer, and a counter that moved for them would
+ * make the one alert that must never be ignored the one that always fires.
+ *
+ * `reason` is `DIVERGENCE_REASONS` — six values — and `scope` is one of two.
+ * Twelve series in total, and none of them names anybody.
+ */
+export const auditChainVerificationFailuresTotal = new Counter({
+  name: 'rasta_audit_chain_verification_failures_total',
+  help: 'Audit chain verifications that found an integrity divergence',
+  labelNames: ['reason', 'scope'] as const,
+  registers: [registry],
+});
+
+/** Verification requests that completed, by scope and outcome. */
+export const auditChainVerificationsTotal = new Counter({
+  name: 'rasta_audit_chain_verifications_total',
+  help: 'Audit chain verification requests that reached a verdict',
+  labelNames: ['scope', 'outcome'] as const,
+  registers: [registry],
+});
+
+/**
+ * How long one verification took, in seconds.
+ *
+ * Verification is the only read in this service whose cost grows with the data
+ * rather than with the page size, so it is the only one worth timing. Buckets
+ * run to a minute because a full month of a busy tenant genuinely takes
+ * seconds, and a histogram that saturates tells nobody anything.
+ */
+export const auditChainVerificationSeconds = new Histogram({
+  name: 'rasta_audit_chain_verification_seconds',
+  help: 'Wall-clock seconds spent verifying one audit chain window',
+  labelNames: ['scope'] as const,
+  buckets: [0.05, 0.25, 1, 5, 15, 60],
+  registers: [registry],
+});
+
+/** Records walked by one verification. */
+export const auditChainRecordsVerified = new Histogram({
+  name: 'rasta_audit_chain_records_verified',
+  help: 'Records whose chain link was recomputed by one verification',
+  labelNames: ['scope'] as const,
+  buckets: [0, 1, 100, 1000, 10000, 100000],
+  registers: [registry],
+});

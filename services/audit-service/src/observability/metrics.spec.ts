@@ -1,4 +1,8 @@
 import {
+  auditChainRecordsVerified,
+  auditChainVerificationFailuresTotal,
+  auditChainVerificationSeconds,
+  auditChainVerificationsTotal,
   auditIngestionFailuresTotal,
   auditIngestionLagSeconds,
   auditPartitionRows,
@@ -10,6 +14,8 @@ import {
   QUERY_ENDPOINTS,
   QUERY_OUTCOMES,
   SUBTREE_DECISIONS,
+  VERIFICATION_OUTCOMES,
+  VERIFICATION_SCOPE_LABELS,
 } from './metrics';
 
 /**
@@ -69,6 +75,13 @@ const AUDIT_METRICS: { name: string; metric: unknown }[] = [
   { name: 'rasta_audit_queries_total', metric: auditQueriesTotal },
   { name: 'rasta_audit_query_rows_returned', metric: auditQueryRowsReturned },
   { name: 'rasta_audit_subtree_decisions_total', metric: auditSubtreeDecisionsTotal },
+  {
+    name: 'rasta_audit_chain_verification_failures_total',
+    metric: auditChainVerificationFailuresTotal,
+  },
+  { name: 'rasta_audit_chain_verifications_total', metric: auditChainVerificationsTotal },
+  { name: 'rasta_audit_chain_verification_seconds', metric: auditChainVerificationSeconds },
+  { name: 'rasta_audit_chain_records_verified', metric: auditChainRecordsVerified },
 ];
 
 const labelsOf = (metric: unknown): readonly string[] =>
@@ -93,6 +106,30 @@ describe('metric cardinality', () => {
     expect(labelsOf(auditQueriesTotal)).toEqual(['endpoint', 'scope', 'outcome']);
     expect(labelsOf(auditQueryRowsReturned)).toEqual(['endpoint']);
     expect(labelsOf(auditSubtreeDecisionsTotal)).toEqual(['decision']);
+  });
+
+  it('gives the chain metrics only closed sets', () => {
+    // The divergence counter is where somebody will be tempted to add an
+    // organization label, because the first question during an incident is
+    // "whose chain". It stays out: the answer belongs in the verification
+    // response, behind the authorization that response already carries.
+    expect(labelsOf(auditChainVerificationFailuresTotal)).toEqual(['reason', 'scope']);
+    expect(labelsOf(auditChainVerificationsTotal)).toEqual(['scope', 'outcome']);
+    expect(labelsOf(auditChainVerificationSeconds)).toEqual(['scope']);
+    expect(labelsOf(auditChainRecordsVerified)).toEqual(['scope']);
+  });
+
+  it('bounds the chain label sets to a countable number of series', () => {
+    // Six reasons times two scopes, and two scopes times four outcomes.
+    // Cardinality is a property worth pinning: an unbounded label set is how a
+    // metrics endpoint becomes an index of what happened to whom.
+    expect(Object.values(VERIFICATION_SCOPE_LABELS)).toEqual(['organization', 'platform']);
+    expect(Object.values(VERIFICATION_OUTCOMES)).toEqual([
+      'valid',
+      'divergent',
+      'empty',
+      'unverifiable_legacy',
+    ]);
   });
 });
 

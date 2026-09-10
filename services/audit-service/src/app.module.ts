@@ -25,7 +25,12 @@ import { PrismaService } from './prisma/prisma.service';
 import { AuditRepository } from './audit/audit.repository';
 import { AuditController } from './audit/audit.controller';
 import { AuditQueryService } from './audit/audit.query.service';
-import { AuditEventDetailQueryPipe, AuditEventQueryPipe } from './audit/audit.query.pipes';
+import { AuditVerificationService } from './audit/audit.verification.service';
+import {
+  AuditEventDetailQueryPipe,
+  AuditEventQueryPipe,
+  AuditVerifyQueryPipe,
+} from './audit/audit.query.pipes';
 import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
 import { DOMAIN_PROJECTOR_CONSUMER, DOMAIN_TOPICS } from './audit/audit.mapper';
 import { auditPartitionRows } from './observability/metrics';
@@ -39,10 +44,11 @@ import { brokersOf, loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/e
  * ## What is here
  *
  * One consumer group over the ten produced domain topics, a repository that
- * writes the audit row, its idempotency marker and the organization hierarchy
- * projection in a single transaction, the ingestion metrics — that is path A
- * (ADR-053 § 1) — and two authenticated read endpoints behind the platform's
- * global guards.
+ * writes the audit row, its chain link, its idempotency marker and the
+ * organization hierarchy projection in a single transaction, the ingestion
+ * metrics — that is path A (ADR-053 § 1) — and three authenticated read
+ * endpoints behind the platform's global guards, one of which recomputes the
+ * chain (AUD-003, ADR-053 § 6).
  *
  * ## The guards are global, and the health probes are the only exception
  *
@@ -60,9 +66,11 @@ import { brokersOf, loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/e
  *   export         AUD-002 stops at search and read. Export is asynchronous,
  *                  `SYSTEM_ADMIN`-only and audited in its own right
  *                  (ADR-053 § 10), and belongs with the work that builds it.
- *   hash chain     AUD-003. `record_hash` and `previous_hash` exist as columns
- *                  and are never written. A null there means "no chain yet",
- *                  which is why no read publishes them.
+ *   correction     AUD-004, not AUD-003. ADR-053 § 7 routes a correction
+ *                  through path B, and path B is the trail consumer below. With
+ *                  no producer, no outbox and no write API, the only way to
+ *                  record one today would be the direct insert § 7 forbids, so
+ *                  `correction_of` stays an inert column and no route exists.
  *   trail consumer AUD-004. `rasta.audit.trail.v1` is path B. Consuming it here
  *                  would have this service auditing its own writes.
  *   outbox         Never. audit-service is a terminal sink (ADR § 14), which is
@@ -105,6 +113,7 @@ import { brokersOf, loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/e
 
     AuditRepository,
     AuditQueryService,
+    AuditVerificationService,
 
     // Registered as classes, not as factory providers, because the controller
     // reaches them as `@Query(AuditEventQueryPipe)`. Nest resolves a
@@ -116,6 +125,7 @@ import { brokersOf, loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/e
     // still names the ceiling this deployment runs (`audit.query.pipes.ts`).
     AuditEventQueryPipe,
     AuditEventDetailQueryPipe,
+    AuditVerifyQueryPipe,
 
     {
       provide: InternalTokenService,

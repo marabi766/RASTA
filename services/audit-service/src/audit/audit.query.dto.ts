@@ -53,6 +53,17 @@ export const MAX_PAGE_LIMIT = 200;
 /** The default ceiling for `AUDIT_MAX_QUERY_WINDOW_DAYS`. */
 export const DEFAULT_MAX_QUERY_WINDOW_DAYS = 90;
 
+/**
+ * The default ceiling for `AUDIT_MAX_VERIFICATION_RECORDS` (AUD-003).
+ *
+ * A hundred thousand SHA-256 recomputations over rows already in the page cache
+ * is a few seconds, which is a request an operator can wait for during an
+ * investigation and a load a service can absorb. Lives here beside the window
+ * ceiling because the two are the same kind of control and drift apart if they
+ * live apart.
+ */
+export const DEFAULT_MAX_VERIFICATION_RECORDS = 100_000;
+
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /** Bounds mirrored from the migration's column widths. */
@@ -121,6 +132,29 @@ export interface AuditEventQuery {
 export interface AuditEventDetailQuery {
   readonly from: Date;
   readonly to: Date;
+  readonly organizationId?: string;
+}
+
+/** The two chain families a verification may target (ADR-053 § 6). */
+export const VERIFY_SCOPES = ['ORGANIZATION', 'PLATFORM'] as const;
+
+/**
+ * What a validated verification query looks like.
+ *
+ * `scope` is explicit rather than inferred from whether `organizationId` was
+ * supplied, and that is a security decision rather than a style one. The
+ * platform chain is the rows with no tenant, and ADR-053 § 10 makes those
+ * readable by `SYSTEM_ADMIN` alone. If "no organizationId" silently meant "the
+ * platform chain", then a `UNION_ADMIN` who omitted the parameter — the
+ * ordinary way to ask about your own organization on the search endpoint —
+ * would be asking for platform-scoped evidence instead. Naming the scope makes
+ * the two requests different requests, so the authority check has something
+ * unambiguous to refuse.
+ */
+export interface AuditVerifyQuery {
+  readonly from: Date;
+  readonly to: Date;
+  readonly scope: (typeof VERIFY_SCOPES)[number];
   readonly organizationId?: string;
 }
 
@@ -254,6 +288,56 @@ export function buildAuditEventDetailQuerySchema(
 }
 
 /**
+ * Builds the verification query schema for a configured window ceiling.
+ *
+ * The same ceiling as search and detail, and for a stronger reason: verifying a
+ * window means walking every chain position it touches, so an unbounded range
+ * is not a slow query but a full read of the store dressed as one request.
+ *
+ * `.strict()` for the same reason as the list schema — a client that believes
+ * in a filter this endpoint does not have would otherwise be told its narrower
+ * question had been answered.
+ */
+export function buildAuditVerifyQuerySchema(
+  maxWindowDays: number = DEFAULT_MAX_QUERY_WINDOW_DAYS,
+): z.ZodType<AuditVerifyQuery, z.ZodTypeDef, unknown> {
+  return z
+    .object({
+      ...windowShape,
+      ...commonFilterShape,
+      scope: z
+        .enum(VERIFY_SCOPES)
+        .default('ORGANIZATION')
+        .describe(
+          'Which chain to verify. `ORGANIZATION` verifies exactly one tenant’s ' +
+            'chain; `PLATFORM` verifies the chain of records that have no tenant ' +
+            'and is reachable by SYSTEM_ADMIN only.',
+        ),
+    })
+    .strict()
+    .superRefine((value, ctx) => {
+      refineWindow(value, ctx, maxWindowDays);
+
+      if (value.scope === 'PLATFORM' && value.organizationId !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['organizationId'],
+          // Refused rather than ignored. A request that named both is a client
+          // that believes one of the two is being honoured, and guessing which
+          // would be answering a question nobody asked.
+          message: '`organizationId` may not be combined with `scope=PLATFORM`',
+        });
+      }
+    })
+    .transform((value): AuditVerifyQuery => ({
+      from: new Date(value.from),
+      to: new Date(value.to),
+      scope: value.scope,
+      organizationId: value.organizationId,
+    }));
+}
+
+/**
  * The path parameter.
  *
  * Bounded to the column width and to the identifier alphabet so a probe cannot
@@ -270,3 +354,4 @@ export const auditEventIdSchema = z
 /** The schemas the OpenAPI document publishes, at the configured ceiling. */
 export const auditEventQuerySchema = buildAuditEventQuerySchema();
 export const auditEventDetailQuerySchema = buildAuditEventDetailQuerySchema();
+export const auditVerifyQuerySchema = buildAuditVerifyQuerySchema();

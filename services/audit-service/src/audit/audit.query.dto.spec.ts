@@ -3,9 +3,12 @@ import {
   auditEventIdSchema,
   buildAuditEventDetailQuerySchema,
   buildAuditEventQuerySchema,
+  buildAuditVerifyQuerySchema,
   DEFAULT_MAX_QUERY_WINDOW_DAYS,
+  DEFAULT_MAX_VERIFICATION_RECORDS,
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
+  VERIFY_SCOPES,
 } from './audit.query.dto';
 
 /**
@@ -207,4 +210,100 @@ describe('the path parameter', () => {
       expect(auditEventIdSchema.safeParse(id).success).toBe(false);
     },
   );
+});
+
+describe('the verification query', () => {
+  const verifySchema = buildAuditVerifyQuerySchema();
+
+  const parseVerify = (query: Record<string, unknown>) => verifySchema.safeParse(query);
+
+  const verifyPaths = (result: ReturnType<typeof parseVerify>): string[] =>
+    result.success ? [] : result.error.issues.map((issue) => issue.path.join('.'));
+
+  it('defaults to the organization scope', () => {
+    // The default is the narrow one. A default of PLATFORM would mean a
+    // caller who omitted the parameter was asking for the records that have no
+    // tenant, which ADR-053 § 10 reserves to SYSTEM_ADMIN.
+    const result = parseVerify({ from: FROM, to: TO });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.scope).toBe('ORGANIZATION');
+      expect(result.data.organizationId).toBeUndefined();
+    }
+  });
+
+  it('publishes exactly the two chain families', () => {
+    expect([...VERIFY_SCOPES]).toEqual(['ORGANIZATION', 'PLATFORM']);
+  });
+
+  it('parses both boundaries into instants', () => {
+    const result = parseVerify({ from: FROM, to: TO, organizationId: 'ORG-1' });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.from.toISOString()).toBe(FROM);
+      expect(result.data.to.toISOString()).toBe(TO);
+      expect(result.data.organizationId).toBe('ORG-1');
+    }
+  });
+
+  it('requires the window, like every other audit query', () => {
+    // Verification walks every chain position the window touches, so an
+    // unbounded range is not a slow query — it is a full read of the store.
+    expect(verifyPaths(parseVerify({})).sort()).toEqual(['from', 'to']);
+  });
+
+  it('refuses a window wider than the configured ceiling, naming the number', () => {
+    const narrow = buildAuditVerifyQuerySchema(7);
+    const result = narrow.safeParse({ from: FROM, to: TO });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((issue) => issue.message).join(' ')).toContain('7');
+    }
+  });
+
+  it('refuses `to` earlier than `from`', () => {
+    expect(parseVerify({ from: TO, to: FROM }).success).toBe(false);
+  });
+
+  it('refuses an organization named alongside the platform scope', () => {
+    // Refused rather than ignored: a request that named both is a client that
+    // believes one of the two is being honoured, and guessing which would be
+    // answering a question nobody asked.
+    expect(
+      verifyPaths(parseVerify({ from: FROM, to: TO, scope: 'PLATFORM', organizationId: 'ORG-1' })),
+    ).toContain('organizationId');
+  });
+
+  it('accepts the platform scope on its own', () => {
+    expect(parseVerify({ from: FROM, to: TO, scope: 'PLATFORM' }).success).toBe(true);
+  });
+
+  it('refuses a scope outside the two', () => {
+    expect(parseVerify({ from: FROM, to: TO, scope: 'EVERYTHING' }).success).toBe(false);
+  });
+
+  it('offers none of the search filters, so a caller cannot believe it narrowed', () => {
+    // A verification is over a whole chain segment. A filter here would look
+    // like it verified a subset, which is not a thing a hash chain can do.
+    for (const extra of ['actorId', 'action', 'resourceType', 'outcome', 'cursor', 'limit']) {
+      expect(parseVerify({ from: FROM, to: TO, [extra]: 'anything' }).success).toBe(false);
+    }
+  });
+
+  it('refuses an organization identifier longer than the column', () => {
+    expect(parseVerify({ from: FROM, to: TO, organizationId: 'O'.repeat(129) }).success).toBe(
+      false,
+    );
+  });
+
+  it('publishes a record ceiling default that is separate from the window ceiling', () => {
+    // The window bounds the time a verification covers; this bounds the work,
+    // and a busy tenant writes more in a day than a quiet one does in a
+    // quarter.
+    expect(DEFAULT_MAX_VERIFICATION_RECORDS).toBe(100_000);
+    expect(DEFAULT_MAX_VERIFICATION_RECORDS).not.toBe(DEFAULT_MAX_QUERY_WINDOW_DAYS);
+  });
 });

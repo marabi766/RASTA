@@ -6,8 +6,10 @@ import type { AuditEnv } from '../config/env';
 import {
   buildAuditEventDetailQuerySchema,
   buildAuditEventQuerySchema,
+  buildAuditVerifyQuerySchema,
   type AuditEventDetailQuery,
   type AuditEventQuery,
+  type AuditVerifyQuery,
 } from './audit.query.dto';
 
 /**
@@ -70,5 +72,12 @@ export class AuditEventQueryPipe extends SchemaQueryPipe<AuditEventQuery> {
 export class AuditEventDetailQueryPipe extends SchemaQueryPipe<AuditEventDetailQuery> {
   constructor(@Inject(ENV) env: AuditEnv) {
     super(buildAuditEventDetailQuerySchema(env.AUDIT_MAX_QUERY_WINDOW_DAYS));
+  }
+}
+
+@Injectable()
+export class AuditVerifyQueryPipe extends SchemaQueryPipe<AuditVerifyQuery> {
+  constructor(@Inject(ENV) env: AuditEnv) {
+    super(buildAuditVerifyQuerySchema(env.AUDIT_MAX_QUERY_WINDOW_DAYS));
   }
 }
