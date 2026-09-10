@@ -74,3 +74,32 @@ export {
   formatStreamSeq,
 } from './events/envelope';
 export type { ActorType, EventActor, EventEnvelope, DlqReason } from './events/envelope';
+
+export {
+  AUDIT_EVENT_RECORDED,
+  AUDIT_EVENT_RECORDED_VERSION,
+  AUDIT_OUTCOMES,
+  auditOutcomeSchema,
+  AUDIT_ACTION_PATTERN,
+  auditActionSchema,
+  AUDIT_CORRECTION_ACTION,
+  auditTrailActorSchema,
+  AUDIT_CHANGES_MAX_ENTRIES,
+  auditChangeFieldSchema,
+  auditRedactedMarkerSchema,
+  auditHashedMarkerSchema,
+  auditChangeValueSchema,
+  auditChangeSchema,
+  auditChangesSchema,
+  auditErrorCodeSchema,
+  auditTrailSourceSchema,
+  auditTrailPayloadSchemaV1,
+} from './events/audit-trail';
+export type {
+  AuditOutcome,
+  AuditTrailActor,
+  AuditChangeValue,
+  AuditChange,
+  AuditTrailSource,
+  AuditTrailPayloadV1,
+} from './events/audit-trail';
