@@ -4,7 +4,17 @@ import { SENSITIVE_KEYS } from '@rasta/logging';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { AuditRepository } from '../src/audit/audit.repository';
 import { DOMAIN_PROJECTOR_CONSUMER, toAuditEventRecord } from '../src/audit/audit.mapper';
-import { cleanupRun, id, newMigratorPrisma, newPrisma, RUN_TAG } from './helpers';
+import type { OrganizationProjection } from '../src/audit/organization-projection';
+import { CHAIN_HASH_BYTES, computeRecordHash, hashesEqual } from '../src/audit/audit.chain';
+import {
+  cleanupRun,
+  id,
+  instantIn,
+  newMigratorPrisma,
+  newPrisma,
+  runMonth,
+  RUN_TAG,
+} from './helpers';
 
 /**
  * What actually lands in the database when an envelope is ingested.
@@ -37,6 +47,31 @@ describe('domain-event ingestion (real PostgreSQL)', () => {
       payload: { reason: 'sold', password: 'hunter2' },
       ...overrides,
     } as EventEnvelope;
+  }
+
+  /** One chain head, read as the row the database actually holds. */
+  interface ChainHeadRow {
+    chain_length: bigint;
+    head_hash: Uint8Array | null;
+    head_event_id: string | null;
+    head_sequence_no: bigint | null;
+    first_sequence_no: bigint | null;
+  }
+
+  async function headOf(organizationId: string | null, chainMonth: string): Promise<ChainHeadRow> {
+    const rows = await prisma.client.$queryRawUnsafe<ChainHeadRow[]>(
+      `SELECT chain_length, head_hash, head_event_id, head_sequence_no, first_sequence_no
+         FROM audit_chain_head
+        WHERE chain_scope = $1::audit_chain_scope
+          AND organization_id = $2
+          AND chain_month = $3::date`,
+      organizationId === null ? 'PLATFORM' : 'ORGANIZATION',
+      organizationId ?? '',
+      chainMonth,
+    );
+    const head = rows[0];
+    if (!head) throw new Error(`no chain head for ${organizationId ?? '(platform)'}/${chainMonth}`);
+    return head;
   }
 
   beforeAll(async () => {
@@ -156,19 +191,163 @@ describe('domain-event ingestion (real PostgreSQL)', () => {
     expect(asText).not.toContain('SECRET-');
   });
 
-  it('leaves the AUD-003 hash columns unwritten', async () => {
-    // A null here means "no chain yet", not "verified". Asserted so a future
-    // change that starts writing them cannot do so unnoticed.
-    const source = envelope();
-    await repository.ingest(toAuditEventRecord(source, delivery()), DOMAIN_PROJECTOR_CONSUMER);
+  describe('the AUD-003 hash chain', () => {
+    /**
+     * The chain the writer builds, read back from the columns PostgreSQL holds
+     * and recomputed with the production functions.
+     *
+     * Recomputed rather than compared against a literal: a fixture digest would
+     * only prove that this test and `computeRecordHash` agree today, whereas
+     * re-deriving the value from the stored row proves the row carries
+     * everything the hash covers — which is the claim ADR-053 § 6 makes and the
+     * only one an operator holding a database dump could ever check.
+     */
+    it('opens a chain with the first record and links the second to it', async () => {
+      // The same tenant and the same UTC month, so both records land in one
+      // chain. `envelope()` mints a fresh tenant each call, which would
+      // otherwise give each record a chain of its own.
+      const tenantId = id('ORG');
+      const firstSource = envelope({ tenantId, occurredAt: '2026-11-20T14:05:00.000Z' });
+      const secondSource = envelope({ tenantId, occurredAt: '2026-11-21T09:30:00.000Z' });
 
-    const row = await prisma.client.auditEvent.findFirstOrThrow({
-      where: { sourceEventId: source.eventId },
+      expect(
+        await repository.ingest(
+          toAuditEventRecord(firstSource, delivery()),
+          DOMAIN_PROJECTOR_CONSUMER,
+        ),
+      ).toBe('WRITTEN');
+      expect(
+        await repository.ingest(
+          toAuditEventRecord(secondSource, delivery()),
+          DOMAIN_PROJECTOR_CONSUMER,
+        ),
+      ).toBe('WRITTEN');
+
+      const first = await prisma.client.auditEvent.findFirstOrThrow({
+        where: { sourceEventId: firstSource.eventId },
+      });
+      const second = await prisma.client.auditEvent.findFirstOrThrow({
+        where: { sourceEventId: secondSource.eventId },
+      });
+
+      // The first link of a chain: a full SHA-256, and nothing before it.
+      expect(first.recordHash).not.toBeNull();
+      expect(first.recordHash?.length).toBe(CHAIN_HASH_BYTES);
+      expect(first.previousHash).toBeNull();
+      expect(first.correctionOf).toBeNull();
+
+      // The second points at the first, and at nothing else.
+      expect(second.previousHash).not.toBeNull();
+      expect(hashesEqual(second.previousHash, first.recordHash)).toBe(true);
+      expect(second.sequenceNo).toBeGreaterThan(first.sequenceNo);
+
+      // Both digests reproduce from the stored row.
+      expect(hashesEqual(computeRecordHash(first, null), first.recordHash)).toBe(true);
+      expect(hashesEqual(computeRecordHash(second, first.recordHash), second.recordHash)).toBe(
+        true,
+      );
+
+      // And the head names the tail, with the segment opened at the head record.
+      const head = await headOf(tenantId, '2026-11-01');
+      expect(head.chain_length).toBe(2n);
+      expect(hashesEqual(head.head_hash, second.recordHash)).toBe(true);
+      expect(head.head_event_id).toBe(second.id);
+      expect(head.head_sequence_no).toBe(second.sequenceNo);
+      expect(head.first_sequence_no).toBe(first.sequenceNo);
     });
 
-    expect(row.recordHash).toBeNull();
-    expect(row.previousHash).toBeNull();
-    expect(row.correctionOf).toBeNull();
+    it('gives a different UTC month of the same tenant its own chain', async () => {
+      // ADR-053 § 6 scopes a chain to `(organization, UTC month)`. A record in
+      // a new month opens a new segment rather than continuing the old one,
+      // which is what keeps two months independently writable.
+      const tenantId = id('ORG');
+      const november = envelope({ tenantId, occurredAt: '2026-11-02T00:00:00.000Z' });
+      const december = envelope({ tenantId, occurredAt: '2026-12-02T00:00:00.000Z' });
+
+      await repository.ingest(toAuditEventRecord(november, delivery()), DOMAIN_PROJECTOR_CONSUMER);
+      await repository.ingest(toAuditEventRecord(december, delivery()), DOMAIN_PROJECTOR_CONSUMER);
+
+      const decemberRow = await prisma.client.auditEvent.findFirstOrThrow({
+        where: { sourceEventId: december.eventId },
+      });
+      expect(decemberRow.previousHash).toBeNull();
+
+      expect((await headOf(tenantId, '2026-11-01')).chain_length).toBe(1n);
+      expect((await headOf(tenantId, '2026-12-01')).chain_length).toBe(1n);
+    });
+
+    it('leaves the head untouched when a redelivery is refused', async () => {
+      // A chain that grew on redelivery would report a length no set of records
+      // could reproduce. The duplicate check runs before the chain is touched,
+      // so the tip must be byte-for-byte what it was.
+      const tenantId = id('ORG');
+      const source = envelope({ tenantId });
+
+      expect(
+        await repository.ingest(toAuditEventRecord(source, delivery()), DOMAIN_PROJECTOR_CONSUMER),
+      ).toBe('WRITTEN');
+      const before = await headOf(tenantId, '2026-11-01');
+
+      expect(
+        await repository.ingest(toAuditEventRecord(source, delivery()), DOMAIN_PROJECTOR_CONSUMER),
+      ).toBe('DUPLICATE');
+      const after = await headOf(tenantId, '2026-11-01');
+
+      expect(after.chain_length).toBe(before.chain_length);
+      expect(after.head_event_id).toBe(before.head_event_id);
+      expect(after.head_sequence_no).toBe(before.head_sequence_no);
+      expect(after.first_sequence_no).toBe(before.first_sequence_no);
+      expect(hashesEqual(after.head_hash, before.head_hash)).toBe(true);
+
+      expect(
+        await prisma.client.auditEvent.count({ where: { sourceEventId: source.eventId } }),
+      ).toBe(1);
+    });
+
+    it('rolls the chain back with the record when the transaction fails', async () => {
+      // The strongest statement this suite can make about the write path: a
+      // failure *after* the head has been advanced inside the transaction must
+      // leave no row, no marker and no advancement. Forced with a projection
+      // the database refuses — `organization_ref_parent_not_self` — which
+      // `applyOrganizationProjection` runs last, so everything before it is
+      // already written when the statement raises.
+      const tenantId = id('ORG');
+      const anchor = envelope({ tenantId });
+      await repository.ingest(toAuditEventRecord(anchor, delivery()), DOMAIN_PROJECTOR_CONSUMER);
+      const before = await headOf(tenantId, '2026-11-01');
+
+      const doomed = envelope({ tenantId });
+      const selfParented: OrganizationProjection = {
+        kind: 'CREATED',
+        organizationId: tenantId,
+        parentOrganizationId: tenantId,
+        hierarchyPath: null,
+        hierarchyDepth: 0,
+        status: 'ACTIVE',
+        observedAt: new Date(),
+      };
+
+      await expect(
+        repository.ingest(
+          toAuditEventRecord(doomed, delivery()),
+          DOMAIN_PROJECTOR_CONSUMER,
+          selfParented,
+        ),
+      ).rejects.toThrow();
+
+      expect(
+        await prisma.client.auditEvent.count({ where: { sourceEventId: doomed.eventId } }),
+      ).toBe(0);
+      expect(await prisma.client.processedEvent.count({ where: { eventId: doomed.eventId } })).toBe(
+        0,
+      );
+
+      const after = await headOf(tenantId, '2026-11-01');
+      expect(after.chain_length).toBe(before.chain_length);
+      expect(after.head_event_id).toBe(before.head_event_id);
+      expect(after.head_sequence_no).toBe(before.head_sequence_no);
+      expect(hashesEqual(after.head_hash, before.head_hash)).toBe(true);
+    });
   });
 
   describe('idempotency', () => {
@@ -265,8 +444,17 @@ describe('domain-event ingestion (real PostgreSQL)', () => {
     expect(ref).not.toBeNull();
   });
 
-  it('accepts a platform-scoped event with no organization', async () => {
-    const source = envelope({ tenantId: undefined });
+  it('accepts a platform-scoped event and gives it the platform chain', async () => {
+    // Deliberately in a month this run owns outright. The platform chain's key
+    // is `('PLATFORM', '', month)` and carries nothing tag-shaped, so a fixed
+    // month would be shared with every other run that ever wrote a
+    // platform-scoped row — and `cleanupRun` would then have to choose between
+    // deleting a head those rows still depend on and refusing to clean.
+    const chainMonth = runMonth(0);
+    const source = envelope({
+      tenantId: undefined,
+      occurredAt: instantIn(chainMonth, 5).toISOString(),
+    });
     expect(
       await repository.ingest(toAuditEventRecord(source, delivery()), DOMAIN_PROJECTOR_CONSUMER),
     ).toBe('WRITTEN');
@@ -275,6 +463,14 @@ describe('domain-event ingestion (real PostgreSQL)', () => {
       where: { sourceEventId: source.eventId },
     });
     expect(row.organizationId).toBeNull();
+
+    // Its own chain, never a tenant's: the platform head is the only one keyed
+    // by the empty organization.
+    const head = await headOf(null, chainMonth);
+    expect(head.chain_length).toBe(1n);
+    expect(head.head_event_id).toBe(row.id);
+    expect(hashesEqual(head.head_hash, row.recordHash)).toBe(true);
+    expect(head.first_sequence_no).toBe(row.sequenceNo);
   });
 
   describe('partition routing', () => {

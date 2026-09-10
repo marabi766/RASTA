@@ -46,7 +46,11 @@ describe('the published OpenAPI contract (real application)', () => {
   const window = queryWindow();
 
   const LIST = '/v1/audit-events';
+  const VERIFY = '/v1/audit-events/verify';
   const DETAIL = '/v1/audit-events/{id}';
+
+  /** Every published path. Read endpoints only; there is no write operation. */
+  const PATHS = [LIST, VERIFY, DETAIL];
 
   beforeAll(async () => {
     migrator = newMigratorPrisma();
@@ -85,18 +89,26 @@ describe('the published OpenAPI contract (real application)', () => {
   };
 
   describe('the routes it describes', () => {
-    it('publishes exactly the two read endpoints', () => {
+    it('publishes exactly the three read endpoints', () => {
       // Sorted on both sides, so this asserts the *set* of published paths and
       // not the order Nest happened to register them in. `LIST` sorts before
       // `DETAIL` because `/v1/audit-events` is a prefix of
       // `/v1/audit-events/{id}`.
-      expect(Object.keys(document.paths ?? {}).sort()).toEqual([LIST, DETAIL]);
+      expect(Object.keys(document.paths ?? {}).sort()).toEqual([...PATHS].sort());
+    });
+
+    it('publishes `verify` as its own path and not as a record id', () => {
+      // Nest matches in declaration order, so a `verify` declared after `:id`
+      // would never appear here as a path of its own -- every call would be a
+      // lookup for a record whose id is the word "verify". The unit spec pins
+      // the declaration order; this asserts what the router did with it.
+      expect(document.paths?.[VERIFY]).toBeDefined();
     });
 
     it('publishes no write operation on either path', () => {
       // The absence of `POST /v1/audit-events` is the contract (docs/04 § 4.15),
       // so it is asserted on the document as well as on the router.
-      for (const path of [LIST, DETAIL]) {
+      for (const path of PATHS) {
         expect(Object.keys(document.paths?.[path] ?? {})).toEqual(['get']);
       }
     });
@@ -106,17 +118,17 @@ describe('the published OpenAPI contract (real application)', () => {
       // apply it. Without this the contract would describe a service whose
       // endpoints are open while the guard answers 401 to every one of them.
       expect(document.components?.securitySchemes?.bearer).toBeDefined();
-      for (const path of [LIST, DETAIL]) {
+      for (const path of PATHS) {
         expect(operation(path).security).toEqual([{ bearer: [] }]);
       }
     });
   });
 
   describe('the parameters it publishes', () => {
-    it('marks from and to required on both endpoints', () => {
+    it('marks from and to required on every endpoint', () => {
       // The marketplace failure, prevented: a client that does not know these
       // are mandatory sends neither and meets a 400 it could not have predicted.
-      for (const path of [LIST, DETAIL]) {
+      for (const path of PATHS) {
         const required = parameters(path)
           .filter((parameter) => parameter.required)
           .map((parameter) => parameter.name)
@@ -178,7 +190,7 @@ describe('the published OpenAPI contract (real application)', () => {
 
   describe('the response shapes it publishes', () => {
     it('describes a 200 body for each endpoint', () => {
-      for (const path of [LIST, DETAIL]) {
+      for (const path of PATHS) {
         const responses = operation(path).responses as Record<string, unknown>;
         expect(responses['200']).toBeDefined();
       }
@@ -215,7 +227,7 @@ describe('the published OpenAPI contract (real application)', () => {
   describe('every documented error is reachable', () => {
     it('documents exactly 400, 401, 403, 404 and 500', () => {
       expect(Object.keys(ERROR_DESCRIPTIONS).sort()).toEqual(['400', '401', '403', '404', '500']);
-      for (const path of [LIST, DETAIL]) {
+      for (const path of PATHS) {
         const responses = Object.keys(operation(path).responses as Record<string, unknown>).sort();
         expect(responses).toEqual(['200', '400', '401', '403', '404', '500']);
       }
@@ -263,7 +275,7 @@ describe('the published OpenAPI contract (real application)', () => {
       // `409` and `422` are absent because this service reads, and a read has
       // no state to disagree with. Asserted so a future copy-paste of another
       // service's error table is caught.
-      for (const path of [LIST, DETAIL]) {
+      for (const path of PATHS) {
         const responses = operation(path).responses as Record<string, unknown>;
         expect(responses['409']).toBeUndefined();
         expect(responses['422']).toBeUndefined();
@@ -272,7 +284,7 @@ describe('the published OpenAPI contract (real application)', () => {
 
     it('gives every error response the shared error schema', () => {
       expect(document.components?.schemas?.ApiError).toBeDefined();
-      for (const path of [LIST, DETAIL]) {
+      for (const path of PATHS) {
         const responses = operation(path).responses as Record<
           string,
           { content?: Record<string, { schema?: { $ref?: string } }> }
@@ -296,15 +308,101 @@ describe('the published OpenAPI contract (real application)', () => {
     });
   });
 
+  describe('the verification endpoint (AUD-003)', () => {
+    const verifyQuery = (extra: Record<string, string> = {}): Record<string, string> => ({
+      ...window,
+      ...extra,
+    });
+
+    it('publishes exactly the parameters it accepts, and none of the filters', () => {
+      // A verification covers a whole chain segment. A filter here would look
+      // like it verified a subset, which is not something a hash chain can do.
+      const published = parameters(VERIFY)
+        .filter((parameter) => parameter.in === 'query')
+        .map((parameter) => parameter.name)
+        .sort();
+
+      expect(published).toEqual(['from', 'organizationId', 'scope', 'to'].sort());
+    });
+
+    it('answers a real verification, which is what proves the route order', async () => {
+      // A `verify` declared after `:id` would be a lookup for a record whose id
+      // is the word "verify", and could never answer 200 here.
+      const response = await request(server)
+        .get('/v1/audit-events/verify')
+        .query(verifyQuery({ organizationId: ORG }))
+        .set('Authorization', `Bearer ${systemAdmin()}`);
+
+      expect(response.status).toBe(200);
+      expect(typeof response.body.status).toBe('string');
+      expect(typeof response.body.valid).toBe('boolean');
+    });
+
+    it('matches the verification body the service actually returns', async () => {
+      const response = await request(server)
+        .get('/v1/audit-events/verify')
+        .query(verifyQuery({ organizationId: ORG }))
+        .set('Authorization', `Bearer ${systemAdmin()}`);
+
+      expect(response.status).toBe(200);
+      expect(Object.keys(response.body).sort()).toEqual(Object.keys(bodyProperties(VERIFY)).sort());
+    });
+
+    it('publishes no digest, and returns none', async () => {
+      const response = await request(server)
+        .get('/v1/audit-events/verify')
+        .query(verifyQuery({ organizationId: ORG }))
+        .set('Authorization', `Bearer ${systemAdmin()}`);
+
+      expect(JSON.stringify(bodyProperties(VERIFY))).not.toContain('Hash');
+      expect(JSON.stringify(response.body)).not.toContain('Hash');
+    });
+
+    it('refuses the oversight role here as on every other route', async () => {
+      const response = await request(server)
+        .get('/v1/audit-events/verify')
+        .query(verifyQuery({ organizationId: ORG }))
+        .set('Authorization', `Bearer ${auditor(ORG)}`);
+
+      expect(response.status).toBe(403);
+    });
+
+    it('refuses an organization named alongside the platform scope', async () => {
+      const response = await request(server)
+        .get('/v1/audit-events/verify')
+        .query(verifyQuery({ scope: 'PLATFORM', organizationId: ORG }))
+        .set('Authorization', `Bearer ${systemAdmin()}`);
+
+      expect(response.status).toBe(400);
+    });
+
+    it('refuses a service token', async () => {
+      const response = await request(server)
+        .get('/v1/audit-events/verify')
+        .query(verifyQuery({ organizationId: ORG }))
+        .set('x-internal-token', await internalToken());
+
+      expect(response.status).toBe(403);
+    });
+  });
+
   describe('what the description promises', () => {
-    it('says there is no write endpoint and no verified integrity chain', () => {
-      // The two claims a reader is most likely to get wrong: that a null
-      // `changes` means "nothing changed", and that a record they can read is a
-      // record somebody proved unaltered.
+    it('says there is no write endpoint and states the chain at its real size', () => {
+      // The three claims a reader is most likely to get wrong: that a null
+      // `changes` means "nothing changed", that a record they can read is a
+      // record somebody proved unaltered, and that a hash chain is protection
+      // rather than evidence.
       const description = document.info.description ?? '';
       expect(description).toContain('no write endpoint');
       expect(description).toContain('AUDITOR');
       expect(description).toContain('AUD-003');
+      expect(description).toContain('tamper-evident and unsigned');
+      expect(description).toContain('UNVERIFIABLE_LEGACY');
+      expect(description).not.toContain('tamper-proof');
+    });
+
+    it('documents the verification ceiling where a caller meets it', () => {
+      expect(ERROR_DESCRIPTIONS[400]).toContain('AUDIT_MAX_VERIFICATION_RECORDS');
     });
   });
 });
