@@ -485,15 +485,36 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 
 ## Audit — `rasta.audit.trail.v1`
 
-> **هیچ تولیدکننده و هیچ مصرف‌کننده‌ای امروز وجود ندارد** — `audit-service` ساخته نشده. قرارداد در
-> [ADR-053](../adr/ADR-053-audit-service-append-only-evidence.md) (`Proposed`)، که این Topic را **مسیر دوم** ورودی
-> می‌نامد: مسیر نخست، Projector روی هر ده Topic دامنه‌ای است (`docs/07` § ۷٫۱۰).
+> **وضعیت — 2026-09-11 (AUD-004 Phase A).** `audit-service` **ساخته شده** (AUD-001..003، `docs/04` § ۴٫۱۵) و مسیر
+> نخستِ ورودی‌اش — Projector روی هر ده Topic دامنه‌ای، `docs/07` § ۷٫۱۰ — زنده است. این Topic **مسیر دوم** است
+> (ADR-053 § ۱)، و آنچه در ادامه می‌آید فقط دربارهٔ همین مسیر دوم صادق است:
+>
+> - **قرارداد وجود دارد.** `packages/contracts/src/events/audit-trail.ts` رویداد `AUDIT_EVENT_RECORDED` (**نسخهٔ ۱**)
+>   را با Zod Schema پیاده می‌کند و از `packages/contracts/src/index.ts` صادر می‌شود.
+> - **هیچ Producer و هیچ Consumer زمان اجرا هنوز نوشته نشده.** نه سرویسی روی این Topic می‌نویسد، نه `audit-service`
+>   آن را می‌خواند. سطر «همه سرویس‌ها روی این Topic می‌نویسند» زیر، **نیت طراحی** ADR-053 § ۱ است، نه رفتار امروز —
+>   امروز صفر سرویس می‌نویسد.
+> - **مالکیت Producer برای دو مرزِ نخست تصمیم گرفته شده، ساخته نشده:** `identity-service` هم Producer مرجعِ ردهای
+>   `403` (§ ۴ ADR) و هم Producer نیتِ اصلاح (§ ۷ ADR) خواهد بود — رسیدگی کامل و شواهدش در
+>   [ADR-053 implementation plan](../adr/ADR-053-implementation-plan.md) § ۵.
+> - `Proposed`. جزئیات کامل ADR-053 در
+>   [ADR-053](../adr/ADR-053-audit-service-append-only-evidence.md).
 
-**همه سرویس‌ها** روی این Topic می‌نویسند. تنها مصرف‌کننده `audit-service` است.
+**نیت طراحی — چه کسی روی این Topic خواهد نوشت، وقتی Producerها ساخته شوند.** همهٔ سرویس‌ها (ADR-053 § ۱: هر رویداد
+پرامتیاز یا رد که مسیر A ساختاراً نمی‌تواند بسازد). **تنها مصرف‌کننده** `audit-service` خواهد بود، زیر گروه مصرف‌کنندهٔ
+`audit-service.trail` (ADR-053 § ۱، § ۸).
 
-| رویداد                 | Payload                                                                                                     |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `AUDIT_EVENT_RECORDED` | `actor`, `organizationId`, `action`, `resourceType`, `resourceId`, `outcome`, `changes`, `reason`, `source` |
+**کلید Partition.** قاعدهٔ پیش‌فرض همین سند (ستون «قواعد» بالا): `aggregateId` — که برای یک رکورد معمولی همان
+`resourceId` عمل حسابرسی‌شده است، و برای یک اصلاح همان `correctionOf`. وقتی عملی `resourceId` ندارد، `actor.id`
+جایگزین می‌شود (پیاده‌سازی implementation plan § ۵).
+
+| رویداد                 | نسخه | Payload (v1)                                                                                                                                                                                              |
+| ---------------------- | :--: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AUDIT_EVENT_RECORDED` |  ۱   | `actor {type, id, roles[]}`, `organizationId?`, `action`, `resourceType`, `resourceId`, `outcome`, `errorCode?`, `reason?`, `changes[]?`, `occurrenceCount`, `source? {ip?, userAgent?}`, `correctionOf?` |
+
+**چهار ناورداییِ اصلاح، در Schema اجباری‌اند** (ADR-053 § ۷): `correctionOf` حاضر باشد یعنی `action ===
+'audit.correction'`، `outcome === 'SUCCESS'`، `reason` غیرخالی، و `actor.type === 'USER'` — هرکدام نبود، Schema رد
+می‌کند. **مجوزدهی، Redaction و تجمیعِ ردها در این Schema نیست** — همه سمتِ Producer‌اند، وقتی ساخته شوند.
 
 ---
 
