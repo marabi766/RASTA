@@ -145,6 +145,13 @@ test.describe('capabilities that are not built', () => {
 
 test.describe('routes needing a session', () => {
   test('asks the user to sign in rather than failing', async ({ page }) => {
+    // Playwright's 30s default is not enough headroom for the settle described
+    // below when the three viewport projects run it at once *and* Keycloak
+    // happens to be reachable — the case where the renew runs its full 20s
+    // rather than failing at once. The test passed alone and failed in the
+    // parallel run, which is a scheduling fact rather than a product one.
+    test.setTimeout(90_000);
+
     await page.goto('/marketplace');
 
     // The generous timeout is the silent-renew attempt settling. Where Keycloak
@@ -178,5 +185,33 @@ test.describe('interactive targets', () => {
       const box = await links.nth(index).boundingBox();
       expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
     }
+  });
+});
+
+test.describe('the presentation route in the default build', () => {
+  test('opens without a session', async ({ page }) => {
+    // `/demo` carries no session guard in either mode: it is the route a
+    // presenter opens first, and a login wall there defeats the purpose.
+    await page.goto('/demo');
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+  });
+
+  test('says the data is live, and shows no fixture disclosure', async ({ page }) => {
+    await page.goto('/demo');
+
+    // This build set no `NEXT_PUBLIC_DEMO_DATA_MODE`, so the default holds.
+    // A fixture banner here would mean the mode had turned itself on.
+    await expect(page.getByTestId('fixture-disclosure')).toHaveCount(0);
+    await expect(page.getByText('LIVE').first()).toBeVisible();
+    await expect(page.getByText('دادهٔ زنده').first()).toBeVisible();
+  });
+
+  test('sends the tour to list screens rather than to invented records', async ({ page }) => {
+    await page.goto('/demo');
+    await page.getByRole('button', { name: 'شروع روایت', exact: true }).click();
+
+    // A live tenant has no record with a known id, so a deep link would 404 on
+    // every deployment but the fixture one.
+    await expect(page).toHaveURL(/\/organizations$/);
   });
 });

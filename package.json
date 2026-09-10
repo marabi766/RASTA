@@ -43,6 +43,7 @@
     "demo:web": "pnpm --filter @rasta/web dev",
     "demo:web:fixture": "node scripts/run-demo-web.mjs --mode fixture",
     "demo:web:live": "node scripts/run-demo-web.mjs --mode live",
+    "demo:web:verify": "pnpm --filter @rasta/web test:ui:fixture",
     "db:migrate": "turbo run db:migrate",
     "db:generate": "turbo run db:generate",
     "db:seed": "turbo run db:seed"

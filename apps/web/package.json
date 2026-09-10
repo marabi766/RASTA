@@ -14,6 +14,7 @@
     "test:unit": "jest",
     "test:coverage": "jest --coverage",
     "test:ui": "playwright test",
+    "test:ui:fixture": "playwright test --config playwright.fixture.config.ts",
     "screens": "playwright test --config playwright.screens.config.ts",
     "analyze:bundle": "node scripts/bundle-budget.mjs"
   },
