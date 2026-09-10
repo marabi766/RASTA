@@ -2,6 +2,7 @@ import {
   NotAnIntegerStringError,
   formatInteger,
   formatMoneyMinor,
+  formatYear,
   groupDigits,
   toLatinDigits,
   toPersianDigits,
@@ -89,5 +90,16 @@ describe('digit conversion', () => {
   it('formats a count', () => {
     expect(formatInteger(1250)).toBe('۱٬۲۵۰');
     expect(formatInteger('7')).toBe('۷');
+  });
+
+  /**
+   * A year is an identifier, not a quantity. Grouped, «۲٬۰۱۹» reads as a count
+   * of two thousand and nineteen — which is what `formatInteger` is for, and
+   * what a manufacture year must never go through.
+   */
+  it('writes a year without a thousands separator', () => {
+    expect(formatYear(2019)).toBe('۲۰۱۹');
+    expect(formatYear(1398)).toBe('۱۳۹۸');
+    expect(formatInteger(2019)).toBe('۲٬۰۱۹');
   });
 });

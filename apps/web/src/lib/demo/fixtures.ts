@@ -31,20 +31,25 @@
  * this size would spend most of it on something a live deployment cannot use.
  */
 
+import { FIXTURE_ENTRY_POINTS } from './entry-points';
+
 const ORG_ALEF = 'org_demo_dehyari_alef';
 const ORG_BEH = 'org_demo_dehyari_beh';
 const ORG_WORKSHOP = 'org_demo_workshop';
 const ORG_SUPPLIER = 'org_demo_supplier';
 
-const ASSET_GRADER = 'ast_demo_grader';
+// The four ids the tour deep-links to live in their own module, so the tour can
+// import them without pulling this dataset into a live build. They are still
+// defined once: a link and the record it points at cannot drift apart.
+const ASSET_GRADER = FIXTURE_ENTRY_POINTS.assetId;
+const REQUEST_OIL = FIXTURE_ENTRY_POINTS.maintenanceRequestId;
+const PRODUCT_OIL = FIXTURE_ENTRY_POINTS.productId;
+const ORDER_OIL = FIXTURE_ENTRY_POINTS.orderId;
+
 const ASSET_LOADER = 'ast_demo_loader';
 const ASSET_TANKER = 'ast_demo_tanker';
-
-const REQUEST_OIL = 'mrq_demo_oil_change';
-const PRODUCT_OIL = 'prd_demo_engine_oil';
 const OFFER_OIL_A = 'ofr_demo_oil_a';
 const OFFER_OIL_B = 'ofr_demo_oil_b';
-const ORDER_OIL = 'ord_demo_oil';
 
 /** Fixed timestamps. A demo that drifts with the clock is not reproducible. */
 const T = {
@@ -59,6 +64,7 @@ const T = {
 
 const asset = (
   id: string,
+  serial: string,
   name: string,
   type: string,
   status: string,
@@ -72,7 +78,7 @@ const asset = (
   type,
   manufacturer: 'نمونه‌سازان',
   model: 'DEMO-100',
-  serialNumber: `SN-DEMO-${id.slice(-4)}`,
+  serialNumber: `SN-DEMO-${serial}`,
   manufactureYear: 2019,
   status,
   commissionedAt: T.commissioned,
@@ -84,9 +90,9 @@ const asset = (
 });
 
 const ASSETS = [
-  asset(ASSET_GRADER, 'گریدر نمونه ۱', 'GRADER', 'IN_MAINTENANCE', '۱۲ ب ۳۴۵ ایران ۵۴'),
-  asset(ASSET_LOADER, 'لودر نمونه ۲', 'LOADER', 'ACTIVE', '۱۷ ج ۸۸۱ ایران ۵۴'),
-  asset(ASSET_TANKER, 'تانکر آب نمونه ۳', 'WATER_TANKER', 'IDLE', null),
+  asset(ASSET_GRADER, '0001', 'گریدر نمونه ۱', 'GRADER', 'IN_MAINTENANCE', '۱۲ ب ۳۴۵ ایران ۵۴'),
+  asset(ASSET_LOADER, '0002', 'لودر نمونه ۲', 'LOADER', 'ACTIVE', '۱۷ ج ۸۸۱ ایران ۵۴'),
+  asset(ASSET_TANKER, '0003', 'تانکر آب نمونه ۳', 'WATER_TANKER', 'IDLE', null),
 ];
 
 /**
@@ -828,11 +834,3 @@ export const FIXTURE_RESPONSES: Readonly<Record<string, unknown>> = {
   '/v1/documents': shortPage(DOCUMENTS),
   '/v1/suppliers': cursorPage(SUPPLIERS),
 };
-
-/** The ids a presenter can navigate to. Used by the tour's deep links. */
-export const FIXTURE_ENTRY_POINTS = {
-  assetId: ASSET_GRADER,
-  maintenanceRequestId: REQUEST_OIL,
-  productId: PRODUCT_OIL,
-  orderId: ORDER_OIL,
-} as const;

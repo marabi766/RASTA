@@ -9,7 +9,7 @@ import {
   type AssetDossier,
   type TimelineEntry,
 } from '@/lib/api/adapters/asset';
-import { formatInteger, formatJalaliDate, formatMoneyMinor } from '@/lib/format';
+import { formatInteger, formatJalaliDate, formatMoneyMinor, formatYear } from '@/lib/format';
 import { useApiResource } from '@/lib/use-api-resource';
 import { Badge, Card, PageHeader } from '../ui/primitives';
 import { Code, DataView, DescriptionList, Maybe, Section } from '../ui/data-view';
@@ -116,9 +116,7 @@ export function DossierView({ assetId }: { assetId: string }): ReactNode {
                     value: (
                       <Maybe
                         value={
-                          data.asset.manufactureYear
-                            ? formatInteger(data.asset.manufactureYear)
-                            : null
+                          data.asset.manufactureYear ? formatYear(data.asset.manufactureYear) : null
                         }
                       />
                     ),

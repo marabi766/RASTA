@@ -89,6 +89,17 @@ export function formatMoneyMinor(amountMinor: string, currency = 'IRR'): string 
   return `${toPersianDigits(groupDigits(amountMinor))} ${label}`;
 }
 
+/**
+ * A year, ungrouped.
+ *
+ * `formatInteger(2019)` renders «۲٬۰۱۹», which is correct for a quantity and
+ * wrong for a year — a thousands separator in a calendar year reads as a count
+ * of two thousand and nineteen somethings. Years are identifiers, not amounts.
+ */
+export function formatYear(year: number): string {
+  return toPersianDigits(String(Math.trunc(year)));
+}
+
 /** A plain integer for display: counts, days, quantities. */
 export function formatInteger(value: number | string): string {
   const asString = typeof value === 'number' ? String(Math.trunc(value)) : value;

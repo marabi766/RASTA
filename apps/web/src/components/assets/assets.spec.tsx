@@ -145,6 +145,18 @@ describe('electronic dossier', () => {
     expect(await screen.findByText('۹٬۰۰۷٬۱۹۹٬۲۵۴٬۷۴۰٬۹۹۳ ریال')).toBeInTheDocument();
   });
 
+  it('writes the manufacture year as a year, not as a quantity', async () => {
+    const { fetchMock, session } = makeHarness();
+    fetchMock.mockImplementation(renderRoute(routes));
+
+    renderWithSession(<DossierView assetId="ast_1" />, session);
+
+    // «۲٬۰۱۹» would be a count of two thousand and nineteen. The year is an
+    // identifier and takes no thousands separator.
+    expect(await screen.findByText('۲۰۱۹')).toBeInTheDocument();
+    expect(screen.queryByText('۲٬۰۱۹')).not.toBeInTheDocument();
+  });
+
   it('reads a negative daysUntilExpiry as time already elapsed', async () => {
     const { fetchMock, session } = makeHarness();
     fetchMock.mockImplementation(renderRoute(routes));
