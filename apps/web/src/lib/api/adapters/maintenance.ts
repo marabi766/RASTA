@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { amountMinorSchema, currencySchema } from '@rasta/contracts';
 import type { AdapterDescriptor } from '../adapter';
-import type { ApiClient } from '../client';
+import type { GatewayClient } from '../client';
 
 /**
  * Service schedules, maintenance requests and repair orders.
@@ -197,7 +197,7 @@ const cursorPage = <T extends z.ZodTypeAny>(item: T) =>
   z.object({ items: z.array(item), nextCursor: z.string().nullable(), hasMore: z.boolean() });
 
 export async function listDueSchedules(
-  client: ApiClient,
+  client: GatewayClient,
   options: { includeNotDue?: boolean; assetId?: string } = {},
   signal?: AbortSignal,
 ): Promise<ScheduleDue[]> {
@@ -217,7 +217,7 @@ export async function listDueSchedules(
 }
 
 export async function listMaintenanceRequests(
-  client: ApiClient,
+  client: GatewayClient,
   options: { assetId?: string; openOnly?: boolean } = {},
   signal?: AbortSignal,
 ): Promise<MaintenanceRequest[]> {
@@ -236,7 +236,7 @@ export async function listMaintenanceRequests(
 }
 
 export async function fetchMaintenanceRequest(
-  client: ApiClient,
+  client: GatewayClient,
   requestId: string,
   signal?: AbortSignal,
 ): Promise<MaintenanceRequestDetail> {
@@ -250,7 +250,7 @@ export async function fetchMaintenanceRequest(
 }
 
 export async function listRepairOrders(
-  client: ApiClient,
+  client: GatewayClient,
   signal?: AbortSignal,
 ): Promise<RepairOrder[]> {
   const result = await client.request({

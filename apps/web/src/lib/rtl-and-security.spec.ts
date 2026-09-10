@@ -84,11 +84,17 @@ describe('no physical direction styling', () => {
 
 describe('nothing secret reaches the browser bundle', () => {
   it('reads no environment variable outside the four public ones', () => {
+    // Five public values and `NODE_ENV`. Each is public by construction: three
+    // are the identity provider's own coordinates, one is the gateway origin,
+    // and `NEXT_PUBLIC_DEMO_DATA_MODE` selects between the live source and the
+    // presentation fixtures — knowing which mode a build is in is exactly what
+    // the disclosure banner tells every viewer anyway.
     const allowed = new Set([
       'NEXT_PUBLIC_API_BASE_URL',
       'NEXT_PUBLIC_KEYCLOAK_URL',
       'NEXT_PUBLIC_KEYCLOAK_REALM',
       'NEXT_PUBLIC_KEYCLOAK_CLIENT_ID',
+      'NEXT_PUBLIC_DEMO_DATA_MODE',
       'NODE_ENV',
     ]);
 

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { AdapterDescriptor } from '../adapter';
-import type { ApiClient } from '../client';
+import type { GatewayClient } from '../client';
 
 /**
  * Drivers, assignments, usage and dispatchability, from `fleet-service`.
@@ -136,7 +136,7 @@ const cursorPage = <T extends z.ZodTypeAny>(item: T) =>
   z.object({ items: z.array(item), nextCursor: z.string().nullable(), hasMore: z.boolean() });
 
 export async function listAvailability(
-  client: ApiClient,
+  client: GatewayClient,
   options: { assetId?: string; availableOnly?: boolean } = {},
   signal?: AbortSignal,
 ): Promise<AvailabilityView[]> {
@@ -158,7 +158,7 @@ export async function listAvailability(
 }
 
 export async function listUtilization(
-  client: ApiClient,
+  client: GatewayClient,
   signal?: AbortSignal,
 ): Promise<UtilizationView[]> {
   const result = await client.request({
@@ -171,7 +171,10 @@ export async function listUtilization(
   return result.data.items;
 }
 
-export async function listDrivers(client: ApiClient, signal?: AbortSignal): Promise<DriverView[]> {
+export async function listDrivers(
+  client: GatewayClient,
+  signal?: AbortSignal,
+): Promise<DriverView[]> {
   const result = await client.request({
     path: '/v1/drivers',
     schema: cursorPage(driverViewSchema),
@@ -183,7 +186,7 @@ export async function listDrivers(client: ApiClient, signal?: AbortSignal): Prom
 }
 
 export async function listAssignments(
-  client: ApiClient,
+  client: GatewayClient,
   options: { assetId?: string; active?: boolean } = {},
   signal?: AbortSignal,
 ): Promise<AssignmentView[]> {
@@ -202,7 +205,7 @@ export async function listAssignments(
 }
 
 export async function listUsageRecords(
-  client: ApiClient,
+  client: GatewayClient,
   options: { assetId?: string } = {},
   signal?: AbortSignal,
 ): Promise<UsageRecord[]> {

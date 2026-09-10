@@ -53,6 +53,7 @@ export function makeHarness(overrides: Partial<SessionValue> = {}): Harness {
 
   const session: SessionValue = {
     status: 'authenticated',
+    dataMode: 'live',
     claims,
     organizationId,
     configurationIssues: [],

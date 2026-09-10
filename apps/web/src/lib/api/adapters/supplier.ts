@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { AdapterDescriptor } from '../adapter';
-import type { ApiClient } from '../client';
+import type { GatewayClient } from '../client';
 
 /**
  * The supplier directory — Phase 1, and only Phase 1.
@@ -82,7 +82,7 @@ export interface SupplierQuery {
 }
 
 export async function searchSuppliers(
-  client: ApiClient,
+  client: GatewayClient,
   query: SupplierQuery = {},
   signal?: AbortSignal,
 ): Promise<SupplierDirectoryEntry[]> {

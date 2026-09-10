@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { amountMinorSchema, currencySchema } from '@rasta/contracts';
 import type { AdapterDescriptor } from '../adapter';
-import type { ApiClient } from '../client';
+import type { GatewayClient } from '../client';
 
 /**
  * Catalogue reads from `marketplace-service`, through the gateway.
@@ -88,7 +88,7 @@ export interface CatalogueQuery {
 }
 
 export async function searchProducts(
-  client: ApiClient,
+  client: GatewayClient,
   query: CatalogueQuery,
   signal?: AbortSignal,
 ): Promise<ProductView[]> {
@@ -108,7 +108,7 @@ export async function searchProducts(
 }
 
 export async function offersForProduct(
-  client: ApiClient,
+  client: GatewayClient,
   productId: string,
   sort: SortOption = 'PRICE_ASC',
   signal?: AbortSignal,
@@ -252,7 +252,7 @@ export type OrderSide = 'BUYER' | 'SUPPLIER';
  * was meant would silently return the wrong one.
  */
 export async function listOrders(
-  client: ApiClient,
+  client: GatewayClient,
   role: OrderSide = 'BUYER',
   signal?: AbortSignal,
 ): Promise<OrderView[]> {
@@ -271,7 +271,7 @@ export async function listOrders(
 }
 
 export async function fetchOrder(
-  client: ApiClient,
+  client: GatewayClient,
   orderId: string,
   signal?: AbortSignal,
 ): Promise<OrderView> {

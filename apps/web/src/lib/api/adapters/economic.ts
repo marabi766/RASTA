@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { amountMinorSchema, currencySchema } from '@rasta/contracts';
 import type { AdapterDescriptor } from '../adapter';
-import type { ApiClient } from '../client';
+import type { GatewayClient } from '../client';
 
 /**
  * Payment-provider disclosure from `economic-service`.
@@ -34,7 +34,7 @@ export const paymentProviderSchema = z.object({
 export type PaymentProviderDisclosure = z.infer<typeof paymentProviderSchema>;
 
 export async function fetchPaymentProvider(
-  client: ApiClient,
+  client: GatewayClient,
   signal?: AbortSignal,
 ): Promise<PaymentProviderDisclosure> {
   const result = await client.request({
@@ -133,7 +133,10 @@ export const TRANSACTION_STATUS_LABELS: Record<string, string> = {
   FAILED: 'ناموفق',
 };
 
-export async function fetchWallet(client: ApiClient, signal?: AbortSignal): Promise<WalletView> {
+export async function fetchWallet(
+  client: GatewayClient,
+  signal?: AbortSignal,
+): Promise<WalletView> {
   const result = await client.request({
     path: '/v1/wallets/me',
     schema: walletViewSchema,
@@ -144,7 +147,7 @@ export async function fetchWallet(client: ApiClient, signal?: AbortSignal): Prom
 }
 
 export async function listTransactions(
-  client: ApiClient,
+  client: GatewayClient,
   options: { includeIncoming?: boolean } = {},
   signal?: AbortSignal,
 ): Promise<TransactionView[]> {
@@ -218,7 +221,7 @@ export type TrialBalance = z.infer<typeof trialBalanceSchema>;
 
 /** `GET /v1/ledger/accounts` returns `{ items }` only — no cursor, no hasMore. */
 export async function listLedgerAccounts(
-  client: ApiClient,
+  client: GatewayClient,
   signal?: AbortSignal,
 ): Promise<LedgerAccount[]> {
   const result = await client.request({
@@ -231,7 +234,7 @@ export async function listLedgerAccounts(
 }
 
 export async function fetchTrialBalance(
-  client: ApiClient,
+  client: GatewayClient,
   signal?: AbortSignal,
 ): Promise<TrialBalance> {
   const result = await client.request({

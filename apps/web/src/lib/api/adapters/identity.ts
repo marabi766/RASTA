@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { AdapterDescriptor } from '../adapter';
-import type { ApiClient } from '../client';
+import type { GatewayClient } from '../client';
 
 /**
  * The authenticated user, from `identity-service`.
@@ -68,7 +68,7 @@ export const currentUserSchema = userViewSchema.extend({
 export type CurrentUser = z.infer<typeof currentUserSchema>;
 
 export async function fetchCurrentUser(
-  client: ApiClient,
+  client: GatewayClient,
   signal?: AbortSignal,
 ): Promise<CurrentUser> {
   const result = await client.request({
@@ -107,7 +107,7 @@ const userPageSchema = z.object({
  * fault.
  */
 export async function listUsers(
-  client: ApiClient,
+  client: GatewayClient,
   signal?: AbortSignal,
 ): Promise<OrganizationUser[]> {
   const result = await client.request({

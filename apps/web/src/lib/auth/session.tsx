@@ -11,7 +11,9 @@ import {
   type ReactNode,
 } from 'react';
 import type { User } from 'oidc-client-ts';
-import { ApiClient } from '../api/client';
+import { ApiClient, type GatewayClient } from '../api/client';
+import { createFixtureClient } from '../demo/fixture-client';
+import { DEMO_IDENTITY, isFixtureMode, readDemoDataMode, type DemoDataMode } from '../demo/mode';
 import { MissingConfigurationError, readPublicEnv, type PublicEnv } from '../env';
 import { readClaims, type TokenClaims } from './claims';
 import { getUserManager } from './user-manager';
@@ -40,8 +42,17 @@ export interface SessionValue {
   /** Present when `status === 'unavailable'`. */
   readonly configurationIssues: readonly string[];
   readonly env: PublicEnv | null;
-  /** Bound to the live session; `null` until there is one. */
-  readonly api: ApiClient | null;
+  /**
+   * The selected data source, or `null` until there is one.
+   *
+   * Typed as the interface rather than the class, because in presentation mode
+   * it is the fixture source. Screens cannot tell the two apart, and that is
+   * the point — the only thing that legitimately knows is `dataMode`, and the
+   * only thing that reads `dataMode` is the banner that discloses it.
+   */
+  readonly api: GatewayClient | null;
+  /** Which source is selected. Decided from configuration, never from failure. */
+  readonly dataMode: DemoDataMode;
   signIn(): Promise<void>;
   signOut(): Promise<void>;
   /**
@@ -77,9 +88,38 @@ export function SessionProvider({ children }: { children: ReactNode }): ReactNod
   // entire tree every fifteen minutes for no visible change.
   const accessToken = useRef<string | null>(null);
   const memberships = useRef<readonly string[]>([]);
+  const fixtureClient = useRef<GatewayClient | null>(null);
+
+  // Read at module scope of the effect rather than on every render: a value
+  // that could change between renders would defeat the guarantee that the mode
+  // is decided once.
+  const [dataMode] = useState<DemoDataMode>(() => readDemoDataMode());
 
   useEffect(() => {
     let cancelled = false;
+
+    // The mode is read once, before anything else, and never reconsidered.
+    // Nothing that happens later — a failed request, a missing service, a
+    // rejected token — can move a live session into fixtures.
+    if (isFixtureMode(dataMode)) {
+      void (async () => {
+        const client = await createFixtureClient();
+        if (cancelled) return;
+
+        // No `oidc-client-ts`, no token, no storage. A fixture session is not a
+        // signed-in session with the checks removed; it is a different thing
+        // that never enters the authentication path at all.
+        fixtureClient.current = client;
+        memberships.current = [...DEMO_IDENTITY.organizationIds];
+        setClaims(demoClaims());
+        setOrganizationId(DEMO_IDENTITY.organizationId);
+        setStatus('authenticated');
+      })();
+
+      return () => {
+        cancelled = true;
+      };
+    }
 
     let resolvedEnv: PublicEnv;
     try {
@@ -158,24 +198,30 @@ export function SessionProvider({ children }: { children: ReactNode }): ReactNod
       cancelled = true;
       detach?.();
     };
-  }, []);
+    // `dataMode` is stable — it comes from a `useState` initializer and has no
+    // setter — so declaring it re-runs nothing. It is declared because the
+    // effect branches on it, and an undeclared branch condition is how a mode
+    // switch would silently fail to take effect.
+  }, [dataMode]);
 
   const signIn = useCallback(async () => {
-    if (!env) return;
+    // A fixture session has no identity provider to redirect to, and reaching
+    // for one would be the exact coupling this mode exists to avoid.
+    if (isFixtureMode(dataMode) || !env) return;
     const manager = await getUserManager(env);
     await manager.signinRedirect({
       // Comes back as `state` on the callback, so a deep link survives the
       // round trip through the identity provider.
       state: { returnTo: window.location.pathname + window.location.search },
     });
-  }, [env]);
+  }, [env, dataMode]);
 
   const signOut = useCallback(async () => {
-    if (!env) return;
+    if (isFixtureMode(dataMode) || !env) return;
     clearSelection();
     const manager = await getUserManager(env);
     await manager.signoutRedirect();
-  }, [env]);
+  }, [env, dataMode]);
 
   const selectOrganization = useCallback((next: string): boolean => {
     if (!memberships.current.includes(next)) return false;
@@ -184,8 +230,18 @@ export function SessionProvider({ children }: { children: ReactNode }): ReactNod
     return true;
   }, []);
 
-  const api = useMemo(() => {
-    if (!env || status !== 'authenticated') return null;
+  /**
+   * The single data-source selection point for the whole application.
+   *
+   * Everything above this line is identical in both modes: the same adapters,
+   * the same screens, the same schemas, the same four render states. That is
+   * deliberate — a presentation that took a different code path from the
+   * product would be demonstrating the presentation.
+   */
+  const api = useMemo<GatewayClient | null>(() => {
+    if (status !== 'authenticated') return null;
+    if (isFixtureMode(dataMode)) return fixtureClient.current;
+    if (!env) return null;
 
     return new ApiClient({
       baseUrl: env.apiBaseUrl,
@@ -201,7 +257,7 @@ export function SessionProvider({ children }: { children: ReactNode }): ReactNod
             }
           : null,
     });
-  }, [env, status, organizationId]);
+  }, [env, status, organizationId, dataMode]);
 
   const value = useMemo<SessionValue>(
     () => ({
@@ -211,6 +267,7 @@ export function SessionProvider({ children }: { children: ReactNode }): ReactNod
       configurationIssues,
       env,
       api,
+      dataMode,
       signIn,
       signOut,
       selectOrganization,
@@ -222,6 +279,7 @@ export function SessionProvider({ children }: { children: ReactNode }): ReactNod
       configurationIssues,
       env,
       api,
+      dataMode,
       signIn,
       signOut,
       selectOrganization,
@@ -235,6 +293,27 @@ export function useSession(): SessionValue {
   const value = useContext(SessionContext);
   if (!value) throw new Error('useSession must be used inside <SessionProvider>');
   return value;
+}
+
+/**
+ * The claims a fixture session presents.
+ *
+ * Shaped like `TokenClaims` so every screen reads it the same way, but built
+ * from a constant rather than decoded from anything: there is no token in
+ * fixture mode to decode. `expiresAt` is `null` because nothing expires when
+ * nothing was issued — a fabricated expiry would invite the renew machinery to
+ * take an interest in a session it has no business touching.
+ */
+function demoClaims(): TokenClaims {
+  return {
+    subject: DEMO_IDENTITY.subject,
+    userId: DEMO_IDENTITY.userId,
+    displayName: DEMO_IDENTITY.displayName,
+    roles: [...DEMO_IDENTITY.roles],
+    activeOrganizationId: DEMO_IDENTITY.organizationId,
+    organizationIds: [...DEMO_IDENTITY.organizationIds],
+    expiresAt: null,
+  };
 }
 
 /**

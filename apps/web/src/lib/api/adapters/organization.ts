@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { AdapterDescriptor } from '../adapter';
-import type { ApiClient } from '../client';
+import type { GatewayClient } from '../client';
 
 /**
  * Organization reads, used by the tenant switcher.
@@ -51,7 +51,7 @@ const listResponseSchema = z.object({
 });
 
 export async function listVisibleOrganizations(
-  client: ApiClient,
+  client: GatewayClient,
   signal?: AbortSignal,
 ): Promise<OrganizationView[]> {
   const result = await client.request({

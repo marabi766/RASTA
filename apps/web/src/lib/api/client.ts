@@ -61,6 +61,24 @@ export interface GatewayResult<T> {
   readonly status: number;
 }
 
+/**
+ * What a screen needs from a data source, and the only thing it may assume.
+ *
+ * Adapters depend on this rather than on `ApiClient`, which is what makes the
+ * portable presentation mode possible without a second copy of every screen:
+ * the fixture source implements the same one method, is selected once at the
+ * session boundary, and every screen above it is unchanged and unaware.
+ *
+ * Deliberately one method. A wider interface would invite a screen to ask
+ * *which* source it is talking to and branch on the answer, and that branch is
+ * exactly how a demo starts behaving differently from the product it is
+ * demonstrating. The one place that legitimately knows the difference is the
+ * banner that discloses it.
+ */
+export interface GatewayClient {
+  request<T>(request: GatewayRequest<T>): Promise<GatewayResult<T>>;
+}
+
 export interface ApiClientOptions {
   readonly baseUrl: string;
   readonly session: SessionReader;
@@ -68,7 +86,7 @@ export interface ApiClientOptions {
   readonly newCorrelationId?: () => string;
 }
 
-export class ApiClient {
+export class ApiClient implements GatewayClient {
   private readonly base: URL;
   private readonly session: SessionReader;
   private readonly fetchImpl: typeof fetch;

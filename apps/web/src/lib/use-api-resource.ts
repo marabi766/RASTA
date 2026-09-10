@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { ApiFailure, CLIENT_ERROR_CODES } from './api/errors';
-import type { ApiClient } from './api/client';
+import type { GatewayClient } from './api/client';
 import { useSession } from './auth/session';
 
 /**
@@ -35,7 +35,7 @@ export interface Resource<T> {
 }
 
 export function useApiResource<T>(
-  load: (client: ApiClient, signal: AbortSignal) => Promise<T>,
+  load: (client: GatewayClient, signal: AbortSignal) => Promise<T>,
   dependencies: readonly unknown[],
 ): Resource<T> {
   const { api, organizationId } = useSession();

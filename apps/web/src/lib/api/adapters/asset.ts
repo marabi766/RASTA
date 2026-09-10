@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { amountMinorSchema } from '@rasta/contracts';
 import type { AdapterDescriptor } from '../adapter';
-import type { ApiClient } from '../client';
+import type { GatewayClient } from '../client';
 
 /**
  * Assets and the electronic dossier, from `asset-service`.
@@ -202,7 +202,7 @@ export interface AssetQuery {
 }
 
 export async function listAssets(
-  client: ApiClient,
+  client: GatewayClient,
   query: AssetQuery = {},
   signal?: AbortSignal,
 ): Promise<AssetView[]> {
@@ -223,7 +223,7 @@ export async function listAssets(
 }
 
 export async function fetchDossier(
-  client: ApiClient,
+  client: GatewayClient,
   assetId: string,
   signal?: AbortSignal,
 ): Promise<AssetDossier> {
@@ -237,7 +237,7 @@ export async function fetchDossier(
 }
 
 export async function fetchTimeline(
-  client: ApiClient,
+  client: GatewayClient,
   assetId: string,
   signal?: AbortSignal,
 ): Promise<TimelineEntry[]> {

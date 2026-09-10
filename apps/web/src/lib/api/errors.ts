@@ -29,6 +29,22 @@ export const CLIENT_ERROR_CODES = {
   TENANT_NOT_IN_MEMBERSHIPS: 'TENANT_NOT_IN_MEMBERSHIPS',
   /** A request was aimed somewhere other than the API Gateway. */
   NON_GATEWAY_TARGET: 'NON_GATEWAY_TARGET',
+  /**
+   * A write was attempted while the presentation fixture source was selected.
+   *
+   * Refused rather than faked. A read-only source that answered a `POST` with a
+   * cheerful result would be teaching an audience that a mutation succeeded,
+   * which is the single most damaging thing a demo can do.
+   */
+  FIXTURE_WRITE_REFUSED: 'FIXTURE_WRITE_REFUSED',
+  /**
+   * The presentation dataset has no record for this route.
+   *
+   * A gap in the demo, deliberately distinct from `NOT_FOUND`: the latter means
+   * the service looked and there was nothing, and conflating the two would hide
+   * an unfinished fixture behind a legitimate-looking empty state.
+   */
+  FIXTURE_MISSING: 'FIXTURE_MISSING',
 } as const;
 
 export type ClientErrorCode = (typeof CLIENT_ERROR_CODES)[keyof typeof CLIENT_ERROR_CODES];
@@ -120,6 +136,10 @@ const MESSAGES: Record<string, string> = {
     'سازمان انتخاب‌شده در فهرست عضویت‌های نشست شما نیست.',
   [CLIENT_ERROR_CODES.NON_GATEWAY_TARGET]:
     'این درخواست به مقصدی جز درگاه API هدف‌گیری شده بود و ارسال نشد.',
+  [CLIENT_ERROR_CODES.FIXTURE_WRITE_REFUSED]:
+    'حالت نمایشی فقط-خواندنی است و هیچ عملیات تغییردهنده‌ای انجام نمی‌دهد.',
+  [CLIENT_ERROR_CODES.FIXTURE_MISSING]:
+    'برای این بخش دادهٔ نمایشی تعریف نشده است. در حالت زنده این صفحه از سرویس واقعی خوانده می‌شود.',
 };
 
 const STATUS_FALLBACK: Record<number, string> = {
