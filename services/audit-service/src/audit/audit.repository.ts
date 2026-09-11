@@ -129,9 +129,10 @@ const AUDIT_EVENT_SELECT = {
   // digest.
   recordHash: true,
   previousHash: true,
-  // `correctionOf` stays absent: it is never written (corrections need path B,
-  // which is AUD-004), and publishing a permanently null correction link would
-  // read as "not corrected", which is a claim this phase cannot make.
+  // `correctionOf` stays absent from the read side. Path B writes it since
+  // AUD-004 Phase B, but publishing it is a public contract change that belongs
+  // with the correction command, and a link shown on only some records would
+  // let a reader take every other record's silence for "not corrected".
 } as const;
 
 /**
@@ -391,10 +392,12 @@ export class AuditRepository {
         const previousHash = tip.head_hash === null ? null : toStorableHash(tip.head_hash);
 
         // One object, used for the hash *and* for the insert, so the two can
-        // never describe different rows. The columns path A does not populate
-        // are written as explicit nulls here rather than omitted: the hash
+        // never describe different rows. The six path-B columns (AUD-004) are
+        // normalised to explicit nulls when a record does not carry them —
+        // which every path-A record does not — rather than omitted: the hash
         // covers them, and "absent" and "null" must not be able to mean two
-        // different things.
+        // different things. A path-A row therefore hashes exactly as it did
+        // before path B existed.
         const stored: HashableAuditRecord = {
           id: record.id,
           occurredAt: record.occurredAt,
@@ -407,23 +410,26 @@ export class AuditRepository {
           resourceType: record.resourceType,
           resourceId: record.resourceId,
           outcome: record.outcome,
-          errorCode: null,
-          reason: null,
-          changes: null,
+          errorCode: record.errorCode ?? null,
+          reason: record.reason ?? null,
+          changes: record.changes ?? null,
           occurrenceCount: record.occurrenceCount,
           sourceService: record.sourceService,
           sourceServiceVersion: record.sourceServiceVersion,
           sourceEventId: record.sourceEventId,
           sourceEventName: record.sourceEventName,
           sourceTopic: record.sourceTopic,
-          sourceIp: null,
-          sourceUserAgent: null,
+          sourceIp: record.sourceIp ?? null,
+          sourceUserAgent: record.sourceUserAgent ?? null,
           correlationId: record.correlationId,
           causationId: record.causationId,
           traceparent: record.traceparent,
           sourceStreamSeq: record.sourceStreamSeq,
           sequenceNo: tip.sequence_no,
-          correctionOf: null,
+          // A correction is this fresh row pointing at an older one. The older
+          // one is never touched — the runtime role holds no UPDATE on this
+          // table, and the append-only trigger would refuse one regardless.
+          correctionOf: record.correctionOf ?? null,
         };
 
         const recordHash = computeRecordHash(stored, previousHash);
@@ -443,6 +449,12 @@ export class AuditRepository {
             outcome: record.outcome,
             errorCode: stored.errorCode,
             reason: stored.reason,
+            // `DbNull`, not `JsonNull`: an absent delta is SQL NULL, which is
+            // what reads back as `null` and what the hash above encoded. A JSON
+            // `null` value would be a third state, and
+            // `audit_event_changes_is_array` refuses it anyway.
+            changes:
+              stored.changes === null ? Prisma.DbNull : (stored.changes as Prisma.InputJsonValue),
             occurrenceCount: stored.occurrenceCount,
             sourceService: stored.sourceService,
             sourceServiceVersion: stored.sourceServiceVersion,

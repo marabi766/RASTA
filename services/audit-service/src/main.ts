@@ -81,8 +81,9 @@ async function bootstrap(): Promise<void> {
   // operator looks first.
   console.warn(
     `[${SERVICE_NAME}] listening on :${env.PORT} (${env.NODE_ENV}) — ` +
-      'domain projector: ingesting 10 domain topics; read API: search and detail ' +
-      '(no export, no integrity verification yet)' +
+      'domain projector: ingesting 10 domain topics; audit trail: consuming ' +
+      'rasta.audit.trail.v1 (no producer publishes to it yet); read API: search, detail ' +
+      'and chain verification (no export, no correction command)' +
       (allowsDeveloperTooling(env) ? ` — docs at http://localhost:${env.PORT}/docs` : ''),
   );
 }

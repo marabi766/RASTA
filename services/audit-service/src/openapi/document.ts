@@ -88,23 +88,28 @@ export const ERROR_DESCRIPTIONS: Record<number, string> = {
  * contracts.
  */
 const DESCRIPTION =
-  'The append-only evidence store. Records are written only by consuming domain ' +
-  'events from Kafka — there is no write endpoint and never will be (docs/04 § 4.15) — ' +
-  'and they are never updated, deleted or truncated, which the database enforces ' +
+  'The append-only evidence store. Records are written only by consuming Kafka — the ' +
+  'ten domain topics (path A) and the explicit audit trail, rasta.audit.trail.v1 ' +
+  '(path B). There is no write endpoint and never will be (docs/04 § 4.15), and ' +
+  'records are never updated, deleted or truncated, which the database enforces ' +
   'independently through privileges and a trigger. Reading is restricted to ' +
   'SYSTEM_ADMIN and UNION_ADMIN; the oversight AUDITOR role has no access to this ' +
   'service at all. Every query must state a bounded from..to window. Records produced ' +
   'by the domain projector carry no actor roles, no source address and no field-level ' +
-  'delta, because a domain event does not carry them: those arrive with the explicit ' +
-  'audit trail (AUD-004). Every record written since AUD-003 carries a SHA-256 link ' +
+  'delta, because a domain event does not carry them. Records from the explicit audit ' +
+  'trail (AUD-004 Phase B) carry actor roles, outcome, error code, reason, source ' +
+  'address and a bounded, redacted delta when the producer supplies them; no service ' +
+  'publishes to that trail yet. Every record written since AUD-003 carries a SHA-256 link ' +
   'into a per-(organization, UTC month) chain, and GET /v1/audit-events/verify ' +
   'recomputes a range of one chain and reports the first divergence. That chain is ' +
   'tamper-evident and unsigned: it makes an alteration visible to anyone who compares ' +
   'against an independent copy of the head, and it is not protection against a database ' +
   'superuser who can rewrite the records and the head together. Records written before ' +
   'AUD-003 carry no link, are never backfilled, and any range containing one is reported ' +
-  'as UNVERIFIABLE_LEGACY rather than as valid. Corrections are not implemented: ' +
-  'ADR-053 § 7 routes them through the explicit audit trail, which is AUD-004.';
+  'as UNVERIFIABLE_LEGACY rather than as valid. No correction command exists: ADR-053 ' +
+  '§ 7 routes a correction through the explicit audit trail, where it is recorded as a ' +
+  'new record linked to the one it corrects — never as an edit — and this API does not ' +
+  'yet publish that link.';
 
 /** Builds the finished document for a booted application. */
 export function buildAuditOpenApiDocument(

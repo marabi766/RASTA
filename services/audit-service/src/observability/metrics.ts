@@ -98,6 +98,28 @@ export const INGESTION_FAILURE_REASONS = {
    * security control that stops advancing.
    */
   UNMAPPABLE_ORGANIZATION_EVENT: 'unmappable_organization_event',
+
+  // AUD-004 Phase B — a path-B message the audit-trail consumer refuses to
+  // record. Five values rather than one because each points an operator at a
+  // different fix, and none of them names anybody: the tenant, the actor and
+  // the event stay in the (redacted) log line and the dead-letter copy.
+
+  /** The envelope itself did not parse. */
+  TRAIL_INVALID_ENVELOPE: 'trail_invalid_envelope',
+  /** It parsed, but is not `AUDIT_EVENT_RECORDED` v1 delivered on the trail topic. */
+  TRAIL_UNSUPPORTED_EVENT: 'trail_unsupported_event',
+  /** The payload failed the v1 contract or a bound of the column it would fill. */
+  TRAIL_INVALID_PAYLOAD: 'trail_invalid_payload',
+  /**
+   * `payload.organizationId` and `envelope.tenantId` did not agree.
+   *
+   * Its own reason because it is the one rejection that is a tenant-isolation
+   * signal rather than a formatting one: a producer that disagrees with itself
+   * about whose record this is must never have either answer picked for it.
+   */
+  TRAIL_TENANT_MISMATCH: 'trail_tenant_mismatch',
+  /** A `changes` entry for a `SENSITIVE_KEYS` field carried a raw value. */
+  TRAIL_UNREDACTED_SENSITIVE_CHANGE: 'trail_unredacted_sensitive_change',
 } as const;
 
 export type IngestionFailureReason =

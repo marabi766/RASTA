@@ -26,12 +26,13 @@ import type { AuditChainVerification } from './audit.verification.view';
  * because "we did not add one" is a fact that stops being true the first time
  * somebody adds one for a migration script.
  *
- * **AUD-003 does not change that, and specifically adds no correction route.**
- * ADR-053 § 7 requires a correction to enter through path B
- * (`rasta.audit.trail.v1`), which is AUD-004: this service has no producer, no
- * outbox and no write API, so the only way to record one today would be a
- * direct insert — the thing § 7 exists to forbid. `correctionOf` therefore
- * stays an inert column, and the correction half of AUD-003 is openly pending.
+ * **AUD-003 and AUD-004 Phase B do not change that, and neither adds a
+ * correction route.** ADR-053 § 7 requires a correction to enter through path B
+ * (`rasta.audit.trail.v1`). Since AUD-004 Phase B this service *consumes* that
+ * path — a published correction becomes a fresh row linked by `correctionOf` —
+ * but it still has no producer, no outbox and no write API, and accepting a
+ * correction command here would be the direct insert § 7 exists to forbid. The
+ * command belongs to the producer side and is not built.
  *
  * ## Route order is load-bearing
  *

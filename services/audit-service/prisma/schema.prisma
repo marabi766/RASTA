@@ -28,12 +28,14 @@
 // the chain existed", never "verified", and the verification endpoint reports
 // such a range as `UNVERIFIABLE_LEGACY` rather than as valid.
 //
-// `correctionOf` (§ 7) is still declared and still **never written**. The ADR
-// requires a correction to arrive through path B (`rasta.audit.trail.v1`), and
-// path B is AUD-004: this service has no producer, no outbox and no write API,
-// so there is no honest way to record one yet. The column stays inert rather
-// than being filled by a shortcut that would make audit-service audit its own
-// writes.
+// `correctionOf` (§ 7) is written since AUD-004 Phase B, and only by path B:
+// the trail consumer records a correction a producer publishes on
+// `rasta.audit.trail.v1` as a fresh row whose `correctionOf` names the corrected
+// record. Nothing updates the corrected row, and this service still has no
+// producer, no outbox and no write API — a correction is never something
+// audit-service originates. The same phase fills `errorCode`, `reason`,
+// `changes`, `sourceIp`, `sourceUserAgent` and real `actorRoles` on path-B rows;
+// path-A rows stay exactly as described above. No column or migration was added.
 //
 // `sequenceNo` is a `BIGSERIAL`, still meaningless across partitions. Within
 // one chain it is now chain order, because the writer draws it while holding

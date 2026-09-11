@@ -1,6 +1,6 @@
 import { ulid } from 'ulid';
 import { SENSITIVE_KEYS, REDACTED } from '@rasta/logging';
-import type { EventEnvelope } from '@rasta/contracts';
+import type { AuditChange, EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 
 /**
@@ -25,8 +25,10 @@ export const DOMAIN_PROJECTOR_CONSUMER = 'audit-service.domain-projector';
  * `construction` and `contract` have no producer yet, and subscribing to a
  * topic nothing writes would make the consumer look broader than it is while
  * `allowAutoTopicCreation: false` refused to start. `rasta.audit.trail.v1` is
- * path B and belongs to AUD-004; consuming it here would mean this service
- * auditing its own writes.
+ * path B and is consumed separately, under its own group, by
+ * `AuditTrailConsumer` (AUD-004 Phase B): subscribing to it here would put two
+ * opposite validation contracts behind one handler and one idempotency
+ * namespace.
  */
 export const DOMAIN_TOPICS = [
   'rasta.identity.v1',
@@ -40,6 +42,19 @@ export const DOMAIN_TOPICS = [
   'rasta.document.v1',
   'rasta.supplier.v1',
 ] as const;
+
+/**
+ * The dead-letter topic both audit consumers share.
+ *
+ * audit's own rather than each producer's: a message that failed *this*
+ * service's validation is this service's problem to replay, and routing it back
+ * to `rasta.asset.v1.dlq` would put it in front of a team that has nothing to
+ * fix. The original topic rides along in the `x-dlq-original-topic` header, so a
+ * path-A copy and a path-B copy stay distinguishable. The topic is created by
+ * `create-topics.sh` and by both CI topic lists, which matters: a dead-letter
+ * write to a topic that does not exist stalls the partition.
+ */
+export const AUDIT_DEAD_LETTER_TOPIC = 'rasta.audit.v1.dlq';
 
 export type AuditActorType = 'USER' | 'SERVICE' | 'SYSTEM' | 'ANONYMOUS';
 export type AuditOutcome = 'SUCCESS' | 'FAILURE' | 'REFUSED';
@@ -65,6 +80,22 @@ export interface AuditEventRecord {
   causationId: string | null;
   traceparent: string | null;
   sourceStreamSeq: bigint | null;
+
+  // Path B only (AUD-004 Phase B, `audit-trail.mapper.ts`). A path-A record
+  // never carries these keys — a domain envelope has nothing to put in them,
+  // and leaving them off keeps "there is nowhere for a payload to go" a
+  // structural fact of path A rather than a convention. The repository writes
+  // an absent key as SQL NULL, and the record hash already covers all six
+  // (`CANONICAL_FIELDS`), so a path-A row hashes exactly as it did before.
+
+  errorCode?: string | null;
+  reason?: string | null;
+  /** Bounded, marker-redacted delta already validated against the v1 contract. */
+  changes?: AuditChange[] | null;
+  sourceIp?: string | null;
+  sourceUserAgent?: string | null;
+  /** The `AuditEvent.id` a correction points at. Never an update of that row. */
+  correctionOf?: string | null;
 }
 
 /**
@@ -160,49 +191,41 @@ export function describePayloadKeys(payload: unknown): string {
   return keys.length > 20 ? `${shown},…(${keys.length} keys)` : shown;
 }
 
+/** The columns a record takes from its envelope and delivery, on either path. */
+export type AuditEnvelopeProvenance = Pick<
+  AuditEventRecord,
+  | 'id'
+  | 'occurredAt'
+  | 'sourceService'
+  | 'sourceServiceVersion'
+  | 'sourceEventId'
+  | 'sourceEventName'
+  | 'sourceTopic'
+  | 'correlationId'
+  | 'causationId'
+  | 'traceparent'
+  | 'sourceStreamSeq'
+>;
+
 /**
- * Maps one envelope and its delivery into a record.
+ * The envelope-derived half of a record — identical whichever path it came by.
+ *
+ * Shared by `toAuditEventRecord` below and by path B's `toAuditTrailRecord`, so
+ * the two paths cannot drift on what `occurredAt`, the source event, the topic
+ * or the causal chain means.
  *
  * `delivery.topic` rather than anything from the envelope, deliberately: the
  * envelope is producer-authored, so a producer could otherwise claim a topic it
  * never published to, and the topic is what tells a path-A row from a path-B
  * row for the rest of this store's life.
  */
-export function toAuditEventRecord(
+export function toEnvelopeProvenance(
   envelope: EventEnvelope,
   delivery: EventDelivery,
-): AuditEventRecord {
-  // ADR § 5: actor is assigned explicitly, never left blank. An envelope with
-  // an actor keeps it; one without is attributed to the producing service as
-  // SYSTEM, so an insurance expiry sweep reads as
-  // `SYSTEM / asset-service` rather than an unexplained gap. ANONYMOUS remains
-  // for an envelope that names neither, which today's schema makes impossible
-  // — `producer` is required — but the branch is here because the ADR defines
-  // it and a future envelope version could relax that.
-  const actorType: AuditActorType = envelope.actor ? envelope.actor.type : 'SYSTEM';
-  const rawActorId = envelope.actor ? envelope.actor.id : envelope.producer;
-  const actorId = boundOptional(rawActorId, LIMITS.actorId);
-
+): AuditEnvelopeProvenance {
   return {
     id: ulid(),
     occurredAt: new Date(envelope.occurredAt),
-
-    actorType: actorId === null && !envelope.actor ? 'ANONYMOUS' : actorType,
-    actorId,
-    // Path A never knows roles. An empty array, never null: null would mean
-    // "unknown", and this is "known to be unavailable" (ADR § 5).
-    actorRoles: [],
-
-    organizationId: boundOptional(envelope.tenantId, LIMITS.organizationId),
-
-    action: bound(ACTION_BY_EVENT_NAME[envelope.eventName] ?? envelope.eventName, LIMITS.action),
-    resourceType: bound(envelope.aggregateType, LIMITS.resourceType),
-    resourceId: boundOptional(envelope.aggregateId, LIMITS.resourceId),
-
-    // A published domain event is a change that already happened. A refusal
-    // never reaches a topic, which is precisely why path B exists.
-    outcome: 'SUCCESS',
-    occurrenceCount: 1,
 
     sourceService: bound(envelope.producer, LIMITS.sourceService),
     sourceServiceVersion: boundOptional(envelope.producerVersion, LIMITS.sourceServiceVersion),
@@ -220,5 +243,43 @@ export function toAuditEventRecord(
       envelope.streamSeq === undefined || envelope.streamSeq === null
         ? null
         : BigInt(envelope.streamSeq),
+  };
+}
+
+/** Maps one envelope and its delivery into a record. */
+export function toAuditEventRecord(
+  envelope: EventEnvelope,
+  delivery: EventDelivery,
+): AuditEventRecord {
+  // ADR § 5: actor is assigned explicitly, never left blank. An envelope with
+  // an actor keeps it; one without is attributed to the producing service as
+  // SYSTEM, so an insurance expiry sweep reads as
+  // `SYSTEM / asset-service` rather than an unexplained gap. ANONYMOUS remains
+  // for an envelope that names neither, which today's schema makes impossible
+  // — `producer` is required — but the branch is here because the ADR defines
+  // it and a future envelope version could relax that.
+  const actorType: AuditActorType = envelope.actor ? envelope.actor.type : 'SYSTEM';
+  const rawActorId = envelope.actor ? envelope.actor.id : envelope.producer;
+  const actorId = boundOptional(rawActorId, LIMITS.actorId);
+
+  return {
+    ...toEnvelopeProvenance(envelope, delivery),
+
+    actorType: actorId === null && !envelope.actor ? 'ANONYMOUS' : actorType,
+    actorId,
+    // Path A never knows roles. An empty array, never null: null would mean
+    // "unknown", and this is "known to be unavailable" (ADR § 5).
+    actorRoles: [],
+
+    organizationId: boundOptional(envelope.tenantId, LIMITS.organizationId),
+
+    action: bound(ACTION_BY_EVENT_NAME[envelope.eventName] ?? envelope.eventName, LIMITS.action),
+    resourceType: bound(envelope.aggregateType, LIMITS.resourceType),
+    resourceId: boundOptional(envelope.aggregateId, LIMITS.resourceId),
+
+    // A published domain event is a change that already happened. A refusal
+    // never reaches a topic, which is precisely why path B exists.
+    outcome: 'SUCCESS',
+    occurrenceCount: 1,
   };
 }

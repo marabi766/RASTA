@@ -24,15 +24,17 @@ import { z } from 'zod';
  *                              nothing, because a forger who rewrote the row
  *                              rewrote the hash beside it. What is published
  *                              instead is `integrity`, below.
- *   correctionOf               AUD-007, and still never written. ADR-053 § 7
- *                              routes a correction through path B, which is
- *                              AUD-004, so a null correction link would read as
- *                              "not corrected" — a claim this phase cannot make.
- *   changes                    Published, and always null in path A. Unlike the
- *                              two above, its absence is *itself* the documented
- *                              contract (ADR-053 § 2.1: a projector row stores
- *                              no payload value), so a client that sees null
- *                              learns the true thing.
+ *   correctionOf               Written by path B since AUD-004 Phase B, and not
+ *                              published yet. Nothing produces a correction
+ *                              today, so every published link would be null,
+ *                              and a null link reads as "not corrected" — a
+ *                              claim this service cannot make until the
+ *                              correction command exists.
+ *   changes                    Published. Always null in path A, whose absence
+ *                              is *itself* the documented contract (ADR-053 §
+ *                              2.1: a projector row stores no payload value);
+ *                              a path-B row carries the bounded, marker-redacted
+ *                              delta its producer declared, or null.
  *
  * ## `integrity` says which of two true things this row is, and nothing more
  *
