@@ -215,6 +215,86 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     ]);
   });
 
+  test(`${REFUSALS} role refusals of GET /v1/users in one window are recorded as one INSUFFICIENT_ROLE record counting ${REFUSALS} (AUD-004 Phase C3)`, async ({
+    auditor,
+    systemAdmin,
+  }) => {
+    // `province.auditor` holds only AUDITOR, so the platform RolesGuard refuses
+    // GET /v1/users (ORGANIZATION_ADMIN | UNION_ADMIN) — a real, unmodified
+    // denial through the real gateway, from the existing realm and seed.
+    const windowMs = e2eConfig().identityAggregationWindowSeconds * 1000;
+    if (windowMs < BURST_BUDGET_MS + WINDOW_START_MARGIN_MS * 2) {
+      throw new Error(
+        `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS=${windowMs / 1000} is too short to place ` +
+          `${REFUSALS} refusals in one window from outside the service`,
+      );
+    }
+    test.setTimeout(windowMs * 2 + 180_000);
+
+    const correlationId = `e2e-role-refusal-${randomUUID()}`;
+    const querySecret = `e2e-query-${randomUUID()}`;
+    await atFreshWindow(windowMs);
+    const burstStartedAt = Date.now();
+
+    for (let i = 0; i < REFUSALS; i += 1) {
+      const response = await auditor.get(`/v1/users?q=${querySecret}`, { correlationId });
+      expect(response.status).toBe(403);
+      expect(errorCode(response.body)).toBe('INSUFFICIENT_ROLE');
+      expect((response.body as { message?: string }).message).toBe(
+        'You do not have permission to perform this action',
+      );
+      expect(response.correlationId).toBe(correlationId);
+    }
+    expect(Date.now() - burstStartedAt).toBeLessThan(BURST_BUDGET_MS);
+
+    let records: AuditRecord[] = [];
+    await waitFor(
+      `the aggregated role-refusal record for correlation ${correlationId}`,
+      async () => {
+        const { status, page } = await findByCorrelation(systemAdmin, correlationId);
+        if (status !== 200 || page.items.length === 0) return false;
+        records = page.items;
+        return true;
+      },
+      windowMs + 150_000,
+      () => `last seen: ${JSON.stringify(records)}`,
+    );
+
+    expect(records).toHaveLength(1);
+    const record = records[0]!;
+    expect(record.occurrenceCount).toBe(REFUSALS);
+    expect(record.outcome).toBe('REFUSED');
+    expect(record.errorCode).toBe('INSUFFICIENT_ROLE');
+    expect(record.action).toBe('identity.users.list');
+    expect(record.resourceType).toBe('User');
+    expect(record.actorType).toBe('USER');
+    expect(record.resourceId).toBe(record.actorId);
+    expect(record.sourceService).toBe('identity-service');
+    expect(record.sourceTopic).toBe('rasta.audit.trail.v1');
+    expect(record.correlationId).toBe(correlationId);
+    // The tenant the auditor acted for, from its own token.
+    expect(record.organizationId).toBe(ORG.oversight);
+    // The actor's own roles are the ADR's evidence; the endpoint's required
+    // roles, the query and the error text are not.
+    expect(record.actorRoles).toContain('AUDITOR');
+    const serialised = JSON.stringify(record);
+    for (const leaked of [querySecret, 'ORGANIZATION_ADMIN', 'UNION_ADMIN', 'permission']) {
+      expect(serialised).not.toContain(leaked);
+    }
+
+    await sleep(3_000);
+    const settled = await findByCorrelation(systemAdmin, correlationId);
+    expect(settled.page.items.map((item) => [item.id, item.occurrenceCount])).toEqual([
+      [record.id, REFUSALS],
+    ]);
+
+    // The refused caller cannot read the evidence its refusal produced.
+    const own = await auditor.get(
+      `/v1/audit-events?${new URLSearchParams({ ...recentWindow(), correlationId }).toString()}`,
+    );
+    expect(own.status).toBe(403);
+  });
+
   test('the caller who was refused cannot read the record their own refusal created', async ({
     tenantA,
   }) => {
