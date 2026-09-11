@@ -328,6 +328,58 @@ model OutboxStreamSequence {
   @@map("outbox_stream_sequence")
 }
 
+/// ADR-053 § 4 — refusals awaiting delivery to `rasta.audit.trail.v1`
+/// (AUD-004 Phase C1).
+///
+/// Deliberately **not** `OutboxMessage`. A `403` has no domain transaction to
+/// share a commit with, and the domain outbox's stream sequencing is for
+/// domain events only. The exception filter writes one row in its own short,
+/// time-bounded transaction; a second relay publishes it.
+///
+/// Bounded columns only — no JSON, no headers, nowhere for a request body, a
+/// token or an exception message to go. Not in `TENANT_SCOPED_MODELS`: like
+/// `OutboxMessage` it is platform plumbing the relay drains across tenants, and
+/// every row names its own tenant explicitly in `organizationId`.
+///
+/// The CHECK constraints and the three partial indexes live in the migration
+/// only; Prisma models neither.
+model SecurityEventOutbox {
+  /// ULID — becomes `envelope.eventId`, the consumer's idempotency key.
+  id String @id @db.VarChar(26)
+
+  organizationId String?  @map("organization_id") @db.VarChar(128)
+  actorType      String   @map("actor_type") @db.VarChar(16)
+  actorId        String   @map("actor_id") @db.VarChar(256)
+  actorRoles     String[] @default([]) @map("actor_roles")
+
+  action       String  @db.VarChar(256)
+  resourceType String  @map("resource_type") @db.VarChar(128)
+  resourceId   String? @map("resource_id") @db.VarChar(256)
+  errorCode    String  @map("error_code") @db.VarChar(64)
+  reason       String? @db.VarChar(1000)
+
+  sourceIp        String? @map("source_ip") @db.VarChar(64)
+  sourceUserAgent String? @map("source_user_agent") @db.VarChar(512)
+  correlationId   String  @map("correlation_id") @db.VarChar(128)
+  traceparent     String? @db.VarChar(55)
+
+  producerVersion String   @map("producer_version") @db.VarChar(64)
+  occurredAt      DateTime @map("occurred_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  /// ADR-050 delivery state, identical in meaning to `OutboxMessage`'s.
+  publishedAt    DateTime? @map("published_at")
+  attempts       Int       @default(0)
+  lastError      String?   @map("last_error") @db.VarChar(1000)
+  claimToken     String?   @map("claim_token")
+  claimOwner     String?   @map("claim_owner")
+  claimExpiresAt DateTime? @map("claim_expires_at")
+  claimCount     Int       @default(0) @map("claim_count")
+  nextAttemptAt  DateTime? @map("next_attempt_at")
+
+  @@map("security_event_outbox")
+}
+
 /// Consumer-side idempotency. Inserted before handling; a unique violation
 /// means the event was already processed and is skipped.
 model ProcessedEvent {
