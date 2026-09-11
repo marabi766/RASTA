@@ -96,11 +96,11 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
  *                  gets a router `404`, which is a structural proof rather than
  *                  a promise. The trail consumer does not change this: it is a
  *                  second Kafka reader, not a door.
- *   producers      None yet. No service publishes `AUDIT_EVENT_RECORDED`, so the
- *                  trail consumer runs and is ready while receiving nothing.
- *                  The reference producer is `identity-service` (implementation
- *                  plan § 5), together with its `security_event_outbox` and the
- *                  windowed refusal aggregation; none of them is built.
+ *   producers      One, for one refusal. `identity-service` publishes
+ *                  `AUDIT_EVENT_RECORDED` for a refused active-organization
+ *                  switch through its own `security_event_outbox` (AUD-004 Phase
+ *                  C1). Windowed refusal aggregation, every other refusal and
+ *                  every other service's producer are not built.
  *   correction     A correction a producer publishes is recorded — as a fresh
  *     command      row whose `correction_of` names the record it corrects, never
  *                  as an edit. Nothing accepts a correction *command*: that

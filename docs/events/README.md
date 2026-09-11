@@ -485,7 +485,7 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 
 ## Audit — `rasta.audit.trail.v1`
 
-> **وضعیت — 2026-09-11 (AUD-004 Phase B).** `audit-service` **ساخته شده** (AUD-001..003، `docs/04` § ۴٫۱۵) و مسیر
+> **وضعیت — 2026-09-11 (AUD-004 Phase C1).** `audit-service` **ساخته شده** (AUD-001..003، `docs/04` § ۴٫۱۵) و مسیر
 > نخستِ ورودی‌اش — Projector روی هر ده Topic دامنه‌ای، `docs/07` § ۷٫۱۰ — زنده است. این Topic **مسیر دوم** است
 > (ADR-053 § ۱)، و آنچه در ادامه می‌آید فقط دربارهٔ همین مسیر دوم صادق است:
 >
@@ -500,11 +500,15 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 >   Throw می‌شود، Retry می‌شود و به `rasta.audit.v1.dlq` می‌رود، و خطا/Log فقط مسیر Schema و نام کلید دارد، نه مقدار.
 >   Idempotency روی `(eventId, 'audit-service.trail')` در همان تراکنشِ ردیف و زنجیرهٔ Hash است؛ فضای نام آن از مسیر A
 >   جداست. اصلاح یک **ردیف تازه** با `correction_of` است، هرگز UPDATE.
-> - **هیچ Producer زمان اجرا هنوز نوشته نشده.** هیچ سرویسی روی این Topic نمی‌نویسد، پس Consumer آماده و بی‌کار است.
->   سطر «همه سرویس‌ها روی این Topic می‌نویسند» زیر، **نیت طراحی** ADR-053 § ۱ است، نه رفتار امروز. `security_event_outbox`،
->   تجمیع پنجره‌ای ردها و فرمان اصلاح هم ساخته نشده‌اند.
-> - **مالکیت Producer برای دو مرزِ نخست تصمیم گرفته شده، ساخته نشده:** `identity-service` هم Producer مرجعِ ردهای
->   `403` (§ ۴ ADR) و هم Producer نیتِ اصلاح (§ ۷ ADR) خواهد بود — رسیدگی کامل و شواهدش در
+> - **یک Producer، برای یک رد (Phase C1).** `identity-service` تنها سرویسی است که روی این Topic می‌نویسد، و فقط یک
+>   رد را: `POST /v1/users/me/active-organization` که با `403 TENANT_MISMATCH` رد می‌شود. Exception Filter ردیف را در
+>   جدول محلی `security_event_outbox` می‌نویسد (تراکنش کوتاه و کراندار؛ شکستش پاسخ `403` را عوض نمی‌کند) و Relay دوم
+>   (ADR-050) آن را پس از اعتبارسنجی Envelope و Payload منتشر می‌کند. مقادیر ثابت این Producer: `outcome = REFUSED`،
+>   `occurrenceCount = 1`، `action = identity.active_organization.switch`، `resourceType = User`، `resourceId` =
+>   شناسهٔ خود کاربر (همان کلید Partition)، مستأجر = سازمانی که فراخوان از طرفش عمل می‌کرد — هرگز سازمان درخواستی.
+> - **هنوز ساخته نشده:** تجمیع پنجره‌ای ردها، هر `403` دیگر در identity، رول‌اوت به هر سرویس دیگر، فرمان اصلاح و
+>   صادرات. سطر «همه سرویس‌ها روی این Topic می‌نویسند» زیر همچنان **نیت طراحی** ADR-053 § ۱ است، نه رفتار امروز.
+>   Producer نیتِ اصلاح (§ ۷ ADR) هم به `identity-service` تصمیم گرفته شده ولی ساخته نشده — جزئیات در
 >   [ADR-053 implementation plan](../adr/ADR-053-implementation-plan.md) § ۵.
 > - `Proposed`. جزئیات کامل ADR-053 در
 >   [ADR-053](../adr/ADR-053-audit-service-append-only-evidence.md).

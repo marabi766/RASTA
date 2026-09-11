@@ -1,6 +1,6 @@
 # ADR-053 — برنامهٔ پیاده‌سازی (audit-service)
 
-- **وضعیت:** برنامه — **در جریان.** AUD-001 و AUD-002 پیاده شده‌اند؛ از AUD-003 نیمهٔ شواهد دست‌نخوردگی پیاده شده و نیمهٔ اصلاح نه؛ از AUD-004 **Phase A — قرارداد** و **Phase B — Consumer مسیر B در `audit-service`** پیاده شده‌اند، ولی هیچ Producer، `security_event_outbox`، تجمیع ردها یا فرمان اصلاحی نه. جزئیات در § ۴، § ۵ و در جدول پایین همین بخش.
+- **وضعیت:** برنامه — **در جریان.** AUD-001 و AUD-002 پیاده شده‌اند؛ از AUD-003 نیمهٔ شواهد دست‌نخوردگی پیاده شده و نیمهٔ اصلاح نه؛ از AUD-004 **Phase A — قرارداد**، **Phase B — Consumer مسیر B در `audit-service`** و **Phase C1 — Producer مرجع ردها در `identity-service` برای یک محل رد، با `security_event_outbox`** پیاده شده‌اند، ولی تجمیع پنجره‌ای ردها، ردهای دیگر، رول‌اوت به سرویس‌های دیگر و فرمان اصلاحی نه. جزئیات در § ۴، § ۵ و در جدول پایین همین بخش.
 - **مرجع تصمیم:** [ADR-053](ADR-053-audit-service-append-only-evidence.md)
 - **قلم مرتبط:** `COM-009` — **`READY` می‌ماند و ۱۳ امتیازش دست نمی‌خورد** تا همهٔ گام‌های زیر پیاده و پذیرفته شوند.
 - **همراه:** [ADR-054 implementation plan](ADR-054-implementation-plan.md)
@@ -10,12 +10,12 @@
 
 **وضعیت گام‌ها — 2026-09-11:**
 
-| گام     | وضعیت                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| AUD-001 | ✅ **پیاده** — Projector مسیر A روی ده Topic دامنه‌ای، جدول `audit_event` پارتیشن‌بندی‌شده و فقط‌الحاقی در دو لایه                                                                                                                                                                                                                                                                                                                           |
-| AUD-002 | ✅ **پیاده** — `GET /v1/audit-events` و `GET /v1/audit-events/{id}`، پنجرهٔ اجباری، صفحه‌بندی Cursor، زیردرخت `UNION_ADMIN` از Projection محلی با Fail-Closed                                                                                                                                                                                                                                                                                |
-| AUD-003 | ⚠️ **نیمه** — زنجیرهٔ Hash، `audit_chain_head`، `GET /v1/audit-events/verify` و متریک‌ها پیاده و روی PostgreSQL واقعی اثبات شده‌اند. **عمل `audit.correction` پیاده نشده** و تا AUD-004 نمی‌تواند باشد (مسیر B، نه نوشتن مستقیم)                                                                                                                                                                                                             |
-| AUD-004 | 🟡 **Phase A و Phase B — قرارداد و Consumer.** Phase A: `packages/contracts/src/events/audit-trail.ts` (`AUDIT_EVENT_RECORDED` v1، Zod، فقط‌Contract). Phase B: `AuditTrailConsumer` در `audit-service` با گروه ثابت `audit-service.trail` — اعتبارسنجی Fail-Closed پیش از نوشتن، Idempotent، روی PostgreSQL و Kafka واقعی تست شده. **بدون Producer، بدون `security_event_outbox`، بدون تجمیع ردها، بدون Endpoint فرمان اصلاح** — جزئیات § ۵ |
+| گام     | وضعیت                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AUD-001 | ✅ **پیاده** — Projector مسیر A روی ده Topic دامنه‌ای، جدول `audit_event` پارتیشن‌بندی‌شده و فقط‌الحاقی در دو لایه                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| AUD-002 | ✅ **پیاده** — `GET /v1/audit-events` و `GET /v1/audit-events/{id}`، پنجرهٔ اجباری، صفحه‌بندی Cursor، زیردرخت `UNION_ADMIN` از Projection محلی با Fail-Closed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| AUD-003 | ⚠️ **نیمه** — زنجیرهٔ Hash، `audit_chain_head`، `GET /v1/audit-events/verify` و متریک‌ها پیاده و روی PostgreSQL واقعی اثبات شده‌اند. **عمل `audit.correction` پیاده نشده** و تا AUD-004 نمی‌تواند باشد (مسیر B، نه نوشتن مستقیم)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| AUD-004 | 🟡 **Phase A، Phase B و Phase C1 — قرارداد، Consumer و یک Producer.** Phase C1: `identity-service` یک رد (`POST /v1/users/me/active-organization` → `403 TENANT_MISMATCH`) را از `security_event_outbox` محلی و Relay دوم ADR-050 منتشر می‌کند؛ سرتاسری تا `audit_event` روی PostgreSQL و Kafka واقعی آزموده شد (§ ۵). **هنوز بدون تجمیع ردها، ردهای دیگر، رول‌اوت به سرویس‌های دیگر و فرمان اصلاح.** سابقه: Phase A: `packages/contracts/src/events/audit-trail.ts` (`AUDIT_EVENT_RECORDED` v1، Zod، فقط‌Contract). Phase B: `AuditTrailConsumer` در `audit-service` با گروه ثابت `audit-service.trail` — اعتبارسنجی Fail-Closed پیش از نوشتن، Idempotent، روی PostgreSQL و Kafka واقعی تست شده. **بدون Producer، بدون `security_event_outbox`، بدون تجمیع ردها، بدون Endpoint فرمان اصلاح** — جزئیات § ۵ |
 
 > **`COM-009` همچنان `READY` و ۱۳ امتیازی است.** پیاده شدن سه گام و نیمی از چهارم، پذیرش صاحب محصول نیست و امتیاز نمی‌دهد؛
 > نوشتن یک Contract هیچ نتیجهٔ قابل‌پذیرش کاربری تحویل نمی‌دهد (`docs/25-progress-governance.md` § ۲۵٫۱، همان استدلال گام صفر).
@@ -372,6 +372,50 @@ source_topic)` خودش را دارد — دو لایهٔ مستقل، همان 
 > **آنچه Consumer عمداً بررسی نمی‌کند:** اینکه `correctionOf` به رکوردی موجود و در همان مستأجر اشاره کند. این پرسش باید
 > پیش از صدور رویداد در Producer فرمان اصلاح پاسخ بگیرد؛ در Consumer، خواندن با شناسه بدون پنجرهٔ زمانی همهٔ پارتیشن‌ها را
 > اسکن می‌کند. `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
+
+> **پیشرفت — 2026-09-11 (Phase C1 — Producer مرجع ردها در `identity-service`، فقط یک محل رد).**
+> `identity-service` اکنون یک رد واقعی را به‌عنوان شاهد ثبت و روی `rasta.audit.trail.v1` منتشر می‌کند:
+> `POST /v1/users/me/active-organization` وقتی `IdentityService.switchActiveOrganization()` با
+> `403 TENANT_MISMATCH` رد می‌کند (فراخوان عضویت فعال در سازمان درخواستی ندارد).
+>
+> - **صف جدا، نه `outbox_message`.** جدول محلی `security_event_outbox` (Migration افزایشی و قابل بازگشت
+>   `20260911120000_security_event_outbox`، با `down.sql`) فقط ستون‌های کراندار دارد: شناسه‌ها، نوع و نقش‌های Actor،
+>   `action`/`resourceType`/`resourceId` ثابت، کد خطا، دلیل ثابت، ip و User-Agent، Correlation/Trace، زمان رخداد و وضعیت
+>   تحویل ADR-050. هیچ JSON، بدنهٔ درخواست، Token، پاسخ یا پیام Exception جایی برای ذخیره ندارد؛ ۱۳ CHECK و ۳ Index جزئی.
+>   مسیر رویداد دامنه‌ای (`IdentityRepository.enqueueEvent`، توالی B3، Relay معمول) دست نخورد و `AUDIT_EVENT_RECORDED` به
+>   `routing.ts` افزوده نشد.
+> - **ثبت در مرز Exception Filter.** `RefusalAuditExceptionFilter` پاسخ فیلتر پلتفرم را اول می‌سازد و نگه می‌دارد،
+>   ثبت را با **طبقه‌بندی نهایی همان پاسخ** اجرا می‌کند و سپس دقیقاً همان پاسخ را می‌فرستد. ثبت فقط وقتی رخ می‌دهد که خطا
+>   در محل تصمیم با یک Site از فهرست ثابت `refusal-sites.ts` علامت خورده باشد **و** وضعیت/کد، متد و الگوی Route با آن Site
+>   بخواند **و** فراخوان کاربر احرازشده باشد. `action`، `resourceType` و `reason` از Site می‌آیند؛ Actor، نقش‌ها، مستأجر،
+>   ip/User-Agent، Correlation و Trace از RequestContext مورد اعتماد؛ `resourceId` شناسهٔ خود کاربر است و **سازمان درخواستی
+>   (ورودی مهاجم) هیچ‌جا ذخیره نمی‌شود**. `401`، `403`های دیگر و `TENANT_MISMATCH`ِ خودِ AuthGuard ثبت نمی‌شوند.
+> - **Best-effort و کراندار.** درج در تراکنش کوتاه خودش با `statement_timeout` و `maxWait` و یک Deadline سخت
+>   (`SECURITY_EVENT_CAPTURE_TIMEOUT_MS`، پیش‌فرض ۲۵۰، بازه ۱۰..۵۰۰۰). موفقیت، Timeout و شکست همه همان `403` با همان بدنه را
+>   برمی‌گردانند؛ Kafka و audit-service روی مسیر تصمیم نیستند. متریک `rasta_security_event_captures_total{outcome}` با
+>   چهار مقدار بسته؛ Logها فقط Site، نتیجه، دلیل بسته، کلاس خطا و کد Prisma/SQLSTATE دارند.
+> - **Flusher.** نمونهٔ دوم `OutboxRelay` پلتفرم (Claim، Lease، تمدید، Ack حصارکشی‌شده با Token، Backoff با ساعت پایگاه
+>   داده، Shutdown کراندار — همان ADR-050) روی Store محلی این جدول، با `AuditTrailPublisher` که هر ردیف را پیش از انتشار با
+>   Envelope استاندارد، `auditTrailPayloadSchemaV1`، ثابت‌های نام/نسخه/Topic، `outcome = REFUSED`، `occurrenceCount = 1` و
+>   توافق دقیق مستأجر Envelope/Payload اعتبارسنجی می‌کند. کلید Partition همان `resourceId` (شناسهٔ کاربر) است. در
+>   `AppModule` شروع و متوقف می‌شود؛ Readiness تغییری نکرد (ADR-021). شکست انتشار ردیف را قابل تکرار نگه می‌دارد.
+> - **بدون تغییر در `packages/*`** — Relay از قبل فقط سازوکار انتقال/Claim بود (A-03)؛ SQL این جدول محلی است (A-01).
+>
+> **شواهد.** Unit (identity، ۱۵۴ تست): فهرست Site، تصمیم ثبت و نگاشت، Envelope و اعتبارسنجی Contract، Recorder
+> (Timeout/شکست/برچسب کراندار/Log امن)، Filter (پاسخ یکسان در هر چهار حالت)، Relay (Retry، Ack حصارکشی‌شده، Shutdown)،
+> Composition root و Env. PostgreSQL واقعی (`test/security-event-outbox.int-spec.ts`، ۷ تست): ثبت بادوام از Endpoint واقعی
+> بدون هیچ مقدار درخواست در هیچ ستون، جداسازی مستأجر، عدم ثبت `401`/`403` دیگر/رد Guard/Switch موفق، `403` یکسان هنگام
+> Timeout واقعی پشت `LOCK TABLE` و هنگام شکست درج، بازپس‌گیری Lease و حصار Worker کهنه، Retry پس از شکست انتشار. Kafka واقعی
+> (`test/refusal-audit-flow.int-spec.ts`، ۲ تست): Endpoint واقعی → Relay واقعی → `rasta.audit.trail.v1` →
+> `AuditTrailConsumer` واقعی → یک `audit_event` با `REFUSED`، نقش‌ها، مستأجر، کد خطا، ip/User-Agent، `occurrenceCount = 1`
+> و بدون مقدار حساس؛ تحویل دوباره توسط دو Worker یک ردیف می‌سازد و Worker کهنه حصار می‌خورد. Migration:
+> `scripts/verify-security-event-outbox-migration.mjs` (up → down → up در Schema یک‌بارمصرف، هر CHECK روی ردیف آزموده)،
+> ثبت‌شده در `test:migration`. Runbook: [`security-event-outbox.md`](../runbooks/security-event-outbox.md).
+>
+> **آنچه هنوز نیست — صریح:** تجمیع پنجره‌ای ردها (هر رد یک ردیف است)؛ هر `403` دیگر در identity و **رول‌اوت به هر سرویس
+> دیگر** (R-2)؛ فرمان اصلاح (`audit.correction`)؛ صادرات؛ Purge ردیف‌های منتشرشده؛ قاعدهٔ هشدار Prometheus. آزمون جریان
+> Kafka کد `audit-service` را **فقط در `test/`** وارد می‌کند تا هر دو نیمه را یک‌جا براند؛ مسیر زمان اجرا فقط Kafka است.
+> `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
 
 **As a** بازبین امنیتی، **I want** ردها و اعمال پرامتیاز با نقش‌های Actor، مبدأ و نتیجه ثبت شوند، **so that** یک تلاش دسترسی
 ردشده شواهد باشد، نه خط Logی که در سی روز منقضی می‌شود.
