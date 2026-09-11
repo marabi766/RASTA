@@ -43,6 +43,16 @@
 > `audit_event` آزموده شد. جملهٔ «هنوز هیچ Producer» بالا وضعیت پیش از این به‌روزرسانی است. **هنوز نیست:** تجمیع
 > پنجره‌ای، `403`های دیگر، رول‌اوت به سرویس‌های دیگر، فرمان اصلاح، صادرات — پس S-06 همچنان کامل نیست. `COM-009` همچنان
 > `READY` با ۱۳ امتیاز و ADR-053 `Proposed` است.
+> **به‌روزرسانی 2026-09-11 (Phase C1 سخت‌سازی معماری):** نسخهٔ نخستِ آزمون Kafka این فاز
+> (`identity-service/test/refusal-audit-flow.int-spec.ts`) شش مسیر از `services/audit-service/src/**` و `test/**` را
+> مستقیم Import می‌کرد تا `AuditTrailConsumer` را در همان فایل identity برپا کند — نقض صریح `AGENTS.md` A-02، که
+> استثنایی برای فایل آزمون قائل نیست. آن فایل حذف شد و با `identity-service/test/security-event-kafka.int-spec.ts`
+> جایگزین شد که مسیر را با `EventConsumer` عمومی `@rasta/nest-common` و Schema عمومی `@rasta/contracts` — نه کد
+> `audit-service` — به‌عنوان ناظر بیرونی می‌بیند؛ ادعای مصرف‌کننده (پایداری، تحویل دوباره، توافق مستأجر) جای خودش را در
+> `audit-service/test/trail-ingestion.int-spec.ts` دست‌نخورده دارد. اثبات سرتاسری اکنون فقط
+> `tests/e2e/specs/identity/01-refusal-audit-trail.e2e-spec.ts` است — Black-Box واقعی روی دو فرایند جدا، از راه
+> Gateway، بدون هیچ Importی میان‌سرویسی — و `scripts/check-service-boundaries.mjs` (تازه، در `pnpm verify` و CI) از
+> تکرار این نقض در هر سرویس دیگری جلوگیری می‌کند. هیچ رفتار Production تغییر نکرد؛ فقط توپولوژی آزمون اصلاح شد.
 >
 > ۲. **هیچ ارائه‌دهندهٔ ایمیل Production و هیچ هویت فرستنده‌ای انتخاب نشده** و تا امروز هیچ پرسش بازی پوششش نمی‌داد (Q-15
 > دربارهٔ پیامک است). اکنون **Q-37**. این **انتشار ایمیل واقعی** را مسدود می‌کند، نه پیاده‌سازی و نه نیمهٔ In-App را.

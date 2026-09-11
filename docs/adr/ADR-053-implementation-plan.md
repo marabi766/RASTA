@@ -406,16 +406,27 @@ source_topic)` خودش را دارد — دو لایهٔ مستقل، همان 
 > Composition root و Env. PostgreSQL واقعی (`test/security-event-outbox.int-spec.ts`، ۷ تست): ثبت بادوام از Endpoint واقعی
 > بدون هیچ مقدار درخواست در هیچ ستون، جداسازی مستأجر، عدم ثبت `401`/`403` دیگر/رد Guard/Switch موفق، `403` یکسان هنگام
 > Timeout واقعی پشت `LOCK TABLE` و هنگام شکست درج، بازپس‌گیری Lease و حصار Worker کهنه، Retry پس از شکست انتشار. Kafka واقعی
-> (`test/refusal-audit-flow.int-spec.ts`، ۲ تست): Endpoint واقعی → Relay واقعی → `rasta.audit.trail.v1` →
-> `AuditTrailConsumer` واقعی → یک `audit_event` با `REFUSED`، نقش‌ها، مستأجر، کد خطا، ip/User-Agent، `occurrenceCount = 1`
-> و بدون مقدار حساس؛ تحویل دوباره توسط دو Worker یک ردیف می‌سازد و Worker کهنه حصار می‌خورد. Migration:
-> `scripts/verify-security-event-outbox-migration.mjs` (up → down → up در Schema یک‌بارمصرف، هر CHECK روی ردیف آزموده)،
-> ثبت‌شده در `test:migration`. Runbook: [`security-event-outbox.md`](../runbooks/security-event-outbox.md).
+> (`test/security-event-kafka.int-spec.ts`، ۲ تست — نسخهٔ اصلاح‌شده، زیر را ببینید): Endpoint واقعی → Relay واقعی →
+> `rasta.audit.trail.v1`، مشاهده‌شده به‌عنوان ناظر بیرونی با `EventConsumer` عمومی `@rasta/nest-common` و اعتبارسنجی با
+> `auditTrailPayloadSchemaV1` عمومی از `@rasta/contracts` — بدون وارد کردن کد `audit-service`؛ Envelope و Payload معتبر با
+> نقش‌ها، مستأجر، کد خطا، ip/User-Agent، `occurrenceCount = 1` و بدون مقدار حساس؛ تحویل دوباره توسط دو Worker حصار Worker
+> کهنه را ثابت می‌کند و دو پیام معتبر واقعی روی Kafka می‌گذارد (نه یک `audit_event`؛ آن ادعا مال `audit-service` است، پایین
+> را ببینید). Migration: `scripts/verify-security-event-outbox-migration.mjs` (up → down → up در Schema یک‌بارمصرف، هر
+> CHECK روی ردیف آزموده)، ثبت‌شده در `test:migration`. Runbook: [`security-event-outbox.md`](../runbooks/security-event-outbox.md).
 >
 > **آنچه هنوز نیست — صریح:** تجمیع پنجره‌ای ردها (هر رد یک ردیف است)؛ هر `403` دیگر در identity و **رول‌اوت به هر سرویس
-> دیگر** (R-2)؛ فرمان اصلاح (`audit.correction`)؛ صادرات؛ Purge ردیف‌های منتشرشده؛ قاعدهٔ هشدار Prometheus. آزمون جریان
-> Kafka کد `audit-service` را **فقط در `test/`** وارد می‌کند تا هر دو نیمه را یک‌جا براند؛ مسیر زمان اجرا فقط Kafka است.
+> دیگر** (R-2)؛ فرمان اصلاح (`audit.correction`)؛ صادرات؛ Purge ردیف‌های منتشرشده؛ قاعدهٔ هشدار Prometheus.
 > `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
+>
+> **اصلاح — 2026-09-11 (Phase C1 سخت‌سازی معماری: حذف وابستگی میان‌سرویسی از آزمون).** جملهٔ بالا دربارهٔ Kafka —
+> نسخهٔ نخست این فاز — وضعیتی را توصیف می‌کرد که با `AGENTS.md` A-02 در تعارض بود:
+> `test/refusal-audit-flow.int-spec.ts` شش مسیر از `services/audit-service/src/**` و `test/**` را مستقیم وارد می‌کرد
+> (`PrismaService`، `AuditRepository`، `AuditTrailConsumer`، `audit.mapper`، `audit-trail.mapper`، `test/helpers`) تا
+> هر دو نیمهٔ جریان را در یک فایل براند. توجیه نوشته‌شدهٔ آن زمان — «فقط در `test/`، نه در مسیر زمان اجرا» — نادرست بود:
+> A-02 صریحاً از هیچ استثنایی برای فایل آزمون نام نمی‌برد، و چیزی که این Import می‌ساخت دقیقاً همان وابستگی ساختاری‌ای
+> بود که A-02 برای جلوگیری از آن نوشته شده — تغییری در `audit-service/src` که این فایل identity را هم می‌شکند، بدون
+> هیچ قرارداد Kafka یا REST میانشان. § ۷ زیر (Test topology نهایی) و `scripts/check-service-boundaries.mjs` این را
+> اصلاح می‌کنند و از تکرارش جلوگیری می‌کنند.
 
 **As a** بازبین امنیتی، **I want** ردها و اعمال پرامتیاز با نقش‌های Actor، مبدأ و نتیجه ثبت شوند، **so that** یک تلاش دسترسی
 ردشده شواهد باشد، نه خط Logی که در سی روز منقضی می‌شود.
