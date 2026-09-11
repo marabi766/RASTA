@@ -30,10 +30,16 @@
     },
     "typecheck": { "dependsOn": ["^build", "db:generate"], "outputs": [] },
     "lint": { "dependsOn": ["^build"], "outputs": [] },
+    // KAFKA_BROKERS is the same trap again (D-005), found by AUD-004 Phase C2:
+    // identity-service's `test` runs its integration project too, and its
+    // Kafka suite skips itself when the variable is absent. Undeclared, turbo
+    // withheld it from the child even with it exported, so `pnpm test` and
+    // `pnpm verify` reported green while the Kafka evidence never ran. A run
+    // with no broker configured still skips — that is the only case that should.
     "test": {
       "dependsOn": ["^build", "db:generate"],
       "outputs": ["coverage/**"],
-      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "S3_*", "DOCUMENT_*"]
+      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "KAFKA_BROKERS", "S3_*", "DOCUMENT_*"]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
     "test:integration": {
@@ -73,7 +79,10 @@
         "PORT_ECONOMIC",
         "PORT_MARKETPLACE",
         "PORT_DOCUMENT",
-        "PLAYWRIGHT_*"
+        "PLAYWRIGHT_*",
+        // The refusal scenario aligns its burst to identity-service's
+        // aggregation window, so it must read the value the service runs with.
+        "SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS"
       ]
     },
     "dev": { "cache": false, "persistent": true },
