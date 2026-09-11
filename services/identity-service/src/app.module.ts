@@ -14,7 +14,6 @@ import {
   InternalTokenService,
   OutboxRelay,
   RequestContextMiddleware,
-  RolesGuard,
   TokenVerifier,
   type AuthGuardOptions,
 } from '@rasta/nest-common';
@@ -44,6 +43,7 @@ import { loadIdentityEnv, SERVICE_NAME, type IdentityEnv } from './config/env';
 import { SecurityEventOutboxStore } from './security-events/security-event-outbox.store';
 import { RefusalAuditRecorder } from './security-events/refusal-audit.recorder';
 import { RefusalAuditExceptionFilter } from './security-events/refusal-audit.filter';
+import { IdentityRolesGuard } from './security-events/identity-roles.guard';
 import {
   createSecurityEventRelay,
   SECURITY_EVENT_RELAY,
@@ -228,8 +228,11 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
 
     // Order matters: authenticate, then authorize. Registered globally so an
     // endpoint is closed unless it opts out with @Public (AGENTS.md A-12).
+    // The role guard is the platform `RolesGuard` behind a thin identity
+    // adaptor that marks allowlisted role refusals for audit (AUD-004 Phase
+    // C3); every authorization decision is still the shared guard's.
     { provide: APP_GUARD, useClass: AuthGuard },
-    { provide: APP_GUARD, useClass: RolesGuard },
+    { provide: APP_GUARD, useClass: IdentityRolesGuard },
     // The platform exception filter, wrapped: every response is the platform's,
     // and allowlisted refusals are additionally captured for audit.
     { provide: APP_FILTER, useClass: RefusalAuditExceptionFilter },

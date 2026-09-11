@@ -1,6 +1,7 @@
-import { APP_FILTER } from '@nestjs/core';
-import { AllExceptionsFilter } from '@rasta/nest-common';
+import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { AllExceptionsFilter, AuthGuard, RolesGuard } from '@rasta/nest-common';
 import { AppModule } from './app.module';
+import { IdentityRolesGuard } from './security-events/identity-roles.guard';
 import { RefusalAuditExceptionFilter } from './security-events/refusal-audit.filter';
 import { SECURITY_EVENT_RELAY } from './security-events/security-event.relay';
 
@@ -39,6 +40,15 @@ describe('AppModule refusal-audit wiring', () => {
     const filters = providers().filter((provider) => provider.provide === APP_FILTER);
     expect(filters).toEqual([{ provide: APP_FILTER, useClass: RefusalAuditExceptionFilter }]);
     expect(filters.some((provider) => provider.useClass === AllExceptionsFilter)).toBe(false);
+  });
+
+  it('authenticates first, then authorizes through the identity role guard in place of the bare shared one', () => {
+    const guards = providers().filter((provider) => provider.provide === APP_GUARD);
+    expect(guards).toEqual([
+      { provide: APP_GUARD, useClass: AuthGuard },
+      { provide: APP_GUARD, useClass: IdentityRolesGuard },
+    ]);
+    expect(guards.some((provider) => provider.useClass === RolesGuard)).toBe(false);
   });
 
   it('provides the refusal relay under its own token, apart from the domain relay', () => {

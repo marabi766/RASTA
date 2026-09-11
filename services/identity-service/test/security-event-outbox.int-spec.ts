@@ -233,7 +233,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
     ).toBe(0);
   });
 
-  it('captures no 401, no unrelated 403, no guard-level TENANT_MISMATCH and no successful switch', async () => {
+  it('captures no 401, no uninstrumented 403, no guard-level TENANT_MISMATCH and no successful switch', async () => {
     const before = await prisma.client.securityEventOutbox.count({
       where: { correlationId: { contains: TAG } },
     });
@@ -246,13 +246,16 @@ describe('security_event_outbox (real PostgreSQL)', () => {
       .send({ organizationId: tagged('ORG') });
     expect(anonymous.status).toBe(401);
 
-    // 403 INSUFFICIENT_ROLE from the roles guard.
+    // 403 INSUFFICIENT_ROLE from the roles guard on an endpoint that is not an
+    // allowlisted site. (`GET /v1/users` became one in AUD-004 Phase C3 and is
+    // proved captured in `security-event-role-refusal.int-spec.ts`.)
     const underPrivileged: Caller = { userId: tagged('USR'), organizationId: tagged('ORG') };
-    const listing = await request(harness.app.getHttpServer())
-      .get('/v1/users')
-      .set('authorization', `Bearer ${userToken(underPrivileged)}`);
-    expect(listing.status).toBe(403);
-    expect(listing.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+    const creating = await request(harness.app.getHttpServer())
+      .post('/v1/users')
+      .set('authorization', `Bearer ${userToken(underPrivileged)}`)
+      .send({});
+    expect(creating.status).toBe(403);
+    expect(creating.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
 
     // 403 TENANT_MISMATCH raised by the auth guard for a header outside the
     // token's memberships — the same code, but not the identity decision.

@@ -3,10 +3,10 @@ import type { RastaError } from '@rasta/nest-common';
 
 /**
  * The refusals this service records as audit evidence (ADR-053 § 4,
- * AUD-004 Phase C1) — a fixed allowlist, and the only source of the audit
+ * AUD-004 Phases C1–C3) — a fixed allowlist, and the only source of the audit
  * `action`, `resourceType` and `reason` those records carry.
  *
- * ## Why an allowlist, and why it is attached at the throw site
+ * ## Why an allowlist, and why it is attached where the decision is made
  *
  * An exception filter sees every error the service raises, and most of them are
  * not evidence: a `401` has no attributable actor, a `404` is not a refusal, and
@@ -22,21 +22,33 @@ import type { RastaError } from '@rasta/nest-common';
  * *what* was refused comes from here; nothing comes from the path, the query
  * string or the body.
  *
- * Phase C1 instruments exactly one site. Every other `403` in this service —
- * and in every other service — is not recorded yet (ADR-053 plan § 8, R-2).
+ * Two deciders may mark, each only its own sites (`decidedBy`):
+ *
+ *   IDENTITY_SERVICE  a domain decision in `IdentityService`, marked at the
+ *                     throw site with `markRefusal`.
+ *   ROLES_GUARD       a denial by the platform `RolesGuard`, marked by
+ *                     `IdentityRolesGuard` after the shared guard decided —
+ *                     the shared guard itself knows nothing of this table.
+ *
+ * Two sites are instrumented. Every other `403` in this service — and in every
+ * other service — is not recorded yet (ADR-053 plan § 8, R-2).
  */
 
 /** Which trusted value names the refused resource. Never request input. */
 export type RefusalResourceSource = 'ACTOR_USER';
 
+/** Who makes the refusal decision, and so who may mark it. */
+export type RefusalDecider = 'IDENTITY_SERVICE' | 'ROLES_GUARD';
+
 export interface RefusalSite {
   /** Stable and bounded — safe in a log line. Never a metric label. */
   readonly key: string;
-  readonly method: 'POST';
+  readonly method: 'GET' | 'POST';
   /** The route template Express reports as `req.route.path`, version prefix included. */
   readonly route: string;
   readonly status: 403;
   readonly errorCode: ErrorCode;
+  readonly decidedBy: RefusalDecider;
   /** A dotted verb, as `auditActionSchema` requires. */
   readonly action: string;
   readonly resourceType: string;
@@ -62,11 +74,38 @@ export const REFUSAL_SITES = {
     route: '/v1/users/me/active-organization',
     status: 403,
     errorCode: ERROR_CODES.TENANT_MISMATCH,
+    decidedBy: 'IDENTITY_SERVICE',
     action: 'identity.active_organization.switch',
     resourceType: 'User',
     resource: 'ACTOR_USER',
     reason:
       'Active organization switch refused: no active membership in the requested organization',
+  },
+
+  /**
+   * `GET /v1/users` refused by the platform `RolesGuard` because the caller
+   * holds neither `ORGANIZATION_ADMIN` nor `UNION_ADMIN` (nor `SYSTEM_ADMIN`)
+   * — AUD-004 Phase C3.
+   *
+   * A collection read has no single refused record, so the resource id is the
+   * caller's own user id from the verified token — stable per actor, the Kafka
+   * partition key, and never request input. Which roles the endpoint requires
+   * and the error's internal context are deliberately not recorded; the query
+   * string never reaches the capture at all. The action name is a Temporary
+   * Decision (`docs/24-open-questions.md` Q-45): the repository documents no
+   * canonical audit verb for listing users.
+   */
+  LIST_USERS: {
+    key: 'identity.list_users',
+    method: 'GET',
+    route: '/v1/users',
+    status: 403,
+    errorCode: ERROR_CODES.INSUFFICIENT_ROLE,
+    decidedBy: 'ROLES_GUARD',
+    action: 'identity.users.list',
+    resourceType: 'User',
+    resource: 'ACTOR_USER',
+    reason: 'User listing refused: the caller holds none of the roles this endpoint requires',
   },
 } as const satisfies Record<string, RefusalSite>;
 
@@ -90,4 +129,20 @@ export function refusalSiteOf(error: unknown): RefusalSite | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
   const name = marks.get(error);
   return name === undefined ? undefined : REFUSAL_SITES[name];
+}
+
+/**
+ * The roles-guard site allowlisted for exactly this matched method and route
+ * template, if there is one. Both values are Express's own — `req.method` and
+ * `req.route.path`, the template, never the concrete URL — so a caller cannot
+ * steer it with a path or a query string.
+ */
+export function rolesGuardSiteFor(method: unknown, route: unknown): RefusalSiteName | undefined {
+  if (typeof method !== 'string' || typeof route !== 'string') return undefined;
+  for (const [name, site] of Object.entries(REFUSAL_SITES) as [RefusalSiteName, RefusalSite][]) {
+    if (site.decidedBy === 'ROLES_GUARD' && site.method === method && site.route === route) {
+      return name;
+    }
+  }
+  return undefined;
 }
