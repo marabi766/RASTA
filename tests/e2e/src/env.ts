@@ -23,6 +23,15 @@ function required(name: string, fallback?: string): string {
   return value;
 }
 
+/** The same bounds identity-service validates, so a typo fails here and not as a timeout. */
+function windowSeconds(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 3600) {
+    throw new Error('SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS must be an integer from 1 to 3600');
+  }
+  return parsed;
+}
+
 export interface E2eConfig {
   /** The api-gateway base URL. Every request in these tests goes through it. */
   gatewayUrl: string;
@@ -75,6 +84,12 @@ export interface E2eConfig {
    * API for a message identity-service never sent (AUD-004 Phase C1).
    */
   identityUrl: string;
+  /**
+   * identity-service's `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS` — read from
+   * the same variable the service reads, so the refusal scenario aligns its
+   * burst to the window the running service actually uses (AUD-004 Phase C2).
+   */
+  identityAggregationWindowSeconds: number;
   /** Keycloak admin, used once to reconcile the E2E users into an imported realm. */
   keycloakAdmin: { username: string; password: string };
   /**
@@ -114,6 +129,9 @@ export function e2eConfig(): E2eConfig {
       'E2E_IDENTITY_URL',
       `http://localhost:${process.env.PORT_IDENTITY?.trim() || '3101'}`,
     ).replace(/\/+$/, ''),
+    identityAggregationWindowSeconds: windowSeconds(
+      required('SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS', '60'),
+    ),
     keycloakUrl: required('KEYCLOAK_URL', 'http://localhost:8080').replace(/\/+$/, ''),
     realm: required('KEYCLOAK_REALM', 'rasta'),
     clientId: required('KEYCLOAK_WEB_CLIENT_ID', 'rasta-web'),

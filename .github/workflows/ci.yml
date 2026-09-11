@@ -1076,6 +1076,11 @@ jobs:
           OIDC_JWKS_URI: http://localhost:8080/realms/rasta/protocol/openid-connect/certs
           OIDC_AUDIENCE: rasta-api
           PORT_IDENTITY: '3101'
+          # AUD-004 Phase C2. The refusal scenario waits for a window to close
+          # before its aggregated record can exist; ten seconds keeps that wait
+          # short without a production bypass. The E2E step reads the same
+          # value to align its burst to a fresh window.
+          SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: '10'
           # The realm import above already carries this client with this exact
           # throwaway secret (`infrastructure/docker/keycloak/rasta-realm.json`,
           # `.env.example`) — a per-run secret here would just be a second value
@@ -1218,6 +1223,7 @@ jobs:
           E2E_DOCUMENT_URL: http://localhost:3114
           E2E_AUDIT_URL: http://localhost:3115
           E2E_IDENTITY_URL: http://localhost:3101
+          SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: '10'
           KEYCLOAK_URL: http://localhost:8080
           KEYCLOAK_REALM: rasta
           KEYCLOAK_WEB_CLIENT_ID: rasta-web

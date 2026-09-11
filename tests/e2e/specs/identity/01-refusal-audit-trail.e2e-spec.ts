@@ -1,15 +1,16 @@
+import { randomUUID } from 'node:crypto';
 import { test, expect, errorCode, type Actor } from '../../src/api';
-import { ORG } from '../../src/env';
+import { e2eConfig, ORG } from '../../src/env';
 import { waitFor } from '../../src/events';
 
 /**
- * AUD-004 Phase C1, black-box, over the real stack (ADR-053 § 4).
+ * AUD-004 Phases C1–C2, black-box, over the real stack (ADR-053 § 4).
  *
- *   HTTP 403 → identity-service's RefusalAuditExceptionFilter
- *            → security_event_outbox (identity's own database)
- *            → refusal relay → rasta.audit.trail.v1 (the real broker)
- *            → audit-service's AuditTrailConsumer → audit_event (audit's own database)
- *            → GET /v1/audit-events (the real read API)
+ *   HTTP 403 ×N → identity-service's RefusalAuditExceptionFilter
+ *               → one security_event_outbox row counting N (identity's own database)
+ *               → window closes → refusal relay → rasta.audit.trail.v1 (the real broker)
+ *               → audit-service's AuditTrailConsumer → audit_event (audit's own database)
+ *               → GET /v1/audit-events (the real read API)
  *
  * ## Why this project exists, and what it replaces
  *
@@ -28,9 +29,11 @@ import { waitFor } from '../../src/events';
  * message the other side of Kafka delivers is that service's own claim,
  * proved in its own suite:
  *
- *   - identity-service:  `test/security-event-outbox.int-spec.ts` (capture)
- *                         and `test/security-event-kafka.int-spec.ts` (real
- *                         publish, contract-valid envelope, lease fencing).
+ *   - identity-service:  `test/security-event-outbox.int-spec.ts` (capture),
+ *                         `test/security-event-aggregation.int-spec.ts`
+ *                         (aggregation, claim boundary, races) and
+ *                         `test/security-event-kafka.int-spec.ts` (real
+ *                         publish, aggregated count, lease fencing).
  *   - audit-service:      `test/trail-ingestion.int-spec.ts` (persistence,
  *                         idempotent redelivery, tenant agreement) and
  *                         `test/kafka-projector.int-spec.ts` (consuming the
@@ -44,6 +47,19 @@ import { waitFor } from '../../src/events';
  * no other suite can is the one thing black-box observation is for: that the
  * two real, separately deployed processes agree on the wire, end to end.
  *
+ * ## Aggregation, observed from outside (Phase C2)
+ *
+ * The scenario refuses the same caller `REFUSALS` times and expects **one**
+ * audit record whose `occurrenceCount` is `REFUSALS`. identity-service decides
+ * windows with the database clock, which a black-box test cannot read, so the
+ * burst is sent early in a fresh window on the runner's clock — with a margin
+ * either side for skew between the runner and the database container — and
+ * every refusal carries one shared correlation id. If the burst ever did
+ * straddle a boundary, the search by that id would return two records and the
+ * test would fail naming them, rather than passing on a lucky sum. The window
+ * is `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS`, read from the same variable
+ * the running service reads (CI: 10 seconds — configuration, not a bypass).
+ *
  * ## Why `dehyari.admin` needs no new fixture
  *
  * `identity-service`'s seed (`prisma/seed.ts`) already places `dehyari.admin`
@@ -52,8 +68,13 @@ import { waitFor } from '../../src/events';
  * switch into it is a genuine, unmodified `TENANT_MISMATCH` — the existing
  * Keycloak realm and identity seed already express the exact membership
  * mismatch this scenario needs, so no test-only seed or auth bypass is
- * required (`CodexPrompt.md` § 4's escape hatch is not exercised).
+ * required.
  */
+
+const REFUSALS = 5;
+/** How far into a window the burst may start, and how much must remain after it. */
+const WINDOW_START_MARGIN_MS = 1_000;
+const BURST_BUDGET_MS = 4_000;
 
 interface AuditRecord {
   id: string;
@@ -95,59 +116,103 @@ async function findByCorrelation(
   return { status: response.status, page: response.body as AuditPage };
 }
 
-test.describe('AUD-004 Phase C1 — a real identity refusal becomes a queryable audit record', () => {
-  test('POST /v1/users/me/active-organization refused with TENANT_MISMATCH is recorded as one REFUSED record', async ({
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Waits until the runner's clock is just past the start of an aggregation window. */
+async function atFreshWindow(windowMs: number): Promise<void> {
+  for (;;) {
+    const offset = Date.now() % windowMs;
+    if (offset >= WINDOW_START_MARGIN_MS && windowMs - offset >= BURST_BUDGET_MS) return;
+    const wait =
+      offset < WINDOW_START_MARGIN_MS
+        ? WINDOW_START_MARGIN_MS - offset
+        : windowMs - offset + WINDOW_START_MARGIN_MS;
+    await sleep(wait);
+  }
+}
+
+test.describe('AUD-004 — real identity refusals become one aggregated, queryable audit record', () => {
+  test(`${REFUSALS} refusals of POST /v1/users/me/active-organization in one window are recorded as one REFUSED record counting ${REFUSALS}`, async ({
     tenantA,
     systemAdmin,
   }) => {
+    const windowMs = e2eConfig().identityAggregationWindowSeconds * 1000;
+    if (windowMs < BURST_BUDGET_MS + WINDOW_START_MARGIN_MS * 2) {
+      throw new Error(
+        `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS=${windowMs / 1000} is too short to place ` +
+          `${REFUSALS} refusals in one window from outside the service`,
+      );
+    }
+    // One wait for a fresh window, one window to close, then two hops.
+    test.setTimeout(windowMs * 2 + 180_000);
+
+    const correlationId = `e2e-refusal-${randomUUID()}`;
+    await atFreshWindow(windowMs);
+    const burstStartedAt = Date.now();
+
     // The refusal itself, exactly as production returns it — asserted before
     // anything else, so a change to this behavior fails here rather than
     // being noticed only as a missing audit record.
-    const response = await tenantA.post('/v1/users/me/active-organization', {
-      body: { organizationId: ORG.b },
-    });
+    for (let i = 0; i < REFUSALS; i += 1) {
+      const response = await tenantA.post('/v1/users/me/active-organization', {
+        body: { organizationId: ORG.b },
+        correlationId,
+      });
+      expect(response.status).toBe(403);
+      expect(errorCode(response.body)).toBe('TENANT_MISMATCH');
+      expect(response.correlationId).toBe(correlationId);
+    }
+    expect(Date.now() - burstStartedAt).toBeLessThan(BURST_BUDGET_MS);
 
-    expect(response.status).toBe(403);
-    expect(errorCode(response.body)).toBe('TENANT_MISMATCH');
-
-    let record: AuditRecord | undefined;
+    let records: AuditRecord[] = [];
     await waitFor(
-      `an audit record for correlation ${response.correlationId}`,
+      `the aggregated audit record for correlation ${correlationId}`,
       async () => {
-        const { status, page } = await findByCorrelation(systemAdmin, response.correlationId);
+        const { status, page } = await findByCorrelation(systemAdmin, correlationId);
         if (status !== 200 || page.items.length === 0) return false;
-        record = page.items[0];
+        records = page.items;
         return true;
       },
-      // Two hops slower than a domain event: identity's own relay poll, then
+      // The window has to close first; then identity's relay poll and
       // audit-service's consumer transaction.
-      120_000,
+      windowMs + 150_000,
+      () => `last seen: ${JSON.stringify(records)}`,
     );
 
-    expect(record).toBeDefined();
-    expect(record!.outcome).toBe('REFUSED');
-    expect(record!.errorCode).toBe('TENANT_MISMATCH');
-    expect(record!.action).toBe('identity.active_organization.switch');
-    expect(record!.resourceType).toBe('User');
-    expect(record!.actorType).toBe('USER');
-    expect(record!.occurrenceCount).toBe(1);
-    expect(record!.sourceService).toBe('identity-service');
-    expect(record!.sourceTopic).toBe('rasta.audit.trail.v1');
-    expect(record!.correlationId).toBe(response.correlationId);
-    expect(Array.isArray(record!.actorRoles)).toBe(true);
-    expect(record!.actorRoles.length).toBeGreaterThan(0);
+    // Published only after its window closed, so the count is final when it
+    // appears. One record, counting every refusal — not one record per probe.
+    expect(records).toHaveLength(1);
+    const record = records[0]!;
+    expect(record.occurrenceCount).toBe(REFUSALS);
+    expect(record.outcome).toBe('REFUSED');
+    expect(record.errorCode).toBe('TENANT_MISMATCH');
+    expect(record.action).toBe('identity.active_organization.switch');
+    expect(record.resourceType).toBe('User');
+    expect(record.actorType).toBe('USER');
+    expect(record.sourceService).toBe('identity-service');
+    expect(record.sourceTopic).toBe('rasta.audit.trail.v1');
+    expect(record.correlationId).toBe(correlationId);
+    expect(Array.isArray(record.actorRoles)).toBe(true);
+    expect(record.actorRoles.length).toBeGreaterThan(0);
 
     // The evidence belongs to the caller's own tenant, never the one they
     // asked for and were refused — the specific misattribution a shared
     // `resolveOrganization` bug would produce.
-    expect(record!.organizationId).toBe(ORG.a);
-    expect(record!.organizationId).not.toBe(ORG.b);
-    expect(record!.resourceId).not.toBe(ORG.b);
+    expect(record.organizationId).toBe(ORG.a);
+    expect(record.organizationId).not.toBe(ORG.b);
+    expect(record.resourceId).not.toBe(ORG.b);
 
     // No secret and no attacker-controlled value reached a column this
     // endpoint would ever answer with.
-    const serialised = JSON.stringify(record);
-    expect(serialised).not.toContain(ORG.b);
+    expect(JSON.stringify(record)).not.toContain(ORG.b);
+
+    // And it stays one: nothing about this burst arrives later as a second record.
+    await sleep(3_000);
+    const settled = await findByCorrelation(systemAdmin, correlationId);
+    expect(settled.status).toBe(200);
+    expect(settled.page.items.map((item) => [item.id, item.occurrenceCount])).toEqual([
+      [record.id, REFUSALS],
+    ]);
   });
 
   test('the caller who was refused cannot read the record their own refusal created', async ({
