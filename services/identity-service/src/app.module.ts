@@ -49,7 +49,10 @@ import {
   SECURITY_EVENT_RELAY,
 } from './security-events/security-event.relay';
 import {
+  securityEventOutboxClosedBacklogAgeSeconds,
+  securityEventOutboxClosedBacklogTotal,
   securityEventOutboxLeasesActive,
+  securityEventOutboxOpenWindows,
   securityEventOutboxPendingAgeSeconds,
   securityEventOutboxPendingTotal,
 } from './observability/security-event.metrics';
@@ -154,14 +157,15 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
     },
 
     // ------------------------------------------------------------------------
-    // Refusal audit (ADR-053 § 4, AUD-004 Phase C1).
+    // Refusal audit (ADR-053 § 4, AUD-004 Phases C1–C2).
     //
     // A second queue and a second relay, beside the domain outbox above and
-    // sharing nothing with it but the Kafka producer. The refusal filter writes
-    // `security_event_outbox` in its own bounded transaction; the refusal relay
-    // publishes it to `rasta.audit.trail.v1`. Neither Kafka nor audit-service
-    // is on the request path: a refusal is decided and answered whether or not
-    // either is reachable.
+    // sharing nothing with it but the Kafka producer. The refusal filter counts
+    // each refusal into `security_event_outbox` in its own bounded transaction
+    // — one row per identity per aggregation window; the refusal relay
+    // publishes a row once its window has closed. Neither Kafka nor
+    // audit-service is on the request path: a refusal is decided and answered
+    // whether or not either is reachable.
     // ------------------------------------------------------------------------
     SecurityEventOutboxStore,
 
@@ -172,6 +176,7 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
         new RefusalAuditRecorder({
           store,
           timeoutMs: env.SECURITY_EVENT_CAPTURE_TIMEOUT_MS,
+          aggregationWindowSeconds: env.SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS,
           producerVersion: env.SERVICE_VERSION,
           logger,
         }),
@@ -283,6 +288,11 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
         securityEventOutboxPendingAgeSeconds.set(
           await this.securityStore.oldestPendingAgeSeconds(),
         );
+        // Phase C2: an open window is expected to wait; a closed one is not.
+        const backlog = await this.securityStore.aggregationBacklog();
+        securityEventOutboxOpenWindows.set(backlog.openWindows);
+        securityEventOutboxClosedBacklogTotal.set(backlog.closedBacklog);
+        securityEventOutboxClosedBacklogAgeSeconds.set(backlog.closedBacklogAgeSeconds);
       } catch {
         // Metrics must never take the service down.
       }

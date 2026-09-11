@@ -107,6 +107,11 @@ export interface IdentityApiOptions {
   captureTimeoutMs?: number;
   /** `SECURITY_EVENT_FLUSH_INTERVAL_MS`, for the real refusal relay. */
   flushIntervalMs?: number;
+  /**
+   * `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS`. The production default (60)
+   * unless a suite needs to watch a window close — configuration, not a bypass.
+   */
+  aggregationWindowSeconds?: number;
   /** Run the real refusal relay against Kafka. Inert otherwise. */
   runSecurityRelay?: boolean;
   /** Replaces the refusal store — used to inject a failing write. */
@@ -142,6 +147,9 @@ export async function startIdentityApi(
     KEYCLOAK_SYNC_ENABLED: 'false',
     SECURITY_EVENT_CAPTURE_TIMEOUT_MS: String(options.captureTimeoutMs ?? 5000),
     SECURITY_EVENT_FLUSH_INTERVAL_MS: String(options.flushIntervalMs ?? 1000),
+    ...(options.aggregationWindowSeconds !== undefined
+      ? { SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: String(options.aggregationWindowSeconds) }
+      : {}),
   });
 
   let builder = Test.createTestingModule({ imports: [AppModule] })

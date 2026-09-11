@@ -26,6 +26,11 @@ function store() {
     pendingCount: jest.fn(async () => 0),
     activeLeaseCount: jest.fn(async () => 0),
     oldestPendingAgeSeconds: jest.fn(async () => 0),
+    aggregationBacklog: jest.fn(async () => ({
+      openWindows: 0,
+      closedBacklog: 0,
+      closedBacklogAgeSeconds: 0,
+    })),
   };
 }
 

@@ -74,6 +74,66 @@ export async function waitFor<T>(
   );
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The database's clock, in Unix milliseconds — the clock every aggregation
+ * window decision is made with (AUD-004 Phase C2). Never the test process's.
+ */
+export async function databaseNowMs(prisma: PrismaService): Promise<number> {
+  const rows = await prisma.client.$queryRawUnsafe<{ ms: number }[]>(
+    'SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::float8 AS ms',
+  );
+  const ms = rows[0]?.ms;
+  if (typeof ms !== 'number') throw new Error('the database did not report its clock');
+  return ms;
+}
+
+/**
+ * Waits, on the database clock, until at least `neededMs` remain in the current
+ * aggregation window, so a burst of refusals a test sends next is guaranteed to
+ * land in one window rather than straddling a boundary by chance.
+ *
+ * Windows align to the Unix epoch (`refusal-aggregation.ts`), so the position
+ * inside the window is the database time modulo the window length.
+ */
+export async function atFreshWindow(
+  prisma: PrismaService,
+  windowSeconds: number,
+  neededMs: number,
+): Promise<void> {
+  const strideMs = windowSeconds * 1000;
+  if (neededMs >= strideMs) {
+    throw new Error(`a ${windowSeconds}s window can never leave ${neededMs}ms`);
+  }
+  for (;;) {
+    const remaining = strideMs - ((await databaseNowMs(prisma)) % strideMs);
+    if (remaining >= neededMs) return;
+    await sleep(remaining + 25);
+  }
+}
+
+/** Waits until row `id`'s aggregation window has closed on the database clock. */
+export async function waitForWindowClose(
+  prisma: PrismaService,
+  id: string,
+  timeoutMs = 120_000,
+): Promise<void> {
+  await waitFor(
+    `the aggregation window of ${id} to close`,
+    async () => {
+      const rows = await prisma.client.$queryRawUnsafe<{ closed: boolean }[]>(
+        `SELECT window_ends_at <= (statement_timestamp() AT TIME ZONE 'UTC')::timestamp(3) AS closed
+           FROM security_event_outbox WHERE id = $1`,
+        id,
+      );
+      return rows[0]?.closed === true;
+    },
+    timeoutMs,
+    50,
+  );
+}
+
 export function tenants() {
   const suffix = ulid().slice(-10);
   return { a: `ORG-ITEST-A-${suffix}`, b: `ORG-ITEST-B-${suffix}` };

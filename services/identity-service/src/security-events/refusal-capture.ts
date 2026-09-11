@@ -213,7 +213,12 @@ export function decideCapture(
     correlationId: correlationIdOf(context, id),
     traceparent: traceparentOf(context),
     producerVersion: producerVersionOf(environment.producerVersion),
+    // The application instant and a single occurrence: enough to prove the row
+    // publishable below. The store persists the database's instant instead,
+    // and counts the occurrence into whichever window row it belongs to
+    // (Phase C2) — the application clock decides nothing about aggregation.
     occurredAt: environment.now,
+    occurrenceCount: 1,
   };
 
   // The exact check the flusher makes before publishing, made now — so a row

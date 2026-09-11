@@ -12,27 +12,29 @@ import {
 } from '@rasta/contracts';
 import type { OutboxRow } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
+import { MAX_OCCURRENCE_COUNT } from './refusal-aggregation';
 
 /**
  * One `security_event_outbox` row → one `AUDIT_EVENT_RECORDED` v1 envelope
- * (ADR-053 §§ 1, 4; AUD-004 Phase C1).
+ * (ADR-053 §§ 1, 4; AUD-004 Phases C1–C2).
  *
- * Every wire value comes from a contract constant or a persisted column. The
- * two fixed facts of this phase are constants here rather than columns, because
- * nothing this producer does can make them otherwise:
+ * Every wire value comes from a contract constant or a persisted column:
  *
- *   outcome          `REFUSED` — the only thing this queue records.
- *   occurrenceCount  `1` — one row per refusal. Windowed aggregation (ADR-053
- *                    § 4) is later work; a count above one would claim an
- *                    aggregation that does not exist.
+ *   outcome          `REFUSED` — a constant; the only thing this queue records.
+ *   occurrenceCount  the row's `occurrence_count` — how many matching refusals
+ *                    its aggregation window counted (Phase C2). Read only from
+ *                    a row the relay has claimed, and a claimed row can no
+ *                    longer change, so the number published is final.
+ *   occurredAt       the row's `occurred_at` — the first occurrence in the
+ *                    window, on the database clock.
  *
- * Deterministic per row: `eventId` is the row id and `occurredAt` the persisted
- * instant, so a row delivered twice produces the same envelope twice and the
- * audit consumer's `(eventId, consumer)` key keeps the second one out.
+ * Deterministic per row: `eventId` is the row id and every other value a
+ * column that is frozen by the time the row is claimed, so a row delivered
+ * twice produces the same envelope — count included — and the audit consumer's
+ * `(eventId, consumer)` key keeps the second one out.
  */
 
 export const REFUSAL_OUTCOME = 'REFUSED' as const satisfies AuditTrailPayloadV1['outcome'];
-export const REFUSAL_OCCURRENCE_COUNT = 1;
 
 /** The persisted evidence columns of one row, as the store reads them back. */
 export interface SecurityEventRecord {
@@ -51,7 +53,10 @@ export interface SecurityEventRecord {
   correlationId: string;
   traceparent: string | null;
   producerVersion: string;
+  /** The first occurrence in the aggregation window. */
   occurredAt: Date;
+  /** Matching refusals this row stands for, 1..2147483647 (Phase C2). */
+  occurrenceCount: number;
 }
 
 /** Delivery state carried alongside, for the relay. */
@@ -89,7 +94,7 @@ export function toAuditTrailPayload(record: SecurityEventRecord): AuditTrailPayl
     outcome: REFUSAL_OUTCOME,
     errorCode: record.errorCode,
     ...(record.reason !== null ? { reason: record.reason } : {}),
-    occurrenceCount: REFUSAL_OCCURRENCE_COUNT,
+    occurrenceCount: record.occurrenceCount,
     ...(Object.keys(source).length > 0 ? { source } : {}),
   };
 }
@@ -184,9 +189,9 @@ function describeIssues(issues: readonly ZodIssue[]): string {
  * Throws unless `row` is exactly what the audit consumer will accept.
  *
  * Re-checks what `toSecurityEventOutboxRow` built, rather than trusting it:
- * the standard envelope, the name/version/topic constants, the v1 payload, this
- * phase's two fixed facts, exact tenant agreement, and a Kafka key equal to the
- * envelope's aggregate. A row that fails stays in the queue and is retried —
+ * the standard envelope, the name/version/topic constants, the v1 payload, the
+ * `REFUSED` outcome, an occurrence count inside PostgreSQL `INTEGER`, exact
+ * tenant agreement, and a Kafka key equal to the envelope's aggregate. A row that fails stays in the queue and is retried —
  * visible in the failure counter and the pending-age gauge — rather than
  * published into a dead-letter topic.
  */
@@ -224,9 +229,11 @@ export function assertPublishableAuditTrailRow(row: OutboxRow): void {
   if (payload.data.outcome !== REFUSAL_OUTCOME) {
     throw new AuditTrailContractError(`outcome is not ${REFUSAL_OUTCOME}`);
   }
-  if (payload.data.occurrenceCount !== REFUSAL_OCCURRENCE_COUNT) {
+  // The schema already demands a positive integer. The ceiling is the column
+  // both ends store it in; a count above it could only be a producer defect.
+  if (payload.data.occurrenceCount > MAX_OCCURRENCE_COUNT) {
     throw new AuditTrailContractError(
-      `occurrenceCount is not ${REFUSAL_OCCURRENCE_COUNT}; refusal aggregation is not implemented`,
+      `occurrenceCount exceeds the PostgreSQL INTEGER ceiling ${MAX_OCCURRENCE_COUNT}`,
     );
   }
   if (payload.data.correctionOf !== undefined || payload.data.changes !== undefined) {

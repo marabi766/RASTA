@@ -45,6 +45,7 @@ function row(
     traceparent: null,
     producerVersion: '1.0.0',
     occurredAt: new Date('2026-09-11T10:00:00.000Z'),
+    occurrenceCount: 1,
     createdAt: new Date('2026-09-11T10:00:00.000Z'),
     publishedAt: null,
     attempts: 0,
@@ -59,7 +60,7 @@ function invalidRow(id: string): OutboxRow {
   const envelope = JSON.parse(JSON.stringify(valid.payload)) as {
     payload: Record<string, unknown>;
   };
-  envelope.payload.occurrenceCount = 2;
+  envelope.payload.occurrenceCount = 0;
   envelope.payload.reason = SENTINEL;
   return { ...valid, payload: envelope };
 }
@@ -129,6 +130,31 @@ describe('createSecurityEventRelay', () => {
     securityEventPublishFailuresTotal.reset();
     securityEventAckFencedTotal.reset();
     securityEventLeaseReclaimedTotal.reset();
+  });
+
+  it('publishes an aggregated row with its persisted count, unchanged', async () => {
+    const rows = [row('01J9ZC000000000000000000G1', { occurrenceCount: 500 })];
+    const store = fakeStore({ token: 'tok-agg', rows, reclaimed: 0 });
+    const sent: OutboxRow[] = [];
+    const publisher: EventPublisher = {
+      publish: jest.fn(async (batch: readonly OutboxRow[]) => {
+        sent.push(...batch);
+      }),
+    };
+
+    const relay = createSecurityEventRelay({
+      store,
+      publisher,
+      logger: silentLogger(),
+      ...relayOptions,
+    });
+    await expect(relay.tick()).resolves.toBe(1);
+
+    expect(sent).toEqual(rows);
+    expect(
+      (sent[0]!.payload as { payload: { occurrenceCount: number } }).payload.occurrenceCount,
+    ).toBe(500);
+    expect(store.markPublished).toHaveBeenCalledWith(['01J9ZC000000000000000000G1'], 'tok-agg');
   });
 
   it('publishes and acknowledges a claimed batch, fenced on its token', async () => {

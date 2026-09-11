@@ -7,6 +7,7 @@ import {
   authEnvSchema,
   loadEnv,
 } from '@rasta/config';
+import { AGGREGATION_WINDOW_SECONDS } from '../security-events/refusal-aggregation';
 
 /**
  * identity-service configuration.
@@ -52,6 +53,25 @@ export const identityEnvSchema = baseEnvSchema
 
     /** Rows one refusal-relay claim may take. */
     SECURITY_EVENT_FLUSH_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
+
+    /**
+     * ADR-053 § 4 — the UTC window matching refusals are counted over (AUD-004
+     * Phase C2). One row per tenant, actor, action, resource and error code per
+     * window; the relay publishes it only after the window closes on the
+     * database clock.
+     *
+     * Default 60: the "500 probes in one minute" ADR-053 § 4 describes. The
+     * window is also the least time before a refusal reaches the audit trail,
+     * which is what the one-hour ceiling bounds; the one-second floor is the
+     * shortest window the table accepts for an aggregate. Lower it for a test
+     * that must observe a closed window, never to switch aggregation off.
+     */
+    SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(AGGREGATION_WINDOW_SECONDS.MIN)
+      .max(AGGREGATION_WINDOW_SECONDS.MAX)
+      .default(AGGREGATION_WINDOW_SECONDS.DEFAULT),
   });
 
 export type IdentityEnv = z.infer<typeof identityEnvSchema>;

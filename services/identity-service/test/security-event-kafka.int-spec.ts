@@ -12,12 +12,12 @@ import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { AuditTrailPublisher } from '../src/security-events/audit-trail.publisher';
 import { REFUSAL_SITES } from '../src/security-events/refusal-sites';
 import { SECURITY_EVENT_RELAY } from '../src/security-events/security-event.relay';
-import { RUN_TAG, id, waitFor } from './helpers';
+import { RUN_TAG, atFreshWindow, id, waitFor, waitForWindowClose } from './helpers';
 import { startIdentityApi, userToken, type Caller, type IdentityApiHarness } from './api-helpers';
 
 /**
- * The refusal outbox against a real Kafka broker (ADR-053 § 4, AUD-004 Phase
- * C1) — corrected topology.
+ * The refusal outbox against a real Kafka broker (ADR-053 § 4, AUD-004 Phases
+ * C1–C2) — corrected topology.
  *
  * ## What changed, and why
  *
@@ -45,6 +45,14 @@ import { startIdentityApi, userToken, type Caller, type IdentityApiHarness } fro
  * from two different services would not make either proof stronger; it
  * would only give the two suites a reason to drift.
  *
+ * ## Aggregation on the wire (Phase C2)
+ *
+ * The relay runs for real, polling every 200 ms, with a three-second
+ * aggregation window (configuration, not a bypass). Matching refusals are
+ * counted into one row; the suite watches that row stay unpublished — and the
+ * topic stay silent about it — for as long as its window is open, then sees
+ * exactly one message carrying the aggregated count once it closes.
+ *
  * The full system — this service's `403`, through Kafka, into
  * audit-service's own store, readable through its own API — is proved
  * without any in-process coupling by the black-box scenario in
@@ -66,8 +74,10 @@ if (!brokerList) {
 
 /** A fresh group replays the trail topic from the start before reaching this run's messages. */
 const CATCH_UP_TIMEOUT_MS = 600_000;
-/** One relay poll, one broker round trip — with rejoin slack. */
+/** One window, one relay poll, one broker round trip — with rejoin slack. */
 const DELIVERY_TIMEOUT_MS = 120_000;
+/** Short enough to watch close; long enough for a burst to land in one window. */
+const WINDOW_SECONDS = 3;
 
 const SITE = REFUSAL_SITES.SWITCH_ACTIVE_ORGANIZATION;
 const TRACEPARENT = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
@@ -125,16 +135,18 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
     requested: string;
     correlationId: string;
     token: string;
+    /** The row this refusal was counted into. */
     eventId: string;
   }
 
-  /** A real refusal through the real endpoint; returns the identity row's id. */
-  async function refuse(): Promise<Refusal> {
-    const caller: Caller = {
-      userId: id('USR'),
-      organizationId: id('ORG'),
-      roles: ['FLEET_MANAGER', 'ORGANIZATION_ADMIN'],
-    };
+  const newCaller = (): Caller => ({
+    userId: id('USR'),
+    organizationId: id('ORG'),
+    roles: ['FLEET_MANAGER', 'ORGANIZATION_ADMIN'],
+  });
+
+  /** A real refusal through the real endpoint; returns the identity row it was counted into. */
+  async function refuse(caller: Caller = newCaller()): Promise<Refusal> {
     const requested = `ORG-REQ-${RUN_TAG}-${ulid()}`;
     const correlationId = id('COR');
     const token = userToken(caller);
@@ -157,11 +169,18 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
     return { caller, requested, correlationId, token, eventId: rows[0]!.id };
   }
 
+  const rowOf = (eventId: string) =>
+    identity.prisma.client.securityEventOutbox.findUniqueOrThrow({ where: { id: eventId } });
+
   beforeAll(async () => {
     observer = new TrailObserver();
     await observer.start();
 
-    identity = await startIdentityApi({ runSecurityRelay: true, flushIntervalMs: 200 });
+    identity = await startIdentityApi({
+      runSecurityRelay: true,
+      flushIntervalMs: 200,
+      aggregationWindowSeconds: WINDOW_SECONDS,
+    });
 
     // Drain once: the observer's group reaches this run's first refusal only
     // after everything the topic already held.
@@ -186,26 +205,60 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
   }, 120_000);
 
   it(
-    'publishes one contract-valid AUDIT_EVENT_RECORDED envelope, and marks the row published',
+    'publishes nothing while a window is open, then one contract-valid AUDIT_EVENT_RECORDED envelope with the aggregated count',
     async () => {
-      const refusal = await refuse();
+      const caller = newCaller();
+      await atFreshWindow(identity.prisma, WINDOW_SECONDS, 2_000);
+
+      const first = await refuse(caller);
+      const second = await refuse(caller);
+      const third = await refuse(caller);
+      expect(second.eventId).toBe(first.eventId);
+      expect(third.eventId).toBe(first.eventId);
+      const eventId = first.eventId;
+      expect((await rowOf(eventId)).occurrenceCount).toBe(3);
+
+      // The relay polls every 200 ms throughout. Until just before the window
+      // ends on the database clock, the row is neither claimed nor published,
+      // and nothing about it reaches the topic.
+      let openChecks = 0;
+      for (;;) {
+        const [{ open }] = await identity.prisma.client.$queryRawUnsafe<{ open: boolean }[]>(
+          `SELECT window_ends_at > (statement_timestamp() AT TIME ZONE 'UTC')::timestamp(3)
+                                   + interval '150 milliseconds' AS open
+             FROM security_event_outbox WHERE id = $1`,
+          eventId,
+        );
+        if (!open) break;
+        const row = await rowOf(eventId);
+        expect(row.publishedAt).toBeNull();
+        expect(row.claimCount).toBe(0);
+        expect(observer.deliveriesOf(eventId)).toHaveLength(0);
+        openChecks += 1;
+        await sleep(100);
+      }
+      expect(openChecks).toBeGreaterThan(0);
 
       const [delivered] = await waitFor(
-        'a delivery of the refusal event',
+        'a delivery of the aggregated refusal event',
         async () => {
-          const found = observer.deliveriesOf(refusal.eventId);
+          const found = observer.deliveriesOf(eventId);
           return found.length > 0 ? found : null;
         },
         DELIVERY_TIMEOUT_MS,
       );
 
       const { envelope, delivery } = delivered!;
+      const row = await rowOf(eventId);
       expect(delivery.topic).toBe(AUDIT_TRAIL_TOPIC);
+      expect(envelope.eventId).toBe(eventId);
       expect(envelope.eventName).toBe(AUDIT_EVENT_RECORDED);
       expect(envelope.producer).toBe('identity-service');
-      expect(envelope.tenantId).toBe(refusal.caller.organizationId);
-      expect(envelope.correlationId).toBe(refusal.correlationId);
+      expect(envelope.tenantId).toBe(caller.organizationId);
+      // The first occurrence's correlation, trace and instant.
+      expect(envelope.correlationId).toBe(first.correlationId);
       expect(envelope.traceparent).toBe(TRACEPARENT);
+      expect(envelope.occurredAt).toBe(row.occurredAt.toISOString());
 
       // The wire contract this service is held to — the same schema
       // audit-service validates against, applied here as an external reader
@@ -214,57 +267,61 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
       expect(payload).toMatchObject({
         actor: {
           type: 'USER',
-          id: refusal.caller.userId,
+          id: caller.userId,
           roles: ['FLEET_MANAGER', 'ORGANIZATION_ADMIN'],
         },
-        organizationId: refusal.caller.organizationId,
+        organizationId: caller.organizationId,
         action: SITE.action,
         resourceType: SITE.resourceType,
-        resourceId: refusal.caller.userId,
+        resourceId: caller.userId,
         outcome: 'REFUSED',
         errorCode: 'TENANT_MISMATCH',
         reason: SITE.reason,
-        occurrenceCount: 1,
+        occurrenceCount: 3,
       });
       expect(payload.source?.userAgent).toBe(USER_AGENT);
       expect(typeof payload.source?.ip).toBe('string');
 
       // No sensitive value reached the wire, in either the envelope or the
-      // payload.
+      // payload — from any of the three requests.
       const wire = JSON.stringify({ envelope, payload });
       for (const leaked of [
-        refusal.requested,
-        refusal.token,
+        first.requested,
+        second.requested,
+        third.requested,
+        first.token,
         `kafka-secret-${RUN_TAG}`,
         'You are not a member',
       ]) {
         expect(wire).not.toContain(leaked);
       }
 
-      // Own database only: the outbox row this service owns was acknowledged
-      // once the broker took it.
+      // Own database only: acknowledged once the broker took it, count unchanged.
       await waitFor(
         'the identity row to be acknowledged',
-        async () =>
-          (
-            await identity.prisma.client.securityEventOutbox.findUniqueOrThrow({
-              where: { id: refusal.eventId },
-            })
-          ).publishedAt,
+        async () => (await rowOf(eventId)).publishedAt,
         DELIVERY_TIMEOUT_MS,
       );
+      expect(await rowOf(eventId)).toMatchObject({ occurrenceCount: 3 });
+      await sleep(500);
+      expect(observer.deliveriesOf(eventId)).toHaveLength(1);
     },
     DELIVERY_TIMEOUT_MS + 60_000,
   );
 
   it(
-    'lease fencing: a reclaimed row is published by the new owner, and the stale claim cannot mark it published',
+    'lease fencing: a reclaimed aggregated row is redelivered with the same eventId and count, and the stale claim cannot mark it published',
     async () => {
       const relay = identity.moduleRef.get<OutboxRelay>(SECURITY_EVENT_RELAY);
       await relay.stop();
 
       try {
-        const refusal = await refuse();
+        const caller = newCaller();
+        await atFreshWindow(identity.prisma, WINDOW_SECONDS, 1_500);
+        const refusal = await refuse(caller);
+        expect((await refuse(caller)).eventId).toBe(refusal.eventId);
+        await waitForWindowClose(identity.prisma, refusal.eventId);
+
         const store = identity.store;
         const publisher = new AuditTrailPublisher(identity.moduleRef.get(KafkaEventPublisher));
 
@@ -301,10 +358,11 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
         );
 
         // Both publishes actually reached the broker, each a contract-valid
-        // copy of the same event — proving the redelivery this test forced is
-        // indistinguishable, on the wire, from a real one. That a consumer
-        // collapses the two into one record is audit-service's own claim
-        // (`test/trail-ingestion.int-spec.ts`, "duplicate delivery").
+        // copy of the same event with the same count — proving the
+        // redelivery this test forced is indistinguishable, on the wire, from
+        // a real one. That a consumer collapses the two into one record is
+        // audit-service's own claim (`test/trail-ingestion.int-spec.ts`,
+        // "duplicate delivery").
         const deliveries = await waitFor(
           'both deliveries of the redelivered event',
           async () => {
@@ -316,8 +374,9 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
         expect(deliveries).toHaveLength(2);
         for (const { envelope } of deliveries) {
           expect(envelope.eventId).toBe(refusal.eventId);
-          auditTrailPayloadSchemaV1.parse(envelope.payload);
+          expect(auditTrailPayloadSchemaV1.parse(envelope.payload).occurrenceCount).toBe(2);
         }
+        expect(await rowOf(refusal.eventId)).toMatchObject({ occurrenceCount: 2, claimCount: 2 });
       } finally {
         relay.start();
       }

@@ -39,6 +39,7 @@ function record(
     traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
     producerVersion: '1.4.2',
     occurredAt: new Date('2026-09-11T10:00:00.000Z'),
+    occurrenceCount: 1,
     createdAt: new Date('2026-09-11T10:00:00.000Z'),
     publishedAt: null,
     attempts: 0,
@@ -132,6 +133,31 @@ describe('audit-trail envelope for a refusal', () => {
     expect(JSON.stringify(toSecurityEventOutboxRow(record()))).toBe(
       JSON.stringify(toSecurityEventOutboxRow(record())),
     );
+    expect(JSON.stringify(toSecurityEventOutboxRow(record({ occurrenceCount: 500 })))).toBe(
+      JSON.stringify(toSecurityEventOutboxRow(record({ occurrenceCount: 500 }))),
+    );
+  });
+
+  describe('publishes the persisted occurrence count (AUD-004 Phase C2)', () => {
+    it.each([1, 2, 500, 2_147_483_647])('carries occurrenceCount %p exactly', (count) => {
+      const row = toSecurityEventOutboxRow(record({ occurrenceCount: count }));
+      const parsed = parseEnvelope(row.payload, auditTrailPayloadSchemaV1);
+
+      expect(parsed.payload.occurrenceCount).toBe(count);
+      // Aggregation changes the count and nothing else on the wire.
+      expect(parsed.eventId).toBe(row.id);
+      expect(parsed.tenantId).toBe('ORG_A');
+      expect(parsed.payload.organizationId).toBe('ORG_A');
+      expect(row.partitionKey).toBe('USR_A');
+      expect(() => assertPublishableAuditTrailRow(row)).not.toThrow();
+    });
+
+    it('never folds the window or any source value into the envelope', () => {
+      const wire = JSON.stringify(toSecurityEventOutboxRow(record({ occurrenceCount: 500 })));
+      // `aggregateType`/`aggregateId` are the contract's own envelope fields.
+      expect(wire).not.toContain('window');
+      expect(wire).not.toContain('aggregation');
+    });
   });
 
   describe('refuses to publish', () => {
@@ -176,9 +202,14 @@ describe('audit-trail envelope for a refusal', () => {
         }),
       ],
       [
-        'an aggregated occurrence count',
+        'an occurrence count above the PostgreSQL INTEGER ceiling',
+        toSecurityEventOutboxRow(record({ occurrenceCount: 2_147_483_648 })),
+      ],
+      ['an occurrence count of zero', toSecurityEventOutboxRow(record({ occurrenceCount: 0 }))],
+      [
+        'a fractional occurrence count',
         tampered((_e, p) => {
-          p.occurrenceCount = 500;
+          p.occurrenceCount = 1.5;
         }),
       ],
       [

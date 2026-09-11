@@ -101,10 +101,16 @@ async function until(check: () => boolean, timeoutMs = 2000): Promise<void> {
   }
 }
 
-function recorderWith(insert: SecurityEventWriter['insert'], timeoutMs = 40): RefusalAuditRecorder {
+const COUNTED = { id: '01J9ZC0000000000000000TEST', occurrenceCount: 2, created: false };
+
+function recorderWith(
+  capture: SecurityEventWriter['capture'],
+  timeoutMs = 40,
+): RefusalAuditRecorder {
   return new RefusalAuditRecorder({
-    store: { insert },
+    store: { capture },
     timeoutMs,
+    aggregationWindowSeconds: 60,
     producerVersion: '1.0.0',
     logger: silentLogger() as unknown as Logger,
   });
@@ -162,7 +168,11 @@ describe('RefusalAuditExceptionFilter', () => {
 
   describe('sends exactly the platform response, once, whatever the capture did', () => {
     const cases: [string, () => RefusalAuditRecorder][] = [
-      ['recorded', () => recorderWith(async () => undefined)],
+      [
+        'recorded as a new window row',
+        () => recorderWith(async () => ({ ...COUNTED, created: true })),
+      ],
+      ['counted into an open window row', () => recorderWith(async () => COUNTED)],
       [
         'failed',
         () =>
@@ -170,7 +180,7 @@ describe('RefusalAuditExceptionFilter', () => {
             throw new Error('database down');
           }),
       ],
-      ['timed out', () => recorderWith(() => new Promise<void>(() => undefined), 20)],
+      ['timed out', () => recorderWith(() => new Promise<typeof COUNTED>(() => undefined), 20)],
       [
         'threw',
         () =>
@@ -207,7 +217,7 @@ describe('RefusalAuditExceptionFilter', () => {
   it('holds the refusal only until the capture settles, never longer than its bound', async () => {
     const filter = new RefusalAuditExceptionFilter(
       silentLogger() as unknown as Logger,
-      recorderWith(() => new Promise<void>(() => undefined), 60),
+      recorderWith(() => new Promise<typeof COUNTED>(() => undefined), 60),
     );
     const started = Date.now();
 
@@ -222,7 +232,7 @@ describe('RefusalAuditExceptionFilter', () => {
     const logger = silentLogger();
     const filter = new RefusalAuditExceptionFilter(
       logger as unknown as Logger,
-      recorderWith(async () => undefined),
+      recorderWith(async () => COUNTED),
     );
 
     const response = run(filter, marked());

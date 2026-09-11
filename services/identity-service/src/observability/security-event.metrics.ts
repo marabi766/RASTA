@@ -1,4 +1,5 @@
 import { Counter, Gauge, registry } from '@rasta/observability';
+import { AGGREGATION_OUTCOMES } from '../security-events/refusal-aggregation';
 
 /**
  * Refusal-audit telemetry (ADR-053 §§ 4, 13; AUD-004 Phase C1).
@@ -41,6 +42,22 @@ export const securityEventCapturesTotal = new Counter({
   registers: [registry],
 });
 
+/** How a recorded capture landed (AUD-004 Phase C2). Values: `AGGREGATION_OUTCOMES`. */
+export const SECURITY_EVENT_AGGREGATION_RESULTS = AGGREGATION_OUTCOMES;
+
+/**
+ * Recorded captures by aggregation result. `created` against `incremented` is
+ * the aggregation ratio; any `ceiling_reached` means one row reached the
+ * INTEGER limit and a successor row was opened for the rest of its window.
+ * A capture that timed out is in neither — its result was never confirmed.
+ */
+export const securityEventAggregationsTotal = new Counter({
+  name: 'rasta_security_event_aggregations_total',
+  help: 'Recorded refusal captures into security_event_outbox, by aggregation result',
+  labelNames: ['result'] as const,
+  registers: [registry],
+});
+
 export const securityEventsPublishedTotal = new Counter({
   name: 'rasta_security_events_published_total',
   help: 'Refusal audit events acknowledged as published to rasta.audit.trail.v1',
@@ -79,10 +96,39 @@ export const securityEventOutboxPendingTotal = new Gauge({
   registers: [registry],
 });
 
-/** Drives the audit-gap alert: refusals that have not reached the audit trail. */
+/**
+ * Age of the oldest unpublished row, open window included. Since Phase C2 this
+ * sits near the aggregation window by design — alert on the closed-window age
+ * below, not on this.
+ */
 export const securityEventOutboxPendingAgeSeconds = new Gauge({
   name: 'rasta_security_event_outbox_pending_age_seconds',
-  help: 'Age of the oldest unpublished security_event_outbox row',
+  help: 'Age of the oldest unpublished security_event_outbox row, including rows whose window is still open',
+  registers: [registry],
+});
+
+/** Rows still counting refusals: unpublished, window not yet closed. Not claimable. */
+export const securityEventOutboxOpenWindows = new Gauge({
+  name: 'rasta_security_event_outbox_open_windows',
+  help: 'Unpublished security_event_outbox rows whose aggregation window is still open',
+  registers: [registry],
+});
+
+/** Rows the relay may publish now: unpublished, window closed. */
+export const securityEventOutboxClosedBacklogTotal = new Gauge({
+  name: 'rasta_security_event_outbox_closed_backlog_total',
+  help: 'Unpublished security_event_outbox rows whose aggregation window has closed',
+  registers: [registry],
+});
+
+/**
+ * Drives the audit-gap alert: how long the oldest claimable row has waited
+ * since its window closed. Zero when nothing closed is waiting. Independent of
+ * the window length, unlike the pending age above.
+ */
+export const securityEventOutboxClosedBacklogAgeSeconds = new Gauge({
+  name: 'rasta_security_event_outbox_closed_backlog_age_seconds',
+  help: 'Seconds since the aggregation window of the oldest unpublished, closed security_event_outbox row ended',
   registers: [registry],
 });
 

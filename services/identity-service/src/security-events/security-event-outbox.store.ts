@@ -10,10 +10,16 @@ import type {
 } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { toSecurityEventOutboxRow, type SecurityEventRecord } from './audit-trail-envelope';
+import {
+  aggregationIdentityOf,
+  assertAggregationWindowSeconds,
+  MAX_OCCURRENCE_COUNT,
+  type CapturedOccurrence,
+} from './refusal-aggregation';
 
 /**
  * `security_event_outbox` persistence — the capture write and the ADR-050 claim
- * protocol over this service's own table (ADR-053 § 4, AUD-004 Phase C1).
+ * protocol over this service's own table (ADR-053 § 4, AUD-004 Phases C1–C2).
  *
  * ## Why these statements are here and not in `@rasta/nest-common`
  *
@@ -35,6 +41,23 @@ import { toSecurityEventOutboxRow, type SecurityEventRecord } from './audit-trai
  * four-stream decomposition is a planner workaround for `outbox_message` at six
  * figures of rows; this table holds refusals awaiting a one-second flush, and
  * published rows leave the partial index the query uses.
+ *
+ * ## Windowed aggregation (Phase C2)
+ *
+ * Two rules, one on each side of the table, and the database enforces both:
+ *
+ *   capture  counts a refusal into the one row that is unpublished, never
+ *            claimed, below the INTEGER ceiling and has the same identity and
+ *            window — or inserts a new row if there is none. One
+ *            `INSERT … ON CONFLICT DO UPDATE` over the partial unique index
+ *            `ux_security_event_outbox_open_bucket`, so concurrent matching
+ *            refusals cannot produce two rows and cannot lose a count.
+ *   claim    takes only rows whose window has closed on the database clock.
+ *            Claiming sets `claim_count` above zero, which removes the row
+ *            from the capture's index; a refusal racing the claim waits on the
+ *            row lock and then either counted before the claim committed or
+ *            inserts a successor row. The row the relay publishes has stopped
+ *            changing — and the table's trigger refuses any later change.
  */
 
 /** Slack between `statement_timeout` and Prisma's transaction ceiling. */
@@ -42,11 +65,67 @@ const TRANSACTION_MARGIN_MS = 1_000;
 /** `last_error VARCHAR(1000)`. */
 const LAST_ERROR_MAX_LENGTH = 1000;
 
+/**
+ * The database's current instant in UTC at the columns' millisecond precision.
+ * The single definition of "now" for every window decision: which window a
+ * refusal falls in, whether a window has closed, and the backlog gauges. A
+ * code constant — never built from data.
+ */
+const DATABASE_NOW_UTC = `(statement_timestamp() AT TIME ZONE 'UTC')::timestamp(3)`;
+
+/**
+ * The partial unique index's predicate, verbatim: `ON CONFLICT` infers the
+ * arbiter only when its `WHERE` implies the index's.
+ */
+const OPEN_BUCKET_PREDICATE = `
+       published_at IS NULL
+   AND claim_count = 0
+   AND occurrence_count < ${MAX_OCCURRENCE_COUNT}
+   AND window_ends_at - window_started_at >= interval '1 second'`;
+
+/**
+ * Count one refusal. Parameters, in order: id, organization_id, actor_type,
+ * actor_id, actor_roles, action, resource_type, resource_id, error_code,
+ * reason, source_ip, source_user_agent, correlation_id, traceparent,
+ * producer_version, window seconds.
+ *
+ * On insert every column is this refusal's. On conflict only the count moves:
+ * the first occurrence's sample (ip, user agent, correlation, trace, roles,
+ * version) stays, and `$1` — this refusal's own ULID — is simply not used.
+ */
+const CAPTURE_SQL = `
+  WITH clock AS (
+    SELECT ${DATABASE_NOW_UTC} AS ts
+  ), bucket AS (
+    SELECT ts,
+           date_bin(make_interval(secs => $16::double precision), ts, TIMESTAMP '1970-01-01') AS started
+      FROM clock
+  )
+  INSERT INTO security_event_outbox (
+    id, organization_id, actor_type, actor_id, actor_roles, action,
+    resource_type, resource_id, error_code, reason, source_ip, source_user_agent,
+    correlation_id, traceparent, producer_version, occurred_at, created_at,
+    occurrence_count, window_started_at, window_ends_at
+  )
+  SELECT $1::text, $2::text, $3::text, $4::text, $5::text[], $6::text,
+         $7::text, $8::text, $9::text, $10::text, $11::text, $12::text,
+         $13::text, $14::text, $15::text, b.ts, b.ts,
+         1, b.started, b.started + make_interval(secs => $16::double precision)
+    FROM bucket b
+  ON CONFLICT (
+    organization_id, actor_type, actor_id, action,
+    resource_type, resource_id, error_code,
+    window_started_at, window_ends_at
+  ) WHERE ${OPEN_BUCKET_PREDICATE}
+  DO UPDATE SET occurrence_count = security_event_outbox.occurrence_count + 1
+  RETURNING id, occurrence_count, (xmax = 0) AS created`;
+
 const RETURNED_COLUMNS = `
   o.id, o.organization_id, o.actor_type, o.actor_id, o.actor_roles, o.action,
   o.resource_type, o.resource_id, o.error_code, o.reason, o.source_ip,
   o.source_user_agent, o.correlation_id, o.traceparent, o.producer_version,
-  o.occurred_at, o.created_at, o.published_at, o.attempts, o.last_error`;
+  o.occurred_at, o.occurrence_count, o.window_ends_at, o.created_at,
+  o.published_at, o.attempts, o.last_error`;
 
 interface RawSecurityEventRow {
   id: string;
@@ -65,6 +144,8 @@ interface RawSecurityEventRow {
   traceparent: string | null;
   producer_version: string;
   occurred_at: Date;
+  occurrence_count: number;
+  window_ends_at: Date;
   created_at: Date;
   published_at: Date | null;
   attempts: number;
@@ -96,6 +177,7 @@ function toRow(raw: RawSecurityEventRow): OutboxRow {
     traceparent: raw.traceparent,
     producerVersion: raw.producer_version,
     occurredAt: raw.occurred_at,
+    occurrenceCount: raw.occurrence_count,
     createdAt: raw.created_at,
     publishedAt: raw.published_at,
     attempts: raw.attempts,
@@ -116,46 +198,88 @@ function statementTimeoutOf(timeoutMs: number): number {
   return bound;
 }
 
+export interface CaptureWriteOptions {
+  /** `SECURITY_EVENT_CAPTURE_TIMEOUT_MS`. */
+  timeoutMs: number;
+  /** `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS`. */
+  windowSeconds: number;
+}
+
+/** Sampled from the database for the gauges; never kept in memory. */
+export interface AggregationBacklog {
+  /** Unpublished rows whose window is still open — counting, not claimable. */
+  openWindows: number;
+  /** Unpublished rows whose window has closed — claimable now. */
+  closedBacklog: number;
+  /** Seconds since the oldest closed, unpublished window ended; 0 when none. */
+  closedBacklogAgeSeconds: number;
+}
+
 @Injectable()
 export class SecurityEventOutboxStore implements OutboxStore {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Writes one refusal in its own short transaction.
+   * Counts one refusal into its aggregation window, in its own short
+   * transaction.
    *
-   * Bounded twice on the database side: `maxWait` for acquiring a connection
-   * and `statement_timeout` for the insert, including any lock it waits on.
-   * The recorder adds a hard deadline around the whole call, so the HTTP
-   * response is never held past the configured bound whatever the driver does.
+   * One batched transaction — `SET LOCAL statement_timeout` and the upsert
+   * sent to the engine together — rather than an interactive one. Every
+   * matching refusal of a probe contends for the same row lock, and an
+   * interactive transaction would hold it across a client round trip per
+   * statement; batched, the lock is held for the upsert and its commit only.
+   * Measured, not assumed: forty concurrent writers on one row pushed
+   * interactive captures past a five-second `statement_timeout`
+   * (`test/security-event-aggregation.int-spec.ts`).
+   *
+   * `statement_timeout` bounds the database work, including any lock it waits
+   * on — a concurrent claim of the same row, for instance. The recorder's hard
+   * deadline bounds the HTTP response whatever the driver does, including a
+   * wait for a pooled connection.
    */
-  async insert(draft: SecurityEventRecord, timeoutMs: number): Promise<void> {
-    const bound = statementTimeoutOf(timeoutMs);
-    await this.prisma.client.$transaction(
-      async (tx) => {
-        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${bound}`);
-        await tx.securityEventOutbox.create({
-          data: {
-            id: draft.id,
-            organizationId: draft.organizationId,
-            actorType: draft.actorType,
-            actorId: draft.actorId,
-            actorRoles: [...draft.actorRoles],
-            action: draft.action,
-            resourceType: draft.resourceType,
-            resourceId: draft.resourceId,
-            errorCode: draft.errorCode,
-            reason: draft.reason,
-            sourceIp: draft.sourceIp,
-            sourceUserAgent: draft.sourceUserAgent,
-            correlationId: draft.correlationId,
-            traceparent: draft.traceparent,
-            producerVersion: draft.producerVersion,
-            occurredAt: draft.occurredAt,
-          },
-        });
-      },
-      { maxWait: bound, timeout: bound + TRANSACTION_MARGIN_MS },
-    );
+  async capture(
+    draft: SecurityEventRecord,
+    options: CaptureWriteOptions,
+  ): Promise<CapturedOccurrence> {
+    const bound = statementTimeoutOf(options.timeoutMs);
+    const windowSeconds = assertAggregationWindowSeconds(options.windowSeconds);
+    const key = aggregationIdentityOf(draft);
+    const client = this.prisma.client;
+
+    const [, rows] = await client.$transaction([
+      client.$executeRawUnsafe(`SET LOCAL statement_timeout = ${bound}`),
+      client.$queryRawUnsafe<{ id: string; occurrence_count: number; created: boolean }[]>(
+        CAPTURE_SQL,
+        draft.id,
+        key.organizationId,
+        key.actorType,
+        key.actorId,
+        [...draft.actorRoles],
+        key.action,
+        key.resourceType,
+        key.resourceId,
+        key.errorCode,
+        draft.reason,
+        draft.sourceIp,
+        draft.sourceUserAgent,
+        draft.correlationId,
+        draft.traceparent,
+        draft.producerVersion,
+        windowSeconds,
+      ),
+    ]);
+
+    // Without a `DO UPDATE … WHERE`, an upsert always yields its row. Zero
+    // would mean the refusal was not counted, and must not look recorded.
+    const [row] = rows;
+    if (rows.length !== 1 || row === undefined) {
+      throw new Error('security event outbox capture: the upsert did not return its row');
+    }
+    return {
+      id: row.id,
+      occurrenceCount: Number(row.occurrence_count),
+      created: row.created,
+    };
   }
 
   async claimPending(request: ClaimRequest): Promise<OutboxClaim> {
@@ -167,9 +291,11 @@ export class SecurityEventOutboxStore implements OutboxStore {
          SELECT id, claim_expires_at AS prev_expires_at
            FROM security_event_outbox
           WHERE published_at IS NULL
+            -- An open window is still counting. Never publish it (Phase C2).
+            AND window_ends_at <= ${DATABASE_NOW_UTC}
             AND (claim_expires_at IS NULL OR claim_expires_at <= now())
             AND (next_attempt_at  IS NULL OR next_attempt_at  <= now())
-          ORDER BY created_at, id
+          ORDER BY window_ends_at, id
           LIMIT $4
             FOR UPDATE SKIP LOCKED
        )
@@ -203,7 +329,7 @@ export class SecurityEventOutboxStore implements OutboxStore {
       rows: rows
         .sort(
           (a, b) =>
-            a.created_at.getTime() - b.created_at.getTime() ||
+            a.window_ends_at.getTime() - b.window_ends_at.getTime() ||
             (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
         )
         .map(toRow),
@@ -327,5 +453,28 @@ export class SecurityEventOutboxStore implements OutboxStore {
           AND claim_expires_at > now()`,
     );
     return Number(result[0]?.count ?? 0);
+  }
+
+  /** Open windows against the closed backlog the relay should be draining. */
+  async aggregationBacklog(): Promise<AggregationBacklog> {
+    const result = await this.prisma.client.$queryRawUnsafe<
+      { open_windows: bigint; closed_backlog: bigint; closed_age: number | null }[]
+    >(
+      `WITH clock AS (SELECT ${DATABASE_NOW_UTC} AS ts)
+       SELECT count(*) FILTER (WHERE o.window_ends_at >  clock.ts)::bigint AS open_windows,
+              count(*) FILTER (WHERE o.window_ends_at <= clock.ts)::bigint AS closed_backlog,
+              EXTRACT(EPOCH FROM (
+                clock.ts - MIN(o.window_ends_at) FILTER (WHERE o.window_ends_at <= clock.ts)
+              ))::float8 AS closed_age
+         FROM clock
+         LEFT JOIN security_event_outbox o ON o.published_at IS NULL
+        GROUP BY clock.ts`,
+    );
+    const row = result[0];
+    return {
+      openWindows: Number(row?.open_windows ?? 0),
+      closedBacklog: Number(row?.closed_backlog ?? 0),
+      closedBacklogAgeSeconds: Math.max(0, row?.closed_age ?? 0),
+    };
   }
 }

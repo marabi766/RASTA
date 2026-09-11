@@ -1,13 +1,17 @@
 import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError, type RequestContext } from '@rasta/nest-common';
 import {
+  securityEventAggregationsTotal,
   securityEventCapturesTotal,
+  SECURITY_EVENT_AGGREGATION_RESULTS,
   SECURITY_EVENT_CAPTURE_OUTCOMES,
 } from '../observability/security-event.metrics';
 import type { SecurityEventRecord } from './audit-trail-envelope';
+import { MAX_OCCURRENCE_COUNT, type CapturedOccurrence } from './refusal-aggregation';
 import type { RefusalObservation } from './refusal-capture';
 import { RefusalAuditRecorder, type SecurityEventWriter } from './refusal-audit.recorder';
 import { markRefusal, REFUSAL_SITES } from './refusal-sites';
+import type { CaptureWriteOptions } from './security-event-outbox.store';
 
 const NOW = new Date('2026-09-11T10:00:00.000Z');
 const SENTINEL = 'SENSITIVE-SENTINEL-9f1c';
@@ -39,26 +43,34 @@ function observation(overrides: Partial<RefusalObservation> = {}): RefusalObserv
 
 interface Harness {
   recorder: RefusalAuditRecorder;
-  insert: jest.Mock<Promise<void>, [SecurityEventRecord, number]>;
+  capture: jest.Mock<Promise<CapturedOccurrence>, [SecurityEventRecord, CaptureWriteOptions]>;
   logger: { warn: jest.Mock; error: jest.Mock };
 }
 
+const CREATED: CapturedOccurrence = {
+  id: '01J9ZC0000000000000000TEST',
+  occurrenceCount: 1,
+  created: true,
+};
+
 function harness(
-  insert: SecurityEventWriter['insert'] = async () => undefined,
+  capture: SecurityEventWriter['capture'] = async () => CREATED,
   timeoutMs = 50,
+  aggregationWindowSeconds = 60,
 ): Harness {
-  const mock = jest.fn(insert);
+  const mock = jest.fn(capture);
   const logger = { warn: jest.fn(), error: jest.fn() };
   const recorder = new RefusalAuditRecorder({
-    store: { insert: mock },
+    store: { capture: mock },
     timeoutMs,
+    aggregationWindowSeconds,
     producerVersion: '1.0.0',
     // The recorder only calls these two; the full pino surface is not needed.
     logger: logger as unknown as ConstructorParameters<typeof RefusalAuditRecorder>[0]['logger'],
     now: () => NOW,
     newId: () => '01J9ZC0000000000000000TEST',
   });
-  return { recorder, insert: mock, logger };
+  return { recorder, capture: mock, logger };
 }
 
 async function captureCounts(): Promise<Record<string, number>> {
@@ -66,29 +78,109 @@ async function captureCounts(): Promise<Record<string, number>> {
   return Object.fromEntries(metric.values.map((v) => [String(v.labels.outcome), v.value]));
 }
 
+async function aggregationCounts(): Promise<Record<string, number>> {
+  const metric = await securityEventAggregationsTotal.get();
+  return Object.fromEntries(metric.values.map((v) => [String(v.labels.result), v.value]));
+}
+
 const logText = (h: Harness): string =>
   JSON.stringify([...h.logger.warn.mock.calls, ...h.logger.error.mock.calls]);
 
 describe('RefusalAuditRecorder', () => {
-  beforeEach(() => securityEventCapturesTotal.reset());
+  beforeEach(() => {
+    securityEventCapturesTotal.reset();
+    securityEventAggregationsTotal.reset();
+  });
 
-  it('records an allowlisted refusal with the configured timeout and counts it', async () => {
-    const h = harness();
+  it('records an allowlisted refusal with the configured timeout and window and counts it', async () => {
+    const h = harness(undefined, 50, 17);
 
     await expect(h.recorder.record(observation())).resolves.toBe('recorded');
 
-    expect(h.insert).toHaveBeenCalledTimes(1);
-    const [draft, timeoutMs] = h.insert.mock.calls[0]!;
-    expect(timeoutMs).toBe(50);
+    expect(h.capture).toHaveBeenCalledTimes(1);
+    const [draft, options] = h.capture.mock.calls[0]!;
+    expect(options).toEqual({ timeoutMs: 50, windowSeconds: 17 });
     expect(draft).toMatchObject({
       organizationId: 'ORG_A',
       actorId: 'USR_A',
       errorCode: 'TENANT_MISMATCH',
       occurredAt: NOW,
+      occurrenceCount: 1,
     });
     expect(await captureCounts()).toEqual({ recorded: 1 });
+    expect(await aggregationCounts()).toEqual({ created: 1 });
     expect(h.logger.warn).not.toHaveBeenCalled();
     expect(h.logger.error).not.toHaveBeenCalled();
+  });
+
+  describe('aggregation (AUD-004 Phase C2)', () => {
+    it.each<[string, CapturedOccurrence, string]>([
+      ['a new window row', CREATED, 'created'],
+      ['a successor row after the ceiling', { ...CREATED, created: true }, 'created'],
+      ['an increment', { ...CREATED, occurrenceCount: 500, created: false }, 'incremented'],
+      [
+        'the increment that reaches the INTEGER ceiling',
+        { ...CREATED, occurrenceCount: MAX_OCCURRENCE_COUNT, created: false },
+        'ceiling_reached',
+      ],
+    ])('reports %s as recorded, and its aggregation result apart', async (_l, captured, result) => {
+      const h = harness(async () => captured);
+
+      await expect(h.recorder.record(observation())).resolves.toBe('recorded');
+
+      expect(await captureCounts()).toEqual({ recorded: 1 });
+      expect(await aggregationCounts()).toEqual({ [result]: 1 });
+      expect(h.logger.warn).not.toHaveBeenCalled();
+      expect(h.logger.error).not.toHaveBeenCalled();
+    });
+
+    it('reports no aggregation result for a capture it could not confirm', async () => {
+      await harness(() => new Promise<CapturedOccurrence>(() => undefined), 20).recorder.record(
+        observation(),
+      );
+      await harness(async () => {
+        throw new Error('down');
+      }).recorder.record(observation());
+
+      expect(await captureCounts()).toEqual({ timeout: 1, failed: 1 });
+      expect(await aggregationCounts()).toEqual({});
+    });
+
+    it('labels the aggregation counter with the result alone, from a closed set', async () => {
+      await harness().recorder.record(observation());
+      await harness(async () => ({
+        ...CREATED,
+        occurrenceCount: 2,
+        created: false,
+      })).recorder.record(observation());
+
+      const results = new Set<string>(Object.values(SECURITY_EVENT_AGGREGATION_RESULTS));
+      const metric = await securityEventAggregationsTotal.get();
+      expect(metric.values.length).toBe(2);
+      for (const value of metric.values) {
+        expect(Object.keys(value.labels)).toEqual(['result']);
+        expect(results.has(String(value.labels.result))).toBe(true);
+      }
+      expect(JSON.stringify(metric)).not.toContain('USR_A');
+      expect(JSON.stringify(metric)).not.toContain('ORG_A');
+      expect(JSON.stringify(metric)).not.toContain(SENTINEL);
+      expect(JSON.stringify(metric)).not.toContain(CREATED.id);
+    });
+
+    it.each([0, 3601, 1.5])('refuses to start with an aggregation window of %p seconds', (w) => {
+      expect(() => harness(undefined, 50, w)).toThrow(RangeError);
+    });
+
+    it('never throws when the aggregation counter itself fails', async () => {
+      const inc = jest.spyOn(securityEventAggregationsTotal, 'inc').mockImplementation(() => {
+        throw new Error('registry broke');
+      });
+      try {
+        await expect(harness().recorder.record(observation())).resolves.toBe('recorded');
+      } finally {
+        inc.mockRestore();
+      }
+    });
   });
 
   it.each([
@@ -98,7 +190,7 @@ describe('RefusalAuditRecorder', () => {
   ])('ignores %s entirely — no write, no count, no log', async (_label, exception) => {
     const h = harness();
     await expect(h.recorder.record(observation({ exception }))).resolves.toBeUndefined();
-    expect(h.insert).not.toHaveBeenCalled();
+    expect(h.capture).not.toHaveBeenCalled();
     expect(await captureCounts()).toEqual({});
     expect(h.logger.warn).not.toHaveBeenCalled();
   });
@@ -108,7 +200,7 @@ describe('RefusalAuditRecorder', () => {
     await expect(
       h.recorder.record(observation({ context: { ...context, authType: 'ANONYMOUS' } })),
     ).resolves.toBe('skipped');
-    expect(h.insert).not.toHaveBeenCalled();
+    expect(h.capture).not.toHaveBeenCalled();
     expect(h.logger.warn).toHaveBeenCalledWith(
       {
         site: 'identity.switch_active_organization',
@@ -160,7 +252,7 @@ describe('RefusalAuditRecorder', () => {
   });
 
   it('settles as a timeout within its deadline when the write never returns', async () => {
-    const h = harness(() => new Promise<void>(() => undefined), 30);
+    const h = harness(() => new Promise<CapturedOccurrence>(() => undefined), 30);
     const started = Date.now();
 
     await expect(h.recorder.record(observation())).resolves.toBe('timeout');

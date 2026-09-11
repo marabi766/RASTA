@@ -341,8 +341,18 @@ model OutboxStreamSequence {
 /// `OutboxMessage` it is platform plumbing the relay drains across tenants, and
 /// every row names its own tenant explicitly in `organizationId`.
 ///
-/// The CHECK constraints and the three partial indexes live in the migration
-/// only; Prisma models neither.
+/// The CHECK constraints, the partial indexes and the evidence trigger live in
+/// the migrations only; Prisma models none of them.
+///
+/// **Windowed aggregation (AUD-004 Phase C2).** One row counts every matching
+/// refusal in one UTC window: same tenant, actor, action, resource and error
+/// code. The capture is a single `INSERT … ON CONFLICT` against the partial
+/// unique index `ux_security_event_outbox_open_bucket`, which covers only rows
+/// never claimed and below the INTEGER ceiling — so a claimed row is never
+/// incremented and a refusal that races the claim opens a successor row. The
+/// relay claims a row only once `windowEndsAt` has passed on the database
+/// clock. Never write this model through Prisma's `create`/`update`: the SQL
+/// in `SecurityEventOutboxStore` is the only writer.
 model SecurityEventOutbox {
   /// ULID — becomes `envelope.eventId`, the consumer's idempotency key.
   id String @id @db.VarChar(26)
@@ -364,8 +374,15 @@ model SecurityEventOutbox {
   traceparent     String? @db.VarChar(55)
 
   producerVersion String   @map("producer_version") @db.VarChar(64)
+  /// The first occurrence in the window, on the database clock (UTC).
   occurredAt      DateTime @map("occurred_at")
   createdAt       DateTime @default(now()) @map("created_at")
+
+  /// How many matching refusals this row stands for: 1..2147483647.
+  occurrenceCount Int      @default(1) @map("occurrence_count")
+  /// The UTC aggregation window, `[windowStartedAt, windowEndsAt)`.
+  windowStartedAt DateTime @map("window_started_at")
+  windowEndsAt    DateTime @map("window_ends_at")
 
   /// ADR-050 delivery state, identical in meaning to `OutboxMessage`'s.
   publishedAt    DateTime? @map("published_at")

@@ -86,6 +86,9 @@ describe('decideCapture', () => {
       traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
       producerVersion: '1.4.2',
       occurredAt: NOW,
+      // One occurrence. Which window row it is counted into is the store's
+      // database decision, not this function's.
+      occurrenceCount: 1,
     });
   });
 

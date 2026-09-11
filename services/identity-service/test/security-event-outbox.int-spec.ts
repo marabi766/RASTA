@@ -13,7 +13,7 @@ import { REFUSAL_SITES } from '../src/security-events/refusal-sites';
 import { createSecurityEventRelay } from '../src/security-events/security-event.relay';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { startIdentityApi, userToken, type Caller, type IdentityApiHarness } from './api-helpers';
-import { newPrisma } from './helpers';
+import { newPrisma, waitForWindowClose } from './helpers';
 
 /**
  * The refusal outbox against a real PostgreSQL (ADR-053 § 4, AUD-004 Phase C1).
@@ -25,6 +25,12 @@ import { newPrisma } from './helpers';
  * are properties of the SQL, not of a fake.
  *
  * Everything this file writes carries `TAG`, and cleanup removes exactly that.
+ *
+ * Since AUD-004 Phase C2 a row is claimable only once its aggregation window
+ * has closed, so this suite runs with a one-second window (configuration) and
+ * waits for it before driving the claim protocol. Every caller here refuses
+ * once, so every row still holds one occurrence; aggregation itself is proved
+ * in `security-event-aggregation.int-spec.ts`.
  */
 
 const TAG = ulid().slice(-10);
@@ -99,7 +105,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
   };
 
   beforeAll(async () => {
-    harness = await startIdentityApi();
+    harness = await startIdentityApi({ aggregationWindowSeconds: 1 });
     prisma = harness.prisma;
     await prisma.client.$queryRawUnsafe('SELECT 1');
   }, 60_000);
@@ -155,6 +161,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
       correlationId,
       traceparent: TRACEPARENT,
       producerVersion: '0.1.0-itest',
+      occurrenceCount: 1,
       publishedAt: null,
       attempts: 0,
       claimToken: null,
@@ -354,7 +361,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
     it('when the insert itself fails', async () => {
       const failing = await startIdentityApi({
         securityEventStore: {
-          insert: async () => {
+          capture: async () => {
             throw Object.assign(new Error(`connection refused near ${QUERY_SECRET}`), {
               name: 'PrismaClientInitializationError',
             });
@@ -362,6 +369,11 @@ describe('security_event_outbox (real PostgreSQL)', () => {
           pendingCount: async () => 0,
           activeLeaseCount: async () => 0,
           oldestPendingAgeSeconds: async () => 0,
+          aggregationBacklog: async () => ({
+            openWindows: 0,
+            closedBacklog: 0,
+            closedBacklogAgeSeconds: 0,
+          }),
         },
       });
 
@@ -395,6 +407,8 @@ describe('security_event_outbox (real PostgreSQL)', () => {
       expect((await switchOrganization(harness, caller, requestedOrg())).status).toBe(403);
       const rows = await rowsFor(caller.userId);
       expect(rows).toHaveLength(1);
+      // An open window is never claimable (Phase C2).
+      await waitForWindowClose(prisma, rows[0]!.id);
       return rows[0]!.id;
     }
 

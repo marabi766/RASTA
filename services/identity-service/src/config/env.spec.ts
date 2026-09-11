@@ -70,6 +70,30 @@ describe('refusal audit configuration', () => {
     expect(env.SECURITY_EVENT_FLUSH_BATCH_SIZE).toBe(100);
   });
 
+  it('aggregates refusals over the one-minute window ADR-053 § 4 describes by default', () => {
+    expect(withEnv({}).SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS).toBe(60);
+  });
+
+  it.each([
+    ['1', 1],
+    ['10', 10],
+    ['3600', 3600],
+  ])('accepts an aggregation window of %p seconds', (value, expected) => {
+    expect(
+      withEnv({ SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: value })
+        .SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS,
+    ).toBe(expected);
+  });
+
+  it.each(['0', '-60', '3601', '1.5', 'minute'])(
+    'refuses an aggregation window of %p rather than disabling or stretching aggregation',
+    (value) => {
+      expect(() => withEnv({ SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: value })).toThrow(
+        EnvValidationError,
+      );
+    },
+  );
+
   it.each(['9', '5001', 'abc', '1.5'])('refuses a capture timeout of %p', (value) => {
     expect(() => withEnv({ SECURITY_EVENT_CAPTURE_TIMEOUT_MS: value })).toThrow(EnvValidationError);
   });

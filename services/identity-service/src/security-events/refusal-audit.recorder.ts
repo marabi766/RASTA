@@ -1,22 +1,31 @@
 import type { Logger } from '@rasta/logging';
 import { ulid } from 'ulid';
 import {
+  securityEventAggregationsTotal,
   securityEventCapturesTotal,
   SECURITY_EVENT_CAPTURE_OUTCOMES,
   type SecurityEventCaptureOutcome,
 } from '../observability/security-event.metrics';
 import type { SecurityEventRecord } from './audit-trail-envelope';
+import {
+  aggregationOutcomeOf,
+  assertAggregationWindowSeconds,
+  type CapturedOccurrence,
+} from './refusal-aggregation';
 import { decideCapture, type RefusalObservation } from './refusal-capture';
+import type { CaptureWriteOptions } from './security-event-outbox.store';
 
 /** The one store method the recorder needs. */
 export interface SecurityEventWriter {
-  insert(draft: SecurityEventRecord, timeoutMs: number): Promise<void>;
+  capture(draft: SecurityEventRecord, options: CaptureWriteOptions): Promise<CapturedOccurrence>;
 }
 
 export interface RefusalAuditRecorderOptions {
   store: SecurityEventWriter;
   /** `SECURITY_EVENT_CAPTURE_TIMEOUT_MS`. */
   timeoutMs: number;
+  /** `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS`. */
+  aggregationWindowSeconds: number;
   producerVersion: string;
   logger: Pick<Logger, 'warn' | 'error'>;
   /** Injection seams for tests. */
@@ -81,7 +90,7 @@ export function describeCaptureFailure(error: unknown): {
 }
 
 type WriteResult =
-  | { outcome: typeof SECURITY_EVENT_CAPTURE_OUTCOMES.RECORDED }
+  | { outcome: typeof SECURITY_EVENT_CAPTURE_OUTCOMES.RECORDED; captured: CapturedOccurrence }
   | { outcome: typeof SECURITY_EVENT_CAPTURE_OUTCOMES.TIMEOUT; error?: unknown }
   | { outcome: typeof SECURITY_EVENT_CAPTURE_OUTCOMES.FAILED; error: unknown };
 
@@ -104,12 +113,21 @@ type WriteResult =
  * draft, the user agent, the IP or anything from the request. (The platform
  * logger's context mixin adds the correlation id to every line, as it does for
  * every other log line in the service.)
+ *
+ * ## Aggregation (Phase C2)
+ *
+ * "Recorded" means the refusal was counted: into a new row or into the open
+ * row of its window. Which one is a store decision made by the database, and
+ * shows up only in `rasta_security_event_aggregations_total{result}` — the
+ * response, the log and the capture outcome are the same either way.
  */
 export class RefusalAuditRecorder {
   private readonly now: () => Date;
   private readonly newId: () => string;
 
   constructor(private readonly options: RefusalAuditRecorderOptions) {
+    // Fail at boot on a window the store would refuse on every refusal.
+    assertAggregationWindowSeconds(options.aggregationWindowSeconds);
     this.now = options.now ?? (() => new Date());
     this.newId = options.newId ?? ulid;
   }
@@ -157,7 +175,9 @@ export class RefusalAuditRecorder {
     const result = await this.write(decision.draft);
     this.count(result.outcome);
 
-    if (result.outcome !== SECURITY_EVENT_CAPTURE_OUTCOMES.RECORDED) {
+    if (result.outcome === SECURITY_EVENT_CAPTURE_OUTCOMES.RECORDED) {
+      this.countAggregation(result.captured);
+    } else {
       this.log(
         'error',
         {
@@ -181,6 +201,14 @@ export class RefusalAuditRecorder {
     }
   }
 
+  private countAggregation(captured: CapturedOccurrence): void {
+    try {
+      securityEventAggregationsTotal.inc({ result: aggregationOutcomeOf(captured) });
+    } catch {
+      // Telemetry must never reach the response path.
+    }
+  }
+
   private log(level: 'warn' | 'error', fields: Record<string, unknown>, message: string): void {
     try {
       this.options.logger[level](fields, message);
@@ -190,12 +218,13 @@ export class RefusalAuditRecorder {
   }
 
   /**
-   * The insert, raced against a hard deadline.
+   * The capture, raced against a hard deadline.
    *
    * The deadline is what bounds the response; the store's own
    * `statement_timeout` is what stops the database work. A write that commits
-   * after its deadline has passed is still a durable row and will be published
-   * — it was merely not confirmed in time, and is counted as a timeout.
+   * after its deadline has passed is still a durable count and will be
+   * published — it was merely not confirmed in time, and is counted as a
+   * timeout.
    */
   private write(draft: SecurityEventRecord): Promise<WriteResult> {
     return new Promise<WriteResult>((resolve) => {
@@ -213,16 +242,19 @@ export class RefusalAuditRecorder {
       );
       deadline.unref?.();
 
-      let pending: Promise<void>;
+      let pending: Promise<CapturedOccurrence>;
       try {
-        pending = this.options.store.insert(draft, this.options.timeoutMs);
+        pending = this.options.store.capture(draft, {
+          timeoutMs: this.options.timeoutMs,
+          windowSeconds: this.options.aggregationWindowSeconds,
+        });
       } catch (error) {
         settle({ outcome: SECURITY_EVENT_CAPTURE_OUTCOMES.FAILED, error });
         return;
       }
 
       pending.then(
-        () => settle({ outcome: SECURITY_EVENT_CAPTURE_OUTCOMES.RECORDED }),
+        (captured) => settle({ outcome: SECURITY_EVENT_CAPTURE_OUTCOMES.RECORDED, captured }),
         (error: unknown) =>
           settle(
             isTimeout(error)
