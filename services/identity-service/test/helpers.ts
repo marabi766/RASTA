@@ -31,6 +31,49 @@ export function id(prefix: string): string {
   return `${prefix}_${ulid()}`;
 }
 
+/**
+ * Tags every identifier one test run creates, so a suite that shares
+ * infrastructure with other runs (a developer's `pnpm infra:up`, another
+ * suite's Kafka consumer group) can tell its own rows and messages apart.
+ * Not currently read by a cleanup routine — this service's integration
+ * suites tag rows for grep-ability in a shared log, not for automated
+ * teardown.
+ */
+export const RUN_TAG = ulid().slice(-10);
+
+/**
+ * Waits for `check` to become truthy, or gives up with a readable failure.
+ *
+ * Identity-owned rather than imported from another service: AGENTS.md A-02
+ * forbids a service reaching into another's `src/**` or `test/**`, and a
+ * generic poll is cheap enough to keep on each side of that boundary rather
+ * than share.
+ */
+export async function waitFor<T>(
+  description: string,
+  check: () => Promise<T | null | undefined>,
+  timeoutMs = 60_000,
+  intervalMs = 250,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let last: unknown;
+
+  while (Date.now() < deadline) {
+    try {
+      const result = await check();
+      if (result) return result;
+    } catch (error) {
+      last = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(
+    `Timed out after ${timeoutMs}ms waiting for ${description}` +
+      (last ? `; last error: ${String(last)}` : ''),
+  );
+}
+
 export function tenants() {
   const suffix = ulid().slice(-10);
   return { a: `ORG-ITEST-A-${suffix}`, b: `ORG-ITEST-B-${suffix}` };

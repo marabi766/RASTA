@@ -65,6 +65,16 @@ export interface E2eConfig {
    * have written yet.
    */
   auditUrl: string;
+  /**
+   * identity-service directly.
+   *
+   * The refusal scenario goes through the **gateway**, like every other
+   * scenario here. This URL exists only for health gating before the run —
+   * identity-service's own refusal relay has to be running before a refusal
+   * can ever reach Kafka, or the scenario times out blaming the audit read
+   * API for a message identity-service never sent (AUD-004 Phase C1).
+   */
+  identityUrl: string;
   /** Keycloak admin, used once to reconcile the E2E users into an imported realm. */
   keycloakAdmin: { username: string; password: string };
   /**
@@ -99,6 +109,10 @@ export function e2eConfig(): E2eConfig {
     auditUrl: required(
       'E2E_AUDIT_URL',
       `http://localhost:${process.env.PORT_AUDIT?.trim() || '3115'}`,
+    ).replace(/\/+$/, ''),
+    identityUrl: required(
+      'E2E_IDENTITY_URL',
+      `http://localhost:${process.env.PORT_IDENTITY?.trim() || '3101'}`,
     ).replace(/\/+$/, ''),
     keycloakUrl: required('KEYCLOAK_URL', 'http://localhost:8080').replace(/\/+$/, ''),
     realm: required('KEYCLOAK_REALM', 'rasta'),
