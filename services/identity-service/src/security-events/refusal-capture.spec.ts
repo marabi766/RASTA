@@ -1,0 +1,266 @@
+import { ERROR_CODES } from '@rasta/contracts';
+import { RastaError, type RequestContext } from '@rasta/nest-common';
+import { CAPTURE_SKIP_REASONS, decideCapture, type RefusalObservation } from './refusal-capture';
+import { markRefusal, REFUSAL_SITES } from './refusal-sites';
+
+/**
+ * The capture decision, branch by branch. Every value a persisted row carries
+ * is asserted to come from the trusted context or from the fixed site — and the
+ * request's own text is planted with sentinels that must never appear.
+ */
+
+const NOW = new Date('2026-09-11T10:00:00.000Z');
+const EVENT_ID = '01J9ZC0000000000000000TEST';
+const ENVIRONMENT = { now: NOW, newId: () => EVENT_ID, producerVersion: '1.4.2' };
+
+const REQUESTED_ORGANIZATION = 'ORG_REQUESTED_SENTINEL';
+const QUERY_SECRET = 'QUERY-SECRET-SENTINEL';
+
+const site = REFUSAL_SITES.SWITCH_ACTIVE_ORGANIZATION;
+
+function context(overrides: Partial<RequestContext> = {}): RequestContext {
+  return {
+    correlationId: 'COR_01J9ZC00000000000000000001',
+    requestId: '01J9ZC00000000000000000REQ',
+    traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+    spanId: '00f067aa0ba902b7',
+    organizationId: 'ORG_A',
+    organizationIds: ['ORG_A'],
+    userId: 'USR_A',
+    subject: 'kc-subject',
+    roles: ['FLEET_MANAGER', 'ORGANIZATION_ADMIN'],
+    authType: 'USER',
+    ip: '203.0.113.7',
+    userAgent: 'Mozilla/5.0 (identity unit)',
+    method: 'POST',
+    path: `/v1/users/me/active-organization?token=${QUERY_SECRET}`,
+    startedAt: 0,
+    ...overrides,
+  };
+}
+
+const refusal = (): RastaError =>
+  markRefusal(RastaError.tenantMismatch(REQUESTED_ORGANIZATION, []), 'SWITCH_ACTIVE_ORGANIZATION');
+
+function observe(overrides: Partial<RefusalObservation> = {}): RefusalObservation {
+  return {
+    exception: refusal(),
+    status: 403,
+    code: ERROR_CODES.TENANT_MISMATCH,
+    method: 'POST',
+    route: site.route,
+    context: context(),
+    ...overrides,
+  };
+}
+
+function captured(observation: RefusalObservation) {
+  const decision = decideCapture(observation, ENVIRONMENT);
+  if (decision.kind !== 'CAPTURE') {
+    throw new Error(`expected a capture, got ${JSON.stringify(decision)}`);
+  }
+  return decision.draft;
+}
+
+function skipReason(observation: RefusalObservation): string | undefined {
+  const decision = decideCapture(observation, ENVIRONMENT);
+  return decision.kind === 'SKIP' ? decision.reason : undefined;
+}
+
+describe('decideCapture', () => {
+  it('maps actor, roles, tenant, source and trace from the trusted context and the rest from the site', () => {
+    expect(captured(observe())).toEqual({
+      id: EVENT_ID,
+      organizationId: 'ORG_A',
+      actorType: 'USER',
+      actorId: 'USR_A',
+      actorRoles: ['FLEET_MANAGER', 'ORGANIZATION_ADMIN'],
+      action: 'identity.active_organization.switch',
+      resourceType: 'User',
+      resourceId: 'USR_A',
+      errorCode: 'TENANT_MISMATCH',
+      reason: site.reason,
+      sourceIp: '203.0.113.7',
+      sourceUserAgent: 'Mozilla/5.0 (identity unit)',
+      correlationId: 'COR_01J9ZC00000000000000000001',
+      traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+      producerVersion: '1.4.2',
+      occurredAt: NOW,
+    });
+  });
+
+  it('carries no requested organization, no URL text and no exception message', () => {
+    const serialised = JSON.stringify(captured(observe()));
+    expect(serialised).not.toContain(REQUESTED_ORGANIZATION);
+    expect(serialised).not.toContain(QUERY_SECRET);
+    expect(serialised).not.toContain('active-organization?');
+    expect(serialised).not.toContain(refusal().message);
+  });
+
+  it('records the tenant the caller was acting for, never another one', () => {
+    expect(
+      captured(
+        observe({ context: context({ organizationId: 'ORG_B', organizationIds: ['ORG_B'] }) }),
+      ).organizationId,
+    ).toBe('ORG_B');
+  });
+
+  it('records a platform-scoped refusal when the caller acts for no organization', () => {
+    const draft = captured(
+      observe({ context: context({ organizationId: undefined, organizationIds: [] }) }),
+    );
+    expect(draft.organizationId).toBeNull();
+  });
+
+  it('deduplicates roles in their original order and keeps an empty list empty', () => {
+    expect(
+      captured(observe({ context: context({ roles: ['B', 'A', 'B', 'A'] }) })).actorRoles,
+    ).toEqual(['B', 'A']);
+    expect(captured(observe({ context: context({ roles: [] }) })).actorRoles).toEqual([]);
+  });
+
+  describe('is not a refusal site', () => {
+    it.each([
+      ["the auth guard's own TENANT_MISMATCH", RastaError.tenantMismatch('ORG_X', ['ORG_A'])],
+      ['an INSUFFICIENT_ROLE refusal', RastaError.insufficientRole(['UNION_ADMIN'], [])],
+      ['a FORBIDDEN refusal', RastaError.forbidden()],
+      ['a 401', RastaError.unauthenticated()],
+      ['a plain Error', new Error('boom')],
+    ])('for %s', (_label, exception) => {
+      expect(decideCapture(observe({ exception }), ENVIRONMENT)).toEqual({
+        kind: 'NOT_A_REFUSAL_SITE',
+      });
+    });
+  });
+
+  describe('skips a marked refusal that does not match its site exactly', () => {
+    it.each([
+      ['status 401', { status: 401, code: ERROR_CODES.UNAUTHENTICATED }],
+      ['status 500', { status: 500, code: ERROR_CODES.INTERNAL_ERROR }],
+      ['a different 403 code', { code: ERROR_CODES.FORBIDDEN }],
+      ['a missing code', { code: undefined }],
+    ])('classification: %s', (_label, overrides) => {
+      expect(skipReason(observe(overrides))).toBe(CAPTURE_SKIP_REASONS.CLASSIFICATION_MISMATCH);
+    });
+
+    it.each([
+      ['another method', { method: 'GET' }],
+      ['no matched route', { route: undefined }],
+      ['another route template', { route: '/v1/users/:id' }],
+      ['the concrete URL instead of the template', { route: `${site.route}?x=1` }],
+    ])('route: %s', (_label, overrides) => {
+      expect(skipReason(observe(overrides))).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+
+    it.each([
+      ['no request context', undefined],
+      ['an anonymous caller', context({ authType: 'ANONYMOUS', userId: undefined, roles: [] })],
+      ['a service caller', context({ authType: 'SERVICE', userId: undefined, callerService: 'x' })],
+      ['a user token with no user id', context({ userId: undefined })],
+      ['a blank user id', context({ userId: '   ' })],
+    ])('authentication: %s', (_label, ctx) => {
+      expect(skipReason(observe({ context: ctx }))).toBe(
+        CAPTURE_SKIP_REASONS.NOT_AUTHENTICATED_USER,
+      );
+    });
+
+    it.each([
+      ['more than 64 roles', context({ roles: Array.from({ length: 65 }, (_, i) => `ROLE_${i}`) })],
+      ['a blank role', context({ roles: ['FLEET_MANAGER', ' '] })],
+      ['an oversized role', context({ roles: ['R'.repeat(129)] })],
+      ['a blank organization', context({ organizationId: ' ' })],
+      ['an oversized organization id', context({ organizationId: 'O'.repeat(129) })],
+      ['an oversized user id', context({ userId: 'U'.repeat(257) })],
+    ])('attribution: %s', (_label, ctx) => {
+      expect(skipReason(observe({ context: ctx }))).toBe(CAPTURE_SKIP_REASONS.UNATTRIBUTABLE);
+    });
+
+    it('contract: an event the audit contract would refuse never becomes a row', () => {
+      const decision = decideCapture(observe(), { ...ENVIRONMENT, newId: () => '' });
+      expect(decision).toMatchObject({
+        kind: 'SKIP',
+        reason: CAPTURE_SKIP_REASONS.CONTRACT_VIOLATION,
+      });
+    });
+  });
+
+  describe('source and correlation values are bounded or dropped', () => {
+    it('strips control characters from the user agent and truncates it to 512 characters', () => {
+      const nul = String.fromCharCode(0);
+      const bell = String.fromCharCode(7);
+      const del = String.fromCharCode(127);
+      const draft = captured(
+        observe({
+          context: context({ userAgent: `Agent${nul}/1${bell}.0${del} ${'x'.repeat(600)}` }),
+        }),
+      );
+      expect(draft.sourceUserAgent).toHaveLength(512);
+      expect(draft.sourceUserAgent?.startsWith('Agent/1.0 xxx')).toBe(true);
+      expect(
+        [...(draft.sourceUserAgent ?? '')].every((c) => {
+          const code = c.codePointAt(0) ?? 0;
+          return code >= 32 && code !== 127;
+        }),
+      ).toBe(true);
+    });
+
+    it('drops a user agent that is only control characters or whitespace', () => {
+      const tab = String.fromCharCode(9);
+      expect(
+        captured(observe({ context: context({ userAgent: `${tab}  ${tab}` }) })).sourceUserAgent,
+      ).toBeNull();
+      expect(
+        captured(observe({ context: context({ userAgent: undefined }) })).sourceUserAgent,
+      ).toBeNull();
+    });
+
+    it.each([
+      ['an IPv4 address', '198.51.100.4', '198.51.100.4'],
+      ['an IPv6 address', '2001:db8::7', '2001:db8::7'],
+      ['an IPv4-mapped IPv6 address', '::ffff:127.0.0.1', '::ffff:127.0.0.1'],
+      ['a hostname', 'proxy.internal', null],
+      ['a header-injected list', '1.2.3.4, 5.6.7.8', null],
+      ['nothing', undefined, null],
+    ])('source ip: %s', (_label, ip, expected) => {
+      expect(captured(observe({ context: context({ ip }) })).sourceIp).toBe(expected);
+    });
+
+    it.each([
+      ['with spaces', 'not an id'],
+      ['too long', 'C'.repeat(129)],
+      ['with markup', '<script>'],
+    ])(
+      'falls back to the minted request id for a caller-supplied correlation id %s',
+      (_l, value) => {
+        expect(
+          captured(observe({ context: context({ correlationId: value }) })).correlationId,
+        ).toBe('01J9ZC00000000000000000REQ');
+      },
+    );
+
+    it('falls back to the event id when neither correlation nor request id is usable', () => {
+      expect(
+        captured(observe({ context: context({ correlationId: 'a b', requestId: 'c d' }) }))
+          .correlationId,
+      ).toBe(EVENT_ID);
+    });
+
+    it.each([
+      ['no trace', { traceId: undefined, spanId: undefined }],
+      ['a malformed trace id', { traceId: 'XYZ' }],
+      ['a malformed span id', { spanId: '123' }],
+    ])('leaves traceparent out for %s', (_label, overrides) => {
+      expect(captured(observe({ context: context(overrides) })).traceparent).toBeNull();
+    });
+
+    it.each([
+      ['too long', 'v'.repeat(65)],
+      ['blank', '  '],
+    ])('replaces a %s producer version with a fixed placeholder', (_label, producerVersion) => {
+      expect(decideCapture(observe(), { ...ENVIRONMENT, producerVersion })).toMatchObject({
+        kind: 'CAPTURE',
+        draft: { producerVersion: '0.0.0' },
+      });
+    });
+  });
+});

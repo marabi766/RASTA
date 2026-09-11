@@ -55,3 +55,31 @@ describe('KEYCLOAK_SYNC_ENABLED', () => {
     expect(() => load(value)).toThrow(EnvValidationError);
   });
 });
+
+/**
+ * ADR-053 § 4 — the refusal-audit bounds. The capture timeout is the longest a
+ * `403` can wait on its own evidence, so both ends of its range are policy.
+ */
+describe('refusal audit configuration', () => {
+  const withEnv = (overrides: NodeJS.ProcessEnv) => loadIdentityEnv({ ...BASE, ...overrides });
+
+  it('defaults to a short capture bound and a one-second flush', () => {
+    const env = withEnv({});
+    expect(env.SECURITY_EVENT_CAPTURE_TIMEOUT_MS).toBe(250);
+    expect(env.SECURITY_EVENT_FLUSH_INTERVAL_MS).toBe(1000);
+    expect(env.SECURITY_EVENT_FLUSH_BATCH_SIZE).toBe(100);
+  });
+
+  it.each(['9', '5001', 'abc', '1.5'])('refuses a capture timeout of %p', (value) => {
+    expect(() => withEnv({ SECURITY_EVENT_CAPTURE_TIMEOUT_MS: value })).toThrow(EnvValidationError);
+  });
+
+  it.each([
+    ['SECURITY_EVENT_FLUSH_INTERVAL_MS', '49'],
+    ['SECURITY_EVENT_FLUSH_INTERVAL_MS', '60001'],
+    ['SECURITY_EVENT_FLUSH_BATCH_SIZE', '0'],
+    ['SECURITY_EVENT_FLUSH_BATCH_SIZE', '1001'],
+  ])('refuses %s=%p', (key, value) => {
+    expect(() => withEnv({ [key]: value })).toThrow(EnvValidationError);
+  });
+});
