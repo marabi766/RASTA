@@ -1,4 +1,5 @@
 import {
+  Inject,
   Module,
   type MiddlewareConsumer,
   type NestModule,
@@ -7,7 +8,6 @@ import {
 } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import {
-  AllExceptionsFilter,
   AuthGuard,
   AUTH_OPTIONS,
   EXCEPTION_FILTER_LOGGER,
@@ -41,9 +41,24 @@ import {
 } from './identity/identity.controller';
 import { HealthController, MetricsController } from './health/health.controller';
 import { loadIdentityEnv, SERVICE_NAME, type IdentityEnv } from './config/env';
+import { SecurityEventOutboxStore } from './security-events/security-event-outbox.store';
+import { RefusalAuditRecorder } from './security-events/refusal-audit.recorder';
+import { RefusalAuditExceptionFilter } from './security-events/refusal-audit.filter';
+import {
+  createSecurityEventRelay,
+  SECURITY_EVENT_RELAY,
+} from './security-events/security-event.relay';
+import {
+  securityEventOutboxLeasesActive,
+  securityEventOutboxPendingAgeSeconds,
+  securityEventOutboxPendingTotal,
+} from './observability/security-event.metrics';
 
 export const ENV = Symbol('IDENTITY_ENV');
 export const LOGGER = Symbol('IDENTITY_LOGGER');
+
+/** How often both outbox gauges are sampled from the database. */
+const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
 
 @Module({
   controllers: [
@@ -138,6 +153,56 @@ export const LOGGER = Symbol('IDENTITY_LOGGER');
         }),
     },
 
+    // ------------------------------------------------------------------------
+    // Refusal audit (ADR-053 § 4, AUD-004 Phase C1).
+    //
+    // A second queue and a second relay, beside the domain outbox above and
+    // sharing nothing with it but the Kafka producer. The refusal filter writes
+    // `security_event_outbox` in its own bounded transaction; the refusal relay
+    // publishes it to `rasta.audit.trail.v1`. Neither Kafka nor audit-service
+    // is on the request path: a refusal is decided and answered whether or not
+    // either is reachable.
+    // ------------------------------------------------------------------------
+    SecurityEventOutboxStore,
+
+    {
+      provide: RefusalAuditRecorder,
+      inject: [SecurityEventOutboxStore, ENV, LOGGER],
+      useFactory: (store: SecurityEventOutboxStore, env: IdentityEnv, logger: Logger) =>
+        new RefusalAuditRecorder({
+          store,
+          timeoutMs: env.SECURITY_EVENT_CAPTURE_TIMEOUT_MS,
+          producerVersion: env.SERVICE_VERSION,
+          logger,
+        }),
+    },
+
+    {
+      provide: SECURITY_EVENT_RELAY,
+      inject: [SecurityEventOutboxStore, KafkaEventPublisher, ENV, LOGGER],
+      useFactory: (
+        store: SecurityEventOutboxStore,
+        publisher: KafkaEventPublisher,
+        env: IdentityEnv,
+        logger: Logger,
+      ): OutboxRelay =>
+        createSecurityEventRelay({
+          store,
+          publisher,
+          pollIntervalMs: env.SECURITY_EVENT_FLUSH_INTERVAL_MS,
+          batchSize: env.SECURITY_EVENT_FLUSH_BATCH_SIZE,
+          // Lease, backoff and shutdown grace are ADR-050's, shared with the
+          // domain relay: one set of claim semantics, configured once.
+          leaseSeconds: env.OUTBOX_CLAIM_LEASE_SECONDS,
+          backoff: {
+            baseSeconds: env.OUTBOX_CLAIM_BACKOFF_SECONDS,
+            maxSeconds: env.OUTBOX_CLAIM_BACKOFF_MAX_SECONDS,
+          },
+          shutdownGraceSeconds: env.OUTBOX_SHUTDOWN_GRACE_SECONDS,
+          logger,
+        }),
+    },
+
     {
       provide: AUTH_OPTIONS,
       inject: [ENV],
@@ -160,13 +225,17 @@ export const LOGGER = Symbol('IDENTITY_LOGGER');
     // endpoint is closed unless it opts out with @Public (AGENTS.md A-12).
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
-    { provide: APP_FILTER, useClass: AllExceptionsFilter },
+    // The platform exception filter, wrapped: every response is the platform's,
+    // and allowlisted refusals are additionally captured for audit.
+    { provide: APP_FILTER, useClass: RefusalAuditExceptionFilter },
   ],
 })
 export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdown {
   constructor(
     private readonly relay: OutboxRelay,
     private readonly store: PrismaOutboxStore,
+    @Inject(SECURITY_EVENT_RELAY) private readonly securityRelay: OutboxRelay,
+    private readonly securityStore: SecurityEventOutboxStore,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -177,20 +246,23 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   onModuleInit(): void {
     this.relay.start();
+    this.securityRelay.start();
     this.startOutboxGauges();
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // Let an in-flight batch finish so it is not republished on restart.
-    await this.relay.stop();
+    // Let an in-flight batch finish so it is not republished on restart. Both
+    // relays settle what they own; neither waits beyond its shutdown grace.
+    await Promise.all([this.relay.stop(), this.securityRelay.stop()]);
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }
 
   private gaugeTimer?: NodeJS.Timeout;
 
   /**
-   * Feeds the stuck-relay alert. Age matters more than count: a large backlog
-   * draining quickly is fine, while three rows stuck for ten minutes is not.
+   * Feeds the stuck-relay and audit-gap alerts. Age matters more than count: a
+   * large backlog draining quickly is fine, while three rows stuck for ten
+   * minutes is not.
    */
   private startOutboxGauges(): void {
     const sample = async () => {
@@ -204,9 +276,19 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
       } catch {
         // Metrics must never take the service down.
       }
+      // Sampled separately, so a failure on one queue never blanks the other's.
+      try {
+        securityEventOutboxPendingTotal.set(await this.securityStore.pendingCount());
+        securityEventOutboxLeasesActive.set(await this.securityStore.activeLeaseCount());
+        securityEventOutboxPendingAgeSeconds.set(
+          await this.securityStore.oldestPendingAgeSeconds(),
+        );
+      } catch {
+        // Metrics must never take the service down.
+      }
     };
 
-    this.gaugeTimer = setInterval(() => void sample(), 15_000);
+    this.gaugeTimer = setInterval(() => void sample(), OUTBOX_GAUGE_INTERVAL_MS);
     this.gaugeTimer.unref?.();
   }
 }

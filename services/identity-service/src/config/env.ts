@@ -34,6 +34,24 @@ export const identityEnvSchema = baseEnvSchema
     KEYCLOAK_SYNC_ENABLED: booleanEnv(true),
 
     CORS_ORIGINS: z.string().default(''),
+
+    /**
+     * ADR-053 § 4 — how long a refusal may wait for its `security_event_outbox`
+     * row before the `403` is returned without it.
+     *
+     * Applied twice: as the transaction's `statement_timeout` and as a hard
+     * deadline around the whole write, so neither a slow statement nor a slow
+     * pool acquisition can hold a refusal longer. Short on purpose — capture is
+     * best-effort, and the refusal itself never waits on audit for long. The
+     * ceiling keeps a misconfiguration from turning every `403` into a stall.
+     */
+    SECURITY_EVENT_CAPTURE_TIMEOUT_MS: z.coerce.number().int().min(10).max(5000).default(250),
+
+    /** How often the refusal relay polls `security_event_outbox`. */
+    SECURITY_EVENT_FLUSH_INTERVAL_MS: z.coerce.number().int().min(50).max(60_000).default(1000),
+
+    /** Rows one refusal-relay claim may take. */
+    SECURITY_EVENT_FLUSH_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
   });
 
 export type IdentityEnv = z.infer<typeof identityEnvSchema>;
