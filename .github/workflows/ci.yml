@@ -50,6 +50,17 @@ jobs:
           pnpm run progress:check
           pnpm run test:progress
 
+      - name: Service boundary gate
+        # AGENTS.md A-02: a service reaches another only over REST or Kafka,
+        # never by importing `services/<other>/src/**` or `test/**`. Runs the
+        # checker's own tests first so a checker that stopped catching
+        # anything fails loudly rather than passing an empty gate (AUD-004
+        # Phase C1 hardening — the identity test tree once imported
+        # audit-service directly and no gate caught it).
+        run: |
+          pnpm run test:service-boundaries-lib
+          pnpm run check:service-boundaries
+
       - name: Image scan coverage gate
         # Runs here, in a job that fires on pull requests, rather than beside
         # the `containers` job it protects — that one only runs on a push to
