@@ -1,11 +1,24 @@
 import { Kafka, type Consumer, type Producer } from 'kafkajs';
 import { ulid } from 'ulid';
 import { EventConsumer } from '@rasta/nest-common';
-import { DLQ_HEADERS, type EventEnvelope } from '@rasta/contracts';
+import {
+  AUDIT_EVENT_RECORDED,
+  AUDIT_EVENT_RECORDED_VERSION,
+  AUDIT_TRAIL_TOPIC,
+  DLQ_HEADERS,
+  ERROR_CODES,
+  type EventEnvelope,
+} from '@rasta/contracts';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { AuditRepository } from '../src/audit/audit.repository';
 import { DomainProjectorConsumer } from '../src/consumers/domain-projector.consumer';
-import { DOMAIN_PROJECTOR_CONSUMER, DOMAIN_TOPICS } from '../src/audit/audit.mapper';
+import { AuditTrailConsumer } from '../src/consumers/audit-trail.consumer';
+import {
+  AUDIT_DEAD_LETTER_TOPIC,
+  DOMAIN_PROJECTOR_CONSUMER,
+  DOMAIN_TOPICS,
+} from '../src/audit/audit.mapper';
+import { AUDIT_TRAIL_CONSUMER } from '../src/audit/audit-trail.mapper';
 import { brokers, cleanupRun, id, newMigratorPrisma, newPrisma, RUN_TAG, waitFor } from './helpers';
 
 /**
@@ -477,4 +490,286 @@ describeWithKafka('domain projector over Kafka', () => {
       0,
     );
   }, 60_000);
+});
+
+/**
+ * Path B over a real broker and a real database (AUD-004 Phase B).
+ *
+ * The trail topic and the dead-letter topic are the real ones. The consumer
+ * group is unique per run, for the isolation reason at the top of this file;
+ * that the deployed group is exactly `audit-service.trail` is pinned by the
+ * composition-root spec, and the idempotency key this suite asserts is the
+ * constant, not the run's group.
+ *
+ * No producer exists yet, so fixtures are published straight onto the topic —
+ * which is also the only honest way to prove what this consumer does with a
+ * message a future producer gets wrong.
+ */
+describeWithKafka('audit-trail consumer over Kafka', () => {
+  let prisma: PrismaService;
+  let migrator: PrismaService;
+  let repository: AuditRepository;
+  let trail: AuditTrailConsumer;
+  let producer: Producer;
+
+  const groupId = `audit-itest-trail-${ulid().slice(-12)}`;
+  const silentLogger = {
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    debug: () => undefined,
+    fatal: () => undefined,
+    trace: () => undefined,
+    child: () => silentLogger,
+  } as unknown as Parameters<typeof AuditTrailConsumer.prototype.constructor>[2];
+
+  interface TrailMessageOptions {
+    tenant?: string;
+    payload?: Record<string, unknown>;
+    envelope?: Record<string, unknown>;
+  }
+
+  function trailMessage(options: TrailMessageOptions = {}): EventEnvelope {
+    const tenant = options.tenant ?? id('ORG');
+    return {
+      eventId: id('EVT'),
+      eventName: AUDIT_EVENT_RECORDED,
+      eventVersion: AUDIT_EVENT_RECORDED_VERSION,
+      occurredAt: '2026-12-01T09:00:00.000Z',
+      producer: 'identity-service',
+      producerVersion: '1.0.0',
+      aggregateType: 'AuditEvent',
+      aggregateId: id('RES'),
+      tenantId: tenant,
+      correlationId: id('COR'),
+      payload: {
+        actor: { type: 'USER', id: id('USR'), roles: ['UNION_ADMIN'] },
+        organizationId: tenant,
+        action: 'audit.access.refuse',
+        resourceType: 'AuditEvent',
+        resourceId: id('RES'),
+        outcome: 'REFUSED',
+        errorCode: ERROR_CODES.TENANT_MISMATCH,
+        occurrenceCount: 1,
+        source: { ip: '10.0.0.7', userAgent: 'audit-itest' },
+        ...options.payload,
+      },
+      ...options.envelope,
+    } as EventEnvelope;
+  }
+
+  async function publish(body: unknown): Promise<void> {
+    await producer.send({
+      topic: AUDIT_TRAIL_TOPIC,
+      messages: [{ key: ulid(), value: JSON.stringify(body) }],
+    });
+  }
+
+  const rowFor = (sourceEventId: string) => () =>
+    prisma.client.auditEvent.findFirst({
+      where: { sourceEventId, sourceTopic: AUDIT_TRAIL_TOPIC },
+    });
+
+  beforeAll(async () => {
+    prisma = newPrisma();
+    migrator = newMigratorPrisma();
+    await prisma.onModuleInit();
+    await migrator.onModuleInit();
+    repository = new AuditRepository(prisma);
+
+    const kafka = new Kafka({
+      clientId: 'audit-itest-trail-producer',
+      brokers: brokerList as string[],
+      logLevel: 1,
+    });
+    producer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
+    await producer.connect();
+
+    trail = new AuditTrailConsumer(
+      (handler) =>
+        new EventConsumer(
+          {
+            brokers: brokerList as string[],
+            clientId: 'audit-itest-trail',
+            groupId,
+            topics: [AUDIT_TRAIL_TOPIC],
+            fromBeginning: true,
+            deadLetterTopic: AUDIT_DEAD_LETTER_TOPIC,
+            // The production retry count, with a shorter pause between
+            // attempts. A refused trail message is refused identically on
+            // every attempt, and replaying earlier runs' refused fixtures at
+            // the default backoff would spend this suite's budget waiting.
+            retryBackoffMs: 50,
+          },
+          handler,
+          { log: () => undefined, warn: () => undefined, error: () => undefined },
+        ),
+      repository,
+      silentLogger,
+    );
+    await trail.start();
+
+    // Drain once, as the projector suite does: a sentinel published now is
+    // reached only after everything the trail topic already holds.
+    const sentinel = trailMessage();
+    await publish(sentinel);
+    await waitFor('the trail consumer to catch up', rowFor(sentinel.eventId), 600_000, 1000);
+  }, 660_000);
+
+  afterAll(async () => {
+    await trail?.onModuleDestroy();
+    await producer?.disconnect();
+    await cleanupRun(migrator);
+    await prisma.onModuleDestroy();
+    await migrator.onModuleDestroy();
+  }, 120_000);
+
+  it('records a real AUDIT_EVENT_RECORDED envelope from the trail topic as a path-B row', async () => {
+    const source = trailMessage({
+      payload: { actor: { type: 'USER', id: id('USR'), roles: ['UNION_ADMIN', 'FLEET_MANAGER'] } },
+    });
+    await publish(source);
+
+    const row = await waitFor('the trail row', rowFor(source.eventId), DELIVERY_TIMEOUT_MS);
+
+    expect(row.sourceTopic).toBe(AUDIT_TRAIL_TOPIC);
+    expect(row.sourceEventName).toBe(AUDIT_EVENT_RECORDED);
+    expect(row.organizationId).toBe(source.tenantId);
+    expect(row.actorRoles).toEqual(['UNION_ADMIN', 'FLEET_MANAGER']);
+    expect(row.outcome).toBe('REFUSED');
+    expect(row.errorCode).toBe('TENANT_MISMATCH');
+    expect(row.sourceIp).toBe('10.0.0.7');
+    expect(row.sourceUserAgent).toBe('audit-itest');
+    expect(row.recordHash).not.toBeNull();
+
+    expect(
+      await prisma.client.processedEvent.count({
+        where: { eventId: source.eventId, consumerName: AUDIT_TRAIL_CONSUMER },
+      }),
+    ).toBe(1);
+  }, 180_000);
+
+  it('dead-letters malformed and tenant-mismatched trail messages, records neither, and keeps consuming', async () => {
+    const dlq = new Kafka({
+      clientId: 'audit-itest-trail-dlq-reader',
+      brokers: brokerList as string[],
+      logLevel: 1,
+    });
+    const dlqConsumer = dlq.consumer({ groupId: `${groupId}-dlq` });
+    const dlqMessages: {
+      reason?: string;
+      originalTopic?: string;
+      error?: string;
+      body: string;
+    }[] = [];
+
+    const admin = dlq.admin();
+    await admin.connect();
+    let startAt: ReadonlyMap<number, string>;
+    try {
+      startAt = new Map(
+        (await admin.fetchTopicOffsets(AUDIT_DEAD_LETTER_TOPIC)).map(({ partition, offset }) => [
+          partition,
+          offset,
+        ]),
+      );
+    } finally {
+      await admin.disconnect();
+    }
+
+    const reader = pinToOffsets(dlqConsumer, AUDIT_DEAD_LETTER_TOPIC, startAt);
+
+    try {
+      await dlqConsumer.connect();
+      await dlqConsumer.subscribe({ topic: AUDIT_DEAD_LETTER_TOPIC, fromBeginning: false });
+      await dlqConsumer.run({
+        eachMessage: async ({ message }) => {
+          dlqMessages.push({
+            reason: message.headers?.[DLQ_HEADERS.reason]?.toString(),
+            originalTopic: message.headers?.[DLQ_HEADERS.originalTopic]?.toString(),
+            error: message.headers?.[DLQ_HEADERS.error]?.toString(),
+            body: message.value?.toString('utf8') ?? '',
+          });
+        },
+      });
+      await reader.joined();
+
+      // Run-unique and lower-case, so none of them can satisfy — or be
+      // satisfied by — the projector suite's upper-case `SECRET-` probe.
+      const secret = (label: string): string => `trail-secret-${label}-${RUN_TAG}`;
+
+      // 1. Not an envelope at all: the shared consumer refuses it before the
+      //    handler runs.
+      const unparseable = {
+        eventId: id('EVT'),
+        eventName: 'not a valid name',
+        occurredAt: '2026-12-01T09:00:00.000Z',
+        producer: 'identity-service',
+        aggregateType: 'AuditEvent',
+        aggregateId: id('RES'),
+        payload: { reason: secret('envelope') },
+      };
+      // 2. A real envelope carrying a payload outside the v1 contract.
+      const malformed = trailMessage({
+        payload: { outcome: 'MAYBE', reason: secret('payload') },
+      });
+      // 3. A valid payload for a tenant the envelope does not name.
+      const mismatched = trailMessage({
+        payload: { organizationId: id('ORG'), reason: secret('tenant') },
+      });
+
+      await publish(unparseable);
+      await publish(malformed);
+      await publish(mismatched);
+
+      const deadFor = (label: string) =>
+        waitFor(
+          `the ${label} trail message on the dlq`,
+          async () => dlqMessages.find((message) => message.body.includes(secret(label))),
+          DELIVERY_TIMEOUT_MS,
+        );
+
+      const deadEnvelope = await deadFor('envelope');
+      expect(deadEnvelope.reason).toBe('VALIDATION_FAILED');
+      expect(deadEnvelope.originalTopic).toBe(AUDIT_TRAIL_TOPIC);
+      expect(deadEnvelope.error).not.toContain(secret('envelope'));
+
+      const deadPayload = await deadFor('payload');
+      expect(deadPayload.reason).toBe('MAX_RETRIES_EXCEEDED');
+      expect(deadPayload.originalTopic).toBe(AUDIT_TRAIL_TOPIC);
+      expect(deadPayload.error).toContain('AuditTrailRejectedError');
+      expect(deadPayload.error).toContain('trail_invalid_payload');
+      expect(deadPayload.error).not.toContain(secret('payload'));
+      expect(deadPayload.error).not.toContain('MAYBE');
+
+      const deadTenant = await deadFor('tenant');
+      expect(deadTenant.reason).toBe('MAX_RETRIES_EXCEEDED');
+      expect(deadTenant.error).toContain('trail_tenant_mismatch');
+      expect(deadTenant.error).not.toContain(secret('tenant'));
+      expect(deadTenant.error).not.toContain(mismatched.tenantId as string);
+
+      // Neither refused message left evidence or a marker behind.
+      for (const refused of [malformed, mismatched]) {
+        expect(
+          await prisma.client.auditEvent.count({ where: { sourceEventId: refused.eventId } }),
+        ).toBe(0);
+        expect(
+          await prisma.client.processedEvent.count({ where: { eventId: refused.eventId } }),
+        ).toBe(0);
+      }
+
+      // And the partition kept moving: a valid message afterwards still lands.
+      const good = trailMessage();
+      await publish(good);
+      const row = await waitFor(
+        'the following valid trail row',
+        rowFor(good.eventId),
+        DELIVERY_TIMEOUT_MS,
+      );
+      expect(row.sourceTopic).toBe(AUDIT_TRAIL_TOPIC);
+    } finally {
+      reader.stop();
+      await dlqConsumer.disconnect();
+    }
+  }, 300_000);
 });

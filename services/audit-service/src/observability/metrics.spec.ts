@@ -161,4 +161,28 @@ describe('the closed label sets themselves', () => {
       Object.values(INGESTION_FAILURE_REASONS).length,
     );
   });
+
+  it('gives path-B refusals their own closed reasons, on the same bounded labels', () => {
+    // AUD-004 Phase B adds five reasons and no label. A tenant mismatch in
+    // particular is counted, never labelled with the tenant it disagreed about.
+    expect(Object.values(INGESTION_FAILURE_REASONS)).toEqual(
+      expect.arrayContaining([
+        'trail_invalid_envelope',
+        'trail_unsupported_event',
+        'trail_invalid_payload',
+        'trail_tenant_mismatch',
+        'trail_unredacted_sensitive_change',
+      ]),
+    );
+    for (const reason of Object.values(INGESTION_FAILURE_REASONS)) {
+      expect(reason).toMatch(/^[a-z_]+$/);
+    }
+    expect(labelsOf(auditIngestionFailuresTotal)).toEqual(['reason']);
+    expect(labelsOf(auditRecordsIngestedTotal)).toEqual([
+      'source_service',
+      'source_topic',
+      'outcome',
+    ]);
+    expect(labelsOf(auditIngestionLagSeconds)).toEqual(['source_topic']);
+  });
 });
