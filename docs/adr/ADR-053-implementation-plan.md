@@ -1,6 +1,6 @@
 # ADR-053 — برنامهٔ پیاده‌سازی (audit-service)
 
-- **وضعیت:** برنامه — **در جریان.** AUD-001 و AUD-002 پیاده شده‌اند؛ از AUD-003 نیمهٔ شواهد دست‌نخوردگی پیاده شده و نیمهٔ اصلاح نه؛ از AUD-004 فقط **Phase A — قرارداد** پیاده شده، بدون هیچ رفتار زمان اجرا. جزئیات در § ۴، § ۵ و در جدول پایین همین بخش.
+- **وضعیت:** برنامه — **در جریان.** AUD-001 و AUD-002 پیاده شده‌اند؛ از AUD-003 نیمهٔ شواهد دست‌نخوردگی پیاده شده و نیمهٔ اصلاح نه؛ از AUD-004 **Phase A — قرارداد** و **Phase B — Consumer مسیر B در `audit-service`** پیاده شده‌اند، ولی هیچ Producer، `security_event_outbox`، تجمیع ردها یا فرمان اصلاحی نه. جزئیات در § ۴، § ۵ و در جدول پایین همین بخش.
 - **مرجع تصمیم:** [ADR-053](ADR-053-audit-service-append-only-evidence.md)
 - **قلم مرتبط:** `COM-009` — **`READY` می‌ماند و ۱۳ امتیازش دست نمی‌خورد** تا همهٔ گام‌های زیر پیاده و پذیرفته شوند.
 - **همراه:** [ADR-054 implementation plan](ADR-054-implementation-plan.md)
@@ -10,12 +10,12 @@
 
 **وضعیت گام‌ها — 2026-09-11:**
 
-| گام     | وضعیت                                                                                                                                                                                                                                         |
-| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| AUD-001 | ✅ **پیاده** — Projector مسیر A روی ده Topic دامنه‌ای، جدول `audit_event` پارتیشن‌بندی‌شده و فقط‌الحاقی در دو لایه                                                                                                                            |
-| AUD-002 | ✅ **پیاده** — `GET /v1/audit-events` و `GET /v1/audit-events/{id}`، پنجرهٔ اجباری، صفحه‌بندی Cursor، زیردرخت `UNION_ADMIN` از Projection محلی با Fail-Closed                                                                                 |
-| AUD-003 | ⚠️ **نیمه** — زنجیرهٔ Hash، `audit_chain_head`، `GET /v1/audit-events/verify` و متریک‌ها پیاده و روی PostgreSQL واقعی اثبات شده‌اند. **عمل `audit.correction` پیاده نشده** و تا AUD-004 نمی‌تواند باشد (مسیر B، نه نوشتن مستقیم)              |
-| AUD-004 | 🟡 **فقط Phase A — قرارداد.** `packages/contracts/src/events/audit-trail.ts` (`AUDIT_EVENT_RECORDED` v1، Zod، فقط‌Contract) نوشته و تست شده. **بدون Producer، بدون Consumer، بدون `security_event_outbox`، بدون Endpoint فرمان** — جزئیات § ۵ |
+| گام     | وضعیت                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AUD-001 | ✅ **پیاده** — Projector مسیر A روی ده Topic دامنه‌ای، جدول `audit_event` پارتیشن‌بندی‌شده و فقط‌الحاقی در دو لایه                                                                                                                                                                                                                                                                                                                           |
+| AUD-002 | ✅ **پیاده** — `GET /v1/audit-events` و `GET /v1/audit-events/{id}`، پنجرهٔ اجباری، صفحه‌بندی Cursor، زیردرخت `UNION_ADMIN` از Projection محلی با Fail-Closed                                                                                                                                                                                                                                                                                |
+| AUD-003 | ⚠️ **نیمه** — زنجیرهٔ Hash، `audit_chain_head`، `GET /v1/audit-events/verify` و متریک‌ها پیاده و روی PostgreSQL واقعی اثبات شده‌اند. **عمل `audit.correction` پیاده نشده** و تا AUD-004 نمی‌تواند باشد (مسیر B، نه نوشتن مستقیم)                                                                                                                                                                                                             |
+| AUD-004 | 🟡 **Phase A و Phase B — قرارداد و Consumer.** Phase A: `packages/contracts/src/events/audit-trail.ts` (`AUDIT_EVENT_RECORDED` v1، Zod، فقط‌Contract). Phase B: `AuditTrailConsumer` در `audit-service` با گروه ثابت `audit-service.trail` — اعتبارسنجی Fail-Closed پیش از نوشتن، Idempotent، روی PostgreSQL و Kafka واقعی تست شده. **بدون Producer، بدون `security_event_outbox`، بدون تجمیع ردها، بدون Endpoint فرمان اصلاح** — جزئیات § ۵ |
 
 > **`COM-009` همچنان `READY` و ۱۳ امتیازی است.** پیاده شدن سه گام و نیمی از چهارم، پذیرش صاحب محصول نیست و امتیاز نمی‌دهد؛
 > نوشتن یک Contract هیچ نتیجهٔ قابل‌پذیرش کاربری تحویل نمی‌دهد (`docs/25-progress-governance.md` § ۲۵٫۱، همان استدلال گام صفر).
@@ -330,6 +330,48 @@ source_topic)` خودش را دارد — دو لایهٔ مستقل، همان 
 >   Token تأییدشده)، اینکه کدام میدان از `SENSITIVE_KEYS` باید Redact شود پیش از رسیدن به `changes` (کار Producer، از
 >   `packages/logging/src/redaction.ts` — این بسته یک وابستگی تازه به `@rasta/logging` نمی‌گیرد)، و اینکه ۵۰۰ رد در یک
 >   دقیقه چطور به یک ردیف با `occurrenceCount=500` تبدیل می‌شود (کار Flusherِ Producer، پنجره‌ای، هنوز نانوشته).
+
+> **پیشرفت — 2026-09-11 (Phase B — Consumer مسیر B در `audit-service`؛ بدون Producer).**
+> `services/audit-service/src/consumers/audit-trail.consumer.ts` (`AuditTrailConsumer`) و
+> `src/audit/audit-trail.mapper.ts` پیاده شدند: گروه ثابت `audit-service.trail` فقط روی `AUDIT_TRAIL_TOPIC` — جدا از گروه
+> Projector (`audit-service.domain-projector`)، و هیچ‌کدام از `KAFKA_CONSUMER_GROUP` خوانده نمی‌شوند. هر دو Consumer در
+> `AppModule` ساخته، در Bootstrap شروع و در Shutdown متوقف می‌شوند، و Readiness فقط وقتی `200` است که `database`،
+> `projector` و `trail` هر سه درست باشند. **هیچ Producer، هیچ `security_event_outbox`، هیچ تجمیع ردها، هیچ Endpoint
+> فرمان اصلاح، هیچ API نوشتن حسابرسی و هیچ Migration در این فاز ساخته نشد**؛ Topic از پیش در `create-topics.sh` و هر دو
+> فهرست Topic در CI بود.
+>
+> **مرز اعتبارسنجی، به همین ترتیب، پیش از هر نوشتن:**
+>
+> 1. Envelope استاندارد دوباره Parse می‌شود، حتی پس از `EventConsumer`.
+> 2. `eventName === AUDIT_EVENT_RECORDED`، `eventVersion === AUDIT_EVENT_RECORDED_VERSION`، و Topic تحویل همان
+>    `rasta.audit.trail.v1`.
+> 3. Payload با `auditTrailPayloadSchemaV1`.
+> 4. توافق مستأجر، بسته در خطا: هر دو حاضر و دقیقاً برابر (بدون نرمال‌سازی حروف)، یا هر دو غایب برای رکورد پلتفرمی؛
+>    یک‌طرفه، ناهمسان یا تهی رد می‌شود؛ مستأجر هرگز از Actor، Resource یا Aggregate حدس زده نمی‌شود.
+> 5. کنترل‌های ستون — رد، نه کوتاه‌سازی: شناسهٔ تهی، `correctionOf` بیش از ۶۴ نویسه، `occurrenceCount` بیرون از
+>    `INTEGER`؛ و تغییرِ میدانی از `SENSITIVE_KEYS` با مقدار خام (کنترل دفاعی — Redaction همچنان کار Producer است).
+>
+> رد یعنی Throw، سپس Retry و `rasta.audit.v1.dlq`؛ هیچ ردیف و هیچ نشانگر `processed_event`. پیام خطا — که در Log و Header
+> `x-dlq-error` می‌نشیند — فقط مسیر Schema، کد Zod و عبارت ثابت دارد، هرگز پیام Zod که مقدار دریافتی را نقل می‌کند؛ خطای
+> پایگاه داده به `AuditTrailPersistenceError` با نام کلاس و کد `P####` تبدیل می‌شود و خطای اصلی فقط `cause` است. متریک‌ها
+> پنج مقدار بستهٔ تازه برای `reason` گرفتند و هیچ برچسب تازه‌ای نه.
+>
+> **نگاشت و زنجیره.** همهٔ میدان‌های مسیر B به ستون‌های موجود `audit_event` می‌روند (نوع/شناسه/نقش‌های Actor، سازمان،
+> `action`، Resource، `outcome`، `errorCode`، `reason`، `changes`، `occurrenceCount`، ip و User-Agent، `correctionOf`)، و
+> ستون‌های Envelope از همان تابع مشترکِ مسیر A (`toEnvelopeProvenance`) می‌آیند. `CANONICAL_FIELDS`ِ AUD-003 همهٔ این
+> ستون‌ها را از پیش پوشش می‌داد و Repository تا امروز برایشان null می‌نوشت، پس **`CANONICAL_VERSION` تغییر نکرد** و Hash
+> هر ردیف مسیر A دقیقاً همان است. نوشتن فقط از `AuditRepository.ingest`، با نام مصرف‌کنندهٔ `audit-service.trail` و بدون
+> Projection سلسله‌مراتب. اصلاح یک ردیف تازه با `correction_of` است؛ ردیف اصلی دست نمی‌خورد.
+>
+> **شواهد.** Unit: `audit-trail.mapper.spec.ts`، `audit-trail.consumer.spec.ts` و به‌روزرسانی Composition-root، Health و
+> Metrics. PostgreSQL: `test/trail-ingestion.int-spec.ts` — همهٔ ستون‌ها و بازمحاسبهٔ Hash پس از رفت‌وبرگشت JSONB، زنجیرهٔ
+> مستأجر و پلتفرم، اصلاحِ پیوندی، تحویل تکراری و هم‌زمان، جدایی از فضای نام مسیر A، و دو شکست تراکنش. Kafka: بلوک تازه در
+> `test/kafka-projector.int-spec.ts` — Envelope واقعی به ردیف؛ Envelope بدشکل به `VALIDATION_FAILED`؛ Payload بدشکل و
+> مستأجر ناهمسان به `MAX_RETRIES_EXCEEDED` بدون نشت مقدار در Header و بدون ردیف یا نشانگر؛ و Partition ادامه می‌دهد.
+>
+> **آنچه Consumer عمداً بررسی نمی‌کند:** اینکه `correctionOf` به رکوردی موجود و در همان مستأجر اشاره کند. این پرسش باید
+> پیش از صدور رویداد در Producer فرمان اصلاح پاسخ بگیرد؛ در Consumer، خواندن با شناسه بدون پنجرهٔ زمانی همهٔ پارتیشن‌ها را
+> اسکن می‌کند. `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
 
 **As a** بازبین امنیتی، **I want** ردها و اعمال پرامتیاز با نقش‌های Actor، مبدأ و نتیجه ثبت شوند، **so that** یک تلاش دسترسی
 ردشده شواهد باشد، نه خط Logی که در سی روز منقضی می‌شود.

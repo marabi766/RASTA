@@ -485,15 +485,24 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 
 ## Audit — `rasta.audit.trail.v1`
 
-> **وضعیت — 2026-09-11 (AUD-004 Phase A).** `audit-service` **ساخته شده** (AUD-001..003، `docs/04` § ۴٫۱۵) و مسیر
+> **وضعیت — 2026-09-11 (AUD-004 Phase B).** `audit-service` **ساخته شده** (AUD-001..003، `docs/04` § ۴٫۱۵) و مسیر
 > نخستِ ورودی‌اش — Projector روی هر ده Topic دامنه‌ای، `docs/07` § ۷٫۱۰ — زنده است. این Topic **مسیر دوم** است
 > (ADR-053 § ۱)، و آنچه در ادامه می‌آید فقط دربارهٔ همین مسیر دوم صادق است:
 >
-> - **قرارداد وجود دارد.** `packages/contracts/src/events/audit-trail.ts` رویداد `AUDIT_EVENT_RECORDED` (**نسخهٔ ۱**)
->   را با Zod Schema پیاده می‌کند و از `packages/contracts/src/index.ts` صادر می‌شود.
-> - **هیچ Producer و هیچ Consumer زمان اجرا هنوز نوشته نشده.** نه سرویسی روی این Topic می‌نویسد، نه `audit-service`
->   آن را می‌خواند. سطر «همه سرویس‌ها روی این Topic می‌نویسند» زیر، **نیت طراحی** ADR-053 § ۱ است، نه رفتار امروز —
->   امروز صفر سرویس می‌نویسد.
+> - **قرارداد وجود دارد (Phase A).** `packages/contracts/src/events/audit-trail.ts` رویداد `AUDIT_EVENT_RECORDED`
+>   (**نسخهٔ ۱**) را با Zod Schema پیاده می‌کند و از `packages/contracts/src/index.ts` صادر می‌شود.
+> - **Consumer وجود دارد (Phase B).** `AuditTrailConsumer` در `audit-service` با گروه ثابت `audit-service.trail` فقط
+>   همین Topic را می‌خواند — جدا از گروه Projector، و بی‌اعتنا به `KAFKA_CONSUMER_GROUP`. پیش از هر نوشتن به‌ترتیب
+>   بررسی می‌کند: Envelope استاندارد Parse شود؛ `eventName === AUDIT_EVENT_RECORDED` و `eventVersion === 1` روی همین
+>   Topic؛ Payload با `auditTrailPayloadSchemaV1`؛ و **توافق مستأجر، بسته در خطا**: `payload.organizationId` دقیقاً
+>   برابر `envelope.tenantId`، یا هر دو غایب برای رکورد پلتفرمی — هر ترکیب دیگر (یک‌طرفه، ناهمسان، تهی) رد می‌شود و
+>   مستأجر هرگز از Actor یا Resource حدس زده نمی‌شود. پیام ردشده **هیچ ردیف و هیچ نشانگر `processed_event`** نمی‌سازد؛
+>   Throw می‌شود، Retry می‌شود و به `rasta.audit.v1.dlq` می‌رود، و خطا/Log فقط مسیر Schema و نام کلید دارد، نه مقدار.
+>   Idempotency روی `(eventId, 'audit-service.trail')` در همان تراکنشِ ردیف و زنجیرهٔ Hash است؛ فضای نام آن از مسیر A
+>   جداست. اصلاح یک **ردیف تازه** با `correction_of` است، هرگز UPDATE.
+> - **هیچ Producer زمان اجرا هنوز نوشته نشده.** هیچ سرویسی روی این Topic نمی‌نویسد، پس Consumer آماده و بی‌کار است.
+>   سطر «همه سرویس‌ها روی این Topic می‌نویسند» زیر، **نیت طراحی** ADR-053 § ۱ است، نه رفتار امروز. `security_event_outbox`،
+>   تجمیع پنجره‌ای ردها و فرمان اصلاح هم ساخته نشده‌اند.
 > - **مالکیت Producer برای دو مرزِ نخست تصمیم گرفته شده، ساخته نشده:** `identity-service` هم Producer مرجعِ ردهای
 >   `403` (§ ۴ ADR) و هم Producer نیتِ اصلاح (§ ۷ ADR) خواهد بود — رسیدگی کامل و شواهدش در
 >   [ADR-053 implementation plan](../adr/ADR-053-implementation-plan.md) § ۵.
@@ -501,7 +510,7 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 >   [ADR-053](../adr/ADR-053-audit-service-append-only-evidence.md).
 
 **نیت طراحی — چه کسی روی این Topic خواهد نوشت، وقتی Producerها ساخته شوند.** همهٔ سرویس‌ها (ADR-053 § ۱: هر رویداد
-پرامتیاز یا رد که مسیر A ساختاراً نمی‌تواند بسازد). **تنها مصرف‌کننده** `audit-service` خواهد بود، زیر گروه مصرف‌کنندهٔ
+پرامتیاز یا رد که مسیر A ساختاراً نمی‌تواند بسازد). **تنها مصرف‌کننده** `audit-service` است، زیر گروه مصرف‌کنندهٔ
 `audit-service.trail` (ADR-053 § ۱، § ۸).
 
 **کلید Partition.** قاعدهٔ پیش‌فرض همین سند (ستون «قواعد» بالا): `aggregateId` — که برای یک رکورد معمولی همان
@@ -515,6 +524,13 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 **چهار ناورداییِ اصلاح، در Schema اجباری‌اند** (ADR-053 § ۷): `correctionOf` حاضر باشد یعنی `action ===
 'audit.correction'`، `outcome === 'SUCCESS'`، `reason` غیرخالی، و `actor.type === 'USER'` — هرکدام نبود، Schema رد
 می‌کند. **مجوزدهی، Redaction و تجمیعِ ردها در این Schema نیست** — همه سمتِ Producer‌اند، وقتی ساخته شوند.
+
+**آنچه Consumer افزون بر Schema رد می‌کند — بدون بازنویسی هیچ مقدار.** تغییری در `changes` که میدانش (یا یک بخش نقطه‌دارِ
+آن) در `SENSITIVE_KEYS` از `@rasta/logging` است و مقدار خامِ Scalar به‌جای `{redacted:true}`/`{hash}` دارد؛ `correctionOf`
+بلندتر از ستون ۶۴ نویسه‌ای؛ `occurrenceCount` بیرون از بازهٔ `INTEGER`؛ و شناسه‌های تهی (`actor.id`، `resourceType`،
+`resourceId`، `reason`، `correctionOf`). هرکدام **رد** می‌شود، نه کوتاه یا اصلاح: این جدول تنها جایی است که مقدارِ نشت‌کرده
+هرگز از آن حذف نمی‌شود، و پیوند اصلاحِ کوتاه‌شده به رکوردی اشاره می‌کند که هیچ‌کس نام نبرده. **آنچه Consumer بررسی
+نمی‌کند:** اینکه رکوردِ `correctionOf` واقعاً وجود دارد یا در همان مستأجر است — این بر عهدهٔ Producer فرمان اصلاح است.
 
 ---
 
