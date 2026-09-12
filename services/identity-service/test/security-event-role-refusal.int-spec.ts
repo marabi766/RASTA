@@ -13,11 +13,12 @@ import { startIdentityApi, userToken, type Caller, type IdentityApiHarness } fro
 import { atFreshWindow, waitForWindowClose } from './helpers';
 
 /**
- * The six roles-guard refusal sites — `GET /v1/users` (AUD-004 Phase C3),
+ * The seven roles-guard refusal sites — `GET /v1/users` (AUD-004 Phase C3),
  * `POST /v1/users` (Phase C4), `POST /v1/users/:id/memberships` (Phase C5),
  * `POST /v1/memberships/:id/roles` (Phase C6),
- * `POST /v1/memberships/:id/revoke` (Phase C7) and
- * `POST /v1/registration-requests/:id/approve` (Phase C8), each refused by the
+ * `POST /v1/memberships/:id/revoke` (Phase C7),
+ * `POST /v1/registration-requests/:id/approve` (Phase C8) and
+ * `POST /v1/registration-requests/:id/reject` (Phase C9), each refused by the
  * roles guard with `403 INSUFFICIENT_ROLE` — against a real PostgreSQL
  * (ADR-053 § 4).
  *
@@ -26,11 +27,13 @@ import { atFreshWindow, waitForWindowClose } from './helpers';
  * `RolesGuard`, then the refusal filter, then the Phase C2 aggregation upsert.
  * Nothing about any site bypasses any of them.
  *
- * `POST /v1/registration-requests/:id/reject` stays uninstrumented, so it is
- * the comparison for "the response is unchanged" and the sole negative probe.
- * It is the strongest one available: the same method, the same path prefix and
- * the same single required role as the approval next to it — only the allowlist
- * separates them.
+ * Since Phase C9 every `@Roles` route in identity-service is a site, so there
+ * is no uninstrumented role refusal left to compare a response against. Each
+ * response is therefore pinned to the exact refusal the platform has always
+ * given (`expectPlatformRefusal`), and the byte-for-byte equivalence with the
+ * platform `RolesGuard` is proved in `identity-roles.guard.spec.ts`. The
+ * negative controls are near misses of the instrumented templates and the auth
+ * guard's own, unmarked refusal.
  *
  * A two-second aggregation window (configuration, not a bypass) lets the suite
  * watch a window close. Everything written carries `TAG`; cleanup removes
@@ -45,6 +48,7 @@ const MEMBERSHIP = REFUSAL_SITES.ADD_MEMBERSHIP;
 const ROLES = REFUSAL_SITES.UPDATE_MEMBERSHIP_ROLES;
 const REVOKE = REFUSAL_SITES.REVOKE_MEMBERSHIP;
 const APPROVE = REFUSAL_SITES.APPROVE_REGISTRATION_REQUEST;
+const REJECT = REFUSAL_SITES.REJECT_REGISTRATION_REQUEST;
 const WINDOW_SECONDS = 2;
 
 const QUERY_SECRET = `query-secret-${TAG}`;
@@ -90,6 +94,11 @@ const approveBody = (marker: string = BODY_SECRET): Record<string, unknown> => (
   organizationId: `ORG-BODY-${marker}`,
   roles: ['SYSTEM_ADMIN', 'UNION_ADMIN'],
   note: `${marker}-approve-note`,
+});
+
+/** The reason the caller states for a rejection. Attacker-chosen: not evidence. */
+const rejectBody = (marker: string = BODY_SECRET): Record<string, unknown> => ({
+  reason: `${marker}-reject-reason`,
 });
 
 describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () => {
@@ -199,16 +208,21 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     return call.send(options.body ?? approveBody());
   }
 
-  /**
-   * An uninstrumented role refusal: the same guard, the same error, the same
-   * single required role and the same path prefix as the approval — but not an
-   * allowlisted template.
-   */
-  const rejectRegistration = (caller: Caller) =>
-    request(harness.app.getHttpServer())
-      .post(`/v1/registration-requests/${tagged('REG')}/reject`)
+  function rejectRegistration(
+    caller: Caller,
+    options: {
+      target?: string;
+      body?: Record<string, unknown>;
+      headers?: Record<string, string>;
+    } = {},
+  ) {
+    const call = request(harness.app.getHttpServer())
+      .post(`/v1/registration-requests/${options.target ?? `REG-${PATH_SECRET}`}/reject`)
       .set('authorization', `Bearer ${userToken(caller)}`)
-      .send({});
+      .set('x-correlation-id', tagged('COR'));
+    for (const [name, value] of Object.entries(options.headers ?? {})) call.set(name, value);
+    return call.send(options.body ?? rejectBody());
+  }
 
   const caller = (roles: string[] = ['FLEET_MANAGER']): Caller => ({
     userId: tagged('USR'),
@@ -216,15 +230,24 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     roles,
   });
 
-  const expectSameShape = (
-    instrumented: request.Response,
-    uninstrumented: request.Response,
-  ): void => {
-    expect(instrumented.status).toBe(403);
-    expect(uninstrumented.status).toBe(403);
-    expect(Object.keys(instrumented.body).sort()).toEqual(Object.keys(uninstrumented.body).sort());
-    expect(instrumented.body.code).toBe(uninstrumented.body.code);
-    expect(instrumented.body.message).toBe(uninstrumented.body.message);
+  /**
+   * The exact refusal the platform has always given: `403`, the platform's
+   * fields and nothing else, its code and message, and the caller's own
+   * correlation id and path echoed back. There is no uninstrumented role
+   * refusal left in this service to compare against (Phase C9).
+   */
+  const expectPlatformRefusal = (response: request.Response, correlationId?: string): void => {
+    expect(response.status).toBe(403);
+    expect(Object.keys(response.body).sort()).toEqual([
+      'code',
+      'correlationId',
+      'message',
+      'path',
+      'timestamp',
+    ]);
+    expect(response.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+    expect(response.body.message).toBe('You do not have permission to perform this action');
+    if (correlationId !== undefined) expect(response.body.correlationId).toBe(correlationId);
   };
 
   beforeAll(async () => {
@@ -294,9 +317,9 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
       }
     });
 
-    it('answers with the same response shape as an uninstrumented role refusal', async () => {
+    it('answers with exactly the established platform refusal', async () => {
       const refused = caller();
-      expectSameShape(await listUsers(refused), await rejectRegistration(refused));
+      expectPlatformRefusal(await listUsers(refused));
     });
 
     it('aggregates sequential refusals in one short window, and opens a new row in the next', async () => {
@@ -396,10 +419,9 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
       }
     });
 
-    it('answers with the same response shape as an uninstrumented role refusal', async () => {
+    it('answers with exactly the established platform refusal', async () => {
       const refused = caller();
-      expectSameShape(await createUser(refused), await rejectRegistration(refused));
-      // The uninstrumented refusal is still uncaptured; the instrumented one is.
+      expectPlatformRefusal(await createUser(refused));
       expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([CREATE.action]);
     });
 
@@ -513,9 +535,9 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
       }
     });
 
-    it('answers with the same response shape as an uninstrumented role refusal', async () => {
+    it('answers with exactly the established platform refusal', async () => {
       const refused = caller();
-      expectSameShape(await addMembership(refused), await rejectRegistration(refused));
+      expectPlatformRefusal(await addMembership(refused));
       expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([MEMBERSHIP.action]);
     });
 
@@ -634,10 +656,9 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
       }
     });
 
-    it('answers with the same response shape as an uninstrumented role refusal', async () => {
+    it('answers with exactly the established platform refusal', async () => {
       const refused = caller();
-      expectSameShape(await replaceRoles(refused), await rejectRegistration(refused));
-      // The uninstrumented rejection is still uncaptured; the role replacement is.
+      expectPlatformRefusal(await replaceRoles(refused));
       expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([ROLES.action]);
     });
 
@@ -756,10 +777,9 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
       }
     });
 
-    it('answers with the same response shape as an uninstrumented role refusal', async () => {
+    it('answers with exactly the established platform refusal', async () => {
       const refused = caller();
-      expectSameShape(await revokeMembership(refused), await rejectRegistration(refused));
-      // The uninstrumented registration rejection is still uncaptured; the revocation is.
+      expectPlatformRefusal(await revokeMembership(refused));
       expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([REVOKE.action]);
     });
 
@@ -880,10 +900,9 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
       }
     });
 
-    it('answers with the same response shape as the uninstrumented rejection beside it', async () => {
+    it('answers with exactly the established platform refusal', async () => {
       const refused = caller();
-      expectSameShape(await approveRegistration(refused), await rejectRegistration(refused));
-      // The uninstrumented rejection is still uncaptured; the approval is.
+      expectPlatformRefusal(await approveRegistration(refused));
       expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([APPROVE.action]);
     });
 
@@ -973,7 +992,182 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     });
   });
 
-  it('tenant isolation: never merges refusals across tenants or actors, nor across the seven sites', async () => {
+  describe('POST /v1/registration-requests/:id/reject (Phase C9)', () => {
+    it('captures a real INSUFFICIENT_ROLE refusal attributed to the verified caller, with nothing from the path, rejection reason, role policy, token, cookie or error text', async () => {
+      const refused = caller(['AUDITOR']);
+      const token = userToken(refused);
+      const correlationId = tagged('COR');
+      const target = `REG-${PATH_SECRET}`;
+
+      const response = await request(harness.app.getHttpServer())
+        .post(`/v1/registration-requests/${target}/reject?role=UNION_ADMIN&note=${QUERY_SECRET}`)
+        .set('authorization', `Bearer ${token}`)
+        .set('cookie', `session=${COOKIE_SECRET}`)
+        .set('x-correlation-id', correlationId)
+        .send(rejectBody());
+
+      expectPlatformRefusal(response, correlationId);
+      // As for every route, the platform's error body echoes the caller's own
+      // path back to them, unchanged; the body is never echoed.
+      expect(JSON.stringify(response.body)).not.toContain(BODY_SECRET);
+
+      const rows = await rowsFor(refused.userId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        organizationId: refused.organizationId,
+        actorType: 'USER',
+        actorId: refused.userId,
+        actorRoles: ['AUDITOR'],
+        action: 'identity.registration_requests.reject',
+        resourceType: 'RegistrationRequest',
+        // The verified caller — never the registration request the path names.
+        resourceId: refused.userId,
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: REJECT.reason,
+        correlationId,
+        occurrenceCount: 1,
+        publishedAt: null,
+        claimCount: 0,
+      });
+      expect(rows[0]!.resourceId).not.toBe(target);
+
+      const everything = await rawRow(rows[0]!.id);
+      for (const leaked of [
+        ...REQUIRED_ROLES,
+        APPROVE_REQUIRED_ROLE,
+        'SYSTEM_ADMIN',
+        PATH_SECRET,
+        target,
+        BODY_SECRET,
+        'reject-reason',
+        QUERY_SECRET,
+        COOKIE_SECRET,
+        token,
+        '/v1/registration-requests',
+        '/reject',
+        ':id',
+        'role=',
+        'You do not have permission',
+        'required',
+      ]) {
+        expect(everything).not.toContain(leaked);
+      }
+    });
+
+    it('answers with exactly the established platform refusal', async () => {
+      const refused = caller();
+      expectPlatformRefusal(await rejectRegistration(refused));
+      expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([REJECT.action]);
+    });
+
+    it('aggregates by the caller across different request ids and reason secrets in one window, and opens a new row in the next', async () => {
+      const refused = caller();
+      await atFreshWindow(prisma, WINDOW_SECONDS, 1_500);
+
+      for (let i = 0; i < 3; i += 1) {
+        // A different registration request and reason every time: neither is
+        // aggregation-key material.
+        const response = await rejectRegistration(refused, {
+          target: `REG-${PATH_SECRET}-${i}`,
+          body: rejectBody(`${BODY_SECRET}-${i}`),
+        });
+        expect(response.status).toBe(403);
+        expect(response.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+      }
+
+      const [first, ...others] = await rowsFor(refused.userId);
+      expect(others).toHaveLength(0);
+      expect(first).toMatchObject({
+        occurrenceCount: 3,
+        action: REJECT.action,
+        resourceId: refused.userId,
+      });
+      expect(aggregationWindowOf(first!.occurredAt, WINDOW_SECONDS)).toEqual({
+        startedAt: first!.windowStartedAt,
+        endsAt: first!.windowEndsAt,
+      });
+
+      await waitForWindowClose(prisma, first!.id);
+      expect((await rejectRegistration(refused)).status).toBe(403);
+
+      const rows = await rowsFor(refused.userId);
+      expect(rows.map((row) => row.occurrenceCount)).toEqual([3, 1]);
+      expect(rows.map((row) => row.action)).toEqual([REJECT.action, REJECT.action]);
+      expect(rows[1]!.windowStartedAt.getTime()).toBeGreaterThanOrEqual(
+        rows[0]!.windowEndsAt.getTime(),
+      );
+    });
+
+    it('lets the shared guard allow UNION_ADMIN and SYSTEM_ADMIN through to validation and the domain, and captures nothing for them', async () => {
+      for (const roles of [['UNION_ADMIN'], ['SYSTEM_ADMIN']]) {
+        const allowed = caller(roles);
+
+        // No reason: the required, at-least-ten-character reason fails
+        // validation — so nothing is rejected.
+        const invalid = await rejectRegistration(allowed, { body: {} });
+        expect(invalid.status).toBe(400);
+        expect(invalid.body.code).not.toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+
+        // A valid reason passes the guard and validation and reaches the
+        // domain, which answers 404 for a registration request that was never
+        // created.
+        const notFound = await rejectRegistration(allowed, {
+          body: { reason: 'A reason long enough to pass validation' },
+        });
+        expect(notFound.status).toBe(404);
+        expect(notFound.body.code).not.toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+
+        expect(await rowsFor(allowed.userId)).toHaveLength(0);
+      }
+    });
+
+    it('refuses and captures ORGANIZATION_ADMIN, as it does on the approval', async () => {
+      const refused = caller(['ORGANIZATION_ADMIN']);
+      const response = await rejectRegistration(refused);
+      expectPlatformRefusal(response);
+
+      const rows = await rowsFor(refused.userId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        action: REJECT.action,
+        resourceType: REJECT.resourceType,
+        resourceId: refused.userId,
+        // The caller's own role from the token, not the role the endpoint wants.
+        actorRoles: ['ORGANIZATION_ADMIN'],
+      });
+    });
+
+    it('never merges an approval refusal and a rejection refusal by the same caller in the same window', async () => {
+      const refused = caller(['ORGANIZATION_ADMIN']);
+      await atFreshWindow(prisma, WINDOW_SECONDS, 1_500);
+
+      for (let i = 0; i < 2; i += 1) {
+        const approving = await approveRegistration(refused, { target: `REG-${PATH_SECRET}-${i}` });
+        expect(approving.status).toBe(403);
+      }
+      for (let i = 0; i < 3; i += 1) {
+        const rejecting = await rejectRegistration(refused, { target: `REG-${PATH_SECRET}-${i}` });
+        expect(rejecting.status).toBe(403);
+      }
+
+      const rows = await rowsFor(refused.userId);
+      expect(rows.map((row) => `${row.action} ${row.occurrenceCount}`).sort()).toEqual(
+        [`${APPROVE.action} 2`, `${REJECT.action} 3`].sort(),
+      );
+      // One window, one tenant, one actor, one resource id: only the action differs.
+      expect(new Set(rows.map((row) => row.windowStartedAt.getTime())).size).toBe(1);
+      for (const row of rows) {
+        expect(row).toMatchObject({
+          organizationId: refused.organizationId,
+          resourceType: 'RegistrationRequest',
+          resourceId: refused.userId,
+          errorCode: 'INSUFFICIENT_ROLE',
+        });
+      }
+    });
+  });
+
+  it('tenant isolation: never merges refusals across tenants or actors, nor across the eight sites', async () => {
     const home = tagged('ORG');
     const second = tagged('ORG');
     const person: Caller = {
@@ -1014,6 +1208,13 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
         (await approveRegistration(person, { headers: { 'x-organization-id': second } })).status,
       ).toBe(403);
       expect((await approveRegistration(colleague)).status).toBe(403);
+      expect((await rejectRegistration(person, { target: `REG-${PATH_SECRET}-${i}` })).status).toBe(
+        403,
+      );
+      expect(
+        (await rejectRegistration(person, { headers: { 'x-organization-id': second } })).status,
+      ).toBe(403);
+      expect((await rejectRegistration(colleague)).status).toBe(403);
     }
     // The same person refused by all three other sites in the same window.
     expect((await listUsers(person)).status).toBe(403);
@@ -1055,6 +1256,8 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
         `identity.memberships.revoke ${second} 2`,
         `identity.registration_requests.approve ${home} 2`,
         `identity.registration_requests.approve ${second} 2`,
+        `identity.registration_requests.reject ${home} 2`,
+        `identity.registration_requests.reject ${second} 2`,
       ].sort(),
     );
     // No row of the person's is ever filed under the colleague, or vice versa.
@@ -1065,6 +1268,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
         `${ROLES.action} ${home} 2`,
         `${REVOKE.action} ${home} 2`,
         `${APPROVE.action} ${home} 2`,
+        `${REJECT.action} ${home} 2`,
       ].sort(),
     );
     // A tenant-scoped read sees only its own tenant's rows.
@@ -1079,24 +1283,38 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
         `${person.userId} ${ROLES.action}`,
         `${person.userId} ${REVOKE.action}`,
         `${person.userId} ${APPROVE.action}`,
+        `${person.userId} ${REJECT.action}`,
       ].sort(),
     );
   });
 
-  it('captures nothing for the one role-guarded endpoint that is still not allowlisted', async () => {
+  it('captures nothing for a near miss of an instrumented template, nor for a refusal no site decided', async () => {
     const refused = caller();
-    // Paths, not requests: supertest binds a listener per request and closes
-    // it when that request ends, so each one is built only when it is sent.
-    // `/reject` is the sibling of an instrumented route: same method, same
-    // prefix, same single required role, and still no row.
-    for (let i = 0; i < 2; i += 1) {
+    // Every `@Roles` route in identity-service is a site since Phase C9, so the
+    // negative control is no longer "another role-guarded route" but everything
+    // that is not exactly a site: a method or a template no route serves...
+    for (const [method, path] of [
+      ['get', `/v1/registration-requests/REG-${PATH_SECRET}/reject`],
+      ['put', `/v1/registration-requests/REG-${PATH_SECRET}/approve`],
+      ['patch', `/v1/memberships/MBR-${PATH_SECRET}/revoke`],
+      ['post', `/v1/registration-requests/REG-${PATH_SECRET}/reject/extra`],
+      ['post', `/v1/users/USR-${PATH_SECRET}/memberships/extra`],
+    ] as const) {
       const response = await request(harness.app.getHttpServer())
-        .post(`/v1/registration-requests/${tagged('REG')}/reject`)
+        [method](path)
         .set('authorization', `Bearer ${userToken(refused)}`)
-        .send({ reason: `${BODY_SECRET}-reject-${i}` });
-      expect(response.status).toBe(403);
-      expect(response.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+        .send({ reason: `${BODY_SECRET}-near-miss` });
+      expect(response.status).toBe(404);
     }
+
+    // ...and the auth guard's own TENANT_MISMATCH on an instrumented route: a
+    // refusal made before any role decision, so its error is never marked.
+    const guarded = await rejectRegistration(refused, {
+      headers: { 'x-organization-id': tagged('ORG') },
+    });
+    expect(guarded.status).toBe(403);
+    expect(guarded.body.code).toBe(ERROR_CODES.TENANT_MISMATCH);
+
     expect(await rowsFor(refused.userId)).toHaveLength(0);
   });
 
@@ -1111,6 +1329,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
       APPROVE,
       (refused) => approveRegistration(refused),
     ],
+    ['POST /v1/registration-requests/:id/reject', REJECT, (refused) => rejectRegistration(refused)],
   ])(
     '%s becomes claimable only once its window closes, as one contract-valid event with the aggregated count',
     async (_label, site, refuse) => {

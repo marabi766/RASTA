@@ -312,8 +312,9 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
   /**
    * The roles-guard sites: GET /v1/users (Phase C3), POST /v1/users (Phase C4),
    * POST /v1/users/:id/memberships (Phase C5), POST /v1/memberships/:id/roles
-   * (Phase C6), POST /v1/memberships/:id/revoke (Phase C7) and
-   * POST /v1/registration-requests/:id/approve (Phase C8). Each entry builds the
+   * (Phase C6), POST /v1/memberships/:id/revoke (Phase C7),
+   * POST /v1/registration-requests/:id/approve (Phase C8) and
+   * POST /v1/registration-requests/:id/reject (Phase C9). Each entry builds the
    * concrete path and body of the i-th refusal from the run's secret, so the
    * path id and the body differ on every request.
    */
@@ -371,6 +372,15 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
       (secret, i) => ({
         path: `/v1/registration-requests/REG-${secret}-${i}/approve?q=${secret}`,
         body: { organizationId: `ORG-${secret}-${i}`, roles: ['SYSTEM_ADMIN'] },
+      }),
+    ],
+    [
+      'POST /v1/registration-requests/:id/reject',
+      'REJECT_REGISTRATION_REQUEST',
+      'post',
+      (secret, i) => ({
+        path: `/v1/registration-requests/REG-${secret}-${i}/reject?q=${secret}`,
+        body: { reason: `${secret}-reject-reason-${i}` },
       }),
     ],
   ];
@@ -454,6 +464,10 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
         REVOKE_MEMBERSHIP: ['identity.memberships.revoke', 'Membership'],
         APPROVE_REGISTRATION_REQUEST: [
           'identity.registration_requests.approve',
+          'RegistrationRequest',
+        ],
+        REJECT_REGISTRATION_REQUEST: [
+          'identity.registration_requests.reject',
           'RegistrationRequest',
         ],
       };
