@@ -443,21 +443,29 @@ jobs:
         # the three-way collision the shared-registration step exists to avoid
         # (ADR-053 plan, Step Zero).
         #
-        # They are deliberately absent from three other multi-service steps,
-        # because none of those would use them:
+        # `notification` is deliberately absent from three other multi-service
+        # steps, because none of those would use it:
         #
-        #   Migration reversibility  runs `pnpm test:migration`, and neither
-        #                            service is registered there — it has no
-        #                            real migration to reverse yet, and a
-        #                            vacuous entry is worse than none.
+        #   Migration reversibility  runs `pnpm test:migration`. `notification`
+        #                            is not registered there — it has no real
+        #                            migration to reverse yet, and a vacuous
+        #                            entry is worse than none. `audit` *is*
+        #                            registered (whole-chain
+        #                            `verify-migration-reversible.mjs audit`),
+        #                            and so is `identity`, by the two named
+        #                            verifiers that reach the migrations the
+        #                            whole-chain harness cannot — AUD-004's
+        #                            `security_event_outbox` and AUD-003's
+        #                            `audit_correction_command`. Both services'
+        #                            urls are therefore present in that step.
         #   Outbox B3                passes every url it touches explicitly and
-        #                            neither service owns an outbox today.
+        #                            `notification` owns no outbox today.
         #   E2E `Apply migrations`   carries only the services that job
         #                            actually starts (five, since AUD-004
         #                            Phase C1 added identity-service).
         #
         # A url present in a step that cannot use it reads as registration that
-        # has happened. It has not.
+        # has happened. For `notification` it has not.
         run: pnpm run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
@@ -706,14 +714,16 @@ jobs:
 
       - name: Migration reversibility
         # AGENTS.md § 7 requires every migration to be reversible, and until
-        # now nothing had ever run a down script. up → down → up against a
-        # throwaway schema, asserting between each step that the tables, the
-        # three ledger triggers and `ck_wallet_balances` are there, gone, and
-        # back. It runs here rather than in its own job because this is where
-        # a migrated database already exists.
+        # this step existed nothing had ever run a down script. up → down → up
+        # against a throwaway schema, asserting between each step that every
+        # object the migration owns is there, gone, and back — and, for the
+        # named verifiers, that every object it does *not* own survived, and
+        # that each `down.sql` removed its own `_prisma_migrations` row so the
+        # rollback can be rolled forward again. It runs here rather than in its
+        # own job because this is where a migrated database already exists.
         run: pnpm run test:migration
         env:
-          # All nine, not only the four the whole-chain checks cover. ADR-050
+          # All nine, not only the five the whole-chain checks cover. ADR-050
           # adds its claim columns to every service-owned database, and
           # `verify-outbox-claim-migration.mjs --in-place` reverses that one
           # migration on each of them — so a missing url here is a database
@@ -725,6 +735,14 @@ jobs:
           # and `verify-migration-reversible.mjs supplier` covers it instead —
           # which is why that command is now in `test:migration` rather than
           # only being available to run by hand.
+          #
+          # identity is the mirror of that exception: its *initial* migration
+          # has no down.sql, so the whole-chain verifier cannot reach any of
+          # its migrations, and each one it owns needs a verifier addressed to
+          # it by name. Two are registered — `security_event_outbox` (AUD-004
+          # C1/C2) and `audit_correction_command` (AUD-003's correction half).
+          # A third identity migration would need a third entry; nothing here
+          # discovers it.
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
