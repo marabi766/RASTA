@@ -1,5 +1,6 @@
 import type { AdapterDescriptor } from './adapter';
 import { ASSET_ADAPTER } from './adapters/asset';
+import { AUDIT_ADAPTER } from './adapters/audit';
 import { DOCUMENT_ADAPTER } from './adapters/document';
 import { ECONOMIC_LEDGER_ADAPTER, ECONOMIC_WALLET_ADAPTER } from './adapters/economic';
 import { FLEET_ADAPTER } from './adapters/fleet';
@@ -30,6 +31,7 @@ export const ADAPTERS = [
   ECONOMIC_LEDGER_ADAPTER,
   DOCUMENT_ADAPTER,
   SUPPLIER_ADAPTER,
+  AUDIT_ADAPTER,
 ] as const satisfies readonly AdapterDescriptor[];
 
 export type AdapterId = (typeof ADAPTERS)[number]['id'];

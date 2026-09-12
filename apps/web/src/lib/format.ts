@@ -122,3 +122,40 @@ export function formatJalaliDate(isoTimestamp: string): string {
     day: 'numeric',
   }).format(date);
 }
+
+/** Adds the time of day to `formatJalaliDate`, for records precise to the second. */
+export function formatJalaliDateTime(isoTimestamp: string): string {
+  const date = new Date(isoTimestamp);
+  if (Number.isNaN(date.getTime())) return '—';
+  return new Intl.DateTimeFormat('fa-IR-u-ca-persian', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+}
+
+/**
+ * Converts between an ISO-8601 UTC instant and an `<input type="datetime-local">`
+ * value, treating the picker as a **UTC** picker rather than the browser's local
+ * time.
+ *
+ * `datetime-local` carries no timezone by design, so the alternative —
+ * `new Date(value)`, which the spec defines as local time — would silently
+ * shift every audit window by the presenter's UTC offset. Labelling the field
+ * "UTC" and converting literally keeps the value a presenter types the exact
+ * value the API receives, which matters more here than anywhere else in this
+ * application: AGENTS.md requires UTC storage, and a query window that is
+ * wrong by a timezone is wrong in a way this screen exists to make impossible.
+ */
+export function isoToUtcInputValue(isoTimestamp: string): string {
+  const date = new Date(isoTimestamp);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toISOString().slice(0, 16);
+}
+
+/** The inverse of `isoToUtcInputValue`. `value` is `YYYY-MM-DDTHH:mm`, UTC. */
+export function utcInputValueToIso(value: string): string {
+  return `${value}:00.000Z`;
+}

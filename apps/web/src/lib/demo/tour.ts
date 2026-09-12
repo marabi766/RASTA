@@ -53,6 +53,11 @@ export const TOUR_STOPS: readonly TourStop[] = [
   { id: 'ledger', capabilityKey: 'ledger' },
   { id: 'documents', capabilityKey: 'documents' },
   { id: 'suppliers', capabilityKey: 'suppliers' },
+  {
+    id: 'audit',
+    capabilityKey: 'audit',
+    fixtureHref: `/audit/${FIXTURE_ENTRY_POINTS.auditEventId}`,
+  },
   { id: 'not-built', capabilityKey: 'procurement' },
 ];
 

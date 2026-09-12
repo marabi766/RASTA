@@ -57,7 +57,17 @@ export type ReadinessReason =
   /** Waiting on a product or governance decision, not on engineering. */
   | 'BLOCKED_BY_PRODUCT_DECISION'
   /** Part of the domain shipped; the rest has not started. */
-  | 'PARTIAL';
+  | 'PARTIAL'
+  /**
+   * The screen is real and its adapter reaches a real gateway route, but this
+   * session never exercised it against a running backend — this parallel
+   * task was explicitly forbidden from starting, stopping, resetting or
+   * reseeding the shared integration stack. Distinct from `ARCHITECTURE_READY`
+   * (which has no screen at all): here the screen exists and was only proven
+   * against the fixture dataset, through the same adapter and the same Zod
+   * schemas a live response would have to satisfy.
+   */
+  | 'NOT_LIVE_VERIFIED';
 
 /** Which business area a capability belongs to, for the executive dashboard. */
 export type DomainKey = 'fleet' | 'commerce' | 'finance' | 'civil' | 'platform';
@@ -403,11 +413,17 @@ export const CAPABILITIES: readonly Capability[] = [
     key: 'audit',
     href: '/audit',
     title: 'سوابق حسابرسی',
-    summary: 'رویداد حسابرسی، فقط الحاقی و غیرقابل تغییر.',
-    state: 'PLANNED',
-    service: null,
-    readiness: 'PLANNED',
-    evidence: 'در main فقط Bootstrap سرویس Merge شده (PR #38). AuditEvent پیاده نشده.',
+    summary:
+      'فهرست و جزئیات رویداد حسابرسی فقط‌الحاقی، و بررسی زنجیرهٔ Hash در برابر دست‌کاری مشهود.',
+    state: 'BETA',
+    service: 'audit-service',
+    adapter: 'audit.events',
+    readiness: 'NOT_LIVE_VERIFIED',
+    evidence:
+      'AUD-001 تا AUD-003 روی main مرج شده‌اند (PR #39, #40, #41) — ' +
+      'services/audit-service/src/audit/audit.controller.ts — GET /v1/audit-events، ' +
+      '/v1/audit-events/{id}، /v1/audit-events/verify؛ CI همین شاخه سبز است. ' +
+      'AUD-004 (اصلاح) و Export/Purge عمداً در این نسخه پیاده نشده‌اند.',
     domain: 'platform',
   },
   {

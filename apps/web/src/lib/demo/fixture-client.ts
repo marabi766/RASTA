@@ -26,6 +26,27 @@ import type { GatewayClient, GatewayRequest, GatewayResult } from '../api/client
  * be written from the same shapes the adapters were — there is no second,
  * looser definition for them to satisfy.
  */
+/**
+ * A canonical `path?sorted=query` string for a request, or the bare path when
+ * it carries no query at all.
+ *
+ * Sorted so the key does not depend on the order an adapter happened to list
+ * its query object's keys in. Every existing fixture is keyed by the bare
+ * path and stays reachable through the `this.responses[request.path]`
+ * fallback in `request()` — this function only adds a *more specific* lookup
+ * that a route may opt into by also registering the exact-query key.
+ */
+function queryAwareKey(request: GatewayRequest<unknown>): string {
+  const entries = Object.entries(request.query ?? {})
+    .filter(([, value]) => value !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  if (entries.length === 0) return request.path;
+
+  const query = entries.map(([key, value]) => `${key}=${String(value)}`).join('&');
+  return `${request.path}?${query}`;
+}
+
 export class FixtureGatewayClient implements GatewayClient {
   private sequence = 0;
 
@@ -50,7 +71,13 @@ export class FixtureGatewayClient implements GatewayClient {
     }
 
     const correlationId = this.nextCorrelationId();
-    const body = this.responses[request.path];
+    const key = queryAwareKey(request);
+    // A query-specific fixture wins when one is registered — today only
+    // `/v1/audit-events/verify` needs that, to tell its four outcomes apart
+    // from one path. Every other route has no such entry and falls back to
+    // the bare path exactly as before, so this is additive, not a behaviour
+    // change for the rest of the dataset.
+    const body = key in this.responses ? this.responses[key] : this.responses[request.path];
 
     if (body === undefined) {
       // A screen reading a route the dataset does not cover is a gap in the

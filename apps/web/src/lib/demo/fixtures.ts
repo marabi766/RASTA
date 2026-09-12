@@ -31,6 +31,7 @@
  * this size would spend most of it on something a live deployment cannot use.
  */
 
+import type { AuditDivergenceReason } from '../api/adapters/audit';
 import { FIXTURE_ENTRY_POINTS } from './entry-points';
 
 const ORG_ALEF = 'org_demo_dehyari_alef';
@@ -45,6 +46,7 @@ const ASSET_GRADER = FIXTURE_ENTRY_POINTS.assetId;
 const REQUEST_OIL = FIXTURE_ENTRY_POINTS.maintenanceRequestId;
 const PRODUCT_OIL = FIXTURE_ENTRY_POINTS.productId;
 const ORDER_OIL = FIXTURE_ENTRY_POINTS.orderId;
+const AUDIT_EVENT_PRIMARY = FIXTURE_ENTRY_POINTS.auditEventId;
 
 const ASSET_LOADER = 'ast_demo_loader';
 const ASSET_TANKER = 'ast_demo_tanker';
@@ -776,6 +778,233 @@ const cursorPage = (items: unknown[]) => ({ items, nextCursor: null, hasMore: fa
 const shortPage = (items: unknown[]) => ({ items, nextCursor: null });
 
 /**
+ * The audit evidence store (AUD-001 through AUD-003).
+ *
+ * ## Why the list ignores its own filters
+ *
+ * Every fixture in this file answers the same response regardless of the
+ * query it was asked with — `/v1/transactions` does not actually honour
+ * `includeIncoming` either. The list and detail endpoints below follow that
+ * same rule. Only `verify` breaks it, and only because the prompt this
+ * dataset was built for explicitly asks for four distinguishable outcomes
+ * from one endpoint, which no amount of query-blindness can produce. See
+ * `VERIFY_SCENARIOS` below and `FixtureGatewayClient`'s query-aware lookup in
+ * `fixture-client.ts`.
+ *
+ * ## Why these records, and not new invented ones
+ *
+ * Each entry is the evidence trail for something this dataset already
+ * claims happened elsewhere: the grader's registration, its maintenance
+ * request, the oil order, the presenter's sign-in. An audit log that invented
+ * its own parallel story would contradict the rest of the demo the moment
+ * someone cross-checks a timestamp.
+ */
+const auditEvent = (
+  id: string,
+  action: string,
+  resourceType: string,
+  resourceId: string | null,
+  sourceService: string,
+  sourceEventName: string,
+  occurredAt: string,
+  extra: Partial<{
+    organizationId: string | null;
+    actorType: 'USER' | 'SERVICE' | 'SYSTEM' | 'ANONYMOUS';
+    actorId: string | null;
+    outcome: 'SUCCESS' | 'FAILURE' | 'REFUSED';
+    integrity: 'CHAINED' | 'UNCHAINED';
+  }> = {},
+) => ({
+  id,
+  occurredAt,
+  recordedAt: occurredAt,
+  actorType: extra.actorType ?? 'USER',
+  actorId: extra.actorId ?? 'usr_demo_presenter',
+  actorRoles: [],
+  organizationId: extra.organizationId ?? ORG_ALEF,
+  action,
+  resourceType,
+  resourceId,
+  outcome: extra.outcome ?? 'SUCCESS',
+  errorCode: null,
+  reason: null,
+  // Always null in path A — AUD-001 through AUD-003 carry no payload delta.
+  changes: null,
+  occurrenceCount: 1,
+  sourceService,
+  sourceServiceVersion: '1.0.0',
+  sourceEventId: `evt_demo_${id}`,
+  sourceEventName,
+  sourceTopic: `rasta.${sourceService.replace('-service', '')}.v1`,
+  sourceIp: null,
+  sourceUserAgent: null,
+  correlationId: `cid_demo_${id}`,
+  causationId: null,
+  traceparent: null,
+  sourceStreamSeq: '1',
+  sequenceNo: '1',
+  integrity: extra.integrity ?? 'CHAINED',
+});
+
+const AUDIT_EVENTS = [
+  auditEvent(
+    AUDIT_EVENT_PRIMARY,
+    'asset.asset_registered',
+    'Asset',
+    ASSET_GRADER,
+    'asset-service',
+    'ASSET_REGISTERED',
+    T.registered,
+  ),
+  auditEvent(
+    'aev_demo_0002',
+    'maintenance.maintenance_requested',
+    'MaintenanceRequest',
+    REQUEST_OIL,
+    'maintenance-service',
+    'MAINTENANCE_REQUESTED',
+    T.reported,
+  ),
+  auditEvent(
+    'aev_demo_0003',
+    'marketplace.order_placed',
+    'Order',
+    ORDER_OIL,
+    'marketplace-service',
+    'ORDER_PLACED',
+    T.ordered,
+  ),
+  auditEvent(
+    'aev_demo_0004',
+    'identity.user_signed_in',
+    'User',
+    'usr_demo_presenter',
+    'identity-service',
+    'USER_SIGNED_IN',
+    T.now,
+  ),
+];
+
+/**
+ * The four verification outcomes (AUD-003), each reachable through a fixed,
+ * documented preset — never from whatever dates happen to be in the form.
+ *
+ * `AuditVerifyView`'s four preset buttons set exactly these four
+ * `(scope, organizationId, from, to)` combinations, and `fixture-client.ts`
+ * looks up `verify` by the exact query string before falling back to the
+ * unconditional default below. A caller who types an arbitrary range gets
+ * the default (`VALID`) response — an honest limitation of a dataset with no
+ * real chain behind it, stated in the screen's own fixture-mode notice.
+ */
+const VERIFY_WINDOW = { from: '2026-08-01T00:00:00.000Z', to: '2026-09-05T12:00:00.000Z' } as const;
+const VERIFY_EMPTY_WINDOW = {
+  from: '2019-01-01T00:00:00.000Z',
+  to: '2019-01-02T00:00:00.000Z',
+} as const;
+const VERIFY_LEGACY_WINDOW = {
+  from: '2024-01-01T00:00:00.000Z',
+  to: '2024-06-01T00:00:00.000Z',
+} as const;
+
+const verificationResult = (
+  scope: 'ORGANIZATION' | 'PLATFORM',
+  organizationId: string | null,
+  window: { from: string; to: string },
+  status: 'VALID' | 'DIVERGENT' | 'EMPTY' | 'UNVERIFIABLE_LEGACY',
+  month: string,
+  counts: { inRange: number; verified: number; unchained: number },
+  firstDivergence: {
+    auditEventId: string;
+    occurredAt: string;
+    sequenceNo: string;
+    reason: AuditDivergenceReason;
+  } | null = null,
+) => ({
+  scope,
+  organizationId,
+  from: window.from,
+  to: window.to,
+  status,
+  valid: status === 'VALID',
+  canonicalVersion: 1,
+  recordsInRange: counts.inRange,
+  recordsVerified: counts.verified,
+  unchainedRecords: counts.unchained,
+  months:
+    counts.inRange === 0 && status === 'EMPTY'
+      ? []
+      : [
+          {
+            month,
+            status,
+            recordsInRange: counts.inRange,
+            recordsVerified: counts.verified,
+            unchainedRecords: counts.unchained,
+            seededFromPredecessor: status === 'VALID' || status === 'DIVERGENT',
+          },
+        ],
+  firstDivergence: firstDivergence ? { month, ...firstDivergence } : null,
+});
+
+const VERIFY_VALID = verificationResult(
+  'ORGANIZATION',
+  ORG_ALEF,
+  VERIFY_WINDOW,
+  'VALID',
+  '2026-09',
+  { inRange: 4, verified: 4, unchained: 0 },
+);
+
+const VERIFY_DIVERGENT = verificationResult(
+  'ORGANIZATION',
+  ORG_BEH,
+  VERIFY_WINDOW,
+  'DIVERGENT',
+  '2026-09',
+  { inRange: 3, verified: 2, unchained: 0 },
+  {
+    auditEventId: 'aev_demo_divergent',
+    occurredAt: '2026-09-03T10:00:00.000Z',
+    sequenceNo: '42',
+    reason: 'RECORD_HASH_MISMATCH',
+  },
+);
+
+const VERIFY_EMPTY = verificationResult(
+  'ORGANIZATION',
+  ORG_ALEF,
+  VERIFY_EMPTY_WINDOW,
+  'EMPTY',
+  '2019-01',
+  { inRange: 0, verified: 0, unchained: 0 },
+);
+
+const VERIFY_UNVERIFIABLE_LEGACY = verificationResult(
+  'ORGANIZATION',
+  ORG_ALEF,
+  VERIFY_LEGACY_WINDOW,
+  'UNVERIFIABLE_LEGACY',
+  '2024-01',
+  { inRange: 5, verified: 0, unchained: 5 },
+);
+
+/** Builds the exact query-aware key `fixture-client.ts` looks up — keys are
+ * sorted alphabetically by parameter name, matching `queryAwareKey`. */
+const verifyKey = (
+  scope: string,
+  organizationId: string | null,
+  window: { from: string; to: string },
+) => {
+  const params = [
+    `from=${window.from}`,
+    ...(organizationId !== null ? [`organizationId=${organizationId}`] : []),
+    `scope=${scope}`,
+    `to=${window.to}`,
+  ];
+  return `/v1/audit-events/verify?${params.join('&')}`;
+};
+
+/**
  * The routing table.
  *
  * Keyed by the gateway path an adapter actually calls, so adding a screen that
@@ -833,4 +1062,18 @@ export const FIXTURE_RESPONSES: Readonly<Record<string, unknown>> = {
   // document + supplier
   '/v1/documents': shortPage(DOCUMENTS),
   '/v1/suppliers': cursorPage(SUPPLIERS),
+
+  // audit — list and detail ignore their query, like every other fixture
+  // above; verify is the one route this dataset answers differently per
+  // query, because four distinguishable outcomes cannot come from one
+  // canned response (see the comment above `VERIFY_WINDOW`).
+  '/v1/audit-events': cursorPage(AUDIT_EVENTS),
+  [`/v1/audit-events/${AUDIT_EVENT_PRIMARY}`]: AUDIT_EVENTS[0],
+  [verifyKey('ORGANIZATION', ORG_ALEF, VERIFY_WINDOW)]: VERIFY_VALID,
+  [verifyKey('ORGANIZATION', ORG_BEH, VERIFY_WINDOW)]: VERIFY_DIVERGENT,
+  [verifyKey('ORGANIZATION', ORG_ALEF, VERIFY_EMPTY_WINDOW)]: VERIFY_EMPTY,
+  [verifyKey('ORGANIZATION', ORG_ALEF, VERIFY_LEGACY_WINDOW)]: VERIFY_UNVERIFIABLE_LEGACY,
+  // The default: a caller that did not use one of the four presets above
+  // gets the same outcome a clean, recently-verified chain would report.
+  '/v1/audit-events/verify': VERIFY_VALID,
 };

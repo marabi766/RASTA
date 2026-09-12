@@ -17,4 +17,5 @@ export const FIXTURE_ENTRY_POINTS = {
   maintenanceRequestId: 'mrq_demo_oil_change',
   productId: 'prd_demo_engine_oil',
   orderId: 'ord_demo_oil',
+  auditEventId: 'aev_demo_0001',
 } as const;

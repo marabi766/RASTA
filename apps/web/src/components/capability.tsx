@@ -50,6 +50,8 @@ export const READINESS_PRESENTATION: Record<ReadinessReason, string> = {
   BLOCKED_BY_PRODUCT_DECISION:
     'منتظر یک تصمیم محصولی یا حاکمیتی است، نه منتظر مهندسی. تا آن تصمیم، هیچ قاعده‌ای اختراع نمی‌شود.',
   PARTIAL: 'بخشی از دامنه تحویل شده و بخش دیگر هنوز شروع نشده است.',
+  NOT_LIVE_VERIFIED:
+    'رابط کاربری واقعی است و به یک Endpoint واقعی وصل می‌شود، اما در این نسخه هیچ فراخوانی واقعی در برابر Backend در حال اجرا آزموده نشده — فقط در برابر دادهٔ نمایشی، از همان Adapter و همان Schema.',
 };
 
 /**
