@@ -39,6 +39,10 @@ import {
   UserController,
 } from './identity/identity.controller';
 import { HealthController, MetricsController } from './health/health.controller';
+import { AuditCorrectionController } from './audit-correction/audit-correction.controller';
+import { AuditCorrectionService } from './audit-correction/audit-correction.service';
+import { AuditCorrectionCommandRepository } from './audit-correction/audit-correction.repository';
+import { AuditLookupClient } from './audit-correction/audit-lookup.client';
 import { loadIdentityEnv, SERVICE_NAME, type IdentityEnv } from './config/env';
 import { SecurityEventOutboxStore } from './security-events/security-event-outbox.store';
 import { RefusalAuditRecorder } from './security-events/refusal-audit.recorder';
@@ -69,6 +73,7 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
     UserController,
     MembershipController,
     RegistrationController,
+    AuditCorrectionController,
     HealthController,
     MetricsController,
   ],
@@ -126,6 +131,28 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
     PrismaOutboxStore,
     IdentityRepository,
     IdentityService,
+
+    // ------------------------------------------------------------------------
+    // Audit correction command (ADR-053 § 7, AUD-003 correction). Writes only to this
+    // service's standard outbox; reaches audit-service only through its narrow
+    // internal lookup, with a service token minted for exactly that target.
+    // ------------------------------------------------------------------------
+    AuditCorrectionCommandRepository,
+    AuditCorrectionService,
+    {
+      provide: AuditLookupClient,
+      inject: [ENV],
+      useFactory: (env: IdentityEnv) =>
+        new AuditLookupClient({
+          baseUrl: env.AUDIT_SERVICE_URL,
+          timeoutMs: env.AUDIT_REQUEST_TIMEOUT_MS,
+          tokens: new InternalTokenService(
+            env.INTERNAL_TOKEN_SECRET,
+            env.INTERNAL_TOKEN_ISSUER,
+            env.INTERNAL_TOKEN_TTL_SECONDS,
+          ),
+        }),
+    },
 
     {
       provide: OutboxRelay,

@@ -72,6 +72,20 @@ export const identityEnvSchema = baseEnvSchema
       .min(AGGREGATION_WINDOW_SECONDS.MIN)
       .max(AGGREGATION_WINDOW_SECONDS.MAX)
       .default(AGGREGATION_WINDOW_SECONDS.DEFAULT),
+
+    /**
+     * audit-service's base URL, for the one question the audit correction
+     * command asks it: does the target exist, and in which scope (AUD-003 correction).
+     * Required, with no default: a correction must never be validated against
+     * whatever happened to be listening on a guessed address.
+     */
+    AUDIT_SERVICE_URL: z.string().url(),
+
+    /**
+     * The whole correction-target lookup, body included. Finite, so a slow
+     * audit-service turns into a bounded `504`, never a hung command.
+     */
+    AUDIT_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
   });
 
 export type IdentityEnv = z.infer<typeof identityEnvSchema>;

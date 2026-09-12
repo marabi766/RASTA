@@ -6,8 +6,7 @@ import {
   runUnscoped,
   type OutboxMessageInput,
 } from '@rasta/nest-common';
-import { resolvePartitionKey } from './routing';
-import type { IdentityEventName } from './events';
+import { assertTopicFor, resolvePartitionKey, type OutboundEventName } from './routing';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
 import type { ListUsersQuery } from './dto';
@@ -50,7 +49,9 @@ export class IdentityRepository {
     // inside the caller's transaction, so the counter row lock is held to its
     // commit — which is what makes allocation order equal commit order, and is
     // this service's only serialisation point on the stream boundary.
-    const partition = resolvePartitionKey(input.eventName as IdentityEventName, input.aggregateId);
+    const eventName = input.eventName as OutboundEventName;
+    assertTopicFor(eventName, input.topic);
+    const partition = resolvePartitionKey(eventName, input.aggregateId);
     const streamSeq = await allocateStreamSeqSql(tx, input.topic, partition.key);
 
     const row = buildOutboxRow(

@@ -22,6 +22,7 @@ const BASE: NodeJS.ProcessEnv = {
   KEYCLOAK_REALM: 'rasta',
   KEYCLOAK_BACKEND_CLIENT_ID: 'rasta-backend',
   KEYCLOAK_BACKEND_CLIENT_SECRET: 'a-backend-client-secret',
+  AUDIT_SERVICE_URL: 'http://localhost:3115',
 };
 
 const load = (value?: string) =>
@@ -105,5 +106,22 @@ describe('refusal audit configuration', () => {
     ['SECURITY_EVENT_FLUSH_BATCH_SIZE', '1001'],
   ])('refuses %s=%p', (key, value) => {
     expect(() => withEnv({ [key]: value })).toThrow(EnvValidationError);
+  });
+});
+
+describe('audit correction lookup configuration (AUD-003 correction)', () => {
+  it('requires the audit-service URL, with no guessed default', () => {
+    const { AUDIT_SERVICE_URL: _omitted, ...withoutUrl } = BASE;
+    expect(() => loadIdentityEnv(withoutUrl)).toThrow();
+  });
+
+  it('refuses a value that is not a URL', () => {
+    expect(() => loadIdentityEnv({ ...BASE, AUDIT_SERVICE_URL: 'audit-service' })).toThrow();
+  });
+
+  it('bounds the lookup with a finite default timeout', () => {
+    expect(loadIdentityEnv(BASE).AUDIT_REQUEST_TIMEOUT_MS).toBe(3000);
+    expect(() => loadIdentityEnv({ ...BASE, AUDIT_REQUEST_TIMEOUT_MS: '0' })).toThrow();
+    expect(() => loadIdentityEnv({ ...BASE, AUDIT_REQUEST_TIMEOUT_MS: '60000' })).toThrow();
   });
 });
