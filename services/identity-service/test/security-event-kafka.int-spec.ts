@@ -310,8 +310,9 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
   );
 
   /**
-   * The roles-guard sites: GET /v1/users (Phase C3), POST /v1/users (Phase C4)
-   * and POST /v1/users/:id/memberships (Phase C5). Each entry builds the
+   * The roles-guard sites: GET /v1/users (Phase C3), POST /v1/users (Phase C4),
+   * POST /v1/users/:id/memberships (Phase C5) and POST /v1/memberships/:id/roles
+   * (Phase C6). Each entry builds the
    * concrete path and body of the i-th refusal from the run's secret, so the
    * path id and the body differ on every request.
    */
@@ -342,6 +343,15 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
       (secret, i) => ({
         path: `/v1/users/USR-${secret}-${i}/memberships?q=${secret}`,
         body: { organizationId: `ORG-${secret}-${i}`, roles: ['SYSTEM_ADMIN'] },
+      }),
+    ],
+    [
+      'POST /v1/memberships/:id/roles',
+      'UPDATE_MEMBERSHIP_ROLES',
+      'post',
+      (secret, i) => ({
+        path: `/v1/memberships/MBR-${secret}-${i}/roles?q=${secret}`,
+        body: { roles: ['SYSTEM_ADMIN'], reason: `${secret}-reason-${i}` },
       }),
     ],
   ];
@@ -421,6 +431,7 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
         LIST_USERS: ['identity.users.list', 'User'],
         CREATE_USER: ['identity.users.create', 'User'],
         ADD_MEMBERSHIP: ['identity.memberships.create', 'Membership'],
+        UPDATE_MEMBERSHIP_ROLES: ['identity.memberships.roles.replace', 'Membership'],
       };
       expect([payload.action, payload.resourceType]).toEqual(expected[siteName]);
 
