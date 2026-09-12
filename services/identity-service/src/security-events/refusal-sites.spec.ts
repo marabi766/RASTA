@@ -2,12 +2,13 @@ import { AUDIT_ACTION_PATTERN, ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
 import { markRefusal, refusalSiteOf, rolesGuardSiteFor, REFUSAL_SITES } from './refusal-sites';
 
-describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C4)', () => {
-  it('instruments exactly three refusal sites', () => {
+describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C5)', () => {
+  it('instruments exactly four refusal sites', () => {
     expect(Object.keys(REFUSAL_SITES)).toEqual([
       'SWITCH_ACTIVE_ORGANIZATION',
       'LIST_USERS',
       'CREATE_USER',
+      'ADD_MEMBERSHIP',
     ]);
   });
 
@@ -57,10 +58,27 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C4)', () => 
     });
   });
 
+  it('pins the membership creation to POST /v1/users/:id/memberships, 403 and INSUFFICIENT_ROLE, decided by the roles guard', () => {
+    expect(REFUSAL_SITES.ADD_MEMBERSHIP).toEqual({
+      key: 'identity.add_membership',
+      method: 'POST',
+      route: '/v1/users/:id/memberships',
+      status: 403,
+      errorCode: ERROR_CODES.INSUFFICIENT_ROLE,
+      decidedBy: 'ROLES_GUARD',
+      action: 'identity.memberships.create',
+      resourceType: 'Membership',
+      // The caller, never the target user named in the path.
+      resource: 'ACTOR_USER',
+      reason:
+        'Membership creation refused: the caller holds none of the roles this endpoint requires',
+    });
+  });
+
   it('names no role, no query value and no URL in any site’s fixed evidence', () => {
     for (const site of Object.values(REFUSAL_SITES)) {
       for (const text of [site.action, site.resourceType, site.reason]) {
-        expect(text).not.toMatch(/ORGANIZATION_ADMIN|UNION_ADMIN|SYSTEM_ADMIN|\?|\/v1\//);
+        expect(text).not.toMatch(/ORGANIZATION_ADMIN|UNION_ADMIN|SYSTEM_ADMIN|\?|\/v1\/|:id/);
       }
     }
   });
@@ -69,6 +87,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C4)', () => 
     it.each([
       ['GET', '/v1/users', 'LIST_USERS'],
       ['POST', '/v1/users', 'CREATE_USER'],
+      ['POST', '/v1/users/:id/memberships', 'ADD_MEMBERSHIP'],
     ])('finds the roles-guard site for exactly %s %s', (method, route, expected) => {
       expect(rolesGuardSiteFor(method, route)).toBe(expected);
     });
@@ -78,8 +97,18 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C4)', () => 
       ['another method on the same template', 'PUT', '/v1/users'],
       ['PATCH on the same template', 'PATCH', '/v1/users'],
       ['another template', 'GET', '/v1/users/:id'],
-      ['a nested POST template', 'POST', '/v1/users/:id/memberships'],
-      ['another POST template', 'POST', '/v1/memberships/:id/roles'],
+      ['GET on the membership template', 'GET', '/v1/users/:id/memberships'],
+      ['PUT on the membership template', 'PUT', '/v1/users/:id/memberships'],
+      ['lower-case POST on the membership template', 'post', '/v1/users/:id/memberships'],
+      ['a trailing slash on the membership template', 'POST', '/v1/users/:id/memberships/'],
+      ['a differently named parameter', 'POST', '/v1/users/:userId/memberships'],
+      ['an adjacent deeper template', 'POST', '/v1/users/:id/memberships/:membershipId'],
+      ['a concrete membership URL', 'POST', '/v1/users/USR_01ABC/memberships'],
+      ['a concrete membership URL with a query', 'POST', '/v1/users/:id/memberships?role=x'],
+      ['membership roles', 'POST', '/v1/memberships/:id/roles'],
+      ['membership revoke', 'POST', '/v1/memberships/:id/revoke'],
+      ['registration approval', 'POST', '/v1/registration-requests/:id/approve'],
+      ['registration rejection', 'POST', '/v1/registration-requests/:id/reject'],
       ['a concrete URL', 'GET', '/v1/users?q=x'],
       ['a concrete POST URL', 'POST', '/v1/users?role=ORGANIZATION_ADMIN'],
       ['a trailing slash', 'GET', '/v1/users/'],
@@ -88,7 +117,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C4)', () => 
       ['lower-case POST', 'post', '/v1/users'],
       ['no route', 'GET', undefined],
       ['no route for a POST', 'POST', undefined],
-      ['no method', undefined, '/v1/users'],
+      ['no method', undefined, '/v1/users/:id/memberships'],
       ['non-string values', 1, { path: '/v1/users' }],
     ])('finds nothing for %s', (_label, method, route) => {
       expect(rolesGuardSiteFor(method, route)).toBeUndefined();
@@ -110,7 +139,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C4)', () => 
     const identities = Object.values(REFUSAL_SITES).map(
       (site) => `${site.action}|${site.resourceType}|${site.errorCode}`,
     );
-    expect(identities).toHaveLength(3);
+    expect(identities).toHaveLength(4);
     expect(new Set(identities).size).toBe(identities.length);
   });
 
@@ -121,6 +150,12 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C4)', () => 
     expect(create.method).not.toBe(list.method);
     expect(create.action).not.toBe(list.action);
     expect(create.key).not.toBe(list.key);
+  });
+
+  it('keeps every site key and route template unique per method', () => {
+    const sites = Object.values(REFUSAL_SITES);
+    expect(new Set(sites.map((site) => site.key)).size).toBe(sites.length);
+    expect(new Set(sites.map((site) => `${site.method} ${site.route}`)).size).toBe(sites.length);
   });
 
   it('marks an error without changing anything the platform filter reads', () => {
@@ -139,16 +174,19 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C4)', () => 
     expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
   });
 
-  it('marks a role refusal as CREATE_USER without changing its serialisation', () => {
-    const plain = RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['AUDITOR']);
-    const marked = markRefusal(
-      RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['AUDITOR']),
-      'CREATE_USER',
-    );
-    expect(refusalSiteOf(marked)).toBe(REFUSAL_SITES.CREATE_USER);
-    expect(refusalSiteOf(plain)).toBeUndefined();
-    expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
-  });
+  it.each(['CREATE_USER', 'ADD_MEMBERSHIP'] as const)(
+    'marks a role refusal as %s without changing its serialisation',
+    (siteName) => {
+      const plain = RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['AUDITOR']);
+      const marked = markRefusal(
+        RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['AUDITOR']),
+        siteName,
+      );
+      expect(refusalSiteOf(marked)).toBe(REFUSAL_SITES[siteName]);
+      expect(refusalSiteOf(plain)).toBeUndefined();
+      expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
+    },
+  );
 
   it('recognises only the error instance that was marked', () => {
     const marked = markRefusal(

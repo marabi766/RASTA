@@ -16,7 +16,8 @@ import { refusalSiteOf, REFUSAL_SITES } from './refusal-sites';
  * The identity role guard is the shared `RolesGuard` plus one thing: it marks
  * the shared guard's own `INSUFFICIENT_ROLE` refusal — the same object — when,
  * and only when, the matched route is an allowlisted `ROLES_GUARD` site
- * (AUD-004 Phases C3–C4: `GET /v1/users` and `POST /v1/users`).
+ * (AUD-004 Phases C3–C5: `GET /v1/users`, `POST /v1/users` and
+ * `POST /v1/users/:id/memberships`).
  */
 
 class ProbeController {
@@ -26,6 +27,9 @@ class ProbeController {
   @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
   create(): void {}
 
+  @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
+  addMembership(): void {}
+
   @Public('guard spec probe')
   open(): void {}
 
@@ -34,6 +38,7 @@ class ProbeController {
 
 const LIST = ProbeController.prototype.list;
 const CREATE = ProbeController.prototype.create;
+const ADD_MEMBERSHIP = ProbeController.prototype.addMembership;
 const OPEN = ProbeController.prototype.open;
 const ANY = ProbeController.prototype.anyAuthenticated;
 
@@ -41,8 +46,12 @@ interface ProbeRequest {
   method?: string;
   route?: { path?: string };
   url?: string;
+  params?: Record<string, string>;
   body?: unknown;
 }
+
+const PATH_SENTINEL = 'USR-PATH-SENTINEL';
+const BODY_SENTINEL = 'SENSITIVE-BODY-SENTINEL';
 
 const listRequest: ProbeRequest = {
   method: 'GET',
@@ -54,8 +63,23 @@ const createRequest: ProbeRequest = {
   method: 'POST',
   route: { path: '/v1/users' },
   url: '/v1/users',
-  body: { username: 'SENSITIVE-BODY-SENTINEL', roles: ['SYSTEM_ADMIN'] },
+  body: { username: BODY_SENTINEL, roles: ['SYSTEM_ADMIN'] },
 };
+
+const addMembershipRequest: ProbeRequest = {
+  method: 'POST',
+  route: { path: '/v1/users/:id/memberships' },
+  url: `/v1/users/${PATH_SENTINEL}/memberships?role=UNION_ADMIN`,
+  params: { id: PATH_SENTINEL },
+  body: { organizationId: `ORG-${BODY_SENTINEL}`, roles: ['SYSTEM_ADMIN'] },
+};
+
+const requestFor = (handler: () => void): ProbeRequest =>
+  handler === CREATE
+    ? createRequest
+    : handler === ADD_MEMBERSHIP
+      ? addMembershipRequest
+      : listRequest;
 
 function execution(
   handler: () => void,
@@ -172,49 +196,94 @@ describe('IdentityRolesGuard', () => {
     expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
   });
 
-  it('marks the shared guard’s INSUFFICIENT_ROLE for POST /v1/users with the CREATE_USER site', () => {
-    const { error } = outcome(
-      identityGuard(),
-      execution(CREATE, createRequest),
-      user(['FLEET_MANAGER']),
-    );
+  it.each<[string, () => void, ProbeRequest, 'CREATE_USER' | 'ADD_MEMBERSHIP']>([
+    ['POST /v1/users', CREATE, createRequest, 'CREATE_USER'],
+    ['POST /v1/users/:id/memberships', ADD_MEMBERSHIP, addMembershipRequest, 'ADD_MEMBERSHIP'],
+  ])(
+    'marks the shared guard’s INSUFFICIENT_ROLE for %s with its own site',
+    (_label, handler, request, siteName) => {
+      const { error } = outcome(identityGuard(), execution(handler, request), user(['AUDITOR']));
 
-    expect(error).toBeInstanceOf(RastaError);
-    expect((error as RastaError).code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
-    expect((error as RastaError).status).toBe(403);
-    expect(refusalSiteOf(error)).toBe(REFUSAL_SITES.CREATE_USER);
-  });
+      expect(error).toBeInstanceOf(RastaError);
+      expect((error as RastaError).code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+      expect((error as RastaError).status).toBe(403);
+      expect(refusalSiteOf(error)).toBe(REFUSAL_SITES[siteName]);
+    },
+  );
 
-  it('rethrows the very object the shared guard threw for POST /v1/users, unchanged', () => {
-    const exec = execution(CREATE, createRequest);
-    const thrown = RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['FLEET_MANAGER']);
-    const spy = jest.spyOn(RolesGuard.prototype, 'canActivate').mockImplementation(() => {
-      throw thrown;
-    });
-    const { error } = outcome(identityGuard(), exec, user(['FLEET_MANAGER']));
-    expect(error).toBe(thrown);
-    expect(refusalSiteOf(thrown)).toBe(REFUSAL_SITES.CREATE_USER);
-    spy.mockRestore();
+  it.each<[string, () => void, ProbeRequest, 'CREATE_USER' | 'ADD_MEMBERSHIP']>([
+    ['POST /v1/users', CREATE, createRequest, 'CREATE_USER'],
+    ['POST /v1/users/:id/memberships', ADD_MEMBERSHIP, addMembershipRequest, 'ADD_MEMBERSHIP'],
+  ])(
+    'rethrows the very object the shared guard threw for %s, unchanged',
+    (_label, handler, request, siteName) => {
+      const exec = execution(handler, request);
+      const thrown = RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['FLEET_MANAGER']);
+      const spy = jest.spyOn(RolesGuard.prototype, 'canActivate').mockImplementation(() => {
+        throw thrown;
+      });
+      const { error } = outcome(identityGuard(), exec, user(['FLEET_MANAGER']));
+      expect(error).toBe(thrown);
+      expect(refusalSiteOf(thrown)).toBe(REFUSAL_SITES[siteName]);
+      spy.mockRestore();
 
-    const marked = outcome(identityGuard(), exec, user(['FLEET_MANAGER'])).error as RastaError;
-    const plain = outcome(platformGuard(), exec, user(['FLEET_MANAGER'])).error as RastaError;
-    expect(refusalSiteOf(plain)).toBeUndefined();
-    expect(marked.constructor).toBe(plain.constructor);
-    expect(marked.internalContext).toEqual(plain.internalContext);
-    expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
-    // The body the caller sent plays no part in the decision or the error.
-    expect(JSON.stringify(marked)).not.toContain('SENSITIVE-BODY-SENTINEL');
-  });
+      const marked = outcome(identityGuard(), exec, user(['FLEET_MANAGER'])).error as RastaError;
+      const plain = outcome(platformGuard(), exec, user(['FLEET_MANAGER'])).error as RastaError;
+      expect(refusalSiteOf(plain)).toBeUndefined();
+      expect(marked.constructor).toBe(plain.constructor);
+      expect(marked.internalContext).toEqual(plain.internalContext);
+      expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
+      // The path id and the body the caller sent play no part in the decision or the error.
+      expect(JSON.stringify(marked)).not.toContain(BODY_SENTINEL);
+      expect(JSON.stringify(marked)).not.toContain(PATH_SENTINEL);
+    },
+  );
 
   it.each<[string, ProbeRequest]>([
     ['another method on the same template', { method: 'PUT', route: { path: '/v1/users' } }],
     ['a lower-case method', { method: 'post', route: { path: '/v1/users' } }],
     ['another route template', { method: 'GET', route: { path: '/v1/memberships' } }],
     ['a nested template', { method: 'GET', route: { path: '/v1/users/:id' } }],
-    ['a nested POST template', { method: 'POST', route: { path: '/v1/users/:id/memberships' } }],
     ['a trailing slash', { method: 'POST', route: { path: '/v1/users/' } }],
+    [
+      'a lower-case method on the membership template',
+      { method: 'post', route: { path: '/v1/users/:id/memberships' } },
+    ],
+    [
+      'GET on the membership template',
+      { method: 'GET', route: { path: '/v1/users/:id/memberships' } },
+    ],
+    [
+      'a trailing slash on the membership template',
+      { method: 'POST', route: { path: '/v1/users/:id/memberships/' } },
+    ],
+    [
+      'a differently named path parameter',
+      { method: 'POST', route: { path: '/v1/users/:userId/memberships' } },
+    ],
+    [
+      'an adjacent deeper template',
+      { method: 'POST', route: { path: '/v1/users/:id/memberships/:membershipId' } },
+    ],
+    [
+      'a concrete membership URL where the template belongs',
+      { method: 'POST', route: { path: `/v1/users/${PATH_SENTINEL}/memberships` } },
+    ],
+    ['membership roles', { method: 'POST', route: { path: '/v1/memberships/:id/roles' } }],
+    ['membership revoke', { method: 'POST', route: { path: '/v1/memberships/:id/revoke' } }],
+    [
+      'registration approval',
+      { method: 'POST', route: { path: '/v1/registration-requests/:id/approve' } },
+    ],
+    [
+      'registration rejection',
+      { method: 'POST', route: { path: '/v1/registration-requests/:id/reject' } },
+    ],
     ['no matched route at all', { method: 'GET', url: '/v1/users' }],
-    ['no matched route for a POST', { method: 'POST', url: '/v1/users' }],
+    [
+      'no matched route for a membership POST',
+      { method: 'POST', url: `/v1/users/${PATH_SENTINEL}/memberships` },
+    ],
     [
       'a concrete URL where the template belongs',
       { method: 'GET', route: { path: '/v1/users?q=x' } },
@@ -229,7 +298,7 @@ describe('IdentityRolesGuard', () => {
   it('does not mark outside HTTP', () => {
     const { error } = outcome(
       identityGuard(),
-      execution(LIST, listRequest, 'rpc'),
+      execution(ADD_MEMBERSHIP, addMembershipRequest, 'rpc'),
       user(['FLEET_MANAGER']),
     );
     expect((error as RastaError).code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
@@ -244,7 +313,7 @@ describe('IdentityRolesGuard', () => {
 
     const { error } = outcome(
       identityGuard(),
-      execution(LIST, listRequest),
+      execution(ADD_MEMBERSHIP, addMembershipRequest),
       user(['FLEET_MANAGER']),
     );
 
@@ -297,8 +366,19 @@ describe('IdentityRolesGuard', () => {
       ['a service caller on the create endpoint', CREATE, serviceCaller],
       ['a disallowed role on the create endpoint', CREATE, user(['AUDITOR'])],
       ['no context on the create endpoint', CREATE, undefined],
+      [
+        'ORGANIZATION_ADMIN on the membership endpoint',
+        ADD_MEMBERSHIP,
+        user(['ORGANIZATION_ADMIN']),
+      ],
+      ['UNION_ADMIN on the membership endpoint', ADD_MEMBERSHIP, user(['UNION_ADMIN'])],
+      ['SYSTEM_ADMIN on the membership endpoint', ADD_MEMBERSHIP, user(['SYSTEM_ADMIN'])],
+      ['a service caller on the membership endpoint', ADD_MEMBERSHIP, serviceCaller],
+      ['a disallowed role on the membership endpoint', ADD_MEMBERSHIP, user(['AUDITOR'])],
+      ['no roles on the membership endpoint', ADD_MEMBERSHIP, user([])],
+      ['no context on the membership endpoint', ADD_MEMBERSHIP, undefined],
     ])('%s', (_label, handler, context) => {
-      const exec = execution(handler, handler === CREATE ? createRequest : listRequest);
+      const exec = execution(handler, requestFor(handler));
       const mine = outcome(identityGuard(), exec, context);
       const shared = outcome(platformGuard(), exec, context);
 

@@ -166,7 +166,7 @@ describe('RefusalAuditExceptionFilter', () => {
     });
   });
 
-  it.each(['LIST_USERS', 'CREATE_USER'] as const)(
+  it.each(['LIST_USERS', 'CREATE_USER', 'ADD_MEMBERSHIP'] as const)(
     'captures a roles-guard denial marked %s with its own classification, and sends the platform response unchanged',
     async (siteName) => {
       const site = REFUSAL_SITES[siteName];
@@ -195,7 +195,7 @@ describe('RefusalAuditExceptionFilter', () => {
           status: 403,
           code: ERROR_CODES.INSUFFICIENT_ROLE,
           method: site.method,
-          route: '/v1/users',
+          route: site.route,
         }),
       );
       expect(response.status).toHaveBeenCalledTimes(1);

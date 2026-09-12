@@ -30,7 +30,7 @@ import type { RastaError } from '@rasta/nest-common';
  *                     `IdentityRolesGuard` after the shared guard decided —
  *                     the shared guard itself knows nothing of this table.
  *
- * Three sites are instrumented. Every other `403` in this service — and in every
+ * Four sites are instrumented. Every other `403` in this service — and in every
  * other service — is not recorded yet (ADR-053 plan § 8, R-2).
  */
 
@@ -131,6 +131,33 @@ export const REFUSAL_SITES = {
     resourceType: 'User',
     resource: 'ACTOR_USER',
     reason: 'User creation refused: the caller holds none of the roles this endpoint requires',
+  },
+
+  /**
+   * `POST /v1/users/:id/memberships` refused by the platform `RolesGuard`
+   * because the caller holds neither `ORGANIZATION_ADMIN` nor `UNION_ADMIN`
+   * (nor `SYSTEM_ADMIN`) — AUD-004 Phase C5.
+   *
+   * The guard refuses before any membership exists and before the path id or
+   * the body is read or validated; both are attacker-chosen. So the resource id
+   * is the caller's own user id from the verified token, and neither the target
+   * user in the path, the organization or roles in the body, the endpoint's
+   * required roles nor the error's internal context is ever recorded. The
+   * action name and resource type are a Temporary Decision
+   * (`docs/24-open-questions.md` Q-47).
+   */
+  ADD_MEMBERSHIP: {
+    key: 'identity.add_membership',
+    method: 'POST',
+    route: '/v1/users/:id/memberships',
+    status: 403,
+    errorCode: ERROR_CODES.INSUFFICIENT_ROLE,
+    decidedBy: 'ROLES_GUARD',
+    action: 'identity.memberships.create',
+    resourceType: 'Membership',
+    resource: 'ACTOR_USER',
+    reason:
+      'Membership creation refused: the caller holds none of the roles this endpoint requires',
   },
 } as const satisfies Record<string, RefusalSite>;
 
