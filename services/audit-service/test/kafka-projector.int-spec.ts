@@ -501,9 +501,10 @@ describeWithKafka('domain projector over Kafka', () => {
  * composition-root spec, and the idempotency key this suite asserts is the
  * constant, not the run's group.
  *
- * No producer exists yet, so fixtures are published straight onto the topic —
- * which is also the only honest way to prove what this consumer does with a
- * message a future producer gets wrong.
+ * Fixtures are published straight onto the topic rather than through
+ * identity-service, the producer that exists today — which is also the only
+ * honest way to prove what this consumer does with a message a producer gets
+ * wrong, since the real producer validates before it publishes.
  */
 describeWithKafka('audit-trail consumer over Kafka', () => {
   let prisma: PrismaService;

@@ -82,8 +82,9 @@ async function bootstrap(): Promise<void> {
   console.warn(
     `[${SERVICE_NAME}] listening on :${env.PORT} (${env.NODE_ENV}) — ` +
       'domain projector: ingesting 10 domain topics; audit trail: consuming ' +
-      'rasta.audit.trail.v1 (no producer publishes to it yet); read API: search, detail ' +
-      'and chain verification (no export, no correction command)' +
+      'rasta.audit.trail.v1 (identity-service refusals and corrections); read API: search, ' +
+      'detail and chain verification (no write API, no export; corrections are commanded ' +
+      'through identity-service, never here)' +
       (allowsDeveloperTooling(env) ? ` — docs at http://localhost:${env.PORT}/docs` : ''),
   );
 }

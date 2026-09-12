@@ -20,7 +20,7 @@ import type { AuditChainVerification } from './audit.verification.view';
  * ## There is no write endpoint, and its absence is the contract
  *
  * `docs/04` § 4.15 is explicit: "writing is from Kafka only". So there is no
- * `POST /v1/audit-events`, no export route yet, and no correction route yet.
+ * `POST /v1/audit-events`, no export route yet, and no correction route.
  * A caller that posts here gets a `404` from the router, which is a structural
  * proof rather than a promise — `test/authorization.int-spec.ts` asserts it,
  * because "we did not add one" is a fact that stops being true the first time
@@ -30,9 +30,11 @@ import type { AuditChainVerification } from './audit.verification.view';
  * correction route.** ADR-053 § 7 requires a correction to enter through path B
  * (`rasta.audit.trail.v1`). Since AUD-004 Phase B this service *consumes* that
  * path — a published correction becomes a fresh row linked by `correctionOf` —
- * but it still has no producer, no outbox and no write API, and accepting a
- * correction command here would be the direct insert § 7 exists to forbid. The
- * command belongs to the producer side and is not built.
+ * but it still produces nothing, owns no outbox and has no write API, and
+ * accepting a correction command here would be the direct insert § 7 exists to
+ * forbid. The command belongs to the producer side: it is
+ * `POST /v1/audit-corrections` on identity-service, which reaches this service
+ * only through the internal target lookup (`audit-internal.controller.ts`).
  *
  * ## Route order is load-bearing
  *

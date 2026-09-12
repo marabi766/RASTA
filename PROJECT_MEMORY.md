@@ -170,6 +170,16 @@
 > پرس‌وجوی صریح پس از هر اجرا: Schemaهای `audit_correction_command_check` و `migration_check` باقی نماندند. **آنچه همچنان
 > اجرا نشده:** `pnpm test:migration` کامل ریشه (پایگاه و نقشِ هر نُه سرویس را می‌خواهد و در این نشست تلاش نشد) و `pnpm verify` کامل روی این ماشین.
 >
+> **به‌روزرسانی 2026-09-12 (هم‌خوانی مستندات جاری AUD-003/AUD-004 و Runbook شکاف شواهد):** توصیف‌های جاری که هنوز «بدون
+> Producer» و «بدون فرمان اصلاح» می‌گفتند اصلاح شدند — `description` در `services/audit-service/package.json`، خط شروع
+> `main.ts`، سرآیند `app.module.ts`، `audit.controller.ts`، توضیح Readiness، توضیح OpenAPI و یک توضیح `kafka-projector.int-spec.ts`
+> — بی هیچ تغییر رفتاری؛ سطرهای AUD-003 (اکنون ✅) و AUD-004 جدول وضعیت ADR-053 plan با § ۴/۵ هم‌خوان شدند و نگاشت نام فایل‌های
+> پذیرش برنامه (`refusal-flow.int-spec.ts`، `changes-redaction.spec.ts`) به آزمون‌های واقعی در § ۷ آن سند آمد.
+> [`docs/runbooks/audit-gap-detected.md`](docs/runbooks/audit-gap-detected.md) تازه است و فقط بر قابلیت‌های موجود تکیه دارد.
+> **دو شکاف رصدپذیری هنگام نوشتنش پیدا شد و ثبت شد، نه رفع:** `audit-service` متریک‌های ورودی و زنجیره را در فرایند ثبت
+> می‌کند ولی **هیچ Route `/metrics` ندارد** و هدف Scrape Prometheus محلی نیست؛ و `rasta_dlq_messages_total` تعریف شده ولی
+> `EventConsumer` مشترک آن را افزایش نمی‌دهد. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
+>
 > **به‌روزرسانی 2026-09-12 (Phase C10 — محل رد نهم، نخستین تصمیم‌گیرندهٔ غیر از دامنه و `RolesGuard`):**
 > `identity-service` اکنون **دقیقاً نُه** محل رد دارد. محل تازه ردِ خودِ `AuthGuard` پلتفرم است: Token تأییدشده‌ای که با
 > `X-Organization-Id` سازمانی بیرون از عضویت‌هایش را می‌خواهد (`action = identity.tenant_context.select`،

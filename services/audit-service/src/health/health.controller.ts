@@ -106,9 +106,9 @@ export class HealthController {
       // disagrees with the router, and the router is what serves callers.
       //
       // Still deliberately narrow: `trail: true` says the path-B consumer is
-      // running. It does not claim that anything publishes to that topic — no
-      // producer exists yet — nor a correction command or export, none of
-      // which are built.
+      // running. It does not claim that anything is publishing to that topic
+      // right now, nor that producers are healthy — identity-service's outboxes
+      // report their own state — and it claims no export, which is not built.
       ingests: true,
       queryApi: true,
     };

@@ -98,17 +98,21 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
  *                  gets a router `404`, which is a structural proof rather than
  *                  a promise. The trail consumer does not change this: it is a
  *                  second Kafka reader, not a door.
- *   producers      One, for one refusal. `identity-service` publishes
- *                  `AUDIT_EVENT_RECORDED` for a refused active-organization
- *                  switch through its own `security_event_outbox` (AUD-004 Phase
- *                  C1). Windowed refusal aggregation, every other refusal and
- *                  every other service's producer are not built.
- *   correction     A correction a producer publishes is recorded — as a fresh
- *     command      row whose `correction_of` names the record it corrects, never
- *                  as an edit. Nothing accepts a correction *command*: that
- *                  belongs to the producer side (ADR-053 § 7), and this service
- *                  producing and consuming its own correction would be the
- *                  direct write § 7 exists to forbid.
+ *   producers      Not in this service. The only producer on the trail today is
+ *                  `identity-service`: nine refusal sites (AUD-004 Phases
+ *                  C1–C10), aggregated per configurable window, through its
+ *                  `security_event_outbox`; and the correction command, through
+ *                  its standard outbox. Every other service's refusals (R-2),
+ *                  refusals stopped at the Gateway and service-token refusals
+ *                  are not recorded.
+ *   correction     A published correction is recorded — as a fresh row whose
+ *     command      `correction_of` names the record it corrects, never as an
+ *                  edit. This service accepts no correction *command*: that is
+ *                  `POST /v1/audit-corrections` on identity-service (ADR-053
+ *                  § 7), and this service producing and consuming its own
+ *                  correction would be the direct write § 7 exists to forbid.
+ *                  What it offers that command is one internal, service-token
+ *                  target lookup, which returns no evidence.
  *   export         Asynchronous, `SYSTEM_ADMIN`-only and audited in its own
  *                  right (ADR-053 § 10); belongs with the work that builds it.
  *   outbox         Never. audit-service is a terminal sink (ADR § 14), which is

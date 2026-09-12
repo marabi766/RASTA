@@ -2,7 +2,7 @@
   "name": "@rasta/audit-service",
   "version": "0.1.0",
   "private": true,
-  "description": "Append-only audit evidence store. AUD-001 (domain projector), AUD-002 (tenant-safe read API), AUD-003's tamper-evidence half (per tenant-month hash chain plus GET /v1/audit-events/verify) and AUD-004 Phase B (validating, idempotent consumer of AUDIT_EVENT_RECORDED v1 on rasta.audit.trail.v1 as audit-service.trail). No write endpoint by design, no producer publishes to the trail yet, no refusal aggregation, no correction command, no export, and the chain is unsigned.",
+  "description": "Append-only audit evidence store. AUD-001 (domain projector), AUD-002 (tenant-safe read API), AUD-003 (per tenant-month hash chain plus GET /v1/audit-events/verify, and correction records linked both ways by correctionOf/correctedBy) and AUD-004 Phase B (validating, idempotent consumer of AUDIT_EVENT_RECORDED v1 on rasta.audit.trail.v1 as audit-service.trail). identity-service is the only producer on the trail today: nine windowed-aggregated refusal sites and the POST /v1/audit-corrections command. This service has no write endpoint by design, does not originate corrections, offers only an internal correction-target lookup to identity-service, and has no export and no chain signature.",
   "main": "dist/main.js",
   "scripts": {
     "build": "prisma generate && tsc -p tsconfig.json && node ../../scripts/copy-prisma-client.mjs",

@@ -101,8 +101,9 @@ const DESCRIPTION =
   'by the domain projector carry no actor roles, no source address and no field-level ' +
   'delta, because a domain event does not carry them. Records from the explicit audit ' +
   'trail (AUD-004 Phase B) carry actor roles, outcome, error code, reason, source ' +
-  'address and a bounded, redacted delta when the producer supplies them; no service ' +
-  'publishes to that trail yet. Every record written since AUD-003 carries a SHA-256 link ' +
+  'address and a bounded, redacted delta when the producer supplies them; today the only ' +
+  'service publishing to that trail is identity-service, for its nine instrumented refusal ' +
+  'sites and for corrections. Every record written since AUD-003 carries a SHA-256 link ' +
   'into a per-(organization, UTC month) chain, and GET /v1/audit-events/verify ' +
   'recomputes a range of one chain and reports the first divergence. That chain is ' +
   'tamper-evident and unsigned: it makes an alteration visible to anyone who compares ' +
