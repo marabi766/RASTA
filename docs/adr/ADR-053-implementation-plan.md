@@ -791,7 +791,7 @@ source_topic)` خودش را دارد — دو لایهٔ مستقل، همان 
 > `/approve` در برابر `/reject`، مجموعه، الگوهای عضویت و بی‌Route)، یکتایی کلید/متد-Route/شناسهٔ تجمیع برای هر هشت محل،
 > `decideCapture` با شناسهٔ Actor و بی هیچ محتوای درخواست/سیاست/خطا، رد شدنِ خطای بی‌علامت، برابری کامل تصمیم Guard با
 > `RolesGuard` برای `UNION_ADMIN`، `SYSTEM_ADMIN`، `ORGANIZATION_ADMIN` (رد)، فراخوان سرویس، نقش غیرمجاز، بی‌نقش و بی‌Context، و
-> مقایسه‌گرِ مستقیمِ بالا. PostgreSQL واقعی (`test/security-event-role-refusal.int-spec.ts`، ۳۹ تست؛ کل Integration در ۵ Suite، ۸۰
+> مقایسه‌گرِ مستقیمِ بالا. PostgreSQL واقعی (`test/security-event-role-refusal.int-spec.ts`، ۴۰ تست؛ کل Integration در ۵ Suite، ۸۰
 > تست، صفر Skip): ثبت با انتساب مورد اعتماد و بدون هیچ Sentinel در هیچ ستون (`row_to_json`)؛ تجمیع با شناسه‌ها و دلیل‌های متفاوت
 > در پنجرهٔ ۲ ثانیه‌ای و ردیف تازه در پنجرهٔ بعد؛ جداسازی مستأجر/Actor در هر هشت محل؛ جدایی ردیف تأیید و رد برای یک Actor در
 > یک پنجره؛ `UNION_ADMIN`/`SYSTEM_ADMIN` به اعتبارسنجی (`400`) و دامنه (`404`) می‌رسند و ثبت نمی‌شوند؛ رد و ثبت
