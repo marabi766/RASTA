@@ -330,11 +330,32 @@ ADR-053 § ۱۰؛ `assertNotAuditor()`؛ OpenAPI تولیدشده، Commit‌ش�
 > - **ثبت در دروازه.** `test:migration` ریشه اکنون Verifier تازه را هم صدا می‌زند (CI از پیش `DATABASE_URL_IDENTITY` را به
 >   همان Step می‌داد، پس Workflow تغییری نخواست)، و `verify` تستِ واحدِ تازه (`test:audit-correction-lib`) را.
 >
-> **آنچه هنوز اثبات نشده:** خودِ اجرای up → down → up در این نشست **انجام نشد**. Docker Desktop این ماشین بالا نمی‌آید
-> (WSL دیسک `ext4.vhdx` را با `E_ACCESSDENIED` وصل نمی‌کند و ترمیمش دسترسی Administrator می‌خواهد)، پس PostgreSQL نبود؛ و
-> `pnpm install` هم کامل نشد چون `registry.npmjs.org` از این شبکه Reset می‌شود و یک بستهٔ Store نیست. آنچه اجرا شد:
-> ۳۳ تست واحد روی همان کدی که Verifier اجرا می‌کند (نه رونوشتش) — ۱۱ تای موجود به‌علاوهٔ ۲۲ تای تازه. **یک رشتهٔ
-> ساخته‌شده Rollback نیست**؛ این Verifier باید در نخستین نشستی که زیرساخت دارد (یا در CI) واقعاً اجرا شود.
+> **اجرای واقعی — 2026-09-12 (هر دو اثبات سبز).** Docker Desktop این ماشین همچنان بالا نمی‌آید، پس هر دو اثبات روی Cluster
+> یک‌بارمصرفِ **PostgreSQL 16.14 بومی** اجرا شد: `initdb` (UTF-8، `trust`) در پوشه‌ای یکتا زیر Temp، گوش‌دادن فقط روی
+> `127.0.0.1:5399` (پورت 5433 در بازهٔ Excluded Port ویندوز 5433–5532 بود و `bind` با Permission denied رد شد)، سرویس
+> PostgreSQL روی 5432 دست‌نخورده. نقش‌ها و پایگاه‌ها فقط همان‌ها که لازم بود: `rasta_identity`، `rasta_audit`، و
+> `rasta_audit_migrator` بی‌عضویت در `rasta_audit`، با Schemaِ `audit` در مالکیت Migrator و فقط `USAGE` برای `rasta_audit`
+> — مطابق `00-init-databases.sh`. `DATABASE_URL` در هر دو اجرا Unset بود تا URLِ ویژهٔ سرویس جایگزین نشود.
+>
+> - **نقص یافته و رفع‌شده (Commit `5808941`).** نخستین اجرای Verifier identity نشان داد Probeهای رد نمی‌توانستند سبز شوند:
+>   متن خروجی `prisma db execute` را می‌جستند، و Prisma 6.19.3 خطای PostgreSQL را چاپ نمی‌کند — برای `NOT NULL` فقط
+>   `Failing row contains (…)`، و برای طول زیاد جملهٔ یکسان `P2000 … Column: (not available)` برای هر دو ستونِ `CHAR(64)` و
+>   `VARCHAR(26)`. اکنون هر Probe در بلوک `DO` اجرا می‌شود که با `GET STACKED DIAGNOSTICS` یک خط از SQLSTATE، جدول، ستون،
+>   Constraint و پیامِ خودِ PostgreSQL برمی‌گرداند؛ پذیرفته‌شدنِ دستور نشانگری جدا دارد. ۵ تست واحد تازه؛ هیچ ادعایی حذف یا
+>   سست نشد. `migrate deploy` دوم اکنون نام Migrationِ دوباره‌اعمال‌شده را چاپ می‌کند.
+> - **identity:** `DATABASE_URL_IDENTITY=postgresql://rasta_identity@127.0.0.1:5399/rasta_identity?schema=public node
+scripts/verify-audit-correction-command-migration.mjs` — خروج 0؛ `up → down → up in 39250ms` (Wall 39.4s)، با
+>   `re-applied 20260912120000_audit_correction_command`. اجرای پیشینِ همان کد پیش از افزودن آن خط چاپی: 61994ms، سبز.
+> - **audit:** `DATABASE_URL_AUDIT=postgresql://rasta_audit@127.0.0.1:5399/rasta_audit?schema=audit node
+scripts/verify-migration-reversible.mjs audit` — همان شکل URL که Step CI می‌دهد، نه `DATABASE_URL_AUDIT_MIGRATOR`؛ خروج
+>   0؛ کل زنجیرهٔ چهار Migration، `up → down → up in 20406ms` (Wall 20.7s)، با `audit_event_correction_idx` در نگاشت `EXPECTED`.
+> - **پاک‌سازی:** پس از هر CLI، پرس‌وجوی صریح `pg_namespace` نشان داد `audit_correction_command_check` و `migration_check`
+>   باقی نماندند و Schemaهای واقعی `public`/`audit` هیچ Relationی نگرفتند. Cluster متوقف و فقط پوشهٔ خودش حذف شد.
+> - **تست واحد:** `node --test scripts/verify-audit-correction-command-lib.test.mjs scripts/verify-migration-reversible-lib.test.mjs`
+>   — ۳۷ تست، ۳۷ سبز.
+>
+> **آنچه همچنان اجرا نشده:** `pnpm test:migration` کامل ریشه (پایگاه و نقشِ هر نُه سرویس را می‌خواهد و در این نشست تلاش نشد) و
+> `pnpm verify` کامل روی این ماشین. سبز بودن این دو اثبات هدفمند، سبز بودن آن دو دروازه نیست.
 
 **As a** اپراتور پلتفرم، **I want** بتوانم اثبات کنم یک بازه از رکوردها تغییر نکرده، و رکورد غلط را بی‌آنکه گفتهٔ قبلی‌اش پاک
 شود اصلاح کنم، **so that** یکپارچگی انبار نشان‌دادنی باشد نه ادعاشده.

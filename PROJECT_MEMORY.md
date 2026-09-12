@@ -155,10 +155,20 @@
 > بمانند، و آزمودن یکتایی/`NOT NULL`/طول/Default/JSONB)، `audit_event_correction_idx` افزوده به نگاشت `EXPECTED`ِ
 > `verify-migration-reversible.mjs` (Migrationی که فقط یک Index می‌سازد و نامش آنجا نباشد به‌کلی نامرئی است)، هر دو
 > `down.sql` اکنون ردیف Ledger خودشان — و فقط خودشان — را پاک می‌کنند، و ثبت در `test:migration` و `verify` ریشه.
-> **اما:** خودِ اجرای up → down → up در این نشست انجام **نشد** — Docker Desktop این ماشین بالا نمی‌آید (WSL دیسک
-> `ext4.vhdx` را با `E_ACCESSDENIED` وصل نمی‌کند؛ ترمیمش دسترسی Administrator می‌خواهد) و `pnpm install` هم کامل نشد
-> (`registry.npmjs.org` از این شبکه Reset می‌شود و یک بستهٔ Store نیست). فقط ۳۳ تست واحد روی همان کدِ Verifier اجرا شد.
-> پس امروز ادعای درست این است: **ثبت شد و تست واحد دارد؛ Rollback هنوز روی پایگاه داده اجرا نشده.**
+> **تکمیل همان روز (اجرای واقعی هر دو Rollback):** Docker Desktop همچنان بالا نمی‌آید، پس هر دو اثبات روی یک Cluster
+> یک‌بارمصرفِ **PostgreSQL 16.14 بومی** (`initdb` با UTF-8 و `trust` در پوشهٔ Temp، فقط `127.0.0.1:5399` — پورت 5433 در
+> بازهٔ Excluded Port ویندوز بود — بی‌دست‌زدن به سرویس 5432) اجرا شد، با نقش‌ها/پایگاه‌ها/Schemaِ `audit` مطابق
+> `00-init-databases.sh` و `DATABASE_URL` عمداً Unset. نخستین اجرا یک نقص واقعی در **خودِ Verifier** نشان داد: Probeهای رد،
+> متنِ خروجی `prisma db execute` را می‌جستند، و Prisma 6.19.3 خطای PostgreSQL را چاپ نمی‌کند (برای `NOT NULL` فقط
+> `Failing row contains`، و برای طولِ زیاد جملهٔ یکسان `P2000 … Column: (not available)` برای `CHAR(64)` و `VARCHAR(26)`).
+> Commit `5808941` هر Probe را در بلوکی می‌پیچد که با `GET STACKED DIAGNOSTICS`، SQLSTATE/جدول/ستون/Constraint/پیام خودِ
+> PostgreSQL را برمی‌گرداند (با ۵ تست واحد تازه؛ مجموع دو مجموعهٔ Verifier اکنون ۳۷ تست، ۳۷ سبز). سپس:
+> `DATABASE_URL_IDENTITY=… node scripts/verify-audit-correction-command-migration.mjs` — **سبز**، up → down → up در
+> 39250ms، با خروجی `re-applied 20260912120000_audit_correction_command`؛ و
+> `DATABASE_URL_AUDIT=…/rasta_audit?schema=audit node scripts/verify-migration-reversible.mjs audit` (همان شکل CI، نه
+> `_MIGRATOR`) — **سبز**، کل زنجیرهٔ چهار Migration در 20406ms، با `audit_event_correction_idx` در اثبات بودن/نبودن/بازگشت.
+> پرس‌وجوی صریح پس از هر اجرا: Schemaهای `audit_correction_command_check` و `migration_check` باقی نماندند. **آنچه همچنان
+> اجرا نشده:** `pnpm test:migration` کامل ریشه (پایگاه و نقشِ هر نُه سرویس را می‌خواهد و در این نشست تلاش نشد) و `pnpm verify` کامل روی این ماشین.
 >
 > **به‌روزرسانی 2026-09-12 (Phase C10 — محل رد نهم، نخستین تصمیم‌گیرندهٔ غیر از دامنه و `RolesGuard`):**
 > `identity-service` اکنون **دقیقاً نُه** محل رد دارد. محل تازه ردِ خودِ `AuthGuard` پلتفرم است: Token تأییدشده‌ای که با
