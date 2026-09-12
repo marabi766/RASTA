@@ -772,4 +772,110 @@ describeWithKafka('audit-trail consumer over Kafka', () => {
       await dlqConsumer.disconnect();
     }
   }, 300_000);
+
+  it('records a correction as one linked row after duplicate delivery, and leaves the original untouched (AUD-003 correction)', async () => {
+    const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+    const flatten = (row: unknown): string =>
+      JSON.stringify(row, (_key, value: unknown) =>
+        typeof value === 'bigint'
+          ? value.toString()
+          : value instanceof Uint8Array
+            ? Buffer.from(value).toString('hex')
+            : value,
+      );
+
+    const source = trailMessage();
+    await publish(source);
+    const target = await waitFor(
+      'the original trail row',
+      rowFor(source.eventId),
+      DELIVERY_TIMEOUT_MS,
+    );
+    const before = flatten(target);
+
+    // Exactly the envelope identity-service's correction command produces.
+    const correction = {
+      eventId: id('EVT'),
+      eventName: AUDIT_EVENT_RECORDED,
+      eventVersion: AUDIT_EVENT_RECORDED_VERSION,
+      occurredAt: '2026-12-01T09:30:00.000Z',
+      producer: 'identity-service',
+      producerVersion: '0.1.0',
+      aggregateType: 'AuditEvent',
+      aggregateId: target.id,
+      tenantId: source.tenantId,
+      correlationId: id('COR'),
+      actor: { type: 'USER', id: id('USRADMIN') },
+      streamKey: target.id,
+      streamSeq: 1,
+      payload: {
+        actor: { type: 'USER', id: id('USRADMIN'), roles: ['SYSTEM_ADMIN'] },
+        organizationId: source.tenantId,
+        action: 'audit.correction',
+        resourceType: 'AuditEvent',
+        resourceId: target.id,
+        outcome: 'SUCCESS',
+        reason: 'Recorded against the wrong resource (INC-5120)',
+        changes: [
+          { field: 'outcome', from: 'REFUSED', to: 'SUCCESS' },
+          { field: 'credentials.password', from: { redacted: true }, to: { redacted: true } },
+        ],
+        occurrenceCount: 1,
+        correctionOf: target.id,
+      },
+    };
+
+    // Delivered twice, keyed by the target exactly as identity's relay keys it.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await producer.send({
+        topic: AUDIT_TRAIL_TOPIC,
+        messages: [{ key: target.id, value: JSON.stringify(correction) }],
+      });
+    }
+
+    const row = await waitFor(
+      'the correction row',
+      rowFor(correction.eventId),
+      DELIVERY_TIMEOUT_MS,
+    );
+    await pause(3_000);
+
+    // eventId idempotency: one row and one processed marker, however many copies.
+    expect(
+      await prisma.client.auditEvent.count({
+        where: { sourceEventId: correction.eventId, sourceTopic: AUDIT_TRAIL_TOPIC },
+      }),
+    ).toBe(1);
+    expect(
+      await prisma.client.processedEvent.count({
+        where: { eventId: correction.eventId, consumerName: AUDIT_TRAIL_CONSUMER },
+      }),
+    ).toBe(1);
+
+    expect(row).toMatchObject({
+      correctionOf: target.id,
+      organizationId: source.tenantId,
+      action: 'audit.correction',
+      resourceType: 'AuditEvent',
+      resourceId: target.id,
+      outcome: 'SUCCESS',
+      errorCode: null,
+      actorType: 'USER',
+      actorRoles: ['SYSTEM_ADMIN'],
+      correlationId: correction.correlationId,
+      sourceTopic: AUDIT_TRAIL_TOPIC,
+    });
+    expect(row.changes).toEqual(correction.payload.changes);
+
+    // Both link directions resolve under the tenant's own scope.
+    const links = await repository.findCorrectionIds(
+      { kind: 'ORGANIZATION', organizationId: source.tenantId as string },
+      [target],
+    );
+    expect(links.get(target.id)).toEqual([row.id]);
+
+    // Append-only: the original is exactly what it was.
+    const after = await rowFor(source.eventId)();
+    expect(flatten(after)).toBe(before);
+  });
 });
