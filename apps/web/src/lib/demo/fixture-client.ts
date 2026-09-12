@@ -1,5 +1,6 @@
 import { ApiFailure, CLIENT_ERROR_CODES } from '../api/errors';
 import type { GatewayClient, GatewayRequest, GatewayResult } from '../api/client';
+import { FIXTURE_ENTRY_POINTS } from './entry-points';
 
 /**
  * The presentation data source.
@@ -47,10 +48,23 @@ function queryAwareKey(request: GatewayRequest<unknown>): string {
   return `${request.path}?${query}`;
 }
 
+/**
+ * A fixture entry is either the response itself, or a function that computes
+ * it fresh on every call.
+ *
+ * The function form is how `createFixtureClient` below wires a handful of
+ * routes to the interactive scenario engine (`./scenario/`): the closure
+ * re-reads the current scenario snapshot on every request, so a dispatched
+ * action is visible on the very next `GET` rather than only after the client
+ * is rebuilt. Every route this application had before the scenario engine
+ * existed keeps the plain value form and is completely unaffected.
+ */
+export type FixtureResponseEntry = unknown | (() => unknown);
+
 export class FixtureGatewayClient implements GatewayClient {
   private sequence = 0;
 
-  constructor(private readonly responses: Readonly<Record<string, unknown>>) {}
+  constructor(private readonly responses: Readonly<Record<string, FixtureResponseEntry>>) {}
 
   async request<T>(request: GatewayRequest<T>): Promise<GatewayResult<T>> {
     const method = request.method ?? 'GET';
@@ -77,7 +91,8 @@ export class FixtureGatewayClient implements GatewayClient {
     // from one path. Every other route has no such entry and falls back to
     // the bare path exactly as before, so this is additive, not a behaviour
     // change for the rest of the dataset.
-    const body = key in this.responses ? this.responses[key] : this.responses[request.path];
+    const entry = key in this.responses ? this.responses[key] : this.responses[request.path];
+    const body = typeof entry === 'function' ? entry() : entry;
 
     if (body === undefined) {
       // A screen reading a route the dataset does not cover is a gap in the
@@ -123,13 +138,60 @@ export class FixtureGatewayClient implements GatewayClient {
 }
 
 /**
- * Builds the fixture client, loading the dataset on demand.
+ * Builds the fixture client, loading the dataset — and the interactive
+ * scenario engine — on demand.
  *
- * Dynamic because a live build must not carry it. The fixtures are a few
- * kilobytes of gzip that a live deployment can never use, and ADR-003's 200 KiB
- * budget does not have room to spend on data that is switched off.
+ * Dynamic because a live build must not carry either. The static dataset and
+ * the scenario engine (state model, reducer, invariants, persistence,
+ * read-model) are kilobytes of gzip a live deployment can never use, and
+ * ADR-003's 200 KiB budget does not have room to spend on code that is
+ * switched off.
+ *
+ * ## The state-aware routes, and why it is only these five
+ *
+ * Every route the scenario engine can actually change something about:
+ * the maintenance request (estimate approval), the order (placement and
+ * payment), the wallet (payment's effect on balances), the document list
+ * (attachment and scan result) and the audit-event list (every action
+ * appends one entry). Every other route — assets, fleet, the marketplace
+ * catalogue, suppliers, the audit chain-verification presets — has no
+ * scenario action that touches it, so it stays the plain static value it
+ * always was. Wiring a route here does not change what the scenario engine
+ * does; it only lets a route that does change re-read it.
  */
 export async function createFixtureClient(): Promise<GatewayClient> {
   const { FIXTURE_RESPONSES } = await import('./fixtures');
-  return new FixtureGatewayClient(FIXTURE_RESPONSES);
+  const { getScenarioStore } = await import('./scenario/store');
+  const readModel = await import('./scenario/read-model');
+
+  const getSnapshot = () => getScenarioStore().getState();
+  const asRecord = (value: unknown): Record<string, unknown> =>
+    typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+
+  const maintenanceDetailKey = `/v1/maintenance-requests/${FIXTURE_ENTRY_POINTS.maintenanceRequestId}`;
+  const orderDetailKey = `/v1/orders/${FIXTURE_ENTRY_POINTS.orderId}`;
+
+  const responses: Record<string, FixtureResponseEntry> = {
+    ...FIXTURE_RESPONSES,
+    [maintenanceDetailKey]: () =>
+      readModel.projectMaintenanceRequestDetail(
+        asRecord(FIXTURE_RESPONSES[maintenanceDetailKey]),
+        getSnapshot(),
+      ),
+    [orderDetailKey]: () =>
+      readModel.projectOrder(asRecord(FIXTURE_RESPONSES[orderDetailKey]), getSnapshot()),
+    '/v1/orders': () =>
+      readModel.projectOrdersPage(asRecord(FIXTURE_RESPONSES['/v1/orders']), getSnapshot()),
+    '/v1/wallets/me': () =>
+      readModel.projectWallet(asRecord(FIXTURE_RESPONSES['/v1/wallets/me']), getSnapshot()),
+    '/v1/documents': () =>
+      readModel.projectDocumentsPage(asRecord(FIXTURE_RESPONSES['/v1/documents']), getSnapshot()),
+    '/v1/audit-events': () =>
+      readModel.projectAuditEventsPage(
+        asRecord(FIXTURE_RESPONSES['/v1/audit-events']),
+        getSnapshot(),
+      ),
+  };
+
+  return new FixtureGatewayClient(responses);
 }
