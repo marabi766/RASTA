@@ -233,7 +233,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
     ).toBe(0);
   });
 
-  it('captures no 401, no uninstrumented 403, no guard-level TENANT_MISMATCH and no successful switch', async () => {
+  it('captures no 401, no route near miss, no guard-level TENANT_MISMATCH and no successful switch', async () => {
     const before = await prisma.client.securityEventOutbox.count({
       where: { correlationId: { contains: TAG } },
     });
@@ -246,20 +246,28 @@ describe('security_event_outbox (real PostgreSQL)', () => {
       .send({ organizationId: tagged('ORG') });
     expect(anonymous.status).toBe(401);
 
-    // 403 INSUFFICIENT_ROLE from the roles guard on the one role-guarded
-    // endpoint that is still not an allowlisted site. (`GET /v1/users`,
-    // `POST /v1/users`, `POST /v1/users/:id/memberships`,
-    // `POST /v1/memberships/:id/roles`, `POST /v1/memberships/:id/revoke` and
-    // `POST /v1/registration-requests/:id/approve` became sites in AUD-004
-    // Phases C3–C8 and are proved captured in
-    // `security-event-role-refusal.int-spec.ts`.)
+    // Near misses of instrumented templates: a method no route serves and a
+    // template deeper than any route. Since AUD-004 Phase C9 every `@Roles`
+    // route in identity-service is an allowlisted site (proved captured in
+    // `security-event-role-refusal.int-spec.ts`), so no uninstrumented
+    // INSUFFICIENT_ROLE is left to send; what must stay uncaptured is every
+    // request that is not exactly a site.
     const underPrivileged: Caller = { userId: tagged('USR'), organizationId: tagged('ORG') };
-    const rejecting = await request(harness.app.getHttpServer())
-      .post(`/v1/registration-requests/${tagged('REG')}/reject`)
-      .set('authorization', `Bearer ${userToken(underPrivileged)}`)
-      .send({});
-    expect(rejecting.status).toBe(403);
-    expect(rejecting.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+    for (const [method, path] of [
+      ['get', `/v1/registration-requests/${tagged('REG')}/reject`],
+      ['put', `/v1/registration-requests/${tagged('REG')}/approve`],
+      ['post', `/v1/registration-requests/${tagged('REG')}/reject/${tagged('X')}`],
+    ] as const) {
+      const nearMiss = await request(harness.app.getHttpServer())
+        [method](path)
+        .set('authorization', `Bearer ${userToken(underPrivileged)}`)
+        .set('x-correlation-id', tagged('COR'))
+        .send({});
+      expect(nearMiss.status).toBe(404);
+    }
+    expect(
+      await prisma.client.securityEventOutbox.count({ where: { actorId: underPrivileged.userId } }),
+    ).toBe(0);
 
     // 403 TENANT_MISMATCH raised by the auth guard for a header outside the
     // token's memberships — the same code, but not the identity decision.

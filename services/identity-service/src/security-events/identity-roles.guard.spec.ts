@@ -1,7 +1,8 @@
-import type { ExecutionContext } from '@nestjs/common';
+import type { ArgumentsHost, ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ERROR_CODES } from '@rasta/contracts';
 import {
+  AllExceptionsFilter,
   Public,
   RastaError,
   Roles,
@@ -9,6 +10,7 @@ import {
   runWithContext,
   type RequestContext,
 } from '@rasta/nest-common';
+import type { Logger } from '@rasta/logging';
 import { IdentityRolesGuard } from './identity-roles.guard';
 import { refusalSiteOf, REFUSAL_SITES } from './refusal-sites';
 
@@ -16,14 +18,18 @@ import { refusalSiteOf, REFUSAL_SITES } from './refusal-sites';
  * The identity role guard is the shared `RolesGuard` plus one thing: it marks
  * the shared guard's own `INSUFFICIENT_ROLE` refusal — the same object — when,
  * and only when, the matched route is an allowlisted `ROLES_GUARD` site
- * (AUD-004 Phases C3–C8: `GET /v1/users`, `POST /v1/users`,
+ * (AUD-004 Phases C3–C9: `GET /v1/users`, `POST /v1/users`,
  * `POST /v1/users/:id/memberships`, `POST /v1/memberships/:id/roles`,
- * `POST /v1/memberships/:id/revoke` and
- * `POST /v1/registration-requests/:id/approve`).
+ * `POST /v1/memberships/:id/revoke`,
+ * `POST /v1/registration-requests/:id/approve` and
+ * `POST /v1/registration-requests/:id/reject` — every `@Roles` route in
+ * identity-service).
  *
- * `POST /v1/registration-requests/:id/reject` carries the same method, the same
- * prefix and the same single required role, and is deliberately **not** a site:
- * it is the near miss that proves only the allowlist decides.
+ * With every role-guarded route instrumented, no uninstrumented HTTP refusal is
+ * left to compare a response against. So "marking changes nothing" is proved
+ * here directly: given the same denied caller and the same route metadata, the
+ * platform guard and this one throw the same error and the platform filter
+ * sends the same HTTP response for both — the mark lives only in a `WeakMap`.
  */
 
 class ProbeController {
@@ -121,7 +127,7 @@ const approveRequest: ProbeRequest = {
   body: { organizationId: `ORG-${BODY_SENTINEL}`, roles: ['SYSTEM_ADMIN'] },
 };
 
-/** The uninstrumented sibling: identical in every way the guard can see. */
+/** The sibling review outcome: same method, prefix and single required role. */
 const rejectRequest: ProbeRequest = {
   method: 'POST',
   route: { path: '/v1/registration-requests/:id/reject' },
@@ -147,7 +153,8 @@ type MarkedSiteName =
   | 'ADD_MEMBERSHIP'
   | 'UPDATE_MEMBERSHIP_ROLES'
   | 'REVOKE_MEMBERSHIP'
-  | 'APPROVE_REGISTRATION_REQUEST';
+  | 'APPROVE_REGISTRATION_REQUEST'
+  | 'REJECT_REGISTRATION_REQUEST';
 
 const MARKED_SITES: [string, () => void, ProbeRequest, MarkedSiteName][] = [
   ['POST /v1/users', CREATE, createRequest, 'CREATE_USER'],
@@ -159,6 +166,12 @@ const MARKED_SITES: [string, () => void, ProbeRequest, MarkedSiteName][] = [
     APPROVE,
     approveRequest,
     'APPROVE_REGISTRATION_REQUEST',
+  ],
+  [
+    'POST /v1/registration-requests/:id/reject',
+    REJECT,
+    rejectRequest,
+    'REJECT_REGISTRATION_REQUEST',
   ],
 ];
 
@@ -452,12 +465,40 @@ describe('IdentityRolesGuard', () => {
       { method: 'POST', route: { path: '/v1/registration-requests' } },
     ],
     [
-      'registration rejection, the uninstrumented sibling',
-      { method: 'POST', route: { path: '/v1/registration-requests/:id/reject' } },
+      'a lower-case method on the reject template',
+      { method: 'post', route: { path: '/v1/registration-requests/:id/reject' } },
     ],
     [
-      'a concrete rejection URL',
+      'GET on the reject template',
+      { method: 'GET', route: { path: '/v1/registration-requests/:id/reject' } },
+    ],
+    [
+      'PUT on the reject template',
+      { method: 'PUT', route: { path: '/v1/registration-requests/:id/reject' } },
+    ],
+    [
+      'a trailing slash on the reject template',
+      { method: 'POST', route: { path: '/v1/registration-requests/:id/reject/' } },
+    ],
+    [
+      'a differently named reject parameter',
+      { method: 'POST', route: { path: '/v1/registration-requests/:requestId/reject' } },
+    ],
+    [
+      'a deeper reject template',
+      { method: 'POST', route: { path: '/v1/registration-requests/:id/reject/:step' } },
+    ],
+    [
+      'a concrete reject URL where the template belongs',
       { method: 'POST', route: { path: `/v1/registration-requests/${PATH_SENTINEL}/reject` } },
+    ],
+    [
+      'a reject template with a query',
+      { method: 'POST', route: { path: '/v1/registration-requests/:id/reject?reason=x' } },
+    ],
+    [
+      'no matched route for a reject POST',
+      { method: 'POST', url: `/v1/registration-requests/${PATH_SENTINEL}/reject` },
     ],
     ['no matched route at all', { method: 'GET', url: '/v1/users' }],
     [
@@ -489,15 +530,14 @@ describe('IdentityRolesGuard', () => {
     expect(outcome(platformGuard(), exec, user(['ORGANIZATION_ADMIN'])).result).toBeUndefined();
   });
 
-  it('never marks the sibling POST /v1/registration-requests/:id/reject', () => {
+  it('marks ORGANIZATION_ADMIN’s reject refusal as the reject site, never as the approval', () => {
     const exec = execution(REJECT, rejectRequest);
-    const mine = outcome(identityGuard(), exec, user(['ORGANIZATION_ADMIN']));
-    const shared = outcome(platformGuard(), exec, user(['ORGANIZATION_ADMIN']));
+    const { result, error } = outcome(identityGuard(), exec, user(['ORGANIZATION_ADMIN']));
 
-    expect((mine.error as RastaError).code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
-    expect((mine.error as RastaError).status).toBe(403);
-    expect(refusalSiteOf(mine.error)).toBeUndefined();
-    expect(JSON.stringify(mine.error)).toBe(JSON.stringify(shared.error));
+    expect(result).toBeUndefined();
+    expect((error as RastaError).code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+    expect(refusalSiteOf(error)).toBe(REFUSAL_SITES.REJECT_REGISTRATION_REQUEST);
+    expect(refusalSiteOf(error)).not.toBe(REFUSAL_SITES.APPROVE_REGISTRATION_REQUEST);
   });
 
   it('does not mark outside HTTP', () => {
@@ -607,8 +647,11 @@ describe('IdentityRolesGuard', () => {
       ['no roles on the approve endpoint', APPROVE, user([])],
       ['no context on the approve endpoint', APPROVE, undefined],
       ['UNION_ADMIN on the reject endpoint', REJECT, user(['UNION_ADMIN'])],
+      ['SYSTEM_ADMIN on the reject endpoint', REJECT, user(['SYSTEM_ADMIN'])],
       ['ORGANIZATION_ADMIN on the reject endpoint', REJECT, user(['ORGANIZATION_ADMIN'])],
+      ['a service caller on the reject endpoint', REJECT, serviceCaller],
       ['a disallowed role on the reject endpoint', REJECT, user(['AUDITOR'])],
+      ['no roles on the reject endpoint', REJECT, user([])],
       ['no context on the reject endpoint', REJECT, undefined],
     ])('%s', (_label, handler, context) => {
       const exec = execution(handler, requestFor(handler));
@@ -625,4 +668,80 @@ describe('IdentityRolesGuard', () => {
       if (mine.result !== undefined) expect(mine.result).toBe(true);
     });
   });
+});
+
+/** What the platform exception filter sends for `error`, minus its timestamp. */
+function platformHttpResponse(
+  error: unknown,
+  request: ProbeRequest,
+  context: RequestContext,
+): { status?: number; body?: Record<string, unknown> } {
+  const sent: { status?: number; body?: Record<string, unknown> } = {};
+  const response = {
+    status: (code: number) => {
+      sent.status = code;
+      return response;
+    },
+    json: (body: unknown) => {
+      const { timestamp: _timestamp, ...rest } = body as Record<string, unknown>;
+      sent.body = rest;
+    },
+  };
+  const host = {
+    getType: () => 'http',
+    getArgs: () => [request, response],
+    getArgByIndex: (index: number) => [request, response][index],
+    switchToHttp: () => ({
+      getRequest: () => request,
+      getResponse: () => response,
+      getNext: () => undefined,
+    }),
+  } as unknown as ArgumentsHost;
+  const logger = { warn: jest.fn(), error: jest.fn(), debug: jest.fn(), info: jest.fn() };
+  runWithContext(context, () =>
+    new AllExceptionsFilter(logger as unknown as Logger).catch(error, host),
+  );
+  return sent;
+}
+
+describe('marking changes nothing observable — the comparator once every route is a site (Phase C9)', () => {
+  it.each(MARKED_SITES)(
+    '%s: the same denied caller gets the same error, and the same HTTP response, from both guards',
+    (_label, handler, request, siteName) => {
+      const exec = execution(handler, request);
+      const denied: RequestContext = { ...user(['FLEET_MANAGER']), path: request.url };
+      const mine = outcome(identityGuard(), exec, denied).error as RastaError;
+      const shared = outcome(platformGuard(), exec, denied).error as RastaError;
+
+      // The same class, status, code, message and internal context...
+      expect(mine).toBeInstanceOf(RastaError);
+      expect(mine.constructor).toBe(shared.constructor);
+      expect(mine.status).toBe(403);
+      expect([mine.status, mine.code, mine.message]).toEqual([
+        shared.status,
+        shared.code,
+        shared.message,
+      ]);
+      expect(mine.internalContext).toEqual(shared.internalContext);
+      expect(Object.keys(mine).sort()).toEqual(Object.keys(shared).sort());
+      expect(JSON.stringify(mine)).toBe(JSON.stringify(shared));
+
+      // ...and the only difference is out of band.
+      expect(refusalSiteOf(mine)).toBe(REFUSAL_SITES[siteName]);
+      expect(refusalSiteOf(shared)).toBeUndefined();
+
+      // What the platform filter sends is identical, and is the established refusal.
+      const forMine = platformHttpResponse(mine, request, denied);
+      expect(forMine).toEqual(platformHttpResponse(shared, request, denied));
+      expect(forMine).toEqual({
+        status: 403,
+        body: {
+          code: ERROR_CODES.INSUFFICIENT_ROLE,
+          message: 'You do not have permission to perform this action',
+          correlationId: denied.correlationId,
+          path: request.url,
+        },
+      });
+    },
+  );
 });

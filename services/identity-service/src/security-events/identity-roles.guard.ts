@@ -13,7 +13,7 @@ interface RouteAwareRequest {
 /**
  * identity-service's role guard: the platform `RolesGuard`, unchanged, plus
  * audit marking of the role refusals this service allowlists (ADR-053 § 4,
- * AUD-004 Phases C3–C8).
+ * AUD-004 Phases C3–C9).
  *
  * ## Authorization is the shared guard's, and only the shared guard's
  *

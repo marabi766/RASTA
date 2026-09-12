@@ -3,7 +3,7 @@ import type { RastaError } from '@rasta/nest-common';
 
 /**
  * The refusals this service records as audit evidence (ADR-053 § 4,
- * AUD-004 Phases C1–C8) — a fixed allowlist, and the only source of the audit
+ * AUD-004 Phases C1–C9) — a fixed allowlist, and the only source of the audit
  * `action`, `resourceType` and `reason` those records carry.
  *
  * ## Why an allowlist, and why it is attached where the decision is made
@@ -30,7 +30,7 @@ import type { RastaError } from '@rasta/nest-common';
  *                     `IdentityRolesGuard` after the shared guard decided —
  *                     the shared guard itself knows nothing of this table.
  *
- * Seven sites are instrumented. Every other `403` in this service — and in every
+ * Eight sites are instrumented. Every other `403` in this service — and in every
  * other service — is not recorded yet (ADR-053 plan § 8, R-2).
  */
 
@@ -222,10 +222,9 @@ export const REFUSAL_SITES = {
    * `RolesGuard` because the caller does not hold `UNION_ADMIN` (nor
    * `SYSTEM_ADMIN`) — AUD-004 Phase C8.
    *
-   * The first site whose endpoint requires a **single** role, and the last
-   * `RolesGuard` denial in this service apart from the sibling `/reject`, which
-   * stays uninstrumented on purpose: it is the comparator that proves marking
-   * changes nothing observable.
+   * The first site whose endpoint requires a **single** role. Its sibling
+   * `/reject` is a site of its own (Phase C9) with a distinct action, so the
+   * two outcomes of one review never aggregate into one row.
    *
    * The guard refuses before the registration request named in the path is
    * looked up and before the body is read or validated; the id and everything
@@ -250,6 +249,37 @@ export const REFUSAL_SITES = {
     resource: 'ACTOR_USER',
     reason:
       'Registration approval refused: the caller holds none of the roles this endpoint requires',
+  },
+
+  /**
+   * `POST /v1/registration-requests/:id/reject` refused by the platform
+   * `RolesGuard` because the caller does not hold `UNION_ADMIN` (nor
+   * `SYSTEM_ADMIN`) — AUD-004 Phase C9, and the last `@Roles` route in this
+   * service: with it, every role-guarded route is an allowlisted site.
+   *
+   * The guard refuses before the registration request named in the path is
+   * looked up and before the body — the stated rejection reason included — is
+   * read or validated; all of it is attacker-chosen, and the request may not
+   * exist. So the resource id is the caller's own user id from the verified
+   * token, and neither the path id, the reason, the endpoint's required role
+   * nor the error's internal context is ever recorded. The catalogue's
+   * `REGISTRATION_REJECTED` names a rejection that *happened*, which is not the
+   * verb of a refused command, so the action name and resource type are a
+   * Temporary Decision (`docs/24-open-questions.md` Q-51). The action differs
+   * from `APPROVE_REGISTRATION_REQUEST`'s so the two never share a row.
+   */
+  REJECT_REGISTRATION_REQUEST: {
+    key: 'identity.reject_registration_request',
+    method: 'POST',
+    route: '/v1/registration-requests/:id/reject',
+    status: 403,
+    errorCode: ERROR_CODES.INSUFFICIENT_ROLE,
+    decidedBy: 'ROLES_GUARD',
+    action: 'identity.registration_requests.reject',
+    resourceType: 'RegistrationRequest',
+    resource: 'ACTOR_USER',
+    reason:
+      'Registration rejection refused: the caller holds none of the roles this endpoint requires',
   },
 } as const satisfies Record<string, RefusalSite>;
 
