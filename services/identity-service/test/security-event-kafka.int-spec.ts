@@ -7,13 +7,19 @@ import {
   auditTrailPayloadSchemaV1,
   type EventEnvelope,
 } from '@rasta/contracts';
-import { EventConsumer, type EventDelivery, type OutboxRelay } from '@rasta/nest-common';
+import {
+  EventConsumer,
+  runUnscoped,
+  type EventDelivery,
+  type OutboxRelay,
+} from '@rasta/nest-common';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { AuditTrailPublisher } from '../src/security-events/audit-trail.publisher';
 import { REFUSAL_SITES, type RefusalSiteName } from '../src/security-events/refusal-sites';
 import { SECURITY_EVENT_RELAY } from '../src/security-events/security-event.relay';
 import { RUN_TAG, atFreshWindow, id, waitFor, waitForWindowClose } from './helpers';
 import { startIdentityApi, userToken, type Caller, type IdentityApiHarness } from './api-helpers';
+import { startAuditStub } from './audit-stub';
 
 /**
  * The refusal outbox against a real Kafka broker (ADR-053 § 4, AUD-004 Phases
@@ -592,6 +598,144 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
       );
       await sleep(500);
       expect(observer.deliveriesOf(eventId)).toHaveLength(1);
+    },
+    DELIVERY_TIMEOUT_MS + 60_000,
+  );
+
+  it(
+    'the audit correction command: one schema-valid correction on the trail, keyed by its target, relayed by the standard outbox (AUD-003 correction)',
+    async () => {
+      // The production wiring end to end on identity's side: the real command,
+      // the real standard outbox, the real standard relay, the real broker.
+      // audit-service is stood in for only at its lookup; what it does with
+      // this message is proved in its own Kafka suite and black-box.
+      const stub = await startAuditStub();
+      const corrections = await startIdentityApi({
+        runDomainRelay: true,
+        auditServiceUrl: stub.url,
+      });
+      const targetId = `01AUD${RUN_TAG}${ulid().slice(-11)}`;
+      const tenant = id('ORG');
+      const occurredAt = new Date(Date.now() - 120_000).toISOString();
+      stub.targets.set(targetId, { id: targetId, organizationId: tenant, occurredAt });
+      const admin: Caller = {
+        userId: id('USR'),
+        organizationId: id('ORGADMIN'),
+        roles: ['SYSTEM_ADMIN'],
+      };
+      const correlationId = id('COR');
+      const key = id('KEY');
+      const secret = `kafka-correction-secret-${RUN_TAG}`;
+      const body = {
+        auditEventId: targetId,
+        occurredAt,
+        reason: 'Recorded as SUCCESS; the operation actually failed (INC-4471)',
+        changes: [
+          { field: 'outcome', from: 'SUCCESS', to: 'FAILURE' },
+          { field: 'credentials.password', from: secret, to: `${secret}-new` },
+        ],
+      };
+      const send = () =>
+        request(corrections.app.getHttpServer())
+          .post('/v1/audit-corrections')
+          .set('authorization', `Bearer ${userToken(admin)}`)
+          .set('idempotency-key', key)
+          .set('x-correlation-id', correlationId)
+          .set('user-agent', USER_AGENT)
+          .send(body);
+
+      try {
+        const response = await send();
+        expect(response.status).toBe(202);
+        const eventId = response.body.eventId as string;
+
+        const [delivered] = await waitFor(
+          'a delivery of the correction',
+          async () => {
+            const found = observer.deliveriesOf(eventId);
+            return found.length > 0 ? found : null;
+          },
+          DELIVERY_TIMEOUT_MS,
+        );
+        const { envelope, delivery } = delivered!;
+        expect(delivery.topic).toBe(AUDIT_TRAIL_TOPIC);
+        expect(envelope).toMatchObject({
+          eventId,
+          eventName: AUDIT_EVENT_RECORDED,
+          eventVersion: 1,
+          producer: 'identity-service',
+          aggregateType: 'AuditEvent',
+          aggregateId: targetId,
+          // Tenant agreement: the envelope and the payload name the same tenant,
+          // and it is the target's, never the administrator's.
+          tenantId: tenant,
+          // The stream — and the Kafka key the relay published with — is the
+          // target id: the outbox row's partition key, asserted below.
+          streamKey: targetId,
+          streamSeq: 1,
+          correlationId,
+        });
+
+        const payload = auditTrailPayloadSchemaV1.parse(envelope.payload);
+        expect(payload).toEqual({
+          actor: { type: 'USER', id: admin.userId, roles: ['SYSTEM_ADMIN'] },
+          organizationId: tenant,
+          action: 'audit.correction',
+          resourceType: 'AuditEvent',
+          resourceId: targetId,
+          outcome: 'SUCCESS',
+          reason: body.reason,
+          changes: [
+            { field: 'outcome', from: 'SUCCESS', to: 'FAILURE' },
+            { field: 'credentials.password', from: { redacted: true }, to: { redacted: true } },
+          ],
+          occurrenceCount: 1,
+          source: { ip: expect.any(String), userAgent: USER_AGENT },
+          correctionOf: targetId,
+        });
+        const wire = JSON.stringify(envelope);
+        for (const leaked of [secret, admin.organizationId!, key]) {
+          expect(wire).not.toContain(leaked);
+        }
+
+        const row = await waitFor(
+          'the correction row to be acknowledged',
+          async () => {
+            const found = await runUnscoped('reads platform plumbing', () =>
+              corrections.prisma.client.outboxMessage.findUnique({ where: { id: eventId } }),
+            );
+            return found?.publishedAt ? found : null;
+          },
+          DELIVERY_TIMEOUT_MS,
+        );
+        expect(row).toMatchObject({ topic: AUDIT_TRAIL_TOPIC, partitionKey: targetId });
+
+        // A replay of the command is a replay: the same answer, no second message.
+        const replay = await send();
+        expect(replay.status).toBe(202);
+        expect(replay.body).toEqual(response.body);
+        await sleep(1_500);
+        expect(observer.deliveriesOf(eventId)).toHaveLength(1);
+        // The command reached audit-service only through its lookup, once.
+        expect(stub.lookups.filter((lookup) => lookup.id === targetId)).toHaveLength(1);
+      } finally {
+        await runUnscoped('integration cleanup of this run only', async () => {
+          await corrections.prisma.client.$executeRawUnsafe(
+            'DELETE FROM outbox_message WHERE aggregate_id = $1',
+            targetId,
+          );
+          await corrections.prisma.client.$executeRawUnsafe(
+            'DELETE FROM outbox_stream_sequence WHERE partition_key = $1',
+            targetId,
+          );
+          await corrections.prisma.client.$executeRawUnsafe(
+            'DELETE FROM audit_correction_command WHERE target_id = $1',
+            targetId,
+          );
+        });
+        await corrections.close();
+        await stub.close();
+      }
     },
     DELIVERY_TIMEOUT_MS + 60_000,
   );

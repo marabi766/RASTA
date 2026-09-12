@@ -60,6 +60,15 @@ const INTERNAL_SECRET = randomBytes(24).toString('hex');
  */
 const internalTokens = new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300);
 
+/**
+ * Verifies an internal token minted by the booted service, as the service it
+ * was minted for would. Used by the audit-service stand-in to prove the
+ * correction command authenticates its lookup exactly as ADR-020/035 require.
+ */
+export function verifyInternalToken(token: string, audience: string) {
+  return internalTokens.verify(token, audience);
+}
+
 /** A service-to-service token this service's auth guard verifies as genuine. */
 export function serviceToken(
   callerService = 'fleet-service',
@@ -132,6 +141,14 @@ export interface IdentityApiOptions {
   runSecurityRelay?: boolean;
   /** Replaces the refusal store — used to inject a failing write. */
   securityEventStore?: unknown;
+  /**
+   * `AUDIT_SERVICE_URL` — where the audit correction command looks its target
+   * up (AUD-003 correction). Defaults to an address nothing listens on, so a suite that
+   * never issues a correction cannot accidentally depend on one.
+   */
+  auditServiceUrl?: string;
+  /** Run the real standard-outbox relay against Kafka. Inert otherwise. */
+  runDomainRelay?: boolean;
 }
 
 export interface IdentityApiHarness {
@@ -163,6 +180,8 @@ export async function startIdentityApi(
     KEYCLOAK_SYNC_ENABLED: 'false',
     SECURITY_EVENT_CAPTURE_TIMEOUT_MS: String(options.captureTimeoutMs ?? 5000),
     SECURITY_EVENT_FLUSH_INTERVAL_MS: String(options.flushIntervalMs ?? 1000),
+    AUDIT_SERVICE_URL: options.auditServiceUrl ?? 'http://127.0.0.1:9',
+    AUDIT_REQUEST_TIMEOUT_MS: '2000',
     ...(options.aggregationWindowSeconds !== undefined
       ? { SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: String(options.aggregationWindowSeconds) }
       : {}),
@@ -171,8 +190,6 @@ export async function startIdentityApi(
   let builder = Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(ENV)
     .useValue(env)
-    .overrideProvider(OutboxRelay)
-    .useValue(inertRelay)
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
       // Wrapped exactly as `app.module.ts` wraps it, so these suites boot the
@@ -202,6 +219,9 @@ export async function startIdentityApi(
         }),
     });
 
+  if (!options.runDomainRelay) {
+    builder = builder.overrideProvider(OutboxRelay).useValue(inertRelay);
+  }
   if (!options.runSecurityRelay) {
     builder = builder.overrideProvider(SECURITY_EVENT_RELAY).useValue(inertRelay);
   }
