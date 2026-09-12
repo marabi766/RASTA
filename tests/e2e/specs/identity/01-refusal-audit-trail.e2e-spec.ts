@@ -4,8 +4,10 @@ import { e2eConfig, ORG } from '../../src/env';
 import { waitFor } from '../../src/events';
 
 /**
- * AUD-004 Phases C1–C7, black-box, over the real stack (ADR-053 § 4): one
- * scenario per instrumented identity refusal site (C1, C3, C4, C5, C6, C7).
+ * AUD-004 Phases C1–C8, black-box, over the real stack (ADR-053 § 4): one
+ * scenario per instrumented identity refusal site (C1, C3, C4, C5, C6, C7, C8),
+ * plus the uninstrumented `POST /v1/registration-requests/:id/reject` beside
+ * the C8 approval as the comparison and the negative probe.
  *
  *   HTTP 403 ×N → identity-service's RefusalAuditExceptionFilter
  *               → one security_event_outbox row counting N (identity's own database)
@@ -682,6 +684,124 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     expect(settled.page.items.map((item) => [item.id, item.occurrenceCount])).toEqual([
       [record.id, REFUSALS],
     ]);
+
+    // The refused caller cannot read the evidence its refusal produced.
+    const own = await auditor.get(
+      `/v1/audit-events?${new URLSearchParams({ ...recentWindow(), correlationId }).toString()}`,
+    );
+    expect(own.status).toBe(403);
+  });
+
+  test(`${REFUSALS} role refusals of POST /v1/registration-requests/:id/approve with varying request ids and body secrets are recorded as one INSUFFICIENT_ROLE record counting ${REFUSALS} (AUD-004 Phase C8)`, async ({
+    auditor,
+    systemAdmin,
+  }) => {
+    // `province.auditor` holds only AUDITOR, so it lacks UNION_ADMIN and the
+    // platform RolesGuard refuses POST /v1/registration-requests/:id/approve
+    // before the registration request is looked up or the body is read. Every
+    // refusal names a different request and a different body secret; the record
+    // must aggregate by the caller alone.
+    const windowMs = e2eConfig().identityAggregationWindowSeconds * 1000;
+    if (windowMs < BURST_BUDGET_MS + WINDOW_START_MARGIN_MS * 2) {
+      throw new Error(
+        `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS=${windowMs / 1000} is too short to place ` +
+          `${REFUSALS} refusals in one window from outside the service`,
+      );
+    }
+    test.setTimeout(windowMs * 2 + 180_000);
+
+    const correlationId = `e2e-approve-refusal-${randomUUID()}`;
+    const targets = Array.from({ length: REFUSALS }, () => `REG-e2e-approve-${randomUUID()}`);
+    const bodySecrets = Array.from(
+      { length: REFUSALS },
+      () => `e2e-approve-secret-${randomUUID()}`,
+    );
+    await atFreshWindow(windowMs);
+    const burstStartedAt = Date.now();
+
+    for (let i = 0; i < REFUSALS; i += 1) {
+      const response = await auditor.post(`/v1/registration-requests/${targets[i]}/approve`, {
+        body: { organizationId: `ORG-${bodySecrets[i]}`, roles: ['UNION_ADMIN'] },
+        correlationId,
+      });
+      expect(response.status).toBe(403);
+      expect(errorCode(response.body)).toBe('INSUFFICIENT_ROLE');
+      expect((response.body as { message?: string }).message).toBe(
+        'You do not have permission to perform this action',
+      );
+      expect(response.correlationId).toBe(correlationId);
+      // The platform's error body echoes the caller's own path back to them,
+      // unchanged and the same for every route; the body is never echoed.
+      expect(JSON.stringify(response.body)).not.toContain(bodySecrets[i]!);
+    }
+    expect(Date.now() - burstStartedAt).toBeLessThan(BURST_BUDGET_MS);
+
+    // The sibling review outcome is uninstrumented: the same method, the same
+    // prefix and the same single required role produce the identical response
+    // and no record of their own.
+    const rejectCorrelationId = `e2e-reject-probe-${randomUUID()}`;
+    const rejection = await auditor.post(`/v1/registration-requests/${randomUUID()}/reject`, {
+      body: { reason: `e2e-reject-${randomUUID()}` },
+      correlationId: rejectCorrelationId,
+    });
+    expect(rejection.status).toBe(403);
+    expect(errorCode(rejection.body)).toBe('INSUFFICIENT_ROLE');
+    expect((rejection.body as { message?: string }).message).toBe(
+      'You do not have permission to perform this action',
+    );
+
+    let records: AuditRecord[] = [];
+    await waitFor(
+      `the aggregated approve-refusal record for correlation ${correlationId}`,
+      async () => {
+        const { status, page } = await findByCorrelation(systemAdmin, correlationId);
+        if (status !== 200 || page.items.length === 0) return false;
+        records = page.items;
+        return true;
+      },
+      windowMs + 150_000,
+      () => `last seen: ${JSON.stringify(records)}`,
+    );
+
+    expect(records).toHaveLength(1);
+    const record = records[0]!;
+    expect(record.occurrenceCount).toBe(REFUSALS);
+    expect(record.outcome).toBe('REFUSED');
+    expect(record.errorCode).toBe('INSUFFICIENT_ROLE');
+    expect(record.action).toBe('identity.registration_requests.approve');
+    expect(record.resourceType).toBe('RegistrationRequest');
+    expect(record.actorType).toBe('USER');
+    // The verified caller, never any of the registration requests the paths named.
+    expect(record.resourceId).toBe(record.actorId);
+    expect(record.sourceService).toBe('identity-service');
+    expect(record.sourceTopic).toBe('rasta.audit.trail.v1');
+    expect(record.correlationId).toBe(correlationId);
+    expect(record.organizationId).toBe(ORG.oversight);
+    expect(record.actorRoles).toContain('AUDITOR');
+    const serialised = JSON.stringify(record);
+    for (const leaked of [
+      ...targets,
+      ...bodySecrets,
+      'REG-e2e-approve-',
+      '/registration-requests',
+      '/approve',
+      'UNION_ADMIN',
+      'permission',
+    ]) {
+      expect(serialised).not.toContain(leaked);
+    }
+
+    await sleep(3_000);
+    const settled = await findByCorrelation(systemAdmin, correlationId);
+    expect(settled.status).toBe(200);
+    expect(settled.page.items.map((item) => [item.id, item.occurrenceCount])).toEqual([
+      [record.id, REFUSALS],
+    ]);
+
+    // The uninstrumented rejection produced no record at all.
+    const probe = await findByCorrelation(systemAdmin, rejectCorrelationId);
+    expect(probe.status).toBe(200);
+    expect(probe.page.items).toHaveLength(0);
 
     // The refused caller cannot read the evidence its refusal produced.
     const own = await auditor.get(

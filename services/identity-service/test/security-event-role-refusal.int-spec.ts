@@ -13,19 +13,24 @@ import { startIdentityApi, userToken, type Caller, type IdentityApiHarness } fro
 import { atFreshWindow, waitForWindowClose } from './helpers';
 
 /**
- * The five roles-guard refusal sites — `GET /v1/users` (AUD-004 Phase C3),
+ * The six roles-guard refusal sites — `GET /v1/users` (AUD-004 Phase C3),
  * `POST /v1/users` (Phase C4), `POST /v1/users/:id/memberships` (Phase C5),
- * `POST /v1/memberships/:id/roles` (Phase C6) and
- * `POST /v1/memberships/:id/revoke` (Phase C7), each refused by the roles guard
- * with `403 INSUFFICIENT_ROLE` — against a real PostgreSQL (ADR-053 § 4).
+ * `POST /v1/memberships/:id/roles` (Phase C6),
+ * `POST /v1/memberships/:id/revoke` (Phase C7) and
+ * `POST /v1/registration-requests/:id/approve` (Phase C8), each refused by the
+ * roles guard with `403 INSUFFICIENT_ROLE` — against a real PostgreSQL
+ * (ADR-053 § 4).
  *
  * Every refusal here is a real request through the real `AppModule`: the global
  * auth guard, then `IdentityRolesGuard` delegating to the platform
  * `RolesGuard`, then the refusal filter, then the Phase C2 aggregation upsert.
  * Nothing about any site bypasses any of them.
  *
- * `POST /v1/registration-requests/:id/approve` stays uninstrumented, so it is
- * the comparison for "the response is unchanged" and one of the negative probes.
+ * `POST /v1/registration-requests/:id/reject` stays uninstrumented, so it is
+ * the comparison for "the response is unchanged" and the sole negative probe.
+ * It is the strongest one available: the same method, the same path prefix and
+ * the same single required role as the approval next to it — only the allowlist
+ * separates them.
  *
  * A two-second aggregation window (configuration, not a bypass) lets the suite
  * watch a window close. Everything written carries `TAG`; cleanup removes
@@ -39,6 +44,7 @@ const CREATE = REFUSAL_SITES.CREATE_USER;
 const MEMBERSHIP = REFUSAL_SITES.ADD_MEMBERSHIP;
 const ROLES = REFUSAL_SITES.UPDATE_MEMBERSHIP_ROLES;
 const REVOKE = REFUSAL_SITES.REVOKE_MEMBERSHIP;
+const APPROVE = REFUSAL_SITES.APPROVE_REGISTRATION_REQUEST;
 const WINDOW_SECONDS = 2;
 
 const QUERY_SECRET = `query-secret-${TAG}`;
@@ -47,6 +53,8 @@ const BODY_SECRET = `body-secret-${TAG}`;
 const PATH_SECRET = `path-secret-${TAG}`;
 /** The endpoint's required roles: policy, never evidence. */
 const REQUIRED_ROLES = ['ORGANIZATION_ADMIN', 'UNION_ADMIN'];
+/** The approval endpoint requires exactly one role. Still policy, still never evidence. */
+const APPROVE_REQUIRED_ROLE = 'UNION_ADMIN';
 
 /** A user the caller asks to create. Attacker-chosen: none of it is evidence. */
 const createBody = (marker: string = BODY_SECRET): Record<string, unknown> => ({
@@ -75,6 +83,13 @@ const rolesBody = (marker: string = BODY_SECRET): Record<string, unknown> => ({
 /** The reason the caller states for a revocation. Attacker-chosen: not evidence. */
 const revokeBody = (marker: string = BODY_SECRET): Record<string, unknown> => ({
   reason: `${marker}-revoke-reason`,
+});
+
+/** What the caller says the approval should grant. Attacker-chosen: not evidence. */
+const approveBody = (marker: string = BODY_SECRET): Record<string, unknown> => ({
+  organizationId: `ORG-BODY-${marker}`,
+  roles: ['SYSTEM_ADMIN', 'UNION_ADMIN'],
+  note: `${marker}-approve-note`,
 });
 
 describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () => {
@@ -168,10 +183,30 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     return call.send(options.body ?? revokeBody());
   }
 
-  /** An uninstrumented role refusal: same guard, same error, not an allowlisted template. */
-  const approveRegistration = (caller: Caller) =>
+  function approveRegistration(
+    caller: Caller,
+    options: {
+      target?: string;
+      body?: Record<string, unknown>;
+      headers?: Record<string, string>;
+    } = {},
+  ) {
+    const call = request(harness.app.getHttpServer())
+      .post(`/v1/registration-requests/${options.target ?? `REG-${PATH_SECRET}`}/approve`)
+      .set('authorization', `Bearer ${userToken(caller)}`)
+      .set('x-correlation-id', tagged('COR'));
+    for (const [name, value] of Object.entries(options.headers ?? {})) call.set(name, value);
+    return call.send(options.body ?? approveBody());
+  }
+
+  /**
+   * An uninstrumented role refusal: the same guard, the same error, the same
+   * single required role and the same path prefix as the approval — but not an
+   * allowlisted template.
+   */
+  const rejectRegistration = (caller: Caller) =>
     request(harness.app.getHttpServer())
-      .post(`/v1/registration-requests/${tagged('REG')}/approve`)
+      .post(`/v1/registration-requests/${tagged('REG')}/reject`)
       .set('authorization', `Bearer ${userToken(caller)}`)
       .send({});
 
@@ -261,7 +296,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
 
     it('answers with the same response shape as an uninstrumented role refusal', async () => {
       const refused = caller();
-      expectSameShape(await listUsers(refused), await approveRegistration(refused));
+      expectSameShape(await listUsers(refused), await rejectRegistration(refused));
     });
 
     it('aggregates sequential refusals in one short window, and opens a new row in the next', async () => {
@@ -363,7 +398,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
 
     it('answers with the same response shape as an uninstrumented role refusal', async () => {
       const refused = caller();
-      expectSameShape(await createUser(refused), await approveRegistration(refused));
+      expectSameShape(await createUser(refused), await rejectRegistration(refused));
       // The uninstrumented refusal is still uncaptured; the instrumented one is.
       expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([CREATE.action]);
     });
@@ -480,7 +515,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
 
     it('answers with the same response shape as an uninstrumented role refusal', async () => {
       const refused = caller();
-      expectSameShape(await addMembership(refused), await approveRegistration(refused));
+      expectSameShape(await addMembership(refused), await rejectRegistration(refused));
       expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([MEMBERSHIP.action]);
     });
 
@@ -601,8 +636,8 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
 
     it('answers with the same response shape as an uninstrumented role refusal', async () => {
       const refused = caller();
-      expectSameShape(await replaceRoles(refused), await approveRegistration(refused));
-      // The uninstrumented revoke is still uncaptured; the role replacement is.
+      expectSameShape(await replaceRoles(refused), await rejectRegistration(refused));
+      // The uninstrumented rejection is still uncaptured; the role replacement is.
       expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([ROLES.action]);
     });
 
@@ -723,8 +758,8 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
 
     it('answers with the same response shape as an uninstrumented role refusal', async () => {
       const refused = caller();
-      expectSameShape(await revokeMembership(refused), await approveRegistration(refused));
-      // The uninstrumented registration approval is still uncaptured; the revocation is.
+      expectSameShape(await revokeMembership(refused), await rejectRegistration(refused));
+      // The uninstrumented registration rejection is still uncaptured; the revocation is.
       expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([REVOKE.action]);
     });
 
@@ -778,7 +813,167 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     });
   });
 
-  it('tenant isolation: never merges refusals across tenants or actors, nor across the six sites', async () => {
+  describe('POST /v1/registration-requests/:id/approve (Phase C8)', () => {
+    it('captures a real INSUFFICIENT_ROLE refusal attributed to the verified caller, with nothing from the path, approval body, role policy, token, cookie or error text', async () => {
+      const refused = caller(['AUDITOR']);
+      const token = userToken(refused);
+      const correlationId = tagged('COR');
+      const target = `REG-${PATH_SECRET}`;
+
+      const response = await request(harness.app.getHttpServer())
+        .post(`/v1/registration-requests/${target}/approve?role=UNION_ADMIN&note=${QUERY_SECRET}`)
+        .set('authorization', `Bearer ${token}`)
+        .set('cookie', `session=${COOKIE_SECRET}`)
+        .set('x-correlation-id', correlationId)
+        .send(approveBody());
+
+      expect(response.status).toBe(403);
+      expect(response.body).toMatchObject({
+        code: ERROR_CODES.INSUFFICIENT_ROLE,
+        message: 'You do not have permission to perform this action',
+        correlationId,
+      });
+      // As for every route, the platform's error body echoes the caller's own
+      // path back to them, unchanged; the body is never echoed.
+      expect(JSON.stringify(response.body)).not.toContain(BODY_SECRET);
+
+      const rows = await rowsFor(refused.userId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        organizationId: refused.organizationId,
+        actorType: 'USER',
+        actorId: refused.userId,
+        actorRoles: ['AUDITOR'],
+        action: 'identity.registration_requests.approve',
+        resourceType: 'RegistrationRequest',
+        // The verified caller — never the registration request the path names.
+        resourceId: refused.userId,
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: APPROVE.reason,
+        correlationId,
+        occurrenceCount: 1,
+        publishedAt: null,
+        claimCount: 0,
+      });
+      expect(rows[0]!.resourceId).not.toBe(target);
+
+      const everything = await rawRow(rows[0]!.id);
+      for (const leaked of [
+        ...REQUIRED_ROLES,
+        APPROVE_REQUIRED_ROLE,
+        'SYSTEM_ADMIN',
+        PATH_SECRET,
+        target,
+        BODY_SECRET,
+        'ORG-BODY-',
+        QUERY_SECRET,
+        COOKIE_SECRET,
+        token,
+        '/v1/registration-requests',
+        '/approve',
+        ':id',
+        'role=',
+        'You do not have permission',
+        'required',
+      ]) {
+        expect(everything).not.toContain(leaked);
+      }
+    });
+
+    it('answers with the same response shape as the uninstrumented rejection beside it', async () => {
+      const refused = caller();
+      expectSameShape(await approveRegistration(refused), await rejectRegistration(refused));
+      // The uninstrumented rejection is still uncaptured; the approval is.
+      expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([APPROVE.action]);
+    });
+
+    it('aggregates by the caller across different request ids and body secrets in one window, and opens a new row in the next', async () => {
+      const refused = caller();
+      await atFreshWindow(prisma, WINDOW_SECONDS, 1_500);
+
+      for (let i = 0; i < 3; i += 1) {
+        // A different registration request and body every time: neither is
+        // aggregation-key material.
+        const response = await approveRegistration(refused, {
+          target: `REG-${PATH_SECRET}-${i}`,
+          body: approveBody(`${BODY_SECRET}-${i}`),
+        });
+        expect(response.status).toBe(403);
+        expect(response.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+      }
+
+      const [first, ...others] = await rowsFor(refused.userId);
+      expect(others).toHaveLength(0);
+      expect(first).toMatchObject({
+        occurrenceCount: 3,
+        action: APPROVE.action,
+        resourceId: refused.userId,
+      });
+      expect(aggregationWindowOf(first!.occurredAt, WINDOW_SECONDS)).toEqual({
+        startedAt: first!.windowStartedAt,
+        endsAt: first!.windowEndsAt,
+      });
+
+      await waitForWindowClose(prisma, first!.id);
+      expect((await approveRegistration(refused)).status).toBe(403);
+
+      const rows = await rowsFor(refused.userId);
+      expect(rows.map((row) => row.occurrenceCount)).toEqual([3, 1]);
+      expect(rows.map((row) => row.action)).toEqual([APPROVE.action, APPROVE.action]);
+      expect(rows[1]!.windowStartedAt.getTime()).toBeGreaterThanOrEqual(
+        rows[0]!.windowEndsAt.getTime(),
+      );
+    });
+
+    it('lets the shared guard allow UNION_ADMIN and SYSTEM_ADMIN, and captures nothing for them', async () => {
+      for (const roles of [['UNION_ADMIN'], ['SYSTEM_ADMIN']]) {
+        const allowed = caller(roles);
+
+        // An invalid body: the guard lets the request through to validation,
+        // which rejects `roles: []` against `min(1)` — so nothing is approved.
+        const invalid = await approveRegistration(allowed, { body: { roles: [] } });
+        expect(invalid.status).toBe(400);
+        expect(invalid.body.code).not.toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+
+        // An empty body is *valid* here (`roles` is optional), so this one gets
+        // past the guard and past validation and reaches the domain, which
+        // answers 404 for a registration request that was never created. That
+        // is the stronger demonstration: the allowed caller was stopped by
+        // nothing this slice added.
+        const notFound = await approveRegistration(allowed, { body: {} });
+        expect(notFound.status).toBe(404);
+        expect(notFound.body.code).not.toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+
+        expect(await rowsFor(allowed.userId)).toHaveLength(0);
+      }
+    });
+
+    it('refuses and captures ORGANIZATION_ADMIN, which every other roles-guard site allows', async () => {
+      // This endpoint requires UNION_ADMIN alone. The shared guard makes that
+      // call; the site only has to follow it exactly.
+      const refused = caller(['ORGANIZATION_ADMIN']);
+      const response = await approveRegistration(refused);
+      expect(response.status).toBe(403);
+      expect(response.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+
+      const rows = await rowsFor(refused.userId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        action: APPROVE.action,
+        resourceType: APPROVE.resourceType,
+        resourceId: refused.userId,
+        // The caller's own role from the token, not the role the endpoint wants.
+        actorRoles: ['ORGANIZATION_ADMIN'],
+      });
+
+      // The same caller is allowed by the shared guard on an earlier site.
+      const allowedElsewhere = await listUsers(refused);
+      expect(allowedElsewhere.status).toBe(200);
+      expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([APPROVE.action]);
+    });
+  });
+
+  it('tenant isolation: never merges refusals across tenants or actors, nor across the seven sites', async () => {
     const home = tagged('ORG');
     const second = tagged('ORG');
     const person: Caller = {
@@ -812,6 +1007,13 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
         (await revokeMembership(person, { headers: { 'x-organization-id': second } })).status,
       ).toBe(403);
       expect((await revokeMembership(colleague)).status).toBe(403);
+      expect(
+        (await approveRegistration(person, { target: `REG-${PATH_SECRET}-${i}` })).status,
+      ).toBe(403);
+      expect(
+        (await approveRegistration(person, { headers: { 'x-organization-id': second } })).status,
+      ).toBe(403);
+      expect((await approveRegistration(colleague)).status).toBe(403);
     }
     // The same person refused by all three other sites in the same window.
     expect((await listUsers(person)).status).toBe(403);
@@ -822,10 +1024,25 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
       .send({ organizationId: `ORG-REQ-${TAG}` });
     expect(switchRefusal.status).toBe(403);
 
+    // Totalled per (action, tenant), not per row: with seven sites this burst
+    // may cross a window boundary, which splits one identity's refusals over two
+    // rows. That is the *aggregation* property, proved per site above and on
+    // either side of a boundary in `security-event-aggregation.int-spec.ts`.
+    // What this test owns is the *isolation* property: what must never be
+    // merged, never is — so the identity, not the window, is what it counts by.
+    const totals = (
+      rows: { action: string; organizationId: string | null; occurrenceCount: number }[],
+    ) => {
+      const summed = new Map<string, number>();
+      for (const row of rows) {
+        const identity = `${row.action} ${row.organizationId}`;
+        summed.set(identity, (summed.get(identity) ?? 0) + row.occurrenceCount);
+      }
+      return [...summed].map(([identity, count]) => `${identity} ${count}`).sort();
+    };
+
     const personRows = await rowsFor(person.userId);
-    expect(
-      personRows.map((row) => `${row.action} ${row.organizationId} ${row.occurrenceCount}`).sort(),
-    ).toEqual(
+    expect(totals(personRows)).toEqual(
       [
         `identity.active_organization.switch ${home} 1`,
         `identity.users.list ${home} 1`,
@@ -836,45 +1053,47 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
         `identity.memberships.roles.replace ${second} 2`,
         `identity.memberships.revoke ${home} 2`,
         `identity.memberships.revoke ${second} 2`,
+        `identity.registration_requests.approve ${home} 2`,
+        `identity.registration_requests.approve ${second} 2`,
       ].sort(),
     );
-    expect(
-      (await rowsFor(colleague.userId))
-        .map((row) => `${row.action} ${row.organizationId} ${row.occurrenceCount}`)
-        .sort(),
-    ).toEqual(
+    // No row of the person's is ever filed under the colleague, or vice versa.
+    expect(personRows.every((row) => row.actorId === person.userId)).toBe(true);
+    expect(totals(await rowsFor(colleague.userId))).toEqual(
       [
         `${MEMBERSHIP.action} ${home} 2`,
         `${ROLES.action} ${home} 2`,
         `${REVOKE.action} ${home} 2`,
+        `${APPROVE.action} ${home} 2`,
       ].sort(),
     );
     // A tenant-scoped read sees only its own tenant's rows.
     const secondTenantRows = await prisma.client.securityEventOutbox.findMany({
       where: { organizationId: second, actorId: { in: [person.userId, colleague.userId] } },
     });
-    expect(secondTenantRows.map((row) => `${row.actorId} ${row.action}`).sort()).toEqual(
+    expect(
+      [...new Set(secondTenantRows.map((row) => `${row.actorId} ${row.action}`))].sort(),
+    ).toEqual(
       [
         `${person.userId} ${MEMBERSHIP.action}`,
         `${person.userId} ${ROLES.action}`,
         `${person.userId} ${REVOKE.action}`,
+        `${person.userId} ${APPROVE.action}`,
       ].sort(),
     );
   });
 
-  it('captures nothing for an INSUFFICIENT_ROLE from a role-guarded endpoint that is not allowlisted', async () => {
+  it('captures nothing for the one role-guarded endpoint that is still not allowlisted', async () => {
     const refused = caller();
     // Paths, not requests: supertest binds a listener per request and closes
     // it when that request ends, so each one is built only when it is sent.
-    const paths = [
-      `/v1/registration-requests/${tagged('REG')}/approve`,
-      `/v1/registration-requests/${tagged('REG')}/reject`,
-    ];
-    for (const path of paths) {
+    // `/reject` is the sibling of an instrumented route: same method, same
+    // prefix, same single required role, and still no row.
+    for (let i = 0; i < 2; i += 1) {
       const response = await request(harness.app.getHttpServer())
-        .post(path)
+        .post(`/v1/registration-requests/${tagged('REG')}/reject`)
         .set('authorization', `Bearer ${userToken(refused)}`)
-        .send({});
+        .send({ reason: `${BODY_SECRET}-reject-${i}` });
       expect(response.status).toBe(403);
       expect(response.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
     }
@@ -887,6 +1106,11 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     ['POST /v1/users/:id/memberships', MEMBERSHIP, (refused) => addMembership(refused)],
     ['POST /v1/memberships/:id/roles', ROLES, (refused) => replaceRoles(refused)],
     ['POST /v1/memberships/:id/revoke', REVOKE, (refused) => revokeMembership(refused)],
+    [
+      'POST /v1/registration-requests/:id/approve',
+      APPROVE,
+      (refused) => approveRegistration(refused),
+    ],
   ])(
     '%s becomes claimable only once its window closes, as one contract-valid event with the aggregated count',
     async (_label, site, refuse) => {
