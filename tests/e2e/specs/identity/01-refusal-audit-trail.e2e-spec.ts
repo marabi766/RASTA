@@ -4,8 +4,8 @@ import { e2eConfig, ORG } from '../../src/env';
 import { waitFor } from '../../src/events';
 
 /**
- * AUD-004 Phases C1–C6, black-box, over the real stack (ADR-053 § 4): one
- * scenario per instrumented identity refusal site (C1, C3, C4, C5, C6).
+ * AUD-004 Phases C1–C7, black-box, over the real stack (ADR-053 § 4): one
+ * scenario per instrumented identity refusal site (C1, C3, C4, C5, C6, C7).
  *
  *   HTTP 403 ×N → identity-service's RefusalAuditExceptionFilter
  *               → one security_event_outbox row counting N (identity's own database)
@@ -572,6 +572,103 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
       '/memberships',
       '/roles',
       'SYSTEM_ADMIN',
+      'ORGANIZATION_ADMIN',
+      'UNION_ADMIN',
+      'permission',
+    ]) {
+      expect(serialised).not.toContain(leaked);
+    }
+
+    await sleep(3_000);
+    const settled = await findByCorrelation(systemAdmin, correlationId);
+    expect(settled.status).toBe(200);
+    expect(settled.page.items.map((item) => [item.id, item.occurrenceCount])).toEqual([
+      [record.id, REFUSALS],
+    ]);
+
+    // The refused caller cannot read the evidence its refusal produced.
+    const own = await auditor.get(
+      `/v1/audit-events?${new URLSearchParams({ ...recentWindow(), correlationId }).toString()}`,
+    );
+    expect(own.status).toBe(403);
+  });
+
+  test(`${REFUSALS} role refusals of POST /v1/memberships/:id/revoke with varying memberships and reasons are recorded as one INSUFFICIENT_ROLE record counting ${REFUSALS} (AUD-004 Phase C7)`, async ({
+    auditor,
+    systemAdmin,
+  }) => {
+    // `province.auditor` holds only AUDITOR, so the platform RolesGuard refuses
+    // POST /v1/memberships/:id/revoke (ORGANIZATION_ADMIN | UNION_ADMIN) before
+    // the membership is looked up or the body is read. Every refusal names a
+    // different membership and a different reason; the record must aggregate by
+    // the caller alone.
+    const windowMs = e2eConfig().identityAggregationWindowSeconds * 1000;
+    if (windowMs < BURST_BUDGET_MS + WINDOW_START_MARGIN_MS * 2) {
+      throw new Error(
+        `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS=${windowMs / 1000} is too short to place ` +
+          `${REFUSALS} refusals in one window from outside the service`,
+      );
+    }
+    test.setTimeout(windowMs * 2 + 180_000);
+
+    const correlationId = `e2e-revoke-refusal-${randomUUID()}`;
+    const targets = Array.from({ length: REFUSALS }, () => `MBR-e2e-revoke-${randomUUID()}`);
+    const bodySecrets = Array.from({ length: REFUSALS }, () => `e2e-revoke-reason-${randomUUID()}`);
+    await atFreshWindow(windowMs);
+    const burstStartedAt = Date.now();
+
+    for (let i = 0; i < REFUSALS; i += 1) {
+      const response = await auditor.post(`/v1/memberships/${targets[i]}/revoke`, {
+        body: { reason: bodySecrets[i] },
+        correlationId,
+      });
+      expect(response.status).toBe(403);
+      expect(errorCode(response.body)).toBe('INSUFFICIENT_ROLE');
+      expect((response.body as { message?: string }).message).toBe(
+        'You do not have permission to perform this action',
+      );
+      expect(response.correlationId).toBe(correlationId);
+      // The platform's error body echoes the caller's own path back to them,
+      // unchanged and the same for every route; the body is never echoed.
+      expect(JSON.stringify(response.body)).not.toContain(bodySecrets[i]!);
+    }
+    expect(Date.now() - burstStartedAt).toBeLessThan(BURST_BUDGET_MS);
+
+    let records: AuditRecord[] = [];
+    await waitFor(
+      `the aggregated revoke-refusal record for correlation ${correlationId}`,
+      async () => {
+        const { status, page } = await findByCorrelation(systemAdmin, correlationId);
+        if (status !== 200 || page.items.length === 0) return false;
+        records = page.items;
+        return true;
+      },
+      windowMs + 150_000,
+      () => `last seen: ${JSON.stringify(records)}`,
+    );
+
+    expect(records).toHaveLength(1);
+    const record = records[0]!;
+    expect(record.occurrenceCount).toBe(REFUSALS);
+    expect(record.outcome).toBe('REFUSED');
+    expect(record.errorCode).toBe('INSUFFICIENT_ROLE');
+    expect(record.action).toBe('identity.memberships.revoke');
+    expect(record.resourceType).toBe('Membership');
+    expect(record.actorType).toBe('USER');
+    // The verified caller, never any of the memberships the paths named.
+    expect(record.resourceId).toBe(record.actorId);
+    expect(record.sourceService).toBe('identity-service');
+    expect(record.sourceTopic).toBe('rasta.audit.trail.v1');
+    expect(record.correlationId).toBe(correlationId);
+    expect(record.organizationId).toBe(ORG.oversight);
+    expect(record.actorRoles).toContain('AUDITOR');
+    const serialised = JSON.stringify(record);
+    for (const leaked of [
+      ...targets,
+      ...bodySecrets,
+      'MBR-e2e-revoke-',
+      '/memberships',
+      '/revoke',
       'ORGANIZATION_ADMIN',
       'UNION_ADMIN',
       'permission',
