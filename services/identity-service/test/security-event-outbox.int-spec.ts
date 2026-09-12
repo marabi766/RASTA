@@ -233,7 +233,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
     ).toBe(0);
   });
 
-  it('captures no 401, no route near miss, no guard-level TENANT_MISMATCH and no successful switch', async () => {
+  it('captures no 401, no route near miss, no unattributable guard refusal and no successful switch', async () => {
     const before = await prisma.client.securityEventOutbox.count({
       where: { correlationId: { contains: TAG } },
     });
@@ -269,9 +269,13 @@ describe('security_event_outbox (real PostgreSQL)', () => {
       await prisma.client.securityEventOutbox.count({ where: { actorId: underPrivileged.userId } }),
     ).toBe(0);
 
-    // 403 TENANT_MISMATCH raised by the auth guard for a header outside the
-    // token's memberships — the same code, but not the identity decision.
-    const probing: Caller = { userId: tagged('USR'), organizationId: tagged('ORG') };
+    // The auth guard's own 403 TENANT_MISMATCH — a site of its own since
+    // Phase C10, so it is no longer a negative control for *being* a guard
+    // refusal. What stays uncaptured is the unattributable one: this token has
+    // no active organization, so there is no trusted tenant to file evidence
+    // under and the refusal is deliberately not recorded (fail closed). The
+    // captured case is proved in `security-event-auth-guard.int-spec.ts`.
+    const probing: Caller = { userId: tagged('USR'), organizationIds: [tagged('ORG')] };
     const guardRefusal = await switchOrganization(harness, probing, tagged('ORG'), {
       headers: { 'x-organization-id': tagged('ORGHDR') },
     });

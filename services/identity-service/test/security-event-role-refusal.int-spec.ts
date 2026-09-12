@@ -32,8 +32,10 @@ import { atFreshWindow, waitForWindowClose } from './helpers';
  * response is therefore pinned to the exact refusal the platform has always
  * given (`expectPlatformRefusal`), and the byte-for-byte equivalence with the
  * platform `RolesGuard` is proved in `identity-roles.guard.spec.ts`. The
- * negative controls are near misses of the instrumented templates and the auth
- * guard's own, unmarked refusal.
+ * negative controls are near misses of the instrumented templates. Since Phase
+ * C10 the auth guard's own refusal is a site too, so it is no longer a negative
+ * control for being uncaptured — it is asserted here to be captured as *its own*
+ * site, which is what proves the two guards never mark each other's refusals.
  *
  * A two-second aggregation window (configuration, not a bypass) lets the suite
  * watch a window close. Everything written carries `TAG`; cleanup removes
@@ -1288,7 +1290,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     );
   });
 
-  it('captures nothing for a near miss of an instrumented template, nor for a refusal no site decided', async () => {
+  it('captures nothing for a near miss of an instrumented template, and files the auth guard’s refusal under its own site', async () => {
     const refused = caller();
     // Every `@Roles` route in identity-service is a site since Phase C9, so the
     // negative control is no longer "another role-guarded route" but everything
@@ -1307,15 +1309,27 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
       expect(response.status).toBe(404);
     }
 
-    // ...and the auth guard's own TENANT_MISMATCH on an instrumented route: a
-    // refusal made before any role decision, so its error is never marked.
-    const guarded = await rejectRegistration(refused, {
+    expect(await rowsFor(refused.userId)).toHaveLength(0);
+
+    // ...and the auth guard's own TENANT_MISMATCH on an instrumented route.
+    // It is refused before any role decision, so it is never the role site: a
+    // separate caller sends it, and their single row carries the auth guard's
+    // action, not this route's (Phase C10).
+    const probing = caller();
+    const guarded = await rejectRegistration(probing, {
       headers: { 'x-organization-id': tagged('ORG') },
     });
     expect(guarded.status).toBe(403);
     expect(guarded.body.code).toBe(ERROR_CODES.TENANT_MISMATCH);
 
-    expect(await rowsFor(refused.userId)).toHaveLength(0);
+    const guardRows = await rowsFor(probing.userId);
+    expect(guardRows).toHaveLength(1);
+    expect(guardRows[0]).toMatchObject({
+      action: REFUSAL_SITES.AUTH_TENANT_MISMATCH.action,
+      errorCode: 'TENANT_MISMATCH',
+      resourceId: probing.userId,
+    });
+    expect(guardRows[0]!.action).not.toBe(REJECT.action);
   });
 
   it.each<[string, RefusalSite, (refused: Caller) => request.Test]>([

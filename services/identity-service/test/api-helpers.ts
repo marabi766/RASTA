@@ -10,6 +10,7 @@ import {
 } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { AppModule, ENV } from '../src/app.module';
+import { withAuthGuardRefusalAudit } from '../src/security-events/auth-guard-refusal';
 import { loadIdentityEnv } from '../src/config/env';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { SecurityEventOutboxStore } from '../src/security-events/security-event-outbox.store';
@@ -51,6 +52,21 @@ export const SERVICE_NAME = 'identity-service';
 
 /** Minted per run — a literal would be indistinguishable from a real secret (S-01). */
 const INTERNAL_SECRET = randomBytes(24).toString('hex');
+
+/**
+ * The internal tokens the booted service will accept — the same instance the
+ * harness configures the guard with, so a test can act as another service
+ * exactly as that service would (ADR-020, ADR-035).
+ */
+const internalTokens = new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300);
+
+/** A service-to-service token this service's auth guard verifies as genuine. */
+export function serviceToken(
+  callerService = 'fleet-service',
+  organizationId?: string,
+): Promise<string> {
+  return internalTokens.issue(callerService, SERVICE_NAME, 'SERVICE', organizationId);
+}
 
 export interface TestClaims {
   sub: string;
@@ -159,27 +175,31 @@ export async function startIdentityApi(
     .useValue(inertRelay)
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
-      factory: (): AuthGuardOptions => ({
-        serviceName: SERVICE_NAME,
-        internalTokens: new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300),
-        tokenVerifier: {
-          verifyUserToken: async (token: string) => {
-            const claims = decodeClaims(token);
-            return {
-              sub: claims.sub,
-              rastaUserId: claims.rastaUserId,
-              organizationId: claims.organizationId,
-              organizationIds: claims.organizationIds ?? [],
-              roles: claims.roles,
-              username: claims.username,
-              expiresAt: Date.now() + 60_000,
-            };
-          },
-          // JUSTIFIED-ANY: the guard depends on the concrete TokenVerifier class
-          // and this stub implements only the method it calls.
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any,
-      }),
+      // Wrapped exactly as `app.module.ts` wraps it, so these suites boot the
+      // production refusal-audit observation of the auth guard's own tenant
+      // refusal rather than a harness that quietly lacks it (Phase C10).
+      factory: (): AuthGuardOptions =>
+        withAuthGuardRefusalAudit({
+          serviceName: SERVICE_NAME,
+          internalTokens,
+          tokenVerifier: {
+            verifyUserToken: async (token: string) => {
+              const claims = decodeClaims(token);
+              return {
+                sub: claims.sub,
+                rastaUserId: claims.rastaUserId,
+                organizationId: claims.organizationId,
+                organizationIds: claims.organizationIds ?? [],
+                roles: claims.roles,
+                username: claims.username,
+                expiresAt: Date.now() + 60_000,
+              };
+            },
+            // JUSTIFIED-ANY: the guard depends on the concrete TokenVerifier class
+            // and this stub implements only the method it calls.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+        }),
     });
 
   if (!options.runSecurityRelay) {

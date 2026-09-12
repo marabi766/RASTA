@@ -457,6 +457,7 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
       });
       const expected: Record<RefusalSiteName, [string, string]> = {
         SWITCH_ACTIVE_ORGANIZATION: ['identity.active_organization.switch', 'User'],
+        AUTH_TENANT_MISMATCH: ['identity.tenant_context.select', 'User'],
         LIST_USERS: ['identity.users.list', 'User'],
         CREATE_USER: ['identity.users.create', 'User'],
         ADD_MEMBERSHIP: ['identity.memberships.create', 'Membership'],
@@ -487,6 +488,105 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
 
       await waitFor(
         'the role refusal row to be acknowledged',
+        async () => (await rowOf(eventId)).publishedAt,
+        DELIVERY_TIMEOUT_MS,
+      );
+      await sleep(500);
+      expect(observer.deliveriesOf(eventId)).toHaveLength(1);
+    },
+    DELIVERY_TIMEOUT_MS + 60_000,
+  );
+
+  it(
+    'the auth guard tenant refusal: repeated probes in one window become one contract-valid TENANT_MISMATCH event with their count',
+    async () => {
+      // AUD-004 Phase C10. The refusal the platform `AuthGuard` itself makes,
+      // before any controller authorization: each probe names a different
+      // organization in `X-Organization-Id` and aims at a different endpoint,
+      // and all of it aggregates into the one record the caller's own tenant
+      // and actor identify.
+      const site = REFUSAL_SITES.AUTH_TENANT_MISMATCH;
+      const caller: Caller = { userId: id('USR'), organizationId: id('ORG'), roles: ['AUDITOR'] };
+      const token = userToken(caller);
+      const probeSecret = `tenant-probe-secret-${RUN_TAG}`;
+      await atFreshWindow(identity.prisma, WINDOW_SECONDS, 2_000);
+
+      const rejected: string[] = [];
+      const correlations: string[] = [];
+      const paths = ['/v1/users/me', '/v1/users', `/v1/users/USR-${probeSecret}`];
+      for (let i = 0; i < 3; i += 1) {
+        const requested = `ORG-REJECTED-${RUN_TAG}-${ulid()}`;
+        const correlationId = id('COR');
+        rejected.push(requested);
+        correlations.push(correlationId);
+
+        const response = await request(identity.app.getHttpServer())
+          .get(`${paths[i]}?q=${probeSecret}`)
+          .set('authorization', `Bearer ${token}`)
+          .set('user-agent', USER_AGENT)
+          .set('x-correlation-id', correlationId)
+          .set('x-organization-id', requested);
+
+        expect(response.status).toBe(403);
+        expect(response.body).toMatchObject({
+          code: ERROR_CODES.TENANT_MISMATCH,
+          message: 'You are not a member of the requested organization',
+          correlationId,
+        });
+      }
+
+      const rows = await identity.prisma.client.securityEventOutbox.findMany({
+        where: { actorId: caller.userId },
+      });
+      expect(rows).toHaveLength(1);
+      const eventId = rows[0]!.id;
+      expect(rows[0]!.occurrenceCount).toBe(3);
+
+      // Silent on the topic while the window is open.
+      await sleep(500);
+      if ((await rowOf(eventId)).windowEndsAt.getTime() > Date.now() + 300) {
+        expect(observer.deliveriesOf(eventId)).toHaveLength(0);
+        expect((await rowOf(eventId)).publishedAt).toBeNull();
+      }
+
+      const [delivered] = await waitFor(
+        'a delivery of the aggregated auth-guard refusal',
+        async () => {
+          const found = observer.deliveriesOf(eventId);
+          return found.length > 0 ? found : null;
+        },
+        DELIVERY_TIMEOUT_MS,
+      );
+      const { envelope, delivery } = delivered!;
+      expect(delivery.topic).toBe(AUDIT_TRAIL_TOPIC);
+      expect(envelope.eventName).toBe(AUDIT_EVENT_RECORDED);
+      expect(envelope.eventId).toBe(eventId);
+      // The tenant the caller legitimately acts for, from the verified token.
+      expect(envelope.tenantId).toBe(caller.organizationId);
+      expect(envelope.correlationId).toBe(correlations[0]);
+
+      const payload = auditTrailPayloadSchemaV1.parse(envelope.payload);
+      expect(payload).toMatchObject({
+        actor: { type: 'USER', id: caller.userId, roles: ['AUDITOR'] },
+        organizationId: caller.organizationId,
+        action: site.action,
+        resourceType: site.resourceType,
+        resourceId: caller.userId,
+        outcome: 'REFUSED',
+        errorCode: 'TENANT_MISMATCH',
+        reason: site.reason,
+        occurrenceCount: 3,
+      });
+
+      // Nothing the caller chose reached the wire: not the organizations they
+      // asked for, not the endpoints they aimed at, not the token.
+      const wire = JSON.stringify({ envelope, payload });
+      for (const leaked of [...rejected, probeSecret, token, '/v1/users', 'You are not a member']) {
+        expect(wire).not.toContain(leaked);
+      }
+
+      await waitFor(
+        'the auth-guard refusal row to be acknowledged',
         async () => (await rowOf(eventId)).publishedAt,
         DELIVERY_TIMEOUT_MS,
       );
