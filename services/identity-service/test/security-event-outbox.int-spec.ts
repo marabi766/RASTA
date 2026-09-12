@@ -248,16 +248,16 @@ describe('security_event_outbox (real PostgreSQL)', () => {
 
     // 403 INSUFFICIENT_ROLE from the roles guard on an endpoint that is not an
     // allowlisted site. (`GET /v1/users`, `POST /v1/users`,
-    // `POST /v1/users/:id/memberships` and `POST /v1/memberships/:id/roles`
-    // became sites in AUD-004 Phases C3–C6 and are proved captured in
-    // `security-event-role-refusal.int-spec.ts`.)
+    // `POST /v1/users/:id/memberships`, `POST /v1/memberships/:id/roles` and
+    // `POST /v1/memberships/:id/revoke` became sites in AUD-004 Phases C3–C7
+    // and are proved captured in `security-event-role-refusal.int-spec.ts`.)
     const underPrivileged: Caller = { userId: tagged('USR'), organizationId: tagged('ORG') };
-    const revoking = await request(harness.app.getHttpServer())
-      .post(`/v1/memberships/${tagged('MBR')}/revoke`)
+    const approving = await request(harness.app.getHttpServer())
+      .post(`/v1/registration-requests/${tagged('REG')}/approve`)
       .set('authorization', `Bearer ${userToken(underPrivileged)}`)
       .send({});
-    expect(revoking.status).toBe(403);
-    expect(revoking.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+    expect(approving.status).toBe(403);
+    expect(approving.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
 
     // 403 TENANT_MISMATCH raised by the auth guard for a header outside the
     // token's memberships — the same code, but not the identity decision.

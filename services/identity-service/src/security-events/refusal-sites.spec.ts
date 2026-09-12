@@ -2,14 +2,15 @@ import { AUDIT_ACTION_PATTERN, ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
 import { markRefusal, refusalSiteOf, rolesGuardSiteFor, REFUSAL_SITES } from './refusal-sites';
 
-describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C6)', () => {
-  it('instruments exactly five refusal sites', () => {
+describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C7)', () => {
+  it('instruments exactly six refusal sites', () => {
     expect(Object.keys(REFUSAL_SITES)).toEqual([
       'SWITCH_ACTIVE_ORGANIZATION',
       'LIST_USERS',
       'CREATE_USER',
       'ADD_MEMBERSHIP',
       'UPDATE_MEMBERSHIP_ROLES',
+      'REVOKE_MEMBERSHIP',
     ]);
   });
 
@@ -93,6 +94,23 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C6)', () => 
     });
   });
 
+  it('pins the membership revocation to POST /v1/memberships/:id/revoke, 403 and INSUFFICIENT_ROLE, decided by the roles guard', () => {
+    expect(REFUSAL_SITES.REVOKE_MEMBERSHIP).toEqual({
+      key: 'identity.revoke_membership',
+      method: 'POST',
+      route: '/v1/memberships/:id/revoke',
+      status: 403,
+      errorCode: ERROR_CODES.INSUFFICIENT_ROLE,
+      decidedBy: 'ROLES_GUARD',
+      action: 'identity.memberships.revoke',
+      resourceType: 'Membership',
+      // The caller, never the membership named in the path.
+      resource: 'ACTOR_USER',
+      reason:
+        'Membership revocation refused: the caller holds none of the roles this endpoint requires',
+    });
+  });
+
   it('names no role, no query value and no URL in any site’s fixed evidence', () => {
     for (const site of Object.values(REFUSAL_SITES)) {
       for (const text of [site.action, site.resourceType, site.reason]) {
@@ -107,6 +125,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C6)', () => 
       ['POST', '/v1/users', 'CREATE_USER'],
       ['POST', '/v1/users/:id/memberships', 'ADD_MEMBERSHIP'],
       ['POST', '/v1/memberships/:id/roles', 'UPDATE_MEMBERSHIP_ROLES'],
+      ['POST', '/v1/memberships/:id/revoke', 'REVOKE_MEMBERSHIP'],
     ])('finds the roles-guard site for exactly %s %s', (method, route, expected) => {
       expect(rolesGuardSiteFor(method, route)).toBe(expected);
     });
@@ -134,7 +153,15 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C6)', () => 
       ['a differently named roles parameter', 'POST', '/v1/memberships/:membershipId/roles'],
       ['a deeper roles template', 'POST', '/v1/memberships/:id/roles/:role'],
       ['the membership collection', 'POST', '/v1/memberships'],
-      ['membership revoke', 'POST', '/v1/memberships/:id/revoke'],
+      ['lower-case POST on the revoke template', 'post', '/v1/memberships/:id/revoke'],
+      ['GET on the revoke template', 'GET', '/v1/memberships/:id/revoke'],
+      ['PUT on the revoke template', 'PUT', '/v1/memberships/:id/revoke'],
+      ['PATCH on the revoke template', 'PATCH', '/v1/memberships/:id/revoke'],
+      ['a concrete revoke URL', 'POST', '/v1/memberships/MBR_01ABC/revoke'],
+      ['a revoke template with a query', 'POST', '/v1/memberships/:id/revoke?reason=x'],
+      ['a trailing slash on the revoke template', 'POST', '/v1/memberships/:id/revoke/'],
+      ['a differently named revoke parameter', 'POST', '/v1/memberships/:membershipId/revoke'],
+      ['a deeper revoke template', 'POST', '/v1/memberships/:id/revoke/:confirm'],
       ['registration approval', 'POST', '/v1/registration-requests/:id/approve'],
       ['registration rejection', 'POST', '/v1/registration-requests/:id/reject'],
       ['a concrete URL', 'GET', '/v1/users?q=x'],
@@ -167,7 +194,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C6)', () => 
     const identities = Object.values(REFUSAL_SITES).map(
       (site) => `${site.action}|${site.resourceType}|${site.errorCode}`,
     );
-    expect(identities).toHaveLength(5);
+    expect(identities).toHaveLength(6);
     expect(new Set(identities).size).toBe(identities.length);
   });
 
@@ -202,28 +229,45 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C6)', () => 
     expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
   });
 
-  it('keeps the two Membership sites apart by action, so their evidence never merges', () => {
-    const add = REFUSAL_SITES.ADD_MEMBERSHIP;
-    const replace = REFUSAL_SITES.UPDATE_MEMBERSHIP_ROLES;
-    expect(replace.resourceType).toBe(add.resourceType);
-    expect(replace.errorCode).toBe(add.errorCode);
-    expect(replace.action).not.toBe(add.action);
-    expect(replace.route).not.toBe(add.route);
+  it('keeps the three Membership sites apart by action, so their evidence never merges', () => {
+    const membershipSites = [
+      REFUSAL_SITES.ADD_MEMBERSHIP,
+      REFUSAL_SITES.UPDATE_MEMBERSHIP_ROLES,
+      REFUSAL_SITES.REVOKE_MEMBERSHIP,
+    ];
+    // Same resource type and same error code: only the action separates them.
+    for (const site of membershipSites) {
+      expect(site.resourceType).toBe('Membership');
+      expect(site.errorCode).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+    }
+    expect(new Set(membershipSites.map((site) => site.action)).size).toBe(3);
+    expect(new Set(membershipSites.map((site) => site.route)).size).toBe(3);
   });
 
-  it.each(['CREATE_USER', 'ADD_MEMBERSHIP', 'UPDATE_MEMBERSHIP_ROLES'] as const)(
-    'marks a role refusal as %s without changing its serialisation',
-    (siteName) => {
-      const plain = RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['AUDITOR']);
-      const marked = markRefusal(
-        RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['AUDITOR']),
-        siteName,
-      );
-      expect(refusalSiteOf(marked)).toBe(REFUSAL_SITES[siteName]);
-      expect(refusalSiteOf(plain)).toBeUndefined();
-      expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
-    },
-  );
+  it('keeps the two membership sub-resource sites on one prefix apart by their last segment', () => {
+    const roles = REFUSAL_SITES.UPDATE_MEMBERSHIP_ROLES;
+    const revoke = REFUSAL_SITES.REVOKE_MEMBERSHIP;
+    expect(revoke.method).toBe(roles.method);
+    expect(revoke.route).not.toBe(roles.route);
+    expect(revoke.key).not.toBe(roles.key);
+    expect(revoke.reason).not.toBe(roles.reason);
+  });
+
+  it.each([
+    'CREATE_USER',
+    'ADD_MEMBERSHIP',
+    'UPDATE_MEMBERSHIP_ROLES',
+    'REVOKE_MEMBERSHIP',
+  ] as const)('marks a role refusal as %s without changing its serialisation', (siteName) => {
+    const plain = RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['AUDITOR']);
+    const marked = markRefusal(
+      RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['AUDITOR']),
+      siteName,
+    );
+    expect(refusalSiteOf(marked)).toBe(REFUSAL_SITES[siteName]);
+    expect(refusalSiteOf(plain)).toBeUndefined();
+    expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
+  });
 
   it('recognises only the error instance that was marked', () => {
     const marked = markRefusal(

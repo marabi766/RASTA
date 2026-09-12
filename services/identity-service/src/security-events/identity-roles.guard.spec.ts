@@ -16,8 +16,9 @@ import { refusalSiteOf, REFUSAL_SITES } from './refusal-sites';
  * The identity role guard is the shared `RolesGuard` plus one thing: it marks
  * the shared guard's own `INSUFFICIENT_ROLE` refusal — the same object — when,
  * and only when, the matched route is an allowlisted `ROLES_GUARD` site
- * (AUD-004 Phases C3–C6: `GET /v1/users`, `POST /v1/users`,
- * `POST /v1/users/:id/memberships` and `POST /v1/memberships/:id/roles`).
+ * (AUD-004 Phases C3–C7: `GET /v1/users`, `POST /v1/users`,
+ * `POST /v1/users/:id/memberships`, `POST /v1/memberships/:id/roles` and
+ * `POST /v1/memberships/:id/revoke`).
  */
 
 class ProbeController {
@@ -33,6 +34,9 @@ class ProbeController {
   @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
   replaceRoles(): void {}
 
+  @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
+  revokeMembership(): void {}
+
   @Public('guard spec probe')
   open(): void {}
 
@@ -43,6 +47,7 @@ const LIST = ProbeController.prototype.list;
 const CREATE = ProbeController.prototype.create;
 const ADD_MEMBERSHIP = ProbeController.prototype.addMembership;
 const REPLACE_ROLES = ProbeController.prototype.replaceRoles;
+const REVOKE = ProbeController.prototype.revokeMembership;
 const OPEN = ProbeController.prototype.open;
 const ANY = ProbeController.prototype.anyAuthenticated;
 
@@ -86,21 +91,32 @@ const replaceRolesRequest: ProbeRequest = {
   body: { roles: ['SYSTEM_ADMIN'], reason: BODY_SENTINEL },
 };
 
-const requestFor = (handler: () => void): ProbeRequest =>
-  handler === CREATE
-    ? createRequest
-    : handler === ADD_MEMBERSHIP
-      ? addMembershipRequest
-      : handler === REPLACE_ROLES
-        ? replaceRolesRequest
-        : listRequest;
+const revokeRequest: ProbeRequest = {
+  method: 'POST',
+  route: { path: '/v1/memberships/:id/revoke' },
+  url: `/v1/memberships/${PATH_SENTINEL}/revoke?reason=UNION_ADMIN`,
+  params: { id: PATH_SENTINEL },
+  body: { reason: BODY_SENTINEL },
+};
 
-type MarkedSiteName = 'CREATE_USER' | 'ADD_MEMBERSHIP' | 'UPDATE_MEMBERSHIP_ROLES';
+const REQUEST_BY_HANDLER = new Map<() => void, ProbeRequest>([
+  [CREATE, createRequest],
+  [ADD_MEMBERSHIP, addMembershipRequest],
+  [REPLACE_ROLES, replaceRolesRequest],
+  [REVOKE, revokeRequest],
+]);
+
+const requestFor = (handler: () => void): ProbeRequest =>
+  REQUEST_BY_HANDLER.get(handler) ?? listRequest;
+
+type MarkedSiteName =
+  'CREATE_USER' | 'ADD_MEMBERSHIP' | 'UPDATE_MEMBERSHIP_ROLES' | 'REVOKE_MEMBERSHIP';
 
 const MARKED_SITES: [string, () => void, ProbeRequest, MarkedSiteName][] = [
   ['POST /v1/users', CREATE, createRequest, 'CREATE_USER'],
   ['POST /v1/users/:id/memberships', ADD_MEMBERSHIP, addMembershipRequest, 'ADD_MEMBERSHIP'],
   ['POST /v1/memberships/:id/roles', REPLACE_ROLES, replaceRolesRequest, 'UPDATE_MEMBERSHIP_ROLES'],
+  ['POST /v1/memberships/:id/revoke', REVOKE, revokeRequest, 'REVOKE_MEMBERSHIP'],
 ];
 
 function execution(
@@ -315,7 +331,43 @@ describe('IdentityRolesGuard', () => {
       'no matched route for a roles POST',
       { method: 'POST', url: `/v1/memberships/${PATH_SENTINEL}/roles` },
     ],
-    ['membership revoke', { method: 'POST', route: { path: '/v1/memberships/:id/revoke' } }],
+    [
+      'a lower-case method on the revoke template',
+      { method: 'post', route: { path: '/v1/memberships/:id/revoke' } },
+    ],
+    [
+      'GET on the revoke template',
+      { method: 'GET', route: { path: '/v1/memberships/:id/revoke' } },
+    ],
+    [
+      'PUT on the revoke template',
+      { method: 'PUT', route: { path: '/v1/memberships/:id/revoke' } },
+    ],
+    [
+      'a trailing slash on the revoke template',
+      { method: 'POST', route: { path: '/v1/memberships/:id/revoke/' } },
+    ],
+    [
+      'a differently named revoke parameter',
+      { method: 'POST', route: { path: '/v1/memberships/:membershipId/revoke' } },
+    ],
+    [
+      'a deeper revoke template',
+      { method: 'POST', route: { path: '/v1/memberships/:id/revoke/:confirm' } },
+    ],
+    [
+      'a concrete revoke URL where the template belongs',
+      { method: 'POST', route: { path: `/v1/memberships/${PATH_SENTINEL}/revoke` } },
+    ],
+    [
+      'a revoke template with a query',
+      { method: 'POST', route: { path: '/v1/memberships/:id/revoke?reason=x' } },
+    ],
+    [
+      'no matched route for a revoke POST',
+      { method: 'POST', url: `/v1/memberships/${PATH_SENTINEL}/revoke` },
+    ],
+    ['the membership collection', { method: 'POST', route: { path: '/v1/memberships' } }],
     [
       'registration approval',
       { method: 'POST', route: { path: '/v1/registration-requests/:id/approve' } },
@@ -429,6 +481,13 @@ describe('IdentityRolesGuard', () => {
       ['a disallowed role on the roles endpoint', REPLACE_ROLES, user(['AUDITOR'])],
       ['no roles on the roles endpoint', REPLACE_ROLES, user([])],
       ['no context on the roles endpoint', REPLACE_ROLES, undefined],
+      ['ORGANIZATION_ADMIN on the revoke endpoint', REVOKE, user(['ORGANIZATION_ADMIN'])],
+      ['UNION_ADMIN on the revoke endpoint', REVOKE, user(['UNION_ADMIN'])],
+      ['SYSTEM_ADMIN on the revoke endpoint', REVOKE, user(['SYSTEM_ADMIN'])],
+      ['a service caller on the revoke endpoint', REVOKE, serviceCaller],
+      ['a disallowed role on the revoke endpoint', REVOKE, user(['AUDITOR'])],
+      ['no roles on the revoke endpoint', REVOKE, user([])],
+      ['no context on the revoke endpoint', REVOKE, undefined],
     ])('%s', (_label, handler, context) => {
       const exec = execution(handler, requestFor(handler));
       const mine = outcome(identityGuard(), exec, context);
