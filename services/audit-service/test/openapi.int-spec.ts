@@ -148,6 +148,31 @@ describe('the published OpenAPI contract (real application)', () => {
     });
   });
 
+  describe('the scrape target it serves and does not publish', () => {
+    it('answers GET /metrics without a token, in the Prometheus text format', async () => {
+      // Booted from the real `AppModule`, behind the real global guards: a
+      // metrics controller that was never registered, or one the guards close,
+      // cannot answer 200 here.
+      const response = await request(server).get('/metrics');
+
+      expect(response.status).toBe(200);
+      expect(String(response.headers['content-type'])).toMatch(/^text\/plain/);
+      expect(String(response.headers['content-type'])).toContain('version=0.0.4');
+      expect(response.text).toContain('# TYPE rasta_audit_records_ingested_total counter');
+      expect(response.text).toContain('# TYPE rasta_audit_chain_verifications_total counter');
+    });
+
+    it('keeps /metrics, and the probes, out of the published document', () => {
+      // The contract stays the four read paths asserted above. An open route
+      // published here would be stamped with bearer security it does not have.
+      const paths = Object.keys(document.paths ?? {});
+
+      expect(paths).not.toContain('/metrics');
+      expect(paths.some((path) => path.includes('metrics') || path.includes('health'))).toBe(false);
+      expect(paths.sort()).toEqual([...PATHS, INTERNAL].sort());
+    });
+  });
+
   describe('the parameters it publishes', () => {
     it('marks from and to required on every endpoint', () => {
       // The marketplace failure, prevented: a client that does not know these

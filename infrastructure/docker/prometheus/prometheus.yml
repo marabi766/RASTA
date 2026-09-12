@@ -27,5 +27,6 @@ scrape_configs:
           - 'host.docker.internal:3000'
           - 'host.docker.internal:3101'
           - 'host.docker.internal:3102'
+          - 'host.docker.internal:3115'
         labels:
           environment: local

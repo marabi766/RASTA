@@ -72,10 +72,12 @@
 
 > **درباره متریک‌ها — صادقانه.** `audit-service` متریک‌های `rasta_audit_ingestion_failures_total{reason}`،
 > `rasta_audit_ingestion_lag_seconds{source_topic}` و `rasta_audit_records_ingested_total{source_service,source_topic,outcome}` را
-> **در فرایند ثبت می‌کند، ولی امروز هیچ Route `/metrics` ندارد** (برخلاف `identity-service`) و هدف Scrape
-> `infrastructure/docker/prometheus/prometheus.yml` هم نیست. پس هیچ داشبورد یا هشداری از آن‌ها فرض نکن؛ تا وقتی آن Route
-> ساخته شود، شواهد `audit-service` از Readiness، Log، Lag کافکا، DLQ و API جست‌وجوست. همچنین `rasta_dlq_messages_total`
-> تعریف شده ولی `EventConsumer` مشترک آن را **افزایش نمی‌دهد** — عمق DLQ را از خود Topic بخوان. متریک‌های
+> در فرایند ثبت می‌کند و از **`GET /metrics`** همان سرویس (پورت پیش‌فرض `3115`، `@Public`، بیرون از قرارداد OpenAPI، بی هیچ
+> شناسهٔ مستأجر/Actor/منبع/رویداد/Correlation در Label) صادر می‌کند. `host.docker.internal:3115` در Job `rasta-services`
+> فایل **محلی** `infrastructure/docker/prometheus/prometheus.yml` هست؛ پیکربندی Scrape محیط واقعی وابسته به استقرار است و
+> در مخزن نیست. **هیچ قاعدهٔ هشدار و هیچ داشبوردی** روی این متریک‌ها در مخزن نیست، پس هشداری فرض نکن: شواهد همچنان از
+> خواندن مستقیم `/metrics` (یا Prometheus محلی)، Readiness، Log، Lag کافکا، DLQ و API جست‌وجوست. همچنین
+> `rasta_dlq_messages_total` تعریف شده ولی `EventConsumer` مشترک آن را **افزایش نمی‌دهد** — عمق DLQ را از خود Topic بخوان. متریک‌های
 > `rasta_security_event_*` و `rasta_outbox_*` در `/metrics` خودِ `identity-service` صادر می‌شوند.
 
 ## اثر
@@ -312,9 +314,11 @@ SELECT id, source_topic, source_service, occurred_at, recorded_at, occurrence_co
 
 ## پیشگیری
 
-- **Route `/metrics` برای `audit-service` و هدف Scrape آن** — امروز نیست؛ بدون آن هیچ متریک ورودی حسابرسی قابل هشدار نیست.
+- Route `/metrics` در `audit-service` و هدف Scrape محلی آن (`host.docker.internal:3115`) **اکنون وجود دارند**؛ پیکربندی Scrape
+  محیط واقعی هنوز وابسته به استقرار و بیرون از مخزن است.
 - قاعدهٔ هشدار روی `rasta_audit_ingestion_failures_total`، Lag هر دو گروه `audit-service.*`، رشد `rasta.audit.v1.dlq`، و
-  `rasta_security_event_captures_total{outcome=~"failed|timeout"}` — هیچ‌کدام امروز در مخزن نیست.
+  `rasta_security_event_captures_total{outcome=~"failed|timeout"}` — هیچ‌کدام امروز در مخزن نیست، هرچند متریک‌های
+  `audit-service` اکنون قابل Scrape‌اند.
 - افزایش `rasta_dlq_messages_total` در `EventConsumer` مشترک، تا این متریکِ تعریف‌شده واقعاً چیزی بشمارد.
 - Script بازپخش DLQ (R-6) یا حذف ارجاع به آن از [replay-dlq](replay-dlq.md).
 - نگهداشت Topic مسیر B و DLQ در محیط واقعی را صریح و مستند کن؛ Script محلی فقط سی روز دارد.

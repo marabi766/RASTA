@@ -14,8 +14,10 @@
 > نمی‌کند** — گام ۷ پایین. رکوردی که نرسیده (نه رکوردی که تغییر کرده) موضوع
 > [`audit-gap-detected.md`](audit-gap-detected.md) است.
 >
-> **هشدار محرک امروز خودکار نیست:** `rasta_audit_chain_verification_failures_total` در فرایند
-> `audit-service` ثبت می‌شود، ولی آن سرویس هنوز Route `/metrics` ندارد و قاعدهٔ هشداری در مخزن نیست.
+> **هشدار محرک امروز خودکار نیست:** `rasta_audit_chain_verification_failures_total` و دیگر متریک‌های
+> زنجیره در فرایند `audit-service` ثبت و از `GET /metrics` آن صادر می‌شوند، و Prometheus **محلی**
+> (`infrastructure/docker/prometheus/prometheus.yml`) آن را Scrape می‌کند؛ ولی **هیچ قاعدهٔ هشداری در
+> مخزن نیست** که این Runbook را خودکار آغاز کند، و Scrape محیط واقعی وابسته به استقرار است.
 > تا آن وقت، این Runbook با پاسخ `DIVERGENT` یک فراخوانی `verify` شروع می‌شود.
 
 ---

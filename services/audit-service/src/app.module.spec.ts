@@ -22,6 +22,7 @@ import {
 } from './audit/audit.query.pipes';
 import { AuditVerificationService } from './audit/audit.verification.service';
 import { HealthController } from './health/health.controller';
+import { MetricsController } from './observability/metrics.controller';
 import { ENV, LOGGER } from './tokens';
 import type { AuditEnv } from './config/env';
 import {
@@ -139,14 +140,51 @@ describe('audit-service composition root', () => {
     process.env = originalEnv;
   });
 
-  it('registers exactly the health probes, the read API and the internal target lookup', () => {
+  it('registers exactly the health probes, the metrics scrape target, the read API and the internal target lookup', () => {
     // Pinned rather than left open: another controller here is either a write
     // surface `docs/04` § 4.15 forbids or an export route nothing builds yet,
     // and both should have to change this line before they ship. AUD-004 Phase
     // B added a consumer, not a controller. AUD-003 correction adds one internal *read*,
     // reserved for identity-service's service token — still no write surface.
+    // The metrics controller is a single public GET over the shared registry;
+    // `metrics.controller.spec.ts` proves that route over HTTP, and this line is
+    // what proves it is registered at all.
     const controllers = (Reflect.getMetadata('controllers', AppModule) ?? []) as unknown[];
-    expect(controllers).toEqual([HealthController, AuditController, AuditInternalController]);
+    expect(controllers).toEqual([
+      HealthController,
+      MetricsController,
+      AuditController,
+      AuditInternalController,
+    ]);
+  });
+
+  it('opens no write surface and no export route on any registered controller', () => {
+    // Structural, over every handler of every registered controller: each is a
+    // GET, and no path names an export. Nest stores the method as a
+    // `RequestMethod` number, where GET is 0.
+    const controllers = (Reflect.getMetadata('controllers', AppModule) ?? []) as (new (
+      ...args: never[]
+    ) => object)[];
+
+    for (const controller of controllers) {
+      const prototype = controller.prototype as Record<string, unknown>;
+      const handlers = Object.getOwnPropertyNames(prototype)
+        .filter((name) => name !== 'constructor')
+        .map((name) => prototype[name])
+        .filter((handler) => Reflect.hasMetadata('method', handler as object));
+
+      expect(handlers.length).toBeGreaterThan(0);
+      for (const handler of handlers) {
+        expect(Reflect.getMetadata('method', handler as object)).toBe(0);
+        const path = [
+          Reflect.getMetadata('path', controller),
+          Reflect.getMetadata('path', handler as object),
+        ]
+          .flat()
+          .join('/');
+        expect(path).not.toMatch(/export/i);
+      }
+    }
   });
 
   it('registers the guards globally, authentication before authorization', () => {

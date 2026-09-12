@@ -180,6 +180,21 @@
 > می‌کند ولی **هیچ Route `/metrics` ندارد** و هدف Scrape Prometheus محلی نیست؛ و `rasta_dlq_messages_total` تعریف شده ولی
 > `EventConsumer` مشترک آن را افزایش نمی‌دهد. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
+> **به‌روزرسانی 2026-09-12 (Route `/metrics` در `audit-service` و هدف Scrape محلی — شکاف رصدپذیری اول بسته شد):**
+> `MetricsController` تازه (`src/observability/metrics.controller.ts`) — `GET /metrics` بی‌نسخه با `metricsText()` و
+> `metricsContentType` از `@rasta/observability`، `@Public` با دلیل صریح، `@ApiExcludeController()` — به‌صراحت در
+> `AppModule` ثبت شد؛ Guardهای سراسری دست نخوردند و قرارداد OpenAPI همچنان دقیقاً چهار مسیر خواندنی است. Exposition همان
+> متریک‌های ورودی، پرس‌وجو، ظرفیت و زنجیره است که از پیش ثبت می‌شدند و هیچ Label شناسه‌ای ندارند (ADR-053 § 13).
+> `host.docker.internal:3115` به Job `rasta-services` در `infrastructure/docker/prometheus/prometheus.yml` افزوده شد — این فقط
+> پیکربندی **محلی** است؛ Scrape محیط واقعی وابسته به استقرار و بیرون از مخزن است. آزمون‌ها: Supertest واحد پشت
+> `AuthGuard`/`RolesGuard` واقعی (بی Token → `200`، Content-Type متنی Prometheus، `# HELP/# TYPE rasta_audit_*`، Route بستهٔ
+> کناری → `401`)، فهرست دقیق Controllerها به‌علاوهٔ اثبات ساختاری «فقط GET، بی Route صادرات»، و در `openapi.int-spec.ts`
+> درخواست واقعی `/metrics` روی `AppModule` واقعی و اثبات نبودن آن در Document. Integration روی Cluster یک‌بارمصرف
+> PostgreSQL 16 بومی (`127.0.0.1:5399`) اجرا شد چون Container `rasta-postgres` پورت میزبان ندارد. `promtool check config`
+> (Image `prom/prometheus:v3.1.0`) سبز؛ Scrape زندهٔ یک فرایند در حال اجرا انجام **نشد**. **هنوز نیست:** هیچ قاعدهٔ هشدار
+> Prometheus یا داشبورد؛ و `rasta_dlq_messages_total` هنوز در `EventConsumer` مشترک **افزایش نمی‌یابد** (گام بعدی جدا).
+> `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
+>
 > **به‌روزرسانی 2026-09-12 (Phase C10 — محل رد نهم، نخستین تصمیم‌گیرندهٔ غیر از دامنه و `RolesGuard`):**
 > `identity-service` اکنون **دقیقاً نُه** محل رد دارد. محل تازه ردِ خودِ `AuthGuard` پلتفرم است: Token تأییدشده‌ای که با
 > `X-Organization-Id` سازمانی بیرون از عضویت‌هایش را می‌خواهد (`action = identity.tenant_context.select`،

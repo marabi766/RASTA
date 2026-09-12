@@ -22,6 +22,7 @@ import {
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { HealthController } from './health/health.controller';
+import { MetricsController } from './observability/metrics.controller';
 import { PrismaService } from './prisma/prisma.service';
 import { AuditRepository } from './audit/audit.repository';
 import { AuditController } from './audit/audit.controller';
@@ -71,8 +72,9 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
  *
  * Both write through one repository that stores the audit row, its chain link,
  * its idempotency marker — and, for path A only, the organization hierarchy
- * projection — in a single transaction. Beside them: the ingestion metrics and
- * three authenticated read endpoints behind the platform's global guards, one
+ * projection — in a single transaction. Beside them: the ingestion metrics, the
+ * `GET /metrics` scrape target that exposes them, and three authenticated read
+ * endpoints behind the platform's global guards, one
  * of which recomputes the chain (AUD-003, ADR-053 § 6).
  *
  * ## Both group names are constants, never `KAFKA_CONSUMER_GROUP`
@@ -84,12 +86,12 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
  * path's idempotency namespace. Each factory therefore names its group
  * explicitly, and `app.module.spec.ts` proves the variable changes neither.
  *
- * ## The guards are global, and the health probes are the only exception
+ * ## The guards are global, and the operational routes are the only exception
  *
  * `AuthGuard` then `RolesGuard`, in that order: authenticate, then authorize.
  * Registered globally so an endpoint is closed unless it says otherwise
- * (AGENTS.md S-02), which is why the two probes carry `@Public` with a stated
- * reason and nothing else does.
+ * (AGENTS.md S-02), which is why the two probes and the metrics scrape target
+ * carry `@Public` with a stated reason and nothing else does.
  *
  * ## What is deliberately still absent
  *
@@ -127,7 +129,7 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
  * that holds for the trail topic as much as for the ten domain topics.
  */
 @Module({
-  controllers: [HealthController, AuditController, AuditInternalController],
+  controllers: [HealthController, MetricsController, AuditController, AuditInternalController],
   providers: [
     { provide: ENV, useFactory: (): AuditEnv => loadAuditEnv() },
 
