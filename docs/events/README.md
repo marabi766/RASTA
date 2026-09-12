@@ -506,10 +506,22 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 >   (ADR-050) آن را پس از اعتبارسنجی Envelope و Payload منتشر می‌کند. مقادیر ثابت این Producer: `outcome = REFUSED`،
 >   `occurrenceCount = 1`، `action = identity.active_organization.switch`، `resourceType = User`، `resourceId` =
 >   شناسهٔ خود کاربر (همان کلید Partition)، مستأجر = سازمانی که فراخوان از طرفش عمل می‌کرد — هرگز سازمان درخواستی.
-> - **هنوز ساخته نشده:** تجمیع پنجره‌ای ردها، هر `403` دیگر در identity، رول‌اوت به هر سرویس دیگر، فرمان اصلاح و
->   صادرات. سطر «همه سرویس‌ها روی این Topic می‌نویسند» زیر همچنان **نیت طراحی** ADR-053 § ۱ است، نه رفتار امروز.
->   Producer نیتِ اصلاح (§ ۷ ADR) هم به `identity-service` تصمیم گرفته شده ولی ساخته نشده — جزئیات در
->   [ADR-053 implementation plan](../adr/ADR-053-implementation-plan.md) § ۵.
+> - **وضعیت 2026-09-12 — دو بند بالا دیگر همهٔ امروز نیستند.** Producerِ ردها در `identity-service` اکنون **نُه** محل رد
+>   دارد (AUD-004 Phase C1–C10: محل دامنه‌ای `SWITCH_ACTIVE_ORGANIZATION`، هفت Route دارای `@Roles` و `TENANT_MISMATCH`ِ خودِ
+>   `AuthGuard`) و ردهای یکسان را در یک پنجرهٔ UTC در یک ردیف با `occurrenceCount` تجمیع می‌کند (Phase C2)؛ ردیف فقط پس از
+>   بسته‌شدن پنجره منتشر می‌شود.
+> - **Producerِ اصلاح وجود دارد (نیمهٔ اصلاحِ AUD-003).** `POST /v1/audit-corrections` در `identity-service` (فقط
+>   `SYSTEM_ADMIN`، `Idempotency-Key` الزامی) هدف را از راه Endpoint داخلی `audit-service` اثبات می‌کند و **یک**
+>   `AUDIT_EVENT_RECORDED` v1 را از `outbox_message` **استاندارد** identity — نه `security_event_outbox` — و با Relay
+>   استاندارد (ADR-050) منتشر می‌کند، در همان تراکنشِ رکورد Idempotency. مقادیر ثابت: `action = audit.correction`،
+>   `resourceType = AuditEvent`، `resourceId = correctionOf =` شناسهٔ هدف، `outcome = SUCCESS`، بی `errorCode`، `reason`
+>   الزامی، `changes` با Redaction، `occurrenceCount = 1`؛ Actor و نقش‌ها از Token تأییدشده؛ مستأجر فقط از هدفِ اثبات‌شده
+>   (برای هدفِ پلتفرمی، هم `organizationId` و هم `tenantId` غایب)؛ `aggregateType/aggregateId = AuditEvent`/شناسهٔ هدف و
+>   **کلید Partition = شناسهٔ هدف**. شکل HTTP فرمان تصمیم موقت **Q-53** است.
+> - **هنوز ساخته نشده:** رول‌اوت به هر سرویس دیگر (R-2)، ثبت ردهایی که Gateway یک Hop زودتر می‌گیرد،
+>   `SERVICE_TENANT_CONTEXT_INVALID`/`FORBIDDEN`، صادرات، Purge، امضا و قاعدهٔ هشدار. سطر «همه سرویس‌ها روی این Topic
+>   می‌نویسند» زیر همچنان **نیت طراحی** ADR-053 § ۱ است، نه رفتار امروز — جزئیات در
+>   [ADR-053 implementation plan](../adr/ADR-053-implementation-plan.md) § ۴ و § ۵.
 > - `Proposed`. جزئیات کامل ADR-053 در
 >   [ADR-053](../adr/ADR-053-audit-service-append-only-evidence.md).
 
@@ -527,7 +539,7 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 
 **چهار ناورداییِ اصلاح، در Schema اجباری‌اند** (ADR-053 § ۷): `correctionOf` حاضر باشد یعنی `action ===
 'audit.correction'`، `outcome === 'SUCCESS'`، `reason` غیرخالی، و `actor.type === 'USER'` — هرکدام نبود، Schema رد
-می‌کند. **مجوزدهی، Redaction و تجمیعِ ردها در این Schema نیست** — همه سمتِ Producer‌اند، وقتی ساخته شوند.
+می‌کند. **مجوزدهی، Redaction و تجمیعِ ردها در این Schema نیست** — همه سمتِ Producer‌اند (`identity-service`).
 
 **آنچه Consumer افزون بر Schema رد می‌کند — بدون بازنویسی هیچ مقدار.** تغییری در `changes` که میدانش (یا یک بخش نقطه‌دارِ
 آن) در `SENSITIVE_KEYS` از `@rasta/logging` است و مقدار خامِ Scalar به‌جای `{redacted:true}`/`{hash}` دارد؛ `correctionOf`

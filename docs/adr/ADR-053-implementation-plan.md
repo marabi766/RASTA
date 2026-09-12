@@ -1,6 +1,6 @@
 # ADR-053 — برنامهٔ پیاده‌سازی (audit-service)
 
-- **وضعیت:** برنامه — **در جریان.** AUD-001 و AUD-002 پیاده شده‌اند؛ از AUD-003 نیمهٔ شواهد دست‌نخوردگی پیاده شده و نیمهٔ اصلاح نه؛ از AUD-004 **Phase A — قرارداد**، **Phase B — Consumer مسیر B در `audit-service`** و **Phase C1 — Producer مرجع ردها در `identity-service` برای یک محل رد، با `security_event_outbox`** پیاده شده‌اند، و **Phase C2 — تجمیع پنجره‌ای ردهای همان یک محل** نیز، و **Phase C3 — محل رد دوم در identity (`GET /v1/users` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C4 — محل رد سوم (`POST /v1/users` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C5 — محل رد چهارم (`POST /v1/users/:id/memberships` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C6 — محل رد پنجم (`POST /v1/memberships/:id/roles` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C7 — محل رد ششم (`POST /v1/memberships/:id/revoke` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C8 — محل رد هفتم (`POST /v1/registration-requests/:id/approve` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C9 — محل رد هشتم و آخرین Route دارای `@Roles` (`POST /v1/registration-requests/:id/reject` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C10 — محل رد نهم و نخستین تصمیم‌گیرندهٔ تازه (`403 TENANT_MISMATCH`ِ خودِ `AuthGuard` پلتفرم، Route-agnostic)**؛ ولی ردهای دیگر، رول‌اوت به سرویس‌های دیگر، فرمان اصلاحی، صادرات و Purge نه. جزئیات در § ۴، § ۵ و در جدول پایین همین بخش.
+- **وضعیت:** برنامه — **در جریان.** AUD-001 و AUD-002 پیاده شده‌اند؛ AUD-003 کامل پیاده شده (شواهد دست‌نخوردگی **و** رکورد جبرانی)؛ از AUD-004 **Phase A — قرارداد**، **Phase B — Consumer مسیر B در `audit-service`** و **Phase C1 — Producer مرجع ردها در `identity-service` برای یک محل رد، با `security_event_outbox`** پیاده شده‌اند، و **Phase C2 — تجمیع پنجره‌ای ردهای همان یک محل** نیز، و **Phase C3 — محل رد دوم در identity (`GET /v1/users` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C4 — محل رد سوم (`POST /v1/users` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C5 — محل رد چهارم (`POST /v1/users/:id/memberships` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C6 — محل رد پنجم (`POST /v1/memberships/:id/roles` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C7 — محل رد ششم (`POST /v1/memberships/:id/revoke` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C8 — محل رد هفتم (`POST /v1/registration-requests/:id/approve` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C9 — محل رد هشتم و آخرین Route دارای `@Roles` (`POST /v1/registration-requests/:id/reject` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C10 — محل رد نهم و نخستین تصمیم‌گیرندهٔ تازه (`403 TENANT_MISMATCH`ِ خودِ `AuthGuard` پلتفرم، Route-agnostic)**؛ ولی ردهای دیگر، رول‌اوت به سرویس‌های دیگر، فرمان اصلاحی، صادرات و Purge نه. جزئیات در § ۴، § ۵ و در جدول پایین همین بخش.
 - **مرجع تصمیم:** [ADR-053](ADR-053-audit-service-append-only-evidence.md)
 - **قلم مرتبط:** `COM-009` — **`READY` می‌ماند و ۱۳ امتیازش دست نمی‌خورد** تا همهٔ گام‌های زیر پیاده و پذیرفته شوند.
 - **همراه:** [ADR-054 implementation plan](ADR-054-implementation-plan.md)
@@ -257,6 +257,53 @@ ADR-053 § ۱۰؛ `assertNotAuditor()`؛ OpenAPI تولیدشده، Commit‌ش�
 > را «—» گذاشته بود؛ پیاده‌سازی دو برچسب **کراندار** `reason` (شش مقدار) و `scope` (دو مقدار) دارد. هیچ‌کدام
 > Cardinality بالا ندارند و هیچ‌کدام مستأجر، Actor یا منبع را نام نمی‌برند، پس CONSTRAINT سند `docs/13` نقض نشده — ولی این
 > تفاوت باید هنگام پذیرش ADR در § ۱۳ اصلاح شود.
+
+> **پیشرفت — 2026-09-12 (نیمهٔ اصلاح: فرمان `audit.correction`، سرتاسر).** ردیف سومِ جدول بالا — «رکوردی غلط باشد /
+> `SYSTEM_ADMIN` اصلاحی با دلیل ثبت کند» — اکنون پیاده است. AUD-003 با این فاز کامل می‌شود.
+>
+> - **مالکیت و مسیر.** فرمان در `identity-service` است (§ ۵ همین سند از پیش این را تصمیم گرفته بود):
+>   `POST /v1/audit-corrections`، پیشوندی سطح‌بالا در Gateway چون مسیریابی بر نخستین بخش مسیر است و `audit-events` مال
+>   `audit-service` است که API نوشتن ندارد. فقط `SYSTEM_ADMIN` (Gateway و identity، و یک بررسی سوم در خودِ سرویس که Token
+>   سرویس را هم رد می‌کند)، و `Idempotency-Key` الزامی. شکل HTTP تصمیم موقت **Q-53** است؛ محتوای رکورد از ADR-053 § ۷ می‌آید
+>   و حدس زده نشده.
+> - **هیچ نوشتن مستقیمی.** فرمان یک `AUDIT_EVENT_RECORDED` v1 در `outbox_message` **استاندارد** identity می‌نویسد — نه
+>   `security_event_outbox`، نه Outbox تازه، نه دسترسی به پایگاه دادهٔ audit — و Relay استاندارد (ADR-050، بی‌تغییر) آن را
+>   منتشر می‌کند. `aggregateType/aggregateId = AuditEvent`/شناسهٔ هدف، Topic `rasta.audit.trail.v1`، و **کلید Partition و
+>   Stream ADR-051 = شناسهٔ هدف** (`correctionOf`). مسیریابی identity اکنون یک اتحاد صریح است
+>   (`OutboundEventName`)، `AUDIT_EVENT_RECORDED` به `IDENTITY_EVENTS` افزوده **نشده**، و `assertTopicFor` هر رویداد دامنه‌ای
+>   را از Topic حسابرسی و اصلاح را از هر Topic دیگر باز می‌دارد.
+> - **مرز اعتماد هدف (REST، نه پایگاه داده).** `audit-service` یک Endpoint داخلی و باریک گرفت:
+>   `GET /v1/internal/audit-events/{id}?occurredAt=…` با `@AllowService('identity-service')` به‌علاوهٔ یک بررسی دوم که هر
+>   Token کاربر را هم رد می‌کند. سه میدان برمی‌گرداند — شناسه، سازمان (`null` برای رکورد پلتفرمی) و لحظه — و هیچ شاهدی.
+>   `occurredAt` الزامی است چون `audit_event` بر همان ستون پارتیشن‌بندی شده: خواندن یک پارتیشن با کلید اصلی است، و تطابق
+>   **دقیق** شرط است. هدف ناموجود و لحظهٔ ناهم‌خوان هر دو `404`ِ یکسان می‌گیرند. خواندن‌های عمومی همچنان به هیچ Token سرویسی
+>   داده نمی‌شوند. مستأجرِ رکورد اصلاح **فقط** از همین پاسخ کپی می‌شود، هرگز از درخواست؛ برای هدف پلتفرمی، هم
+>   `payload.organizationId` و هم `envelope.tenantId` غایب‌اند (`buildOutboxRow` اکنون `organizationId: null` را «بی‌مستأجر»
+>   می‌فهمد، نه «از Context بگیر» — تنها تغییر بستهٔ مشترک، و عمومی).
+> - **Idempotency واقعی.** جدول تازهٔ `audit_correction_command` با کلید `(actor_id, idempotency_key)` — نه
+>   `idempotency_key` که مستأجر `NOT NULL` دارد و برای فرمانی پلتفرم‌گستر مستأجرِ جانشین می‌خواست (هیچ Sentinel). ردیف فرمان و
+>   ردیف Outbox در **یک تراکنش** نوشته می‌شوند؛ همان کلید + همان درخواست همان `202` را برمی‌گرداند (بایت‌به‌بایت، چون پاسخ با
+>   ترتیب کلید ثابت بازساخته می‌شود)، درخواست متفاوت `409 IDEMPOTENCY_KEY_REUSED` می‌گیرد، و درخواست‌های هم‌زمان یک اثر دارند
+>   (بازندهٔ رقابت روی کلید اصلی می‌شکند و ردیف Outbox خودش را با خود برمی‌گرداند). نگهداشت نامحدود، عمداً و مستند.
+> - **خواندن، هر دو جهت.** هر رکورد اکنون `correctionOf` (nullable) و `correctedBy` (آرایه، خالی وقتی نیست) را منتشر می‌کند.
+>   پیوندها یک‌بار برای هر صفحه و **زیر همان دامنهٔ** آن صفحه خوانده می‌شوند (`organization_id = $1` وقتی مستأجر-محدود است،
+>   بی‌هیچ `OR ... IS NULL`)، با کران پایینِ `occurred_at`ِ قدیمی‌ترین هدف برای هرس پارتیشن و یک Index تازه
+>   (`audit_event_correction_idx`، Migration افزایشی و قابل بازگشت). اصل **بایت‌به‌بایت** دست‌نخورده می‌ماند، Hashاش عوض
+>   نمی‌شود، اصلاح حلقهٔ بعدیِ همان زنجیره است و `verify` همچنان `VALID` می‌دهد.
+>
+> **شواهد.** Unit: `@rasta/nest-common` ۸ Suite/۱۳۴ تست، identity ۱۸ Suite/۷۰۹ تست، audit ۲۱ Suite/۶۱۱ تست، Gateway ۹۱ تست
+> (DTO/Redaction، ساخت دقیق Payload و Envelope، مسیریابی و کلید Stream، مجوزدهی، تصمیم‌های Lookup، پاکسازی خطای Upstream،
+> منطق Replay/Reuse/هم‌زمانی، واگذاری Controller و پیوند خواندن). PostgreSQL واقعی: identity ۷ Suite/۱۰۸ تست (از جمله
+> `audit-correction.int-spec.ts` با ۱۹ تست: هدف مستأجری و پلتفرمی، Replay، بدنهٔ متفاوت، شش درخواست هم‌زمان، هدف ناموجود/
+> لحظهٔ ناهم‌خوان، `503`ِ کراندار، و دو شکستِ شبیه‌سازی‌شده که ردیف Outbox و ردیف فرمان را با هم برمی‌گردانند)، audit ۱۱
+> Suite/۱۷۴ تست (از جمله `correction-linkage.int-spec.ts`: پیوند دوطرفه، نبود نشت میان‌مستأجری، زنجیرهٔ پلتفرمی، و Endpoint
+> داخلی). Kafka واقعی: identity فرمان را از Relay استاندارد روی Topic می‌گذارد و یک پیام معتبر با کلید هدف دیده می‌شود؛
+> audit همان شکل پیام را دو بار می‌گیرد و **یک** ردیف می‌سازد. Black-Box (Playwright، ۱۲ سناریو): `SYSTEM_ADMIN` یک رکورد
+> واقعی را از Gateway اصلاح می‌کند، هر دو جهت پیوند خوانده می‌شوند، اصل بی‌تغییر می‌ماند، Replay/Reuse/نبود کلید/نقش‌های دیگر/
+> هدف ناموجود همگی طبق قرارداد پاسخ می‌گیرند.
+>
+> **آنچه هنوز نیست:** صادرات، Purge ردیف‌های منتشرشده، امضا، قاعدهٔ هشدار، رول‌اوت ثبت ردها به سرویس‌های دیگر (R-2) و ردهایی
+> که Gateway یک Hop زودتر می‌گیرد. `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
 
 **As a** اپراتور پلتفرم، **I want** بتوانم اثبات کنم یک بازه از رکوردها تغییر نکرده، و رکورد غلط را بی‌آنکه گفتهٔ قبلی‌اش پاک
 شود اصلاح کنم، **so that** یکپارچگی انبار نشان‌دادنی باشد نه ادعاشده.
