@@ -21,6 +21,8 @@
 > زنجیره **Tamper-Evident** است، نه Tamper-Proof. `COM-009` همچنان `READY` با ۱۳ امتیاز است.
 > جزئیات گام‌به‌گام در [برنامهٔ پیاده‌سازی](ADR-053-implementation-plan.md) § ۴ و Runbook
 > [`audit-chain-divergence.md`](../runbooks/audit-chain-divergence.md).
+> سخت‌سازی پس از MVP با Checkpoint امضاشدهٔ KMS/HSM و بایگانی WORM در مرز اعتماد مستقل، در
+> [ADR-055](ADR-055-audit-external-anchoring-and-immutable-archive.md) ثبت شده و هنوز پیاده نشده است.
 
 ---
 
