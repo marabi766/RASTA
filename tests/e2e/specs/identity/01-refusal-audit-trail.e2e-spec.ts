@@ -4,10 +4,20 @@ import { e2eConfig, ORG } from '../../src/env';
 import { waitFor } from '../../src/events';
 
 /**
- * AUD-004 Phases C1–C8, black-box, over the real stack (ADR-053 § 4): one
- * scenario per instrumented identity refusal site (C1, C3, C4, C5, C6, C7, C8),
- * plus the uninstrumented `POST /v1/registration-requests/:id/reject` beside
- * the C8 approval as the comparison and the negative probe.
+ * AUD-004 Phases C1–C9, black-box, over the real stack (ADR-053 § 4): one
+ * scenario per instrumented identity refusal site (C1, C3, C4, C5, C6, C7, C8,
+ * C9), plus one proving that the two outcomes of a registration review — an
+ * approval refusal and a rejection refusal by the same caller — stay two
+ * records.
+ *
+ * ## The gateway budget on `registration-requests`
+ *
+ * The gateway allows 5 calls per user per hour on that prefix
+ * (`services/api-gateway/src/config/routes.ts`), for authenticated callers
+ * too. The three scenarios that use it each use their own actor and stay
+ * inside it: `province.auditor` 5 (C8), `dehyari.admin` 5 (C9) and
+ * `dehyari.admin.b` 4 (the separation scenario). Nothing here raises, resets
+ * or bypasses the limit; a local rerun inside the same hour is answered 429.
  *
  *   HTTP 403 ×N → identity-service's RefusalAuditExceptionFilter
  *               → one security_event_outbox row counting N (identity's own database)
@@ -694,7 +704,6 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
 
   test(`${REFUSALS} role refusals of POST /v1/registration-requests/:id/approve with varying request ids and body secrets are recorded as one INSUFFICIENT_ROLE record counting ${REFUSALS} (AUD-004 Phase C8)`, async ({
     auditor,
-    tenantB,
     systemAdmin,
   }) => {
     // `province.auditor` holds only AUDITOR, so it lacks UNION_ADMIN and the
@@ -706,9 +715,9 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     // The gateway throttles the whole `registration-requests` prefix at 5 calls
     // per user per hour (`services/api-gateway/src/config/routes.ts`) — the
     // self-registration surface's protection, applied to authenticated callers
-    // too. The burst below spends exactly one actor's hour, so the `/reject`
-    // comparison is made by a second refused actor rather than a sixth call
-    // that would be answered 429. Nothing here raises or bypasses the limit.
+    // too. The burst below spends exactly this actor's hour; the Phase C9
+    // scenarios use two other actors for the same reason. Nothing here raises,
+    // resets or bypasses the limit.
     const windowMs = e2eConfig().identityAggregationWindowSeconds * 1000;
     if (windowMs < BURST_BUDGET_MS + WINDOW_START_MARGIN_MS * 2) {
       throw new Error(
@@ -743,21 +752,6 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
       expect(JSON.stringify(response.body)).not.toContain(bodySecrets[i]!);
     }
     expect(Date.now() - burstStartedAt).toBeLessThan(BURST_BUDGET_MS);
-
-    // The sibling review outcome is uninstrumented: the same method, the same
-    // prefix and the same single required role produce the identical response
-    // and no record of their own.
-    const rejectCorrelationId = `e2e-reject-probe-${randomUUID()}`;
-    // `dehyari.admin.b` lacks UNION_ADMIN too, and has its own gateway budget.
-    const rejection = await tenantB.post(`/v1/registration-requests/${randomUUID()}/reject`, {
-      body: { reason: `e2e-reject-${randomUUID()}` },
-      correlationId: rejectCorrelationId,
-    });
-    expect(rejection.status).toBe(403);
-    expect(errorCode(rejection.body)).toBe('INSUFFICIENT_ROLE');
-    expect((rejection.body as { message?: string }).message).toBe(
-      'You do not have permission to perform this action',
-    );
 
     let records: AuditRecord[] = [];
     await waitFor(
@@ -807,16 +801,189 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
       [record.id, REFUSALS],
     ]);
 
-    // The uninstrumented rejection produced no record at all.
-    const probe = await findByCorrelation(systemAdmin, rejectCorrelationId);
-    expect(probe.status).toBe(200);
-    expect(probe.page.items).toHaveLength(0);
-
     // The refused caller cannot read the evidence its refusal produced.
     const own = await auditor.get(
       `/v1/audit-events?${new URLSearchParams({ ...recentWindow(), correlationId }).toString()}`,
     );
     expect(own.status).toBe(403);
+  });
+
+  test(`${REFUSALS} role refusals of POST /v1/registration-requests/:id/reject with varying request ids and reason secrets are recorded as one INSUFFICIENT_ROLE record counting ${REFUSALS} (AUD-004 Phase C9)`, async ({
+    tenantA,
+    systemAdmin,
+  }) => {
+    // `dehyari.admin` holds ORGANIZATION_ADMIN, FLEET_MANAGER and
+    // PROCUREMENT_USER — not UNION_ADMIN, the only role this endpoint accepts —
+    // so the platform RolesGuard refuses before the registration request is
+    // looked up or the stated reason is read. The five calls are this actor's
+    // whole gateway hour on the prefix (see the header).
+    const windowMs = e2eConfig().identityAggregationWindowSeconds * 1000;
+    if (windowMs < BURST_BUDGET_MS + WINDOW_START_MARGIN_MS * 2) {
+      throw new Error(
+        `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS=${windowMs / 1000} is too short to place ` +
+          `${REFUSALS} refusals in one window from outside the service`,
+      );
+    }
+    test.setTimeout(windowMs * 2 + 180_000);
+
+    const correlationId = `e2e-reject-refusal-${randomUUID()}`;
+    const targets = Array.from({ length: REFUSALS }, () => `REG-e2e-reject-${randomUUID()}`);
+    const reasonSecrets = Array.from(
+      { length: REFUSALS },
+      () => `e2e-reject-secret-${randomUUID()}`,
+    );
+    await atFreshWindow(windowMs);
+    const burstStartedAt = Date.now();
+
+    for (let i = 0; i < REFUSALS; i += 1) {
+      const response = await tenantA.post(`/v1/registration-requests/${targets[i]}/reject`, {
+        body: { reason: `${reasonSecrets[i]} is the stated reason` },
+        correlationId,
+      });
+      // The exact refusal the platform has always given: since Phase C9 there
+      // is no uninstrumented role refusal left to compare it against.
+      expect(response.status).toBe(403);
+      expect(errorCode(response.body)).toBe('INSUFFICIENT_ROLE');
+      expect((response.body as { message?: string }).message).toBe(
+        'You do not have permission to perform this action',
+      );
+      expect(response.correlationId).toBe(correlationId);
+      expect(JSON.stringify(response.body)).not.toContain(reasonSecrets[i]!);
+    }
+    expect(Date.now() - burstStartedAt).toBeLessThan(BURST_BUDGET_MS);
+
+    let records: AuditRecord[] = [];
+    await waitFor(
+      `the aggregated reject-refusal record for correlation ${correlationId}`,
+      async () => {
+        const { status, page } = await findByCorrelation(systemAdmin, correlationId);
+        if (status !== 200 || page.items.length === 0) return false;
+        records = page.items;
+        return true;
+      },
+      windowMs + 150_000,
+      () => `last seen: ${JSON.stringify(records)}`,
+    );
+
+    expect(records).toHaveLength(1);
+    const record = records[0]!;
+    expect(record.occurrenceCount).toBe(REFUSALS);
+    expect(record.outcome).toBe('REFUSED');
+    expect(record.errorCode).toBe('INSUFFICIENT_ROLE');
+    expect(record.action).toBe('identity.registration_requests.reject');
+    expect(record.resourceType).toBe('RegistrationRequest');
+    expect(record.actorType).toBe('USER');
+    // The verified caller, never any of the registration requests the paths named.
+    expect(record.resourceId).toBe(record.actorId);
+    expect(record.sourceService).toBe('identity-service');
+    expect(record.sourceTopic).toBe('rasta.audit.trail.v1');
+    expect(record.correlationId).toBe(correlationId);
+    expect(record.organizationId).toBe(ORG.a);
+    // The caller's own role: allowed on every other roles-guard site, refused here.
+    expect(record.actorRoles).toContain('ORGANIZATION_ADMIN');
+    const serialised = JSON.stringify(record);
+    for (const leaked of [
+      ...targets,
+      ...reasonSecrets,
+      'REG-e2e-reject-',
+      'stated reason',
+      '/registration-requests',
+      '/reject',
+      'UNION_ADMIN',
+      'permission',
+    ]) {
+      expect(serialised).not.toContain(leaked);
+    }
+
+    await sleep(3_000);
+    const settled = await findByCorrelation(systemAdmin, correlationId);
+    expect(settled.status).toBe(200);
+    expect(settled.page.items.map((item) => [item.id, item.occurrenceCount])).toEqual([
+      [record.id, REFUSALS],
+    ]);
+
+    // The refused caller cannot read the evidence its refusal produced.
+    const own = await tenantA.get(
+      `/v1/audit-events?${new URLSearchParams({ ...recentWindow(), correlationId }).toString()}`,
+    );
+    expect(own.status).toBe(403);
+  });
+
+  test('approval and rejection refusals by one caller in one window stay two distinct records (AUD-004 Phase C9)', async ({
+    tenantB,
+    systemAdmin,
+  }) => {
+    // `dehyari.admin.b` holds only ORGANIZATION_ADMIN. Two approvals and two
+    // rejections — four calls, inside its 5-per-hour gateway budget — share one
+    // caller, one tenant, one window and one correlation id. Only the action
+    // differs, and that alone must keep the two outcomes apart.
+    const windowMs = e2eConfig().identityAggregationWindowSeconds * 1000;
+    if (windowMs < BURST_BUDGET_MS + WINDOW_START_MARGIN_MS * 2) {
+      throw new Error(
+        `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS=${windowMs / 1000} is too short to place ` +
+          'four refusals in one window from outside the service',
+      );
+    }
+    test.setTimeout(windowMs * 2 + 180_000);
+
+    const correlationId = `e2e-review-separation-${randomUUID()}`;
+    const outcomes = ['approve', 'approve', 'reject', 'reject'] as const;
+    // Per-request ids and reason secrets, distinct from the correlation id —
+    // which the records carry by design — so the leak check below is exact.
+    const targets = outcomes.map(() => `REG-e2e-sep-${randomUUID()}`);
+    const reasonSecrets = outcomes.map(() => `e2e-sep-secret-${randomUUID()}`);
+    await atFreshWindow(windowMs);
+    const burstStartedAt = Date.now();
+
+    for (const [i, outcome] of outcomes.entries()) {
+      const response = await tenantB.post(`/v1/registration-requests/${targets[i]}/${outcome}`, {
+        body:
+          outcome === 'approve'
+            ? { roles: ['UNION_ADMIN'] }
+            : { reason: `${reasonSecrets[i]} is the stated reason` },
+        correlationId,
+      });
+      expect(response.status).toBe(403);
+      expect(errorCode(response.body)).toBe('INSUFFICIENT_ROLE');
+    }
+    expect(Date.now() - burstStartedAt).toBeLessThan(BURST_BUDGET_MS);
+
+    let records: AuditRecord[] = [];
+    await waitFor(
+      `the approval and rejection refusal records for correlation ${correlationId}`,
+      async () => {
+        const { status, page } = await findByCorrelation(systemAdmin, correlationId);
+        if (status !== 200 || page.items.length < 2) return false;
+        records = page.items;
+        return true;
+      },
+      windowMs + 150_000,
+      () => `last seen: ${JSON.stringify(records)}`,
+    );
+
+    expect(records.map((record) => `${record.action} ${record.occurrenceCount}`).sort()).toEqual([
+      'identity.registration_requests.approve 2',
+      'identity.registration_requests.reject 2',
+    ]);
+    for (const record of records) {
+      expect(record.actorId).toBe(records[0]!.actorId);
+      expect(record.resourceId).toBe(record.actorId);
+      expect(record.organizationId).toBe(ORG.b);
+      expect(record.resourceType).toBe('RegistrationRequest');
+      expect(record.outcome).toBe('REFUSED');
+      expect(record.errorCode).toBe('INSUFFICIENT_ROLE');
+      const serialised = JSON.stringify(record);
+      for (const leaked of [...targets, ...reasonSecrets, 'e2e-sep-', 'stated reason']) {
+        expect(serialised).not.toContain(leaked);
+      }
+    }
+
+    await sleep(3_000);
+    const settled = await findByCorrelation(systemAdmin, correlationId);
+    expect(settled.status).toBe(200);
+    expect(settled.page.items.map((item) => item.id).sort()).toEqual(
+      records.map((record) => record.id).sort(),
+    );
   });
 
   test('the caller who was refused cannot read the record their own refusal created', async ({
