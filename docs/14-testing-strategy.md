@@ -209,6 +209,18 @@ At-Least-Once خودِ ADR در تناقض بود.
 **بازگشت‌پذیری Migration:** `node scripts/verify-outbox-claim-migration.mjs --in-place`
 روی هر هشت پایگاه داده، بخشی از `pnpm test:migration`.
 
+**نکته 2026-09-12 — `test:migration` سه شکل Verifier دارد، و هر Migration تازه باید
+در یکی‌شان ثبت شود.** (۱) `verify-migration-reversible.mjs <svc>` کل زنجیرهٔ یک سرویس
+را برمی‌گرداند و برای **هر** Migration آن سرویس یک `down.sql` می‌خواهد — پس سرویسی که
+Migration نخستش `down.sql` ندارد (مثل `identity`) از این راه پوشش نمی‌گیرد.
+(۲) `verify-outbox-claim-migration.mjs` سرویس‌ها را با Convention کشف می‌کند
+(`model OutboxMessage`) و Migrationها را نام‌به‌نام می‌شناسد. (۳) Verifier مستقل برای
+یک Migration معیّن: `verify-security-event-outbox-migration.mjs` و
+`verify-audit-correction-command-migration.mjs`. **هیچ‌یک از این سه، Migrationی را که
+در آن ثبت نشده کشف نمی‌کند** — و Migrationی که هیچ Harness اجرایش نمی‌کند، `down.sql`اش
+یک فایل است، نه یک Rollback. برای شکل ۱، افزودن اشیاء تازه به نگاشت `EXPECTED` هم لازم
+است؛ Migrationی که فقط یک Index می‌سازد و نامش در آن نگاشت نیست، **به‌کلی** نامرئی است.
+
 ---
 
 ## ۱۴٫۴ تست قرارداد

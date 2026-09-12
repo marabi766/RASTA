@@ -146,6 +146,20 @@
 > رول‌اوت به سرویس‌های دیگر (R-2) و ردهای متوقف‌شده در Gateway. `COM-009` همچنان `READY` با ۱۳ امتیاز و ADR-053 `Proposed`
 > است.
 >
+> **به‌روزرسانی 2026-09-12 (برگشت‌پذیری آن دو Migration — تصحیح ادعای بالا):** جملهٔ «دو Migration افزایشی و **قابل
+> بازگشت**» در به‌روزرسانی پیشین، `down.sql` نوشته‌شده را با Rollback اثبات‌شده یکی گرفته بود. هیچ‌کدام از آن دو در هیچ
+> Harnessی ثبت نبود، پس هیچ‌گاه اجرا نشده بود، و هر دو `down.sql` ردیف `_prisma_migrations` خود را هم جا می‌گذاشتند — یعنی
+> Rollbackی که دیگر هرگز رو به جلو اعمال نمی‌شد. اکنون: Verifier مستقل تازه
+> `scripts/verify-audit-correction-command-migration.mjs` برای جدول identity (Schema یک‌بارمصرف، امضای دقیق هر هفت ستون،
+> کلید مرکب با `pg_get_constraintdef`، Ledgerِ خودش و Ledgerِ هر Migration دیگر، ده جدول و پنج شیء پیش‌موجود که باید سرپا
+> بمانند، و آزمودن یکتایی/`NOT NULL`/طول/Default/JSONB)، `audit_event_correction_idx` افزوده به نگاشت `EXPECTED`ِ
+> `verify-migration-reversible.mjs` (Migrationی که فقط یک Index می‌سازد و نامش آنجا نباشد به‌کلی نامرئی است)، هر دو
+> `down.sql` اکنون ردیف Ledger خودشان — و فقط خودشان — را پاک می‌کنند، و ثبت در `test:migration` و `verify` ریشه.
+> **اما:** خودِ اجرای up → down → up در این نشست انجام **نشد** — Docker Desktop این ماشین بالا نمی‌آید (WSL دیسک
+> `ext4.vhdx` را با `E_ACCESSDENIED` وصل نمی‌کند؛ ترمیمش دسترسی Administrator می‌خواهد) و `pnpm install` هم کامل نشد
+> (`registry.npmjs.org` از این شبکه Reset می‌شود و یک بستهٔ Store نیست). فقط ۳۳ تست واحد روی همان کدِ Verifier اجرا شد.
+> پس امروز ادعای درست این است: **ثبت شد و تست واحد دارد؛ Rollback هنوز روی پایگاه داده اجرا نشده.**
+>
 > **به‌روزرسانی 2026-09-12 (Phase C10 — محل رد نهم، نخستین تصمیم‌گیرندهٔ غیر از دامنه و `RolesGuard`):**
 > `identity-service` اکنون **دقیقاً نُه** محل رد دارد. محل تازه ردِ خودِ `AuthGuard` پلتفرم است: Token تأییدشده‌ای که با
 > `X-Organization-Id` سازمانی بیرون از عضویت‌هایش را می‌خواهد (`action = identity.tenant_context.select`،

@@ -305,6 +305,37 @@ ADR-053 § ۱۰؛ `assertNotAuditor()`؛ OpenAPI تولیدشده، Commit‌ش�
 > **آنچه هنوز نیست:** صادرات، Purge ردیف‌های منتشرشده، امضا، قاعدهٔ هشدار، رول‌اوت ثبت ردها به سرویس‌های دیگر (R-2) و ردهایی
 > که Gateway یک Hop زودتر می‌گیرد. `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
 
+> **پیشرفت — 2026-09-12 (برگشت‌پذیری هر دو Migrationِ نیمهٔ اصلاح).** فاز پیشین دو Migration افزایشی آورد که هیچ‌کدام را
+> هیچ Harnessی در این Repository اجرا نمی‌کرد. این فاز آن شکاف را می‌بندد.
+>
+> - **`20260912120000_audit_correction_command` (identity).** `verify-migration-reversible.mjs` کل زنجیرهٔ یک سرویس را
+>   برمی‌گرداند و برای هر Migration یک `down.sql` می‌خواهد؛ Migration نخستِ identity `down.sql` ندارد، پس آن Harness به
+>   **هیچ** Migrationِ identity نمی‌رسد. دو Verifierِ نام‌به‌نامِ موجود (ADR-050/051 و `security_event_outbox`) هم این جدول
+>   را پوشش نمی‌دهند. پس Verifier مستقل تازه‌ای اضافه شد:
+>   `scripts/verify-audit-correction-command-migration.mjs` — روی Schema یک‌بارمصرف در پایگاه دادهٔ خود identity:
+>   `migrate deploy` → اثبات جدول با **امضای دقیق هر هفت ستون** (نوع، طول، دقت، Nullability، Default)، کلید مرکب با
+>   `pg_get_constraintdef` (نه با نام، چون فقط تعریف، ترتیب `(actor_id, idempotency_key)` را از عکسش جدا می‌کند)، ردیف
+>   Ledger خودش، ردیف Ledger **هر** Migration دیگر، و هر شیء پیش‌موجودی که باید سرپا بماند (ده جدول از جمله
+>   `idempotency_key`ِ مستأجری که این فرمان عمداً از آن استفاده نمی‌کند، و `security_event_outbox` با Trigger و تابعش) →
+>   آزمودن یکتایی کلید، اینکه Actor واقعاً جزء کلید است، هر `NOT NULL`، هر دو طول اعلام‌شده (`CHAR(64)` و `VARCHAR(26)`)،
+>   Default ستون `created_at`، و JSONB بودن `response_body` → `down.sql` → اثبات نبودِ جدول و ردیف Ledger **و بودنِ** همهٔ
+>   بقیه → `migrate deploy` دوباره که **باید** همین Migration را اعمال کند.
+> - **`20260912120000_audit_event_correction_index` (audit).** این Migration فقط یک Index می‌سازد — همان شکلی که Harness
+>   موجود به آن کور بود: Indexی که نگاشت `EXPECTED` نامش را نبرد، Indexی است که اثبات `up` هرگز نمی‌جویدش، اثبات `down`
+>   هرگز دلتنگش نمی‌شود و `up` دوم هرگز بازش نمی‌گرداند. `audit_event_correction_idx` به همان نگاشت افزوده شد.
+> - **هر دو `down.sql` ردیف `_prisma_migrations` خودشان را پاک می‌کنند.** پیش‌تر نمی‌کردند، و این تنها یک نقص آراستگی نبود:
+>   `migrate deploy` فقط از همین Ledger تصمیم می‌گیرد چه اعمال کند، پس Rollbackی که ردیف را جا بگذارد، Migration را
+>   **برای همیشه غیرقابل‌اعمال** می‌کند. تستی افزوده شد که این را برای **هر** Migrationِ audit می‌خواهد — و می‌خواهد که هر
+>   `down.sql` فقط ردیف خودش را پاک کند، نه ردیف دیگری.
+> - **ثبت در دروازه.** `test:migration` ریشه اکنون Verifier تازه را هم صدا می‌زند (CI از پیش `DATABASE_URL_IDENTITY` را به
+>   همان Step می‌داد، پس Workflow تغییری نخواست)، و `verify` تستِ واحدِ تازه (`test:audit-correction-lib`) را.
+>
+> **آنچه هنوز اثبات نشده:** خودِ اجرای up → down → up در این نشست **انجام نشد**. Docker Desktop این ماشین بالا نمی‌آید
+> (WSL دیسک `ext4.vhdx` را با `E_ACCESSDENIED` وصل نمی‌کند و ترمیمش دسترسی Administrator می‌خواهد)، پس PostgreSQL نبود؛ و
+> `pnpm install` هم کامل نشد چون `registry.npmjs.org` از این شبکه Reset می‌شود و یک بستهٔ Store نیست. آنچه اجرا شد:
+> ۳۳ تست واحد روی همان کدی که Verifier اجرا می‌کند (نه رونوشتش) — ۱۱ تای موجود به‌علاوهٔ ۲۲ تای تازه. **یک رشتهٔ
+> ساخته‌شده Rollback نیست**؛ این Verifier باید در نخستین نشستی که زیرساخت دارد (یا در CI) واقعاً اجرا شود.
+
 **As a** اپراتور پلتفرم، **I want** بتوانم اثبات کنم یک بازه از رکوردها تغییر نکرده، و رکورد غلط را بی‌آنکه گفتهٔ قبلی‌اش پاک
 شود اصلاح کنم، **so that** یکپارچگی انبار نشان‌دادنی باشد نه ادعاشده.
 
