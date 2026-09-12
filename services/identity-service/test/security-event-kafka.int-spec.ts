@@ -309,15 +309,46 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
     DELIVERY_TIMEOUT_MS + 60_000,
   );
 
-  /** The roles-guard sites: GET /v1/users (Phase C3) and POST /v1/users (Phase C4). */
-  const roleRefusalSites: [string, RefusalSiteName, 'get' | 'post'][] = [
-    ['GET /v1/users', 'LIST_USERS', 'get'],
-    ['POST /v1/users', 'CREATE_USER', 'post'],
+  /**
+   * The roles-guard sites: GET /v1/users (Phase C3), POST /v1/users (Phase C4)
+   * and POST /v1/users/:id/memberships (Phase C5). Each entry builds the
+   * concrete path and body of the i-th refusal from the run's secret, so the
+   * path id and the body differ on every request.
+   */
+  const roleRefusalSites: [
+    string,
+    RefusalSiteName,
+    'get' | 'post',
+    (secret: string, i: number) => { path: string; body?: Record<string, unknown> },
+  ][] = [
+    ['GET /v1/users', 'LIST_USERS', 'get', (secret) => ({ path: `/v1/users?q=${secret}` })],
+    [
+      'POST /v1/users',
+      'CREATE_USER',
+      'post',
+      (secret, i) => ({
+        path: `/v1/users?q=${secret}`,
+        body: {
+          username: `${secret}-${i}`,
+          email: `${secret}@identity.itest`,
+          roles: ['SYSTEM_ADMIN'],
+        },
+      }),
+    ],
+    [
+      'POST /v1/users/:id/memberships',
+      'ADD_MEMBERSHIP',
+      'post',
+      (secret, i) => ({
+        path: `/v1/users/USR-${secret}-${i}/memberships?q=${secret}`,
+        body: { organizationId: `ORG-${secret}-${i}`, roles: ['SYSTEM_ADMIN'] },
+      }),
+    ],
   ];
 
   it.each(roleRefusalSites)(
     '%s: repeated role refusals in one window become one contract-valid INSUFFICIENT_ROLE event with their count',
-    async (_label, siteName, method) => {
+    async (_label, siteName, method, build) => {
       const site = REFUSAL_SITES[siteName];
       const caller: Caller = { userId: id('USR'), organizationId: id('ORG'), roles: ['AUDITOR'] };
       const token = userToken(caller);
@@ -328,19 +359,14 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
       for (let i = 0; i < 3; i += 1) {
         const correlationId = id('COR');
         correlations.push(correlationId);
+        const { path, body } = build(requestSecret, i);
         const call = request(identity.app.getHttpServer())
-          [method](`${site.route}?q=${requestSecret}`)
+          [method](path)
           .set('authorization', `Bearer ${token}`)
           .set('user-agent', USER_AGENT)
           .set('x-correlation-id', correlationId);
-        // A create carries a body naming the user it wanted; none of it is evidence.
-        const response = await (method === 'post'
-          ? call.send({
-              username: `${requestSecret}-${i}`,
-              email: `${requestSecret}@identity.itest`,
-              roles: ['SYSTEM_ADMIN'],
-            })
-          : call);
+        // A body names what the caller wanted; none of it, nor the path id, is evidence.
+        const response = await (body === undefined ? call : call.send(body));
         expect(response.status).toBe(403);
         expect(response.body).toMatchObject({
           code: ERROR_CODES.INSUFFICIENT_ROLE,
@@ -383,16 +409,20 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
         actor: { type: 'USER', id: caller.userId, roles: ['AUDITOR'] },
         organizationId: caller.organizationId,
         action: site.action,
-        resourceType: 'User',
+        resourceType: site.resourceType,
         resourceId: caller.userId,
         outcome: 'REFUSED',
         errorCode: 'INSUFFICIENT_ROLE',
         reason: site.reason,
         occurrenceCount: 3,
       });
-      expect(payload.action).toBe(
-        siteName === 'CREATE_USER' ? 'identity.users.create' : 'identity.users.list',
-      );
+      const expected: Record<RefusalSiteName, [string, string]> = {
+        SWITCH_ACTIVE_ORGANIZATION: ['identity.active_organization.switch', 'User'],
+        LIST_USERS: ['identity.users.list', 'User'],
+        CREATE_USER: ['identity.users.create', 'User'],
+        ADD_MEMBERSHIP: ['identity.memberships.create', 'Membership'],
+      };
+      expect([payload.action, payload.resourceType]).toEqual(expected[siteName]);
 
       const wire = JSON.stringify({ envelope, payload });
       for (const leaked of [

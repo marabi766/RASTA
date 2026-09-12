@@ -13,16 +13,17 @@ import { startIdentityApi, userToken, type Caller, type IdentityApiHarness } fro
 import { atFreshWindow, waitForWindowClose } from './helpers';
 
 /**
- * The two roles-guard refusal sites — `GET /v1/users` (AUD-004 Phase C3) and
- * `POST /v1/users` (Phase C4), each refused by the roles guard with
- * `403 INSUFFICIENT_ROLE` — against a real PostgreSQL (ADR-053 § 4).
+ * The three roles-guard refusal sites — `GET /v1/users` (AUD-004 Phase C3),
+ * `POST /v1/users` (Phase C4) and `POST /v1/users/:id/memberships` (Phase C5),
+ * each refused by the roles guard with `403 INSUFFICIENT_ROLE` — against a real
+ * PostgreSQL (ADR-053 § 4).
  *
  * Every refusal here is a real request through the real `AppModule`: the global
  * auth guard, then `IdentityRolesGuard` delegating to the platform
  * `RolesGuard`, then the refusal filter, then the Phase C2 aggregation upsert.
- * Nothing about either site bypasses any of them.
+ * Nothing about any site bypasses any of them.
  *
- * `POST /v1/users/:id/memberships` stays uninstrumented, so it is the
+ * `POST /v1/memberships/:id/roles` stays uninstrumented, so it is the
  * comparison for "the response is unchanged" and one of the negative probes.
  *
  * A two-second aggregation window (configuration, not a bypass) lets the suite
@@ -34,11 +35,13 @@ const TAG = ulid().slice(-10);
 const tagged = (prefix: string): string => `${prefix}_${TAG}_${ulid()}`;
 const LIST = REFUSAL_SITES.LIST_USERS;
 const CREATE = REFUSAL_SITES.CREATE_USER;
+const MEMBERSHIP = REFUSAL_SITES.ADD_MEMBERSHIP;
 const WINDOW_SECONDS = 2;
 
 const QUERY_SECRET = `query-secret-${TAG}`;
 const COOKIE_SECRET = `cookie-secret-${TAG}`;
 const BODY_SECRET = `body-secret-${TAG}`;
+const PATH_SECRET = `path-secret-${TAG}`;
 /** The endpoint's required roles: policy, never evidence. */
 const REQUIRED_ROLES = ['ORGANIZATION_ADMIN', 'UNION_ADMIN'];
 
@@ -51,6 +54,13 @@ const createBody = (marker: string = BODY_SECRET): Record<string, unknown> => ({
   organizationId: `ORG-BODY-${marker}`,
   roles: ['SYSTEM_ADMIN', 'ORGANIZATION_ADMIN'],
   password: `${marker}-password`,
+});
+
+/** A membership the caller asks to add. Attacker-chosen: none of it is evidence. */
+const membershipBody = (marker: string = BODY_SECRET): Record<string, unknown> => ({
+  organizationId: `ORG-BODY-${marker}`,
+  roles: ['SYSTEM_ADMIN', 'UNION_ADMIN'],
+  note: `${marker}-note`,
 });
 
 describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () => {
@@ -96,10 +106,26 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     return call.send(options.body ?? createBody());
   }
 
+  function addMembership(
+    caller: Caller,
+    options: {
+      target?: string;
+      body?: Record<string, unknown>;
+      headers?: Record<string, string>;
+    } = {},
+  ) {
+    const call = request(harness.app.getHttpServer())
+      .post(`/v1/users/${options.target ?? `USR-${PATH_SECRET}`}/memberships`)
+      .set('authorization', `Bearer ${userToken(caller)}`)
+      .set('x-correlation-id', tagged('COR'));
+    for (const [name, value] of Object.entries(options.headers ?? {})) call.set(name, value);
+    return call.send(options.body ?? membershipBody());
+  }
+
   /** An uninstrumented role refusal: same guard, same error, not an allowlisted template. */
-  const addMembership = (caller: Caller) =>
+  const assignRoles = (caller: Caller) =>
     request(harness.app.getHttpServer())
-      .post(`/v1/users/${tagged('USR')}/memberships`)
+      .post(`/v1/memberships/${tagged('MBR')}/roles`)
       .set('authorization', `Bearer ${userToken(caller)}`)
       .send({});
 
@@ -108,6 +134,17 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     organizationId: tagged('ORG'),
     roles,
   });
+
+  const expectSameShape = (
+    instrumented: request.Response,
+    uninstrumented: request.Response,
+  ): void => {
+    expect(instrumented.status).toBe(403);
+    expect(uninstrumented.status).toBe(403);
+    expect(Object.keys(instrumented.body).sort()).toEqual(Object.keys(uninstrumented.body).sort());
+    expect(instrumented.body.code).toBe(uninstrumented.body.code);
+    expect(instrumented.body.message).toBe(uninstrumented.body.message);
+  };
 
   beforeAll(async () => {
     harness = await startIdentityApi({ aggregationWindowSeconds: WINDOW_SECONDS });
@@ -178,14 +215,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
 
     it('answers with the same response shape as an uninstrumented role refusal', async () => {
       const refused = caller();
-      const listing = await listUsers(refused);
-      const uninstrumented = await addMembership(refused);
-
-      expect(listing.status).toBe(403);
-      expect(uninstrumented.status).toBe(403);
-      expect(Object.keys(listing.body).sort()).toEqual(Object.keys(uninstrumented.body).sort());
-      expect(listing.body.code).toBe(uninstrumented.body.code);
-      expect(listing.body.message).toBe(uninstrumented.body.message);
+      expectSameShape(await listUsers(refused), await assignRoles(refused));
     });
 
     it('aggregates sequential refusals in one short window, and opens a new row in the next', async () => {
@@ -287,14 +317,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
 
     it('answers with the same response shape as an uninstrumented role refusal', async () => {
       const refused = caller();
-      const creating = await createUser(refused);
-      const uninstrumented = await addMembership(refused);
-
-      expect(creating.status).toBe(403);
-      expect(uninstrumented.status).toBe(403);
-      expect(Object.keys(creating.body).sort()).toEqual(Object.keys(uninstrumented.body).sort());
-      expect(creating.body.code).toBe(uninstrumented.body.code);
-      expect(creating.body.message).toBe(uninstrumented.body.message);
+      expectSameShape(await createUser(refused), await assignRoles(refused));
       // The uninstrumented refusal is still uncaptured; the instrumented one is.
       expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([CREATE.action]);
     });
@@ -342,7 +365,130 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     });
   });
 
-  it('tenant isolation: never merges refusals across tenants or actors, nor across the three sites', async () => {
+  describe('POST /v1/users/:id/memberships (Phase C5)', () => {
+    it('captures a real INSUFFICIENT_ROLE refusal attributed to the verified caller, with nothing from the path, body, role policy, token, cookie or error text', async () => {
+      const refused = caller(['AUDITOR']);
+      const token = userToken(refused);
+      const correlationId = tagged('COR');
+      const target = `USR-${PATH_SECRET}`;
+
+      const response = await request(harness.app.getHttpServer())
+        .post(`/v1/users/${target}/memberships?role=UNION_ADMIN&note=${QUERY_SECRET}`)
+        .set('authorization', `Bearer ${token}`)
+        .set('cookie', `session=${COOKIE_SECRET}`)
+        .set('x-correlation-id', correlationId)
+        .send(membershipBody());
+
+      expect(response.status).toBe(403);
+      expect(response.body).toMatchObject({
+        code: ERROR_CODES.INSUFFICIENT_ROLE,
+        message: 'You do not have permission to perform this action',
+        correlationId,
+      });
+      // The platform's error body echoes the caller's own request path back to
+      // them (unchanged, the same for every route); the body is never echoed.
+      // What matters is that neither reaches the stored evidence, below.
+      expect(JSON.stringify(response.body)).not.toContain(BODY_SECRET);
+
+      const rows = await rowsFor(refused.userId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        organizationId: refused.organizationId,
+        actorType: 'USER',
+        actorId: refused.userId,
+        actorRoles: ['AUDITOR'],
+        action: 'identity.memberships.create',
+        resourceType: 'Membership',
+        // The verified caller — never the target user the path names.
+        resourceId: refused.userId,
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: MEMBERSHIP.reason,
+        correlationId,
+        occurrenceCount: 1,
+        publishedAt: null,
+        claimCount: 0,
+      });
+      expect(rows[0]!.resourceId).not.toBe(target);
+
+      const everything = await rawRow(rows[0]!.id);
+      for (const leaked of [
+        ...REQUIRED_ROLES,
+        'SYSTEM_ADMIN',
+        PATH_SECRET,
+        target,
+        BODY_SECRET,
+        'ORG-BODY-',
+        QUERY_SECRET,
+        COOKIE_SECRET,
+        token,
+        '/v1/users',
+        '/memberships',
+        ':id',
+        'role=',
+        'You do not have permission',
+        'required',
+      ]) {
+        expect(everything).not.toContain(leaked);
+      }
+    });
+
+    it('answers with the same response shape as an uninstrumented role refusal', async () => {
+      const refused = caller();
+      expectSameShape(await addMembership(refused), await assignRoles(refused));
+      expect((await rowsFor(refused.userId)).map((row) => row.action)).toEqual([MEMBERSHIP.action]);
+    });
+
+    it('aggregates by the caller across different target ids and bodies in one window, and opens a new row in the next', async () => {
+      const refused = caller();
+      await atFreshWindow(prisma, WINDOW_SECONDS, 1_500);
+
+      for (let i = 0; i < 3; i += 1) {
+        // A different target and body every time: neither is aggregation-key material.
+        const response = await addMembership(refused, {
+          target: `USR-${PATH_SECRET}-${i}`,
+          body: membershipBody(`${BODY_SECRET}-${i}`),
+        });
+        expect(response.status).toBe(403);
+        expect(response.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+      }
+
+      const [first, ...others] = await rowsFor(refused.userId);
+      expect(others).toHaveLength(0);
+      expect(first).toMatchObject({
+        occurrenceCount: 3,
+        action: MEMBERSHIP.action,
+        resourceId: refused.userId,
+      });
+      expect(aggregationWindowOf(first!.occurredAt, WINDOW_SECONDS)).toEqual({
+        startedAt: first!.windowStartedAt,
+        endsAt: first!.windowEndsAt,
+      });
+
+      await waitForWindowClose(prisma, first!.id);
+      expect((await addMembership(refused)).status).toBe(403);
+
+      const rows = await rowsFor(refused.userId);
+      expect(rows.map((row) => row.occurrenceCount)).toEqual([3, 1]);
+      expect(rows.map((row) => row.action)).toEqual([MEMBERSHIP.action, MEMBERSHIP.action]);
+      expect(rows[1]!.windowStartedAt.getTime()).toBeGreaterThanOrEqual(
+        rows[0]!.windowEndsAt.getTime(),
+      );
+    });
+
+    it('lets the shared guard allow ORGANIZATION_ADMIN, UNION_ADMIN and SYSTEM_ADMIN, and captures nothing for them', async () => {
+      for (const roles of [['ORGANIZATION_ADMIN'], ['UNION_ADMIN'], ['SYSTEM_ADMIN']]) {
+        const allowed = caller(roles);
+        // An invalid body: the guard lets the request through to validation,
+        // which answers 400 — so no membership is created and nothing is refused.
+        const response = await addMembership(allowed, { body: {} });
+        expect(response.status).toBe(400);
+        expect(response.body.code).not.toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+        expect(await rowsFor(allowed.userId)).toHaveLength(0);
+      }
+    });
+  });
+
+  it('tenant isolation: never merges refusals across tenants or actors, nor across the four sites', async () => {
     const home = tagged('ORG');
     const second = tagged('ORG');
     const person: Caller = {
@@ -359,14 +505,15 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     await atFreshWindow(prisma, WINDOW_SECONDS, 1_500);
 
     for (let i = 0; i < 2; i += 1) {
-      expect((await createUser(person)).status).toBe(403);
-      expect((await createUser(person, { headers: { 'x-organization-id': second } })).status).toBe(
-        403,
-      );
-      expect((await createUser(colleague)).status).toBe(403);
+      expect((await addMembership(person, { target: `USR-${PATH_SECRET}-${i}` })).status).toBe(403);
+      expect(
+        (await addMembership(person, { headers: { 'x-organization-id': second } })).status,
+      ).toBe(403);
+      expect((await addMembership(colleague)).status).toBe(403);
     }
-    // The same person refused by both other sites in the same window.
+    // The same person refused by all three other sites in the same window.
     expect((await listUsers(person)).status).toBe(403);
+    expect((await createUser(person)).status).toBe(403);
     const switchRefusal = await request(harness.app.getHttpServer())
       .post('/v1/users/me/active-organization')
       .set('authorization', `Bearer ${userToken(person)}`)
@@ -380,8 +527,9 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
       [
         `identity.active_organization.switch ${home} 1`,
         `identity.users.list ${home} 1`,
-        `identity.users.create ${home} 2`,
-        `identity.users.create ${second} 2`,
+        `identity.users.create ${home} 1`,
+        `identity.memberships.create ${home} 2`,
+        `identity.memberships.create ${second} 2`,
       ].sort(),
     );
     expect(
@@ -390,13 +538,13 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
         row.organizationId,
         row.occurrenceCount,
       ]),
-    ).toEqual([[CREATE.action, home, 2]]);
+    ).toEqual([[MEMBERSHIP.action, home, 2]]);
     // A tenant-scoped read sees only its own tenant's rows.
     const secondTenantRows = await prisma.client.securityEventOutbox.findMany({
       where: { organizationId: second, actorId: { in: [person.userId, colleague.userId] } },
     });
     expect(secondTenantRows.map((row) => [row.actorId, row.action])).toEqual([
-      [person.userId, CREATE.action],
+      [person.userId, MEMBERSHIP.action],
     ]);
   });
 
@@ -405,9 +553,10 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     // Paths, not requests: supertest binds a listener per request and closes
     // it when that request ends, so each one is built only when it is sent.
     const paths = [
-      `/v1/users/${tagged('USR')}/memberships`,
       `/v1/memberships/${tagged('MBR')}/roles`,
       `/v1/memberships/${tagged('MBR')}/revoke`,
+      `/v1/registration-requests/${tagged('REG')}/approve`,
+      `/v1/registration-requests/${tagged('REG')}/reject`,
     ];
     for (const path of paths) {
       const response = await request(harness.app.getHttpServer())
@@ -423,6 +572,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
   it.each<[string, RefusalSite, (refused: Caller) => request.Test]>([
     ['GET /v1/users', LIST, (refused) => listUsers(refused)],
     ['POST /v1/users', CREATE, (refused) => createUser(refused)],
+    ['POST /v1/users/:id/memberships', MEMBERSHIP, (refused) => addMembership(refused)],
   ])(
     '%s becomes claimable only once its window closes, as one contract-valid event with the aggregated count',
     async (_label, site, refuse) => {
@@ -456,14 +606,16 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
       expect(envelope.tenantId).toBe(refused.organizationId);
       expect(envelope.payload).toMatchObject({
         action: site.action,
-        resourceType: 'User',
+        resourceType: site.resourceType,
         resourceId: refused.userId,
         outcome: 'REFUSED',
         errorCode: 'INSUFFICIENT_ROLE',
         occurrenceCount: 2,
       });
       const wire = JSON.stringify(envelope);
-      for (const leaked of [...REQUIRED_ROLES, BODY_SECRET]) expect(wire).not.toContain(leaked);
+      for (const leaked of [...REQUIRED_ROLES, BODY_SECRET, PATH_SECRET]) {
+        expect(wire).not.toContain(leaked);
+      }
 
       expect(await harness.store.markPublished([row!.id], closed.token!)).toBe(1);
     },
