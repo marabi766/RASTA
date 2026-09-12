@@ -4,6 +4,7 @@ import { usePathname } from 'next/navigation';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Button, Card } from '../ui/primitives';
 import { DemoModeChip } from './mode-banner';
+import { ScenarioResetGate } from './scenario-reset-gate';
 import { useTour } from './tour-provider';
 
 /** The routes that own the toolbar. Everywhere else it does not exist. */
@@ -46,6 +47,7 @@ export function PresentationToolbar(): ReactNode {
 
       <CopyLinkButton />
       <FullscreenButton />
+      <ScenarioResetGate />
     </Card>
   );
 }

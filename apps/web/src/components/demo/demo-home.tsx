@@ -17,6 +17,7 @@ import { formatInteger } from '@/lib/format';
 import { CapabilityBadge, STATE_PRESENTATION } from '../capability';
 import { Badge, Button, Card, PageHeader } from '../ui/primitives';
 import { PresentationToolbar } from './presentation-toolbar';
+import { ScenarioStatusGate } from './scenario-status-gate';
 import { useTour } from './tour-provider';
 
 /**
@@ -57,6 +58,7 @@ export function DemoHome(): ReactNode {
       />
 
       <PresentationToolbar />
+      <ScenarioStatusGate />
 
       <section aria-labelledby="mode-heading" className="mb-8">
         <h2 id="mode-heading" className="mb-3 text-lg font-bold text-[var(--tx)]">
