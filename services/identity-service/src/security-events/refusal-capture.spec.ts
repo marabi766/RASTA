@@ -513,6 +513,101 @@ describe('decideCapture', () => {
     });
   });
 
+  describe('the roles-guard site POST /v1/registration-requests/:id/approve (AUD-004 Phase C8)', () => {
+    const approveSite = REFUSAL_SITES.APPROVE_REGISTRATION_REQUEST;
+    const TARGET_REQUEST = 'REG_APPROVE_PATH_SENTINEL';
+    const BODY_ORGANIZATION = 'ORG_APPROVE_BODY_SENTINEL';
+    const denial = (): RastaError =>
+      markRefusal(
+        // One required role, not two: the approve endpoint is `@Roles('UNION_ADMIN')`.
+        RastaError.insufficientRole(['UNION_ADMIN'], ['ORGANIZATION_ADMIN']),
+        'APPROVE_REGISTRATION_REQUEST',
+      );
+    const observeApprove = (overrides: Partial<RefusalObservation> = {}): RefusalObservation => ({
+      exception: denial(),
+      status: 403,
+      code: ERROR_CODES.INSUFFICIENT_ROLE,
+      method: 'POST',
+      route: approveSite.route,
+      context: context({
+        roles: ['ORGANIZATION_ADMIN'],
+        path: `/v1/registration-requests/${TARGET_REQUEST}/approve?org=${BODY_ORGANIZATION}`,
+      }),
+      ...overrides,
+    });
+
+    it('names the verified caller as the resource, never the registration request in the path', () => {
+      const draft = captured(observeApprove());
+      expect(draft).toMatchObject({
+        organizationId: 'ORG_A',
+        actorType: 'USER',
+        actorId: 'USR_A',
+        // The caller's *own* roles from the token — not the role the endpoint wants.
+        actorRoles: ['ORGANIZATION_ADMIN'],
+        action: 'identity.registration_requests.approve',
+        resourceType: 'RegistrationRequest',
+        resourceId: 'USR_A',
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: approveSite.reason,
+        occurrenceCount: 1,
+      });
+      expect(draft.resourceId).not.toBe(TARGET_REQUEST);
+    });
+
+    it("records neither the path, the approval body, the endpoint's required role, nor the error's text or context", () => {
+      const serialised = JSON.stringify(captured(observeApprove()));
+      for (const leaked of [
+        TARGET_REQUEST,
+        BODY_ORGANIZATION,
+        '/v1/registration-requests',
+        '/approve',
+        'UNION_ADMIN',
+        denial().message,
+        'required',
+      ]) {
+        expect(serialised).not.toContain(leaked);
+      }
+    });
+
+    it('never shares an aggregation identity with any other site', () => {
+      const draft = captured(observeApprove());
+      for (const other of Object.values(REFUSAL_SITES)) {
+        if (other === approveSite) continue;
+        expect(`${draft.action}|${draft.resourceType}|${draft.errorCode}`).not.toBe(
+          `${other.action}|${other.resourceType}|${other.errorCode}`,
+        );
+      }
+    });
+
+    it.each([
+      // The sibling review outcome: same method, same prefix, same required role.
+      [
+        'POST /v1/registration-requests/:id/reject',
+        { route: '/v1/registration-requests/:id/reject' },
+      ],
+      ['the registration-request collection', { route: '/v1/registration-requests' }],
+      ['POST /v1/memberships/:id/revoke', { route: '/v1/memberships/:id/revoke' }],
+      ['GET on the same template', { method: 'GET' }],
+      [
+        'a concrete path where the template belongs',
+        { route: '/v1/registration-requests/REG_X/approve' },
+      ],
+      ['a trailing slash', { route: '/v1/registration-requests/:id/approve/' }],
+      ['a renamed parameter', { route: '/v1/registration-requests/:requestId/approve' }],
+    ])('skips a marked denial observed on %s', (_label, overrides) => {
+      expect(skipReason(observeApprove(overrides))).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+
+    it('never captures an unmarked INSUFFICIENT_ROLE, even on the approve template', () => {
+      expect(
+        decideCapture(
+          observeApprove({ exception: RastaError.insufficientRole(['UNION_ADMIN'], []) }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+  });
+
   describe('is not a refusal site', () => {
     it.each([
       ["the auth guard's own TENANT_MISMATCH", RastaError.tenantMismatch('ORG_X', ['ORG_A'])],

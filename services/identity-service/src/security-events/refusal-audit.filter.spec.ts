@@ -172,6 +172,7 @@ describe('RefusalAuditExceptionFilter', () => {
     'ADD_MEMBERSHIP',
     'UPDATE_MEMBERSHIP_ROLES',
     'REVOKE_MEMBERSHIP',
+    'APPROVE_REGISTRATION_REQUEST',
   ] as const)(
     'captures a roles-guard denial marked %s with its own classification, and sends the platform response unchanged',
     async (siteName) => {

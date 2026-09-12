@@ -246,18 +246,20 @@ describe('security_event_outbox (real PostgreSQL)', () => {
       .send({ organizationId: tagged('ORG') });
     expect(anonymous.status).toBe(401);
 
-    // 403 INSUFFICIENT_ROLE from the roles guard on an endpoint that is not an
-    // allowlisted site. (`GET /v1/users`, `POST /v1/users`,
-    // `POST /v1/users/:id/memberships`, `POST /v1/memberships/:id/roles` and
-    // `POST /v1/memberships/:id/revoke` became sites in AUD-004 Phases C3–C7
-    // and are proved captured in `security-event-role-refusal.int-spec.ts`.)
+    // 403 INSUFFICIENT_ROLE from the roles guard on the one role-guarded
+    // endpoint that is still not an allowlisted site. (`GET /v1/users`,
+    // `POST /v1/users`, `POST /v1/users/:id/memberships`,
+    // `POST /v1/memberships/:id/roles`, `POST /v1/memberships/:id/revoke` and
+    // `POST /v1/registration-requests/:id/approve` became sites in AUD-004
+    // Phases C3–C8 and are proved captured in
+    // `security-event-role-refusal.int-spec.ts`.)
     const underPrivileged: Caller = { userId: tagged('USR'), organizationId: tagged('ORG') };
-    const approving = await request(harness.app.getHttpServer())
-      .post(`/v1/registration-requests/${tagged('REG')}/approve`)
+    const rejecting = await request(harness.app.getHttpServer())
+      .post(`/v1/registration-requests/${tagged('REG')}/reject`)
       .set('authorization', `Bearer ${userToken(underPrivileged)}`)
       .send({});
-    expect(approving.status).toBe(403);
-    expect(approving.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+    expect(rejecting.status).toBe(403);
+    expect(rejecting.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
 
     // 403 TENANT_MISMATCH raised by the auth guard for a header outside the
     // token's memberships — the same code, but not the identity decision.

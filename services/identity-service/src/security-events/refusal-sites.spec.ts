@@ -2,8 +2,8 @@ import { AUDIT_ACTION_PATTERN, ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
 import { markRefusal, refusalSiteOf, rolesGuardSiteFor, REFUSAL_SITES } from './refusal-sites';
 
-describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C7)', () => {
-  it('instruments exactly six refusal sites', () => {
+describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C8)', () => {
+  it('instruments exactly seven refusal sites', () => {
     expect(Object.keys(REFUSAL_SITES)).toEqual([
       'SWITCH_ACTIVE_ORGANIZATION',
       'LIST_USERS',
@@ -11,6 +11,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C7)', () => 
       'ADD_MEMBERSHIP',
       'UPDATE_MEMBERSHIP_ROLES',
       'REVOKE_MEMBERSHIP',
+      'APPROVE_REGISTRATION_REQUEST',
     ]);
   });
 
@@ -111,6 +112,23 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C7)', () => 
     });
   });
 
+  it('pins the registration approval to POST /v1/registration-requests/:id/approve, 403 and INSUFFICIENT_ROLE, decided by the roles guard', () => {
+    expect(REFUSAL_SITES.APPROVE_REGISTRATION_REQUEST).toEqual({
+      key: 'identity.approve_registration_request',
+      method: 'POST',
+      route: '/v1/registration-requests/:id/approve',
+      status: 403,
+      errorCode: ERROR_CODES.INSUFFICIENT_ROLE,
+      decidedBy: 'ROLES_GUARD',
+      action: 'identity.registration_requests.approve',
+      resourceType: 'RegistrationRequest',
+      // The caller, never the registration request named in the path.
+      resource: 'ACTOR_USER',
+      reason:
+        'Registration approval refused: the caller holds none of the roles this endpoint requires',
+    });
+  });
+
   it('names no role, no query value and no URL in any site’s fixed evidence', () => {
     for (const site of Object.values(REFUSAL_SITES)) {
       for (const text of [site.action, site.resourceType, site.reason]) {
@@ -126,6 +144,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C7)', () => 
       ['POST', '/v1/users/:id/memberships', 'ADD_MEMBERSHIP'],
       ['POST', '/v1/memberships/:id/roles', 'UPDATE_MEMBERSHIP_ROLES'],
       ['POST', '/v1/memberships/:id/revoke', 'REVOKE_MEMBERSHIP'],
+      ['POST', '/v1/registration-requests/:id/approve', 'APPROVE_REGISTRATION_REQUEST'],
     ])('finds the roles-guard site for exactly %s %s', (method, route, expected) => {
       expect(rolesGuardSiteFor(method, route)).toBe(expected);
     });
@@ -162,8 +181,29 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C7)', () => 
       ['a trailing slash on the revoke template', 'POST', '/v1/memberships/:id/revoke/'],
       ['a differently named revoke parameter', 'POST', '/v1/memberships/:membershipId/revoke'],
       ['a deeper revoke template', 'POST', '/v1/memberships/:id/revoke/:confirm'],
-      ['registration approval', 'POST', '/v1/registration-requests/:id/approve'],
+      ['lower-case POST on the approve template', 'post', '/v1/registration-requests/:id/approve'],
+      ['GET on the approve template', 'GET', '/v1/registration-requests/:id/approve'],
+      ['PUT on the approve template', 'PUT', '/v1/registration-requests/:id/approve'],
+      ['PATCH on the approve template', 'PATCH', '/v1/registration-requests/:id/approve'],
+      ['a concrete approve URL', 'POST', '/v1/registration-requests/REG_01ABC/approve'],
+      ['an approve template with a query', 'POST', '/v1/registration-requests/:id/approve?role=x'],
+      [
+        'a trailing slash on the approve template',
+        'POST',
+        '/v1/registration-requests/:id/approve/',
+      ],
+      [
+        'a differently named approve parameter',
+        'POST',
+        '/v1/registration-requests/:requestId/approve',
+      ],
+      ['a deeper approve template', 'POST', '/v1/registration-requests/:id/approve/:step'],
+      ['the registration-request collection', 'POST', '/v1/registration-requests'],
+      ['a registration request by id', 'GET', '/v1/registration-requests/:id'],
+      // The sibling review outcome stays uninstrumented on purpose: it is the
+      // comparator that proves marking changes nothing observable.
       ['registration rejection', 'POST', '/v1/registration-requests/:id/reject'],
+      ['a concrete rejection URL', 'POST', '/v1/registration-requests/REG_01ABC/reject'],
       ['a concrete URL', 'GET', '/v1/users?q=x'],
       ['a concrete POST URL', 'POST', '/v1/users?role=ORGANIZATION_ADMIN'],
       ['a trailing slash', 'GET', '/v1/users/'],
@@ -194,7 +234,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C7)', () => 
     const identities = Object.values(REFUSAL_SITES).map(
       (site) => `${site.action}|${site.resourceType}|${site.errorCode}`,
     );
-    expect(identities).toHaveLength(6);
+    expect(identities).toHaveLength(7);
     expect(new Set(identities).size).toBe(identities.length);
   });
 
@@ -253,11 +293,21 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C7)', () => 
     expect(revoke.reason).not.toBe(roles.reason);
   });
 
+  it('keeps the instrumented registration approval apart from its uninstrumented sibling', () => {
+    const approve = REFUSAL_SITES.APPROVE_REGISTRATION_REQUEST;
+    // `/reject` shares the method, the prefix and the required role, and is
+    // deliberately absent: the allowlist is the only thing that separates them.
+    expect(approve.route.endsWith('/approve')).toBe(true);
+    expect(Object.values(REFUSAL_SITES).some((site) => site.route.endsWith('/reject'))).toBe(false);
+    expect(rolesGuardSiteFor('POST', '/v1/registration-requests/:id/reject')).toBeUndefined();
+  });
+
   it.each([
     'CREATE_USER',
     'ADD_MEMBERSHIP',
     'UPDATE_MEMBERSHIP_ROLES',
     'REVOKE_MEMBERSHIP',
+    'APPROVE_REGISTRATION_REQUEST',
   ] as const)('marks a role refusal as %s without changing its serialisation', (siteName) => {
     const plain = RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['AUDITOR']);
     const marked = markRefusal(

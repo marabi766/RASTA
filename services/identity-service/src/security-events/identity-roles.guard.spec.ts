@@ -16,9 +16,14 @@ import { refusalSiteOf, REFUSAL_SITES } from './refusal-sites';
  * The identity role guard is the shared `RolesGuard` plus one thing: it marks
  * the shared guard's own `INSUFFICIENT_ROLE` refusal — the same object — when,
  * and only when, the matched route is an allowlisted `ROLES_GUARD` site
- * (AUD-004 Phases C3–C7: `GET /v1/users`, `POST /v1/users`,
- * `POST /v1/users/:id/memberships`, `POST /v1/memberships/:id/roles` and
- * `POST /v1/memberships/:id/revoke`).
+ * (AUD-004 Phases C3–C8: `GET /v1/users`, `POST /v1/users`,
+ * `POST /v1/users/:id/memberships`, `POST /v1/memberships/:id/roles`,
+ * `POST /v1/memberships/:id/revoke` and
+ * `POST /v1/registration-requests/:id/approve`).
+ *
+ * `POST /v1/registration-requests/:id/reject` carries the same method, the same
+ * prefix and the same single required role, and is deliberately **not** a site:
+ * it is the near miss that proves only the allowlist decides.
  */
 
 class ProbeController {
@@ -37,6 +42,13 @@ class ProbeController {
   @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
   revokeMembership(): void {}
 
+  // The two registration review outcomes: one required role, not two.
+  @Roles('UNION_ADMIN')
+  approveRegistration(): void {}
+
+  @Roles('UNION_ADMIN')
+  rejectRegistration(): void {}
+
   @Public('guard spec probe')
   open(): void {}
 
@@ -48,6 +60,8 @@ const CREATE = ProbeController.prototype.create;
 const ADD_MEMBERSHIP = ProbeController.prototype.addMembership;
 const REPLACE_ROLES = ProbeController.prototype.replaceRoles;
 const REVOKE = ProbeController.prototype.revokeMembership;
+const APPROVE = ProbeController.prototype.approveRegistration;
+const REJECT = ProbeController.prototype.rejectRegistration;
 const OPEN = ProbeController.prototype.open;
 const ANY = ProbeController.prototype.anyAuthenticated;
 
@@ -99,24 +113,53 @@ const revokeRequest: ProbeRequest = {
   body: { reason: BODY_SENTINEL },
 };
 
+const approveRequest: ProbeRequest = {
+  method: 'POST',
+  route: { path: '/v1/registration-requests/:id/approve' },
+  url: `/v1/registration-requests/${PATH_SENTINEL}/approve?role=UNION_ADMIN`,
+  params: { id: PATH_SENTINEL },
+  body: { organizationId: `ORG-${BODY_SENTINEL}`, roles: ['SYSTEM_ADMIN'] },
+};
+
+/** The uninstrumented sibling: identical in every way the guard can see. */
+const rejectRequest: ProbeRequest = {
+  method: 'POST',
+  route: { path: '/v1/registration-requests/:id/reject' },
+  url: `/v1/registration-requests/${PATH_SENTINEL}/reject`,
+  params: { id: PATH_SENTINEL },
+  body: { reason: BODY_SENTINEL },
+};
+
 const REQUEST_BY_HANDLER = new Map<() => void, ProbeRequest>([
   [CREATE, createRequest],
   [ADD_MEMBERSHIP, addMembershipRequest],
   [REPLACE_ROLES, replaceRolesRequest],
   [REVOKE, revokeRequest],
+  [APPROVE, approveRequest],
+  [REJECT, rejectRequest],
 ]);
 
 const requestFor = (handler: () => void): ProbeRequest =>
   REQUEST_BY_HANDLER.get(handler) ?? listRequest;
 
 type MarkedSiteName =
-  'CREATE_USER' | 'ADD_MEMBERSHIP' | 'UPDATE_MEMBERSHIP_ROLES' | 'REVOKE_MEMBERSHIP';
+  | 'CREATE_USER'
+  | 'ADD_MEMBERSHIP'
+  | 'UPDATE_MEMBERSHIP_ROLES'
+  | 'REVOKE_MEMBERSHIP'
+  | 'APPROVE_REGISTRATION_REQUEST';
 
 const MARKED_SITES: [string, () => void, ProbeRequest, MarkedSiteName][] = [
   ['POST /v1/users', CREATE, createRequest, 'CREATE_USER'],
   ['POST /v1/users/:id/memberships', ADD_MEMBERSHIP, addMembershipRequest, 'ADD_MEMBERSHIP'],
   ['POST /v1/memberships/:id/roles', REPLACE_ROLES, replaceRolesRequest, 'UPDATE_MEMBERSHIP_ROLES'],
   ['POST /v1/memberships/:id/revoke', REVOKE, revokeRequest, 'REVOKE_MEMBERSHIP'],
+  [
+    'POST /v1/registration-requests/:id/approve',
+    APPROVE,
+    approveRequest,
+    'APPROVE_REGISTRATION_REQUEST',
+  ],
 ];
 
 function execution(
@@ -369,12 +412,52 @@ describe('IdentityRolesGuard', () => {
     ],
     ['the membership collection', { method: 'POST', route: { path: '/v1/memberships' } }],
     [
-      'registration approval',
-      { method: 'POST', route: { path: '/v1/registration-requests/:id/approve' } },
+      'a lower-case method on the approve template',
+      { method: 'post', route: { path: '/v1/registration-requests/:id/approve' } },
     ],
     [
-      'registration rejection',
+      'GET on the approve template',
+      { method: 'GET', route: { path: '/v1/registration-requests/:id/approve' } },
+    ],
+    [
+      'PUT on the approve template',
+      { method: 'PUT', route: { path: '/v1/registration-requests/:id/approve' } },
+    ],
+    [
+      'a trailing slash on the approve template',
+      { method: 'POST', route: { path: '/v1/registration-requests/:id/approve/' } },
+    ],
+    [
+      'a differently named approve parameter',
+      { method: 'POST', route: { path: '/v1/registration-requests/:requestId/approve' } },
+    ],
+    [
+      'a deeper approve template',
+      { method: 'POST', route: { path: '/v1/registration-requests/:id/approve/:step' } },
+    ],
+    [
+      'a concrete approve URL where the template belongs',
+      { method: 'POST', route: { path: `/v1/registration-requests/${PATH_SENTINEL}/approve` } },
+    ],
+    [
+      'an approve template with a query',
+      { method: 'POST', route: { path: '/v1/registration-requests/:id/approve?role=x' } },
+    ],
+    [
+      'no matched route for an approve POST',
+      { method: 'POST', url: `/v1/registration-requests/${PATH_SENTINEL}/approve` },
+    ],
+    [
+      'the registration-request collection',
+      { method: 'POST', route: { path: '/v1/registration-requests' } },
+    ],
+    [
+      'registration rejection, the uninstrumented sibling',
       { method: 'POST', route: { path: '/v1/registration-requests/:id/reject' } },
+    ],
+    [
+      'a concrete rejection URL',
+      { method: 'POST', route: { path: `/v1/registration-requests/${PATH_SENTINEL}/reject` } },
     ],
     ['no matched route at all', { method: 'GET', url: '/v1/users' }],
     [
@@ -390,6 +473,31 @@ describe('IdentityRolesGuard', () => {
 
     expect((error as RastaError).code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
     expect(refusalSiteOf(error)).toBeUndefined();
+  });
+
+  it('marks ORGANIZATION_ADMIN’s approve refusal, a role every earlier site allows', () => {
+    // The approve endpoint requires UNION_ADMIN only. The shared guard refuses
+    // ORGANIZATION_ADMIN here and allows it on all four earlier roles-guard
+    // sites, so this is the one case where the role alone decides nothing and
+    // the site still has to be exactly right.
+    const exec = execution(APPROVE, approveRequest);
+    const { result, error } = outcome(identityGuard(), exec, user(['ORGANIZATION_ADMIN']));
+
+    expect(result).toBeUndefined();
+    expect((error as RastaError).code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+    expect(refusalSiteOf(error)).toBe(REFUSAL_SITES.APPROVE_REGISTRATION_REQUEST);
+    expect(outcome(platformGuard(), exec, user(['ORGANIZATION_ADMIN'])).result).toBeUndefined();
+  });
+
+  it('never marks the sibling POST /v1/registration-requests/:id/reject', () => {
+    const exec = execution(REJECT, rejectRequest);
+    const mine = outcome(identityGuard(), exec, user(['ORGANIZATION_ADMIN']));
+    const shared = outcome(platformGuard(), exec, user(['ORGANIZATION_ADMIN']));
+
+    expect((mine.error as RastaError).code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+    expect((mine.error as RastaError).status).toBe(403);
+    expect(refusalSiteOf(mine.error)).toBeUndefined();
+    expect(JSON.stringify(mine.error)).toBe(JSON.stringify(shared.error));
   });
 
   it('does not mark outside HTTP', () => {
@@ -488,6 +596,20 @@ describe('IdentityRolesGuard', () => {
       ['a disallowed role on the revoke endpoint', REVOKE, user(['AUDITOR'])],
       ['no roles on the revoke endpoint', REVOKE, user([])],
       ['no context on the revoke endpoint', REVOKE, undefined],
+      // The approve endpoint requires UNION_ADMIN *only*, so ORGANIZATION_ADMIN
+      // is refused here and allowed everywhere else — the shared guard decides
+      // that, and identity's guard must agree with it exactly.
+      ['UNION_ADMIN on the approve endpoint', APPROVE, user(['UNION_ADMIN'])],
+      ['SYSTEM_ADMIN on the approve endpoint', APPROVE, user(['SYSTEM_ADMIN'])],
+      ['ORGANIZATION_ADMIN on the approve endpoint', APPROVE, user(['ORGANIZATION_ADMIN'])],
+      ['a service caller on the approve endpoint', APPROVE, serviceCaller],
+      ['a disallowed role on the approve endpoint', APPROVE, user(['AUDITOR'])],
+      ['no roles on the approve endpoint', APPROVE, user([])],
+      ['no context on the approve endpoint', APPROVE, undefined],
+      ['UNION_ADMIN on the reject endpoint', REJECT, user(['UNION_ADMIN'])],
+      ['ORGANIZATION_ADMIN on the reject endpoint', REJECT, user(['ORGANIZATION_ADMIN'])],
+      ['a disallowed role on the reject endpoint', REJECT, user(['AUDITOR'])],
+      ['no context on the reject endpoint', REJECT, undefined],
     ])('%s', (_label, handler, context) => {
       const exec = execution(handler, requestFor(handler));
       const mine = outcome(identityGuard(), exec, context);
