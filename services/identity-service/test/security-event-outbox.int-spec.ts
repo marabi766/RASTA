@@ -247,15 +247,16 @@ describe('security_event_outbox (real PostgreSQL)', () => {
     expect(anonymous.status).toBe(401);
 
     // 403 INSUFFICIENT_ROLE from the roles guard on an endpoint that is not an
-    // allowlisted site. (`GET /v1/users` became one in AUD-004 Phase C3 and is
-    // proved captured in `security-event-role-refusal.int-spec.ts`.)
+    // allowlisted site. (`GET /v1/users` and `POST /v1/users` became sites in
+    // AUD-004 Phases C3 and C4 and are proved captured in
+    // `security-event-role-refusal.int-spec.ts`.)
     const underPrivileged: Caller = { userId: tagged('USR'), organizationId: tagged('ORG') };
-    const creating = await request(harness.app.getHttpServer())
-      .post('/v1/users')
+    const addingMembership = await request(harness.app.getHttpServer())
+      .post(`/v1/users/${tagged('USR')}/memberships`)
       .set('authorization', `Bearer ${userToken(underPrivileged)}`)
       .send({});
-    expect(creating.status).toBe(403);
-    expect(creating.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+    expect(addingMembership.status).toBe(403);
+    expect(addingMembership.body.code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
 
     // 403 TENANT_MISMATCH raised by the auth guard for a header outside the
     // token's memberships — the same code, but not the identity decision.

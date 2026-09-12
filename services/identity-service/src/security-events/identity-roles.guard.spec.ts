@@ -16,12 +16,15 @@ import { refusalSiteOf, REFUSAL_SITES } from './refusal-sites';
  * The identity role guard is the shared `RolesGuard` plus one thing: it marks
  * the shared guard's own `INSUFFICIENT_ROLE` refusal — the same object — when,
  * and only when, the matched route is an allowlisted `ROLES_GUARD` site
- * (AUD-004 Phase C3).
+ * (AUD-004 Phases C3–C4: `GET /v1/users` and `POST /v1/users`).
  */
 
 class ProbeController {
   @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
   list(): void {}
+
+  @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
+  create(): void {}
 
   @Public('guard spec probe')
   open(): void {}
@@ -30,6 +33,7 @@ class ProbeController {
 }
 
 const LIST = ProbeController.prototype.list;
+const CREATE = ProbeController.prototype.create;
 const OPEN = ProbeController.prototype.open;
 const ANY = ProbeController.prototype.anyAuthenticated;
 
@@ -37,12 +41,20 @@ interface ProbeRequest {
   method?: string;
   route?: { path?: string };
   url?: string;
+  body?: unknown;
 }
 
 const listRequest: ProbeRequest = {
   method: 'GET',
   route: { path: '/v1/users' },
   url: '/v1/users?q=SENSITIVE-QUERY-SENTINEL',
+};
+
+const createRequest: ProbeRequest = {
+  method: 'POST',
+  route: { path: '/v1/users' },
+  url: '/v1/users',
+  body: { username: 'SENSITIVE-BODY-SENTINEL', roles: ['SYSTEM_ADMIN'] },
 };
 
 function execution(
@@ -160,11 +172,49 @@ describe('IdentityRolesGuard', () => {
     expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
   });
 
+  it('marks the shared guard’s INSUFFICIENT_ROLE for POST /v1/users with the CREATE_USER site', () => {
+    const { error } = outcome(
+      identityGuard(),
+      execution(CREATE, createRequest),
+      user(['FLEET_MANAGER']),
+    );
+
+    expect(error).toBeInstanceOf(RastaError);
+    expect((error as RastaError).code).toBe(ERROR_CODES.INSUFFICIENT_ROLE);
+    expect((error as RastaError).status).toBe(403);
+    expect(refusalSiteOf(error)).toBe(REFUSAL_SITES.CREATE_USER);
+  });
+
+  it('rethrows the very object the shared guard threw for POST /v1/users, unchanged', () => {
+    const exec = execution(CREATE, createRequest);
+    const thrown = RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['FLEET_MANAGER']);
+    const spy = jest.spyOn(RolesGuard.prototype, 'canActivate').mockImplementation(() => {
+      throw thrown;
+    });
+    const { error } = outcome(identityGuard(), exec, user(['FLEET_MANAGER']));
+    expect(error).toBe(thrown);
+    expect(refusalSiteOf(thrown)).toBe(REFUSAL_SITES.CREATE_USER);
+    spy.mockRestore();
+
+    const marked = outcome(identityGuard(), exec, user(['FLEET_MANAGER'])).error as RastaError;
+    const plain = outcome(platformGuard(), exec, user(['FLEET_MANAGER'])).error as RastaError;
+    expect(refusalSiteOf(plain)).toBeUndefined();
+    expect(marked.constructor).toBe(plain.constructor);
+    expect(marked.internalContext).toEqual(plain.internalContext);
+    expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
+    // The body the caller sent plays no part in the decision or the error.
+    expect(JSON.stringify(marked)).not.toContain('SENSITIVE-BODY-SENTINEL');
+  });
+
   it.each<[string, ProbeRequest]>([
-    ['another method on the same template', { method: 'POST', route: { path: '/v1/users' } }],
+    ['another method on the same template', { method: 'PUT', route: { path: '/v1/users' } }],
+    ['a lower-case method', { method: 'post', route: { path: '/v1/users' } }],
     ['another route template', { method: 'GET', route: { path: '/v1/memberships' } }],
     ['a nested template', { method: 'GET', route: { path: '/v1/users/:id' } }],
+    ['a nested POST template', { method: 'POST', route: { path: '/v1/users/:id/memberships' } }],
+    ['a trailing slash', { method: 'POST', route: { path: '/v1/users/' } }],
     ['no matched route at all', { method: 'GET', url: '/v1/users' }],
+    ['no matched route for a POST', { method: 'POST', url: '/v1/users' }],
     [
       'a concrete URL where the template belongs',
       { method: 'GET', route: { path: '/v1/users?q=x' } },
@@ -242,8 +292,13 @@ describe('IdentityRolesGuard', () => {
       ['a disallowed role on a @Roles endpoint', LIST, user(['FLEET_MANAGER', 'AUDITOR'])],
       ['no roles at all on a @Roles endpoint', LIST, user([])],
       ['no context on a @Roles endpoint', LIST, undefined],
+      ['ORGANIZATION_ADMIN on the create endpoint', CREATE, user(['ORGANIZATION_ADMIN'])],
+      ['SYSTEM_ADMIN on the create endpoint', CREATE, user(['SYSTEM_ADMIN'])],
+      ['a service caller on the create endpoint', CREATE, serviceCaller],
+      ['a disallowed role on the create endpoint', CREATE, user(['AUDITOR'])],
+      ['no context on the create endpoint', CREATE, undefined],
     ])('%s', (_label, handler, context) => {
-      const exec = execution(handler, listRequest);
+      const exec = execution(handler, handler === CREATE ? createRequest : listRequest);
       const mine = outcome(identityGuard(), exec, context);
       const shared = outcome(platformGuard(), exec, context);
 

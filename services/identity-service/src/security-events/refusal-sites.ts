@@ -3,7 +3,7 @@ import type { RastaError } from '@rasta/nest-common';
 
 /**
  * The refusals this service records as audit evidence (ADR-053 § 4,
- * AUD-004 Phases C1–C3) — a fixed allowlist, and the only source of the audit
+ * AUD-004 Phases C1–C4) — a fixed allowlist, and the only source of the audit
  * `action`, `resourceType` and `reason` those records carry.
  *
  * ## Why an allowlist, and why it is attached where the decision is made
@@ -30,7 +30,7 @@ import type { RastaError } from '@rasta/nest-common';
  *                     `IdentityRolesGuard` after the shared guard decided —
  *                     the shared guard itself knows nothing of this table.
  *
- * Two sites are instrumented. Every other `403` in this service — and in every
+ * Three sites are instrumented. Every other `403` in this service — and in every
  * other service — is not recorded yet (ADR-053 plan § 8, R-2).
  */
 
@@ -106,6 +106,31 @@ export const REFUSAL_SITES = {
     resourceType: 'User',
     resource: 'ACTOR_USER',
     reason: 'User listing refused: the caller holds none of the roles this endpoint requires',
+  },
+
+  /**
+   * `POST /v1/users` refused by the platform `RolesGuard` because the caller
+   * holds neither `ORGANIZATION_ADMIN` nor `UNION_ADMIN` (nor `SYSTEM_ADMIN`)
+   * — AUD-004 Phase C4.
+   *
+   * A refused create has no created user, and the user the body describes is
+   * attacker-chosen input, so the resource id is the caller's own user id from
+   * the verified token — as for `LIST_USERS`. The guard refuses before the body
+   * is parsed; nothing from it, nor the endpoint's required roles, nor the
+   * error's internal context, is ever recorded. The action name is a Temporary
+   * Decision (`docs/24-open-questions.md` Q-46).
+   */
+  CREATE_USER: {
+    key: 'identity.create_user',
+    method: 'POST',
+    route: '/v1/users',
+    status: 403,
+    errorCode: ERROR_CODES.INSUFFICIENT_ROLE,
+    decidedBy: 'ROLES_GUARD',
+    action: 'identity.users.create',
+    resourceType: 'User',
+    resource: 'ACTOR_USER',
+    reason: 'User creation refused: the caller holds none of the roles this endpoint requires',
   },
 } as const satisfies Record<string, RefusalSite>;
 

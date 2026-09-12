@@ -166,40 +166,44 @@ describe('RefusalAuditExceptionFilter', () => {
     });
   });
 
-  it('captures a roles-guard denial marked LIST_USERS on GET /v1/users with its own classification, and sends the platform response unchanged', async () => {
-    const record = jest.fn(async () => 'recorded' as const);
-    const filter = new RefusalAuditExceptionFilter(
-      silentLogger() as unknown as Logger,
-      { record } as unknown as RefusalAuditRecorder,
-    );
-    const listRequest = { method: 'GET', route: { path: REFUSAL_SITES.LIST_USERS.route } };
-    const exception = markRefusal(
-      RastaError.insufficientRole(['ORGANIZATION_ADMIN', 'UNION_ADMIN'], ['FLEET_MANAGER']),
-      'LIST_USERS',
-    );
-    const unmarked = RastaError.insufficientRole(
-      ['ORGANIZATION_ADMIN', 'UNION_ADMIN'],
-      ['FLEET_MANAGER'],
-    );
-    const expected = platformResponse(unmarked);
+  it.each(['LIST_USERS', 'CREATE_USER'] as const)(
+    'captures a roles-guard denial marked %s with its own classification, and sends the platform response unchanged',
+    async (siteName) => {
+      const site = REFUSAL_SITES[siteName];
+      const record = jest.fn(async () => 'recorded' as const);
+      const filter = new RefusalAuditExceptionFilter(
+        silentLogger() as unknown as Logger,
+        { record } as unknown as RefusalAuditRecorder,
+      );
+      const siteRequest = { method: site.method, route: { path: site.route } };
+      const exception = markRefusal(
+        RastaError.insufficientRole(['ORGANIZATION_ADMIN', 'UNION_ADMIN'], ['FLEET_MANAGER']),
+        siteName,
+      );
+      const unmarked = RastaError.insufficientRole(
+        ['ORGANIZATION_ADMIN', 'UNION_ADMIN'],
+        ['FLEET_MANAGER'],
+      );
+      const expected = platformResponse(unmarked);
 
-    const response = run(filter, exception, listRequest);
-    await until(() => response.json.mock.calls.length > 0);
+      const response = run(filter, exception, siteRequest);
+      await until(() => response.json.mock.calls.length > 0);
 
-    expect(record).toHaveBeenCalledWith(
-      expect.objectContaining({
-        exception,
-        status: 403,
-        code: ERROR_CODES.INSUFFICIENT_ROLE,
-        method: 'GET',
-        route: '/v1/users',
-      }),
-    );
-    expect(response.status).toHaveBeenCalledTimes(1);
-    expect(response.status).toHaveBeenCalledWith(403);
-    expect(withoutTimestamp(response.json.mock.calls[0]![0])).toEqual(expected.body);
-    expect(expected.body).toMatchObject({ code: 'INSUFFICIENT_ROLE' });
-  });
+      expect(record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exception,
+          status: 403,
+          code: ERROR_CODES.INSUFFICIENT_ROLE,
+          method: site.method,
+          route: '/v1/users',
+        }),
+      );
+      expect(response.status).toHaveBeenCalledTimes(1);
+      expect(response.status).toHaveBeenCalledWith(403);
+      expect(withoutTimestamp(response.json.mock.calls[0]![0])).toEqual(expected.body);
+      expect(expected.body).toMatchObject({ code: 'INSUFFICIENT_ROLE' });
+    },
+  );
 
   it('answers an unmarked INSUFFICIENT_ROLE on GET /v1/users synchronously and without capture', () => {
     const recorder = { record: jest.fn() } as unknown as RefusalAuditRecorder;

@@ -187,6 +187,76 @@ describe('decideCapture', () => {
     });
   });
 
+  describe('the roles-guard site POST /v1/users (AUD-004 Phase C4)', () => {
+    const createSite = REFUSAL_SITES.CREATE_USER;
+    const BODY_SECRET = 'BODY-SECRET-SENTINEL';
+    const denial = (): RastaError =>
+      markRefusal(
+        RastaError.insufficientRole(['ORGANIZATION_ADMIN', 'UNION_ADMIN'], ['AUDITOR']),
+        'CREATE_USER',
+      );
+    const observeCreate = (overrides: Partial<RefusalObservation> = {}): RefusalObservation => ({
+      exception: denial(),
+      status: 403,
+      code: ERROR_CODES.INSUFFICIENT_ROLE,
+      method: 'POST',
+      route: createSite.route,
+      context: context({ roles: ['AUDITOR'], path: `/v1/users?username=${BODY_SECRET}` }),
+      ...overrides,
+    });
+
+    it('maps the actor, roles and tenant from the context and everything else from the site', () => {
+      expect(captured(observeCreate())).toMatchObject({
+        organizationId: 'ORG_A',
+        actorType: 'USER',
+        actorId: 'USR_A',
+        actorRoles: ['AUDITOR'],
+        action: 'identity.users.create',
+        resourceType: 'User',
+        resourceId: 'USR_A',
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: createSite.reason,
+        occurrenceCount: 1,
+      });
+    });
+
+    it("records neither the endpoint's required roles, the request, nor the error's text or context", () => {
+      const serialised = JSON.stringify(captured(observeCreate()));
+      expect(serialised).not.toContain('ORGANIZATION_ADMIN');
+      expect(serialised).not.toContain('UNION_ADMIN');
+      expect(serialised).not.toContain(BODY_SECRET);
+      expect(serialised).not.toContain(denial().message);
+      expect(serialised).not.toContain('required');
+    });
+
+    it('never shares an aggregation identity with the listing site on the same template', () => {
+      const create = captured(observeCreate());
+      const list = captured({
+        ...observeCreate(),
+        exception: markRefusal(RastaError.insufficientRole(['UNION_ADMIN'], []), 'LIST_USERS'),
+        method: 'GET',
+      });
+      expect(create.action).not.toBe(list.action);
+      expect(create.reason).not.toBe(list.reason);
+    });
+
+    it.each([
+      ['GET on the same template', { method: 'GET' }],
+      ['a nested template', { route: '/v1/users/:id/memberships' }],
+    ])('skips a marked denial observed on %s', (_label, overrides) => {
+      expect(skipReason(observeCreate(overrides))).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+
+    it('never captures an unmarked INSUFFICIENT_ROLE, even on POST /v1/users', () => {
+      expect(
+        decideCapture(
+          observeCreate({ exception: RastaError.insufficientRole(['UNION_ADMIN'], []) }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+  });
+
   describe('is not a refusal site', () => {
     it.each([
       ["the auth guard's own TENANT_MISMATCH", RastaError.tenantMismatch('ORG_X', ['ORG_A'])],
