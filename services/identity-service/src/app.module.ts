@@ -43,6 +43,7 @@ import { loadIdentityEnv, SERVICE_NAME, type IdentityEnv } from './config/env';
 import { SecurityEventOutboxStore } from './security-events/security-event-outbox.store';
 import { RefusalAuditRecorder } from './security-events/refusal-audit.recorder';
 import { RefusalAuditExceptionFilter } from './security-events/refusal-audit.filter';
+import { withAuthGuardRefusalAudit } from './security-events/auth-guard-refusal';
 import { IdentityRolesGuard } from './security-events/identity-roles.guard';
 import {
   createSecurityEventRelay,
@@ -211,19 +212,24 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
     {
       provide: AUTH_OPTIONS,
       inject: [ENV],
-      useFactory: (env: IdentityEnv): AuthGuardOptions => ({
-        serviceName: SERVICE_NAME,
-        tokenVerifier: new TokenVerifier({
-          jwksUri: env.OIDC_JWKS_URI,
-          issuer: env.OIDC_ISSUER_URL,
-          audience: env.OIDC_AUDIENCE,
+      // The platform options, plus refusal-audit observation of the guard's
+      // own tenant refusal (AUD-004 Phase C10). The guard is the platform's,
+      // unchanged, and remains the only authentication and tenant resolver;
+      // the observer only marks the refusal it has already decided.
+      useFactory: (env: IdentityEnv): AuthGuardOptions =>
+        withAuthGuardRefusalAudit({
+          serviceName: SERVICE_NAME,
+          tokenVerifier: new TokenVerifier({
+            jwksUri: env.OIDC_JWKS_URI,
+            issuer: env.OIDC_ISSUER_URL,
+            audience: env.OIDC_AUDIENCE,
+          }),
+          internalTokens: new InternalTokenService(
+            env.INTERNAL_TOKEN_SECRET,
+            env.INTERNAL_TOKEN_ISSUER,
+            env.INTERNAL_TOKEN_TTL_SECONDS,
+          ),
         }),
-        internalTokens: new InternalTokenService(
-          env.INTERNAL_TOKEN_SECRET,
-          env.INTERNAL_TOKEN_ISSUER,
-          env.INTERNAL_TOKEN_TTL_SECONDS,
-        ),
-      }),
     },
 
     // Order matters: authenticate, then authorize. Registered globally so an

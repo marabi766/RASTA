@@ -1,9 +1,16 @@
 import { AUDIT_ACTION_PATTERN, ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
-import { markRefusal, refusalSiteOf, rolesGuardSiteFor, REFUSAL_SITES } from './refusal-sites';
+import {
+  markGuardRefusal,
+  markRefusal,
+  refusalSiteOf,
+  rolesGuardSiteFor,
+  trustedAttributionOf,
+  REFUSAL_SITES,
+} from './refusal-sites';
 
-describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C9)', () => {
-  it('instruments exactly eight refusal sites', () => {
+describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C10)', () => {
+  it('instruments exactly nine refusal sites', () => {
     expect(Object.keys(REFUSAL_SITES)).toEqual([
       'SWITCH_ACTIVE_ORGANIZATION',
       'LIST_USERS',
@@ -13,6 +20,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C9)', () => 
       'REVOKE_MEMBERSHIP',
       'APPROVE_REGISTRATION_REQUEST',
       'REJECT_REGISTRATION_REQUEST',
+      'AUTH_TENANT_MISMATCH',
     ]);
   });
 
@@ -147,6 +155,59 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C9)', () => 
     });
   });
 
+  it('pins the auth guard tenant refusal to no route at all, 403 and TENANT_MISMATCH (Phase C10)', () => {
+    expect(REFUSAL_SITES.AUTH_TENANT_MISMATCH).toEqual({
+      key: 'identity.auth_tenant_mismatch',
+      // Route-agnostic: the shared auth guard refuses before any controller
+      // authorization, so no route identifies this decision.
+      method: null,
+      route: null,
+      status: 403,
+      errorCode: ERROR_CODES.TENANT_MISMATCH,
+      decidedBy: 'AUTH_GUARD',
+      action: 'identity.tenant_context.select',
+      resourceType: 'User',
+      // The caller, never the organization the rejected header named.
+      resource: 'ACTOR_USER',
+      reason:
+        'Organization selection refused: the requested organization is outside the verified token memberships',
+    });
+  });
+
+  it('is the only route-agnostic site, and the only one the auth guard decides', () => {
+    const routeless = Object.values(REFUSAL_SITES).filter(
+      (site) => site.method === null || site.route === null,
+    );
+    const guardDecided = Object.values(REFUSAL_SITES).filter(
+      (site) => site.decidedBy === 'AUTH_GUARD',
+    );
+
+    expect(routeless).toEqual([REFUSAL_SITES.AUTH_TENANT_MISMATCH]);
+    expect(guardDecided).toEqual([REFUSAL_SITES.AUTH_TENANT_MISMATCH]);
+    // Every other site still names both, so "no route" can never be the
+    // accidental state of a site whose template was forgotten.
+    for (const site of Object.values(REFUSAL_SITES)) {
+      if (site.decidedBy === 'AUTH_GUARD') continue;
+      expect(typeof site.method).toBe('string');
+      expect(typeof site.route).toBe('string');
+    }
+  });
+
+  it('keeps the two TENANT_MISMATCH sites apart by decider and action', () => {
+    // The same code, the same status and the same resource type, raised at two
+    // different decisions: the guard's header check and the domain's switch.
+    const guard = REFUSAL_SITES.AUTH_TENANT_MISMATCH;
+    const domain = REFUSAL_SITES.SWITCH_ACTIVE_ORGANIZATION;
+
+    expect(guard.errorCode).toBe(domain.errorCode);
+    expect(guard.status).toBe(domain.status);
+    expect(guard.resourceType).toBe(domain.resourceType);
+    expect(guard.decidedBy).not.toBe(domain.decidedBy);
+    expect(guard.action).not.toBe(domain.action);
+    expect(guard.key).not.toBe(domain.key);
+    expect(guard.reason).not.toBe(domain.reason);
+  });
+
   it('allowlists every @Roles route identity-service serves, so none is left uninstrumented (Phase C9)', () => {
     // The seven role-guarded routes of `identity.controller.ts`. With the last
     // of them a site, no HTTP role refusal is left to act as an "unchanged
@@ -266,6 +327,10 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C9)', () => 
       ['no route for a POST', 'POST', undefined],
       ['no method', undefined, '/v1/users/:id/memberships'],
       ['non-string values', 1, { path: '/v1/users' }],
+      // The route-agnostic site is never reachable through this lookup: it is
+      // not decided by the roles guard, and it has no method or route to match.
+      ['a null method and route', null, null],
+      ['the guard site’s own null route', 'POST', null],
     ])('finds nothing for %s', (_label, method, route) => {
       expect(rolesGuardSiteFor(method, route)).toBeUndefined();
     });
@@ -286,7 +351,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C9)', () => 
     const identities = Object.values(REFUSAL_SITES).map(
       (site) => `${site.action}|${site.resourceType}|${site.errorCode}`,
     );
-    expect(identities).toHaveLength(8);
+    expect(identities).toHaveLength(9);
     expect(new Set(identities).size).toBe(identities.length);
   });
 
@@ -389,6 +454,88 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C9)', () => 
     // Same code, same message, different instance — e.g. the auth guard's own
     // TENANT_MISMATCH for a bad X-Organization-Id header.
     expect(refusalSiteOf(RastaError.tenantMismatch('ORG_X', ['ORG_A']))).toBeUndefined();
+  });
+
+  describe('the auth guard site is marked only with trusted attribution (Phase C10)', () => {
+    const attribution = {
+      userId: 'USR_TRUSTED',
+      organizationId: 'ORG_ACTIVE',
+      roles: ['FLEET_MANAGER'],
+    };
+
+    it('marks the refusal and keeps it byte-for-byte what it was', () => {
+      const plain = RastaError.tenantMismatch('ORG_HEADER_SENTINEL', ['ORG_ACTIVE']);
+      const marked = markGuardRefusal(
+        RastaError.tenantMismatch('ORG_HEADER_SENTINEL', ['ORG_ACTIVE']),
+        'AUTH_TENANT_MISMATCH',
+        attribution,
+      );
+
+      expect(refusalSiteOf(marked)).toBe(REFUSAL_SITES.AUTH_TENANT_MISMATCH);
+      expect(marked.constructor).toBe(plain.constructor);
+      expect(marked.internalContext).toEqual(plain.internalContext);
+      expect(Object.keys(marked).sort()).toEqual(Object.keys(plain).sort());
+      expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
+    });
+
+    it('carries the trusted actor and tenant, copied rather than referenced', () => {
+      const roles = ['FLEET_MANAGER'];
+      const error = markGuardRefusal(
+        RastaError.tenantMismatch('ORG_HEADER_SENTINEL', []),
+        'AUTH_TENANT_MISMATCH',
+        { ...attribution, roles },
+      );
+
+      // Mutating the caller's array afterwards must not rewrite evidence.
+      roles.push('SYSTEM_ADMIN');
+
+      expect(trustedAttributionOf(error)).toEqual({
+        userId: 'USR_TRUSTED',
+        organizationId: 'ORG_ACTIVE',
+        roles: ['FLEET_MANAGER'],
+      });
+    });
+
+    it('never re-marks or re-attributes an error another decider already marked', () => {
+      // One refusal is one decision. Were a second mark to win, a domain
+      // refusal could be re-filed as a guard refusal, with someone else's
+      // attribution.
+      const error = markRefusal(
+        RastaError.tenantMismatch('ORG_HEADER_SENTINEL', []),
+        'SWITCH_ACTIVE_ORGANIZATION',
+      );
+      markGuardRefusal(error, 'AUTH_TENANT_MISMATCH', attribution);
+
+      expect(refusalSiteOf(error)).toBe(REFUSAL_SITES.SWITCH_ACTIVE_ORGANIZATION);
+      expect(trustedAttributionOf(error)).toBeUndefined();
+    });
+
+    it('leaves every route-marked and unmarked error without attribution', () => {
+      const roleRefusal = markRefusal(
+        RastaError.insufficientRole(['UNION_ADMIN'], []),
+        'LIST_USERS',
+      );
+
+      expect(trustedAttributionOf(roleRefusal)).toBeUndefined();
+      expect(trustedAttributionOf(RastaError.tenantMismatch('ORG_X', []))).toBeUndefined();
+      expect(trustedAttributionOf(undefined)).toBeUndefined();
+      expect(trustedAttributionOf('TENANT_MISMATCH')).toBeUndefined();
+    });
+
+    it('recognises only the instance that was marked', () => {
+      const marked = markGuardRefusal(
+        RastaError.tenantMismatch('ORG_HEADER_SENTINEL', []),
+        'AUTH_TENANT_MISMATCH',
+        attribution,
+      );
+
+      expect(refusalSiteOf(marked)).toBe(REFUSAL_SITES.AUTH_TENANT_MISMATCH);
+      // The auth guard's refusal for a different request: same class, same
+      // code, no mark.
+      const other = RastaError.tenantMismatch('ORG_HEADER_SENTINEL', []);
+      expect(refusalSiteOf(other)).toBeUndefined();
+      expect(trustedAttributionOf(other)).toBeUndefined();
+    });
   });
 
   it.each([

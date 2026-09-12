@@ -5,7 +5,7 @@ import {
   toSecurityEventOutboxRow,
   type SecurityEventRecord,
 } from './audit-trail-envelope';
-import { refusalSiteOf, type RefusalSite } from './refusal-sites';
+import { refusalSiteOf, trustedAttributionOf, type RefusalSite } from './refusal-sites';
 
 /**
  * The decision the refusal filter makes, as a pure function (ADR-053 § 4).
@@ -17,8 +17,11 @@ import { refusalSiteOf, type RefusalSite } from './refusal-sites';
  *
  *   action, resourceType,   the refusal site (`refusal-sites.ts`) — code, never
  *   reason, errorCode       the URL or the body
- *   actor id, roles,        the verified token, through the frozen request
- *   organization            context the auth guard upgraded
+ *   actor id, roles,        the verified token: through the frozen request
+ *   organization            context the auth guard upgraded, or — for the one
+ *                           site the guard itself decides, before there is any
+ *                           such context — through the trusted attribution that
+ *                           guard's seam supplied (Phase C10)
  *   resource id             the actor's own user id (the site says which)
  *   ip, user agent,         the request-context middleware — bounded and
  *   correlation, trace      shape-checked here, or left out
@@ -173,20 +176,57 @@ export function decideCapture(
   if (observation.status !== site.status || observation.code !== site.errorCode) {
     return skip(CAPTURE_SKIP_REASONS.CLASSIFICATION_MISMATCH);
   }
-  if (observation.method !== site.method || observation.route !== site.route) {
-    return skip(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
-  }
-
-  // Authenticated users only. ADR-053 § 4 excludes the unauthenticated case,
-  // and a service caller has no place in this site.
+  // The request context carries the correlation id, trace and source of every
+  // record, whichever site this is, so nothing is recorded without it.
   const context = observation.context;
-  if (!context || context.authType !== 'USER' || !isNonBlank(context.userId)) {
-    return skip(CAPTURE_SKIP_REASONS.NOT_AUTHENTICATED_USER);
+  if (!context) {
+    return skip(
+      site.decidedBy === 'AUTH_GUARD'
+        ? CAPTURE_SKIP_REASONS.UNATTRIBUTABLE
+        : CAPTURE_SKIP_REASONS.NOT_AUTHENTICATED_USER,
+    );
   }
 
-  const actorId = context.userId;
-  const roles = rolesOf(context.roles);
-  const organizationId = context.organizationId;
+  let actorId: string;
+  let claimedRoles: readonly string[];
+  let organizationId: string | undefined;
+
+  if (site.decidedBy === 'AUTH_GUARD') {
+    // Route-agnostic, and only here: this refusal precedes controller
+    // authorization, so the route it happened to be aimed at identifies
+    // nothing (`refusal-sites.ts`). The attribution comes from the shared
+    // guard's own verified token, because at this point the request context
+    // has not been upgraded and still says ANONYMOUS. A marked error without
+    // it is not this refusal and is not recorded.
+    const attribution = trustedAttributionOf(observation.exception);
+    if (
+      attribution === undefined ||
+      !isNonBlank(attribution.userId) ||
+      !isNonBlank(attribution.organizationId)
+    ) {
+      return skip(CAPTURE_SKIP_REASONS.UNATTRIBUTABLE);
+    }
+    actorId = attribution.userId;
+    claimedRoles = attribution.roles;
+    // The tenant the caller legitimately acts for, never the one they asked
+    // for and were refused.
+    organizationId = attribution.organizationId;
+  } else {
+    if (observation.method !== site.method || observation.route !== site.route) {
+      return skip(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    }
+
+    // Authenticated users only. ADR-053 § 4 excludes the unauthenticated case,
+    // and a service caller has no place in these sites.
+    if (context.authType !== 'USER' || !isNonBlank(context.userId)) {
+      return skip(CAPTURE_SKIP_REASONS.NOT_AUTHENTICATED_USER);
+    }
+    actorId = context.userId;
+    claimedRoles = context.roles;
+    organizationId = context.organizationId;
+  }
+
+  const roles = rolesOf(claimedRoles);
   if (
     actorId.length > ACTOR_ID_MAX_LENGTH ||
     roles === null ||

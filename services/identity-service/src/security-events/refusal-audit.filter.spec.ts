@@ -9,7 +9,7 @@ import {
 import type { Logger } from '@rasta/logging';
 import { RefusalAuditExceptionFilter } from './refusal-audit.filter';
 import { RefusalAuditRecorder, type SecurityEventWriter } from './refusal-audit.recorder';
-import { markRefusal, REFUSAL_SITES } from './refusal-sites';
+import { markGuardRefusal, markRefusal, REFUSAL_SITES } from './refusal-sites';
 
 /**
  * The filter's one promise: the response is the platform's, byte for byte,
@@ -212,6 +212,58 @@ describe('RefusalAuditExceptionFilter', () => {
       expect(expected.body).toMatchObject({ code: 'INSUFFICIENT_ROLE' });
     },
   );
+
+  it('captures the auth guard’s marked TENANT_MISMATCH on any route, and answers unchanged', async () => {
+    // Route-agnostic (Phase C10): the filter hands the recorder whatever route
+    // the request matched, and the capture decision ignores it for this site.
+    const record = jest.fn(async () => 'recorded' as const);
+    const filter = new RefusalAuditExceptionFilter(
+      silentLogger() as unknown as Logger,
+      {
+        record,
+      } as unknown as RefusalAuditRecorder,
+    );
+    const guardRequest = { method: 'GET', route: { path: '/v1/users/me' } };
+    const exception = markGuardRefusal(
+      RastaError.tenantMismatch('ORG_HEADER_SENTINEL', ['ORG_A']),
+      'AUTH_TENANT_MISMATCH',
+      { userId: 'USR_A', organizationId: 'ORG_A', roles: ['FLEET_MANAGER'] },
+    );
+    const expected = platformResponse(RastaError.tenantMismatch('ORG_HEADER_SENTINEL', ['ORG_A']));
+
+    const response = run(filter, exception, guardRequest);
+    await until(() => response.json.mock.calls.length > 0);
+
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        exception,
+        status: 403,
+        code: ERROR_CODES.TENANT_MISMATCH,
+        method: 'GET',
+        route: '/v1/users/me',
+      }),
+    );
+    expect(response.status).toHaveBeenCalledTimes(1);
+    expect(response.status).toHaveBeenCalledWith(403);
+    expect(withoutTimestamp(response.json.mock.calls[0]![0])).toEqual(expected.body);
+    expect(expected.body).toMatchObject({ code: 'TENANT_MISMATCH' });
+  });
+
+  it('answers the auth guard’s unmarked TENANT_MISMATCH synchronously and without capture', () => {
+    // The same class, code and message, from a request whose token had no
+    // active organization: unmarked, so not evidence.
+    const recorder = { record: jest.fn() } as unknown as RefusalAuditRecorder;
+    const filter = new RefusalAuditExceptionFilter(silentLogger() as unknown as Logger, recorder);
+
+    const response = run(filter, RastaError.tenantMismatch('ORG_HEADER_SENTINEL', []), {
+      method: 'GET',
+      route: { path: '/v1/users/me' },
+    });
+
+    expect(response.json).toHaveBeenCalledTimes(1);
+    expect(response.status).toHaveBeenCalledWith(403);
+    expect(recorder.record).not.toHaveBeenCalled();
+  });
 
   it('answers an unmarked INSUFFICIENT_ROLE on GET /v1/users synchronously and without capture', () => {
     const recorder = { record: jest.fn() } as unknown as RefusalAuditRecorder;

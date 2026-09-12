@@ -1,7 +1,13 @@
 import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError, type RequestContext } from '@rasta/nest-common';
 import { CAPTURE_SKIP_REASONS, decideCapture, type RefusalObservation } from './refusal-capture';
-import { markRefusal, REFUSAL_SITES } from './refusal-sites';
+import {
+  markGuardRefusal,
+  markRefusal,
+  REFUSAL_SITES,
+  type RefusalSiteName,
+  type RouteRefusalSiteName,
+} from './refusal-sites';
 
 /**
  * The capture decision, branch by branch. Every value a persisted row carries
@@ -700,6 +706,183 @@ describe('decideCapture', () => {
           ENVIRONMENT,
         ),
       ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+  });
+
+  describe('the auth guard site, which is route-agnostic (AUD-004 Phase C10)', () => {
+    const guardSite = REFUSAL_SITES.AUTH_TENANT_MISMATCH;
+    const TRUSTED_USER = 'USR_TRUSTED_TOKEN';
+    const TRUSTED_ORG = 'ORG_ACTIVE_FROM_TOKEN';
+    const REJECTED_ORG = 'ORG_REJECTED_HEADER_SENTINEL';
+
+    const denial = (): RastaError =>
+      markGuardRefusal(
+        RastaError.tenantMismatch(REJECTED_ORG, [TRUSTED_ORG]),
+        'AUTH_TENANT_MISMATCH',
+        { userId: TRUSTED_USER, organizationId: TRUSTED_ORG, roles: ['FLEET_MANAGER'] },
+      );
+
+    /**
+     * The context as it really is when the auth guard refuses: established by
+     * the middleware, never upgraded, so still anonymous and carrying no user.
+     * The record's attribution therefore cannot come from here — only its
+     * correlation, trace and source can.
+     */
+    const guardContext = (overrides: Partial<RequestContext> = {}): RequestContext =>
+      context({
+        authType: 'ANONYMOUS',
+        userId: undefined,
+        organizationId: undefined,
+        organizationIds: [],
+        roles: [],
+        path: `/v1/users/me?probe=${REJECTED_ORG}`,
+        ...overrides,
+      });
+
+    const observeGuard = (overrides: Partial<RefusalObservation> = {}): RefusalObservation => ({
+      exception: denial(),
+      status: 403,
+      code: ERROR_CODES.TENANT_MISMATCH,
+      method: 'GET',
+      route: '/v1/users/me',
+      context: guardContext(),
+      ...overrides,
+    });
+
+    it('attributes the record to the verified token, not to the anonymous context', () => {
+      expect(captured(observeGuard())).toEqual({
+        id: EVENT_ID,
+        organizationId: TRUSTED_ORG,
+        actorType: 'USER',
+        actorId: TRUSTED_USER,
+        actorRoles: ['FLEET_MANAGER'],
+        action: 'identity.tenant_context.select',
+        resourceType: 'User',
+        resourceId: TRUSTED_USER,
+        errorCode: 'TENANT_MISMATCH',
+        reason: guardSite.reason,
+        // Correlation, trace and source still come from the request context —
+        // they are provenance, not attribution.
+        sourceIp: '203.0.113.7',
+        sourceUserAgent: 'Mozilla/5.0 (identity unit)',
+        correlationId: 'COR_01J9ZC00000000000000000001',
+        traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+        producerVersion: '1.4.2',
+        occurredAt: NOW,
+        occurrenceCount: 1,
+      });
+    });
+
+    it.each([
+      ['no matched route at all', { method: undefined, route: undefined }],
+      ['another service route', { method: 'POST', route: '/v1/memberships/:id/revoke' }],
+      ['an instrumented roles-guard route', { method: 'GET', route: '/v1/users' }],
+      [
+        'the domain site’s own route',
+        { method: 'POST', route: '/v1/users/me/active-organization' },
+      ],
+      ['a concrete URL', { method: 'GET', route: '/v1/users/USR_X' }],
+    ])('captures the same record on %s, because the guard decides before routing', (_l, over) => {
+      // Pinning this site to one route would silently drop the identical
+      // refusal made against every other endpoint.
+      expect(captured(observeGuard(over))).toMatchObject({
+        actorId: TRUSTED_USER,
+        organizationId: TRUSTED_ORG,
+        action: guardSite.action,
+        resourceId: TRUSTED_USER,
+      });
+    });
+
+    it('records neither the rejected organization, the URL, nor the error’s text or context', () => {
+      const serialised = JSON.stringify(captured(observeGuard()));
+      for (const leaked of [REJECTED_ORG, QUERY_SECRET, '/v1/users', 'probe=', denial().message]) {
+        expect(serialised).not.toContain(leaked);
+      }
+      // The error's own `internalContext` — which holds the rejected header and
+      // the membership list — reaches neither the record nor its keys. (The
+      // word "requested" does appear, in the site's *fixed* reason text; that
+      // is authored here, not taken from the request.)
+      expect(serialised).not.toContain('internalContext');
+      expect(denial().internalContext).toEqual({ requested: REJECTED_ORG, allowed: [TRUSTED_ORG] });
+    });
+
+    it('never shares an aggregation identity with the domain’s own TENANT_MISMATCH', () => {
+      const guard = captured(observeGuard());
+      for (const other of Object.values(REFUSAL_SITES)) {
+        if (other === guardSite) continue;
+        expect(`${guard.action}|${guard.resourceType}|${guard.errorCode}`).not.toBe(
+          `${other.action}|${other.resourceType}|${other.errorCode}`,
+        );
+      }
+      expect(guard.action).not.toBe(REFUSAL_SITES.SWITCH_ACTIVE_ORGANIZATION.action);
+    });
+
+    it.each([
+      ['an INSUFFICIENT_ROLE classification', { code: ERROR_CODES.INSUFFICIENT_ROLE }],
+      ['a 401', { status: 401, code: ERROR_CODES.UNAUTHENTICATED }],
+      ['a 500', { status: 500, code: ERROR_CODES.INTERNAL_ERROR }],
+    ])('still skips a marked refusal classified as %s', (_label, overrides) => {
+      // Route-agnostic is not classification-agnostic: the platform's final
+      // answer must still be the 403 this site describes.
+      expect(skipReason(observeGuard(overrides))).toBe(
+        CAPTURE_SKIP_REASONS.CLASSIFICATION_MISMATCH,
+      );
+    });
+
+    it('fails closed when the site is marked without trusted attribution', () => {
+      // `markRefusal` cannot name this site in TypeScript; if it ever did at
+      // runtime, the record would have no attribution and must not be written.
+      const forced = (markRefusal as (error: RastaError, site: RefusalSiteName) => RastaError)(
+        RastaError.tenantMismatch(REJECTED_ORG, []),
+        'AUTH_TENANT_MISMATCH',
+      );
+
+      expect(skipReason(observeGuard({ exception: forced }))).toBe(
+        CAPTURE_SKIP_REASONS.UNATTRIBUTABLE,
+      );
+    });
+
+    it('fails closed with no request context, so nothing is recorded uncorrelated', () => {
+      expect(skipReason(observeGuard({ context: undefined }))).toBe(
+        CAPTURE_SKIP_REASONS.UNATTRIBUTABLE,
+      );
+    });
+
+    it.each([
+      ['an oversized actor id', 'U'.repeat(257), TRUSTED_ORG, ['FLEET_MANAGER']],
+      ['an oversized organization id', TRUSTED_USER, 'O'.repeat(129), ['FLEET_MANAGER']],
+      ['a blank role', TRUSTED_USER, TRUSTED_ORG, ['FLEET_MANAGER', ' ']],
+      ['too many roles', TRUSTED_USER, TRUSTED_ORG, Array.from({ length: 65 }, (_, i) => `R${i}`)],
+    ])('fails closed on %s in the attribution', (_label, userId, organizationId, roles) => {
+      const exception = markGuardRefusal(
+        RastaError.tenantMismatch(REJECTED_ORG, []),
+        'AUTH_TENANT_MISMATCH',
+        { userId, organizationId, roles },
+      );
+
+      expect(skipReason(observeGuard({ exception }))).toBe(CAPTURE_SKIP_REASONS.UNATTRIBUTABLE);
+    });
+
+    it('never captures an unmarked TENANT_MISMATCH, whatever the route', () => {
+      expect(
+        decideCapture(
+          observeGuard({ exception: RastaError.tenantMismatch(REJECTED_ORG, [TRUSTED_ORG]) }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+
+    it('leaves every route-bound site route-checked, so only this one is exempt', () => {
+      // The domain's TENANT_MISMATCH shares this site's code and status. Seen
+      // on another route it is still a route mismatch, not a guard refusal.
+      const domain = markRefusal(
+        RastaError.tenantMismatch(REJECTED_ORG, []),
+        'SWITCH_ACTIVE_ORGANIZATION' as RouteRefusalSiteName,
+      );
+
+      expect(
+        skipReason(observeGuard({ exception: domain, method: 'GET', route: '/v1/users/me' })),
+      ).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
     });
   });
 

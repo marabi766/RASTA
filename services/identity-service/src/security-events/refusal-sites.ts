@@ -3,17 +3,19 @@ import type { RastaError } from '@rasta/nest-common';
 
 /**
  * The refusals this service records as audit evidence (ADR-053 § 4,
- * AUD-004 Phases C1–C9) — a fixed allowlist, and the only source of the audit
+ * AUD-004 Phases C1–C10) — a fixed allowlist, and the only source of the audit
  * `action`, `resourceType` and `reason` those records carry.
  *
  * ## Why an allowlist, and why it is attached where the decision is made
  *
  * An exception filter sees every error the service raises, and most of them are
- * not evidence: a `401` has no attributable actor, a `404` is not a refusal, and
- * the same `TENANT_MISMATCH` code is also raised by the auth guard for a bad
- * `X-Organization-Id` header — before any identity decision was made. Deciding
- * from the status code alone would record all of those, and deciding from the
- * URL would let a caller choose what the audit record says.
+ * not evidence: a `401` has no attributable actor and a `404` is not a refusal.
+ * The same `TENANT_MISMATCH` code is raised at two different decisions — by the
+ * auth guard for a bad `X-Organization-Id` header, and by `IdentityService` for a
+ * switch into an organization the caller holds no active membership in — and the
+ * two are separate sites, with separate deciders and separate actions (Phase
+ * C10). Deciding from the status code alone would record every refusal, and
+ * deciding from the URL would let a caller choose what the audit record says.
  *
  * So a refusal is recorded only when **the code that made the decision** marks
  * the error it throws with a site from this table, and the filter then checks
@@ -22,15 +24,33 @@ import type { RastaError } from '@rasta/nest-common';
  * *what* was refused comes from here; nothing comes from the path, the query
  * string or the body.
  *
- * Two deciders may mark, each only its own sites (`decidedBy`):
+ * Three deciders may mark, each only its own sites (`decidedBy`):
  *
  *   IDENTITY_SERVICE  a domain decision in `IdentityService`, marked at the
  *                     throw site with `markRefusal`.
  *   ROLES_GUARD       a denial by the platform `RolesGuard`, marked by
  *                     `IdentityRolesGuard` after the shared guard decided —
  *                     the shared guard itself knows nothing of this table.
+ *   AUTH_GUARD        the platform `AuthGuard`'s own tenant refusal, marked by
+ *                     `markAuthGuardTenantMismatch` through that guard's generic
+ *                     observation seam (`auth-guard-refusal.ts`).
  *
- * Eight sites are instrumented. Every other `403` in this service — and in every
+ * ## Why one site is route-agnostic
+ *
+ * The two guard deciders differ in *when* they decide. A role denial happens on
+ * a matched route, so its site names that route and the filter checks it. The
+ * auth guard decides **before** any controller authorization, on every
+ * authenticated request whatever it was aimed at, so no route identifies it —
+ * pinning it to one would silently drop the same refusal made anywhere else.
+ * Its site therefore carries `method: null` and `route: null`, and the filter
+ * skips the route check for it and for nothing else (`refusal-capture.ts`).
+ *
+ * That is only safe because such a site cannot be marked from request data:
+ * `markGuardRefusal` demands a trusted actor and tenant that only the shared
+ * guard's post-verification seam can supply, and a mark without them is never
+ * captured.
+ *
+ * Nine sites are instrumented. Every other `403` in this service — and in every
  * other service — is not recorded yet (ADR-053 plan § 8, R-2).
  */
 
@@ -38,14 +58,11 @@ import type { RastaError } from '@rasta/nest-common';
 export type RefusalResourceSource = 'ACTOR_USER';
 
 /** Who makes the refusal decision, and so who may mark it. */
-export type RefusalDecider = 'IDENTITY_SERVICE' | 'ROLES_GUARD';
+export type RefusalDecider = 'IDENTITY_SERVICE' | 'ROLES_GUARD' | 'AUTH_GUARD';
 
-export interface RefusalSite {
+interface RefusalSiteBase {
   /** Stable and bounded — safe in a log line. Never a metric label. */
   readonly key: string;
-  readonly method: 'GET' | 'POST';
-  /** The route template Express reports as `req.route.path`, version prefix included. */
-  readonly route: string;
   readonly status: 403;
   readonly errorCode: ErrorCode;
   readonly decidedBy: RefusalDecider;
@@ -56,6 +73,28 @@ export interface RefusalSite {
   /** Fixed text. Never built from the request. */
   readonly reason: string;
 }
+
+/** A refusal made on one matched route, and recorded only on that route. */
+export interface RouteRefusalSite extends RefusalSiteBase {
+  readonly decidedBy: 'IDENTITY_SERVICE' | 'ROLES_GUARD';
+  readonly method: 'GET' | 'POST';
+  /** The route template Express reports as `req.route.path`, version prefix included. */
+  readonly route: string;
+}
+
+/**
+ * A refusal made before routing matters, and recorded whatever the route was.
+ *
+ * `null` rather than a wildcard: there is no route to compare, and a wildcard
+ * would read as "every route matches", which is a different and weaker claim.
+ */
+export interface GuardRefusalSite extends RefusalSiteBase {
+  readonly decidedBy: 'AUTH_GUARD';
+  readonly method: null;
+  readonly route: null;
+}
+
+export type RefusalSite = RouteRefusalSite | GuardRefusalSite;
 
 export const REFUSAL_SITES = {
   /**
@@ -281,9 +320,72 @@ export const REFUSAL_SITES = {
     reason:
       'Registration rejection refused: the caller holds none of the roles this endpoint requires',
   },
+
+  /**
+   * Any authenticated request refused by the platform `AuthGuard` with
+   * `403 TENANT_MISMATCH`, because `X-Organization-Id` asked to act for an
+   * organization outside the verified token's memberships — AUD-004 Phase C10,
+   * and the first site decided by neither this service's domain nor the roles
+   * guard.
+   *
+   * **Route-agnostic** (see the header). The guard refuses before any
+   * controller authorization, so the refusal belongs to the caller and the
+   * tenant they were acting for, not to the endpoint they happened to aim at.
+   *
+   * The organization is the verified token's **active** organization — the one
+   * the caller legitimately acts for — never the rejected header, which is
+   * attacker-chosen and recorded nowhere. A token with no active organization
+   * is not captured at all rather than captured as platform-scoped: an
+   * unattributable tenant probe must not be filed under "no tenant" beside
+   * legitimate platform-wide work.
+   *
+   * The resource is the caller's own user record — the subject whose tenant
+   * context the request tried to select. The action name and resource type are
+   * a Temporary Decision (`docs/24-open-questions.md` Q-52).
+   */
+  AUTH_TENANT_MISMATCH: {
+    key: 'identity.auth_tenant_mismatch',
+    method: null,
+    route: null,
+    status: 403,
+    errorCode: ERROR_CODES.TENANT_MISMATCH,
+    decidedBy: 'AUTH_GUARD',
+    action: 'identity.tenant_context.select',
+    resourceType: 'User',
+    resource: 'ACTOR_USER',
+    reason:
+      'Organization selection refused: the requested organization is outside the verified token memberships',
+  },
 } as const satisfies Record<string, RefusalSite>;
 
 export type RefusalSiteName = keyof typeof REFUSAL_SITES;
+
+/** The sites a decider marks on a matched route. */
+export type RouteRefusalSiteName = {
+  [Name in RefusalSiteName]: (typeof REFUSAL_SITES)[Name]['decidedBy'] extends 'AUTH_GUARD'
+    ? never
+    : Name;
+}[RefusalSiteName];
+
+/** The sites the shared auth guard's seam marks, which need trusted attribution. */
+export type GuardRefusalSiteName = Exclude<RefusalSiteName, RouteRefusalSiteName>;
+
+/**
+ * Who a guard refusal was decided against, taken from the shared guard's own
+ * verified token — the only attribution a route-agnostic site has.
+ *
+ * Deliberately not the request context: when the auth guard refuses, the
+ * context still says `ANONYMOUS`, because it is upgraded only once the tenant
+ * resolves. Reading it there would file every tenant probe as unattributable;
+ * reading the header, or decoding the token again here, would invent an actor
+ * this service never verified.
+ */
+export interface TrustedRefusalAttribution {
+  readonly userId: string;
+  /** The verified token's active organization. Never the rejected header. */
+  readonly organizationId: string;
+  readonly roles: readonly string[];
+}
 
 /**
  * Error → site. A `WeakMap` rather than a property on the error, so the thrown
@@ -292,10 +394,49 @@ export type RefusalSiteName = keyof typeof REFUSAL_SITES;
  */
 const marks = new WeakMap<object, RefusalSiteName>();
 
+/** Attribution for the sites that have no request context to read one from. */
+const attributions = new WeakMap<object, TrustedRefusalAttribution>();
+
 /** Marks `error` as a refusal from `site` and returns it unchanged, for `throw`. */
-export function markRefusal<T extends RastaError>(error: T, site: RefusalSiteName): T {
+export function markRefusal<T extends RastaError>(error: T, site: RouteRefusalSiteName): T {
   marks.set(error, site);
   return error;
+}
+
+/**
+ * Marks a guard refusal, with the trusted actor and tenant it was decided
+ * against. Returns the error unchanged, exactly as `markRefusal` does.
+ *
+ * Separate from `markRefusal`, and the only way to mark a route-agnostic site,
+ * so that "recorded without a route" and "recorded without trusted
+ * attribution" cannot come apart: the type system demands the attribution
+ * here, and `decideCapture` refuses such a site without it.
+ *
+ * An error already marked is left alone. One refusal is one decision, and the
+ * decider that marked it first is the one that made it.
+ */
+export function markGuardRefusal<T extends RastaError>(
+  error: T,
+  site: GuardRefusalSiteName,
+  attribution: TrustedRefusalAttribution,
+): T {
+  if (marks.has(error)) return error;
+  marks.set(error, site);
+  attributions.set(
+    error,
+    Object.freeze({
+      userId: attribution.userId,
+      organizationId: attribution.organizationId,
+      roles: Object.freeze([...attribution.roles]),
+    }),
+  );
+  return error;
+}
+
+/** The trusted attribution a guard refusal was marked with, if it was. */
+export function trustedAttributionOf(error: unknown): TrustedRefusalAttribution | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  return attributions.get(error);
 }
 
 /** The site an error was marked with, or `undefined` for every unmarked value. */
@@ -311,12 +452,31 @@ export function refusalSiteOf(error: unknown): RefusalSite | undefined {
  * `req.route.path`, the template, never the concrete URL — so a caller cannot
  * steer it with a path or a query string.
  */
-export function rolesGuardSiteFor(method: unknown, route: unknown): RefusalSiteName | undefined {
+export function rolesGuardSiteFor(
+  method: unknown,
+  route: unknown,
+): RouteRefusalSiteName | undefined {
   if (typeof method !== 'string' || typeof route !== 'string') return undefined;
   for (const [name, site] of Object.entries(REFUSAL_SITES) as [RefusalSiteName, RefusalSite][]) {
-    if (site.decidedBy === 'ROLES_GUARD' && site.method === method && site.route === route) {
+    if (
+      site.decidedBy === 'ROLES_GUARD' &&
+      site.method === method &&
+      site.route === route &&
+      isRouteSiteName(name)
+    ) {
       return name;
     }
   }
   return undefined;
+}
+
+/**
+ * Whether a site name is one of the route-bound ones — the same question
+ * `RouteRefusalSiteName` asks of the table, asked of a value.
+ *
+ * A predicate rather than a cast, so that adding a second route-agnostic site
+ * cannot quietly widen what `markRefusal` accepts.
+ */
+function isRouteSiteName(name: RefusalSiteName): name is RouteRefusalSiteName {
+  return REFUSAL_SITES[name].decidedBy !== 'AUTH_GUARD';
 }
