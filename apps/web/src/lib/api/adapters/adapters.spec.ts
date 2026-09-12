@@ -3,6 +3,7 @@ import { ApiClient } from '../client';
 import { ApiFailure, CLIENT_ERROR_CODES } from '../errors';
 import { ADAPTERS } from '../adapter-registry';
 import { fetchDossier, fetchTimeline, listAssets } from './asset';
+import { fetchAuditEvent, searchAuditEvents, verifyAuditChain } from './audit';
 import { listDocuments } from './document';
 import { fetchTrialBalance, fetchWallet, listLedgerAccounts, listTransactions } from './economic';
 import { listAvailability, listDrivers, listUtilization } from './fleet';
@@ -61,6 +62,7 @@ function requestedUrl(fetchMock: jest.Mock): URL {
 }
 
 const page = (items: unknown[]) => ({ items, nextCursor: null, hasMore: false });
+const AUDIT_WINDOW = { from: '2026-01-01T00:00:00.000Z', to: '2026-01-02T00:00:00.000Z' };
 
 // ---------------------------------------------------------------------------
 // Fixtures, each mirroring the shape its service returns
@@ -128,6 +130,17 @@ describe('gateway paths', () => {
     ['suppliers', (c: ApiClient) => searchSuppliers(c), '/v1/suppliers'],
     ['current user', (c: ApiClient) => fetchCurrentUser(c), '/v1/users/me'],
     ['users', (c: ApiClient) => listUsers(c), '/v1/users'],
+    ['audit events', (c: ApiClient) => searchAuditEvents(c, AUDIT_WINDOW), '/v1/audit-events'],
+    [
+      'audit event detail',
+      (c: ApiClient) => fetchAuditEvent(c, 'aev_1', AUDIT_WINDOW),
+      '/v1/audit-events/aev_1',
+    ],
+    [
+      'audit verify',
+      (c: ApiClient) => verifyAuditChain(c, AUDIT_WINDOW),
+      '/v1/audit-events/verify',
+    ],
   ])('%s targets %s on the gateway', async (_name, call, expectedPath) => {
     // The body is deliberately wrong for most of these; the assertion is about
     // where the request went, and a schema failure still records the call.
@@ -331,6 +344,7 @@ describe('adapter descriptors', () => {
       'economic-service',
       'document-service',
       'supplier-service',
+      'audit-service',
     ]);
 
     for (const adapter of ADAPTERS) {
@@ -341,7 +355,7 @@ describe('adapter descriptors', () => {
   it('reaches no service this milestone has no right to call', () => {
     // Nothing exists behind these prefixes; an adapter pointed at one would be
     // a claim the manifest is designed to make impossible.
-    const unbuilt = ['demand-requests', 'warehouses', 'tenders', 'audit-events', 'dashboards'];
+    const unbuilt = ['demand-requests', 'warehouses', 'tenders', 'dashboards'];
     const declared = ADAPTERS.flatMap((adapter) =>
       adapter.routes.map((route) => route.split(' ')[1]),
     );

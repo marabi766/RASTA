@@ -155,7 +155,6 @@ describe('shipped manifest', () => {
       'construction',
       'contracts',
       'notifications',
-      'audit',
       'analytics',
       'returns',
     ];
@@ -170,6 +169,17 @@ describe('shipped manifest', () => {
 
   it('keeps supplier out of the finished states while COM-005 is in progress', () => {
     expect(capabilityByKey('suppliers')?.state).toBe('BETA');
+  });
+
+  it('calls audit BETA, not LIVE, because this session never ran it against a real backend', () => {
+    // AUD-001 through AUD-003 are stable and merged (PR #39, #40, #41), and the
+    // screen's adapter reaches the real gateway route — but a parallel task is
+    // forbidden from starting, stopping, resetting or reseeding the shared
+    // integration stack, so there is no live smoke test behind this claim yet.
+    const entry = capabilityByKey('audit');
+    expect(entry?.state).toBe('BETA');
+    expect(entry?.service).toBe('audit-service');
+    expect(entry?.readiness).toBe('NOT_LIVE_VERIFIED');
   });
 
   it('lets only LIVE and BETA capabilities reach the network', () => {
