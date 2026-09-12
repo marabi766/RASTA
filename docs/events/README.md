@@ -522,6 +522,10 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 >   `SERVICE_TENANT_CONTEXT_INVALID`/`FORBIDDEN`، صادرات، Purge، امضا و قاعدهٔ هشدار. سطر «همه سرویس‌ها روی این Topic
 >   می‌نویسند» زیر همچنان **نیت طراحی** ADR-053 § ۱ است، نه رفتار امروز — جزئیات در
 >   [ADR-053 implementation plan](../adr/ADR-053-implementation-plan.md) § ۴ و § ۵.
+> - **Runbook (2026-09-12).** رکورد حسابرسیِ مورد انتظار که نرسیده، یا پیام در `rasta.audit.v1.dlq` →
+>   [`audit-gap-detected.md`](../runbooks/audit-gap-detected.md)؛ رکورد ثبت‌شده‌ای که با زنجیره‌اش نمی‌خواند →
+>   [`audit-chain-divergence.md`](../runbooks/audit-chain-divergence.md)؛ صف ردهای identity →
+>   [`security-event-outbox.md`](../runbooks/security-event-outbox.md).
 > - `Proposed`. جزئیات کامل ADR-053 در
 >   [ADR-053](../adr/ADR-053-audit-service-append-only-evidence.md).
 
