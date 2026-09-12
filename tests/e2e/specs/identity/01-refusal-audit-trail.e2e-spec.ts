@@ -4,7 +4,8 @@ import { e2eConfig, ORG } from '../../src/env';
 import { waitFor } from '../../src/events';
 
 /**
- * AUD-004 Phases C1–C2, black-box, over the real stack (ADR-053 § 4).
+ * AUD-004 Phases C1–C4, black-box, over the real stack (ADR-053 § 4): one
+ * scenario per instrumented identity refusal site (C1, C3, C4).
  *
  *   HTTP 403 ×N → identity-service's RefusalAuditExceptionFilter
  *               → one security_event_outbox row counting N (identity's own database)
@@ -279,6 +280,103 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     expect(record.actorRoles).toContain('AUDITOR');
     const serialised = JSON.stringify(record);
     for (const leaked of [querySecret, 'ORGANIZATION_ADMIN', 'UNION_ADMIN', 'permission']) {
+      expect(serialised).not.toContain(leaked);
+    }
+
+    await sleep(3_000);
+    const settled = await findByCorrelation(systemAdmin, correlationId);
+    expect(settled.page.items.map((item) => [item.id, item.occurrenceCount])).toEqual([
+      [record.id, REFUSALS],
+    ]);
+
+    // The refused caller cannot read the evidence its refusal produced.
+    const own = await auditor.get(
+      `/v1/audit-events?${new URLSearchParams({ ...recentWindow(), correlationId }).toString()}`,
+    );
+    expect(own.status).toBe(403);
+  });
+
+  test(`${REFUSALS} role refusals of POST /v1/users in one window are recorded as one INSUFFICIENT_ROLE record counting ${REFUSALS} (AUD-004 Phase C4)`, async ({
+    auditor,
+    systemAdmin,
+  }) => {
+    // `province.auditor` holds only AUDITOR, so the platform RolesGuard refuses
+    // POST /v1/users (ORGANIZATION_ADMIN | UNION_ADMIN) before the body is
+    // read — a real, unmodified denial through the real gateway. The body
+    // names a user the caller wanted to create; none of it is evidence.
+    const windowMs = e2eConfig().identityAggregationWindowSeconds * 1000;
+    if (windowMs < BURST_BUDGET_MS + WINDOW_START_MARGIN_MS * 2) {
+      throw new Error(
+        `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS=${windowMs / 1000} is too short to place ` +
+          `${REFUSALS} refusals in one window from outside the service`,
+      );
+    }
+    test.setTimeout(windowMs * 2 + 180_000);
+
+    const correlationId = `e2e-create-refusal-${randomUUID()}`;
+    const bodySecret = `e2e-body-${randomUUID()}`;
+    await atFreshWindow(windowMs);
+    const burstStartedAt = Date.now();
+
+    for (let i = 0; i < REFUSALS; i += 1) {
+      const response = await auditor.post('/v1/users', {
+        body: {
+          username: `${bodySecret}-${i}`,
+          email: `${bodySecret}@e2e.invalid`,
+          firstName: bodySecret,
+          lastName: bodySecret,
+          organizationId: ORG.b,
+          roles: ['SYSTEM_ADMIN'],
+        },
+        correlationId,
+      });
+      expect(response.status).toBe(403);
+      expect(errorCode(response.body)).toBe('INSUFFICIENT_ROLE');
+      expect((response.body as { message?: string }).message).toBe(
+        'You do not have permission to perform this action',
+      );
+      expect(response.correlationId).toBe(correlationId);
+      expect(JSON.stringify(response.body)).not.toContain(bodySecret);
+    }
+    expect(Date.now() - burstStartedAt).toBeLessThan(BURST_BUDGET_MS);
+
+    let records: AuditRecord[] = [];
+    await waitFor(
+      `the aggregated create-refusal record for correlation ${correlationId}`,
+      async () => {
+        const { status, page } = await findByCorrelation(systemAdmin, correlationId);
+        if (status !== 200 || page.items.length === 0) return false;
+        records = page.items;
+        return true;
+      },
+      windowMs + 150_000,
+      () => `last seen: ${JSON.stringify(records)}`,
+    );
+
+    expect(records).toHaveLength(1);
+    const record = records[0]!;
+    expect(record.occurrenceCount).toBe(REFUSALS);
+    expect(record.outcome).toBe('REFUSED');
+    expect(record.errorCode).toBe('INSUFFICIENT_ROLE');
+    expect(record.action).toBe('identity.users.create');
+    expect(record.resourceType).toBe('User');
+    expect(record.actorType).toBe('USER');
+    // A refused create has no created user: the resource is the caller.
+    expect(record.resourceId).toBe(record.actorId);
+    expect(record.sourceService).toBe('identity-service');
+    expect(record.sourceTopic).toBe('rasta.audit.trail.v1');
+    expect(record.correlationId).toBe(correlationId);
+    expect(record.organizationId).toBe(ORG.oversight);
+    expect(record.actorRoles).toContain('AUDITOR');
+    const serialised = JSON.stringify(record);
+    for (const leaked of [
+      bodySecret,
+      ORG.b,
+      'SYSTEM_ADMIN',
+      'ORGANIZATION_ADMIN',
+      'UNION_ADMIN',
+      'permission',
+    ]) {
       expect(serialised).not.toContain(leaked);
     }
 

@@ -10,7 +10,7 @@ import {
 import { EventConsumer, type EventDelivery, type OutboxRelay } from '@rasta/nest-common';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { AuditTrailPublisher } from '../src/security-events/audit-trail.publisher';
-import { REFUSAL_SITES } from '../src/security-events/refusal-sites';
+import { REFUSAL_SITES, type RefusalSiteName } from '../src/security-events/refusal-sites';
 import { SECURITY_EVENT_RELAY } from '../src/security-events/security-event.relay';
 import { RUN_TAG, atFreshWindow, id, waitFor, waitForWindowClose } from './helpers';
 import { startIdentityApi, userToken, type Caller, type IdentityApiHarness } from './api-helpers';
@@ -309,24 +309,38 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
     DELIVERY_TIMEOUT_MS + 60_000,
   );
 
-  it(
-    'the second site: repeated GET /v1/users role refusals in one window become one contract-valid INSUFFICIENT_ROLE event with their count',
-    async () => {
-      const LIST = REFUSAL_SITES.LIST_USERS;
+  /** The roles-guard sites: GET /v1/users (Phase C3) and POST /v1/users (Phase C4). */
+  const roleRefusalSites: [string, RefusalSiteName, 'get' | 'post'][] = [
+    ['GET /v1/users', 'LIST_USERS', 'get'],
+    ['POST /v1/users', 'CREATE_USER', 'post'],
+  ];
+
+  it.each(roleRefusalSites)(
+    '%s: repeated role refusals in one window become one contract-valid INSUFFICIENT_ROLE event with their count',
+    async (_label, siteName, method) => {
+      const site = REFUSAL_SITES[siteName];
       const caller: Caller = { userId: id('USR'), organizationId: id('ORG'), roles: ['AUDITOR'] };
       const token = userToken(caller);
-      const querySecret = `list-secret-${RUN_TAG}`;
+      const requestSecret = `role-refusal-secret-${RUN_TAG}`;
       await atFreshWindow(identity.prisma, WINDOW_SECONDS, 2_000);
 
       const correlations: string[] = [];
       for (let i = 0; i < 3; i += 1) {
         const correlationId = id('COR');
         correlations.push(correlationId);
-        const response = await request(identity.app.getHttpServer())
-          .get(`${LIST.route}?q=${querySecret}`)
+        const call = request(identity.app.getHttpServer())
+          [method](`${site.route}?q=${requestSecret}`)
           .set('authorization', `Bearer ${token}`)
           .set('user-agent', USER_AGENT)
           .set('x-correlation-id', correlationId);
+        // A create carries a body naming the user it wanted; none of it is evidence.
+        const response = await (method === 'post'
+          ? call.send({
+              username: `${requestSecret}-${i}`,
+              email: `${requestSecret}@identity.itest`,
+              roles: ['SYSTEM_ADMIN'],
+            })
+          : call);
         expect(response.status).toBe(403);
         expect(response.body).toMatchObject({
           code: ERROR_CODES.INSUFFICIENT_ROLE,
@@ -368,19 +382,23 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
       expect(payload).toMatchObject({
         actor: { type: 'USER', id: caller.userId, roles: ['AUDITOR'] },
         organizationId: caller.organizationId,
-        action: 'identity.users.list',
+        action: site.action,
         resourceType: 'User',
         resourceId: caller.userId,
         outcome: 'REFUSED',
         errorCode: 'INSUFFICIENT_ROLE',
-        reason: LIST.reason,
+        reason: site.reason,
         occurrenceCount: 3,
       });
+      expect(payload.action).toBe(
+        siteName === 'CREATE_USER' ? 'identity.users.create' : 'identity.users.list',
+      );
 
       const wire = JSON.stringify({ envelope, payload });
       for (const leaked of [
-        querySecret,
+        requestSecret,
         token,
+        'SYSTEM_ADMIN',
         'ORGANIZATION_ADMIN',
         'UNION_ADMIN',
         'You do not have permission',
