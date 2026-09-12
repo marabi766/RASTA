@@ -125,13 +125,107 @@ export function insertCommand(overrides = {}) {
 export const CLEAR_PROBES = `DELETE FROM "${TABLE}" WHERE actor_id LIKE 'USR_ACCCHK%';`;
 
 /**
- * A unique violation on the composite key, as `prisma db execute` reports one:
- * by constraint name, or as Prisma's P2002 naming exactly the key's columns.
+ * The SQLSTATEs the negative probes expect, named rather than spelled at each
+ * call site. PostgreSQL's codes, not Prisma's: see `refusalProbe`.
  */
-export const PRIMARY_KEY_VIOLATION = [
-  PRIMARY_KEY.name,
-  'Unique constraint failed on the fields: (`actor_id`,`idempotency_key`)',
-];
+export const SQLSTATE = {
+  NOT_NULL_VIOLATION: '23502',
+  STRING_TOO_LONG: '22001',
+  UNIQUE_VIOLATION: '23505',
+};
+
+/**
+ * Emitted by `refusalProbe` when the statement it guards was *accepted*. A
+ * probe that silently succeeded must not be readable as a refusal that simply
+ * arrived worded differently.
+ */
+export const ACCEPTED_MARKER = 'accepted: the database accepted a statement it must refuse';
+
+/** The one field of a refusal line that a caller may leave undeclared. */
+const REFUSAL_LINE = 'refused: sqlstate=[%] table=[%] column=[%] constraint=[%] message=[%]';
+
+/**
+ * A statement the database must refuse, wrapped so that PostgreSQL itself says
+ * *why* it refused.
+ *
+ * ## Why this is not a string match on the CLI's output
+ *
+ * `prisma db execute` does not print the error PostgreSQL returned; it prints
+ * Prisma's own rendering of it, and that rendering is lossy in exactly the
+ * places a constraint proof depends on. Measured against Prisma 6.19.3 and
+ * PostgreSQL 16.14, for statements this verifier runs:
+ *
+ *   NOT NULL        only the DETAIL line — `Error: Failing row contains
+ *                   (null, …)`. The message that names the column never
+ *                   appears at all.
+ *   value too long  `Error: P2000 … The provided value for the column is too
+ *                   long for the column's type. Column: (not available)`. The
+ *                   column is absent and so is the width, so a `CHAR(64)`
+ *                   probe and a `VARCHAR(26)` probe are indistinguishable —
+ *                   one generic sentence would satisfy both.
+ *   unique          `Error: P2002 Unique constraint failed on the fields: (…)`.
+ *
+ * Matching those means asserting Prisma's wording, and for the two width
+ * probes it means asserting nothing: the only text available is the same for
+ * every column of every type. So the statement runs inside a block that
+ * catches the error, reads PostgreSQL's own diagnostics, and re-raises them as
+ * one line chosen here. A `RAISE EXCEPTION` message *is* printed verbatim, so
+ * the SQLSTATE, the table, the column, the constraint and the original message
+ * all reach the verifier intact.
+ *
+ * ## What each kind of refusal can prove
+ *
+ * The diagnostics a violation carries differ, so each probe declares the ones
+ * that identify it:
+ *
+ *   23502  TABLE_NAME and COLUMN_NAME — the column, by name, in the right
+ *          table. Structured, and independent of how PostgreSQL words it.
+ *   23505  TABLE_NAME and CONSTRAINT_NAME — the key that refused, by name.
+ *   22001  none of them: the error is raised coercing the value, before any
+ *          column is involved. MESSAGE_TEXT carries the declared type and its
+ *          width, and is the only evidence there is — so those probes declare
+ *          `message` and the others deliberately do not.
+ *
+ * `message` is last on the line, so an expectation that omits it is a prefix of
+ * what the block raises: every declared field still has to match exactly.
+ */
+export function refusalProbe({
+  statement,
+  sqlstate,
+  table = '',
+  column = '',
+  constraint = '',
+  message,
+}) {
+  const fields = [
+    `sqlstate=[${sqlstate}]`,
+    `table=[${table}]`,
+    `column=[${column}]`,
+    `constraint=[${constraint}]`,
+  ];
+  if (message !== undefined) fields.push(`message=[${message}]`);
+
+  return {
+    expected: `refused: ${fields.join(' ')}`,
+    script: `
+DO $$
+DECLARE state TEXT; tbl TEXT; col TEXT; con TEXT; msg TEXT;
+BEGIN
+  BEGIN
+    ${statement}
+  EXCEPTION WHEN OTHERS THEN
+    -- PostgreSQL's own account of the failure. GET STACKED DIAGNOSTICS returns
+    -- an empty string, never NULL, for an item the error does not carry.
+    GET STACKED DIAGNOSTICS
+      state = RETURNED_SQLSTATE, tbl = TABLE_NAME, col = COLUMN_NAME,
+      con = CONSTRAINT_NAME, msg = MESSAGE_TEXT;
+    RAISE EXCEPTION '${REFUSAL_LINE}', state, tbl, col, con, msg;
+  END;
+  RAISE EXCEPTION '${literal(ACCEPTED_MARKER)}';
+END
+$$;`,
+  };
+}
 
 const count = (variable, from, where) => `
   SELECT count(*) INTO ${variable} FROM ${from}

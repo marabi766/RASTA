@@ -5,16 +5,18 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  ACCEPTED_MARKER,
   CLEAR_PROBES,
   COLUMNS,
   COMMAND_ROW,
   MIGRATION,
   PRIMARY_KEY,
-  PRIMARY_KEY_VIOLATION,
+  SQLSTATE,
   SURVIVORS,
   TABLE,
   assertState,
   insertCommand,
+  refusalProbe,
 } from './verify-audit-correction-command-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -208,15 +210,121 @@ test('insertCommand omits a column set to undefined, so a default can be observe
 
 test('the probe cleanup is scoped to this verifier own rows', () => {
   assert.match(CLEAR_PROBES, /WHERE actor_id LIKE 'USR_ACCCHK%'/);
-  assert.ok(COMMAND_ROW.actor_id.includes('USR_ACCCHK'), 'the probe row is outside its own cleanup');
+  assert.ok(
+    COMMAND_ROW.actor_id.includes('USR_ACCCHK'),
+    'the probe row is outside its own cleanup',
+  );
 });
 
-test('the expected violation names the key both ways a failure can be reported', () => {
-  assert.ok(PRIMARY_KEY_VIOLATION.includes(PRIMARY_KEY.name));
+// ---------------------------------------------------------------------------
+// refusalProbe
+//
+// The regression these tests guard is specific and was live: every negative
+// probe used to assert a substring of `prisma db execute`'s output, and that
+// output is Prisma's rendering of the PostgreSQL error, not the error. For a
+// NOT NULL violation Prisma prints only `Failing row contains (null, …)`, so a
+// probe expecting `null value in column "actor_id"` could never pass; for a
+// value-too-long it prints `P2000 … Column: (not available)`, which is the
+// same sentence for every column of every width, so the two width probes could
+// not be told apart even if one of them silently stopped failing. Asserting
+// PostgreSQL's own diagnostics is what makes those probes mean anything.
+// ---------------------------------------------------------------------------
+
+test('refusalProbe asks PostgreSQL why it refused, rather than reading Prisma output', () => {
+  const { script } = refusalProbe({
+    statement: insertCommand({ actor_id: 'NULL' }),
+    sqlstate: SQLSTATE.NOT_NULL_VIOLATION,
+    table: TABLE,
+    column: 'actor_id',
+  });
+
+  assert.match(script, /^\s*DO \$\$/);
+  assert.match(script, /END\s*\$\$;$/);
+  assert.ok(script.includes(insertCommand({ actor_id: 'NULL' })), 'the statement is not run');
+  assert.match(script, /GET STACKED DIAGNOSTICS/);
+  for (const item of [
+    'RETURNED_SQLSTATE',
+    'TABLE_NAME',
+    'COLUMN_NAME',
+    'CONSTRAINT_NAME',
+    'MESSAGE_TEXT',
+  ]) {
+    assert.ok(script.includes(item), `${item} is not read, so it cannot be asserted`);
+  }
+});
+
+test('refusalProbe fails the probe when the statement is accepted', () => {
+  const { script } = refusalProbe({
+    statement: insertCommand(),
+    sqlstate: SQLSTATE.UNIQUE_VIOLATION,
+  });
+
+  // After the handler, not inside it: a statement that raised nothing must be
+  // reported as accepted rather than passing for want of an exception.
+  assert.ok(script.includes(ACCEPTED_MARKER), 'an accepted statement would look like a refusal');
   assert.ok(
-    PRIMARY_KEY_VIOLATION.some((text) => text.includes('actor_id') && text.includes('idempotency_key')),
-    'Prisma reports P2002 by field names, not by constraint name',
+    script.indexOf(ACCEPTED_MARKER) > script.indexOf('GET STACKED DIAGNOSTICS'),
+    'the acceptance check must come after the exception handler, or it always fires',
   );
+});
+
+test('refusalProbe expects every declared diagnostic, by exact value', () => {
+  const notNull = refusalProbe({
+    statement: insertCommand({ target_id: 'NULL' }),
+    sqlstate: SQLSTATE.NOT_NULL_VIOLATION,
+    table: TABLE,
+    column: 'target_id',
+  });
+
+  assert.equal(
+    notNull.expected,
+    `refused: sqlstate=[23502] table=[${TABLE}] column=[target_id] constraint=[]`,
+    'a not-null probe proves the column, by name, in the right table',
+  );
+
+  const key = refusalProbe({
+    statement: insertCommand(),
+    sqlstate: SQLSTATE.UNIQUE_VIOLATION,
+    table: TABLE,
+    constraint: PRIMARY_KEY.name,
+  });
+
+  assert.ok(key.expected.includes(`constraint=[${PRIMARY_KEY.name}]`));
+  assert.ok(key.expected.includes(`sqlstate=[23505]`));
+});
+
+test('refusalProbe leaves an undeclared message a prefix match, not a wildcard', () => {
+  const withMessage = refusalProbe({
+    statement: insertCommand({ request_hash: `repeat('a', 65)` }),
+    sqlstate: SQLSTATE.STRING_TOO_LONG,
+    message: 'value too long for type character(64)',
+  });
+  const withoutMessage = refusalProbe({
+    statement: insertCommand({ request_hash: `repeat('a', 65)` }),
+    sqlstate: SQLSTATE.STRING_TOO_LONG,
+  });
+
+  // 22001 carries no table, column or constraint — the message is the only
+  // evidence of *which* width refused, so that probe declares it and the line
+  // still ends with it.
+  assert.ok(withMessage.expected.endsWith('message=[value too long for type character(64)]'));
+  assert.ok(withMessage.expected.startsWith(withoutMessage.expected));
+  assert.ok(!withoutMessage.expected.includes('message='));
+});
+
+test('the raised line orders its fields the way an expectation is built', () => {
+  const { script, expected } = refusalProbe({
+    statement: insertCommand(),
+    sqlstate: SQLSTATE.NOT_NULL_VIOLATION,
+  });
+
+  // The placeholders and the arguments have to agree, or the line names the
+  // wrong diagnostic and every expectation built from it is a false negative.
+  assert.match(
+    script,
+    /RAISE EXCEPTION 'refused: sqlstate=\[%\] table=\[%\] column=\[%\] constraint=\[%\] message=\[%\]',\s*state, tbl, col, con, msg;/,
+  );
+  assert.equal(expected, 'refused: sqlstate=[23502] table=[] column=[] constraint=[]');
 });
 
 // ---------------------------------------------------------------------------
@@ -310,9 +418,15 @@ test('each survivor kind is looked up in the catalog that kind lives in', () => 
   // catalog, and the relkind/tgisinternal filters are part of the lookup.
   assert.match(script, /information_schema\.tables[\s\S]*?table_name = 'user'/);
   assert.match(script, /pg_class c JOIN pg_namespace[\s\S]*?relkind IN \('i', 'I'\)/);
-  assert.match(script, /pg_constraint c JOIN pg_namespace[\s\S]*?conname = 'ck_outbox_claim_triple'/);
+  assert.match(
+    script,
+    /pg_constraint c JOIN pg_namespace[\s\S]*?conname = 'ck_outbox_claim_triple'/,
+  );
   assert.match(script, /pg_trigger t JOIN pg_class[\s\S]*?NOT t\.tgisinternal/);
-  assert.match(script, /pg_proc p JOIN pg_namespace[\s\S]*?proname = 'security_event_outbox_guard'/);
+  assert.match(
+    script,
+    /pg_proc p JOIN pg_namespace[\s\S]*?proname = 'security_event_outbox_guard'/,
+  );
 });
 
 test('assertState is a DO block, because prisma db execute reports only an exit status', () => {

@@ -47,13 +47,16 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import {
+  ACCEPTED_MARKER,
   CLEAR_PROBES,
   COLUMNS,
   MIGRATION,
-  PRIMARY_KEY_VIOLATION,
+  PRIMARY_KEY,
+  SQLSTATE,
   TABLE,
   assertState,
   insertCommand,
+  refusalProbe,
 } from './verify-audit-correction-command-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -128,18 +131,28 @@ function mustRun(label, script) {
   console.log(`  ✓ ${label}`);
 }
 
-function mustFail(label, script, expected) {
+/**
+ * Runs a `refusalProbe` and requires the database to have refused for exactly
+ * the declared reason.
+ *
+ * The probe reports the refusal in PostgreSQL's own terms rather than Prisma's
+ * rendering of them — see `refusalProbe` for what that rendering loses — so
+ * `expected` is one exact line and matching it is an equality check on the
+ * evidence, not a guess at wording.
+ */
+function mustFail(label, { script, expected }) {
   const result = sql(script);
   if (result.ok) {
     dropScratch();
+    fail(`${label}: the probe did not raise at all, so it proves nothing.`);
+  }
+  if (result.output.includes(ACCEPTED_MARKER)) {
+    dropScratch();
     fail(`${label}: the database accepted a statement it must refuse.`);
   }
-  // A list because `prisma db execute` reports some violations by the database's
-  // own message and others as a Prisma error code naming the fields.
-  const acceptable = Array.isArray(expected) ? expected : [expected];
-  if (!acceptable.some((name) => result.output.includes(name))) {
+  if (!result.output.includes(expected)) {
     dropScratch();
-    fail(`${label}: refused, but not by ${acceptable.join(' or ')}:\n${result.output}`);
+    fail(`${label}: refused, but not by ${expected}:\n${result.output}`);
   }
   console.log(`  ✓ ${label}`);
 }
@@ -162,6 +175,9 @@ function deploy(label, { mustApply = [] } = {}) {
     }
   }
   console.log(`  ✓ ${label}`);
+  // Named, not implied by the tick: the re-application is the evidence that
+  // down.sql removed its own ledger row.
+  for (const name of mustApply) console.log(`      re-applied ${name}`);
 }
 
 const present = assertState({ present: true, otherMigrations: OTHER_MIGRATIONS });
@@ -193,8 +209,12 @@ mustRun('up: the table, its exact column shape, its key and every ledger row', p
 mustRun('a command row is accepted', fresh(insertCommand()));
 mustFail(
   'the same actor cannot replay the same key',
-  fresh(`${insertCommand()} ${insertCommand({ request_hash: `repeat('b', 64)` })}`),
-  PRIMARY_KEY_VIOLATION,
+  refusalProbe({
+    statement: fresh(`${insertCommand()} ${insertCommand({ request_hash: `repeat('b', 64)` })}`),
+    sqlstate: SQLSTATE.UNIQUE_VIOLATION,
+    table: TABLE,
+    constraint: PRIMARY_KEY.name,
+  }),
 );
 mustRun(
   'the actor is part of the key: another administrator may reuse the key',
@@ -209,9 +229,12 @@ mustRun(
 for (const { name } of COLUMNS.filter((column) => column.name !== 'created_at')) {
   mustFail(
     `${name} is never null`,
-    fresh(insertCommand({ [name]: 'NULL' })),
-    // The database's own message, or Prisma's error naming the field.
-    [`null value in column "${name}"`, `Null constraint failed on the fields: (\`${name}\`)`],
+    refusalProbe({
+      statement: fresh(insertCommand({ [name]: 'NULL' })),
+      sqlstate: SQLSTATE.NOT_NULL_VIOLATION,
+      table: TABLE,
+      column: name,
+    }),
   );
 }
 
@@ -222,13 +245,19 @@ for (const { name } of COLUMNS.filter((column) => column.name !== 'created_at'))
 // right shape.
 mustFail(
   'request_hash is exactly a SHA-256 digest wide',
-  fresh(insertCommand({ request_hash: `repeat('a', 65)` })),
-  'value too long for type character(64)',
+  refusalProbe({
+    statement: fresh(insertCommand({ request_hash: `repeat('a', 65)` })),
+    sqlstate: SQLSTATE.STRING_TOO_LONG,
+    message: 'value too long for type character(64)',
+  }),
 );
 mustFail(
   'event_id is exactly a ULID wide',
-  fresh(insertCommand({ event_id: `repeat('A', 27)` })),
-  'value too long for type character varying(26)',
+  refusalProbe({
+    statement: fresh(insertCommand({ event_id: `repeat('A', 27)` })),
+    sqlstate: SQLSTATE.STRING_TOO_LONG,
+    message: 'value too long for type character varying(26)',
+  }),
 );
 
 // --- created_at, and that response_body is really JSONB -------------------------------
