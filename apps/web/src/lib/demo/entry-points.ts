@@ -18,4 +18,14 @@ export const FIXTURE_ENTRY_POINTS = {
   productId: 'prd_demo_engine_oil',
   orderId: 'ord_demo_oil',
   auditEventId: 'aev_demo_0001',
+  /**
+   * The four ids below are the scenario engine's normalized references
+   * (`lib/demo/scenario/`). Listed here rather than re-declared there, for
+   * the same reason as the five above: a reference and the record it points
+   * at must not be able to drift apart.
+   */
+  organizationId: 'org_demo_dehyari_alef',
+  supplierOrganizationId: 'org_demo_supplier',
+  offerId: 'ofr_demo_oil_a',
+  walletId: 'wal_demo_1',
 } as const;
