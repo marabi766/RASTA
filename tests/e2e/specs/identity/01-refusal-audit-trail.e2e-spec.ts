@@ -4,11 +4,37 @@ import { e2eConfig, ORG } from '../../src/env';
 import { waitFor } from '../../src/events';
 
 /**
- * AUD-004 Phases C1–C9, black-box, over the real stack (ADR-053 § 4): one
+ * AUD-004 Phases C1–C10, black-box, over the real stack (ADR-053 § 4): one
  * scenario per instrumented identity refusal site (C1, C3, C4, C5, C6, C7, C8,
- * C9), plus one proving that the two outcomes of a registration review — an
+ * C9, C10), plus one proving that the two outcomes of a registration review — an
  * approval refusal and a rejection refusal by the same caller — stay two
  * records.
+ *
+ * ## The one scenario that does not go through the gateway, and why
+ *
+ * Every other scenario here goes through the front door. The Phase C10 refusal
+ * cannot: the gateway runs the **same** shared `AuthGuard`, so it refuses a
+ * foreign `X-Organization-Id` itself, and forwards `X-Organization-Id` only as
+ * the tenant it already resolved (`proxy.service.ts`). No request carrying a
+ * mismatched header can reach identity-service through the gateway at all.
+ *
+ * That is a property worth pinning rather than working around, so the C10
+ * scenario asserts both halves:
+ *
+ *   through the gateway   the refusal is the gateway's own, and identity
+ *                         records nothing — the gateway is not an instrumented
+ *                         producer (R-2)
+ *   direct to identity    the same probe against identity-service's own
+ *                         listener — what a caller inside the cluster, or a
+ *                         misrouted request, actually looks like — is refused
+ *                         by identity's guard and recorded
+ *
+ * Talking to a service directly is an established, labelled exception in this
+ * suite (`CallOptions.baseUrl`, as the economic service-to-service scenarios
+ * do). It is not a bypass of anything under test: the token is the same real
+ * Keycloak token, the process is the same production `dist/main.js`, and no
+ * limit is raised, reset or evaded — the gateway's rate limiter simply is not
+ * on that path.
  *
  * ## The gateway budget on `registration-requests`
  *
@@ -18,6 +44,10 @@ import { waitFor } from '../../src/events';
  * inside it: `province.auditor` 5 (C8), `dehyari.admin` 5 (C9) and
  * `dehyari.admin.b` 4 (the separation scenario). Nothing here raises, resets
  * or bypasses the limit; a local rerun inside the same hour is answered 429.
+ *
+ * C10 adds no call to that prefix. Its one gateway call is a `users` read by
+ * `dehyari.admin.b`, which runs on the platform default (300 per minute per
+ * user), and its five recorded probes go straight to identity-service.
  *
  *   HTTP 403 ×N → identity-service's RefusalAuditExceptionFilter
  *               → one security_event_outbox row counting N (identity's own database)
@@ -984,6 +1014,123 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     expect(settled.page.items.map((item) => item.id).sort()).toEqual(
       records.map((record) => record.id).sort(),
     );
+  });
+
+  test(`${REFUSALS} auth-guard tenant refusals in one window are recorded as one TENANT_MISMATCH record counting ${REFUSALS} (AUD-004 Phase C10)`, async ({
+    tenantB,
+    systemAdmin,
+    config,
+  }) => {
+    // The platform `AuthGuard`'s own refusal: a verified token asking, in
+    // `X-Organization-Id`, to act for an organization it holds no membership
+    // in. `dehyari.admin.b` belongs to ORG-DEH-0002 only, and each probe names
+    // a different organization that exists nowhere — a real, unmodified tenant
+    // probe. See the header for why these five go direct to identity-service.
+    const windowMs = e2eConfig().identityAggregationWindowSeconds * 1000;
+    if (windowMs < BURST_BUDGET_MS + WINDOW_START_MARGIN_MS * 2) {
+      throw new Error(
+        `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS=${windowMs / 1000} is too short to place ` +
+          `${REFUSALS} refusals in one window from outside the service`,
+      );
+    }
+    test.setTimeout(windowMs * 2 + 180_000);
+
+    const correlationId = `e2e-tenant-probe-${randomUUID()}`;
+    const gatewayCorrelationId = `e2e-tenant-probe-gateway-${randomUUID()}`;
+    const rejected = Array.from({ length: REFUSALS }, () => `ORG-E2E-REJECTED-${randomUUID()}`);
+    // Different endpoints, to prove the record does not depend on the route:
+    // the guard refuses before any controller authorization.
+    const paths = ['/v1/users/me', '/v1/users', '/v1/users/me', '/v1/users/me', '/v1/users'];
+
+    // First, through the front door. The gateway runs the same shared guard,
+    // so it refuses this itself and identity-service never sees the request.
+    const throughGateway = await tenantB.get('/v1/users/me', {
+      organizationId: `ORG-E2E-REJECTED-${randomUUID()}`,
+      correlationId: gatewayCorrelationId,
+    });
+    expect(throughGateway.status).toBe(403);
+    expect(errorCode(throughGateway.body)).toBe('TENANT_MISMATCH');
+
+    await atFreshWindow(windowMs);
+    const burstStartedAt = Date.now();
+
+    for (let i = 0; i < REFUSALS; i += 1) {
+      const response = await tenantB.get(paths[i]!, {
+        baseUrl: config.identityUrl,
+        organizationId: rejected[i],
+        correlationId,
+      });
+      // The exact refusal the platform has always given, unchanged by the
+      // marking — and the same one the gateway gave above.
+      expect(response.status).toBe(403);
+      expect(errorCode(response.body)).toBe('TENANT_MISMATCH');
+      expect((response.body as { message?: string }).message).toBe(
+        'You are not a member of the requested organization',
+      );
+      expect(response.correlationId).toBe(correlationId);
+      expect(JSON.stringify(response.body)).not.toContain(rejected[i]!);
+    }
+    expect(Date.now() - burstStartedAt).toBeLessThan(BURST_BUDGET_MS);
+
+    let records: AuditRecord[] = [];
+    await waitFor(
+      `the aggregated tenant-probe record for correlation ${correlationId}`,
+      async () => {
+        const { status, page } = await findByCorrelation(systemAdmin, correlationId);
+        if (status !== 200 || page.items.length === 0) return false;
+        records = page.items;
+        return true;
+      },
+      windowMs + 150_000,
+      () => `last seen: ${JSON.stringify(records)}`,
+    );
+
+    expect(records).toHaveLength(1);
+    const record = records[0]!;
+    expect(record.occurrenceCount).toBe(REFUSALS);
+    expect(record.outcome).toBe('REFUSED');
+    expect(record.errorCode).toBe('TENANT_MISMATCH');
+    expect(record.action).toBe('identity.tenant_context.select');
+    expect(record.resourceType).toBe('User');
+    expect(record.actorType).toBe('USER');
+    // The caller, never any organization they asked for.
+    expect(record.resourceId).toBe(record.actorId);
+    expect(record.sourceService).toBe('identity-service');
+    expect(record.sourceTopic).toBe('rasta.audit.trail.v1');
+    expect(record.correlationId).toBe(correlationId);
+    // The tenant the caller legitimately acts for, from their verified token.
+    expect(record.organizationId).toBe(ORG.b);
+    expect(record.actorRoles).toContain('ORGANIZATION_ADMIN');
+
+    const serialised = JSON.stringify(record);
+    for (const leaked of [
+      ...rejected,
+      'ORG-E2E-REJECTED-',
+      '/v1/users',
+      'You are not a member',
+      ORG.a,
+    ]) {
+      expect(serialised).not.toContain(leaked);
+    }
+
+    await sleep(3_000);
+    const settled = await findByCorrelation(systemAdmin, correlationId);
+    expect(settled.status).toBe(200);
+    expect(settled.page.items.map((item) => [item.id, item.occurrenceCount])).toEqual([
+      [record.id, REFUSALS],
+    ]);
+
+    // The gateway's own refusal produced no identity evidence: it was decided
+    // one hop earlier, by a service that is not an instrumented producer.
+    const atGateway = await findByCorrelation(systemAdmin, gatewayCorrelationId);
+    expect(atGateway.status).toBe(200);
+    expect(atGateway.page.items).toEqual([]);
+
+    // The refused caller cannot read the evidence its refusal produced.
+    const own = await tenantB.get(
+      `/v1/audit-events?${new URLSearchParams({ ...recentWindow(), correlationId }).toString()}`,
+    );
+    expect(own.status).toBe(403);
   });
 
   test('the caller who was refused cannot read the record their own refusal created', async ({
