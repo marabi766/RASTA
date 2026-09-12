@@ -14,6 +14,12 @@ import { e2eConfig, ORG, type E2eConfig } from './env';
 
 /** The seeded development users, by the role each one exists to exercise. */
 export const E2E_USERS = {
+  /**
+   * Platform operator. The only role that may read audit evidence across
+   * tenants (ADR-053 § 10) — a union administrator is confined to its own
+   * subtree, which is a different scenario.
+   */
+  systemAdmin: 'system.admin',
   /** Platform scope. Reads the trial balance and any journal. */
   platformAdmin: 'union.admin',
   /** Tenant A's financial administrator — the payer side of the critical path. */

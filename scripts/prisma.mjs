@@ -34,14 +34,28 @@ function serviceSuffix() {
 
 const suffix = serviceSuffix();
 const key = `DATABASE_URL_${suffix}`;
-// An explicit DATABASE_URL wins, so CI and containers — which set exactly one
-// database per process — need no special case.
-const url = process.env.DATABASE_URL ?? process.env[key];
+const migratorKey = `${key}_MIGRATOR`;
+
+// Every command routed through this script is DDL — `migrate deploy` and
+// `migrate dev` are its only two callers — so it prefers a migrator connection
+// when the service declares one.
+//
+// audit-service is the first to need this and the reason it exists. ADR-053
+// makes `audit_event` append-only at the privilege layer, and a privilege the
+// runtime role can hand back to itself is not a barrier: PostgreSQL lets a
+// table owner `GRANT UPDATE` to itself unchallenged (measured on 16.4). So the
+// audit tables are owned by `rasta_audit_migrator` in a schema that role owns,
+// and the runtime role gets only SELECT and INSERT. Migrations must therefore
+// connect as the owner, not as the service.
+//
+// Additive by construction: a service with no `DATABASE_URL_<SVC>_MIGRATOR`
+// resolves exactly as before, which is every other service today.
+const url = process.env[migratorKey] ?? process.env.DATABASE_URL ?? process.env[key];
 
 if (!url) {
   console.error(
-    `${key} is not set. Copy .env.example to .env at the repository root, ` +
-      `or set DATABASE_URL for this process.`,
+    `Neither ${migratorKey} nor ${key} is set. Copy .env.example to .env at the ` +
+      `repository root, or set DATABASE_URL for this process.`,
   );
   process.exit(1);
 }

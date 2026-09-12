@@ -8,8 +8,19 @@
 - **همراه:** [ADR-054](ADR-054-notification-service-delivery.md) — سرویس اعلان. دو سرویس، دو پایگاه داده، دو Topic. هیچ ماژول یا پایگاه دادهٔ مشترکی.
 - **برنامهٔ اجرا:** [ADR-053 implementation plan](ADR-053-implementation-plan.md)
 
-> **این سند تصمیم است، نه گزارش.** `services/audit-service/` وجود ندارد. هیچ جدول، هیچ Consumer، هیچ Endpoint و هیچ خطی از کد
-> نوشته نشده و این سند چنین ادعایی نمی‌کند. وضعیت `Proposed` است و تا پذیرش صاحب محصول همان می‌ماند.
+> **این سند تصمیم است، نه گزارش.** متن زیر همان تصمیم 2026-09-07 است و عمداً بازنویسی نشده؛ هرجا «امروز» می‌گوید،
+> منظور همان تاریخ است. وضعیت `Proposed` است و **تا پذیرش صاحب محصول همان می‌ماند** — پیاده شدن بخشی از تصمیم، پذیرش آن نیست.
+>
+> **وضعیت پیاده‌سازی — 2026-09-10.** `services/audit-service/` **وجود دارد**. پیاده و روی PostgreSQL واقعی اثبات‌شده:
+> AUD-001 (Projector مسیر A روی ده Topic دامنه‌ای، `audit_event` پارتیشن‌بندی‌شده و فقط‌الحاقی در دو لایه)، AUD-002
+> (`GET /v1/audit-events` و `/{id}`)، و **نیمهٔ شواهد دست‌نخوردگی AUD-003** — زنجیرهٔ Hash به‌ازای `(organizationId، ماه UTC)`،
+> جدول `audit_chain_head`، و `GET /v1/audit-events/verify`.
+>
+> **آنچه هنوز پیاده نیست:** رکورد جبرانی § ۷ (`audit.correction`) — این سرویس نه Producer دارد، نه Outbox، نه API نوشتن،
+> پس `correctionOf` ستونی بی‌اثر است؛ مصرف‌کنندهٔ `rasta.audit.trail.v1` (مسیر B، AUD-004)؛ صادرات؛ و **امضا** (§ ۶).
+> زنجیره **Tamper-Evident** است، نه Tamper-Proof. `COM-009` همچنان `READY` با ۱۳ امتیاز است.
+> جزئیات گام‌به‌گام در [برنامهٔ پیاده‌سازی](ADR-053-implementation-plan.md) § ۴ و Runbook
+> [`audit-chain-divergence.md`](../runbooks/audit-chain-divergence.md).
 
 ---
 

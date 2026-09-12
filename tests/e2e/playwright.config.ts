@@ -96,5 +96,16 @@ export default defineConfig({
       // them and settles no money, so ordering it behind a financial suite
       // would only mean a ledger failure hid a storage one.
     },
+    {
+      name: 'audit-api',
+      testDir: './specs/audit',
+      // Last, and dependent on the three that produce the events it records.
+      // audit-service is a terminal sink: it writes nothing of its own and can
+      // only return evidence another service published (ADR-053 § 1, path A).
+      // Running it first would mean asserting on an empty store, and running it
+      // in parallel would make "the record arrived" a race with the run that
+      // creates it.
+      dependencies: ['economic-api', 'marketplace-api', 'document-api'],
+    },
   ],
 });

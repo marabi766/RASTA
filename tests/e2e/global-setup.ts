@@ -69,6 +69,23 @@ export default async function globalSetup(): Promise<void> {
       120_000,
     );
 
+    // ---- audit-service ------------------------------------------------------
+    // Its readiness probe answers 200 only once the domain projector has
+    // actually joined its consumer group. Gated here rather than inside a
+    // scenario, because a suite that started before the projector was
+    // consuming would look for a record nothing could have written yet and
+    // fail as a timeout blaming the query API.
+    await waitFor(
+      `audit-service to be ready at ${config.auditUrl}/health/ready`,
+      async () => {
+        const response = await context.get(`${config.auditUrl}/health/ready`, {
+          failOnStatusCode: false,
+        });
+        return response.status() === 200;
+      },
+      120_000,
+    );
+
     // ---- Keycloak -----------------------------------------------------------
     await waitFor(
       `Keycloak realm ${config.realm} to be reachable`,

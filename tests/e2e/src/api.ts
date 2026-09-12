@@ -167,6 +167,8 @@ export class Anonymous {
 
 export interface RastaFixtures {
   config: E2eConfig;
+  /** Platform operator — the only actor that may read audit evidence across tenants. */
+  systemAdmin: Actor;
   /** Tenant A's financial administrator — the payer. */
   tenantA: Actor;
   /** Tenant B's financial administrator — the payee, and the cross-tenant probe. */
@@ -211,6 +213,9 @@ export const test = base.extend<RastaFixtures>({
   // eslint-disable-next-line no-empty-pattern
   config: async ({}, use) => {
     await use(e2eConfig());
+  },
+  systemAdmin: async ({ request, config }, use) => {
+    await use(await actor(E2E_USERS.systemAdmin, request, config));
   },
   tenantA: async ({ request, config }, use) => {
     await use(await actor(E2E_USERS.tenantA, request, config));
