@@ -16,8 +16,8 @@ import { refusalSiteOf, REFUSAL_SITES } from './refusal-sites';
  * The identity role guard is the shared `RolesGuard` plus one thing: it marks
  * the shared guard's own `INSUFFICIENT_ROLE` refusal — the same object — when,
  * and only when, the matched route is an allowlisted `ROLES_GUARD` site
- * (AUD-004 Phases C3–C5: `GET /v1/users`, `POST /v1/users` and
- * `POST /v1/users/:id/memberships`).
+ * (AUD-004 Phases C3–C6: `GET /v1/users`, `POST /v1/users`,
+ * `POST /v1/users/:id/memberships` and `POST /v1/memberships/:id/roles`).
  */
 
 class ProbeController {
@@ -30,6 +30,9 @@ class ProbeController {
   @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
   addMembership(): void {}
 
+  @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
+  replaceRoles(): void {}
+
   @Public('guard spec probe')
   open(): void {}
 
@@ -39,6 +42,7 @@ class ProbeController {
 const LIST = ProbeController.prototype.list;
 const CREATE = ProbeController.prototype.create;
 const ADD_MEMBERSHIP = ProbeController.prototype.addMembership;
+const REPLACE_ROLES = ProbeController.prototype.replaceRoles;
 const OPEN = ProbeController.prototype.open;
 const ANY = ProbeController.prototype.anyAuthenticated;
 
@@ -74,12 +78,30 @@ const addMembershipRequest: ProbeRequest = {
   body: { organizationId: `ORG-${BODY_SENTINEL}`, roles: ['SYSTEM_ADMIN'] },
 };
 
+const replaceRolesRequest: ProbeRequest = {
+  method: 'POST',
+  route: { path: '/v1/memberships/:id/roles' },
+  url: `/v1/memberships/${PATH_SENTINEL}/roles?role=UNION_ADMIN`,
+  params: { id: PATH_SENTINEL },
+  body: { roles: ['SYSTEM_ADMIN'], reason: BODY_SENTINEL },
+};
+
 const requestFor = (handler: () => void): ProbeRequest =>
   handler === CREATE
     ? createRequest
     : handler === ADD_MEMBERSHIP
       ? addMembershipRequest
-      : listRequest;
+      : handler === REPLACE_ROLES
+        ? replaceRolesRequest
+        : listRequest;
+
+type MarkedSiteName = 'CREATE_USER' | 'ADD_MEMBERSHIP' | 'UPDATE_MEMBERSHIP_ROLES';
+
+const MARKED_SITES: [string, () => void, ProbeRequest, MarkedSiteName][] = [
+  ['POST /v1/users', CREATE, createRequest, 'CREATE_USER'],
+  ['POST /v1/users/:id/memberships', ADD_MEMBERSHIP, addMembershipRequest, 'ADD_MEMBERSHIP'],
+  ['POST /v1/memberships/:id/roles', REPLACE_ROLES, replaceRolesRequest, 'UPDATE_MEMBERSHIP_ROLES'],
+];
 
 function execution(
   handler: () => void,
@@ -196,10 +218,7 @@ describe('IdentityRolesGuard', () => {
     expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
   });
 
-  it.each<[string, () => void, ProbeRequest, 'CREATE_USER' | 'ADD_MEMBERSHIP']>([
-    ['POST /v1/users', CREATE, createRequest, 'CREATE_USER'],
-    ['POST /v1/users/:id/memberships', ADD_MEMBERSHIP, addMembershipRequest, 'ADD_MEMBERSHIP'],
-  ])(
+  it.each(MARKED_SITES)(
     'marks the shared guard’s INSUFFICIENT_ROLE for %s with its own site',
     (_label, handler, request, siteName) => {
       const { error } = outcome(identityGuard(), execution(handler, request), user(['AUDITOR']));
@@ -211,10 +230,7 @@ describe('IdentityRolesGuard', () => {
     },
   );
 
-  it.each<[string, () => void, ProbeRequest, 'CREATE_USER' | 'ADD_MEMBERSHIP']>([
-    ['POST /v1/users', CREATE, createRequest, 'CREATE_USER'],
-    ['POST /v1/users/:id/memberships', ADD_MEMBERSHIP, addMembershipRequest, 'ADD_MEMBERSHIP'],
-  ])(
+  it.each(MARKED_SITES)(
     'rethrows the very object the shared guard threw for %s, unchanged',
     (_label, handler, request, siteName) => {
       const exec = execution(handler, request);
@@ -269,7 +285,36 @@ describe('IdentityRolesGuard', () => {
       'a concrete membership URL where the template belongs',
       { method: 'POST', route: { path: `/v1/users/${PATH_SENTINEL}/memberships` } },
     ],
-    ['membership roles', { method: 'POST', route: { path: '/v1/memberships/:id/roles' } }],
+    [
+      'a lower-case method on the roles template',
+      { method: 'post', route: { path: '/v1/memberships/:id/roles' } },
+    ],
+    ['GET on the roles template', { method: 'GET', route: { path: '/v1/memberships/:id/roles' } }],
+    ['PUT on the roles template', { method: 'PUT', route: { path: '/v1/memberships/:id/roles' } }],
+    [
+      'a trailing slash on the roles template',
+      { method: 'POST', route: { path: '/v1/memberships/:id/roles/' } },
+    ],
+    [
+      'a differently named roles parameter',
+      { method: 'POST', route: { path: '/v1/memberships/:membershipId/roles' } },
+    ],
+    [
+      'a deeper roles template',
+      { method: 'POST', route: { path: '/v1/memberships/:id/roles/:role' } },
+    ],
+    [
+      'a concrete roles URL where the template belongs',
+      { method: 'POST', route: { path: `/v1/memberships/${PATH_SENTINEL}/roles` } },
+    ],
+    [
+      'a roles template with a query',
+      { method: 'POST', route: { path: '/v1/memberships/:id/roles?role=UNION_ADMIN' } },
+    ],
+    [
+      'no matched route for a roles POST',
+      { method: 'POST', url: `/v1/memberships/${PATH_SENTINEL}/roles` },
+    ],
     ['membership revoke', { method: 'POST', route: { path: '/v1/memberships/:id/revoke' } }],
     [
       'registration approval',
@@ -377,6 +422,13 @@ describe('IdentityRolesGuard', () => {
       ['a disallowed role on the membership endpoint', ADD_MEMBERSHIP, user(['AUDITOR'])],
       ['no roles on the membership endpoint', ADD_MEMBERSHIP, user([])],
       ['no context on the membership endpoint', ADD_MEMBERSHIP, undefined],
+      ['ORGANIZATION_ADMIN on the roles endpoint', REPLACE_ROLES, user(['ORGANIZATION_ADMIN'])],
+      ['UNION_ADMIN on the roles endpoint', REPLACE_ROLES, user(['UNION_ADMIN'])],
+      ['SYSTEM_ADMIN on the roles endpoint', REPLACE_ROLES, user(['SYSTEM_ADMIN'])],
+      ['a service caller on the roles endpoint', REPLACE_ROLES, serviceCaller],
+      ['a disallowed role on the roles endpoint', REPLACE_ROLES, user(['AUDITOR'])],
+      ['no roles on the roles endpoint', REPLACE_ROLES, user([])],
+      ['no context on the roles endpoint', REPLACE_ROLES, undefined],
     ])('%s', (_label, handler, context) => {
       const exec = execution(handler, requestFor(handler));
       const mine = outcome(identityGuard(), exec, context);

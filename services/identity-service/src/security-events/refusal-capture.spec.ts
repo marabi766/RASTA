@@ -342,6 +342,91 @@ describe('decideCapture', () => {
     });
   });
 
+  describe('the roles-guard site POST /v1/memberships/:id/roles (AUD-004 Phase C6)', () => {
+    const rolesSite = REFUSAL_SITES.UPDATE_MEMBERSHIP_ROLES;
+    const TARGET_MEMBERSHIP = 'MBR_TARGET_PATH_SENTINEL';
+    const BODY_REASON = 'REASON_BODY_SENTINEL';
+    const denial = (): RastaError =>
+      markRefusal(
+        RastaError.insufficientRole(['ORGANIZATION_ADMIN', 'UNION_ADMIN'], ['AUDITOR']),
+        'UPDATE_MEMBERSHIP_ROLES',
+      );
+    const observeRoles = (overrides: Partial<RefusalObservation> = {}): RefusalObservation => ({
+      exception: denial(),
+      status: 403,
+      code: ERROR_CODES.INSUFFICIENT_ROLE,
+      method: 'POST',
+      route: rolesSite.route,
+      context: context({
+        roles: ['AUDITOR'],
+        path: `/v1/memberships/${TARGET_MEMBERSHIP}/roles?reason=${BODY_REASON}`,
+      }),
+      ...overrides,
+    });
+
+    it('names the verified caller as the resource, never the membership in the path', () => {
+      const draft = captured(observeRoles());
+      expect(draft).toMatchObject({
+        organizationId: 'ORG_A',
+        actorType: 'USER',
+        actorId: 'USR_A',
+        actorRoles: ['AUDITOR'],
+        action: 'identity.memberships.roles.replace',
+        resourceType: 'Membership',
+        resourceId: 'USR_A',
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: rolesSite.reason,
+        occurrenceCount: 1,
+      });
+      expect(draft.resourceId).not.toBe(TARGET_MEMBERSHIP);
+    });
+
+    it("records neither the path, the body, the endpoint's required roles, nor the error's text or context", () => {
+      const serialised = JSON.stringify(captured(observeRoles()));
+      for (const leaked of [
+        TARGET_MEMBERSHIP,
+        BODY_REASON,
+        '/v1/memberships',
+        '/roles',
+        'ORGANIZATION_ADMIN',
+        'UNION_ADMIN',
+        denial().message,
+        'required',
+      ]) {
+        expect(serialised).not.toContain(leaked);
+      }
+    });
+
+    it('never shares an aggregation identity with any other site, including membership creation', () => {
+      const draft = captured(observeRoles());
+      for (const other of Object.values(REFUSAL_SITES)) {
+        if (other === rolesSite) continue;
+        expect(`${draft.action}|${draft.resourceType}|${draft.errorCode}`).not.toBe(
+          `${other.action}|${other.resourceType}|${other.errorCode}`,
+        );
+      }
+    });
+
+    it.each([
+      ['POST /v1/users/:id/memberships', { route: '/v1/users/:id/memberships' }],
+      ['GET on the same template', { method: 'GET' }],
+      ['a concrete path where the template belongs', { route: '/v1/memberships/MBR_X/roles' }],
+      ['membership revoke', { route: '/v1/memberships/:id/revoke' }],
+      ['a trailing slash', { route: '/v1/memberships/:id/roles/' }],
+    ])('skips a marked denial observed on %s', (_label, overrides) => {
+      expect(skipReason(observeRoles(overrides))).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+
+    it('never captures an unmarked INSUFFICIENT_ROLE, even on the roles template', () => {
+      expect(
+        decideCapture(
+          observeRoles({ exception: RastaError.insufficientRole(['UNION_ADMIN'], []) }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+  });
+
   describe('is not a refusal site', () => {
     it.each([
       ["the auth guard's own TENANT_MISMATCH", RastaError.tenantMismatch('ORG_X', ['ORG_A'])],

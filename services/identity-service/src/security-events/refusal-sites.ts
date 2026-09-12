@@ -3,7 +3,7 @@ import type { RastaError } from '@rasta/nest-common';
 
 /**
  * The refusals this service records as audit evidence (ADR-053 § 4,
- * AUD-004 Phases C1–C4) — a fixed allowlist, and the only source of the audit
+ * AUD-004 Phases C1–C6) — a fixed allowlist, and the only source of the audit
  * `action`, `resourceType` and `reason` those records carry.
  *
  * ## Why an allowlist, and why it is attached where the decision is made
@@ -30,7 +30,7 @@ import type { RastaError } from '@rasta/nest-common';
  *                     `IdentityRolesGuard` after the shared guard decided —
  *                     the shared guard itself knows nothing of this table.
  *
- * Four sites are instrumented. Every other `403` in this service — and in every
+ * Five sites are instrumented. Every other `403` in this service — and in every
  * other service — is not recorded yet (ADR-053 plan § 8, R-2).
  */
 
@@ -158,6 +158,34 @@ export const REFUSAL_SITES = {
     resource: 'ACTOR_USER',
     reason:
       'Membership creation refused: the caller holds none of the roles this endpoint requires',
+  },
+
+  /**
+   * `POST /v1/memberships/:id/roles` refused by the platform `RolesGuard`
+   * because the caller holds neither `ORGANIZATION_ADMIN` nor `UNION_ADMIN`
+   * (nor `SYSTEM_ADMIN`) — AUD-004 Phase C6.
+   *
+   * The guard refuses before the membership named in the path is looked up and
+   * before the body is read or validated; the id and the roles asked for are
+   * attacker-chosen, and the membership may not exist. So the resource id is
+   * the caller's own user id from the verified token, and neither the path id,
+   * the requested roles or stated reason in the body, the endpoint's required
+   * roles nor the error's internal context is ever recorded. The action name
+   * and resource type are a Temporary Decision (`docs/24-open-questions.md`
+   * Q-48).
+   */
+  UPDATE_MEMBERSHIP_ROLES: {
+    key: 'identity.update_membership_roles',
+    method: 'POST',
+    route: '/v1/memberships/:id/roles',
+    status: 403,
+    errorCode: ERROR_CODES.INSUFFICIENT_ROLE,
+    decidedBy: 'ROLES_GUARD',
+    action: 'identity.memberships.roles.replace',
+    resourceType: 'Membership',
+    resource: 'ACTOR_USER',
+    reason:
+      'Membership role replacement refused: the caller holds none of the roles this endpoint requires',
   },
 } as const satisfies Record<string, RefusalSite>;
 

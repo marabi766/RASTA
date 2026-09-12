@@ -166,7 +166,7 @@ describe('RefusalAuditExceptionFilter', () => {
     });
   });
 
-  it.each(['LIST_USERS', 'CREATE_USER', 'ADD_MEMBERSHIP'] as const)(
+  it.each(['LIST_USERS', 'CREATE_USER', 'ADD_MEMBERSHIP', 'UPDATE_MEMBERSHIP_ROLES'] as const)(
     'captures a roles-guard denial marked %s with its own classification, and sends the platform response unchanged',
     async (siteName) => {
       const site = REFUSAL_SITES[siteName];

@@ -2,13 +2,14 @@ import { AUDIT_ACTION_PATTERN, ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
 import { markRefusal, refusalSiteOf, rolesGuardSiteFor, REFUSAL_SITES } from './refusal-sites';
 
-describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C5)', () => {
-  it('instruments exactly four refusal sites', () => {
+describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C6)', () => {
+  it('instruments exactly five refusal sites', () => {
     expect(Object.keys(REFUSAL_SITES)).toEqual([
       'SWITCH_ACTIVE_ORGANIZATION',
       'LIST_USERS',
       'CREATE_USER',
       'ADD_MEMBERSHIP',
+      'UPDATE_MEMBERSHIP_ROLES',
     ]);
   });
 
@@ -75,6 +76,23 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C5)', () => 
     });
   });
 
+  it('pins the membership role replacement to POST /v1/memberships/:id/roles, 403 and INSUFFICIENT_ROLE, decided by the roles guard', () => {
+    expect(REFUSAL_SITES.UPDATE_MEMBERSHIP_ROLES).toEqual({
+      key: 'identity.update_membership_roles',
+      method: 'POST',
+      route: '/v1/memberships/:id/roles',
+      status: 403,
+      errorCode: ERROR_CODES.INSUFFICIENT_ROLE,
+      decidedBy: 'ROLES_GUARD',
+      action: 'identity.memberships.roles.replace',
+      resourceType: 'Membership',
+      // The caller, never the membership named in the path.
+      resource: 'ACTOR_USER',
+      reason:
+        'Membership role replacement refused: the caller holds none of the roles this endpoint requires',
+    });
+  });
+
   it('names no role, no query value and no URL in any site’s fixed evidence', () => {
     for (const site of Object.values(REFUSAL_SITES)) {
       for (const text of [site.action, site.resourceType, site.reason]) {
@@ -88,6 +106,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C5)', () => 
       ['GET', '/v1/users', 'LIST_USERS'],
       ['POST', '/v1/users', 'CREATE_USER'],
       ['POST', '/v1/users/:id/memberships', 'ADD_MEMBERSHIP'],
+      ['POST', '/v1/memberships/:id/roles', 'UPDATE_MEMBERSHIP_ROLES'],
     ])('finds the roles-guard site for exactly %s %s', (method, route, expected) => {
       expect(rolesGuardSiteFor(method, route)).toBe(expected);
     });
@@ -105,7 +124,16 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C5)', () => 
       ['an adjacent deeper template', 'POST', '/v1/users/:id/memberships/:membershipId'],
       ['a concrete membership URL', 'POST', '/v1/users/USR_01ABC/memberships'],
       ['a concrete membership URL with a query', 'POST', '/v1/users/:id/memberships?role=x'],
-      ['membership roles', 'POST', '/v1/memberships/:id/roles'],
+      ['lower-case POST on the roles template', 'post', '/v1/memberships/:id/roles'],
+      ['GET on the roles template', 'GET', '/v1/memberships/:id/roles'],
+      ['PUT on the roles template', 'PUT', '/v1/memberships/:id/roles'],
+      ['PATCH on the roles template', 'PATCH', '/v1/memberships/:id/roles'],
+      ['a concrete roles URL', 'POST', '/v1/memberships/MBR_01ABC/roles'],
+      ['a roles template with a query', 'POST', '/v1/memberships/:id/roles?role=UNION_ADMIN'],
+      ['a trailing slash on the roles template', 'POST', '/v1/memberships/:id/roles/'],
+      ['a differently named roles parameter', 'POST', '/v1/memberships/:membershipId/roles'],
+      ['a deeper roles template', 'POST', '/v1/memberships/:id/roles/:role'],
+      ['the membership collection', 'POST', '/v1/memberships'],
       ['membership revoke', 'POST', '/v1/memberships/:id/revoke'],
       ['registration approval', 'POST', '/v1/registration-requests/:id/approve'],
       ['registration rejection', 'POST', '/v1/registration-requests/:id/reject'],
@@ -139,7 +167,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C5)', () => 
     const identities = Object.values(REFUSAL_SITES).map(
       (site) => `${site.action}|${site.resourceType}|${site.errorCode}`,
     );
-    expect(identities).toHaveLength(4);
+    expect(identities).toHaveLength(5);
     expect(new Set(identities).size).toBe(identities.length);
   });
 
@@ -174,7 +202,16 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C5)', () => 
     expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
   });
 
-  it.each(['CREATE_USER', 'ADD_MEMBERSHIP'] as const)(
+  it('keeps the two Membership sites apart by action, so their evidence never merges', () => {
+    const add = REFUSAL_SITES.ADD_MEMBERSHIP;
+    const replace = REFUSAL_SITES.UPDATE_MEMBERSHIP_ROLES;
+    expect(replace.resourceType).toBe(add.resourceType);
+    expect(replace.errorCode).toBe(add.errorCode);
+    expect(replace.action).not.toBe(add.action);
+    expect(replace.route).not.toBe(add.route);
+  });
+
+  it.each(['CREATE_USER', 'ADD_MEMBERSHIP', 'UPDATE_MEMBERSHIP_ROLES'] as const)(
     'marks a role refusal as %s without changing its serialisation',
     (siteName) => {
       const plain = RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['AUDITOR']);
