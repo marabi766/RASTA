@@ -129,10 +129,10 @@ const AUDIT_EVENT_SELECT = {
   // digest.
   recordHash: true,
   previousHash: true,
-  // `correctionOf` stays absent from the read side. Path B writes it since
-  // AUD-004 Phase B, but publishing it is a public contract change that belongs
-  // with the correction command, and a link shown on only some records would
-  // let a reader take every other record's silence for "not corrected".
+  // Published since AUD-003 correction, together with `correctedBy`: the correction
+  // command exists, so every record's link — including a null one — is now a
+  // true statement (`audit.view.ts`).
+  correctionOf: true,
 } as const;
 
 /**
@@ -740,6 +740,78 @@ export class AuditRepository {
     });
 
     return (row as AuditEventRow | null) ?? null;
+  }
+
+  /**
+   * The corrections of a set of already-read records, under the **same** scope
+   * those records were read with (AUD-003 correction, ADR-053 § 7).
+   *
+   * One query for a whole page, never one per row. The scope predicate is the
+   * one `search` and `findById` use — `organization_id = $1` when the read was
+   * tenant-bound, nothing when a `SYSTEM_ADMIN` read every tenant — so a link can
+   * only ever name a record the caller could have read directly. A correction
+   * carries its target's organization (the producer copies it from a trusted
+   * lookup), so it lives in the same scope as the record it corrects, and no
+   * `OR organization_id IS NULL` is ever needed.
+   *
+   * Bounded below by the earliest target's `occurredAt`: a correction is minted
+   * after the record it corrects, so every partition older than that is pruned.
+   * There is deliberately no upper bound — a correction may be issued any time
+   * later, and a cut-off would silently drop the link, which is the one thing
+   * this field must never do.
+   */
+  async findCorrectionIds(
+    scope: AuditReadScope,
+    targets: readonly { id: string; occurredAt: Date }[],
+  ): Promise<Map<string, string[]>> {
+    const links = new Map<string, string[]>();
+    const first = targets[0];
+    if (first === undefined) return links;
+
+    let earliest = first.occurredAt;
+    for (const target of targets) {
+      if (target.occurredAt < earliest) earliest = target.occurredAt;
+    }
+
+    const where: Prisma.AuditEventWhereInput = {
+      correctionOf: { in: [...new Set(targets.map((target) => target.id))] },
+      occurredAt: { gte: earliest },
+    };
+    if (scope.kind === 'ORGANIZATION' || scope.organizationId !== undefined) {
+      where.organizationId = scope.organizationId;
+    }
+
+    const rows = await this.prisma.client.auditEvent.findMany({
+      where,
+      orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],
+      select: { id: true, correctionOf: true },
+    });
+
+    for (const row of rows) {
+      if (row.correctionOf === null) continue;
+      const list = links.get(row.correctionOf) ?? [];
+      list.push(row.id);
+      links.set(row.correctionOf, list);
+    }
+    return links;
+  }
+
+  /**
+   * The internal correction-target lookup: one record by its exact identity.
+   *
+   * A primary-key read on `(occurred_at, id)`, so exactly one partition. No
+   * scope predicate, on purpose and safely: the only caller is the correction
+   * producer, which must learn the target's true scope in order to copy it, and
+   * the answer is three fields, none of them evidence (`audit.lookup.ts`).
+   */
+  async findTarget(
+    id: string,
+    occurredAt: Date,
+  ): Promise<{ id: string; occurredAt: Date; organizationId: string | null } | null> {
+    return this.prisma.client.auditEvent.findUnique({
+      where: { occurredAt_id: { occurredAt, id } },
+      select: { id: true, occurredAt: true, organizationId: true },
+    });
   }
 
   // -------------------------------------------------------------------------

@@ -25,6 +25,8 @@ import { HealthController } from './health/health.controller';
 import { PrismaService } from './prisma/prisma.service';
 import { AuditRepository } from './audit/audit.repository';
 import { AuditController } from './audit/audit.controller';
+import { AuditInternalController } from './audit/audit-internal.controller';
+import { AuditTargetLookupService } from './audit/audit.lookup';
 import { AuditQueryService } from './audit/audit.query.service';
 import { AuditVerificationService } from './audit/audit.verification.service';
 import {
@@ -121,7 +123,7 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
  * that holds for the trail topic as much as for the ten domain topics.
  */
 @Module({
-  controllers: [HealthController, AuditController],
+  controllers: [HealthController, AuditController, AuditInternalController],
   providers: [
     { provide: ENV, useFactory: (): AuditEnv => loadAuditEnv() },
 
@@ -151,6 +153,10 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
     AuditRepository,
     AuditQueryService,
     AuditVerificationService,
+    // The one service-to-service read: the correction producer proving its
+    // target (AUD-003 correction). Separate from the query service so general reads keep
+    // refusing every service token unchanged.
+    AuditTargetLookupService,
 
     // Registered as classes, not as factory providers, because the controller
     // reaches them as `@Query(AuditEventQueryPipe)`. Nest resolves a

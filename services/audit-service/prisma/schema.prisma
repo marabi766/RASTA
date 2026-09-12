@@ -195,6 +195,9 @@ model AuditEvent {
   /// The chain-order access path: one tenant's rows inside one month
   /// partition, in the order the chain was built (AUD-003).
   @@index([organizationId, sequenceNo], map: "audit_event_chain_idx")
+  /// `correctedBy`: the later rows whose `correction_of` names a record
+  /// (AUD-003 correction). Probed once per page, bounded below by the earliest target.
+  @@index([correctionOf, occurredAt], map: "audit_event_correction_idx")
   @@map("audit_event")
 }
 

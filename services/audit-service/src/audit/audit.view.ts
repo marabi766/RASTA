@@ -24,12 +24,20 @@ import { z } from 'zod';
  *                              nothing, because a forger who rewrote the row
  *                              rewrote the hash beside it. What is published
  *                              instead is `integrity`, below.
- *   correctionOf               Written by path B since AUD-004 Phase B, and not
- *                              published yet. Nothing produces a correction
- *                              today, so every published link would be null,
- *                              and a null link reads as "not corrected" — a
- *                              claim this service cannot make until the
- *                              correction command exists.
+ *   correctionOf               Published since AUD-003 correction: the correction command
+ *   correctedBy                exists, so a null link is now the honest claim
+ *                              "not corrected" rather than "nothing can correct
+ *                              anything". The two are published together and
+ *                              deliberately: `correctionOf` alone would let a
+ *                              reader holding the original take its silence for
+ *                              "never corrected", which is the one thing a
+ *                              correction has to be able to say.
+ *
+ *                              Both are scoped exactly as the record is. A link
+ *                              is only ever populated from rows the same caller
+ *                              could read directly, so neither field can
+ *                              disclose the existence of a record outside the
+ *                              caller's authority.
  *   changes                    Published. Always null in path A, whose absence
  *                              is *itself* the documented contract (ADR-053 §
  *                              2.1: a projector row stores no payload value);
@@ -75,6 +83,19 @@ export const auditEventViewSchema = z
 
     /** Always null in path A. AUD-004 supplies a bounded, redacted delta. */
     changes: z.unknown().nullable(),
+
+    /**
+     * The record this one corrects (ADR-053 § 7), or null when it corrects
+     * nothing. Set only on a correction, which is itself an ordinary
+     * append-only row.
+     */
+    correctionOf: z.string().nullable(),
+    /**
+     * Every correction of *this* record, oldest first. Empty when there is
+     * none — never null, because "no corrections" is a statement this service
+     * can now make and an absent key would not make it.
+     */
+    correctedBy: z.array(z.string()),
 
     occurrenceCount: z.number().int(),
 
@@ -150,12 +171,26 @@ export interface AuditEventRow {
   traceparent: string | null;
   sourceStreamSeq: bigint | null;
   sequenceNo: bigint;
+  /** Null unless this row is a correction of another (ADR-053 § 7). */
+  correctionOf: string | null;
   /** Null on every row written before AUD-003; never backfilled. */
   recordHash: Uint8Array | null;
   previousHash: Uint8Array | null;
 }
 
-export function toAuditEventView(row: AuditEventRow): AuditEventView {
+/**
+ * Serialises one row.
+ *
+ * `correctedBy` is passed in rather than read here: it is a second query, made
+ * once for a whole page under the same scope the page was read with, so this
+ * function stays a pure mapping and cannot accidentally issue a per-row lookup.
+ * Defaulting it to empty is deliberate — a caller that has not resolved links
+ * publishes "no corrections", never a half-populated one.
+ */
+export function toAuditEventView(
+  row: AuditEventRow,
+  correctedBy: readonly string[] = [],
+): AuditEventView {
   return {
     id: row.id,
     occurredAt: row.occurredAt.toISOString(),
@@ -178,6 +213,11 @@ export function toAuditEventView(row: AuditEventRow): AuditEventView {
     // `undefined` would drop the key from the JSON body entirely, and a missing
     // key and an explicit null are different claims to a client.
     changes: row.changes ?? null,
+
+    correctionOf: row.correctionOf,
+    // A copy: nothing downstream may mutate the caller's link map through the
+    // view it was handed.
+    correctedBy: [...correctedBy],
 
     occurrenceCount: row.occurrenceCount,
 

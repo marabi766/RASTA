@@ -14,6 +14,7 @@ import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
 import { AuditTrailConsumer } from './consumers/audit-trail.consumer';
 import { AuditRepository } from './audit/audit.repository';
 import { AuditController } from './audit/audit.controller';
+import { AuditInternalController } from './audit/audit-internal.controller';
 import {
   AuditEventDetailQueryPipe,
   AuditEventQueryPipe,
@@ -138,14 +139,14 @@ describe('audit-service composition root', () => {
     process.env = originalEnv;
   });
 
-  it('registers exactly the health probes and the read API', () => {
-    // Two controllers, and the count is pinned rather than left open: a third
-    // one appearing here is either a write surface `docs/04` § 4.15 forbids or
-    // an export route AUD-002 does not build, and both should have to change
-    // this line before they ship. AUD-004 Phase B adds a consumer, not a
-    // controller — path B is a second Kafka reader, never an HTTP door.
+  it('registers exactly the health probes, the read API and the internal target lookup', () => {
+    // Pinned rather than left open: another controller here is either a write
+    // surface `docs/04` § 4.15 forbids or an export route nothing builds yet,
+    // and both should have to change this line before they ship. AUD-004 Phase
+    // B added a consumer, not a controller. AUD-003 correction adds one internal *read*,
+    // reserved for identity-service's service token — still no write surface.
     const controllers = (Reflect.getMetadata('controllers', AppModule) ?? []) as unknown[];
-    expect(controllers).toEqual([HealthController, AuditController]);
+    expect(controllers).toEqual([HealthController, AuditController, AuditInternalController]);
   });
 
   it('registers the guards globally, authentication before authorization', () => {

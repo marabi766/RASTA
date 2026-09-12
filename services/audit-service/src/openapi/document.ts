@@ -9,6 +9,7 @@ import {
 } from '../audit/audit.query.dto';
 import { auditEventPageSchema, auditEventViewSchema } from '../audit/audit.view';
 import { auditChainVerificationSchema } from '../audit/audit.verification.view';
+import { auditTargetLookupQuerySchema, auditTargetViewSchema } from '../audit/audit.lookup';
 
 /**
  * Fills in what Nest cannot see.
@@ -55,12 +56,14 @@ const RESPONSE_BODIES: Record<string, { status: '200'; schema: z.ZodTypeAny }> =
   'GET /v1/audit-events': { status: '200', schema: auditEventPageSchema },
   'GET /v1/audit-events/verify': { status: '200', schema: auditChainVerificationSchema },
   'GET /v1/audit-events/{id}': { status: '200', schema: auditEventViewSchema },
+  'GET /v1/internal/audit-events/{id}': { status: '200', schema: auditTargetViewSchema },
 };
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/audit-events': auditEventQuerySchema,
   'GET /v1/audit-events/verify': auditVerifyQuerySchema,
   'GET /v1/audit-events/{id}': auditEventDetailQuerySchema,
+  'GET /v1/internal/audit-events/{id}': auditTargetLookupQuerySchema,
 };
 
 /**
@@ -73,7 +76,7 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The request does not match the published schema. `from` and `to` are mandatory, `to` may not precede `from`, and the window may not exceed `AUDIT_MAX_QUERY_WINDOW_DAYS` (default 90) — the message names the configured limit. `resourceId` requires `resourceType`. Unknown parameters are refused rather than ignored, so a misspelled filter is a 400 and never a silently narrower answer. An invalid or unparseable `cursor` lands here too. On `/verify`: `organizationId` may not be combined with `scope=PLATFORM`, a `SYSTEM_ADMIN` verifying a tenant must name exactly one `organizationId`, and a window whose contiguous chain walk would exceed `AUDIT_MAX_VERIFICATION_RECORDS` records is refused from row counts, before any record is read.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
-  403: 'Authenticated, but not permitted. Only `SYSTEM_ADMIN` and `UNION_ADMIN` reach audit records; `AUDITOR`, `ORGANIZATION_ADMIN`, every unlisted role and every service token are refused. Also returned to a `UNION_ADMIN` who names an `organizationId` the local hierarchy projection does not prove is beneath their own — including one that has moved out and one no projection exists for — and to any non-`SYSTEM_ADMIN` asking `/verify` for `scope=PLATFORM`.',
+  403: 'Authenticated, but not permitted. Only `SYSTEM_ADMIN` and `UNION_ADMIN` reach audit records; `AUDITOR`, `ORGANIZATION_ADMIN`, every unlisted role and every service token are refused. The internal correction-target lookup is the reverse: only `identity-service`’s service token reaches it, and every user token and every other service is refused. Also returned to a `UNION_ADMIN` who names an `organizationId` the local hierarchy projection does not prove is beneath their own — including one that has moved out and one no projection exists for — and to any non-`SYSTEM_ADMIN` asking `/verify` for `scope=PLATFORM`.',
   404: 'Not found. Also returned for a record that exists under another tenant, or outside the supplied `from`..`to` window, so a record’s existence is never disclosed by the difference between two statuses.',
   500: 'Unexpected server error.',
 };
@@ -106,10 +109,13 @@ const DESCRIPTION =
   'against an independent copy of the head, and it is not protection against a database ' +
   'superuser who can rewrite the records and the head together. Records written before ' +
   'AUD-003 carry no link, are never backfilled, and any range containing one is reported ' +
-  'as UNVERIFIABLE_LEGACY rather than as valid. No correction command exists: ADR-053 ' +
-  '§ 7 routes a correction through the explicit audit trail, where it is recorded as a ' +
-  'new record linked to the one it corrects — never as an edit — and this API does not ' +
-  'yet publish that link.';
+  'as UNVERIFIABLE_LEGACY rather than as valid. A correction (ADR-053 § 7) is commanded ' +
+  'through identity-service and arrives on the explicit audit trail like any other ' +
+  'write; it is recorded as a new record linked to the one it corrects — never as an ' +
+  'edit — and every record publishes both directions of that link, correctionOf and ' +
+  'correctedBy, scoped exactly as the record itself. One internal endpoint, reachable ' +
+  "only by identity-service's service token, proves a correction target exists and " +
+  'names its scope; it returns no evidence.';
 
 /** Builds the finished document for a booted application. */
 export function buildAuditOpenApiDocument(
@@ -133,6 +139,19 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
   document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  // The internal correction-target lookup is not bearer-authenticated: it is
+  // reached with a signed service token (ADR-020/035) and by exactly one
+  // service. Publishing it under the bearer scheme would describe a door that
+  // does not exist and hide the one that does.
+  document.components.securitySchemes ??= {};
+  document.components.securitySchemes.internalToken = {
+    type: 'apiKey',
+    in: 'header',
+    name: 'x-internal-token',
+    description:
+      'A signed internal service token. The correction-target lookup accepts one ' +
+      'minted for audit-service by identity-service, and nothing else.',
+  } as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
@@ -146,7 +165,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       // service whose endpoints are open while the guard answers 401 to every
       // one of them. On an audit API that is not a documentation nicety: a
       // reviewer reading the contract must be able to see the store is closed.
-      operation.security ??= [{ bearer: [] }];
+      operation.security ??= path.startsWith('/v1/internal/')
+        ? [{ internalToken: [] }]
+        : [{ bearer: [] }];
 
       const query = QUERY_SCHEMAS[key];
       if (query) {
