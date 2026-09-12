@@ -694,6 +694,7 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
 
   test(`${REFUSALS} role refusals of POST /v1/registration-requests/:id/approve with varying request ids and body secrets are recorded as one INSUFFICIENT_ROLE record counting ${REFUSALS} (AUD-004 Phase C8)`, async ({
     auditor,
+    tenantB,
     systemAdmin,
   }) => {
     // `province.auditor` holds only AUDITOR, so it lacks UNION_ADMIN and the
@@ -701,6 +702,13 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     // before the registration request is looked up or the body is read. Every
     // refusal names a different request and a different body secret; the record
     // must aggregate by the caller alone.
+    //
+    // The gateway throttles the whole `registration-requests` prefix at 5 calls
+    // per user per hour (`services/api-gateway/src/config/routes.ts`) — the
+    // self-registration surface's protection, applied to authenticated callers
+    // too. The burst below spends exactly one actor's hour, so the `/reject`
+    // comparison is made by a second refused actor rather than a sixth call
+    // that would be answered 429. Nothing here raises or bypasses the limit.
     const windowMs = e2eConfig().identityAggregationWindowSeconds * 1000;
     if (windowMs < BURST_BUDGET_MS + WINDOW_START_MARGIN_MS * 2) {
       throw new Error(
@@ -740,7 +748,8 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     // prefix and the same single required role produce the identical response
     // and no record of their own.
     const rejectCorrelationId = `e2e-reject-probe-${randomUUID()}`;
-    const rejection = await auditor.post(`/v1/registration-requests/${randomUUID()}/reject`, {
+    // `dehyari.admin.b` lacks UNION_ADMIN too, and has its own gateway budget.
+    const rejection = await tenantB.post(`/v1/registration-requests/${randomUUID()}/reject`, {
       body: { reason: `e2e-reject-${randomUUID()}` },
       correlationId: rejectCorrelationId,
     });
