@@ -342,8 +342,9 @@ SELECT id, source_topic, source_service, occurred_at, recorded_at, occurrence_co
 - Route `/metrics` در `audit-service` و هدف Scrape محلی آن (`host.docker.internal:3115`) **اکنون وجود دارند**؛ پیکربندی Scrape
   محیط واقعی هنوز وابسته به استقرار و بیرون از مخزن است.
 - قواعد `RastaAuditIngestionFailure`، `RastaSecurityEventCaptureGap`، `RastaDeadLetterMessagePublished` و `RastaAuditConsumerLag`
-  **اکنون** در Prometheus محلی هستند و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` ثبت می‌شود؛ هنوز نیست: Alertmanager و تحویل اعلان،
-  Scrape محیط واقعی، هشدار روی `rasta_audit_ingestion_lag_seconds` و روی `up{job="kafka-exporter"}`.
+  **اکنون** در Prometheus محلی هستند و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` ثبت می‌شود؛ نبودن سیگنال Lag هم با
+  `RastaKafkaExporterUnavailable` و `RastaAuditConsumerGroupMetricsMissing` صریح است ([audit-ingestion-lag](audit-ingestion-lag.md)).
+  هنوز نیست: Alertmanager و تحویل اعلان، Scrape محیط واقعی، و هشدار روی `rasta_audit_ingestion_lag_seconds`.
 - Script بازپخش DLQ (R-6) یا حذف ارجاع به آن از [replay-dlq](replay-dlq.md).
 - نگهداشت Topic مسیر B و DLQ در محیط واقعی را صریح و مستند کن؛ Script محلی فقط سی روز دارد.
 - ثبت ردها در سرویس‌های دیگر (R-2)، ردهای Gateway و ردهای Token سرویس — تا آن وقت نبودن آن‌ها «شکاف حادثه» نیست و نباید

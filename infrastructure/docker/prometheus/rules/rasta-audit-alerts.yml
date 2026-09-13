@@ -12,8 +12,10 @@
 # Rules for every alert here:
 # - Counter alerts use `increase(...[5m]) > 0` and no `for`: each metric's
 #   contract says any increase is actionable, so a delay would only hide one.
-#   The Kafka lag alert is a gauge and is the exception: it uses `for: 5m`,
-#   because lag that clears on its own is normal consumption.
+#   The Kafka alerts are the exception. Lag is a gauge and uses `for: 5m`,
+#   because lag that clears on its own is normal consumption; the two
+#   missing-signal alerts use `for: 2m` (exporter) and `for: 5m` (group) so a
+#   single failed scrape or a brief exporter restart does not fire.
 # - `sum by` keeps exactly the bounded labels the metric declares and drops the
 #   scrape's own `job`/`instance`/`environment`. No annotation names a tenant,
 #   actor, resource, event, correlation id, partition, offset or error text —
@@ -112,6 +114,49 @@ groups:
         annotations:
           summary: 'Audit consumer group {{ $labels.consumergroup }} has lagged on {{ $labels.topic }} for 5 minutes'
           description: 'Kafka consumer group {{ $labels.consumergroup }} has been behind on {{ $labels.topic }} for at least 5 minutes ({{ $value }} records past its committed offset now). audit_event rows for those records may not exist yet.'
+          runbook: docs/runbooks/audit-ingestion-lag.md
+
+      # RastaAuditConsumerLag is silent when its input is gone, so the two
+      # alerts below make that loss explicit. They are complementary, never
+      # both: the first covers the exporter itself, the second the case where
+      # the exporter is scraped but an expected group reports nothing.
+      #
+      # `absent(up{...})` catches a target Prometheus no longer has at all
+      # (removed from prometheus.yml, or never loaded); `== 0` alone would be
+      # empty then. `min by (job)` drops `instance`, and `absent` of a selector
+      # with only `job="kafka-exporter"` yields the same single `job` label.
+      - alert: RastaKafkaExporterUnavailable
+        expr: min by (job) (up{job="kafka-exporter"}) == 0 or absent(up{job="kafka-exporter"})
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Prometheus has not scraped the Kafka exporter for 2 minutes'
+          description: 'The {{ $labels.job }} scrape target has been down or missing for at least 2 minutes. RastaAuditConsumerLag and the audit DLQ retained-records rule have no input while this fires: their silence is not evidence of healthy audit ingestion.'
+          runbook: docs/runbooks/audit-ingestion-lag.md
+
+      # The exporter emits kafka_consumergroup_lag for a group only for topics
+      # where that group has at least one committed offset (--offset.show-all
+      # keeps stopped groups that have one). No series therefore means the
+      # broker holds no committed offsets for the group. A present -1, 0 or
+      # positive value counts as present. One `absent` per group, each with
+      # only an exact `consumergroup` matcher, so the result keeps exactly that
+      # label and names the missing group. Gated on the exporter being up so
+      # an exporter outage raises only RastaKafkaExporterUnavailable.
+      - alert: RastaAuditConsumerGroupMetricsMissing
+        expr: |
+          (
+              absent(kafka_consumergroup_lag{consumergroup="audit-service.domain-projector"})
+            or
+              absent(kafka_consumergroup_lag{consumergroup="audit-service.trail"})
+          )
+          and on () (min(up{job="kafka-exporter"}) == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'No Kafka lag metrics for audit consumer group {{ $labels.consumergroup }}'
+          description: 'kafka-exporter is being scraped but has reported no kafka_consumergroup_lag series for {{ $labels.consumergroup }} for at least 5 minutes: the broker holds no committed offsets for that group, so RastaAuditConsumerLag cannot evaluate it. Start or inspect the real audit-service consumer; never reset, delete or shift its offsets.'
           runbook: docs/runbooks/audit-ingestion-lag.md
 
       # Records currently retained in rasta.audit.v1.dlq: per partition, newest

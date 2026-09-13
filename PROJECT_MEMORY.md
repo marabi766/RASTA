@@ -223,8 +223,22 @@ config` → `SUCCESS: 8 rules found`، `promtool test rules` → `SUCCESS` (دو
 > → ۳۵ و Clamp ۰ → ۵)؛ چهار جهش (`for: 3m`، حذف فیلتر گروه، حذف دو `clamp_min`) هر چهار را شکست داد. زنده: Target
 > `kafka-exporter` برابر `up`، `scrape_samples_scraped` ۱۰۱۲۰، Recording Rule `{topic="rasta.audit.v1.dlq"} 18162`، و چون
 > `audit-service` اجرا نمی‌شد (`members` = ۰) هر ۱۱ ترکیب (ده Topic دامنه + Trail با Lag ۳۶) از `pending` به `firing` رسیدند.
-> **هنوز نیست:** Alertmanager و تحویل اعلان، Scrape محیط واقعی، داشبورد، هشدار روی `up{job="kafka-exporter"}` و روی
-> `rasta_audit_ingestion_lag_seconds`، Lag گروه‌های دیگر و عمق Topicهای DLQ دیگر، ابزار بازپخش و تشخیص رکورد غایب.
+> **نقطهٔ کور بسته‌شده (همان روز، بعدتر):** سکوت `RastaAuditConsumerLag` بی ورودی دیگر با «بی‌Lag» یکی نیست. دو هشدار
+> `warning` در همان گروه: `RastaKafkaExporterUnavailable` (`for: 2m`،
+> `min by (job) (up{job="kafka-exporter"}) == 0 or absent(up{job="kafka-exporter"})`، Label فقط `job`) و
+> `RastaAuditConsumerGroupMetricsMissing` (`for: 5m`،
+> `(absent(kafka_consumergroup_lag{consumergroup="audit-service.domain-projector"}) or absent(kafka_consumergroup_lag{consumergroup="audit-service.trail"})) and on () (min(up{job="kafka-exporter"}) == 1)`،
+> Label فقط `consumergroup`؛ هنگام خرابی Exporter خاموش). اکنون ۱۰ قاعده (۹ هشدار + ۱ Recording). **شواهد:** `check config` →
+> `SUCCESS: 10 rules found`؛ `test rules` → `SUCCESS` با نُه گروه آزمون تازه (`pending` در ۱m از راه `ALERTS`، `firing` در ۲m،
+> نبودن کامل `up`، خرابی گذرا، گروه غایب با Label دقیق، صفر/`-1` موجود، گروه‌های `audit-itest-*`، سرکوب هنگام خرابی Exporter،
+> ناپدید شدن گذرا با `stale` و Reset تایمر)؛ نُه جهش (حذف `absent(up)`، حذف/ضعیف کردن Gate، سه Regex، حذف `min by`، کوتاه کردن
+> دو `for`) همه شکست خوردند. زنده روی Broker موجود: توقف فقط `kafka-exporter` → `up=0`، `pending` از 09:57:36 و `firing` از
+> 09:59:36 UTC با `{job="kafka-exporter",severity="warning"}`، رفع پس از Start دوباره؛ هشدار گروه غایب هیچ‌گاه فعال نشد. شاخهٔ
+> «Exporter سالم/گروه غایب» عمداً زنده بازتولید نشد، چون هر دو گروه Offset Commit‌شده دارند و ساختنش حذف Metadata گروه یا
+> جابه‌جایی Offset می‌خواست؛ فقط `promtool` آن را اثبات می‌کند.
+> **هنوز نیست:** Alertmanager و تحویل اعلان، Scrape محیط واقعی، داشبورد، هشدار روی
+> `rasta_audit_ingestion_lag_seconds` (امروز Gauge، ADR-053 Histogram/p95 می‌خواهد)، Lag گروه‌های دیگر و عمق Topicهای DLQ دیگر،
+> ابزار بازپخش و تشخیص رکورد غایب.
 > `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series

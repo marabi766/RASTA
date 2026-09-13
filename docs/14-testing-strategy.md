@@ -585,7 +585,7 @@ pnpm verify                     # دروازه کامل کیفیت
 **پیکربندی و قواعد هشدار Prometheus.** Job مستقل `prometheus-rules` در CI (روی هر PR و `main`، بی وابستگی Node و بیرون از
 Job سریع `quality`) همان Image سرویس `prometheus` در `docker-compose.yml` را با کل پوشهٔ
 `infrastructure/docker/prometheus` به‌صورت فقط‌خواندنی در `/etc/prometheus` اجرا می‌کند؛ پس مسیر `rule_files` همان است که در
-زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار هفت هشدار و یک Recording Rule را،
+زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار نُه هشدار و یک Recording Rule را،
 با افزایش واقعی شمارنده (نه مقدار مطلق) و کنترل‌های منفی (`outcome="recorded"`/`"skipped"` هشدار نمی‌دهد، سن پشتهٔ بسته ≤ ۶۰
 هشدار نمی‌دهد، `pending_age` ورودی هشدار نیست)، گذار Series صادرشده با صفر به نخستین رخداد (که هشدار می‌دهد) و Labelهای
 دقیق هر هشدار. برای Kafka همان Fixture با نام و Labelهای واقعی `danielqsj/kafka-exporter:v1.9.0`
@@ -593,7 +593,16 @@ Job سریع `quality`) همان Image سرویس `prometheus` در `docker-comp
 اثبات می‌کند: `RastaAuditConsumerLag` برای هر دو گروه `audit-service.domain-projector` و `audit-service.trail` در ۴ دقیقه نمی‌سوزد و
 در ۵ دقیقه با Label و Annotation دقیق می‌سوزد، `-1` (Partition بی Commit) جمع را کم نمی‌کند، با رسیدن Lag به صفر برطرف می‌شود، و Lag
 صفر، Lag گذرای کمتر از ۵ دقیقه، یک صفرِ میانی (که ۵ دقیقه را از نو آغاز می‌کند) و گروه غیرحسابرسی (`maintenance-service.usage`،
-`audit-itest-trail-…`) هشدار نمی‌دهند. `promql_expr_test` Recording Rule `topic:kafka_topic_retained_records:sum` را روی سه Partition
+`audit-itest-trail-…`) هشدار نمی‌دهند. `RastaKafkaExporterUnavailable`: با `up{job="kafka-exporter"}=0` در ۱ دقیقه `pending`
+است (از راه `promql_expr_test` روی `ALERTS`، چون `alert_rule_test` فقط `firing` را می‌بیند) و در ۲ دقیقه فقط با Label
+`job`/`severity` می‌سوزد و با بازگشت `up=1` رفع می‌شود؛ `up` یک Job دیگر، خرابی گذرای کمتر از ۲ دقیقه و `up=1` پایدار نمی‌سوزند؛
+و نبودن کامل Series `up{job="kafka-exporter"}` هم در ۲ دقیقه با همان Labelها می‌سوزد. `RastaAuditConsumerGroupMetricsMissing`:
+با Exporter سالم، نبودن هر یک از دو گروه (و هر دو، روی Broker تازه) پس از ۵ دقیقه یک هشدار با Label `consumergroup` همان گروه
+می‌دهد و در ۴ دقیقه نه؛ هر دو گروه موجود با مقدار صفر و `-1` نمی‌سوزند؛ گروه‌های `audit-itest-…`، `audit-itest-trail-…` و
+`maintenance-service.usage` جای گروه ثابت را نمی‌گیرند؛ Exporter خاموش یا بی Series `up` این هشدار را خاموش می‌کند؛ و گروهی
+که کمتر از ۵ دقیقه ناپدید می‌شود (با نشانگر `stale` واقعی Prometheus) نمی‌سوزد و بازگشتش ۵ دقیقه را از نو آغاز می‌کند. جهش‌های
+حذف شاخهٔ `absent(up…)`، حذف شرط سلامت Exporter (یا `== 1` → `>= 0`)، ضعیف کردن تطابق دقیق گروه به Regex (سه شکل)، حذف
+`min by (job)` و کوتاه کردن هر `for` هر کدام Fixture را شکست دادند. `promql_expr_test` Recording Rule `topic:kafka_topic_retained_records:sum` را روی سه Partition
 (۱۰۵، سپس ۱۱۵ پس از نوشتن تازه، سپس ۳۵ پس از حذف به‌دست Retention)، نادیده ماندن Topic DLQ دیگر، و Clamp (Partition با Offsetهای
 متقاطع صفر است و از Partition دیگر کم نمی‌کند) می‌سنجد. `pnpm verify` این دروازه را اجرا نمی‌کند، چون Docker
 می‌خواهد. فرمان محلی (در Git Bash روی ویندوز `MSYS_NO_PATHCONV=1` لازم است):

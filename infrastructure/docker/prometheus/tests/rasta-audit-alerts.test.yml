@@ -418,6 +418,269 @@ tests:
               runbook: docs/runbooks/audit-ingestion-lag.md
 
   # ---------------------------------------------------------------------------
+  # RastaKafkaExporterUnavailable — a down target is pending before 2 minutes,
+  # fires at 2 minutes with only `job`, and resolves once it is scraped again.
+  # `up{job,instance}` is the series Prometheus writes for every scrape.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '0 0 0 0 0 1 1 1'
+      # Another job being down is not the exporter.
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3115",environment="local"}'
+        values: '0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kafka-exporter
+            exp_annotations:
+              summary: 'Prometheus has not scraped the Kafka exporter for 2 minutes'
+              description: 'The kafka-exporter scrape target has been down or missing for at least 2 minutes. RastaAuditConsumerLag and the audit DLQ retained-records rule have no input while this fires: their silence is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      - eval_time: 5m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      # The exporter-down state never raises the missing-group alert.
+      - eval_time: 4m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+    promql_expr_test:
+      # alert_rule_test sees only firing alerts; ALERTS shows the pending state.
+      - expr: ALERTS{alertname="RastaKafkaExporterUnavailable"}
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaKafkaExporterUnavailable",alertstate="pending",job="kafka-exporter",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaKafkaExporterUnavailable"}
+        eval_time: 2m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaKafkaExporterUnavailable",alertstate="firing",job="kafka-exporter",severity="warning"}'
+            value: 1
+
+  # A scrape failure shorter than 2 minutes never fires.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '1 0 0 1 1 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+
+  # A healthy exporter reporting both audit groups fires neither alert. Zero
+  # and -1 (a partition the group never committed) are present values.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '1x10'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.identity.v1"}'
+        values: '0x10'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.trail",partition="0",topic="rasta.audit.trail.v1"}'
+        values: '-1x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+
+  # No `up{job="kafka-exporter"}` at all: the target is gone from Prometheus.
+  # `== 0` alone would be empty; the alert still fires with the same labels,
+  # and the missing-group alert stays silent because nothing says the exporter
+  # is up.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prometheus",instance="localhost:9090"}'
+        values: '1x6'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kafka-exporter
+            exp_annotations:
+              summary: 'Prometheus has not scraped the Kafka exporter for 2 minutes'
+              description: 'The kafka-exporter scrape target has been down or missing for at least 2 minutes. RastaAuditConsumerLag and the audit DLQ retained-records rule have no input while this fires: their silence is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      - eval_time: 6m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditConsumerGroupMetricsMissing — exporter up, trail group absent.
+  # Only the fixed group name counts: the integration-test group
+  # `audit-itest-trail-…` and another service's group do not stand in for it,
+  # and the present domain-projector group (including a -1 partition) does not
+  # alert.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '1x6'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.identity.v1"}'
+        values: '3x6'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="1",topic="rasta.identity.v1"}'
+        values: '-1x6'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-itest-trail-2XBS1RCJJYC7",partition="0",topic="rasta.audit.trail.v1"}'
+        values: '0x6'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="maintenance-service.usage",partition="0",topic="rasta.asset.v1"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.trail
+            exp_annotations:
+              summary: 'No Kafka lag metrics for audit consumer group audit-service.trail'
+              description: 'kafka-exporter is being scraped but has reported no kafka_consumergroup_lag series for audit-service.trail for at least 5 minutes: the broker holds no committed offsets for that group, so RastaAuditConsumerLag cannot evaluate it. Start or inspect the real audit-service consumer; never reset, delete or shift its offsets.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      - eval_time: 5m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+
+  # Exporter up, domain-projector absent; the integration-test projector group
+  # `audit-itest-…` does not stand in for it.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '1x6'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.trail",partition="0",topic="rasta.audit.trail.v1"}'
+        values: '0x6'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-itest-01K4ZJ8S2M7Q",partition="0",topic="rasta.identity.v1"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.domain-projector
+            exp_annotations:
+              summary: 'No Kafka lag metrics for audit consumer group audit-service.domain-projector'
+              description: 'kafka-exporter is being scraped but has reported no kafka_consumergroup_lag series for audit-service.domain-projector for at least 5 minutes: the broker holds no committed offsets for that group, so RastaAuditConsumerLag cannot evaluate it. Start or inspect the real audit-service consumer; never reset, delete or shift its offsets.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # Exporter up and no audit group at all (a fresh broker): one alert per
+  # group, each naming it.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.domain-projector
+            exp_annotations:
+              summary: 'No Kafka lag metrics for audit consumer group audit-service.domain-projector'
+              description: 'kafka-exporter is being scraped but has reported no kafka_consumergroup_lag series for audit-service.domain-projector for at least 5 minutes: the broker holds no committed offsets for that group, so RastaAuditConsumerLag cannot evaluate it. Start or inspect the real audit-service consumer; never reset, delete or shift its offsets.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.trail
+            exp_annotations:
+              summary: 'No Kafka lag metrics for audit consumer group audit-service.trail'
+              description: 'kafka-exporter is being scraped but has reported no kafka_consumergroup_lag series for audit-service.trail for at least 5 minutes: the broker holds no committed offsets for that group, so RastaAuditConsumerLag cannot evaluate it. Start or inspect the real audit-service consumer; never reset, delete or shift its offsets.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # Exporter down with no group series: only RastaKafkaExporterUnavailable
+  # diagnoses it, however long it lasts.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kafka-exporter
+            exp_annotations:
+              summary: 'Prometheus has not scraped the Kafka exporter for 2 minutes'
+              description: 'The kafka-exporter scrape target has been down or missing for at least 2 minutes. RastaAuditConsumerLag and the audit DLQ retained-records rule have no input while this fires: their silence is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # A group that disappears for less than 5 minutes does not fire, and its
+  # reappearance restarts the 5 minutes. `stale` is the marker Prometheus
+  # writes when a series drops out of a successful scrape.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '1x12'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.identity.v1"}'
+        values: '0x12'
+      # Absent 1m-4m, back (as -1) at 5m only, absent again from 6m.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.trail",partition="0",topic="rasta.audit.trail.v1"}'
+        values: '0 stale _ _ _ -1 stale _ _ _ _ _ _'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      # Without the reset, pending since 1m would fire here.
+      - eval_time: 6m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.trail
+            exp_annotations:
+              summary: 'No Kafka lag metrics for audit consumer group audit-service.trail'
+              description: 'kafka-exporter is being scraped but has reported no kafka_consumergroup_lag series for audit-service.trail for at least 5 minutes: the broker holds no committed offsets for that group, so RastaAuditConsumerLag cannot evaluate it. Start or inspect the real audit-service consumer; never reset, delete or shift its offsets.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # ---------------------------------------------------------------------------
   # topic:kafka_topic_retained_records:sum — records retained in
   # rasta.audit.v1.dlq, summed over partitions and labelled by topic only.
   # Inputs: kafka_topic_partition_current_offset and

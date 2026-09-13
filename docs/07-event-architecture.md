@@ -469,7 +469,9 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 ردیف Lag فقط برای **دو گروه حسابرسی** قاعده دارد و آستانهٔ آن متفاوت است. Lag از سمت Broker با `kafka-exporter`
 (`danielqsj/kafka-exporter:v1.9.0`) خوانده می‌شود، نه با متریک `kafka_consumer_lag` خود سرویس. `RastaAuditConsumerLag` هنگامی
 می‌سوزد که `sum by (consumergroup, topic) (clamp_min(kafka_consumergroup_lag{consumergroup=~"audit-service\\.(domain-projector|trail)"}, 0)) > 0`
-پنج دقیقهٔ پیوسته برقرار بماند ([`runbooks/audit-ingestion-lag.md`](runbooks/audit-ingestion-lag.md)). Recording Rule
+پنج دقیقهٔ پیوسته برقرار بماند ([`runbooks/audit-ingestion-lag.md`](runbooks/audit-ingestion-lag.md)). چون آن هشدار بی ورودی
+ساکت است، `RastaKafkaExporterUnavailable` (Exporter دو دقیقه Scrape نشده یا Target نیست) و `RastaAuditConsumerGroupMetricsMissing`
+(Exporter سالم، ولی یکی از دو گروه پنج دقیقه هیچ Series Lag ندارد) نبودن سیگنال را صریح می‌کنند. Recording Rule
 `topic:kafka_topic_retained_records:sum` تعداد رکوردی را که Kafka در `rasta.audit.v1.dlq` نگه می‌دارد نشان می‌دهد — نه تعداد پیام
 حل‌نشده؛ هیچ وضعیت Triage برای پیام DLQ وجود ندارد و هشداری روی این عدد نیست. Lag گروه‌های دیگر، سن Outbox عمومی، مدت پردازش و
 شکست اعتبارسنجی هنوز قاعده ندارند. این قواعد را فقط Prometheus **محلی** Compose ارزیابی می‌کند؛ مخزن

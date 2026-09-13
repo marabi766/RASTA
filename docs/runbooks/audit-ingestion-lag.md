@@ -1,17 +1,31 @@
 # Runbook: Lag مصرف‌کنندهٔ حسابرسی
 
 **شدت:** 🟠 هشدار — 🔴 بحرانی اگر Lag به نگهداشت Topic نزدیک شود
-**هشدار محرک:** `RastaAuditConsumerLag` (🟠 `warning`) در
+**هشدار محرک:** `RastaAuditConsumerLag`، `RastaKafkaExporterUnavailable` و `RastaAuditConsumerGroupMetricsMissing` (هر سه 🟠
+`warning`) در
 [`infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`](../../infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml)
 **زمان پاسخ هدف:** ۳۰ دقیقه
 
 ```promql
+# RastaAuditConsumerLag — for: 5m؛ Labelها: consumergroup, topic
 sum by (consumergroup, topic) (
   clamp_min(kafka_consumergroup_lag{consumergroup=~"audit-service\\.(domain-projector|trail)"}, 0)
 ) > 0
+
+# RastaKafkaExporterUnavailable — for: 2m؛ Label: job
+min by (job) (up{job="kafka-exporter"}) == 0 or absent(up{job="kafka-exporter"})
+
+# RastaAuditConsumerGroupMetricsMissing — for: 5m؛ Label: consumergroup
+(
+    absent(kafka_consumergroup_lag{consumergroup="audit-service.domain-projector"})
+  or
+    absent(kafka_consumergroup_lag{consumergroup="audit-service.trail"})
+)
+and on () (min(up{job="kafka-exporter"}) == 1)
 ```
 
-با `for: 5m`؛ Labelهای هشدار فقط `consumergroup` و `topic`اند (به‌علاوهٔ `severity`).
+هر سه به‌علاوهٔ `severity`. دو هشدار آخر برای این‌اند که **سکوت `RastaAuditConsumerLag` با «بی‌Lag» اشتباه نشود:** آن هشدار
+فقط روی Seriesهای موجود کار می‌کند و وقتی ورودی‌اش نیست ساکت است. این دو هرگز هم‌زمان نمی‌سوزند.
 
 ---
 
@@ -30,8 +44,20 @@ sum by (consumergroup, topic) (
 > - **فقط محلی.** این قاعده را فقط Prometheus محلی Compose ارزیابی می‌کند و در `http://localhost:9090/alerts` دیده می‌شود.
 >   **مخزن Alertmanager ندارد، پس هیچ اعلانی به هیچ‌کس تحویل نمی‌شود.** Scrape و مسیریابی اعلان محیط واقعی وابسته به استقرار
 >   است و در مخزن نیست.
-> - **آنچه این هشدار نمی‌بیند.** (۱) اگر Exporter یا Scrape آن از کار بیفتد، Seriesها کهنه می‌شوند و هشدار ساکت است — هشداری
->   روی `up{job="kafka-exporter"}` نیست. (۲) Partition با `-1`. (۳) تأخیر زمانی درون خود سرویس:
+> - **از دست رفتن سیگنال — دو حالت جدا.**
+>   - **Exporter در دسترس نیست** → `RastaKafkaExporterUnavailable` پس از `for: 2m`: `up{job="kafka-exporter"}` صفر است (Container
+>     خاموش یا Scrape ناموفق) **یا اصلاً Series ندارد** (Job از `prometheus.yml` حذف یا بار نشده) — شاخهٔ `absent(...)` حالت دوم
+>     را می‌گیرد که `== 0` به‌تنها نمی‌بیند. `min by (job)` Label `instance` را کنار می‌گذارد. در این حالت هیچ Series کافکایی
+>     تازه نیست و Lag و عمق DLQ **نامعلوم**اند. Scrape ناموفق یا Restart کوتاه‌تر از دو دقیقه هشدار نمی‌دهد.
+>   - **Exporter سالم است ولی گروهی گزارش نمی‌شود** → `RastaAuditConsumerGroupMetricsMissing` پس از `for: 5m`، یک هشدار برای هر
+>     گروه غایب با Label `consumergroup`. Exporter برای یک گروه فقط Topicهایی را گزارش می‌کند که گروه در آن دست‌کم یک Offset
+>     Commit‌شده دارد (`--offset.show-all` گروه متوقفِ دارای Offset را هم نگه می‌دارد)؛ پس نبودن **هیچ** Series
+>     `kafka_consumergroup_lag` برای گروه یعنی Broker هیچ Offset Commit‌شده‌ای برای آن گروه گزارش نمی‌کند. مقدار موجود `-1`، صفر
+>     یا مثبت «موجود» است. هر گروه با تطابق **دقیق** نامش سنجیده می‌شود؛ گروه‌های آزمون `audit-itest-*` جای آن را نمی‌گیرند. وقتی
+>     Exporter خودش در دسترس نیست این هشدار عمداً خاموش است تا یک خرابی دو تشخیص نگیرد. ناپدید شدن گذرای کمتر از پنج دقیقه
+>     هشدار نمی‌دهد و بازگشت Series پنج دقیقه را از نو آغاز می‌کند.
+> - **آنچه این هشدارها نمی‌بینند.** (۱) گروه موجودی که فقط در برخی Topicها Offset دارد: Topic بی Commit گزارش نمی‌شود و هشدار
+>   ندارد. (۲) Partition با `-1`. (۳) تأخیر زمانی درون خود سرویس:
 >   `rasta_audit_ingestion_lag_seconds{source_topic}` در `/metrics` صادر می‌شود ولی قاعدهٔ هشدار ندارد. (۴) رکوردی که هرگز به
 >   Topic نرسیده — [audit-gap-detected](audit-gap-detected.md).
 
@@ -40,6 +66,8 @@ sum by (consumergroup, topic) (
 ## علائم
 
 - `RastaAuditConsumerLag` در `/alerts` Prometheus محلی `firing` است.
+- `RastaKafkaExporterUnavailable` یا `RastaAuditConsumerGroupMetricsMissing` `firing` است: Lag آن گروه‌ها **نامعلوم** است، نه صفر
+  (§ ۵ تشخیص).
 - جست‌وجوی حسابرسی عمل‌ها یا ردهای تازه را دیر یا اصلاً نشان نمی‌دهد.
 - `GET /health/ready` روی `audit-service` پاسخ `503` با `projector` یا `trail` برابر `false` می‌دهد، یا سرویس اصلاً اجرا نمی‌شود.
 
@@ -66,8 +94,12 @@ kafka_consumergroup_lag{consumergroup=~"audit-service\\.(domain-projector|trail)
 # عضو زندهٔ گروه — 0 یعنی هیچ Consumerی متصل نیست
 kafka_consumergroup_members{consumergroup=~"audit-service\\.(domain-projector|trail)"}
 
-# آیا خود داده تازه است؟
+# آیا خود داده تازه است؟ (0 یا بی Series → RastaKafkaExporterUnavailable)
 up{job="kafka-exporter"}
+
+# کدام گروه اصلاً Series ندارد؟ (نتیجهٔ تهی = گروه گزارش می‌شود)
+absent(kafka_consumergroup_lag{consumergroup="audit-service.domain-projector"})
+absent(kafka_consumergroup_lag{consumergroup="audit-service.trail"})
 
 # روند: رشد، ثابت یا نزول در ۳۰ دقیقه
 delta(kafka_consumergroup_lag_sum{consumergroup=~"audit-service\\.(domain-projector|trail)"}[30m])
@@ -106,7 +138,28 @@ topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}
 پس بزرگ بودنش به‌تنها نشانهٔ مشکل نیست و روی آن هشداری نیست. نشانهٔ تازه **افزایش** آن یا
 `RastaDeadLetterMessagePublished` است → [replay-dlq](replay-dlq.md).
 
-### ۵. دسته‌بندی
+### ۵. سیگنال از دست رفته
+
+**`RastaKafkaExporterUnavailable`:**
+
+- `docker compose ps kafka-exporter` و `docker compose logs --tail=100 kafka-exporter` — Container اجرا می‌شود؟ به `kafka:9094`
+  وصل می‌شود؟
+- خطای Scrape Job `kafka-exporter` در `http://localhost:9090/targets` (DNS، Connection refused، `context deadline exceeded`).
+- اگر `up{job="kafka-exporter"}` اصلاً Series ندارد، Job در `prometheus.yml` بار نشده یا حذف شده است.
+- تا رفع این هشدار، **سکوت `RastaAuditConsumerLag` و عدد عمق DLQ را نشانهٔ سلامت نگیر**؛ نمای Broker (§ ۲) را مستقیم بخوان.
+
+**`RastaAuditConsumerGroupMetricsMissing`:** Broker برای گروه نام‌برده Offset Commit‌شده‌ای گزارش نمی‌کند. حالت محتمل در
+Stack محلی **Broker یا Volume تازهٔ Kafka** است که `audit-service` هنوز روی آن اجرا نشده یا Consumer آن هنوز چیزی Commit نکرده؛
+حالت دیگر، گروهی است که مدت‌ها بی عضو مانده و Broker Offsetهایش را طبق نگهداشت Offset خودش پاک کرده است.
+
+- `kafka-consumer-groups.sh --describe --group <consumergroup>` (§ ۲) — گروه وجود دارد؟ عضو دارد؟ Offset دارد؟
+- `audit-service` واقعی را اجرا یا بررسی کن: `GET /health/ready` (`projector`/`trail`) و Log اتصال Consumer. پس از نخستین Commit
+  Series باز می‌گردد و هشدار رفع می‌شود.
+- **⛔ برای ساختن Series، Offset گروه را Reset یا Shift نکن، گروه را حذف نکن و Consumer تشخیصی با همان `--group` اجرا نکن**
+  (اقدام ۲ و ۳). اگر Offsetهای گروهی که پیش‌تر مصرف می‌کرد از دست رفته‌اند، نقطهٔ ادامهٔ مصرف تابع پیکربندی Consumer است؛ پیش از
+  هر تصمیم آن را ثبت کن و احتمال شکاف را با [audit-gap-detected](audit-gap-detected.md) بسنج.
+
+### ۶. دسته‌بندی
 
 | `members` | روند Lag               | Readiness                | معنای محتمل                                                                     |
 | :-------: | ---------------------- | ------------------------ | ------------------------------------------------------------------------------- |
@@ -136,6 +189,8 @@ topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}
 ## تأیید رفع
 
 - [ ] `RastaAuditConsumerLag` برای همان `consumergroup`/`topic` دیگر در `/alerts` نیست
+- [ ] `RastaKafkaExporterUnavailable` و `RastaAuditConsumerGroupMetricsMissing` در `/alerts` نیستند (`up{job="kafka-exporter"}`
+      برابر `1` و هر دو `absent(...)` بالا تهی)
 - [ ] `kafka_consumergroup_lag` هر Partition دو گروه صفر است یا پیوسته رو به نزول
 - [ ] `kafka_consumergroup_members` هر دو گروه بزرگ‌تر از صفر و `GET /health/ready` پاسخ `200`
 - [ ] `RastaAuditIngestionFailure` و `RastaDeadLetterMessagePublished` در همان بازه نسوخته‌اند، یا هر کدام Runbook خود را طی کرده
@@ -143,7 +198,8 @@ topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}
 
 ## پیشگیری
 
-- هشدار روی `up{job="kafka-exporter"} == 0` تا نبودن داده با «بی‌Lag» اشتباه نشود — هنوز نیست.
+- نبودن داده دیگر با «بی‌Lag» یکی نیست: `RastaKafkaExporterUnavailable` و `RastaAuditConsumerGroupMetricsMissing` — فقط محلی و بی
+  تحویل اعلان.
 - قاعدهٔ هشدار روی `rasta_audit_ingestion_lag_seconds` (ADR-053 § ۱۳: p95 > ۶۰ ثانیه) — هنوز نیست.
 - Scrape و مسیریابی اعلان محیط واقعی و Alertmanager — وابسته به استقرار و بیرون از مخزن.
 - وضعیت Triage برای پیام DLQ، تا بتوان «پیام حل‌نشده» را واقعاً شمرد — امروز وجود ندارد.
