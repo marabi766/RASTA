@@ -13,6 +13,7 @@ import { formatInteger, formatJalaliDate, formatMoneyMinor, formatYear } from '@
 import { useApiResource } from '@/lib/use-api-resource';
 import { Badge, Card, PageHeader } from '../ui/primitives';
 import { Code, DataView, DescriptionList, Maybe, Section } from '../ui/data-view';
+import { AssetScenarioGate } from './asset-scenario-gate';
 import { StatusBadge } from './assets-view';
 
 /**
@@ -78,6 +79,8 @@ export function DossierView({ assetId }: { assetId: string }): ReactNode {
           />
 
           <ComplianceCard compliance={data.compliance} />
+
+          <AssetScenarioGate assetId={data.asset.id} />
 
           <Section
             id="identity"

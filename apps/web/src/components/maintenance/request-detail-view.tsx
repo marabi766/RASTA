@@ -13,6 +13,7 @@ import { formatInteger, formatJalaliDate, formatMoneyMinor } from '@/lib/format'
 import { useApiResource } from '@/lib/use-api-resource';
 import { Badge, Card, PageHeader } from '../ui/primitives';
 import { Code, DataTable, DataView, DescriptionList, Maybe, Section } from '../ui/data-view';
+import { MaintenanceScenarioGate } from './maintenance-scenario-gate';
 
 /**
  * One maintenance request, with its referrals and cost breakdown.
@@ -203,6 +204,8 @@ export function MaintenanceRequestDetailView({ requestId }: { requestId: string 
               ) : null}
             </Card>
           </Section>
+
+          <MaintenanceScenarioGate requestId={request.id} onApplied={resource.reload} />
 
           <Section id="cost-breakdown" title="تفکیک هزینه">
             {request.costBreakdown.length === 0 ? (
