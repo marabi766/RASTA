@@ -75,7 +75,7 @@ const OUTCOME_TONE: Record<AuditOutcome, 'success' | 'danger' | 'warning'> = {
  * published it and never inspected: `loadMore` appends it to the next
  * request's `cursor` field and nothing else in this component looks inside it.
  */
-export function AuditEventList(): ReactNode {
+export function AuditEventList({ reloadKey }: { reloadKey?: number } = {}): ReactNode {
   const [filters, setFilters] = useState<AuditFilters>(defaultFilters);
   const [draft, setDraft] = useState<AuditFilters>(filters);
   const [items, setItems] = useState<readonly AuditEventView[]>([]);
@@ -102,7 +102,11 @@ export function AuditEventList(): ReactNode {
         setItems((current) => (cursor ? [...current, ...page.items] : page.items));
         return page;
       }),
-    [filters, cursor],
+    // `reloadKey` has no effect on what is requested — it exists only so the
+    // fixture-mode scenario panel (`audit-scenario-gate.tsx`) can force a
+    // refetch after appending an activity-log entry, without this component
+    // knowing the scenario engine exists.
+    [filters, cursor, reloadKey],
   );
 
   const onSubmit = (event: FormEvent): void => {

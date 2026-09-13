@@ -1,9 +1,10 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Card, PageHeader } from '../ui/primitives';
 import { CapabilityBadge, READINESS_PRESENTATION } from '../capability';
 import { AuditEventList } from './audit-list';
+import { AuditScenarioGate } from './audit-scenario-gate';
 import { AuditVerifyPanel } from './audit-verify';
 
 /**
@@ -28,6 +29,12 @@ import { AuditVerifyPanel } from './audit-verify';
  * control hinting at one, no mention beyond this sentence.
  */
 export function AuditView(): ReactNode {
+  // Bumped by the fixture-mode scenario panel after it appends an
+  // activity-log entry, so `AuditEventList` refetches through the real
+  // `searchAuditEvents` → read-model path rather than this component
+  // patching a row into place itself.
+  const [reloadKey, setReloadKey] = useState(0);
+
   return (
     <>
       <PageHeader
@@ -51,7 +58,9 @@ export function AuditView(): ReactNode {
         </p>
       </Card>
 
-      <AuditEventList />
+      <AuditScenarioGate onApplied={() => setReloadKey((key) => key + 1)} />
+
+      <AuditEventList reloadKey={reloadKey} />
       <AuditVerifyPanel />
     </>
   );

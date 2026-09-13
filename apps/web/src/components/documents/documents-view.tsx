@@ -11,6 +11,7 @@ import { formatInteger, formatJalaliDate } from '@/lib/format';
 import { useApiResource } from '@/lib/use-api-resource';
 import { Badge, Card, PageHeader, type Tone } from '../ui/primitives';
 import { Code, DataTable, DataView, Maybe, Section } from '../ui/data-view';
+import { DocumentScenarioGate } from './document-scenario-gate';
 
 /**
  * Document metadata, and what each scan verdict actually means.
@@ -44,6 +45,8 @@ export function DocumentsView(): ReactNode {
         title="اسناد"
         description="فراداده اسناد سازمان فعال. کلید ذخیره‌سازی، نام سطل و هیچ نشانی دانلودی هرگز از مرز API عبور نمی‌کند."
       />
+
+      <DocumentScenarioGate onApplied={resource.reload} />
 
       <DataView
         resource={resource}
