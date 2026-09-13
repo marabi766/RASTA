@@ -12,6 +12,8 @@
 # Rules for every alert here:
 # - Counter alerts use `increase(...[5m]) > 0` and no `for`: each metric's
 #   contract says any increase is actionable, so a delay would only hide one.
+#   The Kafka lag alert is a gauge and is the exception: it uses `for: 5m`,
+#   because lag that clears on its own is normal consumption.
 # - `sum by` keeps exactly the bounded labels the metric declares and drops the
 #   scrape's own `job`/`instance`/`environment`. No annotation names a tenant,
 #   actor, resource, event, correlation id, partition, offset or error text —
@@ -89,3 +91,35 @@ groups:
           summary: 'Refusal audit events failed to publish ({{ $labels.reason }})'
           description: 'rasta_security_event_publish_failures_total increased with reason {{ $labels.reason }} in the last 5 minutes; the rows were scheduled for retry.'
           runbook: docs/runbooks/security-event-outbox.md
+
+  # Broker-side view of the two audit consumer groups and the audit DLQ, from
+  # docker-compose.yml `kafka-exporter` (danielqsj/kafka-exporter v1.9.0). None
+  # of these series carries a tenant, actor, event or error; `partition` is
+  # summed away before a series is recorded or an alert is raised.
+  - name: rasta-audit-kafka
+    rules:
+      - alert: RastaAuditConsumerLag
+        # kafka_consumergroup_lag is newest offset minus the group's committed
+        # offset, per partition. The exporter reports -1 for a partition the
+        # group has never committed, so it is clamped to 0 before summing: -1
+        # is "unknown", never "ahead". `for: 5m` means the summed lag was above
+        # zero at every evaluation for 5 minutes; normal catch-up drops to 0 and
+        # resets it. Only the two fixed audit-service groups are matched.
+        expr: sum by (consumergroup, topic) (clamp_min(kafka_consumergroup_lag{consumergroup=~"audit-service\\.(domain-projector|trail)"}, 0)) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Audit consumer group {{ $labels.consumergroup }} has lagged on {{ $labels.topic }} for 5 minutes'
+          description: 'Kafka consumer group {{ $labels.consumergroup }} has been behind on {{ $labels.topic }} for at least 5 minutes ({{ $value }} records past its committed offset now). audit_event rows for those records may not exist yet.'
+          runbook: docs/runbooks/audit-ingestion-lag.md
+
+      # Records currently retained in rasta.audit.v1.dlq: per partition, newest
+      # offset minus oldest retained offset, clamped at 0 (the two offsets are
+      # read separately and can briefly cross), then summed. It is an offset
+      # span, not a count of unresolved messages: nothing records whether a DLQ
+      # message was triaged or replayed, and the number only falls when Kafka
+      # retention deletes old segments. There is deliberately no alert on it;
+      # RastaDeadLetterMessagePublished fires for every new DLQ write.
+      - record: topic:kafka_topic_retained_records:sum
+        expr: sum by (topic) (clamp_min(kafka_topic_partition_current_offset{topic="rasta.audit.v1.dlq"} - kafka_topic_partition_oldest_offset{topic="rasta.audit.v1.dlq"}, 0))

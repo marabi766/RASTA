@@ -206,6 +206,27 @@
 > شش تلاش → دو، و نبودن شناسه/متن خطا/Partition در Label)؛ nest-common اکنون ۸ مجموعه / ۱۴۰ آزمون. **هنوز نیست:** هیچ
 > قاعدهٔ هشدار Prometheus یا داشبورد، Script بازپخش DLQ و Scrape محیط واقعی. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
+> **به‌روزرسانی 2026-09-13 (Lag کافکای دو گروه حسابرسی و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` — فقط محلی):** سرویس Compose
+> `kafka-exporter` (`danielqsj/kafka-exporter:v1.9.0`، `--kafka.server=kafka:9094`، `--offset.show-all`، Profile
+> `observability`/`all`، وابسته به سلامت `kafka`، **بی Port میزبان**) و Job `kafka-exporter` در `prometheus.yml`
+> (`scrape_interval: 30s`، `scrape_timeout: 25s` — پاسخ Exporter روی Broker محلی با صدها گروه `*-itest-*` ۲ تا ۹ ثانیه بود).
+> متریک/Labelهای تأییدشده از `/metrics` زنده: `kafka_consumergroup_lag{consumergroup,partition,topic}` (**`-1`** برای Partition بی
+> Commit)، `kafka_consumergroup_lag_sum{consumergroup,topic}` (بی `-1`)، `kafka_consumergroup_members{consumergroup}`،
+> `kafka_topic_partition_current_offset`/`_oldest_offset{partition,topic}`. گروه تازهٔ `rasta-audit-kafka` در
+> `rasta-audit-alerts.yml`: هشدار `RastaAuditConsumerLag` (`warning`، `for: 5m`،
+> `sum by (consumergroup, topic) (clamp_min(kafka_consumergroup_lag{consumergroup=~"audit-service\\.(domain-projector|trail)"}, 0)) > 0`،
+> Runbook تازهٔ `docs/runbooks/audit-ingestion-lag.md`) و Recording Rule `topic:kafka_topic_retained_records:sum`
+> (`sum by (topic) (clamp_min(current_offset - oldest_offset, 0))` فقط برای `rasta.audit.v1.dlq`، فقط Label `topic`). عمق
+> نگه‌داشته **پیام حل‌نشده نیست** (وضعیت Triage برای DLQ وجود ندارد)، پس عمداً هشداری روی آن نیست. **شواهد:** `promtool check
+config` → `SUCCESS: 8 rules found`، `promtool test rules` → `SUCCESS` (دو گروه Lag: هر دو گروه در ۴m نه و ۵m با Label/Annotation
+> دقیق، `-1` کم نمی‌کند، رفع با صفر شدن، صفر/گذرا/صفرِ میانی/گروه غیرحسابرسی بی هشدار؛ دو گروه `promql_expr_test` برای ۱۰۵ → ۱۱۵
+> → ۳۵ و Clamp ۰ → ۵)؛ چهار جهش (`for: 3m`، حذف فیلتر گروه، حذف دو `clamp_min`) هر چهار را شکست داد. زنده: Target
+> `kafka-exporter` برابر `up`، `scrape_samples_scraped` ۱۰۱۲۰، Recording Rule `{topic="rasta.audit.v1.dlq"} 18162`، و چون
+> `audit-service` اجرا نمی‌شد (`members` = ۰) هر ۱۱ ترکیب (ده Topic دامنه + Trail با Lag ۳۶) از `pending` به `firing` رسیدند.
+> **هنوز نیست:** Alertmanager و تحویل اعلان، Scrape محیط واقعی، داشبورد، هشدار روی `up{job="kafka-exporter"}` و روی
+> `rasta_audit_ingestion_lag_seconds`، Lag گروه‌های دیگر و عمق Topicهای DLQ دیگر، ابزار بازپخش و تشخیص رکورد غایب.
+> `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس
@@ -221,7 +242,8 @@
 > `promtool` اکنون `scope` کوچک تولیدی را به کار می‌برد و گروه تازهٔ «صفر → نخستین رخداد» هر پنج هشدار شمارنده را اثبات
 > می‌کند (و یک کنترلِ Series متولدشده با ۱ که هشدار نمی‌دهد)؛ بی صفرِ پیشین همان پنج ارزیابی شکست خوردند. قواعد، آستانه‌ها و
 > Annotationها بی‌تغییرند. **هنوز نیست:** Alertmanager و تحویل اعلان، داشبورد، Scrape محیط واقعی، هشدار Lag کافکا یا عمق
-> Topic DLQ، ابزار بازپخش و تشخیص رکورد غایب؛ S-06، AUD-004 و COM-009 بسته نمی‌شوند (`COM-009` همچنان `READY`/۱۳ و ADR-053
+> Topic DLQ (Lag دو گروه `audit-service.*` و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` در به‌روزرسانی بالاتر همان روز افزوده شدند)،
+> ابزار بازپخش و تشخیص رکورد غایب؛ S-06، AUD-004 و COM-009 بسته نمی‌شوند (`COM-009` همچنان `READY`/۱۳ و ADR-053
 > `Proposed`).
 >
 > **به‌روزرسانی 2026-09-13 (قواعد هشدار Prometheus زنجیرهٔ شواهد حسابرسی — فقط محلی):** فایل
@@ -245,7 +267,8 @@
 > `activeAlertmanagers` تهی بود. Job مستقل CI `prometheus-rules` هر دو فرمان `promtool` را روی PR و `main` اجرا می‌کند.
 > **محدودیت تأییدشده:** Series برچسب‌دار `prom-client` با مقدار ۱ متولد می‌شود، پس نخستین رخدادِ هر ترکیب Label پس از شروع
 > فرایند هشدار نمی‌دهد (مقداردهی صفر در کد، گامی جدا — در به‌روزرسانی بعدی همان روز انجام شد). **هنوز نیست:** Alertmanager و هر تحویل اعلان، داشبورد، Scrape محیط
-> واقعی، هشدار Lag کافکا یا عمق Topic DLQ، ابزار بازپخش DLQ و تشخیص رکورد حسابرسیِ غایب. این گام S-06، AUD-004، COM-009 یا
+> واقعی، هشدار Lag کافکا یا عمق Topic DLQ (برای دو گروه حسابرسی و `rasta.audit.v1.dlq` بعدتر همان روز افزوده شد)، ابزار
+> بازپخش DLQ و تشخیص رکورد حسابرسیِ غایب. این گام S-06، AUD-004، COM-009 یا
 > عملیات‌پذیری محیط واقعی را نمی‌بندد؛ `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
 > **به‌روزرسانی 2026-09-12 (Phase C10 — محل رد نهم، نخستین تصمیم‌گیرندهٔ غیر از دامنه و `RolesGuard`):**

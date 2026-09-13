@@ -390,6 +390,23 @@ services:
       - '9090:9090'
     profiles: ['observability', 'all']
 
+  # Broker-side Kafka metrics for the local Prometheus: consumer-group offsets
+  # and lag, and each partition's oldest/newest offset. Reached only over the
+  # Compose network (prometheus.yml job `kafka-exporter`), so no host port.
+  # --offset.show-all (also the default) keeps groups with no live member, so a
+  # stopped consumer still shows its lag instead of disappearing.
+  kafka-exporter:
+    <<: *restart
+    image: danielqsj/kafka-exporter:v1.9.0
+    container_name: rasta-kafka-exporter
+    command:
+      - '--kafka.server=kafka:9094'
+      - '--offset.show-all'
+    depends_on:
+      kafka:
+        condition: service_healthy
+    profiles: ['observability', 'all']
+
   grafana:
     <<: *restart
     image: grafana/grafana:11.5.1

@@ -5,39 +5,48 @@
 
 ## فهرست
 
-| Runbook                                             | هشدار محرک                                                                                                                                                                    | شدت        | وضعیت     |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | --------- |
-| [ledger-imbalance](ledger-imbalance.md)             | Journal نامتوازن · انحراف کیف پول و دفتر کل                                                                                                                                   | 🔴 بحرانی  | ✅ آماده  |
-| [outbox-stuck](outbox-stuck.md)                     | `rasta_outbox_pending_age_seconds > 60`                                                                                                                                       | 🟠 هشدار   | ✅ آماده  |
-| [replay-dlq](replay-dlq.md)                         | `RastaDeadLetterMessagePublished` — افزایش `rasta_dlq_messages_total`                                                                                                         | 🟠 هشدار   | ✅ آماده  |
-| [audit-chain-divergence](audit-chain-divergence.md) | `RastaAuditChainDivergence` — افزایش `rasta_audit_chain_verification_failures_total`                                                                                          | 🔴 بحرانی  | ✅ آماده  |
-| [database-bootstrap](database-bootstrap.md)         | راه‌اندازی محیط جدید                                                                                                                                                          | ⚪ عملیاتی | ✅ آماده  |
-| [malware-scanner-down](malware-scanner-down.md)     | `rasta_document_scanner_up == 0` · امضای کهنه                                                                                                                                 | 🟠 هشدار   | ✅ آماده  |
-| [outbox-b2-backfill](outbox-b2-backfill.md)         | ندارد — با دستور صریح اپراتور                                                                                                                                                 | ⚪ عملیاتی | ✅ آماده  |
-| [security-event-outbox](security-event-outbox.md)   | `RastaSecurityEventCaptureGap` · `RastaSecurityEventClosedBacklogStale` (`closed_backlog_age_seconds > 60`) · `RastaSecurityEventPublishFailure`                              | 🔴/🟠      | ✅ آماده  |
-| [audit-gap-detected](audit-gap-detected.md)         | `RastaAuditIngestionFailure` · `RastaSecurityEventCaptureGap`؛ پیام در `rasta.audit.v1.dlq` فقط هشدار عمومی `RastaDeadLetterMessagePublished` را دارد؛ رکورد غایب هشدار ندارد | 🔴 بحرانی  | ✅ آماده  |
-| [failed-settlement](failed-settlement.md)           | Workflow شکست‌خورده در `rasta-settlement`                                                                                                                                     | 🔴 بحرانی  | 📅 روز ۲۷ |
-| [restore-database](restore-database.md)             | از دست رفتن داده                                                                                                                                                              | 🔴 بحرانی  | 📅 روز ۲۷ |
-| [disaster-recovery](disaster-recovery.md)           | از دست رفتن منطقه                                                                                                                                                             | 🔴 بحرانی  | 📅 روز ۲۷ |
-| [secret-leak](secret-leak.md)                       | اسکن Secret یافته پیدا کرد                                                                                                                                                    | 🔴 بحرانی  | 📅 روز ۲۳ |
-| [rollback-deployment](rollback-deployment.md)       | شکست Smoke Test پس از استقرار                                                                                                                                                 | 🟠 هشدار   | 📅 روز ۲۸ |
+| Runbook                                             | هشدار محرک                                                                                                                                                                              | شدت        | وضعیت     |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | --------- |
+| [ledger-imbalance](ledger-imbalance.md)             | Journal نامتوازن · انحراف کیف پول و دفتر کل                                                                                                                                             | 🔴 بحرانی  | ✅ آماده  |
+| [outbox-stuck](outbox-stuck.md)                     | `rasta_outbox_pending_age_seconds > 60`                                                                                                                                                 | 🟠 هشدار   | ✅ آماده  |
+| [replay-dlq](replay-dlq.md)                         | `RastaDeadLetterMessagePublished` — افزایش `rasta_dlq_messages_total`                                                                                                                   | 🟠 هشدار   | ✅ آماده  |
+| [audit-chain-divergence](audit-chain-divergence.md) | `RastaAuditChainDivergence` — افزایش `rasta_audit_chain_verification_failures_total`                                                                                                    | 🔴 بحرانی  | ✅ آماده  |
+| [database-bootstrap](database-bootstrap.md)         | راه‌اندازی محیط جدید                                                                                                                                                                    | ⚪ عملیاتی | ✅ آماده  |
+| [malware-scanner-down](malware-scanner-down.md)     | `rasta_document_scanner_up == 0` · امضای کهنه                                                                                                                                           | 🟠 هشدار   | ✅ آماده  |
+| [outbox-b2-backfill](outbox-b2-backfill.md)         | ندارد — با دستور صریح اپراتور                                                                                                                                                           | ⚪ عملیاتی | ✅ آماده  |
+| [security-event-outbox](security-event-outbox.md)   | `RastaSecurityEventCaptureGap` · `RastaSecurityEventClosedBacklogStale` (`closed_backlog_age_seconds > 60`) · `RastaSecurityEventPublishFailure`                                        | 🔴/🟠      | ✅ آماده  |
+| [audit-gap-detected](audit-gap-detected.md)         | `RastaAuditIngestionFailure` · `RastaSecurityEventCaptureGap`؛ پیام در `rasta.audit.v1.dlq` فقط هشدار عمومی `RastaDeadLetterMessagePublished` را دارد؛ رکورد غایب هشدار ندارد           | 🔴 بحرانی  | ✅ آماده  |
+| [audit-ingestion-lag](audit-ingestion-lag.md)       | `RastaAuditConsumerLag` — Lag مثبت پنج دقیقهٔ پیوسته در `audit-service.domain-projector` یا `audit-service.trail`؛ عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` فقط Recording Rule است، بی هشدار | 🟠 هشدار   | ✅ آماده  |
+| [failed-settlement](failed-settlement.md)           | Workflow شکست‌خورده در `rasta-settlement`                                                                                                                                               | 🔴 بحرانی  | 📅 روز ۲۷ |
+| [restore-database](restore-database.md)             | از دست رفتن داده                                                                                                                                                                        | 🔴 بحرانی  | 📅 روز ۲۷ |
+| [disaster-recovery](disaster-recovery.md)           | از دست رفتن منطقه                                                                                                                                                                       | 🔴 بحرانی  | 📅 روز ۲۷ |
+| [secret-leak](secret-leak.md)                       | اسکن Secret یافته پیدا کرد                                                                                                                                                              | 🔴 بحرانی  | 📅 روز ۲۳ |
+| [rollback-deployment](rollback-deployment.md)       | شکست Smoke Test پس از استقرار                                                                                                                                                           | 🟠 هشدار   | 📅 روز ۲۸ |
 
 **📅 = برنامه‌ریزی‌شده، هنوز نوشته نشده.** این وضعیت صادقانه ثبت شده تا کسی روی
 Runbook ناموجود حساب نکند. تاریخ‌ها از [`../20-day-30-plan.md`](../20-day-30-plan.md).
 
 ## قواعد هشدار موجود در مخزن
 
-نام‌های `Rasta…` بالا شش هشدار
+نام‌های `Rasta…` بالا هفت هشدار
 [`infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`](../../infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml)
-هستند — **تنها قواعد هشدار مخزن**. باقی ستون «هشدار محرک» شرط مستند است، نه قاعدهٔ نوشته‌شده. رفتار این شش قاعده با
+هستند — **تنها قواعد هشدار مخزن** — و همان فایل یک Recording Rule هم دارد (`topic:kafka_topic_retained_records:sum`). باقی ستون
+«هشدار محرک» شرط مستند است، نه قاعدهٔ نوشته‌شده. رفتار این هشت قاعده با
 `promtool test rules` روی `infrastructure/docker/prometheus/tests/rasta-audit-alerts.test.yml` در Job `prometheus-rules` CI
 اثبات می‌شود ([`../14-testing-strategy.md`](../14-testing-strategy.md) § ۱۴٫۱۱).
 
 - **فقط محلی.** Prometheus سرویس `prometheus` در `docker-compose.yml` (Profile `observability`) آن‌ها را ارزیابی می‌کند و در
   `http://localhost:9090/alerts` دیده می‌شوند. **مخزن Alertmanager ندارد، پس هیچ اعلانی به هیچ‌کس تحویل نمی‌شود.** Scrape و
-  مسیریابی اعلانِ محیط واقعی وابسته به استقرار است و در مخزن نیست. داشبورد، هشدار Lag کافکا یا عمق Topic DLQ، ابزار بازپخش
-  DLQ و تشخیص رکورد حسابرسیِ غایب هم نیستند.
-- **Label.** هر هشدار شمارنده با `sum by` فقط Labelهای کراندار خود متریک را نگه می‌دارد؛ هیچ Label یا Annotation شناسهٔ
+  مسیریابی اعلانِ محیط واقعی وابسته به استقرار است و در مخزن نیست. داشبورد، ابزار بازپخش DLQ و تشخیص رکورد حسابرسیِ غایب هم
+  نیستند.
+- **Kafka از سمت Broker.** `kafka-exporter` (`danielqsj/kafka-exporter:v1.9.0`، Profile `observability`/`all`، بی Port میزبان)
+  را Job `kafka-exporter` هر ۳۰ ثانیه از شبکهٔ Compose می‌خواند. `RastaAuditConsumerLag` فقط دو گروه ثابت `audit-service.*` را با
+  `for: 5m` می‌پاید ([audit-ingestion-lag](audit-ingestion-lag.md)). `topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}`
+  رکوردهای **نگه‌داشته** در آن Topic است، نه پیام حل‌نشده — مخزن وضعیت Triage برای پیام DLQ ندارد و فقط Retention آن را کم
+  می‌کند — پس عمداً هشداری روی آن نیست؛ `RastaDeadLetterMessagePublished` هر نوشتن تازه را اعلام می‌کند. Lag گروه‌های دیگر و
+  عمق Topicهای DLQ دیگر قاعده ندارند، و هشداری روی `up{job="kafka-exporter"}` نیست.
+- **Label.** هر هشدار شمارنده با `sum by` فقط Labelهای کراندار خود متریک را نگه می‌دارد (هشدار Lag فقط `consumergroup, topic` و
+  Recording Rule فقط `topic`)؛ هیچ Label یا Annotation شناسهٔ
   مستأجر، Actor، منبع، رویداد، Correlation، Partition، Offset یا متن خطا ندارد.
 
 ### مقداردهی صفر هشدارهای شمارنده

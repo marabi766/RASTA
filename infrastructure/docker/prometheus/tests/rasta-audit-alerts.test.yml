@@ -311,3 +311,178 @@ tests:
       - eval_time: 4m
         alertname: RastaAuditChainDivergence
         exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditConsumerLag — sustained lag on both audit groups fires after 5m.
+  #
+  # Series names and labels are the ones danielqsj/kafka-exporter v1.9.0
+  # serves: kafka_consumergroup_lag{consumergroup,partition,topic}, with -1 for
+  # a partition the group has never committed.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # domain-projector: 5 + (-1 clamped to 0) + 2 = 7, caught up from 7m.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.identity.v1"}'
+        values: '5 5 5 5 5 5 5 0 0 0 0'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="1",topic="rasta.identity.v1"}'
+        values: '-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="2",topic="rasta.identity.v1"}'
+        values: '2 2 2 2 2 2 2 0 0 0 0'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.trail",partition="0",topic="rasta.audit.trail.v1"}'
+        values: '3 3 3 3 3 3 3 3 3 3 3'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.trail",partition="1",topic="rasta.audit.trail.v1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0'
+      # Zero lag never fires.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.asset.v1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0'
+      # Never committed: -1 is unknown, not lag.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.fleet.v1"}'
+        values: '-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1'
+      # Other groups, however far behind, are not audit consumers.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="maintenance-service.usage",partition="0",topic="rasta.asset.v1"}'
+        values: '50 50 50 50 50 50 50 50 50 50 50'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-itest-trail-2XBS1RCJJYC7",partition="0",topic="rasta.audit.trail.v1"}'
+        values: '40 40 40 40 40 40 40 40 40 40 40'
+    alert_rule_test:
+      # Pending, not firing, before 5 minutes.
+      - eval_time: 4m
+        alertname: RastaAuditConsumerLag
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditConsumerLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.domain-projector
+              topic: rasta.identity.v1
+            exp_annotations:
+              summary: 'Audit consumer group audit-service.domain-projector has lagged on rasta.identity.v1 for 5 minutes'
+              description: 'Kafka consumer group audit-service.domain-projector has been behind on rasta.identity.v1 for at least 5 minutes (7 records past its committed offset now). audit_event rows for those records may not exist yet.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.trail
+              topic: rasta.audit.trail.v1
+            exp_annotations:
+              summary: 'Audit consumer group audit-service.trail has lagged on rasta.audit.trail.v1 for 5 minutes'
+              description: 'Kafka consumer group audit-service.trail has been behind on rasta.audit.trail.v1 for at least 5 minutes (3 records past its committed offset now). audit_event rows for those records may not exist yet.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      # domain-projector caught up at 7m and resolves; trail is still behind.
+      - eval_time: 7m
+        alertname: RastaAuditConsumerLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.trail
+              topic: rasta.audit.trail.v1
+            exp_annotations:
+              summary: 'Audit consumer group audit-service.trail has lagged on rasta.audit.trail.v1 for 5 minutes'
+              description: 'Kafka consumer group audit-service.trail has been behind on rasta.audit.trail.v1 for at least 5 minutes (3 records past its committed offset now). audit_event rows for those records may not exist yet.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditConsumerLag — transient lag does not fire, and a single zero
+  # restarts the 5 minutes.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Positive from 1m to 4m, caught up at 5m: never 5 continuous minutes.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.economic.v1"}'
+        values: '0 4 9 4 1 0 0 0 0 0 0 0'
+      # Positive 0m-3m, zero at 4m, positive again from 5m: fires at 10m only.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.trail",partition="2",topic="rasta.audit.trail.v1"}'
+        values: '2 2 2 2 0 2 2 2 2 2 2 2'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RastaAuditConsumerLag
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditConsumerLag
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaAuditConsumerLag
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: RastaAuditConsumerLag
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditConsumerLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.trail
+              topic: rasta.audit.trail.v1
+            exp_annotations:
+              summary: 'Audit consumer group audit-service.trail has lagged on rasta.audit.trail.v1 for 5 minutes'
+              description: 'Kafka consumer group audit-service.trail has been behind on rasta.audit.trail.v1 for at least 5 minutes (2 records past its committed offset now). audit_event rows for those records may not exist yet.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # ---------------------------------------------------------------------------
+  # topic:kafka_topic_retained_records:sum — records retained in
+  # rasta.audit.v1.dlq, summed over partitions and labelled by topic only.
+  # Inputs: kafka_topic_partition_current_offset and
+  # kafka_topic_partition_oldest_offset{partition,topic}.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'kafka_topic_partition_current_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="0",topic="rasta.audit.v1.dlq"}'
+        values: '120 130 130'
+      - series: 'kafka_topic_partition_oldest_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="0",topic="rasta.audit.v1.dlq"}'
+        values: '20 20 100'
+      - series: 'kafka_topic_partition_current_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="1",topic="rasta.audit.v1.dlq"}'
+        values: '55 55 55'
+      - series: 'kafka_topic_partition_oldest_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="1",topic="rasta.audit.v1.dlq"}'
+        values: '50 50 50'
+      - series: 'kafka_topic_partition_current_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="2",topic="rasta.audit.v1.dlq"}'
+        values: '30 30 30'
+      - series: 'kafka_topic_partition_oldest_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="2",topic="rasta.audit.v1.dlq"}'
+        values: '30 30 30'
+      # Another dead-letter topic is not recorded.
+      - series: 'kafka_topic_partition_current_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="0",topic="rasta.identity.v1.dlq"}'
+        values: '999 999 999'
+      - series: 'kafka_topic_partition_oldest_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="0",topic="rasta.identity.v1.dlq"}'
+        values: '0 0 0'
+    promql_expr_test:
+      # (120-20) + (55-50) + (30-30)
+      - expr: topic:kafka_topic_retained_records:sum
+        eval_time: 0m
+        exp_samples:
+          - labels: 'topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}'
+            value: 105
+      # A new DLQ write on partition 0.
+      - expr: topic:kafka_topic_retained_records:sum
+        eval_time: 1m
+        exp_samples:
+          - labels: 'topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}'
+            value: 115
+      # Retention deleted old records from partition 0.
+      - expr: topic:kafka_topic_retained_records:sum
+        eval_time: 2m
+        exp_samples:
+          - labels: 'topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}'
+            value: 35
+
+  # Clamp: offsets read at slightly different moments can cross. That partition
+  # counts as 0 and never subtracts from another partition.
+  - interval: 1m
+    input_series:
+      - series: 'kafka_topic_partition_current_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="0",topic="rasta.audit.v1.dlq"}'
+        values: '7 7'
+      - series: 'kafka_topic_partition_oldest_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="0",topic="rasta.audit.v1.dlq"}'
+        values: '10 10'
+      - series: 'kafka_topic_partition_current_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="1",topic="rasta.audit.v1.dlq"}'
+        values: '4 9'
+      - series: 'kafka_topic_partition_oldest_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="1",topic="rasta.audit.v1.dlq"}'
+        values: '4 4'
+    promql_expr_test:
+      - expr: topic:kafka_topic_retained_records:sum
+        eval_time: 0m
+        exp_samples:
+          - labels: 'topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}'
+            value: 0
+      # 0 (clamped from -3) + 5, not 2.
+      - expr: topic:kafka_topic_retained_records:sum
+        eval_time: 1m
+        exp_samples:
+          - labels: 'topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}'
+            value: 5

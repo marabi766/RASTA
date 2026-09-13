@@ -20,6 +20,16 @@ scrape_configs:
     static_configs:
       - targets: ['otel-collector:8889']
 
+  # docker-compose.yml `kafka-exporter`, over the Compose network. A slower
+  # interval and a longer timeout than the default: the exporter queries the
+  # broker for every consumer group on each scrape, and a local broker that has
+  # accumulated test groups took 2-9 s to answer.
+  - job_name: kafka-exporter
+    scrape_interval: 30s
+    scrape_timeout: 25s
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+
   - job_name: keycloak
     metrics_path: /metrics
     static_configs:

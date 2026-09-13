@@ -5,8 +5,10 @@
 `RastaSecurityEventCaptureGap` (🔴 `critical`، افزایش `rasta_security_event_captures_total{outcome=~"failed|timeout"}` — مسیرش
 [security-event-outbox](security-event-outbox.md)) در `infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`، فقط در
 Prometheus **محلی** و **بی Alertmanager، پس بی تحویل اعلان**. پیام در `rasta.audit.v1.dlq` فقط هشدار عمومی
-`RastaDeadLetterMessagePublished` (`service` = `KAFKA_CLIENT_ID` مصرف‌کنندهٔ `audit-service`) را دارد، نه هشدار اختصاصی حسابرسی. **رکوردِ غایب خودش هیچ هشداری ندارد:** تشخیص رکورد گمشده، Lag
-کافکا، عمق Topic DLQ، Scrape محیط واقعی و داشبورد در مخزن نیستند؛ پس این Runbook همچنان با یکی از علائم پایین، یا با گزارش
+`RastaDeadLetterMessagePublished` (`service` = `KAFKA_CLIENT_ID` مصرف‌کنندهٔ `audit-service`) را دارد، نه هشدار اختصاصی حسابرسی. Lag پایدارِ دو گروه `audit-service.*` هشدار
+`RastaAuditConsumerLag` را دارد ([audit-ingestion-lag](audit-ingestion-lag.md))، و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` فقط
+Recording Rule `topic:kafka_topic_retained_records:sum` است، بی هشدار. **رکوردِ غایب خودش هیچ هشداری ندارد:** تشخیص رکورد
+گمشده، Scrape محیط واقعی و داشبورد در مخزن نیستند؛ پس این Runbook همچنان با یکی از علائم پایین، یا با گزارش
 انسانی («این عمل/رد در حسابرسی دیده نمی‌شود») هم شروع می‌شود.
 **زمان پاسخ هدف:** ۳۰ دقیقه برای دسته‌بندی؛ ۱۵ دقیقه اگر رویداد مالی یا رد امنیتی در کار است
 
@@ -68,7 +70,8 @@ Prometheus **محلی** و **بی Alertmanager، پس بی تحویل اعلان
   حسابرسی دیده نمی‌شود.
 - `GET /health/ready` روی `audit-service` پاسخ `503` می‌دهد و در `checks` یکی از `database`، `projector` یا `trail` برابر
   `false` است.
-- Lag گروه `audit-service.domain-projector` یا `audit-service.trail` رشد می‌کند.
+- Lag گروه `audit-service.domain-projector` یا `audit-service.trail` رشد می‌کند، یا `RastaAuditConsumerLag` می‌سوزد (Lag پنج
+  دقیقهٔ پیوسته بالای صفر — [audit-ingestion-lag](audit-ingestion-lag.md)).
 - پیام تازه در `rasta.audit.v1.dlq`.
 - در Log `audit-service`: مسیر B `Rejected <EVENT> <eventId> from <topic>[<partition>]: …`؛ مسیر A
   `Cannot map <EVENT> <eventId> from <topic> …` یا `Cannot project … into the organization hierarchy …`؛ و از
@@ -81,15 +84,17 @@ Prometheus **محلی** و **بی Alertmanager، پس بی تحویل اعلان
 > شناسهٔ مستأجر/Actor/منبع/رویداد/Correlation در Label) صادر می‌کند. `host.docker.internal:3115` در Job `rasta-services`
 > فایل **محلی** `infrastructure/docker/prometheus/prometheus.yml` هست؛ پیکربندی Scrape محیط واقعی وابسته به استقرار است و
 > در مخزن نیست. Prometheus محلی روی این متریک‌ها فقط `RastaAuditIngestionFailure` را ارزیابی می‌کند (و روی متریک‌های مجاور
-> `RastaSecurityEventCaptureGap`، `RastaDeadLetterMessagePublished` و دو هشدار دیگر صف ردها)؛ **Alertmanager، داشبورد، هشدار Lag
-> کافکا یا عمق DLQ و تشخیص رکورد گمشده در مخزن نیست**. Seriesهای هشدار از شروع فرایند با صفر صادر می‌شوند، پس نخستین
+> `RastaSecurityEventCaptureGap`، `RastaDeadLetterMessagePublished` و دو هشدار دیگر صف ردها)؛ از سمت Broker، `kafka-exporter` Lag دو گروه `audit-service.*` را
+> برای `RastaAuditConsumerLag` و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` را برای Recording Rule `topic:kafka_topic_retained_records:sum`
+> فراهم می‌کند؛ **Alertmanager، داشبورد، هشدار روی عمق DLQ و تشخیص رکورد گمشده در مخزن نیست**. Seriesهای هشدار از شروع فرایند با صفر صادر می‌شوند، پس نخستین
 > شکست هم هشدار می‌دهد ([README](README.md#مقداردهی-صفر-هشدارهای-شمارنده))؛ ولی رکوردی که هرگز نرسیده شکستی نمی‌شمارد، پس
 > نبودن هشدار را نشانهٔ سلامت نگیر: شواهد همچنان از خواندن مستقیم
 > `/metrics` (یا Prometheus محلی)، Readiness، Log، Lag کافکا، DLQ و API جست‌وجوست. همچنین
 > `EventConsumer` مشترک `rasta_dlq_messages_total{service,topic,reason}` را **فقط پس از موفقیت `send` به Topic DLQ** یک
 > واحد افزایش می‌دهد (`service` = `clientId` مصرف‌کننده، `topic` = Topic مبدأ، `reason` = `VALIDATION_FAILED` یا
 > `MAX_RETRIES_EXCEEDED`)؛ تلاش مجدد، `send` ردشده و پیامِ Drop‌شده بی Topic DLQ شمرده نمی‌شوند. شمارنده از شروع فرایند
-> است و عمق فعلی DLQ نیست — عمق را همچنان از خود Topic بخوان. متریک‌های
+> است و عمق فعلی DLQ نیست — عمق نگه‌داشته را از `topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}` یا خود Topic
+> بخوان، و بدان که آن عدد «پیام حل‌نشده» نیست: هیچ وضعیت Triage برای پیام DLQ ثبت نمی‌شود و فقط Retention آن را کم می‌کند. متریک‌های
 > `rasta_security_event_*` و `rasta_outbox_*` در `/metrics` خودِ `identity-service` صادر می‌شوند.
 
 ## اثر
@@ -179,7 +184,15 @@ Payload را دارد — نه مقدار. دلیل‌ها با برچسب‌ه�
 
 ### ۴. Kafka — Lag و DLQ (فقط‌خواندنی)
 
-Stack محلی همین مخزن:
+Prometheus محلی (Profile `observability`؛ داده از `kafka-exporter`، هر ۳۰ ثانیه):
+
+```promql
+kafka_consumergroup_lag{consumergroup=~"audit-service\\.(domain-projector|trail)"}      # هر Partition؛ -1 = بی Commit
+kafka_consumergroup_members{consumergroup=~"audit-service\\.(domain-projector|trail)"}  # 0 = هیچ Consumer متصل نیست
+topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}                     # رکورد نگه‌داشته، نه حل‌نشده
+```
+
+Stack محلی همین مخزن، مستقیم از Broker:
 
 ```bash
 docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
@@ -328,9 +341,9 @@ SELECT id, source_topic, source_service, occurred_at, recorded_at, occurrence_co
 
 - Route `/metrics` در `audit-service` و هدف Scrape محلی آن (`host.docker.internal:3115`) **اکنون وجود دارند**؛ پیکربندی Scrape
   محیط واقعی هنوز وابسته به استقرار و بیرون از مخزن است.
-- قاعدهٔ هشدار روی `rasta_audit_ingestion_failures_total`، Lag هر دو گروه `audit-service.*`، رشد `rasta.audit.v1.dlq`، و
-  `rasta_security_event_captures_total{outcome=~"failed|timeout"}` — هیچ‌کدام امروز در مخزن نیست، هرچند متریک‌های
-  `audit-service` اکنون قابل Scrape‌اند.
+- قواعد `RastaAuditIngestionFailure`، `RastaSecurityEventCaptureGap`، `RastaDeadLetterMessagePublished` و `RastaAuditConsumerLag`
+  **اکنون** در Prometheus محلی هستند و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` ثبت می‌شود؛ هنوز نیست: Alertmanager و تحویل اعلان،
+  Scrape محیط واقعی، هشدار روی `rasta_audit_ingestion_lag_seconds` و روی `up{job="kafka-exporter"}`.
 - Script بازپخش DLQ (R-6) یا حذف ارجاع به آن از [replay-dlq](replay-dlq.md).
 - نگهداشت Topic مسیر B و DLQ در محیط واقعی را صریح و مستند کن؛ Script محلی فقط سی روز دارد.
 - ثبت ردها در سرویس‌های دیگر (R-2)، ردهای Gateway و ردهای Token سرویس — تا آن وقت نبودن آن‌ها «شکاف حادثه» نیست و نباید

@@ -585,10 +585,17 @@ pnpm verify                     # دروازه کامل کیفیت
 **پیکربندی و قواعد هشدار Prometheus.** Job مستقل `prometheus-rules` در CI (روی هر PR و `main`، بی وابستگی Node و بیرون از
 Job سریع `quality`) همان Image سرویس `prometheus` در `docker-compose.yml` را با کل پوشهٔ
 `infrastructure/docker/prometheus` به‌صورت فقط‌خواندنی در `/etc/prometheus` اجرا می‌کند؛ پس مسیر `rule_files` همان است که در
-زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار شش هشدار را،
+زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار هفت هشدار و یک Recording Rule را،
 با افزایش واقعی شمارنده (نه مقدار مطلق) و کنترل‌های منفی (`outcome="recorded"`/`"skipped"` هشدار نمی‌دهد، سن پشتهٔ بسته ≤ ۶۰
 هشدار نمی‌دهد، `pending_age` ورودی هشدار نیست)، گذار Series صادرشده با صفر به نخستین رخداد (که هشدار می‌دهد) و Labelهای
-دقیق هر هشدار. `pnpm verify` این دروازه را اجرا نمی‌کند، چون Docker
+دقیق هر هشدار. برای Kafka همان Fixture با نام و Labelهای واقعی `danielqsj/kafka-exporter:v1.9.0`
+(`kafka_consumergroup_lag{consumergroup,partition,topic}`، `kafka_topic_partition_current_offset`/`_oldest_offset{partition,topic}`)
+اثبات می‌کند: `RastaAuditConsumerLag` برای هر دو گروه `audit-service.domain-projector` و `audit-service.trail` در ۴ دقیقه نمی‌سوزد و
+در ۵ دقیقه با Label و Annotation دقیق می‌سوزد، `-1` (Partition بی Commit) جمع را کم نمی‌کند، با رسیدن Lag به صفر برطرف می‌شود، و Lag
+صفر، Lag گذرای کمتر از ۵ دقیقه، یک صفرِ میانی (که ۵ دقیقه را از نو آغاز می‌کند) و گروه غیرحسابرسی (`maintenance-service.usage`،
+`audit-itest-trail-…`) هشدار نمی‌دهند. `promql_expr_test` Recording Rule `topic:kafka_topic_retained_records:sum` را روی سه Partition
+(۱۰۵، سپس ۱۱۵ پس از نوشتن تازه، سپس ۳۵ پس از حذف به‌دست Retention)، نادیده ماندن Topic DLQ دیگر، و Clamp (Partition با Offsetهای
+متقاطع صفر است و از Partition دیگر کم نمی‌کند) می‌سنجد. `pnpm verify` این دروازه را اجرا نمی‌کند، چون Docker
 می‌خواهد. فرمان محلی (در Git Bash روی ویندوز `MSYS_NO_PATHCONV=1` لازم است):
 
 ```bash
