@@ -12,6 +12,7 @@ import {
   toAuditTrailRecord,
 } from '../audit/audit-trail.mapper';
 import type { ConsumerFactory } from './domain-projector.consumer';
+import { trailSourceServiceLabel } from '../audit/audit-producer-topology';
 import {
   auditIngestionFailuresTotal,
   auditIngestionLagSeconds,
@@ -188,8 +189,10 @@ export class AuditTrailConsumer implements OnModuleDestroy {
       return;
     }
 
+    // A known trail producer's name, otherwise `unknown` — never the raw,
+    // producer-authored claim, which stays unchanged in the stored row.
     auditRecordsIngestedTotal.inc({
-      source_service: record.sourceService,
+      source_service: trailSourceServiceLabel(record.sourceService),
       source_topic: record.sourceTopic,
       outcome: record.outcome,
     });

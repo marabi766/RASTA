@@ -585,7 +585,7 @@ pnpm verify                     # دروازه کامل کیفیت
 **پیکربندی و قواعد هشدار Prometheus.** Job مستقل `prometheus-rules` در CI (روی هر PR و `main`، بی وابستگی Node و بیرون از
 Job سریع `quality`) همان Image سرویس `prometheus` در `docker-compose.yml` را با کل پوشهٔ
 `infrastructure/docker/prometheus` به‌صورت فقط‌خواندنی در `/etc/prometheus` اجرا می‌کند؛ پس مسیر `rule_files` همان است که در
-زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار ده هشدار و یک Recording Rule را،
+زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار یازده هشدار و یک Recording Rule را،
 با افزایش واقعی شمارنده (نه مقدار مطلق) و کنترل‌های منفی (`outcome="recorded"`/`"skipped"` هشدار نمی‌دهد، سن پشتهٔ بسته ≤ ۶۰
 هشدار نمی‌دهد، `pending_age` ورودی هشدار نیست)، گذار Series صادرشده با صفر به نخستین رخداد (که هشدار می‌دهد) و Labelهای
 دقیق هر هشدار. برای Kafka همان Fixture با نام و Labelهای واقعی `danielqsj/kafka-exporter:v1.9.0`
@@ -613,7 +613,23 @@ Job سریع `quality`) همان Image سرویس `prometheus` در `docker-comp
 Fixture را شکست دادند. آزمون‌های واحد `audit-service` (`metrics.spec.ts` و دو Spec مصرف‌کننده) مرزهای دقیق Bucket، ۱۱ Topic مشتق از
 `DOMAIN_TOPICS` و `AUDIT_TRAIL_TOPIC`، Exposition صفرِ `_bucket`/`_sum`/`_count` پیش از نخستین رکورد، مقداردهی با `zero()` بی
 فراخوان `observe`، و برای مسیر A و B یک مشاهدهٔ دقیق با `Date.now()` ثابت (Bucket درست، `_sum` دقیق)، Clamp ساعت جلوتر به Bucket
-صفر، و نبودن مشاهده برای `DUPLICATE`، رد و شکست پایگاه داده را اثبات می‌کنند. `promql_expr_test` Recording Rule `topic:kafka_topic_retained_records:sum` را روی سه Partition
+صفر، و نبودن مشاهده برای `DUPLICATE`، رد و شکست پایگاه داده را اثبات می‌کنند. `RastaAuditProducerSilent` با `rasta_audit_expected_active_producer{source_service}` و `rasta_audit_records_ingested_total`
+واقعی (Labelهای Scrape روی دو Instance، چند Topic و Outcome) در چهار گروه اثبات می‌شود: تولیدکنندهٔ مورد انتظار و ساکت از ۰ تا ۳۵۹
+دقیقه نه `pending` است نه `firing` (Startup: `offset 6h` هنوز نمونه ندارد)، در ۳۶۰ و ۳۸۹ دقیقه `pending` (از راه `ALERTS`) و دقیقاً در ۳۹۰
+دقیقه **یک** هشدار با فقط `source_service`/`severity` و Annotation دقیق؛ سرویس پیکربندی‌نشده با شمارندهٔ قدیمی یا صفر، Label
+`unknown` و تولیدکننده‌ای که از ۳۰۰ دقیقه پیکربندی شده نمی‌سوزند؛ دو تولیدکننده مستقل‌اند (یکی در ۳۹۰ می‌سوزد، دیگری با ردیف ۱۰۰
+دقیقه‌ای روی Topic/Outcome/Instance دیگر تا ۴۵۹ ساکت می‌ماند)؛ ردیف ۴۵۰ دقیقه‌ای هشدار روشن را برطرف و ردیف ۴۷۰ دقیقه‌ای `pending`
+را از نو آغاز می‌کند (در ۴۸۹ نمی‌سوزد)؛ Reset شمارنده در Restart بی ردیف (۷→۰) ساکت است و می‌سوزد، ولی ردیف پیش از نخستین Scrape
+(۷→۱) شمرده می‌شود؛ تولیدکنندهٔ پیکربندی‌شده بی Series شمارنده می‌سوزد؛ Gate که ناپدید شده و نبودن کامل Gate هیچ‌کدام نمی‌سوزند.
+نُه جهش در کپی موقت Fixture را شکست دادند: حذف Gate (`== 0` تنها روی شمارنده)، حذف Gate `offset 6h`، `unless on ()`،
+`sum by (source_topic)`، `max by (source_service, instance)`، پنجرهٔ `1h` و `5h`، حذف `for` و `for: 5m`. آزمون‌های واحد `audit-service`
+توپولوژی Frozen (ده Topic، نُه مالک، ۱۰ مقدار Label با `unknown`)، Label مسیر A و B برای تولیدکنندهٔ دلخواه، بلند، هم‌نام با حروف دیگر و
+نام معتبر روی Topic غیرخودی (همه `unknown`)، ماندن ادعای تولیدکننده در رکورد ذخیره‌شده، کرانداری Label با ۵۰ تولیدکنندهٔ متمایز،
+اعتبارسنجی `AUDIT_EXPECTED_ACTIVE_PRODUCERS` (پیش‌فرض خالی، Trim/Dedupe، رد نام ناشناخته و عنصر خالی بی بازگویی متن)، و
+Exposition دقیق Gate و Tupleهای صفر (۱۲ برای identity+asset، ۳۳ برای همه، `inc(…, 0)` بی پاک کردن شمارش واقعی، امن پس از
+`reset()`، پیش از شروع Consumerها) را می‌سنجند؛ ده جهش TypeScript (بازگشت هر دو مسیر به `record.sourceService`، نادیده گرفتن تطابق
+مالک، `inc(…, 1)`، حذف Seeding، حذف فراخوان `AppModule`، ردنکردن نام ناشناخته، پیش‌فرض همهٔ سرویس‌ها، Reset نکردن Gate) هر کدام
+دست‌کم یک آزمون را شکست دادند. `promql_expr_test` Recording Rule `topic:kafka_topic_retained_records:sum` را روی سه Partition
 (۱۰۵، سپس ۱۱۵ پس از نوشتن تازه، سپس ۳۵ پس از حذف به‌دست Retention)، نادیده ماندن Topic DLQ دیگر، و Clamp (Partition با Offsetهای
 متقاطع صفر است و از Partition دیگر کم نمی‌کند) می‌سنجد. `pnpm verify` این دروازه را اجرا نمی‌کند، چون Docker
 می‌خواهد. فرمان محلی (در Git Bash روی ویندوز `MSYS_NO_PATHCONV=1` لازم است):

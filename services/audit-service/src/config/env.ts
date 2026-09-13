@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { DOMAIN_PROJECTOR_CONSUMER } from '../audit/audit.mapper';
 import {
+  AUDIT_SOURCE_SERVICES,
+  isAuditSourceService,
+  type AuditSourceService,
+} from '../audit/audit-producer-topology';
+import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
@@ -16,6 +21,51 @@ export const SERVICE_NAME = 'audit-service';
 
 /** The port `.env.example` (`PORT_AUDIT`) and `AUDIT_SERVICE_URL` both name. */
 export const DEFAULT_PORT = '3115';
+
+/**
+ * Parses `AUDIT_EXPECTED_ACTIVE_PRODUCERS`: a comma-separated list of known
+ * audit producers whose silence should alert.
+ *
+ * Empty (or unset) is the empty set, and that is the default on purpose: no
+ * document says which services must emit audit events continuously, or how
+ * long a quiet period is legitimate (Q-54), so without an explicit operational
+ * expectation no producer is treated as failed for being idle.
+ *
+ * Entries are trimmed and deduplicated. An empty element (`a,,b`, a trailing
+ * comma) and any name outside `AUDIT_SOURCE_SERVICES` — including the metric
+ * fallback `unknown` and any other casing — refuse to boot rather than being
+ * skipped: a typo that silently dropped a producer would disable exactly the
+ * alert the operator asked for. The message names the entry's position and the
+ * allowed set, never the rejected text.
+ */
+export const expectedActiveProducersSchema = z
+  .string()
+  .default('')
+  .transform((raw, context): readonly AuditSourceService[] => {
+    if (raw.trim().length === 0) return Object.freeze([]);
+
+    const parsed = new Set<AuditSourceService>();
+    const entries = raw.split(',');
+    entries.forEach((entry, index) => {
+      const name = entry.trim();
+      if (name.length === 0) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `entry ${index + 1} of ${entries.length} is empty`,
+        });
+      } else if (!isAuditSourceService(name)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            `entry ${index + 1} of ${entries.length} is not a known audit producer; ` +
+            `allowed: ${AUDIT_SOURCE_SERVICES.join(', ')}`,
+        });
+      } else {
+        parsed.add(name);
+      }
+    });
+    return Object.freeze([...parsed]);
+  });
 
 /**
  * audit-service configuration.
@@ -100,6 +150,17 @@ export const auditEnvSchema = baseEnvSchema
       .min(1_000)
       .max(5_000_000)
       .default(DEFAULT_MAX_VERIFICATION_RECORDS),
+
+    /**
+     * Producers whose audit silence `RastaAuditProducerSilent` may report.
+     *
+     * Exported as `rasta_audit_expected_active_producer{source_service} 1`,
+     * which gates the alert. Runtime-configurable because which services have a
+     * guaranteed traffic cadence differs per environment; the quiet window
+     * itself lives in the checked-in Prometheus rule. See
+     * `expectedActiveProducersSchema` above for the validation contract.
+     */
+    AUDIT_EXPECTED_ACTIVE_PRODUCERS: expectedActiveProducersSchema,
   });
 
 export type AuditEnv = z.infer<typeof auditEnvSchema>;

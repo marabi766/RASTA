@@ -248,8 +248,27 @@ config` → `SUCCESS: 8 rules found`، `promtool test rules` → `SUCCESS` (دو
 > Topic مستقل در ۹m، مرز دقیق ۶۰، Instance کندِ اقلیت، `NaN`، Reset `for` تا ۱۳m) و ۹ جهش PromQL همه شکست خوردند. زنده:
 > `/metrics` روی Backlog واقعی محلی (بی رویداد ساختگی) ۱۳۲ Series و `_count` برابر ردیف‌های نوشته‌شده نشان داد و Prometheus قاعده
 > را `health=ok` ارزیابی کرد؛ هشدار **زنده نسوخت**، چون کل Backlog پیش از نمونهٔ دوم Scrape نوشته شد و `rate` صفر (p95 = `NaN`) بود.
+> **سکوت تولیدکنندهٔ مورد انتظار — Opt-in (همان روز، بعدتر):** نخست یک نقص Cardinality رفع شد: `source_service` در
+> `rasta_audit_records_ingested_total` مستقیماً `envelope.producer` بود (رشتهٔ تولیدکننده، فقط تا ۱۲۸ نویسه) و ادعای «کراندار» در
+> ADR-053 § ۱۳ درست نبود. اکنون `services/audit-service/src/audit/audit-producer-topology.ts` تنها منبع Frozen توپولوژی است: ده
+> Topic مسیر A با مالک (نُه مالک؛ `asset-service` مالک `rasta.asset.v1` و `rasta.insurance.v1`)، `AUDIT_TRAIL_PRODUCERS` =
+> `identity-service`، و Fallback ‏`unknown`؛ `DOMAIN_TOPICS` از آن مشتق است. Label مسیر A نام مالک است فقط اگر Producer با
+> مالک Topic تحویل بخواند، مسیر B فقط تولیدکنندهٔ شناخته‌شدهٔ Trail، وگرنه `unknown` (۱۰ مقدار). ستون ذخیره‌شدهٔ `source_service`
+> بی‌تغییر همان ادعای تولیدکننده است. پیکربندی `AUDIT_EXPECTED_ACTIVE_PRODUCERS` (CSV، پیش‌فرض **خالی**، Trim/Dedupe، رد نام
+> ناشناخته و عنصر خالی بی بازگویی متن، آرایهٔ Frozen). `AppModule.onModuleInit` پیش از شروع Consumerها
+> `initializeExpectedProducerSeries` را صدا می‌زند: `rasta_audit_expected_active_producer{source_service} 1` فقط برای اعضا و
+> Tupleهای شمارندهٔ آن‌ها با `inc(…, 0)`. هشدار `RastaAuditProducerSilent` (`warning`، `for: 30m`، Label فقط `source_service`،
+> Runbook `audit-gap-detected`):
+> `(max by (source_service) (rasta_audit_expected_active_producer == 1) and on (source_service) max by (source_service) (rasta_audit_expected_active_producer offset 6h == 1)) unless on (source_service) (sum by (source_service) (increase(rasta_audit_records_ingested_total[6h])) > 0)`
+> — آستانهٔ مؤثر ۶ ساعت و ۳۰ دقیقه بی ردیف؛ نخستین Firing ممکن ۶h30m پس از نخستین Scrape Gate. پرسش باز **Q-54** (کدام سرویس
+> آهنگ تضمین‌شده دارد و چه سکوتی اقدام‌پذیر است؛ 🟡، ۱۷ قابل تعویق، ۴۷ باز). اکنون ۱۲ قاعده (۱۱ هشدار + ۱ Recording).
+> **شواهد:** audit-service ۲۳ مجموعه / ۷۱۷ آزمون و ۱۰ جهش TypeScript همه گرفته شدند؛ `check config` → `SUCCESS: 12 rules found`؛
+> `test rules` → `SUCCESS` با ۲۹ گروه (۴ تازه: Startup تا ۳۵۹m ساکت، pending ۳۶۰m، firing دقیقاً ۳۹۰m با یک هشدار برای دو Instance؛
+> سرویس پیکربندی‌نشده/`unknown`/تازه‌پیکربندی‌شده ساکت؛ دو تولیدکنندهٔ مستقل؛ رفع با ردیف و Reset ‏pending؛ Reset شمارنده ۷→۰
+> ساکت و ۷→۱ شمرده؛ بی Series شمارنده می‌سوزد؛ بی Gate ساکت) و ۹ جهش PromQL همه شکست خوردند. شواهد زنده در
+> `ClaudeResultReport.md` همین گام. **مرز:** فقط نبودِ ردیف از تولیدکنندهٔ اعلام‌شده را ثابت می‌کند، نه انتشار رویداد برای هر عملیات.
 > **هنوز نیست:** Alertmanager و تحویل اعلان، Scrape محیط واقعی، داشبورد، Lag گروه‌های دیگر و عمق Topicهای DLQ دیگر، تشخیص
-> Offset غایبِ هر Topic، ابزار بازپخش و تشخیص رکورد غایب.
+> Offset غایبِ هر Topic، ابزار بازپخش، Heartbeat تولیدکننده، هشدار `up` برای Target ‏`audit-service` و تشخیص رکورد غایب.
 > `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series

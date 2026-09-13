@@ -2,6 +2,7 @@ import { ulid } from 'ulid';
 import { SENSITIVE_KEYS, REDACTED } from '@rasta/logging';
 import type { AuditChange, EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
+import { AUDIT_DOMAIN_TOPIC_OWNERS, type AuditDomainTopic } from './audit-producer-topology';
 
 /**
  * Turns a domain envelope into the row the audit store keeps.
@@ -29,19 +30,14 @@ export const DOMAIN_PROJECTOR_CONSUMER = 'audit-service.domain-projector';
  * `AuditTrailConsumer` (AUD-004 Phase B): subscribing to it here would put two
  * opposite validation contracts behind one handler and one idempotency
  * namespace.
+ *
+ * Derived from `AUDIT_DOMAIN_TOPIC_OWNERS`, which names each topic together
+ * with the service that owns it: the subscription and the metric label set
+ * cannot disagree about which topics exist.
  */
-export const DOMAIN_TOPICS = [
-  'rasta.identity.v1',
-  'rasta.organization.v1',
-  'rasta.asset.v1',
-  'rasta.insurance.v1',
-  'rasta.fleet.v1',
-  'rasta.maintenance.v1',
-  'rasta.marketplace.v1',
-  'rasta.economic.v1',
-  'rasta.document.v1',
-  'rasta.supplier.v1',
-] as const;
+export const DOMAIN_TOPICS: readonly AuditDomainTopic[] = Object.freeze(
+  AUDIT_DOMAIN_TOPIC_OWNERS.map((entry) => entry.topic),
+);
 
 /**
  * The dead-letter topic both audit consumers share.

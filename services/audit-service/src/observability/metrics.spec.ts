@@ -20,8 +20,15 @@ import {
   initializeIngestionLagSeries,
   AUDIT_INGESTION_LAG_BUCKETS,
   AUDIT_INGESTION_SOURCE_TOPICS,
+  auditExpectedActiveProducer,
+  initializeExpectedProducerSeries,
 } from './metrics';
-import { AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
+import { AUDIT_OUTCOMES, AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
+import {
+  AUDIT_SOURCE_SERVICE_LABELS,
+  AUDIT_SOURCE_SERVICES,
+  AUDIT_UNKNOWN_SOURCE_SERVICE,
+} from '../audit/audit-producer-topology';
 import { metricsText } from '@rasta/observability';
 import { DOMAIN_TOPICS } from '../audit/audit.mapper';
 import { DIVERGENCE_REASON_VALUES } from '../audit/audit.verification.view';
@@ -77,6 +84,7 @@ interface LabelledMetric {
 
 const AUDIT_METRICS: { name: string; metric: unknown }[] = [
   { name: 'rasta_audit_records_ingested_total', metric: auditRecordsIngestedTotal },
+  { name: 'rasta_audit_expected_active_producer', metric: auditExpectedActiveProducer },
   { name: 'rasta_audit_ingestion_lag_seconds', metric: auditIngestionLagSeconds },
   { name: 'rasta_audit_ingestion_failures_total', metric: auditIngestionFailuresTotal },
   { name: 'rasta_audit_partition_rows', metric: auditPartitionRows },
@@ -447,5 +455,148 @@ describe('ingestion lag histogram', () => {
     );
     expect(others).toHaveLength(120);
     expect(others.filter((line) => line.value !== 0)).toEqual([]);
+  });
+});
+
+/**
+ * The producer-silence inputs: the expected-producer info metric, and the
+ * zero-seeded `rasta_audit_records_ingested_total` tuples for exactly those
+ * producers. Both come from validated configuration, so nothing is exported at
+ * module load.
+ */
+describe('expected producer series', () => {
+  interface ExposedSample {
+    labels: Record<string, string>;
+    value: number;
+  }
+
+  const INFO = 'rasta_audit_expected_active_producer';
+  const INGESTED = 'rasta_audit_records_ingested_total';
+
+  async function exposed(name: string): Promise<ExposedSample[]> {
+    return (await metricsText())
+      .split('\n')
+      .filter((line) => line.startsWith(`${name}{`))
+      .map((line) => {
+        const match = /^[a-z_]+\{(.*)\} (\S+)$/.exec(line);
+        if (!match) throw new Error(`Unparseable exposition line: ${line}`);
+        const labels: Record<string, string> = {};
+        for (const pair of (match[1] ?? '').matchAll(/(\w+)="([^"]*)"/g)) {
+          labels[pair[1] ?? ''] = pair[2] ?? '';
+        }
+        return { labels, value: Number(match[2]) };
+      });
+  }
+
+  const tuple = ({ labels }: ExposedSample): string =>
+    `${labels.source_service}|${labels.source_topic}|${labels.outcome}`;
+
+  afterEach(() => {
+    auditExpectedActiveProducer.reset();
+    auditRecordsIngestedTotal.reset();
+  });
+
+  it('exports neither metric at module load, before configuration is known', async () => {
+    // Nothing earlier in this file touches either metric.
+    expect(await exposed(INFO)).toEqual([]);
+    expect(await exposed(INGESTED)).toEqual([]);
+  });
+
+  it('declares only the closed source_service label on the info metric', () => {
+    expect(labelsOf(auditExpectedActiveProducer)).toEqual(['source_service']);
+    expect(labelsOf(auditRecordsIngestedTotal)).toEqual([
+      'source_service',
+      'source_topic',
+      'outcome',
+    ]);
+  });
+
+  it('exports nothing for the default empty set', async () => {
+    initializeExpectedProducerSeries([]);
+
+    expect(await exposed(INFO)).toEqual([]);
+    expect(await exposed(INGESTED)).toEqual([]);
+  });
+
+  it('exports 1 per configured producer and every tuple it contributes, at zero', async () => {
+    initializeExpectedProducerSeries(['identity-service', 'asset-service']);
+
+    expect(await exposed(INFO)).toEqual([
+      { labels: { source_service: 'identity-service' }, value: 1 },
+      { labels: { source_service: 'asset-service' }, value: 1 },
+    ]);
+    const ingested = await exposed(INGESTED);
+    expect(ingested.map(tuple).sort()).toEqual(
+      [
+        ...['rasta.identity.v1', AUDIT_TRAIL_TOPIC].map((topic) => `identity-service|${topic}`),
+        ...['rasta.asset.v1', 'rasta.insurance.v1'].map((topic) => `asset-service|${topic}`),
+      ]
+        .flatMap((prefix) => AUDIT_OUTCOMES.map((outcome) => `${prefix}|${outcome}`))
+        .sort(),
+    );
+    expect(ingested).toHaveLength(12);
+    expect(ingested.every((sample) => sample.value === 0)).toBe(true);
+  });
+
+  it('bounds the whole configured exposition by the topology: nine producers, 33 tuples', async () => {
+    initializeExpectedProducerSeries(AUDIT_SOURCE_SERVICES);
+
+    const info = await exposed(INFO);
+    expect(info.map((sample) => sample.labels.source_service)).toEqual([...AUDIT_SOURCE_SERVICES]);
+    const ingested = await exposed(INGESTED);
+    // Eleven topics, each with exactly one owner, times three outcomes.
+    expect(ingested).toHaveLength(33);
+    expect(new Set(ingested.map((sample) => sample.labels.source_topic))).toEqual(
+      new Set(AUDIT_INGESTION_SOURCE_TOPICS),
+    );
+    for (const sample of [...info, ...ingested]) {
+      expect(AUDIT_SOURCE_SERVICE_LABELS).toContain(sample.labels.source_service);
+      expect(sample.labels.source_service).not.toBe(AUDIT_UNKNOWN_SOURCE_SERVICE);
+      for (const forbidden of FORBIDDEN_LABELS) {
+        expect(Object.keys(sample.labels).map((key) => key.toLowerCase())).not.toContain(
+          forbidden.toLowerCase(),
+        );
+      }
+    }
+  });
+
+  it('never erases a real count, and names exactly the latest set when initialized again', async () => {
+    initializeExpectedProducerSeries(['identity-service', 'asset-service']);
+    auditRecordsIngestedTotal.inc({
+      source_service: 'asset-service',
+      source_topic: 'rasta.insurance.v1',
+      outcome: 'SUCCESS',
+    });
+
+    initializeExpectedProducerSeries(['asset-service']);
+
+    expect(await exposed(INFO)).toEqual([
+      { labels: { source_service: 'asset-service' }, value: 1 },
+    ]);
+    expect((await exposed(INGESTED)).filter((sample) => sample.value !== 0)).toEqual([
+      {
+        labels: {
+          source_service: 'asset-service',
+          source_topic: 'rasta.insurance.v1',
+          outcome: 'SUCCESS',
+        },
+        value: 1,
+      },
+    ]);
+  });
+
+  it('is safe after a registry-style reset, and seeds with inc(0) rather than a fabricated row', async () => {
+    initializeExpectedProducerSeries(['supplier-service']);
+    auditExpectedActiveProducer.reset();
+    auditRecordsIngestedTotal.reset();
+
+    initializeExpectedProducerSeries(['supplier-service']);
+
+    expect(await exposed(INFO)).toEqual([
+      { labels: { source_service: 'supplier-service' }, value: 1 },
+    ]);
+    const ingested = await exposed(INGESTED);
+    expect(ingested).toHaveLength(3);
+    expect(ingested.reduce((sum, sample) => sum + sample.value, 0)).toBe(0);
   });
 });

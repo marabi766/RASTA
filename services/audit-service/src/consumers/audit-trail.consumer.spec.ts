@@ -645,3 +645,96 @@ describe('a database failure', () => {
     );
   });
 });
+
+/**
+ * `source_service` on path B is a known trail producer's name or the
+ * fallback, never the envelope's `producer` string. The stored row keeps the
+ * producer's (length-bounded) claim either way.
+ */
+describe('source_service label on path B', () => {
+  interface Series {
+    value: number;
+    labels: Record<string, string | number | undefined>;
+  }
+
+  async function series(): Promise<Series[]> {
+    const { values } = await (
+      auditRecordsIngestedTotal as unknown as { get(): Promise<{ values: Series[] }> }
+    ).get();
+    return values;
+  }
+
+  const labelValues = async (): Promise<unknown[]> => [
+    ...new Set((await series()).map((entry) => entry.labels.source_service)),
+  ];
+
+  async function write(producer: string): Promise<AuditEventRecord> {
+    const ingested: IngestCall[] = [];
+    await trailWith([], async (...args) => {
+      ingested.push(args);
+      return 'WRITTEN';
+    }).handle(envelope(payload(), { producer }), delivery());
+    expect(ingested).toHaveLength(1);
+    return (ingested[0] as IngestCall)[0];
+  }
+
+  beforeEach(() => {
+    auditRecordsIngestedTotal.reset();
+  });
+
+  afterAll(() => {
+    auditRecordsIngestedTotal.reset();
+  });
+
+  it('keeps the name of a known trail producer', async () => {
+    const record = await write('identity-service');
+
+    expect(record.sourceService).toBe('identity-service');
+    expect(
+      await valueOf(counter(auditRecordsIngestedTotal), {
+        source_service: 'identity-service',
+        source_topic: AUDIT_TRAIL_TOPIC,
+        outcome: 'REFUSED',
+      }),
+    ).toBe(1);
+    expect(await labelValues()).toEqual(['identity-service']);
+  });
+
+  it.each([
+    ['an arbitrary producer', 'SENTINEL-invented-service'],
+    ['a domain owner that is not a trail producer', 'asset-service'],
+    ['audit-service itself', 'audit-service'],
+    ['the fallback spelled by the producer', 'unknown'],
+    ['a near-miss casing', 'IDENTITY-SERVICE'],
+  ])('counts %s under the fallback and stores the claim unchanged', async (_case, producer) => {
+    const record = await write(producer);
+
+    expect(record.sourceService).toBe(producer);
+    expect(
+      await valueOf(counter(auditRecordsIngestedTotal), {
+        source_service: 'unknown',
+        source_topic: AUDIT_TRAIL_TOPIC,
+        outcome: 'REFUSED',
+      }),
+    ).toBe(1);
+    expect(await labelValues()).toEqual(['unknown']);
+  });
+
+  it('never turns an overlong producer into a label, and stores it bounded as before', async () => {
+    const producer = `identity-service${'SENTINEL'.repeat(600)}`;
+
+    const record = await write(producer);
+
+    expect(record.sourceService).toBe(producer.slice(0, 128));
+    expect(await labelValues()).toEqual(['unknown']);
+    expect(JSON.stringify(await series())).not.toContain('SENTINEL');
+  });
+
+  it('takes a bounded set of label values however many distinct producers publish', async () => {
+    for (let index = 0; index < 50; index += 1) await write(`producer-${index}`);
+    await write('identity-service');
+
+    expect((await labelValues()).sort()).toEqual(['identity-service', 'unknown']);
+    expect(await series()).toHaveLength(2);
+  });
+});

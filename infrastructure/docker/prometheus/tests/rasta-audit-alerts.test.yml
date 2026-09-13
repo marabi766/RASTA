@@ -632,6 +632,317 @@ tests:
         exp_alerts: []
 
   # ---------------------------------------------------------------------------
+  # RastaAuditProducerSilent — an expected producer contributed no row.
+  #
+  # Gate: rasta_audit_expected_active_producer{source_service} 1, which
+  # audit-service exports only for AUDIT_EXPECTED_ACTIVE_PRODUCERS, present now
+  # and 6h ago. Condition: no increase of rasta_audit_records_ingested_total for
+  # that source_service over [6h], summed across topics, outcomes and
+  # instances. `for: 30m`. Series start at 0m, which is the first scrape.
+  #
+  # Main group, 0m-420m:
+  # - identity-service: expected on two audit-service instances, counters on
+  #   both instances, two topics and three outcomes, all flat (one at an old
+  #   non-zero value). The gate first holds at 360m (offset 6h reaches the 0m
+  #   sample), so it is pending 360m-389m and fires at exactly 390m, as one
+  #   alert labelled only source_service and severity.
+  # - fleet-service: old non-zero and zero counters, never declared expected.
+  # - unknown: the fallback label is never declared, however large its count.
+  # - organization-service: declared only from 300m (a newly configured
+  #   producer, counters zero-seeded with it). Its gate needs a sample 6h
+  #   earlier, so it cannot even be pending before 660m.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_expected_active_producer{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="identity-service"}'
+        values: '1x420'
+      - series: 'rasta_audit_expected_active_producer{job="rasta-services",instance="audit-b.internal:3115",environment="local",source_service="identity-service"}'
+        values: '1x420'
+      - series: 'rasta_audit_expected_active_producer{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="organization-service"}'
+        values: '_x299 1x120'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="SUCCESS"}'
+        values: '0x420'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="FAILURE"}'
+        values: '0x420'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.audit.trail.v1",outcome="SUCCESS"}'
+        values: '42x420'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="audit-b.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="SUCCESS"}'
+        values: '0x420'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="audit-b.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.audit.trail.v1",outcome="REFUSED"}'
+        values: '0x420'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="fleet-service",source_topic="rasta.fleet.v1",outcome="SUCCESS"}'
+        values: '3x420'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="fleet-service",source_topic="rasta.fleet.v1",outcome="FAILURE"}'
+        values: '0x420'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="unknown",source_topic="rasta.asset.v1",outcome="SUCCESS"}'
+        values: '5x420'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="organization-service",source_topic="rasta.organization.v1",outcome="SUCCESS"}'
+        values: '_x299 0x120'
+    alert_rule_test:
+      # First scrape, and every evaluation before the gate can hold.
+      - eval_time: 0m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 359m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      # Pending, not firing.
+      - eval_time: 360m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 389m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 390m
+        alertname: RastaAuditProducerSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_service: identity-service
+            exp_annotations:
+              summary: 'No audit records from expected producer identity-service for 6h30m'
+              description: 'identity-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 420m
+        alertname: RastaAuditProducerSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_service: identity-service
+            exp_annotations:
+              summary: 'No audit records from expected producer identity-service for 6h30m'
+              description: 'identity-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+    promql_expr_test:
+      # alert_rule_test sees only firing alerts; ALERTS shows the pending state.
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 359m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 360m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="pending",severity="warning",source_service="identity-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 389m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="pending",severity="warning",source_service="identity-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 390m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="firing",severity="warning",source_service="identity-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 420m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="firing",severity="warning",source_service="identity-service"}'
+            value: 1
+
+  # Two producers independently, recovery and a pending reset, 0m-600m.
+  # - identity-service: flat until a row at 450m on rasta.identity.v1 (instance
+  #   A). Fires at 390m, still firing at 449m, resolved at 450m.
+  # - asset-service: declared on both instances. Its only rows are on
+  #   rasta.insurance.v1 with outcome FAILURE on instance B, at 100m and 470m,
+  #   while its instance-A rasta.asset.v1 series stays at 0. The 100m row keeps
+  #   it quiet until the 99m sample leaves the window: pending from 459m. The
+  #   470m row clears that pending state, so it does not fire at 489m, and its
+  #   next possible pending evaluation (830m) is outside the fixture.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_expected_active_producer{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="identity-service"}'
+        values: '1x600'
+      - series: 'rasta_audit_expected_active_producer{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="asset-service"}'
+        values: '1x600'
+      - series: 'rasta_audit_expected_active_producer{job="rasta-services",instance="audit-b.internal:3115",environment="local",source_service="asset-service"}'
+        values: '1x600'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="SUCCESS"}'
+        values: '0x449 1x150'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="audit-b.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.audit.trail.v1",outcome="REFUSED"}'
+        values: '0x600'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="asset-service",source_topic="rasta.asset.v1",outcome="SUCCESS"}'
+        values: '0x600'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="audit-b.internal:3115",environment="local",source_service="asset-service",source_topic="rasta.insurance.v1",outcome="FAILURE"}'
+        values: '0x99 1x369 2x130'
+    alert_rule_test:
+      - eval_time: 359m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 390m
+        alertname: RastaAuditProducerSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_service: identity-service
+            exp_annotations:
+              summary: 'No audit records from expected producer identity-service for 6h30m'
+              description: 'identity-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 449m
+        alertname: RastaAuditProducerSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_service: identity-service
+            exp_annotations:
+              summary: 'No audit records from expected producer identity-service for 6h30m'
+              description: 'identity-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      # identity-service wrote a row: resolved.
+      - eval_time: 450m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      # asset-service would fire here had the 470m row not reset pending.
+      - eval_time: 489m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 600m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 389m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="pending",severity="warning",source_service="identity-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 390m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="firing",severity="warning",source_service="identity-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 450m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 458m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 459m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="pending",severity="warning",source_service="asset-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 469m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="pending",severity="warning",source_service="asset-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 470m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 489m
+        exp_samples: []
+
+  # Restarts and missing input, 0m-500m. Every declared series here is present
+  # at 0m, so the gate holds from 360m.
+  # - identity-service: audit-service restarted at 200m and re-seeded its
+  #   counter at 0 with no row since (7 -> 0). `increase` treats the drop as a
+  #   reset, not a write: pending 360m, fires 390m.
+  # - asset-service: restarted at 200m and wrote a row before the first
+  #   post-restart scrape (7 -> 1). The reset correction counts that row, so it
+  #   stays quiet until the 199m sample leaves the window (pending at 559m).
+  # - supplier-service: declared, but no counter series at all. It contributed
+  #   no row, so it is silent and fires at 390m.
+  # - document-service: declared until 199m only. With no gate series now it
+  #   never fires, although its counters are flat.
+  # - economic-service: flat counters, never declared.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_expected_active_producer{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="identity-service"}'
+        values: '1x500'
+      - series: 'rasta_audit_expected_active_producer{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="asset-service"}'
+        values: '1x500'
+      - series: 'rasta_audit_expected_active_producer{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="supplier-service"}'
+        values: '1x500'
+      - series: 'rasta_audit_expected_active_producer{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="document-service"}'
+        values: '1x199 _x300'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="SUCCESS"}'
+        values: '7x199 0x300'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="asset-service",source_topic="rasta.asset.v1",outcome="SUCCESS"}'
+        values: '7x199 1x300'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="document-service",source_topic="rasta.document.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="economic-service",source_topic="rasta.economic.v1",outcome="SUCCESS"}'
+        values: '0x500'
+    alert_rule_test:
+      - eval_time: 389m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 390m
+        alertname: RastaAuditProducerSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_service: identity-service
+            exp_annotations:
+              summary: 'No audit records from expected producer identity-service for 6h30m'
+              description: 'identity-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+          - exp_labels:
+              severity: warning
+              source_service: supplier-service
+            exp_annotations:
+              summary: 'No audit records from expected producer supplier-service for 6h30m'
+              description: 'supplier-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 500m
+        alertname: RastaAuditProducerSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_service: identity-service
+            exp_annotations:
+              summary: 'No audit records from expected producer identity-service for 6h30m'
+              description: 'identity-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+          - exp_labels:
+              severity: warning
+              source_service: supplier-service
+            exp_annotations:
+              summary: 'No audit records from expected producer supplier-service for 6h30m'
+              description: 'supplier-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+
+  # No expected-producer input at all: every counter below is flat, on two
+  # instances, and nothing fires. Absent gate input never means "every known
+  # service is expected".
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="audit-b.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="organization-service",source_topic="rasta.organization.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="audit-b.internal:3115",environment="local",source_service="organization-service",source_topic="rasta.organization.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="asset-service",source_topic="rasta.asset.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="audit-b.internal:3115",environment="local",source_service="asset-service",source_topic="rasta.asset.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_service="supplier-service",source_topic="rasta.supplier.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="rasta-services",instance="audit-b.internal:3115",environment="local",source_service="supplier-service",source_topic="rasta.supplier.v1",outcome="SUCCESS"}'
+        values: '0x500'
+    alert_rule_test:
+      - eval_time: 390m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 500m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 400m
+        exp_samples: []
+
+  # ---------------------------------------------------------------------------
   # RastaAuditConsumerLag — sustained lag on both audit groups fires after 5m.
   #
   # Series names and labels are the ones danielqsj/kafka-exporter v1.9.0

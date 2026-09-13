@@ -1,6 +1,7 @@
-import { AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
+import { AUDIT_OUTCOMES, AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
 import { Counter, Gauge, Histogram, registry } from '@rasta/observability';
 import { DOMAIN_TOPICS } from '../audit/audit.mapper';
+import { sourceTopicsOf, type AuditSourceService } from '../audit/audit-producer-topology';
 import { DIVERGENCE_REASON_VALUES } from '../audit/audit.verification.view';
 
 /**
@@ -16,18 +17,45 @@ import { DIVERGENCE_REASON_VALUES } from '../audit/audit.verification.view';
  * store's access controls. A metric naming an organization leaks the tenant
  * list to everyone who can read the dashboard.
  *
- * Every label below is drawn from a set fixed at deploy time: the ten topics
+ * Every label below is drawn from a set fixed at deploy time: the eleven topics
  * this service subscribes to, the services that produce them, and three
  * outcome values. That is what makes them safe.
  */
 
-/** Rows written, by where they came from. */
+/**
+ * Rows written, by where they came from.
+ *
+ * `source_service` is **not** the envelope's `producer` string. That string is
+ * producer-authored and only length-bounded, so used raw it would let any
+ * publisher mint a series per distinct value. The consumers derive the label
+ * from `audit-producer-topology.ts` instead — the delivery topic's owner when
+ * the producer agrees (path A), a known trail producer (path B), otherwise
+ * `unknown` — so it takes at most ten values (`AUDIT_SOURCE_SERVICE_LABELS`).
+ * `source_topic` is the delivery topic, eleven values. `outcome` is the
+ * three-value enum. The stored row still keeps the producer's own claim.
+ */
 export const auditRecordsIngestedTotal = new Counter({
   name: 'rasta_audit_records_ingested_total',
   help: 'Audit rows written by the domain projector',
-  // `source_service` and `source_topic` are both bounded by deployment: nine
-  // producing services, ten subscribed topics. `outcome` is the enum.
   labelNames: ['source_service', 'source_topic', 'outcome'] as const,
+  registers: [registry],
+});
+
+/**
+ * The producers this deployment says must keep contributing rows.
+ *
+ * An info metric: `1` for each service named in
+ * `AUDIT_EXPECTED_ACTIVE_PRODUCERS`, and no series at all for anything else.
+ * `RastaAuditProducerSilent` joins on it, so a producer that nobody has declared
+ * traffic-expected can be quiet forever without an alert — which is the only
+ * honest default while no document says which services must emit continuously
+ * (`docs/24-open-questions.md` Q-54). Its only label is the closed
+ * `source_service` set; `unknown` is never a valid value.
+ */
+export const auditExpectedActiveProducer = new Gauge({
+  name: 'rasta_audit_expected_active_producer',
+  help: 'Set to 1 for each audit producer configured as traffic-expected (AUDIT_EXPECTED_ACTIVE_PRODUCERS)',
+  labelNames: ['source_service'] as const,
   registers: [registry],
 });
 
@@ -348,6 +376,35 @@ export function initializeAuditAlertSeries(): void {
 export function initializeIngestionLagSeries(): void {
   for (const source_topic of AUDIT_INGESTION_SOURCE_TOPICS) {
     auditIngestionLagSeconds.zero({ source_topic });
+  }
+}
+
+/**
+ * Exports the producer-silence inputs for the configured expected producers.
+ *
+ * Called by `AppModule.onModuleInit`, after the environment has been validated
+ * and before either consumer starts, never at module load: the set comes from
+ * configuration, and a module-load call could only ever see the empty default.
+ *
+ * - `rasta_audit_expected_active_producer{source_service} 1` for each one, and
+ *   nothing else. The gauge is reset first so the exposition names exactly the
+ *   set passed in; it holds configuration, not observations.
+ * - `rasta_audit_records_ingested_total` at zero, via `inc(labels, 0)`, for
+ *   every topic that producer contributes times each outcome. Without it a
+ *   producer's first row after a restart would be born at 1, `increase` would
+ *   see no rise, and a producer that did write would be reported silent. `inc`
+ *   by zero never erases a real count, so calling this again — as a test that
+ *   `reset()`s does — is safe.
+ */
+export function initializeExpectedProducerSeries(expected: readonly AuditSourceService[]): void {
+  auditExpectedActiveProducer.reset();
+  for (const source_service of expected) {
+    auditExpectedActiveProducer.set({ source_service }, 1);
+    for (const source_topic of sourceTopicsOf(source_service)) {
+      for (const outcome of AUDIT_OUTCOMES) {
+        auditRecordsIngestedTotal.inc({ source_service, source_topic, outcome }, 0);
+      }
+    }
   }
 }
 

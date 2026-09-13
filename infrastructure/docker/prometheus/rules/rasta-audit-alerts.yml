@@ -16,6 +16,9 @@
 #   because lag that clears on its own is normal consumption; the two
 #   missing-signal alerts use `for: 2m` (exporter) and `for: 5m` (group) so a
 #   single failed scrape or a brief exporter restart does not fire.
+#   RastaAuditProducerSilent is the other exception: it alerts on the absence
+#   of an increase, so it uses a 6h window and `for: 30m`, and fires only for
+#   producers audit-service was explicitly configured to expect.
 # - `sum by` keeps exactly the bounded labels the metric declares and drops the
 #   scrape's own `job`/`instance`/`environment`. No annotation names a tenant,
 #   actor, resource, event, correlation id, partition, offset or error text —
@@ -111,6 +114,51 @@ groups:
           summary: 'Refusal audit events failed to publish ({{ $labels.reason }})'
           description: 'rasta_security_event_publish_failures_total increased with reason {{ $labels.reason }} in the last 5 minutes; the rows were scheduled for retry.'
           runbook: docs/runbooks/security-event-outbox.md
+
+      - alert: RastaAuditProducerSilent
+        # ADR-053 § 13 "a service went silent", for opt-in producers only. It
+        # is gated on rasta_audit_expected_active_producer{source_service} 1,
+        # which audit-service exports only for services named in
+        # AUDIT_EXPECTED_ACTIVE_PRODUCERS (empty by default, Q-54). No gate
+        # series, no alert: an unconfigured producer can be idle forever.
+        #
+        # Quiet window: 6h, written twice below (the gate's `offset 6h` and the
+        # `[6h]` range) and always changed together. `for: 30m` on top, so the effective
+        # threshold is no row for 6h30m. Local operational choice pending Q-54;
+        # it is not a legal or business interval.
+        #
+        # - The gate must hold now AND 6h ago (`offset 6h`, within the 5m
+        #   lookback), so the first possible pending evaluation is 6h after
+        #   Prometheus first saw the producer declared expected, and firing 30m
+        #   later: a first scrape or a newly configured producer never fires
+        #   early on a range that does not yet cover the window.
+        # - `unless` any positive increase: a row with any topic/outcome on any
+        #   instance suppresses it and resets pending. `increase` handles the
+        #   counter reset of an audit-service restart; the counters are
+        #   zero-seeded for expected producers, so a first row after restart is
+        #   a 0 -> 1 step. A configured producer with no counter series at all
+        #   also counts as silent: it contributed no row.
+        # - `max by`/`sum by (source_service)` drop topic, outcome and the
+        #   scrape's job/instance/environment, so several audit-service
+        #   instances yield one alert per producer. `unknown` is never gated.
+        #
+        # Proves only that no row arrived from a producer declared
+        # traffic-expected; it cannot prove every state change emitted an event.
+        expr: |
+          (
+              max by (source_service) (rasta_audit_expected_active_producer == 1)
+            and on (source_service)
+              max by (source_service) (rasta_audit_expected_active_producer offset 6h == 1)
+          )
+          unless on (source_service)
+            (sum by (source_service) (increase(rasta_audit_records_ingested_total[6h])) > 0)
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'No audit records from expected producer {{ $labels.source_service }} for 6h30m'
+          description: '{{ $labels.source_service }} is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+          runbook: docs/runbooks/audit-gap-detected.md
 
   # Broker-side view of the two audit consumer groups and the audit DLQ, from
   # docker-compose.yml `kafka-exporter` (danielqsj/kafka-exporter v1.9.0). None

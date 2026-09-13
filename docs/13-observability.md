@@ -267,24 +267,26 @@ POST /v1/orders                                    [gateway]        45ms
 
 ### وضعیت اجرا — قواعد موجود در مخزن (2026-09-13)
 
-دو جدول بالا **هدف** است. تنها قواعد نوشته‌شده، ده هشدار و یک Recording Rule زنجیرهٔ شواهد حسابرسی در
+دو جدول بالا **هدف** است. تنها قواعد نوشته‌شده، یازده هشدار و یک Recording Rule زنجیرهٔ شواهد حسابرسی در
 [`../infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`](../infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml)
 هستند که `prometheus.yml` با `rule_files` بارشان می‌کند:
 
-| هشدار                                   | شدت        | شرط                                                                                                                                                                                                                     | Runbook                                                      |
-| --------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `RastaDeadLetterMessagePublished`       | `warning`  | `sum by (service, topic, reason) (increase(rasta_dlq_messages_total[5m])) > 0`                                                                                                                                          | [replay-dlq](runbooks/replay-dlq.md)                         |
-| `RastaAuditIngestionFailure`            | `warning`  | `sum by (reason) (increase(rasta_audit_ingestion_failures_total[5m])) > 0`                                                                                                                                              | [audit-gap-detected](runbooks/audit-gap-detected.md)         |
-| `RastaAuditIngestionLagHigh`            | `warning`  | `histogram_quantile(0.95, sum by (le, source_topic) (rate(rasta_audit_ingestion_lag_seconds_bucket[5m]))) > 60` با `for: 5m`                                                                                            | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
-| `RastaAuditChainDivergence`             | `critical` | `sum by (reason, scope) (increase(rasta_audit_chain_verification_failures_total[5m])) > 0`                                                                                                                              | [audit-chain-divergence](runbooks/audit-chain-divergence.md) |
-| `RastaSecurityEventCaptureGap`          | `critical` | `sum by (outcome) (increase(rasta_security_event_captures_total{outcome=~"failed\|timeout"}[5m])) > 0`                                                                                                                  | [security-event-outbox](runbooks/security-event-outbox.md)   |
-| `RastaSecurityEventClosedBacklogStale`  | `warning`  | `rasta_security_event_outbox_closed_backlog_age_seconds > 60`                                                                                                                                                           | [security-event-outbox](runbooks/security-event-outbox.md)   |
-| `RastaSecurityEventPublishFailure`      | `warning`  | `sum by (reason) (increase(rasta_security_event_publish_failures_total[5m])) > 0`                                                                                                                                       | [security-event-outbox](runbooks/security-event-outbox.md)   |
-| `RastaAuditConsumerLag`                 | `warning`  | `sum by (consumergroup, topic) (clamp_min(kafka_consumergroup_lag{consumergroup=~"audit-service\\.(domain-projector\|trail)"}, 0)) > 0` با `for: 5m`                                                                    | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
-| `RastaKafkaExporterUnavailable`         | `warning`  | `min by (job) (up{job="kafka-exporter"}) == 0 or absent(up{job="kafka-exporter"})` با `for: 2m`                                                                                                                         | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
-| `RastaAuditConsumerGroupMetricsMissing` | `warning`  | `(absent(kafka_consumergroup_lag{consumergroup="audit-service.domain-projector"}) or absent(kafka_consumergroup_lag{consumergroup="audit-service.trail"})) and on () (min(up{job="kafka-exporter"}) == 1)` با `for: 5m` | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
+| هشدار                                   | شدت        | شرط                                                                                                                                                                                                                                                                                                     | Runbook                                                      |
+| --------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `RastaDeadLetterMessagePublished`       | `warning`  | `sum by (service, topic, reason) (increase(rasta_dlq_messages_total[5m])) > 0`                                                                                                                                                                                                                          | [replay-dlq](runbooks/replay-dlq.md)                         |
+| `RastaAuditIngestionFailure`            | `warning`  | `sum by (reason) (increase(rasta_audit_ingestion_failures_total[5m])) > 0`                                                                                                                                                                                                                              | [audit-gap-detected](runbooks/audit-gap-detected.md)         |
+| `RastaAuditIngestionLagHigh`            | `warning`  | `histogram_quantile(0.95, sum by (le, source_topic) (rate(rasta_audit_ingestion_lag_seconds_bucket[5m]))) > 60` با `for: 5m`                                                                                                                                                                            | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
+| `RastaAuditProducerSilent`              | `warning`  | `(max by (source_service) (rasta_audit_expected_active_producer == 1) and on (source_service) max by (source_service) (rasta_audit_expected_active_producer offset 6h == 1)) unless on (source_service) (sum by (source_service) (increase(rasta_audit_records_ingested_total[6h])) > 0)` با `for: 30m` | [audit-gap-detected](runbooks/audit-gap-detected.md)         |
+| `RastaAuditChainDivergence`             | `critical` | `sum by (reason, scope) (increase(rasta_audit_chain_verification_failures_total[5m])) > 0`                                                                                                                                                                                                              | [audit-chain-divergence](runbooks/audit-chain-divergence.md) |
+| `RastaSecurityEventCaptureGap`          | `critical` | `sum by (outcome) (increase(rasta_security_event_captures_total{outcome=~"failed\|timeout"}[5m])) > 0`                                                                                                                                                                                                  | [security-event-outbox](runbooks/security-event-outbox.md)   |
+| `RastaSecurityEventClosedBacklogStale`  | `warning`  | `rasta_security_event_outbox_closed_backlog_age_seconds > 60`                                                                                                                                                                                                                                           | [security-event-outbox](runbooks/security-event-outbox.md)   |
+| `RastaSecurityEventPublishFailure`      | `warning`  | `sum by (reason) (increase(rasta_security_event_publish_failures_total[5m])) > 0`                                                                                                                                                                                                                       | [security-event-outbox](runbooks/security-event-outbox.md)   |
+| `RastaAuditConsumerLag`                 | `warning`  | `sum by (consumergroup, topic) (clamp_min(kafka_consumergroup_lag{consumergroup=~"audit-service\\.(domain-projector\|trail)"}, 0)) > 0` با `for: 5m`                                                                                                                                                    | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
+| `RastaKafkaExporterUnavailable`         | `warning`  | `min by (job) (up{job="kafka-exporter"}) == 0 or absent(up{job="kafka-exporter"})` با `for: 2m`                                                                                                                                                                                                         | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
+| `RastaAuditConsumerGroupMetricsMissing` | `warning`  | `(absent(kafka_consumergroup_lag{consumergroup="audit-service.domain-projector"}) or absent(kafka_consumergroup_lag{consumergroup="audit-service.trail"})) and on () (min(up{job="kafka-exporter"}) == 1)` با `for: 5m`                                                                                 | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
 
-هشدارهای شمارنده `for` ندارند، چون قرارداد هر متریک می‌گوید هر افزایش اقدام‌پذیر است. رفتار هر ده هشدار و Recording Rule با
+هشدارهای شمارنده `for` ندارند، چون قرارداد هر متریک می‌گوید هر افزایش اقدام‌پذیر است؛ استثنا `RastaAuditProducerSilent` است که بر
+**نبودِ** افزایش هشدار می‌دهد. رفتار هر یازده هشدار و Recording Rule با
 `promtool test rules` در CI اثبات می‌شود ([`14-testing-strategy.md`](14-testing-strategy.md) § ۱۴٫۱۱). **مرز:** این قواعد را فقط
 Prometheus **محلی** Compose ارزیابی می‌کند؛ مخزن **Alertmanager ندارد**، پس هیچ اعلانی تحویل نمی‌شود؛ Scrape محیط واقعی و داشبورد
 در مخزن نیستند.
@@ -306,6 +308,46 @@ Prometheus **محلی** Compose ارزیابی می‌کند؛ مخزن **Alertm
 - **تفاوت با Lag کافکا:** این فاصلهٔ زمانی شواهدِ **نوشته‌شده** است؛ `kafka_consumergroup_lag` تعداد رکوردِ **هنوز مصرف‌نشده**.
   مصرف‌کننده‌ای که متوقف است هیچ مشاهده‌ای ندارد، پس این هشدار ساکت است و `RastaAuditConsumerLag` و دو هشدار از دست رفتن
   سیگنال آن را می‌بینند. p95 بالا با Lag کافکای صفر یعنی رویدادها دیر به Kafka رسیده‌اند (Outbox/Relay تولیدکننده).
+
+**ساکت شدن تولیدکنندهٔ مورد انتظار — Opt-in.** ADR-053 § ۱۳ از `rasta_audit_records_ingested_total` می‌خواهد «ساکت شدن یک
+سرویس» را نشان دهد. هیچ سندی نمی‌گوید کدام سرویس باید پیوسته رویداد حسابرسی بفرستد یا چه سکوتی مشروع است
+([`24-open-questions.md`](24-open-questions.md) Q-54)، پس این هشدار فقط برای تولیدکننده‌ای کار می‌کند که صریحاً پیکربندی شده است:
+
+- **برچسب `source_service` کراندار است.** پیش از این تغییر، Label مستقیماً `envelope.producer` بود — رشته‌ای که تولیدکننده می‌نویسد
+  و فقط طولش (۱۲۸) محدود است — پس هر رشتهٔ تازه یک Series تازه می‌ساخت و ادعای «کراندار» درست نبود. اکنون
+  `services/audit-service/src/audit/audit-producer-topology.ts` تنها منبع توپولوژی است: ده Topic مسیر A با مالک دقیق
+  (`rasta.identity.v1`→`identity-service`، `rasta.organization.v1`→`organization-service`، `rasta.asset.v1` و
+  `rasta.insurance.v1`→`asset-service`، `rasta.fleet.v1`→`fleet-service`، `rasta.maintenance.v1`→`maintenance-service`،
+  `rasta.marketplace.v1`→`marketplace-service`، `rasta.economic.v1`→`economic-service`، `rasta.document.v1`→`document-service`،
+  `rasta.supplier.v1`→`supplier-service`) و تولیدکنندگان مسیر B (امروز فقط `identity-service`). `DOMAIN_TOPICS`، مجموعهٔ مجاز
+  پیکربندی و Seriesهای صفر از همین فهرست مشتق می‌شوند. مسیر A نام مالک را فقط وقتی `producer` با مالکِ **Topic تحویل** یکی باشد
+  برچسب می‌زند؛ مسیر B فقط برای تولیدکنندهٔ شناخته‌شدهٔ Trail؛ هر چیز دیگر (نام دلخواه، بلند، نام معتبر روی Topic دیگر) زیر
+  `unknown`. `source_service` حداکثر ۱۰ مقدار دارد (۹ سرویس + `unknown`)، `source_topic` ۱۱ و `outcome` سه. **ردیف ذخیره‌شده
+  تغییری نمی‌کند:** `source_service` در `audit_event` همان ادعای تولیدکننده (با همان حد ۱۲۸) است؛ این سخت‌سازی Label است، نه
+  سانسور شواهد.
+- **پیکربندی:** `AUDIT_EXPECTED_ACTIVE_PRODUCERS` (CSV، در `.env.example`). پیش‌فرض **خالی** است، یعنی هیچ هشداری فعال نیست.
+  ورودی‌ها Trim و Deduplicate می‌شوند؛ نام ناشناخته (از جمله `unknown` و حروف بزرگ دیگر) و عنصر خالی (`a,,b`، ویرگول انتهایی)
+  راه‌اندازی را متوقف می‌کنند و پیام خطا فقط شمارهٔ عنصر و مجموعهٔ مجاز را می‌گوید، نه متن ردشده. نتیجه آرایهٔ Frozen است.
+- **Exposition:** پس از اعتبارسنجی پیکربندی و پیش از شروع هر دو Consumer، `AppModule.onModuleInit` تابع
+  `initializeExpectedProducerSeries` را صدا می‌زند: `rasta_audit_expected_active_producer{source_service} 1` فقط برای سرویس‌های
+  پیکربندی‌شده (Gauge پیش از آن Reset می‌شود تا دقیقاً همان مجموعه را بگوید)، و هر Tuple
+  `rasta_audit_records_ingested_total{source_service,source_topic,outcome}` همان سرویس‌ها با `inc(labels, 0)` — هرگز رویداد
+  ساختگی مثبت؛ تکرار آن شمارش واقعی را پاک نمی‌کند. با مجموعهٔ خالی هیچ‌کدام صادر نمی‌شود؛ با هر ۹ سرویس، ۹ Series اطلاعات و
+  ۳۳ Tuple شمارنده (۱۱ Topic × ۳ Outcome). به `rasta_audit_records_ingested_total` هیچ Label تازه‌ای اضافه نشد.
+- **هشدار** `RastaAuditProducerSilent` (`warning`، گروه `rasta-audit-evidence`، Labelها فقط `source_service` و `severity`):
+  Gate فعلی **و** Gate شش ساعت پیش (`offset 6h`، درون Lookback پنج‌دقیقه‌ای) باید `1` باشند، و `unless` هر افزایش مثبت
+  در `[6h]` جمع‌شده به‌ازای `source_service` روی همهٔ Topicها، Outcomeها و Instanceها. با `for: 30m` آستانهٔ مؤثر **۶ ساعت و ۳۰
+  دقیقه بی هیچ ردیف** است. پنجره در قاعدهٔ checked-in ثابت است (Prometheus آن را از Runtime نمی‌خواند)؛ فقط مجموعهٔ مورد انتظار
+  Runtime-configurable است. انتخاب عملیاتی محلی است، نه حقوقی یا کسب‌وکاری.
+- **زمان‌بندی و Startup:** نخستین ارزیابی Pending ممکن ۶ ساعت پس از نخستین Scrapeی است که تولیدکننده را مورد انتظار دید و
+  Firing ۳۰ دقیقه بعد، پس نخستین Scrape یا تولیدکنندهٔ تازه پیکربندی‌شده روی Rangeی که هنوز پنجره را نمی‌پوشاند نمی‌سوزد. پس از
+  یک ردیف، شرط تا خروج آخرین نمونهٔ پیش از آن از پنجره (حدود ۶ ساعت) نادرست است و Pending را از نو آغاز می‌کند. `increase`
+  Reset شمارنده در Restart را افزایش نمی‌شمارد (۷→۰ ساکت می‌ماند)، ولی ردیفی که پیش از نخستین Scrape پس از Restart نوشته شد
+  (۷→۱) شمرده می‌شود. تولیدکنندهٔ پیکربندی‌شده بی هیچ Series شمارنده هم ساکت است و می‌سوزد. Instanceهای متعدد یک هشدار می‌دهند
+  و اجتماع مجموعه‌های پیکربندی‌شدهٔ آن‌ها Gate است. اگر audit-service Scrape نشود Gate غایب است و این هشدار **ساکت** می‌ماند؛
+  برای Target خود audit-service هنوز هشدار `up` وجود ندارد.
+- **مرز:** این هشدار فقط نبودِ ردیف از تولیدکننده‌ای را ثابت می‌کند که صریحاً «ترافیک‌دار» اعلام شده؛ **نمی‌تواند** ثابت کند هر
+  عملیات تغییر وضعیت رویدادی منتشر کرده است. Heartbeat تولیدکننده، تطبیق Gap حسابرسی، Alertmanager و داشبورد وجود ندارند.
 
 **Lag و عمق DLQ از سمت Broker.** سرویس `kafka-exporter` در `docker-compose.yml` (`danielqsj/kafka-exporter:v1.9.0`، Profile
 `observability`/`all`، متصل به `kafka:9094`، **بی Port میزبان**) را Job `kafka-exporter` در `prometheus.yml` از شبکهٔ Compose با

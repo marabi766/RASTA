@@ -1,4 +1,5 @@
 import {
+  Inject,
   Module,
   type MiddlewareConsumer,
   type NestModule,
@@ -43,7 +44,7 @@ import {
   DOMAIN_TOPICS,
 } from './audit/audit.mapper';
 import { AUDIT_TRAIL_CONSUMER } from './audit/audit-trail.mapper';
-import { auditPartitionRows } from './observability/metrics';
+import { auditPartitionRows, initializeExpectedProducerSeries } from './observability/metrics';
 import { ENV, LOGGER } from './tokens';
 import { brokersOf, loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/env';
 
@@ -298,6 +299,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly projector: DomainProjectorConsumer,
     private readonly trail: AuditTrailConsumer,
     private readonly repository: AuditRepository,
+    @Inject(ENV) private readonly env: AuditEnv,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -305,6 +307,11 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onModuleInit(): Promise<void> {
+    // Before either consumer starts, so every zero-seeded producer series is
+    // exported before a first row could be counted, and after the environment
+    // was validated, because the expected set is configuration.
+    initializeExpectedProducerSeries(this.env.AUDIT_EXPECTED_ACTIVE_PRODUCERS);
+
     // Both paths, and a failure to start either one fails startup. A service
     // that came up with one path silently absent would pass every check that
     // looked only at the other. Each consumer stops itself on shutdown through

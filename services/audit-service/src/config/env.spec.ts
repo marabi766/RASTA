@@ -1,4 +1,5 @@
 import { corsOrigins, brokersOf, DEFAULT_PORT, loadAuditEnv, SERVICE_NAME } from './env';
+import { AUDIT_SOURCE_SERVICES } from '../audit/audit-producer-topology';
 import {
   DEFAULT_MAX_QUERY_WINDOW_DAYS,
   DEFAULT_MAX_VERIFICATION_RECORDS,
@@ -197,5 +198,79 @@ describe('audit-service configuration', () => {
         expect(() => loadAuditEnv(base({ AUDIT_MAX_VERIFICATION_RECORDS: value }))).toThrow();
       },
     );
+  });
+  describe('the expected active producer set (producer-silence alert)', () => {
+    it('defaults to the empty set, so no producer is expected to be active', () => {
+      const env = loadAuditEnv(base());
+
+      expect(env.AUDIT_EXPECTED_ACTIVE_PRODUCERS).toEqual([]);
+      expect(Object.isFrozen(env.AUDIT_EXPECTED_ACTIVE_PRODUCERS)).toBe(true);
+    });
+
+    it.each([[''], ['   ']])('reads %j as the empty set', (value) => {
+      expect(
+        loadAuditEnv(base({ AUDIT_EXPECTED_ACTIVE_PRODUCERS: value }))
+          .AUDIT_EXPECTED_ACTIVE_PRODUCERS,
+      ).toEqual([]);
+    });
+
+    it('trims and deduplicates known producers into a frozen list', () => {
+      const env = loadAuditEnv(
+        base({
+          AUDIT_EXPECTED_ACTIVE_PRODUCERS:
+            ' identity-service,asset-service , identity-service,supplier-service',
+        }),
+      );
+
+      expect(env.AUDIT_EXPECTED_ACTIVE_PRODUCERS).toEqual([
+        'identity-service',
+        'asset-service',
+        'supplier-service',
+      ]);
+      expect(Object.isFrozen(env.AUDIT_EXPECTED_ACTIVE_PRODUCERS)).toBe(true);
+    });
+
+    it('accepts every known producer', () => {
+      expect(
+        loadAuditEnv(base({ AUDIT_EXPECTED_ACTIVE_PRODUCERS: AUDIT_SOURCE_SERVICES.join(',') }))
+          .AUDIT_EXPECTED_ACTIVE_PRODUCERS,
+      ).toEqual([...AUDIT_SOURCE_SERVICES]);
+    });
+
+    it.each([
+      ['identity-service,,asset-service'],
+      ['identity-service,'],
+      [',identity-service'],
+      [' , '],
+    ])('refuses the empty element in %j', (value) => {
+      expect(() => loadAuditEnv(base({ AUDIT_EXPECTED_ACTIVE_PRODUCERS: value }))).toThrow(
+        /AUDIT_EXPECTED_ACTIVE_PRODUCERS.*is empty/s,
+      );
+    });
+
+    it.each([
+      ['unknown'],
+      ['audit-service'],
+      ['notification-service'],
+      ['Identity-Service'],
+      ['identity'],
+      ['identity-service;asset-service'],
+      ['asset-service,SENTINEL-not-a-service'],
+      ['z'.repeat(4096)],
+    ])('refuses %s rather than accepting an unbounded label', (value) => {
+      let thrown: unknown;
+      try {
+        loadAuditEnv(base({ AUDIT_EXPECTED_ACTIVE_PRODUCERS: value }));
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      const text = JSON.stringify(thrown) + String((thrown as Error).message);
+      expect(text).toMatch(/not a known audit producer/);
+      // Names the position and the allowed set, never the rejected text.
+      expect(text).not.toContain('SENTINEL');
+      expect(text).not.toContain('zzzz');
+    });
   });
 });

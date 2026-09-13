@@ -3,12 +3,14 @@
 **شدت:** 🔴 بحرانی اگر شکاف تأیید شود · 🟠 هشدار تا وقتی مشکوک است
 **هشدار محرک:** `RastaAuditIngestionFailure` (🟠 `warning`، افزایش `rasta_audit_ingestion_failures_total{reason}`) و
 `RastaSecurityEventCaptureGap` (🔴 `critical`، افزایش `rasta_security_event_captures_total{outcome=~"failed|timeout"}` — مسیرش
-[security-event-outbox](security-event-outbox.md)) در `infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`، فقط در
+[security-event-outbox](security-event-outbox.md)) و `RastaAuditProducerSilent` (🟠 `warning`، تولیدکنندهٔ پیکربندی‌شده در
+`AUDIT_EXPECTED_ACTIVE_PRODUCERS` که ۶ ساعت و ۳۰ دقیقه هیچ ردیفی نساخته — § ۷ تشخیص) در
+`infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`، فقط در
 Prometheus **محلی** و **بی Alertmanager، پس بی تحویل اعلان**. پیام در `rasta.audit.v1.dlq` فقط هشدار عمومی
 `RastaDeadLetterMessagePublished` (`service` = `KAFKA_CLIENT_ID` مصرف‌کنندهٔ `audit-service`) را دارد، نه هشدار اختصاصی حسابرسی. Lag پایدارِ دو گروه `audit-service.*` هشدار
 `RastaAuditConsumerLag` را دارد ([audit-ingestion-lag](audit-ingestion-lag.md))، و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` فقط
-Recording Rule `topic:kafka_topic_retained_records:sum` است، بی هشدار. **رکوردِ غایب خودش هیچ هشداری ندارد:** تشخیص رکورد
-گمشده، Scrape محیط واقعی و داشبورد در مخزن نیستند؛ پس این Runbook همچنان با یکی از علائم پایین، یا با گزارش
+Recording Rule `topic:kafka_topic_retained_records:sum` است، بی هشدار. **رکوردِ غایب خودش هیچ هشداری ندارد:** `RastaAuditProducerSilent` فقط سکوت
+کامل یک تولیدکنندهٔ صریحاً مورد انتظار را می‌بیند، نه یک رکورد گمشده در میان ترافیک عادی؛ تشخیص رکورد گمشده، Scrape محیط واقعی و داشبورد در مخزن نیستند؛ پس این Runbook همچنان با یکی از علائم پایین، یا با گزارش
 انسانی («این عمل/رد در حسابرسی دیده نمی‌شود») هم شروع می‌شود.
 **زمان پاسخ هدف:** ۳۰ دقیقه برای دسته‌بندی؛ ۱۵ دقیقه اگر رویداد مالی یا رد امنیتی در کار است
 
@@ -73,6 +75,7 @@ Recording Rule `topic:kafka_topic_retained_records:sum` است، بی هشدار
 - Lag گروه `audit-service.domain-projector` یا `audit-service.trail` رشد می‌کند، یا `RastaAuditConsumerLag` می‌سوزد (Lag پنج
   دقیقهٔ پیوسته بالای صفر — [audit-ingestion-lag](audit-ingestion-lag.md)).
 - پیام تازه در `rasta.audit.v1.dlq`.
+- `RastaAuditProducerSilent` برای یک `source_service` می‌سوزد (§ ۷ تشخیص).
 - در Log `audit-service`: مسیر B `Rejected <EVENT> <eventId> from <topic>[<partition>]: …`؛ مسیر A
   `Cannot map <EVENT> <eventId> from <topic> …` یا `Cannot project … into the organization hierarchy …`؛ و از
   `EventConsumer` مشترک `Unparseable message on …`، `Handler failed <N>x for …` یا `Attempt <i>/<N> failed for …`.
@@ -83,8 +86,11 @@ Recording Rule `topic:kafka_topic_retained_records:sum` است، بی هشدار
 > در فرایند ثبت می‌کند و از **`GET /metrics`** همان سرویس (پورت پیش‌فرض `3115`، `@Public`، بیرون از قرارداد OpenAPI، بی هیچ
 > شناسهٔ مستأجر/Actor/منبع/رویداد/Correlation در Label) صادر می‌کند. `host.docker.internal:3115` در Job `rasta-services`
 > فایل **محلی** `infrastructure/docker/prometheus/prometheus.yml` هست؛ پیکربندی Scrape محیط واقعی وابسته به استقرار است و
-> در مخزن نیست. Prometheus محلی روی این متریک‌ها `RastaAuditIngestionFailure` و `RastaAuditIngestionLagHigh` (p95 Histogram
-> تأخیر، فقط برای ردیف نوشته‌شده) را ارزیابی می‌کند (و روی متریک‌های مجاور
+> در مخزن نیست. `source_service` در متریک **ادعای خام `envelope.producer` نیست**: از توپولوژی بستهٔ
+> `services/audit-service/src/audit/audit-producer-topology.ts` مشتق می‌شود (مالک Topic تحویل در مسیر A وقتی Producer با آن
+> می‌خواند، تولیدکنندهٔ شناخته‌شدهٔ Trail در مسیر B، وگرنه `unknown`)؛ ستون `source_service` ردیف ذخیره‌شده همان ادعای خام است.
+> Prometheus محلی روی این متریک‌ها `RastaAuditIngestionFailure`، `RastaAuditIngestionLagHigh` (p95 Histogram
+> تأخیر، فقط برای ردیف نوشته‌شده) و `RastaAuditProducerSilent` (فقط با Gate `rasta_audit_expected_active_producer`) را ارزیابی می‌کند (و روی متریک‌های مجاور
 > `RastaSecurityEventCaptureGap`، `RastaDeadLetterMessagePublished` و دو هشدار دیگر صف ردها)؛ از سمت Broker، `kafka-exporter` Lag دو گروه `audit-service.*` را
 > برای `RastaAuditConsumerLag` و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` را برای Recording Rule `topic:kafka_topic_retained_records:sum`
 > فراهم می‌کند؛ **Alertmanager، داشبورد، هشدار روی عمق DLQ و تشخیص رکورد گمشده در مخزن نیست**. Seriesهای هشدار از شروع فرایند با صفر صادر می‌شوند، پس نخستین
@@ -273,6 +279,27 @@ SELECT id, source_topic, source_service, occurred_at, recorded_at, occurrence_co
 |        هست        |     نیست      | **نباید رخ دهد** (یک تراکنش). شواهد را حفظ کن و مانند واگرایی تشدید کن — [audit-chain-divergence](audit-chain-divergence.md) |
 |       نیست        |      هست      | **نباید رخ دهد.** همان                                                                                                       |
 
+### ۷. `RastaAuditProducerSilent` — تولیدکنندهٔ مورد انتظار ساکت است
+
+این هشدار فقط برای سرویسی می‌سوزد که در `AUDIT_EXPECTED_ACTIVE_PRODUCERS` نام برده شده (پیش‌فرض خالی — Q-54) و
+`rasta_audit_records_ingested_total` برای آن `source_service` روی **هیچ** Topic، Outcome یا Instanceی ۶ ساعت و ۳۰ دقیقه
+افزایش نیافته است. معنایش «ردیفی از این تولیدکننده نرسیده» است، نه «شکاف ثابت‌شده» و نه «همهٔ عملیات رویداد منتشر کرده‌اند».
+Label هشدار فقط `source_service` است؛ هیچ مستأجر یا رویدادی در آن نیست.
+
+1. **آیا انتظار درست است؟** مقدار واقعی `AUDIT_EXPECTED_ACTIVE_PRODUCERS` در استقرار و `rasta_audit_expected_active_producer` را
+   در `/metrics` بخوان. اگر آن سرویس در این محیط واقعاً ترافیک تضمین‌شده ندارد (محیط محلی، ساعت کم‌کار، سرویس غیرفعال)، هشدار
+   **پیکربندی نادرست** است: سرویس را از مجموعه بردار و تصمیم را در Q-54 ثبت کن. هرگز برای خاموش کردن آن رویداد ساختگی منتشر نکن.
+2. **آیا ردیف‌ها زیر `unknown` شمرده می‌شوند؟** `sum by (source_topic) (increase(rasta_audit_records_ingested_total{source_service="unknown"}[6h]))`.
+   افزایش روی Topic مالک این سرویس یعنی ردیف‌ها **ثبت شده‌اند** ولی `envelope.producer` با مالک Topic (مسیر A) یا مجموعهٔ
+   تولیدکنندگان Trail (مسیر B) نمی‌خواند — مثلاً نام سرویس عوض شده یا Producer اشتباه روی Topic دیگری منتشر می‌کند. ردیف ذخیره‌شده
+   ادعای واقعی تولیدکننده را در `source_service` دارد (گام ۶). اصلاح در Producer است یا، اگر توپولوژی واقعاً عوض شده، در
+   `services/audit-service/src/audit/audit-producer-topology.ts`؛ نه در داده.
+3. **آیا `audit-service` مصرف می‌کند؟** Readiness (گام ۳)، `RastaAuditConsumerLag`، Lag گروه `audit-service.domain-projector` یا
+   `audit-service.trail` و DLQ (گام ۴). `RastaAuditIngestionFailure` هم‌زمان یعنی پیام‌ها رسیده‌اند ولی ردیف نساخته‌اند.
+4. **آیا Producer منتشر می‌کند؟** Outbox همان سرویس (گام ۵ و [outbox-stuck](outbox-stuck.md)): `rasta_outbox_pending_age_seconds{service}`
+   و ردیف‌های `published_at IS NULL`. Offset جدیدترین Topic مالک را هم بخوان؛ Offset ثابت یعنی چیزی به Kafka نرسیده.
+5. **اگر همه سالم‌اند و فقط عملیاتی رخ نداده،** شکاف حادثه وجود ندارد؛ مورد ۱ را اعمال کن.
+
 ---
 
 ## اقدام
@@ -280,6 +307,9 @@ SELECT id, source_topic, source_service, occurred_at, recorded_at, occurrence_co
 ### گام ۱ — مهار
 
 - **علت را در Producer یا Consumer رفع کن، نه در داده.** بازنشر پیش از رفع، همان پیام را دوباره به DLQ می‌فرستد.
+- `RastaAuditProducerSilent`: اگر انتظار نادرست بود، سرویس را از `AUDIT_EXPECTED_ACTIVE_PRODUCERS` بردار و `audit-service` را
+  با پیکربندی تازه راه بینداز (شواهد تغییری نمی‌کنند)؛ اگر Producer یا Consumer خراب است، همان را رفع کن. هشدار با نخستین ردیف
+  واقعی برطرف می‌شود. رویداد آزمایشی یا ساختگی برای خاموش کردن آن منتشر نکن و Offset گروه‌ها را جابه‌جا نکن.
 - Consumer گیرکرده روی یک پیام: رفع کد/پایگاه داده/Topic، سپس اجازه بده Retry و DLQ کارشان را بکنند. Offset را دستی رد نکن.
 - Producerی که `trail_tenant_mismatch` یا `trail_unredacted_sensitive_change` می‌سازد: **حادثهٔ امنیتی** است؛ مالک امنیت را
   همین حالا خبر کن. پیام‌های DLQ آن ممکن است مقدار حساس داشته باشند — دسترسی به DLQ را محدود نگه دار و بدنه را جایی کپی نکن.
@@ -345,8 +375,11 @@ SELECT id, source_topic, source_service, occurred_at, recorded_at, occurrence_co
 - قواعد `RastaAuditIngestionFailure`، `RastaSecurityEventCaptureGap`، `RastaDeadLetterMessagePublished` و `RastaAuditConsumerLag`
   **اکنون** در Prometheus محلی هستند و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` ثبت می‌شود؛ نبودن سیگنال Lag هم با
   `RastaKafkaExporterUnavailable` و `RastaAuditConsumerGroupMetricsMissing` صریح است ([audit-ingestion-lag](audit-ingestion-lag.md)).
-  p95 تأخیر ردیف‌های نوشته‌شده هم با `RastaAuditIngestionLagHigh` (Histogram `rasta_audit_ingestion_lag_seconds`) هشدار دارد. هنوز
-  نیست: Alertmanager و تحویل اعلان، و Scrape محیط واقعی.
+  p95 تأخیر ردیف‌های نوشته‌شده هم با `RastaAuditIngestionLagHigh` (Histogram `rasta_audit_ingestion_lag_seconds`) هشدار دارد، و
+  سکوت کامل تولیدکنندهٔ صریحاً مورد انتظار با `RastaAuditProducerSilent`. هنوز نیست: Alertmanager و تحویل اعلان، Scrape محیط
+  واقعی، Heartbeat تولیدکننده، تطبیق شکاف رکورد به رکورد، و هشدار `up` برای Target خود `audit-service`.
+- پاسخ Q-54 ([`../24-open-questions.md`](../24-open-questions.md)): کدام سرویس در کدام محیط حداقل آهنگ رویداد حسابرسی تضمین‌شده
+  دارد و چه سکوتی اقدام‌پذیر است. پاسخ فقط `AUDIT_EXPECTED_ACTIVE_PRODUCERS` و پنجره/`for` قاعده را تغییر می‌دهد.
 - Script بازپخش DLQ (R-6) یا حذف ارجاع به آن از [replay-dlq](replay-dlq.md).
 - نگهداشت Topic مسیر B و DLQ در محیط واقعی را صریح و مستند کن؛ Script محلی فقط سی روز دارد.
 - ثبت ردها در سرویس‌های دیگر (R-2)، ردهای Gateway و ردهای Token سرویس — تا آن وقت نبودن آن‌ها «شکاف حادثه» نیست و نباید

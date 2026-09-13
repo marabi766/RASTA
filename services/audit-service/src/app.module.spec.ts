@@ -24,6 +24,8 @@ import { AuditVerificationService } from './audit/audit.verification.service';
 import { HealthController } from './health/health.controller';
 import { MetricsController } from './observability/metrics.controller';
 import { ENV, LOGGER } from './tokens';
+import { metricsText } from '@rasta/observability';
+import { auditExpectedActiveProducer, auditRecordsIngestedTotal } from './observability/metrics';
 import type { AuditEnv } from './config/env';
 import {
   AUDIT_DEAD_LETTER_TOPIC,
@@ -396,6 +398,7 @@ describe('audit-service composition root', () => {
       startable('projector', order) as unknown as DomainProjectorConsumer,
       startable('trail', order) as unknown as AuditTrailConsumer,
       idleRepository,
+      providerFor(ENV).useFactory?.() as AuditEnv,
     );
 
     await module.onModuleInit();
@@ -413,6 +416,7 @@ describe('audit-service composition root', () => {
       startable('projector', order) as unknown as DomainProjectorConsumer,
       startable('trail', order, true) as unknown as AuditTrailConsumer,
       idleRepository,
+      providerFor(ENV).useFactory?.() as AuditEnv,
     );
 
     await expect(module.onModuleInit()).rejects.toThrow(/does not host this topic-partition/);
@@ -431,6 +435,7 @@ describe('audit-service composition root', () => {
       projector,
       startable('trail', order) as unknown as AuditTrailConsumer,
       idleRepository,
+      providerFor(ENV).useFactory?.() as AuditEnv,
     );
     await module.onModuleInit();
     await module.onApplicationShutdown();
@@ -454,8 +459,88 @@ describe('audit-service composition root', () => {
       startable('projector', order) as unknown as DomainProjectorConsumer,
       startable('trail', order) as unknown as AuditTrailConsumer,
       repository,
+      providerFor(ENV).useFactory?.() as AuditEnv,
     );
     await expect(module.onModuleInit()).resolves.toBeUndefined();
     await module.onApplicationShutdown();
+  });
+  describe('expected-producer series, seeded from validated configuration', () => {
+    async function exposition(): Promise<string[]> {
+      return (await metricsText())
+        .split('\n')
+        .filter(
+          (line) =>
+            line.startsWith('rasta_audit_expected_active_producer{') ||
+            line.startsWith('rasta_audit_records_ingested_total{'),
+        );
+    }
+
+    afterEach(() => {
+      auditExpectedActiveProducer.reset();
+      auditRecordsIngestedTotal.reset();
+    });
+
+    it('injects the validated environment by its token', () => {
+      expect(Reflect.getMetadata('self:paramtypes', AppModule)).toEqual([{ index: 3, param: ENV }]);
+    });
+
+    it('exports nothing for producer silence under the default empty set', async () => {
+      auditExpectedActiveProducer.reset();
+      auditRecordsIngestedTotal.reset();
+      const order: string[] = [];
+      const module = new AppModule(
+        startable('projector', order) as unknown as DomainProjectorConsumer,
+        startable('trail', order) as unknown as AuditTrailConsumer,
+        idleRepository,
+        providerFor(ENV).useFactory?.() as AuditEnv,
+      );
+
+      await module.onModuleInit();
+      await module.onApplicationShutdown();
+
+      expect(await exposition()).toEqual([]);
+    });
+
+    it('seeds the configured producers before either consumer starts', async () => {
+      process.env = {
+        ...process.env,
+        AUDIT_EXPECTED_ACTIVE_PRODUCERS: ' identity-service, asset-service ,identity-service',
+      };
+      auditExpectedActiveProducer.reset();
+      auditRecordsIngestedTotal.reset();
+      const seenAtStart: string[][] = [];
+      const recording = (name: string) => ({
+        start: async () => {
+          seenAtStart.push([name, ...(await exposition())]);
+        },
+        isRunning: () => true,
+      });
+      const module = new AppModule(
+        recording('projector') as unknown as DomainProjectorConsumer,
+        recording('trail') as unknown as AuditTrailConsumer,
+        idleRepository,
+        providerFor(ENV).useFactory?.() as AuditEnv,
+      );
+
+      await module.onModuleInit();
+      await module.onApplicationShutdown();
+
+      const [projectorStart] = seenAtStart;
+      expect(projectorStart?.[0]).toBe('projector');
+      const lines = projectorStart?.slice(1) ?? [];
+      expect(
+        lines.filter((line) => line.startsWith('rasta_audit_expected_active_producer{')),
+      ).toEqual([
+        'rasta_audit_expected_active_producer{source_service="identity-service"} 1',
+        'rasta_audit_expected_active_producer{source_service="asset-service"} 1',
+      ]);
+      // identity: its domain topic and the trail; asset: asset and insurance.
+      // Two topics each, times three outcomes, all at zero.
+      const counters = lines.filter((line) =>
+        line.startsWith('rasta_audit_records_ingested_total{'),
+      );
+      expect(counters).toHaveLength(12);
+      expect(counters.every((line) => line.endsWith(' 0'))).toBe(true);
+    });
   });
 });

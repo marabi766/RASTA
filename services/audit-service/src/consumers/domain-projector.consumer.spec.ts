@@ -475,3 +475,129 @@ describe('ingestion lag histogram on path A', () => {
     expect(await totalCount()).toBe(before);
   });
 });
+
+/**
+ * `source_service` on path A is derived from the closed producer topology,
+ * never copied from `envelope.producer`, which any publisher on a subscribed
+ * topic authors. The stored row keeps the producer's (length-bounded) claim.
+ */
+describe('source_service label on path A', () => {
+  interface Series {
+    value: number;
+    labels: Record<string, string | number | undefined>;
+  }
+
+  const base = {
+    eventId: '01JPROJECTORLABELSPEC0001',
+    eventName: 'ASSET_REGISTERED',
+    eventVersion: 1,
+    occurredAt: '2026-09-15T10:30:00.000Z',
+    producerVersion: '1.0.0',
+    aggregateType: 'Asset',
+    aggregateId: 'AST_0001',
+    tenantId: 'ORG-1',
+    correlationId: 'corr-label-1',
+    payload: { assetId: 'AST_0001' },
+  };
+
+  async function series(): Promise<Series[]> {
+    const { values } = await (
+      auditRecordsIngestedTotal as unknown as { get(): Promise<{ values: Series[] }> }
+    ).get();
+    return values;
+  }
+
+  const labelValues = async (): Promise<unknown[]> => [
+    ...new Set((await series()).map((entry) => entry.labels.source_service)),
+  ];
+
+  const countOf = async (labels: Record<string, string>): Promise<number> =>
+    (await series())
+      .filter((entry) =>
+        Object.entries(labels).every(([key, value]) => entry.labels[key] === value),
+      )
+      .reduce((sum, entry) => sum + entry.value, 0);
+
+  /** Handles one envelope as written, and returns the record handed to the store. */
+  async function write(producer: string, topic: string): Promise<AuditEventRecord> {
+    const stored: AuditEventRecord[] = [];
+    const projector = new DomainProjectorConsumer(
+      () => ({}) as EventConsumer,
+      {
+        ingest: async (record: AuditEventRecord): Promise<IngestOutcome> => {
+          stored.push(record);
+          return 'WRITTEN';
+        },
+      } as unknown as AuditRepository,
+      silentLogger,
+    );
+    await projector.handle({ ...base, producer } as EventEnvelope, { topic, partition: 0 });
+    expect(stored).toHaveLength(1);
+    return stored[0] as AuditEventRecord;
+  }
+
+  beforeEach(() => {
+    auditRecordsIngestedTotal.reset();
+  });
+
+  afterAll(() => {
+    auditRecordsIngestedTotal.reset();
+  });
+
+  it.each([
+    ['rasta.asset.v1', 'asset-service'],
+    ['rasta.insurance.v1', 'asset-service'],
+    ['rasta.supplier.v1', 'supplier-service'],
+  ])('keeps the owner name when %s is produced by %s', async (topic, producer) => {
+    const record = await write(producer, topic);
+
+    expect(record.sourceService).toBe(producer);
+    expect(
+      await countOf({ source_service: producer, source_topic: topic, outcome: 'SUCCESS' }),
+    ).toBe(1);
+    expect(await labelValues()).toEqual([producer]);
+  });
+
+  it.each([
+    ['an arbitrary producer', 'rasta.asset.v1', 'SENTINEL-invented-service'],
+    ['a tenant-looking producer', 'rasta.asset.v1', 'ORG_01JSENTINELTENANT0001'],
+    ['a known service on a topic it does not own', 'rasta.asset.v1', 'identity-service'],
+    ['the trail producer on a domain topic', 'rasta.supplier.v1', 'identity-service'],
+    ['a near-miss casing', 'rasta.asset.v1', 'Asset-Service'],
+  ])(
+    'counts %s under the fallback and stores the claim unchanged',
+    async (_case, topic, producer) => {
+      const record = await write(producer, topic);
+
+      expect(record.sourceService).toBe(producer);
+      expect(record.sourceTopic).toBe(topic);
+      expect(
+        await countOf({ source_service: 'unknown', source_topic: topic, outcome: 'SUCCESS' }),
+      ).toBe(1);
+      expect(await labelValues()).toEqual(['unknown']);
+    },
+  );
+
+  it('never turns an overlong producer into a label, and stores it bounded as before', async () => {
+    const producer = `asset-service${'SENTINEL'.repeat(600)}`;
+
+    const record = await write(producer, 'rasta.asset.v1');
+
+    expect(record.sourceService).toBe(producer.slice(0, 128));
+    expect(await labelValues()).toEqual(['unknown']);
+    expect(JSON.stringify(await series())).not.toContain('SENTINEL');
+  });
+
+  it('takes a bounded set of label values however many distinct producers publish', async () => {
+    for (let index = 0; index < 50; index += 1) {
+      await write(`producer-${index}`, 'rasta.asset.v1');
+      await write(`producer-${index}`, 'rasta.fleet.v1');
+    }
+    await write('asset-service', 'rasta.asset.v1');
+    await write('fleet-service', 'rasta.fleet.v1');
+
+    expect((await labelValues()).sort()).toEqual(['asset-service', 'fleet-service', 'unknown']);
+    expect(await series()).toHaveLength(4);
+    expect(await countOf({ source_service: 'unknown' })).toBe(100);
+  });
+});
