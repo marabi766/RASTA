@@ -14,6 +14,7 @@ import { useApiResource } from '@/lib/use-api-resource';
 import { Badge, Card, PageHeader, cx } from '../ui/primitives';
 import { Code, DataTable, DataView, DescriptionList, Maybe, Section } from '../ui/data-view';
 import { OrderStatusBadge } from './orders-view';
+import { PaymentScenarioGate } from './payment-scenario-gate';
 
 /**
  * One order, with the state machine drawn from the real transition table.
@@ -109,6 +110,8 @@ export function OrderDetailView({ orderId }: { orderId: string }): ReactNode {
               ) : null}
             </Card>
           </Section>
+
+          <PaymentScenarioGate orderId={order.id} onApplied={resource.reload} />
 
           <Section
             id="transitions"

@@ -13,6 +13,7 @@ import { formatInteger, formatMoneyMinor } from '@/lib/format';
 import { useApiResource } from '@/lib/use-api-resource';
 import { ApiErrorView } from '../api-error';
 import { Badge, Card, EmptyState, LoadingState, PageHeader, cx } from '../ui/primitives';
+import { OfferScenarioGate } from './offer-scenario-gate';
 
 /**
  * Offer comparison for one product — the second half of the live slice.
@@ -116,6 +117,8 @@ export function OffersView({ productId }: { productId: string }): ReactNode {
       {state.status === 'success' && state.data.length > 0 ? (
         <OfferTable offers={state.data} />
       ) : null}
+
+      <OfferScenarioGate productId={productId} />
 
       <PaymentDisclosureLink />
     </>
