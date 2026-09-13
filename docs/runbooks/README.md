@@ -15,7 +15,7 @@
 | [malware-scanner-down](malware-scanner-down.md)     | `rasta_document_scanner_up == 0` · امضای کهنه                                                                                                                                                                                                                                                                                                                                                                                  | 🟠 هشدار   | ✅ آماده  |
 | [outbox-b2-backfill](outbox-b2-backfill.md)         | ندارد — با دستور صریح اپراتور                                                                                                                                                                                                                                                                                                                                                                                                  | ⚪ عملیاتی | ✅ آماده  |
 | [security-event-outbox](security-event-outbox.md)   | `RastaSecurityEventCaptureGap` · `RastaSecurityEventClosedBacklogStale` (`closed_backlog_age_seconds > 60`) · `RastaSecurityEventPublishFailure`                                                                                                                                                                                                                                                                               | 🔴/🟠      | ✅ آماده  |
-| [audit-gap-detected](audit-gap-detected.md)         | `RastaAuditIngestionFailure` · `RastaSecurityEventCaptureGap` · `RastaAuditProducerSilent` (تولیدکنندهٔ پیکربندی‌شده در `AUDIT_EXPECTED_ACTIVE_PRODUCERS` ۶ ساعت و ۳۰ دقیقه بی ردیف)؛ پیام در `rasta.audit.v1.dlq` فقط هشدار عمومی `RastaDeadLetterMessagePublished` را دارد؛ رکورد غایب هشدار ندارد                                                                                                                           | 🔴 بحرانی  | ✅ آماده  |
+| [audit-gap-detected](audit-gap-detected.md)         | `RastaAuditIngestionFailure` · `RastaSecurityEventCaptureGap` · `RastaAuditProducerSilent` (تولیدکنندهٔ پیکربندی‌شده در `AUDIT_EXPECTED_ACTIVE_PRODUCERS` ۶ ساعت و ۳۰ دقیقه بی ردیف) · `RastaAuditServiceMetricsUnavailable` (Job اختصاصی `audit-service` دو دقیقه Scrape نمی‌شود یا نیست)؛ پیام در `rasta.audit.v1.dlq` فقط هشدار عمومی `RastaDeadLetterMessagePublished` را دارد؛ رکورد غایب هشدار ندارد                     | 🔴 بحرانی  | ✅ آماده  |
 | [audit-ingestion-lag](audit-ingestion-lag.md)       | `RastaAuditConsumerLag` — Lag مثبت پنج دقیقهٔ پیوسته در `audit-service.domain-projector` یا `audit-service.trail` · `RastaKafkaExporterUnavailable` (Exporter دو دقیقه در دسترس نیست) · `RastaAuditConsumerGroupMetricsMissing` (Exporter سالم، گروه پنج دقیقه بی Series) · `RastaAuditIngestionLagHigh` (p95 تأخیر ردیف نوشته‌شده پنج دقیقه > ۶۰ ثانیه)؛ عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` فقط Recording Rule است، بی هشدار | 🟠 هشدار   | ✅ آماده  |
 | [failed-settlement](failed-settlement.md)           | Workflow شکست‌خورده در `rasta-settlement`                                                                                                                                                                                                                                                                                                                                                                                      | 🔴 بحرانی  | 📅 روز ۲۷ |
 | [restore-database](restore-database.md)             | از دست رفتن داده                                                                                                                                                                                                                                                                                                                                                                                                               | 🔴 بحرانی  | 📅 روز ۲۷ |
@@ -28,10 +28,10 @@ Runbook ناموجود حساب نکند. تاریخ‌ها از [`../20-day-30-
 
 ## قواعد هشدار موجود در مخزن
 
-نام‌های `Rasta…` بالا یازده هشدار
+نام‌های `Rasta…` بالا دوازده هشدار
 [`infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`](../../infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml)
 هستند — **تنها قواعد هشدار مخزن** — و همان فایل یک Recording Rule هم دارد (`topic:kafka_topic_retained_records:sum`). باقی ستون
-«هشدار محرک» شرط مستند است، نه قاعدهٔ نوشته‌شده. رفتار این دوازده قاعده با
+«هشدار محرک» شرط مستند است، نه قاعدهٔ نوشته‌شده. رفتار این سیزده قاعده با
 `promtool test rules` روی `infrastructure/docker/prometheus/tests/rasta-audit-alerts.test.yml` در Job `prometheus-rules` CI
 اثبات می‌شود ([`../14-testing-strategy.md`](../14-testing-strategy.md) § ۱۴٫۱۱).
 
@@ -45,6 +45,10 @@ Runbook ناموجود حساب نکند. تاریخ‌ها از [`../20-day-30-
   رکوردهای **نگه‌داشته** در آن Topic است، نه پیام حل‌نشده — مخزن وضعیت Triage برای پیام DLQ ندارد و فقط Retention آن را کم
   می‌کند — پس عمداً هشداری روی آن نیست؛ `RastaDeadLetterMessagePublished` هر نوشتن تازه را اعلام می‌کند. Lag گروه‌های دیگر و
   عمق Topicهای DLQ دیگر قاعده ندارند.
+- **از دست رفتن متریک‌های `audit-service` صریح است.** Target `host.docker.internal:3115` اکنون فقط در Job اختصاصی
+  `audit-service` است (نه `rasta-services`). `RastaAuditServiceMetricsUnavailable` (`for: 2m`) = `min by (job) (up{job="audit-service"}) == 0 or absent(up{job="audit-service"})`؛
+  `min by (job)` یعنی شکست Scrape **هر** Replica کافی است و چند Replica یک هشدار با فقط `job`/`severity` می‌دهند. تا وقتی
+  می‌سوزد، سکوت هشدارهای شکست، تأخیر، واگرایی و سکوت تولیدکننده هیچ معنایی ندارد ([audit-gap-detected](audit-gap-detected.md) § ۸).
 - **از دست رفتن سیگنال Kafka صریح است.** `RastaKafkaExporterUnavailable` (`for: 2m`) وقتی
   `min by (job) (up{job="kafka-exporter"}) == 0 or absent(up{job="kafka-exporter"})` است، یعنی Exporter Scrape نمی‌شود یا Target
   اصلاً وجود ندارد. `RastaAuditConsumerGroupMetricsMissing` (`for: 5m`) فقط **وقتی Exporter سالم است** (`min(up{job="kafka-exporter"}) == 1`)
@@ -65,7 +69,7 @@ Runbook ناموجود حساب نکند. تاریخ‌ها از [`../20-day-30-
   ([audit-gap-detected](audit-gap-detected.md)). `source_service` از توپولوژی بسته مشتق است (۹ سرویس + `unknown`)، نه از
   `envelope.producer`.
 - **Label.** هر هشدار شمارنده با `sum by` فقط Labelهای کراندار خود متریک را نگه می‌دارد (هشدار Lag فقط `consumergroup, topic`،
-  هشدار Exporter فقط `job`، هشدار گروه غایب فقط `consumergroup`، هشدار p95 فقط `source_topic`، هشدار سکوت فقط `source_service` و Recording Rule فقط `topic`)؛ هیچ Label یا Annotation شناسهٔ
+  هشدار Exporter فقط `job`، هشدار گروه غایب فقط `consumergroup`، هشدار p95 فقط `source_topic`، هشدار سکوت فقط `source_service`، هشدار متریک audit-service فقط `job` و Recording Rule فقط `topic`)؛ هیچ Label یا Annotation شناسهٔ
   مستأجر، Actor، منبع، رویداد، Correlation، Partition، Offset یا متن خطا ندارد.
 
 ### مقداردهی صفر هشدارهای شمارنده

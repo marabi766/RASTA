@@ -943,6 +943,367 @@ tests:
         exp_samples: []
 
   # ---------------------------------------------------------------------------
+  # RastaAuditServiceMetricsUnavailable — the dedicated `audit-service` scrape
+  # job is down or missing. `for: 2m`, labels only `job` and `severity`.
+  #
+  # Outage, recovery and a second outage. The audit-service target is up at
+  # 0m-1m, down 2m-5m, up 6m-7m, down 8m-11m and up at 12m. Pending at 2m and
+  # 3m, firing at exactly 4m, resolved at 6m; the second outage starts the
+  # timer again (pending 8m-9m, firing at 10m). The rasta-services targets on
+  # the same host (one always down, one always up, one flapping) never raise or
+  # suppress it.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1 1 0 0 0 0 1 1 0 0 0 0 1'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '0x12'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3101",environment="local"}'
+        values: '1x12'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3102",environment="local"}'
+        values: '1 0 1 0 1 0 1 0 1 0 1 0 1'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 5m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 6m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 11m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 12m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+    promql_expr_test:
+      # alert_rule_test sees only firing alerts; ALERTS shows the pending state.
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 1m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 2m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="firing",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 6m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 8m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 9m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="firing",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 12m
+        exp_samples: []
+
+  # A healthy audit-service, on two replicas, never fires, however many other
+  # targets are down: every rasta-services target and the Kafka exporter fail
+  # for the whole fixture.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="audit-service",instance="audit-b.internal:3115",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '0x10'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3101",environment="local"}'
+        values: '0x10'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3102",environment="local"}'
+        values: '0x10'
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 10m
+        exp_samples: []
+
+  # No up{job="audit-service"} at all: the job is not configured, or was never
+  # loaded. `== 0` alone would be empty; `absent` supplies the same single
+  # `job` label. Pending at 0m and 1m, firing at 2m. Healthy rasta-services
+  # targets (including the address audit-service used to share a job with)
+  # cannot stand in for it.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3101",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3102",environment="local"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 10m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 0m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 2m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="firing",job="audit-service",severity="warning"}'
+            value: 1
+
+  # The target disappears from a running Prometheus (removed from
+  # prometheus.yml): Prometheus writes a staleness marker, after which the
+  # selector is empty and `absent` holds. Pending at 2m-3m, firing at 4m.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1 1 stale'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 8m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 1m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 2m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+
+  # Replicas: `min by (job)`. Replica B stops being scraped at 2m while A stays
+  # up, and that alone fires at 4m — its process-local counters are missing
+  # from every aggregate. A fails too from 6m; still exactly one alert, with
+  # only `job` and `severity`, never `instance`. Both recover at 9m.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1 1 1 1 1 1 0 0 0 1 1'
+      - series: 'up{job="audit-service",instance="audit-b.internal:3115",environment="local"}'
+        values: '1 1 0 0 0 0 0 0 0 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 7m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 9m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="firing",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 7m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="firing",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 9m
+        exp_samples: []
+
+  # Scrape failures shorter than 2 minutes never fire: each run of failures
+  # is interrupted by a successful scrape, which resets the timer.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1 0 1 0 0 1 0 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 5m
+        exp_samples: []
+
+  # ---------------------------------------------------------------------------
   # RastaAuditConsumerLag — sustained lag on both audit groups fires after 5m.
   #
   # Series names and labels are the ones danielqsj/kafka-exporter v1.9.0
@@ -1057,7 +1418,7 @@ tests:
       - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
         values: '0 0 0 0 0 1 1 1'
       # Another job being down is not the exporter.
-      - series: 'up{job="rasta-services",instance="host.docker.internal:3115",environment="local"}'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3101",environment="local"}'
         values: '0 0 0 0 0 0 0 0'
     alert_rule_test:
       - eval_time: 1m

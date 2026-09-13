@@ -585,7 +585,7 @@ pnpm verify                     # دروازه کامل کیفیت
 **پیکربندی و قواعد هشدار Prometheus.** Job مستقل `prometheus-rules` در CI (روی هر PR و `main`، بی وابستگی Node و بیرون از
 Job سریع `quality`) همان Image سرویس `prometheus` در `docker-compose.yml` را با کل پوشهٔ
 `infrastructure/docker/prometheus` به‌صورت فقط‌خواندنی در `/etc/prometheus` اجرا می‌کند؛ پس مسیر `rule_files` همان است که در
-زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار یازده هشدار و یک Recording Rule را،
+زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار دوازده هشدار و یک Recording Rule را،
 با افزایش واقعی شمارنده (نه مقدار مطلق) و کنترل‌های منفی (`outcome="recorded"`/`"skipped"` هشدار نمی‌دهد، سن پشتهٔ بسته ≤ ۶۰
 هشدار نمی‌دهد، `pending_age` ورودی هشدار نیست)، گذار Series صادرشده با صفر به نخستین رخداد (که هشدار می‌دهد) و Labelهای
 دقیق هر هشدار. برای Kafka همان Fixture با نام و Labelهای واقعی `danielqsj/kafka-exporter:v1.9.0`
@@ -613,7 +613,15 @@ Job سریع `quality`) همان Image سرویس `prometheus` در `docker-comp
 Fixture را شکست دادند. آزمون‌های واحد `audit-service` (`metrics.spec.ts` و دو Spec مصرف‌کننده) مرزهای دقیق Bucket، ۱۱ Topic مشتق از
 `DOMAIN_TOPICS` و `AUDIT_TRAIL_TOPIC`، Exposition صفرِ `_bucket`/`_sum`/`_count` پیش از نخستین رکورد، مقداردهی با `zero()` بی
 فراخوان `observe`، و برای مسیر A و B یک مشاهدهٔ دقیق با `Date.now()` ثابت (Bucket درست، `_sum` دقیق)، Clamp ساعت جلوتر به Bucket
-صفر، و نبودن مشاهده برای `DUPLICATE`، رد و شکست پایگاه داده را اثبات می‌کنند. `RastaAuditProducerSilent` با `rasta_audit_expected_active_producer{source_service}` و `rasta_audit_records_ingested_total`
+صفر، و نبودن مشاهده برای `DUPLICATE`، رد و شکست پایگاه داده را اثبات می‌کنند. `RastaAuditServiceMetricsUnavailable` با Seriesهای واقعی `up{job,instance,environment}` در شش گروه اثبات می‌شود: Target اختصاصی
+`audit-service` که در ۲ دقیقه قطع می‌شود در ۲ و ۳ دقیقه `pending` (از راه `ALERTS`) و دقیقاً در ۴ دقیقه **یک** هشدار با فقط
+`job`/`severity` و Annotation دقیق است، با بازگشت در ۶ دقیقه رفع می‌شود و قطع دوم از ۸ دقیقه باز ۲ دقیقه می‌خواهد (Firing در ۱۰)؛
+Targetهای `rasta-services` همان میزبان (همیشه خاموش، همیشه روشن، متناوب) و Exporter خاموش نه آن را می‌سوزانند نه سرکوب
+می‌کنند، و audit-service سالم با دو Replica هرگز نمی‌سوزد؛ نبودن کامل `up{job="audit-service"}` در ۰ و ۱ دقیقه `pending` و در ۲
+دقیقه Firing است و `rasta-services` سالم جایش را نمی‌گیرد؛ Target برداشته‌شده (نشانگر `stale`) در ۴ دقیقه می‌سوزد؛ از دو Replica
+شکست فقط یکی در ۴ دقیقه می‌سوزد و با شکست هر دو هنوز یک هشدار بی `instance` است؛ و شکست‌های کوتاه‌تر از ۲ دقیقه هرگز نمی‌سوزند.
+هشت جهش در کپی موقت Fixture را شکست دادند: حذف شاخهٔ `absent`، حذف شاخهٔ `== 0`، Selector ‏`rasta-services`، حذف Selector،
+`min by (job, instance)`، `max by (job)`، حذف `for` و `for: 1m`. `RastaAuditProducerSilent` با `rasta_audit_expected_active_producer{source_service}` و `rasta_audit_records_ingested_total`
 واقعی (Labelهای Scrape روی دو Instance، چند Topic و Outcome) در چهار گروه اثبات می‌شود: تولیدکنندهٔ مورد انتظار و ساکت از ۰ تا ۳۵۹
 دقیقه نه `pending` است نه `firing` (Startup: `offset 6h` هنوز نمونه ندارد)، در ۳۶۰ و ۳۸۹ دقیقه `pending` (از راه `ALERTS`) و دقیقاً در ۳۹۰
 دقیقه **یک** هشدار با فقط `source_service`/`severity` و Annotation دقیق؛ سرویس پیکربندی‌نشده با شمارندهٔ قدیمی یا صفر، Label

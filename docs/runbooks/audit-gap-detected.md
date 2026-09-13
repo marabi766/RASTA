@@ -4,7 +4,8 @@
 **هشدار محرک:** `RastaAuditIngestionFailure` (🟠 `warning`، افزایش `rasta_audit_ingestion_failures_total{reason}`) و
 `RastaSecurityEventCaptureGap` (🔴 `critical`، افزایش `rasta_security_event_captures_total{outcome=~"failed|timeout"}` — مسیرش
 [security-event-outbox](security-event-outbox.md)) و `RastaAuditProducerSilent` (🟠 `warning`، تولیدکنندهٔ پیکربندی‌شده در
-`AUDIT_EXPECTED_ACTIVE_PRODUCERS` که ۶ ساعت و ۳۰ دقیقه هیچ ردیفی نساخته — § ۷ تشخیص) در
+`AUDIT_EXPECTED_ACTIVE_PRODUCERS` که ۶ ساعت و ۳۰ دقیقه هیچ ردیفی نساخته — § ۷ تشخیص) و `RastaAuditServiceMetricsUnavailable` (🟠 `warning`، Job اختصاصی `audit-service` دو دقیقه Scrape نمی‌شود یا
+اصلاً نیست — § ۸ تشخیص) در
 `infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`، فقط در
 Prometheus **محلی** و **بی Alertmanager، پس بی تحویل اعلان**. پیام در `rasta.audit.v1.dlq` فقط هشدار عمومی
 `RastaDeadLetterMessagePublished` (`service` = `KAFKA_CLIENT_ID` مصرف‌کنندهٔ `audit-service`) را دارد، نه هشدار اختصاصی حسابرسی. Lag پایدارِ دو گروه `audit-service.*` هشدار
@@ -76,6 +77,7 @@ Recording Rule `topic:kafka_topic_retained_records:sum` است، بی هشدار
   دقیقهٔ پیوسته بالای صفر — [audit-ingestion-lag](audit-ingestion-lag.md)).
 - پیام تازه در `rasta.audit.v1.dlq`.
 - `RastaAuditProducerSilent` برای یک `source_service` می‌سوزد (§ ۷ تشخیص).
+- `RastaAuditServiceMetricsUnavailable` می‌سوزد: هیچ هشدار دیگر `rasta_audit_*` ورودی قابل اعتماد ندارد (§ ۸ تشخیص).
 - در Log `audit-service`: مسیر B `Rejected <EVENT> <eventId> from <topic>[<partition>]: …`؛ مسیر A
   `Cannot map <EVENT> <eventId> from <topic> …` یا `Cannot project … into the organization hierarchy …`؛ و از
   `EventConsumer` مشترک `Unparseable message on …`، `Handler failed <N>x for …` یا `Attempt <i>/<N> failed for …`.
@@ -84,7 +86,7 @@ Recording Rule `topic:kafka_topic_retained_records:sum` است، بی هشدار
 > **درباره متریک‌ها — صادقانه.** `audit-service` متریک‌های `rasta_audit_ingestion_failures_total{reason}`،
 > `rasta_audit_ingestion_lag_seconds{source_topic}` و `rasta_audit_records_ingested_total{source_service,source_topic,outcome}` را
 > در فرایند ثبت می‌کند و از **`GET /metrics`** همان سرویس (پورت پیش‌فرض `3115`، `@Public`، بیرون از قرارداد OpenAPI، بی هیچ
-> شناسهٔ مستأجر/Actor/منبع/رویداد/Correlation در Label) صادر می‌کند. `host.docker.internal:3115` در Job `rasta-services`
+> شناسهٔ مستأجر/Actor/منبع/رویداد/Correlation در Label) صادر می‌کند. `host.docker.internal:3115` در Job اختصاصی `audit-service`
 > فایل **محلی** `infrastructure/docker/prometheus/prometheus.yml` هست؛ پیکربندی Scrape محیط واقعی وابسته به استقرار است و
 > در مخزن نیست. `source_service` در متریک **ادعای خام `envelope.producer` نیست**: از توپولوژی بستهٔ
 > `services/audit-service/src/audit/audit-producer-topology.ts` مشتق می‌شود (مالک Topic تحویل در مسیر A وقتی Producer با آن
@@ -300,6 +302,31 @@ Label هشدار فقط `source_service` است؛ هیچ مستأجر یا رو�
    و ردیف‌های `published_at IS NULL`. Offset جدیدترین Topic مالک را هم بخوان؛ Offset ثابت یعنی چیزی به Kafka نرسیده.
 5. **اگر همه سالم‌اند و فقط عملیاتی رخ نداده،** شکاف حادثه وجود ندارد؛ مورد ۱ را اعمال کن.
 
+### ۸. `RastaAuditServiceMetricsUnavailable` — متریک‌های `audit-service` Scrape نمی‌شوند
+
+این هشدار یعنی Job اختصاصی `audit-service` در Prometheus دست‌کم ۲ دقیقه `up == 0` داشته (Scrape دست‌کم یک Instance شکست خورده)
+یا اصلاً Series `up{job="audit-service"}` ندارد. تا وقتی می‌سوزد، `RastaAuditIngestionFailure`، `RastaAuditIngestionLagHigh`،
+`RastaAuditChainDivergence` و `RastaAuditProducerSilent` ورودی ندارند و **سکوتشان نشانهٔ سلامت نیست**. این هشدار فقط از دست
+رفتن تله‌متری را ثابت می‌کند، نه شکاف شواهد؛ به ترتیب زیر جدا کن:
+
+1. **Prometheus Target را می‌شناسد؟** در `http://localhost:9090/targets` (یا
+   `curl -s localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.labels.job=="audit-service") | {health, lastError, scrapeUrl}'`)
+   ببین Job هست یا نه. **نبودن Job** (شاخهٔ `absent`) خطای پیکربندی یا بار نشدن است: `infrastructure/docker/prometheus/prometheus.yml`
+   را با `promtool check config` بسنج و Prometheus را با پیکربندی درست دوباره بار کن. این حالت دربارهٔ خود `audit-service` چیزی نمی‌گوید.
+2. **فرایند زنده است؟** اگر Target هست و `lastError` اتصال ردشده/Timeout است، از همان میزبان `GET /health/live` و
+   `GET /health/ready` روی پورت `3115` را بخوان. پاسخ ندادن یعنی **خرابی سرویس/فرایند**: Log راه‌اندازی را ببین (پیکربندی
+   نامعتبر مانند `AUDIT_EXPECTED_ACTIVE_PRODUCERS`، پایگاه داده یا Kafka در دسترس نیست) و سرویس را با پیکربندی درست راه بینداز.
+3. **فقط `/metrics` خراب است؟** اگر `/health/live` پاسخ می‌دهد ولی `curl -s -o /dev/null -w '%{http_code}' http://<host>:3115/metrics`
+   `200` نیست یا بدنه `# TYPE rasta_audit_` ندارد، **خرابی Route متریک** است؛ مسئلهٔ کد یا استقرار `audit-service`، نه Kafka.
+4. **Prometheus به آن نمی‌رسد؟** اگر `/metrics` از میزبان `200` است ولی Target `down` است، **دسترس‌پذیری Prometheus** است:
+   نشانی `host.docker.internal`، شبکهٔ Container، Firewall یا `scrape_timeout`. `lastError` همان Target را بخوان.
+5. **Scrape سالم شد ولی ingestion نه؟** وقتی هشدار رفع شد، این Runbook را از § ۳ و § ۴ ادامه بده: Readiness با
+   `projector`/`trail` برابر `false`، `RastaAuditConsumerLag`، `RastaAuditConsumerGroupMetricsMissing` و DLQ **خرابی
+   Consumer/Kafka** را نشان می‌دهند؛ این هشدار آن را نمی‌بیند، چون فرایندی که Scrape می‌شود ممکن است مصرف نکند.
+
+Replica: شکست Scrape فقط یک Instance هم می‌سوزاند، چون شمارنده‌های آن Instance از هر جمع غایب‌اند. Volume را Reset، Offset یا
+گروه را جابه‌جا، یا ترافیک ساختگی منتشر نکن؛ پس از بازگشت، بازهٔ قطع را با گام‌های ۲ و ۶ برای شکاف واقعی بسنج.
+
 ---
 
 ## اقدام
@@ -307,6 +334,9 @@ Label هشدار فقط `source_service` است؛ هیچ مستأجر یا رو�
 ### گام ۱ — مهار
 
 - **علت را در Producer یا Consumer رفع کن، نه در داده.** بازنشر پیش از رفع، همان پیام را دوباره به DLQ می‌فرستد.
+- `RastaAuditServiceMetricsUnavailable`: فرایند، `/metrics` یا مسیر Scrape را طبق § ۸ درست کن. تا رفع نشده، بازهٔ قطع را
+  «بی تله‌متری» ثبت کن، نه «بی شکاف»؛ شکاف احتمالی آن بازه را پس از بازگشت با گام‌های ۲ و ۶ بسنج. برای سبز کردن آن Volume را Reset،
+  Offset را جابه‌جا یا ترافیک ساختگی منتشر نکن.
 - `RastaAuditProducerSilent`: اگر انتظار نادرست بود، سرویس را از `AUDIT_EXPECTED_ACTIVE_PRODUCERS` بردار و `audit-service` را
   با پیکربندی تازه راه بینداز (شواهد تغییری نمی‌کنند)؛ اگر Producer یا Consumer خراب است، همان را رفع کن. هشدار با نخستین ردیف
   واقعی برطرف می‌شود. رویداد آزمایشی یا ساختگی برای خاموش کردن آن منتشر نکن و Offset گروه‌ها را جابه‌جا نکن.
@@ -377,7 +407,7 @@ Label هشدار فقط `source_service` است؛ هیچ مستأجر یا رو�
   `RastaKafkaExporterUnavailable` و `RastaAuditConsumerGroupMetricsMissing` صریح است ([audit-ingestion-lag](audit-ingestion-lag.md)).
   p95 تأخیر ردیف‌های نوشته‌شده هم با `RastaAuditIngestionLagHigh` (Histogram `rasta_audit_ingestion_lag_seconds`) هشدار دارد، و
   سکوت کامل تولیدکنندهٔ صریحاً مورد انتظار با `RastaAuditProducerSilent`. هنوز نیست: Alertmanager و تحویل اعلان، Scrape محیط
-  واقعی، Heartbeat تولیدکننده، تطبیق شکاف رکورد به رکورد، و هشدار `up` برای Target خود `audit-service`.
+  واقعی، Heartbeat تولیدکننده، و تطبیق شکاف رکورد به رکورد. از دست رفتن Scrape خود `audit-service` اکنون `RastaAuditServiceMetricsUnavailable` را دارد (فقط محلی).
 - پاسخ Q-54 ([`../24-open-questions.md`](../24-open-questions.md)): کدام سرویس در کدام محیط حداقل آهنگ رویداد حسابرسی تضمین‌شده
   دارد و چه سکوتی اقدام‌پذیر است. پاسخ فقط `AUDIT_EXPECTED_ACTIVE_PRODUCERS` و پنجره/`for` قاعده را تغییر می‌دهد.
 - Script بازپخش DLQ (R-6) یا حذف ارجاع به آن از [replay-dlq](replay-dlq.md).

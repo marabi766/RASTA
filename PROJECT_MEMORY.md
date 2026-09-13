@@ -185,7 +185,8 @@
 > `metricsContentType` از `@rasta/observability`، `@Public` با دلیل صریح، `@ApiExcludeController()` — به‌صراحت در
 > `AppModule` ثبت شد؛ Guardهای سراسری دست نخوردند و قرارداد OpenAPI همچنان دقیقاً چهار مسیر خواندنی است. Exposition همان
 > متریک‌های ورودی، پرس‌وجو، ظرفیت و زنجیره است که از پیش ثبت می‌شدند و هیچ Label شناسه‌ای ندارند (ADR-053 § 13).
-> `host.docker.internal:3115` به Job `rasta-services` در `infrastructure/docker/prometheus/prometheus.yml` افزوده شد — این فقط
+> `host.docker.internal:3115` به Job `rasta-services` در `infrastructure/docker/prometheus/prometheus.yml` افزوده شد (2026-09-13
+> به Job اختصاصی `audit-service` منتقل شد — ورودی رصدپذیری پایین) — این فقط
 > پیکربندی **محلی** است؛ Scrape محیط واقعی وابسته به استقرار و بیرون از مخزن است. آزمون‌ها: Supertest واحد پشت
 > `AuthGuard`/`RolesGuard` واقعی (بی Token → `200`، Content-Type متنی Prometheus، `# HELP/# TYPE rasta_audit_*`، Route بستهٔ
 > کناری → `401`)، فهرست دقیق Controllerها به‌علاوهٔ اثبات ساختاری «فقط GET، بی Route صادرات»، و در `openapi.int-spec.ts`
@@ -267,8 +268,21 @@ config` → `SUCCESS: 8 rules found`، `promtool test rules` → `SUCCESS` (دو
 > سرویس پیکربندی‌نشده/`unknown`/تازه‌پیکربندی‌شده ساکت؛ دو تولیدکنندهٔ مستقل؛ رفع با ردیف و Reset ‏pending؛ Reset شمارنده ۷→۰
 > ساکت و ۷→۱ شمرده؛ بی Series شمارنده می‌سوزد؛ بی Gate ساکت) و ۹ جهش PromQL همه شکست خوردند. شواهد زنده در
 > `ClaudeResultReport.md` همین گام. **مرز:** فقط نبودِ ردیف از تولیدکنندهٔ اعلام‌شده را ثابت می‌کند، نه انتشار رویداد برای هر عملیات.
+> **از دست رفتن متریک‌های خود `audit-service` صریح شد (همان روز، بعدتر):** همهٔ هشدارهای `rasta_audit_*` بی Scrape همین
+> فرایند بی‌صدا غیرفعال می‌شدند و Target ‏`host.docker.internal:3115` در Job مشترک `rasta-services` فقط با `instance` قابل
+> تشخیص بود. اکنون در `prometheus.yml` Job اختصاصی `audit-service` (`metrics_path: /metrics`، `environment: local`) تنها جای
+> ۳۱۱۵ است و ۳۰۰۰/۳۱۰۱/۳۱۰۲ در `rasta-services` مانده‌اند. هشدار `RastaAuditServiceMetricsUnavailable` (`warning`، `for: 2m`،
+> گروه `rasta-audit-evidence`، Runbook `audit-gap-detected` § ۸ تشخیص،
+> `min by (job) (up{job="audit-service"}) == 0 or absent(up{job="audit-service"})`، Label فقط `job`): شکست Scrape **هر**
+> Replica (`min`، چون شمارنده‌ها محلی فرایندند) یا نبودن کامل Target؛ چند Replica یک هشدار. اکنون ۱۳ قاعده (۱۲ هشدار +
+> ۱ Recording). **شواهد:** `check config` → `SUCCESS: 13 rules found`؛ `test rules` → `SUCCESS` با ۳۵ گروه (۶ تازه: pending
+> ۲–۳m و firing دقیقاً ۴m، رفع و قطع دوم با `for` تازه، `rasta-services`/Exporter خاموش یا سالم بی اثر، `absent` در ۲m،
+> `stale` در ۴m، یک Replica از دو، شکست کوتاه بی هشدار) و ۸ جهش PromQL (حذف `absent`، حذف `== 0`، Selector ‏`rasta-services`
+> یا بی Selector، `by (job, instance)`، `max`، حذف `for`، `for: 1m`) همه شکست خوردند؛ شواهد زنده در `ClaudeResultReport.md`
+> همین گام. **مرز:** فقط از دست رفتن تله‌متری audit-service را ثابت می‌کند، نه انتشار رویداد برای هر عملیات.
 > **هنوز نیست:** Alertmanager و تحویل اعلان، Scrape محیط واقعی، داشبورد، Lag گروه‌های دیگر و عمق Topicهای DLQ دیگر، تشخیص
-> Offset غایبِ هر Topic، ابزار بازپخش، Heartbeat تولیدکننده، هشدار `up` برای Target ‏`audit-service` و تشخیص رکورد غایب.
+> Offset غایبِ هر Topic، ابزار بازپخش، Heartbeat تولیدکننده، هشدار از دست رفتن Scrape برای `identity-service` (Target ‏۳۱۰۱ هنوز
+> در Job مشترک است) و تشخیص رکورد غایب.
 > `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
