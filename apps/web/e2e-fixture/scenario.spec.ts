@@ -21,7 +21,9 @@ test.describe('the scenario status card', () => {
     await page.goto('/demo');
 
     await expect(page.getByText('scenario_demo_grader_oil_change')).toBeVisible();
-    await expect(page.getByText('سازمان انتخاب شد')).toBeVisible();
+    // Two legitimate matches since Phase C added the stage stepper: the
+    // summary line and the stepper's current-stage chip.
+    await expect(page.getByText('سازمان انتخاب شد', { exact: true }).first()).toBeVisible();
   });
 
   test('never appears on a product screen away from the presentation', async ({ page }) => {

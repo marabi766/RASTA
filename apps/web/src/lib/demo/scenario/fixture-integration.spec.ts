@@ -11,23 +11,35 @@ const anySchema = z.unknown();
 /**
  * Modules allowed to reach into `lib/demo/scenario/` at all.
  *
- * Three, and each is already gated: `fixture-client.ts` only builds a client
- * inside `createFixtureClient`, itself only reachable from
- * `lib/auth/session.tsx`'s fixture-mode branch (`demo-mode.spec.ts` proves
- * that one); the other two are the `next/dynamic`-loaded, self-contained UI
- * islands — each wraps its own `<ScenarioProvider>` rather than depending on
- * one mounted above it, which is what keeps them two separate lazy chunks
- * instead of one that would flash both controls in together. Their own
- * gates (`scenario-status-gate.tsx`, `scenario-reset-gate.tsx`) import *them*
- * dynamically, not the engine — they stay off this list on purpose, and the
- * live-bundle test below is what actually matters: it does not check import
- * statements, it checks that rendering in live mode never triggers the
- * dynamic import.
+ * Each is already gated: `fixture-client.ts` only builds a client inside
+ * `createFixtureClient`, itself only reachable from `lib/auth/session.tsx`'s
+ * fixture-mode branch (`demo-mode.spec.ts` proves that one); every other
+ * entry is a `next/dynamic`-loaded, self-contained UI island — each wraps its
+ * own `<ScenarioProvider>` rather than depending on one mounted above it,
+ * which is what keeps them separate lazy chunks instead of one that would
+ * flash every control in together. Their own gates (`*-gate.tsx`, one per
+ * panel) import *them* dynamically, not the engine — gates stay off this list
+ * on purpose, and the live-bundle test below is what actually matters: it
+ * does not check import statements, it checks that rendering in live mode
+ * never triggers the dynamic import.
+ *
+ * `components/demo/scenario-copy.ts` is presentation copy and routing, not
+ * state — but it imports `ScenarioStage`/`PresentationPersona`/
+ * `ScenarioRejectionReason` as types from the barrel, which still counts as
+ * "reaching into the engine" for this test's regex, so every panel below
+ * that uses it needs it on the list too.
  */
 const APPROVED_ENGINE_IMPORTERS = new Set([
   'lib/demo/fixture-client.ts',
+  'components/demo/scenario-copy.ts',
   'components/demo/scenario-status-card.tsx',
   'components/demo/scenario-reset-control.tsx',
+  'components/assets/asset-scenario-panel.tsx',
+  'components/maintenance/maintenance-scenario-panel.tsx',
+  'components/marketplace/offer-scenario-panel.tsx',
+  'components/orders/payment-scenario-panel.tsx',
+  'components/documents/document-scenario-panel.tsx',
+  'components/audit/audit-scenario-panel.tsx',
 ]);
 
 function sourceFiles(): string[] {
@@ -43,7 +55,7 @@ function sourceFiles(): string[] {
   return out.sort();
 }
 
-describe('the scenario engine is reachable from exactly four gated modules', () => {
+describe('the scenario engine is reachable only from its approved importers', () => {
   it('names no unapproved importer', () => {
     const importers = sourceFiles()
       .filter((file) => !file.endsWith('.spec.ts') && !file.endsWith('.spec.tsx'))

@@ -1,6 +1,7 @@
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { resetScenarioStoreSingletonForTests } from '@/lib/demo/scenario/store';
+import { FIXTURE_ENTRY_POINTS } from '@/lib/demo/entry-points';
+import { getScenarioStore, resetScenarioStoreSingletonForTests } from '@/lib/demo/scenario/store';
 import { expectNoAxeViolations, makeHarness, renderWithSession, settle } from '@/test/harness';
 import { ScenarioResetGate } from './scenario-reset-gate';
 import { ScenarioStatusGate } from './scenario-status-gate';
@@ -31,7 +32,9 @@ describe('ScenarioStatusGate', () => {
     renderWithSession(<ScenarioStatusGate />, session);
 
     await screen.findByText('scenario_demo_grader_oil_change');
-    expect(screen.getByText('سازمان انتخاب شد')).toBeInTheDocument();
+    // Two matches now exist: the summary line and the current-stage stepper
+    // chip (added for Phase C) — both legitimately say the same thing.
+    expect(screen.getAllByText('سازمان انتخاب شد').length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('۰')).toBeInTheDocument();
   });
 
@@ -41,6 +44,68 @@ describe('ScenarioStatusGate', () => {
 
     await screen.findByText('scenario_demo_grader_oil_change');
     expect(container.textContent).not.toMatch(/"schemaVersion"|"activityLog"/);
+  });
+
+  it('selects a persona, idempotently, and reflects the choice visually', async () => {
+    const { session } = makeHarness({ dataMode: 'fixture' });
+    renderWithSession(<ScenarioStatusGate />, session);
+
+    await screen.findByText('scenario_demo_grader_oil_change');
+    const fleetManager = screen.getByRole('button', { name: 'مدیر ناوگان' });
+    await userEvent.click(fleetManager);
+    expect(fleetManager).toHaveTextContent('✓');
+
+    // Re-selecting the same persona is idempotent — no rejection, no change.
+    await userEvent.click(fleetManager);
+    expect(fleetManager).toHaveTextContent('✓');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('shows the current stage on the stepper and the matching next-destination link', async () => {
+    const { session } = makeHarness({ dataMode: 'fixture' });
+    renderWithSession(<ScenarioStatusGate />, session);
+
+    await screen.findByText('scenario_demo_grader_oil_change');
+    const current = screen.getByText('سازمان انتخاب شد', { selector: '[aria-current="step"]' });
+    expect(current).toBeInTheDocument();
+
+    const link = screen.getByRole('link', { name: /گام بعدی/ });
+    expect(link).toHaveAttribute('href', '/assets/ast_demo_grader');
+
+    getScenarioStore().dispatch({
+      type: 'MAINTENANCE_REQUEST_CREATED',
+      maintenanceRequestId: FIXTURE_ENTRY_POINTS.maintenanceRequestId,
+      assetId: FIXTURE_ENTRY_POINTS.assetId,
+      organizationId: FIXTURE_ENTRY_POINTS.organizationId,
+      title: 'x',
+    });
+
+    expect(
+      await screen.findByText('درخواست تعمیر ثبت شد', { selector: '[aria-current="step"]' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /گام بعدی/ })).toHaveAttribute(
+      'href',
+      `/maintenance/${FIXTURE_ENTRY_POINTS.maintenanceRequestId}`,
+    );
+  });
+
+  it('has no accessibility violations after a persona change and a stage advance', async () => {
+    const { session } = makeHarness({ dataMode: 'fixture' });
+    const { container } = renderWithSession(<ScenarioStatusGate />, session);
+
+    await screen.findByText('scenario_demo_grader_oil_change');
+    await userEvent.click(screen.getByRole('button', { name: 'مدیر ناوگان' }));
+    await expectNoAxeViolations(container);
+
+    getScenarioStore().dispatch({
+      type: 'MAINTENANCE_REQUEST_CREATED',
+      maintenanceRequestId: FIXTURE_ENTRY_POINTS.maintenanceRequestId,
+      assetId: FIXTURE_ENTRY_POINTS.assetId,
+      organizationId: FIXTURE_ENTRY_POINTS.organizationId,
+      title: 'x',
+    });
+    await screen.findByText('درخواست تعمیر ثبت شد', { selector: '[aria-current="step"]' });
+    await expectNoAxeViolations(container);
   });
 });
 
