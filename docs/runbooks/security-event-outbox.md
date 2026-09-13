@@ -3,11 +3,12 @@
 **شدت:** 🟠 هشدار
 **متریک محرک:** `rasta_security_event_outbox_closed_backlog_age_seconds > 60` · افزایش
 `rasta_security_event_captures_total{outcome=~"failed|timeout"}` ·
-افزایش `rasta_security_event_publish_failures_total`
+افزایش `rasta_security_event_publish_failures_total` · `up{job="identity-service"}` صفر یا غایب
 **هشدار:** در `infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml` —
 `RastaSecurityEventCaptureGap` (🔴 `critical`، `sum by (outcome) (increase(…{outcome=~"failed|timeout"}[5m])) > 0`)،
 `RastaSecurityEventClosedBacklogStale` (🟠 `warning`، `rasta_security_event_outbox_closed_backlog_age_seconds > 60`) و
-`RastaSecurityEventPublishFailure` (🟠 `warning`، `sum by (reason) (increase(…[5m])) > 0`). فقط Prometheus **محلی** آن‌ها را
+`RastaSecurityEventPublishFailure` (🟠 `warning`، `sum by (reason) (increase(…[5m])) > 0`) و
+`RastaIdentityServiceMetricsUnavailable` (🟠 `warning`، `min by (job) (up{job="identity-service"}) == 0 or absent(up{job="identity-service"})` با `for: 2m` — § ۶ تشخیص). فقط Prometheus **محلی** آن‌ها را
 ارزیابی می‌کند؛ مخزن **Alertmanager ندارد** و هیچ اعلانی تحویل نمی‌شود، و Scrape محیط واقعی وابسته به استقرار است.
 `failed`، `timeout` و هر دو `reason` شکست انتشار از بار شدن ماژول متریک با صفر صادر می‌شوند، پس نخستین رخداد هم هشدار
 می‌دهد ([README](README.md#مقداردهی-صفر-هشدارهای-شمارنده)).
@@ -32,6 +33,7 @@
 - `rasta_security_event_outbox_closed_backlog_total` مدام رشد می‌کند
 - ردهای `REFUSED` مسیر B در `audit_event` دیده نمی‌شوند (به یاد داشته باش: هر رد دست‌کم تا پایان پنجره‌اش دیر می‌رسد)
 - `rasta_security_event_captures_total` با `outcome="failed"` یا `outcome="timeout"` بالا می‌رود
+- `RastaIdentityServiceMetricsUnavailable` می‌سوزد: سه هشدار دیگر این Runbook ورودی قابل اعتماد ندارند (§ ۶ تشخیص)
 
 `rasta_security_event_outbox_pending_age_seconds` و `…_pending_total` پنجره‌های باز را هم می‌شمارند؛ نزدیک به طول پنجره
 بودنشان نشانهٔ خرابی نیست. `rasta_security_event_outbox_open_windows` تعداد ردیف‌هایی است که هنوز می‌شمارند.
@@ -100,10 +102,44 @@ SELECT count(*) FILTER (WHERE claim_expires_at > now())  AS live_leases,
   پس سرویس سالم دیده می‌شود حتی وقتی صف منتشر نمی‌شود.
 - Topic `rasta.audit.trail.v1` باید وجود داشته باشد — Producer `allowAutoTopicCreation: false` است.
 
+### ۶. `RastaIdentityServiceMetricsUnavailable` — متریک‌های `identity-service` Scrape نمی‌شوند
+
+این هشدار یعنی Job اختصاصی `identity-service` در Prometheus دست‌کم ۲ دقیقه `up == 0` داشته (Scrape دست‌کم یک Instance شکست
+خورده) یا اصلاً Series `up{job="identity-service"}` ندارد. Label فقط `job` و `severity` است. تا وقتی می‌سوزد، شمارنده‌های ثبت و
+انتشار و Gaugeهای پشتهٔ صف ورودی ندارند، پس **سکوت `RastaSecurityEventCaptureGap`، `RastaSecurityEventClosedBacklogStale` و
+`RastaSecurityEventPublishFailure` نشانهٔ سلامت شواهد رد نیست.** این هشدار فقط از دست رفتن تله‌متری را ثابت می‌کند، نه شکاف
+شواهد؛ به ترتیب زیر جدا کن:
+
+1. **(الف) Job یا Target در Prometheus نیست یا بار نشده؟** در `http://localhost:9090/targets` (یا
+   `curl -s localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.labels.job=="identity-service") | {health, lastError, scrapeUrl}'`)
+   ببین Job هست یا نه. **نبودن Job** (شاخهٔ `absent`) یعنی Target از `infrastructure/docker/prometheus/prometheus.yml` برداشته
+   شده یا Prometheus پیکربندی تازه را بار نکرده — مثلاً هنوز ۳۱۰۱ را زیر `rasta-services` می‌خواند. فایل را با
+   `promtool check config` بسنج و Prometheus را با پیکربندی درست دوباره بار کن. این حالت دربارهٔ خود `identity-service` چیزی نمی‌گوید.
+2. **(ب) فرایند زنده و آماده است؟** اگر Target هست و `lastError` اتصال ردشده/Timeout است، از همان میزبان `GET /health/live`،
+   `GET /health/ready` و `GET /health/startup` روی پورت `3101` را بخوان. پاسخ ندادن `live` یعنی **خرابی فرایند**؛ `ready` برابر
+   `503` یعنی پایگاه دادهٔ identity در دسترس نیست. Log راه‌اندازی را ببین و سرویس را با پیکربندی درست به‌روال عادی راه بینداز.
+3. **(ج) فقط `/metrics` خراب است؟** اگر `/health/live` پاسخ می‌دهد ولی `curl -s -o /dev/null -w '%{http_code}' http://<host>:3101/metrics`
+   `200` نیست یا بدنه `# TYPE rasta_security_event_` ندارد، **خرابی Route متریک** است؛ مسئلهٔ کد یا استقرار `identity-service`، نه Kafka.
+4. **(د) Prometheus به آن نمی‌رسد؟** اگر `/metrics` از میزبان `200` است ولی Target `down` است، **دسترس‌پذیری یا پیکربندی
+   Prometheus** است: نشانی `host.docker.internal`، شبکهٔ Container، Firewall، `metrics_path` یا `scrape_timeout`. `lastError`
+   همان Target را بخوان.
+5. **(هـ) Scrape سالم شد ولی شواهد نه؟** وقتی هشدار رفع شد، سه هشدار دیگر دوباره معنا دارند؛ از § ۱ تا § ۵ همین Runbook ادامه
+   بده: پشتهٔ پنجره‌های بسته، `last_error`، Lease، `checks.kafka` و Topic ‏`rasta.audit.trail.v1` **خرابی Relay، Kafka یا پایگاه
+   داده** را نشان می‌دهند؛ این هشدار آن را نمی‌بیند، چون فرایندی که Scrape می‌شود ممکن است منتشر نکند.
+
+Replica: شکست Scrape فقط یک Instance هم می‌سوزاند، چون شمارنده‌ها و Gaugeهای آن Instance از هر جمع غایب‌اند. Volume را Reset،
+ردیف شواهد را ویرایش یا حذف، Offset یا گروه Kafka را جابه‌جا، یا رد/ترافیک ساختگی منتشر نکن، و خروجی `/metrics` یا Log را با
+داده حساس جایی منتشر نکن. بازهٔ قطع را «بی تله‌متری» ثبت کن، نه «بی شکاف»؛ `captures_total{failed|timeout}` شمارندهٔ محلی فرایند
+است و اگر فرایند در همان بازه Restart شده باشد، افزایش پیش از Restart دیگر دیده نمی‌شود — Log
+`Refusal audit capture did not complete` همان بازه را برای شکاف واقعی بخوان.
+
 ---
 
 ## اقدام
 
+0. **`RastaIdentityServiceMetricsUnavailable`:** Job/Target، فرایند، `/metrics` یا مسیر Scrape را طبق تشخیص § ۶ درست کن. تا
+   رفع نشده، سه هشدار دیگر را «نامعلوم» بخوان، نه «سالم». برای سبز کردن آن Volume را Reset، Offset را جابه‌جا یا ترافیک ساختگی
+   منتشر نکن.
 1. **Kafka در دسترس نیست یا Topic وجود ندارد:** Kafka را برگردان / Topic را با `create-topics.sh` بساز. Relay خودکار
    ادامه می‌دهد؛ Backoff سقف `OUTBOX_CLAIM_BACKOFF_MAX_SECONDS` دارد.
 2. **`AuditTrailContractError`:** Producer را اصلاح و Deploy کن. ردیف‌ها در صف می‌مانند و پس از Deploy در تلاش بعدی
@@ -124,6 +160,7 @@ SELECT count(*) FILTER (WHERE claim_expires_at > now())  AS live_leases,
 
 ## تأیید رفع
 
+- `up{job="identity-service"}` برای هر Instance برابر `1` است و `RastaIdentityServiceMetricsUnavailable` در `/alerts` نیست.
 - `rasta_security_event_outbox_closed_backlog_age_seconds` به زیر ۶۰ برمی‌گردد و `closed_backlog_total` کم می‌شود.
 - یک ردیف تازه در `audit_event` با `source_topic = 'rasta.audit.trail.v1'` و `source_service = 'identity-service'`
   ظاهر می‌شود؛ `occurrence_count` آن برابر همان ردیف `security_event_outbox` است.

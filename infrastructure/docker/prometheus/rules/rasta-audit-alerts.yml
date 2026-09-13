@@ -16,8 +16,9 @@
 #   because lag that clears on its own is normal consumption; the two
 #   missing-signal alerts use `for: 2m` (exporter) and `for: 5m` (group) so a
 #   single failed scrape or a brief exporter restart does not fire.
-#   RastaAuditServiceMetricsUnavailable is the same signal-loss shape for
-#   audit-service's own scrape job, also with `for: 2m`.
+#   RastaAuditServiceMetricsUnavailable and RastaIdentityServiceMetricsUnavailable
+#   are the same signal-loss shape for the audit-service and identity-service
+#   scrape jobs, also with `for: 2m`.
 #   RastaAuditProducerSilent is the other exception: it alerts on the absence
 #   of an increase, so it uses a 6h window and `for: 30m`, and fires only for
 #   producers audit-service was explicitly configured to expect.
@@ -115,6 +116,35 @@ groups:
         annotations:
           summary: 'Refusal audit events failed to publish ({{ $labels.reason }})'
           description: 'rasta_security_event_publish_failures_total increased with reason {{ $labels.reason }} in the last 5 minutes; the rows were scheduled for retry.'
+          runbook: docs/runbooks/security-event-outbox.md
+
+      - alert: RastaIdentityServiceMetricsUnavailable
+        # The three RastaSecurityEvent* rules above read only samples scraped
+        # from identity-service, so they go quiet when it is not scraped. That
+        # loss is made explicit here, with the same shape as
+        # RastaAuditServiceMetricsUnavailable. The dedicated `identity-service`
+        # scrape job is the selector; `instance` never is.
+        #
+        # - `min by (job) (...) == 0`: any configured identity-service target
+        #   failing its scrape. `min`, not `max`: capture and publish counters
+        #   and backlog gauges are process-local, so one replica that is not
+        #   scraped leaves the aggregate evidence incomplete even while another
+        #   replica is up.
+        # - `absent(up{job="identity-service"})`: the target is not configured
+        #   or was never loaded, where `== 0` alone would be empty. It carries
+        #   the same single `job` label.
+        # - `for: 2m`: one failed scrape (15s interval) or a brief restart does
+        #   not fire; recovery resets the timer.
+        #
+        # Proves only that identity-service telemetry is missing, never whether
+        # every refusal produced audit evidence.
+        expr: min by (job) (up{job="identity-service"}) == 0 or absent(up{job="identity-service"})
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Prometheus has not scraped identity-service metrics for 2 minutes'
+          description: 'The {{ $labels.job }} scrape target has been down or missing for at least 2 minutes. Refusal-evidence capture-gap, closed-backlog and publish-failure metrics have no trustworthy input while this fires: silence from RastaSecurityEventCaptureGap, RastaSecurityEventClosedBacklogStale and RastaSecurityEventPublishFailure is not evidence that refusal evidence is healthy.'
           runbook: docs/runbooks/security-event-outbox.md
 
       - alert: RastaAuditProducerSilent

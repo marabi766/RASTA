@@ -585,7 +585,7 @@ pnpm verify                     # دروازه کامل کیفیت
 **پیکربندی و قواعد هشدار Prometheus.** Job مستقل `prometheus-rules` در CI (روی هر PR و `main`، بی وابستگی Node و بیرون از
 Job سریع `quality`) همان Image سرویس `prometheus` در `docker-compose.yml` را با کل پوشهٔ
 `infrastructure/docker/prometheus` به‌صورت فقط‌خواندنی در `/etc/prometheus` اجرا می‌کند؛ پس مسیر `rule_files` همان است که در
-زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار دوازده هشدار و یک Recording Rule را،
+زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار سیزده هشدار و یک Recording Rule (چهارده قاعده) را،
 با افزایش واقعی شمارنده (نه مقدار مطلق) و کنترل‌های منفی (`outcome="recorded"`/`"skipped"` هشدار نمی‌دهد، سن پشتهٔ بسته ≤ ۶۰
 هشدار نمی‌دهد، `pending_age` ورودی هشدار نیست)، گذار Series صادرشده با صفر به نخستین رخداد (که هشدار می‌دهد) و Labelهای
 دقیق هر هشدار. برای Kafka همان Fixture با نام و Labelهای واقعی `danielqsj/kafka-exporter:v1.9.0`
@@ -616,11 +616,25 @@ Fixture را شکست دادند. آزمون‌های واحد `audit-service` (
 صفر، و نبودن مشاهده برای `DUPLICATE`، رد و شکست پایگاه داده را اثبات می‌کنند. `RastaAuditServiceMetricsUnavailable` با Seriesهای واقعی `up{job,instance,environment}` در شش گروه اثبات می‌شود: Target اختصاصی
 `audit-service` که در ۲ دقیقه قطع می‌شود در ۲ و ۳ دقیقه `pending` (از راه `ALERTS`) و دقیقاً در ۴ دقیقه **یک** هشدار با فقط
 `job`/`severity` و Annotation دقیق است، با بازگشت در ۶ دقیقه رفع می‌شود و قطع دوم از ۸ دقیقه باز ۲ دقیقه می‌خواهد (Firing در ۱۰)؛
-Targetهای `rasta-services` همان میزبان (همیشه خاموش، همیشه روشن، متناوب) و Exporter خاموش نه آن را می‌سوزانند نه سرکوب
+Targetهای `rasta-services` و `identity-service` همان میزبان (همیشه خاموش، همیشه روشن، متناوب) و Exporter خاموش نه آن را می‌سوزانند نه سرکوب
 می‌کنند، و audit-service سالم با دو Replica هرگز نمی‌سوزد؛ نبودن کامل `up{job="audit-service"}` در ۰ و ۱ دقیقه `pending` و در ۲
-دقیقه Firing است و `rasta-services` سالم جایش را نمی‌گیرد؛ Target برداشته‌شده (نشانگر `stale`) در ۴ دقیقه می‌سوزد؛ از دو Replica
+دقیقه Firing است و `rasta-services` یا `identity-service` سالم جایش را نمی‌گیرد؛ Target برداشته‌شده (نشانگر `stale`) در ۴ دقیقه می‌سوزد؛ از دو Replica
 شکست فقط یکی در ۴ دقیقه می‌سوزد و با شکست هر دو هنوز یک هشدار بی `instance` است؛ و شکست‌های کوتاه‌تر از ۲ دقیقه هرگز نمی‌سوزند.
 هشت جهش در کپی موقت Fixture را شکست دادند: حذف شاخهٔ `absent`، حذف شاخهٔ `== 0`، Selector ‏`rasta-services`، حذف Selector،
+`min by (job, instance)`، `max by (job)`، حذف `for` و `for: 1m`. `RastaIdentityServiceMetricsUnavailable` به همان شکل با
+Seriesهای واقعی `up{job,instance,environment}` در شش گروه اثبات می‌شود: Target اختصاصی `identity-service` که در ۲ دقیقه قطع
+می‌شود در ۲ و ۳ دقیقه `pending` (از راه `ALERTS`) و دقیقاً در ۴ دقیقه **یک** هشدار با فقط `job`/`severity` و Annotation دقیق
+است، در ۶ دقیقه رفع و در ۶ و ۷ دقیقه بی `pending` است و قطع دوم از ۸ دقیقه باز ۲ دقیقه می‌خواهد (Firing در ۱۰)، در حالی که
+Target همیشه خاموش و Target متناوب `rasta-services` و audit-service سالم نه آن را می‌سوزانند نه سرکوب می‌کنند؛ identity-service
+سالم با دو Replica در ۲، ۵ و ۱۰ دقیقه هرگز نمی‌سوزد، هرچند همهٔ Targetهای `rasta-services`، audit-service و Exporter خاموش‌اند؛
+نبودن کامل `up{job="identity-service"}` در ۰ و ۱ دقیقه `pending` و در ۲ دقیقه Firing است و Targetهای سالم `rasta-services`
+(حتی ۳۱۰۱ زیر پیکربندی قدیمی `rasta-services`) و audit-service جایش را نمی‌گیرند؛ Target برداشته‌شده (نشانگر `stale` در ۲ دقیقه)
+در ۲ و ۳ دقیقه `pending` و در ۴ دقیقه Firing است؛ از دو Replica شکست فقط یکی از ۲ دقیقه در ۴ دقیقه می‌سوزد و با شکست هر دو
+(۷ دقیقه) هنوز یک هشدار بی `instance` است و با بازگشت هر دو در ۹ دقیقه رفع می‌شود؛ و شکست‌های کوتاه‌تر از ۲ دقیقه (در ۴ و ۶ دقیقه
+`pending`، در ۵ و ۷ دقیقه پاک) هرگز نمی‌سوزند. Seriesهای Fixture سه هشدار صف ردها اکنون Labelهای Scrape
+`job="identity-service"` دارند (مقدار و انتظارها بی تغییر؛ Label کامل `RastaSecurityEventClosedBacklogStale` هم همین `job` را
+نشان می‌دهد)، و Seriesهای `up` نشانی ۳۱۰۱ در گروه‌های audit-service و Exporter هم به همین Job رفتند. هشت جهش در کپی موقت
+پوشهٔ Prometheus Fixture را شکست دادند: حذف شاخهٔ `absent`، حذف شاخهٔ `== 0`، Selector ‏`rasta-services`، حذف Selector،
 `min by (job, instance)`، `max by (job)`، حذف `for` و `for: 1m`. `RastaAuditProducerSilent` با `rasta_audit_expected_active_producer{source_service}` و `rasta_audit_records_ingested_total`
 واقعی (Labelهای Scrape روی دو Instance، چند Topic و Outcome) در چهار گروه اثبات می‌شود: تولیدکنندهٔ مورد انتظار و ساکت از ۰ تا ۳۵۹
 دقیقه نه `pending` است نه `firing` (Startup: `offset 6h` هنوز نمونه ندارد)، در ۳۶۰ و ۳۸۹ دقیقه `pending` (از راه `ALERTS`) و دقیقاً در ۳۹۰

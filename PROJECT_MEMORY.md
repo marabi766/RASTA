@@ -271,18 +271,33 @@ config` → `SUCCESS: 8 rules found`، `promtool test rules` → `SUCCESS` (دو
 > **از دست رفتن متریک‌های خود `audit-service` صریح شد (همان روز، بعدتر):** همهٔ هشدارهای `rasta_audit_*` بی Scrape همین
 > فرایند بی‌صدا غیرفعال می‌شدند و Target ‏`host.docker.internal:3115` در Job مشترک `rasta-services` فقط با `instance` قابل
 > تشخیص بود. اکنون در `prometheus.yml` Job اختصاصی `audit-service` (`metrics_path: /metrics`، `environment: local`) تنها جای
-> ۳۱۱۵ است و ۳۰۰۰/۳۱۰۱/۳۱۰۲ در `rasta-services` مانده‌اند. هشدار `RastaAuditServiceMetricsUnavailable` (`warning`، `for: 2m`،
+> ۳۱۱۵ است و ۳۰۰۰/۳۱۰۱/۳۱۰۲ در آن گام در `rasta-services` ماندند (۳۱۰۱ بعدتر رفت، پایین). هشدار `RastaAuditServiceMetricsUnavailable` (`warning`، `for: 2m`،
 > گروه `rasta-audit-evidence`، Runbook `audit-gap-detected` § ۸ تشخیص،
 > `min by (job) (up{job="audit-service"}) == 0 or absent(up{job="audit-service"})`، Label فقط `job`): شکست Scrape **هر**
-> Replica (`min`، چون شمارنده‌ها محلی فرایندند) یا نبودن کامل Target؛ چند Replica یک هشدار. اکنون ۱۳ قاعده (۱۲ هشدار +
+> Replica (`min`، چون شمارنده‌ها محلی فرایندند) یا نبودن کامل Target؛ چند Replica یک هشدار. در آن گام ۱۳ قاعده (۱۲ هشدار +
 > ۱ Recording). **شواهد:** `check config` → `SUCCESS: 13 rules found`؛ `test rules` → `SUCCESS` با ۳۵ گروه (۶ تازه: pending
 > ۲–۳m و firing دقیقاً ۴m، رفع و قطع دوم با `for` تازه، `rasta-services`/Exporter خاموش یا سالم بی اثر، `absent` در ۲m،
 > `stale` در ۴m، یک Replica از دو، شکست کوتاه بی هشدار) و ۸ جهش PromQL (حذف `absent`، حذف `== 0`، Selector ‏`rasta-services`
 > یا بی Selector، `by (job, instance)`، `max`، حذف `for`، `for: 1m`) همه شکست خوردند؛ شواهد زنده در `ClaudeResultReport.md`
 > همین گام. **مرز:** فقط از دست رفتن تله‌متری audit-service را ثابت می‌کند، نه انتشار رویداد برای هر عملیات.
+> **از دست رفتن متریک‌های `identity-service` صریح شد (همان روز، پس از آن):** سه هشدار شواهد رد مسیر B
+> (`RastaSecurityEventCaptureGap`، `RastaSecurityEventClosedBacklogStale`، `RastaSecurityEventPublishFailure`) بی Scrape همین
+> فرایند بی‌صدا ورودی از دست می‌دادند. اکنون در `prometheus.yml` Job اختصاصی `identity-service` (`metrics_path: /metrics`،
+> `environment: local`) تنها جای ۳۱۰۱ است، ۳۱۱۵ فقط در `audit-service` و `rasta-services` فقط ۳۰۰۰/۳۱۰۲. هشدار
+> `RastaIdentityServiceMetricsUnavailable` (`warning`، `for: 2m`، گروه `rasta-audit-evidence` کنار سه هشدار صف ردها، Runbook
+> `security-event-outbox` § ۶ تشخیص، `min by (job) (up{job="identity-service"}) == 0 or absent(up{job="identity-service"})`،
+> Label فقط `job`): شکست Scrape **هر** Replica (`min`، چون شمارنده‌های ثبت/انتشار و Gaugeهای پشته محلی فرایندند) یا نبودن
+> کامل Target؛ چند Replica یک هشدار؛ یک Scrape موفق تایمر را Reset می‌کند. رفتار ۱۲ هشدار و Recording Rule پیشین دست نخورد.
+> **اکنون ۱۴ قاعده (۱۳ هشدار + ۱ Recording).** Seriesهای Fixture سه هشدار صف ردها (و Seriesهای `up` نشانی ۳۱۰۱ در گروه‌های
+> audit-service/Exporter) اکنون `job="identity-service"` دارند، با همان مقدار و انتظار. **شواهد:** `check config` →
+> `SUCCESS: 14 rules found`؛ `test rules` → `SUCCESS` با ۴۱ گروه (۶ تازه: pending ۲–۳m و firing دقیقاً ۴m، رفع در ۶m و قطع دوم
+> با `for` تازه تا ۱۰m، `rasta-services`/audit-service/Exporter خاموش یا سالم بی اثر، `absent` در ۲m حتی با ۳۱۰۱ زیر پیکربندی
+> قدیمی `rasta-services`، `stale` در ۴m، یک Replica از دو در ۴m و یک هشدار با شکست هر دو، شکست کوتاه بی هشدار) و ۸ جهش PromQL
+> (حذف `absent`، حذف `== 0`، Selector ‏`rasta-services` یا بی Selector، `by (job, instance)`، `max`، حذف `for`، `for: 1m`) همه
+> شکست خوردند؛ دروازه‌های سرویس، E2E و شواهد زنده در `ClaudeResultReport.md` همین گام. **مرز:** فقط از دست رفتن تله‌متری
+> identity-service را ثابت می‌کند، نه اینکه هر رد یا تغییر وضعیت شواهد ساخته است.
 > **هنوز نیست:** Alertmanager و تحویل اعلان، Scrape محیط واقعی، داشبورد، Lag گروه‌های دیگر و عمق Topicهای DLQ دیگر، تشخیص
-> Offset غایبِ هر Topic، ابزار بازپخش، Heartbeat تولیدکننده، هشدار از دست رفتن Scrape برای `identity-service` (Target ‏۳۱۰۱ هنوز
-> در Job مشترک است) و تشخیص رکورد غایب.
+> Offset غایبِ هر Topic، ابزار بازپخش، Heartbeat تولیدکننده و تشخیص رکورد غایب (تطبیق شکاف رکورد به رکورد).
 > `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series

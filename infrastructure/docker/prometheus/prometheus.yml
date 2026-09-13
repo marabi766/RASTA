@@ -42,8 +42,22 @@ scrape_configs:
     static_configs:
       - targets:
           - 'host.docker.internal:3000'
-          - 'host.docker.internal:3101'
           - 'host.docker.internal:3102'
+        labels:
+          environment: local
+
+  # identity-service in its own job, and only here, for the same reason as
+  # audit-service below: the job name is the service's stable operational
+  # identity, while `instance` is a deployment-specific address.
+  # RastaIdentityServiceMetricsUnavailable selects up{job="identity-service"}
+  # and keeps only `job`. The refusal-evidence capture-gap, closed-backlog and
+  # publish-failure alerts read this target's samples, so losing it has to be
+  # an alert in its own right rather than a quiet absence of those three.
+  - job_name: identity-service
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 'host.docker.internal:3101'
         labels:
           environment: local
 
