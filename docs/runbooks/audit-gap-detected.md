@@ -77,7 +77,10 @@
 > فایل **محلی** `infrastructure/docker/prometheus/prometheus.yml` هست؛ پیکربندی Scrape محیط واقعی وابسته به استقرار است و
 > در مخزن نیست. **هیچ قاعدهٔ هشدار و هیچ داشبوردی** روی این متریک‌ها در مخزن نیست، پس هشداری فرض نکن: شواهد همچنان از
 > خواندن مستقیم `/metrics` (یا Prometheus محلی)، Readiness، Log، Lag کافکا، DLQ و API جست‌وجوست. همچنین
-> `rasta_dlq_messages_total` تعریف شده ولی `EventConsumer` مشترک آن را **افزایش نمی‌دهد** — عمق DLQ را از خود Topic بخوان. متریک‌های
+> `EventConsumer` مشترک `rasta_dlq_messages_total{service,topic,reason}` را **فقط پس از موفقیت `send` به Topic DLQ** یک
+> واحد افزایش می‌دهد (`service` = `clientId` مصرف‌کننده، `topic` = Topic مبدأ، `reason` = `VALIDATION_FAILED` یا
+> `MAX_RETRIES_EXCEEDED`)؛ تلاش مجدد، `send` ردشده و پیامِ Drop‌شده بی Topic DLQ شمرده نمی‌شوند. شمارنده از شروع فرایند
+> است و عمق فعلی DLQ نیست — عمق را همچنان از خود Topic بخوان. متریک‌های
 > `rasta_security_event_*` و `rasta_outbox_*` در `/metrics` خودِ `identity-service` صادر می‌شوند.
 
 ## اثر
@@ -319,7 +322,6 @@ SELECT id, source_topic, source_service, occurred_at, recorded_at, occurrence_co
 - قاعدهٔ هشدار روی `rasta_audit_ingestion_failures_total`، Lag هر دو گروه `audit-service.*`، رشد `rasta.audit.v1.dlq`، و
   `rasta_security_event_captures_total{outcome=~"failed|timeout"}` — هیچ‌کدام امروز در مخزن نیست، هرچند متریک‌های
   `audit-service` اکنون قابل Scrape‌اند.
-- افزایش `rasta_dlq_messages_total` در `EventConsumer` مشترک، تا این متریکِ تعریف‌شده واقعاً چیزی بشمارد.
 - Script بازپخش DLQ (R-6) یا حذف ارجاع به آن از [replay-dlq](replay-dlq.md).
 - نگهداشت Topic مسیر B و DLQ در محیط واقعی را صریح و مستند کن؛ Script محلی فقط سی روز دارد.
 - ثبت ردها در سرویس‌های دیگر (R-2)، ردهای Gateway و ردهای Token سرویس — تا آن وقت نبودن آن‌ها «شکاف حادثه» نیست و نباید

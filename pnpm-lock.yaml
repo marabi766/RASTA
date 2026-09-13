@@ -143,6 +143,9 @@ importers:
       '@rasta/logging':
         specifier: workspace:*
         version: link:../logging
+      '@rasta/observability':
+        specifier: workspace:*
+        version: link:../observability
       jose:
         specifier: ^5.9.6
         version: 5.10.0

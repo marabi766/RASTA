@@ -108,7 +108,7 @@ Logهای مالی).
 | `rasta_outbox_lease_reclaimed_total`    | Counter   | service                              |
 | `rasta_outbox_claim_attempts_total`     | Counter   | service                              |
 | `rasta_outbox_leases_active`            | Gauge     | service                              |
-| `rasta_dlq_messages_total`              | Counter   | topic, reason                        |
+| `rasta_dlq_messages_total`              | Counter   | service, topic (مبدأ), reason        |
 | `rasta_event_validation_failures_total` | Counter   | topic, event_name                    |
 | `temporal_workflow_completed_total`     | Counter   | workflow_type, task_queue            |
 | `temporal_activity_retries_total`       | Counter   | activity_type                        |

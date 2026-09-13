@@ -7,6 +7,7 @@ import {
   type DlqReason,
   type EventEnvelope,
 } from '@rasta/contracts';
+import { dlqMessagesTotal } from '@rasta/observability';
 import { createSystemContext, runWithContext } from '../context/request-context';
 
 /**
@@ -268,6 +269,12 @@ export class EventConsumer {
    * actually sent, not this consumer's re-serialization of it. The reason,
    * the error and the original topic ride along as headers so the runbook
    * (docs/runbooks/replay-dlq.md) can triage without opening the body.
+   *
+   * `rasta_dlq_messages_total` counts completed publishes, so it moves only
+   * after `send` resolves: a rejected send propagates without counting, and a
+   * consumer with no dead-letter topic drops without counting. Its labels are
+   * the closed set the metric declares — this consumer's `clientId`, the source
+   * topic and the `DlqReason` — and never an event, tenant or error value.
    */
   private async deadLetter(
     originalTopic: string,
@@ -305,6 +312,8 @@ export class EventConsumer {
         },
       ],
     });
+
+    dlqMessagesTotal.inc({ service: this.options.clientId, topic: originalTopic, reason });
   }
 
   private async getDlqProducer(): Promise<Producer> {

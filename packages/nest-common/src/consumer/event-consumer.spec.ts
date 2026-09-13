@@ -5,7 +5,8 @@ import type {
   EventDelivery,
   EventHandler,
 } from './event-consumer';
-import type { EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { dlqMessagesTotal, registry } from '@rasta/observability';
 
 /**
  * The delivery-metadata contract added for ADR-053 AUD-001.
@@ -340,5 +341,260 @@ describe('EventConsumer startup failure', () => {
 
     expect(fake.disconnects).toBe(1);
     expect(consumer.isRunning()).toBe(false);
+  });
+});
+
+/**
+ * `rasta_dlq_messages_total`, counted where a dead letter is actually written.
+ *
+ * The counter is the platform's one signal that a message left the stream, so
+ * it has to agree with the dead-letter topic in both directions: every completed
+ * publish counts once, and nothing else counts — not a retry, not a send the
+ * broker refused (that message is still on its partition), and not a drop by a
+ * consumer that has no dead-letter topic. These drive the real `handleMessage`
+ * and `deadLetter` against a fake producer placed where the lazily connected one
+ * would be, so no broker is needed and the private members stay private.
+ */
+describe('EventConsumer dead-letter metric', () => {
+  const SOURCE_TOPIC = 'rasta.asset.v1';
+  const DLQ_TOPIC = 'rasta.asset.v1.dlq';
+  const CLIENT_ID = 'nest-common-dlq-spec';
+
+  /** Values that must never become a label: identifiers and error text. */
+  const EVENT_ID = '01JDLQMETRICSPEC000000001';
+  const CORRELATION_ID = 'corr-dlq-metric-spec';
+  const TENANT_ID = 'ORG_DLQ_METRIC_TENANT';
+  const HANDLER_FAILURE = 'database unavailable for ORG_DLQ_METRIC_TENANT';
+
+  interface SentRecord {
+    topic: string;
+    messages: { value: Buffer | null; headers: Record<string, unknown> }[];
+  }
+
+  class FakeDlqProducer {
+    readonly sent: SentRecord[] = [];
+
+    constructor(private readonly failure?: Error) {}
+
+    async send(record: SentRecord): Promise<void> {
+      if (this.failure) throw this.failure;
+      this.sent.push(record);
+    }
+  }
+
+  /** The private members these tests reach, named rather than cast to `any`. */
+  interface PrivateDeadLetter {
+    dlqProducer?: FakeDlqProducer;
+    handleMessage(
+      topic: string,
+      partition: number,
+      value: Buffer | null,
+      headers: undefined,
+    ): Promise<void>;
+  }
+
+  const silent: ConsumerLogger = {
+    log: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+  };
+
+  const baseOptions: EventConsumerOptions = {
+    brokers: ['localhost:9092'],
+    clientId: CLIENT_ID,
+    groupId: 'nest-common-dlq-spec.group',
+    topics: [SOURCE_TOPIC],
+    deadLetterTopic: DLQ_TOPIC,
+    maxRetries: 1,
+    retryBackoffMs: 0,
+  };
+
+  const validBytes = (): Buffer =>
+    Buffer.from(
+      JSON.stringify({
+        eventId: EVENT_ID,
+        eventName: 'ASSET_DECOMMISSIONED',
+        eventVersion: 1,
+        occurredAt: '2026-09-08T10:00:00.000Z',
+        producer: 'asset-service',
+        producerVersion: '1.4.0',
+        aggregateType: 'Asset',
+        aggregateId: 'AST_DLQ_METRIC_1',
+        correlationId: CORRELATION_ID,
+        tenantId: TENANT_ID,
+        payload: { reason: 'sold' },
+      }),
+      'utf8',
+    );
+
+  const malformedBytes = (): Buffer =>
+    Buffer.from(`{"eventId":"${EVENT_ID}","tenantId":"${TENANT_ID}", not json`, 'utf8');
+
+  /** The real consumer, with a fake producer where the connected one would be. */
+  function build(
+    producer: FakeDlqProducer | undefined,
+    handler: EventHandler,
+    overrides: Partial<EventConsumerOptions> = {},
+    logger: ConsumerLogger = silent,
+  ): PrivateDeadLetter {
+    const consumer = new EventConsumer({ ...baseOptions, ...overrides }, handler, logger);
+    const handle = consumer as unknown as PrivateDeadLetter;
+    handle.dlqProducer = producer;
+    return handle;
+  }
+
+  interface Sample {
+    labels: Record<string, string | number | undefined>;
+    value: number;
+  }
+
+  async function counted(): Promise<Sample[]> {
+    return (await dlqMessagesTotal.get()).values
+      .filter((sample) => sample.value > 0)
+      .map((sample) => ({ labels: { ...sample.labels }, value: sample.value }));
+  }
+
+  const failingHandler: EventHandler = async () => {
+    throw new Error(HANDLER_FAILURE);
+  };
+
+  beforeEach(() => {
+    dlqMessagesTotal.reset();
+  });
+
+  afterAll(() => {
+    dlqMessagesTotal.reset();
+  });
+
+  it('counts a malformed message once its dead letter is published', async () => {
+    const producer = new FakeDlqProducer();
+    const consumer = build(producer, async () => undefined);
+
+    await consumer.handleMessage(SOURCE_TOPIC, 3, malformedBytes(), undefined);
+
+    expect(producer.sent).toHaveLength(1);
+    expect(producer.sent[0]?.topic).toBe(DLQ_TOPIC);
+    expect(await counted()).toEqual([
+      {
+        labels: { service: CLIENT_ID, topic: SOURCE_TOPIC, reason: DLQ_REASONS.VALIDATION_FAILED },
+        value: 1,
+      },
+    ]);
+  });
+
+  it('counts a handler that exhausted its retries once, as MAX_RETRIES_EXCEEDED', async () => {
+    let attempts = 0;
+    const producer = new FakeDlqProducer();
+    const consumer = build(producer, async () => {
+      attempts += 1;
+      throw new Error(HANDLER_FAILURE);
+    });
+
+    await consumer.handleMessage(SOURCE_TOPIC, 0, validBytes(), undefined);
+
+    expect(attempts).toBe(1);
+    expect(producer.sent).toHaveLength(1);
+    expect(await counted()).toEqual([
+      {
+        labels: {
+          service: CLIENT_ID,
+          topic: SOURCE_TOPIC,
+          reason: DLQ_REASONS.MAX_RETRIES_EXCEEDED,
+        },
+        value: 1,
+      },
+    ]);
+  });
+
+  it('does not count a dead letter the broker refused, and still rejects with that failure', async () => {
+    // The message was written nowhere and is still on its partition, so
+    // counting it would report a DLQ entry that does not exist.
+    const refusal = new Error('DLQ unreachable');
+    const consumer = build(new FakeDlqProducer(refusal), failingHandler);
+
+    await expect(consumer.handleMessage(SOURCE_TOPIC, 0, validBytes(), undefined)).rejects.toBe(
+      refusal,
+    );
+    await expect(consumer.handleMessage(SOURCE_TOPIC, 0, malformedBytes(), undefined)).rejects.toBe(
+      refusal,
+    );
+
+    expect(await counted()).toEqual([]);
+  });
+
+  it('does not count a message dropped by a consumer with no dead-letter topic', async () => {
+    const lines: string[] = [];
+    const logger: ConsumerLogger = {
+      log: (message) => lines.push(message),
+      warn: (message) => lines.push(message),
+      error: (message) => lines.push(message),
+    };
+    const consumer = build(
+      undefined,
+      async () => undefined,
+      { deadLetterTopic: undefined },
+      logger,
+    );
+
+    await expect(
+      consumer.handleMessage(SOURCE_TOPIC, 0, malformedBytes(), undefined),
+    ).resolves.toBeUndefined();
+
+    expect(lines.some((line) => line.includes('dropped'))).toBe(true);
+    expect(await counted()).toEqual([]);
+  });
+
+  it('counts one per completed publish, not one per retry', async () => {
+    let attempts = 0;
+    const producer = new FakeDlqProducer();
+    const consumer = build(
+      producer,
+      async () => {
+        attempts += 1;
+        throw new Error(HANDLER_FAILURE);
+      },
+      { maxRetries: 3 },
+    );
+
+    await consumer.handleMessage(SOURCE_TOPIC, 0, validBytes(), undefined);
+    await consumer.handleMessage(SOURCE_TOPIC, 1, validBytes(), undefined);
+
+    // Six handler attempts, two publishes, two counts.
+    expect(attempts).toBe(6);
+    expect(producer.sent).toHaveLength(2);
+    const samples = await counted();
+    expect(samples).toEqual([
+      {
+        labels: {
+          service: CLIENT_ID,
+          topic: SOURCE_TOPIC,
+          reason: DLQ_REASONS.MAX_RETRIES_EXCEEDED,
+        },
+        value: 2,
+      },
+    ]);
+    expect(samples.reduce((total, sample) => total + sample.value, 0)).toBe(2);
+  });
+
+  it('labels with the closed set only, never an identifier, error text or position', async () => {
+    const producer = new FakeDlqProducer();
+    const consumer = build(producer, failingHandler);
+
+    await consumer.handleMessage(SOURCE_TOPIC, 7, validBytes(), undefined);
+    await consumer.handleMessage(SOURCE_TOPIC, 7, malformedBytes(), undefined);
+
+    // One sample per code path, two publishes in total.
+    const samples = await counted();
+    expect(samples).toHaveLength(2);
+    expect(samples.reduce((total, sample) => total + sample.value, 0)).toBe(2);
+    for (const { labels } of samples) {
+      expect(Object.keys(labels).sort()).toEqual(['reason', 'service', 'topic']);
+    }
+
+    const exposition = await registry.getSingleMetricAsString('rasta_dlq_messages_total');
+    for (const forbidden of [EVENT_ID, CORRELATION_ID, TENANT_ID, HANDLER_FAILURE, DLQ_TOPIC]) {
+      expect(exposition).not.toContain(forbidden);
+    }
+    expect(exposition).not.toMatch(/partition|offset|event_id|tenant|correlation|error/i);
   });
 });

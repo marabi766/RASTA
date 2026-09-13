@@ -195,6 +195,17 @@
 > Prometheus یا داشبورد؛ و `rasta_dlq_messages_total` هنوز در `EventConsumer` مشترک **افزایش نمی‌یابد** (گام بعدی جدا).
 > `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
+> **به‌روزرسانی 2026-09-13 (`rasta_dlq_messages_total` اکنون شمرده می‌شود):** `EventConsumer` مشترک
+> (`packages/nest-common/src/consumer/event-consumer.ts`) همان Counter موجود `dlqMessagesTotal` از `@rasta/observability` را
+> — بی Registry یا Counter دوم — در `deadLetter()` و **فقط پس از resolve شدن `producer.send`** یک واحد افزایش می‌دهد، با
+> Labelهای دقیق `{ service: clientId, topic: <Topic مبدأ>, reason: DlqReason }`. `send` ردشده (خطا همچنان بیرون پرتاب
+> می‌شود و Partition می‌ایستد)، تلاش‌های مجدد و پیامِ Drop‌شده بی `deadLetterTopic` شمرده نمی‌شوند؛ بایت‌ها، Headerها،
+> Idempotence، Retry و Offset بی‌تغییرند. `@rasta/nest-common` اکنون `@rasta/observability: workspace:*` را مستقیم دارد
+> (بی چرخه؛ فقط Importer خودش در `pnpm-lock.yaml`). شش آزمون واحد بی Broker در `event-consumer.spec.ts` (Malformed →
+> `VALIDATION_FAILED`، Retry تمام‌شده → `MAX_RETRIES_EXCEEDED`، `send` ردشده → صفر و همان خطا، بی DLQ → صفر، دو انتشار با
+> شش تلاش → دو، و نبودن شناسه/متن خطا/Partition در Label)؛ nest-common اکنون ۸ مجموعه / ۱۴۰ آزمون. **هنوز نیست:** هیچ
+> قاعدهٔ هشدار Prometheus یا داشبورد، Script بازپخش DLQ و Scrape محیط واقعی. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
+>
 > **به‌روزرسانی 2026-09-12 (Phase C10 — محل رد نهم، نخستین تصمیم‌گیرندهٔ غیر از دامنه و `RolesGuard`):**
 > `identity-service` اکنون **دقیقاً نُه** محل رد دارد. محل تازه ردِ خودِ `AuthGuard` پلتفرم است: Token تأییدشده‌ای که با
 > `X-Organization-Id` سازمانی بیرون از عضویت‌هایش را می‌خواهد (`action = identity.tenant_context.select`،

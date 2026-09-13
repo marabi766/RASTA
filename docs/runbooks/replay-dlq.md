@@ -1,7 +1,10 @@
 # Runbook: بررسی و بازپخش DLQ
 
 **شدت:** 🟠 هشدار
-**هشدار محرک:** `rasta_dlq_messages_total` افزایش یافت (**هر پیام جدید**)
+**سیگنال محرک:** `rasta_dlq_messages_total{service,topic,reason}` افزایش یافت (**هر پیام جدید**)، یا Topic DLQ رشد کرد.
+`EventConsumer` مشترک این شمارنده را فقط پس از انتشار موفق به Topic DLQ یک واحد افزایش می‌دهد (`topic` = Topic مبدأ).
+**امروز هیچ قاعدهٔ هشدار Prometheus در مخزن نیست**، پس این Runbook خودکار آغاز نمی‌شود: افزایش را از `/metrics` یا
+Prometheus بخوان، یا رشد Topic را مستقیم ببین.
 **زمان پاسخ هدف:** ۲ ساعت (۱۵ دقیقه اگر رویداد مالی است)
 
 ---
@@ -134,7 +137,7 @@ docker compose exec kafka kafka-run-class.sh kafka.tools.GetOffsetShell \
   --bootstrap-server localhost:9094 --topic rasta.marketplace.v1.dlq
 ```
 
-- متریک `rasta_dlq_messages_total` ثابت مانده
+- متریک `rasta_dlq_messages_total` برای همان `service`/`topic` پس از بازپخش دوباره افزایش نیافته (شمارنده با راه‌اندازی دوبارهٔ فرایند صفر می‌شود؛ معیار اصلی همان Offset بالاست)
 - اثر کسب‌وکاری رویداد بازپخش‌شده در پایگاه داده دیده می‌شود
 - اگر مالی بود: توازن دفتر کل بررسی شده
 
