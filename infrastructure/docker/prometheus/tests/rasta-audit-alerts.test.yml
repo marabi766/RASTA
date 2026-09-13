@@ -1,5 +1,5 @@
 # Behaviour tests for rules/rasta-audit-alerts.yml. Not loaded by Prometheus:
-# prometheus.yml's `rule_files` names only the rules directory.
+# prometheus.yml's `rule_files` names only rules/rasta-audit-alerts.yml.
 #
 #   docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
 #     --entrypoint promtool prom/prometheus:v3.1.0 \
@@ -79,9 +79,9 @@ tests:
   # ---------------------------------------------------------------------------
   - interval: 1m
     input_series:
-      - series: 'rasta_audit_chain_verification_failures_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",reason="RECORD_HASH_MISMATCH",scope="ORGANIZATION"}'
+      - series: 'rasta_audit_chain_verification_failures_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",reason="RECORD_HASH_MISMATCH",scope="organization"}'
         values: '0 0 1 1 1 1 1 1 1 1 1'
-      - series: 'rasta_audit_chain_verification_failures_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",reason="PREVIOUS_HASH_MISMATCH",scope="PLATFORM"}'
+      - series: 'rasta_audit_chain_verification_failures_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",reason="PREVIOUS_HASH_MISMATCH",scope="platform"}'
         values: '3 3 3 3 3 3 3 3 3 3 3'
     alert_rule_test:
       - eval_time: 1m
@@ -93,10 +93,10 @@ tests:
           - exp_labels:
               severity: critical
               reason: RECORD_HASH_MISMATCH
-              scope: ORGANIZATION
+              scope: organization
             exp_annotations:
-              summary: 'Audit chain verification found a divergence (RECORD_HASH_MISMATCH, ORGANIZATION)'
-              description: 'A ORGANIZATION verification reported RECORD_HASH_MISMATCH in the last 5 minutes. Treat as a security incident; never repair the chain.'
+              summary: 'Audit chain verification found a divergence (RECORD_HASH_MISMATCH, organization)'
+              description: 'A organization verification reported RECORD_HASH_MISMATCH in the last 5 minutes. Treat as a security incident; never repair the chain.'
               runbook: docs/runbooks/audit-chain-divergence.md
       - eval_time: 10m
         alertname: RastaAuditChainDivergence
@@ -216,4 +216,98 @@ tests:
               runbook: docs/runbooks/security-event-outbox.md
       - eval_time: 10m
         alertname: RastaSecurityEventPublishFailure
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # Regression: the first real event after process start fires.
+  #
+  # Production exports every alert-driving counter tuple at zero when the
+  # process (or the DLQ-enabled consumer) is constructed, and scrapes see that
+  # zero before any event. `_` is "no series yet"; each series then appears at
+  # 0 and its first real event takes it to 1. That 0 -> 1 step is what
+  # `increase` sees, so all five counter alerts fire on the very first event.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_dlq_messages_total{service="audit-service",topic="rasta.identity.v1",reason="VALIDATION_FAILED"}'
+        values: '_ _ 0 1 1'
+      - series: 'rasta_audit_ingestion_failures_total{reason="trail_tenant_mismatch"}'
+        values: '_ _ 0 1 1'
+      - series: 'rasta_audit_chain_verification_failures_total{reason="CHAIN_LENGTH_MISMATCH",scope="platform"}'
+        values: '_ _ 0 1 1'
+      - series: 'rasta_security_event_captures_total{outcome="timeout"}'
+        values: '_ _ 0 1 1'
+      - series: 'rasta_security_event_publish_failures_total{reason="contract_violation"}'
+        values: '_ _ 0 1 1'
+    alert_rule_test:
+      # Exported at zero, nothing has happened yet.
+      - eval_time: 2m
+        alertname: RastaDeadLetterMessagePublished
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaDeadLetterMessagePublished
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: audit-service
+              topic: rasta.identity.v1
+              reason: VALIDATION_FAILED
+            exp_annotations:
+              summary: 'A message was published to the dead-letter topic for rasta.identity.v1'
+              description: 'Consumer audit-service dead-lettered a message from rasta.identity.v1 with reason VALIDATION_FAILED in the last 5 minutes. A DLQ message is never routine.'
+              runbook: docs/runbooks/replay-dlq.md
+      - eval_time: 3m
+        alertname: RastaAuditIngestionFailure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: trail_tenant_mismatch
+            exp_annotations:
+              summary: 'audit-service failed to write an audit record (trail_tenant_mismatch)'
+              description: 'rasta_audit_ingestion_failures_total increased with reason trail_tenant_mismatch in the last 5 minutes: at least one ingestion attempt did not produce an audit_event row.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 3m
+        alertname: RastaAuditChainDivergence
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              reason: CHAIN_LENGTH_MISMATCH
+              scope: platform
+            exp_annotations:
+              summary: 'Audit chain verification found a divergence (CHAIN_LENGTH_MISMATCH, platform)'
+              description: 'A platform verification reported CHAIN_LENGTH_MISMATCH in the last 5 minutes. Treat as a security incident; never repair the chain.'
+              runbook: docs/runbooks/audit-chain-divergence.md
+      - eval_time: 3m
+        alertname: RastaSecurityEventCaptureGap
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              outcome: timeout
+            exp_annotations:
+              summary: 'identity-service returned a refusal without audit evidence (timeout)'
+              description: 'rasta_security_event_captures_total increased with outcome timeout in the last 5 minutes: at least one refusal was not captured into security_event_outbox.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 3m
+        alertname: RastaSecurityEventPublishFailure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: contract_violation
+            exp_annotations:
+              summary: 'Refusal audit events failed to publish (contract_violation)'
+              description: 'rasta_security_event_publish_failures_total increased with reason contract_violation in the last 5 minutes; the rows were scheduled for retry.'
+              runbook: docs/runbooks/security-event-outbox.md
+
+  # Control: why the zero series exist. A series first exported at 1 (no zero
+  # before it) has no earlier sample, so `increase` cannot see that event.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_chain_verification_failures_total{reason="RECORD_HASH_MISMATCH",scope="organization"}'
+        values: '_ _ _ 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RastaAuditChainDivergence
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaAuditChainDivergence
         exp_alerts: []

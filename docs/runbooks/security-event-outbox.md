@@ -8,8 +8,9 @@
 `RastaSecurityEventCaptureGap` (🔴 `critical`، `sum by (outcome) (increase(…{outcome=~"failed|timeout"}[5m])) > 0`)،
 `RastaSecurityEventClosedBacklogStale` (🟠 `warning`، `rasta_security_event_outbox_closed_backlog_age_seconds > 60`) و
 `RastaSecurityEventPublishFailure` (🟠 `warning`، `sum by (reason) (increase(…[5m])) > 0`). فقط Prometheus **محلی** آن‌ها را
-ارزیابی می‌کند؛ مخزن **Alertmanager ندارد** و هیچ اعلانی تحویل نمی‌شود، Scrape محیط واقعی وابسته به استقرار است، و نخستین
-افزایشِ هر ترکیب Label پس از شروع فرایند هشدار نمی‌دهد ([README](README.md#محدودیت-هشدارهای-شمارنده)).
+ارزیابی می‌کند؛ مخزن **Alertmanager ندارد** و هیچ اعلانی تحویل نمی‌شود، و Scrape محیط واقعی وابسته به استقرار است.
+`failed`، `timeout` و هر دو `reason` شکست انتشار از بار شدن ماژول متریک با صفر صادر می‌شوند، پس نخستین رخداد هم هشدار
+می‌دهد ([README](README.md#مقداردهی-صفر-هشدارهای-شمارنده)).
 **زمان پاسخ هدف:** ۳۰ دقیقه
 
 > **وضعیت (2026-09-11، AUD-004 Phase C2):** ردها اکنون **پنجره‌ای تجمیع** می‌شوند. ردهای یکسان — همان مستأجر، Actor، فعل،

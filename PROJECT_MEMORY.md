@@ -206,6 +206,24 @@
 > شش تلاش → دو، و نبودن شناسه/متن خطا/Partition در Label)؛ nest-common اکنون ۸ مجموعه / ۱۴۰ آزمون. **هنوز نیست:** هیچ
 > قاعدهٔ هشدار Prometheus یا داشبورد، Script بازپخش DLQ و Scrape محیط واقعی. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
+> **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
+> برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
+> می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس
+> شمارش واقعی را پاک نمی‌کند؛ محل‌های افزایش واقعی دست نخوردند): `initializeAuditAlertSeries()` در
+> `services/audit-service/src/observability/metrics.ts` هنگام بار شدن ماژول — ۸ مقدار `INGESTION_FAILURE_REASONS` و ۶ × ۲
+> ترکیب `DIVERGENCE_REASON_VALUES` × `VERIFICATION_SCOPE_LABELS` (`organization|platform`؛ Import یک‌طرفه از
+> `audit.verification.view.ts`)؛ `initializeSecurityEventAlertSeries()` در `identity-service` — فقط `failed`/`timeout` و هر دو
+> `SECURITY_EVENT_PUBLISH_FAILURE_REASONS`؛ و `EventConsumer` مشترک در Constructor، **فقط با `deadLetterTopic`** —
+> `clientId` × هر Topic مبدأ × پنج `DLQ_REASONS`، بی اتصال Kafka. آزمون‌ها Exposition واقعی (`metricsText()`/Registry) را
+> می‌خوانند: audit ۳ آزمون (۲۲ مجموعه / ۶۲۱)، identity فایل تازهٔ `security-event.metrics.spec.ts` با ۳ آزمون (۱۹ / ۷۱۲)،
+> nest-common ۳ آزمون (۸ / ۱۴۳) — صفرِ دقیق هر ترکیب، نبود Series برای مصرف‌کنندهٔ بی DLQ، و پاک نشدن شمارش واقعی با
+> مقداردهی دوباره؛ پنج جهش (حذف هر فراخوان، مقداردهی بی DLQ، حذف پیش از مقداردهی) هر پنج را شکست دادند. Fixture
+> `promtool` اکنون `scope` کوچک تولیدی را به کار می‌برد و گروه تازهٔ «صفر → نخستین رخداد» هر پنج هشدار شمارنده را اثبات
+> می‌کند (و یک کنترلِ Series متولدشده با ۱ که هشدار نمی‌دهد)؛ بی صفرِ پیشین همان پنج ارزیابی شکست خوردند. قواعد، آستانه‌ها و
+> Annotationها بی‌تغییرند. **هنوز نیست:** Alertmanager و تحویل اعلان، داشبورد، Scrape محیط واقعی، هشدار Lag کافکا یا عمق
+> Topic DLQ، ابزار بازپخش و تشخیص رکورد غایب؛ S-06، AUD-004 و COM-009 بسته نمی‌شوند (`COM-009` همچنان `READY`/۱۳ و ADR-053
+> `Proposed`).
+>
 > **به‌روزرسانی 2026-09-13 (قواعد هشدار Prometheus زنجیرهٔ شواهد حسابرسی — فقط محلی):** فایل
 > `infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml` (گروه `rasta-audit-evidence`) با `rule_files` در
 > `prometheus.yml` بار و پوشهٔ `rules` فقط‌خواندنی در سرویس `prometheus` Compose (همان `prom/prometheus:v3.1.0`) Mount شد.
@@ -226,7 +244,7 @@
 > Prometheus زندهٔ Compose هر شش قاعده را از `/etc/prometheus/rules/rasta-audit-alerts.yml` با `health=ok` بار کرد و
 > `activeAlertmanagers` تهی بود. Job مستقل CI `prometheus-rules` هر دو فرمان `promtool` را روی PR و `main` اجرا می‌کند.
 > **محدودیت تأییدشده:** Series برچسب‌دار `prom-client` با مقدار ۱ متولد می‌شود، پس نخستین رخدادِ هر ترکیب Label پس از شروع
-> فرایند هشدار نمی‌دهد (مقداردهی صفر در کد، گامی جدا). **هنوز نیست:** Alertmanager و هر تحویل اعلان، داشبورد، Scrape محیط
+> فرایند هشدار نمی‌دهد (مقداردهی صفر در کد، گامی جدا — در به‌روزرسانی بعدی همان روز انجام شد). **هنوز نیست:** Alertmanager و هر تحویل اعلان، داشبورد، Scrape محیط
 > واقعی، هشدار Lag کافکا یا عمق Topic DLQ، ابزار بازپخش DLQ و تشخیص رکورد حسابرسیِ غایب. این گام S-06، AUD-004، COM-009 یا
 > عملیات‌پذیری محیط واقعی را نمی‌بندد؛ `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >

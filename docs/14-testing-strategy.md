@@ -587,7 +587,8 @@ Job سریع `quality`) همان Image سرویس `prometheus` در `docker-comp
 `infrastructure/docker/prometheus` به‌صورت فقط‌خواندنی در `/etc/prometheus` اجرا می‌کند؛ پس مسیر `rule_files` همان است که در
 زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار شش هشدار را،
 با افزایش واقعی شمارنده (نه مقدار مطلق) و کنترل‌های منفی (`outcome="recorded"`/`"skipped"` هشدار نمی‌دهد، سن پشتهٔ بسته ≤ ۶۰
-هشدار نمی‌دهد، `pending_age` ورودی هشدار نیست) و Labelهای دقیق هر هشدار. `pnpm verify` این دروازه را اجرا نمی‌کند، چون Docker
+هشدار نمی‌دهد، `pending_age` ورودی هشدار نیست)، گذار Series صادرشده با صفر به نخستین رخداد (که هشدار می‌دهد) و Labelهای
+دقیق هر هشدار. `pnpm verify` این دروازه را اجرا نمی‌کند، چون Docker
 می‌خواهد. فرمان محلی (در Git Bash روی ویندوز `MSYS_NO_PATHCONV=1` لازم است):
 
 ```bash

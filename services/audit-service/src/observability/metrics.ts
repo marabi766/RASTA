@@ -1,4 +1,5 @@
 import { Counter, Gauge, Histogram, registry } from '@rasta/observability';
+import { DIVERGENCE_REASON_VALUES } from '../audit/audit.verification.view';
 
 /**
  * AUD-001 ingestion telemetry.
@@ -269,3 +270,33 @@ export const auditChainRecordsVerified = new Histogram({
   buckets: [0, 1, 100, 1000, 10000, 100000],
   registers: [registry],
 });
+
+// ---------------------------------------------------------------------------
+// Alert series, exported at zero from process start
+//
+// The two counters above drive `RastaAuditIngestionFailure` and
+// `RastaAuditChainDivergence` (infrastructure/docker/prometheus/rules), both
+// `increase(...[5m]) > 0`. prom-client exports a labelled series only once it
+// has a value, so without this a series would be born at 1 on its first real
+// failure and `increase` would have no earlier sample to compare it with: the
+// first failure of each kind after a restart would never alert.
+//
+// `inc(labels, 0)` adds zero. It creates the sample when it is missing and
+// leaves an existing count untouched, so calling this again — as tests that
+// `reset()` a counter do — never erases a real failure. Every value comes from
+// the closed sets the increment sites already use; nothing here is a new label.
+// ---------------------------------------------------------------------------
+
+/** Exports every alert-driving audit failure series at zero. Idempotent. */
+export function initializeAuditAlertSeries(): void {
+  for (const reason of Object.values(INGESTION_FAILURE_REASONS)) {
+    auditIngestionFailuresTotal.inc({ reason }, 0);
+  }
+  for (const reason of DIVERGENCE_REASON_VALUES) {
+    for (const scope of Object.values(VERIFICATION_SCOPE_LABELS)) {
+      auditChainVerificationFailuresTotal.inc({ reason, scope }, 0);
+    }
+  }
+}
+
+initializeAuditAlertSeries();

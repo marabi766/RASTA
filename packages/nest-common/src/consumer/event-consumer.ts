@@ -126,6 +126,30 @@ export class EventConsumer {
       retry: { initialRetryTime: 300, retries: 8 },
       logLevel: 1, // ERROR — kafkajs is extremely chatty at INFO
     });
+    this.initializeDlqSeries();
+  }
+
+  /**
+   * Exports this consumer's `rasta_dlq_messages_total` series at zero.
+   *
+   * `RastaDeadLetterMessagePublished` is `increase(...[5m]) > 0`, and
+   * prom-client exports a labelled series only once it has a value: without
+   * this, the first dead letter for a (topic, reason) after a restart would be
+   * born at 1 and never alert. So every tuple this consumer can ever count —
+   * its `clientId`, each subscribed source topic, each `DlqReason` — exists at
+   * zero from construction, before any connection to Kafka.
+   *
+   * Only with a dead-letter topic: a consumer without one never counts, so it
+   * gets no series either. `inc(labels, 0)` adds zero, so a second consumer
+   * with the same client id and topics leaves an existing count untouched.
+   */
+  private initializeDlqSeries(): void {
+    if (!this.options.deadLetterTopic) return;
+    for (const topic of this.options.topics) {
+      for (const reason of Object.values(DLQ_REASONS)) {
+        dlqMessagesTotal.inc({ service: this.options.clientId, topic, reason }, 0);
+      }
+    }
   }
 
   async start(): Promise<void> {

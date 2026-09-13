@@ -82,8 +82,9 @@ Prometheus **محلی** و **بی Alertmanager، پس بی تحویل اعلان
 > فایل **محلی** `infrastructure/docker/prometheus/prometheus.yml` هست؛ پیکربندی Scrape محیط واقعی وابسته به استقرار است و
 > در مخزن نیست. Prometheus محلی روی این متریک‌ها فقط `RastaAuditIngestionFailure` را ارزیابی می‌کند (و روی متریک‌های مجاور
 > `RastaSecurityEventCaptureGap`، `RastaDeadLetterMessagePublished` و دو هشدار دیگر صف ردها)؛ **Alertmanager، داشبورد، هشدار Lag
-> کافکا یا عمق DLQ و تشخیص رکورد گمشده در مخزن نیست**، و نخستین افزایشِ هر ترکیب Label پس از شروع فرایند هشدار نمی‌دهد
-> ([README](README.md#محدودیت-هشدارهای-شمارنده)). پس نبودن هشدار را نشانهٔ سلامت نگیر: شواهد همچنان از خواندن مستقیم
+> کافکا یا عمق DLQ و تشخیص رکورد گمشده در مخزن نیست**. Seriesهای هشدار از شروع فرایند با صفر صادر می‌شوند، پس نخستین
+> شکست هم هشدار می‌دهد ([README](README.md#مقداردهی-صفر-هشدارهای-شمارنده))؛ ولی رکوردی که هرگز نرسیده شکستی نمی‌شمارد، پس
+> نبودن هشدار را نشانهٔ سلامت نگیر: شواهد همچنان از خواندن مستقیم
 > `/metrics` (یا Prometheus محلی)، Readiness، Log، Lag کافکا، DLQ و API جست‌وجوست. همچنین
 > `EventConsumer` مشترک `rasta_dlq_messages_total{service,topic,reason}` را **فقط پس از موفقیت `send` به Topic DLQ** یک
 > واحد افزایش می‌دهد (`service` = `clientId` مصرف‌کننده، `topic` = Topic مبدأ، `reason` = `VALIDATION_FAILED` یا

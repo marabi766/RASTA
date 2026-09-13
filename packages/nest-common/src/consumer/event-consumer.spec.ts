@@ -598,3 +598,138 @@ describe('EventConsumer dead-letter metric', () => {
     expect(exposition).not.toMatch(/partition|offset|event_id|tenant|correlation|error/i);
   });
 });
+
+/**
+ * The zero series behind `RastaDeadLetterMessagePublished`.
+ *
+ * The alert is `increase(...[5m]) > 0`. prom-client exports a labelled series
+ * only once it has a value, so a series first exported at 1 has no earlier
+ * sample and its first increment is invisible to `increase`. These tests read
+ * the exposition `/metrics` serves and assert that every tuple a DLQ-enabled
+ * consumer can count is already there at zero — and that seeding never erases
+ * a real count.
+ */
+describe('EventConsumer dead-letter metric zero series', () => {
+  const CLIENT_ID = 'nest-common-dlq-zero-spec';
+  const TOPICS = ['rasta.asset.v1', 'rasta.fleet.v1'];
+  const DLQ_TOPIC = 'rasta.asset.v1.dlq';
+  const EVENT_ID = '01JDLQZEROSPEC00000000001';
+  const TENANT_ID = 'ORG_DLQ_ZERO_TENANT';
+
+  const silent: ConsumerLogger = {
+    log: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+  };
+
+  const options: EventConsumerOptions = {
+    brokers: ['localhost:9092'],
+    clientId: CLIENT_ID,
+    groupId: 'nest-common-dlq-zero-spec.group',
+    topics: TOPICS,
+    deadLetterTopic: DLQ_TOPIC,
+    maxRetries: 1,
+    retryBackoffMs: 0,
+  };
+
+  interface ExposedSample {
+    labels: Record<string, string>;
+    value: number;
+  }
+
+  /** Parses the `rasta_dlq_messages_total` lines of the served exposition. */
+  async function exposedFor(service: string): Promise<ExposedSample[]> {
+    const text = await registry.getSingleMetricAsString('rasta_dlq_messages_total');
+    return text
+      .split('\n')
+      .filter((line) => line.startsWith('rasta_dlq_messages_total{'))
+      .map((line) => {
+        const match = /^rasta_dlq_messages_total\{(.*)\} (\S+)$/.exec(line);
+        if (!match) throw new Error(`Unparseable exposition line: ${line}`);
+        const labels: Record<string, string> = {};
+        for (const pair of (match[1] ?? '').matchAll(/(\w+)="([^"]*)"/g)) {
+          labels[pair[1] ?? ''] = pair[2] ?? '';
+        }
+        return { labels, value: Number(match[2]) };
+      })
+      .filter((sample) => sample.labels.service === service);
+  }
+
+  const key = (labels: Record<string, string>): string =>
+    `${labels.service}|${labels.topic}|${labels.reason}`;
+
+  beforeEach(() => {
+    dlqMessagesTotal.reset();
+  });
+
+  afterAll(() => {
+    dlqMessagesTotal.reset();
+  });
+
+  it('exports every subscribed topic x DLQ reason at zero from construction', async () => {
+    new EventConsumer(options, async () => undefined, silent);
+
+    const samples = await exposedFor(CLIENT_ID);
+    const expected = TOPICS.flatMap((topic) =>
+      Object.values(DLQ_REASONS).map((reason) => key({ service: CLIENT_ID, topic, reason })),
+    ).sort();
+
+    expect(samples.map((sample) => key(sample.labels)).sort()).toEqual(expected);
+    expect(samples).toHaveLength(TOPICS.length * 5);
+    for (const sample of samples) {
+      expect(sample.value).toBe(0);
+      expect(Object.keys(sample.labels).sort()).toEqual(['reason', 'service', 'topic']);
+    }
+
+    // The dead-letter topic is where a message goes, never the `topic` label.
+    const text = await registry.getSingleMetricAsString('rasta_dlq_messages_total');
+    for (const forbidden of [DLQ_TOPIC, EVENT_ID, TENANT_ID]) {
+      expect(text).not.toContain(forbidden);
+    }
+  });
+
+  it('exports nothing for a consumer without a dead-letter topic', async () => {
+    const clientId = 'nest-common-no-dlq-zero-spec';
+    new EventConsumer(
+      { ...options, clientId, deadLetterTopic: undefined },
+      async () => undefined,
+      silent,
+    );
+
+    expect(await exposedFor(clientId)).toEqual([]);
+  });
+
+  it('never erases a real count when another consumer seeds the same tuples', async () => {
+    interface PrivateDeadLetter {
+      dlqProducer?: { send(record: unknown): Promise<void> };
+      handleMessage(
+        topic: string,
+        partition: number,
+        value: Buffer | null,
+        headers: undefined,
+      ): Promise<void>;
+    }
+
+    const first = new EventConsumer(
+      options,
+      async () => undefined,
+      silent,
+    ) as unknown as PrivateDeadLetter;
+    first.dlqProducer = { send: async () => undefined };
+
+    await first.handleMessage(TOPICS[0] ?? '', 0, Buffer.from('not json', 'utf8'), undefined);
+
+    // A second consumer with the same client id and topics seeds again.
+    new EventConsumer(options, async () => undefined, silent);
+
+    const samples = await exposedFor(CLIENT_ID);
+    expect(samples).toHaveLength(TOPICS.length * 5);
+    const counted = samples.filter((sample) => sample.value > 0);
+    expect(counted).toEqual([
+      {
+        labels: { service: CLIENT_ID, topic: TOPICS[0], reason: DLQ_REASONS.VALIDATION_FAILED },
+        value: 1,
+      },
+    ]);
+  });
+});

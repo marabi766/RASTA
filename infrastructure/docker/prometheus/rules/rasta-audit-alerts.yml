@@ -17,10 +17,12 @@
 #   actor, resource, event, correlation id, partition, offset or error text —
 #   none of those are metric labels, and none may become one.
 #
-# Known limit: prom-client exports a labelled counter series only after its
-# first `inc`, so a series is born at 1 and `increase` cannot see that first
-# increment. The first occurrence of a label combination after a process start
-# does not fire; every later one does. See docs/runbooks/README.md.
+# Zero series: prom-client exports a labelled counter series only once it has a
+# value, and a series born at 1 has no earlier sample for `increase`. So every
+# alert-driving tuple is exported at 0 before its first real event — by the
+# audit and identity metric modules when they load, and by each DLQ-enabled
+# EventConsumer when it is constructed — and the first real increment fires.
+# The test fixture proves the 0 -> 1 case. See docs/runbooks/README.md.
 
 groups:
   - name: rasta-audit-evidence

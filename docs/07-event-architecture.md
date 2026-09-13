@@ -466,4 +466,5 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 `infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`. همان فایل هشدارهای شکست ورود و واگرایی زنجیرهٔ حسابرسی و
 صف ردهای identity را هم دارد ([`runbooks/README.md`](runbooks/README.md#قواعد-هشدار-موجود-در-مخزن)). Lag، سن Outbox عمومی،
 مدت پردازش و شکست اعتبارسنجی هنوز قاعده ندارند. این قواعد را فقط Prometheus **محلی** Compose ارزیابی می‌کند؛ مخزن
-**Alertmanager ندارد** و هیچ اعلانی تحویل نمی‌شود، و نخستین پیامِ DLQِ هر ترکیب Label پس از شروع فرایند هشدار نمی‌دهد.
+**Alertmanager ندارد** و هیچ اعلانی تحویل نمی‌شود. `EventConsumer` دارای Topic DLQ هنگام ساخته شدن هر ترکیب
+`clientId` × Topic مبدأ × `DlqReason` را با صفر صادر می‌کند، پس نخستین پیام DLQ هم هشدار می‌دهد.

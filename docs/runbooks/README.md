@@ -40,12 +40,24 @@ Runbook ناموجود حساب نکند. تاریخ‌ها از [`../20-day-30-
 - **Label.** هر هشدار شمارنده با `sum by` فقط Labelهای کراندار خود متریک را نگه می‌دارد؛ هیچ Label یا Annotation شناسهٔ
   مستأجر، Actor، منبع، رویداد، Correlation، Partition، Offset یا متن خطا ندارد.
 
-### محدودیت هشدارهای شمارنده
+### مقداردهی صفر هشدارهای شمارنده
 
-هشدارهای شمارنده `increase(…[5m]) > 0` بی `for` هستند. `prom-client` یک Series برچسب‌دار را فقط پس از نخستین `inc` صادر
-می‌کند، پس Series با مقدار ۱ متولد می‌شود و `increase` آن نخستین افزایش را نمی‌بیند: **نخستین رخدادِ هر ترکیب Label پس از
-شروع فرایند هشدار نمی‌دهد**؛ هر رخداد بعدی می‌دهد. این با `promtool` تأیید شده و هنوز رفع نشده (مقداردهی صفرِ Seriesهای
-کراندار در کد، گامی جداست). پس نبودن هشدار، به‌تنها نشانهٔ سلامت نیست.
+هشدارهای شمارنده `increase(…[5m]) > 0` بی `for` هستند. `prom-client` یک Series برچسب‌دار را فقط وقتی مقدار دارد صادر
+می‌کند، و Seriesی که با ۱ متولد شود نمونهٔ پیشینی برای `increase` ندارد. پس **هر ترکیب Label کرانداری که هشداری را می‌راند،
+پیش از نخستین رخداد واقعی با مقدار صفر صادر می‌شود** و نخستین افزایش واقعی دیده می‌شود و هشدار می‌دهد:
+
+- `audit-service` هنگام بار شدن ماژول متریک (`initializeAuditAlertSeries`): هر مقدار `INGESTION_FAILURE_REASONS` برای
+  `rasta_audit_ingestion_failures_total{reason}` و ۶ × ۲ ترکیب `DIVERGENCE_REASON_VALUES` × `organization|platform` برای
+  `rasta_audit_chain_verification_failures_total{reason,scope}`.
+- `identity-service` هنگام بار شدن ماژول متریک (`initializeSecurityEventAlertSeries`): فقط `outcome="failed"` و
+  `"timeout"` از `rasta_security_event_captures_total` (`recorded`/`skipped` هشداری نمی‌رانند) و هر دو `reason` از
+  `rasta_security_event_publish_failures_total`.
+- `EventConsumer` مشترک هنگام ساخته شدن و **فقط اگر `deadLetterTopic` دارد**: `clientId` × هر Topic مبدأ مشترک‌شده × هر پنج
+  `DlqReason` برای `rasta_dlq_messages_total`؛ بی اتصال به Kafka، و هرگز با Topic DLQ به‌عنوان `topic`.
+
+مقداردهی با `inc(labels, 0)` است: صفر اضافه می‌کند، پس شمارش واقعیِ موجود را هرگز پاک نمی‌کند، و محل افزایش‌های واقعی
+(پس از خودِ عمل) عوض نشده است. آزمون‌های واحد Exposition واقعی `/metrics` را می‌خوانند و `promtool` گذار صفر → ۱ را اثبات
+می‌کند. مقدار صفر یعنی «از شروع این فرایند رخدادی شمرده نشده»، نه «سالم»؛ و شمارنده با Restart فرایند از صفر آغاز می‌شود. **مرز باقی:** صفر فقط وقتی کار می‌کند که دست‌کم یک Scrape آن را پیش از رخداد ببیند؛ رخدادی که میان شروع فرایند و نخستین Scrape (بازهٔ ۱۵ ثانیه‌ای محلی) رخ دهد، همچنان نمونهٔ اولِ Series را ۱ می‌کند و هشدار نمی‌دهد.
 
 ## قالب
 

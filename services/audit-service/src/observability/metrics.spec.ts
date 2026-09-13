@@ -16,7 +16,10 @@ import {
   SUBTREE_DECISIONS,
   VERIFICATION_OUTCOMES,
   VERIFICATION_SCOPE_LABELS,
+  initializeAuditAlertSeries,
 } from './metrics';
+import { metricsText } from '@rasta/observability';
+import { DIVERGENCE_REASON_VALUES } from '../audit/audit.verification.view';
 
 /**
  * The line ADR-053 § 13 draws, asserted rather than described.
@@ -184,5 +187,121 @@ describe('the closed label sets themselves', () => {
       'outcome',
     ]);
     expect(labelsOf(auditIngestionLagSeconds)).toEqual(['source_topic']);
+  });
+});
+
+/**
+ * The zero series behind `RastaAuditIngestionFailure` and
+ * `RastaAuditChainDivergence`, read from the exposition `/metrics` serves.
+ *
+ * Both alerts are `increase(...[5m]) > 0`. prom-client exports a labelled
+ * series only once it has a value, so a series first exported at 1 has no
+ * earlier sample and its first real failure is invisible to `increase`. Every
+ * alert-driving tuple must therefore already be exported at zero.
+ */
+describe('alert-driving series exported at zero', () => {
+  interface ExposedSample {
+    labels: Record<string, string>;
+    value: number;
+  }
+
+  async function exposed(name: string): Promise<ExposedSample[]> {
+    const text = await metricsText();
+    return text
+      .split('\n')
+      .filter((line) => line.startsWith(`${name}{`))
+      .map((line) => {
+        const match = /^[a-z_]+\{(.*)\} (\S+)$/.exec(line);
+        if (!match) throw new Error(`Unparseable exposition line: ${line}`);
+        const labels: Record<string, string> = {};
+        for (const pair of (match[1] ?? '').matchAll(/(\w+)="([^"]*)"/g)) {
+          labels[pair[1] ?? ''] = pair[2] ?? '';
+        }
+        return { labels, value: Number(match[2]) };
+      });
+  }
+
+  const INGESTION = 'rasta_audit_ingestion_failures_total';
+  const CHAIN = 'rasta_audit_chain_verification_failures_total';
+
+  const expectedIngestion = Object.values(INGESTION_FAILURE_REASONS).sort();
+  const expectedChain = DIVERGENCE_REASON_VALUES.flatMap((reason) =>
+    Object.values(VERIFICATION_SCOPE_LABELS).map((scope) => `${reason}|${scope}`),
+  ).sort();
+
+  async function assertStartupExposition(): Promise<void> {
+    const ingestion = await exposed(INGESTION);
+    expect(ingestion.map((sample) => sample.labels.reason).sort()).toEqual(expectedIngestion);
+    expect(ingestion).toHaveLength(8);
+    for (const sample of ingestion) {
+      expect(Object.keys(sample.labels)).toEqual(['reason']);
+      expect(sample.value).toBe(0);
+    }
+
+    const chain = await exposed(CHAIN);
+    expect(chain.map((sample) => `${sample.labels.reason}|${sample.labels.scope}`).sort()).toEqual(
+      expectedChain,
+    );
+    // Six reasons times two scopes.
+    expect(chain).toHaveLength(12);
+    for (const sample of chain) {
+      expect(Object.keys(sample.labels).sort()).toEqual(['reason', 'scope']);
+      expect(sample.value).toBe(0);
+    }
+  }
+
+  afterEach(() => {
+    // Leave the singletons as a fresh process has them, whatever a test did.
+    auditIngestionFailuresTotal.reset();
+    auditChainVerificationFailuresTotal.reset();
+    initializeAuditAlertSeries();
+  });
+
+  it('exports every tuple at zero on module load, before any failure', async () => {
+    // Nothing in this file resets or increments these counters before this
+    // test, so this is the exposition the first scrape of a new process sees.
+    await assertStartupExposition();
+  });
+
+  it('seeds exactly the closed sets, with the lowercase scope the increment site uses', async () => {
+    auditIngestionFailuresTotal.reset();
+    auditChainVerificationFailuresTotal.reset();
+    expect(await exposed(INGESTION)).toEqual([]);
+    expect(await exposed(CHAIN)).toEqual([]);
+
+    initializeAuditAlertSeries();
+
+    await assertStartupExposition();
+    expect(await metricsText()).not.toMatch(/scope="(ORGANIZATION|PLATFORM)"/);
+    const keys = [...(await exposed(INGESTION)), ...(await exposed(CHAIN))].flatMap((sample) =>
+      Object.keys(sample.labels).map((label) => label.toLowerCase()),
+    );
+    for (const forbidden of FORBIDDEN_LABELS) {
+      expect(keys).not.toContain(forbidden.toLowerCase());
+    }
+  });
+
+  it('never erases a real failure when seeded again', async () => {
+    auditIngestionFailuresTotal.inc({ reason: INGESTION_FAILURE_REASONS.DATABASE_ERROR });
+    auditChainVerificationFailuresTotal.inc({
+      reason: DIVERGENCE_REASON_VALUES[0],
+      scope: VERIFICATION_SCOPE_LABELS.PLATFORM,
+    });
+
+    initializeAuditAlertSeries();
+
+    const ingestion = await exposed(INGESTION);
+    expect(ingestion).toHaveLength(8);
+    expect(ingestion.filter((sample) => sample.value > 0)).toEqual([
+      { labels: { reason: INGESTION_FAILURE_REASONS.DATABASE_ERROR }, value: 1 },
+    ]);
+    const chain = await exposed(CHAIN);
+    expect(chain).toHaveLength(12);
+    expect(chain.filter((sample) => sample.value > 0)).toEqual([
+      {
+        labels: { reason: DIVERGENCE_REASON_VALUES[0], scope: VERIFICATION_SCOPE_LABELS.PLATFORM },
+        value: 1,
+      },
+    ]);
   });
 });

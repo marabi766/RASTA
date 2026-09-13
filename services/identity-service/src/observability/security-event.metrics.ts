@@ -137,3 +137,30 @@ export const securityEventOutboxLeasesActive = new Gauge({
   help: 'security_event_outbox rows currently held under a live claim lease',
   registers: [registry],
 });
+
+/**
+ * Exports the alert-driving refusal-audit series at zero. Idempotent.
+ *
+ * `RastaSecurityEventCaptureGap` and `RastaSecurityEventPublishFailure`
+ * (infrastructure/docker/prometheus/rules) are `increase(...[5m]) > 0`.
+ * prom-client exports a labelled series only once it has a value, so without
+ * this the first `failed`/`timeout` capture or publish failure after a restart
+ * would be born at 1 and never alert.
+ *
+ * Only the two capture outcomes the alert selects are seeded: `recorded` and
+ * `skipped` drive nothing. `inc(labels, 0)` adds zero, so calling this again
+ * never erases a real count, and no real increment site changes.
+ */
+export function initializeSecurityEventAlertSeries(): void {
+  for (const outcome of [
+    SECURITY_EVENT_CAPTURE_OUTCOMES.FAILED,
+    SECURITY_EVENT_CAPTURE_OUTCOMES.TIMEOUT,
+  ]) {
+    securityEventCapturesTotal.inc({ outcome }, 0);
+  }
+  for (const reason of Object.values(SECURITY_EVENT_PUBLISH_FAILURE_REASONS)) {
+    securityEventPublishFailuresTotal.inc({ reason }, 0);
+  }
+}
+
+initializeSecurityEventAlertSeries();
