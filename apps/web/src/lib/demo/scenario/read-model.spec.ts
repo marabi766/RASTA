@@ -142,7 +142,10 @@ describe('read-model: reflects the scenario once something happened', () => {
       createdAt: 'x',
     };
     const detail = projectOrder(base, state);
-    expect(detail.status).toBe('CREATED');
+    // `PENDING` is a real `ORDER_STATUSES` member (`lib/api/adapters/marketplace.ts`)
+    // for a placed order awaiting its funds hold; the literal `'CREATED'` the base
+    // object carries here is a stale placeholder the projector always overwrites.
+    expect(detail.status).toBe('PENDING');
     expect(detail.totalAmountMinor).toBe('1');
 
     const page = projectOrdersPage({ items: [base], nextCursor: null }, state);

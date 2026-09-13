@@ -43,7 +43,15 @@ export function projectOrder(base: FixtureRecord, snapshot: ScenarioSnapshot): F
 
   return {
     ...base,
-    status: order.status === 'PAYMENT_CAPTURED' ? 'FUNDS_HELD' : 'CREATED',
+    // `PENDING` and `FUNDS_HELD` are both real members of `ORDER_STATUSES`
+    // (`lib/api/adapters/marketplace.ts`) and both sit on `ORDER_HAPPY_PATH`
+    // in that order — `PENDING` is a placed order awaiting its funds hold,
+    // which is exactly this scenario's state between `ORDER_PLACED` and
+    // `PAYMENT_CAPTURED`. An earlier draft used the literal `'CREATED'`,
+    // which is not in `ORDER_STATUSES` at all and made `OrderDetailView`'s
+    // stepper render its "outside the normal path" warning on every placed,
+    // unpaid order — a projection bug, not a narrative choice.
+    status: order.status === 'PAYMENT_CAPTURED' ? 'FUNDS_HELD' : 'PENDING',
     totalAmountMinor: order.totalAmountMinor ?? base.totalAmountMinor,
     createdAt: order.placedAt ?? base.createdAt,
   };
