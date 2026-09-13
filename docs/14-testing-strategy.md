@@ -633,7 +633,13 @@ Target همیشه خاموش و Target متناوب `rasta-services` و audit-se
 (۷ دقیقه) هنوز یک هشدار بی `instance` است و با بازگشت هر دو در ۹ دقیقه رفع می‌شود؛ و شکست‌های کوتاه‌تر از ۲ دقیقه (در ۴ و ۶ دقیقه
 `pending`، در ۵ و ۷ دقیقه پاک) هرگز نمی‌سوزند. Seriesهای Fixture سه هشدار صف ردها اکنون Labelهای Scrape
 `job="identity-service"` دارند (مقدار و انتظارها بی تغییر؛ Label کامل `RastaSecurityEventClosedBacklogStale` هم همین `job` را
-نشان می‌دهد)، و Seriesهای `up` نشانی ۳۱۰۱ در گروه‌های audit-service و Exporter هم به همین Job رفتند. هشت جهش در کپی موقت
+نشان می‌دهد)، و Seriesهای `up` نشانی ۳۱۰۱ در گروه‌های audit-service و Exporter هم به همین Job رفتند. به همین شکل، هر ۱۳۲
+Series ورودی با Label Scrape که خروجی audit-service را مدل می‌کند — ۱۳۰ Series `rasta_audit_*` (روی `host.docker.internal:3115`،
+`audit-b.internal:3115` و Replica ساختگی `host.docker.internal:4115`) و دو Series `rasta_dlq_messages_total{service="audit-service"}`
+— Label واقعی Job اختصاصی `job="audit-service"` دارند؛ چهار Series عمداً کمینه (سه `rasta_audit_*` و یک `rasta_dlq_messages_total`)
+همچنان بی Label Scrape‌اند. قواعد این متریک‌ها `job`/`instance`/`environment` را عمداً با `sum by`/`max by` کنار می‌گذارند؛ در یک
+کپی موقت، جایگزینی `job` همین ۱۳۲ Series با یک Job نگهبان یکتا (بی دست زدن به هیچ Series `up`) `promtool test rules` را با همان
+انتظارها سبز نگه داشت. هشت جهش در کپی موقت
 پوشهٔ Prometheus Fixture را شکست دادند: حذف شاخهٔ `absent`، حذف شاخهٔ `== 0`، Selector ‏`rasta-services`، حذف Selector،
 `min by (job, instance)`، `max by (job)`، حذف `for` و `for: 1m`. `RastaAuditProducerSilent` با `rasta_audit_expected_active_producer{source_service}` و `rasta_audit_records_ingested_total`
 واقعی (Labelهای Scrape روی دو Instance، چند Topic و Outcome) در چهار گروه اثبات می‌شود: تولیدکنندهٔ مورد انتظار و ساکت از ۰ تا ۳۵۹
