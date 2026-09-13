@@ -37,8 +37,10 @@ Runbook ناموجود حساب نکند. تاریخ‌ها از [`../20-day-30-
 
 - **فقط محلی.** Prometheus سرویس `prometheus` در `docker-compose.yml` (Profile `observability`) آن‌ها را ارزیابی می‌کند و در
   `http://localhost:9090/alerts` دیده می‌شوند. **مخزن Alertmanager ندارد، پس هیچ اعلانی به هیچ‌کس تحویل نمی‌شود.** Scrape و
-  مسیریابی اعلانِ محیط واقعی وابسته به استقرار است و در مخزن نیست. داشبورد، ابزار بازپخش DLQ و تشخیص رکورد حسابرسیِ غایب هم
-  نیستند.
+  مسیریابی اعلانِ محیط واقعی وابسته به استقرار است و در مخزن نیست. ابزار بازپخش DLQ و تشخیص رکورد حسابرسیِ غایب هم
+  نیستند. داشبورد **محلی** `Rasta Audit Evidence` (`http://localhost:3001/d/rasta-audit-evidence`، پوشهٔ `Rasta`) همین هشدارها و
+  متریک‌ها را کنار هم نشان می‌دهد؛ نه اعلانی می‌فرستد نه نبودن هشدار در آن اثبات کامل بودن شواهد است
+  ([`../13-observability.md`](../13-observability.md) § ۱۳٫۷).
 - **Kafka از سمت Broker.** `kafka-exporter` (`danielqsj/kafka-exporter:v1.9.0`، Profile `observability`/`all`، بی Port میزبان)
   را Job `kafka-exporter` هر ۳۰ ثانیه از شبکهٔ Compose می‌خواند. `RastaAuditConsumerLag` فقط دو گروه ثابت `audit-service.*` را با
   `for: 5m` می‌پاید ([audit-ingestion-lag](audit-ingestion-lag.md)). `topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}`

@@ -300,6 +300,26 @@ config` → `SUCCESS: 8 rules found`، `promtool test rules` → `SUCCESS` (دو
 > Offset غایبِ هر Topic، ابزار بازپخش، Heartbeat تولیدکننده و تشخیص رکورد غایب (تطبیق شکاف رکورد به رکورد).
 > `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
+> **به‌روزرسانی 2026-09-13 (داشبورد محلی Grafana ‏`Rasta Audit Evidence` — فقط شکاف داشبورد محلی):** Datasource موجود
+> `Prometheus` UID ثابت `rasta-prometheus` گرفت (نام، نوع، URL، `proxy`، پیش‌فرض و `editable: true` دست نخوردند). Provider فایل
+> `infrastructure/docker/grafana/provisioning/dashboards/rasta.yml` (`type: file`، پوشهٔ `Rasta`/`folderUid: rasta`،
+> `disableDeletion: true`، `allowUiUpdates: false`، `updateIntervalSeconds: 10`، مسیر `/etc/grafana/dashboards`) و JSON بیرون از
+> `provisioning/` در `infrastructure/docker/grafana/dashboards/rasta-audit-evidence.json` که `docker-compose.yml` فقط‌خواندنی
+> Mount می‌کند. داشبورد: UID `rasta-audit-evidence`، Tagهای `rasta`/`audit`/`local`، ۶h، Refresh ۳۰s، UTC، بی متغیر؛ **۱۱ Panel،
+> ۱۴ Query**: متن مرز، `ALERTS` برای هر ۱۳ هشدار، `up` سه Job (با `absent`)، Throughput، p95 تأخیر، Lag دو گروه، span نگه‌داشتهٔ
+> DLQ از Recording Rule، وضعیت `RastaAuditProducerSilent` فقط برای تولیدکنندگان پیکربندی‌شده، شکست ورود/زنجیره/DLQ، شکاف ثبت و
+> انتشار ردها، سن پشتهٔ بسته. هیچ قاعده، عبارت، زمان‌بندی یا متریک Prometheus و هیچ کد سرویس تغییر نکرد. **دروازه:**
+> `scripts/check-grafana-dashboard-lib.mjs` + CLI (`pnpm run check:grafana-dashboard`) و ۲۱ آزمون جهش‌محور
+> (`pnpm run test:grafana-dashboard-lib`) در `pnpm verify` و Job ‏`quality`؛ نام هشدارها از خود فایل Rules خوانده می‌شود.
+> **شواهد زنده** (`pnpm run verify:grafana-dashboard-live`، Prometheus v3.1.0 + Grafana 11.5.1 ایزوله با نام/شبکه/Port یکتا):
+> ۱۳ هشدار + ۱ Recording بار شد؛ Datasource با UID/URL درست و Health `OK`؛ داشبورد در پوشهٔ `Rasta` با `provisioned=true` و
+> ۱۱/۱۴؛ `DELETE` → `400 provisioned dashboard cannot be deleted`؛ هر ۱۴ Query در Prometheus و `/api/ds/query` موفق؛
+> `/d/rasta-audit-evidence` → `200`؛ صفر خطای Provisioning داشبورد/Datasource؛ پاک‌سازی بی Container/شبکهٔ باقی. دو خطای
+> از پیش موجود Grafana برای نبودن پوشه‌های `provisioning/plugins` و `provisioning/alerting` گزارش و رفع **نشد**. Grafana 11.5.1
+> در Compose پیش‌فرض Pluginهای Preinstall را از اینترنت دانلود می‌کند (Harness آن را خاموش کرد؛ Compose دست نخورد). **مرز:**
+> فقط تله‌متری محلی؛ Alertmanager/تحویل اعلان، Scrape محیط واقعی، Heartbeat تولیدکننده و تطبیق رکورد به رکورد همچنان نیستند و
+> نبودن هشدار اثبات کامل بودن شواهد نیست. AUD-004 بسته نشد؛ `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

@@ -290,8 +290,8 @@ POST /v1/orders                                    [gateway]        45ms
 هشدارهای شمارنده `for` ندارند، چون قرارداد هر متریک می‌گوید هر افزایش اقدام‌پذیر است؛ استثنا `RastaAuditProducerSilent` است که بر
 **نبودِ** افزایش هشدار می‌دهد. رفتار هر سیزده هشدار و Recording Rule با
 `promtool test rules` در CI اثبات می‌شود ([`14-testing-strategy.md`](14-testing-strategy.md) § ۱۴٫۱۱). **مرز:** این قواعد را فقط
-Prometheus **محلی** Compose ارزیابی می‌کند؛ مخزن **Alertmanager ندارد**، پس هیچ اعلانی تحویل نمی‌شود؛ Scrape محیط واقعی و داشبورد
-در مخزن نیستند.
+Prometheus **محلی** Compose ارزیابی می‌کند؛ مخزن **Alertmanager ندارد**، پس هیچ اعلانی تحویل نمی‌شود؛ Scrape محیط واقعی
+در مخزن نیست. تنها داشبورد موجود، داشبورد **محلی** `Rasta Audit Evidence` است (§ ۱۳٫۷) که همین قواعد و متریک‌ها را نشان می‌دهد.
 
 **تأخیر شواهد از سمت سرویس — Histogram.** `rasta_audit_ingestion_lag_seconds{source_topic}` همان‌گونه که ADR-053 § ۱۳ می‌خواهد
 یک **Histogram** است و در `/metrics` به شکل `rasta_audit_ingestion_lag_seconds_bucket{source_topic,le}`، `_sum{source_topic}` و
@@ -349,7 +349,7 @@ Prometheus **محلی** Compose ارزیابی می‌کند؛ مخزن **Alertm
   و اجتماع مجموعه‌های پیکربندی‌شدهٔ آن‌ها Gate است. اگر audit-service Scrape نشود Gate غایب است و این هشدار **ساکت** می‌ماند؛
   آن حالت را `RastaAuditServiceMetricsUnavailable` (پایین) اعلام می‌کند.
 - **مرز:** این هشدار فقط نبودِ ردیف از تولیدکننده‌ای را ثابت می‌کند که صریحاً «ترافیک‌دار» اعلام شده؛ **نمی‌تواند** ثابت کند هر
-  عملیات تغییر وضعیت رویدادی منتشر کرده است. Heartbeat تولیدکننده، تطبیق Gap حسابرسی، Alertmanager و داشبورد وجود ندارند.
+  عملیات تغییر وضعیت رویدادی منتشر کرده است. Heartbeat تولیدکننده، تطبیق Gap حسابرسی و Alertmanager وجود ندارند؛ داشبورد محلی § ۱۳٫۷ فقط وضعیت همین هشدار را نشان می‌دهد.
 
 **Lag و عمق DLQ از سمت Broker.** سرویس `kafka-exporter` در `docker-compose.yml` (`danielqsj/kafka-exporter:v1.9.0`، Profile
 `observability`/`all`، متصل به `kafka:9094`، **بی Port میزبان**) را Job `kafka-exporter` در `prometheus.yml` از شبکهٔ Compose با
@@ -435,6 +435,47 @@ Prometheus **محلی** Compose ارزیابی می‌کند؛ مخزن **Alertm
 | **Financial Health** | مهندسی + عملیات | حجم تراکنش، نرخ موفقیت، **وضعیت توازن دفتر کل**، تسویه معلق |
 | Business Metrics     | مدیریت پلتفرم   | سفارش، مناقصه، نگهداری، کاربر فعال، کامل بودن داده          |
 | Security             | امنیت           | نرخ ۴۰۱/۴۰۳، برخورد Rate Limit، ورود ناموفق، ناهنجاری       |
+
+### وضعیت اجرا — داشبورد محلی شواهد حسابرسی (2026-09-13)
+
+جدول بالا **هدف** است و هیچ‌کدام از هفت داشبوردش ساخته نشده. تنها داشبورد موجود در مخزن **`Rasta Audit Evidence`** است، فقط برای
+Stack **محلی** Compose (Profile `observability`/`all`):
+
+- **مخاطب:** مهندس یا اپراتور محلی که یکی از Runbookهای شواهد حسابرسی را دنبال می‌کند و می‌خواهد همان سیزده هشدار و یک Recording
+  Rule § ۱۳٫۶ را کنار متریک‌های ورودی‌شان ببیند.
+- **Provisioning پایدار:** Datasource موجود `Prometheus` در
+  [`../infrastructure/docker/grafana/provisioning/datasources/prometheus.yml`](../infrastructure/docker/grafana/provisioning/datasources/prometheus.yml)
+  اکنون UID ثابت **`rasta-prometheus`** دارد (نام، نوع، URL `http://prometheus:9090`، `access: proxy`، پیش‌فرض بودن و
+  `editable` دست نخوردند) و هر Query داشبورد همین UID را صریحاً نام می‌برد — نه جست‌وجوی نام، نه متغیر `${DS_PROMETHEUS}`.
+  Provider فایل [`provisioning/dashboards/rasta.yml`](../infrastructure/docker/grafana/provisioning/dashboards/rasta.yml)
+  داشبوردها را از `/etc/grafana/dashboards` در پوشهٔ **`Rasta`** (`folderUid: rasta`) بار می‌کند، با `disableDeletion: true`،
+  `allowUiUpdates: false` و `updateIntervalSeconds: 10`. JSON در
+  [`../infrastructure/docker/grafana/dashboards/rasta-audit-evidence.json`](../infrastructure/docker/grafana/dashboards/rasta-audit-evidence.json)
+  بیرون از `provisioning/` است (تا Grafana فایل Provider را داشبورد نخواند) و در `docker-compose.yml` فقط‌خواندنی Mount می‌شود.
+  UID داشبورد `rasta-audit-evidence`، Tagها `rasta`/`audit`/`local`، بازهٔ پیش‌فرض ۶ ساعت (پنجرهٔ `RastaAuditProducerSilent`)،
+  Refresh ۳۰ ثانیه، منطقهٔ زمانی UTC، بی متغیر Template.
+- **۱۱ Panel، ۱۴ Query:** (۱) متن مرز؛ (۲) جدول هشدارهای `pending`/`firing` از `ALERTS` با `alertname`/`alertstate`/`severity`
+  که نام **هر سیزده** هشدار را صریحاً دارد؛ (۳) دسترس‌پذیری سه Job ‏`audit-service`، `identity-service` و `kafka-exporter` با
+  همان `min by (job) (up)` هشدارهای Unavailable، و Job بی Series ‏`up` هم با `absent` صفر نشان داده می‌شود؛ (۴) نرخ
+  `rasta_audit_records_ingested_total` به‌ازای `source_service`/`outcome`؛ (۵) p95 تأخیر ورود به‌ازای `source_topic` با همان
+  تجمیع چند Instance و خط آستانهٔ ۶۰ ثانیهٔ `RastaAuditIngestionLagHigh`؛ (۶) Lag دو گروه ثابت `audit-service.domain-projector` و
+  `audit-service.trail` با Clamp همان هشدار؛ (۷) `topic:kafka_topic_retained_records:sum` برای `rasta.audit.v1.dlq` با عنوان صریح
+  «retained offset span» — نه تعداد پیام حل‌نشده، و بی رنگ آستانه چون هشداری ندارد؛ (۸) تولیدکنندگان **صریحاً پیکربندی‌شده** با
+  وضعیت `RastaAuditProducerSilent` (FIRING/PENDING/«no silence alert»)؛ سرویس پیکربندی‌نشده اصلاً نمایش داده نمی‌شود؛ (۹) افزایش ۵
+  دقیقه‌ای شکست ورود، شکست تأیید زنجیره و `rasta_dlq_messages_total` از Job ‏`audit-service`؛ (۱۰) افزایش `failed|timeout` ثبت ردها
+  و شکست انتشار؛ (۱۱) سن پشتهٔ **بسته** با خط ۶۰ ثانیه — `pending_age` پنجرهٔ باز عمداً نیست. هر Panel توضیح دارد، هر Query همان
+  عبارت (یا عبارت پیش از مقایسهٔ `> 0`) هشدار متناظرش است، و هیچ Label یا متنی شناسهٔ مستأجر، Actor، منبع، رویداد، Correlation،
+  Partition، Offset یا متن خطا را نمایش نمی‌دهد.
+- **دسترسی محلی:** `docker compose --profile observability up -d`، سپس `http://localhost:3001/d/rasta-audit-evidence` (پوشهٔ
+  `Rasta`). ورود با Credential محلی Compose است.
+- **اعتبارسنجی:** `pnpm run check:grafana-dashboard` (در `pnpm verify` و Job ‏`quality` در CI) و
+  `pnpm run verify:grafana-dashboard-live` (دستی، Docker) — جزئیات در [`14-testing-strategy.md`](14-testing-strategy.md) § ۱۴٫۱۱.
+
+**مرز:** این داشبورد تله‌متری توسعهٔ محلی است. **Alertmanager و تحویل اعلان وجود ندارند** — هشداری که می‌سوزد فقط در همین داشبورد
+و صفحهٔ هشدارهای Prometheus محلی دیده می‌شود. **نبودن هشدار اثبات نمی‌کند که هر تغییر وضعیت شواهد حسابرسی ساخته است:** هیچ Panel
+رکوردها را یک‌به‌یک تطبیق نمی‌دهد، Heartbeat تولیدکننده وجود ندارد، و «no silence alert» فقط یعنی آن هشدار نمی‌سوزد. Scrape و
+داشبورد محیط واقعی بیرون از مخزن‌اند. Panelهای خالی روی Stack بی سرویس در حال اجرا انتظار می‌رود؛ داده‌ای که Panel با Stack
+کامل نشان می‌دهد در این گام زنده دیده نشد.
 
 ---
 

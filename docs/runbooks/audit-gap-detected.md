@@ -11,7 +11,7 @@ Prometheus **محلی** و **بی Alertmanager، پس بی تحویل اعلان
 `RastaDeadLetterMessagePublished` (`service` = `KAFKA_CLIENT_ID` مصرف‌کنندهٔ `audit-service`) را دارد، نه هشدار اختصاصی حسابرسی. Lag پایدارِ دو گروه `audit-service.*` هشدار
 `RastaAuditConsumerLag` را دارد ([audit-ingestion-lag](audit-ingestion-lag.md))، و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` فقط
 Recording Rule `topic:kafka_topic_retained_records:sum` است، بی هشدار. **رکوردِ غایب خودش هیچ هشداری ندارد:** `RastaAuditProducerSilent` فقط سکوت
-کامل یک تولیدکنندهٔ صریحاً مورد انتظار را می‌بیند، نه یک رکورد گمشده در میان ترافیک عادی؛ تشخیص رکورد گمشده، Scrape محیط واقعی و داشبورد در مخزن نیستند؛ پس این Runbook همچنان با یکی از علائم پایین، یا با گزارش
+کامل یک تولیدکنندهٔ صریحاً مورد انتظار را می‌بیند، نه یک رکورد گمشده در میان ترافیک عادی؛ تشخیص رکورد گمشده و Scrape محیط واقعی در مخزن نیستند (داشبورد **محلی** `Rasta Audit Evidence` در `http://localhost:3001/d/rasta-audit-evidence` فقط همین هشدارها و متریک‌ها را نشان می‌دهد، بی اعلان)؛ پس این Runbook همچنان با یکی از علائم پایین، یا با گزارش
 انسانی («این عمل/رد در حسابرسی دیده نمی‌شود») هم شروع می‌شود.
 **زمان پاسخ هدف:** ۳۰ دقیقه برای دسته‌بندی؛ ۱۵ دقیقه اگر رویداد مالی یا رد امنیتی در کار است
 
@@ -95,7 +95,7 @@ Recording Rule `topic:kafka_topic_retained_records:sum` است، بی هشدار
 > تأخیر، فقط برای ردیف نوشته‌شده) و `RastaAuditProducerSilent` (فقط با Gate `rasta_audit_expected_active_producer`) را ارزیابی می‌کند (و روی متریک‌های مجاور
 > `RastaSecurityEventCaptureGap`، `RastaDeadLetterMessagePublished` و دو هشدار دیگر صف ردها)؛ از سمت Broker، `kafka-exporter` Lag دو گروه `audit-service.*` را
 > برای `RastaAuditConsumerLag` و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` را برای Recording Rule `topic:kafka_topic_retained_records:sum`
-> فراهم می‌کند؛ **Alertmanager، داشبورد، هشدار روی عمق DLQ و تشخیص رکورد گمشده در مخزن نیست**. Seriesهای هشدار از شروع فرایند با صفر صادر می‌شوند، پس نخستین
+> فراهم می‌کند؛ **Alertmanager، هشدار روی عمق DLQ و تشخیص رکورد گمشده در مخزن نیست**؛ تنها داشبورد، داشبورد محلی `Rasta Audit Evidence` است که نبودن هشدار در آن اثبات کامل بودن شواهد نیست. Seriesهای هشدار از شروع فرایند با صفر صادر می‌شوند، پس نخستین
 > شکست هم هشدار می‌دهد ([README](README.md#مقداردهی-صفر-هشدارهای-شمارنده))؛ ولی رکوردی که هرگز نرسیده شکستی نمی‌شمارد، پس
 > نبودن هشدار را نشانهٔ سلامت نگیر: شواهد همچنان از خواندن مستقیم
 > `/metrics` (یا Prometheus محلی)، Readiness، Log، Lag کافکا، DLQ و API جست‌وجوست. همچنین

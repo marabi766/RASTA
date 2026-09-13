@@ -34,6 +34,14 @@ docker compose --profile observability up -d   # OTel، Prometheus، Grafana
 docker compose --profile all up -d
 ```
 
+**داشبورد محلی شواهد حسابرسی.** با Profile ‏`observability` (یا `all`)، Grafana در `http://localhost:3001` است و داشبورد
+Provision‌شدهٔ **`Rasta Audit Evidence`** در پوشهٔ `Rasta` در `http://localhost:3001/d/rasta-audit-evidence` باز می‌شود (ورود با
+Credential محلی Compose). داشبورد و Datasource (UID ‏`rasta-prometheus`) از فایل‌های مخزن بار می‌شوند: حذف یا ذخیره از UI پذیرفته
+نمی‌شود و تغییر JSON در `infrastructure/docker/grafana/dashboards/` ظرف حدود ۱۰ ثانیه دیده می‌شود. **فقط محلی:** مخزن
+Alertmanager و تحویل اعلان ندارد، پیکربندی Scrape محیط واقعی بیرون از مخزن است، و نبودن هشدار در داشبورد اثبات کامل بودن شواهد
+حسابرسی نیست ([`../13-observability.md`](../13-observability.md) § ۱۳٫۷). Panelهای سرویس فقط وقتی داده دارند که سرویس‌ها روی
+میزبان در حال اجرا باشند.
+
 ## Build تصاویر
 
 ```bash

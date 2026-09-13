@@ -417,6 +417,9 @@ services:
       GF_USERS_ALLOW_SIGN_UP: 'false'
     volumes:
       - ./infrastructure/docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      # Dashboard JSON, loaded by provisioning/dashboards/rasta.yml. Kept out of
+      # provisioning/ so the provider YAML is never parsed as a dashboard.
+      - ./infrastructure/docker/grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
       - '3001:3000'

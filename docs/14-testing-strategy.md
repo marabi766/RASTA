@@ -669,5 +669,37 @@ docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
   --entrypoint promtool prom/prometheus:v3.1.0 test rules /etc/prometheus/tests/rasta-audit-alerts.test.yml
 ```
 
+**قرارداد داشبورد محلی Grafana (2026-09-13).** `scripts/check-grafana-dashboard-lib.mjs` (فقط Node built-in) با CLI
+`pnpm run check:grafana-dashboard` و آزمون‌های `node:test` در `pnpm run test:grafana-dashboard-lib` در `pnpm verify` و گام
+«Grafana dashboard contract» در Job ‏`quality` CI اجرا می‌شود (آزمون‌های Checker اول). Checker روی داشبورد
+`Rasta Audit Evidence` و Provisioning آن با خروج غیرصفر و پیام مشخص رد می‌کند: JSON نامعتبر؛ UID/عنوان/Tag نادرست؛ نبودن
+بازهٔ زمانی یا Refresh صریح؛ ID غیرمثبت یا تکراری Panel، Panel بیرون از شبکهٔ ۲۴ ستونی یا هم‌پوشان؛ هر `datasource` که دقیقاً
+`{"type":"prometheus","uid":"rasta-prometheus"}` نباشد (از جمله نام، متغیر Datasource، `${DS_…}`، `__inputs` و نوع دیگر) و هر URL
+بیرونی؛ Target پنهان، Query خالی یا Panel بی Query؛ هر Label گروه‌بندی/Join/Matcher یا Legend بیرون از فهرست بستهٔ Labelهای
+کراندار؛ هر شناسهٔ ممنوع (tenant، actor، resource، event/correlation id، partition، offset، error/message) در Query یا Legend و شکل
+snake/camel آن‌ها در عنوان و توضیح؛ استفادهٔ `rasta_security_event_outbox_pending_age_seconds` یا `rasta_audit_partition_rows`؛
+نبودن چهار عبارت مرز (local development telemetry، no Alertmanager، no notification delivery، absence of alerts is not proof…) در
+Panel متن **و** توضیح داشبورد؛ و نبودن هر خانوادهٔ سیگنال لازم با **عبارت دقیق** هشدار متناظر. نام هشدارها و Recording Rule از خود
+`rasta-audit-alerts.yml` خوانده می‌شود، پس هشدار تازه‌ای که به Query ‏`ALERTS` افزوده نشود دروازه را شکست می‌دهد؛ Provider
+(`type: file`، پوشهٔ `Rasta`، `disableDeletion: true`، `allowUiUpdates: false`، مسیر `/etc/grafana/dashboards`)، UID و URL
+Datasource و Mount فقط‌خواندنی Compose هم سنجیده می‌شوند. ۲۱ آزمون جهش‌محور روی کپی تازهٔ همان JSON واقعی اثبات می‌کنند Checker
+می‌گیرد: ID تکراری و صفر، Panelهای هم‌پوشان و بیرون از شبکه، UID نادرست Target، Datasource با نام/متغیر/نوع دیگر و URL بیرونی،
+Target پنهان/Query خالی/Panel بی Query، حذف یک هشدار از `ALERTS` و هشدار تازهٔ Rules، ده جهش خانوادهٔ سیگنال (Job، Throughput،
+p95، گروه `trail`، Recording Rule، `scope` زنجیره، `failed|timeout`، سن پشتهٔ بسته، Gate تولیدکننده، Selector ‏DLQ)، `tenant_id`
+در `by`، `{{actor_id}}` در Legend، Matcher ‏`partition`، `correlationId` در توضیح، `pending_age`، حذف عبارت مرز از Panel و توضیح،
+پنج جهش Provisioning، و CLI روی JSON نامعتبر (خروج ۱) و ریشهٔ سالم (خروج ۰).
+
+**اعتبارسنجی زندهٔ Provisioning و PromQL.** `pnpm run verify:grafana-dashboard-live` (دستی، Docker لازم، بیرون از `pnpm verify`)
+Prometheus `v3.1.0` و Grafana `11.5.1` را با نام‌های یکتای `rasta-dashcheck-<suffix>-*`، شبکهٔ یکتا، Portهای میزبان پویا روی
+`127.0.0.1` و Mount فقط‌خواندنی پیکربندی واقعی مخزن بالا می‌آورد، پس به Stack Compose توسعه‌دهنده دست نمی‌زند. پس از سالم شدن هر دو
+API اثبات می‌کند: Prometheus سیزده هشدار و یک Recording Rule را بار کرد؛ Datasource با UID ‏`rasta-prometheus`، URL
+`http://prometheus:9090`، پیش‌فرض و `proxy` است و Health آن از Grafana `OK` است؛ داشبورد با UID و عنوان دقیق، `provisioned=true`،
+در پوشهٔ `Rasta` با تعداد Panel/Target فایل برمی‌گردد و هر Target برگشتی همان UID را دارد؛ `DELETE` داشبورد با `400` رد می‌شود و
+داشبورد می‌ماند؛ هر ۱۴ Query (با جایگزینی `$__rate_interval` با `5m` فقط در Harness) در `/api/v1/query` Prometheus و از راه
+`/api/ds/query` Grafana موفق است (نتیجهٔ خالی پذیرفته است، خطای Parser نه)؛ `GET /d/rasta-audit-evidence` → `200`؛ و Log
+Grafana هیچ خطای Provisioning داشبورد/Datasource ندارد. Harness دقیقاً دو Container (با Volumeهای بی‌نامشان) و شبکهٔ خودش را در
+هر حالت حذف و نبودنشان را گزارش می‌کند. Rendering پیکسلی سنجیده نمی‌شود (Image Renderer نصب نیست) و دادهٔ واقعی سرویس‌ها در این
+اجرا Scrape نشد.
+
 **در CI:** Unit و Contract موازی روی هر Push · Integration و Security روی هر PR ·
 E2E روی `main` پس از استقرار Staging · Load شبانه.
