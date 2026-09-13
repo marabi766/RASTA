@@ -4,6 +4,13 @@ global:
   external_labels:
     cluster: rasta-local
 
+# Resolved relative to this file, so it is the same path in the container
+# (/etc/prometheus/rules/...) and under `promtool check config`. Named
+# explicitly rather than globbed: a glob that matches nothing loads no rules and
+# still passes the config check. tests/ is never listed here.
+rule_files:
+  - rules/rasta-audit-alerts.yml
+
 scrape_configs:
   - job_name: prometheus
     static_configs:

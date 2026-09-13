@@ -460,3 +460,10 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 | `rasta_event_processing_duration`  | p99 > ۵ ثانیه               |
 | `rasta_event_validation_failures`  | > ۰ → هشدار (نقض قرارداد)   |
 | `rasta_duplicate_events_total`     | پایش (سلامت At-Least-Once)  |
+
+**وضعیت اجرا (2026-09-13).** از این جدول فقط ردیف `rasta_dlq_messages_total` قاعدهٔ نوشته‌شده دارد:
+`RastaDeadLetterMessagePublished` (`sum by (service, topic, reason) (increase(rasta_dlq_messages_total[5m])) > 0`، بی `for`) در
+`infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`. همان فایل هشدارهای شکست ورود و واگرایی زنجیرهٔ حسابرسی و
+صف ردهای identity را هم دارد ([`runbooks/README.md`](runbooks/README.md#قواعد-هشدار-موجود-در-مخزن)). Lag، سن Outbox عمومی،
+مدت پردازش و شکست اعتبارسنجی هنوز قاعده ندارند. این قواعد را فقط Prometheus **محلی** Compose ارزیابی می‌کند؛ مخزن
+**Alertmanager ندارد** و هیچ اعلانی تحویل نمی‌شود، و نخستین پیامِ DLQِ هر ترکیب Label پس از شروع فرایند هشدار نمی‌دهد.

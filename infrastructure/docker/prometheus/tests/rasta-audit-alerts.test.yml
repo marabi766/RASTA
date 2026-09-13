@@ -1,0 +1,219 @@
+# Behaviour tests for rules/rasta-audit-alerts.yml. Not loaded by Prometheus:
+# prometheus.yml's `rule_files` names only the rules directory.
+#
+#   docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+#     --entrypoint promtool prom/prometheus:v3.1.0 \
+#     test rules /etc/prometheus/tests/rasta-audit-alerts.test.yml
+#
+# Counter inputs start at a real sample and increment later, so every positive
+# case proves `increase`, not an absolute counter value. Inputs carry the
+# scrape's `job`/`instance`/`environment` labels so that each expected alert
+# also proves which labels the rule keeps.
+
+rule_files:
+  - ../rules/rasta-audit-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------------------
+  # RastaDeadLetterMessagePublished
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_dlq_messages_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",service="audit-service",topic="rasta.audit.trail.v1",reason="MAX_RETRIES_EXCEEDED"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      # A counter that is already non-zero but does not move must not fire.
+      - series: 'rasta_dlq_messages_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",service="audit-service",topic="rasta.identity.v1",reason="VALIDATION_FAILED"}'
+        values: '7 7 7 7 7 7 7 7 7 7 7'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaDeadLetterMessagePublished
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaDeadLetterMessagePublished
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: audit-service
+              topic: rasta.audit.trail.v1
+              reason: MAX_RETRIES_EXCEEDED
+            exp_annotations:
+              summary: 'A message was published to the dead-letter topic for rasta.audit.trail.v1'
+              description: 'Consumer audit-service dead-lettered a message from rasta.audit.trail.v1 with reason MAX_RETRIES_EXCEEDED in the last 5 minutes. A DLQ message is never routine.'
+              runbook: docs/runbooks/replay-dlq.md
+      # Once the increment has left the 5m window the alert resolves.
+      - eval_time: 10m
+        alertname: RastaDeadLetterMessagePublished
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditIngestionFailure
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_ingestion_failures_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",reason="database_error"}'
+        values: '0 0 2 2 2 2 2 2 2 2 2'
+      - series: 'rasta_audit_ingestion_failures_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",reason="unmappable_envelope"}'
+        values: '4 4 4 4 4 4 4 4 4 4 4'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaAuditIngestionFailure
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaAuditIngestionFailure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: database_error
+            exp_annotations:
+              summary: 'audit-service failed to write an audit record (database_error)'
+              description: 'rasta_audit_ingestion_failures_total increased with reason database_error in the last 5 minutes: at least one ingestion attempt did not produce an audit_event row.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 10m
+        alertname: RastaAuditIngestionFailure
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditChainDivergence
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_chain_verification_failures_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",reason="RECORD_HASH_MISMATCH",scope="ORGANIZATION"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'rasta_audit_chain_verification_failures_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",reason="PREVIOUS_HASH_MISMATCH",scope="PLATFORM"}'
+        values: '3 3 3 3 3 3 3 3 3 3 3'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaAuditChainDivergence
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaAuditChainDivergence
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              reason: RECORD_HASH_MISMATCH
+              scope: ORGANIZATION
+            exp_annotations:
+              summary: 'Audit chain verification found a divergence (RECORD_HASH_MISMATCH, ORGANIZATION)'
+              description: 'A ORGANIZATION verification reported RECORD_HASH_MISMATCH in the last 5 minutes. Treat as a security incident; never repair the chain.'
+              runbook: docs/runbooks/audit-chain-divergence.md
+      - eval_time: 10m
+        alertname: RastaAuditChainDivergence
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaSecurityEventCaptureGap — positive: failed and timeout
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_security_event_captures_total{job="rasta-services",instance="host.docker.internal:3101",environment="local",outcome="failed"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'rasta_security_event_captures_total{job="rasta-services",instance="host.docker.internal:3101",environment="local",outcome="timeout"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'rasta_security_event_captures_total{job="rasta-services",instance="host.docker.internal:3101",environment="local",outcome="recorded"}'
+        values: '0 5 10 15 20 25 30 35 40 45 50'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaSecurityEventCaptureGap
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaSecurityEventCaptureGap
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              outcome: failed
+            exp_annotations:
+              summary: 'identity-service returned a refusal without audit evidence (failed)'
+              description: 'rasta_security_event_captures_total increased with outcome failed in the last 5 minutes: at least one refusal was not captured into security_event_outbox.'
+              runbook: docs/runbooks/security-event-outbox.md
+          - exp_labels:
+              severity: critical
+              outcome: timeout
+            exp_annotations:
+              summary: 'identity-service returned a refusal without audit evidence (timeout)'
+              description: 'rasta_security_event_captures_total increased with outcome timeout in the last 5 minutes: at least one refusal was not captured into security_event_outbox.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 10m
+        alertname: RastaSecurityEventCaptureGap
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaSecurityEventCaptureGap — negative: recorded and skipped never fire
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_security_event_captures_total{job="rasta-services",instance="host.docker.internal:3101",environment="local",outcome="recorded"}'
+        values: '0 5 10 15 20 25 30 35 40 45 50'
+      - series: 'rasta_security_event_captures_total{job="rasta-services",instance="host.docker.internal:3101",environment="local",outcome="skipped"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RastaSecurityEventCaptureGap
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaSecurityEventCaptureGap
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaSecurityEventClosedBacklogStale — at or below 60 never fires; the
+  # pending age, however old, is not an input to this alert.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_security_event_outbox_closed_backlog_age_seconds{job="rasta-services",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 30 60 60 61 90 0'
+      - series: 'rasta_security_event_outbox_pending_age_seconds{job="rasta-services",instance="host.docker.internal:3101",environment="local"}'
+        values: '600 600 600 600 600 600 600'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: RastaSecurityEventClosedBacklogStale
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaSecurityEventClosedBacklogStale
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaSecurityEventClosedBacklogStale
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaSecurityEventClosedBacklogStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: rasta-services
+              instance: host.docker.internal:3101
+              environment: local
+            exp_annotations:
+              summary: 'A closed security_event_outbox window has waited more than 60 seconds'
+              description: 'The oldest unpublished, closed security_event_outbox row ended its window 61 seconds ago; the relay is not publishing refusal evidence.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 6m
+        alertname: RastaSecurityEventClosedBacklogStale
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaSecurityEventPublishFailure
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_security_event_publish_failures_total{job="rasta-services",instance="host.docker.internal:3101",environment="local",reason="publish_error"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'rasta_security_event_publish_failures_total{job="rasta-services",instance="host.docker.internal:3101",environment="local",reason="contract_violation"}'
+        values: '2 2 2 2 2 2 2 2 2 2 2'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaSecurityEventPublishFailure
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaSecurityEventPublishFailure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: publish_error
+            exp_annotations:
+              summary: 'Refusal audit events failed to publish (publish_error)'
+              description: 'rasta_security_event_publish_failures_total increased with reason publish_error in the last 5 minutes; the rows were scheduled for retry.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 10m
+        alertname: RastaSecurityEventPublishFailure
+        exp_alerts: []

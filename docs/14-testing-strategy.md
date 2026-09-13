@@ -582,5 +582,20 @@ pnpm --filter @rasta/asset-service test -- --testNamePattern="tenant isolation"
 pnpm verify                     # دروازه کامل کیفیت
 ```
 
+**پیکربندی و قواعد هشدار Prometheus.** Job مستقل `prometheus-rules` در CI (روی هر PR و `main`، بی وابستگی Node و بیرون از
+Job سریع `quality`) همان Image سرویس `prometheus` در `docker-compose.yml` را با کل پوشهٔ
+`infrastructure/docker/prometheus` به‌صورت فقط‌خواندنی در `/etc/prometheus` اجرا می‌کند؛ پس مسیر `rule_files` همان است که در
+زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار شش هشدار را،
+با افزایش واقعی شمارنده (نه مقدار مطلق) و کنترل‌های منفی (`outcome="recorded"`/`"skipped"` هشدار نمی‌دهد، سن پشتهٔ بسته ≤ ۶۰
+هشدار نمی‌دهد، `pending_age` ورودی هشدار نیست) و Labelهای دقیق هر هشدار. `pnpm verify` این دروازه را اجرا نمی‌کند، چون Docker
+می‌خواهد. فرمان محلی (در Git Bash روی ویندوز `MSYS_NO_PATHCONV=1` لازم است):
+
+```bash
+docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+  --entrypoint promtool prom/prometheus:v3.1.0 check config /etc/prometheus/prometheus.yml
+docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+  --entrypoint promtool prom/prometheus:v3.1.0 test rules /etc/prometheus/tests/rasta-audit-alerts.test.yml
+```
+
 **در CI:** Unit و Contract موازی روی هر Push · Integration و Security روی هر PR ·
 E2E روی `main` پس از استقرار Staging · Load شبانه.

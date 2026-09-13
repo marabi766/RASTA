@@ -1,0 +1,89 @@
+# Alert rules for the audit evidence pipeline, evaluated by the local
+# Prometheus in docker-compose.yml (`observability` profile).
+#
+# Local-only. There is no Alertmanager in this repository, so a firing alert is
+# visible at http://localhost:9090/alerts and nowhere else: nothing is delivered
+# to a person. Production scrape configuration and notification routing are
+# deployment concerns this file does not provide.
+#
+# Behaviour is proven by tests/rasta-audit-alerts.test.yml:
+#   promtool test rules /etc/prometheus/tests/rasta-audit-alerts.test.yml
+#
+# Rules for every alert here:
+# - Counter alerts use `increase(...[5m]) > 0` and no `for`: each metric's
+#   contract says any increase is actionable, so a delay would only hide one.
+# - `sum by` keeps exactly the bounded labels the metric declares and drops the
+#   scrape's own `job`/`instance`/`environment`. No annotation names a tenant,
+#   actor, resource, event, correlation id, partition, offset or error text —
+#   none of those are metric labels, and none may become one.
+#
+# Known limit: prom-client exports a labelled counter series only after its
+# first `inc`, so a series is born at 1 and `increase` cannot see that first
+# increment. The first occurrence of a label combination after a process start
+# does not fire; every later one does. See docs/runbooks/README.md.
+
+groups:
+  - name: rasta-audit-evidence
+    rules:
+      - alert: RastaDeadLetterMessagePublished
+        # Incremented by the shared EventConsumer only after the DLQ publish
+        # resolved; `topic` is the source topic, not the dead-letter topic.
+        expr: sum by (service, topic, reason) (increase(rasta_dlq_messages_total[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'A message was published to the dead-letter topic for {{ $labels.topic }}'
+          description: 'Consumer {{ $labels.service }} dead-lettered a message from {{ $labels.topic }} with reason {{ $labels.reason }} in the last 5 minutes. A DLQ message is never routine.'
+          runbook: docs/runbooks/replay-dlq.md
+
+      - alert: RastaAuditIngestionFailure
+        expr: sum by (reason) (increase(rasta_audit_ingestion_failures_total[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'audit-service failed to write an audit record ({{ $labels.reason }})'
+          description: 'rasta_audit_ingestion_failures_total increased with reason {{ $labels.reason }} in the last 5 minutes: at least one ingestion attempt did not produce an audit_event row.'
+          runbook: docs/runbooks/audit-gap-detected.md
+
+      - alert: RastaAuditChainDivergence
+        # Incremented only for a real divergence, never for an empty window,
+        # legacy records or a refused request.
+        expr: sum by (reason, scope) (increase(rasta_audit_chain_verification_failures_total[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Audit chain verification found a divergence ({{ $labels.reason }}, {{ $labels.scope }})'
+          description: 'A {{ $labels.scope }} verification reported {{ $labels.reason }} in the last 5 minutes. Treat as a security incident; never repair the chain.'
+          runbook: docs/runbooks/audit-chain-divergence.md
+
+      - alert: RastaSecurityEventCaptureGap
+        # `recorded` and `skipped` are normal outcomes; only `failed` and
+        # `timeout` are refusals returned without evidence.
+        expr: sum by (outcome) (increase(rasta_security_event_captures_total{outcome=~"failed|timeout"}[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'identity-service returned a refusal without audit evidence ({{ $labels.outcome }})'
+          description: 'rasta_security_event_captures_total increased with outcome {{ $labels.outcome }} in the last 5 minutes: at least one refusal was not captured into security_event_outbox.'
+          runbook: docs/runbooks/security-event-outbox.md
+
+      - alert: RastaSecurityEventClosedBacklogStale
+        # The closed-window age, deliberately not
+        # rasta_security_event_outbox_pending_age_seconds: open aggregation
+        # windows keep the pending age near the window length by design.
+        expr: rasta_security_event_outbox_closed_backlog_age_seconds > 60
+        labels:
+          severity: warning
+        annotations:
+          summary: 'A closed security_event_outbox window has waited more than 60 seconds'
+          description: 'The oldest unpublished, closed security_event_outbox row ended its window {{ $value }} seconds ago; the relay is not publishing refusal evidence.'
+          runbook: docs/runbooks/security-event-outbox.md
+
+      - alert: RastaSecurityEventPublishFailure
+        expr: sum by (reason) (increase(rasta_security_event_publish_failures_total[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Refusal audit events failed to publish ({{ $labels.reason }})'
+          description: 'rasta_security_event_publish_failures_total increased with reason {{ $labels.reason }} in the last 5 minutes; the rows were scheduled for retry.'
+          runbook: docs/runbooks/security-event-outbox.md

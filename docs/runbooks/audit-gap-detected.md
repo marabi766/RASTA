@@ -1,8 +1,13 @@
 # Runbook: شکاف شواهد حسابرسی (رکوردی که باید در `audit_event` باشد و نیست)
 
 **شدت:** 🔴 بحرانی اگر شکاف تأیید شود · 🟠 هشدار تا وقتی مشکوک است
-**هشدار محرک:** **هیچ قاعدهٔ هشداری در مخزن نیست.** این Runbook با یکی از علائم پایین، یا با گزارش انسانی («این عمل/رد در
-حسابرسی دیده نمی‌شود») شروع می‌شود.
+**هشدار محرک:** `RastaAuditIngestionFailure` (🟠 `warning`، افزایش `rasta_audit_ingestion_failures_total{reason}`) و
+`RastaSecurityEventCaptureGap` (🔴 `critical`، افزایش `rasta_security_event_captures_total{outcome=~"failed|timeout"}` — مسیرش
+[security-event-outbox](security-event-outbox.md)) در `infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`، فقط در
+Prometheus **محلی** و **بی Alertmanager، پس بی تحویل اعلان**. پیام در `rasta.audit.v1.dlq` فقط هشدار عمومی
+`RastaDeadLetterMessagePublished` (`service` = `KAFKA_CLIENT_ID` مصرف‌کنندهٔ `audit-service`) را دارد، نه هشدار اختصاصی حسابرسی. **رکوردِ غایب خودش هیچ هشداری ندارد:** تشخیص رکورد گمشده، Lag
+کافکا، عمق Topic DLQ، Scrape محیط واقعی و داشبورد در مخزن نیستند؛ پس این Runbook همچنان با یکی از علائم پایین، یا با گزارش
+انسانی («این عمل/رد در حسابرسی دیده نمی‌شود») هم شروع می‌شود.
 **زمان پاسخ هدف:** ۳۰ دقیقه برای دسته‌بندی؛ ۱۵ دقیقه اگر رویداد مالی یا رد امنیتی در کار است
 
 ---
@@ -75,8 +80,11 @@
 > در فرایند ثبت می‌کند و از **`GET /metrics`** همان سرویس (پورت پیش‌فرض `3115`، `@Public`، بیرون از قرارداد OpenAPI، بی هیچ
 > شناسهٔ مستأجر/Actor/منبع/رویداد/Correlation در Label) صادر می‌کند. `host.docker.internal:3115` در Job `rasta-services`
 > فایل **محلی** `infrastructure/docker/prometheus/prometheus.yml` هست؛ پیکربندی Scrape محیط واقعی وابسته به استقرار است و
-> در مخزن نیست. **هیچ قاعدهٔ هشدار و هیچ داشبوردی** روی این متریک‌ها در مخزن نیست، پس هشداری فرض نکن: شواهد همچنان از
-> خواندن مستقیم `/metrics` (یا Prometheus محلی)، Readiness، Log، Lag کافکا، DLQ و API جست‌وجوست. همچنین
+> در مخزن نیست. Prometheus محلی روی این متریک‌ها فقط `RastaAuditIngestionFailure` را ارزیابی می‌کند (و روی متریک‌های مجاور
+> `RastaSecurityEventCaptureGap`، `RastaDeadLetterMessagePublished` و دو هشدار دیگر صف ردها)؛ **Alertmanager، داشبورد، هشدار Lag
+> کافکا یا عمق DLQ و تشخیص رکورد گمشده در مخزن نیست**، و نخستین افزایشِ هر ترکیب Label پس از شروع فرایند هشدار نمی‌دهد
+> ([README](README.md#محدودیت-هشدارهای-شمارنده)). پس نبودن هشدار را نشانهٔ سلامت نگیر: شواهد همچنان از خواندن مستقیم
+> `/metrics` (یا Prometheus محلی)، Readiness، Log، Lag کافکا، DLQ و API جست‌وجوست. همچنین
 > `EventConsumer` مشترک `rasta_dlq_messages_total{service,topic,reason}` را **فقط پس از موفقیت `send` به Topic DLQ** یک
 > واحد افزایش می‌دهد (`service` = `clientId` مصرف‌کننده، `topic` = Topic مبدأ، `reason` = `VALIDATION_FAILED` یا
 > `MAX_RETRIES_EXCEEDED`)؛ تلاش مجدد، `send` ردشده و پیامِ Drop‌شده بی Topic DLQ شمرده نمی‌شوند. شمارنده از شروع فرایند

@@ -384,6 +384,7 @@ services:
       - '--storage.tsdb.retention.time=7d'
     volumes:
       - ./infrastructure/docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infrastructure/docker/prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
     ports:
       - '9090:9090'

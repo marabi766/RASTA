@@ -265,6 +265,27 @@ POST /v1/orders                                    [gateway]        45ms
 **CONSTRAINT.** هر هشدار باید **Runbook** داشته باشد. هشدار بدون دستورالعمل پاسخ،
 نویز است و به‌مرور نادیده گرفته می‌شود. → [`runbooks/`](runbooks/)
 
+### وضعیت اجرا — قواعد موجود در مخزن (2026-09-13)
+
+دو جدول بالا **هدف** است. تنها قواعد نوشته‌شده، شش هشدار زنجیرهٔ شواهد حسابرسی در
+[`../infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`](../infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml)
+هستند که `prometheus.yml` با `rule_files` بارشان می‌کند:
+
+| هشدار                                  | شدت        | شرط                                                                                                    | Runbook                                                      |
+| -------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| `RastaDeadLetterMessagePublished`      | `warning`  | `sum by (service, topic, reason) (increase(rasta_dlq_messages_total[5m])) > 0`                         | [replay-dlq](runbooks/replay-dlq.md)                         |
+| `RastaAuditIngestionFailure`           | `warning`  | `sum by (reason) (increase(rasta_audit_ingestion_failures_total[5m])) > 0`                             | [audit-gap-detected](runbooks/audit-gap-detected.md)         |
+| `RastaAuditChainDivergence`            | `critical` | `sum by (reason, scope) (increase(rasta_audit_chain_verification_failures_total[5m])) > 0`             | [audit-chain-divergence](runbooks/audit-chain-divergence.md) |
+| `RastaSecurityEventCaptureGap`         | `critical` | `sum by (outcome) (increase(rasta_security_event_captures_total{outcome=~"failed\|timeout"}[5m])) > 0` | [security-event-outbox](runbooks/security-event-outbox.md)   |
+| `RastaSecurityEventClosedBacklogStale` | `warning`  | `rasta_security_event_outbox_closed_backlog_age_seconds > 60`                                          | [security-event-outbox](runbooks/security-event-outbox.md)   |
+| `RastaSecurityEventPublishFailure`     | `warning`  | `sum by (reason) (increase(rasta_security_event_publish_failures_total[5m])) > 0`                      | [security-event-outbox](runbooks/security-event-outbox.md)   |
+
+هشدارهای شمارنده `for` ندارند، چون قرارداد هر متریک می‌گوید هر افزایش اقدام‌پذیر است. رفتار هر شش قاعده با `promtool test rules`
+در CI اثبات می‌شود ([`14-testing-strategy.md`](14-testing-strategy.md) § ۱۴٫۱۱). **مرز:** این قواعد را فقط Prometheus **محلی**
+Compose ارزیابی می‌کند؛ مخزن **Alertmanager ندارد**، پس هیچ اعلانی تحویل نمی‌شود؛ Scrape محیط واقعی، داشبورد و هشدار Lag
+کافکا یا عمق DLQ در مخزن نیستند؛ و نخستین افزایشِ هر ترکیب Label پس از شروع فرایند هشدار نمی‌دهد
+([`runbooks/README.md`](runbooks/README.md#محدودیت-هشدارهای-شمارنده)). باقی ردیف‌های دو جدول بالا هنوز قاعده ندارند.
+
 ---
 
 ## ۱۳٫۷ داشبوردهای Grafana

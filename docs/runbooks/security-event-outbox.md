@@ -4,6 +4,12 @@
 **متریک محرک:** `rasta_security_event_outbox_closed_backlog_age_seconds > 60` · افزایش
 `rasta_security_event_captures_total{outcome=~"failed|timeout"}` ·
 افزایش `rasta_security_event_publish_failures_total`
+**هشدار:** در `infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml` —
+`RastaSecurityEventCaptureGap` (🔴 `critical`، `sum by (outcome) (increase(…{outcome=~"failed|timeout"}[5m])) > 0`)،
+`RastaSecurityEventClosedBacklogStale` (🟠 `warning`، `rasta_security_event_outbox_closed_backlog_age_seconds > 60`) و
+`RastaSecurityEventPublishFailure` (🟠 `warning`، `sum by (reason) (increase(…[5m])) > 0`). فقط Prometheus **محلی** آن‌ها را
+ارزیابی می‌کند؛ مخزن **Alertmanager ندارد** و هیچ اعلانی تحویل نمی‌شود، Scrape محیط واقعی وابسته به استقرار است، و نخستین
+افزایشِ هر ترکیب Label پس از شروع فرایند هشدار نمی‌دهد ([README](README.md#محدودیت-هشدارهای-شمارنده)).
 **زمان پاسخ هدف:** ۳۰ دقیقه
 
 > **وضعیت (2026-09-11، AUD-004 Phase C2):** ردها اکنون **پنجره‌ای تجمیع** می‌شوند. ردهای یکسان — همان مستأجر، Actor، فعل،
@@ -14,8 +20,8 @@
 >
 > **پیشین (Phase C1):** این صف فقط در `identity-service` وجود دارد و فقط **یک** رد را ثبت می‌کند:
 > `POST /v1/users/me/active-organization` که `IdentityService.switchActiveOrganization()` با `403 TENANT_MISMATCH` رد
-> می‌کند. متریک‌ها تعریف و در `/metrics` صادر می‌شوند؛ **قاعدهٔ هشدار Prometheus برای آن‌ها هنوز در مخزن نوشته نشده** —
-> آستانه‌های بالا پیشنهاد این Runbook‌اند، نه هشدار فعال.
+> می‌کند. متریک‌ها تعریف و در `/metrics` صادر می‌شوند. (از 2026-09-13 سه قاعدهٔ هشدار بالا در Prometheus محلی ارزیابی
+> می‌شوند.)
 
 ---
 
@@ -129,6 +135,6 @@ SELECT count(*) FILTER (WHERE claim_expires_at > now())  AS live_leases,
 
 ## پیشگیری
 
-- قاعدهٔ هشدار Prometheus برای این متریک‌ها بنویس (هنوز نیست) — روی `closed_backlog_age_seconds`، نه `pending_age_seconds`.
+- هشدار سن پشته روی `closed_backlog_age_seconds` است، نه `pending_age_seconds`؛ این را هنگام تغییر قاعده حفظ کن.
 - Purge ردیف‌های منتشرشده هنوز وجود ندارد؛ رشد جدول را پایش کن (تجمیع رشد را به یک ردیف در هر پنجره به‌ازای هر Actor
   کاوشگر محدود کرده، نه یک ردیف به‌ازای هر رد).

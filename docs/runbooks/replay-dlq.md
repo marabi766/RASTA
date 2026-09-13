@@ -3,8 +3,13 @@
 **شدت:** 🟠 هشدار
 **سیگنال محرک:** `rasta_dlq_messages_total{service,topic,reason}` افزایش یافت (**هر پیام جدید**)، یا Topic DLQ رشد کرد.
 `EventConsumer` مشترک این شمارنده را فقط پس از انتشار موفق به Topic DLQ یک واحد افزایش می‌دهد (`topic` = Topic مبدأ).
-**امروز هیچ قاعدهٔ هشدار Prometheus در مخزن نیست**، پس این Runbook خودکار آغاز نمی‌شود: افزایش را از `/metrics` یا
-Prometheus بخوان، یا رشد Topic را مستقیم ببین.
+**هشدار:** `RastaDeadLetterMessagePublished` (🟠 `warning`) در
+[`infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`](../../infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml)
+با `sum by (service, topic, reason) (increase(rasta_dlq_messages_total[5m])) > 0` و بی `for`؛ Labelهای هشدار همان
+`service`، `topic` (Topic **مبدأ**) و `reason`اند. این قاعده را **فقط Prometheus محلی** Compose ارزیابی می‌کند و در `/alerts`
+آن دیده می‌شود؛ **مخزن Alertmanager ندارد، پس هیچ اعلانی به کسی تحویل نمی‌شود**، و Scrape محیط واقعی وابسته به استقرار است.
+شمارنده از شروع فرایند است و عمق فعلی DLQ نیست؛ نخستین پیامِ هر ترکیب Label پس از شروع فرایند هشدار نمی‌دهد (Series با
+مقدار ۱ متولد می‌شود — [README](README.md#محدودیت-هشدارهای-شمارنده)). پس رشد Topic DLQ را همچنان مستقیم هم ببین.
 **زمان پاسخ هدف:** ۲ ساعت (۱۵ دقیقه اگر رویداد مالی است)
 
 ---

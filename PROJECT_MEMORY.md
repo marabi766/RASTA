@@ -206,6 +206,30 @@
 > شش تلاش → دو، و نبودن شناسه/متن خطا/Partition در Label)؛ nest-common اکنون ۸ مجموعه / ۱۴۰ آزمون. **هنوز نیست:** هیچ
 > قاعدهٔ هشدار Prometheus یا داشبورد، Script بازپخش DLQ و Scrape محیط واقعی. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
+> **به‌روزرسانی 2026-09-13 (قواعد هشدار Prometheus زنجیرهٔ شواهد حسابرسی — فقط محلی):** فایل
+> `infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml` (گروه `rasta-audit-evidence`) با `rule_files` در
+> `prometheus.yml` بار و پوشهٔ `rules` فقط‌خواندنی در سرویس `prometheus` Compose (همان `prom/prometheus:v3.1.0`) Mount شد.
+> شش هشدار، هرکدام با `severity`، `summary`/`description` و Annotation `runbook` نسبی به مخزن:
+> `RastaDeadLetterMessagePublished` (`warning`، `sum by (service, topic, reason) (increase(rasta_dlq_messages_total[5m])) > 0`)،
+> `RastaAuditIngestionFailure` (`warning`، `sum by (reason)` روی `rasta_audit_ingestion_failures_total`)،
+> `RastaAuditChainDivergence` (`critical`، `sum by (reason, scope)` روی `rasta_audit_chain_verification_failures_total`)،
+> `RastaSecurityEventCaptureGap` (`critical`، `sum by (outcome)` روی `rasta_security_event_captures_total{outcome=~"failed|timeout"}`)،
+> `RastaSecurityEventClosedBacklogStale` (`warning`، `rasta_security_event_outbox_closed_backlog_age_seconds > 60` — نه
+> `pending_age`) و `RastaSecurityEventPublishFailure` (`warning`، `sum by (reason)` روی
+> `rasta_security_event_publish_failures_total`). هشدارهای شمارنده `increase(…[5m]) > 0` و بی `for`اند؛ هیچ Label یا
+> Annotation شناسهٔ مستأجر/Actor/منبع/رویداد/Correlation/Partition/Offset یا متن خطا ندارد. **شواهد:**
+> `promtool check config` → `SUCCESS: 1 rule files found` و `SUCCESS: 6 rules found`، خروج ۰؛
+> `promtool test rules infrastructure/docker/prometheus/tests/rasta-audit-alerts.test.yml` (هفت گروه آزمون: شش هشدار با افزایش
+> واقعی شمارنده، Labelهای دقیق، رفع پس از خروج از پنجره، و کنترل‌های منفی شمارندهٔ ثابتِ غیرصفر، `recorded`/`skipped`، سن ≤ ۶۰
+> و `pending_age` کهنه) → `SUCCESS`، خروج ۰؛ هشت جهش عمدی قاعده (حذف فیلتر `outcome`، `>= 60`، `pending_age`، شمارندهٔ مطلق
+> در دو هشدار، Label اضافه/کم، شدت غلط) هر هشت را آزمون گرفت؛ حذف فایل قاعده `check config` را با خروج ۱ شکست داد؛ و
+> Prometheus زندهٔ Compose هر شش قاعده را از `/etc/prometheus/rules/rasta-audit-alerts.yml` با `health=ok` بار کرد و
+> `activeAlertmanagers` تهی بود. Job مستقل CI `prometheus-rules` هر دو فرمان `promtool` را روی PR و `main` اجرا می‌کند.
+> **محدودیت تأییدشده:** Series برچسب‌دار `prom-client` با مقدار ۱ متولد می‌شود، پس نخستین رخدادِ هر ترکیب Label پس از شروع
+> فرایند هشدار نمی‌دهد (مقداردهی صفر در کد، گامی جدا). **هنوز نیست:** Alertmanager و هر تحویل اعلان، داشبورد، Scrape محیط
+> واقعی، هشدار Lag کافکا یا عمق Topic DLQ، ابزار بازپخش DLQ و تشخیص رکورد حسابرسیِ غایب. این گام S-06، AUD-004، COM-009 یا
+> عملیات‌پذیری محیط واقعی را نمی‌بندد؛ `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
+>
 > **به‌روزرسانی 2026-09-12 (Phase C10 — محل رد نهم، نخستین تصمیم‌گیرندهٔ غیر از دامنه و `RolesGuard`):**
 > `identity-service` اکنون **دقیقاً نُه** محل رد دارد. محل تازه ردِ خودِ `AuthGuard` پلتفرم است: Token تأییدشده‌ای که با
 > `X-Organization-Id` سازمانی بیرون از عضویت‌هایش را می‌خواهد (`action = identity.tenant_context.select`،

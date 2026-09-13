@@ -158,6 +158,34 @@ jobs:
               --exclude-rule package_managers.pnpm.pnpm-trust-policy.pnpm-trust-policy
 
   # ---------------------------------------------------------------------------
+  # Prometheus configuration and alert rules. Its own job so the Docker pull
+  # stays out of `quality`. Same image as the `prometheus` service in
+  # docker-compose.yml, with the whole directory mounted where that service
+  # sees it, so `rule_files` resolves to the same path here as at runtime.
+  # ---------------------------------------------------------------------------
+  prometheus-rules:
+    name: Prometheus config and alert rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check config and rule syntax
+        # Also fails when a file named in `rule_files` does not exist.
+        run: |
+          docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+            --entrypoint promtool prom/prometheus:v3.1.0 \
+            check config /etc/prometheus/prometheus.yml
+
+      - name: Test alert rule behaviour
+        run: |
+          docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+            --entrypoint promtool prom/prometheus:v3.1.0 \
+            test rules /etc/prometheus/tests/rasta-audit-alerts.test.yml
+
+  # ---------------------------------------------------------------------------
   # Integration and the security tests that need a real database.
   #
   # Service containers rather than Testcontainers here: GitHub provisions them
