@@ -65,7 +65,9 @@ jobs:
         # The provisioned local `Rasta Audit Evidence` dashboard: stable
         # datasource UID on every query, every alert in the rules file, the
         # alerts' own aggregations, bounded labels only, and the boundary text
-        # (docs/13-observability.md § 13.7). Static, so no Docker here; the
+        # (docs/13-observability.md § 13.7); and a self-contained local Grafana
+        # start — the no-outbound GF_* settings on the Compose service and the
+        # inert plugins/alerting provisioning. Static, so no Docker here; the
         # live provisioning and PromQL check is
         # `pnpm run verify:grafana-dashboard-live`. Checker tests run first so
         # a checker that stopped catching anything fails loudly.

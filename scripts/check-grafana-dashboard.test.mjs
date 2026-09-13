@@ -9,9 +9,11 @@ import {
   EXPECTED,
   PATHS,
   checkDashboard,
+  checkGrafanaStartup,
   checkProvisioning,
   checkRepository,
   collectTargets,
+  grafanaServiceEnvironment,
   labelsUsed,
   parseRuleNames,
 } from './check-grafana-dashboard-lib.mjs';
@@ -312,10 +314,176 @@ test('catches provisioning drift', () => {
   }
 });
 
+const startup = () => ({
+  composeYaml: read(PATHS.compose),
+  pluginsYaml: read(PATHS.plugins),
+  alertingYaml: read(PATHS.alerting),
+});
+
+/** Asserts a startup-contract mutation produced an error matching `pattern`. */
+function assertStartupCaught(override, pattern) {
+  const errors = checkGrafanaStartup({ ...startup(), ...override });
+  assert.ok(
+    errors.some((error) => pattern.test(error)),
+    `expected an error matching ${pattern}, got:\n${errors.join('\n') || '(none)'}`,
+  );
+}
+
+test('the tracked Compose Grafana environment and inert provisioning pass the startup contract', () => {
+  assert.deepEqual(checkGrafanaStartup(startup()), []);
+  const env = grafanaServiceEnvironment(startup().composeYaml);
+  for (const [name, value] of Object.entries(EXPECTED.grafanaNoOutboundEnv)) {
+    assert.deepEqual(env.get(name), [`'${value}'`], name);
+  }
+  // Double quotes are as safe as single quotes.
+  const doubleQuoted = startup().composeYaml.replace(
+    "GF_NEWS_NEWS_FEED_ENABLED: 'false'",
+    'GF_NEWS_NEWS_FEED_ENABLED: "false"',
+  );
+  assert.deepEqual(checkGrafanaStartup({ ...startup(), composeYaml: doubleQuoted }), []);
+});
+
+test('catches each no-outbound Compose setting that is missing, unsafe, unquoted or repeated', () => {
+  for (const [name, value] of Object.entries(EXPECTED.grafanaNoOutboundEnv)) {
+    const line = `      ${name}: '${value}'`;
+    const compose = startup().composeYaml;
+    assert.ok(compose.includes(`${line}\n`), `fixture has ${line}`);
+    const unsafe = value === 'true' ? 'false' : 'true';
+    assertStartupCaught(
+      { composeYaml: compose.replace(`${line}\n`, '') },
+      new RegExp(`must set ${name}: '${value}'$`),
+    );
+    assertStartupCaught(
+      { composeYaml: compose.replace(line, `      ${name}: '${unsafe}'`) },
+      new RegExp(`must set ${name}: '${value}' \\(quoted\\), found '${unsafe}'`),
+    );
+    assertStartupCaught(
+      { composeYaml: compose.replace(line, `      ${name}: ${value}`) },
+      new RegExp(`must set ${name}: '${value}' \\(quoted\\), found ${value}$`),
+    );
+    assertStartupCaught(
+      { composeYaml: compose.replace(line, `${line}\n      ${name}: '${unsafe}'`) },
+      new RegExp(`sets ${name} more than once`),
+    );
+  }
+});
+
+test('a no-outbound setting on another Compose service does not satisfy the grafana contract', () => {
+  const name = 'GF_PLUGINS_PREINSTALL_DISABLED';
+  const compose = startup()
+    .composeYaml.replace(`      ${name}: 'true'\n`, '')
+    .replace(/^ {2}kafka-ui:\n/m, (header) => `${header}    environment:\n      ${name}: 'true'\n`);
+  assertStartupCaught({ composeYaml: compose }, new RegExp(`must set ${name}: 'true'$`));
+  assertStartupCaught(
+    { composeYaml: compose.replace(/^ {2}grafana:\s*$/m, '  grafana-renamed:') },
+    /no grafana service found/,
+  );
+});
+
+test('catches a missing, empty or malformed inert plugins file', () => {
+  const base = startup().pluginsYaml;
+  assertStartupCaught({ pluginsYaml: '' }, /plugins\/rasta\.yml: missing or empty/);
+  assertStartupCaught({ pluginsYaml: '# only a comment\n' }, /missing or empty/);
+  assertStartupCaught(
+    { pluginsYaml: base.replace('apps: []', '') },
+    /must contain "apps: \[\]" exactly once, found 0/,
+  );
+  assertStartupCaught(
+    { pluginsYaml: base.replace('apiVersion: 1', 'apiVersion: 2') },
+    /must contain "apiVersion: 1" exactly once, found 0/,
+  );
+  assertStartupCaught({ pluginsYaml: `${base}apps: []\n` }, /"apps: \[\]" exactly once, found 2/);
+});
+
+test('catches a plugins file that starts provisioning an app', () => {
+  const base = startup().pluginsYaml;
+  const declared = base.replace(
+    'apps: []',
+    'apps:\n  - type: grafana-lokiexplore-app\n    org_id: 1\n    disabled: false',
+  );
+  assertStartupCaught({ pluginsYaml: declared }, /unexpected content "apps:"/);
+  assertStartupCaught(
+    { pluginsYaml: declared },
+    /unexpected content "- type: grafana-lokiexplore-app"/,
+  );
+  assertStartupCaught(
+    { pluginsYaml: base.replace('apps: []', 'apps: [{ type: grafana-pyroscope-app }]') },
+    /unexpected content "apps: \[\{ type: grafana-pyroscope-app \}\]"/,
+  );
+});
+
+test('catches an alerting file that declares rules, contact points, policies or anything else', () => {
+  const base = startup().alertingYaml;
+  assertStartupCaught({ alertingYaml: '' }, /alerting\/rasta\.yml: missing or empty/);
+  assertStartupCaught(
+    { alertingYaml: base.replace('apiVersion: 1', 'apiVersion: 2') },
+    /must contain "apiVersion: 1" exactly once, found 0/,
+  );
+  const declarations = [
+    [
+      'groups',
+      'groups:\n  - orgId: 1\n    name: audit\n    folder: Rasta\n    interval: 1m\n    rules: []',
+    ],
+    ['contactPoints', 'contactPoints:\n  - orgId: 1\n    name: oncall\n    receivers: []'],
+    ['policies', 'policies:\n  - orgId: 1\n    receiver: oncall'],
+    ['templates', 'templates:\n  - orgId: 1\n    name: t\n    template: x'],
+    ['muteTimes', 'muteTimes:\n  - orgId: 1\n    name: nights'],
+    ['deleteRules', 'deleteRules:\n  - orgId: 1\n    uid: abc'],
+    ['resetPolicies', 'resetPolicies:\n  - 1'],
+    ['groups', 'groups: []'],
+  ];
+  for (const [key, block] of declarations) {
+    assertStartupCaught(
+      { alertingYaml: `${base}${block}\n` },
+      new RegExp(`alerting/rasta\\.yml: declares "${key}" — this file must provision nothing`),
+    );
+  }
+});
+
+test('refuses any other file beside the inert provisioning files', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rasta-grafana-startup-'));
+  try {
+    for (const path of [
+      PATHS.rules,
+      PATHS.datasource,
+      PATHS.provider,
+      PATHS.compose,
+      PATHS.dashboard,
+      PATHS.plugins,
+      PATHS.alerting,
+    ]) {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      cpSync(join(repoRoot, path), join(root, path));
+    }
+    assert.deepEqual(checkRepository(root).errors, []);
+    writeFileSync(join(root, PATHS.alertingDir, 'oncall.yml'), 'apiVersion: 1\n');
+    writeFileSync(join(root, PATHS.pluginsDir, '.gitkeep'), '');
+    const { errors } = checkRepository(root);
+    assert.ok(
+      errors.some((e) => /alerting\/oncall\.yml: only .*alerting\/rasta\.yml belongs/.test(e)),
+    );
+    assert.ok(errors.some((e) => /plugins\/\.gitkeep: only .*plugins\/rasta\.yml belongs/.test(e)));
+
+    rmSync(join(root, PATHS.plugins));
+    assert.ok(
+      checkRepository(root).errors.some((e) => /plugins\/rasta\.yml: file not found/.test(e)),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('the CLI exits nonzero and names the defect for invalid JSON', () => {
   const root = mkdtempSync(join(tmpdir(), 'rasta-grafana-dashboard-'));
   try {
-    for (const path of [PATHS.rules, PATHS.datasource, PATHS.provider, PATHS.compose]) {
+    for (const path of [
+      PATHS.rules,
+      PATHS.datasource,
+      PATHS.provider,
+      PATHS.compose,
+      PATHS.plugins,
+      PATHS.alerting,
+    ]) {
       mkdirSync(dirname(join(root, path)), { recursive: true });
       cpSync(join(repoRoot, path), join(root, path));
     }

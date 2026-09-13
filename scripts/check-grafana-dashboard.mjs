@@ -13,7 +13,7 @@
  */
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkRepository } from './check-grafana-dashboard-lib.mjs';
+import { EXPECTED, checkRepository } from './check-grafana-dashboard-lib.mjs';
 
 const args = process.argv.slice(2);
 const rootFlag = args.indexOf('--root');
@@ -32,5 +32,7 @@ if (errors.length > 0) {
 
 console.warn(
   `grafana dashboard contract: ${summary.panels} panels, ${summary.targets} queries, ` +
-    `${summary.alerts} alerts and ${summary.records} recording rule(s) covered`,
+    `${summary.alerts} alerts and ${summary.records} recording rule(s) covered; ` +
+    `local Grafana start: ${Object.keys(EXPECTED.grafanaNoOutboundEnv).length} no-outbound settings, ` +
+    'inert plugins/alerting provisioning',
 );

@@ -15,9 +15,12 @@
  * What passing proves: Grafana provisioned the datasource with the stable UID
  * and URL and can reach Prometheus through it; the dashboard is in the `Rasta`
  * folder with the exact UID, title, panel and query count; the dashboard page
- * is served; Grafana logged no provisioning error; Prometheus loaded the rules
- * file; and every query is accepted by Prometheus directly and through
- * Grafana. With no scrape targets running, results are mostly empty — that is
+ * is served; the inert plugins/ and alerting/ provisioning installed no app
+ * plugin and provisioned no alert rule, contact point or policy; Grafana logged
+ * not one error or critical line, tried to install no plugin, and finished
+ * datasource, dashboard and alerting provisioning; Prometheus loaded the rules
+ * file; and every query is accepted by Prometheus directly and through Grafana.
+ * With no scrape targets running, results are mostly empty — that is
  * expected, and says nothing about what the panels would show with real data.
  * Pixel rendering is not checked; no image renderer is installed.
  */
@@ -141,17 +144,12 @@ async function run() {
     `GF_SECURITY_ADMIN_PASSWORD=${adminPassword}`,
     '-e',
     'GF_USERS_ALLOW_SIGN_UP=false',
-    '-e',
-    'GF_ANALYTICS_REPORTING_ENABLED=false',
-    '-e',
-    'GF_ANALYTICS_CHECK_FOR_UPDATES=false',
-    '-e',
-    'GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false',
-    '-e',
-    'GF_NEWS_NEWS_FEED_ENABLED=false',
-    // Grafana 11 otherwise downloads preinstalled app plugins from grafana.com.
-    '-e',
-    'GF_PLUGINS_PREINSTALL_DISABLED=true',
+    // The same no-outbound settings docker-compose.yml gives the `grafana` service:
+    // no analytics, update or news calls, and no first-boot plugin downloads.
+    ...Object.entries(EXPECTED.grafanaNoOutboundEnv).flatMap(([name, value]) => [
+      '-e',
+      `${name}=${value}`,
+    ]),
     '-v',
     mount('infrastructure/docker/grafana/provisioning', '/etc/grafana/provisioning'),
     '-v',
@@ -310,23 +308,83 @@ async function run() {
   assert(page.status === 200, `dashboard page returned ${page.status}`);
   log(`GET /d/${EXPECTED.uid} -> ${page.status}`);
 
-  // Grafana logged no provisioning or datasource error.
+  // The inert plugins/ and alerting/ provisioning installed and provisioned nothing.
+  const apps = await getJson(`${grafana}/api/plugins?type=app`, authed);
+  assert(apps.status === 200 && Array.isArray(apps.body), `plugin list returned ${apps.status}`);
+  const externalApps = apps.body.filter((p) => p.signature !== 'internal');
+  assert(
+    externalApps.length === 0,
+    `non-core app plugins present: ${externalApps.map((p) => p.id).join(', ')}`,
+  );
+  const alertRules = await getJson(`${grafana}/api/v1/provisioning/alert-rules`, authed);
+  assert(
+    alertRules.status === 200 && Array.isArray(alertRules.body) && alertRules.body.length === 0,
+    `Grafana alert rules: ${alertRules.status} ${JSON.stringify(alertRules.body).slice(0, 200)}`,
+  );
+  const contactPoints = await getJson(`${grafana}/api/v1/provisioning/contact-points`, authed);
+  assert(
+    contactPoints.status === 200 && Array.isArray(contactPoints.body),
+    `contact point list returned ${contactPoints.status}`,
+  );
+  const provisionedContactPoints = contactPoints.body.filter((c) => c.provenance);
+  assert(
+    provisionedContactPoints.length === 0,
+    `provisioned contact points: ${provisionedContactPoints.map((c) => c.name).join(', ')}`,
+  );
+  const policies = await getJson(`${grafana}/api/v1/provisioning/policies`, authed);
+  assert(
+    policies.status === 200 && !policies.body.provenance,
+    `notification policy tree is provisioned (${policies.status} ${policies.body?.provenance})`,
+  );
+  log(
+    `plugins: ${apps.body.length} app plugin(s), none outside core ` +
+      `(${apps.body.map((p) => `${p.id}:${p.signature}`).join(', ') || 'none'}); ` +
+      `alerting: ${alertRules.body.length} alert rules, ${contactPoints.body.length} contact point(s) ` +
+      `(${contactPoints.body.map((c) => c.name).join(', ')}), 0 provisioned; policy tree not provisioned`,
+  );
+
+  // Clean startup: not one error or critical line, and every provisioner finished.
   const logs = docker(['logs', names.grafana]);
   const lines = `${logs.stdout}\n${logs.stderr}`.split('\n');
-  const provisioningLines = lines.filter((l) => /provisioning/i.test(l));
+  const provisioningLines = lines.filter((l) => /logger=provisioning/.test(l));
   const errorLines = lines.filter((l) => /level=(error|crit)/.test(l));
-  // Only dashboard and datasource provisioning is this change's concern. Grafana also
-  // logs an error for each provisioning subdirectory it expects but the repository
-  // does not ship (plugins, alerting); those are printed, not hidden, and not failed on.
-  const errors = errorLines.filter(
-    (l) => /logger=provisioning.(dashboard|datasources)/.test(l) || /dashboard|datasource/i.test(l),
+  for (const line of provisioningLines) log(`grafana log: ${line.trim()}`);
+  assert(
+    errorLines.length === 0,
+    `Grafana logged ${errorLines.length} error/critical line(s):\n${errorLines.join('\n')}`,
   );
-  for (const line of errorLines) log(`grafana error-level line: ${line.trim()}`);
-  for (const line of provisioningLines.slice(0, 12)) log(`grafana log: ${line.trim()}`);
-  assert(errors.length === 0, `Grafana logged provisioning errors:\n${errors.join('\n')}`);
+  const evidence = [
+    [
+      'the datasource was provisioned',
+      (l) =>
+        /logger=provisioning\.datasources/.test(l) &&
+        /from configuration/.test(l) &&
+        l.includes(`uid=${EXPECTED.datasourceUid}`),
+    ],
+    [
+      'dashboard provisioning finished',
+      (l) => /logger=provisioning\.dashboard/.test(l) && /finished to provision dashboards/.test(l),
+    ],
+    [
+      'alerting provisioning finished',
+      (l) => /logger=provisioning\.alerting/.test(l) && /finished to provision alerting/.test(l),
+    ],
+  ];
+  for (const [what, matches] of evidence) {
+    assert(lines.some(matches), `Grafana log has no evidence that ${what}`);
+  }
+  // GF_PLUGINS_PREINSTALL_DISABLED: without it this image logs "Installing plugin"
+  // from plugin.backgroundinstaller and downloads app plugins from grafana.com.
+  const installerLines = lines.filter((l) =>
+    /logger=plugin\.(backgroundinstaller|installer)|msg="Installing plugin"/.test(l),
+  );
+  assert(
+    installerLines.length === 0,
+    `Grafana tried to install plugins:\n${installerLines.join('\n')}`,
+  );
   log(
-    `grafana log: ${lines.length} lines, ${provisioningLines.length} mention provisioning, ` +
-      `${errorLines.length} error-level in total, 0 dashboard/datasource errors`,
+    `grafana log: ${lines.length} lines, ${provisioningLines.length} provisioning lines, ` +
+      `0 error/critical lines, 0 plugin installer lines; datasource, dashboard and alerting provisioning finished`,
   );
   return { panels: model.panels.length, targets: targets.length };
 }

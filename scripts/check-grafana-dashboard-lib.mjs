@@ -21,6 +21,10 @@ export const PATHS = Object.freeze({
   dashboardsDir: 'infrastructure/docker/grafana/dashboards',
   datasource: 'infrastructure/docker/grafana/provisioning/datasources/prometheus.yml',
   provider: 'infrastructure/docker/grafana/provisioning/dashboards/rasta.yml',
+  pluginsDir: 'infrastructure/docker/grafana/provisioning/plugins',
+  plugins: 'infrastructure/docker/grafana/provisioning/plugins/rasta.yml',
+  alertingDir: 'infrastructure/docker/grafana/provisioning/alerting',
+  alerting: 'infrastructure/docker/grafana/provisioning/alerting/rasta.yml',
   rules: 'infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml',
   compose: 'docker-compose.yml',
 });
@@ -37,6 +41,28 @@ export const EXPECTED = Object.freeze({
   scrapeJobs: Object.freeze(['audit-service', 'identity-service', 'kafka-exporter']),
   consumerGroups: Object.freeze(['audit-service.domain-projector', 'audit-service.trail']),
   auditDlqTopic: 'rasta.audit.v1.dlq',
+  /**
+   * Environment of the Compose `grafana` service that keeps a local Grafana
+   * 11.5.1 from calling out: usage reporting, core and plugin update checks, the
+   * news feed, and the first-boot download of preinstalled app plugins. The live
+   * verifier starts its container with the same values.
+   */
+  grafanaNoOutboundEnv: Object.freeze({
+    GF_ANALYTICS_REPORTING_ENABLED: 'false',
+    GF_ANALYTICS_CHECK_FOR_UPDATES: 'false',
+    GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false',
+    GF_NEWS_NEWS_FEED_ENABLED: 'false',
+    GF_PLUGINS_PREINSTALL_DISABLED: 'true',
+  }),
+  /**
+   * The only content lines, comments and blank lines aside, of the two inert
+   * provisioning files. Grafana logs an error on every start for a provisioning
+   * directory that does not exist, so each exists with a file that provisions
+   * nothing: no app plugin, and no alert rule group, contact point, policy,
+   * template or mute timing.
+   */
+  inertPluginsLines: Object.freeze(['apiVersion: 1', 'apps: []']),
+  inertAlertingLines: Object.freeze(['apiVersion: 1']),
 });
 
 /**
@@ -553,6 +579,92 @@ export function checkProvisioning({ datasourceYaml, providerYaml, composeYaml })
   return errors;
 }
 
+/** Content lines of a small YAML file: comments and blank lines removed, trailing space trimmed. */
+const contentLines = (text) =>
+  String(text)
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== '' && !/^\s*#/.test(line))
+    .map((line) => line.replace(/\s+$/, ''));
+
+/** Top-level key of a YAML line, if it has one. */
+const topLevelKey = (line) => /^([A-Za-z_][A-Za-z0-9_]*)\s*:/.exec(line)?.[1];
+
+function checkInertFile(label, text, expectedLines, errors) {
+  const lines = contentLines(text);
+  if (lines.length === 0) {
+    errors.push(`${label}: missing or empty — expected exactly ${expectedLines.join(' / ')}`);
+    return;
+  }
+  for (const line of lines) {
+    if (expectedLines.includes(line)) continue;
+    const key = topLevelKey(line);
+    errors.push(
+      key && !expectedLines.some((expected) => topLevelKey(expected) === key)
+        ? `${label}: declares "${key}" — this file must provision nothing`
+        : `${label}: unexpected content "${line.trim()}" — this file must provision nothing`,
+    );
+  }
+  for (const expected of expectedLines) {
+    const count = lines.filter((line) => line === expected).length;
+    if (count !== 1) {
+      errors.push(`${label}: must contain "${expected}" exactly once, found ${count}`);
+    }
+  }
+}
+
+/**
+ * The `environment` entries of the Compose `grafana` service, as written with
+ * their quotes, each name mapped to every value it is given. `null` when there
+ * is no `grafana` service. Reads only the two-space service / four-space key /
+ * six-space entry layout this repository's Compose file uses.
+ */
+export function grafanaServiceEnvironment(composeYaml) {
+  const lines = String(composeYaml).split(/\r?\n/);
+  const start = lines.findIndex((line) => /^ {2}grafana:\s*$/.test(line));
+  if (start < 0) return null;
+  const end = lines.findIndex((line, i) => i > start && /^ {0,2}[^\s#]/.test(line));
+  const block = lines.slice(start + 1, end < 0 ? lines.length : end);
+  const envStart = block.findIndex((line) => /^ {4}environment:\s*$/.test(line));
+  const env = new Map();
+  if (envStart < 0) return env;
+  for (const line of block.slice(envStart + 1)) {
+    if (/^\s*#/.test(line) || line.trim() === '') continue;
+    if (!/^ {6}\S/.test(line)) break;
+    const match = /^ {6}([A-Za-z0-9_]+):\s*(.*?)\s*$/.exec(line);
+    if (match) env.set(match[1], [...(env.get(match[1]) ?? []), match[2]]);
+  }
+  return env;
+}
+
+/**
+ * Checks that local Compose Grafana starts self-contained and clean: the
+ * no-outbound environment on the `grafana` service, and the two inert
+ * provisioning files that stop Grafana logging a missing-directory error.
+ */
+export function checkGrafanaStartup({ composeYaml, pluginsYaml, alertingYaml }) {
+  const errors = [];
+  const env = grafanaServiceEnvironment(composeYaml);
+  if (env === null) {
+    errors.push('docker-compose.yml: no grafana service found');
+  } else {
+    for (const [name, value] of Object.entries(EXPECTED.grafanaNoOutboundEnv)) {
+      const written = env.get(name) ?? [];
+      if (written.length === 0) {
+        errors.push(`docker-compose.yml grafana environment must set ${name}: '${value}'`);
+      } else if (written.length > 1) {
+        errors.push(`docker-compose.yml grafana environment sets ${name} more than once`);
+      } else if (written[0] !== `'${value}'` && written[0] !== `"${value}"`) {
+        errors.push(
+          `docker-compose.yml grafana environment must set ${name}: '${value}' (quoted), found ${written[0] || '(empty)'}`,
+        );
+      }
+    }
+  }
+  checkInertFile(PATHS.plugins, pluginsYaml, EXPECTED.inertPluginsLines, errors);
+  checkInertFile(PATHS.alerting, alertingYaml, EXPECTED.inertAlertingLines, errors);
+  return errors;
+}
+
 /** Reads the repository files and runs every check. */
 export function checkRepository(root) {
   const errors = [];
@@ -582,6 +694,25 @@ export function checkRepository(root) {
       composeYaml: read(PATHS.compose),
     }),
   );
+  errors.push(
+    ...checkGrafanaStartup({
+      composeYaml: read(PATHS.compose),
+      pluginsYaml: read(PATHS.plugins),
+      alertingYaml: read(PATHS.alerting),
+    }),
+  );
+  for (const [dir, file] of [
+    [PATHS.pluginsDir, PATHS.plugins],
+    [PATHS.alertingDir, PATHS.alerting],
+  ]) {
+    // Grafana parses every YAML file in these directories; only the inert one may exist.
+    if (!existsSync(join(root, dir))) continue;
+    for (const name of readdirSync(join(root, dir))) {
+      if (`${dir}/${name}` !== file) {
+        errors.push(`${dir}/${name}: only ${file} belongs in this directory`);
+      }
+    }
+  }
   const dashboardsDir = join(root, PATHS.dashboardsDir);
   if (existsSync(dashboardsDir)) {
     for (const name of readdirSync(dashboardsDir)) {

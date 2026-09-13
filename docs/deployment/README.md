@@ -40,7 +40,10 @@ Credential محلی Compose). داشبورد و Datasource (UID ‏`rasta-promet
 نمی‌شود و تغییر JSON در `infrastructure/docker/grafana/dashboards/` ظرف حدود ۱۰ ثانیه دیده می‌شود. **فقط محلی:** مخزن
 Alertmanager و تحویل اعلان ندارد، پیکربندی Scrape محیط واقعی بیرون از مخزن است، و نبودن هشدار در داشبورد اثبات کامل بودن شواهد
 حسابرسی نیست ([`../13-observability.md`](../13-observability.md) § ۱۳٫۷). Panelهای سرویس فقط وقتی داده دارند که سرویس‌ها روی
-میزبان در حال اجرا باشند.
+میزبان در حال اجرا باشند. Grafana محلی Compose گزارش استفاده، بررسی به‌روزرسانی Grafana و Plugin، خبرنامه و دانلود Pluginهای
+Preinstall را با متغیرهای `GF_*` خاموش دارد و فایل‌های بی‌اثر `provisioning/plugins/rasta.yml` و
+`provisioning/alerting/rasta.yml` را بار می‌کند که هیچ Plugin، قاعدهٔ هشدار، Contact Point یا Policy فراهم نمی‌کنند؛ پس نخستین
+راه‌اندازی به grafana.com وابسته نیست و Log آن خطای Provisioning ندارد. این هم Alertmanager یا تحویل اعلان **نیست**.
 
 ## Build تصاویر
 

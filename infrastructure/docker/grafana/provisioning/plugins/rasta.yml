@@ -1,0 +1,6 @@
+apiVersion: 1
+# Inert on purpose. Grafana reads this directory on every start and logs an
+# error when it does not exist; this file makes it exist without installing or
+# enabling any app plugin. Adding an entry here is a reviewed change:
+# scripts/check-grafana-dashboard-lib.mjs refuses any non-empty list.
+apps: []

@@ -320,6 +320,18 @@ config` → `SUCCESS: 8 rules found`، `promtool test rules` → `SUCCESS` (دو
 > فقط تله‌متری محلی؛ Alertmanager/تحویل اعلان، Scrape محیط واقعی، Heartbeat تولیدکننده و تطبیق رکورد به رکورد همچنان نیستند و
 > نبودن هشدار اثبات کامل بودن شواهد نیست. AUD-004 بسته نشد؛ `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
+> **به‌روزرسانی 2026-09-13 (راه‌اندازی Grafana محلی خودبسنده و بی خطا):** دو ایراد گزارش‌شدهٔ ورودی بالا رفع شد. سرویس
+> `grafana` در Compose اکنون `GF_ANALYTICS_REPORTING_ENABLED`، `GF_ANALYTICS_CHECK_FOR_UPDATES`، `GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES`،
+> `GF_NEWS_NEWS_FEED_ENABLED` (`'false'`) و `GF_PLUGINS_PREINSTALL_DISABLED` (`'true'`) را دارد؛ Image، Port، Credential، Profile و
+> Volumeها دست نخوردند. فایل‌های بی‌اثر `provisioning/plugins/rasta.yml` (`apiVersion: 1`، `apps: []`) و
+> `provisioning/alerting/rasta.yml` (فقط `apiVersion: 1`) هیچ Plugin، Alert Rule، Contact Point یا Policy فراهم نمی‌کنند.
+> `checkGrafanaStartup` در `scripts/check-grafana-dashboard-lib.mjs` هر دو را در `pnpm verify`/CI پاس می‌دارد (۲۸ آزمون، ۷ تازه).
+> `verify-grafana-dashboard-live.mjs` اکنون **صفر** خط `level=error|crit` و صفر خط نصب Plugin می‌خواهد، به‌علاوهٔ شاهد مثبت
+> Provisioning Datasource/داشبورد/Alerting و API (۰ App غیرهسته‌ای، ۰ Alert Rule، ۰ Contact Point/Policy Provision‌شده). **شواهد:**
+> Harness روی Grafana 11.5.1 سه بار سبز (۱۳۸۳ خط Log، ۰ خطا، ۱۴/۱۴ Query، `DELETE` → ۴۰۰، پاک‌سازی کامل)؛ کنترل منفی بی دو پوشه
+> با همان دو خطا شکست خورد. هیچ Alertmanager، تحویل اعلان، قاعده، Plugin، داشبورد یا کد سرویسی افزوده نشد. `COM-009` همچنان
+> `READY`/۱۳ و ADR-053 `Proposed`.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

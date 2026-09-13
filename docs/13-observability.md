@@ -454,6 +454,13 @@ Stack **محلی** Compose (Profile `observability`/`all`):
   بیرون از `provisioning/` است (تا Grafana فایل Provider را داشبورد نخواند) و در `docker-compose.yml` فقط‌خواندنی Mount می‌شود.
   UID داشبورد `rasta-audit-evidence`، Tagها `rasta`/`audit`/`local`، بازهٔ پیش‌فرض ۶ ساعت (پنجرهٔ `RastaAuditProducerSilent`)،
   Refresh ۳۰ ثانیه، منطقهٔ زمانی UTC، بی متغیر Template.
+- **راه‌اندازی خودبسنده و بی خطا (2026-09-13):** سرویس `grafana` در Compose با `GF_ANALYTICS_REPORTING_ENABLED`،
+  `GF_ANALYTICS_CHECK_FOR_UPDATES`، `GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES` و `GF_NEWS_NEWS_FEED_ENABLED` برابر `'false'` و
+  `GF_PLUGINS_PREINSTALL_DISABLED` برابر `'true'` (رشتهٔ Quoteشده) گزارش استفاده، بررسی به‌روزرسانی، خبرنامه و دانلود Pluginهای
+  Preinstall از grafana.com را خاموش می‌کند. پوشه‌های `provisioning/plugins` و `provisioning/alerting` هرکدام یک فایل **بی‌اثر**
+  دارند — `apiVersion: 1` و `apps: []`، و فقط `apiVersion: 1` — تا Grafana 11.5.1 برای نبودن آن پوشه‌ها خطا Log نکند؛ هیچ
+  Plugin، Alert Rule، Contact Point، Notification Policy، Template یا Mute Timing فراهم نمی‌کنند. این **Alertmanager یا تحویل
+  اعلان نیست**: هشدارهای حسابرسی همچنان قواعد Prometheus محلی‌اند و به هیچ‌کس تحویل نمی‌شوند.
 - **۱۱ Panel، ۱۴ Query:** (۱) متن مرز؛ (۲) جدول هشدارهای `pending`/`firing` از `ALERTS` با `alertname`/`alertstate`/`severity`
   که نام **هر سیزده** هشدار را صریحاً دارد؛ (۳) دسترس‌پذیری سه Job ‏`audit-service`، `identity-service` و `kafka-exporter` با
   همان `min by (job) (up)` هشدارهای Unavailable، و Job بی Series ‏`up` هم با `absent` صفر نشان داده می‌شود؛ (۴) نرخ

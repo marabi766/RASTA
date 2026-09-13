@@ -689,6 +689,16 @@ p95، گروه `trail`، Recording Rule، `scope` زنجیره، `failed|timeout
 در `by`، `{{actor_id}}` در Legend، Matcher ‏`partition`، `correlationId` در توضیح، `pending_age`، حذف عبارت مرز از Panel و توضیح،
 پنج جهش Provisioning، و CLI روی JSON نامعتبر (خروج ۱) و ریشهٔ سالم (خروج ۰).
 
+**قرارداد راه‌اندازی Grafana محلی (2026-09-13).** همان Checker (`checkGrafanaStartup`) رد می‌کند: نبودن، مقدار ناامن، مقدار بی
+Quote یا تکرار هر یک از پنج متغیر `GF_ANALYTICS_REPORTING_ENABLED`، `GF_ANALYTICS_CHECK_FOR_UPDATES`،
+`GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES`، `GF_NEWS_NEWS_FEED_ENABLED` (`'false'`) و `GF_PLUGINS_PREINSTALL_DISABLED` (`'true'`)
+در بلوک `environment` خودِ سرویس `grafana` (همان متغیر روی سرویس دیگر پذیرفته نیست)؛ نبودن، خالی بودن یا محتوای دیگر
+`provisioning/plugins/rasta.yml` (دقیقاً `apiVersion: 1` و `apps: []`) و `provisioning/alerting/rasta.yml` (دقیقاً
+`apiVersion: 1`) — از جمله هر App، `groups`، `contactPoints`، `policies`، `templates`، `muteTimes`، `deleteRules` یا
+`resetPolicies` — و هر فایل دیگر (مثلاً `.gitkeep` یا YAML دوم) در آن دو پوشه. هفت آزمون تازه (روی هم ۲۸) حالت مثبت، ۲۰ جهش
+Compose (چهار حالت برای هر متغیر)، متغیر روی سرویس دیگر و سرویس `grafana` غایب، پنج جهش فایل Plugins، دو App اعلام‌شده، هشت
+اعلان Alerting و فایل اضافه/غایب را پوشش می‌دهند؛ خاموش کردن هر یک از سه بخش Checker به ترتیب ۲، ۳ و ۱ آزمون را شکست داد.
+
 **اعتبارسنجی زندهٔ Provisioning و PromQL.** `pnpm run verify:grafana-dashboard-live` (دستی، Docker لازم، بیرون از `pnpm verify`)
 Prometheus `v3.1.0` و Grafana `11.5.1` را با نام‌های یکتای `rasta-dashcheck-<suffix>-*`، شبکهٔ یکتا، Portهای میزبان پویا روی
 `127.0.0.1` و Mount فقط‌خواندنی پیکربندی واقعی مخزن بالا می‌آورد، پس به Stack Compose توسعه‌دهنده دست نمی‌زند. پس از سالم شدن هر دو
@@ -696,8 +706,12 @@ API اثبات می‌کند: Prometheus سیزده هشدار و یک Recording
 `http://prometheus:9090`، پیش‌فرض و `proxy` است و Health آن از Grafana `OK` است؛ داشبورد با UID و عنوان دقیق، `provisioned=true`،
 در پوشهٔ `Rasta` با تعداد Panel/Target فایل برمی‌گردد و هر Target برگشتی همان UID را دارد؛ `DELETE` داشبورد با `400` رد می‌شود و
 داشبورد می‌ماند؛ هر ۱۴ Query (با جایگزینی `$__rate_interval` با `5m` فقط در Harness) در `/api/v1/query` Prometheus و از راه
-`/api/ds/query` Grafana موفق است (نتیجهٔ خالی پذیرفته است، خطای Parser نه)؛ `GET /d/rasta-audit-evidence` → `200`؛ و Log
-Grafana هیچ خطای Provisioning داشبورد/Datasource ندارد. Harness دقیقاً دو Container (با Volumeهای بی‌نامشان) و شبکهٔ خودش را در
+`/api/ds/query` Grafana موفق است (نتیجهٔ خالی پذیرفته است، خطای Parser نه)؛ `GET /d/rasta-audit-evidence` → `200`؛ هیچ App
+Plugin غیرهسته‌ای نصب نیست، Grafana هیچ Alert Rule ندارد و هیچ Contact Point یا Policy آن Provision نشده است؛ و Log Grafana
+**صفر** خط `level=error` یا `level=crit` و صفر خط نصب Plugin دارد و شاهد مثبت پایان Provisioning Datasource (با UID)، داشبورد و
+Alerting را نشان می‌دهد (از 2026-09-13؛ پیش از آن دو خطای پوشهٔ غایب `plugins`/`alerting` پذیرفته می‌شد). Harness همان پنج متغیر
+بی‌تماس بیرونی Compose را از `EXPECTED.grafanaNoOutboundEnv` می‌خواند. کنترل منفی: با برداشتن موقت دو پوشه، Harness با دقیقاً همان
+دو خطا شکست خورد. Harness دقیقاً دو Container (با Volumeهای بی‌نامشان) و شبکهٔ خودش را در
 هر حالت حذف و نبودنشان را گزارش می‌کند. Rendering پیکسلی سنجیده نمی‌شود (Image Renderer نصب نیست) و دادهٔ واقعی سرویس‌ها در این
 اجرا Scrape نشد.
 
