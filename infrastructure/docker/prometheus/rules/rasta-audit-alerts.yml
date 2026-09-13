@@ -51,6 +51,24 @@ groups:
           description: 'rasta_audit_ingestion_failures_total increased with reason {{ $labels.reason }} in the last 5 minutes: at least one ingestion attempt did not produce an audit_event row.'
           runbook: docs/runbooks/audit-gap-detected.md
 
+      - alert: RastaAuditIngestionLagHigh
+        # ADR-053 § 13: p95 of event time (`occurredAt`) to audit row written,
+        # per source topic, over a 5-minute rate window. Buckets are summed
+        # across scrape instances before the quantile, keeping only `le` and
+        # `source_topic`; 60 is an exact bucket bound. It is observed only for
+        # rows actually written, so a stalled consumer writes nothing and this
+        # stays silent (NaN is never > 60): RastaAuditConsumerLag and the two
+        # Kafka signal-loss alerts cover that. `for: 5m` so one slow minute of
+        # replay does not fire.
+        expr: histogram_quantile(0.95, sum by (le, source_topic) (rate(rasta_audit_ingestion_lag_seconds_bucket[5m]))) > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Audit ingestion p95 lag above 60 seconds for {{ $labels.source_topic }}'
+          description: 'The 95th percentile of seconds from event occurrence to audit row written for {{ $labels.source_topic }} has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+          runbook: docs/runbooks/audit-ingestion-lag.md
+
       - alert: RastaAuditChainDivergence
         # Incremented only for a real divergence, never for an empty window,
         # legacy records or a refused request.

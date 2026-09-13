@@ -585,7 +585,7 @@ pnpm verify                     # دروازه کامل کیفیت
 **پیکربندی و قواعد هشدار Prometheus.** Job مستقل `prometheus-rules` در CI (روی هر PR و `main`، بی وابستگی Node و بیرون از
 Job سریع `quality`) همان Image سرویس `prometheus` در `docker-compose.yml` را با کل پوشهٔ
 `infrastructure/docker/prometheus` به‌صورت فقط‌خواندنی در `/etc/prometheus` اجرا می‌کند؛ پس مسیر `rule_files` همان است که در
-زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار نُه هشدار و یک Recording Rule را،
+زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار ده هشدار و یک Recording Rule را،
 با افزایش واقعی شمارنده (نه مقدار مطلق) و کنترل‌های منفی (`outcome="recorded"`/`"skipped"` هشدار نمی‌دهد، سن پشتهٔ بسته ≤ ۶۰
 هشدار نمی‌دهد، `pending_age` ورودی هشدار نیست)، گذار Series صادرشده با صفر به نخستین رخداد (که هشدار می‌دهد) و Labelهای
 دقیق هر هشدار. برای Kafka همان Fixture با نام و Labelهای واقعی `danielqsj/kafka-exporter:v1.9.0`
@@ -602,7 +602,18 @@ Job سریع `quality`) همان Image سرویس `prometheus` در `docker-comp
 `maintenance-service.usage` جای گروه ثابت را نمی‌گیرند؛ Exporter خاموش یا بی Series `up` این هشدار را خاموش می‌کند؛ و گروهی
 که کمتر از ۵ دقیقه ناپدید می‌شود (با نشانگر `stale` واقعی Prometheus) نمی‌سوزد و بازگشتش ۵ دقیقه را از نو آغاز می‌کند. جهش‌های
 حذف شاخهٔ `absent(up…)`، حذف شرط سلامت Exporter (یا `== 1` → `>= 0`)، ضعیف کردن تطابق دقیق گروه به Regex (سه شکل)، حذف
-`min by (job)` و کوتاه کردن هر `for` هر کدام Fixture را شکست دادند. `promql_expr_test` Recording Rule `topic:kafka_topic_retained_records:sum` را روی سه Partition
+`min by (job)` و کوتاه کردن هر `for` هر کدام Fixture را شکست دادند. `RastaAuditIngestionLagHigh` با Seriesهای انباشتی واقعی
+`rasta_audit_ingestion_lag_seconds_bucket{source_topic,le}` روی همان مرزهای سرویس (`1 … 3600`، `+Inf`) و Labelهای
+`job`/`instance`/`environment` Scrape اثبات می‌شود: p95 پیوسته ۶۵٫۴۵ روی دو Instance از ۱ دقیقه درست است، در ۵ دقیقه `pending`
+(از راه `ALERTS`) و در ۶ دقیقه دقیقاً **یک** هشدار با فقط `source_topic`/`severity` و Annotation دقیق؛ Topic دوم که از ۴ دقیقه بالا
+می‌رود مستقل در ۹ دقیقه می‌سوزد؛ p95 دقیقاً روی مرز ۶۰ و p95 برابر ۲۹٫۲۵ نمی‌سوزند؛ Topic با یک Instance کند و یک Instance پرشمار
+سریع (p95 جمع‌شده ۹٫۶۹) نمی‌سوزد؛ Series صادرشده با صفر بی مشاهده (`NaN`) و نبودن کامل Histogram ساکت‌اند؛ و بازهٔ بالای گذرا
+(۱–۳ دقیقه، سپس ۱۰۰۰۰ رکورد سریع) `for` را از نو آغاز می‌کند و فقط در ۱۳ دقیقه می‌سوزد، نه ۶. جهش‌های Quantile ‏`0.5` و `0.99`،
+`by (le)`، `by (source_topic)`، `by (le, source_topic, instance)`، حذف `sum by`، آستانهٔ `> 59` و `> 66`، و `for: 4m` هر نُه
+Fixture را شکست دادند. آزمون‌های واحد `audit-service` (`metrics.spec.ts` و دو Spec مصرف‌کننده) مرزهای دقیق Bucket، ۱۱ Topic مشتق از
+`DOMAIN_TOPICS` و `AUDIT_TRAIL_TOPIC`، Exposition صفرِ `_bucket`/`_sum`/`_count` پیش از نخستین رکورد، مقداردهی با `zero()` بی
+فراخوان `observe`، و برای مسیر A و B یک مشاهدهٔ دقیق با `Date.now()` ثابت (Bucket درست، `_sum` دقیق)، Clamp ساعت جلوتر به Bucket
+صفر، و نبودن مشاهده برای `DUPLICATE`، رد و شکست پایگاه داده را اثبات می‌کنند. `promql_expr_test` Recording Rule `topic:kafka_topic_retained_records:sum` را روی سه Partition
 (۱۰۵، سپس ۱۱۵ پس از نوشتن تازه، سپس ۳۵ پس از حذف به‌دست Retention)، نادیده ماندن Topic DLQ دیگر، و Clamp (Partition با Offsetهای
 متقاطع صفر است و از Partition دیگر کم نمی‌کند) می‌سنجد. `pnpm verify` این دروازه را اجرا نمی‌کند، چون Docker
 می‌خواهد. فرمان محلی (در Git Bash روی ویندوز `MSYS_NO_PATHCONV=1` لازم است):

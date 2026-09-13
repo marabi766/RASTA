@@ -236,9 +236,20 @@ config` → `SUCCESS: 8 rules found`، `promtool test rules` → `SUCCESS` (دو
 > 09:59:36 UTC با `{job="kafka-exporter",severity="warning"}`، رفع پس از Start دوباره؛ هشدار گروه غایب هیچ‌گاه فعال نشد. شاخهٔ
 > «Exporter سالم/گروه غایب» عمداً زنده بازتولید نشد، چون هر دو گروه Offset Commit‌شده دارند و ساختنش حذف Metadata گروه یا
 > جابه‌جایی Offset می‌خواست؛ فقط `promtool` آن را اثبات می‌کند.
-> **هنوز نیست:** Alertmanager و تحویل اعلان، Scrape محیط واقعی، داشبورد، هشدار روی
-> `rasta_audit_ingestion_lag_seconds` (امروز Gauge، ADR-053 Histogram/p95 می‌خواهد)، Lag گروه‌های دیگر و عمق Topicهای DLQ دیگر،
-> ابزار بازپخش و تشخیص رکورد غایب.
+> **تناقض با ADR-053 § ۱۳ رفع شد (همان روز، بعدتر):** `rasta_audit_ingestion_lag_seconds{source_topic}` دیگر Gauge نیست؛
+> **Histogram** با `AUDIT_INGESTION_LAG_BUCKETS` = `1, 5, 15, 30, 60, 120, 300, 900, 3600` (+`+Inf`) است و هر دو مصرف‌کننده
+> فقط پس از `WRITTEN` با `observe(max(0, now - occurredAt))` ثبت می‌کنند (نه `DUPLICATE`، رد یا شکست پایگاه داده). هر ۱۱
+> `source_topic` (`[...DOMAIN_TOPICS, AUDIT_TRAIL_TOPIC]`) هنگام بار شدن ماژول با `zero()` — بی مشاهدهٔ ساختگی — صادر می‌شوند:
+> ۱۳۲ Series. هشدار تازهٔ `RastaAuditIngestionLagHigh` (`warning`، `for: 5m`، گروه `rasta-audit-evidence`،
+> `histogram_quantile(0.95, sum by (le, source_topic) (rate(rasta_audit_ingestion_lag_seconds_bucket[5m]))) > 60`، Label فقط
+> `source_topic`). اکنون ۱۱ قاعده (۱۰ هشدار + ۱ Recording). **شواهد:** audit-service ۲۲ مجموعه / ۶۳۲ آزمون (Exposition دقیق،
+> `zero()` بی `observe`، مسیر A و B با `Date.now()` ثابت، Clamp، Duplicate/خطا بی مشاهده) و ۹ جهش TypeScript همه گرفته شدند؛
+> `check config` → `SUCCESS: 11 rules found`؛ `test rules` → `SUCCESS` (pending در ۵m، firing در ۶m، یک هشدار برای دو Instance،
+> Topic مستقل در ۹m، مرز دقیق ۶۰، Instance کندِ اقلیت، `NaN`، Reset `for` تا ۱۳m) و ۹ جهش PromQL همه شکست خوردند. زنده:
+> `/metrics` روی Backlog واقعی محلی (بی رویداد ساختگی) ۱۳۲ Series و `_count` برابر ردیف‌های نوشته‌شده نشان داد و Prometheus قاعده
+> را `health=ok` ارزیابی کرد؛ هشدار **زنده نسوخت**، چون کل Backlog پیش از نمونهٔ دوم Scrape نوشته شد و `rate` صفر (p95 = `NaN`) بود.
+> **هنوز نیست:** Alertmanager و تحویل اعلان، Scrape محیط واقعی، داشبورد، Lag گروه‌های دیگر و عمق Topicهای DLQ دیگر، تشخیص
+> Offset غایبِ هر Topic، ابزار بازپخش و تشخیص رکورد غایب.
 > `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
 >
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series

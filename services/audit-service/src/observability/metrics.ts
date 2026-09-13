@@ -1,4 +1,6 @@
+import { AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
 import { Counter, Gauge, Histogram, registry } from '@rasta/observability';
+import { DOMAIN_TOPICS } from '../audit/audit.mapper';
 import { DIVERGENCE_REASON_VALUES } from '../audit/audit.verification.view';
 
 /**
@@ -30,21 +32,50 @@ export const auditRecordsIngestedTotal = new Counter({
 });
 
 /**
+ * Upper bounds, in seconds, of the ingestion lag histogram's buckets.
+ *
+ * `60` is an exact boundary because ADR-053 § 13 alerts on p95 > 60 seconds,
+ * and `histogram_quantile` interpolates inside a bucket: without a bound at 60
+ * the alert would be comparing against a guess. Below it, 1–30 separates "live"
+ * from "a retry or two behind"; above it, 2, 5 and 15 minutes and an hour show
+ * how far a stalled consumer has fallen before Kafka retention becomes the
+ * risk. Past an hour the answer is the `+Inf` bucket prom-client adds, and the
+ * broker-side offset lag says how much is waiting. Nine bounds plus `+Inf`, per
+ * topic: a bounded, fixed series count.
+ */
+export const AUDIT_INGESTION_LAG_BUCKETS: readonly number[] = Object.freeze([
+  1, 5, 15, 30, 60, 120, 300, 900, 3600,
+]);
+
+/**
  * How far behind the domain the store is, in seconds.
  *
- * `recordedAt - occurredAt` for the row just written. This is the number that
+ * `recordedAt - occurredAt` for each row written. This is the number that
  * says whether the audit trail is a live record or a historical one, and it is
  * the only reason both timestamps exist as separate columns.
  *
- * A gauge rather than a histogram because the question during an incident is
- * "how stale is it right now", not "what was the distribution last week".
+ * A histogram, as ADR-053 § 13 specifies: the alert is on the p95 over a
+ * window, and a gauge holding only the last row written cannot answer that —
+ * one fast record after a slow minute would overwrite the evidence. Observed
+ * only for a row actually written, never for a duplicate or a failure.
  */
-export const auditIngestionLagSeconds = new Gauge({
+export const auditIngestionLagSeconds = new Histogram({
   name: 'rasta_audit_ingestion_lag_seconds',
   help: 'Seconds between a domain event occurring and its audit row being written',
   labelNames: ['source_topic'] as const,
+  buckets: [...AUDIT_INGESTION_LAG_BUCKETS],
   registers: [registry],
 });
+
+/**
+ * Every `source_topic` this service writes rows from: the ten path-A domain
+ * topics and the path-B trail topic. Derived, never restated, so a topic added
+ * to a subscription is exported here with it.
+ */
+export const AUDIT_INGESTION_SOURCE_TOPICS: readonly string[] = Object.freeze([
+  ...DOMAIN_TOPICS,
+  AUDIT_TRAIL_TOPIC,
+]);
 
 /**
  * Ingestion failures, by a bounded reason.
@@ -285,6 +316,7 @@ export const auditChainRecordsVerified = new Histogram({
 // leaves an existing count untouched, so calling this again — as tests that
 // `reset()` a counter do — never erases a real failure. Every value comes from
 // the closed sets the increment sites already use; nothing here is a new label.
+//
 // ---------------------------------------------------------------------------
 
 /** Exports every alert-driving audit failure series at zero. Idempotent. */
@@ -299,4 +331,25 @@ export function initializeAuditAlertSeries(): void {
   }
 }
 
+/**
+ * Exports the ingestion lag histogram at zero for every source topic.
+ *
+ * `RastaAuditIngestionLagHigh` reads `rate(..._bucket[5m])`, which has the
+ * same first-sample blind spot as `increase`. Seeded with `zero()`, never
+ * `observe(labels, 0)`: an observation of 0 would put a record that never
+ * existed into the lowest bucket and pull the p95 down. `zero()` writes
+ * all-zero `_bucket`, `_sum` and `_count` and counts nothing.
+ *
+ * **Not idempotent, unlike the counter seeding above:** `zero()` replaces a
+ * series, observations included. It runs once, at module load, before any
+ * record can have been observed — and a test may call it again only after
+ * `reset()`.
+ */
+export function initializeIngestionLagSeries(): void {
+  for (const source_topic of AUDIT_INGESTION_SOURCE_TOPICS) {
+    auditIngestionLagSeconds.zero({ source_topic });
+  }
+}
+
 initializeAuditAlertSeries();
+initializeIngestionLagSeries();

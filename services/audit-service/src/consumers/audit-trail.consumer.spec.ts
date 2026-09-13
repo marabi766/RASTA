@@ -97,6 +97,61 @@ async function valueOf(
 
 const counter = (metric: unknown) => metric as { get(): Promise<MetricSnapshot> };
 
+interface LagSnapshot {
+  count: number;
+  sum: number;
+  bucket: (le: number | '+Inf') => number;
+}
+
+/** One topic's ingestion lag histogram: `_count`, `_sum` and each `_bucket`. */
+async function lagOf(topic: string): Promise<LagSnapshot> {
+  const { values } = await (
+    auditIngestionLagSeconds as unknown as {
+      get(): Promise<{
+        values: {
+          metricName?: string;
+          value: number;
+          labels: MetricSnapshot['values'][number]['labels'];
+        }[];
+      }>;
+    }
+  ).get();
+  const own = values.filter((entry) => entry.labels.source_topic === topic);
+  const single = (suffix: string): number =>
+    own.find((entry) => entry.metricName === `rasta_audit_ingestion_lag_seconds_${suffix}`)
+      ?.value ?? 0;
+  return {
+    count: single('count'),
+    sum: single('sum'),
+    bucket: (le) =>
+      own.find(
+        (entry) =>
+          entry.metricName === 'rasta_audit_ingestion_lag_seconds_bucket' && entry.labels.le === le,
+      )?.value ?? 0,
+  };
+}
+
+/** Observations across every topic: a refused message has no topic of its own to count under. */
+async function totalLagCount(): Promise<number> {
+  const { values } = await (
+    auditIngestionLagSeconds as unknown as {
+      get(): Promise<{ values: { metricName?: string; value: number }[] }>;
+    }
+  ).get();
+  return values
+    .filter((entry) => entry.metricName === 'rasta_audit_ingestion_lag_seconds_count')
+    .reduce((sum, entry) => sum + entry.value, 0);
+}
+
+/** Pins `Date.now()` so an observed lag is exact rather than wall-clock dependent. */
+function nowAt(iso: string): void {
+  jest.spyOn(Date, 'now').mockReturnValue(Date.parse(iso));
+}
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
+
 const TENANT = 'ORG_01JTRAILCONSUMER00000001';
 const delivery = (topic: string = AUDIT_TRAIL_TOPIC): EventDelivery =>
   Object.freeze({ topic, partition: 1 });
@@ -260,25 +315,50 @@ describe('recording a valid message', () => {
     expect(record.changes).toEqual([{ field: 'status', from: 'SENTINEL-from', to: 'SENTINEL-to' }]);
   });
 
-  it('counts one written record by bounded labels and sets the lag gauge', async () => {
+  it('counts one written record by bounded labels and observes its lag once', async () => {
     const labels = {
       source_service: 'identity-service',
       source_topic: AUDIT_TRAIL_TOPIC,
       outcome: 'REFUSED',
     };
     const before = await valueOf(counter(auditRecordsIngestedTotal), labels);
+    const lagBefore = await lagOf(AUDIT_TRAIL_TOPIC);
+    const otherBefore = await lagOf('rasta.identity.v1');
 
-    // An `occurredAt` safely in the past, so the lag is positive rather than
-    // clamped to zero against a producer clock that is ahead of this one.
+    // Written 45 seconds after it occurred.
+    nowAt('2026-09-15T10:30:45.000Z');
     await trailWith([], async () => 'WRITTEN').handle(
-      envelope(payload(), { occurredAt: '2020-01-01T00:00:00.000Z' }),
+      envelope(payload(), { occurredAt: '2026-09-15T10:30:00.000Z' }),
       delivery(),
     );
 
     expect(await valueOf(counter(auditRecordsIngestedTotal), labels)).toBe(before + 1);
-    expect(
-      await valueOf(counter(auditIngestionLagSeconds), { source_topic: AUDIT_TRAIL_TOPIC }),
-    ).toBeGreaterThan(0);
+    const lag = await lagOf(AUDIT_TRAIL_TOPIC);
+    expect(lag.count).toBe(lagBefore.count + 1);
+    expect(lag.sum).toBe(lagBefore.sum + 45);
+    expect(lag.bucket(30)).toBe(lagBefore.bucket(30));
+    expect(lag.bucket(60)).toBe(lagBefore.bucket(60) + 1);
+    expect(lag.bucket('+Inf')).toBe(lagBefore.bucket('+Inf') + 1);
+    // Observed under the record's own topic and nowhere else.
+    expect(await lagOf('rasta.identity.v1')).toEqual(
+      expect.objectContaining({ count: otherBefore.count, sum: otherBefore.sum }),
+    );
+  });
+
+  it('clamps a producer clock that is ahead of this one into the zero bucket', async () => {
+    const lagBefore = await lagOf(AUDIT_TRAIL_TOPIC);
+
+    // "Written" ten seconds before it occurred.
+    nowAt('2026-09-15T10:29:50.000Z');
+    await trailWith([], async () => 'WRITTEN').handle(
+      envelope(payload(), { occurredAt: '2026-09-15T10:30:00.000Z' }),
+      delivery(),
+    );
+
+    const lag = await lagOf(AUDIT_TRAIL_TOPIC);
+    expect(lag.count).toBe(lagBefore.count + 1);
+    expect(lag.sum).toBe(lagBefore.sum);
+    expect(lag.bucket(1)).toBe(lagBefore.bucket(1) + 1);
   });
 
   it('logs nothing at all on the success path', async () => {
@@ -296,12 +376,16 @@ describe('duplicate delivery', () => {
     const written = { source_topic: AUDIT_TRAIL_TOPIC };
     const writtenBefore = await valueOf(counter(auditRecordsIngestedTotal), written);
     const failedBefore = await valueOf(counter(auditIngestionFailuresTotal), {});
+    const lagBefore = await lagOf(AUDIT_TRAIL_TOPIC);
 
     await trailWith(calls, async () => 'DUPLICATE').handle(envelope(), delivery());
 
-    // No success metric: a replay is not a new piece of evidence.
+    // No success metric: a replay is not a new piece of evidence, and its lag
+    // is the lag of a record written long ago.
     expect(await valueOf(counter(auditRecordsIngestedTotal), written)).toBe(writtenBefore);
     expect(await valueOf(counter(auditIngestionFailuresTotal), {})).toBe(failedBefore);
+    expect((await lagOf(AUDIT_TRAIL_TOPIC)).count).toBe(lagBefore.count);
+    expect((await lagOf(AUDIT_TRAIL_TOPIC)).sum).toBe(lagBefore.sum);
 
     expect(calls).toHaveLength(1);
     const text = loggedText(calls);
@@ -373,6 +457,7 @@ describe('refusing a message', () => {
       let ingested = 0;
       const before = await valueOf(counter(auditIngestionFailuresTotal), { reason });
       const writtenBefore = await valueOf(counter(auditRecordsIngestedTotal), {});
+      const lagCountBefore = await totalLagCount();
 
       const trail = trailWith(calls, async () => {
         ingested += 1;
@@ -393,6 +478,7 @@ describe('refusing a message', () => {
       expect(ingested).toBe(0);
       expect(await valueOf(counter(auditIngestionFailuresTotal), { reason })).toBe(before + 1);
       expect(await valueOf(counter(auditRecordsIngestedTotal), {})).toBe(writtenBefore);
+      expect(await totalLagCount()).toBe(lagCountBefore);
 
       expect(calls).toHaveLength(1);
       const text = loggedText(calls);
@@ -491,6 +577,7 @@ describe('a database failure', () => {
       reason: 'database_error',
     });
     const writtenBefore = await valueOf(counter(auditRecordsIngestedTotal), {});
+    const lagBefore = await lagOf(AUDIT_TRAIL_TOPIC);
 
     const failure = await trailWith(calls, async () => {
       throw original;
@@ -514,6 +601,8 @@ describe('a database failure', () => {
       failedBefore + 1,
     );
     expect(await valueOf(counter(auditRecordsIngestedTotal), {})).toBe(writtenBefore);
+    expect((await lagOf(AUDIT_TRAIL_TOPIC)).count).toBe(lagBefore.count);
+    expect((await lagOf(AUDIT_TRAIL_TOPIC)).sum).toBe(lagBefore.sum);
 
     // The shared consumer logs the (sanitised) error on every attempt; this
     // handler adds nothing that could carry more.

@@ -1,8 +1,8 @@
 # Runbook: Lag مصرف‌کنندهٔ حسابرسی
 
 **شدت:** 🟠 هشدار — 🔴 بحرانی اگر Lag به نگهداشت Topic نزدیک شود
-**هشدار محرک:** `RastaAuditConsumerLag`، `RastaKafkaExporterUnavailable` و `RastaAuditConsumerGroupMetricsMissing` (هر سه 🟠
-`warning`) در
+**هشدار محرک:** `RastaAuditConsumerLag`، `RastaKafkaExporterUnavailable`، `RastaAuditConsumerGroupMetricsMissing` و
+`RastaAuditIngestionLagHigh` (هر چهار 🟠 `warning`) در
 [`infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`](../../infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml)
 **زمان پاسخ هدف:** ۳۰ دقیقه
 
@@ -22,10 +22,19 @@ min by (job) (up{job="kafka-exporter"}) == 0 or absent(up{job="kafka-exporter"})
     absent(kafka_consumergroup_lag{consumergroup="audit-service.trail"})
 )
 and on () (min(up{job="kafka-exporter"}) == 1)
+
+# RastaAuditIngestionLagHigh — for: 5m؛ Label: source_topic
+histogram_quantile(0.95, sum by (le, source_topic) (rate(rasta_audit_ingestion_lag_seconds_bucket[5m]))) > 60
 ```
 
-هر سه به‌علاوهٔ `severity`. دو هشدار آخر برای این‌اند که **سکوت `RastaAuditConsumerLag` با «بی‌Lag» اشتباه نشود:** آن هشدار
-فقط روی Seriesهای موجود کار می‌کند و وقتی ورودی‌اش نیست ساکت است. این دو هرگز هم‌زمان نمی‌سوزند.
+هر چهار به‌علاوهٔ `severity`. `RastaKafkaExporterUnavailable` و `RastaAuditConsumerGroupMetricsMissing` برای این‌اند که **سکوت
+`RastaAuditConsumerLag` با «بی‌Lag» اشتباه نشود:** آن هشدار فقط روی Seriesهای موجود کار می‌کند و وقتی ورودی‌اش نیست ساکت است.
+این دو هرگز هم‌زمان نمی‌سوزند.
+
+**دو نوع Lag، دو سؤال.** سه هشدار اول از سمت **Broker**اند: چند رکورد پشت Offset Commit‌شدهٔ گروه مانده است.
+`RastaAuditIngestionLagHigh` از سمت **خود `audit-service`** است: ردیف‌هایی که **واقعاً نوشته شدند** چند ثانیه پس از `occurredAt`
+رویداد نوشته شدند. اولی مصرفِ متوقف را می‌بیند؛ دومی تحویلِ دیرِ شواهدی را که هنوز می‌رسد. مصرف‌کننده‌ای که هیچ ردیفی نمی‌نویسد
+هیچ مشاهده‌ای ندارد و دومی را ساکت می‌گذارد — آن‌جا اولی‌ها می‌سوزند.
 
 ---
 
@@ -56,10 +65,19 @@ and on () (min(up{job="kafka-exporter"}) == 1)
 >     یا مثبت «موجود» است. هر گروه با تطابق **دقیق** نامش سنجیده می‌شود؛ گروه‌های آزمون `audit-itest-*` جای آن را نمی‌گیرند. وقتی
 >     Exporter خودش در دسترس نیست این هشدار عمداً خاموش است تا یک خرابی دو تشخیص نگیرد. ناپدید شدن گذرای کمتر از پنج دقیقه
 >     هشدار نمی‌دهد و بازگشت Series پنج دقیقه را از نو آغاز می‌کند.
+> - **تأخیر زمانی درون سرویس — `RastaAuditIngestionLagHigh`.** `rasta_audit_ingestion_lag_seconds{source_topic}` یک
+>   **Histogram** است (ADR-053 § ۱۳) و در `/metrics` به شکل `_bucket{source_topic,le}`، `_sum{source_topic}` و
+>   `_count{source_topic}` صادر می‌شود. هر دو مصرف‌کننده (مسیر A و B) پس از هر نتیجهٔ `WRITTEN` یک بار
+>   `max(0, now - occurredAt)` را به ثانیه Observe می‌کنند — ساعت جلوتر Producer به صفر Clamp می‌شود — و برای `DUPLICATE`،
+>   Envelope ردشده یا شکست پایگاه داده **هیچ** مشاهده‌ای ثبت نمی‌شود. مرزهای Bucket (`AUDIT_INGESTION_LAG_BUCKETS`):
+>   `1, 5, 15, 30, 60, 120, 300, 900, 3600` و `+Inf`؛ `60` مرز دقیق است تا آستانهٔ هشدار درون‌یابی نشود. هر ۱۱ مقدار
+>   `source_topic` (ده `DOMAIN_TOPICS` و `rasta.audit.trail.v1`) هنگام بار شدن ماژول با `zero()` — نه با مشاهدهٔ ساختگی صفر —
+>   صادر می‌شوند: ۱۱ × ۱۰ Bucket + ۱۱ `_sum` + ۱۱ `_count` = ۱۳۲ Series. هشدار p95 را از جمع Bucketها روی همهٔ Instanceها
+>   (`sum by (le, source_topic)`) در پنجرهٔ `rate` پنج‌دقیقه‌ای می‌سازد و پس از `for: 5m` می‌سوزد؛ Labelهایش فقط `source_topic`
+>   و `severity`. بی مشاهده، p95 برابر `NaN` است و هرگز بالای ۶۰ نیست.
 > - **آنچه این هشدارها نمی‌بینند.** (۱) گروه موجودی که فقط در برخی Topicها Offset دارد: Topic بی Commit گزارش نمی‌شود و هشدار
->   ندارد. (۲) Partition با `-1`. (۳) تأخیر زمانی درون خود سرویس:
->   `rasta_audit_ingestion_lag_seconds{source_topic}` در `/metrics` صادر می‌شود ولی قاعدهٔ هشدار ندارد. (۴) رکوردی که هرگز به
->   Topic نرسیده — [audit-gap-detected](audit-gap-detected.md).
+>   ندارد. (۲) Partition با `-1`. (۳) تأخیر رکوردی که هنوز نوشته نشده: Histogram فقط ردیف نوشته‌شده را می‌شمارد. (۴) رکوردی که
+>   هرگز به Topic نرسیده — [audit-gap-detected](audit-gap-detected.md).
 
 ---
 
@@ -68,6 +86,8 @@ and on () (min(up{job="kafka-exporter"}) == 1)
 - `RastaAuditConsumerLag` در `/alerts` Prometheus محلی `firing` است.
 - `RastaKafkaExporterUnavailable` یا `RastaAuditConsumerGroupMetricsMissing` `firing` است: Lag آن گروه‌ها **نامعلوم** است، نه صفر
   (§ ۵ تشخیص).
+- `RastaAuditIngestionLagHigh` برای یک `source_topic` `firing` است: ردیف‌ها نوشته می‌شوند، ولی p95 تأخیرشان پنج دقیقه بالای ۶۰
+  ثانیه مانده است (§ ۳).
 - جست‌وجوی حسابرسی عمل‌ها یا ردهای تازه را دیر یا اصلاً نشان نمی‌دهد.
 - `GET /health/ready` روی `audit-service` پاسخ `503` با `projector` یا `trail` برابر `false` می‌دهد، یا سرویس اصلاً اجرا نمی‌شود.
 
@@ -123,8 +143,23 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
 
 - `GET /health/ready` — `database`، `projector` و `trail`.
 - Log: `Attempt <i>/<N> failed for …`، `Handler failed <N>x for …`، `Unparseable message on …`، و خطاهای پایگاه داده.
-- `GET /metrics`: `rasta_audit_ingestion_failures_total{reason}` (هشدار `RastaAuditIngestionFailure`) و
-  `rasta_audit_ingestion_lag_seconds{source_topic}`.
+- `GET /metrics`: `rasta_audit_ingestion_failures_total{reason}` (هشدار `RastaAuditIngestionFailure`) و Histogram
+  `rasta_audit_ingestion_lag_seconds_bucket|_sum|_count{source_topic}` (هشدار `RastaAuditIngestionLagHigh`).
+
+```promql
+# p95 هر Topic، همان عبارت هشدار بی آستانه
+histogram_quantile(0.95, sum by (le, source_topic) (rate(rasta_audit_ingestion_lag_seconds_bucket[5m])))
+
+# ردیف نوشته‌شده در ثانیه، و میانگین تأخیر، برای هر Topic
+sum by (source_topic) (rate(rasta_audit_ingestion_lag_seconds_count[5m]))
+sum by (source_topic) (rate(rasta_audit_ingestion_lag_seconds_sum[5m]))
+  / sum by (source_topic) (rate(rasta_audit_ingestion_lag_seconds_count[5m]))
+```
+
+وقتی `RastaAuditIngestionLagHigh` می‌سوزد: اگر Lag Broker همان Topic هم بالاست، گروه در حال رسیدن به عقب‌ماندگی است و p95
+بالا نتیجهٔ آن است (§ ۱ و ۲). اگر Lag Broker صفر است، رویدادها دیر **به Kafka رسیده‌اند** — Outbox یا Relay تولیدکننده عقب است،
+یا ساعت Producer عقب است — و این Runbook سمت مصرف را درست نمی‌کند؛ مالک سرویس تولیدکننده را درگیر کن. بازپخش عمدی رکوردهای
+قدیمی هم p95 را بالا می‌برد؛ تکراری‌ها شمرده نمی‌شوند، ولی رکوردی که نخستین بار دیر نوشته شود شمرده می‌شود.
 
 ### ۴. DLQ — عمق نگه‌داشته، نه کار حل‌نشده
 
@@ -191,6 +226,7 @@ Stack محلی **Broker یا Volume تازهٔ Kafka** است که `audit-servic
 - [ ] `RastaAuditConsumerLag` برای همان `consumergroup`/`topic` دیگر در `/alerts` نیست
 - [ ] `RastaKafkaExporterUnavailable` و `RastaAuditConsumerGroupMetricsMissing` در `/alerts` نیستند (`up{job="kafka-exporter"}`
       برابر `1` و هر دو `absent(...)` بالا تهی)
+- [ ] `RastaAuditIngestionLagHigh` برای همان `source_topic` در `/alerts` نیست و p95 بالا دست‌کم پنج دقیقه ≤ ۶۰ ثانیه است
 - [ ] `kafka_consumergroup_lag` هر Partition دو گروه صفر است یا پیوسته رو به نزول
 - [ ] `kafka_consumergroup_members` هر دو گروه بزرگ‌تر از صفر و `GET /health/ready` پاسخ `200`
 - [ ] `RastaAuditIngestionFailure` و `RastaDeadLetterMessagePublished` در همان بازه نسوخته‌اند، یا هر کدام Runbook خود را طی کرده
@@ -200,6 +236,6 @@ Stack محلی **Broker یا Volume تازهٔ Kafka** است که `audit-servic
 
 - نبودن داده دیگر با «بی‌Lag» یکی نیست: `RastaKafkaExporterUnavailable` و `RastaAuditConsumerGroupMetricsMissing` — فقط محلی و بی
   تحویل اعلان.
-- قاعدهٔ هشدار روی `rasta_audit_ingestion_lag_seconds` (ADR-053 § ۱۳: p95 > ۶۰ ثانیه) — هنوز نیست.
+- تأخیر شواهد نوشته‌شده اکنون هشدار دارد: `RastaAuditIngestionLagHigh` (ADR-053 § ۱۳: p95 > ۶۰ ثانیه) — فقط محلی و بی تحویل اعلان.
 - Scrape و مسیریابی اعلان محیط واقعی و Alertmanager — وابسته به استقرار و بیرون از مخزن.
 - وضعیت Triage برای پیام DLQ، تا بتوان «پیام حل‌نشده» را واقعاً شمرد — امروز وجود ندارد.

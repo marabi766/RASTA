@@ -17,8 +17,13 @@ import {
   VERIFICATION_OUTCOMES,
   VERIFICATION_SCOPE_LABELS,
   initializeAuditAlertSeries,
+  initializeIngestionLagSeries,
+  AUDIT_INGESTION_LAG_BUCKETS,
+  AUDIT_INGESTION_SOURCE_TOPICS,
 } from './metrics';
+import { AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
 import { metricsText } from '@rasta/observability';
+import { DOMAIN_TOPICS } from '../audit/audit.mapper';
 import { DIVERGENCE_REASON_VALUES } from '../audit/audit.verification.view';
 
 /**
@@ -303,5 +308,144 @@ describe('alert-driving series exported at zero', () => {
         value: 1,
       },
     ]);
+  });
+});
+
+/**
+ * The ingestion lag histogram ADR-053 § 13 specifies, read from the exposition
+ * `/metrics` serves.
+ *
+ * `RastaAuditIngestionLagHigh` computes a p95 from `_bucket`, so three things
+ * must hold before the first real record: the bucket bounds include exactly 60,
+ * every source topic is already exported, and that export observed nothing.
+ */
+describe('ingestion lag histogram', () => {
+  const LAG = 'rasta_audit_ingestion_lag_seconds';
+  const EXPECTED_LE = ['1', '5', '15', '30', '60', '120', '300', '900', '3600', '+Inf'];
+
+  interface ExposedLine {
+    name: string;
+    labels: Record<string, string>;
+    value: number;
+  }
+
+  async function lagLines(): Promise<ExposedLine[]> {
+    const text = await metricsText();
+    return text
+      .split('\n')
+      .filter((line) => line.startsWith(`${LAG}_`))
+      .map((line) => {
+        const match = /^([a-z_]+)\{(.*)\} (\S+)$/.exec(line);
+        if (!match) throw new Error(`Unparseable exposition line: ${line}`);
+        const labels: Record<string, string> = {};
+        for (const pair of (match[2] ?? '').matchAll(/(\w+)="([^"]*)"/g)) {
+          labels[pair[1] ?? ''] = pair[2] ?? '';
+        }
+        return { name: match[1] ?? '', labels, value: Number(match[3]) };
+      });
+  }
+
+  afterEach(() => {
+    auditIngestionLagSeconds.reset();
+    initializeIngestionLagSeries();
+    jest.restoreAllMocks();
+  });
+
+  it('is a histogram with exactly the documented bucket bounds, 60 among them', async () => {
+    expect(AUDIT_INGESTION_LAG_BUCKETS).toEqual([1, 5, 15, 30, 60, 120, 300, 900, 3600]);
+    expect(Object.isFrozen(AUDIT_INGESTION_LAG_BUCKETS)).toBe(true);
+    const { type } = await auditIngestionLagSeconds.get();
+    expect(type).toBe('histogram');
+    expect(labelsOf(auditIngestionLagSeconds)).toEqual(['source_topic']);
+  });
+
+  it('seeds exactly the ten domain topics and the trail topic, derived from their constants', () => {
+    expect(AUDIT_INGESTION_SOURCE_TOPICS).toEqual([...DOMAIN_TOPICS, AUDIT_TRAIL_TOPIC]);
+    expect(AUDIT_INGESTION_SOURCE_TOPICS).toEqual([
+      'rasta.identity.v1',
+      'rasta.organization.v1',
+      'rasta.asset.v1',
+      'rasta.insurance.v1',
+      'rasta.fleet.v1',
+      'rasta.maintenance.v1',
+      'rasta.marketplace.v1',
+      'rasta.economic.v1',
+      'rasta.document.v1',
+      'rasta.supplier.v1',
+      'rasta.audit.trail.v1',
+    ]);
+    expect(new Set(AUDIT_INGESTION_SOURCE_TOPICS).size).toBe(11);
+    expect(Object.isFrozen(AUDIT_INGESTION_SOURCE_TOPICS)).toBe(true);
+  });
+
+  it('exports zero _bucket, _sum and _count for every topic on module load, before any record', async () => {
+    // Nothing in this file observes before this test, so this is the
+    // exposition the first scrape of a new process sees.
+    const lines = await lagLines();
+    const topics = [...AUDIT_INGESTION_SOURCE_TOPICS].sort();
+
+    const buckets = lines.filter((line) => line.name === `${LAG}_bucket`);
+    const sums = lines.filter((line) => line.name === `${LAG}_sum`);
+    const counts = lines.filter((line) => line.name === `${LAG}_count`);
+    // Eleven topics times nine bounds plus +Inf, and one _sum and _count each.
+    expect(buckets).toHaveLength(110);
+    expect(sums).toHaveLength(11);
+    expect(counts).toHaveLength(11);
+    expect(lines).toHaveLength(132);
+
+    for (const topic of topics) {
+      const own = buckets.filter((line) => line.labels.source_topic === topic);
+      expect(own.map((line) => line.labels.le)).toEqual(EXPECTED_LE);
+      for (const line of own) {
+        expect(Object.keys(line.labels).sort()).toEqual(['le', 'source_topic']);
+        expect(line.value).toBe(0);
+      }
+    }
+    for (const line of [...sums, ...counts]) {
+      expect(Object.keys(line.labels)).toEqual(['source_topic']);
+      expect(line.value).toBe(0);
+    }
+    expect(sums.map((line) => line.labels.source_topic).sort()).toEqual(topics);
+    expect(counts.map((line) => line.labels.source_topic).sort()).toEqual(topics);
+
+    const keys = lines.flatMap((line) => Object.keys(line.labels).map((key) => key.toLowerCase()));
+    for (const forbidden of FORBIDDEN_LABELS) {
+      expect(keys).not.toContain(forbidden.toLowerCase());
+    }
+  });
+
+  it('seeds with zero(), never with a fabricated observation', async () => {
+    auditIngestionLagSeconds.reset();
+    expect(await lagLines()).toEqual([]);
+    const observe = jest.spyOn(auditIngestionLagSeconds, 'observe');
+
+    initializeIngestionLagSeries();
+
+    expect(observe).not.toHaveBeenCalled();
+    const lines = await lagLines();
+    expect(lines).toHaveLength(132);
+    expect(lines.filter((line) => line.value !== 0)).toEqual([]);
+  });
+
+  it('counts one real observation once, in the bucket its value belongs to', async () => {
+    // Exactly 60 is inside le="60": the alert threshold is a bucket bound, so
+    // p95 at 60 is measured, not interpolated.
+    auditIngestionLagSeconds.observe({ source_topic: AUDIT_TRAIL_TOPIC }, 60);
+
+    const own = (await lagLines()).filter((line) => line.labels.source_topic === AUDIT_TRAIL_TOPIC);
+    const bucket = (le: string) =>
+      own.find((line) => line.name === `${LAG}_bucket` && line.labels.le === le)?.value;
+    expect(bucket('30')).toBe(0);
+    expect(bucket('60')).toBe(1);
+    expect(bucket('+Inf')).toBe(1);
+    expect(own.find((line) => line.name === `${LAG}_count`)?.value).toBe(1);
+    expect(own.find((line) => line.name === `${LAG}_sum`)?.value).toBe(60);
+
+    // Every other topic is untouched.
+    const others = (await lagLines()).filter(
+      (line) => line.labels.source_topic !== AUDIT_TRAIL_TOPIC,
+    );
+    expect(others).toHaveLength(120);
+    expect(others.filter((line) => line.value !== 0)).toEqual([]);
   });
 });

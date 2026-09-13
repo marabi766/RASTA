@@ -313,6 +313,325 @@ tests:
         exp_alerts: []
 
   # ---------------------------------------------------------------------------
+  # RastaAuditIngestionLagHigh — ADR-053 § 13: p95 > 60 s per source_topic.
+  #
+  # Inputs are cumulative `rasta_audit_ingestion_lag_seconds_bucket` series with
+  # the service's real bucket bounds (1 5 15 30 60 120 300 900 3600 +Inf) and
+  # the scrape's `job`/`instance`/`environment`. The first rate needs two
+  # samples, so a condition that holds from the first increment is true from
+  # 1m: pending through 5m, firing at 6m, five minutes later.
+  #
+  # Per minute, per instance:
+  # - rasta.identity.v1, two instances: 189 records in (30,60] and 11 in
+  #   (60,120]. p95 = 60 + 60 * (190 - 189) / 11 = 65.45 > 60 (p50 is 45.9).
+  # - rasta.document.v1: the same from 4m only, so it fires independently at 9m.
+  # - rasta.asset.v1: 19 in (30,60] and 1 in (60,120]. p95 lands exactly on the
+  #   60 bound, which is not above 60 (p99 would be 108).
+  # - rasta.audit.trail.v1: 50 in (15,30]. p95 = 29.25.
+  # - rasta.fleet.v1: one instance as identity, the other 10000 records under
+  #   one second. Buckets are summed before the quantile, so p95 is 9.69: one
+  #   slow instance does not speak for the topic.
+  # - rasta.supplier.v1: exported at zero and never observed. The quantile is
+  #   NaN, which is never above 60.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="30"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="60"}'
+        values: '0 189 378 567 756 945 1134 1323 1512 1701 1890 2079 2268 2457 2646'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="120"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="300"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="900"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="3600"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="+Inf"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="30"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="60"}'
+        values: '0 189 378 567 756 945 1134 1323 1512 1701 1890 2079 2268 2457 2646'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="120"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="300"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="900"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="3600"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="+Inf"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="30"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="60"}'
+        values: '0 0 0 0 189 378 567 756 945 1134 1323 1512 1701 1890 2079'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="120"}'
+        values: '0 0 0 0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="300"}'
+        values: '0 0 0 0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="900"}'
+        values: '0 0 0 0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="3600"}'
+        values: '0 0 0 0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="+Inf"}'
+        values: '0 0 0 0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="30"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="60"}'
+        values: '0 19 38 57 76 95 114 133 152 171 190 209 228 247 266'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="120"}'
+        values: '0 20 40 60 80 100 120 140 160 180 200 220 240 260 280'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="300"}'
+        values: '0 20 40 60 80 100 120 140 160 180 200 220 240 260 280'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="900"}'
+        values: '0 20 40 60 80 100 120 140 160 180 200 220 240 260 280'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="3600"}'
+        values: '0 20 40 60 80 100 120 140 160 180 200 220 240 260 280'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="+Inf"}'
+        values: '0 20 40 60 80 100 120 140 160 180 200 220 240 260 280'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="30"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="60"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="120"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="300"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="900"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="3600"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="+Inf"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="30"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="60"}'
+        values: '0 189 378 567 756 945 1134 1323 1512 1701 1890 2079 2268 2457 2646'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="120"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="300"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="900"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="3600"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="+Inf"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="1"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="5"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="15"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="30"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="60"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="120"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="300"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="900"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="3600"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="+Inf"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="30"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="60"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="120"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="300"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="900"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="3600"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="+Inf"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts: []
+      # One alert for identity despite two instances, with only source_topic.
+      - eval_time: 6m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.identity.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.identity.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.identity.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      - eval_time: 8m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.identity.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.identity.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.identity.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      # document became true at 4m and fires on its own schedule.
+      - eval_time: 9m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.document.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.document.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.document.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.identity.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.identity.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.identity.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      - eval_time: 14m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.document.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.document.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.document.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.identity.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.identity.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.identity.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+    promql_expr_test:
+      # alert_rule_test sees only firing alerts; ALERTS shows the pending state.
+      - expr: ALERTS{alertname="RastaAuditIngestionLagHigh"}
+        eval_time: 5m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditIngestionLagHigh",alertstate="pending",severity="warning",source_topic="rasta.document.v1"}'
+            value: 1
+          - labels: 'ALERTS{alertname="RastaAuditIngestionLagHigh",alertstate="pending",severity="warning",source_topic="rasta.identity.v1"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditIngestionLagHigh"}
+        eval_time: 6m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditIngestionLagHigh",alertstate="firing",severity="warning",source_topic="rasta.identity.v1"}'
+            value: 1
+          - labels: 'ALERTS{alertname="RastaAuditIngestionLagHigh",alertstate="pending",severity="warning",source_topic="rasta.document.v1"}'
+            value: 1
+
+  # A high interval that does not last: p95 is 65.45 at 1m-3m, 10000 fast
+  # records at 4m pull it to 33.7, and it stays at or below 47 until the fast
+  # minute leaves the 5m window. True again from 8m, so the `for` restarts
+  # there and fires at 13m, not at 6m.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="1"}'
+        values: '0 0 0 0 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="5"}'
+        values: '0 0 0 0 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="15"}'
+        values: '0 0 0 0 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="30"}'
+        values: '0 0 0 0 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="60"}'
+        values: '0 189 378 567 10567 10756 10945 11134 11323 11512 11701 11890 12079 12268 12457'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="120"}'
+        values: '0 200 400 600 10600 10800 11000 11200 11400 11600 11800 12000 12200 12400 12600'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="300"}'
+        values: '0 200 400 600 10600 10800 11000 11200 11400 11600 11800 12000 12200 12400 12600'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="900"}'
+        values: '0 200 400 600 10600 10800 11000 11200 11400 11600 11800 12000 12200 12400 12600'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="3600"}'
+        values: '0 200 400 600 10600 10800 11000 11200 11400 11600 11800 12000 12200 12400 12600'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="rasta-services",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="+Inf"}'
+        values: '0 200 400 600 10600 10800 11000 11200 11400 11600 11800 12000 12200 12400 12600'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.economic.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.economic.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.economic.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # No histogram input at all is silent here. A consumer that writes nothing
+  # observes nothing; the broker-side lag and signal-loss alerts cover it.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_ingestion_failures_total{job="rasta-services",instance="host.docker.internal:3115",environment="local",reason="database_error"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
   # RastaAuditConsumerLag — sustained lag on both audit groups fires after 5m.
   #
   # Series names and labels are the ones danielqsj/kafka-exporter v1.9.0

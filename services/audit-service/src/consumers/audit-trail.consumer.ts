@@ -195,6 +195,6 @@ export class AuditTrailConsumer implements OnModuleDestroy {
     });
 
     const lagSeconds = Math.max(0, (Date.now() - record.occurredAt.getTime()) / 1000);
-    auditIngestionLagSeconds.set({ source_topic: record.sourceTopic }, lagSeconds);
+    auditIngestionLagSeconds.observe({ source_topic: record.sourceTopic }, lagSeconds);
   }
 }

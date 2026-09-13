@@ -157,7 +157,7 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
       // is the evidence", and clamped at zero because a producer clock slightly
       // ahead of the database's would otherwise report negative lag.
       const lagSeconds = Math.max(0, (Date.now() - record.occurredAt.getTime()) / 1000);
-      auditIngestionLagSeconds.set({ source_topic: record.sourceTopic }, lagSeconds);
+      auditIngestionLagSeconds.observe({ source_topic: record.sourceTopic }, lagSeconds);
     } catch (error) {
       auditIngestionFailuresTotal.inc({ reason: INGESTION_FAILURE_REASONS.DATABASE_ERROR });
       // Deliberately rethrown. Retry and DLQ belong to the shared consumer, and

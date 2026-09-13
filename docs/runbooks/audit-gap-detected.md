@@ -83,7 +83,8 @@ Recording Rule `topic:kafka_topic_retained_records:sum` است، بی هشدار
 > در فرایند ثبت می‌کند و از **`GET /metrics`** همان سرویس (پورت پیش‌فرض `3115`، `@Public`، بیرون از قرارداد OpenAPI، بی هیچ
 > شناسهٔ مستأجر/Actor/منبع/رویداد/Correlation در Label) صادر می‌کند. `host.docker.internal:3115` در Job `rasta-services`
 > فایل **محلی** `infrastructure/docker/prometheus/prometheus.yml` هست؛ پیکربندی Scrape محیط واقعی وابسته به استقرار است و
-> در مخزن نیست. Prometheus محلی روی این متریک‌ها فقط `RastaAuditIngestionFailure` را ارزیابی می‌کند (و روی متریک‌های مجاور
+> در مخزن نیست. Prometheus محلی روی این متریک‌ها `RastaAuditIngestionFailure` و `RastaAuditIngestionLagHigh` (p95 Histogram
+> تأخیر، فقط برای ردیف نوشته‌شده) را ارزیابی می‌کند (و روی متریک‌های مجاور
 > `RastaSecurityEventCaptureGap`، `RastaDeadLetterMessagePublished` و دو هشدار دیگر صف ردها)؛ از سمت Broker، `kafka-exporter` Lag دو گروه `audit-service.*` را
 > برای `RastaAuditConsumerLag` و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` را برای Recording Rule `topic:kafka_topic_retained_records:sum`
 > فراهم می‌کند؛ **Alertmanager، داشبورد، هشدار روی عمق DLQ و تشخیص رکورد گمشده در مخزن نیست**. Seriesهای هشدار از شروع فرایند با صفر صادر می‌شوند، پس نخستین
@@ -344,7 +345,8 @@ SELECT id, source_topic, source_service, occurred_at, recorded_at, occurrence_co
 - قواعد `RastaAuditIngestionFailure`، `RastaSecurityEventCaptureGap`، `RastaDeadLetterMessagePublished` و `RastaAuditConsumerLag`
   **اکنون** در Prometheus محلی هستند و عمق نگه‌داشتهٔ `rasta.audit.v1.dlq` ثبت می‌شود؛ نبودن سیگنال Lag هم با
   `RastaKafkaExporterUnavailable` و `RastaAuditConsumerGroupMetricsMissing` صریح است ([audit-ingestion-lag](audit-ingestion-lag.md)).
-  هنوز نیست: Alertmanager و تحویل اعلان، Scrape محیط واقعی، و هشدار روی `rasta_audit_ingestion_lag_seconds`.
+  p95 تأخیر ردیف‌های نوشته‌شده هم با `RastaAuditIngestionLagHigh` (Histogram `rasta_audit_ingestion_lag_seconds`) هشدار دارد. هنوز
+  نیست: Alertmanager و تحویل اعلان، و Scrape محیط واقعی.
 - Script بازپخش DLQ (R-6) یا حذف ارجاع به آن از [replay-dlq](replay-dlq.md).
 - نگهداشت Topic مسیر B و DLQ در محیط واقعی را صریح و مستند کن؛ Script محلی فقط سی روز دارد.
 - ثبت ردها در سرویس‌های دیگر (R-2)، ردهای Gateway و ردهای Token سرویس — تا آن وقت نبودن آن‌ها «شکاف حادثه» نیست و نباید

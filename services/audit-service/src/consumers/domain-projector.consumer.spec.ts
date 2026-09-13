@@ -4,6 +4,11 @@ import { REDACTED, SENSITIVE_KEYS, type Logger } from '@rasta/logging';
 import { DomainProjectorConsumer } from './domain-projector.consumer';
 import type { AuditRepository, IngestOutcome } from '../audit/audit.repository';
 import type { AuditEventRecord } from '../audit/audit.mapper';
+import {
+  auditIngestionFailuresTotal,
+  auditIngestionLagSeconds,
+  auditRecordsIngestedTotal,
+} from '../observability/metrics';
 
 /**
  * The projector's lifecycle and its readiness answer.
@@ -315,5 +320,158 @@ describe('an unknown event carrying sensitive values', () => {
       expect(text).not.toContain(value);
     }
     expect(text).not.toContain(SENTINEL_PREFIX);
+  });
+});
+
+/**
+ * `rasta_audit_ingestion_lag_seconds` on path A: one observation per row
+ * actually written, under the topic it came from, and nothing for a replay or
+ * a failure. `Date.now()` is pinned so each observed lag is exact.
+ */
+describe('ingestion lag histogram on path A', () => {
+  const TOPIC = 'rasta.asset.v1';
+  const OCCURRED_AT = '2026-09-15T10:30:00.000Z';
+  const delivery: EventDelivery = Object.freeze({ topic: TOPIC, partition: 2 });
+
+  const envelope = {
+    eventId: '01JPROJECTORLAGSPEC000001',
+    eventName: 'ASSET_REGISTERED',
+    eventVersion: 1,
+    occurredAt: OCCURRED_AT,
+    producer: 'asset-service',
+    producerVersion: '1.0.0',
+    aggregateType: 'Asset',
+    aggregateId: 'AST_0001',
+    tenantId: 'ORG-1',
+    correlationId: 'corr-lag-1',
+    payload: { assetId: 'AST_0001' },
+  } as EventEnvelope;
+
+  interface Sample {
+    metricName?: string;
+    value: number;
+    labels: Record<string, string | number | undefined>;
+  }
+
+  async function samples(): Promise<Sample[]> {
+    const { values } = await (
+      auditIngestionLagSeconds as unknown as { get(): Promise<{ values: Sample[] }> }
+    ).get();
+    return values;
+  }
+
+  async function lagOf(topic: string) {
+    const own = (await samples()).filter((entry) => entry.labels.source_topic === topic);
+    const single = (suffix: string): number =>
+      own.find((entry) => entry.metricName === `rasta_audit_ingestion_lag_seconds_${suffix}`)
+        ?.value ?? 0;
+    return {
+      count: single('count'),
+      sum: single('sum'),
+      bucket: (le: number | '+Inf'): number =>
+        own.find(
+          (entry) =>
+            entry.metricName === 'rasta_audit_ingestion_lag_seconds_bucket' &&
+            entry.labels.le === le,
+        )?.value ?? 0,
+    };
+  }
+
+  async function totalCount(): Promise<number> {
+    return (await samples())
+      .filter((entry) => entry.metricName === 'rasta_audit_ingestion_lag_seconds_count')
+      .reduce((sum, entry) => sum + entry.value, 0);
+  }
+
+  async function counterTotal(metric: unknown): Promise<number> {
+    const { values } = await (metric as { get(): Promise<{ values: Sample[] }> }).get();
+    return values.reduce((sum, entry) => sum + entry.value, 0);
+  }
+
+  const nowAt = (iso: string): void => {
+    jest.spyOn(Date, 'now').mockReturnValue(Date.parse(iso));
+  };
+
+  const projector = (ingest: () => Promise<IngestOutcome>): DomainProjectorConsumer =>
+    new DomainProjectorConsumer(
+      () => ({}) as EventConsumer,
+      { ingest } as unknown as AuditRepository,
+      silentLogger,
+    );
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('observes a written record once, under its own topic, with its exact lag', async () => {
+    const before = await lagOf(TOPIC);
+    const otherBefore = await lagOf('rasta.supplier.v1');
+
+    // Written 125 seconds after it occurred: above 120, inside le="300".
+    nowAt('2026-09-15T10:32:05.000Z');
+    await projector(async () => 'WRITTEN').handle(envelope, delivery);
+
+    const after = await lagOf(TOPIC);
+    expect(after.count).toBe(before.count + 1);
+    expect(after.sum).toBe(before.sum + 125);
+    expect(after.bucket(120)).toBe(before.bucket(120));
+    expect(after.bucket(300)).toBe(before.bucket(300) + 1);
+    expect(after.bucket('+Inf')).toBe(before.bucket('+Inf') + 1);
+    const other = await lagOf('rasta.supplier.v1');
+    expect([other.count, other.sum]).toEqual([otherBefore.count, otherBefore.sum]);
+  });
+
+  it('clamps a producer clock that is ahead of this one into the zero bucket', async () => {
+    const before = await lagOf(TOPIC);
+
+    nowAt('2026-09-15T10:29:30.000Z');
+    await projector(async () => 'WRITTEN').handle(envelope, delivery);
+
+    const after = await lagOf(TOPIC);
+    expect(after.count).toBe(before.count + 1);
+    expect(after.sum).toBe(before.sum);
+    expect(after.bucket(1)).toBe(before.bucket(1) + 1);
+  });
+
+  it('observes nothing for a duplicate delivery', async () => {
+    const before = await totalCount();
+    const sumBefore = (await lagOf(TOPIC)).sum;
+
+    nowAt('2026-09-15T11:30:00.000Z');
+    await projector(async () => 'DUPLICATE').handle(envelope, delivery);
+
+    expect(await totalCount()).toBe(before);
+    expect((await lagOf(TOPIC)).sum).toBe(sumBefore);
+  });
+
+  it('observes nothing when the write fails, and still counts the failure', async () => {
+    const before = await totalCount();
+    const writtenBefore = await counterTotal(auditRecordsIngestedTotal);
+    const failuresBefore = await counterTotal(auditIngestionFailuresTotal);
+
+    await expect(
+      projector(async () => {
+        throw new Error('connection refused');
+      }).handle(envelope, delivery),
+    ).rejects.toThrow('connection refused');
+
+    expect(await totalCount()).toBe(before);
+    expect(await counterTotal(auditRecordsIngestedTotal)).toBe(writtenBefore);
+    expect(await counterTotal(auditIngestionFailuresTotal)).toBe(failuresBefore + 1);
+  });
+
+  it('observes nothing for an envelope it cannot map', async () => {
+    const before = await totalCount();
+    let ingested = 0;
+
+    await expect(
+      projector(async () => {
+        ingested += 1;
+        return 'WRITTEN';
+      }).handle({ ...envelope, streamSeq: 'not-a-sequence' } as unknown as EventEnvelope, delivery),
+    ).rejects.toThrow();
+
+    expect(ingested).toBe(0);
+    expect(await totalCount()).toBe(before);
   });
 });
