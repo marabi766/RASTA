@@ -50,6 +50,17 @@ const ROUTE = '/v1/audit-corrections';
 const REASON = 'Recorded as SUCCESS; the operation actually failed (INC-4471)';
 const SECRET_VALUE = `secret-${TAG}`;
 const TRACEPARENT = '00-5af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+/** Concurrent submissions in each race below. */
+const RACE_SIZE = 6;
+/**
+ * The service pool for this suite. A paused race holds one connection for the
+ * winner, one for each of the other `RACE_SIZE - 1` waiting on the command
+ * lock, and one for the lock probe, which shares that pool. Prisma's default
+ * (two per physical core plus one) is five on a four-vCPU CI runner. There the
+ * waiters could never all queue, and the winner's transaction timed out, so
+ * every submission answered 500. Pinned, the race is the same on any machine.
+ */
+const POOL_CONNECTIONS = RACE_SIZE + 2;
 
 describe('audit correction command (real PostgreSQL)', () => {
   let harness: IdentityApiHarness;
@@ -189,7 +200,10 @@ describe('audit correction command (real PostgreSQL)', () => {
 
   beforeAll(async () => {
     stub = await startAuditStub();
-    harness = await startIdentityApi({ auditServiceUrl: stub.url });
+    harness = await startIdentityApi({
+      auditServiceUrl: stub.url,
+      connectionLimit: POOL_CONNECTIONS,
+    });
     prisma = harness.prisma;
   }, 60_000);
 
@@ -399,9 +413,11 @@ describe('audit correction command (real PostgreSQL)', () => {
     const t = target();
     const key = tagged('KEY');
 
-    const responses = await Promise.all(Array.from({ length: 6 }, () => submit(body(t), { key })));
+    const responses = await Promise.all(
+      Array.from({ length: RACE_SIZE }, () => submit(body(t), { key })),
+    );
 
-    expect(responses.map((r) => r.status)).toEqual(Array(6).fill(202));
+    expect(responses.map((r) => r.status)).toEqual(Array(RACE_SIZE).fill(202));
     const bodies = new Set(responses.map((r) => JSON.stringify(r.body)));
     expect(bodies.size).toBe(1);
     const rows = await outboxFor(t.id);
@@ -413,7 +429,7 @@ describe('audit correction command (real PostgreSQL)', () => {
   it('queues concurrent duplicates on the command lock and replays the winner, so only it reaches the outbox', async () => {
     const t = target();
     const key = tagged('KEY');
-    const size = 6;
+    const size = RACE_SIZE;
     const lockKey = commandLockKey(admin.userId, key);
     passLookupsTogether(size);
     // The first writer holds the command lock and waits, before its outbox
@@ -440,7 +456,7 @@ describe('audit correction command (real PostgreSQL)', () => {
   it('refuses a concurrent same-key submission of a different request with 409 and no second outbox row', async () => {
     const t = target();
     const key = tagged('KEY');
-    const size = 6;
+    const size = RACE_SIZE;
     const lockKey = commandLockKey(admin.userId, key);
     const original = body(t);
     const different = body(t, { reason: 'A different reason, submitted at the same moment' });
@@ -472,7 +488,7 @@ describe('audit correction command (real PostgreSQL)', () => {
 
   it('keeps concurrent corrections with distinct keys apart, numbered contiguously on one stream', async () => {
     const t = target();
-    const size = 6;
+    const size = RACE_SIZE;
     passLookupsTogether(size);
 
     const responses = await Promise.all(
@@ -482,9 +498,9 @@ describe('audit correction command (real PostgreSQL)', () => {
     expect(responses.map((r) => r.status)).toEqual(Array(size).fill(202));
     const rows = await outboxFor(t.id);
     expect(rows).toHaveLength(size);
-    expect(rows.map((row) => Number(row.streamSeq)).sort((a, b) => a - b)).toEqual([
-      1, 2, 3, 4, 5, 6,
-    ]);
+    expect(rows.map((row) => Number(row.streamSeq)).sort((a, b) => a - b)).toEqual(
+      Array.from({ length: size }, (_, index) => index + 1),
+    );
     expect(new Set(rows.map((row) => row.id))).toEqual(
       new Set(responses.map((r) => r.body.eventId as string)),
     );

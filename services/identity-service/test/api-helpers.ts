@@ -149,6 +149,14 @@ export interface IdentityApiOptions {
   auditServiceUrl?: string;
   /** Run the real standard-outbox relay against Kafka. Inert otherwise. */
   runDomainRelay?: boolean;
+  /**
+   * The service pool's `connection_limit`. Prisma's default is two per
+   * physical core plus one — nine with four cores, five with the two of a
+   * four-vCPU CI runner. A suite that deliberately parks many requests on one
+   * lock, each holding a pooled connection, sets it so the race it builds does
+   * not depend on the machine it runs on. Unset keeps the default.
+   */
+  connectionLimit?: number;
 }
 
 export interface IdentityApiHarness {
@@ -159,6 +167,14 @@ export interface IdentityApiHarness {
   close(): Promise<void>;
 }
 
+/** `url` with its pool pinned to `connections`, or unchanged when none is given. */
+function withConnectionLimit(url: string, connections: number | undefined): string {
+  if (connections === undefined) return url;
+  const pinned = new URL(url);
+  pinned.searchParams.set('connection_limit', String(connections));
+  return pinned.toString();
+}
+
 export async function startIdentityApi(
   options: IdentityApiOptions = {},
 ): Promise<IdentityApiHarness> {
@@ -166,7 +182,7 @@ export async function startIdentityApi(
     NODE_ENV: 'test',
     LOG_LEVEL: 'error',
     SERVICE_VERSION: '0.1.0-itest',
-    DATABASE_URL: databaseUrl(),
+    DATABASE_URL: withConnectionLimit(databaseUrl(), options.connectionLimit),
     KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:9092',
     KAFKA_CLIENT_ID: `identity-itest-${ulid().slice(-8)}`,
     OIDC_ISSUER_URL: 'http://identitytest.invalid/realms/rasta',
