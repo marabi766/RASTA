@@ -113,6 +113,333 @@ export function planEvidenceRun({ namedRuns = NAMED_RUNS } = {}) {
   ];
 }
 
+// ---------------------------------------------------------------------------
+// Paired calibration (ADR-055) — manual, report-only, and deliberately
+// threshold-free.
+//
+// ADR-055 separates *probe validity* from *environment capability* and refuses
+// to pick a capability threshold until a two-sided dataset exists. Collecting
+// that dataset needs samples in which the measurement and the proof are
+// adjacent: a probe taken an hour before a stress run says nothing about the
+// conditions that run actually met. So one calibration sample is exactly one
+// validated WAL probe followed immediately by one fresh run of the *entire
+// unchanged* aggregation-stress project, with nothing in between.
+//
+// Nothing here judges capability. The outputs are `VALID`, `INVALID` and
+// `INCONCLUSIVE` only; there is no threshold, no margin, and no "too slow".
+
+/** Bounds on how many pairs one campaign may collect. Refused, never coerced. */
+export const MIN_CALIBRATION_PAIRS = 1;
+export const MAX_CALIBRATION_PAIRS = 20;
+
+/** Outcome labels the calibration mode may emit. Capability is not among them. */
+export const CALIBRATION_OUTCOMES = Object.freeze(['VALID', 'INVALID', 'INCONCLUSIVE']);
+
+/** The step id of pair `n`'s probe and of the stress run that must follow it. */
+export const calibrationProbeId = (pair) => `pair-${pair}-probe`;
+export const calibrationStressId = (pair) => `pair-${pair}-stress`;
+
+/**
+ * The ordered calibration plan: one read-only control to prove the counter is
+ * measuring commits at all, then `pairs` adjacent (probe, stress) samples.
+ *
+ * Throws on a pair count that is missing, non-integer or out of bounds — a
+ * silently coerced count would quietly change what a campaign means.
+ */
+export function planCalibrationRun({ pairs } = {}) {
+  if (typeof pairs !== 'number' || !Number.isInteger(pairs)) {
+    throw new Error(`calibration pairs must be an integer, got ${JSON.stringify(pairs)}`);
+  }
+  if (pairs < MIN_CALIBRATION_PAIRS || pairs > MAX_CALIBRATION_PAIRS) {
+    throw new Error(
+      `calibration pairs must be between ${MIN_CALIBRATION_PAIRS} and ${MAX_CALIBRATION_PAIRS}, got ${pairs}`,
+    );
+  }
+  const steps = [
+    { id: 'control', kind: 'probe', sql: CONTROL_SQL, seconds: CONTROL_SECONDS, control: true },
+  ];
+  for (let pair = 1; pair <= pairs; pair += 1) {
+    steps.push({
+      id: calibrationProbeId(pair),
+      kind: 'probe',
+      sql: WAL_PROBE_SQL,
+      seconds: PROBE_SECONDS,
+      pair,
+      role: 'probe',
+    });
+    steps.push({
+      id: calibrationStressId(pair),
+      kind: 'jest-full',
+      // The root route, unfiltered: turbo's task definition and strict
+      // environment are part of what a sample measures.
+      pnpmArgs: ['run', STRESS.rootScript, '--', '--json'],
+      pair,
+      role: 'stress',
+    });
+  }
+  return steps;
+}
+
+const USAGE = [
+  'usage:',
+  '  node scripts/aggregation-evidence.mjs <report-path>',
+  `  node scripts/aggregation-evidence.mjs --calibrate --pairs <${MIN_CALIBRATION_PAIRS}..${MAX_CALIBRATION_PAIRS}> <report-path>`,
+].join('\n');
+
+/**
+ * The command line, as a value. Pure, so every refusal is unit-testable and
+ * happens before any subprocess or database access.
+ *
+ * Returns `{ mode: 'evidence' | 'calibrate', pairs?, reportPath }`, or
+ * `{ error, usage }` — never throws, never reads the environment. A pair count
+ * comes from the command line only: an environment override would let a
+ * campaign silently mean something else than its recorded invocation.
+ */
+export function parseEvidenceArgs(argv) {
+  const args = Array.isArray(argv) ? argv.map(String) : [];
+  const fail = (error) => ({ error, usage: USAGE });
+  let calibrate = false;
+  let pairsRaw = null;
+  const positional = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--') {
+      // `pnpm run <script> -- …` forwards the separator itself. It carries no
+      // meaning here, so it is skipped rather than mistaken for an option.
+      continue;
+    }
+    if (arg === '--calibrate') {
+      if (calibrate) return fail('--calibrate given more than once');
+      calibrate = true;
+    } else if (arg === '--pairs') {
+      if (pairsRaw !== null) return fail('--pairs given more than once');
+      // A following option is never the value: swallowing it would drop the
+      // option silently and change what the campaign means.
+      if (i + 1 >= args.length || args[i + 1].startsWith('--')) {
+        return fail('--pairs needs a value');
+      }
+      pairsRaw = args[i + 1];
+      i += 1;
+    } else if (arg.startsWith('--pairs=')) {
+      if (pairsRaw !== null) return fail('--pairs given more than once');
+      pairsRaw = arg.slice('--pairs='.length);
+      if (pairsRaw === '') return fail('--pairs needs a value');
+    } else if (arg.startsWith('-')) {
+      return fail(`unknown option ${JSON.stringify(arg)}`);
+    } else {
+      positional.push(arg);
+    }
+  }
+
+  if (positional.length === 0) return fail('a report path is required');
+  if (positional.length > 1) return fail(`expected one report path, got ${positional.length}`);
+  const reportPath = positional[0];
+
+  if (!calibrate) {
+    if (pairsRaw !== null) return fail('--pairs requires --calibrate');
+    return { mode: 'evidence', reportPath };
+  }
+  if (pairsRaw === null) return fail('--calibrate requires --pairs');
+  if (!/^\d+$/.test(pairsRaw)) {
+    return fail(`--pairs must be a positive integer, got ${JSON.stringify(pairsRaw)}`);
+  }
+  const pairs = Number(pairsRaw);
+  if (pairs < MIN_CALIBRATION_PAIRS || pairs > MAX_CALIBRATION_PAIRS) {
+    return fail(
+      `--pairs must be between ${MIN_CALIBRATION_PAIRS} and ${MAX_CALIBRATION_PAIRS}, got ${pairs}`,
+    );
+  }
+  return { mode: 'calibrate', pairs, reportPath };
+}
+
+/**
+ * Finite, secret-safe classification of why a step could not produce evidence.
+ *
+ * Input is the aggregate problem strings the harness already built — never raw
+ * child-process output. Output is category counts and the matched reason codes,
+ * so a report can say *what kind* of thing went wrong without carrying a URL, a
+ * credential, a row or a test identifier.
+ *
+ * Deliberately contains no capability category: nothing here may become
+ * "too slow".
+ */
+const INFRASTRUCTURE_CATEGORIES = Object.freeze([
+  ['missingEnvironment', /missing environment|required environment/i],
+  [
+    'dockerUnavailable',
+    /docker (?:not found|unavailable|could not start)|cannot connect to the docker/i,
+  ],
+  [
+    'pgbenchUnavailable',
+    /pgbench (?:not found|unavailable|is not installed)|executable file not found.*pgbench/i,
+  ],
+  ['psqlUnavailable', /psql (?:not found|unavailable|is not installed)/i],
+  [
+    'connectionFailure',
+    /could not connect|connection refused|ECONNREFUSED|ECONNRESET|no such host|could not translate host/i,
+  ],
+  [
+    'permissionDenied',
+    /permission denied|must be superuser|insufficient privilege|denied for function/i,
+  ],
+  [
+    'statsUnreadable',
+    /pg_stat_wal: no row|pg_stat_wal could not be read|relation "pg_stat_wal" does not exist/i,
+  ],
+  ['statsReset', /pg_stat_wal went backwards/i],
+  ['timeout', /after its bound|timed out|process bound exceeded|statement timeout/i],
+  ['failedTransactions', /failed transaction\(s\)/i],
+  ['controlContamination', /read-only control flushed WAL/i],
+  ['backgroundWalContamination', /is not approximately one|below message \+ commit/i],
+  ['noProgress', /reported no completed transaction|reported no tps|printed \d+ progress lines/i],
+  [
+    'harnessError',
+    /exited \d+|could not be written|launcher not found|no jest report|collected no test/i,
+  ],
+]);
+
+export function classifyInfrastructureProblems(problems) {
+  const counts = Object.fromEntries([
+    ...INFRASTRUCTURE_CATEGORIES.map(([name]) => [name, 0]),
+    ['other', 0],
+  ]);
+  for (const problem of problems ?? []) {
+    const text = String(problem);
+    const matched = INFRASTRUCTURE_CATEGORIES.filter(([, pattern]) => pattern.test(text)).map(
+      ([name]) => name,
+    );
+    for (const name of matched) counts[name] += 1;
+    if (matched.length === 0) counts.other += 1;
+  }
+  return counts;
+}
+
+/** The category names, in report order. Fixed, so a report is deterministic. */
+export const INFRASTRUCTURE_CATEGORY_NAMES = Object.freeze([
+  ...INFRASTRUCTURE_CATEGORIES.map(([name]) => name),
+  'other',
+]);
+
+/**
+ * Count, min, median and max of the available values, plus how many were not
+ * available. A missing value is never dropped from the denominator: `count` is
+ * always how many samples were asked for.
+ */
+export function distribution(values) {
+  const all = values ?? [];
+  const usable = all
+    .filter((value) => typeof value === 'number' && Number.isFinite(value))
+    .sort((a, b) => a - b);
+  const middle =
+    usable.length === 0
+      ? null
+      : usable.length % 2 === 1
+        ? usable[(usable.length - 1) / 2]
+        : (usable[usable.length / 2 - 1] + usable[usable.length / 2]) / 2;
+  return {
+    count: all.length,
+    available: usable.length,
+    unavailable: all.length - usable.length,
+    min: usable.length === 0 ? null : usable[0],
+    median: middle === null ? null : Number(middle.toFixed(3)),
+    max: usable.length === 0 ? null : usable[usable.length - 1],
+  };
+}
+
+/**
+ * One calibration campaign as a value: a row per pair, and the distributions
+ * across every pair that was attempted.
+ *
+ * `outcome` is validity only. A pair whose probe was valid but whose stress run
+ * failed is still `VALID` — that combination is exactly the evidence ADR-055
+ * wants, and calling it anything else would be the capability judgement this
+ * mode refuses to make.
+ */
+export function summarizeCalibration({ pairs, results }) {
+  const byId = Object.fromEntries((results ?? []).map((result) => [result.id, result]));
+  const control = byId.control ?? null;
+  const rows = [];
+  for (let pair = 1; pair <= pairs; pair += 1) {
+    const probeResult = byId[calibrationProbeId(pair)] ?? null;
+    const stressResult = byId[calibrationStressId(pair)] ?? null;
+    const probe = probeResult?.probe ?? null;
+    const problems = [
+      ...(probe?.problems ?? []),
+      ...(probeResult?.error ? [probeResult.error] : []),
+      ...(stressResult?.error ? [stressResult.error] : []),
+      ...(stressResult?.summary?.problems ?? []),
+    ];
+    let outcome;
+    if (!probeResult || !probe) outcome = 'INCONCLUSIVE';
+    else if (probeResult.error) outcome = 'INCONCLUSIVE';
+    else if (!probe.valid) outcome = 'INVALID';
+    else outcome = 'VALID';
+    rows.push({
+      pair,
+      outcome,
+      probe: probe
+        ? {
+            transactions: probe.transactions,
+            failed: probe.failed,
+            tps: probe.tps,
+            latencyAverageMs: probe.latencyAverageMs,
+            walSyncDelta: probe.walSyncDelta,
+            walSyncPerSecond: probe.walSyncPerSecond,
+            walSyncPerTransaction: probe.walSyncPerTransaction,
+            walRecordsPerTransaction: probe.walRecordsPerTransaction,
+            minIntervalTps: probe.minIntervalTps,
+            zeroCommitIntervals: probe.zeroCommitIntervals,
+            longestZeroCommitSeconds: probe.longestZeroCommitSeconds,
+            problems: probe.problems ?? [],
+          }
+        : null,
+      stress: stressResult
+        ? {
+            ran: !stressResult.error,
+            passed: stressResult.passed === true,
+            exitCode: stressResult.exitCode ?? null,
+            timedOut: stressResult.timedOut === true,
+            wallSeconds:
+              typeof stressResult.wallSeconds === 'number' ? stressResult.wallSeconds : null,
+            tests: stressResult.summary?.tests ?? null,
+            suites: stressResult.summary?.suites ?? null,
+            failures: stressResult.summary?.failures ?? null,
+            problems: stressResult.summary?.problems ?? [],
+          }
+        : null,
+      infrastructure: classifyInfrastructureProblems(problems),
+    });
+  }
+  const pick = (get) => distribution(rows.map(get));
+  return {
+    pairs,
+    control: control
+      ? { valid: control.probe?.valid === true, problems: control.probe?.problems ?? [] }
+      : null,
+    rows,
+    outcomes: Object.fromEntries(
+      CALIBRATION_OUTCOMES.map((name) => [name, rows.filter((row) => row.outcome === name).length]),
+    ),
+    stressPassed: rows.filter((row) => row.stress?.passed === true).length,
+    stressFailed: rows.filter((row) => row.stress && row.stress.passed !== true).length,
+    distributions: {
+      probeTps: pick((row) => row.probe?.tps ?? null),
+      probeMinIntervalTps: pick((row) => row.probe?.minIntervalTps ?? null),
+      probeLongestStallSeconds: pick((row) => row.probe?.longestZeroCommitSeconds ?? null),
+      stressWallSeconds: pick((row) => row.stress?.wallSeconds ?? null),
+    },
+    infrastructure: rows.reduce(
+      (total, row) => {
+        for (const name of INFRASTRUCTURE_CATEGORY_NAMES) {
+          total[name] = (total[name] ?? 0) + row.infrastructure[name];
+        }
+        return total;
+      },
+      Object.fromEntries(INFRASTRUCTURE_CATEGORY_NAMES.map((name) => [name, 0])),
+    ),
+  };
+}
+
 /** pgbench arguments for one probe: one client, one thread, no vacuum, 1 s progress. */
 export function pgbenchArgs({ seconds, scriptPath }) {
   return ['-n', '-c', '1', '-j', '1', '-T', String(seconds), '-P', '1', '-f', scriptPath];
@@ -511,12 +838,103 @@ export function formatReport({ meta, topology, results }) {
   return `${lines.join('\n')}\n`;
 }
 
+const distributionLine = (label, stats) =>
+  `  ${label}: n=${stats.count} available=${stats.available} unavailable=${stats.unavailable} ` +
+  `min=${fmt(stats.min)} median=${fmt(stats.median)} max=${fmt(stats.max)}`;
+
 /**
- * Static contract for the evidence itself: the proof's stress constants are
- * the ones it was measured with, and the plan runs it the way the evidence
- * claims. Returns problem strings; empty means the contract holds.
+ * The calibration artifact: aggregates only, and no capability claim anywhere.
+ *
+ * Every pair keeps its own line even when it failed, so the denominator of a
+ * campaign is what was attempted rather than what happened to succeed.
  */
-export function validateEvidenceContract({ specSource, plan }) {
+export function formatCalibrationReport({ meta, topology, summary }) {
+  const lines = [
+    'ADR-055 paired calibration - probe immediately followed by the unchanged stress project',
+    `commit=${meta.commit}${meta.runUrl ? ` run=${meta.runUrl}` : ''} generated=${meta.generatedAt}`,
+    `topology: ${Object.entries(topology)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(' ')}`,
+    `pairs: ${summary.pairs}; each pair is one ${PROBE_SECONDS} s validated WAL probe immediately followed by`,
+    `  one fresh unfiltered \`pnpm ${STRESS.rootScript}\` (${STRESS.jestProject}, --runInBand, no retry)`,
+    'validity only: VALID / INVALID / INCONCLUSIVE. No threshold, no margin, no capability judgement.',
+    '',
+    summary.control
+      ? `control (read-only, ${CONTROL_SECONDS} s): valid=${summary.control.valid ? 'yes' : 'NO'}`
+      : 'control: not run',
+  ];
+  for (const problem of summary.control?.problems ?? []) lines.push(`  problem: ${problem}`);
+  lines.push('');
+
+  for (const row of summary.rows) {
+    lines.push(`pair-${row.pair}: outcome=${row.outcome}`);
+    if (!row.probe) {
+      lines.push('  probe: not run');
+    } else {
+      lines.push(
+        `  probe: transactions=${row.probe.transactions} failed=${row.probe.failed} ` +
+          `tps=${fmt(row.probe.tps)} latency_avg_ms=${fmt(row.probe.latencyAverageMs, 3)}`,
+        `    wal_sync_delta=${row.probe.walSyncDelta} wal_sync_per_s=${fmt(row.probe.walSyncPerSecond)} ` +
+          `wal_sync_per_tx=${fmt(row.probe.walSyncPerTransaction, 4)} wal_records_per_tx=${fmt(row.probe.walRecordsPerTransaction, 3)}`,
+        `    min_interval_tps=${fmt(row.probe.minIntervalTps)} zero_commit_intervals=${row.probe.zeroCommitIntervals} ` +
+          `longest_zero_commit_s=${fmt(row.probe.longestZeroCommitSeconds, 1)}`,
+      );
+      for (const problem of row.probe.problems) lines.push(`    problem: ${problem}`);
+    }
+    if (!row.stress) {
+      lines.push('  stress: not run');
+    } else {
+      const t = row.stress.tests;
+      const s = row.stress.suites;
+      lines.push(
+        `  stress: ran=${row.stress.ran ? 'yes' : 'NO'} result=${row.stress.passed ? 'PASS' : 'FAIL'} ` +
+          `exit=${row.stress.exitCode === null ? 'n/a' : row.stress.exitCode}` +
+          `${row.stress.timedOut ? ' (process bound exceeded)' : ''} wall_s=${fmt(row.stress.wallSeconds, 1)}`,
+        `    suites passed/failed/skipped/total=${s ? `${s.passed}/${s.failed}/${s.skipped}/${s.total}` : 'n/a'} ` +
+          `tests passed/failed/skipped/total=${t ? `${t.passed}/${t.failed}/${t.skipped}/${t.total}` : 'n/a'}`,
+        `    failures: ${
+          row.stress.failures
+            ? Object.entries(row.stress.failures)
+                .map(([name, count]) => `${name}=${count}`)
+                .join(' ')
+            : 'n/a'
+        }`,
+      );
+      for (const problem of row.stress.problems) lines.push(`    problem: ${problem}`);
+    }
+    const categories = Object.entries(row.infrastructure).filter(([, count]) => count > 0);
+    if (categories.length > 0) {
+      lines.push(
+        `  infrastructure: ${categories.map(([name, count]) => `${name}=${count}`).join(' ')}`,
+      );
+    }
+  }
+
+  lines.push(
+    '',
+    `outcomes: ${CALIBRATION_OUTCOMES.map((name) => `${name}=${summary.outcomes[name]}`).join(' ')}`,
+    `stress: passed=${summary.stressPassed} failed=${summary.stressFailed} of ${summary.pairs}`,
+    'distributions across every attempted pair:',
+    distributionLine('probe_tps', summary.distributions.probeTps),
+    distributionLine('probe_min_interval_tps', summary.distributions.probeMinIntervalTps),
+    distributionLine('probe_longest_stall_s', summary.distributions.probeLongestStallSeconds),
+    distributionLine('stress_wall_s', summary.distributions.stressWallSeconds),
+    `infrastructure totals: ${INFRASTRUCTURE_CATEGORY_NAMES.map(
+      (name) => `${name}=${summary.infrastructure[name]}`,
+    ).join(' ')}`,
+    '',
+    'this campaign does not locate a capability boundary and proposes no threshold (ADR-055 § 6).',
+  );
+  return `${lines.join('\n')}\n`;
+}
+
+/**
+ * The half of the contract that is about the spec alone: the stress constants
+ * and assertions are the ones every mode was measured against, and the spec
+ * does not retry. Shared by the evidence campaign and the calibration mode so
+ * there is exactly one definition of "unchanged proof".
+ */
+export function validateStressSpecContract(specSource) {
   const problems = [];
   const source = String(specSource);
   const occurrences = source.split(`'${NAMED_PROOF.title}'`).length - 1;
@@ -550,7 +968,16 @@ export function validateEvidenceContract({ specSource, plan }) {
       problems.push(`stress constant or assertion changed: ${JSON.stringify(text)}`);
   }
   if (/retryTimes|\.retry\(/.test(source)) problems.push('the spec retries tests');
+  return problems;
+}
 
+/**
+ * Static contract for the evidence itself: the proof's stress constants are
+ * the ones it was measured with, and the plan runs it the way the evidence
+ * claims. Returns problem strings; empty means the contract holds.
+ */
+export function validateEvidenceContract({ specSource, plan }) {
+  const problems = validateStressSpecContract(specSource);
   const steps = plan ?? [];
   const ids = steps.map((step) => step.id);
   const named = steps.filter((step) => step.kind === 'jest-named');
@@ -614,6 +1041,106 @@ export function validateEvidenceContract({ specSource, plan }) {
     after.control
   ) {
     problems.push(`a ${PROBE_SECONDS} s WAL probe must run after every jest step`);
+  }
+  return problems;
+}
+
+/**
+ * Static contract for a calibration campaign: the proof is the unchanged one,
+ * and the plan really does pair each probe with the stress run immediately
+ * after it.
+ *
+ * Adjacency is the whole point of the mode, so it is asserted structurally: the
+ * stress step of pair `n` must be the very next step after its probe. Anything
+ * between them — another probe, another suite, a second stress run — makes the
+ * sample describe conditions the proof never met.
+ */
+export function validateCalibrationContract({ specSource, plan, pairs }) {
+  const problems = validateStressSpecContract(specSource);
+  const steps = plan ?? [];
+
+  if (!Number.isInteger(pairs) || pairs < MIN_CALIBRATION_PAIRS || pairs > MAX_CALIBRATION_PAIRS) {
+    problems.push(
+      `calibration pairs must be an integer in ${MIN_CALIBRATION_PAIRS}..${MAX_CALIBRATION_PAIRS}, got ${JSON.stringify(pairs)}`,
+    );
+    return problems;
+  }
+  if (steps.length !== pairs * 2 + 1) {
+    problems.push(
+      `plan has ${steps.length} steps; ${pairs} pair(s) plus one control need ${pairs * 2 + 1}`,
+    );
+  }
+  const control = steps[0];
+  if (
+    !control ||
+    control.id !== 'control' ||
+    control.control !== true ||
+    control.kind !== 'probe'
+  ) {
+    problems.push('the read-only control must be the first step');
+  } else if (control.seconds !== CONTROL_SECONDS) {
+    problems.push(`the control must run ${CONTROL_SECONDS} s`);
+  }
+  if (steps.filter((step) => step.control === true).length !== 1) {
+    problems.push('exactly one read-only control may run');
+  }
+  if (new Set(steps.map((step) => step.id)).size !== steps.length) {
+    problems.push('calibration steps share an id');
+  }
+
+  for (let pair = 1; pair <= pairs; pair += 1) {
+    const at = steps.findIndex((step) => step.id === calibrationProbeId(pair));
+    if (at === -1) {
+      problems.push(`pair ${pair} has no probe step`);
+      continue;
+    }
+    const probe = steps[at];
+    const next = steps[at + 1];
+    if (probe.kind !== 'probe' || probe.control === true) {
+      problems.push(`pair ${pair}'s probe must be a WAL-writing probe`);
+    }
+    if (probe.seconds !== PROBE_SECONDS) {
+      problems.push(`pair ${pair}'s probe must run ${PROBE_SECONDS} s`);
+    }
+    problems.push(
+      ...validateProbeSql(probe.sql, { control: false }).map((p) => `${probe.id}: ${p}`),
+    );
+    if (!next || next.id !== calibrationStressId(pair)) {
+      problems.push(
+        `pair ${pair}'s stress run must be the step immediately after its probe (found ${JSON.stringify(next?.id ?? null)})`,
+      );
+      continue;
+    }
+    if (next.kind !== 'jest-full') {
+      problems.push(`pair ${pair}'s stress step must run the whole ${STRESS.jestProject} project`);
+    }
+    const args = next.pnpmArgs ?? [];
+    if (args[0] !== 'run' || args[1] !== STRESS.rootScript) {
+      problems.push(`pair ${pair} must run \`pnpm run ${STRESS.rootScript}\``);
+    }
+    if (args.slice(2).some((arg) => arg.startsWith('--testNamePattern') || arg.startsWith('-t'))) {
+      problems.push(`pair ${pair}'s stress run must be unfiltered`);
+    }
+    if (args.includes('--passWithNoTests')) {
+      problems.push(`pair ${pair} passes with no tests: a missing spec has to fail`);
+    }
+    if (args.some((arg) => /^--retry/.test(arg))) {
+      problems.push(`pair ${pair} retries; a retried sample is not evidence`);
+    }
+  }
+
+  // Nothing outside the control and the pairs may run: an unrelated step would
+  // sit between some pair's probe and the suite that pair is meant to describe.
+  for (const [index, step] of steps.entries()) {
+    if (index === 0) continue;
+    const expected =
+      index % 2 === 1 ? calibrationProbeId((index + 1) / 2) : calibrationStressId(index / 2);
+    if (step.id !== expected) {
+      problems.push(`step ${index} is ${JSON.stringify(step.id)}; the pairs must run back to back`);
+    }
+  }
+  if (steps.some((step) => step.kind === 'jest-named')) {
+    problems.push('a calibration campaign runs the whole project, never a name-filtered proof');
   }
   return problems;
 }

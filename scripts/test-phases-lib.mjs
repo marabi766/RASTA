@@ -42,6 +42,15 @@ export const CI_STEPS = Object.freeze({
 });
 
 /**
+ * The manual ADR-055 calibration campaign. It runs the stress project several
+ * more times against a database it measures, so it must stay out of every
+ * ordinary gate: a quality run that silently ran it would take many minutes
+ * longer and would report an environment measurement as a product result.
+ * ADR-055 is `Proposed` and sets no threshold, so nothing may depend on it yet.
+ */
+export const CALIBRATION_SCRIPT = 'calibrate:aggregation-stress';
+
+/**
  * Turns the orchestrator's argv into the two turbo invocations it runs.
  *
  * `pnpm run test -- --testNamePattern=X` reaches the orchestrator as
@@ -318,6 +327,38 @@ export function validateTestPhases({
     }
   }
 
+  // The manual calibration campaign stays manual: it may not be reachable from
+  // `verify`, from either workspace test task, or from the direct stress route.
+  const referencesCalibration = (script) =>
+    scriptCommands(script).some((words) =>
+      words.some((word) => word === CALIBRATION_SCRIPT || word.endsWith(`/${CALIBRATION_SCRIPT}`)),
+    );
+  for (const name of ['verify', ...WORKSPACE_TASKS, EXCLUSIVE_PHASE.task]) {
+    if (referencesCalibration(rootScripts?.[name])) {
+      problems.push(
+        `root script "${name}" reaches "${CALIBRATION_SCRIPT}"; the calibration campaign is manual only`,
+      );
+    }
+  }
+  const calibration = scriptCommands(rootScripts?.[CALIBRATION_SCRIPT]);
+  if (calibration.length > 0) {
+    if (
+      calibration.length !== 1 ||
+      calibration[0][0] !== 'node' ||
+      calibration[0][1] !== 'scripts/aggregation-evidence.mjs' ||
+      !calibration[0].includes('--calibrate')
+    ) {
+      problems.push(
+        `root script "${CALIBRATION_SCRIPT}" must invoke only \`node scripts/aggregation-evidence.mjs --calibrate\``,
+      );
+    }
+    // The pair count and report path are the caller's, after `--`. Baking
+    // either in would make a recorded invocation mean something it does not.
+    if (calibration[0].some((word) => word === '--pairs' || word.startsWith('--pairs='))) {
+      problems.push(`root script "${CALIBRATION_SCRIPT}" must not fix a pair count`);
+    }
+  }
+
   // Turbo: the exclusive task exists and can never replay a cached green.
   const turboTask = turboTasks?.[task];
   if (!turboTask) {
@@ -471,6 +512,11 @@ export function validateTestPhases({
     if (isTurboRunOf(words, [...WORKSPACE_TASKS, task])) {
       problems.push(
         `CI runs \`${line}\` through turbo directly, bypassing the two-phase orchestrator`,
+      );
+    }
+    if (words.includes(CALIBRATION_SCRIPT) || words.includes('--calibrate')) {
+      problems.push(
+        `CI runs \`${line}\`; the ADR-055 calibration campaign is manual and must not run in ordinary CI`,
       );
     }
   }

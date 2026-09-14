@@ -1,10 +1,24 @@
 #!/usr/bin/env node
 /**
  * Measures identity-service's aggregation stress proof against one PostgreSQL
- * and writes a short aggregate report. Manual: nothing in `pnpm verify` or CI
- * runs it.
+ * and writes a short aggregate report. Manual in both modes: nothing in
+ * `pnpm verify` or CI runs either of them, and `pnpm check:test-phases`
+ * enforces that.
  *
  *   node scripts/aggregation-evidence.mjs <report-path>
+ *     The evidence campaign, unchanged: a control, a WAL probe, five
+ *     name-filtered runs of the proof, the whole project once, the probe again.
+ *
+ *   node scripts/aggregation-evidence.mjs --calibrate --pairs <N> <report-path>
+ *   pnpm run calibrate:aggregation-stress -- --pairs <N> <report-path>
+ *     The ADR-055 paired calibration campaign: a control, then N samples of
+ *     "one validated WAL probe, then immediately the whole unchanged
+ *     aggregation-stress project". Adjacency is the point — a measurement taken
+ *     apart from the run describes conditions that run never met.
+ *
+ * Calibration reports validity only (`VALID`/`INVALID`/`INCONCLUSIVE`). It
+ * applies no threshold and makes no capability judgement: ADR-055 is
+ * `Proposed` and the two-sided dataset it needs does not exist yet.
  *
  * Needs a migrated identity database (`DATABASE_URL_IDENTITY`), libpq
  * variables for a superuser session on the same server (`PGHOST`, `PGPORT`,
@@ -28,16 +42,22 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   STRESS,
+  classifyInfrastructureProblems,
+  formatCalibrationReport,
   formatReport,
+  parseEvidenceArgs,
   parsePgbenchOutput,
   parseWalSamples,
   parseWalStat,
   pgbenchArgs,
+  planCalibrationRun,
   planEvidenceRun,
   redact,
   summarizeBurst,
+  summarizeCalibration,
   summarizeJestReport,
   summarizeProbe,
+  validateCalibrationContract,
   validateEvidenceContract,
 } from './aggregation-evidence-lib.mjs';
 
@@ -50,6 +70,23 @@ const MINUTE = 60_000;
 
 const out = (line) => process.stdout.write(`${line}\n`);
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
+/**
+ * Prints why a step could not produce evidence, as category counts over the
+ * aggregate problems the harness already built — never a child process's
+ * stdout or stderr, which can carry URLs, credentials, rows and identifiers.
+ */
+function reportCategories(label, problems) {
+  const counts = Object.entries(classifyInfrastructureProblems(problems)).filter(
+    ([, count]) => count > 0,
+  );
+  out(
+    `[evidence] ${label}: ${
+      counts.map(([name, count]) => `${name}=${count}`).join(' ') || 'unclassified=0'
+    }`,
+  );
+  for (const problem of problems) out(`[evidence]   problem: ${redact(String(problem))}`);
+}
 
 const children = new Set();
 const containers = new Set();
@@ -124,7 +161,15 @@ async function psql(sql) {
     { timeoutMs: 2 * MINUTE },
   );
   if (result.exitCode !== 0) {
-    throw new Error(`psql exited ${result.exitCode}: ${redact(result.output.slice(-600))}`);
+    // The message becomes a probe `problem`, which reaches the report. So it
+    // carries the exit code and a category — never the output itself, which
+    // can hold a connection string, a role name or a server error verbatim.
+    const categories = Object.entries(
+      classifyInfrastructureProblems([redact(result.output.slice(-600))]),
+    )
+      .filter(([, count]) => count > 0)
+      .map(([name]) => name);
+    throw new Error(`psql exited ${result.exitCode} (${categories.join(', ') || 'unclassified'})`);
   }
   return result.output;
 }
@@ -213,7 +258,10 @@ async function runProbe(step) {
     probe.problems.push(
       `pgbench exited ${bench.exitCode}${bench.timedOut ? ' after its bound' : ''}`,
     );
-    out(redact(bench.output.slice(-1500)));
+    // Only the aggregate problem and its category leave this function. An
+    // output tail — even redacted — can still carry row values, identifiers
+    // and command environments that no report needs.
+    reportCategories(`${step.id} probe`, probe.problems);
   }
   return { id: step.id, passed: probe.valid, probe };
 }
@@ -307,10 +355,12 @@ async function runJest(step) {
     }
   }
   const summary = summarizeJestReport(report, { expectNamed: named });
-  if (!report)
-    out(
-      `[evidence] ${step.id} wrote no jest report; redacted tail:\n${redact(result.output.slice(-3000))}`,
+  if (!report) {
+    summary.problems.push(
+      `${step.id} wrote no jest report (exit ${result.exitCode}${result.timedOut ? ', after its bound' : ''})`,
     );
+    reportCategories(`${step.id} suite`, summary.problems);
+  }
   const wallSeconds = (result.endedAt - result.startedAt) / 1000;
   const wal =
     walBefore && walAfter
@@ -334,41 +384,13 @@ async function runJest(step) {
   };
 }
 
-async function main() {
-  const reportPath = process.argv[2];
-  if (!reportPath) {
-    out('usage: node scripts/aggregation-evidence.mjs <report-path>');
-    return 2;
-  }
-  const missing = [...PG_ENV, 'DATABASE_URL_IDENTITY'].filter((name) => !process.env[name]);
-  if (missing.length > 0) {
-    out(`[evidence] missing environment: ${missing.join(', ')}`);
-    return 2;
-  }
-
-  const plan = planEvidenceRun();
-  const contract = validateEvidenceContract({
-    specSource: readFileSync(join(packageDir, STRESS.spec), 'utf8'),
-    plan,
-  });
-  if (contract.length > 0) {
-    for (const problem of contract) out(`[evidence] contract: ${problem}`);
-    return 1;
-  }
-
-  // Resolved before anything is measured, so a harness that cannot start jest fails first.
-  jestBin();
-
-  workDir = mkdtempSync(join(tmpdir(), 'aggregation-evidence-'));
+/**
+ * Runs an ordered plan. Every step runs; a failing one never stops the rest and
+ * is never retried, so the report keeps the whole distribution rather than
+ * stopping at the first bad sample.
+ */
+async function runPlan(plan) {
   const results = [];
-  let topo;
-  try {
-    topo = await topology();
-  } catch (error) {
-    topo = { error: JSON.stringify(redact(error.message)) };
-  }
-  out(`[evidence] topology ${JSON.stringify(topo)}`);
-
   for (const step of plan) {
     out(`[evidence] ${step.id} started ${new Date().toISOString()}`);
     let result;
@@ -383,16 +405,73 @@ async function main() {
       `[evidence] ${step.id} finished ${new Date().toISOString()}: ${result.passed ? 'PASS' : 'FAIL'}`,
     );
   }
+  return results;
+}
 
+async function commitSha() {
   const head = await runBounded('git', ['rev-parse', 'HEAD'], { timeoutMs: MINUTE });
-  const text = formatReport({
-    meta: {
-      commit: head.exitCode === 0 ? head.output.trim() : 'unknown',
-      generatedAt: new Date().toISOString(),
-    },
-    topology: topo,
-    results,
-  });
+  return head.exitCode === 0 ? head.output.trim() : 'unknown';
+}
+
+async function readTopology() {
+  try {
+    return await topology();
+  } catch (error) {
+    return { error: JSON.stringify(redact(error.message)) };
+  }
+}
+
+async function main() {
+  const parsed = parseEvidenceArgs(process.argv.slice(2));
+  if (parsed.error) {
+    out(`[evidence] ${parsed.error}`);
+    out(parsed.usage);
+    return 2;
+  }
+  const { mode, pairs, reportPath } = parsed;
+
+  const missing = [...PG_ENV, 'DATABASE_URL_IDENTITY'].filter((name) => !process.env[name]);
+  if (missing.length > 0) {
+    // Names only — never the values.
+    out(`[evidence] missing environment: ${missing.join(', ')}`);
+    return 2;
+  }
+
+  const specSource = readFileSync(join(packageDir, STRESS.spec), 'utf8');
+  const plan = mode === 'calibrate' ? planCalibrationRun({ pairs }) : planEvidenceRun();
+  const contract =
+    mode === 'calibrate'
+      ? validateCalibrationContract({ specSource, plan, pairs })
+      : validateEvidenceContract({ specSource, plan });
+  if (contract.length > 0) {
+    for (const problem of contract) out(`[evidence] contract: ${problem}`);
+    return 1;
+  }
+
+  // Resolved before anything is measured, so a harness that cannot start jest fails first.
+  jestBin();
+
+  workDir = mkdtempSync(join(tmpdir(), 'aggregation-evidence-'));
+  const topo = await readTopology();
+  out(`[evidence] topology ${JSON.stringify(topo)}`);
+  if (mode === 'calibrate') {
+    out(
+      `[evidence] calibration: ${pairs} pair(s); each is one ${plan[1].seconds} s probe immediately ` +
+        `followed by one unfiltered \`pnpm run ${STRESS.rootScript}\`. No threshold is applied.`,
+    );
+  }
+
+  const results = await runPlan(plan);
+  const meta = { commit: await commitSha(), generatedAt: new Date().toISOString() };
+  const text =
+    mode === 'calibrate'
+      ? formatCalibrationReport({
+          meta,
+          topology: topo,
+          summary: summarizeCalibration({ pairs, results }),
+        })
+      : formatReport({ meta, topology: topo, results });
+
   out(`\n${text}`);
   try {
     writeFileSync(reportPath, text);
@@ -400,6 +479,9 @@ async function main() {
     out(`[evidence] could not write the report: ${error.code ?? 'error'}`);
     return 1;
   }
+  // Report-only means this is not wired into a quality gate, not that a bad
+  // sample is painted green: an invalid probe, a failed suite, a process that
+  // could not start or a broken topology all still exit non-zero.
   return results.every((result) => result.passed) && !topo.error ? 0 : 1;
 }
 

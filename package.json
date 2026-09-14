@@ -35,6 +35,7 @@
     "test:test-phases": "node --test scripts/test-phases.test.mjs",
     "check:test-phases": "node scripts/check-test-phases.mjs",
     "test:aggregation-evidence-lib": "node --test scripts/aggregation-evidence.test.mjs",
+    "calibrate:aggregation-stress": "node scripts/aggregation-evidence.mjs --calibrate",
     "test:grafana-dashboard-lib": "node --test scripts/check-grafana-dashboard.test.mjs",
     "check:grafana-dashboard": "node scripts/check-grafana-dashboard.mjs",
     "test:grafana-live-isolation-lib": "node --test scripts/verify-grafana-dashboard-isolation.test.mjs",

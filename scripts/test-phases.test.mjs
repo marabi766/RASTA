@@ -5,6 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readTestPhaseInputs } from './check-test-phases.mjs';
 import {
+  CALIBRATION_SCRIPT,
   EXCLUSIVE_PHASE,
   planTestRun,
   projectFiles,
@@ -270,4 +271,66 @@ test('CI losing the exclusive invocation or its security selection is caught', (
   const ungated = real();
   ungated.ciWorkflow = replaceOnce(ungated.ciWorkflow, 'pnpm run check:test-phases\n', 'true\n');
   expectProblem(ungated, /CI must run `pnpm run check:test-phases`/);
+});
+
+// ---------------------------------------------------------------------------
+// The manual ADR-055 calibration campaign stays out of every ordinary gate
+// ---------------------------------------------------------------------------
+
+test('calibration: the real repository keeps it manual', () => {
+  const inputs = real();
+  assert.equal(
+    typeof inputs.rootScripts[CALIBRATION_SCRIPT],
+    'string',
+    'the manual calibration script exists',
+  );
+  // It is reachable by name only, never from a gate.
+  for (const name of ['verify', 'test', 'test:integration', EXCLUSIVE_PHASE.task]) {
+    assert.ok(
+      !inputs.rootScripts[name].includes(CALIBRATION_SCRIPT),
+      `${name} must not reach ${CALIBRATION_SCRIPT}`,
+    );
+  }
+  assert.ok(!inputs.ciWorkflow.includes(CALIBRATION_SCRIPT), 'CI must not run the campaign');
+  assert.ok(!inputs.ciWorkflow.includes('--calibrate'), 'CI must not run the campaign');
+  assert.deepEqual(validateTestPhases(inputs), []);
+});
+
+test('calibration: wiring it into verify, a workspace task or CI is caught', () => {
+  for (const name of ['verify', 'test', 'test:integration', EXCLUSIVE_PHASE.task]) {
+    const inputs = real();
+    inputs.rootScripts[name] = `${inputs.rootScripts[name]} && pnpm run ${CALIBRATION_SCRIPT}`;
+    expectProblem(inputs, new RegExp(`"${name}" reaches "${CALIBRATION_SCRIPT}"`));
+  }
+
+  const viaName = real();
+  viaName.ciWorkflow = replaceOnce(
+    viaName.ciWorkflow,
+    'pnpm run test:aggregation-evidence-lib',
+    `pnpm run test:aggregation-evidence-lib\n          pnpm run ${CALIBRATION_SCRIPT} -- --pairs 3 out.txt`,
+  );
+  expectProblem(viaName, /manual and must not run in ordinary CI/);
+
+  const viaFlag = real();
+  viaFlag.ciWorkflow = replaceOnce(
+    viaFlag.ciWorkflow,
+    'pnpm run test:aggregation-evidence-lib',
+    'pnpm run test:aggregation-evidence-lib\n          node scripts/aggregation-evidence.mjs --calibrate --pairs 3 out.txt',
+  );
+  expectProblem(viaFlag, /manual and must not run in ordinary CI/);
+});
+
+test('calibration: the script itself must stay a bare, pair-count-free entry point', () => {
+  const fixedPairs = real();
+  fixedPairs.rootScripts[CALIBRATION_SCRIPT] =
+    'node scripts/aggregation-evidence.mjs --calibrate --pairs 5';
+  expectProblem(fixedPairs, /must not fix a pair count/);
+
+  const wrongTarget = real();
+  wrongTarget.rootScripts[CALIBRATION_SCRIPT] = 'node scripts/something-else.mjs --calibrate';
+  expectProblem(wrongTarget, /must invoke only/);
+
+  const noFlag = real();
+  noFlag.rootScripts[CALIBRATION_SCRIPT] = 'node scripts/aggregation-evidence.mjs';
+  expectProblem(noFlag, /must invoke only/);
 });
