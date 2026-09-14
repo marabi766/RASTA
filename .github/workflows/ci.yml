@@ -390,7 +390,7 @@ jobs:
         # a mock. A suite that stubbed S3 would prove the mock.
         run: |
           set -euo pipefail
-          docker run -d --name rasta-ci-minio --network host             -e MINIO_ROOT_USER=rasta_minio_admin             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password             minio/minio:RELEASE.2025-04-22T22-12-26Z server /data --address ':9000'
+          docker run -d --name rasta-ci-minio --network host             -e MINIO_ROOT_USER=rasta_minio_admin             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password             quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
@@ -404,7 +404,7 @@ jobs:
           # Private bucket, explicitly. ADR-014 requires it: every read goes
           # through a signed URL, and an anonymous policy here would make the
           # download tests pass for the wrong reason.
-          docker run --rm --network host --entrypoint sh             minio/mc:RELEASE.2025-04-16T18-13-26Z -c "
+          docker run --rm --network host --entrypoint sh             quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z -c "
               mc alias set rasta http://localhost:9000 rasta_minio_admin rasta_minio_ci_password
               mc mb --ignore-existing rasta/rasta-documents
               mc anonymous set none rasta/rasta-documents
@@ -1096,7 +1096,7 @@ jobs:
         # which is the step the whole ADR exists to make observable.
         run: |
           set -euo pipefail
-          docker run -d --name rasta-e2e-minio --network host             -e MINIO_ROOT_USER=rasta_minio_admin             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password             minio/minio:RELEASE.2025-04-22T22-12-26Z server /data --address ':9000'
+          docker run -d --name rasta-e2e-minio --network host             -e MINIO_ROOT_USER=rasta_minio_admin             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password             quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then break; fi
@@ -1104,7 +1104,7 @@ jobs:
           done
           curl -fsS http://localhost:9000/minio/health/live >/dev/null
 
-          docker run --rm --network host --entrypoint sh             minio/mc:RELEASE.2025-04-16T18-13-26Z -c "
+          docker run --rm --network host --entrypoint sh             quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z -c "
               mc alias set rasta http://localhost:9000 rasta_minio_admin rasta_minio_ci_password
               mc mb --ignore-existing rasta/rasta-documents
               mc anonymous set none rasta/rasta-documents
