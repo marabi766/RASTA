@@ -62,6 +62,16 @@
       // shell exported them directly.
       "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "KAFKA_BROKERS", "S3_*", "DOCUMENT_*"]
     },
+    // identity-service's two 500-write aggregation proofs, run alone after the
+    // parallel workspace phase by `scripts/run-test-phases.mjs` (docs/14
+    // § 14.3). Never cached: its evidence is a run against the live database,
+    // and a replayed green would be no evidence at all. The same strict
+    // environment applies — undeclared, DATABASE_URL_IDENTITY never arrives.
+    "test:aggregation-stress": {
+      "cache": false,
+      "dependsOn": ["^build", "db:generate"],
+      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "KAFKA_BROKERS"]
+    },
     // Turbo runs tasks in a strict environment, so anything the E2E harness
     // reads has to be declared here or it simply is not there — and the
     // failure looks like "the gateway is down" rather than "the port was

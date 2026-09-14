@@ -71,6 +71,19 @@ jobs:
           pnpm run test:local-postgres-config
           pnpm run check:local-postgres-config
 
+      - name: Test phase contract
+        # identity-service's aggregation stress spec (two 500-write proofs on
+        # one hot row) must run exactly once, alone, after every other
+        # workspace test task: beside the other services' integration suites
+        # on one PostgreSQL it measured their WAL load instead of row
+        # serialization (docs/14 § 14.3). Static — reads package.json,
+        # turbo.json, identity's jest config and this workflow; no database.
+        # The checker's own tests run first so a checker that stopped catching
+        # anything fails loudly.
+        run: |
+          pnpm run test:test-phases
+          pnpm run check:test-phases
+
       - name: Grafana dashboard contract
         # The provisioned local `Rasta Audit Evidence` dashboard: stable
         # datasource UID on every query, every alert in the rules file, the
@@ -538,6 +551,13 @@ jobs:
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
 
       - name: Integration tests
+        # Two phases (`scripts/run-test-phases.mjs`): every package's
+        # integration suites in parallel, then identity-service's aggregation
+        # stress spec alone, once the rest have exited. Its 500-write proofs
+        # serialize on one hot row; beside the other suites on this one
+        # PostgreSQL they measured shared WAL load, not the upsert (docs/14
+        # § 14.3). Never `turbo run test:integration` directly — that runs
+        # the workspace phase only; `check:test-phases` enforces it.
         run: pnpm run test:integration
         env:
           NODE_ENV: test
@@ -731,6 +751,11 @@ jobs:
         # stops all movement, `overspend` is the negative balance that cannot
         # happen, and `cap` is the anti-fraud reward ceiling. A failure in any
         # of them is a financial defect, not a flaky test.
+        #
+        # Both commands go through the two-phase orchestrator, so the pattern
+        # also filters identity-service's aggregation stress spec, run alone
+        # after the parallel phase; `concurren` is what selects its two
+        # 500-write proofs in the second command (`check:test-phases`).
         run: |
           pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"
           pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)"

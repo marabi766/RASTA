@@ -91,8 +91,13 @@ export async function databaseNowMs(prisma: PrismaService): Promise<number> {
 
 /**
  * Waits, on the database clock, until at least `neededMs` remain in the current
- * aggregation window, so a burst of refusals a test sends next is guaranteed to
- * land in one window rather than straddling a boundary by chance.
+ * aggregation window, so a burst of refusals a test sends next starts with that
+ * margin rather than straddling a boundary by chance.
+ *
+ * A starting margin, not a completion guarantee: nothing here bounds how long
+ * the burst then takes. A burst slower than `neededMs` still crosses into the
+ * next window — which is what the 500-write proofs did beside the whole
+ * workspace's integration suites, and why they run alone (`jest.config.js`).
  *
  * Windows align to the Unix epoch (`refusal-aggregation.ts`), so the position
  * inside the window is the database time modulo the window length.

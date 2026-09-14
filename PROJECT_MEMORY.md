@@ -394,6 +394,26 @@ actorId, key])` به‌صورت `int64` علامت‌دار (کدگذاری بی
 > چهار Client» و یک بار دو ردیف به‌جای یک در «۵۰۰ رد از Endpoint» (Burst از مرز پنجرهٔ ۶۰ ثانیه‌ای گذشت) — و بار سوم سبز شد
 > (۸۴۰/۸۴۰)؛ همان Spec به‌تنها سه از سه سبز بود. پس آن ناپایداری زیر بار موازی `pnpm test` از تأخیر IPv6 نیست و هنوز باز است.
 >
+> **پیگیری همان روز (علت آن ناپایداری: زمان‌بندی Harness، نه محصول):** با Instrumentation موقت (فقط آمار تجمیعی؛ سپس حذف) و
+> نمونه‌برداری `pg_stat_activity`/`pg_locks`/`pg_stat_wal` هر ۲۵۰ms روی Forwarder `127.0.0.1:25433 → rasta-postgres:5432`:
+> **به‌تنها** (۳ اجرا، سبز) هر Burst ۵۰۰تایی ۲۱٫۴–۲۳٫۶ ثانیه، ~۲۲ ‏WAL Sync/s، p95 Capture ۰٫۶۳–۰٫۶۵s (Endpoint) و ۱٫۲۶–۱٫۳۴s (چهار
+> Client)، بیشینه ۴٫۹۶s، صفر خطا؛ **کنار Suiteهای Integration سرویس‌های دیگر** (۲ اجرا): ۴۲٫۴–۱۲۳٫۶ ثانیه، WAL Sync تا ۷٫۱/s، و در
+> یک اجرا ۶ Capture بالای ۵s با ۴ خطای `57014` (Burst از مرز پنجره گذشت؛ Jest در ۱۲۰s قطع کرد). هیچ `P2024`/`P2028` (گرفتن اتصال) دیده
+> نشد و Backendهای identity بیکار در دسترس بودند؛ انتظارها `Lock:transactionid`/`tuple` پشت نگه‌دارنده‌ای روی `IO:WALSync`/`LWLock:WALWrite`
+> و I/O سرویس‌های دیگر (`DataFileImmediateSync`) بود. پس نقص محصول نیست. **مرز تازه:** Project ‏Jest ‏`aggregation-stress` فقط همین Spec؛
+> `integration` آن را کنار می‌گذارد؛ `pnpm test`/`pnpm test:integration` از `scripts/run-test-phases.mjs` می‌گذرند (فاز موازی، سپس پس از
+> پایان آن — حتی ناموفق — `turbo run test:aggregation-stress --filter=@rasta/identity-service`، بی Cache)؛ CI همان مسیر را دارد و گام
+> `Test phase contract` (`pnpm test:test-phases` ۱۷ تست + `pnpm check:test-phases`، ایستا) در `pnpm verify` و Job ‏`quality`. پنجرهٔ ۶۰s،
+> مرز ۵s، Pool، SQL و Assertionهای ۵۰۰ دست نخوردند؛ توضیح `atFreshWindow` به «حاشیهٔ شروع، نه تضمین پایان» اصلاح شد. **شواهد پایداری:**
+> فاز انحصاری با Instrumentation: Burstها ۱۸٫۹/۱۹٫۴s، p95 ۰٫۵۵/۱٫۲۷s، بیشینه ۳٫۰۱s، ~۲۶ ‏WAL Sync/s؛ ۵/۵ اجرای پشت‌سرهم
+> `pnpm test:aggregation-stress` سبز (۲۲/۲۲)؛ ۴ اجرای Orchestrator (`test:integration` ×۳، `test` ×۱) — اثبات فشار ۴/۴ سبز و هر بار پس از
+> خروج فاز موازی آغاز شد، با صفر Backend فعال سرویس دیگر در سه اجرای سبز؛ کل identity ‏۲۷ Suite / ۸۴۰ تست. **Known Issue باز (نامرتبط):**
+> فاز موازی خودش زیر بار این ماشین ناپایدار ماند — `maintenance-service › cost atomicity` (۷ یا ۰ از ۱۰)، ۵۰۰ در supplier/marketplace،
+> `Can't reach database server` در fleet و `P2028` در audit در اجراهای جداگانه؛ اوج ~۹۲ Backend در برابر `max_connections=100`. پنج اجرای
+> ناموفق `audit-service › tenant-isolation` که هم‌زمان در زنجیرهٔ ثابت `PLATFORM/2026-10` نوشته بودند، ۶۰ ردیف برچسب‌دار به‌جا گذاشتند و
+> پاک‌سازی هر اجرای بعدی را رد می‌کردند؛ با همان منطق `cleanupRun` (ردیف بیگانه = ۰، Triggerها بازگردانده) دستی از پایگاه محلی پاک شدند.
+> `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`؛ AUD-004 بسته نشد.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

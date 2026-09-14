@@ -1,0 +1,273 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { readTestPhaseInputs } from './check-test-phases.mjs';
+import {
+  EXCLUSIVE_PHASE,
+  planTestRun,
+  projectFiles,
+  scriptCommands,
+  selectedProjects,
+  shellWords,
+  stressProofTitles,
+  stripJsonComments,
+  validateTestPhases,
+  workflowStepCommands,
+} from './test-phases-lib.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const CLI = resolve(here, 'check-test-phases.mjs');
+const SPEC = EXCLUSIVE_PHASE.spec;
+
+/** The real repository inputs, deep-copied so a mutation never leaks between tests. */
+const real = () => structuredClone(readTestPhaseInputs());
+
+function expectProblem(inputs, pattern) {
+  const problems = validateTestPhases(inputs);
+  assert.ok(
+    problems.some((problem) => pattern.test(problem)),
+    `no problem matched ${pattern}; got:\n${problems.join('\n') || '(none)'}`,
+  );
+}
+
+const replaceOnce = (text, from, to) => {
+  assert.ok(text.includes(from), `fixture text not found: ${from}`);
+  return text.replace(from, to);
+};
+
+// ---------------------------------------------------------------------------
+// The orchestrator's plan
+// ---------------------------------------------------------------------------
+
+test('plan: a bare task runs the workspace phase, then the stress task alone', () => {
+  assert.deepEqual(planTestRun(['test']), [
+    { phase: 'workspace', args: ['run', 'test'] },
+    {
+      phase: 'exclusive',
+      args: ['run', 'test:aggregation-stress', '--filter=@rasta/identity-service'],
+    },
+  ]);
+  assert.deepEqual(
+    planTestRun(['test:integration']).map((step) => step.args[1]),
+    ['test:integration', 'test:aggregation-stress'],
+  );
+});
+
+test('plan: arguments after `--` reach both phases unchanged, quotes and spaces included', () => {
+  const pattern = '--testNamePattern=(tenant|subtree visibility)';
+  const [workspace, exclusive] = planTestRun(['test:integration', '--', pattern]);
+  assert.deepEqual(workspace.args, ['run', 'test:integration', '--', pattern]);
+  assert.deepEqual(exclusive.args.slice(-2), ['--', pattern]);
+});
+
+test('plan: refuses an unknown task and any option before `--`', () => {
+  assert.throws(() => planTestRun([]), /unknown task/);
+  assert.throws(() => planTestRun(['test:e2e']), /unknown task/);
+  assert.throws(() => planTestRun(['test', '--filter=@rasta/economic-service']), /before `--`/);
+});
+
+// ---------------------------------------------------------------------------
+// Parsing helpers
+// ---------------------------------------------------------------------------
+
+test('shellWords honours quotes; scriptCommands splits on &&', () => {
+  assert.deepEqual(shellWords(`pnpm run test -- --testNamePattern="(a|b c)" 'x y'`), [
+    'pnpm',
+    'run',
+    'test',
+    '--',
+    '--testNamePattern=(a|b c)',
+    'x y',
+  ]);
+  assert.throws(() => shellWords('echo "open'), /unterminated/);
+  assert.deepEqual(scriptCommands('a b && c'), [['a', 'b'], ['c']]);
+});
+
+test('stripJsonComments keeps comment-like text inside strings', () => {
+  const parsed = JSON.parse(
+    stripJsonComments('{\n  // note\n  "a": "http://x/*y*/", /* b */ "c": 1\n}'),
+  );
+  assert.deepEqual(parsed, { a: 'http://x/*y*/', c: 1 });
+});
+
+test('selectedProjects: named projects, or null for "all"', () => {
+  assert.deepEqual(
+    selectedProjects(['jest', '--selectProjects', 'unit', 'integration', '--runInBand']),
+    ['unit', 'integration'],
+  );
+  assert.equal(selectedProjects(['jest', '--runInBand']), null);
+});
+
+test('projectFiles applies rootDir, testRegex and testPathIgnorePatterns', () => {
+  const files = ['src/a.spec.ts', 'test/a.int-spec.ts', `${SPEC}`];
+  const project = {
+    rootDir: 'test',
+    testRegex: '.*\\.int-spec\\.ts$',
+    testPathIgnorePatterns: ['a\\.int'],
+  };
+  assert.deepEqual(projectFiles(project, files, 'services/x'), [SPEC]);
+});
+
+test('workflowStepCommands reads inline and block run scalars, dropping comments', () => {
+  const yaml = [
+    'jobs:',
+    '  a:',
+    '    steps:',
+    '      - name: One',
+    '        run: pnpm run one',
+    '      - name: Two',
+    '        # a comment',
+    '        run: |',
+    '          # skipped',
+    '          pnpm run two',
+    '          pnpm run three',
+    '        env:',
+    '          X: y',
+  ].join('\n');
+  assert.deepEqual(workflowStepCommands(yaml, 'One'), [['pnpm run one']]);
+  assert.deepEqual(workflowStepCommands(yaml, 'Two'), [['pnpm run two', 'pnpm run three']]);
+  assert.deepEqual(workflowStepCommands(yaml, 'Missing'), []);
+});
+
+test('stressProofTitles finds the two 500-operation proofs in the real spec', () => {
+  const titles = stressProofTitles(real().specSource);
+  assert.equal(titles.length, 2);
+  for (const title of titles) assert.match(title, /\b500\b/);
+});
+
+// ---------------------------------------------------------------------------
+// The contract, on the real repository and on mutations of it
+// ---------------------------------------------------------------------------
+
+test('the real repository satisfies the contract, and the CLI exits 0', () => {
+  assert.deepEqual(validateTestPhases(real()), []);
+  const run = spawnSync(process.execPath, [CLI], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+});
+
+test('root `test` or `test:integration` straight through turbo is caught', () => {
+  for (const task of ['test', 'test:integration']) {
+    const inputs = real();
+    inputs.rootScripts[task] = `turbo run ${task}`;
+    expectProblem(inputs, new RegExp(`root script "${task}" must be exactly`));
+    expectProblem(inputs, /runs a workspace test task through turbo directly/);
+  }
+});
+
+test('a verify that stops running `pnpm run test`, or runs it twice, is caught', () => {
+  const inputs = real();
+  inputs.rootScripts.verify = inputs.rootScripts.verify.replace(' && pnpm run test && ', ' && ');
+  expectProblem(inputs, /"verify" must run `pnpm run test` exactly once \(found 0\)/);
+
+  const twice = real();
+  twice.rootScripts.verify = `${twice.rootScripts.verify} && pnpm run test`;
+  expectProblem(twice, /exactly once \(found 2\)/);
+
+  const noGate = real();
+  noGate.rootScripts.verify = noGate.rootScripts.verify.replace(
+    ' && pnpm run check:test-phases',
+    '',
+  );
+  expectProblem(noGate, /"verify" must run `pnpm run check:test-phases`/);
+});
+
+test('a missing, renamed or cached exclusive turbo task is caught', () => {
+  const missing = real();
+  delete missing.turboTasks[EXCLUSIVE_PHASE.task];
+  expectProblem(missing, /turbo.json has no "test:aggregation-stress" task/);
+
+  const cached = real();
+  delete cached.turboTasks[EXCLUSIVE_PHASE.task].cache;
+  expectProblem(cached, /must set "cache": false/);
+
+  const noEnv = real();
+  noEnv.turboTasks[EXCLUSIVE_PHASE.task].env = ['REDIS_URL'];
+  expectProblem(noEnv, /must pass "DATABASE_URL_\*" through/);
+
+  const noRoot = real();
+  delete noRoot.rootScripts[EXCLUSIVE_PHASE.task];
+  expectProblem(noRoot, /root script "test:aggregation-stress" must be exactly/);
+});
+
+test('the stress spec allowed back into the parallel identity phase is caught', () => {
+  // identity `test` selecting every project again.
+  const bare = real();
+  bare.identityScripts.test = 'jest --passWithNoTests --runInBand';
+  expectProblem(bare, /identity script "test" selects the "aggregation-stress" project/);
+
+  // The integration project no longer ignoring the spec.
+  const unignored = real();
+  const integration = unignored.jestProjects.find(
+    (project) => project.displayName === 'integration',
+  );
+  integration.testPathIgnorePatterns = ['/node_modules/'];
+  expectProblem(unignored, /"integration" \(selected by "test"\) collects .*parallel phase/);
+  expectProblem(unignored, /"integration" \(selected by "test:integration"\) collects/);
+});
+
+test('an exclusive phase that selects nothing, or the wrong thing, is caught', () => {
+  const removed = real();
+  removed.jestProjects = removed.jestProjects.filter(
+    (project) => project.displayName !== 'aggregation-stress',
+  );
+  expectProblem(removed, /has no "aggregation-stress" project/);
+
+  const tolerant = real();
+  tolerant.identityScripts[EXCLUSIVE_PHASE.task] += ' --passWithNoTests';
+  expectProblem(tolerant, /must not pass with no tests/);
+
+  const wide = real();
+  wide.jestProjects.find((project) => project.displayName === 'aggregation-stress').testRegex =
+    '.*\\.int-spec\\.ts$';
+  expectProblem(wide, /must collect exactly/);
+
+  const gone = real();
+  gone.identityFiles = gone.identityFiles.filter((file) => file !== SPEC);
+  expectProblem(gone, /does not exist/);
+
+  const untitled = real();
+  untitled.specSource = untitled.specSource.replaceAll('500', 'five hundred');
+  expectProblem(untitled, /no longer names its two 500-operation proofs/);
+});
+
+test('another identity integration spec leaving the parallel phase is caught', () => {
+  const inputs = real();
+  const integration = inputs.jestProjects.find((project) => project.displayName === 'integration');
+  integration.testPathIgnorePatterns = [...integration.testPathIgnorePatterns, 'audit-correction'];
+  expectProblem(
+    inputs,
+    /test\/audit-correction\.int-spec\.ts is not collected by identity "test:integration"/,
+  );
+});
+
+test('CI losing the exclusive invocation or its security selection is caught', () => {
+  const direct = real();
+  direct.ciWorkflow = replaceOnce(
+    direct.ciWorkflow,
+    'run: pnpm run test:integration\n',
+    'run: pnpm exec turbo run test:integration\n',
+  );
+  expectProblem(direct, /"Integration tests" must run `pnpm run test:integration`/);
+  expectProblem(direct, /through turbo directly, bypassing the two-phase orchestrator/);
+
+  const narrowed = real();
+  narrowed.ciWorkflow = replaceOnce(narrowed.ciWorkflow, '|concurren|', '|');
+  expectProblem(narrowed, /pattern no longer selects the stress proof/);
+
+  const dropped = real();
+  dropped.ciWorkflow = replaceOnce(
+    dropped.ciWorkflow,
+    'pnpm run test:integration -- --testNamePattern=',
+    'pnpm exec turbo run test:integration -- --testNamePattern=',
+  );
+  expectProblem(
+    dropped,
+    /must run `pnpm run test:integration -- --testNamePattern=…` exactly once/,
+  );
+
+  const ungated = real();
+  ungated.ciWorkflow = replaceOnce(ungated.ciWorkflow, 'pnpm run check:test-phases\n', 'true\n');
+  expectProblem(ungated, /CI must run `pnpm run check:test-phases`/);
+});

@@ -37,7 +37,22 @@ import { atFreshWindow, newPrisma, waitForWindowClose } from './helpers';
  *
  * Every burst that must land in one window first waits, on the database clock,
  * for enough of the window to remain (`atFreshWindow`), so a result never
- * depends on where in a window the test happened to start.
+ * depends on where in a window the test happened to start. That is a starting
+ * margin only: a burst that runs longer than it still crosses the boundary.
+ *
+ * This spec runs alone. Its two 500-write proofs serialize on one hot row, so
+ * their pace is the database's commit latency, and beside every other
+ * service's integration suite on the same PostgreSQL they measured that WAL
+ * load instead (2026-09-14: bursts of 42–124 s rather than ~22 s, a `57014`
+ * on the five-second capture bound, a burst crossing its window). So the
+ * `aggregation-stress` jest project owns this file, and `pnpm test`,
+ * `pnpm test:integration`, `pnpm verify` and CI run it once, after the
+ * parallel workspace phase (`scripts/test-phases-lib.mjs`, docs/14 § 14.3).
+ * What the proofs still prove is unchanged — the real endpoint and
+ * independent Prisma clients, the real row lock, exactly one created row,
+ * counts 1..500 with no gap, and no `timeout` or `failed` capture — with the
+ * production window, statement bound and pool. They are not a throughput
+ * benchmark and set no SLA.
  *
  * Everything written carries `TAG` in its actor id; cleanup removes exactly
  * that, so the suite is independent of any other run on the same database.
@@ -302,7 +317,8 @@ describe('windowed refusal aggregation (real PostgreSQL)', () => {
       // clients, 1.75 s mean — PROJECT_MEMORY, AUD-004 Phase C2). Forty writers
       // there would prove the volume's fsync, not the upsert; eight stay
       // inside the five-second statement bound and still interleave on every
-      // increment.
+      // increment — on a database this spec has to itself, which is why it is
+      // scheduled alone (see the file header).
       const TOTAL = 500;
       const LANES_PER_CLIENT = 2;
       const results: CapturedOccurrence[] = [];

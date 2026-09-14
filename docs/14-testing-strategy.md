@@ -141,6 +141,22 @@ URL باید صریحاً IPv4 باشد. **نشانه:** Prisma `P2028` (`Unable
 این قاعده فقط پیش‌فرض محلی توسعه است؛ سیاست Production برای `connection_limit`، `pool_timeout` یا گرم کردن Pool تصمیمی جدا
 در سطح ADR است.
 
+**اثبات فشار تجمیع رد در فاز انحصاری (2026-09-14).** `pnpm test` و `pnpm test:integration` دیگر مستقیم `turbo run` نیستند؛
+`scripts/run-test-phases.mjs` آنها را در دو فاز اجرا می‌کند: (۱) **فاز Workspace** — همان `turbo run <task>` موازی برای همهٔ
+بسته‌ها، که Project ‏`integration` در `identity-service` در آن `security-event-aggregation.int-spec.ts` را کنار می‌گذارد؛ (۲) **فاز
+انحصاری** — فقط پس از پایان فاز ۱ (حتی اگر شکست خورده باشد، تا شکستی نامرتبط شاهد فشار را پنهان نکند؛ کد خروج همان نخستین شکست است)، `turbo run test:aggregation-stress --filter=@rasta/identity-service` که Project ‏Jest
+`aggregation-stress` را با `--runInBand`، بی `--passWithNoTests` و بی Cache ‏Turbo اجرا می‌کند. هر فاز با زمان UTC در Log اعلام
+می‌شود. آرگومان‌های پس از `--` (مثل `--testNamePattern` گام امنیتی CI) به هر دو فاز می‌رسند؛ گزینهٔ پیش از `--` (مثل `--filter`)
+رد می‌شود، چون تصمیم می‌گرفت فاز انحصاری اجرا شود یا نه — اجرای فیلترشده بی فاز انحصاری `pnpm exec turbo run <task> --filter …`
+است، و خودِ اثبات به‌تنها `pnpm test:aggregation-stress`. **چرا:** دو اثبات ۵۰۰-نوشتنی این Spec روی یک ردیف داغ سریال می‌شوند، پس
+سرعتشان تأخیر Commit پایگاه داده است. به‌تنها هر Burst حدود ۲۲ ثانیه با ~۲۲ ‏WAL Sync بر ثانیه و بی Capture بالای ۵ ثانیه بود؛ کنار
+Suiteهای Integration سرویس‌های دیگر روی همان PostgreSQL، ۴۲ تا ۱۲۴ ثانیه، WAL Sync تا ~۷ بر ثانیه افتاد، Captureها مرز
+`statement_timeout` پنج‌ثانیه‌ای را رد کردند (`57014`) یا Burst از مرز پنجرهٔ ۶۰ ثانیه‌ای گذشت. انتظارها روی Row Lock پشت نگه‌دارنده‌ای
+بود که روی WAL/I/O ایستاده بود، نه روی گرفتن اتصال از Pool. `atFreshWindow` فقط **حاشیهٔ شروع** می‌دهد، نه تضمین پایان. پنجرهٔ
+پیش‌فرض ۶۰ ثانیه، مرز پنج‌ثانیه‌ای Capture، Pool، SQL و هر دو Assertion ‏۵۰۰ دست نخوردند؛ این Spec معیار Throughput یا SLA نیست.
+`pnpm test:test-phases` و `pnpm check:test-phases` (ایستا، بی پایگاه داده) در `pnpm verify` و Job ‏`quality` در CI تضمین می‌کنند که
+Spec از فاز موازی بیرون، دقیقاً یک بار در فاز انحصاری، و گام‌های `Integration tests` و امنیتی CI همچنان از Orchestrator می‌گذرند.
+
 **چرا اینها با تست واحد جایگزین نمی‌شوند.** هر کدام یک واقعیت را می‌سنجند که فقط
 پایگاه داده واقعی تولیدش می‌کند: شکل خطای `P2002` در Prisma (که **نام ستون**
 می‌دهد، نه نام Index)، انحراف ساعت میان میزبان و PostgreSQL، رفتار Tenant Guard
@@ -588,7 +604,8 @@ PostgreSQL آن نقض کل تراکنش را Abort می‌کند و هر دست
 ```bash
 pnpm test                       # همه
 pnpm test:unit                  # سریع، بدون زیرساخت
-pnpm test:integration           # نیازمند Docker
+pnpm test:integration           # نیازمند Docker (دو فاز: موازی، سپس اثبات فشار تجمیع به‌تنها)
+pnpm test:aggregation-stress    # فقط اثبات فشار تجمیع identity، به‌تنها (§ ۱۴٫۳)
 pnpm test:e2e                   # نیازمند Stack کامل
 pnpm --filter @rasta/economic-service test -- --coverage
 pnpm --filter @rasta/asset-service test -- --testNamePattern="tenant isolation"
