@@ -157,6 +157,19 @@ Suiteهای Integration سرویس‌های دیگر روی همان PostgreSQL�
 `pnpm test:test-phases` و `pnpm check:test-phases` (ایستا، بی پایگاه داده) در `pnpm verify` و Job ‏`quality` در CI تضمین می‌کنند که
 Spec از فاز موازی بیرون، دقیقاً یک بار در فاز انحصاری، و گام‌های `Integration tests` و امنیتی CI همچنان از Orchestrator می‌گذرند.
 
+**شواهد نرخ Commit برای همان اثبات (2026-09-14، دستی).** `scripts/aggregation-evidence.mjs` (منطق خالص در
+`scripts/aggregation-evidence-lib.mjs`) روی یک PostgreSQL تنها اجرا می‌کند: یک Control فقط‌خواندنی و یک Probe ‏WAL تک‌Committer
+اعتبارسنجی‌شده (`pgbench -c 1 -j 1` با `pg_logical_emit_message(true, …)`؛ از `pg_stat_wal` باید تقریباً یک `wal_sync` در هر Commit
+دیده شود، و `txid_current()` یا تراکنش فقط‌خواندنی رد می‌شود) پیش و پس از Jest، پنج فرایند تازهٔ Jest فقط برای اثبات «۵۰۰ Capture
+از چهار Client» با `--testNamePattern` دقیق (۱ اجرا، ۲۱ فیلترشده)، و یک اجرای کامل `pnpm test:aggregation-stress`. فقط آمار تجمیعی
+می‌نویسد، بی Retry و بی آستانهٔ نرخ Commit، و ثابت‌های فشار (۵۰۰، چهار Client، `LANES_PER_CLIENT = 2`، مرز ۵۰۰۰ms، پنجرهٔ ۶۰s) را
+با قرارداد ایستا می‌پاید. خودِ اندازه‌گیری در CI اجرا نمی‌شود؛ فقط آزمون‌های Parser، اعتبارسنجی Probe و قرارداد
+(`pnpm test:aggregation-evidence-lib`) در `pnpm verify` و Job ‏`quality` هستند. **نتیجه:** روی Runner بومی Ubuntu 24.04 در GitHub (۴ CPU،
+همان `postgis/postgis:16-3.4`، `fsync=on`، `synchronous_commit=on`، `wal_sync_method=fdatasync`) هر دو Probe شصت‌ثانیه‌ای حدود
+۴٬۶۰۰ Commit معتبر بر ثانیه بودند، بی هیچ بازهٔ یک‌ثانیه‌ای بی Commit؛ هر پنج اجرای نام‌دار (هر کدام ~۰٫۵۴ ثانیه و ~۵۰۱ ‏`wal_sync`) و
+کل Project ‏(۲۲/۲۲) سبز شدند. همان Probe روی Docker Desktop محلی ۱۴٫۶ تا ۲۹٫۲ بود. پس شکست‌های محلی از محیط‌اند، نه از اثبات. Runner
+حدود ۲۰۰ برابر سریع‌تر است و این اثبات را نزدیک مرزش نمی‌آزماید؛ آستانهٔ هر پیش‌شرط Fail-Fast هنوز تعیین نشده است.
+
 **ماه اختصاصی اجرا برای زنجیرهٔ Platform در Fixtureهای audit (2026-09-14).** کلید زنجیرهٔ Tenant شناسهٔ سازمانِ دارای `RUN_TAG`
 را دارد و خودبه‌خود به هر اجرا اختصاص دارد؛ کلید زنجیرهٔ Platform ‏(`PLATFORM/(platform)/<ماه>`) هیچ Tag یا Tenantی ندارد. پس
 هر Suite ‏Integration در `audit-service` که ردیف `organizationId: null` می‌نویسد باید زمان آن را از یک Slot اختصاصی

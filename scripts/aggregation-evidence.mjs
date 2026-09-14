@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 /**
- * Collects native-Linux evidence for identity-service's aggregation stress
- * proof and writes one short aggregate report.
+ * Measures identity-service's aggregation stress proof against one PostgreSQL
+ * and writes a short aggregate report. Manual: nothing in `pnpm verify` or CI
+ * runs it.
  *
  *   node scripts/aggregation-evidence.mjs <report-path>
  *
  * Needs a migrated identity database (`DATABASE_URL_IDENTITY`), libpq
  * variables for a superuser session on the same server (`PGHOST`, `PGPORT`,
- * `PGUSER`, `PGPASSWORD`, `PGDATABASE`) and Docker, which runs `pgbench` and
- * `psql` from the server's own image (`EVIDENCE_PG_IMAGE`) on the host
- * network. The plan and every judgement live in `aggregation-evidence-lib.mjs`.
+ * `PGUSER`, `PGPASSWORD`, `PGDATABASE`), and Docker, which runs `pgbench` and
+ * `psql` from the server's own image (`EVIDENCE_PG_IMAGE`) on
+ * `EVIDENCE_DOCKER_NETWORK` (default `host`; on Docker Desktop, the server's
+ * Compose network with `PGHOST` set to its service name). It runs the stress
+ * spec six times against that database, so give it the database alone —
+ * beside other suites it measures their load. The plan and every
+ * judgement live in `aggregation-evidence-lib.mjs`.
  *
  * Every step runs; a failing one never stops the rest or is retried. The exit
  * code is non-zero when any step failed, any probe was invalid, or the report
@@ -39,6 +44,7 @@ import {
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const packageDir = join(root, STRESS.packageDir);
 const image = process.env.EVIDENCE_PG_IMAGE ?? 'postgis/postgis:16-3.4';
+const network = process.env.EVIDENCE_DOCKER_NETWORK ?? 'host';
 const PG_ENV = ['PGHOST', 'PGPORT', 'PGUSER', 'PGPASSWORD', 'PGDATABASE'];
 const MINUTE = 60_000;
 
@@ -104,7 +110,7 @@ const dockerPg = (extra, command) => [
   'run',
   '--rm',
   '--network',
-  'host',
+  network,
   ...PG_ENV.flatMap((name) => ['-e', name]),
   ...extra,
   image,
@@ -353,7 +359,7 @@ async function main() {
   // Resolved before anything is measured, so a harness that cannot start jest fails first.
   jestBin();
 
-  workDir = mkdtempSync(join(process.env.RUNNER_TEMP ?? tmpdir(), 'aggregation-evidence-'));
+  workDir = mkdtempSync(join(tmpdir(), 'aggregation-evidence-'));
   const results = [];
   let topo;
   try {
@@ -378,14 +384,10 @@ async function main() {
     );
   }
 
-  const server = process.env.GITHUB_SERVER_URL;
+  const head = await runBounded('git', ['rev-parse', 'HEAD'], { timeoutMs: MINUTE });
   const text = formatReport({
     meta: {
-      commit: process.env.GITHUB_SHA ?? 'local',
-      runUrl:
-        server && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID
-          ? `${server}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}/attempts/${process.env.GITHUB_RUN_ATTEMPT ?? '1'}`
-          : 'local',
+      commit: head.exitCode === 0 ? head.output.trim() : 'unknown',
       generatedAt: new Date().toISOString(),
     },
     topology: topo,

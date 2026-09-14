@@ -437,6 +437,27 @@ concurrent captures from four independent database clients` با `57014`، ۲۱/
 > پیش‌تر به زمان‌بندی نسبت داده شد، این بار بی بار موازی هم‌زمان؛ باز است. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`؛ AUD-004 بسته
 > نشد.
 >
+> **پیگیری همان روز (شواهد Linux بومی برای اثبات فشار تجمیع):** **آزمایش محلی جفت‌شده (بی Commit):** پنج اجرای اثبات «۵۰۰ Capture
+> از چهار Client» روی Volume موجود `rasta-postgres` و پنج اجرا روی PostgreSQL یک‌بارمصرف، هر ده سبز. Probe تک‌Committer روی Volume
+> موجود ۱۴٫۶–۲۳٫۰ ‏tps بود و روی Volume یک‌بارمصرف ۲۶٫۰–۲۶٫۶. این آزمایش Volume را از مسیر ذخیره‌سازی میزبان جدا نکرد. **CI:** Draft
+> PR #44 فقط برای اجرای CI باز شد و Merge نمی‌شود. آن PR با `main` در `README.md` تعارض دارد، پس GitHub هیچ `pull_request` ای اجرا
+> نمی‌کند؛ از این رو Commitهای موقت `460d4c6` و `e639261` یک Workflow شواهد و Trigger ‏`push` همین شاخه را افزودند. اجرای نخست
+> (`34865601557`) به‌خاطر نقص Harness نامعتبر شد (`jest/bin/jest.js` مسیر Export‌شده نیست) و هیچ Jest ای اجرا نشد. اجرای معتبر
+> [`34866093019`](https://github.com/marabi766/RASTA/actions/runs/34866093019) روی `e6392610`، با Ubuntu 24.04.5 (Image ‏`ubuntu24/20260907.300.1`، ۴ CPU، ۱۵٫۶GiB، overlay2) و
+> Service ‏`postgis/postgis:16-3.4`، ‏PostgreSQL 16.4 (`fsync=on`، `synchronous_commit=on`، `fdatasync`، ‏`shared_buffers=128MB`)، تنها
+> روی پایگاه داده: Control ‏`SELECT 1` ‏۹۲٬۹۴۹ تراکنش با ۰٫۰۰۰۳ ‏`wal_sync` در هر تراکنش؛ Probe پیش ۲۷۳٬۸۲۲ تراکنش، ۴٬۵۶۴ ‏tps،
+> تأخیر ۰٫۲۱۹ms، ‏`wal_sync` ۱٫۰۰۰۴ در هر تراکنش، کمینهٔ بازه ۳٬۷۹۴ ‏tps، صفر بازهٔ بی Commit؛ Probe پس ۲۷۷٬۲۸۱، ۴٬۶۲۲ ‏tps، ۰٫۲۱۶ms،
+> ۱٫۰۰۰۰، کمینه ۳٬۹۷۴، صفر بازه. پنج اجرای نام‌دار هر پنج سبز (۱ اجرا، ۲۱ فیلترشده؛ آزمون ۵۳۵–۵۴۸ms؛ ۵۰۱–۵۰۳ ‏`wal_sync`؛ صفر `57014`،
+> خطای دیگر پایگاه داده، Timeout ‏Jest، ردیف دوم یا شکاف شمارش). اجرای کامل ‏۲۲/۲۲ سبز در ۵۳٫۸ ثانیه. Burst کوتاه‌تر از تفکیک
+> نمونه‌بردار یک‌ثانیه‌ای بود، پس ارقام Burst ‏`n/a` ماندند. Artifact آن (۱٬۴۹۷ بایت) تا 2026-09-21 نگه داشته می‌شود. در همان Commit، CI
+> معمول Quality، Security، Prometheus و ClamAV را سبز داشت؛ Integration و E2E پیش از هر آزمون در `Start MinIO` شکست خوردند
+> (`pull access denied for minio/minio`)، که `main` در `18497e5` با Quay رفع کرده و این شاخه هنوز ندارد. **نتیجه:** شکست‌های محلی
+> محیطی‌اند (Docker Desktop/بار میزبان)، نه نقص اثبات. اطمینان بالا برای Runner؛ ولی Runner حدود ۲۰۰ برابر سریع‌تر است و مرز اثبات را
+> نمی‌آزماید. **پاک‌سازی:** Workflow و Trigger موقت حذف شدند؛ `scripts/aggregation-evidence{,-lib,.test}.mjs` به‌صورت اندازه‌گیری
+> دستی ماند (§ ۱۴٫۳ در `docs/14`) با ۱۲ آزمون `pnpm test:aggregation-evidence-lib` در `pnpm verify` و Job ‏`quality`. کد محصول، Spec،
+> Timeout، Pool، SQL و پنجره تغییر نکردند. آستانهٔ پیش‌شرط هنوز تعیین نشده است. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`؛
+> AUD-004 بسته نشد.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

@@ -1,15 +1,17 @@
 /**
- * Native-Linux evidence for identity-service's aggregation stress proof — the
- * pure half.
+ * Commit-rate evidence for identity-service's aggregation stress proof — the
+ * pure half of a manual measurement (`aggregation-evidence.mjs`).
  *
  * Why this exists. The four-client 500-capture proof in
  * `security-event-aggregation.int-spec.ts` serializes on one hot row, so its
- * pace is the database's commit latency. Locally it has failed only on Docker
- * Desktop under host load, and passed 5/5 on both an existing and a disposable
- * volume when the host was quiet (PROJECT_MEMORY, AUD-004). Before any
- * fail-fast storage-capability precondition can be designed, the distribution
- * on a native Ubuntu runner is the missing input. This measures it; it sets no
- * commit-rate threshold and changes nothing the proof asserts.
+ * pace is the database's commit latency. On Docker Desktop it has failed only
+ * under host load. On a native Ubuntu GitHub runner (2026-09-14, PROJECT_MEMORY
+ * AUD-004) the same database image committed ~4,600 validated single-client
+ * WAL syncs/s, against ~15–29/s locally, and the unchanged proof passed 5/5
+ * named runs plus the whole project. A future fail-fast storage-capability
+ * precondition needs both distributions, so this keeps the measurement
+ * reproducible. It sets no commit-rate threshold and changes nothing the proof
+ * asserts.
  *
  * Plan: a read-only control and a validated single-committer WAL probe, five
  * fresh jest processes running only the named proof, one fresh run of the whole
@@ -17,8 +19,8 @@
  * WAL probe again. Output is aggregates only — never a connection string,
  * credential, row, identifier or failure message.
  *
- * The runner (`aggregation-evidence.mjs`) executes the plan and reads the real
- * processes; everything here takes plain values and is unit-tested.
+ * Everything here takes plain values and is unit-tested
+ * (`pnpm test:aggregation-evidence-lib`); the runner executes the plan.
  */
 
 /** The unchanged proof, selected by its exact title. */
@@ -488,8 +490,8 @@ function jestLines(label, run) {
 export function formatReport({ meta, topology, results }) {
   const byId = Object.fromEntries(results.map((result) => [result.id, result]));
   const lines = [
-    'AUD-004 aggregation stress proof - native Ubuntu CI evidence',
-    `commit=${meta.commit} run=${meta.runUrl} generated=${meta.generatedAt}`,
+    'AUD-004 aggregation stress proof - commit-rate evidence',
+    `commit=${meta.commit}${meta.runUrl ? ` run=${meta.runUrl}` : ''} generated=${meta.generatedAt}`,
     `topology: ${Object.entries(topology)
       .map(([key, value]) => `${key}=${value}`)
       .join(' ')}`,

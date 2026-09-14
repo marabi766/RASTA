@@ -3,8 +3,6 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readTestPhaseInputs } from './check-test-phases.mjs';
-import { validateTestPhases, workflowStepCommands } from './test-phases-lib.mjs';
 import {
   NAMED_PROOF,
   NAMED_RUNS,
@@ -30,7 +28,6 @@ import {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const specSource = readFileSync(join(root, STRESS.packageDir, STRESS.spec), 'utf8');
-const EVIDENCE_WORKFLOW = join(root, '.github', 'workflows', 'aggregation-stress-evidence.yml');
 const fullName = [...NAMED_PROOF.describePath, NAMED_PROOF.title].join(' ');
 
 const PGBENCH_OUTPUT = `pgbench (16.4 (Debian 16.4-1.pgdg110+2))
@@ -444,49 +441,4 @@ test('the report carries aggregates and fails when any step failed', () => {
   assert.match(broken, /control .*: valid=NO harness error: docker not found/);
   assert.match(broken, /named-1: result=FAIL harness error: jest launcher not found/);
   assert.match(broken, /verdict: FAIL \(control, named-1\)/);
-});
-
-// ---------------------------------------------------------------------------
-// The workflow: the evidence job, and the normal gates it must not bend
-
-test('the evidence workflow runs the harness once on the integration job’s database and uploads a 7-day artifact', () => {
-  const workflow = readFileSync(EVIDENCE_WORKFLOW, 'utf8');
-  const ci = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
-  const commands = [...workflow.matchAll(/^\s*- name:\s*(.+?)\s*$/gm)].flatMap((m) =>
-    workflowStepCommands(workflow, m[1]).flat(),
-  );
-
-  assert.match(workflow, /image: postgis\/postgis:16-3\.4\n/);
-  assert.match(ci, /image: postgis\/postgis:16-3\.4\n/);
-  assert.equal(
-    commands.filter((line) => /^node scripts\/aggregation-evidence\.mjs\b/.test(line)).length,
-    1,
-    'the harness runs exactly once',
-  );
-  assert.ok(commands.includes('node --test scripts/aggregation-evidence.test.mjs'));
-  assert.ok(commands.includes('bash infrastructure/docker/postgres/00-init-databases.sh'));
-  assert.ok(commands.includes('pnpm --filter @rasta/identity-service run db:migrate'));
-  assert.ok(!/passWithNoTests/.test(workflow));
-  assert.ok(!/continue-on-error/.test(workflow), 'evidence must not turn failures green');
-  assert.ok(!/turbo run test/.test(workflow), 'no test task through turbo directly');
-  assert.ok(
-    !/redis:|kafka:|minio|clamav/i.test(workflow),
-    'PostgreSQL only: no other service load',
-  );
-  assert.match(workflow, /uses: actions\/upload-artifact@[0-9a-f]{40} # v4/);
-  assert.match(workflow, /retention-days: 7\n/);
-  assert.match(workflow, /if-no-files-found: error\n/);
-  assert.ok(!/cancel-in-progress: true/.test(workflow));
-  for (const url of [
-    'DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public',
-  ]) {
-    assert.ok(
-      workflow.includes(url) && ci.includes(url),
-      'same identity database as the integration job',
-    );
-  }
-});
-
-test('the normal CI gates still run the stress spec through the two-phase orchestrator', () => {
-  assert.deepEqual(validateTestPhases(readTestPhaseInputs()), []);
 });

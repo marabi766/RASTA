@@ -2,11 +2,7 @@ name: CI
 
 on:
   push:
-    # TEMPORARY (AUD-004 evidence): the feature branch is listed so the normal
-    # gates run on the exact evidence commit — its draft PR conflicts with
-    # main, and GitHub runs no `pull_request` workflow for a conflicting PR.
-    # Removed with the evidence workflow.
-    branches: [main, feat/audit-service-aud-004-contract]
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -83,10 +79,14 @@ jobs:
         # serialization (docs/14 § 14.3). Static — reads package.json,
         # turbo.json, identity's jest config and this workflow; no database.
         # The checker's own tests run first so a checker that stopped catching
-        # anything fails loudly.
+        # anything fails loudly. The manual commit-rate evidence harness for the
+        # same spec (`scripts/aggregation-evidence.mjs`) keeps its parsers,
+        # probe validation and stress-constant contract tested here; the
+        # measurement itself never runs in CI.
         run: |
           pnpm run test:test-phases
           pnpm run check:test-phases
+          pnpm run test:aggregation-evidence-lib
 
       - name: Grafana dashboard contract
         # The provisioned local `Rasta Audit Evidence` dashboard: stable
