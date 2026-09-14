@@ -415,15 +415,16 @@ services:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin_dev_password
       GF_USERS_ALLOW_SIGN_UP: 'false'
-      # Local stack: no usage reporting, update or news checks, and no download
-      # of Grafana 11's preinstalled app plugins from grafana.com on first boot.
-      # Quoted so YAML keeps them strings. Enforced by
-      # scripts/check-grafana-dashboard-lib.mjs.
+      # Local stack: no usage reporting, update or news checks, no download of
+      # Grafana 11's preinstalled app plugins, and no download of the plugin
+      # signature public keys from grafana.com. Quoted so YAML keeps them
+      # strings. Enforced by scripts/check-grafana-dashboard-lib.mjs.
       GF_ANALYTICS_REPORTING_ENABLED: 'false'
       GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false'
       GF_NEWS_NEWS_FEED_ENABLED: 'false'
       GF_PLUGINS_PREINSTALL_DISABLED: 'true'
+      GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: 'true'
     volumes:
       - ./infrastructure/docker/grafana/provisioning:/etc/grafana/provisioning:ro
       # Dashboard JSON, loaded by provisioning/dashboards/rasta.yml. Kept out of

@@ -698,22 +698,49 @@ Quote یا تکرار هر یک از پنج متغیر `GF_ANALYTICS_REPORTING_E
 `resetPolicies` — و هر فایل دیگر (مثلاً `.gitkeep` یا YAML دوم) در آن دو پوشه. هفت آزمون تازه (روی هم ۲۸) حالت مثبت، ۲۰ جهش
 Compose (چهار حالت برای هر متغیر)، متغیر روی سرویس دیگر و سرویس `grafana` غایب، پنج جهش فایل Plugins، دو App اعلام‌شده، هشت
 اعلان Alerting و فایل اضافه/غایب را پوشش می‌دهند؛ خاموش کردن هر یک از سه بخش Checker به ترتیب ۲، ۳ و ۱ آزمون را شکست داد.
+از 2026-09-14 متغیر ششم `GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED` (`'true'`) هم در همان فهرست است، پس همان حلقه ۲۴ جهش Compose
+می‌سازد (هنوز ۲۸ آزمون)؛ نخستین اجرای زندهٔ بی مسیر بیرونی (پایین) نشان داد بدون آن Grafana برای دانلود کلیدهای امضای Plugin از
+grafana.com یک خط `level=error` از `plugin.signature.key_retriever` Log می‌کند.
 
-**اعتبارسنجی زندهٔ Provisioning و PromQL.** `pnpm run verify:grafana-dashboard-live` (دستی، Docker لازم، بیرون از `pnpm verify`)
-Prometheus `v3.1.0` و Grafana `11.5.1` را با نام‌های یکتای `rasta-dashcheck-<suffix>-*`، شبکهٔ یکتا، Portهای میزبان پویا روی
-`127.0.0.1` و Mount فقط‌خواندنی پیکربندی واقعی مخزن بالا می‌آورد، پس به Stack Compose توسعه‌دهنده دست نمی‌زند. پس از سالم شدن هر دو
-API اثبات می‌کند: Prometheus سیزده هشدار و یک Recording Rule را بار کرد؛ Datasource با UID ‏`rasta-prometheus`، URL
+**اعتبارسنجی زندهٔ Provisioning و PromQL، روی شبکهٔ بی مسیر بیرونی (از 2026-09-14).** `pnpm run verify:grafana-dashboard-live`
+(دستی، Docker لازم، بیرون از `pnpm verify`) Prometheus `v3.1.0` و Grafana `11.5.1` را با نام‌های یکتای `rasta-dashcheck-<suffix>-*`
+و Mount فقط‌خواندنی پیکربندی واقعی مخزن روی شبکهٔ یکتای `docker network create --internal` و **بی هیچ Port منتشرشده** بالا
+می‌آورد، پس به Stack Compose توسعه‌دهنده دست نمی‌زند. Docker Desktop 29.7.2/WSL2 برای Containerی که فقط به شبکهٔ Internal وصل است
+Port میزبان منتشر نمی‌کند (آزمایش 2026-09-13)، پس Assertionهای HTTP در `scripts/verify-grafana-dashboard-probe.mjs` داخل Container
+کوتاه‌عمر `node:22-alpine` روی همان شبکه اجرا می‌شوند که مخزن را فقط‌خواندنی به‌عنوان Working Directory دارد، با `--user node`،
+`--read-only`، `--cap-drop ALL` و `no-new-privileges`، بی Socket ‏Docker، و فقط از راه Aliasهای `http://prometheus:9090` و
+`http://grafana:3000` (Probe هر URL جز `http://<alias>:<port>` را رد می‌کند؛ گذرواژهٔ تصادفی Grafana فقط با نام `-e` به CLI ‏Docker
+داده می‌شود و در Argv یا خروجی نمی‌آید). هر سه Image پیش از ساخت شبکه موجود یا Pull می‌شوند و Containerها با `--pull never`
+ساخته می‌شوند. Orchestrator میزبان از `scripts/verify-grafana-dashboard-isolation-lib.mjs` (Docker تزریقی) اثبات می‌کند: `docker network
+inspect` دقیقاً یک شبکه با همان نام و `Internal` بولی `true` برمی‌گرداند؛ و `docker container inspect` هر سه Container را فقط به همان
+شبکه (و `NetworkMode` همان) وصل و بی هیچ Binding در `HostConfig.PortBindings`، `NetworkSettings.Ports` یا `PublishAllPorts`
+نشان می‌دهد — یک بار پیش از شروع Probe و دوباره، همراه با Inspect دوبارهٔ شبکه، پس از خروج آن؛ Probe باید با کد خروج `0` تمام شود
+و Prometheus و Grafana هنوز در حال اجرا باشند. Probe اثبات می‌کند: Prometheus سیزده هشدار و یک Recording Rule را بار کرد؛ Datasource با UID ‏`rasta-prometheus`، URL
 `http://prometheus:9090`، پیش‌فرض و `proxy` است و Health آن از Grafana `OK` است؛ داشبورد با UID و عنوان دقیق، `provisioned=true`،
 در پوشهٔ `Rasta` با تعداد Panel/Target فایل برمی‌گردد و هر Target برگشتی همان UID را دارد؛ `DELETE` داشبورد با `400` رد می‌شود و
 داشبورد می‌ماند؛ هر ۱۴ Query (با جایگزینی `$__rate_interval` با `5m` فقط در Harness) در `/api/v1/query` Prometheus و از راه
 `/api/ds/query` Grafana موفق است (نتیجهٔ خالی پذیرفته است، خطای Parser نه)؛ `GET /d/rasta-audit-evidence` → `200`؛ هیچ App
-Plugin غیرهسته‌ای نصب نیست، Grafana هیچ Alert Rule ندارد و هیچ Contact Point یا Policy آن Provision نشده است؛ و Log Grafana
+Plugin غیرهسته‌ای نصب نیست، Grafana هیچ Alert Rule ندارد و هیچ Contact Point یا Policy آن Provision نشده است. سپس Orchestrator
+(نه Probe، که به Docker دسترسی ندارد) نشان می‌دهد Log Grafana
 **صفر** خط `level=error` یا `level=crit` و صفر خط نصب Plugin دارد و شاهد مثبت پایان Provisioning Datasource (با UID)، داشبورد و
-Alerting را نشان می‌دهد (از 2026-09-13؛ پیش از آن دو خطای پوشهٔ غایب `plugins`/`alerting` پذیرفته می‌شد). Harness همان پنج متغیر
+Alerting را نشان می‌دهد (از 2026-09-13؛ پیش از آن دو خطای پوشهٔ غایب `plugins`/`alerting` پذیرفته می‌شد). Harness متغیرهای
 بی‌تماس بیرونی Compose را از `EXPECTED.grafanaNoOutboundEnv` می‌خواند. کنترل منفی: با برداشتن موقت دو پوشه، Harness با دقیقاً همان
-دو خطا شکست خورد. Harness دقیقاً دو Container (با Volumeهای بی‌نامشان) و شبکهٔ خودش را در
-هر حالت حذف و نبودنشان را گزارش می‌کند. Rendering پیکسلی سنجیده نمی‌شود (Image Renderer نصب نیست) و دادهٔ واقعی سرویس‌ها در این
-اجرا Scrape نشد.
+دو خطا شکست خورد. Harness دقیقاً سه Container (با Volumeهای بی‌نامشان) و شبکهٔ خودش را در
+هر حالت حذف و نبودن Container، شبکه و آن Volumeها را گزارش می‌کند. Rendering پیکسلی سنجیده نمی‌شود (Image Renderer نصب نیست) و
+دادهٔ واقعی سرویس‌ها در این اجرا Scrape نشد.
+
+**شواهد اجرای بی مسیر بیرونی (2026-09-14).** نخستین اجرا روی شبکهٔ Internal با وجود عبور هر ۱۴+۱۴ Query شکست خورد: یک خط
+`level=error` از `plugin.signature.key_retriever` (`Get "https://grafana.com/api/plugins/ci/keys": … server misbehaving`)؛ پاک‌سازی
+کامل بود. پس از افزودن `GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED` به Compose و ثابت مشترک، اجرا سبز شد: `internal=true`، سه
+Container فقط روی همان شبکه و `publishedPorts=0` پیش و پس از Probe، Probe به هر دو Alias رسید و با `0` خارج شد، ۱۴ Query مستقیم و
+۱۴ Query از Grafana، ۰ خط خطا و ۰ خط نصب Plugin، و پاک‌سازی بی Container، شبکه یا Volume باقی. `pnpm run
+test:grafana-live-isolation-lib` (`scripts/verify-grafana-dashboard-isolation.test.mjs`، ۱۰ آزمون با Docker جعلی، در `pnpm verify`
+و گام «Grafana dashboard contract» در CI) آرگومان `--internal`، رد `Internal=false`/`"true"`/خروجی خالی، ناقص، چندتایی یا نام
+دیگر/شکست Inspect، شبکهٔ اضافه، اشتباه یا غایب، Binding منتشرشده، URLهای غیر Alias در Probe، و Wiring خودِ `verifyLive` (Inspect
+پیش و پس از Probe، بی `-p`، بی گذرواژه در Argv، پاک‌سازی در هر شکست) را می‌پوشاند. این آزمون‌ها Docker واقعی اجرا **نمی‌کنند**.
+کنترل‌های منفی: حذف `--internal` ۴ آزمون، دور زدن Inspect دقیق شبکه ۴، یک Binding ساختگی در Fixture جعلی ۴، دور زدن بررسی Port
+۲ و دور زدن Helper در Orchestrator ۳ آزمون را شکست داد. **مرز:** این فقط اثبات می‌کند همین Stack یک‌بارمصرف بی مسیر بیرونی بالا
+می‌آید و بررسی‌هایش را کامل می‌کند؛ اثبات نمی‌کند شبکهٔ Compose توسعه محدود است، و سیاست شبکهٔ Production نیست.
 
 **در CI:** Unit و Contract موازی روی هر Push · Integration و Security روی هر PR ·
 E2E روی `main` پس از استقرار Staging · Load شبانه.

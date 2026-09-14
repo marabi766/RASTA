@@ -332,6 +332,25 @@ config` → `SUCCESS: 8 rules found`، `promtool test rules` → `SUCCESS` (دو
 > با همان دو خطا شکست خورد. هیچ Alertmanager، تحویل اعلان، قاعده، Plugin، داشبورد یا کد سرویسی افزوده نشد. `COM-009` همچنان
 > `READY`/۱۳ و ADR-053 `Proposed`.
 >
+> **به‌روزرسانی 2026-09-14 (Harness زندهٔ داشبورد روی شبکهٔ بی مسیر بیرونی):** آزمایش 2026-09-13 نشان داد Docker Desktop
+> 29.7.2/WSL2 برای Containerی که فقط روی شبکهٔ `--internal` است Port میزبان منتشر نمی‌کند. پس `verify-grafana-dashboard-live.mjs`
+> اکنون Orchestrator است: Prometheus و Grafana روی `docker network create --internal` یکتا، بی `-p`، با Aliasهای `prometheus` و
+> `grafana`؛ Assertionهای HTTP به `verify-grafana-dashboard-probe.mjs` در Container کوتاه‌عمر `node:22-alpine` (فقط همان شبکه، مخزن
+> فقط‌خواندنی، `--user node`، `--read-only`، `--cap-drop ALL`، بی Socket ‏Docker) منتقل شد؛ Log Grafana در میزبان بررسی می‌شود.
+> `verify-grafana-dashboard-isolation-lib.mjs` (Docker تزریقی) با `network inspect` (دقیقاً یک شبکه، همان نام، `Internal` بولی
+> `true`) و `container inspect` (هر سه Container فقط روی همان شبکه، بی Binding) پیش و پس از Probe شکست بسته دارد؛ ۱۰ آزمون با Docker
+> جعلی (`pnpm run test:grafana-live-isolation-lib`) در `pnpm verify` و CI. **یافته:** نخستین اجرای ایزوله با یک خط `level=error`
+> از `plugin.signature.key_retriever` (دانلود کلید امضای Plugin از grafana.com) شکست خورد؛ `GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED:
+'true'` به سرویس `grafana` در Compose و `EXPECTED.grafanaNoOutboundEnv` افزوده شد (شش متغیر). **شواهد:** اجرای بعدی سبز —
+> `internal=true`، `publishedPorts=0` پیش و پس از Probe، Probe با `0`، ۱۴+۱۴ Query، ۰ خطا/۰ نصب Plugin، پاک‌سازی کامل؛ کنترل‌های منفی
+> (حذف `--internal`، دور زدن Inspect، Binding ساختگی، دور زدن بررسی Port یا Helper) آزمون‌ها را شکستند. **مرز:** فقط همین Stack
+> یک‌بارمصرف؛ شبکهٔ Compose توسعه محدود نیست و سیاست شبکهٔ Production نیست. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
+> **Known Issue باز (کد سرویس دست نخورد):** در همین اجرا آزمون‌های `identity-service` از Cache خارج شدند و
+> `audit-correction.int-spec.ts › collapses concurrent duplicate submissions into one command and one outbox row` ناپایدار است — در
+> سه `pnpm verify` هر سه بار و در اجرای تنهای همان Spec دو از سه بار، ۲ یا ۳ از ۶ درخواست هم‌زمان `500 INTERNAL_ERROR` («could not
+> be recorded») گرفتند؛ یک بار هم `windowed refusal aggregation › exactly 500 concurrent captures` با `57014 statement timeout` شکست
+> خورد. خطای زیرین پایگاه داده (غیر Unique Violation) هنوز تشخیص داده نشده است.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

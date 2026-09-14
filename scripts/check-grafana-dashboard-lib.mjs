@@ -44,8 +44,10 @@ export const EXPECTED = Object.freeze({
   /**
    * Environment of the Compose `grafana` service that keeps a local Grafana
    * 11.5.1 from calling out: usage reporting, core and plugin update checks, the
-   * news feed, and the first-boot download of preinstalled app plugins. The live
-   * verifier starts its container with the same values.
+   * news feed, the first-boot download of preinstalled app plugins, and the
+   * download of the plugin-signature public keys from grafana.com (which, with no
+   * route out, logs `level=error` from `plugin.signature.key_retriever`). The
+   * live verifier starts its container with the same values.
    */
   grafanaNoOutboundEnv: Object.freeze({
     GF_ANALYTICS_REPORTING_ENABLED: 'false',
@@ -53,6 +55,7 @@ export const EXPECTED = Object.freeze({
     GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false',
     GF_NEWS_NEWS_FEED_ENABLED: 'false',
     GF_PLUGINS_PREINSTALL_DISABLED: 'true',
+    GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: 'true',
   }),
   /**
    * The only content lines, comments and blank lines aside, of the two inert

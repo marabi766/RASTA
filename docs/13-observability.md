@@ -456,8 +456,12 @@ Stack **محلی** Compose (Profile `observability`/`all`):
   Refresh ۳۰ ثانیه، منطقهٔ زمانی UTC، بی متغیر Template.
 - **راه‌اندازی خودبسنده و بی خطا (2026-09-13):** سرویس `grafana` در Compose با `GF_ANALYTICS_REPORTING_ENABLED`،
   `GF_ANALYTICS_CHECK_FOR_UPDATES`، `GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES` و `GF_NEWS_NEWS_FEED_ENABLED` برابر `'false'` و
-  `GF_PLUGINS_PREINSTALL_DISABLED` برابر `'true'` (رشتهٔ Quoteشده) گزارش استفاده، بررسی به‌روزرسانی، خبرنامه و دانلود Pluginهای
-  Preinstall از grafana.com را خاموش می‌کند. پوشه‌های `provisioning/plugins` و `provisioning/alerting` هرکدام یک فایل **بی‌اثر**
+  `GF_PLUGINS_PREINSTALL_DISABLED` و (از 2026-09-14) `GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED` برابر `'true'` (رشتهٔ Quoteشده)
+  گزارش استفاده، بررسی به‌روزرسانی، خبرنامه، دانلود Pluginهای Preinstall و دانلود کلیدهای عمومی امضای Plugin از grafana.com را
+  خاموش می‌کند. Harness زندهٔ `verify-grafana-dashboard-live` از 2026-09-14 همین پیکربندی را روی شبکهٔ Docker ‏`--internal` و بی
+  Port منتشرشده اجرا می‌کند و با Inspect ‏Docker (`Internal=true`، یک شبکه برای هر Container، `publishedPorts=0`) نشان می‌دهد
+  Provisioning، هر ۱۴ Query و Log بی خطا **بی مسیر بیرونی** برقرارند؛ پیش از آن نبودن تماس بیرونی فقط از متغیرها و Log استنباط
+  می‌شد. این فقط دربارهٔ آن Stack یک‌بارمصرف است: شبکهٔ Compose توسعه محدود نشده و سیاست شبکهٔ Production نیست. پوشه‌های `provisioning/plugins` و `provisioning/alerting` هرکدام یک فایل **بی‌اثر**
   دارند — `apiVersion: 1` و `apps: []`، و فقط `apiVersion: 1` — تا Grafana 11.5.1 برای نبودن آن پوشه‌ها خطا Log نکند؛ هیچ
   Plugin، Alert Rule، Contact Point، Notification Policy، Template یا Mute Timing فراهم نمی‌کنند. این **Alertmanager یا تحویل
   اعلان نیست**: هشدارهای حسابرسی همچنان قواعد Prometheus محلی‌اند و به هیچ‌کس تحویل نمی‌شوند.
