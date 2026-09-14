@@ -157,6 +157,15 @@ Suiteهای Integration سرویس‌های دیگر روی همان PostgreSQL�
 `pnpm test:test-phases` و `pnpm check:test-phases` (ایستا، بی پایگاه داده) در `pnpm verify` و Job ‏`quality` در CI تضمین می‌کنند که
 Spec از فاز موازی بیرون، دقیقاً یک بار در فاز انحصاری، و گام‌های `Integration tests` و امنیتی CI همچنان از Orchestrator می‌گذرند.
 
+**ماه اختصاصی اجرا برای زنجیرهٔ Platform در Fixtureهای audit (2026-09-14).** کلید زنجیرهٔ Tenant شناسهٔ سازمانِ دارای `RUN_TAG`
+را دارد و خودبه‌خود به هر اجرا اختصاص دارد؛ کلید زنجیرهٔ Platform ‏(`PLATFORM/(platform)/<ماه>`) هیچ Tag یا Tenantی ندارد. پس
+هر Suite ‏Integration در `audit-service` که ردیف `organizationId: null` می‌نویسد باید زمان آن را از یک Slot اختصاصی
+`runMonth(slot)` با `instantIn` بگیرد (Slotهای فعلی: `ingestion` ۰، `hash-chain` و `trail-ingestion` ۱، `correction-linkage` ۷،
+`tenant-isolation` ۸) و پنجره‌های Query را هم از همان ماه بسازد، نه از ساعت دیوار. پنجرهٔ ثابت `2026-10` در `fixtures.ts`
+(`at()`/`queryWindow()`) فقط برای Suiteهایی درست است که زنجیرهٔ Platform مشترک نمی‌سازند یا مالکیت انحصاری را جداگانه ثابت
+می‌کنند. **نشانه:** اجرای هم‌زمان یا نیمه‌کارهٔ دو فرایند در یک ماه ثابت ردیف بیگانه در زنجیرهٔ Platform یکدیگر می‌گذارد و
+`cleanupRun` هر دو را (به‌درستی) رد می‌کند؛ راه حل ماه اختصاصی است، نه ضعیف کردن آن رد.
+
 **چرا اینها با تست واحد جایگزین نمی‌شوند.** هر کدام یک واقعیت را می‌سنجند که فقط
 پایگاه داده واقعی تولیدش می‌کند: شکل خطای `P2002` در Prisma (که **نام ستون**
 می‌دهد، نه نام Index)، انحراف ساعت میان میزبان و PostgreSQL، رفتار Tenant Guard

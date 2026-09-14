@@ -414,6 +414,29 @@ actorId, key])` به‌صورت `int64` علامت‌دار (کدگذاری بی
 > پاک‌سازی هر اجرای بعدی را رد می‌کردند؛ با همان منطق `cleanupRun` (ردیف بیگانه = ۰، Triggerها بازگردانده) دستی از پایگاه محلی پاک شدند.
 > `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`؛ AUD-004 بسته نشد.
 >
+> **پیگیری همان روز (زنجیرهٔ Platform اختصاصی برای `tenant-isolation` در audit):** **نقص:** `tenant-isolation.int-spec.ts` تنها Suite
+> audit بود که ردیف `organizationId: null` را با `at()`/`queryWindow()` ثابت `fixtures.ts` در ماه `2026-10` می‌نوشت؛ کلید زنجیرهٔ
+> Platform (`PLATFORM/(platform)/2026-10-01`) هیچ Tag اجرایی ندارد، پس هر دو اجرای هم‌پوشان یا نیمه‌کاره ردیف «بیگانه» در زنجیرهٔ
+> یکدیگر می‌گذاشتند و `cleanupRun` (به‌درستی) هر دو را رد می‌کرد. **اصلاح (فقط Fixture آزمون):** Slot نام‌دار
+> `TENANT_ISOLATION_MONTH_SLOT = 8` → `RUN_MONTH = runMonth(8)`؛ همهٔ ردیف‌های این فایل با `instantIn(RUN_MONTH, دقیقه)`، پنجرهٔ
+> Query روز اول همان ماه و پنجرهٔ «بیرون از پنجره» روز سوم همان ماه (به‌جای تاریخ‌های ثابت نوامبر ۲۰۲۶)؛ کلید زنجیرهٔ Platform اکنون
+> `PLATFORM/(platform)/<runMonth(8)>`. `fixtures.ts`، `helpers.ts` و رد `cleanupRun` دست نخوردند؛ همهٔ Assertionهای جداسازی ماندند.
+> آزمون تازه (۱۸ → ۱۹) ثابت می‌کند ماه Platform همان ماه اجرا با ۱ ردیف برچسب‌دار و ۰ بیگانه است، و `afterAll` روی `CleanupReport`
+> ثابت می‌کند هر زنجیره در `RUN_MONTH`، ۰ ردیف بیگانه، زنجیرهٔ Platform دقیقاً `{taggedRows: 1, foreignRows: 0}`، و پس از پاک‌سازی ۰
+> ردیف/۰ Head در آن ماه و ۰ Trigger غیرفعال. جهش موقت (برگرداندن زمان و پنجره به `2026-10`) همان آزمون و `afterAll` را شکست داد و
+> بایت‌به‌بایت بازگردانده شد. **شواهد (Forwarder موقت `127.0.0.1:25433 → rasta-postgres:5432`):** ۵ اجرای پشت‌سرهم و ۴ اجرای تکی دیگر همه ۱۹/۱۹ سبز، دو جفت
+> فرایند Jest هم‌پوشان مستقل (۲ ثانیه و هم‌زمان) هر چهار ۱/۱ Suite و ۱۹/۱۹، هر کدام Tag و ماه یکتا (مثلاً `2743-11` و `2694-12`)؛ Probe
+> تجمیعی هر اجرا: در حین ۹ ردیف برچسب‌دار، ۸ `organization_ref`، ۱ ردیف در ماه Platform خودش؛ پس از آن ۰/۰/۰، ۰ Head، ۰ ردیف Platform
+> در `2026-10` و ۰ Trigger غیرفعال. کل Project ‏integration در audit ‏۱۱/۱۱ Suite و ۱۷۷/۱۷۷ تست. `pnpm test:integration` دو بار با کد ۱
+> بسته شد، در Suiteهای نامرتبط فاز موازی (`organization-service › b3 stream sequencing` با تراکنش منقضی ۵۰۰۰ms؛ `maintenance › cost
+atomicity` ۷ از ۱۰ و `economic › wallet concurrency` ۵۶ از ۱۰۰) که Turbo به‌خاطرشان audit را پیش از پایان لغو کرد؛ فاز انحصاری هر دو بار
+> ۲۲/۲۲ سبز. یک `turbo run test:integration --continue`: `tenant-isolation` زیر بار موازی PASS، ولی `audit › kafka-projector` (۸ تست) با
+> `Can't reach database server` روی Forwarder، به‌همراه همان ناپایداری‌های نامرتبط شناخته‌شده. `format:check`، `progress:check`، `lint`،
+> `typecheck` و `build` سبز؛ `pnpm verify` با کد ۱ فقط در فاز انحصاری identity بسته شد (`windowed refusal aggregation › exactly 500
+concurrent captures from four independent database clients` با `57014`، ۲۱/۲۲؛ فاز Workspace ‏۳۴/۳۴ سبز) — همان ناپایداری فشار که
+> پیش‌تر به زمان‌بندی نسبت داده شد، این بار بی بار موازی هم‌زمان؛ باز است. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`؛ AUD-004 بسته
+> نشد.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس
