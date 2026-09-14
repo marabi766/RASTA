@@ -458,6 +458,23 @@ concurrent captures from four independent database clients` با `57014`، ۲۱/
 > Timeout، Pool، SQL و پنجره تغییر نکردند. آستانهٔ پیش‌شرط هنوز تعیین نشده است. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`؛
 > AUD-004 بسته نشد.
 >
+> **پیگیری همان روز (ادغام `main` و نخستین CI معمول PR #44):** `origin/main` (`20a6bbe`، شامل Quay برای MinIO در `18497e5` و
+> README انگلیسی #42) با Merge Commit عادی `18c5b93` وارد شاخه شد. تنها تعارض `README.md` بود: README ‏`main` نگه داشته شد و یادداشت
+> Local development اکنون `127.0.0.1:5433`، بازنویسی‌نشدن `.env`، `pnpm check:local-postgres-config` و شواهد `localhost`/IPv6 و `P2028`
+> در `docs/14` § ۱۴٫۳ را می‌گوید. PR #44 از `CONFLICTING` به `MERGEABLE` رسید (همچنان Draft). **نخستین اجرای `pull_request`**
+> ([`34871530347`](https://github.com/marabi766/RASTA/actions/runs/34871530347)): MinIO و mc از Quay در Integration و E2E موفق، E2E سبز؛ ولی
+> `identity-service › audit-correction.int-spec.ts` دو تست از ۹۰ شکست خورد (هر شش ارسال `500`): «صف تکراری‌ها روی قفل فرمان» و «۴۰۹
+> هم‌زمان». این دو اثبات از `0110573` هرگز در CI اجرا نشده بودند. **علت (قطعی، مال Harness):** نویسندهٔ برنده درون تراکنش تعاملی (مهلت
+> ۵s) منتظر می‌ماند تا پنج ارسال دیگر روی Advisory Lock صف بکشند؛ این هفت اتصال هم‌زمان از Pool سرویس می‌خواهد (برنده، پنج منتظر،
+> Probe ‏`pg_locks` روی همان Pool)، ولی پیش‌فرض Prisma دو برابر هستهٔ فیزیکی به‌علاوهٔ یک است: پنج روی Runner چهار vCPU و نه روی ماشین
+> چهارهسته‌ای محلی. بازتولید محلی با `connection_limit=5` (Forwarder موقت، `rasta-postgres` دست‌نخورده): همان دو تست، دو بار؛ پیش‌فرض
+> ۲۳/۲۳. **اصلاح `afe2403` (فقط Harness):** گزینهٔ `connectionLimit` در `startIdentityApi` و `RACE_SIZE + 2 = 8` در این Suite؛ با URL
+> محدود به ۵، سه اجرا ۲۳/۲۳؛ جهش به ۶ همان دو تست را شکست داد. کد محصول، Pool Production، Timeout، پروتکل قفل و Assertionها تغییر
+> نکردند. **CI روی `afe2403`** ([`34874246924`](https://github.com/marabi766/RASTA/actions/runs/34874246924)): هر شش Job سبز (Build and scan
+> images فقط روی `main`)، از جمله Integration با همهٔ Coverage Gateها، Tenant isolation، Migration reversibility، B3 و فاز انحصاری فشار؛ E2E
+> ۹۵ سبز. `pnpm verify` محلی اجرا نشد: `rasta-postgres` Port منتشرشده ندارد و `.env` به `localhost:5433` بسته اشاره می‌کند. `COM-009`
+> همچنان `READY`/۱۳ و ADR-053 `Proposed`؛ AUD-004 بسته نشد.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس
