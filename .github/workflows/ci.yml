@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # TEMPORARY (AUD-004 evidence): the feature branch is listed so the normal
+    # gates run on the exact evidence commit — its draft PR conflicts with
+    # main, and GitHub runs no `pull_request` workflow for a conflicting PR.
+    # Removed with the evidence workflow.
+    branches: [main, feat/audit-service-aud-004-contract]
   pull_request:
     branches: [main]
 
