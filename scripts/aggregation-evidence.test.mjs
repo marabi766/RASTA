@@ -432,6 +432,18 @@ test('the report carries aggregates and fails when any step failed', () => {
   assert.match(text, /burst_wal_sync_per_s=24/);
   assert.match(text, /verdict: FAIL \(named-3\)/);
   assert.match(text, /control .*: not run/);
+
+  const broken = formatReport({
+    meta: { commit: 'abc', runUrl: 'local', generatedAt: 'now' },
+    topology: {},
+    results: [
+      { id: 'control', passed: false, error: 'docker not found' },
+      { id: 'named-1', passed: false, error: 'jest launcher not found' },
+    ],
+  });
+  assert.match(broken, /control .*: valid=NO harness error: docker not found/);
+  assert.match(broken, /named-1: result=FAIL harness error: jest launcher not found/);
+  assert.match(broken, /verdict: FAIL \(control, named-1\)/);
 });
 
 // ---------------------------------------------------------------------------

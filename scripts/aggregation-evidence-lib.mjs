@@ -440,8 +440,10 @@ const fmt = (value, digits = 2) =>
       ? String(Number(value.toFixed(digits)))
       : String(value);
 
-function probeLines(label, probe) {
-  if (!probe) return [`${label}: not run`];
+function probeLines(label, result) {
+  if (!result) return [`${label}: not run`];
+  if (result.error) return [`${label}: valid=NO harness error: ${result.error}`];
+  const { probe } = result;
   const lines = [
     `${label}: valid=${probe.valid ? 'yes' : 'NO'} seconds=${probe.seconds} transactions=${probe.transactions} ` +
       `failed=${probe.failed} tps=${fmt(probe.tps)} latency_avg_ms=${fmt(probe.latencyAverageMs, 3)}`,
@@ -456,6 +458,7 @@ function probeLines(label, probe) {
 
 function jestLines(label, run) {
   if (!run) return [`${label}: not run`];
+  if (run.error) return [`${label}: result=FAIL harness error: ${run.error}`];
   const s = run.summary;
   const failures = Object.entries(s.failures)
     .map(([name, count]) => `${name}=${count}`)
@@ -494,15 +497,13 @@ export function formatReport({ meta, topology, results }) {
     `named runs: ${NAMED_RUNS} fresh jest processes; full project: 1 fresh process via pnpm ${STRESS.rootScript}; no retries`,
     'burst figures come from pg_stat_wal sampled every ~1 s (backend counters flush about once per second)',
     '',
-    ...probeLines('control (read-only SELECT 1, 1 client)', byId.control?.probe),
-    ...probeLines('probe-before (pg_logical_emit_message, 1 client)', byId['probe-before']?.probe),
+    ...probeLines('control (read-only SELECT 1, 1 client)', byId.control),
+    ...probeLines('probe-before (pg_logical_emit_message, 1 client)', byId['probe-before']),
   ];
   for (let i = 1; i <= NAMED_RUNS; i += 1)
     lines.push(...jestLines(`named-${i}`, byId[`named-${i}`]));
   lines.push(...jestLines('full-project', byId['full-project']));
-  lines.push(
-    ...probeLines('probe-after (pg_logical_emit_message, 1 client)', byId['probe-after']?.probe),
-  );
+  lines.push(...probeLines('probe-after (pg_logical_emit_message, 1 client)', byId['probe-after']));
   const failed = results.filter((result) => !result.passed).map((result) => result.id);
   lines.push('', `verdict: ${failed.length === 0 ? 'PASS' : `FAIL (${failed.join(', ')})`}`);
   return `${lines.join('\n')}\n`;

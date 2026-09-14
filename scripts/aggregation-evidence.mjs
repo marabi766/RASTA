@@ -254,6 +254,15 @@ function startSampler(id) {
   };
 }
 
+/** The package's own jest launcher. `jest/bin/jest.js` is not an exported subpath, so go through the manifest. */
+function jestBin() {
+  const manifest = createRequire(join(packageDir, 'package.json')).resolve('jest/package.json');
+  const { bin } = JSON.parse(readFileSync(manifest, 'utf8'));
+  const path = join(dirname(manifest), typeof bin === 'string' ? bin : bin.jest);
+  if (!existsSync(path)) throw new Error(`jest launcher not found at ${path}`);
+  return path;
+}
+
 async function runJest(step) {
   const reportPath = join(workDir, `${step.id}.json`);
   const named = step.kind === 'jest-named';
@@ -268,11 +277,7 @@ async function runJest(step) {
   const result = named
     ? await runBounded(
         process.execPath,
-        [
-          createRequire(join(packageDir, 'package.json')).resolve('jest/bin/jest.js'),
-          ...step.jestArgs,
-          `--outputFile=${reportPath}`,
-        ],
+        [jestBin(), ...step.jestArgs, `--outputFile=${reportPath}`],
         { cwd: packageDir, env, timeoutMs: 8 * MINUTE },
       )
     : await runBounded('pnpm', [...step.pnpmArgs, `--outputFile=${reportPath}`], {
@@ -345,6 +350,9 @@ async function main() {
     return 1;
   }
 
+  // Resolved before anything is measured, so a harness that cannot start jest fails first.
+  jestBin();
+
   workDir = mkdtempSync(join(process.env.RUNNER_TEMP ?? tmpdir(), 'aggregation-evidence-'));
   const results = [];
   let topo;
@@ -357,7 +365,13 @@ async function main() {
 
   for (const step of plan) {
     out(`[evidence] ${step.id} started ${new Date().toISOString()}`);
-    const result = step.kind === 'probe' ? await runProbe(step) : await runJest(step);
+    let result;
+    try {
+      result = step.kind === 'probe' ? await runProbe(step) : await runJest(step);
+    } catch (error) {
+      // Recorded as a failed step; the remaining steps still run.
+      result = { id: step.id, passed: false, error: redact(error?.message ?? String(error)) };
+    }
     results.push(result);
     out(
       `[evidence] ${step.id} finished ${new Date().toISOString()}: ${result.passed ? 'PASS' : 'FAIL'}`,
