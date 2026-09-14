@@ -10,7 +10,11 @@ import {
 import { runUnscoped } from '@rasta/nest-common';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { IdentityRepository } from '../src/identity/identity.repository';
-import { AuditCorrectionCommandRepository } from '../src/audit-correction/audit-correction.repository';
+import {
+  AuditCorrectionCommandRepository,
+  commandLockKey,
+} from '../src/audit-correction/audit-correction.repository';
+import { AuditLookupClient } from '../src/audit-correction/audit-lookup.client';
 import {
   serviceToken,
   startIdentityApi,
@@ -117,6 +121,71 @@ describe('audit correction command (real PostgreSQL)', () => {
     runUnscoped('reads platform plumbing', () =>
       prisma.client.auditCorrectionCommand.findMany({ where: { targetId } }),
     );
+
+  /** Granted (or waiting) holders of one advisory-lock key in this database. */
+  const advisoryLocks = async (lockKey: bigint, granted: boolean): Promise<number> => {
+    // PostgreSQL shows a bigint advisory key as two unsigned 32-bit halves.
+    const unsigned = BigInt.asUintN(64, lockKey);
+    const rows = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+      `SELECT count(*)::int AS n FROM pg_locks
+        WHERE locktype = 'advisory' AND objsubid = 1
+          AND classid::bigint = $1 AND objid::bigint = $2 AND granted = $3
+          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+      Number(unsigned >> 32n),
+      Number(unsigned & 0xffffffffn),
+      granted,
+    );
+    return rows[0]!.n;
+  };
+
+  /** Polls `condition` until it holds; fails loudly rather than hanging. */
+  async function until(condition: () => Promise<boolean>, what: string): Promise<void> {
+    const deadline = Date.now() + 15_000;
+    while (!(await condition())) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+
+  /**
+   * Holds every request after its fast replay check until all `size` have
+   * passed it, so they genuinely overlap at the transaction.
+   */
+  function passLookupsTogether(size: number): void {
+    const lookups = harness.moduleRef.get(AuditLookupClient);
+    const findTarget = lookups.findTarget.bind(lookups);
+    let arrived = 0;
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => (open = resolve));
+    jest.spyOn(lookups, 'findTarget').mockImplementation(async (id, occurredAt) => {
+      arrived += 1;
+      if (arrived === size) open();
+      await opened;
+      return findTarget(id, occurredAt);
+    });
+  }
+
+  /**
+   * Counts outbox writes, and pauses the first one until `caughtUp()` says the
+   * rest of the race is waiting behind it — or until another writer reaches the
+   * outbox as well, which is the failure these tests exist to catch.
+   */
+  function watchOutboxWrites(caughtUp: () => Promise<boolean>): { count: () => number } {
+    const repository = harness.moduleRef.get(IdentityRepository);
+    const enqueueEvent = repository.enqueueEvent.bind(repository);
+    let writes = 0;
+    jest.spyOn(repository, 'enqueueEvent').mockImplementation(async (tx, input) => {
+      writes += 1;
+      if (writes === 1) {
+        await until(
+          async () => writes > 1 || (await caughtUp()),
+          'the other submissions to queue on the command lock',
+        );
+      }
+      return enqueueEvent(tx, input);
+    });
+    return { count: () => writes };
+  }
 
   beforeAll(async () => {
     stub = await startAuditStub();
@@ -335,8 +404,126 @@ describe('audit correction command (real PostgreSQL)', () => {
     expect(responses.map((r) => r.status)).toEqual(Array(6).fill(202));
     const bodies = new Set(responses.map((r) => JSON.stringify(r.body)));
     expect(bodies.size).toBe(1);
+    const rows = await outboxFor(t.id);
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0]!.streamSeq)).toBe(1);
+    expect(await commandsFor(t.id)).toHaveLength(1);
+  });
+
+  it('queues concurrent duplicates on the command lock and replays the winner, so only it reaches the outbox', async () => {
+    const t = target();
+    const key = tagged('KEY');
+    const size = 6;
+    const lockKey = commandLockKey(admin.userId, key);
+    passLookupsTogether(size);
+    // The first writer holds the command lock and waits, before its outbox
+    // write, until the other five are provably waiting on that same lock.
+    const writes = watchOutboxWrites(
+      async () => (await advisoryLocks(lockKey, false)) === size - 1,
+    );
+
+    const responses = await Promise.all(
+      Array.from({ length: size }, () => submit(body(t), { key })),
+    );
+
+    expect(responses.map((r) => r.status)).toEqual(Array(size).fill(202));
+    expect(new Set(responses.map((r) => JSON.stringify(r.body))).size).toBe(1);
+    // Every loser decided under the lock: none allocated a sequence or wrote.
+    expect(writes.count()).toBe(1);
+    const rows = await outboxFor(t.id);
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0]!.streamSeq)).toBe(1);
+    expect(await commandsFor(t.id)).toHaveLength(1);
+    expect(await advisoryLocks(lockKey, true)).toBe(0);
+  });
+
+  it('refuses a concurrent same-key submission of a different request with 409 and no second outbox row', async () => {
+    const t = target();
+    const key = tagged('KEY');
+    const size = 6;
+    const lockKey = commandLockKey(admin.userId, key);
+    const original = body(t);
+    const different = body(t, { reason: 'A different reason, submitted at the same moment' });
+    passLookupsTogether(size);
+    const writes = watchOutboxWrites(
+      async () => (await advisoryLocks(lockKey, false)) === size - 1,
+    );
+
+    const variants = Array.from({ length: size }, (_, i) => (i % 2 === 0 ? original : different));
+    const responses = await Promise.all(variants.map((variant) => submit(variant, { key })));
+
+    const winner = variants[responses.findIndex((r) => r.status === 202)];
+    expect(winner).toBeDefined();
+    responses.forEach((response, i) => {
+      if (variants[i] === winner) {
+        expect(response.status).toBe(202);
+      } else {
+        expect(response.status).toBe(409);
+        expect(response.body.code).toBe(ERROR_CODES.IDEMPOTENCY_KEY_REUSED);
+      }
+    });
+    const accepted = responses.filter((r) => r.status === 202);
+    expect(accepted).toHaveLength(size / 2);
+    expect(new Set(accepted.map((r) => JSON.stringify(r.body))).size).toBe(1);
+    expect(writes.count()).toBe(1);
     expect(await outboxFor(t.id)).toHaveLength(1);
     expect(await commandsFor(t.id)).toHaveLength(1);
+  });
+
+  it('keeps concurrent corrections with distinct keys apart, numbered contiguously on one stream', async () => {
+    const t = target();
+    const size = 6;
+    passLookupsTogether(size);
+
+    const responses = await Promise.all(
+      Array.from({ length: size }, () => submit(body(t), { key: tagged('KEY') })),
+    );
+
+    expect(responses.map((r) => r.status)).toEqual(Array(size).fill(202));
+    const rows = await outboxFor(t.id);
+    expect(rows).toHaveLength(size);
+    expect(rows.map((row) => Number(row.streamSeq)).sort((a, b) => a - b)).toEqual([
+      1, 2, 3, 4, 5, 6,
+    ]);
+    expect(new Set(rows.map((row) => row.id))).toEqual(
+      new Set(responses.map((r) => r.body.eventId as string)),
+    );
+    expect(await commandsFor(t.id)).toHaveLength(size);
+  });
+
+  it('holds the command lock for exactly the transaction that took it', async () => {
+    const commands = harness.moduleRef.get(AuditCorrectionCommandRepository);
+    const actorId = tagged('USR');
+    const key = tagged('KEY');
+    const lockKey = commandLockKey(actorId, key);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let locked!: () => void;
+    const isLocked = new Promise<void>((resolve) => (locked = resolve));
+
+    const holder = prisma.transaction(async (tx) => {
+      await commands.lockCommandKey(tx, actorId, key);
+      locked();
+      await released;
+    });
+    await isLocked;
+
+    expect(await advisoryLocks(lockKey, true)).toBe(1);
+    // Another command's key is a different lock.
+    expect(await advisoryLocks(commandLockKey(actorId, `${key}-other`), true)).toBe(0);
+
+    release();
+    await holder;
+    // Released by the commit: a session lock would still be held here.
+    expect(await advisoryLocks(lockKey, true)).toBe(0);
+
+    await expect(
+      prisma.transaction(async (tx) => {
+        await commands.lockCommandKey(tx, actorId, key);
+        throw new Error('roll back');
+      }),
+    ).rejects.toThrow('roll back');
+    expect(await advisoryLocks(lockKey, true)).toBe(0);
   });
 
   it.each([

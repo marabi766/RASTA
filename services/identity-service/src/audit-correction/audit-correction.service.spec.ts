@@ -48,40 +48,70 @@ interface Harness {
   enqueueEvent: jest.Mock;
   transaction: jest.Mock;
   find: jest.Mock;
+  lockCommandKey: jest.Mock;
   create: jest.Mock;
   findTarget: jest.Mock;
+  /** Every collaborator call, in order, marking reads made inside the transaction. */
+  calls: string[];
 }
+
+const TX = { tag: 'tx' };
 
 function harness(
   options: {
     target?: AuditTarget | null;
+    /** The fast check before audit-service is asked anything. */
     existing?: AuditCorrectionCommandRecord | null;
+    /** The re-read under the command lock, inside the transaction. */
+    underLock?: AuditCorrectionCommandRecord | null;
+    lock?: () => Promise<void>;
+    reread?: () => Promise<AuditCorrectionCommandRecord | null>;
     enqueue?: () => Promise<string>;
     create?: () => Promise<void>;
+    /** The read after a unique violation, outside the rolled-back transaction. */
     afterConflict?: AuditCorrectionCommandRecord | null;
   } = {},
 ): Harness {
-  const enqueueEvent = jest.fn(options.enqueue ?? (async () => EVENT_ID));
-  const tx = { tag: 'tx' };
-  const transaction = jest.fn(async (fn: (client: unknown) => Promise<unknown>) => fn(tx));
-  let finds = 0;
-  const find = jest.fn(async () => {
-    finds += 1;
-    return finds === 1 ? (options.existing ?? null) : (options.afterConflict ?? null);
+  const calls: string[] = [];
+  const enqueueEvent = jest.fn(async () => {
+    calls.push('enqueueEvent');
+    return (options.enqueue ?? (async () => EVENT_ID))();
   });
-  const create = jest.fn(options.create ?? (async () => undefined));
-  const findTarget = jest.fn(async () =>
-    options.target === undefined
+  const transaction = jest.fn(async (fn: (client: unknown) => Promise<unknown>) => {
+    calls.push('transaction');
+    return fn(TX);
+  });
+  let outside = 0;
+  const find = jest.fn(async (_actorId: string, _key: string, tx?: unknown) => {
+    if (tx !== undefined) {
+      calls.push('find:tx');
+      return options.reread ? options.reread() : (options.underLock ?? null);
+    }
+    outside += 1;
+    calls.push('find');
+    return outside === 1 ? (options.existing ?? null) : (options.afterConflict ?? null);
+  });
+  const lockCommandKey = jest.fn(async () => {
+    calls.push('lockCommandKey');
+    return (options.lock ?? (async () => undefined))();
+  });
+  const create = jest.fn(async () => {
+    calls.push('create');
+    return (options.create ?? (async () => undefined))();
+  });
+  const findTarget = jest.fn(async () => {
+    calls.push('findTarget');
+    return options.target === undefined
       ? { id: TARGET_ID, organizationId: 'ORG-DEH-0001', occurredAt: new Date(COMMAND.occurredAt) }
-      : options.target,
-  );
+      : options.target;
+  });
 
   const service = new AuditCorrectionService(
     { enqueueEvent, transaction } as unknown as IdentityRepository,
-    { find, create } as unknown as AuditCorrectionCommandRepository,
+    { find, lockCommandKey, create } as unknown as AuditCorrectionCommandRepository,
     { findTarget } as unknown as AuditLookupClient,
   );
-  return { service, enqueueEvent, transaction, find, create, findTarget };
+  return { service, enqueueEvent, transaction, find, lockCommandKey, create, findTarget, calls };
 }
 
 /**
@@ -127,7 +157,7 @@ describe('AuditCorrectionService', () => {
     expect(h.transaction).toHaveBeenCalledTimes(1);
     expect(h.enqueueEvent).toHaveBeenCalledTimes(1);
     const [tx, message] = h.enqueueEvent.mock.calls[0]!;
-    expect(tx).toEqual({ tag: 'tx' });
+    expect(tx).toBe(TX);
     expect(message).toEqual({
       aggregateType: 'AuditEvent',
       aggregateId: TARGET_ID,
@@ -233,7 +263,14 @@ describe('AuditCorrectionService', () => {
       const error = await refusal(submit(h, admin(overrides)));
 
       expect(error.code).toBe('FORBIDDEN');
-      for (const effect of [h.find, h.findTarget, h.transaction, h.enqueueEvent, h.create]) {
+      for (const effect of [
+        h.find,
+        h.findTarget,
+        h.transaction,
+        h.lockCommandKey,
+        h.enqueueEvent,
+        h.create,
+      ]) {
         expect(effect).not.toHaveBeenCalled();
       }
     });
@@ -305,7 +342,23 @@ describe('AuditCorrectionService', () => {
     });
 
     await expect(submit(h)).resolves.toEqual(winner.responseBody);
-    expect(h.find).toHaveBeenCalledTimes(2);
+    // Before the lookup, under the lock, and once more after the rollback —
+    // outside the transaction that failed.
+    expect(h.find.mock.calls.map((call) => call.length > 2 && call[2] !== undefined)).toEqual([
+      false,
+      true,
+      false,
+    ]);
+    expect(h.calls).toEqual([
+      'find',
+      'findTarget',
+      'transaction',
+      'lockCommandKey',
+      'find:tx',
+      'enqueueEvent',
+      'create',
+      'find',
+    ]);
   });
 
   it('refuses a concurrent duplicate carrying a different request', async () => {
@@ -317,6 +370,110 @@ describe('AuditCorrectionService', () => {
     });
 
     expect((await refusal(submit(h))).code).toBe('IDEMPOTENCY_KEY_REUSED');
+  });
+
+  describe('the command lock decides before anything is allocated', () => {
+    it('locks the (actor, key) command and re-reads it inside the transaction before the outbox write', async () => {
+      const h = harness();
+
+      await submit(h);
+
+      expect(h.calls).toEqual([
+        'find',
+        'findTarget',
+        'transaction',
+        'lockCommandKey',
+        'find:tx',
+        'enqueueEvent',
+        'create',
+      ]);
+      expect(h.lockCommandKey).toHaveBeenCalledWith(TX, 'USR-PLATFORM-ADMIN', KEY);
+      expect(h.find).toHaveBeenLastCalledWith('USR-PLATFORM-ADMIN', KEY, TX);
+      expect(h.create).toHaveBeenCalledTimes(1);
+      expect(h.create.mock.calls[0]![0]).toBe(TX);
+    });
+
+    it('never holds the transaction open across the audit-service lookup', async () => {
+      const h = harness();
+
+      await submit(h);
+
+      expect(h.calls.indexOf('findTarget')).toBeLessThan(h.calls.indexOf('transaction'));
+      expect(h.calls.indexOf('transaction')).toBeLessThan(h.calls.indexOf('lockCommandKey'));
+    });
+
+    it('replays a winner found under the lock byte-for-byte, allocating and inserting nothing', async () => {
+      const winner = record({
+        // JSONB hands the stored body back in its own key order.
+        responseBody: JSON.parse(
+          '{"eventId":"01JEVENT00000000000000C11","acceptedAt":"2026-09-12T11:00:00.000Z",' +
+            '"correctionOf":"01JAUDIT0000000000000001","status":"ACCEPTED"}',
+        ) as AuditCorrectionAccepted,
+      });
+      const h = harness({ underLock: winner });
+
+      const replayed = await submit(h);
+
+      expect(JSON.stringify(replayed)).toBe(
+        '{"status":"ACCEPTED","eventId":"01JEVENT00000000000000C11",' +
+          '"correctionOf":"01JAUDIT0000000000000001","acceptedAt":"2026-09-12T11:00:00.000Z"}',
+      );
+      expect(h.calls).toEqual(['find', 'findTarget', 'transaction', 'lockCommandKey', 'find:tx']);
+      expect(h.enqueueEvent).not.toHaveBeenCalled();
+      expect(h.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses a different request found under the lock with 409, writing nothing', async () => {
+      const h = harness({ underLock: record({ requestHash: 'e'.repeat(64) }) });
+
+      const error = await refusal(submit(h));
+
+      expect(error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+      expect(error.status).toBe(409);
+      expect(h.enqueueEvent).not.toHaveBeenCalled();
+      expect(h.create).not.toHaveBeenCalled();
+      // Refused as it was found: no second look outside the transaction.
+      expect(h.find).toHaveBeenCalledTimes(2);
+    });
+
+    it.each<[string, Parameters<typeof harness>[0]]>([
+      [
+        'the lock',
+        {
+          lock: async () => {
+            throw Object.assign(new Error('canceling statement due to lock timeout on 42'), {
+              code: 'P2010',
+              meta: { code: '55P03' },
+            });
+          },
+        },
+      ],
+      [
+        'the re-read',
+        {
+          reread: async () => {
+            throw Object.assign(new Error('Transaction API error: Unable to start a transaction'), {
+              code: 'P2028',
+            });
+          },
+        },
+      ],
+    ])(
+      'turns a failure of %s into the bounded INTERNAL_ERROR, writing nothing',
+      async (_label, options) => {
+        const h = harness(options);
+
+        const error = await refusal(submit(h));
+
+        expect(error.code).toBe('INTERNAL_ERROR');
+        expect(error.message).toBe(
+          'The correction could not be recorded; nothing was changed and it is safe to retry',
+        );
+        expect(JSON.stringify(error)).not.toMatch(/P20|55P03|lock timeout|Transaction API/);
+        expect(h.enqueueEvent).not.toHaveBeenCalled();
+        expect(h.create).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('turns an outbox failure into an explicit error, recording no command', async () => {

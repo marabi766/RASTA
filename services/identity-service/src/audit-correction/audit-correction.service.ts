@@ -36,7 +36,9 @@ import { hashCorrectionCommand, type AuditCorrectionCommand } from './dto';
  *                      one the trusted lookup returned)
  *   5. payload         built from 1 and 4 plus the validated command, and
  *                      checked against the wire contract
- *   6. commit          outbox row + command record, one transaction
+ *   6. commit          one transaction: lock the (actor, key) command, re-read
+ *                      it and replay or refuse if a concurrent duplicate
+ *                      committed first, otherwise outbox row + command record
  *
  * Nothing from the request body can name an organization, actor or source, and
  * a missing or mismatched target stops at step 4 having written nothing.
@@ -167,6 +169,15 @@ export class AuditCorrectionService {
 
     try {
       return await this.repository.transaction(async (tx) => {
+        // Decide under the command's own lock, before anything is allocated. A
+        // concurrent duplicate that passed the check above waits here for the
+        // winner to commit, then replays it without ever touching the outbox
+        // stream counter. The lock is taken only now, so no transaction is held
+        // open across the audit-service lookup.
+        await this.commands.lockCommandKey(tx, actorId, key);
+        const winner = await this.commands.find(actorId, key, tx);
+        if (winner) return replayOrRefuse(winner, requestHash);
+
         const eventId = await this.repository.enqueueEvent(tx, {
           aggregateType: CORRECTION_RESOURCE_TYPE,
           // The target, so every correction of one record is one ordered stream
@@ -201,8 +212,9 @@ export class AuditCorrectionService {
       });
     } catch (error) {
       if (isUniqueViolation(error)) {
-        // A concurrent duplicate committed first; this attempt rolled back
-        // with its outbox row. Answer as that one did.
+        // Defensive: a writer outside the lock protocol committed the same
+        // command first; this attempt rolled back with its outbox row. Answer
+        // as that one did.
         const winner = await this.commands.find(actorId, key);
         if (winner) return replayOrRefuse(winner, requestHash);
       }

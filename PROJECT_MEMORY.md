@@ -144,7 +144,9 @@
 > کوچک `buildOutboxRow`: `organizationId: null` یعنی «بی‌مستأجر»). دو Migration افزایشی و قابل بازگشت:
 > `audit_correction_command` در identity و `audit_event_correction_idx` در audit. **هنوز نیست:** صادرات، Purge، امضا، هشدار،
 > رول‌اوت به سرویس‌های دیگر (R-2) و ردهای متوقف‌شده در Gateway. `COM-009` همچنان `READY` با ۱۳ امتیاز و ADR-053 `Proposed`
-> است.
+> است. **Invariant هم‌زمانی (2026-09-14):** تصمیم «بنویس یا Replay کن» زیر Advisory Lock تراکنشیِ `(actorId, key)` و با بازخوانی
+> درون همان تراکنش، **پیش از** تخصیص Sequence جریان Outbox گرفته می‌شود؛ `P2002` فقط خط دفاع آخر است (جزئیات و شواهد در
+> به‌روزرسانی 2026-09-14 «تشخیص آن ناپایداری»).
 >
 > **به‌روزرسانی 2026-09-12 (برگشت‌پذیری آن دو Migration — تصحیح ادعای بالا):** جملهٔ «دو Migration افزایشی و **قابل
 > بازگشت**» در به‌روزرسانی پیشین، `down.sql` نوشته‌شده را با Rollback اثبات‌شده یکی گرفته بود. هیچ‌کدام از آن دو در هیچ
@@ -345,11 +347,42 @@ config` → `SUCCESS: 8 rules found`، `promtool test rules` → `SUCCESS` (دو
 > `internal=true`، `publishedPorts=0` پیش و پس از Probe، Probe با `0`، ۱۴+۱۴ Query، ۰ خطا/۰ نصب Plugin، پاک‌سازی کامل؛ کنترل‌های منفی
 > (حذف `--internal`، دور زدن Inspect، Binding ساختگی، دور زدن بررسی Port یا Helper) آزمون‌ها را شکستند. **مرز:** فقط همین Stack
 > یک‌بارمصرف؛ شبکهٔ Compose توسعه محدود نیست و سیاست شبکهٔ Production نیست. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`.
-> **Known Issue باز (کد سرویس دست نخورد):** در همین اجرا آزمون‌های `identity-service` از Cache خارج شدند و
-> `audit-correction.int-spec.ts › collapses concurrent duplicate submissions into one command and one outbox row` ناپایدار است — در
-> سه `pnpm verify` هر سه بار و در اجرای تنهای همان Spec دو از سه بار، ۲ یا ۳ از ۶ درخواست هم‌زمان `500 INTERNAL_ERROR` («could not
-> be recorded») گرفتند؛ یک بار هم `windowed refusal aggregation › exactly 500 concurrent captures` با `57014 statement timeout` شکست
-> خورد. خطای زیرین پایگاه داده (غیر Unique Violation) هنوز تشخیص داده نشده است.
+> **Known Issue آن روز — اکنون تشخیص داده و بسته شد (به‌روزرسانی بعدی را ببین):** در همین اجرا آزمون‌های `identity-service`
+> از Cache خارج شدند و `audit-correction.int-spec.ts › collapses concurrent duplicate submissions into one command and one outbox
+row` ناپایدار بود — در سه `pnpm verify` هر سه بار و در اجرای تنهای همان Spec دو از سه بار، ۲ یا ۳ از ۶ درخواست هم‌زمان
+> `500 INTERNAL_ERROR` («could not be recorded») گرفتند؛ یک بار هم `windowed refusal aggregation › exactly 500 concurrent captures` با
+> `57014 statement timeout` شکست خورد. آن زمان خطای زیرین پایگاه داده (غیر Unique Violation) تشخیص داده نشده بود.
+>
+> **به‌روزرسانی 2026-09-14 (تشخیص آن ناپایداری و سریال‌سازی تصمیم Idempotency فرمان اصلاح):** **خطای زیرین:** با Classifier
+> موقت (فقط کلاس خطا، کد `P####`، `meta.code` و یک برچسب ثابت؛ بی پیام/Query/شناسه؛ سپس حذف و بازگردانی بایت‌به‌بایت) هر ۵۰۰ از
+> نوع `PrismaClientKnownRequestError` **`P2028`** با `meta.code` تهی و متن «Unable to start a transaction in the given time»
+> (برچسب `START_TIMEOUT`، ~۲۰۰۰ms = `maxWait` پیش‌فرض Prisma) بود — ۱۷ رخداد در ۶ اجرای پشت‌سرهم (۶ از ۶ شکست) و ۹ در ۴ اجرای
+> بعدی. **علت ریشه‌ای Lock نبود:** در اجرای زمان‌دار، برنده در ۶۰ms Commit شد و دو تراکنش دیگر اصلاً شروع نشدند. Probe مستقل
+> Pool نشان داد باز کردن **هر اتصال تازه** از راه `localhost:25433` حدود ۲۰۶۹ms طول می‌کشد (ویندوز اول `::1` را امتحان می‌کند و
+> Forwarder موقت فقط روی `127.0.0.1` Publish شده بود) و ۳/۶/۹ تراکنش موازیِ بدیهی همه `P2028` می‌گیرند؛ با `127.0.0.1` اتصال ۳۵ms
+> و ۹ اتصال در ۱۳۴ms. پس Pool تنبل Prisma + تأخیر اتصال بیش از `maxWait` = ۵۰۰. همان کد پیش از اصلاح روی `127.0.0.1` پنج از پنج
+> سبز بود (۲۵ Loser از مسیر `P2002` بازیابی شدند). مسیر مستقیم میزبان در دسترس نیست: `rasta-postgres` هیچ Port منتشرشده‌ای ندارد و
+> بازهٔ 5433–5532 در Excluded Port ویندوز است. **درس Harness:** Forwarder موقت PostgreSQL باید هر دو `127.0.0.1` و `[::1]` را
+> Publish کند (یا URL با `127.0.0.1` باشد)، وگرنه هر آزمون هم‌زمانی تراکنشی با `P2028` شکست می‌خورد. **اصلاح محصول (همان مسابقهٔ
+> ساختاری که Prompt نام برد، مستقل از علت بالا):** Loserهای هم‌کلید پیش‌تر پشت Row Lockِ `outbox_stream_sequence` صف می‌کشیدند،
+> Sequence و ردیف Outbox تخصیص می‌دادند و فقط در `commands.create` با `P2002` برمی‌گشتند. اکنون در
+> `AuditCorrectionService.submit` پس از Lookup مورد اعتماد (هیچ تراکنشی روی REST باز نمی‌ماند): تراکنش →
+> `AuditCorrectionCommandRepository.lockCommandKey(tx, actorId, key)` = `SELECT pg_advisory_xact_lock($1)` پارامتری (Tagged
+> `$executeRaw`) روی کلید `commandLockKey` = هشت بایت اولِ SHA-256ِ `JSON.stringify(['identity-service:audit_correction_command:v1',
+actorId, key])` به‌صورت `int64` علامت‌دار (کدگذاری بی‌ابهام، نسخه‌دار، Collision فقط سریال‌سازی محافظه‌کارانه) → بازخوانی
+> `find(actorId, key, tx)` زیر READ COMMITTED → اگر برنده هست `replayOrRefuse` بی هیچ تخصیص/درج؛ وگرنه `enqueueEvent` و
+> `commands.create` در همان تراکنش. بازیابی `P2002` به‌عنوان خط دفاع آخر ماند؛ Migration/Schema، قرارداد، Route، Timeout و
+> هم‌زمانی آزمون‌ها دست نخوردند. **شواهد:** ۴۲ تست واحد در دو فایل (ترتیب lock → re-read → outbox، Replay بایت‌به‌بایت و ۴۰۹ زیر
+> Lock بی نوشتن، شکست Lock/Re-read → همان `INTERNAL_ERROR` کراندار، `P2002`، و Seam SQL: فقط `tx.$executeRaw` با رشته‌های دقیق
+> `['SELECT pg_advisory_xact_lock(', ')']`، کلید Pinشده و تفکیک Tupleهای مبهم)؛ Integration از ۱۹ به ۲۳ تست: شش Duplicate با
+> Barrier که اولین نویسنده را تا دیده‌شدن ۵ منتظرِ `pg_locks` نگه می‌دارد (دقیقاً ۱ `enqueueEvent`)، ۳+۳ درخواست هم‌کلید/متفاوت
+> (یک گروه ۲۰۲، دیگری ۴۰۹، یک ردیف Outbox)، ۶ کلید متمایز با `streamSeq` پیوستهٔ ۱..۶، و آزاد شدن Lock با Commit و Rollback.
+> کنترل‌های منفی (پشتیبان/بازگردانی با sha256 یکسان): حذف Lock (واحد ۱ و Integration ۳ شکست، `enqueueEvent` = ۶)، حذف Re-read
+> (واحد ۵، Integration ۲، = ۶)، Session Lock (واحد ۱؛ Integration گیر کرد و Kill شد، ردیف‌های همان TAG دستی پاک شدند)، Lock پس از
+> Outbox (واحد ۶، Integration ۳). پایداری پس از اصلاح: ۱۲/۱۲ اجرای پشت‌سرهم روی Forwarder با `127.0.0.1`، ۱۰/۱۰ روی Forwarder دوپشته
+> با همان `localhost`؛ روی Forwarder فقط-IPv4 با `localhost` همچنان `P2028` (محیطی، نه محصول). کل `identity-service` ۲۷ Suite و
+> ۸۴۰ تست سبز؛ `pnpm verify` روی Forwarder دوپشته سبز (identity بی Cache، ۸۴۰/۸۴۰)؛ E2E هویت (`specs/identity/`، Stack محلی شش
+> سرویس از `dist`) ۱۲/۱۲ سبز، از جمله `02-audit-correction`. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`؛ AUD-004 بسته نشد.
 >
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
