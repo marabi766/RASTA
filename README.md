@@ -65,6 +65,14 @@ pnpm db:seed
 pnpm dev
 ```
 
+> **PostgreSQL سمت میزبان: `127.0.0.1`، نه `localhost`.** `.env.example` عمداً `POSTGRES_HOST` و همهٔ
+> `DATABASE_URL_*`ها را روی `127.0.0.1:5433` می‌گذارد. Docker یا یک Forwarder موقت ممکن است Port را فقط روی IPv4 منتشر
+> کند، در حالی که `localhost` ممکن است اول به `::1` برسد؛ آن‌وقت هر اتصال تازهٔ Pool منتظر شکست IPv6 می‌ماند و تراکنش‌های
+> هم‌زمان حدود `maxWait` دوثانیه‌ای Prisma با `P2028` شکست می‌خورند — که شبیه Lock Contention برنامه است ولی نیست. اگر `.env`
+> قدیمی‌تان هنوز `localhost` دارد، آن را خودتان به `127.0.0.1` تغییر دهید (هیچ اسکریپتی `.env` را بازنویسی نمی‌کند).
+> `pnpm check:local-postgres-config` این قاعده را روی `.env.example` می‌سنجد و در `pnpm verify` اجرا می‌شود. جزئیات:
+> `docs/14-testing-strategy.md` § ۱۴٫۳.
+
 پس از بالا آمدن:
 
 | سرویس             | آدرس                       | اطلاعات ورود                                     |

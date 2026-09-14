@@ -61,6 +61,16 @@ jobs:
           pnpm run test:service-boundaries-lib
           pnpm run check:service-boundaries
 
+      - name: Local PostgreSQL defaults contract
+        # `.env.example` must point host-side PostgreSQL at 127.0.0.1, not
+        # `localhost`, which can try ::1 first against an IPv4-only listener
+        # and time Prisma transactions out with P2028. Reads the committed file
+        # as text only; the service-container URLs this workflow uses are its
+        # own and are not checked or changed.
+        run: |
+          pnpm run test:local-postgres-config
+          pnpm run check:local-postgres-config
+
       - name: Grafana dashboard contract
         # The provisioned local `Rasta Audit Evidence` dashboard: stable
         # datasource UID on every query, every alert in the rules file, the

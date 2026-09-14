@@ -128,6 +128,19 @@ Stream می‌کند و از INSTREAM عبور می‌دهد، و رأی زیر 
 به‌جایش زیرساخت موجود (`pnpm infra:up` محلی، Service Container ها در CI) به‌کار
 رفت — همان نتیجه بدون Docker-in-Docker.
 
+**آدرس PostgreSQL سمت میزبان در اجرای محلی (2026-09-14).** URLهای PostgreSQL که از میزبان به Listener یا Forwarder
+فقط-IPv4 می‌رسند باید `127.0.0.1` باشند؛ پیش‌فرض‌های `.env.example` همین‌اند (`POSTGRES_HOST` و هر `DATABASE_URL_*`، از جمله
+Migrator). اگر URL به هر دلیل `localhost` است، هر Forwarder موقت باید **هر دو** `127.0.0.1` و `[::1]` را منتشر کند؛ وگرنه
+URL باید صریحاً IPv4 باشد. **نشانه:** Prisma `P2028` (`Unable to start a transaction in the given time` یا تراکنش منقضی) در
+حدود `maxWait` دوثانیه‌ای تراکنش تعاملی، فقط زیر هم‌زمانی و فقط وقتی Pool اتصال تازه باز می‌کند؛ اتصال تکی کند (~۲ ثانیه) و
+تراکنش بدیهی موازی هم همان خطا را می‌گیرد. **تمایز از Lock Contention برنامه:** در Lock Contention تراکنش‌ها **شروع
+می‌شوند** و روی یک Query منتظر می‌مانند؛ در این حالت اصلاً شروع نمی‌شوند چون اتصالی نیست، و تغییر URL به `127.0.0.1` خطا را
+بی هیچ تغییر کدی برطرف می‌کند (تشخیص اصلی در `PROJECT_MEMORY.md`، به‌روزرسانی 2026-09-14). `pnpm test:local-postgres-config`
+و `pnpm check:local-postgres-config` این قرارداد را فقط به‌صورت متنی روی `.env.example` می‌سنجند (نه Probe شبکه، بی خواندن
+`.env`، بی چاپ مقدار) و در `pnpm verify` و Job `quality` در CI اجرا می‌شوند؛ URLهای Service Container خودِ CI جدا و دست‌نخورده‌اند.
+این قاعده فقط پیش‌فرض محلی توسعه است؛ سیاست Production برای `connection_limit`، `pool_timeout` یا گرم کردن Pool تصمیمی جدا
+در سطح ADR است.
+
 **چرا اینها با تست واحد جایگزین نمی‌شوند.** هر کدام یک واقعیت را می‌سنجند که فقط
 پایگاه داده واقعی تولیدش می‌کند: شکل خطای `P2002` در Prisma (که **نام ستون**
 می‌دهد، نه نام Index)، انحراف ساعت میان میزبان و PostgreSQL، رفتار Tenant Guard

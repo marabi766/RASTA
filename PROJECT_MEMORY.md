@@ -383,6 +383,16 @@ actorId, key])` به‌صورت `int64` علامت‌دار (کدگذاری بی
 > با همان `localhost`؛ روی Forwarder فقط-IPv4 با `localhost` همچنان `P2028` (محیطی، نه محصول). کل `identity-service` ۲۷ Suite و
 > ۸۴۰ تست سبز؛ `pnpm verify` روی Forwarder دوپشته سبز (identity بی Cache، ۸۴۰/۸۴۰)؛ E2E هویت (`specs/identity/`، Stack محلی شش
 > سرویس از `dist`) ۱۲/۱۲ سبز، از جمله `02-audit-correction`. `COM-009` همچنان `READY`/۱۳ و ADR-053 `Proposed`؛ AUD-004 بسته نشد.
+> **پیگیری همان روز (درس Harness اکنون اجباری است):** `.env.example` اکنون `POSTGRES_HOST` و هر ۱۷ `DATABASE_URL_*`ِ PostgreSQL
+> (Runtime و `DATABASE_URL_AUDIT_MIGRATOR`) را روی `127.0.0.1:5433` می‌گذارد (Port، نام DB، Schema، نقش و گذرواژهٔ نمونه
+> دست‌نخورده؛ Endpointهای غیر PostgreSQL همان `localhost`). دروازهٔ متنی `scripts/check-local-postgres-config{-lib,}.mjs` (بی
+> Probe شبکه، بی خواندن `.env`، بی چاپ مقدار) Host دقیق، Port برابر `POSTGRES_PORT`، URL بدشکل و انتساب تکراری را Fail-Closed
+> رد می‌کند؛ ۱۷ تست `node:test` (`pnpm test:local-postgres-config`) و `pnpm check:local-postgres-config` در `pnpm verify` و Job
+> `quality` در CI. `.env` محلی کاربر عمداً بازنویسی نشد؛ README و `docs/14` § ۱۴٫۳ قاعده و نشانهٔ `P2028` را ثبت می‌کنند. تغییری
+> در کد برنامه، Schema، Timeout یا URLهای CI نیست. **یافتهٔ جانبی:** با URL صریح `127.0.0.1` (Forwarder فقط-IPv4، بی تأخیر IPv6)
+> `pnpm verify` دو بار در `security-event-aggregation.int-spec.ts` قرمز شد — یک بار `57014 statement timeout` در «۵۰۰ Capture از
+> چهار Client» و یک بار دو ردیف به‌جای یک در «۵۰۰ رد از Endpoint» (Burst از مرز پنجرهٔ ۶۰ ثانیه‌ای گذشت) — و بار سوم سبز شد
+> (۸۴۰/۸۴۰)؛ همان Spec به‌تنها سه از سه سبز بود. پس آن ناپایداری زیر بار موازی `pnpm test` از تأخیر IPv6 نیست و هنوز باز است.
 >
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
