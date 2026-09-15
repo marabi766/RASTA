@@ -138,6 +138,14 @@ export const MAX_CALIBRATION_PAIRS = 20;
 /** Outcome labels the calibration mode may emit. Capability is not among them. */
 export const CALIBRATION_OUTCOMES = Object.freeze(['VALID', 'INVALID', 'INCONCLUSIVE']);
 
+/**
+ * The same three labels as an object, so code names them instead of spelling
+ * them. There is exactly one outcome vocabulary; this is a view of it.
+ */
+export const PROBE_OUTCOME = Object.freeze(
+  Object.fromEntries(CALIBRATION_OUTCOMES.map((name) => [name, name])),
+);
+
 /** The step id of pair `n`'s probe and of the stress run that must follow it. */
 export const calibrationProbeId = (pair) => `pair-${pair}-probe`;
 export const calibrationStressId = (pair) => `pair-${pair}-stress`;
@@ -302,6 +310,46 @@ export const INFRASTRUCTURE_CATEGORY_NAMES = Object.freeze([
 const KNOWN_CATEGORIES = new Set(INFRASTRUCTURE_CATEGORY_NAMES);
 
 /**
+ * What each category says about the *measurement*, per ADR-055 § 4. One table,
+ * consulted by one resolver; nothing here is derived from text.
+ *
+ * The split is not about speed — no entry may ever mean "too slow". It is about
+ * whether a measurement exists at all:
+ *
+ * - `INCONCLUSIVE` — nothing trustworthy was measured, so nothing may be said
+ *   about the measurement. Reporting these as `INVALID` would claim a sample was
+ *   taken and found wanting, when in fact no sample was taken.
+ * - `INVALID` — the probe reached the server and the resulting measurement fails
+ *   the unchanged `PROBE_VALIDITY` bounds, or the server refused the probe
+ *   itself. ADR-055 § 4 names the `pg_logical_emit_message` privilege refusal
+ *   `INVALID`, so `permissionDenied` sits here even when it surfaces before any
+ *   figure is produced; what it must never do is produce a fabricated figure.
+ */
+export const CATEGORY_VALIDITY = Object.freeze({
+  [INFRASTRUCTURE_CATEGORY.missingEnvironment]: 'INCONCLUSIVE',
+  [INFRASTRUCTURE_CATEGORY.dockerUnavailable]: 'INCONCLUSIVE',
+  [INFRASTRUCTURE_CATEGORY.pgbenchUnavailable]: 'INCONCLUSIVE',
+  [INFRASTRUCTURE_CATEGORY.psqlUnavailable]: 'INCONCLUSIVE',
+  [INFRASTRUCTURE_CATEGORY.connectionFailure]: 'INCONCLUSIVE',
+  [INFRASTRUCTURE_CATEGORY.statsUnreadable]: 'INCONCLUSIVE',
+  [INFRASTRUCTURE_CATEGORY.timeout]: 'INCONCLUSIVE',
+  [INFRASTRUCTURE_CATEGORY.harnessError]: 'INCONCLUSIVE',
+  // An unclassified failure is inconclusive for the same reason: if the harness
+  // cannot name what went wrong, it certainly cannot vouch for a measurement.
+  other: 'INCONCLUSIVE',
+  [INFRASTRUCTURE_CATEGORY.permissionDenied]: 'INVALID',
+  [INFRASTRUCTURE_CATEGORY.statsReset]: 'INVALID',
+  [INFRASTRUCTURE_CATEGORY.failedTransactions]: 'INVALID',
+  [INFRASTRUCTURE_CATEGORY.controlContamination]: 'INVALID',
+  [INFRASTRUCTURE_CATEGORY.backgroundWalContamination]: 'INVALID',
+  // Only `summarizeProbe` emits this, and only from a pgbench run whose output
+  // was in hand — so it always describes a measurement that was attempted and
+  // came back empty, not a process that never ran. A pgbench that did not
+  // complete adds its own inconclusive category, which wins below.
+  [INFRASTRUCTURE_CATEGORY.noProgress]: 'INVALID',
+});
+
+/**
  * Known names only, deduplicated, in report order — the single normalization
  * path. An unknown name is dropped rather than invented into the vocabulary.
  */
@@ -330,6 +378,48 @@ export function countCategories(diagnostics) {
     else for (const name of names) counts[name] += 1;
   }
   return counts;
+}
+
+/**
+ * The validity outcome a set of attached diagnostics implies.
+ *
+ * `INCONCLUSIVE` dominates `INVALID` whenever both apply: an absent or
+ * untrustworthy measurement must never be presented as a measured sample that
+ * failed. Both flags are collected before deciding, so the answer cannot depend
+ * on the order the diagnostics arrived in.
+ *
+ * `VALID` needs *no* diagnostic at all — it is the absence of any reason to
+ * doubt, never the failure to recognize one.
+ */
+export function outcomeForDiagnostics(diagnostics) {
+  let inconclusive = false;
+  let invalid = false;
+  for (const entry of diagnostics ?? []) {
+    const names = normalizeCategories(entry?.categories);
+    // A diagnostic whose categories nobody recognized counts as `other`, the
+    // same way `countCategories` counts it.
+    for (const name of names.length === 0 ? ['other'] : names) {
+      if (CATEGORY_VALIDITY[name] === PROBE_OUTCOME.INCONCLUSIVE) inconclusive = true;
+      if (CATEGORY_VALIDITY[name] === PROBE_OUTCOME.INVALID) invalid = true;
+    }
+  }
+  if (inconclusive) return PROBE_OUTCOME.INCONCLUSIVE;
+  return invalid ? PROBE_OUTCOME.INVALID : PROBE_OUTCOME.VALID;
+}
+
+/**
+ * Fixes a probe's explicit outcome from the diagnostics attached to it, and
+ * derives `valid` from that one decision.
+ *
+ * Called again whenever a diagnostic is added after the fact, so `outcome` and
+ * `valid` always describe the complete set. `valid` stays only because the
+ * legacy evidence report prints it; it is a view of `outcome`, never a second
+ * opinion.
+ */
+export function sealProbeOutcome(probe) {
+  probe.outcome = outcomeForDiagnostics(probe.diagnostics);
+  probe.valid = probe.outcome === PROBE_OUTCOME.VALID;
+  return probe;
 }
 
 /** Sums category counts, keeping every name in the total even at zero. */
@@ -551,13 +641,36 @@ export function distribution(values) {
 }
 
 /**
+ * The explicit validity outcome of one probe step, as the step recorded it.
+ *
+ * Nothing here reads `problems` prose or falls back to `valid === false`. A step
+ * that never produced a probe at all is judged from the typed diagnostics it
+ * did carry; a step that is simply absent, or that somehow carries neither, is
+ * `INCONCLUSIVE` — refusing to guess is the whole point.
+ */
+export function probeOutcomeOf(result) {
+  if (!result) return PROBE_OUTCOME.INCONCLUSIVE;
+  const explicit = result.probe?.outcome;
+  if (CALIBRATION_OUTCOMES.includes(explicit)) return explicit;
+  if (!result.probe && (result.diagnostics?.length ?? 0) > 0) {
+    return outcomeForDiagnostics(result.diagnostics);
+  }
+  return PROBE_OUTCOME.INCONCLUSIVE;
+}
+
+/**
  * One calibration campaign as a value: a row per pair, and the distributions
  * across every pair that was attempted.
  *
- * `outcome` is validity only. A pair whose probe was valid but whose stress run
- * failed is still `VALID` — that combination is exactly the evidence ADR-055
- * wants, and calling it anything else would be the capability judgement this
- * mode refuses to make.
+ * `outcome` is validity only, and it is **read** from the probe rather than
+ * inferred here: the probe fixed it where it knew whether a trustworthy
+ * measurement existed. Inferring it from `valid === false` is exactly the bug
+ * this replaced — it turned an unreachable server into a measured invalid
+ * sample.
+ *
+ * A pair whose probe was valid but whose stress run failed is still `VALID` —
+ * that combination is exactly the evidence ADR-055 wants, and calling it
+ * anything else would be the capability judgement this mode refuses to make.
  */
 export function summarizeCalibration({ pairs, results }) {
   const byId = Object.fromEntries((results ?? []).map((result) => [result.id, result]));
@@ -570,14 +683,9 @@ export function summarizeCalibration({ pairs, results }) {
     const probeResult = byId[calibrationProbeId(pair)] ?? null;
     const stressResult = byId[calibrationStressId(pair)] ?? null;
     const probe = probeResult?.probe ?? null;
-    let outcome;
-    if (!probeResult || !probe) outcome = 'INCONCLUSIVE';
-    else if (probeResult.error) outcome = 'INCONCLUSIVE';
-    else if (!probe.valid) outcome = 'INVALID';
-    else outcome = 'VALID';
     rows.push({
       pair,
-      outcome,
+      outcome: probeOutcomeOf(probeResult),
       probe: probe
         ? {
             transactions: probe.transactions,
@@ -619,15 +727,21 @@ export function summarizeCalibration({ pairs, results }) {
   // total rather than being folded into the per-pair denominator. A failed
   // control is then a number, not only a sentence.
   const controlInfrastructure = countCategories(diagnosticsOf(control));
+  // A control that never ran is `INCONCLUSIVE`, not "valid=no": the counter was
+  // never confirmed either way, and saying otherwise would claim a check that
+  // did not happen.
+  const controlOutcome = probeOutcomeOf(control);
   return {
     pairs,
     control: control
       ? {
-          valid: control.probe?.valid === true,
+          outcome: controlOutcome,
+          valid: controlOutcome === PROBE_OUTCOME.VALID,
           problems: control.probe?.problems ?? [],
           infrastructure: controlInfrastructure,
         }
       : null,
+    controlOutcome,
     controlInfrastructure,
     rows,
     outcomes: Object.fromEntries(
@@ -805,7 +919,11 @@ export function summarizeProbe({ pgbench, before, after, seconds, control = fals
       }
     }
   }
-  return {
+  // This probe reached the server and produced figures, so its outcome is
+  // whatever those figures earned: `VALID`, or `INVALID` for a measurement that
+  // failed the bounds. `measureProbe` seals it again if the pgbench process
+  // itself turns out not to have completed.
+  return sealProbeOutcome({
     control,
     seconds,
     transactions,
@@ -821,33 +939,39 @@ export function summarizeProbe({ pgbench, before, after, seconds, control = fals
     minIntervalTps: pgbench.minIntervalTps,
     zeroCommitIntervals: pgbench.zeroCommitIntervals,
     longestZeroCommitSeconds: pgbench.longestZeroCommitSeconds,
-    valid: problems.length === 0,
     problems,
     diagnostics: found.diagnostics,
-  };
+  });
 }
 
-/** A probe that never measured: the shape of a real one, with its diagnostics and no figures. */
+/**
+ * A probe that never measured: the shape of a real one, its diagnostics, and
+ * **no figures at all**.
+ *
+ * Every numeric field is `null` rather than `0`. A zero is an observation — it
+ * says the probe ran and committed nothing — and this probe did not run. The
+ * distributions already treat `null` as unavailable while keeping the pair in
+ * the denominator, which is exactly what an attempted-but-unmeasured sample is.
+ */
 export function emptyProbe(step, diagnostics) {
   const entries = diagnostics ?? [];
-  return {
+  return sealProbeOutcome({
     control: step.control === true,
     seconds: step.seconds,
-    transactions: 0,
-    failed: 0,
+    transactions: null,
+    failed: null,
     tps: null,
     latencyAverageMs: null,
-    walSyncDelta: 0,
+    walSyncDelta: null,
     walSyncPerSecond: null,
     walSyncPerTransaction: null,
     walRecordsPerTransaction: null,
     minIntervalTps: null,
-    zeroCommitIntervals: 0,
+    zeroCommitIntervals: null,
     longestZeroCommitSeconds: null,
-    valid: false,
     problems: entries.map((entry) => entry.text),
     diagnostics: [...entries],
-  };
+  });
 }
 
 /**
@@ -872,6 +996,9 @@ export async function measureProbe(step, { readWalStat, runPgbench, settle }) {
     if (settle) await settle();
     after = await readWalStat();
   } catch (error) {
+    // Nothing was measured. The probe carries the typed reason and no figures;
+    // its outcome comes from that reason, so an unreachable server is
+    // `INCONCLUSIVE` rather than a zero-valued sample that "failed validity".
     const probe = emptyProbe(step, [diagnosticFromError(error)]);
     return { id: step.id, passed: false, probe, diagnostics: probe.diagnostics };
   }
@@ -883,8 +1010,14 @@ export async function measureProbe(step, { readWalStat, runPgbench, settle }) {
     control: step.control === true,
   });
   if (bench.outcome !== PROCESS_OUTCOME.completed || bench.exitCode !== 0) {
-    probe.valid = false;
-    addDiagnostic(probe, processDiagnosticEntry(bench));
+    // The pgbench process did not complete, so whatever its output parsed to is
+    // not an observation — a partial or absent summary parses to zeros that a
+    // distribution would happily average. Every category found so far is kept,
+    // including the validity ones, but the figures are dropped: the process
+    // diagnostic makes this `INCONCLUSIVE`, and an inconclusive probe must
+    // contribute no numbers at all.
+    const unmeasured = emptyProbe(step, [...probe.diagnostics, processDiagnosticEntry(bench)]);
+    return { id: step.id, passed: false, probe: unmeasured, diagnostics: unmeasured.diagnostics };
   }
   return { id: step.id, passed: probe.valid, probe, diagnostics: probe.diagnostics };
 }
@@ -1138,12 +1271,15 @@ function probeLines(label, result) {
   if (!result) return [`${label}: not run`];
   if (result.error) return [`${label}: valid=NO harness error: ${result.error}`];
   const { probe } = result;
+  // Every figure goes through `fmt`, so a probe that never measured prints
+  // `n/a` rather than a zero a reader would take for an observation.
   const lines = [
-    `${label}: valid=${probe.valid ? 'yes' : 'NO'} seconds=${probe.seconds} transactions=${probe.transactions} ` +
-      `failed=${probe.failed} tps=${fmt(probe.tps)} latency_avg_ms=${fmt(probe.latencyAverageMs, 3)}`,
-    `  wal_sync_delta=${probe.walSyncDelta} wal_sync_per_s=${fmt(probe.walSyncPerSecond)} ` +
+    `${label}: valid=${probe.valid ? 'yes' : 'NO'} outcome=${probe.outcome ?? 'n/a'} ` +
+      `seconds=${probe.seconds} transactions=${fmt(probe.transactions, 0)} ` +
+      `failed=${fmt(probe.failed, 0)} tps=${fmt(probe.tps)} latency_avg_ms=${fmt(probe.latencyAverageMs, 3)}`,
+    `  wal_sync_delta=${fmt(probe.walSyncDelta, 0)} wal_sync_per_s=${fmt(probe.walSyncPerSecond)} ` +
       `wal_sync_per_tx=${fmt(probe.walSyncPerTransaction, 4)} wal_records_per_tx=${fmt(probe.walRecordsPerTransaction, 3)}`,
-    `  min_interval_tps=${fmt(probe.minIntervalTps)} zero_commit_intervals=${probe.zeroCommitIntervals} ` +
+    `  min_interval_tps=${fmt(probe.minIntervalTps)} zero_commit_intervals=${fmt(probe.zeroCommitIntervals, 0)} ` +
       `longest_zero_commit_s=${fmt(probe.longestZeroCommitSeconds, 1)}`,
   ];
   for (const problem of probe.problems) lines.push(`  problem: ${problem}`);
@@ -1225,8 +1361,10 @@ export function formatCalibrationReport({ meta, topology, summary }) {
     'validity only: VALID / INVALID / INCONCLUSIVE. No threshold, no margin, no capability judgement.',
     '',
     summary.control
-      ? `control (read-only, ${CONTROL_SECONDS} s): valid=${summary.control.valid ? 'yes' : 'NO'}`
-      : 'control: not run',
+      ? `control (read-only, ${CONTROL_SECONDS} s): outcome=${summary.control.outcome} valid=${
+          summary.control.valid ? 'yes' : 'NO'
+        }`
+      : `control: not run, outcome=${summary.controlOutcome ?? PROBE_OUTCOME.INCONCLUSIVE}`,
   ];
   for (const problem of summary.control?.problems ?? []) lines.push(`  problem: ${problem}`);
   lines.push(
@@ -1242,11 +1380,11 @@ export function formatCalibrationReport({ meta, topology, summary }) {
       lines.push('  probe: not run');
     } else {
       lines.push(
-        `  probe: transactions=${row.probe.transactions} failed=${row.probe.failed} ` +
+        `  probe: transactions=${fmt(row.probe.transactions, 0)} failed=${fmt(row.probe.failed, 0)} ` +
           `tps=${fmt(row.probe.tps)} latency_avg_ms=${fmt(row.probe.latencyAverageMs, 3)}`,
-        `    wal_sync_delta=${row.probe.walSyncDelta} wal_sync_per_s=${fmt(row.probe.walSyncPerSecond)} ` +
+        `    wal_sync_delta=${fmt(row.probe.walSyncDelta, 0)} wal_sync_per_s=${fmt(row.probe.walSyncPerSecond)} ` +
           `wal_sync_per_tx=${fmt(row.probe.walSyncPerTransaction, 4)} wal_records_per_tx=${fmt(row.probe.walRecordsPerTransaction, 3)}`,
-        `    min_interval_tps=${fmt(row.probe.minIntervalTps)} zero_commit_intervals=${row.probe.zeroCommitIntervals} ` +
+        `    min_interval_tps=${fmt(row.probe.minIntervalTps)} zero_commit_intervals=${fmt(row.probe.zeroCommitIntervals, 0)} ` +
           `longest_zero_commit_s=${fmt(row.probe.longestZeroCommitSeconds, 1)}`,
       );
       for (const problem of row.probe.problems) lines.push(`    problem: ${problem}`);

@@ -208,6 +208,23 @@ PostgreSQL اجرا می‌کنند (`pnpm test:aggregation-evidence-lib` ‏۳�
 Script ریشهٔ `calibrate:aggregation-stress` را هم نقض قرارداد می‌شمارد. هیچ آستانه، حاشیه، Classifier توانایی، Preflight یا
 دروازه‌ای اضافه نشد و ADR-055 همچنان `Proposed` است.
 
+**حالت صریح اعتبار: `INVALID` در برابر `INCONCLUSIVE` (2026-09-15).** گام قبلی **دسته** را درست کرد ولی **حکم** را نه:
+نتیجهٔ Probe حالت صریحی نداشت و `summarizeCalibration()` هر `probe.valid === false` را `INVALID` می‌نامید، پس شکست اتصال،
+نبودِ Docker/`psql`/`pgbench`، Timeout و `pg_stat_wal` ناخوانا همگی «نمونه‌ای که سنجیده شد و رد شد» گزارش می‌شدند — در حالی
+که ADR-055 §§ ۳–۴ آن‌ها را `INCONCLUSIVE` می‌داند (بازتولید: `connectionFailure` با `outcome = INVALID`). اکنون خودِ نتیجهٔ
+Probe یک حالت صریح از همان سه برچسب حمل می‌کند (`probe.outcome`؛ هیچ برچسب توانایی اضافه نشد)، `summarizeCalibration()`
+آن را **می‌خواند** و دیگر از `problems` یا از `valid: false` استنتاج نمی‌کند، و `probe.valid` مشتقِ آن است (`true` تنها برای
+`VALID`). نگاشت از یک جدول یکتا می‌آید (`CATEGORY_VALIDITY`، بی هیچ Regex): **`INCONCLUSIVE`** برای `missingEnvironment`،
+`dockerUnavailable`، `pgbenchUnavailable`، `psqlUnavailable`، `connectionFailure`، `statsUnreadable`، `timeout`،
+`harnessError` و هر شکست طبقه‌بندی‌نشده (`other`)؛ **`INVALID`** برای `permissionDenied`، `statsReset`،
+`failedTransactions`، `controlContamination`، `backgroundWalContamination` و `noProgress`؛ و **`VALID`** تنها با نبودِ هر
+تشخیص. اگر هر دو نوع هم‌زمان باشند **`INCONCLUSIVE` برنده است** و ترتیب ورود تشخیص‌ها پاسخ را عوض نمی‌کند. Probeای که اندازه
+نگرفت **هیچ عدد ساختگی** ندارد (همهٔ میدان‌های عددی `null`، نه `0`)، ولی جفت در مخرج همهٔ توزیع‌ها با `available=0`
+می‌ماند؛ در همین گام یک نشتِ عددی واقعی هم رفع شد که خروجی ناقص یک `pgbench` ناتمام را به‌شکل `longest_zero_commit_s = 0`
+وارد توزیع می‌کرد. Control هم حالت صریح دارد و Controlِ اجرانشده `INCONCLUSIVE` است، نه `valid=no`. کران‌های عددی اعتبار،
+SQL ‏Probe، ثابت‌های فشار، مجاورت جفت، نبود Retry، دستی‌بودن و معنای خروج غیرصفر **تغییر نکردند**، و
+`pnpm test:aggregation-evidence-lib` اکنون ۳۶/۳۶ است.
+
 **ماه اختصاصی اجرا برای زنجیرهٔ Platform در Fixtureهای audit (2026-09-14).** کلید زنجیرهٔ Tenant شناسهٔ سازمانِ دارای `RUN_TAG`
 را دارد و خودبه‌خود به هر اجرا اختصاص دارد؛ کلید زنجیرهٔ Platform ‏(`PLATFORM/(platform)/<ماه>`) هیچ Tag یا Tenantی ندارد. پس
 هر Suite ‏Integration در `audit-service` که ردیف `organizationId: null` می‌نویسد باید زمان آن را از یک Slot اختصاصی

@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   CALIBRATION_OUTCOMES,
+  CATEGORY_VALIDITY,
   CONTROL_SECONDS,
   CONTROL_SQL,
   INFRASTRUCTURE_CATEGORY,
@@ -32,6 +33,7 @@ import {
   measureProbe,
   namedProofPattern,
   normalizeCategories,
+  outcomeForDiagnostics,
   parseEvidenceArgs,
   parsePgbenchOutput,
   parseWalSamples,
@@ -39,8 +41,10 @@ import {
   pgbenchArgs,
   planCalibrationRun,
   planEvidenceRun,
+  probeOutcomeOf,
   processDiagnostic,
   redact,
+  sealProbeOutcome,
   summarizeBurst,
   summarizeCalibration,
   summarizeJestReport,
@@ -903,22 +907,24 @@ const contamination = diagnostic(
   'wal_sync per transaction 2.400 is not approximately one',
 );
 
-const probeFor = ({ tps = 20, valid = true, minIntervalTps = 12, stall = 0 } = {}) => ({
-  transactions: 1200,
-  failed: 0,
-  tps,
-  latencyAverageMs: 50,
-  walSyncDelta: 1200,
-  walSyncPerSecond: 20,
-  walSyncPerTransaction: valid ? 1.0 : 2.4,
-  walRecordsPerTransaction: 2.1,
-  minIntervalTps,
-  zeroCommitIntervals: stall > 0 ? 1 : 0,
-  longestZeroCommitSeconds: stall,
-  valid,
-  problems: valid ? [] : [contamination.text],
-  diagnostics: valid ? [] : [contamination],
-});
+// Sealed through the production helper, so a fixture can never carry an
+// outcome the real code would not have reached.
+const probeFor = ({ tps = 20, valid = true, minIntervalTps = 12, stall = 0 } = {}) =>
+  sealProbeOutcome({
+    transactions: 1200,
+    failed: 0,
+    tps,
+    latencyAverageMs: 50,
+    walSyncDelta: 1200,
+    walSyncPerSecond: 20,
+    walSyncPerTransaction: valid ? 1.0 : 2.4,
+    walRecordsPerTransaction: 2.1,
+    minIntervalTps,
+    zeroCommitIntervals: stall > 0 ? 1 : 0,
+    longestZeroCommitSeconds: stall,
+    problems: valid ? [] : [contamination.text],
+    diagnostics: valid ? [] : [contamination],
+  });
 
 const stressFor = ({ passed = true, wallSeconds = 55, diagnostics = [] } = {}) => ({
   passed,
@@ -940,11 +946,10 @@ const calibrationResults = (rows, { control } = {}) => [
   {
     id: 'control',
     passed: !control,
-    probe: {
-      valid: !control,
+    probe: sealProbeOutcome({
       problems: control ? [control.text] : [],
       diagnostics: control ? [control] : [],
-    },
+    }),
     diagnostics: control ? [control] : [],
   },
   ...rows.flatMap((row, index) => {
@@ -1160,10 +1165,17 @@ test('transport: a psql connection failure stays connectionFailure all the way t
   );
   assert.equal(summary.infrastructure.other, 0);
   assert.equal(summary.rows[0].infrastructure.connectionFailure, 1);
-  // The validity verdict is unchanged by this repair: a probe that could not
-  // measure is still `INVALID` and still never "slow". What changed is that the
-  // reason beside it is the real one.
-  assert.deepEqual(summary.outcomes, { VALID: 0, INVALID: 1, INCONCLUSIVE: 0 });
+  // A server that was never reached measured nothing, so there is no sample to
+  // call invalid (ADR-055 § 4). This assertion previously froze `INVALID=1`,
+  // which claimed a measurement that never happened.
+  assert.equal(result.probe.outcome, 'INCONCLUSIVE');
+  assert.equal(result.probe.valid, false);
+  assert.equal(summary.rows[0].outcome, 'INCONCLUSIVE');
+  assert.deepEqual(summary.outcomes, { VALID: 0, INVALID: 0, INCONCLUSIVE: 1 });
+  // And no figure was invented to fill the gap.
+  for (const field of ['transactions', 'failed', 'tps', 'walSyncDelta', 'zeroCommitIntervals']) {
+    assert.equal(result.probe[field], null, `${field} must stay unavailable, not zero`);
+  }
 
   const text = formatCalibrationReport({
     meta: { commit: 'abc1234', generatedAt: '2026-09-14T00:00:00.000Z' },
@@ -1171,6 +1183,9 @@ test('transport: a psql connection failure stays connectionFailure all the way t
     summary,
   });
   assert.match(text, /connectionFailure=1/);
+  assert.match(text, /pair-1: outcome=INCONCLUSIVE/);
+  assert.match(text, /transactions=n\/a failed=n\/a tps=n\/a/);
+  assert.match(text, /wal_sync_delta=n\/a/);
   assertNoLeak(text, 'the report');
   assertNoLeak(summary, 'the summary');
   assertNoLeak(result, 'the retained result');
@@ -1420,4 +1435,315 @@ test('transport: a valid probe and a passing suite keep the legacy shapes untouc
     Object.fromEntries(INFRASTRUCTURE_CATEGORY_NAMES.map((name) => [name, 0])),
     'a clean campaign reports no infrastructure category at all',
   );
+});
+
+// ---------------------------------------------------------------------------
+// Validity semantics (ADR-055 §§ 3–4): "nothing was measured" and "a measurement
+// failed its bounds" are different answers, and only one of them is INVALID.
+
+/** One probe whose `pg_stat_wal` reading failed with exactly this process result. */
+const probeFromFailedReading = (over) =>
+  measureProbe(probeStep, {
+    readWalStat: () => walStatFrom(bounded(over)),
+    runPgbench: () => assert.fail('pgbench must not run after the reading failed'),
+    settle: () => Promise.resolve(),
+  });
+
+/** A pgbench run against readings chosen to make the result measurable. */
+const probeFromBench = (benchOver, { before = [10, 10], after = [3100, 1540] } = {}) => {
+  const at = ([walRecords, walSync]) => ({ walRecords, walSync, walWrite: 0, walBytes: 0 });
+  const readings = [at(before), at(after)];
+  return measureProbe(
+    { ...probeStep, seconds: 5 },
+    {
+      readWalStat: () => Promise.resolve(readings.shift()),
+      runPgbench: () =>
+        Promise.resolve(bounded({ tool: IN_IMAGE_TOOL.pgbench, exitCode: 0, ...benchOver })),
+      settle: () => Promise.resolve(),
+    },
+  );
+};
+
+/** The fixture's five progress lines with a chosen transaction count. */
+const benchOutput = (transactions) =>
+  PGBENCH_OUTPUT.replace(
+    'number of transactions actually processed: 59',
+    `number of transactions actually processed: ${transactions}`,
+  );
+
+const MISSING_EXECUTABLE =
+  'docker: Error response from daemon: failed to create task for container: exec: executable file not found in $PATH: unknown.';
+
+test('validity policy: the category table is total, and inconclusive dominates invalid', () => {
+  const inconclusive = [
+    'missingEnvironment',
+    'dockerUnavailable',
+    'pgbenchUnavailable',
+    'psqlUnavailable',
+    'connectionFailure',
+    'statsUnreadable',
+    'timeout',
+    'harnessError',
+    'other',
+  ];
+  const invalid = [
+    'permissionDenied',
+    'statsReset',
+    'failedTransactions',
+    'controlContamination',
+    'backgroundWalContamination',
+    'noProgress',
+  ];
+  for (const name of inconclusive) assert.equal(CATEGORY_VALIDITY[name], 'INCONCLUSIVE', name);
+  for (const name of invalid) assert.equal(CATEGORY_VALIDITY[name], 'INVALID', name);
+  // The two lists together are the whole vocabulary: no category is unjudged,
+  // and no category may assert validity — only the absence of all of them can.
+  assert.deepEqual([...inconclusive, ...invalid].sort(), [...INFRASTRUCTURE_CATEGORY_NAMES].sort());
+  assert.ok(!Object.values(CATEGORY_VALIDITY).includes('VALID'));
+
+  assert.equal(outcomeForDiagnostics([]), 'VALID');
+  assert.equal(outcomeForDiagnostics(undefined), 'VALID');
+  for (const name of inconclusive) {
+    assert.equal(outcomeForDiagnostics([diagnostic([name], name)]), 'INCONCLUSIVE', name);
+  }
+  for (const name of invalid) {
+    assert.equal(outcomeForDiagnostics([diagnostic([name], name)]), 'INVALID', name);
+  }
+  // A diagnostic nobody could classify counts as `other`, and `other` doubts.
+  assert.equal(outcomeForDiagnostics([diagnostic([], 'unrecognized')]), 'INCONCLUSIVE');
+  assert.equal(outcomeForDiagnostics([diagnostic(['tooSlow'], 'not a category')]), 'INCONCLUSIVE');
+
+  // Mixed: inconclusive wins, in either order and within a single diagnostic.
+  const doubt = diagnostic(['connectionFailure'], 'a');
+  const failedValidity = diagnostic(['backgroundWalContamination'], 'b');
+  assert.equal(outcomeForDiagnostics([failedValidity, doubt]), 'INCONCLUSIVE');
+  assert.equal(outcomeForDiagnostics([doubt, failedValidity]), 'INCONCLUSIVE');
+  assert.equal(
+    outcomeForDiagnostics([diagnostic(['backgroundWalContamination', 'timeout'], 'c')]),
+    'INCONCLUSIVE',
+  );
+  assert.equal(outcomeForDiagnostics([failedValidity, diagnostic(['statsReset'], 'd')]), 'INVALID');
+});
+
+test('validity policy: every inconclusive cause reaches the pair, totals and report as INCONCLUSIVE', async () => {
+  const cases = {
+    connectionFailure: await probeFromFailedReading({
+      exitCode: 1,
+      output: `psql: error: connection to server at "${LEAKS.host}" (${LEAKS.address}) failed: Connection refused`,
+    }),
+    dockerUnavailable: await probeFromFailedReading({
+      outcome: PROCESS_OUTCOME.launcherFailed,
+      exitCode: 127,
+    }),
+    psqlUnavailable: await probeFromFailedReading({ exitCode: 125, output: MISSING_EXECUTABLE }),
+    pgbenchUnavailable: await probeFromBench({
+      exitCode: 125,
+      output: `${MISSING_EXECUTABLE} ${LEAKS.url}`,
+    }),
+    statsUnreadable: await probeFromFailedReading({
+      exitCode: 0,
+      output: 'nothing that parses as a pg_stat_wal row',
+    }),
+    timeout: await probeFromFailedReading({ outcome: PROCESS_OUTCOME.timedOut, exitCode: 1 }),
+    harnessError: await probeFromFailedReading({
+      launcher: LAUNCHER.pnpm,
+      tool: null,
+      outcome: PROCESS_OUTCOME.launcherFailed,
+      exitCode: 127,
+    }),
+    // A step that fell over before it produced a probe at all, carrying a
+    // diagnostic nobody could classify.
+    other: { passed: false, diagnostics: [diagnostic([], 'something nobody predicted')] },
+  };
+
+  for (const [label, result] of Object.entries(cases)) {
+    const summary = summarizeCalibration({
+      pairs: 1,
+      results: [{ ...result, id: calibrationProbeId(1) }],
+    });
+    assert.equal(summary.rows[0].outcome, 'INCONCLUSIVE', `${label} must be INCONCLUSIVE`);
+    assert.deepEqual(summary.outcomes, { VALID: 0, INVALID: 0, INCONCLUSIVE: 1 }, label);
+    assert.equal(summary.infrastructure[label], 1, `${label} keeps its own category`);
+    if (result.probe) {
+      assert.equal(result.probe.outcome, 'INCONCLUSIVE', `${label} at the probe`);
+      assert.equal(result.probe.valid, false, `${label} is never valid`);
+      assert.equal(result.passed, false, `${label} still exits non-zero`);
+      assert.equal(result.probe.tps, null, `${label} invents no tps`);
+    }
+    // The attempted pair stays in every denominator with nothing available.
+    for (const stats of Object.values(summary.distributions)) {
+      assert.equal(stats.count, 1, `${label} stays in the denominator`);
+      assert.equal(stats.available, 0, `${label} contributes no observation`);
+    }
+    const text = formatCalibrationReport({
+      meta: { commit: 'abc', generatedAt: 'now' },
+      topology: {},
+      summary,
+    });
+    assert.match(text, /pair-1: outcome=INCONCLUSIVE/, label);
+    assertNoLeak(summary, `the ${label} summary`);
+    assertNoLeak(text, `the ${label} report`);
+  }
+
+  // The control is judged the same way, and keeps its separate category total.
+  const controlSummary = summarizeCalibration({
+    pairs: 1,
+    results: [{ ...cases.dockerUnavailable, id: 'control' }],
+  });
+  assert.equal(controlSummary.controlOutcome, 'INCONCLUSIVE');
+  assert.equal(controlSummary.control.outcome, 'INCONCLUSIVE');
+  assert.equal(controlSummary.control.valid, false);
+  assert.equal(controlSummary.controlInfrastructure.dockerUnavailable, 1);
+  assert.match(
+    formatCalibrationReport({
+      meta: { commit: 'abc', generatedAt: 'now' },
+      topology: {},
+      summary: controlSummary,
+    }),
+    /control \(read-only, \d+ s\): outcome=INCONCLUSIVE valid=NO/,
+  );
+});
+
+test('validity policy: a measurement that failed its bounds is INVALID, not inconclusive', async () => {
+  const at = (walRecords, walSync) => ({ walRecords, walSync, walWrite: 0, walBytes: 0 });
+  const pgbench = {
+    ...parsePgbenchOutput(PGBENCH_OUTPUT),
+    progressIntervals: 60,
+    transactions: 1500,
+  };
+
+  const cases = {
+    // The server refused the probe function itself — ADR-055 § 4 names this INVALID.
+    permissionDenied: await probeFromFailedReading({
+      exitCode: 1,
+      output: `ERROR:  permission denied for function pg_logical_emit_message (role "${LEAKS.user}")`,
+    }),
+    statsReset: {
+      probe: summarizeProbe({ pgbench, before: at(100, 100), after: at(10, 10), seconds: 60 }),
+    },
+    failedTransactions: {
+      probe: summarizeProbe({
+        pgbench: { ...pgbench, failed: 2 },
+        before: at(10, 10),
+        after: at(3100, 1540),
+        seconds: 60,
+      }),
+    },
+    controlContamination: {
+      probe: summarizeProbe({
+        pgbench: { ...pgbench, transactions: 40000, progressIntervals: 10 },
+        before: at(0, 0),
+        after: at(90000, 40000),
+        seconds: 10,
+        control: true,
+      }),
+    },
+    backgroundWalContamination: {
+      probe: summarizeProbe({ pgbench, before: at(10, 10), after: at(20, 12), seconds: 60 }),
+    },
+    // A pgbench that ran to a clean exit and reported nothing: a real, empty
+    // measurement rather than a process that never ran.
+    noProgress: await probeFromBench({ output: benchOutput(0) }),
+  };
+
+  for (const [label, result] of Object.entries(cases)) {
+    assert.equal(result.probe.outcome, 'INVALID', `${label} must be INVALID`);
+    assert.equal(result.probe.valid, false, `${label} is not valid`);
+    const summary = summarizeCalibration({
+      pairs: 1,
+      results: [
+        {
+          id: calibrationProbeId(1),
+          passed: false,
+          probe: result.probe,
+          diagnostics: result.probe.diagnostics,
+        },
+      ],
+    });
+    assert.equal(summary.rows[0].outcome, 'INVALID', label);
+    assert.deepEqual(summary.outcomes, { VALID: 0, INVALID: 1, INCONCLUSIVE: 0 }, label);
+    assertNoLeak(result.probe, `the ${label} probe`);
+  }
+
+  // `noProgress` flips to INCONCLUSIVE the moment the pgbench process itself did
+  // not complete: then there was no measurement to call empty.
+  const killed = await probeFromBench({
+    outcome: PROCESS_OUTCOME.timedOut,
+    exitCode: 1,
+    output: benchOutput(0),
+  });
+  assert.equal(killed.probe.outcome, 'INCONCLUSIVE', 'a killed pgbench measured nothing');
+  assert.ok(countCategories(killed.diagnostics).noProgress > 0, 'the category is still kept');
+  assert.equal(countCategories(killed.diagnostics).timeout, 1);
+  // And its partial output contributes no figure: a summary that was never
+  // finished parses to zeros a distribution would otherwise average in.
+  const killedSummary = summarizeCalibration({
+    pairs: 1,
+    results: [{ ...killed, id: calibrationProbeId(1) }],
+  });
+  for (const [name, stats] of Object.entries(killedSummary.distributions)) {
+    assert.equal(stats.count, 1, name);
+    assert.equal(stats.available, 0, `${name} must record no observation`);
+  }
+  for (const field of ['tps', 'transactions', 'longestZeroCommitSeconds', 'zeroCommitIntervals']) {
+    assert.equal(killed.probe[field], null, `${field} must stay unavailable`);
+  }
+});
+
+test('validity policy: a clean measurement is VALID, and a missing probe or control is INCONCLUSIVE', async () => {
+  const clean = await probeFromBench({ output: benchOutput(1500) });
+  assert.equal(clean.probe.outcome, 'VALID');
+  assert.equal(clean.probe.valid, true, clean.probe.problems.join('; '));
+  assert.equal(clean.passed, true);
+  assert.deepEqual(clean.diagnostics, []);
+
+  const summary = summarizeCalibration({
+    pairs: 2,
+    results: [{ ...clean, id: calibrationProbeId(1) }],
+  });
+  assert.equal(summary.rows[0].outcome, 'VALID');
+  assert.equal(summary.rows[1].outcome, 'INCONCLUSIVE', 'a probe that was never run');
+  assert.equal(summary.rows[1].probe, null);
+  assert.equal(summary.control, null);
+  assert.equal(summary.controlOutcome, 'INCONCLUSIVE', 'a control that never ran');
+  assert.match(
+    formatCalibrationReport({ meta: { commit: 'abc', generatedAt: 'now' }, topology: {}, summary }),
+    /control: not run, outcome=INCONCLUSIVE/,
+  );
+
+  // `probeOutcomeOf` never guesses from `valid` or from prose.
+  assert.equal(probeOutcomeOf(undefined), 'INCONCLUSIVE');
+  assert.equal(
+    probeOutcomeOf({ probe: { valid: false, problems: ['permission denied'] } }),
+    'INCONCLUSIVE',
+  );
+  assert.equal(probeOutcomeOf({ probe: { valid: true } }), 'INCONCLUSIVE');
+  assert.equal(
+    probeOutcomeOf({ diagnostics: [diagnostic(['backgroundWalContamination'], 'x')] }),
+    'INVALID',
+  );
+
+  // A failing stress suite after a valid probe leaves the pair VALID and stays a
+  // product-test failure, acquiring no infrastructure category.
+  const paired = summarizeCalibration({
+    pairs: 1,
+    results: [
+      { ...clean, id: calibrationProbeId(1) },
+      {
+        ...summarizeJestRun({
+          step: stressStep,
+          result: bounded({ launcher: LAUNCHER.pnpm, tool: null, exitCode: 1 }),
+          report: report([assertion(fullName, 'failed'), ...others]),
+          walBefore: { walSync: 10 },
+          walAfter: { walSync: 20 },
+        }),
+        id: calibrationStressId(1),
+      },
+    ],
+  });
+  assert.equal(paired.rows[0].outcome, 'VALID', 'a failed suite is not an invalid probe');
+  assert.equal(paired.rows[0].stress.passed, false);
+  assert.equal(paired.infrastructure.harnessError, 0);
+  assert.equal(paired.infrastructure.timeout, 0);
+  assert.deepEqual(paired.outcomes, { VALID: 1, INVALID: 0, INCONCLUSIVE: 0 });
 });

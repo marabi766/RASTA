@@ -547,6 +547,34 @@ concurrent captures from four independent database clients` با `57014`، ۲۱/
 > یکپارچه‌سازی CI؛ کران ۲۹٫۲ همچنان بی Provenance. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛
 > AUD-004 بسته نشد.
 >
+> **پیگیری همان روز (حالت صریح اعتبار — تفکیک `INCONCLUSIVE` از `INVALID` پیش از هر نمونه):** گام قبلی **دسته** را درست کرد
+> ولی **حکم اعتبار** را نه، و آزمونش جملهٔ نادرست «Probeای که نتوانست اندازه بگیرد همچنان `INVALID` است» را تثبیت کرده بود.
+> **بازتولید روی `b0cf196` (پیش از تغییر)، از راه `measureProbe()` → `summarizeCalibration()`:** با `result.error` غایب،
+> `result.probe.valid = false` و تشخیص `connectionFailure`، نتیجهٔ جفت `INVALID` می‌شد (`{VALID:0, INVALID:1,
+INCONCLUSIVE:0}`) — یعنی «سنجیدم و رد شد» برای سروری که هرگز در دسترس نبود. **پس از تغییر:** `probe.outcome` و نتیجهٔ جفت
+> `INCONCLUSIVE` (`{VALID:0, INVALID:0, INCONCLUSIVE:1}`). علت: `emptyProbe` فقط `valid: false` می‌داد و
+> `summarizeCalibration()` هر `valid === false` را `INVALID` می‌نامید. **راه‌حل:** خودِ نتیجهٔ Probe یک حالت صریح متناهی حمل
+> می‌کند (`probe.outcome`، از همان سه برچسب موجود؛ هیچ برچسب توانایی اضافه نشد)، `summarizeCalibration()` آن را **می‌خواند**
+> (`probeOutcomeOf`) و دیگر از `problems` یا `valid: false` استنتاج نمی‌کند، و `probe.valid` مشتق است (`true` تنها برای
+> `VALID`). نگاشت از یک جدول یکتا می‌آید (`CATEGORY_VALIDITY`، بی هیچ Regex) با تقدم قطعی: **`INCONCLUSIVE`** برای
+> `missingEnvironment`، `dockerUnavailable`، `pgbenchUnavailable`، `psqlUnavailable`، `connectionFailure`،
+> `statsUnreadable`، `timeout`، `harnessError` و `other`؛ **`INVALID`** برای `permissionDenied`، `statsReset`،
+> `failedTransactions`، `controlContamination`، `backgroundWalContamination` و `noProgress`؛ **`VALID`** تنها با نبودِ هر
+> تشخیص. **اگر هر دو نوع هم‌زمان باشند `INCONCLUSIVE` برنده است** و ترتیب ورود پاسخ را عوض نمی‌کند. **نقص دومی که در همین
+> گام پیدا شد:** وقتی فرایند `pgbench` کامل نمی‌شد، خروجی ناقصش باز هم تجزیه می‌شد و `longest_zero_commit_s = 0` را
+> به‌عنوان مشاهده وارد توزیع می‌کرد؛ اکنون در آن حالت دسته‌ها نگه داشته و ارقام دور ریخته می‌شوند. Probeِ اندازه‌نگرفته
+> **هیچ عدد ساختگی** ندارد (همه `null`، نه `0`) ولی جفت با `available=0` در مخرج می‌ماند. Control هم حالت صریح گرفت
+> (`summary.controlOutcome`)؛ Controlِ اجرانشده `INCONCLUSIVE` است، نه `valid=no`. **حفظ شد:** چسبندگی ساخت‌یافتهٔ دسته‌ها و
+> نبودِ بازخوانی نثر (`classifyInfrastructureProblems` بازنگشت)، کران‌های عددی اعتبار، SQL ‏Probe، ثابت‌ها و Selectorهای فشار،
+> مجاورت جفت، نبود Retry، دستی‌بودن، قرارداد ایستا و معنای خروج غیرصفر. **شواهد:**
+> `node --test scripts/aggregation-evidence.test.mjs` ۳۶/۳۶ (۴ تازه)، `pnpm run test:aggregation-evidence-lib` ۳۶/۳۶،
+> `pnpm run test:test-phases` ۲۱/۲۱، `pnpm run check:test-phases` خروج ۰، `pnpm run progress:check` خروج ۰،
+> `pnpm lint` و `pnpm typecheck` سبز، `pnpm format:check` تمیز، ESLint مستقیم روی دو فایل تغییریافته بی رگرسیون (همان ۱۳
+> خطای `no-undef` پیش‌زمینه‌ای برای `structuredClone`، پیش و پس یکسان)، `git diff --check` تمیز. **کمپین زنده اجرا نشد**
+> (طبق دستور). **هنوز نیست:** مجموعه‌دادهٔ دوطرفه، عدد آستانه، حاشیهٔ ایمنی، Classifier توانایی، دروازهٔ Fail-Fast و
+> یکپارچه‌سازی CI؛ کران ۲۹٫۲ همچنان بی Provenance. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛
+> AUD-004 بسته نشد.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس
