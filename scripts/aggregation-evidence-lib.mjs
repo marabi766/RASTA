@@ -20,7 +20,10 @@
  * credential, row, identifier or failure message.
  *
  * Everything here takes plain values and is unit-tested
- * (`pnpm test:aggregation-evidence-lib`); the runner executes the plan.
+ * (`pnpm test:aggregation-evidence-lib`); the runner executes the plan. That
+ * includes the diagnostic transport: `measureProbe` and `summarizeJestRun` take
+ * their subprocess results as parameters, so why a step could not measure is
+ * carried end to end and asserted without Docker or PostgreSQL.
  */
 
 /** The unchanged proof, selected by its exact title. */
@@ -252,73 +255,274 @@ export function parseEvidenceArgs(argv) {
   return { mode: 'calibrate', pairs, reportPath };
 }
 
+// ---------------------------------------------------------------------------
+// Structured, secret-safe diagnostics
+//
+// Why a category is *carried* and never re-derived. A step that cannot produce
+// evidence knows exactly why at the moment it fails — the child's own output is
+// still in hand there, and nowhere else. Rendering that knowledge as prose and
+// classifying the prose again later throws it away: a `psql` that could not
+// reach the server becomes "something exited 1", and the campaign reports a
+// harness error where an unreachable database happened.
+//
+// So the category is fixed **once**, at the source, and from then on only fixed
+// category names, a fixed launcher identity, a fixed tool identity and numbers
+// travel onward. The text beside them exists for a human to read; nothing
+// downstream parses it, and no report depends on it.
+
 /**
- * Finite, secret-safe classification of why a step could not produce evidence.
- *
- * Input is the aggregate problem strings the harness already built — never raw
- * child-process output. Output is category counts and the matched reason codes,
- * so a report can say *what kind* of thing went wrong without carrying a URL, a
- * credential, a row or a test identifier.
+ * The finite infrastructure vocabulary — the one canonical set of reason codes.
  *
  * Deliberately contains no capability category: nothing here may become
  * "too slow".
  */
-const INFRASTRUCTURE_CATEGORIES = Object.freeze([
-  ['missingEnvironment', /missing environment|required environment/i],
-  [
-    'dockerUnavailable',
-    /docker (?:not found|unavailable|could not start)|cannot connect to the docker/i,
-  ],
-  [
-    'pgbenchUnavailable',
-    /pgbench (?:not found|unavailable|is not installed)|executable file not found.*pgbench/i,
-  ],
-  ['psqlUnavailable', /psql (?:not found|unavailable|is not installed)/i],
-  [
-    'connectionFailure',
-    /could not connect|connection refused|ECONNREFUSED|ECONNRESET|no such host|could not translate host/i,
-  ],
-  [
-    'permissionDenied',
-    /permission denied|must be superuser|insufficient privilege|denied for function/i,
-  ],
-  [
-    'statsUnreadable',
-    /pg_stat_wal: no row|pg_stat_wal could not be read|relation "pg_stat_wal" does not exist/i,
-  ],
-  ['statsReset', /pg_stat_wal went backwards/i],
-  ['timeout', /after its bound|timed out|process bound exceeded|statement timeout/i],
-  ['failedTransactions', /failed transaction\(s\)/i],
-  ['controlContamination', /read-only control flushed WAL/i],
-  ['backgroundWalContamination', /is not approximately one|below message \+ commit/i],
-  ['noProgress', /reported no completed transaction|reported no tps|printed \d+ progress lines/i],
-  [
-    'harnessError',
-    /exited \d+|could not be written|launcher not found|no jest report|collected no test/i,
-  ],
+export const INFRASTRUCTURE_CATEGORY = Object.freeze({
+  missingEnvironment: 'missingEnvironment',
+  dockerUnavailable: 'dockerUnavailable',
+  pgbenchUnavailable: 'pgbenchUnavailable',
+  psqlUnavailable: 'psqlUnavailable',
+  connectionFailure: 'connectionFailure',
+  permissionDenied: 'permissionDenied',
+  statsUnreadable: 'statsUnreadable',
+  statsReset: 'statsReset',
+  timeout: 'timeout',
+  failedTransactions: 'failedTransactions',
+  controlContamination: 'controlContamination',
+  backgroundWalContamination: 'backgroundWalContamination',
+  noProgress: 'noProgress',
+  harnessError: 'harnessError',
+});
+
+/** The category names, in report order. Fixed, so a report is deterministic. */
+export const INFRASTRUCTURE_CATEGORY_NAMES = Object.freeze([
+  ...Object.values(INFRASTRUCTURE_CATEGORY),
+  'other',
 ]);
 
-export function classifyInfrastructureProblems(problems) {
-  const counts = Object.fromEntries([
-    ...INFRASTRUCTURE_CATEGORIES.map(([name]) => [name, 0]),
-    ['other', 0],
-  ]);
-  for (const problem of problems ?? []) {
-    const text = String(problem);
-    const matched = INFRASTRUCTURE_CATEGORIES.filter(([, pattern]) => pattern.test(text)).map(
-      ([name]) => name,
-    );
-    for (const name of matched) counts[name] += 1;
-    if (matched.length === 0) counts.other += 1;
+const KNOWN_CATEGORIES = new Set(INFRASTRUCTURE_CATEGORY_NAMES);
+
+/**
+ * Known names only, deduplicated, in report order — the single normalization
+ * path. An unknown name is dropped rather than invented into the vocabulary.
+ */
+export function normalizeCategories(categories) {
+  const seen = new Set();
+  for (const value of categories ?? []) if (KNOWN_CATEGORIES.has(value)) seen.add(value);
+  return INFRASTRUCTURE_CATEGORY_NAMES.filter((name) => seen.has(name));
+}
+
+/** One diagnostic: its fixed categories, and the aggregate line a human reads. */
+export function diagnostic(categories, text) {
+  return { categories: normalizeCategories(categories), text: String(text) };
+}
+
+/**
+ * The single counting path. A diagnostic adds one to each of its categories; a
+ * diagnostic that carries none adds one to `other`, so nothing is dropped
+ * silently. Counting the same diagnostic twice is impossible because a result
+ * keeps exactly one list.
+ */
+export function countCategories(diagnostics) {
+  const counts = Object.fromEntries(INFRASTRUCTURE_CATEGORY_NAMES.map((name) => [name, 0]));
+  for (const entry of diagnostics ?? []) {
+    const names = normalizeCategories(entry?.categories);
+    if (names.length === 0) counts.other += 1;
+    else for (const name of names) counts[name] += 1;
   }
   return counts;
 }
 
-/** The category names, in report order. Fixed, so a report is deterministic. */
-export const INFRASTRUCTURE_CATEGORY_NAMES = Object.freeze([
-  ...INFRASTRUCTURE_CATEGORIES.map(([name]) => name),
-  'other',
+/** Sums category counts, keeping every name in the total even at zero. */
+export function totalCategories(counts) {
+  return counts.reduce(
+    (total, one) => {
+      for (const name of INFRASTRUCTURE_CATEGORY_NAMES) total[name] += one?.[name] ?? 0;
+      return total;
+    },
+    Object.fromEntries(INFRASTRUCTURE_CATEGORY_NAMES.map((name) => [name, 0])),
+  );
+}
+
+/**
+ * Records one diagnostic on a probe or a suite summary, keeping its text in the
+ * human-readable `problems` list. The two lists are written together here and
+ * nowhere else, so they cannot drift and `problems` is never the source of a
+ * category.
+ */
+export function addDiagnostic(target, entry) {
+  target.diagnostics.push(entry);
+  target.problems.push(entry.text);
+  return target;
+}
+
+/**
+ * A failure that already knows its categories. It carries no child output, no
+ * command arguments, no connection data and no OS error text — only the fixed
+ * diagnostic built where the cause was still visible.
+ */
+export class DiagnosticError extends Error {
+  constructor(entry) {
+    super(entry.text);
+    this.name = 'DiagnosticError';
+    this.diagnostic = entry;
+  }
+}
+
+/**
+ * Any thrown value as a fixed diagnostic. A throw that did not bring its own
+ * categories keeps `harnessError` and **loses its message**: an arbitrary
+ * message can carry a path, a username, a host or a credential, and no report
+ * needs one.
+ */
+export function diagnosticFromError(error) {
+  const attached = error?.diagnostic;
+  if (attached && Array.isArray(attached.categories)) {
+    return diagnostic(attached.categories, attached.text ?? 'the step could not measure');
+  }
+  return diagnostic([INFRASTRUCTURE_CATEGORY.harnessError], 'the step could not measure');
+}
+
+/**
+ * The fixed launchers this harness may start. A diagnostic names one of these
+ * and never a command line, so a reader learns *what* was asked for without the
+ * arguments, the environment or the connection behind it.
+ */
+export const LAUNCHER = Object.freeze({
+  docker: 'docker',
+  pnpm: 'pnpm',
+  jest: 'jest',
+  git: 'git',
+});
+
+/** The fixed tools run inside the pinned PostgreSQL image, through `docker`. */
+export const IN_IMAGE_TOOL = Object.freeze({ psql: 'psql', pgbench: 'pgbench' });
+
+/**
+ * How a bounded process ended. Three outcomes, and never an OS error message:
+ * the launcher itself could not start, the child ran to an exit code, or the
+ * hard time bound killed it.
+ */
+export const PROCESS_OUTCOME = Object.freeze({
+  completed: 'completed',
+  launcherFailed: 'launcherFailed',
+  timedOut: 'timedOut',
+});
+
+/**
+ * What a child's *own* output shows. These patterns describe Docker's and
+ * PostgreSQL's messages — not this harness's prose — and they are applied
+ * exactly once, where the raw text is still in hand. Only fixed names leave.
+ */
+const OUTPUT_CATEGORIES = Object.freeze([
+  [
+    INFRASTRUCTURE_CATEGORY.dockerUnavailable,
+    /cannot connect to the docker daemon|is the docker daemon running|error during connect|docker daemon is not running|docker: command not found/i,
+  ],
+  [
+    INFRASTRUCTURE_CATEGORY.connectionFailure,
+    /could not connect|connection to server .{0,200}failed|connection refused|ECONNREFUSED|ECONNRESET|no such host|could not translate host|server closed the connection unexpectedly|password authentication failed/i,
+  ],
+  [
+    INFRASTRUCTURE_CATEGORY.permissionDenied,
+    /permission denied|must be superuser|insufficient privilege|denied for function/i,
+  ],
+  [INFRASTRUCTURE_CATEGORY.statsUnreadable, /relation "pg_stat_wal" does not exist/i],
+  [INFRASTRUCTURE_CATEGORY.timeout, /canceling statement due to statement timeout|\b57014\b/i],
 ]);
+
+/**
+ * A container that started but could not exec what was asked of it. Which tool
+ * is missing comes from the **request**, not from the text: the runner names
+ * the in-image tool it launched, so `psql` and `pgbench` stay distinguishable
+ * without parsing a message for a program name.
+ */
+const EXECUTABLE_MISSING = /executable file not found|command not found|no such file or directory/i;
+
+export function categoriesFromProcessOutput(text, { tool = null } = {}) {
+  const output = String(text ?? '');
+  const found = new Set();
+  for (const [name, pattern] of OUTPUT_CATEGORIES) if (pattern.test(output)) found.add(name);
+  if (EXECUTABLE_MISSING.test(output)) {
+    if (tool === IN_IMAGE_TOOL.psql) found.add(INFRASTRUCTURE_CATEGORY.psqlUnavailable);
+    else if (tool === IN_IMAGE_TOOL.pgbench) found.add(INFRASTRUCTURE_CATEGORY.pgbenchUnavailable);
+    else found.add(INFRASTRUCTURE_CATEGORY.harnessError);
+  }
+  return normalizeCategories([...found]);
+}
+
+const known = (value, vocabulary) => (Object.values(vocabulary).includes(value) ? value : null);
+
+/**
+ * The finite diagnostic of one bounded process result.
+ *
+ * It reads the child's output only to match it once, here. What it returns is
+ * fixed category names, a fixed launcher, a fixed tool and numbers — no output,
+ * no arguments, no environment, no connection data. A launcher that could not
+ * spawn is typed by *which* launcher it was, so a Docker CLI that cannot start
+ * or cannot reach its daemon is `dockerUnavailable` rather than an anonymous
+ * exit 127.
+ */
+export function processDiagnostic({
+  launcher,
+  tool = null,
+  outcome,
+  exitCode = null,
+  output = '',
+} = {}) {
+  const requestedTool = known(tool, IN_IMAGE_TOOL);
+  const requestedLauncher = known(launcher, LAUNCHER);
+  const found = new Set(categoriesFromProcessOutput(output, { tool: requestedTool }));
+  if (outcome === PROCESS_OUTCOME.timedOut) found.add(INFRASTRUCTURE_CATEGORY.timeout);
+  if (outcome === PROCESS_OUTCOME.launcherFailed) {
+    found.add(
+      requestedLauncher === LAUNCHER.docker
+        ? INFRASTRUCTURE_CATEGORY.dockerUnavailable
+        : INFRASTRUCTURE_CATEGORY.harnessError,
+    );
+  }
+  // A nonzero exit nobody recognized is still a harness fact, not an unknown.
+  if (found.size === 0) found.add(INFRASTRUCTURE_CATEGORY.harnessError);
+  return {
+    launcher: requestedLauncher,
+    tool: requestedTool,
+    outcome: known(outcome, PROCESS_OUTCOME) ?? PROCESS_OUTCOME.launcherFailed,
+    exitCode: Number.isInteger(exitCode) ? exitCode : null,
+    categories: normalizeCategories([...found]),
+  };
+}
+
+/** The one human-readable line for a process diagnostic: fixed words, fixed names, numbers. */
+export function describeProcessDiagnostic(detail) {
+  const launcher = detail.launcher ?? 'an unpinned launcher';
+  const what = detail.tool ? `${detail.tool} via ${launcher}` : launcher;
+  const how =
+    detail.outcome === PROCESS_OUTCOME.launcherFailed
+      ? 'could not start'
+      : detail.outcome === PROCESS_OUTCOME.timedOut
+        ? 'exceeded its time bound'
+        : `exited ${detail.exitCode === null ? 'unknown' : detail.exitCode}`;
+  return `${what} ${how} (${detail.categories.join(', ') || 'other'})`;
+}
+
+/** One bounded process result as a diagnostic ready to record. */
+export function processDiagnosticEntry(result, note = '') {
+  const detail = processDiagnostic(result ?? {});
+  return diagnostic(
+    detail.categories,
+    `${describeProcessDiagnostic(detail)}${note ? ` ${note}` : ''}`,
+  );
+}
+
+/**
+ * The output of a bounded result that succeeded, or a typed refusal carrying
+ * the categories of why it did not. The refusal never carries the output.
+ */
+export function checkedOutput(result) {
+  if (result?.outcome !== PROCESS_OUTCOME.completed || result?.exitCode !== 0) {
+    throw new DiagnosticError(processDiagnosticEntry(result));
+  }
+  return String(result.output ?? '');
+}
 
 /**
  * Count, min, median and max of the available values, plus how many were not
@@ -358,17 +562,14 @@ export function distribution(values) {
 export function summarizeCalibration({ pairs, results }) {
   const byId = Object.fromEntries((results ?? []).map((result) => [result.id, result]));
   const control = byId.control ?? null;
+  // Categories come from the diagnostics a step already attached, never from
+  // re-reading the prose it also produced.
+  const diagnosticsOf = (result) => result?.diagnostics ?? [];
   const rows = [];
   for (let pair = 1; pair <= pairs; pair += 1) {
     const probeResult = byId[calibrationProbeId(pair)] ?? null;
     const stressResult = byId[calibrationStressId(pair)] ?? null;
     const probe = probeResult?.probe ?? null;
-    const problems = [
-      ...(probe?.problems ?? []),
-      ...(probeResult?.error ? [probeResult.error] : []),
-      ...(stressResult?.error ? [stressResult.error] : []),
-      ...(stressResult?.summary?.problems ?? []),
-    ];
     let outcome;
     if (!probeResult || !probe) outcome = 'INCONCLUSIVE';
     else if (probeResult.error) outcome = 'INCONCLUSIVE';
@@ -407,15 +608,27 @@ export function summarizeCalibration({ pairs, results }) {
             problems: stressResult.summary?.problems ?? [],
           }
         : null,
-      infrastructure: classifyInfrastructureProblems(problems),
+      infrastructure: countCategories([
+        ...diagnosticsOf(probeResult),
+        ...diagnosticsOf(stressResult),
+      ]),
     });
   }
   const pick = (get) => distribution(rows.map(get));
+  // The control is not a pair, so it keeps its own explicit fixed-category
+  // total rather than being folded into the per-pair denominator. A failed
+  // control is then a number, not only a sentence.
+  const controlInfrastructure = countCategories(diagnosticsOf(control));
   return {
     pairs,
     control: control
-      ? { valid: control.probe?.valid === true, problems: control.probe?.problems ?? [] }
+      ? {
+          valid: control.probe?.valid === true,
+          problems: control.probe?.problems ?? [],
+          infrastructure: controlInfrastructure,
+        }
       : null,
+    controlInfrastructure,
     rows,
     outcomes: Object.fromEntries(
       CALIBRATION_OUTCOMES.map((name) => [name, rows.filter((row) => row.outcome === name).length]),
@@ -428,15 +641,7 @@ export function summarizeCalibration({ pairs, results }) {
       probeLongestStallSeconds: pick((row) => row.probe?.longestZeroCommitSeconds ?? null),
       stressWallSeconds: pick((row) => row.stress?.wallSeconds ?? null),
     },
-    infrastructure: rows.reduce(
-      (total, row) => {
-        for (const name of INFRASTRUCTURE_CATEGORY_NAMES) {
-          total[name] = (total[name] ?? 0) + row.infrastructure[name];
-        }
-        return total;
-      },
-      Object.fromEntries(INFRASTRUCTURE_CATEGORY_NAMES.map((name) => [name, 0])),
-    ),
+    infrastructure: totalCategories(rows.map((row) => row.infrastructure)),
   };
 }
 
@@ -516,39 +721,69 @@ export function parsePgbenchOutput(text) {
   };
 }
 
-/** `wal_records|wal_sync|wal_write|wal_bytes` from psql's unaligned tuples-only output. */
+/**
+ * `wal_records|wal_sync|wal_write|wal_bytes` from psql's unaligned tuples-only
+ * output. Output that is not that shape refuses with `statsUnreadable`: without
+ * the counter no validity can be shown, and that is not a harness error.
+ */
 export function parseWalStat(text) {
   const line = String(text)
     .split(/\r?\n/)
     .map((l) => l.trim())
     .find((l) => /^\d+\|\d+\|\d+\|\d+$/.test(l));
-  if (!line) throw new Error('pg_stat_wal: no row in the expected shape');
+  if (!line) {
+    throw new DiagnosticError(
+      diagnostic(
+        [INFRASTRUCTURE_CATEGORY.statsUnreadable],
+        'pg_stat_wal: no row in the expected shape',
+      ),
+    );
+  }
   const [walRecords, walSync, walWrite, walBytes] = line.split('|').map(Number);
   return { walRecords, walSync, walWrite, walBytes };
 }
 
-/** Joins a pgbench run with the `pg_stat_wal` readings around it and judges validity. */
+/** The `pg_stat_wal` reading behind one bounded `psql` result, or a typed refusal. */
+export const walStatFrom = (result) => parseWalStat(checkedOutput(result));
+
+/**
+ * Joins a pgbench run with the `pg_stat_wal` readings around it and judges
+ * validity. Every validity problem is recorded with its canonical category at
+ * the point it is found, so nothing downstream has to read the sentence back.
+ */
 export function summarizeProbe({ pgbench, before, after, seconds, control = false }) {
-  const problems = [];
+  const found = { problems: [], diagnostics: [] };
+  const record = (categories, text) => addDiagnostic(found, diagnostic(categories, text));
+  const { problems } = found;
   const syncDelta = after.walSync - before.walSync;
   const recordDelta = after.walRecords - before.walRecords;
   const transactions = pgbench.transactions ?? 0;
   if (!Number.isInteger(pgbench.transactions) || transactions <= 0) {
-    problems.push('pgbench reported no completed transaction');
+    record([INFRASTRUCTURE_CATEGORY.noProgress], 'pgbench reported no completed transaction');
   }
-  if (pgbench.failed !== 0)
-    problems.push(`pgbench reported ${pgbench.failed} failed transaction(s)`);
-  if (pgbench.tps === null) problems.push('pgbench reported no tps');
+  if (pgbench.failed !== 0) {
+    record(
+      [INFRASTRUCTURE_CATEGORY.failedTransactions],
+      `pgbench reported ${pgbench.failed} failed transaction(s)`,
+    );
+  }
+  if (pgbench.tps === null) record([INFRASTRUCTURE_CATEGORY.noProgress], 'pgbench reported no tps');
   if (pgbench.progressIntervals < Math.floor(seconds * 0.9)) {
-    problems.push(`pgbench printed ${pgbench.progressIntervals} progress lines for ${seconds} s`);
+    record(
+      [INFRASTRUCTURE_CATEGORY.noProgress],
+      `pgbench printed ${pgbench.progressIntervals} progress lines for ${seconds} s`,
+    );
   }
-  if (syncDelta < 0 || recordDelta < 0) problems.push('pg_stat_wal went backwards (stats reset?)');
+  if (syncDelta < 0 || recordDelta < 0) {
+    record([INFRASTRUCTURE_CATEGORY.statsReset], 'pg_stat_wal went backwards (stats reset?)');
+  }
   const syncPerTransaction = transactions > 0 ? syncDelta / transactions : null;
   const recordsPerTransaction = transactions > 0 ? recordDelta / transactions : null;
   if (syncPerTransaction !== null) {
     if (control) {
       if (syncPerTransaction > PROBE_VALIDITY.maxControlSyncPerTransaction) {
-        problems.push(
+        record(
+          [INFRASTRUCTURE_CATEGORY.controlContamination],
           `read-only control flushed WAL ${syncPerTransaction.toFixed(4)} times per transaction`,
         );
       }
@@ -557,12 +792,14 @@ export function summarizeProbe({ pgbench, before, after, seconds, control = fals
         syncPerTransaction < PROBE_VALIDITY.minSyncPerTransaction ||
         syncPerTransaction > PROBE_VALIDITY.maxSyncPerTransaction
       ) {
-        problems.push(
+        record(
+          [INFRASTRUCTURE_CATEGORY.backgroundWalContamination],
           `wal_sync per transaction ${syncPerTransaction.toFixed(3)} is not approximately one`,
         );
       }
       if (recordsPerTransaction < PROBE_VALIDITY.minRecordsPerTransaction) {
-        problems.push(
+        record(
+          [INFRASTRUCTURE_CATEGORY.backgroundWalContamination],
           `wal_records per transaction ${recordsPerTransaction.toFixed(3)} is below message + commit`,
         );
       }
@@ -586,7 +823,70 @@ export function summarizeProbe({ pgbench, before, after, seconds, control = fals
     longestZeroCommitSeconds: pgbench.longestZeroCommitSeconds,
     valid: problems.length === 0,
     problems,
+    diagnostics: found.diagnostics,
   };
+}
+
+/** A probe that never measured: the shape of a real one, with its diagnostics and no figures. */
+export function emptyProbe(step, diagnostics) {
+  const entries = diagnostics ?? [];
+  return {
+    control: step.control === true,
+    seconds: step.seconds,
+    transactions: 0,
+    failed: 0,
+    tps: null,
+    latencyAverageMs: null,
+    walSyncDelta: 0,
+    walSyncPerSecond: null,
+    walSyncPerTransaction: null,
+    walRecordsPerTransaction: null,
+    minIntervalTps: null,
+    zeroCommitIntervals: 0,
+    longestZeroCommitSeconds: null,
+    valid: false,
+    problems: entries.map((entry) => entry.text),
+    diagnostics: [...entries],
+  };
+}
+
+/**
+ * One probe step as a value: the `pg_stat_wal` readings around one `pgbench`
+ * run, joined and judged.
+ *
+ * Both subprocesses are **injected**, so the whole diagnostic transport — a
+ * bounded process result becoming a typed diagnostic, that diagnostic reaching
+ * a probe result, and the probe result reaching a campaign summary — is
+ * exercised without Docker or PostgreSQL. `readWalStat` is expected to throw a
+ * `DiagnosticError`; `runPgbench` resolves to a bounded process result. Neither
+ * the output nor the thrown message is retained.
+ */
+export async function measureProbe(step, { readWalStat, runPgbench, settle }) {
+  let before;
+  let after;
+  let bench;
+  try {
+    before = await readWalStat();
+    bench = await runPgbench(step);
+    // A backend flushes its WAL counters when it exits; give that a moment.
+    if (settle) await settle();
+    after = await readWalStat();
+  } catch (error) {
+    const probe = emptyProbe(step, [diagnosticFromError(error)]);
+    return { id: step.id, passed: false, probe, diagnostics: probe.diagnostics };
+  }
+  const probe = summarizeProbe({
+    pgbench: parsePgbenchOutput(bench.output),
+    before,
+    after,
+    seconds: step.seconds,
+    control: step.control === true,
+  });
+  if (bench.outcome !== PROCESS_OUTCOME.completed || bench.exitCode !== 0) {
+    probe.valid = false;
+    addDiagnostic(probe, processDiagnosticEntry(bench));
+  }
+  return { id: step.id, passed: probe.valid, probe, diagnostics: probe.diagnostics };
 }
 
 /** `epoch|wal_sync` samples from a `\watch 1` psql session. */
@@ -698,7 +998,9 @@ const SKIPPED = new Set(['pending', 'skipped', 'todo', 'disabled']);
  * requires that exactly the named proof ran and every other test was filtered.
  */
 export function summarizeJestReport(report, { expectNamed = false } = {}) {
-  const problems = [];
+  const found = { problems: [], diagnostics: [] };
+  const record = (categories, text) => addDiagnostic(found, diagnostic(categories, text));
+  const { problems } = found;
   const assertions = (report?.testResults ?? []).flatMap((suite) => suite.assertionResults ?? []);
   const ran = assertions.filter((a) => !SKIPPED.has(a.status));
   const skipped = assertions.length - ran.length;
@@ -712,19 +1014,27 @@ export function summarizeJestReport(report, { expectNamed = false } = {}) {
     .map((suite) => String(suite.message ?? ''));
   const messages = [...failedAssertions.flatMap((a) => a.failureMessages ?? []), ...suiteErrors];
 
-  if (!report || typeof report.numTotalTests !== 'number') problems.push('no jest report');
-  if ((report?.numTotalTests ?? 0) === 0) problems.push('jest collected no test');
-  if ((report?.numFailedTests ?? 0) > 0) problems.push(`${report.numFailedTests} test(s) failed`);
-  if ((report?.numFailedTestSuites ?? 0) > 0 || (report?.numRuntimeErrorTestSuites ?? 0) > 0) {
-    problems.push('a test suite failed');
+  // A missing or empty report is a harness fact. A report that exists and says
+  // tests failed is a *product* outcome, so it deliberately carries no
+  // infrastructure category and lands in `other` rather than being dressed up
+  // as an environment problem.
+  if (!report || typeof report.numTotalTests !== 'number') {
+    record([INFRASTRUCTURE_CATEGORY.harnessError], 'no jest report');
   }
-  if (report && report.success !== true) problems.push('jest did not report success');
+  if ((report?.numTotalTests ?? 0) === 0) {
+    record([INFRASTRUCTURE_CATEGORY.harnessError], 'jest collected no test');
+  }
+  if ((report?.numFailedTests ?? 0) > 0) record([], `${report.numFailedTests} test(s) failed`);
+  if ((report?.numFailedTestSuites ?? 0) > 0 || (report?.numRuntimeErrorTestSuites ?? 0) > 0) {
+    record([], 'a test suite failed');
+  }
+  if (report && report.success !== true) record([], 'jest did not report success');
 
   let namedDurationMs = null;
   if (expectNamed) {
     const fullName = [...NAMED_PROOF.describePath, NAMED_PROOF.title].join(' ');
     if (ran.length !== 1 || ran[0].fullName !== fullName) {
-      problems.push(`the name filter ran ${ran.length} test(s); exactly the named proof must run`);
+      record([], `the name filter ran ${ran.length} test(s); exactly the named proof must run`);
     } else {
       namedDurationMs = ran[0].duration ?? null;
     }
@@ -745,6 +1055,61 @@ export function summarizeJestReport(report, { expectNamed = false } = {}) {
     namedDurationMs,
     failures: classifyFailures(messages),
     problems,
+    diagnostics: found.diagnostics,
+  };
+}
+
+/**
+ * One jest step as a value: its aggregates, its diagnostics, and the WAL span
+ * around it.
+ *
+ * Takes the bounded process result rather than running anything, so the same
+ * transport can be exercised without jest, Docker or PostgreSQL. A run that
+ * produced a report but failed tests keeps only the report's own problems — an
+ * ordinary failing proof must not be relabelled as an infrastructure failure —
+ * while a run that produced no report, or whose process never started or was
+ * killed by its bound, carries the process diagnostic instead.
+ */
+export function summarizeJestRun({ step, result, report = null, walBefore, walAfter, samples }) {
+  const summary = summarizeJestReport(report, { expectNamed: step.kind === 'jest-named' });
+  if (!report) {
+    addDiagnostic(summary, processDiagnosticEntry(result, 'and wrote no jest report'));
+  } else if (result?.outcome !== PROCESS_OUTCOME.completed) {
+    addDiagnostic(summary, processDiagnosticEntry(result));
+  }
+  const wallSeconds = (result.endedAt - result.startedAt) / 1000;
+  const wal =
+    walBefore && walAfter
+      ? {
+          walSyncDelta: walAfter.walSync - walBefore.walSync,
+          walSyncPerSecond: (walAfter.walSync - walBefore.walSync) / wallSeconds,
+        }
+      : null;
+  if (!wal) {
+    addDiagnostic(
+      summary,
+      diagnostic(
+        [INFRASTRUCTURE_CATEGORY.statsUnreadable],
+        'pg_stat_wal could not be read around the run',
+      ),
+    );
+  }
+  const timedOut = result.outcome === PROCESS_OUTCOME.timedOut;
+  return {
+    id: step.id,
+    passed:
+      result.exitCode === 0 &&
+      result.outcome === PROCESS_OUTCOME.completed &&
+      summary.problems.length === 0,
+    exitCode: result.exitCode,
+    timedOut,
+    startedAt: result.startedAt.toISOString(),
+    endedAt: result.endedAt.toISOString(),
+    wallSeconds,
+    summary,
+    wal,
+    burst: samples ? summarizeBurst(samples) : null,
+    diagnostics: summary.diagnostics,
   };
 }
 
@@ -864,7 +1229,12 @@ export function formatCalibrationReport({ meta, topology, summary }) {
       : 'control: not run',
   ];
   for (const problem of summary.control?.problems ?? []) lines.push(`  problem: ${problem}`);
-  lines.push('');
+  lines.push(
+    `  control infrastructure: ${INFRASTRUCTURE_CATEGORY_NAMES.map(
+      (name) => `${name}=${summary.controlInfrastructure?.[name] ?? 0}`,
+    ).join(' ')}`,
+    '',
+  );
 
   for (const row of summary.rows) {
     lines.push(`pair-${row.pair}: outcome=${row.outcome}`);
@@ -919,8 +1289,11 @@ export function formatCalibrationReport({ meta, topology, summary }) {
     distributionLine('probe_min_interval_tps', summary.distributions.probeMinIntervalTps),
     distributionLine('probe_longest_stall_s', summary.distributions.probeLongestStallSeconds),
     distributionLine('stress_wall_s', summary.distributions.stressWallSeconds),
-    `infrastructure totals: ${INFRASTRUCTURE_CATEGORY_NAMES.map(
+    `infrastructure totals across pairs: ${INFRASTRUCTURE_CATEGORY_NAMES.map(
       (name) => `${name}=${summary.infrastructure[name]}`,
+    ).join(' ')}`,
+    `control infrastructure totals: ${INFRASTRUCTURE_CATEGORY_NAMES.map(
+      (name) => `${name}=${summary.controlInfrastructure?.[name] ?? 0}`,
     ).join(' ')}`,
     '',
     'this campaign does not locate a capability boundary and proposes no threshold (ADR-055 § 6).',

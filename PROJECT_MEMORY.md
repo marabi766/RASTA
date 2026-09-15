@@ -519,6 +519,34 @@ concurrent captures from four independent database clients` با `57014`، ۲۱/
 > آستانه، حاشیهٔ ایمنی، Classifier توانایی، دروازهٔ Fail-Fast و یکپارچه‌سازی CI. کران ۲۹٫۲ همچنان بی Provenance است و جایگزین
 > نشد. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 بسته نشد.
 >
+> **پیگیری 2026-09-15 (انتقال ساخت‌یافتهٔ تشخیص — تعمیر مسیر اجرای واقعی پیش از جمع‌آوری شواهد):** آزمون‌های دستهٔ زیرساخت در
+> گام قبل فقط **خالص** بودند و مسیر اجرای واقعی را پوشش نمی‌دادند؛ خودِ Runner دسته‌ای را که ساخته بود از دست می‌داد.
+> **بازتولید روی `b3355c4` (پیش از تغییر):** `classifyInfrastructureProblems(['psql exited 1 (connectionFailure)'])` →
+> `connectionFailure=0، harnessError=1`؛ همان با `permissionDenied` → `permissionDenied=0، harnessError=1`؛ و
+> `['psql exited 127 (other)']` → `dockerUnavailable=0، harnessError=1`. علت: `psql()` دسته را داخل جمله می‌نوشت،
+> `summarizeCalibration()` جمله را دوباره طبقه‌بندی می‌کرد، و طبقه‌بندِ نثرمحور نام‌های خودش را نمی‌شناخت ولی `exited 1` را
+> می‌شناخت. **پس از تغییر (همان سه مورد، از راه مسیر کامل `psql` → Probe → Summary):** `connectionFailure=1`،
+> `permissionDenied=1`، `dockerUnavailable=1` و در هر سه `harnessError=0`، `other=0`. **راه‌حل:** یک واژگان یکتای صادرشده
+> (`INFRASTRUCTURE_CATEGORY`) و یک مسیر یکتای نرمال‌سازی/شمارش (`normalizeCategories`/`countCategories`)؛ تثبیت دسته **یک بار**
+> همان‌جا که خروجی خام فرزند در دست است (`processDiagnostic`)؛ حذف کاملِ طبقه‌بندِ نثرمحور
+> (`classifyInfrastructureProblems` و جدول Regexش). `runBounded` سه پایان را تفکیک می‌کند
+> (`launcherFailed`/`completed`/`timedOut`) و `launcher` ثابت (`docker`/`pnpm`/`jest`/`git`) و `tool` درون‌تصویری
+> (`psql`/`pgbench`) را نگه می‌دارد **بی** آرگومان، محیط، داده اتصال یا متن خطای سیستم‌عامل؛ کدام ابزار غایب است از **درخواست**
+> می‌آید نه از متن. `measureProbe`/`summarizeJestRun` تشخیص‌ها را روی نتیجه می‌چسبانند و `summarizeCalibration` همان‌ها را جمع
+> می‌زند. **مرزی که حفظ شد:** Suiteای با گزارش Jest و تستِ شکسته دستهٔ زیرساختی نمی‌گیرد (وگرنه اثبات شکست‌خورده «خطای Harness»
+> برچسب می‌خورد). **Control** در یک جمع صریح جداگانه (`controlInfrastructure`) می‌آید، و هر جفتِ تلاش‌شده در مخرج می‌ماند.
+> **نشتی‌های بسته‌شده:** مسیر مطلق Launcher ‏Jest در پیام خطا (نام کاربر/ماشین)، پیام خام `topology()` در Artifact، و خروجی خام
+> `docker info` در گزارش (اکنون فقط توکن با شکل ثابت)؛ پرتابِ بی‌دسته دسته‌اش را نگه می‌دارد و پیامش را از دست می‌دهد.
+> `redact` ضعیف نشد. **قرارداد مجاور:** حذف Script ریشهٔ `calibrate:aggregation-stress` پیش از این **هیچ** مشکلی تولید
+> نمی‌کرد (`[]`)؛ حالا رد می‌شود. **شواهد:** `node --test scripts/aggregation-evidence.test.mjs` ۳۲/۳۲ (۹ تازه، خالص ‎+۸ پس از
+> جایگزینی آزمون نثرمحور)، `pnpm run test:test-phases` ۲۱/۲۱ (۱ تازه)، `pnpm run check:test-phases` خروج ۰،
+> `pnpm run progress:check` خروج ۰، `pnpm lint` و `pnpm typecheck` سبز، `pnpm format:check` تمیز، ESLint مستقیم روی هر
+> `scripts/*.mjs` تغییریافته بی رگرسیون (همان ۳۷ خطای `no-undef` پیش‌زمینه‌ای برای Globalهای Node، پیش و پس از تغییر یکسان)،
+> `git diff --check` تمیز. **کمپین زنده اجرا نشد** (طبق دستور این Iteration): مسیر تشخیص باید پیش از جمع‌آوری شواهد
+> قابل‌اعتماد می‌شد. **هنوز نیست:** مجموعه‌دادهٔ دوطرفه، عدد آستانه، حاشیهٔ ایمنی، Classifier توانایی، دروازهٔ Fail-Fast و
+> یکپارچه‌سازی CI؛ کران ۲۹٫۲ همچنان بی Provenance. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛
+> AUD-004 بسته نشد.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

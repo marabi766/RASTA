@@ -334,3 +334,19 @@ test('calibration: the script itself must stay a bare, pair-count-free entry poi
   noFlag.rootScripts[CALIBRATION_SCRIPT] = 'node scripts/aggregation-evidence.mjs';
   expectProblem(noFlag, /must invoke only/);
 });
+
+test('calibration: deleting the manual entry point is rejected, not silently accepted', () => {
+  // "Manual" means reachable by name only — so the name must exist. Before the
+  // contract said so, deleting the script produced no problem at all and the
+  // shape rules below it asserted nothing.
+  const deleted = real();
+  delete deleted.rootScripts[CALIBRATION_SCRIPT];
+  expectProblem(deleted, new RegExp(`root script "${CALIBRATION_SCRIPT}" must exist`));
+
+  const emptied = real();
+  emptied.rootScripts[CALIBRATION_SCRIPT] = '';
+  expectProblem(emptied, new RegExp(`root script "${CALIBRATION_SCRIPT}" must exist`));
+
+  // And the real repository still has it, so the rule is not vacuously green.
+  assert.deepEqual(validateTestPhases(real()), []);
+});

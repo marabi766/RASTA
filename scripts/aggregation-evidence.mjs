@@ -33,6 +33,15 @@
  * Every step runs; a failing one never stops the rest or is retried. The exit
  * code is non-zero when any step failed, any probe was invalid, or the report
  * could not be written. Only aggregates are printed or written.
+ *
+ * **Why a step's failure is typed here and never re-read.** A subprocess result
+ * is turned into a fixed diagnostic — a launcher, an in-image tool, an outcome,
+ * an exit code and canonical category names — at the one place its raw output
+ * still exists. From there only that diagnostic travels: to the probe or suite
+ * result, to the campaign summary and into the report. No stage parses a
+ * sentence to learn what happened, so an unreachable server stays
+ * `connectionFailure` and a Docker CLI that cannot start stays
+ * `dockerUnavailable` instead of collapsing into "something exited 1".
  */
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -41,24 +50,30 @@ import { cpus, release, tmpdir, totalmem } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  DiagnosticError,
+  INFRASTRUCTURE_CATEGORY,
+  IN_IMAGE_TOOL,
+  LAUNCHER,
+  PROCESS_OUTCOME,
   STRESS,
-  classifyInfrastructureProblems,
+  checkedOutput,
+  countCategories,
+  diagnostic,
+  diagnosticFromError,
   formatCalibrationReport,
   formatReport,
+  measureProbe,
   parseEvidenceArgs,
-  parsePgbenchOutput,
   parseWalSamples,
-  parseWalStat,
   pgbenchArgs,
   planCalibrationRun,
   planEvidenceRun,
   redact,
-  summarizeBurst,
   summarizeCalibration,
-  summarizeJestReport,
-  summarizeProbe,
+  summarizeJestRun,
   validateCalibrationContract,
   validateEvidenceContract,
+  walStatFrom,
 } from './aggregation-evidence-lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -72,20 +87,19 @@ const out = (line) => process.stdout.write(`${line}\n`);
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /**
- * Prints why a step could not produce evidence, as category counts over the
- * aggregate problems the harness already built — never a child process's
- * stdout or stderr, which can carry URLs, credentials, rows and identifiers.
+ * Prints why a step could not produce evidence, as counts over the categories
+ * the step already attached — never a child process's stdout or stderr, which
+ * can carry URLs, credentials, rows and identifiers, and never a re-reading of
+ * the aggregate text printed beside them.
  */
-function reportCategories(label, problems) {
-  const counts = Object.entries(classifyInfrastructureProblems(problems)).filter(
-    ([, count]) => count > 0,
-  );
+function reportDiagnostics(label, diagnostics) {
+  const counts = Object.entries(countCategories(diagnostics)).filter(([, count]) => count > 0);
   out(
     `[evidence] ${label}: ${
       counts.map(([name, count]) => `${name}=${count}`).join(' ') || 'unclassified=0'
     }`,
   );
-  for (const problem of problems) out(`[evidence]   problem: ${redact(String(problem))}`);
+  for (const entry of diagnostics) out(`[evidence]   problem: ${entry.text}`);
 }
 
 const children = new Set();
@@ -105,17 +119,33 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   });
 }
 
+/** The fixed command behind each launcher name. Nothing else may be spawned. */
+const LAUNCHER_COMMAND = Object.freeze({
+  [LAUNCHER.docker]: 'docker',
+  [LAUNCHER.pnpm]: 'pnpm',
+  [LAUNCHER.jest]: process.execPath,
+  [LAUNCHER.git]: 'git',
+});
+
 /**
  * Runs one process with a hard bound, keeping only the tail of its output in
- * memory. Never throws: a process that cannot start reports exit 127.
+ * memory. Never throws, and never keeps an OS error message: the three ways a
+ * run can end — the launcher could not start, the child exited, the bound
+ * killed it — are distinguished by `outcome`, and the caller learns *which*
+ * fixed launcher and in-image tool it asked for without the arguments, the
+ * environment or the connection behind them.
  */
-function runBounded(command, args, { cwd = root, env = process.env, timeoutMs, input } = {}) {
+function runBounded(
+  launcher,
+  args,
+  { cwd = root, env = process.env, timeoutMs, input, tool } = {},
+) {
   return new Promise((done) => {
     const startedAt = new Date();
-    const child = spawn(command, args, {
+    const child = spawn(LAUNCHER_COMMAND[launcher], args, {
       cwd,
       env,
-      shell: process.platform === 'win32' && command === 'pnpm',
+      shell: process.platform === 'win32' && launcher === LAUNCHER.pnpm,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     children.add(child);
@@ -130,14 +160,26 @@ function runBounded(command, args, { cwd = root, env = process.env, timeoutMs, i
       timedOut = true;
       child.kill('SIGKILL');
     }, timeoutMs);
-    const finish = (exitCode) => {
+    const finish = (exitCode, outcome) => {
       clearTimeout(timer);
       children.delete(child);
-      const endedAt = new Date();
-      done({ exitCode, timedOut, output, startedAt, endedAt });
+      done({
+        launcher,
+        tool: tool ?? null,
+        outcome,
+        exitCode,
+        timedOut: outcome === PROCESS_OUTCOME.timedOut,
+        output,
+        startedAt,
+        endedAt: new Date(),
+      });
     };
-    child.on('error', () => finish(127));
-    child.on('close', (code) => finish(code ?? 1));
+    // The spawn error object is deliberately never read: it carries an errno,
+    // a path and a command line, and which launcher failed is already known.
+    child.on('error', () => finish(127, PROCESS_OUTCOME.launcherFailed));
+    child.on('close', (code) =>
+      finish(code ?? 1, timedOut ? PROCESS_OUTCOME.timedOut : PROCESS_OUTCOME.completed),
+    );
     if (input !== undefined) child.stdin.end(input);
     else child.stdin.end();
   });
@@ -154,32 +196,25 @@ const dockerPg = (extra, command) => [
   ...command,
 ];
 
-async function psql(sql) {
-  const result = await runBounded(
-    'docker',
+/** One `psql` execution in the pinned image. The result is typed; the output is never retained. */
+const psqlRun = (sql) =>
+  runBounded(
+    LAUNCHER.docker,
     dockerPg([], ['psql', '-X', '-A', '-t', '-q', '-v', 'ON_ERROR_STOP=1', '-c', sql]),
-    { timeoutMs: 2 * MINUTE },
+    { timeoutMs: 2 * MINUTE, tool: IN_IMAGE_TOOL.psql },
   );
-  if (result.exitCode !== 0) {
-    // The message becomes a probe `problem`, which reaches the report. So it
-    // carries the exit code and a category — never the output itself, which
-    // can hold a connection string, a role name or a server error verbatim.
-    const categories = Object.entries(
-      classifyInfrastructureProblems([redact(result.output.slice(-600))]),
-    )
-      .filter(([, count]) => count > 0)
-      .map(([name]) => name);
-    throw new Error(`psql exited ${result.exitCode} (${categories.join(', ') || 'unclassified'})`);
-  }
-  return result.output;
-}
+
+const psql = async (sql) => checkedOutput(await psqlRun(sql));
 
 const readWal = async () =>
-  parseWalStat(
-    await psql(
+  walStatFrom(
+    await psqlRun(
       "SELECT concat_ws('|', wal_records, wal_sync, wal_write, wal_bytes) FROM pg_stat_wal",
     ),
   );
+
+/** A storage driver name is one fixed token or it is not reported at all. */
+const DRIVER_NAME = /^[A-Za-z0-9_.-]{1,32}$/;
 
 async function topology() {
   const settings = [
@@ -205,9 +240,10 @@ async function topology() {
     ? (readFileSync('/etc/os-release', 'utf8').match(/^PRETTY_NAME="?([^"\n]+)"?/m)?.[1] ??
       'unknown')
     : process.platform;
-  const driver = await runBounded('docker', ['info', '--format', '{{.Driver}}'], {
+  const driver = await runBounded(LAUNCHER.docker, ['info', '--format', '{{.Driver}}'], {
     timeoutMs: MINUTE,
   });
+  const driverName = driver.exitCode === 0 ? driver.output.trim() : '';
   return {
     runner_os: JSON.stringify(osName),
     runner_image:
@@ -217,73 +253,37 @@ async function topology() {
     kernel: release(),
     cpus: cpus().length,
     memory_gib: (totalmem() / 2 ** 30).toFixed(1),
-    docker_storage_driver: driver.exitCode === 0 ? driver.output.trim() : 'unknown',
+    docker_storage_driver: DRIVER_NAME.test(driverName) ? driverName : 'unknown',
     postgres_image: image,
-    ...Object.fromEntries(settings.map((name, index) => [name, row[index] ?? 'unknown'])),
+    // Server settings are fixed names with short fixed-shape values; `redact`
+    // stays on top of them so a surprising value cannot become the exception.
+    ...Object.fromEntries(settings.map((name, index) => [name, redact(row[index] ?? 'unknown')])),
   };
 }
 
-async function runProbe(step) {
+/** Writes the probe script and runs the injected plan step through the shared helper. */
+function runProbe(step) {
   const scriptPath = join(workDir, `${step.id}.sql`);
   writeFileSync(scriptPath, `${step.sql}\n`);
-  let before;
-  let after;
-  let bench;
-  try {
-    before = await readWal();
-    bench = await runBounded(
-      'docker',
-      dockerPg(
-        ['-v', `${workDir}:/probe:ro`],
-        ['pgbench', ...pgbenchArgs({ seconds: step.seconds, scriptPath: `/probe/${step.id}.sql` })],
+  return measureProbe(step, {
+    readWalStat: readWal,
+    runPgbench: (probeStep) =>
+      runBounded(
+        LAUNCHER.docker,
+        dockerPg(
+          ['-v', `${workDir}:/probe:ro`],
+          [
+            'pgbench',
+            ...pgbenchArgs({
+              seconds: probeStep.seconds,
+              scriptPath: `/probe/${probeStep.id}.sql`,
+            }),
+          ],
+        ),
+        { timeoutMs: probeStep.seconds * 1000 + 2 * MINUTE, tool: IN_IMAGE_TOOL.pgbench },
       ),
-      { timeoutMs: step.seconds * 1000 + 2 * MINUTE },
-    );
-    // A backend flushes its WAL counters when it exits; give that a moment.
-    await sleep(1500);
-    after = await readWal();
-  } catch (error) {
-    const probe = { valid: false, problems: [redact(error.message)] };
-    return { id: step.id, passed: false, probe: emptyProbe(step, probe) };
-  }
-  const probe = summarizeProbe({
-    pgbench: parsePgbenchOutput(bench.output),
-    before,
-    after,
-    seconds: step.seconds,
-    control: step.control === true,
+    settle: () => sleep(1500),
   });
-  if (bench.exitCode !== 0 || bench.timedOut) {
-    probe.valid = false;
-    probe.problems.push(
-      `pgbench exited ${bench.exitCode}${bench.timedOut ? ' after its bound' : ''}`,
-    );
-    // Only the aggregate problem and its category leave this function. An
-    // output tail — even redacted — can still carry row values, identifiers
-    // and command environments that no report needs.
-    reportCategories(`${step.id} probe`, probe.problems);
-  }
-  return { id: step.id, passed: probe.valid, probe };
-}
-
-function emptyProbe(step, { problems }) {
-  return {
-    control: step.control === true,
-    seconds: step.seconds,
-    transactions: 0,
-    failed: 0,
-    tps: null,
-    latencyAverageMs: null,
-    walSyncDelta: 0,
-    walSyncPerSecond: null,
-    walSyncPerTransaction: null,
-    walRecordsPerTransaction: null,
-    minIntervalTps: null,
-    zeroCommitIntervals: 0,
-    longestZeroCommitSeconds: null,
-    valid: false,
-    problems,
-  };
 }
 
 /** A `\watch 1` psql session sampling `pg_stat_wal` until stopped. */
@@ -291,29 +291,46 @@ function startSampler(id) {
   const name = `rasta-evidence-sampler-${process.pid}-${id}`;
   containers.add(name);
   const run = runBounded(
-    'docker',
+    LAUNCHER.docker,
     dockerPg(['-i', '--name', name], ['psql', '-X', '-A', '-t', '-q']),
     {
       timeoutMs: 40 * MINUTE,
+      tool: IN_IMAGE_TOOL.psql,
       input:
         "SELECT extract(epoch FROM clock_timestamp())::numeric(16,3) || '|' || wal_sync FROM pg_stat_wal \\watch 1\n",
     },
   );
   return async () => {
-    await runBounded('docker', ['kill', '--signal', 'INT', name], { timeoutMs: MINUTE });
+    await runBounded(LAUNCHER.docker, ['kill', '--signal', 'INT', name], { timeoutMs: MINUTE });
     const stopped = await Promise.race([run, sleep(10_000).then(() => null)]);
-    if (!stopped) await runBounded('docker', ['rm', '-f', name], { timeoutMs: MINUTE });
+    if (!stopped) await runBounded(LAUNCHER.docker, ['rm', '-f', name], { timeoutMs: MINUTE });
     containers.delete(name);
     return parseWalSamples((stopped ?? (await run)).output);
   };
 }
 
-/** The package's own jest launcher. `jest/bin/jest.js` is not an exported subpath, so go through the manifest. */
+/**
+ * The package's own jest launcher. `jest/bin/jest.js` is not an exported
+ * subpath, so go through the manifest. A failure here refuses with a category
+ * and no path: an absolute path names a user and a machine.
+ */
 function jestBin() {
-  const manifest = createRequire(join(packageDir, 'package.json')).resolve('jest/package.json');
-  const { bin } = JSON.parse(readFileSync(manifest, 'utf8'));
-  const path = join(dirname(manifest), typeof bin === 'string' ? bin : bin.jest);
-  if (!existsSync(path)) throw new Error(`jest launcher not found at ${path}`);
+  let path;
+  try {
+    const manifest = createRequire(join(packageDir, 'package.json')).resolve('jest/package.json');
+    const { bin } = JSON.parse(readFileSync(manifest, 'utf8'));
+    path = join(dirname(manifest), typeof bin === 'string' ? bin : bin.jest);
+  } catch {
+    path = null;
+  }
+  if (!path || !existsSync(path)) {
+    throw new DiagnosticError(
+      diagnostic(
+        [INFRASTRUCTURE_CATEGORY.harnessError],
+        'the jest launcher could not be resolved in the identity package',
+      ),
+    );
+  }
   return path;
 }
 
@@ -329,12 +346,12 @@ async function runJest(step) {
   const stopSampler = named ? startSampler(step.id) : null;
   const env = { ...process.env, NODE_ENV: 'test' };
   const result = named
-    ? await runBounded(
-        process.execPath,
-        [jestBin(), ...step.jestArgs, `--outputFile=${reportPath}`],
-        { cwd: packageDir, env, timeoutMs: 8 * MINUTE },
-      )
-    : await runBounded('pnpm', [...step.pnpmArgs, `--outputFile=${reportPath}`], {
+    ? await runBounded(LAUNCHER.jest, [jestBin(), ...step.jestArgs, `--outputFile=${reportPath}`], {
+        cwd: packageDir,
+        env,
+        timeoutMs: 8 * MINUTE,
+      })
+    : await runBounded(LAUNCHER.pnpm, [...step.pnpmArgs, `--outputFile=${reportPath}`], {
         env,
         timeoutMs: 30 * MINUTE,
       });
@@ -354,34 +371,7 @@ async function runJest(step) {
       report = null;
     }
   }
-  const summary = summarizeJestReport(report, { expectNamed: named });
-  if (!report) {
-    summary.problems.push(
-      `${step.id} wrote no jest report (exit ${result.exitCode}${result.timedOut ? ', after its bound' : ''})`,
-    );
-    reportCategories(`${step.id} suite`, summary.problems);
-  }
-  const wallSeconds = (result.endedAt - result.startedAt) / 1000;
-  const wal =
-    walBefore && walAfter
-      ? {
-          walSyncDelta: walAfter.walSync - walBefore.walSync,
-          walSyncPerSecond: (walAfter.walSync - walBefore.walSync) / wallSeconds,
-        }
-      : null;
-  if (!wal) summary.problems.push('pg_stat_wal could not be read around the run');
-  return {
-    id: step.id,
-    passed: result.exitCode === 0 && !result.timedOut && summary.problems.length === 0,
-    exitCode: result.exitCode,
-    timedOut: result.timedOut,
-    startedAt: result.startedAt.toISOString(),
-    endedAt: result.endedAt.toISOString(),
-    wallSeconds,
-    summary,
-    wal,
-    burst: samples ? summarizeBurst(samples) : null,
-  };
+  return summarizeJestRun({ step, result, report, walBefore, walAfter, samples });
 }
 
 /**
@@ -397,10 +387,13 @@ async function runPlan(plan) {
     try {
       result = step.kind === 'probe' ? await runProbe(step) : await runJest(step);
     } catch (error) {
-      // Recorded as a failed step; the remaining steps still run.
-      result = { id: step.id, passed: false, error: redact(error?.message ?? String(error)) };
+      // Recorded as a failed step; the remaining steps still run. An untyped
+      // throw keeps its category and loses its message.
+      const entry = diagnosticFromError(error);
+      result = { id: step.id, passed: false, error: entry.text, diagnostics: [entry] };
     }
     results.push(result);
+    if (result.diagnostics?.length > 0) reportDiagnostics(step.id, result.diagnostics);
     out(
       `[evidence] ${step.id} finished ${new Date().toISOString()}: ${result.passed ? 'PASS' : 'FAIL'}`,
     );
@@ -409,15 +402,19 @@ async function runPlan(plan) {
 }
 
 async function commitSha() {
-  const head = await runBounded('git', ['rev-parse', 'HEAD'], { timeoutMs: MINUTE });
-  return head.exitCode === 0 ? head.output.trim() : 'unknown';
+  const head = await runBounded(LAUNCHER.git, ['rev-parse', 'HEAD'], { timeoutMs: MINUTE });
+  return head.exitCode === 0 && head.outcome === PROCESS_OUTCOME.completed
+    ? head.output.trim()
+    : 'unknown';
 }
 
 async function readTopology() {
   try {
     return await topology();
   } catch (error) {
-    return { error: JSON.stringify(redact(error.message)) };
+    // Category names only: a topology that could not be read must not put an
+    // arbitrary message into the artifact.
+    return { error: diagnosticFromError(error).categories.join(',') || 'other' };
   }
 }
 
@@ -433,7 +430,12 @@ async function main() {
   const missing = [...PG_ENV, 'DATABASE_URL_IDENTITY'].filter((name) => !process.env[name]);
   if (missing.length > 0) {
     // Names only — never the values.
-    out(`[evidence] missing environment: ${missing.join(', ')}`);
+    reportDiagnostics('environment', [
+      diagnostic(
+        [INFRASTRUCTURE_CATEGORY.missingEnvironment],
+        `missing environment: ${missing.join(', ')}`,
+      ),
+    ]);
     return 2;
   }
 
@@ -491,7 +493,7 @@ main()
     process.exit(code);
   })
   .catch((error) => {
-    out(`[evidence] aborted: ${redact(error?.message ?? String(error))}`);
+    out(`[evidence] aborted: ${diagnosticFromError(error).text}`);
     cleanup();
     process.exit(1);
   });

@@ -7,22 +7,31 @@ import {
   CALIBRATION_OUTCOMES,
   CONTROL_SECONDS,
   CONTROL_SQL,
+  INFRASTRUCTURE_CATEGORY,
   INFRASTRUCTURE_CATEGORY_NAMES,
+  IN_IMAGE_TOOL,
+  LAUNCHER,
   MAX_CALIBRATION_PAIRS,
   MIN_CALIBRATION_PAIRS,
   NAMED_PROOF,
   NAMED_RUNS,
   PROBE_SECONDS,
+  PROCESS_OUTCOME,
   STRESS,
   WAL_PROBE_SQL,
   calibrationProbeId,
   calibrationStressId,
+  categoriesFromProcessOutput,
   classifyFailures,
-  classifyInfrastructureProblems,
+  countCategories,
+  diagnostic,
+  diagnosticFromError,
   distribution,
   formatCalibrationReport,
   formatReport,
+  measureProbe,
   namedProofPattern,
+  normalizeCategories,
   parseEvidenceArgs,
   parsePgbenchOutput,
   parseWalSamples,
@@ -30,14 +39,17 @@ import {
   pgbenchArgs,
   planCalibrationRun,
   planEvidenceRun,
+  processDiagnostic,
   redact,
   summarizeBurst,
   summarizeCalibration,
   summarizeJestReport,
+  summarizeJestRun,
   summarizeProbe,
   validateCalibrationContract,
   validateEvidenceContract,
   validateProbeSql,
+  walStatFrom,
 } from './aggregation-evidence-lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -747,43 +759,149 @@ test('distributions: deterministic for odd and even counts, and missing values a
   assert.equal(distribution([5]).median, 5);
 });
 
-test('infrastructure classification: every category, and never a capability verdict', () => {
-  const cases = {
-    missingEnvironment: 'missing environment: PGHOST, PGPORT',
-    dockerUnavailable: 'docker not found on PATH',
-    pgbenchUnavailable: 'pgbench not found in the image',
-    psqlUnavailable: 'psql not found in the image',
-    connectionFailure: 'could not connect to server',
-    permissionDenied: 'permission denied for function pg_logical_emit_message',
-    statsUnreadable: 'pg_stat_wal: no row in the expected shape',
-    statsReset: 'pg_stat_wal went backwards (stats reset?)',
-    timeout: 'pgbench exited 1 after its bound',
-    failedTransactions: 'pgbench reported 3 failed transaction(s)',
-    controlContamination: 'read-only control flushed WAL 0.5000 times per transaction',
-    backgroundWalContamination: 'wal_sync per transaction 2.400 is not approximately one',
-    noProgress: 'pgbench reported no completed transaction',
-    harnessError: 'jest launcher not found at /x',
-  };
-  for (const [category, message] of Object.entries(cases)) {
-    const counts = classifyInfrastructureProblems([message]);
-    assert.equal(counts[category], 1, `${JSON.stringify(message)} must classify as ${category}`);
-    assert.equal(counts.other, 0, `${category} must not fall through to "other"`);
-  }
-  assert.equal(classifyInfrastructureProblems(['something nobody predicted']).other, 1);
+test('the category vocabulary is one fixed list, and never a capability verdict', () => {
   assert.deepEqual(
-    Object.keys(classifyInfrastructureProblems([])).sort(),
-    [...INFRASTRUCTURE_CATEGORY_NAMES].sort(),
+    [...INFRASTRUCTURE_CATEGORY_NAMES],
+    [...Object.values(INFRASTRUCTURE_CATEGORY), 'other'],
+    'the names are the vocabulary; there is no second list',
   );
-  assert.equal(classifyInfrastructureProblems(undefined).other, 0);
-
   // No category, anywhere, is a statement about speed.
   for (const name of INFRASTRUCTURE_CATEGORY_NAMES) {
     assert.ok(!/capable|incapable|slow|threshold|fast/i.test(name), name);
   }
   assert.deepEqual([...CALIBRATION_OUTCOMES], ['VALID', 'INVALID', 'INCONCLUSIVE']);
+
+  // Normalization is the one gate: unknown names are dropped, known ones are
+  // deduplicated and ordered, so counting cannot invent or double a category.
+  assert.deepEqual(normalizeCategories(['timeout', 'timeout', 'dockerUnavailable']), [
+    'dockerUnavailable',
+    'timeout',
+  ]);
+  assert.deepEqual(normalizeCategories(['VALID_INCAPABLE', 'tooSlow', undefined, null]), []);
+  assert.deepEqual(normalizeCategories(undefined), []);
+
+  const counts = countCategories([
+    diagnostic(['timeout', 'connectionFailure'], 'a'),
+    diagnostic(['timeout'], 'b'),
+    diagnostic(['timeout', 'timeout'], 'c'),
+    diagnostic(['nothing recognized'], 'd'),
+    diagnostic([], 'e'),
+  ]);
+  assert.equal(counts.timeout, 3, 'a repeated category inside one diagnostic counts once');
+  assert.equal(counts.connectionFailure, 1);
+  assert.equal(counts.other, 2, 'a diagnostic with no known category is never dropped');
+  assert.deepEqual(Object.keys(counts).sort(), [...INFRASTRUCTURE_CATEGORY_NAMES].sort());
+  assert.deepEqual(
+    countCategories(undefined),
+    Object.fromEntries(INFRASTRUCTURE_CATEGORY_NAMES.map((name) => [name, 0])),
+  );
+});
+
+test('a bounded process result keeps its reason, and its output never leaves', () => {
+  const SERVER_TEXT =
+    'psql: error: connection to server at "db.invalid" (10.11.12.13), port 5432 failed: Connection refused';
+  const at = (over) => ({
+    launcher: LAUNCHER.docker,
+    tool: IN_IMAGE_TOOL.psql,
+    outcome: PROCESS_OUTCOME.completed,
+    exitCode: 1,
+    output: '',
+    ...over,
+  });
+
+  // A recognizable connection failure keeps `connectionFailure`, not `harnessError`.
+  const refused = processDiagnostic(at({ output: SERVER_TEXT }));
+  assert.deepEqual(refused.categories, ['connectionFailure']);
+  assert.equal(refused.launcher, 'docker');
+  assert.equal(refused.tool, 'psql');
+  assert.equal(refused.exitCode, 1);
+  assert.ok(!JSON.stringify(refused).includes('db.invalid'), 'no host survives');
+  assert.ok(!JSON.stringify(refused).includes('10.11.12.13'), 'no address survives');
+
+  // A privilege refusal keeps `permissionDenied`.
+  assert.deepEqual(
+    processDiagnostic(
+      at({ output: 'ERROR:  permission denied for function pg_logical_emit_message' }),
+    ).categories,
+    ['permissionDenied'],
+  );
+
+  // A launcher that could not spawn is typed by *which* launcher it was: no
+  // error string is read, and exit 127 alone is never the whole story.
+  const noDocker = processDiagnostic(
+    at({ outcome: PROCESS_OUTCOME.launcherFailed, exitCode: 127, tool: null }),
+  );
+  assert.deepEqual(noDocker.categories, ['dockerUnavailable']);
+  assert.deepEqual(
+    processDiagnostic({
+      launcher: LAUNCHER.pnpm,
+      outcome: PROCESS_OUTCOME.launcherFailed,
+      exitCode: 127,
+    }).categories,
+    ['harnessError'],
+  );
+
+  // A Docker CLI that started but cannot reach its daemon is the same category.
+  assert.deepEqual(
+    processDiagnostic(
+      at({
+        tool: null,
+        output:
+          'error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/info": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.',
+      }),
+    ).categories,
+    ['dockerUnavailable'],
+  );
+
+  // Which in-image tool is missing comes from the request, not from the text,
+  // so `psql` and `pgbench` absence stay distinguishable.
+  const missing =
+    'docker: Error response from daemon: failed to create task for container: exec: executable file not found in $PATH: unknown.';
+  assert.deepEqual(processDiagnostic(at({ output: missing })).categories, ['psqlUnavailable']);
+  assert.deepEqual(
+    processDiagnostic(at({ tool: IN_IMAGE_TOOL.pgbench, output: missing })).categories,
+    ['pgbenchUnavailable'],
+  );
+  assert.deepEqual(processDiagnostic(at({ tool: null, output: missing })).categories, [
+    'harnessError',
+  ]);
+
+  // The bound killing a child is `timeout`, and a nonzero exit nobody
+  // recognized is still a fact rather than an unknown.
+  assert.deepEqual(processDiagnostic(at({ outcome: PROCESS_OUTCOME.timedOut })).categories, [
+    'timeout',
+  ]);
+  assert.deepEqual(processDiagnostic(at({ output: 'something nobody predicted' })).categories, [
+    'harnessError',
+  ]);
+  // Several applicable categories are all counted, deterministically ordered.
+  assert.deepEqual(
+    processDiagnostic(at({ outcome: PROCESS_OUTCOME.timedOut, output: SERVER_TEXT })).categories,
+    ['connectionFailure', 'timeout'],
+  );
+  assert.deepEqual(categoriesFromProcessOutput(SERVER_TEXT), ['connectionFailure']);
+  assert.deepEqual(categoriesFromProcessOutput(undefined), []);
+
+  // A `pg_stat_wal` that cannot be read is its own category, not a harness error.
+  assert.throws(() => parseWalStat('ERROR: permission denied'), /expected shape/);
+  try {
+    parseWalStat('nothing usable');
+    assert.fail('malformed pg_stat_wal must refuse');
+  } catch (error) {
+    assert.deepEqual(diagnosticFromError(error).categories, ['statsUnreadable']);
+  }
+  // An untyped throw keeps a category and loses its message.
+  const untyped = diagnosticFromError(new Error('PGPASSWORD=hunter2 at C:/Users/someone/x'));
+  assert.deepEqual(untyped.categories, ['harnessError']);
+  assert.ok(!/hunter2|Users/.test(untyped.text), untyped.text);
 });
 
 // --- fixtures for the summary tests -----------------------------------------
+
+const contamination = diagnostic(
+  [INFRASTRUCTURE_CATEGORY.backgroundWalContamination],
+  'wal_sync per transaction 2.400 is not approximately one',
+);
 
 const probeFor = ({ tps = 20, valid = true, minIntervalTps = 12, stall = 0 } = {}) => ({
   transactions: 1200,
@@ -798,10 +916,11 @@ const probeFor = ({ tps = 20, valid = true, minIntervalTps = 12, stall = 0 } = {
   zeroCommitIntervals: stall > 0 ? 1 : 0,
   longestZeroCommitSeconds: stall,
   valid,
-  problems: valid ? [] : ['wal_sync per transaction 2.400 is not approximately one'],
+  problems: valid ? [] : [contamination.text],
+  diagnostics: valid ? [] : [contamination],
 });
 
-const stressFor = ({ passed = true, wallSeconds = 55, problems = [] } = {}) => ({
+const stressFor = ({ passed = true, wallSeconds = 55, diagnostics = [] } = {}) => ({
   passed,
   exitCode: passed ? 0 : 1,
   timedOut: false,
@@ -811,20 +930,41 @@ const stressFor = ({ passed = true, wallSeconds = 55, problems = [] } = {}) => (
     tests: { total: 22, passed: passed ? 22 : 21, failed: passed ? 0 : 1, skipped: 0 },
     namedDurationMs: null,
     failures: classifyFailures(passed ? [] : ['canceling statement due to statement timeout']),
-    problems,
+    problems: diagnostics.map((entry) => entry.text),
+    diagnostics,
   },
+  diagnostics,
 });
 
-const calibrationResults = (rows) => [
-  { id: 'control', passed: true, probe: { valid: true, problems: [] } },
+const calibrationResults = (rows, { control } = {}) => [
+  {
+    id: 'control',
+    passed: !control,
+    probe: {
+      valid: !control,
+      problems: control ? [control.text] : [],
+      diagnostics: control ? [control] : [],
+    },
+    diagnostics: control ? [control] : [],
+  },
   ...rows.flatMap((row, index) => {
     const pair = index + 1;
     const steps = [];
     if (row.probe !== undefined) {
-      steps.push({ id: calibrationProbeId(pair), passed: row.probe.valid, probe: row.probe });
+      steps.push({
+        id: calibrationProbeId(pair),
+        passed: row.probe.valid,
+        probe: row.probe,
+        diagnostics: row.probe.diagnostics ?? [],
+      });
     }
     if (row.probeError) {
-      steps.push({ id: calibrationProbeId(pair), passed: false, error: row.probeError });
+      steps.push({
+        id: calibrationProbeId(pair),
+        passed: false,
+        error: row.probeError.text,
+        diagnostics: [row.probeError],
+      });
     }
     if (row.stress !== undefined) {
       steps.push({ id: calibrationStressId(pair), ...row.stress });
@@ -869,7 +1009,12 @@ test('calibration summary: a pair that never ran is INCONCLUSIVE and still count
     pairs: 3,
     results: calibrationResults([
       { probe: probeFor(), stress: stressFor() },
-      { probeError: 'psql exited 2' },
+      {
+        probeError: diagnostic(
+          [INFRASTRUCTURE_CATEGORY.connectionFailure],
+          'psql could not reach the server',
+        ),
+      },
       {},
     ]),
   });
@@ -945,4 +1090,334 @@ test('calibration report: aggregates only, deterministic, and free of every sent
   assert.match(sparse, /probe: not run/);
   assert.match(sparse, /stress: not run/);
   assert.match(sparse, /probe_tps: n=2 available=0 unavailable=2 min=n\/a median=n\/a max=n\/a/);
+});
+
+// ---------------------------------------------------------------------------
+// The diagnostic transport, end to end: a subprocess result becomes a typed
+// diagnostic, the diagnostic reaches the probe or suite result, and the result
+// reaches the campaign summary and the report — with no stage re-reading prose.
+//
+// Nothing below needs Docker or PostgreSQL: the bounded process is injected.
+
+/** Everything a real run could leak, planted in the places a real run would put it. */
+const LEAKS = Object.freeze({
+  url: 'postgresql://rasta_identity:hunter2@db.invalid:5432/rasta',
+  password: 'hunter2',
+  token: 'eyJhbGciOi.eyJzdWIi.sig',
+  user: 'rasta_identity',
+  host: 'db.invalid',
+  address: '10.11.12.13',
+  identifier: 'USR_ABCDE12345_01J8Z3K4M5N6P7Q8R9S0T1V2W3',
+  row: '1200|300|310|99999 occurrenceCount: 500',
+  testId: 'windowed refusal aggregation (real PostgreSQL) > one row per identity per window',
+});
+
+const bounded = (over = {}) => ({
+  launcher: LAUNCHER.docker,
+  tool: IN_IMAGE_TOOL.psql,
+  outcome: PROCESS_OUTCOME.completed,
+  exitCode: 0,
+  output: '',
+  startedAt: new Date('2026-09-14T00:00:00.000Z'),
+  endedAt: new Date('2026-09-14T00:01:00.000Z'),
+  ...over,
+});
+
+const probeStep = { id: calibrationProbeId(1), kind: 'probe', sql: WAL_PROBE_SQL, seconds: 60 };
+const stressStep = { id: calibrationStressId(1), kind: 'jest-full' };
+
+/** A probe whose `psql` failed exactly as the injected result says it did. */
+const probeWithFailingPsql = (over) =>
+  measureProbe(probeStep, {
+    readWalStat: () => walStatFrom(bounded(over)),
+    runPgbench: () => assert.fail('pgbench must not run after the reading failed'),
+    settle: () => Promise.resolve(),
+  });
+
+const assertNoLeak = (value, label) => {
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  for (const [name, sentinel] of Object.entries(LEAKS)) {
+    assert.ok(!text.includes(sentinel), `${label} leaked ${name}`);
+  }
+};
+
+test('transport: a psql connection failure stays connectionFailure all the way to the totals', async () => {
+  const result = await probeWithFailingPsql({
+    exitCode: 1,
+    output: `psql: error: connection to server at "${LEAKS.host}" (${LEAKS.address}), port 5432 failed: Connection refused\nPGPASSWORD=${LEAKS.password}\n${LEAKS.url}`,
+  });
+  assert.equal(result.passed, false);
+  assert.deepEqual(result.diagnostics.map((entry) => entry.categories).flat(), [
+    'connectionFailure',
+  ]);
+
+  const summary = summarizeCalibration({ pairs: 1, results: [result] });
+  assert.equal(summary.infrastructure.connectionFailure, 1);
+  assert.equal(
+    summary.infrastructure.harnessError,
+    0,
+    'the true category must not collapse into harnessError',
+  );
+  assert.equal(summary.infrastructure.other, 0);
+  assert.equal(summary.rows[0].infrastructure.connectionFailure, 1);
+  // The validity verdict is unchanged by this repair: a probe that could not
+  // measure is still `INVALID` and still never "slow". What changed is that the
+  // reason beside it is the real one.
+  assert.deepEqual(summary.outcomes, { VALID: 0, INVALID: 1, INCONCLUSIVE: 0 });
+
+  const text = formatCalibrationReport({
+    meta: { commit: 'abc1234', generatedAt: '2026-09-14T00:00:00.000Z' },
+    topology: {},
+    summary,
+  });
+  assert.match(text, /connectionFailure=1/);
+  assertNoLeak(text, 'the report');
+  assertNoLeak(summary, 'the summary');
+  assertNoLeak(result, 'the retained result');
+});
+
+test('transport: a privilege denial stays permissionDenied through the same path', async () => {
+  const result = await probeWithFailingPsql({
+    exitCode: 1,
+    output: `ERROR:  permission denied for function pg_logical_emit_message\nrole "${LEAKS.user}" ${LEAKS.identifier}`,
+  });
+  const summary = summarizeCalibration({ pairs: 1, results: [result] });
+  assert.equal(summary.infrastructure.permissionDenied, 1);
+  assert.equal(summary.infrastructure.harnessError, 0);
+  assertNoLeak(result, 'the retained result');
+  assertNoLeak(summary, 'the summary');
+});
+
+test('transport: an unstartable Docker launcher becomes dockerUnavailable, reading no error string', async () => {
+  const result = await probeWithFailingPsql({
+    outcome: PROCESS_OUTCOME.launcherFailed,
+    exitCode: 127,
+    // `runBounded` never reads the spawn error, so there is nothing to consume.
+    output: '',
+  });
+  assert.deepEqual(result.diagnostics.map((entry) => entry.categories).flat(), [
+    'dockerUnavailable',
+  ]);
+  const summary = summarizeCalibration({ pairs: 1, results: [result] });
+  assert.equal(summary.infrastructure.dockerUnavailable, 1);
+  assert.equal(summary.infrastructure.harnessError, 0);
+  assert.equal(summary.infrastructure.other, 0);
+  assert.match(result.probe.problems[0], /docker could not start \(dockerUnavailable\)/);
+});
+
+test('transport: a missing in-image psql and a missing pgbench stay distinguishable', async () => {
+  const missing =
+    'docker: Error response from daemon: failed to create task for container: exec: executable file not found in $PATH: unknown.';
+  const noPsql = await probeWithFailingPsql({ exitCode: 125, output: missing });
+  assert.equal(
+    summarizeCalibration({ pairs: 1, results: [noPsql] }).infrastructure.psqlUnavailable,
+    1,
+  );
+
+  // pgbench absence is reached only once the readings succeeded, so the probe
+  // runs to the point where pgbench is launched.
+  const reading = () => walStatFrom(bounded({ output: '1200|300|310|99999' }));
+  const noPgbench = await measureProbe(probeStep, {
+    readWalStat: reading,
+    runPgbench: () =>
+      Promise.resolve(
+        bounded({ tool: IN_IMAGE_TOOL.pgbench, exitCode: 125, output: `${missing} ${LEAKS.url}` }),
+      ),
+    settle: () => Promise.resolve(),
+  });
+  const summary = summarizeCalibration({ pairs: 1, results: [noPgbench] });
+  assert.equal(summary.infrastructure.pgbenchUnavailable, 1);
+  assert.equal(summary.infrastructure.psqlUnavailable, 0);
+  assert.equal(noPgbench.passed, false);
+  assertNoLeak(noPgbench, 'the retained result');
+});
+
+test('transport: timeout and nonzero exit survive to both the pair row and the campaign totals', async () => {
+  const timedOutProbe = await probeWithFailingPsql({
+    outcome: PROCESS_OUTCOME.timedOut,
+    exitCode: 1,
+  });
+  // A suite process that was killed by its bound and wrote no report.
+  const timedOutStress = summarizeJestRun({
+    step: stressStep,
+    result: bounded({
+      launcher: LAUNCHER.pnpm,
+      tool: null,
+      outcome: PROCESS_OUTCOME.timedOut,
+      exitCode: 1,
+    }),
+    report: null,
+    walBefore: { walSync: 10 },
+    walAfter: { walSync: 20 },
+  });
+  const summary = summarizeCalibration({
+    pairs: 1,
+    results: [timedOutProbe, { ...timedOutStress, id: calibrationStressId(1) }],
+  });
+  assert.equal(summary.rows[0].infrastructure.timeout, 2, 'both halves of the pair timed out');
+  assert.equal(summary.infrastructure.timeout, 2);
+  assert.equal(summary.rows[0].stress.timedOut, true);
+  assert.equal(timedOutStress.passed, false);
+
+  // A suite that exited nonzero without a report is a harness fact; a suite
+  // that ran and reported failing tests is not relabelled as infrastructure.
+  const noReport = summarizeJestRun({
+    step: stressStep,
+    result: bounded({ launcher: LAUNCHER.pnpm, tool: null, exitCode: 1, output: LEAKS.url }),
+    report: null,
+    walBefore: { walSync: 10 },
+    walAfter: { walSync: 20 },
+  });
+  const harness = summarizeCalibration({
+    pairs: 1,
+    results: [{ ...noReport, id: calibrationStressId(1) }],
+  });
+  assert.equal(
+    harness.infrastructure.harnessError,
+    3,
+    'no report, no collected test, and the process diagnostic itself',
+  );
+  assertNoLeak(noReport, 'the retained suite result');
+
+  const ranAndFailed = summarizeJestRun({
+    step: stressStep,
+    result: bounded({ launcher: LAUNCHER.pnpm, tool: null, exitCode: 1 }),
+    report: report([assertion(fullName, 'failed'), ...others]),
+    walBefore: { walSync: 10 },
+    walAfter: { walSync: 20 },
+  });
+  const product = summarizeCalibration({
+    pairs: 1,
+    results: [{ ...ranAndFailed, id: calibrationStressId(1) }],
+  });
+  assert.equal(
+    product.infrastructure.harnessError,
+    0,
+    'a failing proof is not an infrastructure failure',
+  );
+  assert.equal(product.infrastructure.timeout, 0);
+  assert.ok(product.infrastructure.other > 0, 'it is still counted, as an unclassified problem');
+});
+
+test('transport: probe validity problems keep their own categories, with no double counting', async () => {
+  const pgbench = { ...parsePgbenchOutput(PGBENCH_OUTPUT), progressIntervals: 60, transactions: 0 };
+  const at = (walRecords, walSync) => ({ walRecords, walSync, walWrite: 0, walBytes: 0 });
+  // Failed transactions, no completed transaction, and a counter that went
+  // backwards — three categories from one probe, each counted once.
+  const probe = summarizeProbe({
+    pgbench: { ...pgbench, failed: 3 },
+    before: at(100, 100),
+    after: at(10, 10),
+    seconds: 60,
+  });
+  const counts = countCategories(probe.diagnostics);
+  assert.equal(counts.noProgress, 1);
+  assert.equal(counts.failedTransactions, 1);
+  assert.equal(counts.statsReset, 1);
+  assert.equal(counts.other, 0);
+  assert.equal(probe.problems.length, probe.diagnostics.length, 'text and categories stay paired');
+
+  // A contaminated read-only control is `controlContamination`, and it reaches
+  // the campaign as an explicit total of its own rather than as free text.
+  const control = summarizeProbe({
+    pgbench: { ...pgbench, transactions: 40000, progressIntervals: 10 },
+    before: at(0, 0),
+    after: at(90000, 40000),
+    seconds: 10,
+    control: true,
+  });
+  assert.deepEqual(control.diagnostics.map((entry) => entry.categories).flat(), [
+    'controlContamination',
+  ]);
+
+  const summary = summarizeCalibration({
+    pairs: 1,
+    results: calibrationResults([{ probe: probeFor(), stress: stressFor() }], {
+      control: control.diagnostics[0],
+    }),
+  });
+  assert.equal(summary.controlInfrastructure.controlContamination, 1);
+  assert.equal(summary.control.infrastructure.controlContamination, 1);
+  assert.equal(summary.control.valid, false);
+  assert.equal(
+    summary.infrastructure.controlContamination,
+    0,
+    'the control is not a pair, so it does not enter the per-pair denominator',
+  );
+  const text = formatCalibrationReport({
+    meta: { commit: 'abc', generatedAt: 'now' },
+    topology: {},
+    summary,
+  });
+  assert.match(text, /control infrastructure totals: .*controlContamination=1/);
+  assert.match(text, /control infrastructure: .*controlContamination=1/);
+  assert.match(text, /infrastructure totals across pairs: .*controlContamination=0/);
+});
+
+test('transport: a valid probe and a passing suite keep the legacy shapes untouched', async () => {
+  const pgbench = {
+    ...parsePgbenchOutput(PGBENCH_OUTPUT),
+    progressIntervals: 60,
+    transactions: 1500,
+  };
+  const at = (walRecords, walSync) => ({ walRecords, walSync, walWrite: 0, walBytes: 0 });
+  // The fixture prints five progress lines, so the probe it describes is a
+  // five-second one; validity is about shape, not about duration.
+  const good = await measureProbe(
+    { ...probeStep, seconds: 5 },
+    {
+      readWalStat: (() => {
+        const readings = [at(10, 10), at(3100, 1540)];
+        return () => Promise.resolve(readings.shift());
+      })(),
+      runPgbench: () =>
+        Promise.resolve(
+          bounded({
+            tool: IN_IMAGE_TOOL.pgbench,
+            output: PGBENCH_OUTPUT.replace(
+              'number of transactions actually processed: 59',
+              'number of transactions actually processed: 1500',
+            ),
+          }),
+        ),
+      settle: () => Promise.resolve(),
+    },
+  );
+  assert.equal(good.probe.transactions, 1500);
+  assert.equal(good.passed, true, good.probe.problems.join('; '));
+  assert.deepEqual(good.probe.problems, []);
+  assert.deepEqual(good.diagnostics, []);
+  assert.deepEqual(
+    summarizeProbe({ pgbench, before: at(10, 10), after: at(3100, 1540), seconds: 60 }).problems,
+    [],
+  );
+
+  const passing = summarizeJestRun({
+    step: stressStep,
+    result: bounded({ launcher: LAUNCHER.pnpm, tool: null, exitCode: 0 }),
+    report: report([assertion(fullName, 'passed'), ...others]),
+    walBefore: { walSync: 10 },
+    walAfter: { walSync: 610 },
+  });
+  assert.equal(passing.passed, true);
+  assert.deepEqual(passing.summary.problems, []);
+  assert.deepEqual(passing.diagnostics, []);
+  assert.equal(passing.wallSeconds, 60);
+  assert.equal(passing.wal.walSyncDelta, 600);
+  assert.equal(passing.timedOut, false);
+
+  // The legacy evidence report renders exactly as before for a clean campaign.
+  const summary = summarizeCalibration({
+    pairs: 1,
+    results: [
+      { ...good, id: calibrationProbeId(1) },
+      { ...passing, id: calibrationStressId(1) },
+    ],
+  });
+  assert.deepEqual(summary.outcomes, { VALID: 1, INVALID: 0, INCONCLUSIVE: 0 });
+  assert.deepEqual(
+    summary.infrastructure,
+    Object.fromEntries(INFRASTRUCTURE_CATEGORY_NAMES.map((name) => [name, 0])),
+    'a clean campaign reports no infrastructure category at all',
+  );
 });

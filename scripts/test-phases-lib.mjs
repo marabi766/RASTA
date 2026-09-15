@@ -341,7 +341,14 @@ export function validateTestPhases({
     }
   }
   const calibration = scriptCommands(rootScripts?.[CALIBRATION_SCRIPT]);
-  if (calibration.length > 0) {
+  if (calibration.length === 0) {
+    // The campaign is manual, which means it is reachable *by name only* — so
+    // the name has to exist. Without it there is no recorded invocation, and
+    // the contract below would silently assert nothing.
+    problems.push(
+      `root script "${CALIBRATION_SCRIPT}" must exist: the calibration campaign's only entry point is manual`,
+    );
+  } else {
     if (
       calibration.length !== 1 ||
       calibration[0][0] !== 'node' ||
