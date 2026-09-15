@@ -29,8 +29,10 @@ import { dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { runEvidenceCli } from './aggregation-evidence.mjs';
+import { runBounded, runEvidenceCli } from './aggregation-evidence.mjs';
 import {
+  LAUNCHER,
+  PROCESS_OUTCOME,
   REQUIRED_CAMPAIGN_ENV,
   STRESS,
   calibrationProbeId,
@@ -620,3 +622,213 @@ test('runner: the legacy evidence mode keeps its contract exit code and writes n
   assert.match(lines.join('\n'), /preflight: harnessError=1/);
   assertNoLeak(lines.join('\n'), 'the legacy contract output');
 });
+
+// ---------------------------------------------------------------------------
+// The campaign's process bounds.
+//
+// Both defects below were found by a real campaign, not by review: the induced
+// calibration run of 2026-09-15 spent two hours and fifty-seven minutes inside
+// one stress step whose thirty-minute bound had already fired. The bound had
+// signalled `pnpm` alone, `turbo` and `jest` survived holding the inherited
+// pipes, and the promise was waiting on a `close` that could no longer arrive.
+//
+// These tests therefore launch a **real** Node process tree, not a mock, with a
+// descendant that inherits stdout and stderr — the exact shape the campaign
+// hits. They need no Docker, no PostgreSQL, no network and no credentials, and
+// they never print a child's pid or output.
+// ---------------------------------------------------------------------------
+
+/** The bound the hung tree is given: long enough to be reached deliberately. */
+const HUNG_BOUND_MS = 1_500;
+/** CI slack. A shared runner can suspend a process for seconds at a time. */
+const SETTLE_SLACK_MS = 30_000;
+/** How long a settle may take once the direct child is gone. */
+const EXIT_SETTLE_MS = 30_000;
+/** How long a descendant may take to die after its group has been signalled. */
+const DESCENDANT_EXIT_MS = 30_000;
+/** An OS fact is polled for, never assumed to have happened already. */
+const POLL_MS = 50;
+/** A per-test ceiling, so a regression fails the suite instead of hanging it. */
+const TEST_TIMEOUT_MS = 120_000;
+
+/** A descendant that inherits this process's pipes — the reason `close` stalls. */
+const SPAWN_INHERITING_DESCENDANT = [
+  "const { spawn } = require('node:child_process');",
+  "const { writeFileSync } = require('node:fs');",
+  "const kid = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], {",
+  "  stdio: 'inherit',",
+  '});',
+  'writeFileSync(process.argv[1], String(kid.pid));',
+].join('\n');
+
+/** …and then never ends, so only the bound can end it. */
+const HANGING_TREE = `${SPAWN_INHERITING_DESCENDANT}\nsetInterval(() => {}, 1e9);`;
+
+/** …and then exits at once, leaving the descendant holding the pipes. */
+const EXITING_PARENT = `${SPAWN_INHERITING_DESCENDANT}\nprocess.exit(0);`;
+
+const strays = new Set();
+const forget = (pid) => {
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch {
+    // Already gone. A test's own cleanup may never become a test failure.
+  }
+};
+after(() => {
+  for (const pid of strays) forget(pid);
+});
+
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means it exists and is not ours to signal; anything else means gone.
+    return error?.code === 'EPERM';
+  }
+}
+
+/** Waits for an OS fact, polling, and answers whether it arrived within the bound. */
+async function within(boundMs, holds) {
+  const deadline = Date.now() + boundMs;
+  while (Date.now() < deadline) {
+    if (holds()) return true;
+    await new Promise((done) => setTimeout(done, POLL_MS));
+  }
+  return holds();
+}
+
+/** The descendant's pid, remembered for teardown, never printed. */
+async function descendantPid(pidFile) {
+  const arrived = await within(EXIT_SETTLE_MS, () => existsSync(pidFile));
+  assert.ok(arrived, 'the child tree recorded its descendant');
+  const pid = Number.parseInt(readFileSync(pidFile, 'utf8'), 10);
+  assert.ok(Number.isInteger(pid) && pid > 0, 'the descendant pid is a positive integer');
+  strays.add(pid);
+  return pid;
+}
+
+/** Every bounded result carries exactly this shape, and nothing else. */
+function assertResultShape(result) {
+  assert.deepEqual(
+    Object.keys(result).sort(),
+    ['endedAt', 'exitCode', 'launcher', 'outcome', 'output', 'startedAt', 'timedOut', 'tool'],
+    'the bounded result contract is unchanged',
+  );
+  assert.ok(result.startedAt instanceof Date && result.endedAt instanceof Date);
+  assert.ok(result.endedAt.getTime() >= result.startedAt.getTime());
+}
+
+test(
+  'bounds: a hung tree reaches its bound, settles promptly as timedOut, and leaves no descendant',
+  { timeout: TEST_TIMEOUT_MS },
+  async () => {
+    const pidFile = join(tempDir(), 'descendant.pid');
+    const startedAt = Date.now();
+    const result = await runBounded(LAUNCHER.jest, ['-e', HANGING_TREE, pidFile], {
+      cwd: repoRoot,
+      env: scrubbedEnv(),
+      timeoutMs: HUNG_BOUND_MS,
+    });
+    const elapsed = Date.now() - startedAt;
+    const pid = await descendantPid(pidFile);
+
+    try {
+      assertResultShape(result);
+      assert.equal(result.outcome, PROCESS_OUTCOME.timedOut);
+      assert.equal(result.timedOut, true);
+      assert.equal(result.launcher, LAUNCHER.jest);
+      assert.ok(Number.isInteger(result.exitCode) && result.exitCode !== 0, 'a non-success status');
+      assert.ok(elapsed >= HUNG_BOUND_MS, 'the bound was reached, not short-circuited');
+      // The defect: `close` never arrived, so the old runner waited for ever.
+      assert.ok(
+        elapsed < HUNG_BOUND_MS + SETTLE_SLACK_MS,
+        'the result settles on the bound, not on a `close` a descendant withholds',
+      );
+
+      if (process.platform === 'win32') {
+        // Windows has no process group to signal; the platform-neutral half of
+        // this proof — reaching the bound and settling promptly — is above.
+        assert.ok(true, 'process-group termination is asserted on POSIX only');
+      } else {
+        const gone = await within(DESCENDANT_EXIT_MS, () => !isAlive(pid));
+        assert.ok(gone, 'the bound signalled the whole process group, not just the direct child');
+      }
+    } finally {
+      forget(pid);
+      strays.delete(pid);
+    }
+  },
+);
+
+test(
+  'bounds: the direct child exiting settles the run even while a descendant holds the pipes',
+  { timeout: TEST_TIMEOUT_MS },
+  async () => {
+    const pidFile = join(tempDir(), 'orphan.pid');
+    const startedAt = Date.now();
+    // The parent exits 0 at once; its descendant keeps the inherited stdout and
+    // stderr open for ever, so `close` can never fire. The old runner hung here.
+    const result = await runBounded(LAUNCHER.jest, ['-e', EXITING_PARENT, pidFile], {
+      cwd: repoRoot,
+      env: scrubbedEnv(),
+      timeoutMs: TEST_TIMEOUT_MS,
+    });
+    const elapsed = Date.now() - startedAt;
+    const pid = await descendantPid(pidFile);
+
+    try {
+      assertResultShape(result);
+      assert.equal(result.outcome, PROCESS_OUTCOME.completed, 'an ordinary exit stays completed');
+      assert.equal(result.exitCode, 0);
+      assert.equal(result.timedOut, false);
+      assert.ok(elapsed < EXIT_SETTLE_MS, 'and the run settles rather than waiting for ever');
+
+      if (process.platform !== 'win32') {
+        // The proof that the *drain* settled this, not `close`: the descendant
+        // is still running, so the write ends of those pipes are still open.
+        assert.ok(isAlive(pid), 'the descendant is still holding the inherited pipes');
+      }
+      // On Windows a descendant does not outlive its parent, so the held-pipe
+      // condition cannot be staged there; what stays platform-neutral is that
+      // the run settles once, within a bound, and no later event rewrites it.
+
+      // Killing it now makes `close` fire on an already-settled run: the guard
+      // must absorb it rather than settle twice or rewrite the first result.
+      const snapshot = { ...result };
+      forget(pid);
+      await within(EXIT_SETTLE_MS, () => !isAlive(pid));
+      await new Promise((done) => setTimeout(done, POLL_MS * 4));
+      assert.deepEqual({ ...result }, snapshot, 'a late `close` cannot change a settled result');
+    } finally {
+      forget(pid);
+      strays.delete(pid);
+    }
+  },
+);
+
+test(
+  'bounds: a launcher that cannot start stays launcherFailed, and its `close` cannot overwrite that',
+  { timeout: TEST_TIMEOUT_MS },
+  async () => {
+    // A working directory that does not exist fails the spawn itself, so Node
+    // emits `error` and then `close` for the same child — the double-settle race.
+    const result = await runBounded(LAUNCHER.jest, ['-e', 'process.exit(0)'], {
+      cwd: join(tempDir(), 'absent'),
+      env: scrubbedEnv(),
+      timeoutMs: TEST_TIMEOUT_MS,
+    });
+    const snapshot = { ...result };
+
+    assertResultShape(result);
+    assert.equal(result.outcome, PROCESS_OUTCOME.launcherFailed);
+    assert.equal(result.exitCode, 127, 'the established launcher-failure status is unchanged');
+    assert.equal(result.timedOut, false);
+    assert.equal(result.output, '', 'a spawn that never ran has no output to keep');
+
+    await new Promise((done) => setTimeout(done, POLL_MS * 4));
+    assert.deepEqual({ ...result }, snapshot, 'the `close` after a failed spawn changes nothing');
+    assertNoLeak(JSON.stringify(result), 'the launcher-failure result');
+  },
+);

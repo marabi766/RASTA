@@ -698,6 +698,27 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 > ایمنی، Classifier توانایی، Preflight فاز، دروازهٔ Fail-Fast و یکپارچه‌سازی CI؛ کران ۲۹٫۲ همچنان بی Provenance.
 > `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 بسته نشد.
 >
+> **پیگیری همان روز — کران فرایندِ Harness رفع و Regression-Test شد:** فقط مسدودکنندهٔ (۲) بالا بسته شد و تنها
+> `runBounded` و مسیر Cleanup در `scripts/aggregation-evidence.mjs` عوض شدند. (الف) **کران درخت را می‌کشد، نه فرزند
+> را:** هر Launcher روی POSIX با `detached: true` آغاز می‌شود و کران/Cleanup با `process.kill(-pid, 'SIGKILL')` کل
+> Process Group را سیگنال می‌دهند؛ PID پیش از سیگنالِ گروه باید عدد صحیح **مثبت** باشد، و در شکست سیگنالِ گروه — یا
+> روی Windows که Process Group قابل‌سیگنال ندارد — همان `child.kill('SIGKILL')` Fallback می‌ماند. خاتمه Idempotent و
+> Race-Safe است: گروهِ پیش‌تر تمام‌شده حالت عادی است، چیزی Throw نمی‌شود، نتیجهٔ ثبت‌شده بازنویسی نمی‌شود و هیچ
+> errno/PID/آرگومان/خروجی‌ای در Log یا گزارش نمی‌آید. (ب) **پایان کار به `exit` بسته است، نه `close`:** پس از `exit`
+> حداکثر یک مهلت نام‌دار `PIPE_DRAIN_MS = 2000` به خروجیِ در راه داده می‌شود؛ `close` داخل آن مهلت نتیجه را بی‌درنگ و
+> با کل دنباله نهایی می‌کند و در نبودش Pipeها تخریب و نتیجه به‌هرحال نهایی می‌شود. Timeout همان `outcome: timedOut`،
+> `timedOut: true`، کد خروج ناموفق در نبود کد عددی و زمان‌های دقیق را می‌دهد؛ `launcherFailed` و خروج عادی معنای
+> قبلی‌شان را دارند و **قالب گزارش تغییر نکرد**. (ج) **دقیقاً یک‌بار Settle** — `close` پس از Timeout یا پس از خطای
+> Launcher چیزی را عوض نمی‌کند؛ همهٔ Timer/Listenerها هنگام نهایی‌شدن پاک می‌شوند. Cleanup سیگنالی
+> (`SIGINT`/`SIGTERM`) و پایانی از همان Helper استفاده می‌کنند، پس `turbo`/Jest/Worker/`psql`/`pgbench` پشت سر
+> نمی‌مانند؛ حذف Container و دایرکتوری موقت دست نخورد. **اثبات:** سه Regression در
+> `scripts/aggregation-evidence-cli.test.mjs` با **درخت فرایند واقعی** Node (نه Mock) و نوهٔ وارثِ `stdout`/`stderr`،
+> بدون Docker/PostgreSQL/شبکه/`.env`/Credential و بدون چاپ PID یا خروجی. Assertion خاتمهٔ Process Group روی Windows
+> صریحاً رد می‌شود؛ اعتبارش از اجرای CI معمول روی Ubuntu بومی می‌آید. **هیچ کمپینی اجرا نشد، هیچ Workflow موقتی ساخته
+> نشد، هیچ Artifact شواهدی لمس نشد.** مسدودکنندهٔ (۱) — شدت سهمیهٔ ۰٫۰۰۵ CPU برای ۲۰ جفت — **همچنان باز** است، سمت
+> شکست § ۶ همچنان **برآورده نشده**، و هیچ آستانه/حاشیه/Classifier/Preflight/دروازه/Bypass/Retry/Skip-Green یا
+> یکپارچه‌سازی CI اضافه نشد. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز است.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

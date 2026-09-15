@@ -307,6 +307,21 @@ Ubuntu یک‌بارمصرف، **دقیقاً یک** Service Container ‏`postg
 نشد.** Workflow موقت **در همان تکرار حذف شد**؛ `ci.yml`، فازهای تست، `pnpm verify` و Harness دست نخوردند و هیچ
 آستانه، حاشیه، Classifier توانایی، Preflight فاز، دروازهٔ Fail-Fast، Bypass، Retry یا Skip-Green اضافه نشد.
 
+**کران فرایندِ Harness رفع و Regression-Test شد (2026-09-15).** فقط مسدودکنندهٔ (۲) بالا بسته شد، در `runBounded` و
+مسیر Cleanup فایل `scripts/aggregation-evidence.mjs`: هر Launcher روی POSIX با `detached: true` آغاز می‌شود و کران و
+Cleanup با `process.kill(-pid, 'SIGKILL')` **کل Process Group** را می‌کشند (PID پیش از سیگنالِ گروه باید عدد صحیح
+مثبت باشد؛ در شکست سیگنالِ گروه و روی Windows همان `child.kill` به‌عنوان Fallback می‌ماند؛ خاتمه Idempotent است و
+هیچ errno/PID/خروجی‌ای گزارش نمی‌کند). پایان کار دیگر به `close` بسته نیست: `exit` واقعیتِ خاتمهٔ فرایند مستقیم است و
+پس از آن حداکثر `PIPE_DRAIN_MS = 2000` به خروجیِ در راه فرصت داده می‌شود، سپس Pipeها تخریب و نتیجه **به‌هرحال** و
+**دقیقاً یک‌بار** نهایی می‌شود — پس یک `close` دیرهنگام یا نوهٔ بازمانده نه کمپین را معلق می‌کند و نه نتیجه را
+بازنویسی. معناهای تایپ‌شدهٔ `timedOut`/`launcherFailed`/خروج عادی و قالب گزارش تغییر نکردند. سه Regression در
+`scripts/aggregation-evidence-cli.test.mjs` یک درخت فرایند **واقعی** Node با نوهٔ وارثِ `stdout`/`stderr` راه
+می‌اندازند و بدون Docker/PostgreSQL/شبکه/Credential اجرا می‌شوند؛ Assertion مربوط به Process Group فقط روی POSIX
+معنا دارد و روی Windows صریحاً رد می‌شود، پس اعتبارش از اجرای CI معمول روی Ubuntu بومی می‌آید (همان گام
+`test:aggregation-evidence-lib`). **مسدودکنندهٔ (۱) — شدت سهمیهٔ ۰٫۰۰۵ CPU برای ۲۰ جفت — همچنان باز است**، هیچ
+کمپین تازه‌ای اجرا نشد، هیچ Artifact سمت شکستی وجود ندارد، الزام § ۶ برآورده نشده و هیچ آستانه یا سیاست
+زمان‌اجرا/CI اضافه نشد.
+
 **ماه اختصاصی اجرا برای زنجیرهٔ Platform در Fixtureهای audit (2026-09-14).** کلید زنجیرهٔ Tenant شناسهٔ سازمانِ دارای `RUN_TAG`
 را دارد و خودبه‌خود به هر اجرا اختصاص دارد؛ کلید زنجیرهٔ Platform ‏(`PLATFORM/(platform)/<ماه>`) هیچ Tag یا Tenantی ندارد. پس
 هر Suite ‏Integration در `audit-service` که ردیف `organizationId: null` می‌نویسد باید زمان آن را از یک Slot اختصاصی

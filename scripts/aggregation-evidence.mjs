@@ -119,8 +119,67 @@ const children = new Set();
 const containers = new Set();
 let workDir;
 
+/**
+ * Only POSIX has process groups this harness can signal. Windows has none, and
+ * `detached` there would hand a console application its own console window, so
+ * the whole process-tree mechanism is gated on the campaign's real platform.
+ */
+const POSIX = process.platform !== 'win32';
+
+/**
+ * How long output already in flight may still arrive after the direct child
+ * has exited, before the pipes are torn down and the result is settled anyway.
+ *
+ * `close` is the event that says every pipe is done, and it is the one event a
+ * surviving descendant can withhold forever: `turbo` and `jest` inherit the
+ * same `stdout` and `stderr`, so killing `pnpm` alone leaves them holding the
+ * write ends open. Waiting on `close` therefore cannot be how a bounded run
+ * ends. `exit` is the fact that the direct process is gone; this interval is
+ * the grace after it, generous enough that an ordinary run still settles on
+ * `close` with its whole tail, bounded so a held pipe cannot stall a campaign.
+ */
+const PIPE_DRAIN_MS = 2_000;
+
+/** The exit code recorded when a child was killed and left no numeric status. */
+const NO_EXIT_STATUS = 1;
+
+/**
+ * SIGKILLs a bounded child *and everything it started*.
+ *
+ * Signalling the negative process-group id is the whole point: a campaign step
+ * is `pnpm` → `turbo` → `jest` → workers, or `docker` → an in-image tool, and a
+ * signal aimed at the direct child leaves the rest of that tree running against
+ * the same database the next step is about to measure.
+ *
+ * Idempotent and race-safe on purpose. It runs from a time bound, from a signal
+ * handler and from ordinary cleanup, so a group that has already exited is the
+ * normal case, not an error; nothing here throws and nothing here is reported,
+ * because an OS error carries an errno and a pid and answers no question the
+ * caller asked.
+ */
+function terminateTree(child) {
+  const pid = child?.pid;
+  let signalledGroup = false;
+  if (POSIX && Number.isInteger(pid) && pid > 0) {
+    try {
+      // Negative id: the group this child leads, because it was spawned detached.
+      process.kill(-pid, 'SIGKILL');
+      signalledGroup = true;
+    } catch {
+      // Already gone, never became a group leader, or not permitted. The direct
+      // child is still worth a try, and either way this is not a campaign fact.
+    }
+  }
+  if (signalledGroup) return;
+  try {
+    child?.kill('SIGKILL');
+  } catch {
+    // Same reasoning: a child that cannot be signalled is already unreachable.
+  }
+}
+
 function cleanup() {
-  for (const child of children) child.kill('SIGKILL');
+  for (const child of children) terminateTree(child);
   for (const name of containers) spawn('docker', ['rm', '-f', name], { stdio: 'ignore' });
   if (workDir) rmSync(workDir, { recursive: true, force: true });
 }
@@ -134,14 +193,27 @@ const LAUNCHER_COMMAND = Object.freeze({
 });
 
 /**
- * Runs one process with a hard bound, keeping only the tail of its output in
- * memory. Never throws, and never keeps an OS error message: the three ways a
- * run can end — the launcher could not start, the child exited, the bound
- * killed it — are distinguished by `outcome`, and the caller learns *which*
- * fixed launcher and in-image tool it asked for without the arguments, the
- * environment or the connection behind them.
+ * Runs one process *tree* with a hard bound, keeping only the tail of its
+ * output in memory. Never throws, and never keeps an OS error message: the
+ * three ways a run can end — the launcher could not start, the child exited,
+ * the bound killed it — are distinguished by `outcome`, and the caller learns
+ * *which* fixed launcher and in-image tool it asked for without the arguments,
+ * the environment or the connection behind them.
+ *
+ * Two properties are load-bearing, and both were once absent:
+ *
+ * 1. **The bound kills the tree, not the child.** Every launcher starts in its
+ *    own process group on POSIX, and the bound signals that group. Killing
+ *    `pnpm` alone left `turbo`, `jest` and its workers running.
+ * 2. **Completion follows `exit`, not `close`.** A surviving descendant holds
+ *    the inherited pipes open, so `close` may never arrive. `exit` settles the
+ *    result after at most one `PIPE_DRAIN_MS` grace, and `close` inside that
+ *    grace settles it immediately with the whole tail.
+ *
+ * The promise settles exactly once: a `close` after a timeout, or after a
+ * launcher error, cannot replace the outcome already recorded.
  */
-function runBounded(
+export function runBounded(
   launcher,
   args,
   { cwd = root, env = process.env, timeoutMs, input, tool } = {},
@@ -151,6 +223,8 @@ function runBounded(
     const child = spawn(LAUNCHER_COMMAND[launcher], args, {
       cwd,
       env,
+      // Its own process group, so the bound and cleanup can reach descendants.
+      detached: POSIX,
       shell: process.platform === 'win32' && launcher === LAUNCHER.pnpm,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -161,14 +235,37 @@ function runBounded(
     };
     child.stdout.on('data', keep);
     child.stderr.on('data', keep);
+    // A pipe whose far end is gone raises `EPIPE`/`ECONNRESET`, and an
+    // unhandled stream error would end the campaign in place of reporting it.
+    // The outcome below is the only thing that ever speaks for a bounded run.
+    const ignore = () => {};
+    child.stdin?.on('error', ignore);
+    child.stdout?.on('error', ignore);
+    child.stderr?.on('error', ignore);
+
     let timedOut = false;
+    let settled = false;
+    let drainTimer = null;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      terminateTree(child);
     }, timeoutMs);
+
     const finish = (exitCode, outcome) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      if (drainTimer !== null) clearTimeout(drainTimer);
+      drainTimer = null;
       children.delete(child);
+      // Nothing may keep this runner alive once its result is known: a pipe an
+      // orphaned descendant still holds is an active handle, and a listener on
+      // it would go on appending to output nobody will read.
+      child.stdout?.removeListener('data', keep);
+      child.stderr?.removeListener('data', keep);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      child.stdin?.destroy();
       done({
         launcher,
         tool: tool ?? null,
@@ -180,12 +277,27 @@ function runBounded(
         endedAt: new Date(),
       });
     };
+
+    let status = null;
+    const settleFromExit = () =>
+      finish(
+        Number.isInteger(status) ? status : NO_EXIT_STATUS,
+        timedOut ? PROCESS_OUTCOME.timedOut : PROCESS_OUTCOME.completed,
+      );
+
     // The spawn error object is deliberately never read: it carries an errno,
     // a path and a command line, and which launcher failed is already known.
+    // A `close` follows a failed spawn; `settled` keeps it from overwriting this.
     child.on('error', () => finish(127, PROCESS_OUTCOME.launcherFailed));
-    child.on('close', (code) =>
-      finish(code ?? 1, timedOut ? PROCESS_OUTCOME.timedOut : PROCESS_OUTCOME.completed),
-    );
+    child.on('exit', (code) => {
+      status = code;
+      if (settled || drainTimer !== null) return;
+      drainTimer = setTimeout(settleFromExit, PIPE_DRAIN_MS);
+    });
+    child.on('close', (code) => {
+      if (status === null) status = code;
+      settleFromExit();
+    });
     if (input !== undefined) child.stdin.end(input);
     else child.stdin.end();
   });
