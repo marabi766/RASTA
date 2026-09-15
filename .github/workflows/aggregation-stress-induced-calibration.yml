@@ -1,0 +1,242 @@
+name: Aggregation stress induced calibration (temporary)
+
+# TEMPORARY — ADR-055 § 6 evidence collection, second half. Removed from the
+# branch in the same iteration, as soon as one run is captured.
+#
+# **What is missing and why this exists.** § 6 refuses to choose a capability
+# threshold until a *paired* dataset exists with **both** outcomes in it. The
+# quiet half now exists (`docs/evidence/adr-055/quiet-calibration-github-2026-09-15.txt`:
+# 20 VALID probes, 20/20 passing stress runs, slowest probe still 2494.8 tps,
+# no stall anywhere). That half only says the boundary is far below 2494.8. The
+# half that would *locate* a boundary is the environment-caused failure side,
+# and no sample of it has ever been collected.
+#
+# **The induced condition, and its exact boundary.** A sustained external
+# resource constraint is applied to the ephemeral PostgreSQL service container
+# and to nothing else: a fixed CFS CPU quota of 5000 µs per 1 000 000 µs period
+# (0.005 CPU). It is not SQL load, not a second workload, not background WAL,
+# not a pause or a kill, not a PostgreSQL setting, and it does not vary between
+# pairs. The product proof and the measurement are untouched: the stress spec,
+# the probe SQL, `PROBE_VALIDITY`, the selectors, the timeouts, the lane and
+# write counts and the harness are exactly what they are on this branch. A
+# sample collected by loosening the proof would say nothing about the proof.
+#
+# **What this job is not.** It applies no threshold, no safety margin and no
+# capability judgement; it adds no `VALID_CAPABLE`/`VALID_INCAPABLE`, no
+# classifier, no phase preflight, no fail-fast gate, no bypass, no retry and no
+# skip-green behaviour; and it adds nothing to ordinary CI, to `pnpm verify` or
+# to the test phases. A valid probe followed by a failed unchanged suite stays
+# `VALID` evidence — naming it anything else is the capability judgement § 6
+# defers.
+#
+# **Why a disposable runner.** The only local host available runs a pre-existing
+# `rasta` Compose stack whose sixteen services all carry `restart: unless-stopped`;
+# starting its stopped Docker daemon would restart them, and no local Docker
+# resource may be constrained. Both the runner and the service container here are
+# created and destroyed by this one run, so the quota dies with them.
+#
+# A push trigger on the one feature branch rather than `pull_request`: that
+# branch's draft PR conflicts with `main`, and GitHub runs no `pull_request`
+# workflow for a conflicting PR. A push also measures the exact commit rather
+# than a merge with `main`.
+#
+# Harness and reasoning: `scripts/aggregation-evidence-lib.mjs`,
+# `docs/adr/ADR-055-aggregation-stress-environment-capability.md`.
+on:
+  push:
+    branches: [feat/audit-service-aud-004-contract]
+
+concurrency:
+  # Never cancel: a half-measured campaign is not a shorter campaign, it is a
+  # dataset with a hole in it.
+  group: aggregation-induced-calibration-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+  PNPM_VERSION: '11.22.0'
+  # The induced condition, named once and used everywhere: 5000 µs of CPU per
+  # 1 000 000 µs period on the PostgreSQL service container only. Named
+  # constants rather than inline numbers so the applied value and the verified
+  # value are provably the same two numbers.
+  CPU_PERIOD_US: '1000000'
+  CPU_QUOTA_US: '5000'
+
+jobs:
+  aggregation-induced-calibration:
+    name: ADR-055 induced paired calibration (native Ubuntu, 20 pairs)
+    runs-on: ubuntu-latest
+    # A constrained database makes every pair slower and less predictable than
+    # the quiet campaign's ~2 minutes. The bound is generous because the
+    # campaign is never retried; a campaign killed before it writes its report
+    # is a lost iteration, not a shorter one.
+    timeout-minutes: 180
+
+    # Exactly one service container. No Kafka, Redis, Keycloak, Temporal,
+    # MinIO, ClamAV or application service: anything else on this machine would
+    # be measured as storage load, and — worse here — the image filter that
+    # resolves the container to constrain would stop being unambiguous.
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: rasta
+          POSTGRES_PASSWORD: rasta_ci_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rasta"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Harness tests (no infrastructure)
+        # Before the quota, and never beside the measurement: the parsers,
+        # validity rules, diagnostic scopes, report shape and the static
+        # campaign contract first, so a harness that stopped measuring what it
+        # claims fails before a single sample is taken.
+        run: |
+          pnpm run test:aggregation-evidence-lib
+          pnpm run check:test-phases
+
+      - name: Provision databases, roles and extensions
+        # Provisioning and migrations run on the *unconstrained* service. The
+        # induced condition is a condition on the measurement, not a way to
+        # break setup: a campaign that never reached a usable schema would say
+        # nothing about the proof.
+        env:
+          PGPASSWORD: rasta_ci_password
+          POSTGRES_USER: rasta
+          POSTGRES_SERVICE_PASSWORD: rasta_ci_service_password
+        run: |
+          export PGHOST=localhost PGPORT=5432
+          psql -U rasta -d postgres -c "SELECT 1" >/dev/null
+          bash infrastructure/docker/postgres/00-init-databases.sh
+
+      - name: Generate and build identity-service dependencies
+        run: |
+          pnpm --filter @rasta/identity-service run db:generate
+          pnpm exec turbo run build --filter=@rasta/identity-service^...
+
+      - name: Apply identity migrations
+        run: pnpm --filter @rasta/identity-service run db:migrate
+        env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+
+      - name: Apply and verify the induced CPU constraint
+        # Resolve the one service container by its exact image and refuse on any
+        # other count: constraining the wrong container, or constraining nothing
+        # and measuring anyway, both produce a dataset that lies about its own
+        # conditions. The identifier is captured and never printed.
+        #
+        # `docker update` writes the container name to stdout on success, so it
+        # is silenced. Verification reads exactly two fields — never broad
+        # `docker inspect` output — and the job dies here, before any
+        # measurement, if either number is not the constant that was asked for.
+        run: |
+          set -euo pipefail
+          ids="$(docker ps --quiet --filter "ancestor=postgis/postgis:16-3.4")"
+          count="$(printf '%s' "$ids" | grep -c . || true)"
+          if [ "$count" -ne 1 ]; then
+            echo "expected exactly one postgis/postgis:16-3.4 container, found $count" >&2
+            exit 1
+          fi
+          docker update --cpu-period "$CPU_PERIOD_US" --cpu-quota "$CPU_QUOTA_US" "$ids" >/dev/null
+          period="$(docker inspect --format '{{.HostConfig.CpuPeriod}}' "$ids")"
+          quota="$(docker inspect --format '{{.HostConfig.CpuQuota}}' "$ids")"
+          echo "applied_cpu_period_us=$period"
+          echo "applied_cpu_quota_us=$quota"
+          if [ "$period" != "$CPU_PERIOD_US" ] || [ "$quota" != "$CPU_QUOTA_US" ]; then
+            echo "induced condition did not apply exactly; refusing to measure" >&2
+            exit 1
+          fi
+
+      - name: Environment provenance
+        # Names and fixed-shape values only. No connection string, no password,
+        # no `docker inspect`, no environment dump, no workspace path: a
+        # provenance block that leaks is worse than no provenance block.
+        #
+        # `docker ps` is restricted to the image column on purpose — it is the
+        # evidence that PostgreSQL is the only container on this machine, and
+        # the only column that carries no identity.
+        #
+        # The two quota numbers are repeated here so the artifact's own
+        # provenance and the applied condition sit in one place in the log.
+        env:
+          PGPASSWORD: rasta_ci_password
+        run: |
+          echo "runner_image=${ImageOS:-unknown}/${ImageVersion:-unknown}"
+          echo "kernel=$(uname -r)"
+          echo "cpus=$(nproc)"
+          echo "memory_gib=$(awk '/MemTotal/ {printf "%.1f", $2/1048576}' /proc/meminfo)"
+          echo "docker_storage_driver=$(docker info --format '{{.Driver}}')"
+          echo "containers_running=$(docker ps -q | wc -l)"
+          echo "container_images:"
+          docker ps --format '{{.Image}}' | sed 's/^/  /'
+          echo "induced_cpu_period_us=$CPU_PERIOD_US"
+          echo "induced_cpu_quota_us=$CPU_QUOTA_US"
+          psql -h 127.0.0.1 -p 5432 -U rasta -d postgres -X -A -t -q -c \
+            "SELECT format('%s=%s', name, setting) FROM pg_settings
+             WHERE name IN ('server_version','fsync','synchronous_commit',
+                            'wal_level','wal_sync_method','full_page_writes',
+                            'shared_buffers','max_connections','max_wal_size',
+                            'checkpoint_timeout')
+             ORDER BY name"
+
+      - name: Induced paired calibration campaign (20 pairs, one run, no retry)
+        # One campaign, no retry, nothing else running beside it — no build and
+        # no test task shares the machine with the measurement. Every step runs
+        # even after a failing one, so the artifact keeps the whole distribution
+        # rather than stopping at the first failed pair.
+        #
+        # A NON-ZERO EXIT IS THE EXPECTED OUTCOME HERE. Under the induced
+        # condition the unchanged stress suites are expected to fail, and the
+        # campaign correctly refuses to exit zero. The status is captured only
+        # so the upload step still runs, and is then re-raised unchanged: a
+        # green light over a failed proof is exactly what ADR-055 § 3 forbids.
+        run: |
+          set +e
+          pnpm run calibrate:aggregation-stress -- --pairs 20 "$RUNNER_TEMP/induced-calibration.txt"
+          status=$?
+          set -e
+          echo "campaign_exit=$status"
+          exit "$status"
+        env:
+          NODE_ENV: test
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          EVIDENCE_PG_IMAGE: postgis/postgis:16-3.4
+
+      - name: Upload the induced calibration artifact
+        # `always()`: a campaign that refused or failed still produced the one
+        # record of what happened, and under an induced constraint that record
+        # is precisely the point.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: adr-055-induced-calibration
+          path: ${{ runner.temp }}/induced-calibration.txt
+          retention-days: 3
+          if-no-files-found: error
