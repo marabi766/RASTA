@@ -34,9 +34,10 @@
  * code is non-zero when any step failed, any probe was invalid, or the report
  * could not be written. Only aggregates are printed or written.
  *
- * **A refused calibration still answers.** When a prerequisite stops the
- * campaign before it measures anything — a missing environment name, a jest
- * launcher that cannot be resolved — a valid calibration request with a
+ * **A refused calibration still answers.** When anything stops the campaign
+ * before it measures — a missing environment name, a jest launcher that cannot
+ * be resolved, a stress spec that cannot be read, static contract drift, a
+ * temporary directory that cannot be made — a valid calibration request with a
  * writable path still gets its artifact: every requested pair and the control
  * recorded as `INCONCLUSIVE`, every step marked not run, no invented figure, and
  * the single campaign-level cause counted once at campaign scope rather than
@@ -447,25 +448,33 @@ function saveReport(reportPath, text, write, log) {
 }
 
 /**
- * The campaign's own prerequisites, checked before any step exists: the
- * environment names a campaign needs, and the jest launcher a stress half needs.
- *
- * Both are checked, not just the first, so one refusal describes everything
- * that is missing. Nothing here connects, spawns a measurement or reads an
- * environment *value* — a refusal must not become the one place a credential
- * leaks. The result is campaign-scoped: it is one event whatever the pair count.
+ * How many contract findings the one campaign diagnostic quotes, and how much
+ * of each. Bounded on purpose: an artifact is a record, not a transcript.
  */
-function campaignPreflight({ env, resolveJestBin }) {
-  const problems = [];
-  const missing = missingCampaignEnv(env);
-  if (missing.length > 0) problems.push(missingEnvironmentDiagnostic(missing));
-  try {
-    resolveJestBin();
-  } catch (error) {
-    // An untyped throw keeps `harnessError` and loses its message.
-    problems.push(diagnosticFromError(error));
-  }
-  return problems;
+const CONTRACT_FINDINGS_SHOWN = 5;
+const CONTRACT_FINDING_CHARS = 200;
+
+/**
+ * Static contract drift as **one** campaign event.
+ *
+ * A contract check answers with one finding per broken clause, and a single
+ * edit to the spec breaks several at once. Counting each finding as its own
+ * `harnessError` would say the campaign failed five times when it refused once,
+ * and that number would go straight into ADR-055 section 6's dataset. So the
+ * findings become one diagnostic. Its text quotes the repository's *own* fixed
+ * problem sentences — which interpolate expected constants, step ids and counts,
+ * never spec source and never a path — bounded in number and in length, and
+ * passed through `redact` as a second line of defence.
+ */
+function contractDiagnostic(findings) {
+  const shown = findings
+    .slice(0, CONTRACT_FINDINGS_SHOWN)
+    .map((finding) => redact(String(finding)).slice(0, CONTRACT_FINDING_CHARS));
+  return diagnostic(
+    [INFRASTRUCTURE_CATEGORY.harnessError],
+    `the static campaign contract failed with ${findings.length} finding(s): ` +
+      `${shown.join('; ')}${findings.length > shown.length ? '; and more' : ''}`,
+  );
 }
 
 /**
@@ -477,23 +486,170 @@ function campaignPreflight({ env, resolveJestBin }) {
 const UNMEASURED_TOPOLOGY = Object.freeze({ measured: 'no' });
 
 /**
- * The measuring half: validate the static contract, then run the plan and write
- * what it produced. Reached only after the prerequisites hold, so every number
- * in its report comes from a step that actually ran.
+ * The two exit codes a refusal may keep, decided by the *first* thing that
+ * refused. Both are non-zero; they differ only in which thing has to be fixed.
+ *
+ * - `2` — the campaign's prerequisites are not in place: a missing environment
+ *   name, a launcher that will not resolve, a spec that cannot be read, a
+ *   temporary directory that cannot be made. Fix the machine.
+ * - `1` — the repository's own static contract no longer describes the proof
+ *   this harness measures. Fix the code. This is the code the contract check
+ *   has always returned, and it stays.
  */
-async function runMeasuredCampaign({ mode, pairs, reportPath, writeReport, readCommit, now, log }) {
-  const specSource = readFileSync(join(packageDir, STRESS.spec), 'utf8');
-  const plan = mode === 'calibrate' ? planCalibrationRun({ pairs }) : planEvidenceRun();
-  const contract =
-    mode === 'calibrate'
-      ? validateCalibrationContract({ specSource, plan, pairs })
-      : validateEvidenceContract({ specSource, plan });
-  if (contract.length > 0) {
-    for (const problem of contract) log(`[evidence] contract: ${problem}`);
-    return 1;
+const PREREQUISITE_EXIT = 2;
+const CONTRACT_EXIT = 1;
+
+/**
+ * Everything that must hold before a campaign may measure anything, in one
+ * place and in one pass: the environment names, the jest launcher, the stress
+ * spec, the plan, the static contract, and last the temporary work directory.
+ *
+ * Returns either the **validated plan** the measuring half will run — built and
+ * checked exactly once, here, never again — or campaign-scoped diagnostics and
+ * the exit code the refusal keeps. Nothing in here opens a connection, starts
+ * Docker, spawns a measurement or reads an environment *value*: a refusal must
+ * not become the one place a credential leaks.
+ *
+ * Everything that can still be checked is checked, not only the first failure,
+ * so one refusal describes as much of the situation as it can. The work
+ * directory is created last, so a campaign that was going to refuse never
+ * leaves one behind.
+ */
+function prepareCampaign({ mode, pairs, env, resolveJestBin, readSpec, makeWorkDir, log }) {
+  const problems = [];
+  const codes = [];
+  const refuse = (entry, code) => {
+    problems.push(entry);
+    codes.push(code);
+  };
+  const setupFailure = (text) =>
+    diagnostic([INFRASTRUCTURE_CATEGORY.harnessError], `the campaign could not start: ${text}`);
+
+  const missing = missingCampaignEnv(env);
+  if (missing.length > 0) refuse(missingEnvironmentDiagnostic(missing), PREREQUISITE_EXIT);
+  try {
+    resolveJestBin();
+  } catch (error) {
+    // An untyped throw keeps `harnessError` and loses its message.
+    refuse(diagnosticFromError(error), PREREQUISITE_EXIT);
   }
 
-  workDir = mkdtempSync(join(tmpdir(), 'aggregation-evidence-'));
+  let specSource;
+  try {
+    specSource = readSpec();
+  } catch {
+    // The errno, the path and the message each name a machine; the category
+    // names only what happened, so the exception is read no further.
+    refuse(setupFailure('the aggregation stress spec could not be read'), PREREQUISITE_EXIT);
+  }
+
+  let plan = null;
+  if (specSource !== undefined) {
+    try {
+      plan = mode === 'calibrate' ? planCalibrationRun({ pairs }) : planEvidenceRun();
+    } catch {
+      refuse(setupFailure('the campaign plan could not be built'), PREREQUISITE_EXIT);
+    }
+  }
+
+  if (plan) {
+    const findings =
+      mode === 'calibrate'
+        ? validateCalibrationContract({ specSource, plan, pairs })
+        : validateEvidenceContract({ specSource, plan });
+    if (findings.length > 0) {
+      for (const finding of findings) log(`[evidence] contract: ${finding}`);
+      refuse(contractDiagnostic(findings), CONTRACT_EXIT);
+      plan = null;
+    }
+  }
+
+  if (problems.length > 0) return { problems, exitCode: codes[0], plan: null };
+
+  try {
+    workDir = makeWorkDir();
+  } catch {
+    return {
+      problems: [setupFailure('the temporary campaign directory could not be created')],
+      exitCode: PREREQUISITE_EXIT,
+      plan: null,
+    };
+  }
+  return { problems: [], exitCode: 0, plan };
+}
+
+/**
+ * Removes the campaign's temporary directory, after a refusal as after a run.
+ *
+ * It never throws: this runs in a `finally`, and a directory a straggling child
+ * still holds must not replace the exit code the campaign already decided — nor
+ * put an OS message carrying that path anywhere.
+ */
+function releaseWorkDir() {
+  if (!workDir) return;
+  try {
+    rmSync(workDir, { recursive: true, force: true });
+    workDir = undefined;
+  } catch {
+    // Left set on purpose, so the entry point's `cleanup` tries once more.
+    // Either way the path is never said out loud.
+  }
+}
+
+/** The commit, or `unknown`: provenance may never be why a refusal loses its artifact. */
+async function commitFor(readCommit) {
+  try {
+    return await readCommit();
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Renders and writes the one artifact a refused calibration owes its caller,
+ * then keeps the refusal's exit code.
+ *
+ * The legacy evidence report has no campaign-scoped section and its schema is
+ * established, so that mode refuses without an artifact — unchanged.
+ */
+async function refuseCampaign({
+  mode,
+  pairs,
+  reportPath,
+  problems,
+  exitCode,
+  writeReport,
+  readCommit,
+  now,
+  log,
+}) {
+  reportDiagnostics('preflight', problems, log);
+  if (mode !== 'calibrate') return exitCode;
+  const text = formatCalibrationReport({
+    meta: { commit: await commitFor(readCommit), generatedAt: now().toISOString() },
+    topology: UNMEASURED_TOPOLOGY,
+    summary: summarizeCalibration({ pairs, results: [], preflight: problems }),
+  });
+  log(`\n${text}`);
+  saveReport(reportPath, text, writeReport, log);
+  return exitCode;
+}
+
+/**
+ * The measuring half. It receives the plan preparation already built and
+ * validated, so nothing is planned or re-checked here: this function's first
+ * statement is the campaign's first measurement.
+ */
+async function runMeasuredCampaign({
+  mode,
+  pairs,
+  plan,
+  reportPath,
+  writeReport,
+  readCommit,
+  now,
+  log,
+}) {
   const topo = await readTopology();
   log(`[evidence] topology ${JSON.stringify(topo)}`);
   if (mode === 'calibrate') {
@@ -504,7 +660,7 @@ async function runMeasuredCampaign({ mode, pairs, reportPath, writeReport, readC
   }
 
   const results = await runPlan(plan);
-  const meta = { commit: await readCommit(), generatedAt: now().toISOString() };
+  const meta = { commit: await commitFor(readCommit), generatedAt: now().toISOString() };
   const text =
     mode === 'calibrate'
       ? formatCalibrationReport({
@@ -537,10 +693,18 @@ async function runMeasuredCampaign({ mode, pairs, reportPath, writeReport, readC
  * is invented, and the one campaign-level cause is counted once at campaign
  * scope rather than copied into each row. The exit code stays non-zero — an
  * artifact is a record of a refusal, never a pass.
+ *
+ * **Where the boundary is.** Everything that can refuse before a measurement
+ * exists lives in `prepareCampaign`, and every one of its refusals goes through
+ * `refuseCampaign`. `runMeasuredCampaign` is unreachable after any of them and
+ * its first statement is the campaign's first measurement, so the top-level
+ * catch at the entry point covers only failures that happened *while measuring*.
  */
 export async function runEvidenceCli({ argv = [], env = process.env, deps = {} } = {}) {
   const {
     resolveJestBin = jestBin,
+    readSpec = () => readFileSync(join(packageDir, STRESS.spec), 'utf8'),
+    makeWorkDir = () => mkdtempSync(join(tmpdir(), 'aggregation-evidence-')),
     writeReport = (path, text) => writeFileSync(path, text),
     measureCampaign = runMeasuredCampaign,
     readCommit = commitSha,
@@ -558,23 +722,43 @@ export async function runEvidenceCli({ argv = [], env = process.env, deps = {} }
   }
   const { mode, pairs, reportPath } = parsed;
 
-  const preflight = campaignPreflight({ env, resolveJestBin });
-  if (preflight.length > 0) {
-    reportDiagnostics('preflight', preflight, log);
-    // The legacy evidence report has no campaign-scoped section and its schema
-    // is established; it keeps refusing without an artifact (ADR-055).
-    if (mode !== 'calibrate') return 2;
-    const text = formatCalibrationReport({
-      meta: { commit: await readCommit(), generatedAt: now().toISOString() },
-      topology: UNMEASURED_TOPOLOGY,
-      summary: summarizeCalibration({ pairs, results: [], preflight }),
+  try {
+    const prepared = prepareCampaign({
+      mode,
+      pairs,
+      env,
+      resolveJestBin,
+      readSpec,
+      makeWorkDir,
+      log,
     });
-    log(`\n${text}`);
-    saveReport(reportPath, text, writeReport, log);
-    return 2;
+    if (prepared.problems.length > 0) {
+      return await refuseCampaign({
+        mode,
+        pairs,
+        reportPath,
+        problems: prepared.problems,
+        exitCode: prepared.exitCode,
+        writeReport,
+        readCommit,
+        now,
+        log,
+      });
+    }
+    return await measureCampaign({
+      mode,
+      pairs,
+      plan: prepared.plan,
+      reportPath,
+      writeReport,
+      readCommit,
+      now,
+      log,
+    });
+  } finally {
+    // After a refusal as after a run: nothing temporary outlives the campaign.
+    releaseWorkDir();
   }
-
-  return measureCampaign({ mode, pairs, reportPath, writeReport, readCommit, now, log });
 }
 
 /** True only when this file is the process's entry point, not an import. */

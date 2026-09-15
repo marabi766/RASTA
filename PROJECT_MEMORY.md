@@ -604,6 +604,34 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 > دروازهٔ Fail-Fast و یکپارچه‌سازی CI؛ کران ۲۹٫۲ همچنان بی Provenance. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055
 > همچنان `Proposed`؛ AUD-004 بسته نشد.
 >
+> **پیگیری همان روز (کامل شدن مرز رد پیش از اندازه‌گیری — و تصحیح ادعای بند بالا):** بند بالا نوشت «هر درخواست
+> کالیبراسیونِ معتبر با مسیر نوشتنی همیشه پاسخ می‌گیرد»؛ آن **ادعا بزرگ‌تر از کار بود**. فقط دو علت پوشش داده شده بود
+> (نام‌های غایب محیط، Launcher ‏jest). سه مسیر دیگر هنوز پیش از هر اندازه‌گیری و **بی Artifact** رد می‌کردند: خواندن
+> Spec فشار و ساخت Plan (پرتاب به `catch` بالایی)، قرارداد ایستا (`return 1` بی `saveReport()`) و ساخت پوشهٔ موقت.
+> **بازتولید روی `5e949a3`** (Runner همان Commit در کپی خارج از Repository، محیط کامل، `resolveJestBin` تزریق‌شده تا
+> علت فقط خواندن Spec باشد): `THREW=yes`، `EXIT=1`، `ARTIFACT=none`. **پس از تغییر، همان ورودی:** `EXIT=2`،
+> `ARTIFACT=written`، `pairs: 2 requested, 0 attempted`، `control: not run, outcome=INCONCLUSIVE`،
+> `pair-1`/`pair-2: outcome=INCONCLUSIVE`، `outcomes: VALID=0 INVALID=0 INCONCLUSIVE=2`،
+> `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a max=n/a`، و `harnessError` برابر **۱** در جمع
+> سطح‌کمپین و **۰** در جمع جفت‌ها و Control. **رد قرارداد ایستا** هم همین‌طور: `EXIT=1` (همان کدی که بررسی قرارداد
+> همیشه برمی‌گرداند)، Artifact نوشته می‌شود، `harnessError` کمپین ۱ و جفت/Control ۰. **راه‌حل:** `prepareCampaign()`
+> در یک گذر محیط، Launcher، Spec، Plan، قرارداد و در **آخر** پوشهٔ موقت را می‌سنجد و یا **Planِ اعتبارسنجی‌شده** را
+> برمی‌گرداند یا تشخیص‌های سطح‌کمپین را؛ `runMeasuredCampaign()` همان Plan را می‌گیرد و **قرارداد را دوباره نمی‌سنجد**
+> (دقیقاً یک بار)، و نخستین دستورش نخستین اندازه‌گیری است — پس نیمهٔ اندازه‌گیر پس از هر رد **دست‌نیافتنی** است و
+> `catch` بالایی فقط شکستِ حین اندازه‌گیری را می‌پوشاند. پوشهٔ موقت آخر ساخته و در `finally` پس از موفقیت و شکست آزاد
+> می‌شود. **یک کمپینِ رد شده یک رویداد است:** چند Finding قرارداد **یک** `harnessError` می‌شود، با نقل‌قول کراندار
+> (≤۵ Finding، ≤۲۰۰ نویسه) از جمله‌های ثابت خود Repository و عبور از `redact` — بی محتوای Spec، بی مسیر، بی متن
+> استثنا. **حفظ شد:** معنای آرگومان بدشکل (Usage + ۲ بی Artifact)، حالت `evidence` قدیمی و Schema گزارشش، واژگان یکتای
+> دسته، مسیر یکتای نرمال‌سازی/شمارش، `INCONCLUSIVE` برای هر علت آماده‌سازی، مجاورت دقیق جفت‌ها، نبود Retry، SQL و
+> ثابت‌های فشار و دستی‌ماندن کمپین. **شواهد:** `node --test scripts/aggregation-evidence-cli.test.mjs` ۱۳/۱۳،
+> `node --test scripts/aggregation-evidence.test.mjs` ۳۶/۳۶ (بی تغییر)، `pnpm run test:aggregation-evidence-lib`
+> ۴۹/۴۹، `pnpm run test:test-phases` ۲۱/۲۱، `pnpm run check:test-phases` خروج ۰، `pnpm run progress:check` خروج ۰،
+> `pnpm lint` و `pnpm typecheck` سبز، `pnpm format:check` تمیز، ESLint مستقیم روی Scriptهای تغییریافته بی رگرسیون
+> نسبت به `5e949a3` (همان `no-undef` پیش‌زمینه‌ای روی Globalهای Node)، `git diff --check` تمیز. **کمپین زنده اجرا نشد
+> و هیچ نمونه‌ای جمع نشد.** **هنوز نیست:** مجموعه‌دادهٔ دوطرفه، عدد آستانه، حاشیهٔ ایمنی، Classifier توانایی،
+> Preflight فاز، دروازهٔ Fail-Fast و یکپارچه‌سازی CI؛ کران ۲۹٫۲ همچنان بی Provenance. `COM-009` همچنان `READY`/۱۳،
+> ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 بسته نشد.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس
