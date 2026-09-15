@@ -575,6 +575,35 @@ INCONCLUSIVE:0}`) — یعنی «سنجیدم و رد شد» برای سروری
 > یکپارچه‌سازی CI؛ کران ۲۹٫۲ همچنان بی Provenance. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛
 > AUD-004 بسته نشد.
 >
+> **پیگیری همان روز (رد پیش‌شرط در سطح کمپین — Artifact برای درخواست معتبر می‌ماند):** گام قبلی معنای `INCONCLUSIVE` را در
+> Helperها درست کرد ولی **مسیر واقعی CLI** هرگز به آن نمی‌رسید. **بازتولید روی `5e51889` (پیش از تغییر):**
+> `node scripts/aggregation-evidence.mjs --calibrate --pairs 2 <مسیر>` با محیط ناقص → `[evidence] environment:
+missingEnvironment=1`، **`exit=2` و هیچ Artifactی** — پس مسیر گزارشِ درخواست‌شده نوشته نمی‌شد، Control و جفت‌ها نتیجهٔ صریح
+> نمی‌گرفتند و Artifact واقعی نه مخرج داشت نه جمع دسته. شکست پیش از اجرا در `jestBin()` هم همین‌طور. **پس از تغییر، همان
+> فراخوانی:** `exit=2` (همچنان غیرصفر) و Artifact **نوشته می‌شود** با `control: not run, outcome=INCONCLUSIVE`،
+> `pair-1`/`pair-2: outcome=INCONCLUSIVE` با `probe: not run` و `stress: not run`، `outcomes: VALID=0 INVALID=0
+INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a max=n/a` (هر چهار توزیع)،
+> `topology: measured=no`، `preflight infrastructure totals (campaign scope, denominator=1 campaign): missingEnvironment=1`
+> و `infrastructure totals across pairs: missingEnvironment=0`. **راه‌حل:** رد پیش‌شرط رویدادی در **سطح کمپین** است و صریح
+> مدل می‌شود — `campaignPreflight()` هر دو پیش‌شرط را جمع می‌کند (نام‌های غایب محیط از `missingCampaignEnv()`، و Launcher
+> ‏jest) و هیچ **مقدار** محیطی نمی‌خواند؛ جمع دسته‌اش دامنهٔ یک کمپین دارد و در سطر جفت‌ها کپی نمی‌شود (کپی کردنش شکست‌هایی
+> می‌ساخت که رخ نداده‌اند). گزارش چهار دامنهٔ متمایز نگه می‌دارد: Preflight کمپین، Control، جمع جفت‌ها و Suite فشار.
+> **مرز آزمون‌پذیری:** `runEvidenceCli({ argv, env, deps })` صادر شد و نقطهٔ ورود **محافظت‌شده** است، پس Import کردن ماژول
+> چیزی را علیه زیرساخت اجرا نمی‌کند؛ وابستگی‌های تزریق‌شده `resolveJestBin`/`writeReport`/`readCommit`/`now`/`log`/
+> `measureCampaign` و آزمون‌ها ثابت می‌کنند نیمهٔ اندازه‌گیر در مسیر رد **صدا زده نمی‌شود**. **حفظ شد:** واژگان یکتای دسته،
+> مسیر یکتای نرمال‌سازی/شمارش، حالت صریح Probe، تقدم `INCONCLUSIVE`، `null` بودن ارقام غایب، خروجی فقط‌تجمیعی و بی‌راز،
+> نبود Retry، مجاورت جفت، ثابت‌ها و SQL فشار، قرارداد ایستا و دستی‌ماندن کمپین؛ آرگومان بدشکل یا نبودِ مسیر گزارش همچنان
+> Usage و خروج ۲ بی Artifact است، و حالت `evidence` قدیمی و Schema گزارشش دست نخورد. شکست نوشتن گزارش غیرصفر می‌ماند و فقط
+> یک `code` با شکل ثابت چاپ می‌کند (هر چیز دیگر → `error`). **شواهد:**
+> `node --test scripts/aggregation-evidence-cli.test.mjs` ۶/۶، `node --test scripts/aggregation-evidence.test.mjs` ۳۶/۳۶
+> (بی تغییر)، `pnpm run test:aggregation-evidence-lib` ۴۲/۴۲، `pnpm run test:test-phases` ۲۱/۲۱،
+> `pnpm run check:test-phases` خروج ۰، `pnpm run progress:check` خروج ۰، `pnpm lint` و `pnpm typecheck` سبز،
+> `pnpm format:check` تمیز، ESLint مستقیم روی Scriptهای ریشهٔ تغییریافته بی رگرسیون نسبت به `5e51889` (همان
+> `no-undef` پیش‌زمینه‌ای `structuredClone`)، `git diff --check` تمیز. **کمپین زنده اجرا نشد** و هیچ نمونه‌ای جمع نشد.
+> **هنوز نیست:** مجموعه‌دادهٔ دوطرفه، عدد آستانه، حاشیهٔ ایمنی، Classifier توانایی، Preflight در `run-test-phases.mjs`،
+> دروازهٔ Fail-Fast و یکپارچه‌سازی CI؛ کران ۲۹٫۲ همچنان بی Provenance. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055
+> همچنان `Proposed`؛ AUD-004 بسته نشد.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

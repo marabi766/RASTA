@@ -493,6 +493,73 @@ pair outcome = INVALID       ← نادرست؛ باید INCONCLUSIVE باشد
 **آنچه همچنان نیست.** مجموعه‌دادهٔ دوطرفه، عدد آستانه، حاشیهٔ ایمنی، Classifier توانایی، دروازهٔ Fail-Fast و یکپارچه‌سازی
 با CI معمول — **هیچ‌کدام**. کران بی‌Provenance ‏۲۹٫۲ هم جایگزین نشد.
 
+## وضعیت پیاده‌سازی — 2026-09-15: رد پیش‌شرط در سطح کمپین (Artifact می‌ماند، خروج غیرصفر می‌ماند)
+
+> **این ADR همچنان `Proposed` است.** این گام هیچ آستانه، حاشیه، `VALID_CAPABLE`/`VALID_INCAPABLE`، Classifier توانایی،
+> Preflight در `run-test-phases.mjs`، دروازهٔ Fail-Fast، Bypass محیطی، Retry یا اجرای کالیبراسیون در CI معمول اضافه نکرد و
+> **هیچ کمپین زنده‌ای اجرا نشد**. ADR-053 هم `Proposed` ماند و کران بی‌Provenance ‏۲۹٫۲ سر جایش است.
+
+**مسئله.** گام قبلی معنای `INCONCLUSIVE` را در Helperها درست کرد، ولی **مسیر واقعی CLI** هرگز به آن نمی‌رسید. نقطهٔ ورود
+`scripts/aggregation-evidence.mjs` متغیرهای لازم را **پیش از** ساختن و اجرای کمپین بررسی می‌کرد و بی‌درنگ با کد ۲ برمی‌گشت:
+
+```text
+node scripts/aggregation-evidence.mjs --calibrate --pairs 2 <مسیر-گزارش>   # روی 5e51889
+[evidence] environment: missingEnvironment=1
+[evidence]   problem: missing environment: PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, DATABASE_URL_IDENTITY
+exit=2      artifact = هیچ
+```
+
+پس مسیر گزارشِ **درخواست‌شده** هرگز نوشته نمی‌شد، Control و هیچ جفتی نتیجهٔ صریح `INCONCLUSIVE` نمی‌گرفت، و Artifact واقعی نه
+مخرجی داشت نه جمع دسته‌ای. تنها آزمونی که `missingEnvironment` را نام می‌برد، `outcomeForDiagnostics()` را جدا صدا می‌زد.
+شکست پیش از اجرا در `jestBin()` هم به `catch` بالایی می‌رسید و همان‌طور بی Artifact می‌ماند.
+
+**تصمیم پیاده‌سازی.** رد پیش‌شرط، رویدادی در **سطح کمپین** است و صریح مدل می‌شود:
+
+- `campaignPreflight()` هر دو پیش‌شرط را جمع می‌کند (نام‌های غایب محیط از `missingCampaignEnv()`، و Launcher ‏jest)، نه فقط اولی
+  را؛ و هیچ **مقدارِ** متغیر محیطی را نمی‌خواند.
+- برای درخواست کالیبراسیونِ نحواً معتبر با مسیر خروجی نوشتنی، Artifact **نوشته می‌شود**: Control و **هر جفت درخواست‌شده**
+  `INCONCLUSIVE`، هر گام `not run`، هر جفت در مخرج همهٔ توزیع‌ها با `available=0`، `topology: measured=no`، و هیچ عدد ساختگی.
+- **مخرجِ دسته.** جمع Preflight دامنهٔ **کمپین** دارد: `denominator=1 campaign`. یک متغیر غایب **یک** رویداد است، نه یکی به‌ازای
+  هر جفت؛ کپی کردن همان تشخیص در هر سطر، شکست‌هایی می‌ساخت که رخ نداده‌اند. گزارش اکنون **چهار دامنهٔ** متمایز دارد و هرگز
+  آن‌ها را در هم جمع نمی‌کند: `preflight` (کمپین)، `control`، `infrastructure totals across pairs` و تشخیص‌های Suite فشار.
+- خروج **غیرصفر** می‌ماند (`2`). Artifact سند یک **رد** است، نه یک قبولی.
+
+**چرا اصلاً نوشته می‌شود.** درخواستی که پاسخ ندهد از درخواستی که هرگز داده نشده تفکیک‌ناپذیر است. مجموعه‌دادهٔ § ۶ باید بتواند
+«کمپینی که رد شد» را از «کمپینی که اجرا نشد» جدا کند، وگرنه از همان نمونهٔ اول مخرجش مبهم است.
+
+**معنای CLI دست‌نخورده ماند.** آرگومان بدشکل یا نبودِ مسیر گزارش همچنان Usage چاپ می‌کند و با ۲ بی هیچ Artifact خارج می‌شود —
+چون هدف خروجی معتبری وجود ندارد. شکست نوشتن گزارش غیرصفر می‌ماند و **نه** مسیر، نه Credential، نه مقدار محیطی، نه خروجی خام
+فرزند و نه متن دلخواه استثنا را فاش نمی‌کند؛ فقط یک `code` با شکل ثابت (`/^[A-Z][A-Z0-9_]{1,15}$/`) چاپ می‌شود و هر چیز دیگری
+به `error` فرو می‌افتد. حالت `evidence` قدیمی عمداً دست نخورد: Schema گزارشش بخش سطح‌کمپین ندارد و دامنهٔ لازم این گام
+کالیبراسیون است.
+
+**مرز تستی، بی اجرای زنده.** `runEvidenceCli({ argv, env, deps })` صادر شد و نقطهٔ ورود **محافظت‌شده** است (فقط وقتی همین فایل
+نقطهٔ ورود فرایند باشد اجرا می‌شود)، پس Import کردن ماژول هیچ چیزی را علیه زیرساخت اجرا نمی‌کند. وابستگی‌های تزریق‌شده:
+`resolveJestBin`، `writeReport`، `readCommit`، `now`، `log` و `measureCampaign` — و آزمون‌ها اثبات می‌کنند نیمهٔ اندازه‌گیر در
+مسیر رد **اصلاً صدا زده نمی‌شود**. هیچ مسیر دومی برای Parse، نرمال‌سازی دسته، تصمیم اعتبار، خلاصه‌سازی یا قالب‌بندی ساخته نشد.
+
+**آزمون‌ها.** `pnpm test:aggregation-evidence-lib` ‏**۴۲/۴۲** (۳۶ آزمون پیشین بی تغییر + ۶ آزمون تازهٔ CLI/Runner در
+`scripts/aggregation-evidence-cli.test.mjs`، بی Docker و بی PostgreSQL، با مسیر گزارش موقت و پاک‌سازی). فرایندهای فرزند کراندارند
+و محیطشان از صفر ساخته می‌شود، پس Credential تصادفی وارد آزمونِ «محیط ناقص» نمی‌شود.
+
+**پس از تغییر، همان فراخوانی:**
+
+```text
+exit=2      artifact = نوشته شد
+control: not run, outcome=INCONCLUSIVE
+pair-1: outcome=INCONCLUSIVE   probe: not run   stress: not run
+pair-2: outcome=INCONCLUSIVE   probe: not run   stress: not run
+outcomes: VALID=0 INVALID=0 INCONCLUSIVE=2
+probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a max=n/a
+preflight infrastructure totals (campaign scope, denominator=1 campaign): missingEnvironment=1 …
+infrastructure totals across pairs: missingEnvironment=0 …
+```
+
+**آنچه همچنان نیست.** مجموعه‌دادهٔ دوطرفه، عدد آستانه، حاشیهٔ ایمنی، Classifier توانایی، دروازهٔ Fail-Fast و یکپارچه‌سازی با CI
+معمول — **هیچ‌کدام**.
+
+---
+
 ---
 
 ## Rollout، Rollback و رصدپذیری

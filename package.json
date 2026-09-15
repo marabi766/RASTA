@@ -34,7 +34,7 @@
     "check:local-postgres-config": "node scripts/check-local-postgres-config.mjs",
     "test:test-phases": "node --test scripts/test-phases.test.mjs",
     "check:test-phases": "node scripts/check-test-phases.mjs",
-    "test:aggregation-evidence-lib": "node --test scripts/aggregation-evidence.test.mjs",
+    "test:aggregation-evidence-lib": "node --test scripts/aggregation-evidence.test.mjs scripts/aggregation-evidence-cli.test.mjs",
     "calibrate:aggregation-stress": "node scripts/aggregation-evidence.mjs --calibrate",
     "test:grafana-dashboard-lib": "node --test scripts/check-grafana-dashboard.test.mjs",
     "check:grafana-dashboard": "node scripts/check-grafana-dashboard.mjs",

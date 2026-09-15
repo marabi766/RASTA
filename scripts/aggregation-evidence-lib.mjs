@@ -264,6 +264,45 @@ export function parseEvidenceArgs(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// Campaign prerequisites
+//
+// A prerequisite is a *campaign-level* fact: it is true or false once, before
+// any step exists, and when it is false **nothing is measured at all**. That is
+// a different event from a probe that ran and could not be trusted, and the two
+// must never be counted in the same denominator — one missing variable is one
+// campaign that never started, not one failure per requested pair.
+
+/** libpq variables for the superuser session the probes need. */
+export const PG_LIBPQ_ENV = Object.freeze([
+  'PGHOST',
+  'PGPORT',
+  'PGUSER',
+  'PGPASSWORD',
+  'PGDATABASE',
+]);
+
+/** Everything a campaign needs before it may measure anything. Names only. */
+export const REQUIRED_CAMPAIGN_ENV = Object.freeze([...PG_LIBPQ_ENV, 'DATABASE_URL_IDENTITY']);
+
+/**
+ * Which required variables are absent — the **names**, never the values. An
+ * environment value is a credential or a connection string by definition here,
+ * so nothing in this file ever reads one.
+ */
+export function missingCampaignEnv(env) {
+  const source = env ?? {};
+  return REQUIRED_CAMPAIGN_ENV.filter((name) => !source[name]);
+}
+
+/** The one diagnostic for an incomplete environment: fixed category, names only. */
+export function missingEnvironmentDiagnostic(missing) {
+  return diagnostic(
+    [INFRASTRUCTURE_CATEGORY.missingEnvironment],
+    `missing environment: ${(missing ?? []).join(', ')}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Structured, secret-safe diagnostics
 //
 // Why a category is *carried* and never re-derived. A step that cannot produce
@@ -671,8 +710,16 @@ export function probeOutcomeOf(result) {
  * A pair whose probe was valid but whose stress run failed is still `VALID` —
  * that combination is exactly the evidence ADR-055 wants, and calling it
  * anything else would be the capability judgement this mode refuses to make.
+ *
+ * `preflight` carries the campaign-level diagnostics of a refusal that happened
+ * **before any step existed** — a missing variable, a launcher that could not be
+ * resolved. Its denominator is *one campaign*, so it is counted once in its own
+ * total and never copied into the pair rows: multiplying one campaign event by
+ * the requested pair count would invent failures that never happened. The pairs
+ * are still requested, so they stay in every distribution with `available = 0`
+ * and an `INCONCLUSIVE` outcome — attempted nothing, measured nothing.
  */
-export function summarizeCalibration({ pairs, results }) {
+export function summarizeCalibration({ pairs, results, preflight = [] }) {
   const byId = Object.fromEntries((results ?? []).map((result) => [result.id, result]));
   const control = byId.control ?? null;
   // Categories come from the diagnostics a step already attached, never from
@@ -731,8 +778,19 @@ export function summarizeCalibration({ pairs, results }) {
   // never confirmed either way, and saying otherwise would claim a check that
   // did not happen.
   const controlOutcome = probeOutcomeOf(control);
+  // One campaign-scoped total, counted once. `refused` is what the runner knows
+  // and states; it is never inferred from an empty result list, because a
+  // campaign can also legitimately produce no rows for other reasons.
+  const preflightDiagnostics = preflight ?? [];
+  const preflightInfrastructure = countCategories(preflightDiagnostics);
   return {
     pairs,
+    preflight: {
+      refused: preflightDiagnostics.length > 0,
+      problems: preflightDiagnostics.map((entry) => entry.text),
+      infrastructure: preflightInfrastructure,
+    },
+    preflightInfrastructure,
     control: control
       ? {
           outcome: controlOutcome,
@@ -1348,24 +1406,46 @@ const distributionLine = (label, stats) =>
  *
  * Every pair keeps its own line even when it failed, so the denominator of a
  * campaign is what was attempted rather than what happened to succeed.
+ *
+ * A campaign refused by its own prerequisites still renders in full, and says
+ * so in one place: nothing ran, every requested pair is `INCONCLUSIVE`, and the
+ * one refusal is counted once at campaign scope. A request that produced no
+ * artifact at all would look exactly like a request that was never made.
  */
 export function formatCalibrationReport({ meta, topology, summary }) {
+  const refused = summary.preflight?.refused === true;
   const lines = [
     'ADR-055 paired calibration - probe immediately followed by the unchanged stress project',
     `commit=${meta.commit}${meta.runUrl ? ` run=${meta.runUrl}` : ''} generated=${meta.generatedAt}`,
     `topology: ${Object.entries(topology)
       .map(([key, value]) => `${key}=${value}`)
       .join(' ')}`,
-    `pairs: ${summary.pairs}; each pair is one ${PROBE_SECONDS} s validated WAL probe immediately followed by`,
+    `pairs: ${summary.pairs}${refused ? ' requested, 0 attempted' : ''}; each pair is one ${PROBE_SECONDS} s validated WAL probe immediately followed by`,
     `  one fresh unfiltered \`pnpm ${STRESS.rootScript}\` (${STRESS.jestProject}, --runInBand, no retry)`,
     'validity only: VALID / INVALID / INCONCLUSIVE. No threshold, no margin, no capability judgement.',
     '',
+    `campaign preflight: ${
+      refused
+        ? 'REFUSED before any measurement - no control, probe or stress step was started'
+        : 'passed'
+    }`,
+  ];
+  for (const problem of summary.preflight?.problems ?? []) lines.push(`  problem: ${problem}`);
+  lines.push(
+    // Scope, spelled out beside the numbers: this row counts campaigns, not
+    // pairs, so one refusal reads as one event however many pairs were asked for.
+    `  preflight infrastructure (campaign scope, denominator=1 campaign, never per pair): ${INFRASTRUCTURE_CATEGORY_NAMES.map(
+      (name) => `${name}=${summary.preflight?.infrastructure?.[name] ?? 0}`,
+    ).join(' ')}`,
+    '',
+  );
+  lines.push(
     summary.control
       ? `control (read-only, ${CONTROL_SECONDS} s): outcome=${summary.control.outcome} valid=${
           summary.control.valid ? 'yes' : 'NO'
         }`
       : `control: not run, outcome=${summary.controlOutcome ?? PROBE_OUTCOME.INCONCLUSIVE}`,
-  ];
+  );
   for (const problem of summary.control?.problems ?? []) lines.push(`  problem: ${problem}`);
   lines.push(
     `  control infrastructure: ${INFRASTRUCTURE_CATEGORY_NAMES.map(
@@ -1422,7 +1502,9 @@ export function formatCalibrationReport({ meta, topology, summary }) {
     '',
     `outcomes: ${CALIBRATION_OUTCOMES.map((name) => `${name}=${summary.outcomes[name]}`).join(' ')}`,
     `stress: passed=${summary.stressPassed} failed=${summary.stressFailed} of ${summary.pairs}`,
-    'distributions across every attempted pair:',
+    refused
+      ? 'distributions across every requested pair (none was attempted, so none is available):'
+      : 'distributions across every attempted pair:',
     distributionLine('probe_tps', summary.distributions.probeTps),
     distributionLine('probe_min_interval_tps', summary.distributions.probeMinIntervalTps),
     distributionLine('probe_longest_stall_s', summary.distributions.probeLongestStallSeconds),
@@ -1432,6 +1514,11 @@ export function formatCalibrationReport({ meta, topology, summary }) {
     ).join(' ')}`,
     `control infrastructure totals: ${INFRASTRUCTURE_CATEGORY_NAMES.map(
       (name) => `${name}=${summary.controlInfrastructure?.[name] ?? 0}`,
+    ).join(' ')}`,
+    // Four scopes, four totals, never summed into one: campaign preflight,
+    // control, pair probes and stress suites answer different questions.
+    `preflight infrastructure totals (campaign scope, denominator=1 campaign): ${INFRASTRUCTURE_CATEGORY_NAMES.map(
+      (name) => `${name}=${summary.preflight?.infrastructure?.[name] ?? 0}`,
     ).join(' ')}`,
     '',
     'this campaign does not locate a capability boundary and proposes no threshold (ADR-055 § 6).',

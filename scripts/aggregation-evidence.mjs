@@ -34,6 +34,16 @@
  * code is non-zero when any step failed, any probe was invalid, or the report
  * could not be written. Only aggregates are printed or written.
  *
+ * **A refused calibration still answers.** When a prerequisite stops the
+ * campaign before it measures anything — a missing environment name, a jest
+ * launcher that cannot be resolved — a valid calibration request with a
+ * writable path still gets its artifact: every requested pair and the control
+ * recorded as `INCONCLUSIVE`, every step marked not run, no invented figure, and
+ * the single campaign-level cause counted once at campaign scope rather than
+ * once per pair. The exit stays non-zero. Writing nothing would make a campaign
+ * that refused indistinguishable from one that was never launched, which is
+ * exactly the confusion ADR-055 § 6 cannot afford in its dataset.
+ *
  * **Why a step's failure is typed here and never re-read.** A subprocess result
  * is turned into a fixed diagnostic — a launcher, an in-image tool, an outcome,
  * an exit code and canonical category names — at the one place its raw output
@@ -54,6 +64,7 @@ import {
   INFRASTRUCTURE_CATEGORY,
   IN_IMAGE_TOOL,
   LAUNCHER,
+  PG_LIBPQ_ENV,
   PROCESS_OUTCOME,
   STRESS,
   checkedOutput,
@@ -63,6 +74,8 @@ import {
   formatCalibrationReport,
   formatReport,
   measureProbe,
+  missingCampaignEnv,
+  missingEnvironmentDiagnostic,
   parseEvidenceArgs,
   parseWalSamples,
   pgbenchArgs,
@@ -80,7 +93,6 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const packageDir = join(root, STRESS.packageDir);
 const image = process.env.EVIDENCE_PG_IMAGE ?? 'postgis/postgis:16-3.4';
 const network = process.env.EVIDENCE_DOCKER_NETWORK ?? 'host';
-const PG_ENV = ['PGHOST', 'PGPORT', 'PGUSER', 'PGPASSWORD', 'PGDATABASE'];
 const MINUTE = 60_000;
 
 const out = (line) => process.stdout.write(`${line}\n`);
@@ -92,14 +104,14 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
  * can carry URLs, credentials, rows and identifiers, and never a re-reading of
  * the aggregate text printed beside them.
  */
-function reportDiagnostics(label, diagnostics) {
+function reportDiagnostics(label, diagnostics, log = out) {
   const counts = Object.entries(countCategories(diagnostics)).filter(([, count]) => count > 0);
-  out(
+  log(
     `[evidence] ${label}: ${
       counts.map(([name, count]) => `${name}=${count}`).join(' ') || 'unclassified=0'
     }`,
   );
-  for (const entry of diagnostics) out(`[evidence]   problem: ${entry.text}`);
+  for (const entry of diagnostics) log(`[evidence]   problem: ${entry.text}`);
 }
 
 const children = new Set();
@@ -110,13 +122,6 @@ function cleanup() {
   for (const child of children) child.kill('SIGKILL');
   for (const name of containers) spawn('docker', ['rm', '-f', name], { stdio: 'ignore' });
   if (workDir) rmSync(workDir, { recursive: true, force: true });
-}
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
-    out(`[evidence] ${signal} received; stopping children and removing temporary files`);
-    cleanup();
-    process.exit(signal === 'SIGINT' ? 130 : 143);
-  });
 }
 
 /** The fixed command behind each launcher name. Nothing else may be spawned. */
@@ -190,7 +195,7 @@ const dockerPg = (extra, command) => [
   '--rm',
   '--network',
   network,
-  ...PG_ENV.flatMap((name) => ['-e', name]),
+  ...PG_LIBPQ_ENV.flatMap((name) => ['-e', name]),
   ...extra,
   image,
   ...command,
@@ -418,27 +423,65 @@ async function readTopology() {
   }
 }
 
-async function main() {
-  const parsed = parseEvidenceArgs(process.argv.slice(2));
-  if (parsed.error) {
-    out(`[evidence] ${parsed.error}`);
-    out(parsed.usage);
-    return 2;
-  }
-  const { mode, pairs, reportPath } = parsed;
+/**
+ * An OS error code, or nothing. A fixed short token is safe to print; an
+ * exception's message is not — it carries the path it failed on, and a report
+ * path names a user, a machine and sometimes a mount.
+ */
+const ERROR_CODE = /^[A-Z][A-Z0-9_]{1,15}$/;
 
-  const missing = [...PG_ENV, 'DATABASE_URL_IDENTITY'].filter((name) => !process.env[name]);
-  if (missing.length > 0) {
-    // Names only — never the values.
-    reportDiagnostics('environment', [
-      diagnostic(
-        [INFRASTRUCTURE_CATEGORY.missingEnvironment],
-        `missing environment: ${missing.join(', ')}`,
-      ),
-    ]);
-    return 2;
+/**
+ * Saves the artifact, or refuses without naming the target. Returns whether it
+ * was written; the caller's exit code never depends on the difference between a
+ * missing directory and a read-only one.
+ */
+function saveReport(reportPath, text, write, log) {
+  try {
+    write(reportPath, text);
+    return true;
+  } catch (error) {
+    const code = String(error?.code ?? '');
+    log(`[evidence] could not write the report: ${ERROR_CODE.test(code) ? code : 'error'}`);
+    return false;
   }
+}
 
+/**
+ * The campaign's own prerequisites, checked before any step exists: the
+ * environment names a campaign needs, and the jest launcher a stress half needs.
+ *
+ * Both are checked, not just the first, so one refusal describes everything
+ * that is missing. Nothing here connects, spawns a measurement or reads an
+ * environment *value* — a refusal must not become the one place a credential
+ * leaks. The result is campaign-scoped: it is one event whatever the pair count.
+ */
+function campaignPreflight({ env, resolveJestBin }) {
+  const problems = [];
+  const missing = missingCampaignEnv(env);
+  if (missing.length > 0) problems.push(missingEnvironmentDiagnostic(missing));
+  try {
+    resolveJestBin();
+  } catch (error) {
+    // An untyped throw keeps `harnessError` and loses its message.
+    problems.push(diagnosticFromError(error));
+  }
+  return problems;
+}
+
+/**
+ * What the artifact says about the machine when nothing was read from it.
+ *
+ * A refused campaign never opens a connection, so it has no topology. Printing
+ * a plausible one would be the same lie as printing a probe figure.
+ */
+const UNMEASURED_TOPOLOGY = Object.freeze({ measured: 'no' });
+
+/**
+ * The measuring half: validate the static contract, then run the plan and write
+ * what it produced. Reached only after the prerequisites hold, so every number
+ * in its report comes from a step that actually ran.
+ */
+async function runMeasuredCampaign({ mode, pairs, reportPath, writeReport, readCommit, now, log }) {
   const specSource = readFileSync(join(packageDir, STRESS.spec), 'utf8');
   const plan = mode === 'calibrate' ? planCalibrationRun({ pairs }) : planEvidenceRun();
   const contract =
@@ -446,25 +489,22 @@ async function main() {
       ? validateCalibrationContract({ specSource, plan, pairs })
       : validateEvidenceContract({ specSource, plan });
   if (contract.length > 0) {
-    for (const problem of contract) out(`[evidence] contract: ${problem}`);
+    for (const problem of contract) log(`[evidence] contract: ${problem}`);
     return 1;
   }
 
-  // Resolved before anything is measured, so a harness that cannot start jest fails first.
-  jestBin();
-
   workDir = mkdtempSync(join(tmpdir(), 'aggregation-evidence-'));
   const topo = await readTopology();
-  out(`[evidence] topology ${JSON.stringify(topo)}`);
+  log(`[evidence] topology ${JSON.stringify(topo)}`);
   if (mode === 'calibrate') {
-    out(
+    log(
       `[evidence] calibration: ${pairs} pair(s); each is one ${plan[1].seconds} s probe immediately ` +
         `followed by one unfiltered \`pnpm run ${STRESS.rootScript}\`. No threshold is applied.`,
     );
   }
 
   const results = await runPlan(plan);
-  const meta = { commit: await commitSha(), generatedAt: new Date().toISOString() };
+  const meta = { commit: await readCommit(), generatedAt: now().toISOString() };
   const text =
     mode === 'calibrate'
       ? formatCalibrationReport({
@@ -474,26 +514,90 @@ async function main() {
         })
       : formatReport({ meta, topology: topo, results });
 
-  out(`\n${text}`);
-  try {
-    writeFileSync(reportPath, text);
-  } catch (error) {
-    out(`[evidence] could not write the report: ${error.code ?? 'error'}`);
-    return 1;
-  }
+  log(`\n${text}`);
+  if (!saveReport(reportPath, text, writeReport, log)) return 1;
   // Report-only means this is not wired into a quality gate, not that a bad
   // sample is painted green: an invalid probe, a failed suite, a process that
   // could not start or a broken topology all still exit non-zero.
   return results.every((result) => result.passed) && !topo.error ? 0 : 1;
 }
 
-main()
-  .then((code) => {
-    cleanup();
-    process.exit(code);
-  })
-  .catch((error) => {
-    out(`[evidence] aborted: ${diagnosticFromError(error).text}`);
-    cleanup();
-    process.exit(1);
-  });
+/**
+ * The CLI as a value: argv and the environment in, an exit code out. Exported
+ * so the refusal paths are testable exactly as the CLI runs them, with no
+ * Docker, no PostgreSQL and no live campaign — importing this module starts
+ * nothing, because the entry point below is guarded.
+ *
+ * **Why a refused calibration still writes its artifact.** A caller that asked
+ * for N pairs and gave a writable path asked a question; answering with no file
+ * at all is indistinguishable from never having been asked, and the next reader
+ * cannot tell a campaign that refused from one that was never launched. So the
+ * refusal is *rendered*: every requested pair stays in the denominator as
+ * `INCONCLUSIVE` with nothing available, every step is marked not run, no figure
+ * is invented, and the one campaign-level cause is counted once at campaign
+ * scope rather than copied into each row. The exit code stays non-zero — an
+ * artifact is a record of a refusal, never a pass.
+ */
+export async function runEvidenceCli({ argv = [], env = process.env, deps = {} } = {}) {
+  const {
+    resolveJestBin = jestBin,
+    writeReport = (path, text) => writeFileSync(path, text),
+    measureCampaign = runMeasuredCampaign,
+    readCommit = commitSha,
+    now = () => new Date(),
+    log = out,
+  } = deps;
+
+  const parsed = parseEvidenceArgs(argv);
+  if (parsed.error) {
+    // No valid output target exists yet, so there is nothing to write to and
+    // nowhere to record this: usage and a refusal are the whole answer.
+    log(`[evidence] ${parsed.error}`);
+    log(parsed.usage);
+    return 2;
+  }
+  const { mode, pairs, reportPath } = parsed;
+
+  const preflight = campaignPreflight({ env, resolveJestBin });
+  if (preflight.length > 0) {
+    reportDiagnostics('preflight', preflight, log);
+    // The legacy evidence report has no campaign-scoped section and its schema
+    // is established; it keeps refusing without an artifact (ADR-055).
+    if (mode !== 'calibrate') return 2;
+    const text = formatCalibrationReport({
+      meta: { commit: await readCommit(), generatedAt: now().toISOString() },
+      topology: UNMEASURED_TOPOLOGY,
+      summary: summarizeCalibration({ pairs, results: [], preflight }),
+    });
+    log(`\n${text}`);
+    saveReport(reportPath, text, writeReport, log);
+    return 2;
+  }
+
+  return measureCampaign({ mode, pairs, reportPath, writeReport, readCommit, now, log });
+}
+
+/** True only when this file is the process's entry point, not an import. */
+const invokedDirectly =
+  typeof process.argv[1] === 'string' &&
+  resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+
+if (invokedDirectly) {
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => {
+      out(`[evidence] ${signal} received; stopping children and removing temporary files`);
+      cleanup();
+      process.exit(signal === 'SIGINT' ? 130 : 143);
+    });
+  }
+  runEvidenceCli({ argv: process.argv.slice(2) })
+    .then((code) => {
+      cleanup();
+      process.exit(code);
+    })
+    .catch((error) => {
+      out(`[evidence] aborted: ${diagnosticFromError(error).text}`);
+      cleanup();
+      process.exit(1);
+    });
+}
