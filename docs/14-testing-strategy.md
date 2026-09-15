@@ -285,6 +285,28 @@ Artifact پیش از ورود به Git با ۴۸ بررسی مستقل سنجی�
 بی‌Provenance ۲۹٫۲ سر جایش است. هیچ آستانه، حاشیه، Classifier توانایی، Preflight فاز، دروازهٔ Fail-Fast، Bypass، Retry،
 Skip-Green، بار القایی یا اجرای کالیبراسیون در CI معمول اضافه نشد.
 
+**نخستین تلاش القایی برای سمت شکست — ناتمام، و مسدودکننده‌اش (2026-09-15).** نیمهٔ دوم مجموعه‌دادهٔ ADR-055 § ۶
+(نمونهٔ شکستِ **ناشی از محیط**) تلاش شد و **جمع نشد**. یک Workflow موقت و فقط‌شاخه‌ای
+(`aggregation-stress-induced-calibration.yml`) روی Commit ‏`9b03ac0`، با همان توپولوژی کمپین آرام — Runner بومی
+Ubuntu یک‌بارمصرف، **دقیقاً یک** Service Container ‏`postgis/postgis:16-3.4`، بی هر سرویس دیگر — پس از Provisioning
+و Migration همان یک Container را با فیلتر دقیق تصویر یافت و یک **سهمیهٔ CFS ثابت و بیرونی** روی آن گذاشت:
+`CPU_PERIOD_US=1000000`، `CPU_QUOTA_US=5000` (**۰٫۰۰۵ CPU**)، بازخوانده و **دقیقاً تأییدشده** با یک
+`docker inspect --format` دو‌فیلدی (`applied_cpu_period_us=1000000`، `applied_cpu_quota_us=5000`). نه بار SQL، نه
+بار جانبی، نه WAL پس‌زمینه، نه Pause/Kill، نه تغییر تنظیم PostgreSQL، و بدون تغییر در Spec، Probe،
+`PROBE_VALIDITY`، Selectorها، Timeoutها یا Harness. هیچ Docker یا PostgreSQL محلی لمس نشد.
+**نتیجه:** اجرای `34997524401` (تلاش ۱) — گام‌های ۱..۱۲ `success`، گام کمپین `16:51:55Z` تا `19:51:01Z` با **مهلت
+۱۸۰ دقیقه‌ای Job** کشته شد (`cancelled`)، و Upload با `if-no-files-found: error` شکست خورد چون **فایلی نوشته نشده
+بود**. **هیچ Artifact‌ی تولید، اعتبارسنجی یا Commit نشد.** Control ‏`PASS` و `pair-1-probe` ‏**`PASS`** (۶۷ ثانیه) —
+یعنی Probe زیر این سهمیه همچنان **معتبر** ماند — ولی `pair-1-stress` از `16:53:18Z` **۲ ساعت و ۵۷ دقیقه و ۴۳ ثانیه**
+هیچ خروجی نداد. **دو مسدودکنندهٔ مستقل:** (۱) یک اجرای دست‌نخوردهٔ Suite زیر این سهمیه از کران ۳۰ دقیقه‌ای Harness
+می‌گذرد (۲۲ تست — `testTimeout` پیش‌فرض ۶۰ ثانیه با Overrideهای ۱۵s تا ۱۲۰s — روی پایگاه داده‌ای با ۵ms CPU در هر
+ثانیه)، پس ۲۰ جفت در ۱۸۰ دقیقه جا نمی‌شود؛ و (۲) آن کران در عمل خاتمه نمی‌دهد — `runBounded` فقط `child.kill('SIGKILL')` روی خودِ `pnpm` می‌زند، نوه‌ها
+(`turbo`/`jest`) همان `stdout`/`stderr` را نگه می‌دارند، و رویداد `close` که Promise با آن حل می‌شود هرگز نمی‌آید.
+این نقص در کمپین آرام پنهان بود چون بیشینهٔ `stress_wall_s` آنجا ۵۹٫۷۸ ثانیه بود. اصلاح کران، گامی **جدا** و
+پیش‌شرط هر کمپین القایی بعدی است. **شمار جفت‌های `VALID` با Suite شکست‌خورده: صفر؛ الزام سمت شکستِ § ۶ برآورده
+نشد.** Workflow موقت **در همان تکرار حذف شد**؛ `ci.yml`، فازهای تست، `pnpm verify` و Harness دست نخوردند و هیچ
+آستانه، حاشیه، Classifier توانایی، Preflight فاز، دروازهٔ Fail-Fast، Bypass، Retry یا Skip-Green اضافه نشد.
+
 **ماه اختصاصی اجرا برای زنجیرهٔ Platform در Fixtureهای audit (2026-09-14).** کلید زنجیرهٔ Tenant شناسهٔ سازمانِ دارای `RUN_TAG`
 را دارد و خودبه‌خود به هر اجرا اختصاص دارد؛ کلید زنجیرهٔ Platform ‏(`PLATFORM/(platform)/<ماه>`) هیچ Tag یا Tenantی ندارد. پس
 هر Suite ‏Integration در `audit-service` که ردیف `organizationId: null` می‌نویسد باید زمان آن را از یک Slot اختصاصی
