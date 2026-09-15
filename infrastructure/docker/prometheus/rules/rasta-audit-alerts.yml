@@ -1,0 +1,295 @@
+# Alert rules for the audit evidence pipeline, evaluated by the local
+# Prometheus in docker-compose.yml (`observability` profile).
+#
+# Local-only. There is no Alertmanager in this repository, so a firing alert is
+# visible at http://localhost:9090/alerts and nowhere else: nothing is delivered
+# to a person. Production scrape configuration and notification routing are
+# deployment concerns this file does not provide.
+#
+# Behaviour is proven by tests/rasta-audit-alerts.test.yml:
+#   promtool test rules /etc/prometheus/tests/rasta-audit-alerts.test.yml
+#
+# Rules for every alert here:
+# - Counter alerts use `increase(...[5m]) > 0` and no `for`: each metric's
+#   contract says any increase is actionable, so a delay would only hide one.
+#   The Kafka alerts are the exception. Lag is a gauge and uses `for: 5m`,
+#   because lag that clears on its own is normal consumption; the two
+#   missing-signal alerts use `for: 2m` (exporter) and `for: 5m` (group) so a
+#   single failed scrape or a brief exporter restart does not fire.
+#   RastaAuditServiceMetricsUnavailable and RastaIdentityServiceMetricsUnavailable
+#   are the same signal-loss shape for the audit-service and identity-service
+#   scrape jobs, also with `for: 2m`.
+#   RastaAuditProducerSilent is the other exception: it alerts on the absence
+#   of an increase, so it uses a 6h window and `for: 30m`, and fires only for
+#   producers audit-service was explicitly configured to expect.
+# - `sum by` keeps exactly the bounded labels the metric declares and drops the
+#   scrape's own `job`/`instance`/`environment`. No annotation names a tenant,
+#   actor, resource, event, correlation id, partition, offset or error text —
+#   none of those are metric labels, and none may become one.
+#
+# Zero series: prom-client exports a labelled counter series only once it has a
+# value, and a series born at 1 has no earlier sample for `increase`. So every
+# alert-driving tuple is exported at 0 before its first real event — by the
+# audit and identity metric modules when they load, and by each DLQ-enabled
+# EventConsumer when it is constructed — and the first real increment fires.
+# The test fixture proves the 0 -> 1 case. See docs/runbooks/README.md.
+
+groups:
+  - name: rasta-audit-evidence
+    rules:
+      - alert: RastaDeadLetterMessagePublished
+        # Incremented by the shared EventConsumer only after the DLQ publish
+        # resolved; `topic` is the source topic, not the dead-letter topic.
+        expr: sum by (service, topic, reason) (increase(rasta_dlq_messages_total[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'A message was published to the dead-letter topic for {{ $labels.topic }}'
+          description: 'Consumer {{ $labels.service }} dead-lettered a message from {{ $labels.topic }} with reason {{ $labels.reason }} in the last 5 minutes. A DLQ message is never routine.'
+          runbook: docs/runbooks/replay-dlq.md
+
+      - alert: RastaAuditIngestionFailure
+        expr: sum by (reason) (increase(rasta_audit_ingestion_failures_total[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'audit-service failed to write an audit record ({{ $labels.reason }})'
+          description: 'rasta_audit_ingestion_failures_total increased with reason {{ $labels.reason }} in the last 5 minutes: at least one ingestion attempt did not produce an audit_event row.'
+          runbook: docs/runbooks/audit-gap-detected.md
+
+      - alert: RastaAuditIngestionLagHigh
+        # ADR-053 § 13: p95 of event time (`occurredAt`) to audit row written,
+        # per source topic, over a 5-minute rate window. Buckets are summed
+        # across scrape instances before the quantile, keeping only `le` and
+        # `source_topic`; 60 is an exact bucket bound. It is observed only for
+        # rows actually written, so a stalled consumer writes nothing and this
+        # stays silent (NaN is never > 60): RastaAuditConsumerLag and the two
+        # Kafka signal-loss alerts cover that. `for: 5m` so one slow minute of
+        # replay does not fire.
+        expr: histogram_quantile(0.95, sum by (le, source_topic) (rate(rasta_audit_ingestion_lag_seconds_bucket[5m]))) > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Audit ingestion p95 lag above 60 seconds for {{ $labels.source_topic }}'
+          description: 'The 95th percentile of seconds from event occurrence to audit row written for {{ $labels.source_topic }} has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+          runbook: docs/runbooks/audit-ingestion-lag.md
+
+      - alert: RastaAuditChainDivergence
+        # Incremented only for a real divergence, never for an empty window,
+        # legacy records or a refused request.
+        expr: sum by (reason, scope) (increase(rasta_audit_chain_verification_failures_total[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Audit chain verification found a divergence ({{ $labels.reason }}, {{ $labels.scope }})'
+          description: 'A {{ $labels.scope }} verification reported {{ $labels.reason }} in the last 5 minutes. Treat as a security incident; never repair the chain.'
+          runbook: docs/runbooks/audit-chain-divergence.md
+
+      - alert: RastaSecurityEventCaptureGap
+        # `recorded` and `skipped` are normal outcomes; only `failed` and
+        # `timeout` are refusals returned without evidence.
+        expr: sum by (outcome) (increase(rasta_security_event_captures_total{outcome=~"failed|timeout"}[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'identity-service returned a refusal without audit evidence ({{ $labels.outcome }})'
+          description: 'rasta_security_event_captures_total increased with outcome {{ $labels.outcome }} in the last 5 minutes: at least one refusal was not captured into security_event_outbox.'
+          runbook: docs/runbooks/security-event-outbox.md
+
+      - alert: RastaSecurityEventClosedBacklogStale
+        # The closed-window age, deliberately not
+        # rasta_security_event_outbox_pending_age_seconds: open aggregation
+        # windows keep the pending age near the window length by design.
+        expr: rasta_security_event_outbox_closed_backlog_age_seconds > 60
+        labels:
+          severity: warning
+        annotations:
+          summary: 'A closed security_event_outbox window has waited more than 60 seconds'
+          description: 'The oldest unpublished, closed security_event_outbox row ended its window {{ $value }} seconds ago; the relay is not publishing refusal evidence.'
+          runbook: docs/runbooks/security-event-outbox.md
+
+      - alert: RastaSecurityEventPublishFailure
+        expr: sum by (reason) (increase(rasta_security_event_publish_failures_total[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Refusal audit events failed to publish ({{ $labels.reason }})'
+          description: 'rasta_security_event_publish_failures_total increased with reason {{ $labels.reason }} in the last 5 minutes; the rows were scheduled for retry.'
+          runbook: docs/runbooks/security-event-outbox.md
+
+      - alert: RastaIdentityServiceMetricsUnavailable
+        # The three RastaSecurityEvent* rules above read only samples scraped
+        # from identity-service, so they go quiet when it is not scraped. That
+        # loss is made explicit here, with the same shape as
+        # RastaAuditServiceMetricsUnavailable. The dedicated `identity-service`
+        # scrape job is the selector; `instance` never is.
+        #
+        # - `min by (job) (...) == 0`: any configured identity-service target
+        #   failing its scrape. `min`, not `max`: capture and publish counters
+        #   and backlog gauges are process-local, so one replica that is not
+        #   scraped leaves the aggregate evidence incomplete even while another
+        #   replica is up.
+        # - `absent(up{job="identity-service"})`: the target is not configured
+        #   or was never loaded, where `== 0` alone would be empty. It carries
+        #   the same single `job` label.
+        # - `for: 2m`: one failed scrape (15s interval) or a brief restart does
+        #   not fire; recovery resets the timer.
+        #
+        # Proves only that identity-service telemetry is missing, never whether
+        # every refusal produced audit evidence.
+        expr: min by (job) (up{job="identity-service"}) == 0 or absent(up{job="identity-service"})
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Prometheus has not scraped identity-service metrics for 2 minutes'
+          description: 'The {{ $labels.job }} scrape target has been down or missing for at least 2 minutes. Refusal-evidence capture-gap, closed-backlog and publish-failure metrics have no trustworthy input while this fires: silence from RastaSecurityEventCaptureGap, RastaSecurityEventClosedBacklogStale and RastaSecurityEventPublishFailure is not evidence that refusal evidence is healthy.'
+          runbook: docs/runbooks/security-event-outbox.md
+
+      - alert: RastaAuditProducerSilent
+        # ADR-053 § 13 "a service went silent", for opt-in producers only. It
+        # is gated on rasta_audit_expected_active_producer{source_service} 1,
+        # which audit-service exports only for services named in
+        # AUDIT_EXPECTED_ACTIVE_PRODUCERS (empty by default, Q-54). No gate
+        # series, no alert: an unconfigured producer can be idle forever.
+        #
+        # Quiet window: 6h, written twice below (the gate's `offset 6h` and the
+        # `[6h]` range) and always changed together. `for: 30m` on top, so the effective
+        # threshold is no row for 6h30m. Local operational choice pending Q-54;
+        # it is not a legal or business interval.
+        #
+        # - The gate must hold now AND 6h ago (`offset 6h`, within the 5m
+        #   lookback), so the first possible pending evaluation is 6h after
+        #   Prometheus first saw the producer declared expected, and firing 30m
+        #   later: a first scrape or a newly configured producer never fires
+        #   early on a range that does not yet cover the window.
+        # - `unless` any positive increase: a row with any topic/outcome on any
+        #   instance suppresses it and resets pending. `increase` handles the
+        #   counter reset of an audit-service restart; the counters are
+        #   zero-seeded for expected producers, so a first row after restart is
+        #   a 0 -> 1 step. A configured producer with no counter series at all
+        #   also counts as silent: it contributed no row.
+        # - `max by`/`sum by (source_service)` drop topic, outcome and the
+        #   scrape's job/instance/environment, so several audit-service
+        #   instances yield one alert per producer. `unknown` is never gated.
+        #
+        # Proves only that no row arrived from a producer declared
+        # traffic-expected; it cannot prove every state change emitted an event.
+        expr: |
+          (
+              max by (source_service) (rasta_audit_expected_active_producer == 1)
+            and on (source_service)
+              max by (source_service) (rasta_audit_expected_active_producer offset 6h == 1)
+          )
+          unless on (source_service)
+            (sum by (source_service) (increase(rasta_audit_records_ingested_total[6h])) > 0)
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'No audit records from expected producer {{ $labels.source_service }} for 6h30m'
+          description: '{{ $labels.source_service }} is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+          runbook: docs/runbooks/audit-gap-detected.md
+
+      - alert: RastaAuditServiceMetricsUnavailable
+        # Every rule above that reads a rasta_audit_* series goes quiet when
+        # audit-service is not scraped, so that loss is made explicit here,
+        # with the same shape as RastaKafkaExporterUnavailable. The dedicated
+        # `audit-service` scrape job is the selector; `instance` never is.
+        #
+        # - `min by (job) (...) == 0`: any configured audit-service target
+        #   failing its scrape. `min`, not `max`: counters are process-local,
+        #   so one replica that is not scraped leaves the aggregate history
+        #   incomplete even while another replica is up.
+        # - `absent(up{job="audit-service"})`: the target is not configured or
+        #   was never loaded, where `== 0` alone would be empty. It carries the
+        #   same single `job` label.
+        # - `for: 2m`: one failed scrape (15s interval) or a brief restart does
+        #   not fire; recovery resets the timer.
+        #
+        # Proves only that audit-service telemetry is missing, never whether
+        # any state change emitted an audit event.
+        expr: min by (job) (up{job="audit-service"}) == 0 or absent(up{job="audit-service"})
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+          description: 'The {{ $labels.job }} scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+          runbook: docs/runbooks/audit-gap-detected.md
+
+  # Broker-side view of the two audit consumer groups and the audit DLQ, from
+  # docker-compose.yml `kafka-exporter` (danielqsj/kafka-exporter v1.9.0). None
+  # of these series carries a tenant, actor, event or error; `partition` is
+  # summed away before a series is recorded or an alert is raised.
+  - name: rasta-audit-kafka
+    rules:
+      - alert: RastaAuditConsumerLag
+        # kafka_consumergroup_lag is newest offset minus the group's committed
+        # offset, per partition. The exporter reports -1 for a partition the
+        # group has never committed, so it is clamped to 0 before summing: -1
+        # is "unknown", never "ahead". `for: 5m` means the summed lag was above
+        # zero at every evaluation for 5 minutes; normal catch-up drops to 0 and
+        # resets it. Only the two fixed audit-service groups are matched.
+        expr: sum by (consumergroup, topic) (clamp_min(kafka_consumergroup_lag{consumergroup=~"audit-service\\.(domain-projector|trail)"}, 0)) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Audit consumer group {{ $labels.consumergroup }} has lagged on {{ $labels.topic }} for 5 minutes'
+          description: 'Kafka consumer group {{ $labels.consumergroup }} has been behind on {{ $labels.topic }} for at least 5 minutes ({{ $value }} records past its committed offset now). audit_event rows for those records may not exist yet.'
+          runbook: docs/runbooks/audit-ingestion-lag.md
+
+      # RastaAuditConsumerLag is silent when its input is gone, so the two
+      # alerts below make that loss explicit. They are complementary, never
+      # both: the first covers the exporter itself, the second the case where
+      # the exporter is scraped but an expected group reports nothing.
+      #
+      # `absent(up{...})` catches a target Prometheus no longer has at all
+      # (removed from prometheus.yml, or never loaded); `== 0` alone would be
+      # empty then. `min by (job)` drops `instance`, and `absent` of a selector
+      # with only `job="kafka-exporter"` yields the same single `job` label.
+      - alert: RastaKafkaExporterUnavailable
+        expr: min by (job) (up{job="kafka-exporter"}) == 0 or absent(up{job="kafka-exporter"})
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Prometheus has not scraped the Kafka exporter for 2 minutes'
+          description: 'The {{ $labels.job }} scrape target has been down or missing for at least 2 minutes. RastaAuditConsumerLag and the audit DLQ retained-records rule have no input while this fires: their silence is not evidence of healthy audit ingestion.'
+          runbook: docs/runbooks/audit-ingestion-lag.md
+
+      # The exporter emits kafka_consumergroup_lag for a group only for topics
+      # where that group has at least one committed offset (--offset.show-all
+      # keeps stopped groups that have one). No series therefore means the
+      # broker holds no committed offsets for the group. A present -1, 0 or
+      # positive value counts as present. One `absent` per group, each with
+      # only an exact `consumergroup` matcher, so the result keeps exactly that
+      # label and names the missing group. Gated on the exporter being up so
+      # an exporter outage raises only RastaKafkaExporterUnavailable.
+      - alert: RastaAuditConsumerGroupMetricsMissing
+        expr: |
+          (
+              absent(kafka_consumergroup_lag{consumergroup="audit-service.domain-projector"})
+            or
+              absent(kafka_consumergroup_lag{consumergroup="audit-service.trail"})
+          )
+          and on () (min(up{job="kafka-exporter"}) == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'No Kafka lag metrics for audit consumer group {{ $labels.consumergroup }}'
+          description: 'kafka-exporter is being scraped but has reported no kafka_consumergroup_lag series for {{ $labels.consumergroup }} for at least 5 minutes: the broker holds no committed offsets for that group, so RastaAuditConsumerLag cannot evaluate it. Start or inspect the real audit-service consumer; never reset, delete or shift its offsets.'
+          runbook: docs/runbooks/audit-ingestion-lag.md
+
+      # Records currently retained in rasta.audit.v1.dlq: per partition, newest
+      # offset minus oldest retained offset, clamped at 0 (the two offsets are
+      # read separately and can briefly cross), then summed. It is an offset
+      # span, not a count of unresolved messages: nothing records whether a DLQ
+      # message was triaged or replayed, and the number only falls when Kafka
+      # retention deletes old segments. There is deliberately no alert on it;
+      # RastaDeadLetterMessagePublished fires for every new DLQ write.
+      - record: topic:kafka_topic_retained_records:sum
+        expr: sum by (topic) (clamp_min(kafka_topic_partition_current_offset{topic="rasta.audit.v1.dlq"} - kafka_topic_partition_oldest_offset{topic="rasta.audit.v1.dlq"}, 0))

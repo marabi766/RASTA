@@ -1,6 +1,10 @@
 apiVersion: 1
 datasources:
   - name: Prometheus
+    # Stable identity for provisioned dashboards: every panel in
+    # infrastructure/docker/grafana/dashboards/ names this UID, so a dashboard
+    # never depends on a datasource name lookup or a user-selected variable.
+    uid: rasta-prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090

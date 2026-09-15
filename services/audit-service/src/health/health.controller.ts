@@ -4,6 +4,7 @@ import { Public } from '@rasta/nest-common';
 import type { Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { DomainProjectorConsumer } from '../consumers/domain-projector.consumer';
+import { AuditTrailConsumer } from '../consumers/audit-trail.consumer';
 import { SERVICE_NAME } from '../config/env';
 
 /**
@@ -15,8 +16,8 @@ import { SERVICE_NAME } from '../config/env';
  *            it must never depend on anything external or one flaky dependency
  *            becomes a restart loop across every replica.
  *
- *   ready  — can this service do its job? For a projector that means two
- *            things, and both are checked.
+ *   ready  — can this service do its job? For a service with two input paths
+ *            that means three things, and all three are checked.
  *
  * ## Why the database check asks about privileges specifically
  *
@@ -32,11 +33,14 @@ import { SERVICE_NAME } from '../config/env';
  * per-privilege reasoning; it asks the catalogue rather than attempting a
  * write, so a probe never leaves a row in an append-only store.
  *
- * ## Why a stopped consumer is not ready
+ * ## Why either stopped consumer is not ready
  *
- * A projector with no consumer is a service that answers health checks while
+ * A consumer that is not running is a service that answers health checks while
  * the evidence stops accumulating — the exact failure ADR-053 exists to
- * prevent, and the one nobody notices because nothing errors.
+ * prevent, and the one nobody notices because nothing errors. That is as true
+ * of the audit trail (AUD-004 Phase B) as of the domain projector, so each is
+ * reported separately and either one being down fails readiness: a combined
+ * flag would let a healthy projector hide a stopped trail.
  *
  * Kafka connectivity itself is deliberately *not* a readiness failure: the
  * broker being briefly unreachable is what consumer retries are for, and
@@ -62,6 +66,7 @@ export class HealthController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly projector: DomainProjectorConsumer,
+    private readonly trail: AuditTrailConsumer,
   ) {}
 
   @Get('live')
@@ -79,29 +84,31 @@ export class HealthController {
   async ready(@Res({ passthrough: true }) response: Response): Promise<{
     status: string;
     service: string;
-    checks: { database: boolean; projector: boolean };
+    checks: { database: boolean; projector: boolean; trail: boolean };
     ingests: true;
     queryApi: true;
   }> {
     const database = await this.prisma.isHealthy();
     const projector = this.projector.isRunning();
+    const trail = this.trail.isRunning();
 
-    const ready = database && projector;
+    const ready = database && projector && trail;
     response.status(ready ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE);
 
     return {
       status: ready ? 'ok' : 'unavailable',
       service: SERVICE_NAME,
-      checks: { database, projector },
+      checks: { database, projector, trail },
       // Said in the payload rather than only in a doc, and kept honest in both
       // directions: while `queryApi` was `false` it stated a real absence, and
       // AUD-002 built the read API, so it says so. A readiness payload that
       // under-reports is not "safely conservative" — it is a probe that
       // disagrees with the router, and the router is what serves callers.
       //
-      // Still deliberately narrow: this says the two read endpoints exist. It
-      // does not claim a hash chain (AUD-003), a verify endpoint, corrections
-      // or export, none of which are built.
+      // Still deliberately narrow: `trail: true` says the path-B consumer is
+      // running. It does not claim that anything is publishing to that topic
+      // right now, nor that producers are healthy — identity-service's outboxes
+      // report their own state — and it claims no export, which is not built.
       ingests: true,
       queryApi: true,
     };

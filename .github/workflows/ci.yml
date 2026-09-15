@@ -50,6 +50,62 @@ jobs:
           pnpm run progress:check
           pnpm run test:progress
 
+      - name: Service boundary gate
+        # AGENTS.md A-02: a service reaches another only over REST or Kafka,
+        # never by importing `services/<other>/src/**` or `test/**`. Runs the
+        # checker's own tests first so a checker that stopped catching
+        # anything fails loudly rather than passing an empty gate (AUD-004
+        # Phase C1 hardening — the identity test tree once imported
+        # audit-service directly and no gate caught it).
+        run: |
+          pnpm run test:service-boundaries-lib
+          pnpm run check:service-boundaries
+
+      - name: Local PostgreSQL defaults contract
+        # `.env.example` must point host-side PostgreSQL at 127.0.0.1, not
+        # `localhost`, which can try ::1 first against an IPv4-only listener
+        # and time Prisma transactions out with P2028. Reads the committed file
+        # as text only; the service-container URLs this workflow uses are its
+        # own and are not checked or changed.
+        run: |
+          pnpm run test:local-postgres-config
+          pnpm run check:local-postgres-config
+
+      - name: Test phase contract
+        # identity-service's aggregation stress spec (two 500-write proofs on
+        # one hot row) must run exactly once, alone, after every other
+        # workspace test task: beside the other services' integration suites
+        # on one PostgreSQL it measured their WAL load instead of row
+        # serialization (docs/14 § 14.3). Static — reads package.json,
+        # turbo.json, identity's jest config and this workflow; no database.
+        # The checker's own tests run first so a checker that stopped catching
+        # anything fails loudly. The manual commit-rate evidence harness for the
+        # same spec (`scripts/aggregation-evidence.mjs`) keeps its parsers,
+        # probe validation and stress-constant contract tested here; the
+        # measurement itself never runs in CI.
+        run: |
+          pnpm run test:test-phases
+          pnpm run check:test-phases
+          pnpm run test:aggregation-evidence-lib
+
+      - name: Grafana dashboard contract
+        # The provisioned local `Rasta Audit Evidence` dashboard: stable
+        # datasource UID on every query, every alert in the rules file, the
+        # alerts' own aggregations, bounded labels only, and the boundary text
+        # (docs/13-observability.md § 13.7); and a self-contained local Grafana
+        # start — the no-outbound GF_* settings on the Compose service and the
+        # inert plugins/alerting provisioning. Static, so no Docker here; the
+        # live provisioning and PromQL check on an internal Docker network is
+        # `pnpm run verify:grafana-dashboard-live`. Checker tests run first so
+        # a checker that stopped catching anything fails loudly. The isolation
+        # helper tests run that harness's topology checks (internal network,
+        # one network per container, no published port) against a fake Docker
+        # only — they are not a live isolation run.
+        run: |
+          pnpm run test:grafana-dashboard-lib
+          pnpm run check:grafana-dashboard
+          pnpm run test:grafana-live-isolation-lib
+
       - name: Image scan coverage gate
         # Runs here, in a job that fires on pull requests, rather than beside
         # the `containers` job it protects — that one only runs on a push to
@@ -145,6 +201,34 @@ jobs:
               --exclude-rule package_managers.npm.npm-missing-minimum-release-age.npm-missing-minimum-release-age \
               --exclude-rule package_managers.pnpm.pnpm-missing-minimum-release-age.pnpm-minimum-release-age \
               --exclude-rule package_managers.pnpm.pnpm-trust-policy.pnpm-trust-policy
+
+  # ---------------------------------------------------------------------------
+  # Prometheus configuration and alert rules. Its own job so the Docker pull
+  # stays out of `quality`. Same image as the `prometheus` service in
+  # docker-compose.yml, with the whole directory mounted where that service
+  # sees it, so `rule_files` resolves to the same path here as at runtime.
+  # ---------------------------------------------------------------------------
+  prometheus-rules:
+    name: Prometheus config and alert rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check config and rule syntax
+        # Also fails when a file named in `rule_files` does not exist.
+        run: |
+          docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+            --entrypoint promtool prom/prometheus:v3.1.0 \
+            check config /etc/prometheus/prometheus.yml
+
+      - name: Test alert rule behaviour
+        run: |
+          docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+            --entrypoint promtool prom/prometheus:v3.1.0 \
+            test rules /etc/prometheus/tests/rasta-audit-alerts.test.yml
 
   # ---------------------------------------------------------------------------
   # Integration and the security tests that need a real database.
@@ -432,20 +516,29 @@ jobs:
         # the three-way collision the shared-registration step exists to avoid
         # (ADR-053 plan, Step Zero).
         #
-        # They are deliberately absent from three other multi-service steps,
-        # because none of those would use them:
+        # `notification` is deliberately absent from three other multi-service
+        # steps, because none of those would use it:
         #
-        #   Migration reversibility  runs `pnpm test:migration`, and neither
-        #                            service is registered there — it has no
-        #                            real migration to reverse yet, and a
-        #                            vacuous entry is worse than none.
+        #   Migration reversibility  runs `pnpm test:migration`. `notification`
+        #                            is not registered there — it has no real
+        #                            migration to reverse yet, and a vacuous
+        #                            entry is worse than none. `audit` *is*
+        #                            registered (whole-chain
+        #                            `verify-migration-reversible.mjs audit`),
+        #                            and so is `identity`, by the two named
+        #                            verifiers that reach the migrations the
+        #                            whole-chain harness cannot — AUD-004's
+        #                            `security_event_outbox` and AUD-003's
+        #                            `audit_correction_command`. Both services'
+        #                            urls are therefore present in that step.
         #   Outbox B3                passes every url it touches explicitly and
-        #                            neither service owns an outbox today.
-        #   E2E `Apply migrations`   carries only the four services that job
-        #                            actually starts.
+        #                            `notification` owns no outbox today.
+        #   E2E `Apply migrations`   carries only the services that job
+        #                            actually starts (five, since AUD-004
+        #                            Phase C1 added identity-service).
         #
         # A url present in a step that cannot use it reads as registration that
-        # has happened. It has not.
+        # has happened. For `notification` it has not.
         run: pnpm run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
@@ -462,6 +555,13 @@ jobs:
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
 
       - name: Integration tests
+        # Two phases (`scripts/run-test-phases.mjs`): every package's
+        # integration suites in parallel, then identity-service's aggregation
+        # stress spec alone, once the rest have exited. Its 500-write proofs
+        # serialize on one hot row; beside the other suites on this one
+        # PostgreSQL they measured shared WAL load, not the upsert (docs/14
+        # § 14.3). Never `turbo run test:integration` directly — that runs
+        # the workspace phase only; `check:test-phases` enforces it.
         run: pnpm run test:integration
         env:
           NODE_ENV: test
@@ -655,6 +755,11 @@ jobs:
         # stops all movement, `overspend` is the negative balance that cannot
         # happen, and `cap` is the anti-fraud reward ceiling. A failure in any
         # of them is a financial defect, not a flaky test.
+        #
+        # Both commands go through the two-phase orchestrator, so the pattern
+        # also filters identity-service's aggregation stress spec, run alone
+        # after the parallel phase; `concurren` is what selects its two
+        # 500-write proofs in the second command (`check:test-phases`).
         run: |
           pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"
           pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)"
@@ -694,14 +799,16 @@ jobs:
 
       - name: Migration reversibility
         # AGENTS.md § 7 requires every migration to be reversible, and until
-        # now nothing had ever run a down script. up → down → up against a
-        # throwaway schema, asserting between each step that the tables, the
-        # three ledger triggers and `ck_wallet_balances` are there, gone, and
-        # back. It runs here rather than in its own job because this is where
-        # a migrated database already exists.
+        # this step existed nothing had ever run a down script. up → down → up
+        # against a throwaway schema, asserting between each step that every
+        # object the migration owns is there, gone, and back — and, for the
+        # named verifiers, that every object it does *not* own survived, and
+        # that each `down.sql` removed its own `_prisma_migrations` row so the
+        # rollback can be rolled forward again. It runs here rather than in its
+        # own job because this is where a migrated database already exists.
         run: pnpm run test:migration
         env:
-          # All nine, not only the four the whole-chain checks cover. ADR-050
+          # All nine, not only the five the whole-chain checks cover. ADR-050
           # adds its claim columns to every service-owned database, and
           # `verify-outbox-claim-migration.mjs --in-place` reverses that one
           # migration on each of them — so a missing url here is a database
@@ -713,6 +820,14 @@ jobs:
           # and `verify-migration-reversible.mjs supplier` covers it instead —
           # which is why that command is now in `test:migration` rather than
           # only being available to run by hand.
+          #
+          # identity is the mirror of that exception: its *initial* migration
+          # has no down.sql, so the whole-chain verifier cannot reach any of
+          # its migrations, and each one it owns needs a verifier addressed to
+          # it by name. Two are registered — `security_event_outbox` (AUD-004
+          # C1/C2) and `audit_correction_command` (AUD-003's correction half).
+          # A third identity migration would need a third entry; nothing here
+          # discovers it.
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
@@ -901,11 +1016,13 @@ jobs:
 
       - name: Apply migrations
         run: |
+          pnpm --filter @rasta/identity-service run db:migrate
           pnpm --filter @rasta/economic-service run db:migrate
           pnpm --filter @rasta/marketplace-service run db:migrate
           pnpm --filter @rasta/document-service run db:migrate
           pnpm --filter @rasta/audit-service run db:migrate
         env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
@@ -915,6 +1032,18 @@ jobs:
           # itself is not a barrier, so `rasta_audit` owns nothing it writes to.
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+
+      - name: Seed identity-service
+        # AUD-004 Phase C1's refusal scenario needs `dehyari.admin` to have a
+        # real membership row in exactly one organization, so a switch to the
+        # other seeded tenant (`ORG-DEH-0002`) is a genuine, unmodified
+        # `TENANT_MISMATCH` rather than a fixture built for the test. The
+        # Keycloak realm import above already carries the matching
+        # `rasta_user_id` attributes; this is the other half of the same seed
+        # (`services/identity-service/prisma/seed.ts`).
+        run: pnpm --filter @rasta/identity-service run db:seed
+        env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
 
       - name: Build
         run: pnpm run build
@@ -1036,7 +1165,7 @@ jobs:
             setTimeout(() => { console.error("clamd did not answer the runner"); process.exit(1); }, 15000);
           '
 
-      - name: Start economic, marketplace, document and audit services and api-gateway
+      - name: Start identity, economic, marketplace, document and audit services and api-gateway
         # From `dist`, the same artefact the container image runs, rather than
         # from a watch-mode dev server. Started here rather than by Playwright's
         # `webServer` because several processes have to come up in order and
@@ -1049,6 +1178,20 @@ jobs:
           OIDC_ISSUER_URL: http://localhost:8080/realms/rasta
           OIDC_JWKS_URI: http://localhost:8080/realms/rasta/protocol/openid-connect/certs
           OIDC_AUDIENCE: rasta-api
+          PORT_IDENTITY: '3101'
+          # AUD-004 Phase C2. The refusal scenario waits for a window to close
+          # before its aggregated record can exist; ten seconds keeps that wait
+          # short without a production bypass. The E2E step reads the same
+          # value to align its burst to a fresh window.
+          SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: '10'
+          # The realm import above already carries this client with this exact
+          # throwaway secret (`infrastructure/docker/keycloak/rasta-realm.json`,
+          # `.env.example`) — a per-run secret here would just be a second value
+          # to keep in sync with a file that is already checked in.
+          KEYCLOAK_URL: http://localhost:8080
+          KEYCLOAK_REALM: rasta
+          KEYCLOAK_BACKEND_CLIENT_ID: rasta-backend
+          KEYCLOAK_BACKEND_CLIENT_SECRET: backend_dev_secret_change_me
           PORT_ECONOMIC: '3112'
           PORT_API_GATEWAY: '3000'
           ECONOMIC_PLATFORM_ORGANIZATION_ID: ORG-PLATFORM
@@ -1106,6 +1249,11 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/rasta-logs
 
+          ( cd services/identity-service && \
+            PORT=3101 SERVICE_NAME=identity-service \
+            DATABASE_URL=postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public \
+            node dist/main.js > /tmp/rasta-logs/identity.log 2>&1 & )
+
           ( cd services/economic-service && \
             PORT=3112 SERVICE_NAME=economic-service \
             node dist/main.js > /tmp/rasta-logs/economic.log 2>&1 & )
@@ -1132,6 +1280,8 @@ jobs:
             node dist/main.js > /tmp/rasta-logs/gateway.log 2>&1 & )
 
           for attempt in $(seq 1 60); do
+            identity="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3101/health/ready || true)"
             economic="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3112/health/ready || true)"
             marketplace="$(curl -s -o /dev/null -w '%{http_code}' \
@@ -1146,7 +1296,7 @@ jobs:
               http://localhost:3115/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/wallets/me || true)"
-            if [ "$economic" = "200" ] && [ "$marketplace" = "200" ] \
+            if [ "$identity" = "200" ] && [ "$economic" = "200" ] && [ "$marketplace" = "200" ] \
                && [ "$document" = "200" ] && [ "$audit" = "200" ] \
                && [ "$gateway" = "401" ]; then
               echo "stack up after ${attempt} attempt(s)"
@@ -1155,7 +1305,8 @@ jobs:
             sleep 3
           done
 
-          echo "the stack did not come up (economic=${economic}, marketplace=${marketplace}, document=${document}, audit=${audit}, gateway=${gateway})"
+          echo "the stack did not come up (identity=${identity}, economic=${economic}, marketplace=${marketplace}, document=${document}, audit=${audit}, gateway=${gateway})"
+          cat /tmp/rasta-logs/identity.log
           cat /tmp/rasta-logs/economic.log
           cat /tmp/rasta-logs/marketplace.log
           cat /tmp/rasta-logs/document.log
@@ -1174,6 +1325,8 @@ jobs:
           E2E_MARKETPLACE_URL: http://localhost:3106
           E2E_DOCUMENT_URL: http://localhost:3114
           E2E_AUDIT_URL: http://localhost:3115
+          E2E_IDENTITY_URL: http://localhost:3101
+          SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: '10'
           KEYCLOAK_URL: http://localhost:8080
           KEYCLOAK_REALM: rasta
           KEYCLOAK_WEB_CLIENT_ID: rasta-web
@@ -1183,6 +1336,8 @@ jobs:
       - name: Service logs
         if: failure()
         run: |
+          echo '--- identity-service ---'
+          tail -n 200 /tmp/rasta-logs/identity.log || true
           echo '--- economic-service ---'
           tail -n 200 /tmp/rasta-logs/economic.log || true
           echo '--- marketplace-service ---'

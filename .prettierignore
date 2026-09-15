@@ -9,3 +9,6 @@ pnpm-lock.yaml
 docs/api/*.generated.json
 # Generated deterministically by `pnpm progress:report`; `progress:check` is its formatter gate.
 docs/25-project-progress.md
+# Local agent handoff artifacts, excluded from Git via .git/info/exclude; they must not decide repository formatting quality.
+/CodexPrompt.md
+/ClaudeResultReport.md

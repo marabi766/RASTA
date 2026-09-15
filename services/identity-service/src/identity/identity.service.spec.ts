@@ -4,6 +4,7 @@ import { IdentityService } from './identity.service';
 import type { IdentityRepository } from './identity.repository';
 import type { KeycloakAdminClient } from '../keycloak/keycloak.client';
 import { IDENTITY_EVENTS } from './events';
+import { REFUSAL_SITES, refusalSiteOf } from '../security-events/refusal-sites';
 
 /**
  * Identity service behaviour, with the repository and Keycloak stubbed.
@@ -147,6 +148,32 @@ describe('switchActiveOrganization', () => {
       ),
     ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
   });
+
+  it.each([
+    ['no membership', null],
+    ['a revoked membership', membershipRow({ organizationId: TEST_ORG_B, status: 'REVOKED' })],
+  ])(
+    'marks the refusal for %s as the allowlisted audit site, changing nothing else (ADR-053 § 4)',
+    async (_label, membership) => {
+      const h = harness();
+      h.repository.findMembership.mockResolvedValue(membership as never);
+
+      const refusal = await runWithContext(context(), () =>
+        h.service.switchActiveOrganization({ organizationId: TEST_ORG_B }),
+      ).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      expect(refusal).toBeInstanceOf(RastaError);
+      expect(refusal).toMatchObject({ status: 403, code: 'TENANT_MISMATCH' });
+      expect(refusalSiteOf(refusal)).toBe(REFUSAL_SITES.SWITCH_ACTIVE_ORGANIZATION);
+      // The active organization was not changed.
+      expect(
+        (h.repository.client as unknown as { user: { update: jest.Mock } }).user.update,
+      ).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('getUser — object-level authorization', () => {

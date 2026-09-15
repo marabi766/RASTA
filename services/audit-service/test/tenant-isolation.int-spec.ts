@@ -1,9 +1,54 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { cleanupRun, newMigratorPrisma, runtimeUrl } from './helpers';
+import {
+  cleanupRun,
+  disabledProtectiveTriggers,
+  instantIn,
+  newMigratorPrisma,
+  runMonth,
+  RUN_TAG,
+  runtimeUrl,
+  type CleanupReport,
+} from './helpers';
 import { startApi, systemAdmin, unionAdmin, type ApiHarness } from './api-helpers';
-import { at, orgId, projectOrganization, queryWindow, seedAuditEvent } from './fixtures';
+import { orgId, projectOrganization, seedAuditEvent } from './fixtures';
+
+/**
+ * This file's `runMonth` slot. Distinct from every other platform-chain suite
+ * (`ingestion` 0, `hash-chain` and `trail-ingestion` 1, `correction-linkage` 7).
+ */
+const TENANT_ISOLATION_MONTH_SLOT = 8;
+
+/**
+ * The month every row this file writes lands in — and so the month of its one
+ * platform-scoped row's chain, `PLATFORM/(platform)/<RUN_MONTH>`.
+ *
+ * Not the shared `2026-10` window from `fixtures.ts`. The platform chain key
+ * carries no tenant and no tag, so a fixed month is one chain shared by every
+ * run that ever seeds a platform row into it: two overlapping runs — or one
+ * interrupted before its cleanup — each leave rows the other's `cleanupRun`
+ * must refuse to clean around. A run-owned month makes this file the chain's
+ * only writer by construction.
+ */
+const RUN_MONTH = runMonth(TENANT_ISOLATION_MONTH_SLOT);
+
+const MINUTES_PER_DAY = 24 * 60;
+
+/** An instant `minutes` into this run's month. */
+const at = (minutes: number): Date => instantIn(RUN_MONTH, minutes);
+
+/** A window of whole days inside `RUN_MONTH`, as query parameters. */
+const dayWindow = (firstDay: number, days: number): { from: string; to: string } => ({
+  from: instantIn(RUN_MONTH, firstDay * MINUTES_PER_DAY).toISOString(),
+  to: instantIn(RUN_MONTH, (firstDay + days) * MINUTES_PER_DAY).toISOString(),
+});
+
+/** The first day of the month — every row below is seeded within its first 70 minutes. */
+const SEEDED_WINDOW = dayWindow(0, 1);
+
+/** A day in the same month that no seeded row falls in. */
+const DISJOINT_WINDOW = dayWindow(2, 1);
 
 /**
  * The five tenant-isolation cases of `ADR-053-implementation-plan.md` § 6.4,
@@ -40,7 +85,7 @@ describe('audit tenant isolation (real PostgreSQL)', () => {
   /** Projected under A, then deactivated. */
   const DEACTIVATED = orgId('ISO-DEACTIVATED');
 
-  const window = queryWindow();
+  const window = SEEDED_WINDOW;
 
   /** The organizations a response actually carried. */
   const organizationsIn = (body: { items: { organizationId: string | null }[] }): unknown[] =>
@@ -105,9 +150,89 @@ describe('audit tenant isolation (real PostgreSQL)', () => {
 
   afterAll(async () => {
     await api?.close();
-    await cleanupRun(migrator);
-    await migrator.onModuleDestroy();
+    try {
+      const report = await cleanupRun(migrator);
+      await expectOwnMonthCleaned(report);
+    } finally {
+      await migrator.onModuleDestroy();
+    }
   }, 120_000);
+
+  /**
+   * What sits in this run's platform chain, `PLATFORM/(platform)/<RUN_MONTH>`:
+   * rows this run wrote, rows anyone else wrote, and the chain's head. Counted
+   * with the same tag predicate `cleanupRun` deletes on.
+   */
+  async function platformChainState(): Promise<{ tagged: number; foreign: number; heads: number }> {
+    const [state] = await migrator.client.$queryRawUnsafe<
+      { tagged_rows: bigint; foreign_rows: bigint; heads: bigint }[]
+    >(
+      `WITH platform_month AS (
+         SELECT (source_event_id LIKE $2 OR resource_id LIKE $2 OR correlation_id LIKE $2) AS tagged
+           FROM audit_event
+          WHERE organization_id IS NULL
+            AND occurred_at >= ($1::date::timestamp AT TIME ZONE 'UTC')
+            AND occurred_at <  (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'UTC')
+       )
+       SELECT (SELECT count(*) FROM platform_month WHERE tagged)     AS tagged_rows,
+              (SELECT count(*) FROM platform_month WHERE NOT tagged) AS foreign_rows,
+              (SELECT count(*) FROM audit_chain_head
+                WHERE chain_scope = 'PLATFORM'::audit_chain_scope
+                  AND organization_id = ''
+                  AND chain_month = $1::date)                        AS heads`,
+      RUN_MONTH,
+      `%_${RUN_TAG}_%`,
+    );
+    if (!state) throw new Error(`no state for PLATFORM/(platform)/${RUN_MONTH}`);
+    return {
+      tagged: Number(state.tagged_rows),
+      foreign: Number(state.foreign_rows),
+      heads: Number(state.heads),
+    };
+  }
+
+  /**
+   * That the cleanup was this run's alone and emptied its platform month.
+   *
+   * `cleanupRun` has already proven that no tagged audit, processed-event or
+   * organization-ref row and no tag-owned head survived. This adds what only
+   * this file knows: every chain it wrote into — tenant or platform — was in
+   * `RUN_MONTH`, none held a foreign row, the platform chain of that month has
+   * neither rows nor a head left, and every protective trigger is back on.
+   */
+  async function expectOwnMonthCleaned(report: CleanupReport): Promise<void> {
+    expect(report.chains.length).toBeGreaterThan(0);
+    expect(report.chains.filter((chain) => chain.chainMonth !== RUN_MONTH)).toEqual([]);
+    expect(report.chains.filter((chain) => chain.foreignRows > 0)).toEqual([]);
+    expect(report.chains.filter((chain) => chain.chainScope === 'PLATFORM')).toEqual([
+      {
+        chainScope: 'PLATFORM',
+        organizationId: '',
+        chainMonth: RUN_MONTH,
+        taggedRows: 1,
+        foreignRows: 0,
+      },
+    ]);
+
+    expect(await platformChainState()).toEqual({ tagged: 0, foreign: 0, heads: 0 });
+    expect(await disabledProtectiveTriggers(migrator)).toEqual([]);
+  }
+
+  // -------------------------------------------------------------------------
+  // 0. The fixture owns the one chain key that carries no run tag.
+  // -------------------------------------------------------------------------
+
+  it('seeds its platform-scoped row into a platform chain month no other run writes', async () => {
+    // Outside the eighteen pre-built partitions `runMonth` avoids, and never
+    // the shared `2026-10` window the other read suites use.
+    expect(RUN_MONTH).toMatch(/^2\d{3}-(0[1-9]|1[0-2])-01$/);
+    expect(RUN_MONTH).not.toBe('2026-10-01');
+
+    // Exactly the one row this run seeded and nobody else's, which is what lets
+    // `cleanupRun` remove the chain rather than refuse it.
+    const { tagged, foreign } = await platformChainState();
+    expect({ tagged, foreign }).toEqual({ tagged: 1, foreign: 0 });
+  });
 
   // -------------------------------------------------------------------------
   // 1. A union administrator asking for another union.
@@ -327,7 +452,7 @@ describe('audit tenant isolation (real PostgreSQL)', () => {
 
     const response = await request(server)
       .get(`/v1/audit-events/${inside.id}`)
-      .query({ from: '2026-11-01T00:00:00.000Z', to: '2026-11-30T00:00:00.000Z' })
+      .query(DISJOINT_WINDOW)
       .set('Authorization', `Bearer ${unionAdmin(UNION_A)}`);
 
     expect(response.status).toBe(404);

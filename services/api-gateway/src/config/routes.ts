@@ -93,6 +93,18 @@ export const ROUTES: readonly RouteRule[] = [
   { prefix: 'users', service: 'identity' },
   { prefix: 'memberships', service: 'identity' },
   { prefix: 'roles', service: 'identity' },
+  // The audit correction command (ADR-053 § 7, AUD-003 correction). A top-level prefix
+  // routed to identity-service, the command's owner: routing is by first
+  // segment, and `audit-events` belongs to audit-service, which has no write
+  // endpoint and never will. SYSTEM_ADMIN only, and an Idempotency-Key is
+  // mandatory because a correction is irreversible; identity-service enforces
+  // both again, and decides what may actually be corrected.
+  {
+    prefix: 'audit-corrections',
+    service: 'identity',
+    roles: ['SYSTEM_ADMIN'],
+    requiresIdempotencyKey: true,
+  },
 
   // ---- organization ------------------------------------------------------
   { prefix: 'organizations', service: 'organization' },

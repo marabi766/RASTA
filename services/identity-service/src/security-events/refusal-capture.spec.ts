@@ -1,0 +1,1033 @@
+import { ERROR_CODES } from '@rasta/contracts';
+import { RastaError, type RequestContext } from '@rasta/nest-common';
+import { CAPTURE_SKIP_REASONS, decideCapture, type RefusalObservation } from './refusal-capture';
+import {
+  markGuardRefusal,
+  markRefusal,
+  REFUSAL_SITES,
+  type RefusalSiteName,
+  type RouteRefusalSiteName,
+} from './refusal-sites';
+
+/**
+ * The capture decision, branch by branch. Every value a persisted row carries
+ * is asserted to come from the trusted context or from the fixed site — and the
+ * request's own text is planted with sentinels that must never appear.
+ */
+
+const NOW = new Date('2026-09-11T10:00:00.000Z');
+const EVENT_ID = '01J9ZC0000000000000000TEST';
+const ENVIRONMENT = { now: NOW, newId: () => EVENT_ID, producerVersion: '1.4.2' };
+
+const REQUESTED_ORGANIZATION = 'ORG_REQUESTED_SENTINEL';
+const QUERY_SECRET = 'QUERY-SECRET-SENTINEL';
+
+const site = REFUSAL_SITES.SWITCH_ACTIVE_ORGANIZATION;
+
+function context(overrides: Partial<RequestContext> = {}): RequestContext {
+  return {
+    correlationId: 'COR_01J9ZC00000000000000000001',
+    requestId: '01J9ZC00000000000000000REQ',
+    traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+    spanId: '00f067aa0ba902b7',
+    organizationId: 'ORG_A',
+    organizationIds: ['ORG_A'],
+    userId: 'USR_A',
+    subject: 'kc-subject',
+    roles: ['FLEET_MANAGER', 'ORGANIZATION_ADMIN'],
+    authType: 'USER',
+    ip: '203.0.113.7',
+    userAgent: 'Mozilla/5.0 (identity unit)',
+    method: 'POST',
+    path: `/v1/users/me/active-organization?token=${QUERY_SECRET}`,
+    startedAt: 0,
+    ...overrides,
+  };
+}
+
+const refusal = (): RastaError =>
+  markRefusal(RastaError.tenantMismatch(REQUESTED_ORGANIZATION, []), 'SWITCH_ACTIVE_ORGANIZATION');
+
+function observe(overrides: Partial<RefusalObservation> = {}): RefusalObservation {
+  return {
+    exception: refusal(),
+    status: 403,
+    code: ERROR_CODES.TENANT_MISMATCH,
+    method: 'POST',
+    route: site.route,
+    context: context(),
+    ...overrides,
+  };
+}
+
+function captured(observation: RefusalObservation) {
+  const decision = decideCapture(observation, ENVIRONMENT);
+  if (decision.kind !== 'CAPTURE') {
+    throw new Error(`expected a capture, got ${JSON.stringify(decision)}`);
+  }
+  return decision.draft;
+}
+
+function skipReason(observation: RefusalObservation): string | undefined {
+  const decision = decideCapture(observation, ENVIRONMENT);
+  return decision.kind === 'SKIP' ? decision.reason : undefined;
+}
+
+describe('decideCapture', () => {
+  it('maps actor, roles, tenant, source and trace from the trusted context and the rest from the site', () => {
+    expect(captured(observe())).toEqual({
+      id: EVENT_ID,
+      organizationId: 'ORG_A',
+      actorType: 'USER',
+      actorId: 'USR_A',
+      actorRoles: ['FLEET_MANAGER', 'ORGANIZATION_ADMIN'],
+      action: 'identity.active_organization.switch',
+      resourceType: 'User',
+      resourceId: 'USR_A',
+      errorCode: 'TENANT_MISMATCH',
+      reason: site.reason,
+      sourceIp: '203.0.113.7',
+      sourceUserAgent: 'Mozilla/5.0 (identity unit)',
+      correlationId: 'COR_01J9ZC00000000000000000001',
+      traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+      producerVersion: '1.4.2',
+      occurredAt: NOW,
+      // One occurrence. Which window row it is counted into is the store's
+      // database decision, not this function's.
+      occurrenceCount: 1,
+    });
+  });
+
+  it('carries no requested organization, no URL text and no exception message', () => {
+    const serialised = JSON.stringify(captured(observe()));
+    expect(serialised).not.toContain(REQUESTED_ORGANIZATION);
+    expect(serialised).not.toContain(QUERY_SECRET);
+    expect(serialised).not.toContain('active-organization?');
+    expect(serialised).not.toContain(refusal().message);
+  });
+
+  it('records the tenant the caller was acting for, never another one', () => {
+    expect(
+      captured(
+        observe({ context: context({ organizationId: 'ORG_B', organizationIds: ['ORG_B'] }) }),
+      ).organizationId,
+    ).toBe('ORG_B');
+  });
+
+  it('records a platform-scoped refusal when the caller acts for no organization', () => {
+    const draft = captured(
+      observe({ context: context({ organizationId: undefined, organizationIds: [] }) }),
+    );
+    expect(draft.organizationId).toBeNull();
+  });
+
+  it('deduplicates roles in their original order and keeps an empty list empty', () => {
+    expect(
+      captured(observe({ context: context({ roles: ['B', 'A', 'B', 'A'] }) })).actorRoles,
+    ).toEqual(['B', 'A']);
+    expect(captured(observe({ context: context({ roles: [] }) })).actorRoles).toEqual([]);
+  });
+
+  describe('the roles-guard site GET /v1/users (AUD-004 Phase C3)', () => {
+    const listSite = REFUSAL_SITES.LIST_USERS;
+    const denial = (): RastaError =>
+      markRefusal(
+        RastaError.insufficientRole(['ORGANIZATION_ADMIN', 'UNION_ADMIN'], ['FLEET_MANAGER']),
+        'LIST_USERS',
+      );
+    const observeList = (overrides: Partial<RefusalObservation> = {}): RefusalObservation => ({
+      exception: denial(),
+      status: 403,
+      code: ERROR_CODES.INSUFFICIENT_ROLE,
+      method: 'GET',
+      route: listSite.route,
+      context: context({ roles: ['FLEET_MANAGER'], path: `/v1/users?q=${QUERY_SECRET}` }),
+      ...overrides,
+    });
+
+    it('maps the actor, roles and tenant from the context and everything else from the site', () => {
+      expect(captured(observeList())).toMatchObject({
+        organizationId: 'ORG_A',
+        actorType: 'USER',
+        actorId: 'USR_A',
+        actorRoles: ['FLEET_MANAGER'],
+        action: 'identity.users.list',
+        resourceType: 'User',
+        resourceId: 'USR_A',
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: listSite.reason,
+        occurrenceCount: 1,
+      });
+    });
+
+    it("records neither the endpoint's required roles, the query, nor the error's text or context", () => {
+      const serialised = JSON.stringify(captured(observeList()));
+      expect(serialised).not.toContain('ORGANIZATION_ADMIN');
+      expect(serialised).not.toContain('UNION_ADMIN');
+      expect(serialised).not.toContain(QUERY_SECRET);
+      expect(serialised).not.toContain(denial().message);
+      expect(serialised).not.toContain('required');
+    });
+
+    it.each([
+      ['a TENANT_MISMATCH classification', { code: ERROR_CODES.TENANT_MISMATCH }],
+      ['a 401', { status: 401, code: ERROR_CODES.UNAUTHENTICATED }],
+    ])('skips a marked denial classified as %s', (_label, overrides) => {
+      expect(skipReason(observeList(overrides))).toBe(CAPTURE_SKIP_REASONS.CLASSIFICATION_MISMATCH);
+    });
+
+    it.each([
+      ['POST on the same template', { method: 'POST' }],
+      ['another template', { route: '/v1/users/:id' }],
+    ])('skips a marked denial observed on %s', (_label, overrides) => {
+      expect(skipReason(observeList(overrides))).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+
+    it('never captures an unmarked INSUFFICIENT_ROLE, even on GET /v1/users', () => {
+      expect(
+        decideCapture(
+          observeList({ exception: RastaError.insufficientRole(['UNION_ADMIN'], []) }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+  });
+
+  describe('the roles-guard site POST /v1/users (AUD-004 Phase C4)', () => {
+    const createSite = REFUSAL_SITES.CREATE_USER;
+    const BODY_SECRET = 'BODY-SECRET-SENTINEL';
+    const denial = (): RastaError =>
+      markRefusal(
+        RastaError.insufficientRole(['ORGANIZATION_ADMIN', 'UNION_ADMIN'], ['AUDITOR']),
+        'CREATE_USER',
+      );
+    const observeCreate = (overrides: Partial<RefusalObservation> = {}): RefusalObservation => ({
+      exception: denial(),
+      status: 403,
+      code: ERROR_CODES.INSUFFICIENT_ROLE,
+      method: 'POST',
+      route: createSite.route,
+      context: context({ roles: ['AUDITOR'], path: `/v1/users?username=${BODY_SECRET}` }),
+      ...overrides,
+    });
+
+    it('maps the actor, roles and tenant from the context and everything else from the site', () => {
+      expect(captured(observeCreate())).toMatchObject({
+        organizationId: 'ORG_A',
+        actorType: 'USER',
+        actorId: 'USR_A',
+        actorRoles: ['AUDITOR'],
+        action: 'identity.users.create',
+        resourceType: 'User',
+        resourceId: 'USR_A',
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: createSite.reason,
+        occurrenceCount: 1,
+      });
+    });
+
+    it("records neither the endpoint's required roles, the request, nor the error's text or context", () => {
+      const serialised = JSON.stringify(captured(observeCreate()));
+      expect(serialised).not.toContain('ORGANIZATION_ADMIN');
+      expect(serialised).not.toContain('UNION_ADMIN');
+      expect(serialised).not.toContain(BODY_SECRET);
+      expect(serialised).not.toContain(denial().message);
+      expect(serialised).not.toContain('required');
+    });
+
+    it('never shares an aggregation identity with the listing site on the same template', () => {
+      const create = captured(observeCreate());
+      const list = captured({
+        ...observeCreate(),
+        exception: markRefusal(RastaError.insufficientRole(['UNION_ADMIN'], []), 'LIST_USERS'),
+        method: 'GET',
+      });
+      expect(create.action).not.toBe(list.action);
+      expect(create.reason).not.toBe(list.reason);
+    });
+
+    it.each([
+      ['GET on the same template', { method: 'GET' }],
+      ['a nested template', { route: '/v1/users/:id/memberships' }],
+    ])('skips a marked denial observed on %s', (_label, overrides) => {
+      expect(skipReason(observeCreate(overrides))).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+
+    it('never captures an unmarked INSUFFICIENT_ROLE, even on POST /v1/users', () => {
+      expect(
+        decideCapture(
+          observeCreate({ exception: RastaError.insufficientRole(['UNION_ADMIN'], []) }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+  });
+
+  describe('the roles-guard site POST /v1/users/:id/memberships (AUD-004 Phase C5)', () => {
+    const membershipSite = REFUSAL_SITES.ADD_MEMBERSHIP;
+    const TARGET_USER = 'USR_TARGET_PATH_SENTINEL';
+    const BODY_ORGANIZATION = 'ORG_BODY_SENTINEL';
+    const denial = (): RastaError =>
+      markRefusal(
+        RastaError.insufficientRole(['ORGANIZATION_ADMIN', 'UNION_ADMIN'], ['AUDITOR']),
+        'ADD_MEMBERSHIP',
+      );
+    const observeMembership = (
+      overrides: Partial<RefusalObservation> = {},
+    ): RefusalObservation => ({
+      exception: denial(),
+      status: 403,
+      code: ERROR_CODES.INSUFFICIENT_ROLE,
+      method: 'POST',
+      route: membershipSite.route,
+      context: context({
+        roles: ['AUDITOR'],
+        path: `/v1/users/${TARGET_USER}/memberships?organizationId=${BODY_ORGANIZATION}`,
+      }),
+      ...overrides,
+    });
+
+    it('names the verified caller as the resource, never the target user in the path', () => {
+      const draft = captured(observeMembership());
+      expect(draft).toMatchObject({
+        organizationId: 'ORG_A',
+        actorType: 'USER',
+        actorId: 'USR_A',
+        actorRoles: ['AUDITOR'],
+        action: 'identity.memberships.create',
+        resourceType: 'Membership',
+        resourceId: 'USR_A',
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: membershipSite.reason,
+        occurrenceCount: 1,
+      });
+      expect(draft.resourceId).not.toBe(TARGET_USER);
+    });
+
+    it("records neither the path, the body, the endpoint's required roles, nor the error's text or context", () => {
+      const serialised = JSON.stringify(captured(observeMembership()));
+      for (const leaked of [
+        TARGET_USER,
+        BODY_ORGANIZATION,
+        '/v1/users',
+        'ORGANIZATION_ADMIN',
+        'UNION_ADMIN',
+        denial().message,
+        'required',
+      ]) {
+        expect(serialised).not.toContain(leaked);
+      }
+    });
+
+    it('never shares an aggregation identity with any other site', () => {
+      const draft = captured(observeMembership());
+      for (const other of Object.values(REFUSAL_SITES)) {
+        if (other === membershipSite) continue;
+        expect(`${draft.action}|${draft.resourceType}`).not.toBe(
+          `${other.action}|${other.resourceType}`,
+        );
+      }
+    });
+
+    it.each([
+      ['POST /v1/users', { route: '/v1/users' }],
+      ['GET on the same template', { method: 'GET' }],
+      ['a concrete path where the template belongs', { route: '/v1/users/USR_X/memberships' }],
+      ['membership roles', { route: '/v1/memberships/:id/roles' }],
+    ])('skips a marked denial observed on %s', (_label, overrides) => {
+      expect(skipReason(observeMembership(overrides))).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+
+    it('never captures an unmarked INSUFFICIENT_ROLE, even on the membership template', () => {
+      expect(
+        decideCapture(
+          observeMembership({ exception: RastaError.insufficientRole(['UNION_ADMIN'], []) }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+  });
+
+  describe('the roles-guard site POST /v1/memberships/:id/roles (AUD-004 Phase C6)', () => {
+    const rolesSite = REFUSAL_SITES.UPDATE_MEMBERSHIP_ROLES;
+    const TARGET_MEMBERSHIP = 'MBR_TARGET_PATH_SENTINEL';
+    const BODY_REASON = 'REASON_BODY_SENTINEL';
+    const denial = (): RastaError =>
+      markRefusal(
+        RastaError.insufficientRole(['ORGANIZATION_ADMIN', 'UNION_ADMIN'], ['AUDITOR']),
+        'UPDATE_MEMBERSHIP_ROLES',
+      );
+    const observeRoles = (overrides: Partial<RefusalObservation> = {}): RefusalObservation => ({
+      exception: denial(),
+      status: 403,
+      code: ERROR_CODES.INSUFFICIENT_ROLE,
+      method: 'POST',
+      route: rolesSite.route,
+      context: context({
+        roles: ['AUDITOR'],
+        path: `/v1/memberships/${TARGET_MEMBERSHIP}/roles?reason=${BODY_REASON}`,
+      }),
+      ...overrides,
+    });
+
+    it('names the verified caller as the resource, never the membership in the path', () => {
+      const draft = captured(observeRoles());
+      expect(draft).toMatchObject({
+        organizationId: 'ORG_A',
+        actorType: 'USER',
+        actorId: 'USR_A',
+        actorRoles: ['AUDITOR'],
+        action: 'identity.memberships.roles.replace',
+        resourceType: 'Membership',
+        resourceId: 'USR_A',
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: rolesSite.reason,
+        occurrenceCount: 1,
+      });
+      expect(draft.resourceId).not.toBe(TARGET_MEMBERSHIP);
+    });
+
+    it("records neither the path, the body, the endpoint's required roles, nor the error's text or context", () => {
+      const serialised = JSON.stringify(captured(observeRoles()));
+      for (const leaked of [
+        TARGET_MEMBERSHIP,
+        BODY_REASON,
+        '/v1/memberships',
+        '/roles',
+        'ORGANIZATION_ADMIN',
+        'UNION_ADMIN',
+        denial().message,
+        'required',
+      ]) {
+        expect(serialised).not.toContain(leaked);
+      }
+    });
+
+    it('never shares an aggregation identity with any other site, including membership creation', () => {
+      const draft = captured(observeRoles());
+      for (const other of Object.values(REFUSAL_SITES)) {
+        if (other === rolesSite) continue;
+        expect(`${draft.action}|${draft.resourceType}|${draft.errorCode}`).not.toBe(
+          `${other.action}|${other.resourceType}|${other.errorCode}`,
+        );
+      }
+    });
+
+    it.each([
+      ['POST /v1/users/:id/memberships', { route: '/v1/users/:id/memberships' }],
+      ['GET on the same template', { method: 'GET' }],
+      ['a concrete path where the template belongs', { route: '/v1/memberships/MBR_X/roles' }],
+      ['membership revoke', { route: '/v1/memberships/:id/revoke' }],
+      ['a trailing slash', { route: '/v1/memberships/:id/roles/' }],
+    ])('skips a marked denial observed on %s', (_label, overrides) => {
+      expect(skipReason(observeRoles(overrides))).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+
+    it('never captures an unmarked INSUFFICIENT_ROLE, even on the roles template', () => {
+      expect(
+        decideCapture(
+          observeRoles({ exception: RastaError.insufficientRole(['UNION_ADMIN'], []) }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+  });
+
+  describe('the roles-guard site POST /v1/memberships/:id/revoke (AUD-004 Phase C7)', () => {
+    const revokeSite = REFUSAL_SITES.REVOKE_MEMBERSHIP;
+    const TARGET_MEMBERSHIP = 'MBR_REVOKE_PATH_SENTINEL';
+    const BODY_REASON = 'REVOKE_REASON_BODY_SENTINEL';
+    const denial = (): RastaError =>
+      markRefusal(
+        RastaError.insufficientRole(['ORGANIZATION_ADMIN', 'UNION_ADMIN'], ['AUDITOR']),
+        'REVOKE_MEMBERSHIP',
+      );
+    const observeRevoke = (overrides: Partial<RefusalObservation> = {}): RefusalObservation => ({
+      exception: denial(),
+      status: 403,
+      code: ERROR_CODES.INSUFFICIENT_ROLE,
+      method: 'POST',
+      route: revokeSite.route,
+      context: context({
+        roles: ['AUDITOR'],
+        path: `/v1/memberships/${TARGET_MEMBERSHIP}/revoke?reason=${BODY_REASON}`,
+      }),
+      ...overrides,
+    });
+
+    it('names the verified caller as the resource, never the membership in the path', () => {
+      const draft = captured(observeRevoke());
+      expect(draft).toMatchObject({
+        organizationId: 'ORG_A',
+        actorType: 'USER',
+        actorId: 'USR_A',
+        actorRoles: ['AUDITOR'],
+        action: 'identity.memberships.revoke',
+        resourceType: 'Membership',
+        resourceId: 'USR_A',
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: revokeSite.reason,
+        occurrenceCount: 1,
+      });
+      expect(draft.resourceId).not.toBe(TARGET_MEMBERSHIP);
+    });
+
+    it("records neither the path, the body reason, the endpoint's required roles, nor the error's text or context", () => {
+      const serialised = JSON.stringify(captured(observeRevoke()));
+      for (const leaked of [
+        TARGET_MEMBERSHIP,
+        BODY_REASON,
+        '/v1/memberships',
+        '/revoke',
+        'ORGANIZATION_ADMIN',
+        'UNION_ADMIN',
+        denial().message,
+        'required',
+      ]) {
+        expect(serialised).not.toContain(leaked);
+      }
+    });
+
+    it('never shares an aggregation identity with any other site, including the other two Membership sites', () => {
+      const draft = captured(observeRevoke());
+      for (const other of Object.values(REFUSAL_SITES)) {
+        if (other === revokeSite) continue;
+        expect(`${draft.action}|${draft.resourceType}|${draft.errorCode}`).not.toBe(
+          `${other.action}|${other.resourceType}|${other.errorCode}`,
+        );
+      }
+    });
+
+    it.each([
+      ['POST /v1/memberships/:id/roles', { route: '/v1/memberships/:id/roles' }],
+      ['POST /v1/users/:id/memberships', { route: '/v1/users/:id/memberships' }],
+      ['GET on the same template', { method: 'GET' }],
+      ['a concrete path where the template belongs', { route: '/v1/memberships/MBR_X/revoke' }],
+      ['a trailing slash', { route: '/v1/memberships/:id/revoke/' }],
+      ['registration approval', { route: '/v1/registration-requests/:id/approve' }],
+    ])('skips a marked denial observed on %s', (_label, overrides) => {
+      expect(skipReason(observeRevoke(overrides))).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+
+    it('never captures an unmarked INSUFFICIENT_ROLE, even on the revoke template', () => {
+      expect(
+        decideCapture(
+          observeRevoke({ exception: RastaError.insufficientRole(['UNION_ADMIN'], []) }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+  });
+
+  describe('the roles-guard site POST /v1/registration-requests/:id/approve (AUD-004 Phase C8)', () => {
+    const approveSite = REFUSAL_SITES.APPROVE_REGISTRATION_REQUEST;
+    const TARGET_REQUEST = 'REG_APPROVE_PATH_SENTINEL';
+    const BODY_ORGANIZATION = 'ORG_APPROVE_BODY_SENTINEL';
+    const denial = (): RastaError =>
+      markRefusal(
+        // One required role, not two: the approve endpoint is `@Roles('UNION_ADMIN')`.
+        RastaError.insufficientRole(['UNION_ADMIN'], ['ORGANIZATION_ADMIN']),
+        'APPROVE_REGISTRATION_REQUEST',
+      );
+    const observeApprove = (overrides: Partial<RefusalObservation> = {}): RefusalObservation => ({
+      exception: denial(),
+      status: 403,
+      code: ERROR_CODES.INSUFFICIENT_ROLE,
+      method: 'POST',
+      route: approveSite.route,
+      context: context({
+        roles: ['ORGANIZATION_ADMIN'],
+        path: `/v1/registration-requests/${TARGET_REQUEST}/approve?org=${BODY_ORGANIZATION}`,
+      }),
+      ...overrides,
+    });
+
+    it('names the verified caller as the resource, never the registration request in the path', () => {
+      const draft = captured(observeApprove());
+      expect(draft).toMatchObject({
+        organizationId: 'ORG_A',
+        actorType: 'USER',
+        actorId: 'USR_A',
+        // The caller's *own* roles from the token — not the role the endpoint wants.
+        actorRoles: ['ORGANIZATION_ADMIN'],
+        action: 'identity.registration_requests.approve',
+        resourceType: 'RegistrationRequest',
+        resourceId: 'USR_A',
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: approveSite.reason,
+        occurrenceCount: 1,
+      });
+      expect(draft.resourceId).not.toBe(TARGET_REQUEST);
+    });
+
+    it("records neither the path, the approval body, the endpoint's required role, nor the error's text or context", () => {
+      const serialised = JSON.stringify(captured(observeApprove()));
+      for (const leaked of [
+        TARGET_REQUEST,
+        BODY_ORGANIZATION,
+        '/v1/registration-requests',
+        '/approve',
+        'UNION_ADMIN',
+        denial().message,
+        'required',
+      ]) {
+        expect(serialised).not.toContain(leaked);
+      }
+    });
+
+    it('never shares an aggregation identity with any other site', () => {
+      const draft = captured(observeApprove());
+      for (const other of Object.values(REFUSAL_SITES)) {
+        if (other === approveSite) continue;
+        expect(`${draft.action}|${draft.resourceType}|${draft.errorCode}`).not.toBe(
+          `${other.action}|${other.resourceType}|${other.errorCode}`,
+        );
+      }
+    });
+
+    it.each([
+      // The sibling review outcome: same method, same prefix, same required role.
+      [
+        'POST /v1/registration-requests/:id/reject',
+        { route: '/v1/registration-requests/:id/reject' },
+      ],
+      ['the registration-request collection', { route: '/v1/registration-requests' }],
+      ['POST /v1/memberships/:id/revoke', { route: '/v1/memberships/:id/revoke' }],
+      ['GET on the same template', { method: 'GET' }],
+      [
+        'a concrete path where the template belongs',
+        { route: '/v1/registration-requests/REG_X/approve' },
+      ],
+      ['a trailing slash', { route: '/v1/registration-requests/:id/approve/' }],
+      ['a renamed parameter', { route: '/v1/registration-requests/:requestId/approve' }],
+    ])('skips a marked denial observed on %s', (_label, overrides) => {
+      expect(skipReason(observeApprove(overrides))).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+
+    it('never captures an unmarked INSUFFICIENT_ROLE, even on the approve template', () => {
+      expect(
+        decideCapture(
+          observeApprove({ exception: RastaError.insufficientRole(['UNION_ADMIN'], []) }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+  });
+
+  describe('the roles-guard site POST /v1/registration-requests/:id/reject (AUD-004 Phase C9)', () => {
+    const rejectSite = REFUSAL_SITES.REJECT_REGISTRATION_REQUEST;
+    const TARGET_REQUEST = 'REG_REJECT_PATH_SENTINEL';
+    const REASON = 'REJECT_REASON_BODY_SENTINEL';
+    const denial = (): RastaError =>
+      markRefusal(
+        RastaError.insufficientRole(['UNION_ADMIN'], ['ORGANIZATION_ADMIN']),
+        'REJECT_REGISTRATION_REQUEST',
+      );
+    const observeReject = (overrides: Partial<RefusalObservation> = {}): RefusalObservation => ({
+      exception: denial(),
+      status: 403,
+      code: ERROR_CODES.INSUFFICIENT_ROLE,
+      method: 'POST',
+      route: rejectSite.route,
+      context: context({
+        roles: ['ORGANIZATION_ADMIN'],
+        path: `/v1/registration-requests/${TARGET_REQUEST}/reject?reason=${REASON}`,
+      }),
+      ...overrides,
+    });
+
+    it('names the verified caller as the resource, never the registration request in the path', () => {
+      const draft = captured(observeReject());
+      expect(draft).toMatchObject({
+        organizationId: 'ORG_A',
+        actorType: 'USER',
+        actorId: 'USR_A',
+        // The caller's *own* roles from the token — not the role the endpoint wants.
+        actorRoles: ['ORGANIZATION_ADMIN'],
+        action: 'identity.registration_requests.reject',
+        resourceType: 'RegistrationRequest',
+        resourceId: 'USR_A',
+        errorCode: 'INSUFFICIENT_ROLE',
+        reason: rejectSite.reason,
+        occurrenceCount: 1,
+      });
+      expect(draft.resourceId).not.toBe(TARGET_REQUEST);
+    });
+
+    it("records neither the path, the rejection reason, the endpoint's required role, nor the error's text or context", () => {
+      const serialised = JSON.stringify(captured(observeReject()));
+      for (const leaked of [
+        TARGET_REQUEST,
+        REASON,
+        '/v1/registration-requests',
+        '/reject',
+        'UNION_ADMIN',
+        denial().message,
+        'required',
+      ]) {
+        expect(serialised).not.toContain(leaked);
+      }
+    });
+
+    it('never shares an aggregation identity with any other site, the approval included', () => {
+      const draft = captured(observeReject());
+      for (const other of Object.values(REFUSAL_SITES)) {
+        if (other === rejectSite) continue;
+        expect(`${draft.action}|${draft.resourceType}|${draft.errorCode}`).not.toBe(
+          `${other.action}|${other.resourceType}|${other.errorCode}`,
+        );
+      }
+      expect(draft.action).not.toBe(REFUSAL_SITES.APPROVE_REGISTRATION_REQUEST.action);
+    });
+
+    it.each([
+      // The sibling review outcome: a reject mark seen on the approve route.
+      [
+        'POST /v1/registration-requests/:id/approve',
+        { route: '/v1/registration-requests/:id/approve' },
+      ],
+      ['the registration-request collection', { route: '/v1/registration-requests' }],
+      ['POST /v1/memberships/:id/revoke', { route: '/v1/memberships/:id/revoke' }],
+      ['GET on the same template', { method: 'GET' }],
+      [
+        'a concrete path where the template belongs',
+        { route: '/v1/registration-requests/REG_X/reject' },
+      ],
+      ['a trailing slash', { route: '/v1/registration-requests/:id/reject/' }],
+      ['a renamed parameter', { route: '/v1/registration-requests/:requestId/reject' }],
+    ])('skips a marked denial observed on %s', (_label, overrides) => {
+      expect(skipReason(observeReject(overrides))).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+
+    it('never captures an unmarked INSUFFICIENT_ROLE, even on the reject template', () => {
+      expect(
+        decideCapture(
+          observeReject({ exception: RastaError.insufficientRole(['UNION_ADMIN'], []) }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+  });
+
+  describe('the auth guard site, which is route-agnostic (AUD-004 Phase C10)', () => {
+    const guardSite = REFUSAL_SITES.AUTH_TENANT_MISMATCH;
+    const TRUSTED_USER = 'USR_TRUSTED_TOKEN';
+    const TRUSTED_ORG = 'ORG_ACTIVE_FROM_TOKEN';
+    const REJECTED_ORG = 'ORG_REJECTED_HEADER_SENTINEL';
+
+    const denial = (): RastaError =>
+      markGuardRefusal(
+        RastaError.tenantMismatch(REJECTED_ORG, [TRUSTED_ORG]),
+        'AUTH_TENANT_MISMATCH',
+        { userId: TRUSTED_USER, organizationId: TRUSTED_ORG, roles: ['FLEET_MANAGER'] },
+      );
+
+    /**
+     * The context as it really is when the auth guard refuses: established by
+     * the middleware, never upgraded, so still anonymous and carrying no user.
+     * The record's attribution therefore cannot come from here — only its
+     * correlation, trace and source can.
+     */
+    const guardContext = (overrides: Partial<RequestContext> = {}): RequestContext =>
+      context({
+        authType: 'ANONYMOUS',
+        userId: undefined,
+        organizationId: undefined,
+        organizationIds: [],
+        roles: [],
+        path: `/v1/users/me?probe=${REJECTED_ORG}`,
+        ...overrides,
+      });
+
+    const observeGuard = (overrides: Partial<RefusalObservation> = {}): RefusalObservation => ({
+      exception: denial(),
+      status: 403,
+      code: ERROR_CODES.TENANT_MISMATCH,
+      method: 'GET',
+      route: '/v1/users/me',
+      context: guardContext(),
+      ...overrides,
+    });
+
+    it('attributes the record to the verified token, not to the anonymous context', () => {
+      expect(captured(observeGuard())).toEqual({
+        id: EVENT_ID,
+        organizationId: TRUSTED_ORG,
+        actorType: 'USER',
+        actorId: TRUSTED_USER,
+        actorRoles: ['FLEET_MANAGER'],
+        action: 'identity.tenant_context.select',
+        resourceType: 'User',
+        resourceId: TRUSTED_USER,
+        errorCode: 'TENANT_MISMATCH',
+        reason: guardSite.reason,
+        // Correlation, trace and source still come from the request context —
+        // they are provenance, not attribution.
+        sourceIp: '203.0.113.7',
+        sourceUserAgent: 'Mozilla/5.0 (identity unit)',
+        correlationId: 'COR_01J9ZC00000000000000000001',
+        traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+        producerVersion: '1.4.2',
+        occurredAt: NOW,
+        occurrenceCount: 1,
+      });
+    });
+
+    it.each([
+      ['no matched route at all', { method: undefined, route: undefined }],
+      ['another service route', { method: 'POST', route: '/v1/memberships/:id/revoke' }],
+      ['an instrumented roles-guard route', { method: 'GET', route: '/v1/users' }],
+      [
+        'the domain site’s own route',
+        { method: 'POST', route: '/v1/users/me/active-organization' },
+      ],
+      ['a concrete URL', { method: 'GET', route: '/v1/users/USR_X' }],
+    ])('captures the same record on %s, because the guard decides before routing', (_l, over) => {
+      // Pinning this site to one route would silently drop the identical
+      // refusal made against every other endpoint.
+      expect(captured(observeGuard(over))).toMatchObject({
+        actorId: TRUSTED_USER,
+        organizationId: TRUSTED_ORG,
+        action: guardSite.action,
+        resourceId: TRUSTED_USER,
+      });
+    });
+
+    it('records neither the rejected organization, the URL, nor the error’s text or context', () => {
+      const serialised = JSON.stringify(captured(observeGuard()));
+      for (const leaked of [REJECTED_ORG, QUERY_SECRET, '/v1/users', 'probe=', denial().message]) {
+        expect(serialised).not.toContain(leaked);
+      }
+      // The error's own `internalContext` — which holds the rejected header and
+      // the membership list — reaches neither the record nor its keys. (The
+      // word "requested" does appear, in the site's *fixed* reason text; that
+      // is authored here, not taken from the request.)
+      expect(serialised).not.toContain('internalContext');
+      expect(denial().internalContext).toEqual({ requested: REJECTED_ORG, allowed: [TRUSTED_ORG] });
+    });
+
+    it('never shares an aggregation identity with the domain’s own TENANT_MISMATCH', () => {
+      const guard = captured(observeGuard());
+      for (const other of Object.values(REFUSAL_SITES)) {
+        if (other === guardSite) continue;
+        expect(`${guard.action}|${guard.resourceType}|${guard.errorCode}`).not.toBe(
+          `${other.action}|${other.resourceType}|${other.errorCode}`,
+        );
+      }
+      expect(guard.action).not.toBe(REFUSAL_SITES.SWITCH_ACTIVE_ORGANIZATION.action);
+    });
+
+    it.each([
+      ['an INSUFFICIENT_ROLE classification', { code: ERROR_CODES.INSUFFICIENT_ROLE }],
+      ['a 401', { status: 401, code: ERROR_CODES.UNAUTHENTICATED }],
+      ['a 500', { status: 500, code: ERROR_CODES.INTERNAL_ERROR }],
+    ])('still skips a marked refusal classified as %s', (_label, overrides) => {
+      // Route-agnostic is not classification-agnostic: the platform's final
+      // answer must still be the 403 this site describes.
+      expect(skipReason(observeGuard(overrides))).toBe(
+        CAPTURE_SKIP_REASONS.CLASSIFICATION_MISMATCH,
+      );
+    });
+
+    it('fails closed when the site is marked without trusted attribution', () => {
+      // `markRefusal` cannot name this site in TypeScript; if it ever did at
+      // runtime, the record would have no attribution and must not be written.
+      const forced = (markRefusal as (error: RastaError, site: RefusalSiteName) => RastaError)(
+        RastaError.tenantMismatch(REJECTED_ORG, []),
+        'AUTH_TENANT_MISMATCH',
+      );
+
+      expect(skipReason(observeGuard({ exception: forced }))).toBe(
+        CAPTURE_SKIP_REASONS.UNATTRIBUTABLE,
+      );
+    });
+
+    it('fails closed with no request context, so nothing is recorded uncorrelated', () => {
+      expect(skipReason(observeGuard({ context: undefined }))).toBe(
+        CAPTURE_SKIP_REASONS.UNATTRIBUTABLE,
+      );
+    });
+
+    it.each([
+      ['an oversized actor id', 'U'.repeat(257), TRUSTED_ORG, ['FLEET_MANAGER']],
+      ['an oversized organization id', TRUSTED_USER, 'O'.repeat(129), ['FLEET_MANAGER']],
+      ['a blank role', TRUSTED_USER, TRUSTED_ORG, ['FLEET_MANAGER', ' ']],
+      ['too many roles', TRUSTED_USER, TRUSTED_ORG, Array.from({ length: 65 }, (_, i) => `R${i}`)],
+    ])('fails closed on %s in the attribution', (_label, userId, organizationId, roles) => {
+      const exception = markGuardRefusal(
+        RastaError.tenantMismatch(REJECTED_ORG, []),
+        'AUTH_TENANT_MISMATCH',
+        { userId, organizationId, roles },
+      );
+
+      expect(skipReason(observeGuard({ exception }))).toBe(CAPTURE_SKIP_REASONS.UNATTRIBUTABLE);
+    });
+
+    it('never captures an unmarked TENANT_MISMATCH, whatever the route', () => {
+      expect(
+        decideCapture(
+          observeGuard({ exception: RastaError.tenantMismatch(REJECTED_ORG, [TRUSTED_ORG]) }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
+    });
+
+    it('leaves every route-bound site route-checked, so only this one is exempt', () => {
+      // The domain's TENANT_MISMATCH shares this site's code and status. Seen
+      // on another route it is still a route mismatch, not a guard refusal.
+      const domain = markRefusal(
+        RastaError.tenantMismatch(REJECTED_ORG, []),
+        'SWITCH_ACTIVE_ORGANIZATION' as RouteRefusalSiteName,
+      );
+
+      expect(
+        skipReason(observeGuard({ exception: domain, method: 'GET', route: '/v1/users/me' })),
+      ).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+  });
+
+  describe('is not a refusal site', () => {
+    it.each([
+      ["the auth guard's own TENANT_MISMATCH", RastaError.tenantMismatch('ORG_X', ['ORG_A'])],
+      ['an INSUFFICIENT_ROLE refusal', RastaError.insufficientRole(['UNION_ADMIN'], [])],
+      ['a FORBIDDEN refusal', RastaError.forbidden()],
+      ['a 401', RastaError.unauthenticated()],
+      ['a plain Error', new Error('boom')],
+    ])('for %s', (_label, exception) => {
+      expect(decideCapture(observe({ exception }), ENVIRONMENT)).toEqual({
+        kind: 'NOT_A_REFUSAL_SITE',
+      });
+    });
+  });
+
+  describe('skips a marked refusal that does not match its site exactly', () => {
+    it.each([
+      ['status 401', { status: 401, code: ERROR_CODES.UNAUTHENTICATED }],
+      ['status 500', { status: 500, code: ERROR_CODES.INTERNAL_ERROR }],
+      ['a different 403 code', { code: ERROR_CODES.FORBIDDEN }],
+      ['a missing code', { code: undefined }],
+    ])('classification: %s', (_label, overrides) => {
+      expect(skipReason(observe(overrides))).toBe(CAPTURE_SKIP_REASONS.CLASSIFICATION_MISMATCH);
+    });
+
+    it.each([
+      ['another method', { method: 'GET' }],
+      ['no matched route', { route: undefined }],
+      ['another route template', { route: '/v1/users/:id' }],
+      ['the concrete URL instead of the template', { route: `${site.route}?x=1` }],
+    ])('route: %s', (_label, overrides) => {
+      expect(skipReason(observe(overrides))).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+
+    it.each([
+      ['no request context', undefined],
+      ['an anonymous caller', context({ authType: 'ANONYMOUS', userId: undefined, roles: [] })],
+      ['a service caller', context({ authType: 'SERVICE', userId: undefined, callerService: 'x' })],
+      ['a user token with no user id', context({ userId: undefined })],
+      ['a blank user id', context({ userId: '   ' })],
+    ])('authentication: %s', (_label, ctx) => {
+      expect(skipReason(observe({ context: ctx }))).toBe(
+        CAPTURE_SKIP_REASONS.NOT_AUTHENTICATED_USER,
+      );
+    });
+
+    it.each([
+      ['more than 64 roles', context({ roles: Array.from({ length: 65 }, (_, i) => `ROLE_${i}`) })],
+      ['a blank role', context({ roles: ['FLEET_MANAGER', ' '] })],
+      ['an oversized role', context({ roles: ['R'.repeat(129)] })],
+      ['a blank organization', context({ organizationId: ' ' })],
+      ['an oversized organization id', context({ organizationId: 'O'.repeat(129) })],
+      ['an oversized user id', context({ userId: 'U'.repeat(257) })],
+    ])('attribution: %s', (_label, ctx) => {
+      expect(skipReason(observe({ context: ctx }))).toBe(CAPTURE_SKIP_REASONS.UNATTRIBUTABLE);
+    });
+
+    it('contract: an event the audit contract would refuse never becomes a row', () => {
+      const decision = decideCapture(observe(), { ...ENVIRONMENT, newId: () => '' });
+      expect(decision).toMatchObject({
+        kind: 'SKIP',
+        reason: CAPTURE_SKIP_REASONS.CONTRACT_VIOLATION,
+      });
+    });
+  });
+
+  describe('source and correlation values are bounded or dropped', () => {
+    it('strips control characters from the user agent and truncates it to 512 characters', () => {
+      const nul = String.fromCharCode(0);
+      const bell = String.fromCharCode(7);
+      const del = String.fromCharCode(127);
+      const draft = captured(
+        observe({
+          context: context({ userAgent: `Agent${nul}/1${bell}.0${del} ${'x'.repeat(600)}` }),
+        }),
+      );
+      expect(draft.sourceUserAgent).toHaveLength(512);
+      expect(draft.sourceUserAgent?.startsWith('Agent/1.0 xxx')).toBe(true);
+      expect(
+        [...(draft.sourceUserAgent ?? '')].every((c) => {
+          const code = c.codePointAt(0) ?? 0;
+          return code >= 32 && code !== 127;
+        }),
+      ).toBe(true);
+    });
+
+    it('drops a user agent that is only control characters or whitespace', () => {
+      const tab = String.fromCharCode(9);
+      expect(
+        captured(observe({ context: context({ userAgent: `${tab}  ${tab}` }) })).sourceUserAgent,
+      ).toBeNull();
+      expect(
+        captured(observe({ context: context({ userAgent: undefined }) })).sourceUserAgent,
+      ).toBeNull();
+    });
+
+    it.each([
+      ['an IPv4 address', '198.51.100.4', '198.51.100.4'],
+      ['an IPv6 address', '2001:db8::7', '2001:db8::7'],
+      ['an IPv4-mapped IPv6 address', '::ffff:127.0.0.1', '::ffff:127.0.0.1'],
+      ['a hostname', 'proxy.internal', null],
+      ['a header-injected list', '1.2.3.4, 5.6.7.8', null],
+      ['nothing', undefined, null],
+    ])('source ip: %s', (_label, ip, expected) => {
+      expect(captured(observe({ context: context({ ip }) })).sourceIp).toBe(expected);
+    });
+
+    it.each([
+      ['with spaces', 'not an id'],
+      ['too long', 'C'.repeat(129)],
+      ['with markup', '<script>'],
+    ])(
+      'falls back to the minted request id for a caller-supplied correlation id %s',
+      (_l, value) => {
+        expect(
+          captured(observe({ context: context({ correlationId: value }) })).correlationId,
+        ).toBe('01J9ZC00000000000000000REQ');
+      },
+    );
+
+    it('falls back to the event id when neither correlation nor request id is usable', () => {
+      expect(
+        captured(observe({ context: context({ correlationId: 'a b', requestId: 'c d' }) }))
+          .correlationId,
+      ).toBe(EVENT_ID);
+    });
+
+    it.each([
+      ['no trace', { traceId: undefined, spanId: undefined }],
+      ['a malformed trace id', { traceId: 'XYZ' }],
+      ['a malformed span id', { spanId: '123' }],
+    ])('leaves traceparent out for %s', (_label, overrides) => {
+      expect(captured(observe({ context: context(overrides) })).traceparent).toBeNull();
+    });
+
+    it.each([
+      ['too long', 'v'.repeat(65)],
+      ['blank', '  '],
+    ])('replaces a %s producer version with a fixed placeholder', (_label, producerVersion) => {
+      expect(decideCapture(observe(), { ...ENVIRONMENT, producerVersion })).toMatchObject({
+        kind: 'CAPTURE',
+        draft: { producerVersion: '0.0.0' },
+      });
+    });
+  });
+});
