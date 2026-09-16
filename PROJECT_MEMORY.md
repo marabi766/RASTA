@@ -828,6 +828,62 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 > Preflight فاز، دروازهٔ Fail-Fast و یکپارچه‌سازی CI؛ کران ۲۹٫۲ همچنان بی Provenance. `COM-009` همچنان
 > `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز است.
 >
+> **به‌روزرسانی 2026-09-16 — نخستین مجموعهٔ جفت‌شدهٔ دوطرفهٔ § ۶ زیر ۰٫۰۱۵ CPU:** شرطی که تکرار پیش هزینه‌اش
+> اندازه‌گیری شده بود، این بار به یک **کمپین جفت‌شدهٔ کامل** تبدیل شد. سهمیهٔ CFS **ثابت**
+> `CPU_PERIOD_US=1000000` / `CPU_QUOTA_US=15000` (**۰٫۰۱۵ CPU**) فقط روی Container سرویس PostgreSQL، **۲۰
+> جفت**، کران گام همان ۳۰ دقیقهٔ **دست‌نخوردهٔ** Harness، مهلت Job ۱۸۰ دقیقه، **یک** اجرا و **بدون Retry**؛
+> شرط بین جفت‌ها تغییر نکرد، بار SQL یا کار جانبی اضافه نشد، پایگاه داده Pause/Kill نشد و هیچ تنظیم PostgreSQL
+> عوض نشد. Workflow موقت و فقط‌شاخه‌ای `aggregation-stress-induced-calibration.yml`، **مشتق از همان Workflow
+> بازبینی‌شدهٔ `9b03ac0`** با تفاوت‌های کارکردی تنها: نام Workflow، گروه Concurrency، ثابت سهمیه، شناسه و نام
+> Job، سه نام گام، نام فایل گزارش و نام/مسیر Artifact — همان SHAهای Pinشده، Node 22 / pnpm 11.22.0، Runner
+> **بومی Ubuntu** یک‌بارمصرف، **دقیقاً یک** Service Container ‏`postgis/postgis:16-3.4`
+> (`containers_running=1`)، Credential یک‌بارمصرف Job-local، همان Provisioning/Build/Migration **پیش از**
+> سهمیه، همان تفکیک دقیق تصویر با رد پیش از اندازه‌گیری، همان `docker update` خاموش‌شده و بازخوانی دوفیلدی
+> `HostConfig.CpuPeriod`/`HostConfig.CpuQuota`، همان Provenance باریک، همان یک فرمان بی‌Retry
+> `calibrate:aggregation-stress -- --pairs 20`، همان گرفتن و **دوباره برافراشتن** کد خروج، و همان Upload با
+> `always()` و `if-no-files-found: error`. روی Commit ‏`a0db6386f6d027cfdd0fbf2c250a70eb4c90bb4c`؛ اجرای
+> `35048202361` (تلاش ۱، رویداد `push`، Workflow و Job هر دو `failure` — **که همان نتیجهٔ یک جفتِ شکست‌خورده
+> است، نه خطای Setup**)، `02:29:53Z`→`03:36:50Z`. **گام‌ها:** ۱..۱۲ همگی `success`، شامل
+> `test:aggregation-evidence-lib` و `check:test-phases` **پیش از** سهمیه و تأیید دقیق
+> `applied_cpu_period_us=1000000` / `applied_cpu_quota_us=15000` (شناسهٔ Container هرگز چاپ نشد)؛ گام ۱۳
+> (کمپین) `failure` `02:31:05Z`→`03:36:45Z` = **۶۵ دقیقه و ۴۰ ثانیه** با `campaign_exit=1`؛ گام ۱۴ (Upload)
+> `success`. **پس هیچ خطای Setup، قرارداد، سهمیه، Harness، مهلت Job یا Artifact رخ نداد.** زمان واقعی ۶۵۴۰
+> ثانیه در برابر ۸۶۳۰ ثانیهٔ پیش‌بینی‌شده و ۱۰۸۰۰ ثانیهٔ مهلت — پیش‌بینی محافظه‌کارانه بود چون از یک نمونهٔ سرد
+> ساخته شده بود. **نتیجه
+> ([`docs/evidence/adr-055/induced-calibration-0015cpu-github-2026-09-16.txt`](docs/evidence/adr-055/induced-calibration-0015cpu-github-2026-09-16.txt)،
+> ۱۷۰ سطر، ۱۳٬۷۴۶ بایت، بی CR، بی BOM، با یک خط جدید پایانی):** `VALID=20`، `INVALID=0`، `INCONCLUSIVE=0`؛
+> Control ‏(۱۰s، فقط‌خواندنی) `VALID`؛ **Suite فشار ۱۹ گذشته / ۱ شکست‌خورده از ۲۰** و هر ۲۰ جفت `ran=yes`؛
+> تنها جفت شکست‌خورده **`pair-1`** است (خروج ۱، ۲۷۱٫۳ ثانیه، ۰/۱/۰/۱ Suite و ۲۰/۲/۰/۲۲ تست) با طبقه‌بندی
+> **`sqlstate57014=1`** و **`jestTimeout=1`** و پنج دستهٔ دیگر صفر؛ توزیع‌ها (کمینه/میانه/بیشینه):
+> `probe_tps` **۳۹٫۸۲ / ۲۰۴٫۶ / ۲۱۲٫۰۲**، `probe_min_interval_tps` **۱ / ۲۶ / ۴۱**، `probe_longest_stall_s`
+> **۰ / ۰ / ۰**، `stress_wall_s` **۱۱۰٫۵۶ / ۱۱۶٫۱۲ / ۲۷۱٫۲۷**؛ چهارده دستهٔ زیرساختی جفت‌ها صفر با `other=3`،
+> و دامنه‌های Control و Preflight هر پانزده دسته صفر. **`other=3` خطای محیط نیست:** `summarizeJestReport` برای
+> گزارشی که وجود دارد و می‌گوید تست شکست خورده عمداً هیچ دستهٔ زیرساختی ثبت نمی‌کند (سه `record([], …)` برای «۲
+> تست شکست خورد»، «یک Suite شکست خورد» و «Jest موفقیت گزارش نکرد») و `countCategories` هر سه را در `other`
+> می‌شمارد. **هیچ ردیف `INVALID`، `INCONCLUSIVE`، تلاش‌نشده، بی‌گزارش یا ردشده به‌دلیل زیرساخت وجود ندارد.**
+> **چرا مجموعه دوطرفه است:** نوزده جفت `VALID` با Suite گذشته **و** یک جفت `VALID` با Suite شکست‌خوردهٔ ناشی
+> از محیط — آن جفت واجد شرایط است چون Probe اش `VALID` است و Suite دست‌نخورده واقعاً اجرا شد، و شکل شکستش
+> `57014` (`canceling statement due to statement timeout`) و گذشتن از Timeout تست است، نه نقض Assertion محصول
+> (هر سه دستهٔ `secondRowOrWindowCrossing`/`countSequence`/`finalRow` صفرند). طبق ADR-055 §§ ۱–۴ این جفت
+> همچنان **`VALID`** است و **`VALID_INCAPABLE` نام‌گذاری نشد**. **محدودیت شناخته‌شده، بی پنهان‌کاری:** این
+> میزبان `*.blob.core.windows.net` را مسدود می‌کند (DNS به `10.10.34.35` می‌رسد و Timeout می‌شود)، پس
+> `gh run download` باز هم شکست خورد و **مقایسهٔ بایت‌به‌بایت با Artifact دانلودشده ممکن نشد**؛ متن از Log همان
+> اجرا استخراج شد — همان رشته‌ای که Harness از **یک متغیر** هم چاپ می‌کند و هم در فایل می‌نویسد — تنها با حذف
+> پیشوند Job/Step/زمان خودِ GitHub، و **هیچ عددی دست‌کاری نشد**؛ Upload با `if-no-files-found: error` موفق شد،
+> پس فایل روی Runner واقعاً وجود داشت. **۴۱ بررسی اعتبارسنجی** پیش از ورود به Git گذشت: Commit مطابق `headSha`
+> همان اجرا، ۲۰ سطر جفت با شناسهٔ ۱..۲۰ هرکدام یک بار و مجاورت Probe→Stress، واژگان فقط
+> `VALID`/`INVALID`/`INCONCLUSIVE`، سازگاری `exit` با `PASS`/`FAIL`، جمع‌های Suite/تست و دسته‌های شکست، هر
+> چهار توزیع **بازمحاسبه‌شده از سطرها**، و بی URL/رشتهٔ اتصال/Credential/Token/مسیر مطلق/IP/PID/شناسه یا نام
+> Container/استثنای خام/خروجی خام/عنوان تست. سه سطر `problem:` روی `pair-1` واژگان ثابت خودِ Harness اند و فقط
+> شمارش‌اند. **Workflow موقت بلافاصله پس از همان یک اجرا حذف شد؛ درخت شاخه دوباره فقط
+> `.github/workflows/ci.yml` دارد.** **هیچ آستانه، حاشیهٔ ایمنیِ آستانه، `VALID_CAPABLE`/`VALID_INCAPABLE`،
+> Classifier توانایی، Preflight فاز، دروازهٔ Fail-Fast، Bypass، Retry، Skip-Green، سیاست زمان اجرا یا
+> یکپارچه‌سازی با CI معمول اضافه نشد**؛ Spec فشار، SQL ‏Probe، `PROBE_VALIDITY`، Selectorها، Timeoutها، تعداد
+> Lane/نوشتن، کد تست، Scriptهای Package، `ci.yml`، فازهای تست، Runner دائمی و **هر سه Artifact پیشین** دست
+> نخوردند؛ کران ۲۹٫۲ همچنان بی Provenance. **پیش‌نیاز جمع‌آوریِ § ۶ برآورده شد** و **گام بعدی پیشنهادی یک
+> بازبینی جداگانه برای تحلیل توزیع و حکمرانی آستانه است — در این تکرار انتخاب یا اجرا نشد.** `COM-009` همچنان
+> `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز است.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

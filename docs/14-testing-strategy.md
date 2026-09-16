@@ -379,6 +379,36 @@ Setup/قرارداد/سهمیه/Wrapper/Artifact رخ نداد.** **نتیجه
 یکپارچه‌سازی CI اضافه نشد؛ `ci.yml`، فازهای تست، `pnpm verify`، Spec، Probe، Runner دائمی و Artifact پیشین دست
 نخوردند و Workflow موقت **در همان تکرار حذف شد**. الزام سمت شکستِ § ۶ همچنان **برآورده نشده** است.
 
+**نخستین مجموعهٔ جفت‌شدهٔ دوطرفه زیر ۰٫۰۱۵ CPU (2026-09-16).** شرط اندازه‌گیری‌شدهٔ مشاهدهٔ پیشین به یک کمپین
+جفت‌شدهٔ کامل تبدیل شد: سهمیهٔ CFS **ثابت** `CPU_PERIOD_US=1000000` / `CPU_QUOTA_US=15000` (**۰٫۰۱۵ CPU**) فقط
+روی Container سرویس PostgreSQL، **۲۰ جفت**، کران گام همان ۳۰ دقیقهٔ دست‌نخوردهٔ Harness، مهلت Job ۱۸۰ دقیقه.
+Workflow موقت و فقط‌شاخه‌ای `aggregation-stress-induced-calibration.yml` (مشتق از همان Workflow بازبینی‌شدهٔ
+`9b03ac0`؛ تفاوت‌های کارکردی تنها نام Workflow، گروه Concurrency، ثابت سهمیه، شناسه و نام Job، سه نام گام و
+نام/مسیر Artifact) روی Commit ‏`a0db638`، اجرای `35048202361` (تلاش ۱، `push`، Workflow و Job هر دو `failure`
+— **که همان نتیجهٔ یک جفتِ شکست‌خورده است، نه خطای Setup**)، ‏`02:29:53Z`→`03:36:50Z`. گام‌های ۱..۱۲ `success`
+— شامل `test:aggregation-evidence-lib` و `check:test-phases` **پیش از** سهمیه و تأیید دقیق
+`applied_cpu_period_us=1000000` / `applied_cpu_quota_us=15000` — گام ۱۳ (کمپین) `failure` با
+`campaign_exit=1` در ۶۵ دقیقه و ۴۰ ثانیه، گام ۱۴ (Upload) `success`؛ **پس هیچ خطای Setup، قرارداد، سهمیه،
+Harness، مهلت Job یا Artifact رخ نداد.** **نتیجه
+([`docs/evidence/adr-055/induced-calibration-0015cpu-github-2026-09-16.txt`](evidence/adr-055/induced-calibration-0015cpu-github-2026-09-16.txt)):**
+`VALID=20`، `INVALID=0`، `INCONCLUSIVE=0`؛ Control ‏`VALID`؛ **Suite فشار ۱۹ گذشته / ۱ شکست‌خورده از ۲۰**، هر
+۲۰ جفت `ran=yes`؛ تنها جفت شکست‌خورده `pair-1` است (خروج ۱، ۲۷۱٫۳ ثانیه، ۰/۱/۰/۱ Suite و ۲۰/۲/۰/۲۲ تست) با
+طبقه‌بندی **`sqlstate57014=1`** و **`jestTimeout=1`** و پنج دستهٔ دیگر صفر؛ توزیع‌ها `probe_tps` ۳۹٫۸۲/۲۰۴٫۶/۲۱۲٫۰۲،
+`probe_min_interval_tps` ۱/۲۶/۴۱، `probe_longest_stall_s` صفر در هر سه، `stress_wall_s` ۱۱۰٫۵۶/۱۱۶٫۱۲/۲۷۱٫۲۷؛
+چهارده دستهٔ زیرساختی جفت‌ها صفر با `other=3` که — مثل مشاهدهٔ پیشین — **نتیجهٔ محصولی است نه خطای محیط**
+(سه `record([], …)` برای «۲ تست شکست خورد»، «یک Suite شکست خورد» و «Jest موفقیت گزارش نکرد»)؛ و دامنه‌های
+Control و Preflight هر پانزده دسته صفر. **هیچ ردیف `INVALID`، `INCONCLUSIVE`، تلاش‌نشده یا ردشده به‌دلیل
+زیرساخت وجود ندارد.** **پس مجموعه دوطرفه است:** نوزده جفت `VALID` با Suite گذشته و یک جفت `VALID` با Suite
+شکست‌خوردهٔ ناشی از محیط (`57014` = `canceling statement due to statement timeout` و گذشتن از Timeout تست؛ سه
+دستهٔ Assertion محصول صفر). طبق ADR-055 §§ ۱–۴، `pair-1` همچنان **`VALID`** است و `VALID_INCAPABLE` نام‌گذاری
+نشد. **محدودیت:** ‏`gh run download` به‌دلیل انسداد `*.blob.core.windows.net` باز هم شکست خورد، پس متن از Log
+همان اجرا (همان رشته‌ای که Harness از یک متغیر هم چاپ و هم ذخیره می‌کند) با حذف پیشوند GitHub استخراج شد و
+**هیچ عددی دست‌کاری نشد**؛ ۴۱ بررسی اعتبارسنجی روی فایل گذشت. **هیچ آستانه، حاشیهٔ ایمنی، Classifier توانایی،
+Preflight فاز، دروازهٔ Fail-Fast، Bypass، Retry، Skip-Green، سیاست زمان اجرا یا یکپارچه‌سازی CI اضافه نشد**؛
+`ci.yml`، فازهای تست، `pnpm verify`، Spec، Probe، Runner دائمی و هر سه Artifact پیشین دست نخوردند و Workflow
+موقت **در همان تکرار حذف شد**. **پیش‌نیاز جمع‌آوریِ § ۶ برآورده شد؛ گام بعدی پیشنهادی یک بازبینی جداگانه برای
+تحلیل توزیع و حکمرانی آستانه است و در این تکرار اجرا نشد.**
+
 **ماه اختصاصی اجرا برای زنجیرهٔ Platform در Fixtureهای audit (2026-09-14).** کلید زنجیرهٔ Tenant شناسهٔ سازمانِ دارای `RUN_TAG`
 را دارد و خودبه‌خود به هر اجرا اختصاص دارد؛ کلید زنجیرهٔ Platform ‏(`PLATFORM/(platform)/<ماه>`) هیچ Tag یا Tenantی ندارد. پس
 هر Suite ‏Integration در `audit-service` که ردیف `organizationId: null` می‌نویسد باید زمان آن را از یک Slot اختصاصی
