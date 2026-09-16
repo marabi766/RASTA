@@ -228,7 +228,8 @@ underivable (review § 5.8).
 ## 7. Independence and comparability contract
 
 **Independence (design).** One pair per **fresh ephemeral GitHub-hosted job** with a **fresh
-PostgreSQL service database**, using the existing calibration mode with `--calibrate --pairs 1`.
+PostgreSQL service database**, using the existing calibration mode with
+`--calibrate --pairs 1 --slot <matrix index>`.
 No serial chain, no shared mutable database, no reuse of a warmed database between slots.
 
 **Comparability (design) — everything below stays exactly as committed:**
@@ -308,7 +309,10 @@ reviewed fix. **No script was changed in this iteration.**
 
 ### 8.3 Required shape of the future temporary workflow
 
-- **A 59-entry matrix indexed `1..59`**, one pair per matrix job.
+- **A 59-entry matrix indexed `1..59`**, one pair per matrix job, each invoking
+  `calibrate:aggregation-stress -- --pairs 1 --slot <matrix index>` so the report content carries
+  `campaign_slot=<matrix index>` (added 2026-09-16, after this preregistration; the slot is explicit
+  input and changes no design value).
 - **`strategy.fail-fast: false`** — mandatory. A qualifying failure makes its own job red, and
   cancelling the other 58 would convert a measured event into 58 missing slots. (`ci.yml` already
   uses this setting on its existing container matrix, so the pattern is in-repo precedent.)
@@ -354,6 +358,16 @@ The denominator is fixed at 59 by construction. `eligible non-events + qualifyin
 blockers + missing == 59` is an assertion the review step must make and report; any other total is
 itself a blocker. Branch A/B of § 6 apply only when `blockers == 0` and `missing == 0`; otherwise
 Branch C applies.
+
+**Implemented 2026-09-16, after this preregistration.** The counting step is
+`pnpm run account:aggregation-campaign -- <report> …`, given every campaign report explicitly. It
+reads the slot from each report's `campaign_slot=` field, never from a name or order, applies the
+four states above from content, prints every slot and the invariant, and exits `0` only for a
+complete, provenance-consistent campaign with zero blockers and zero missing slots. It applies no
+§ 6 interpretation. Only the invocation in § 7 and § 8.3 gained `--slot`; no design value in
+§§ 3–7 or § 9 changed. One reading is made explicit rather than invented: `otherDatabaseError` is
+not among the established environment categories of § 5.2, so it is counted as an unclassified
+failure — a blocker, never a qualifying event.
 
 ---
 

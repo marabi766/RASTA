@@ -13,7 +13,9 @@ import {
   IN_IMAGE_TOOL,
   LAUNCHER,
   MAX_CALIBRATION_PAIRS,
+  MAX_CAMPAIGN_SLOT,
   MIN_CALIBRATION_PAIRS,
+  MIN_CAMPAIGN_SLOT,
   NAMED_PROOF,
   NAMED_RUNS,
   PROBE_SECONDS,
@@ -30,6 +32,7 @@ import {
   distribution,
   formatCalibrationReport,
   formatReport,
+  isCampaignSlot,
   measureProbe,
   namedProofPattern,
   normalizeCategories,
@@ -481,24 +484,30 @@ test('calibration CLI: the legacy invocation still means the evidence campaign',
     mode: 'evidence',
     reportPath: 'report.txt',
   });
-  assert.deepEqual(parseEvidenceArgs(['--calibrate', '--pairs', '3', 'report.txt']), {
-    mode: 'calibrate',
-    pairs: 3,
-    reportPath: 'report.txt',
-  });
-  // Order is not significant, and `--pairs=N` is accepted.
-  assert.deepEqual(parseEvidenceArgs(['report.txt', '--calibrate', '--pairs=4']), {
+  assert.deepEqual(
+    parseEvidenceArgs(['--calibrate', '--pairs', '3', '--slot', '1', 'report.txt']),
+    {
+      mode: 'calibrate',
+      pairs: 3,
+      slot: 1,
+      reportPath: 'report.txt',
+    },
+  );
+  // Order is not significant, and `--pairs=N` / `--slot=S` are accepted.
+  assert.deepEqual(parseEvidenceArgs(['report.txt', '--slot=59', '--calibrate', '--pairs=4']), {
     mode: 'calibrate',
     pairs: 4,
+    slot: 59,
     reportPath: 'report.txt',
   });
-  // `pnpm run calibrate:aggregation-stress -- --pairs 2 out.txt` forwards the
-  // separator itself; it is skipped, not mistaken for an option.
-  assert.deepEqual(parseEvidenceArgs(['--calibrate', '--', '--pairs', '2', 'out.txt']), {
-    mode: 'calibrate',
-    pairs: 2,
-    reportPath: 'out.txt',
-  });
+  // `pnpm run calibrate:aggregation-stress -- --pairs 2 --slot 7 out.txt`
+  // forwards the separator itself; it is skipped, not mistaken for an option.
+  assert.deepEqual(
+    parseEvidenceArgs(['--calibrate', '--', '--pairs', '2', '--slot', '7', 'out.txt']),
+    { mode: 'calibrate', pairs: 2, slot: 7, reportPath: 'out.txt' },
+  );
+  // The legacy evidence result has no slot key at all, not an undefined one.
+  assert.ok(!('slot' in parseEvidenceArgs(['report.txt'])));
   assert.deepEqual(parseEvidenceArgs(['--', 'out.txt']), {
     mode: 'evidence',
     reportPath: 'out.txt',
@@ -513,6 +522,7 @@ test('calibration CLI: every invalid form is refused, with usage and never a coe
     assert.match(parsed.usage, /--calibrate --pairs/);
     assert.equal(parsed.mode, undefined, 'a refusal never yields a mode');
     assert.equal(parsed.pairs, undefined, 'a refusal never yields a pair count');
+    assert.equal(parsed.slot, undefined, 'a refusal never yields a slot');
   };
   bad([], /report path is required/);
   bad(['--calibrate'], /report path is required/);
@@ -536,10 +546,55 @@ test('calibration CLI: every invalid form is refused, with usage and never a coe
   bad(['-r', 'r.txt'], /unknown option/);
   // A report path may not look like a flag: it would be swallowed as one.
   bad(['--calibrate', '--pairs', '2', '--out.txt'], /unknown option/);
+
+  // The campaign slot: required with --calibrate, refused without it, and never
+  // coerced from a signed, decimal, padded, empty or out-of-range spelling.
+  const cal = (...slotArgs) => ['--calibrate', '--pairs', '1', ...slotArgs, 'r.txt'];
+  bad(cal(), /--calibrate requires --slot/);
+  bad(['--slot', '3', 'r.txt'], /--slot requires --calibrate/);
+  bad(['--slot=3', 'r.txt'], /--slot requires --calibrate/);
+  // Like `--pairs`, a bare `--slot` takes the next token, leaving no report path.
+  bad(cal('--slot'), /report path is required/);
+  bad(['--calibrate', '--pairs', '1', 'r.txt', '--slot'], /--slot needs a value/);
+  bad(cal('--slot='), /--slot needs a value/);
+  bad(cal('--slot', '--pairs'), /--slot needs a value/);
+  bad(cal('--slot', '3', '--slot', '4'), /--slot given more than once/);
+  bad(cal('--slot=3', '--slot=3'), /--slot given more than once/);
+  bad(cal('--slot', '3', '--slot=3'), /--slot given more than once/);
+  bad(cal('--slot', '0'), /between 1 and 59, got 0/);
+  bad(cal('--slot', '60'), /between 1 and 59, got 60/);
+  bad(cal('--slot', '1000'), /between 1 and 59, got 1000/);
+  for (const spelling of ['-1', '+1', '1.0', '2.5', '1e1', '0x2', ' 3', 'three', '']) {
+    if (spelling === '') continue; // the empty `--slot=` form is covered above
+    bad(cal(`--slot=${spelling}`), /--slot must be a positive integer/);
+  }
+  bad(cal('--slot', '-1'), /--slot must be a positive integer/);
+  bad(cal('--slot', '07'), /--slot must not have a leading zero/);
+  bad(cal('--slot', '00'), /--slot must not have a leading zero/);
+});
+
+test('calibration CLI: the campaign slot honours 1..59 and stays independent of --pairs', () => {
+  const at = (slot, pairs = 1) =>
+    parseEvidenceArgs(['--calibrate', '--pairs', String(pairs), '--slot', String(slot), 'r.txt']);
+  assert.equal(MIN_CAMPAIGN_SLOT, 1);
+  assert.equal(MAX_CAMPAIGN_SLOT, 59);
+  assert.equal(at(1).slot, 1);
+  assert.equal(at(59).slot, 59);
+  assert.match(at(0).error, /between 1 and 59/);
+  assert.match(at(60).error, /between 1 and 59/);
+  // A slot is not a pair count: the 1..20 pair bound is unchanged and a slot
+  // above it is still accepted, and a pair count never becomes a slot.
+  assert.deepEqual(at(21, 20), { mode: 'calibrate', pairs: 20, slot: 21, reportPath: 'r.txt' });
+  assert.match(at(3, 21).error, /--pairs must be between 1 and 20/);
+  for (const value of [1, 30, 59]) assert.equal(isCampaignSlot(value), true);
+  for (const value of [0, 60, -1, 1.5, '3', null, undefined, NaN]) {
+    assert.equal(isCampaignSlot(value), false, `${String(value)} is not a slot`);
+  }
 });
 
 test('calibration CLI: the pair count honours its bounds, one below and one above', () => {
-  const at = (n) => parseEvidenceArgs(['--calibrate', '--pairs', String(n), 'r.txt']);
+  const at = (n) =>
+    parseEvidenceArgs(['--calibrate', '--pairs', String(n), '--slot', '1', 'r.txt']);
   assert.equal(at(MIN_CALIBRATION_PAIRS).pairs, MIN_CALIBRATION_PAIRS);
   assert.equal(at(MAX_CALIBRATION_PAIRS).pairs, MAX_CALIBRATION_PAIRS);
   assert.match(at(MIN_CALIBRATION_PAIRS - 1).error, /between/);
@@ -1079,15 +1134,31 @@ test('calibration report: aggregates only, deterministic, and free of every sent
       { probe: probeFor({ valid: false }), stress: stressFor({ passed: false, wallSeconds: 121 }) },
     ]),
   });
-  const render = () =>
+  const render = (campaignSlot = 12) =>
     formatCalibrationReport({
-      meta: { commit: 'abc1234', generatedAt: '2026-09-14T00:00:00.000Z' },
+      meta: { commit: 'abc1234', generatedAt: '2026-09-14T00:00:00.000Z', campaignSlot },
       topology: { server_version: '16.4', fsync: 'on' },
       summary,
     });
   const text = render();
 
   assert.equal(text, render(), 'the same input renders byte for byte the same report');
+  // The slot is the third line, exactly once, and is the given value only.
+  assert.equal(text.split('\n')[2], 'campaign_slot=12');
+  assert.equal((text.match(/^campaign_slot=/gm) ?? []).length, 1);
+  assert.equal(render(1).split('\n')[2], 'campaign_slot=1');
+  assert.equal(render(59).split('\n')[2], 'campaign_slot=59');
+  // Anything that is not a preregistered index is rendered `unknown` — the
+  // artifact survives, and accounting will refuse to assign it to a slot.
+  for (const wrong of [null, 0, 60, '7', 2.5]) {
+    assert.equal(render(wrong).split('\n')[2], 'campaign_slot=unknown');
+  }
+  const withoutSlot = formatCalibrationReport({
+    meta: { commit: 'abc1234', generatedAt: '2026-09-14T00:00:00.000Z' },
+    topology: {},
+    summary,
+  });
+  assert.equal(withoutSlot.split('\n')[2], 'campaign_slot=unknown');
   assert.match(text, /pair-1: outcome=VALID/);
   assert.match(text, /pair-2: outcome=INVALID/);
   assert.match(text, /tps=18\.5/);

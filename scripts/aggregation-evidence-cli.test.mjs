@@ -23,13 +23,14 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { runBounded, runEvidenceCli } from './aggregation-evidence.mjs';
+import { runBounded, runEvidenceCli, runMeasuredCampaign } from './aggregation-evidence.mjs';
 import {
   LAUNCHER,
   PROCESS_OUTCOME,
@@ -37,6 +38,9 @@ import {
   STRESS,
   calibrationProbeId,
   calibrationStressId,
+  formatReport,
+  planCalibrationRun,
+  planEvidenceRun,
 } from './aggregation-evidence-lib.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -134,7 +138,7 @@ const fixedDeps = (over = {}) => ({
 
 test('CLI: an incomplete environment still answers a valid calibration request', () => {
   const reportPath = join(tempDir(), 'calibration.txt');
-  const result = runCli(['--calibrate', '--pairs', '3', reportPath], scrubbedEnv());
+  const result = runCli(['--calibrate', '--pairs', '3', '--slot', '7', reportPath], scrubbedEnv());
 
   assert.equal(result.status, 2, `expected a non-zero refusal, stderr: ${result.stderr}`);
   assert.ok(existsSync(reportPath), 'a writable target must receive the artifact');
@@ -147,6 +151,10 @@ test('CLI: an incomplete environment still answers a valid calibration request',
   }
   assert.match(text, /campaign preflight: REFUSED before any measurement/);
   assert.match(text, /pairs: 3 requested, 0 attempted/);
+  // The refused artifact still names the slot it was asked to fill: once, on
+  // the third line, exactly as the command line gave it.
+  assert.equal(text.split('\n')[2], 'campaign_slot=7');
+  assert.equal((text.match(/^campaign_slot=/gm) ?? []).length, 1);
 
   // Nothing ran, so nothing may be presented as a sample that was taken.
   assert.match(text, /control: not run, outcome=INCONCLUSIVE/);
@@ -192,7 +200,7 @@ test('CLI: an incomplete environment still answers a valid calibration request',
 test('CLI: the refusal names the missing variables and never a value it could read', () => {
   const reportPath = join(tempDir(), 'partial.txt');
   const result = runCli(
-    ['--calibrate', '--pairs', '1', reportPath],
+    ['--calibrate', '--pairs', '1', '--slot', '7', reportPath],
     // Four present with sentinel values, two absent: the refusal must report
     // exactly the two names and echo none of the four values.
     scrubbedEnv({
@@ -220,7 +228,7 @@ test('runner: an unresolved jest launcher refuses the same way, and loses its me
   const reportPath = join(tempDir(), 'harness.txt');
   const lines = [];
   const code = await runEvidenceCli({
-    argv: ['--calibrate', '--pairs', '2', reportPath],
+    argv: ['--calibrate', '--pairs', '2', '--slot', '7', reportPath],
     env: fullEnv(),
     deps: fixedDeps({
       resolveJestBin: () => {
@@ -253,7 +261,7 @@ test('runner: an unresolved jest launcher refuses the same way, and loses its me
   // The same inputs render the same bytes: an artifact is a record, not a trace.
   const twin = join(tempDir(), 'harness-twin.txt');
   await runEvidenceCli({
-    argv: ['--calibrate', '--pairs', '2', twin],
+    argv: ['--calibrate', '--pairs', '2', '--slot', '7', twin],
     env: fullEnv(),
     deps: fixedDeps({
       resolveJestBin: () => {
@@ -296,7 +304,7 @@ test('runner: a report that cannot be written stays non-zero and names neither t
   const reportPath = join(tempDir(), 'no-such-directory', 'calibration.txt');
   const lines = [];
   const code = await runEvidenceCli({
-    argv: ['--calibrate', '--pairs', '1', reportPath],
+    argv: ['--calibrate', '--pairs', '1', '--slot', '7', reportPath],
     env: {},
     deps: fixedDeps({ log: (line) => lines.push(line) }),
   });
@@ -311,7 +319,7 @@ test('runner: a report that cannot be written stays non-zero and names neither t
   // and text from an exception may carry anything.
   const noisy = [];
   const noisyCode = await runEvidenceCli({
-    argv: ['--calibrate', '--pairs', '1', join(tempDir(), 'unreachable.txt')],
+    argv: ['--calibrate', '--pairs', '1', '--slot', '7', join(tempDir(), 'unreachable.txt')],
     env: {},
     deps: fixedDeps({
       writeReport: () => {
@@ -420,7 +428,7 @@ test('runner: static contract drift refuses with the artifact, and never measure
   const reportPath = join(tempDir(), 'drift.txt');
   const lines = [];
   const code = await runEvidenceCli({
-    argv: ['--calibrate', '--pairs', '3', reportPath],
+    argv: ['--calibrate', '--pairs', '3', '--slot', '7', reportPath],
     env: fullEnv(),
     deps: fixedDeps({
       readSpec: driftedSpecSource,
@@ -450,7 +458,7 @@ test('runner: many contract findings are still one refused campaign, not many ev
   const reportPath = join(tempDir(), 'many-findings.txt');
   const lines = [];
   const code = await runEvidenceCli({
-    argv: ['--calibrate', '--pairs', '2', reportPath],
+    argv: ['--calibrate', '--pairs', '2', '--slot', '7', reportPath],
     env: fullEnv(),
     // Nothing the contract expects is present, so it answers with many findings.
     deps: fixedDeps({ readSpec: () => '', log: (line) => lines.push(line) }),
@@ -476,7 +484,7 @@ test('runner: a spec that cannot be read refuses with the artifact and loses its
   const reportPath = join(tempDir(), 'unreadable-spec.txt');
   const lines = [];
   const code = await runEvidenceCli({
-    argv: ['--calibrate', '--pairs', '2', reportPath],
+    argv: ['--calibrate', '--pairs', '2', '--slot', '7', reportPath],
     env: fullEnv(),
     deps: fixedDeps({
       readSpec: () => {
@@ -505,7 +513,7 @@ test('runner: a work directory that cannot be made refuses with the artifact', a
   const code = await runEvidenceCli({
     // The real spec, so the static contract genuinely holds and the refusal is
     // the directory alone.
-    argv: ['--calibrate', '--pairs', '2', reportPath],
+    argv: ['--calibrate', '--pairs', '2', '--slot', '7', reportPath],
     env: fullEnv(),
     deps: fixedDeps({
       makeWorkDir: () => {
@@ -533,7 +541,7 @@ test('runner: the same refusal renders byte-identical artifacts', async () => {
   const render = async (name) => {
     const reportPath = join(tempDir(), name);
     await runEvidenceCli({
-      argv: ['--calibrate', '--pairs', '4', reportPath],
+      argv: ['--calibrate', '--pairs', '4', '--slot', '7', reportPath],
       env: fullEnv(),
       deps: fixedDeps({ readSpec: driftedSpecSource, makeWorkDir: () => '', log: () => {} }),
     });
@@ -550,7 +558,7 @@ test('runner: preparation that holds reaches measurement once, with the validate
   let wrote = false;
 
   const code = await runEvidenceCli({
-    argv: ['--calibrate', '--pairs', '2', reportPath],
+    argv: ['--calibrate', '--pairs', '2', '--slot', '7', reportPath],
     env: fullEnv(),
     deps: fixedDeps({
       readSpec: () => {
@@ -593,6 +601,7 @@ test('runner: preparation that holds reaches measurement once, with the validate
     ],
   );
   assert.equal(calls[0].pairs, 2);
+  assert.equal(calls[0].slot, 7, 'the parsed slot is handed to the measuring half');
   assert.equal(calls[0].reportPath, reportPath);
 
   // Nothing temporary outlives the campaign, on the success path too.
@@ -621,6 +630,110 @@ test('runner: the legacy evidence mode keeps its contract exit code and writes n
   assert.equal(existsSync(reportPath), false);
   assert.match(lines.join('\n'), /preflight: harnessError=1/);
   assertNoLeak(lines.join('\n'), 'the legacy contract output');
+});
+
+// ---------------------------------------------------------------------------
+// Campaign slots (ADR-055 preregistration § 8.4): the slot is explicit input,
+// validated before anything else happens, and carried into report content.
+
+test('runner: a calibration request without a valid slot refuses before any prerequisite', async () => {
+  const untouched = {
+    resolveJestBin: () => assert.fail('no prerequisite may be checked for a malformed request'),
+    readSpec: () => assert.fail('no prerequisite may be checked for a malformed request'),
+    makeWorkDir: () => assert.fail('no prerequisite may be checked for a malformed request'),
+    writeReport: () => assert.fail('a malformed request has no artifact'),
+  };
+  const refusals = [
+    [['--calibrate', '--pairs', '1', 'r.txt'], /--calibrate requires --slot/],
+    [['--calibrate', '--pairs', '1', '--slot', '0', 'r.txt'], /between 1 and 59, got 0/],
+    [['--calibrate', '--pairs', '1', '--slot', '60', 'r.txt'], /between 1 and 59, got 60/],
+    [['--calibrate', '--pairs', '1', '--slot', '-3', 'r.txt'], /positive integer/],
+    [['--calibrate', '--pairs', '1', '--slot', '2.0', 'r.txt'], /positive integer/],
+    [['--calibrate', '--pairs', '1', '--slot=', 'r.txt'], /--slot needs a value/],
+    [['--calibrate', '--pairs', '1', '--slot', '3', '--slot', '3', 'r.txt'], /more than once/],
+    [['--slot', '3', 'r.txt'], /--slot requires --calibrate/],
+  ];
+  for (const [argv, pattern] of refusals) {
+    const lines = [];
+    const code = await runEvidenceCli({
+      argv,
+      env: fullEnv(),
+      deps: fixedDeps({ ...untouched, log: (line) => lines.push(line) }),
+    });
+    assert.equal(code, 2, `expected a usage refusal for ${JSON.stringify(argv)}`);
+    assert.match(lines.join('\n'), pattern);
+  }
+});
+
+test('CLI: slot 1 and slot 59 each reach the refused artifact through the real entry point', () => {
+  for (const slot of ['1', '59']) {
+    const reportPath = join(tempDir(), `slot-${slot}.txt`);
+    const result = runCli(
+      ['--calibrate', '--pairs', '1', `--slot=${slot}`, reportPath],
+      scrubbedEnv(),
+    );
+    assert.equal(result.status, 2, `expected a non-zero refusal, stderr: ${result.stderr}`);
+    const lines = readFileSync(reportPath, 'utf8').split('\n');
+    assert.equal(lines[2], `campaign_slot=${slot}`);
+    assert.equal(lines.filter((line) => line.startsWith('campaign_slot=')).length, 1);
+  }
+});
+
+/** The measuring half, with the machine and the plan replaced by fixed values. */
+const measuredText = async ({ mode, slot, plan }) => {
+  let written = null;
+  const code = await runMeasuredCampaign({
+    mode,
+    pairs: mode === 'calibrate' ? 1 : undefined,
+    slot,
+    plan,
+    reportPath: 'unused.txt',
+    writeReport: (_path, text) => {
+      written = text;
+    },
+    readCommit: () => Promise.resolve('abc1234'),
+    now: () => new Date('2026-09-16T00:00:00.000Z'),
+    log: () => {},
+    measure: {
+      readTopology: () => Promise.resolve({ server_version: '16.4', fsync: 'on' }),
+      runPlan: () => Promise.resolve([]),
+    },
+  });
+  return { code, text: written };
+};
+
+test('runner: a measured calibration artifact carries its slot exactly once', async () => {
+  for (const slot of [1, 59]) {
+    const { text } = await measuredText({
+      mode: 'calibrate',
+      slot,
+      plan: planCalibrationRun({ pairs: 1 }),
+    });
+    const lines = text.split('\n');
+    assert.equal(lines[2], `campaign_slot=${slot}`);
+    assert.equal(lines.filter((line) => line.startsWith('campaign_slot=')).length, 1);
+    assert.equal(lines[1], 'commit=abc1234 generated=2026-09-16T00:00:00.000Z');
+    assert.equal(lines[3], 'topology: server_version=16.4 fsync=on');
+    assert.match(text, /campaign preflight: passed/, 'this is the measured path, not a refusal');
+  }
+});
+
+test('runner: the legacy evidence artifact is byte-for-byte unchanged and never gains a slot', async () => {
+  // Even if a slot were somehow handed to it, the legacy mode renders none.
+  const { text } = await measuredText({ mode: 'evidence', slot: 7, plan: planEvidenceRun() });
+  const expected = formatReport({
+    meta: { commit: 'abc1234', generatedAt: '2026-09-16T00:00:00.000Z' },
+    topology: { server_version: '16.4', fsync: 'on' },
+    results: [],
+  });
+  assert.equal(text, expected);
+  assert.ok(!text.includes('campaign_slot'), 'the legacy schema has no campaign slot');
+  // SHA-256 of this exact rendering by the library as it stood at e7c0339,
+  // before campaign slots existed: the legacy schema did not move.
+  assert.equal(
+    createHash('sha256').update(text).digest('hex'),
+    'c02fe3595ec1cbbe03c7c0645b7305729ea5c1f0fd3d98826ebcde196014c47d',
+  );
 });
 
 // ---------------------------------------------------------------------------

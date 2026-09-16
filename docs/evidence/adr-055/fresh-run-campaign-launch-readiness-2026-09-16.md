@@ -189,9 +189,11 @@ for a 418 expected / 2655 ceiling job-minute exposure exists in this repository.
 | 9   | runner / image comparability plan                | **UNVERIFIED** | today's jobs are on `20260907.300.1` (§ 2.4) but images update weekly with a 2–3 day rollout and no version pin (§ 3); the newest release is 8 days old, so a roll-forward during the campaign is plausible. Only the 59 resulting `topology:` lines can validate it; a mismatch is Branch C |
 | 10  | artifact retrieval                               | **BLOCKED**    | artifact download and artifact zip both timed out (§ 2.5); log fallback reproduced the committed text byte-identically but not against artifact bytes, without a reference-free boundary rule, validator or 59-job demonstration (§ 2.5 items 1–4)                                           |
 | 11  | retry prohibition                                | **UNVERIFIED** | harness contract rejects all seven retry spellings (52/52, § 1), but the matrix workflow does not exist, so job-level no-retry and manual re-run detection (`run_attempt`) cannot be checked yet                                                                                             |
-| 12  | account for all 59 indices from artifact content | **UNVERIFIED** | report text carries no slot index (§ 2.6); no committed slot-accounting tool exists                                                                                                                                                                                                          |
+| 12  | account for all 59 indices from artifact content | **VERIFIED**   | implemented later on 2026-09-16, not a live probe: reports carry `campaign_slot=<n>` from the required `--slot`; `account:aggregation-campaign` resolves `1..59` from content (§ 8). `UNVERIFIED` at gate time (§ 2.6)                                                                       |
 
-**Overall: NO-GO.** Rows 2, 6, 7, 8, 9, 10, 11 and 12 are not `VERIFIED`.
+**Overall: NO-GO.** At gate time rows 2, 6, 7, 8, 9, 10, 11 and 12 were not `VERIFIED`. After the
+slot-accounting implementation (§ 8) row 12 is `VERIFIED`; rows 2, 6, 7, 8, 9, 10 and 11 remain
+unresolved, so the verdict is unchanged.
 
 ---
 
@@ -207,6 +209,7 @@ for a 418 expected / 2655 ceiling job-minute exposure exists in this repository.
    account evidence, not from the documentation maximum.
 4. **Slot accounting:** a reviewed way to bind each report to its slot index from artifact content,
    and a slot-accounting procedure that enumerates `1..59` without reading job conclusions.
+   **Implemented later on 2026-09-16 (§ 8).**
 5. **Image cohort:** a launch timed and documented against the runner-image release state, with
    the Branch C consequence of any topology mismatch accepted in advance.
 6. **Retry prohibition at job level:** verified in the workflow itself when it is drafted, including
@@ -223,3 +226,28 @@ None of these changes the preregistered design.
   leading `/`; otherwise the shell rewrites them into filesystem paths (the first five probes of
   this session failed locally for exactly that reason and never reached the network).
 - Arithmetic: § 4, from preregistration § 9.1–9.2.
+
+---
+
+## 8. Update — row 12 resolved by implementation (later on 2026-09-16)
+
+This section records a code change, not a new live probe. §§ 1–5 above are the gate as it was run
+and are not rewritten.
+
+- `scripts/aggregation-evidence.mjs --calibrate` now **requires** `--slot <1..59>` and refuses it
+  without `--calibrate`. It rejects a missing, repeated, empty, signed, decimal, zero-padded, zero or
+  out-of-range slot before any prerequisite check. Every calibration report, refused or measured,
+  carries `campaign_slot=<n>` exactly once as its third line. The legacy evidence report is byte-for-byte
+  unchanged.
+- `pnpm run account:aggregation-campaign -- <report> …` (`scripts/aggregation-campaign-accounting.mjs`
+  and its pure library) resolves every slot `1..59` to `non-event`, `event`, `blocker` or `missing`
+  from report content only. It treats absent, duplicate, malformed or out-of-range slot claims,
+  truncated or edited reports, extra inputs, and commit or topology mismatches as missing or
+  rejected. It prints `non-events + events + blockers + missing = 59` and exits `0` only for a
+  complete, consistent campaign with zero blockers and zero missing slots. It reads no job
+  conclusion and applies no threshold or interpretation.
+
+**Row 12 is `VERIFIED`. Rows 2, 6, 7, 8, 9, 10 and 11 remain unresolved. The verdict stays NO-GO.**
+Still not content-verifiable: the quota read-back. A job that fails it stops before measuring and
+leaves no report, so that slot is `missing`, but a report does not itself record the applied
+quota.

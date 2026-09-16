@@ -135,6 +135,24 @@ export function planEvidenceRun({ namedRuns = NAMED_RUNS } = {}) {
 export const MIN_CALIBRATION_PAIRS = 1;
 export const MAX_CALIBRATION_PAIRS = 20;
 
+/**
+ * The fixed slot indices of the preregistered fresh-run campaign
+ * (`docs/evidence/adr-055/fresh-run-first-pair-replication-design-2026-09-16.md`
+ * § 4): 59 slots, each one fresh job running one pair.
+ *
+ * A slot is **not** a pair. `--pairs` counts samples inside one invocation;
+ * `--slot` names which of the 59 preregistered jobs this invocation is. The
+ * slot is written into the report's own content, so a report identifies itself
+ * without trusting an artifact name, a job name, a file name or the order it
+ * was found in.
+ */
+export const MIN_CAMPAIGN_SLOT = 1;
+export const MAX_CAMPAIGN_SLOT = 59;
+
+/** True only for an integer slot index inside the preregistered range. */
+export const isCampaignSlot = (value) =>
+  Number.isInteger(value) && value >= MIN_CAMPAIGN_SLOT && value <= MAX_CAMPAIGN_SLOT;
+
 /** Outcome labels the calibration mode may emit. Capability is not among them. */
 export const CALIBRATION_OUTCOMES = Object.freeze(['VALID', 'INVALID', 'INCONCLUSIVE']);
 
@@ -194,23 +212,29 @@ export function planCalibrationRun({ pairs } = {}) {
 const USAGE = [
   'usage:',
   '  node scripts/aggregation-evidence.mjs <report-path>',
-  `  node scripts/aggregation-evidence.mjs --calibrate --pairs <${MIN_CALIBRATION_PAIRS}..${MAX_CALIBRATION_PAIRS}> <report-path>`,
+  `  node scripts/aggregation-evidence.mjs --calibrate --pairs <${MIN_CALIBRATION_PAIRS}..${MAX_CALIBRATION_PAIRS}> --slot <${MIN_CAMPAIGN_SLOT}..${MAX_CAMPAIGN_SLOT}> <report-path>`,
 ].join('\n');
 
 /**
  * The command line, as a value. Pure, so every refusal is unit-testable and
  * happens before any subprocess or database access.
  *
- * Returns `{ mode: 'evidence' | 'calibrate', pairs?, reportPath }`, or
- * `{ error, usage }` — never throws, never reads the environment. A pair count
- * comes from the command line only: an environment override would let a
- * campaign silently mean something else than its recorded invocation.
+ * Returns `{ mode: 'evidence', reportPath }`,
+ * `{ mode: 'calibrate', pairs, slot, reportPath }`, or `{ error, usage }` —
+ * never throws, never reads the environment. A pair count and a campaign slot
+ * come from the command line only: an environment override, a matrix variable
+ * or a file name would let a report silently mean something else than its
+ * recorded invocation.
+ *
+ * `--slot` is required with `--calibrate` and refused without it, so the legacy
+ * evidence invocation keeps its exact meaning and its report schema.
  */
 export function parseEvidenceArgs(argv) {
   const args = Array.isArray(argv) ? argv.map(String) : [];
   const fail = (error) => ({ error, usage: USAGE });
   let calibrate = false;
   let pairsRaw = null;
+  let slotRaw = null;
   const positional = [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -235,6 +259,17 @@ export function parseEvidenceArgs(argv) {
       if (pairsRaw !== null) return fail('--pairs given more than once');
       pairsRaw = arg.slice('--pairs='.length);
       if (pairsRaw === '') return fail('--pairs needs a value');
+    } else if (arg === '--slot') {
+      if (slotRaw !== null) return fail('--slot given more than once');
+      if (i + 1 >= args.length || args[i + 1].startsWith('--')) {
+        return fail('--slot needs a value');
+      }
+      slotRaw = args[i + 1];
+      i += 1;
+    } else if (arg.startsWith('--slot=')) {
+      if (slotRaw !== null) return fail('--slot given more than once');
+      slotRaw = arg.slice('--slot='.length);
+      if (slotRaw === '') return fail('--slot needs a value');
     } else if (arg.startsWith('-')) {
       return fail(`unknown option ${JSON.stringify(arg)}`);
     } else {
@@ -248,6 +283,7 @@ export function parseEvidenceArgs(argv) {
 
   if (!calibrate) {
     if (pairsRaw !== null) return fail('--pairs requires --calibrate');
+    if (slotRaw !== null) return fail('--slot requires --calibrate');
     return { mode: 'evidence', reportPath };
   }
   if (pairsRaw === null) return fail('--calibrate requires --pairs');
@@ -260,7 +296,23 @@ export function parseEvidenceArgs(argv) {
       `--pairs must be between ${MIN_CALIBRATION_PAIRS} and ${MAX_CALIBRATION_PAIRS}, got ${pairs}`,
     );
   }
-  return { mode: 'calibrate', pairs, reportPath };
+  if (slotRaw === null) return fail('--calibrate requires --slot');
+  // Digits only: a sign, a decimal point, an exponent or a hex prefix is refused
+  // rather than read, and so is a leading zero — `07` and `7` must not both be
+  // spellings of one slot in a recorded invocation.
+  if (!/^\d+$/.test(slotRaw)) {
+    return fail(`--slot must be a positive integer, got ${JSON.stringify(slotRaw)}`);
+  }
+  if (/^0\d/.test(slotRaw)) {
+    return fail(`--slot must not have a leading zero, got ${JSON.stringify(slotRaw)}`);
+  }
+  const slot = Number(slotRaw);
+  if (!isCampaignSlot(slot)) {
+    return fail(
+      `--slot must be between ${MIN_CAMPAIGN_SLOT} and ${MAX_CAMPAIGN_SLOT}, got ${slotRaw}`,
+    );
+  }
+  return { mode: 'calibrate', pairs, slot, reportPath };
 }
 
 // ---------------------------------------------------------------------------
@@ -1397,6 +1449,30 @@ export function formatReport({ meta, topology, results }) {
   return `${lines.join('\n')}\n`;
 }
 
+/** The first and last line of every calibration report; slot accounting keys on both. */
+export const CALIBRATION_REPORT_HEADER =
+  'ADR-055 paired calibration - probe immediately followed by the unchanged stress project';
+export const CALIBRATION_REPORT_FOOTER =
+  'this campaign does not locate a capability boundary and proposes no threshold (ADR-055 § 6).';
+
+/** The machine-readable slot field's prefix, on the report's third line. */
+export const CAMPAIGN_SLOT_FIELD = 'campaign_slot=';
+
+/**
+ * The failure categories `classifyFailures` counts, partitioned the way the
+ * preregistration § 5.2 reads them. Exported so slot accounting and its tests
+ * use this one list, and a new category cannot appear unpartitioned.
+ *
+ * `otherDatabaseError` is deliberately **not** an environment category: the
+ * committed evidence established only `sqlstate57014` and `jestTimeout`, and an
+ * unestablished category is treated as unclassified — a blocker, never an event.
+ */
+export const FAILURE_CATEGORY_PARTITION = Object.freeze({
+  environment: Object.freeze(['sqlstate57014', 'jestTimeout']),
+  productAssertion: Object.freeze(['secondRowOrWindowCrossing', 'countSequence', 'finalRow']),
+  unclassified: Object.freeze(['otherDatabaseError', 'other']),
+});
+
 const distributionLine = (label, stats) =>
   `  ${label}: n=${stats.count} available=${stats.available} unavailable=${stats.unavailable} ` +
   `min=${fmt(stats.min)} median=${fmt(stats.median)} max=${fmt(stats.max)}`;
@@ -1411,12 +1487,19 @@ const distributionLine = (label, stats) =>
  * so in one place: nothing ran, every requested pair is `INCONCLUSIVE`, and the
  * one refusal is counted once at campaign scope. A request that produced no
  * artifact at all would look exactly like a request that was never made.
+ *
+ * `campaign_slot=` is the third line of every calibration report, refused or
+ * measured, exactly once. It is `meta.campaignSlot` as the command line gave it
+ * — never a file name, a job name or a pair number. A slot that is somehow not
+ * a preregistered index renders as `unknown` instead of losing the artifact,
+ * and slot accounting refuses to assign such a report to any slot.
  */
 export function formatCalibrationReport({ meta, topology, summary }) {
   const refused = summary.preflight?.refused === true;
   const lines = [
-    'ADR-055 paired calibration - probe immediately followed by the unchanged stress project',
+    CALIBRATION_REPORT_HEADER,
     `commit=${meta.commit}${meta.runUrl ? ` run=${meta.runUrl}` : ''} generated=${meta.generatedAt}`,
+    `${CAMPAIGN_SLOT_FIELD}${isCampaignSlot(meta.campaignSlot) ? meta.campaignSlot : 'unknown'}`,
     `topology: ${Object.entries(topology)
       .map(([key, value]) => `${key}=${value}`)
       .join(' ')}`,
@@ -1521,7 +1604,7 @@ export function formatCalibrationReport({ meta, topology, summary }) {
       (name) => `${name}=${summary.preflight?.infrastructure?.[name] ?? 0}`,
     ).join(' ')}`,
     '',
-    'this campaign does not locate a capability boundary and proposes no threshold (ADR-055 § 6).',
+    CALIBRATION_REPORT_FOOTER,
   );
   return `${lines.join('\n')}\n`;
 }

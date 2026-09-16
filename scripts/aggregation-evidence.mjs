@@ -9,12 +9,19 @@
  *     The evidence campaign, unchanged: a control, a WAL probe, five
  *     name-filtered runs of the proof, the whole project once, the probe again.
  *
- *   node scripts/aggregation-evidence.mjs --calibrate --pairs <N> <report-path>
- *   pnpm run calibrate:aggregation-stress -- --pairs <N> <report-path>
+ *   node scripts/aggregation-evidence.mjs --calibrate --pairs <N> --slot <S> <report-path>
+ *   pnpm run calibrate:aggregation-stress -- --pairs <N> --slot <S> <report-path>
  *     The ADR-055 paired calibration campaign: a control, then N samples of
  *     "one validated WAL probe, then immediately the whole unchanged
  *     aggregation-stress project". Adjacency is the point — a measurement taken
  *     apart from the run describes conditions that run never met.
+ *
+ *     `--slot <1..59>` is required here and refused in the evidence mode. It is
+ *     the preregistered fresh-run campaign slot this invocation fills, written
+ *     once into the report as `campaign_slot=<S>` — on a refused campaign as on
+ *     a measured one — so `aggregation-campaign-accounting.mjs` can account for
+ *     every slot from report content alone. It is explicit input only: never
+ *     derived from a file name, a job name, a matrix variable or a pair number.
  *
  * Calibration reports validity only (`VALID`/`INVALID`/`INCONCLUSIVE`). It
  * applies no threshold and makes no capability judgement: ADR-055 is
@@ -727,6 +734,7 @@ async function commitFor(readCommit) {
 async function refuseCampaign({
   mode,
   pairs,
+  slot,
   reportPath,
   problems,
   exitCode,
@@ -738,7 +746,11 @@ async function refuseCampaign({
   reportDiagnostics('preflight', problems, log);
   if (mode !== 'calibrate') return exitCode;
   const text = formatCalibrationReport({
-    meta: { commit: await commitFor(readCommit), generatedAt: now().toISOString() },
+    meta: {
+      commit: await commitFor(readCommit),
+      generatedAt: now().toISOString(),
+      campaignSlot: slot,
+    },
     topology: UNMEASURED_TOPOLOGY,
     summary: summarizeCalibration({ pairs, results: [], preflight: problems }),
   });
@@ -752,17 +764,22 @@ async function refuseCampaign({
  * validated, so nothing is planned or re-checked here: this function's first
  * statement is the campaign's first measurement.
  */
-async function runMeasuredCampaign({
+export async function runMeasuredCampaign({
   mode,
   pairs,
+  slot,
   plan,
   reportPath,
   writeReport,
   readCommit,
   now,
   log,
+  // Injectable only so the artifact this function renders — and the slot it
+  // carries — can be asserted without Docker or PostgreSQL. The CLI never
+  // passes them; a real campaign always reads the machine and runs the plan.
+  measure = { readTopology, runPlan },
 }) {
-  const topo = await readTopology();
+  const topo = await measure.readTopology();
   log(`[evidence] topology ${JSON.stringify(topo)}`);
   if (mode === 'calibrate') {
     log(
@@ -771,12 +788,14 @@ async function runMeasuredCampaign({
     );
   }
 
-  const results = await runPlan(plan);
+  const results = await measure.runPlan(plan);
   const meta = { commit: await commitFor(readCommit), generatedAt: now().toISOString() };
   const text =
     mode === 'calibrate'
       ? formatCalibrationReport({
-          meta,
+          // Only the calibration report carries a slot; the legacy evidence
+          // report's meta, and so its schema, is exactly what it was.
+          meta: { ...meta, campaignSlot: slot },
           topology: topo,
           summary: summarizeCalibration({ pairs, results }),
         })
@@ -833,6 +852,9 @@ export async function runEvidenceCli({ argv = [], env = process.env, deps = {} }
     return 2;
   }
   const { mode, pairs, reportPath } = parsed;
+  // The slot travels only with a calibration request. The legacy evidence mode
+  // never receives the key at all, so nothing downstream can render one.
+  const slotArgs = mode === 'calibrate' ? { slot: parsed.slot } : {};
 
   try {
     const prepared = prepareCampaign({
@@ -848,6 +870,7 @@ export async function runEvidenceCli({ argv = [], env = process.env, deps = {} }
       return await refuseCampaign({
         mode,
         pairs,
+        ...slotArgs,
         reportPath,
         problems: prepared.problems,
         exitCode: prepared.exitCode,
@@ -860,6 +883,7 @@ export async function runEvidenceCli({ argv = [], env = process.env, deps = {} }
     return await measureCampaign({
       mode,
       pairs,
+      ...slotArgs,
       plan: prepared.plan,
       reportPath,
       writeReport,
