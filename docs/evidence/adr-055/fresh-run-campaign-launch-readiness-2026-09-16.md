@@ -560,3 +560,280 @@ separately) is caught.
 
 **Row 9 stays `UNVERIFIED`, row 10 `BLOCKED`, row 11 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved.
 The verdict stays NO-GO.**
+
+---
+
+## 13. Launch runbook — fail-closed operating sequence (2026-09-17)
+
+This section is **procedure, not evidence**. It was written from the committed tools, the
+committed workflow draft and the preregistration. Nothing in it was executed: no workflow was
+installed, pushed, dispatched or rerun, no account, billing or release state was observed, nothing
+was downloaded, and **no real launch record, image-cohort manifest, digest or campaign commit
+exists**. §§ 1–12 are unchanged. Every placeholder below (`<launch-record>`, `<report>` and so on)
+names a file that would only exist inside an authorized launch window.
+
+### 13.1 Rules that apply to every step
+
+1. **STOP means NO-GO.** Any failed, skipped, ambiguous or unprovable check ends the attempt. Absence
+   of proof is a failure, never a pass.
+2. **Before the single push (step L8)**, a STOP launches nothing. Record the reason. A later attempt
+   restarts from Gate 0 with freshly produced inputs; the rejected inputs are kept, not edited.
+3. **After the push**, nothing is repaired. No rerun, retry, re-dispatch, cancellation, second push
+   or replacement slot can make a campaign eligible. This runbook authorizes no second campaign.
+4. **Evidence is kept byte-exact.** Tool outputs, the snapshot, manifest, record, downloaded
+   artifacts and logs are kept exactly as produced, outside `.github/workflows/`. Nothing is
+   reformatted, re-saved, re-encoded or edited. A changed input is a new input with a new digest.
+5. **No secrets.** No credential, token or header is requested by this document, printed, stored in
+   an evidence file or committed. Credentials are handled only by the owner-authorized operation
+   that needs them.
+6. **Two kinds of operation.** `[tool]` is a committed package script, invoked exactly as shown.
+   `[manual/live]` has **no committed tool**. It is performed by hand under the owner's
+   authorization, and its result is recorded by hand. No command is prescribed for it and nothing
+   about it is automated or proven by this repository.
+7. **Exit codes of every `[tool]`:** `0` is the only pass; `1` is a failed check; `2` is a usage
+   error that checked nothing. After exit `2`, only the invocation may be corrected; no input may
+   change.
+
+### 13.2 Gate 0 — external evidence, before anything is installed or launched
+
+**Nothing may be installed or launched until rows 2, 6, 7 and 8 each have new live evidence
+recorded in a dated update of this document, and each is `VERIFIED`.** All items are
+`[manual/live]`.
+
+| #    | required evidence                                                                                                                                                                                                             | row |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
+| G0.1 | The owner deliberately provides or authorizes any credential scope used to read billing or account facts. The operator does not request, refresh or widen a scope on their own initiative (§ 2.2).                            | 8   |
+| G0.2 | Billing, budget, spending-limit and allowance facts, read with that scope and recorded without secrets. The public-repository policy in § 3 and § 4 is a platform policy; it does **not** prove this account's state.         | 8   |
+| G0.3 | An explicit, recorded owner authorization for the **2655 job-minute** ceiling (§ 4). The 418 expected job-minutes are not the authorization bound.                                                                            | 8   |
+| G0.4 | The account's effective concurrency, from account evidence. The per-plan maximum in § 3 is not an effective value.                                                                                                            | 6   |
+| G0.5 | Queue behaviour adequate for a 59-job fan-out, with the basis for judging it adequate recorded next to the evidence. No adequacy criterion is invented here; the § 2.3 observation (at most 5 jobs) does not suffice.         | 7   |
+| G0.6 | A retrieval path demonstrated **from the launch environment**: an existing ADR-055 artifact downloaded byte-for-byte from the host that will retrieve the campaign (§ 6 prerequisite 1), with the row 2 reliability evidence. | 2   |
+
+**STOP** unless every item is recorded and rows 2, 6, 7 and 8 are all `VERIFIED`.
+
+**Gate 1 — recorded launch decision.** The § 5 rule makes GO depend on every row being `VERIFIED`.
+Rows 9, 10 and 11 contain parts that can only be observed during or after the run (the measured
+topology, the 59-artifact retrieval, `run_attempt`). This runbook does **not** reinterpret § 5. A
+launch needs a dated update of this document that records the Gate 0 evidence and states explicitly
+that the post-run parts of rows 9, 10 and 11 are decided by steps L10–L13 below, each failing closed
+to Branch C. **STOP** without that recorded decision.
+
+### 13.3 Launch sequence
+
+Each step names what must be kept. Do not skip or reorder steps.
+
+**L1 — identity and Actions state `[manual/live]`.**
+
+- The local branch is `feat/audit-service-aud-004-contract`. The draft's `on.push.branches` names
+  that literal branch; any other branch needs a separately reviewed draft.
+- The tracked tree and index are clean.
+- Local `HEAD` = upstream = remote branch head.
+- `.github/workflows/` contains only `ci.yml`.
+- Actions is enabled for the repository.
+- No run of the campaign workflow exists yet.
+
+Keep the refs and the observed state. **STOP** on any mismatch.
+
+**L2 — workflow snapshot.**
+
+- Take the exact bytes of
+  [`fresh-run-campaign-workflow-draft-2026-09-16.yaml.txt`](fresh-run-campaign-workflow-draft-2026-09-16.yaml.txt)
+  at the L1 commit as `<workflow-snapshot>`. Keep that copy outside the tracked tree and never under
+  `.github/workflows/`.
+- `[tool]` `pnpm run check:aggregation-campaign-workflow -- <workflow-snapshot>`.
+- **STOP** unless exit `0` and `RESULT: PASS`. Keep the output.
+
+**L3 — local candidate commit, not pushed, not installed.**
+
+- **Why this comes before the manifest.** A report's `commit=` line is `git rev-parse HEAD` in the job's
+  checkout (`commitSha()` in `scripts/aggregation-evidence.mjs`). The draft's checkout step passes no
+  `ref`, and its only trigger is a push that changes the installed workflow path. So the commit the
+  reports will name, and that the cohort review compares with `campaign_commit`, is the pushed commit
+  that adds the workflow file. Its SHA exists only after that commit is created.
+- `[manual/live]` Create one local commit. Its parent is the L1 `HEAD`. Its only change adds the
+  snapshot bytes at the draft's `on.push.paths` path, `.github/workflows/adr-055-fresh-run-first-pair.yml`.
+- This commit is **not** an installation: nothing reaches GitHub until L8.
+- `[manual/live]` Hash the **committed blob** at that path, not the working-tree file (`.gitattributes`
+  applies `* text=auto eol=lf`). The SHA-256 must equal the SHA-256 of `<workflow-snapshot>`, and the
+  commit must change exactly that one path.
+- `[tool]` `pnpm run check:aggregation-campaign-workflow -- .github/workflows/adr-055-fresh-run-first-pair.yml`.
+  It must exit `0` with `RESULT: PASS`. This checks the working-tree text. The byte identity comes
+  from the blob digest above.
+- Keep the candidate SHA, the two digests and the output.
+- **STOP** on any mismatch. The unpushed candidate never left the machine; restart from L2.
+
+**L4 — image-cohort manifest.**
+
+- `[manual/live]` Observe the authoritative runner-image release state: the current and previous
+  `ubuntu24/*` releases and their publication times, from the source used in § 2.4.
+- Write `<image-cohort-manifest>` as one flat JSON object of at most 4 KiB. It has exactly the nine
+  `adr-055-image-cohort-review/v1` fields of § 11:
+  - `schema` = `adr-055-image-cohort-review/v1`;
+  - `observed_at`;
+  - `runner_label` = `ubuntu-24.04`;
+  - `current_image_release`;
+  - `current_image_published_at`;
+  - `previous_image_release`;
+  - `previous_image_published_at`;
+  - `branch_c_on_topology_mismatch_acknowledged` = `true`;
+  - `campaign_commit` = the L3 SHA.
+- Record the release values as observed. Never adjust them to pass a check.
+- Keep the exact bytes. Any change makes a new manifest, which needs a new digest (L5) and a new
+  preflight (L6).
+- The tools check chronology only against the review time. That `observed_at` precedes the first
+  job start is shown only by the kept timestamps.
+
+**L5 — launch record.**
+
+- Write `<launch-record>` as one flat JSON object of at most 4 KiB, with no BOM. It has exactly the ten
+  `adr-055-launch-preflight-record/v1` fields of § 12:
+  - `schema` = `adr-055-launch-preflight-record/v1`;
+  - `campaign_commit` = the L3 SHA;
+  - `workflow_snapshot_sha256` = SHA-256 of the exact `<workflow-snapshot>` bytes;
+  - `image_cohort_manifest_sha256` = SHA-256 of the exact `<image-cohort-manifest>` bytes;
+  - the five acknowledgments, each `true`;
+  - `primary_retrieval` = `per-slot-uploaded-artifacts`.
+- Digests are 64 lowercase hex characters. No committed tool prints a digest, so computing them is
+  `[manual/live]`: a standard SHA-256 over the file bytes, with no re-saving.
+
+**L6 — preflight.**
+
+- `[tool]` `pnpm run check:aggregation-campaign-preflight -- <launch-record> <workflow-snapshot> <image-cohort-manifest>`.
+  The positional order is record, snapshot, manifest.
+- **STOP** unless exit `0` and `PREFLIGHT: COMPLETE`. Exit `1` (`PREFLIGHT: REJECTED`) is a STOP
+  whatever the reason. Keep the 12-line output.
+
+**L7 — pre-push re-verification `[manual/live]`, immediately before L8.**
+
+- Local `HEAD` is still the L3 candidate.
+- Its parent is still the remote branch head.
+- Its only change is still the one workflow path.
+- The committed blob still hashes to `workflow_snapshot_sha256`.
+- The record, snapshot and manifest still hash to the values used in L6.
+
+**STOP** on any difference.
+
+**L8 — the single eligible push `[manual/live, owner-authorized]`.** This push is the installation and
+the launch.
+
+- Push exactly the L3 commit to the branch with a normal push: no force, no amend, no other commit.
+- `[manual/live]` Confirm that the remote branch head equals `campaign_commit`. Git commit identity
+  covers the tree, so that equality binds the installed file to the verified blob. Where the remote
+  file bytes can be read, also hash them against `workflow_snapshot_sha256`.
+- If the push was definitively rejected (the remote head is unchanged and no run exists), nothing
+  launched: **STOP**, NO-GO.
+- If whether the push landed, or which bytes were installed, cannot be proven: **STOP**. Do not push
+  again. Any run that appears is handled by L9–L10, and a byte mismatch makes the campaign
+  ineligible (Branch C).
+- From here until L13 is finished, push nothing to the branch. No push may ever touch the installed
+  workflow file except its later removal (L15).
+
+**L9 — observe without intervening `[manual/live]`.**
+
+- Exactly one run of the campaign workflow exists, for the `push` event, with head SHA
+  `campaign_commit`.
+- No run, job or slot is rerun, retried, re-dispatched, cancelled or replaced.
+- Wait until all 59 jobs are completed. Job conclusions are recorded as metadata only and are never
+  used to classify a slot.
+- Zero runs: **STOP**, NO-GO, with no second push. More than one run: ineligible, Branch C.
+
+**L10 — first-attempt verification `[manual/live]`.**
+
+- Record `github.run_attempt` for the run and the attempt of each of its 59 jobs, without credentials.
+- Eligible only if the run and every job are proven to be attempt `1`.
+- Any other attempt, or a value that cannot be proven, makes the campaign **ineligible → Branch C**,
+  even though the draft's first-step guard stops a re-run attempt from measuring.
+
+**L11 — retrieval.**
+
+- **Primary `[manual/live]`.** Download all 59 per-slot artifacts `adr-055-fresh-run-slot-<n>` before
+  the draft's 3-day `retention-days` expires. Keep the exact bytes of every file.
+- **Fallback, acknowledged in the record.** Use it only for artifacts that cannot be retrieved.
+  - `[manual/live]` Obtain the run-log archive or job logs.
+  - `[tool]` `pnpm run recover:aggregation-campaign-logs -- <job-log> [<job-log> ...]`, with every job
+    log.
+  - It must exit `0` with `RESULT: PASS`. Keep the output.
+  - Recovered text is **not** proven equal to artifact bytes (§ 10).
+  - The tool writes **no report files**, and no committed tool does. So the image-cohort review in L13
+    cannot run over fallback-recovered reports with committed tools.
+  - Any slot that needs the fallback therefore cannot reach Branch A or B under this runbook. The
+    campaign stays unclassified pending a separately reviewed procedure, and without one it is
+    Branch C.
+- An expired, unreachable or incomplete retrieval is `missing` for that slot, which means Branch C.
+
+**L12 — slot accounting.**
+
+- `[tool]` `pnpm run account:aggregation-campaign -- <report> [<report> ...]`, with all 59 report files.
+- It must exit `0` with `accounting: COMPLETE` and an invariant line that ends in `holds`.
+- Anything else (a blocker, missing slot, rejected input or provenance problem) is Branch C. Keep
+  the output.
+
+**L13 — image-cohort review.**
+
+- `[manual/live]` Re-hash the manifest; it must still equal `image_cohort_manifest_sha256`.
+- `[tool]` `pnpm run review:aggregation-campaign-image-cohort -- <image-cohort-manifest> <report> [<report> ...]`,
+  with the same manifest and the same 59 reports as L12.
+- It must exit `0` with `COHORT: CONSISTENT`. Otherwise (`COHORT: BRANCH C`) the result is Branch C.
+- A human reads and records the single measured topology (§ 11, item 5). Keep the output.
+
+**L14 — preregistered interpretation.** Allowed only when L10 proved attempt `1`, L12 is `COMPLETE`
+and L13 is `CONSISTENT`. Take the event count from the L12 totals line.
+
+| condition                                 | branch | wording                                          |
+| ----------------------------------------- | ------ | ------------------------------------------------ |
+| `events >= 1`                             | **A**  | exactly as in preregistration § 6                |
+| `events = 0` and `non-events = 59`        | **B**  | exactly as in § 6 (bound `4.9508 %`)             |
+| anything else, or any earlier failed step | **C**  | inconclusive for the 5 % / one-sided 95 % target |
+
+No threshold, count, target, eligibility rule or classification is changed. No slot is classified
+from a job conclusion. Every deferral in § 6 stays deferred.
+
+**L15 — after evidence capture.**
+
+- The installed workflow is removed by deletion only, as a separate reviewed step, and only after
+  L11–L13 are complete. That removal is not a second campaign push.
+- A run caused by any later push is not campaign evidence.
+- Kept evidence is committed only in a separately authorized evidence commit, without secrets.
+
+### 13.4 Abort and rollback
+
+- **Before L8:** a STOP launches nothing. Keep what was produced, discard only the unpushed local
+  candidate, and restart later from Gate 0.
+- **After L8:** there is no rollback of a launched campaign. Keep all evidence unedited; do not rerun,
+  cancel or re-push to "repair" eligibility.
+- **Topology:** a mismatch across the 59 reports is Branch C.
+- **Accounting or retrieval:** if either is incomplete, the result can never become Branch A or B.
+- **Records:** a launch record or manifest is real only when produced inside an authorized launch
+  window under Gates 0 and 1. The examples in tests are synthetic.
+
+### 13.5 Evidence matrix
+
+| checkpoint | rows    | evidence kept                                                       | fail-closed result                            |
+| ---------- | ------- | ------------------------------------------------------------------- | --------------------------------------------- |
+| G0.1–G0.3  | 8       | owner scope authorization, billing facts, 2655 job-minute approval  | not `VERIFIED` → STOP, NO-GO                  |
+| G0.4       | 6       | effective concurrency from account evidence                         | not `VERIFIED` → STOP, NO-GO                  |
+| G0.5       | 7       | queue evidence and its recorded adequacy basis                      | not `VERIFIED` → STOP, NO-GO                  |
+| G0.6       | 2, 10   | byte-for-byte download of an existing artifact from the launch host | not demonstrated → STOP, NO-GO                |
+| Gate 1     | 2, 6–11 | dated launch decision recorded in this document                     | absent → STOP, NO-GO                          |
+| L1         | 3, 4    | refs, clean state, `ci.yml`-only listing, Actions enabled           | mismatch → STOP, NO-GO                        |
+| L2–L3      | 3, 11   | snapshot bytes, blob digest, workflow check outputs                 | exit ≠ 0 or digest mismatch → STOP, NO-GO     |
+| L4–L6      | 9, 11   | manifest bytes, record bytes, preflight output                      | not `PREFLIGHT: COMPLETE` → STOP, NO-GO       |
+| L7–L8      | 3, 11   | pre-push hashes, remote head = `campaign_commit`                    | before launch → STOP; after launch → Branch C |
+| L9–L10     | 11      | the one run, per-job `run_attempt` metadata                         | not exactly one run or attempt ≠ 1 → Branch C |
+| L11        | 2, 10   | 59 artifact files, or recovery output                               | missing, expired or fallback-only → not A/B   |
+| L12        | 12      | accounting output                                                   | not `accounting: COMPLETE` → Branch C         |
+| L13        | 9       | cohort output, the human-read topology                              | `COHORT: BRANCH C` → Branch C                 |
+| L14        | —       | the branch statement, worded as in preregistration § 6              | any earlier failure → Branch C                |
+
+### 13.6 Status after this section
+
+Nothing above was performed, and no live fact was established. The table in § 5 is unchanged:
+
+- Row 9 stays `UNVERIFIED`.
+- Row 10 stays `BLOCKED`.
+- Row 11 stays `UNVERIFIED`.
+- Rows 2, 6, 7 and 8 stay unresolved.
+- Rows 3, 4 and 12 are still `VERIFIED` only as recorded in §§ 5 and 8. Row 3 must be re-verified at
+  L1.
+
+**The verdict stays NO-GO.**
