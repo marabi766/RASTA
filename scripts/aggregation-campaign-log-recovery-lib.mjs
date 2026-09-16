@@ -22,6 +22,10 @@
  * - **Rejection, never truncation.** A framing defect rejects its whole log; a
  *   limit breach rejects the input it applies to; a report that does not parse
  *   is rejected alone. Every rejection makes the result unclean.
+ * - **Materialization plan.** For the CLI's opt-in `--output-dir`, every accepted
+ *   string stays bound to the slot `parseSlotReport` read from it, and
+ *   `planReportFiles` maps a clean, complete result to `slot-01.txt` … `slot-59.txt`
+ *   with those exact strings. Writing the files is the CLI's job, not this file's.
  *
  * Pure: text in, values out. No file system, no network, no GitHub. Diagnostics
  * are fixed sentences with counts only — never a path, a timestamp or a line of
@@ -40,6 +44,8 @@ import {
 import {
   CALIBRATION_REPORT_FOOTER,
   CALIBRATION_REPORT_HEADER,
+  MAX_CAMPAIGN_SLOT,
+  MIN_CAMPAIGN_SLOT,
 } from './aggregation-evidence-lib.mjs';
 
 const MIB = 1024 * 1024;
@@ -229,13 +235,19 @@ export function recoverCalibrationReports(logs, { limits = LOG_RECOVERY_LIMITS }
     rejections[key] = (rejections[key] ?? 0) + count;
   };
   const finish = (reports) => {
-    const sorted = [...reports].sort();
+    const sorted = [...reports].map(({ text }) => text).sort();
+    // The same accepted strings, each bound to the slot `parseSlotReport` read
+    // from it; ordered by slot, then text, so no input order can show through.
+    const slotReports = [...reports]
+      .map(({ slot, text }) => Object.freeze({ slot, text }))
+      .sort((a, b) => a.slot - b.slot || (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
     const rejectedCount = Object.values(rejections).reduce((sum, n) => sum + n, 0);
     return {
       logs: list.length,
       readableLogs: list.filter((log) => log && !log.unreadable && typeof log.text === 'string')
         .length,
       reports: sorted,
+      slotReports,
       rejections: Object.fromEntries(
         Object.entries(rejections).sort(([a], [b]) => a.localeCompare(b)),
       ),
@@ -293,7 +305,7 @@ export function recoverCalibrationReports(logs, { limits = LOG_RECOVERY_LIMITS }
   const reports = [];
   for (const candidate of candidates) {
     const parsed = parseSlotReport(candidate);
-    if (parsed.ok) reports.push(candidate);
+    if (parsed.ok) reports.push({ slot: parsed.report.slot, text: candidate });
     else reject(`${RECOVERY_REASON.unparseable}: ${parsed.reason}`);
   }
   return finish(reports);
@@ -310,8 +322,97 @@ export function recoverAndAccount(logs, options) {
   return { recovery, accounting, ok, exitCode: ok ? 0 : 1 };
 }
 
-/** Recovery counts first, then the unchanged accounting text, then one verdict. */
-export function formatRecovery({ recovery, accounting, ok }) {
+// ---------------------------------------------------------------------------
+// Materialization plan — which exact bytes go into which fixed file name
+
+/** Digits of the largest slot, so every name has the same bounded ASCII shape. */
+const SLOT_NAME_DIGITS = String(MAX_CAMPAIGN_SLOT).length;
+
+/**
+ * The fixed file name for a slot: `slot-01.txt` … `slot-59.txt`. Derived only
+ * from the integer slot, never from a path, a job name or report text.
+ */
+export function reportFileName(slot) {
+  if (!Number.isInteger(slot) || slot < MIN_CAMPAIGN_SLOT || slot > MAX_CAMPAIGN_SLOT) {
+    throw new RangeError('slot is outside the campaign range');
+  }
+  return `slot-${String(slot).padStart(SLOT_NAME_DIGITS, '0')}.txt`;
+}
+
+/** Fixed, value-free outcome sentences for the opt-in `--output-dir` form. */
+export const MATERIALIZATION_REASON = Object.freeze({
+  notComplete: 'recovery or accounting is not complete',
+  binding: 'recovered reports do not bind one to one to the campaign slots',
+  invalidName: 'output path has no usable directory name',
+  exists: 'output path already exists',
+  uncheckable: 'output path could not be checked',
+  parent: 'output parent is not an existing directory that is not a link',
+  staging: 'staging directory could not be created',
+  stagingOutside: 'staging directory is not inside the output parent',
+  create: 'report file could not be created exclusively',
+  verify: 'report file bytes did not verify after writing',
+  entries: 'staging directory holds unexpected entries',
+  rename: 'output directory could not be put in place',
+  placed: 'output directory was put in place but could not be confirmed',
+});
+
+/** Cleanup outcomes after a failure; staging is never removed recursively. */
+export const MATERIALIZATION_CLEANUP = Object.freeze({
+  none: 'nothing was created',
+  removed: 'owned staging state was removed',
+  incomplete: 'owned staging state could not be fully removed',
+  notRemoved: 'nothing was removed',
+  leftInPlace: 'the output directory was left in place for inspection',
+});
+
+/**
+ * The files a complete, clean recovery may write, or a fixed refusal. Every
+ * slot `1..59` must be bound to exactly one recovered string, and that string
+ * must still pass the unchanged `parseSlotReport` with that same slot. The
+ * text is the accepted recovered string itself — nothing is re-rendered.
+ */
+export function planReportFiles(result) {
+  const refuse = (reason) => ({ ok: false, reason });
+  if (!result?.ok || result.recovery?.clean !== true || result.accounting?.complete !== true) {
+    return refuse(MATERIALIZATION_REASON.notComplete);
+  }
+  const entries = Array.isArray(result.recovery.slotReports) ? result.recovery.slotReports : [];
+  if (entries.length !== CAMPAIGN_SLOT_COUNT) return refuse(MATERIALIZATION_REASON.binding);
+
+  const files = [];
+  for (let slot = MIN_CAMPAIGN_SLOT; slot <= MAX_CAMPAIGN_SLOT; slot += 1) {
+    const bound = entries.filter((entry) => entry?.slot === slot);
+    if (bound.length !== 1 || typeof bound[0].text !== 'string') {
+      return refuse(MATERIALIZATION_REASON.binding);
+    }
+    const parsed = parseSlotReport(bound[0].text);
+    if (!parsed.ok || parsed.report.slot !== slot) return refuse(MATERIALIZATION_REASON.binding);
+    files.push(Object.freeze({ slot, name: reportFileName(slot), text: bound[0].text }));
+  }
+  return { ok: true, files };
+}
+
+/**
+ * One line describing the materialization outcome, from fixed sentences only:
+ * `{ written: true, count }` or `{ written: false, reason, cleanup }`.
+ */
+export function formatMaterialization(outcome) {
+  if (outcome?.written === true) {
+    return `materialization: WRITTEN - ${outcome.count} report files ${reportFileName(
+      MIN_CAMPAIGN_SLOT,
+    )}..${reportFileName(MAX_CAMPAIGN_SLOT)} in a newly created output directory`;
+  }
+  const label = outcome?.reason === MATERIALIZATION_REASON.notComplete ? 'NOT WRITTEN' : 'FAILED';
+  return `materialization: ${label} - ${outcome?.reason}; ${outcome?.cleanup}`;
+}
+
+/**
+ * Recovery counts first, then the unchanged accounting text, then one verdict.
+ * Without `materialization` the text is exactly the read-only form's. With it,
+ * one materialization line precedes the verdict, and `PASS` also requires that
+ * the files were written.
+ */
+export function formatRecovery({ recovery, accounting, ok }, { materialization } = {}) {
   const rejections = Object.entries(recovery.rejections);
   const lines = [
     'ADR-055 campaign log recovery - offline and reference-free; boundaries are the calibration header and footer only',
@@ -325,5 +426,11 @@ export function formatRecovery({ recovery, accounting, ok }) {
     'not provable offline: that a real archive is retrievable, that recovered text equals the uploaded artifact bytes, or that a real 59-job archive recovers',
     '',
   ];
-  return `${lines.join('\n')}${formatAccounting(accounting)}RESULT: ${ok ? 'PASS' : 'FAIL'}\n`;
+  if (materialization === undefined) {
+    return `${lines.join('\n')}${formatAccounting(accounting)}RESULT: ${ok ? 'PASS' : 'FAIL'}\n`;
+  }
+  const pass = ok && materialization.written === true;
+  return `${lines.join('\n')}${formatAccounting(accounting)}${formatMaterialization(
+    materialization,
+  )}\nRESULT: ${pass ? 'PASS' : 'FAIL'}\n`;
 }

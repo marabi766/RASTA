@@ -748,22 +748,30 @@ the launch.
 
 - **Primary `[manual/live]`.** Download all 59 per-slot artifacts `adr-055-fresh-run-slot-<n>` before
   the draft's 3-day `retention-days` expires. Keep the exact bytes of every file.
-- **Fallback, acknowledged in the record.** Use it only for artifacts that cannot be retrieved.
-  - `[manual/live]` Obtain the run-log archive or job logs.
-  - `[tool]` `pnpm run recover:aggregation-campaign-logs -- <job-log> [<job-log> ...]`, with every job
-    log.
-  - It must exit `0` with `RESULT: PASS`. Keep the output.
-  - Recovered text is **not** proven equal to artifact bytes (§ 10).
-  - The tool writes **no report files**, and no committed tool does. So the image-cohort review in L13
-    cannot run over fallback-recovered reports with committed tools.
-  - Any slot that needs the fallback therefore cannot reach Branch A or B under this runbook. The
-    campaign stays unclassified pending a separately reviewed procedure, and without one it is
-    Branch C.
+- **Fallback, acknowledged in the record.** Use it only when the artifacts cannot be retrieved.
+  - `[manual/live]` Obtain the run-log archive or job logs, and keep their exact bytes.
+  - `[tool]` `pnpm run recover:aggregation-campaign-logs -- --output-dir <new-directory> <job-log> [<job-log> ...]`,
+    with every job log. `<new-directory>` must not exist yet. Its parent must be an existing,
+    non-link directory outside the tracked tree and outside `.github/workflows/`.
+  - It must exit `0` with a `materialization: WRITTEN - 59 report files …` line and `RESULT: PASS`.
+    Keep the output and the directory unedited.
+  - _Updated 2026-09-17 (§ 14):_ the recovered reports are now written as files, so L12 and L13 run
+    over `<new-directory>/slot-01.txt` … `slot-59.txt` exactly as over downloaded artifacts. The
+    earlier limitation, that no committed tool wrote fallback reports, no longer applies.
+  - The fallback writes files **only** for a clean recovery whose accounting of all 59 slots is
+    complete. Anything less writes nothing, prints `materialization: NOT WRITTEN`, and exits `1`. A
+    partial fallback is not combined with downloaded artifact files by any committed tool, and
+    this runbook does not combine them.
+  - Recovered text is still **not** proven equal to the uploaded artifact bytes (§ 10).
 - An expired, unreachable or incomplete retrieval is `missing` for that slot, which means Branch C.
+  A materialization failure (exit `1`) leaves no output directory. Keep its output. The same unedited
+  logs may be processed again only into another path that does not exist yet. Nothing already
+  written is deleted, renamed or reused. Until a run exits `0`, retrieval is incomplete.
 
 **L12 — slot accounting.**
 
-- `[tool]` `pnpm run account:aggregation-campaign -- <report> [<report> ...]`, with all 59 report files.
+- `[tool]` `pnpm run account:aggregation-campaign -- <report> [<report> ...]`, with all 59 report files:
+  the downloaded artifact files, or the 59 files materialized by the L11 fallback.
 - It must exit `0` with `accounting: COMPLETE` and an invariant line that ends in `holds`.
 - Anything else (a blocker, missing slot, rejected input or provenance problem) is Branch C. Keep
   the output.
@@ -803,27 +811,30 @@ from a job conclusion. Every deferral in § 6 stays deferred.
   cancel or re-push to "repair" eligibility.
 - **Topology:** a mismatch across the 59 reports is Branch C.
 - **Accounting or retrieval:** if either is incomplete, the result can never become Branch A or B.
+- **Fallback files:** `--output-dir` never overwrites, merges with, cleans or deletes an existing
+  path. A refused or failed materialization leaves no output directory. The tool never removes
+  evidence to make room for a retry.
 - **Records:** a launch record or manifest is real only when produced inside an authorized launch
   window under Gates 0 and 1. The examples in tests are synthetic.
 
 ### 13.5 Evidence matrix
 
-| checkpoint | rows    | evidence kept                                                       | fail-closed result                            |
-| ---------- | ------- | ------------------------------------------------------------------- | --------------------------------------------- |
-| G0.1–G0.3  | 8       | owner scope authorization, billing facts, 2655 job-minute approval  | not `VERIFIED` → STOP, NO-GO                  |
-| G0.4       | 6       | effective concurrency from account evidence                         | not `VERIFIED` → STOP, NO-GO                  |
-| G0.5       | 7       | queue evidence and its recorded adequacy basis                      | not `VERIFIED` → STOP, NO-GO                  |
-| G0.6       | 2, 10   | byte-for-byte download of an existing artifact from the launch host | not demonstrated → STOP, NO-GO                |
-| Gate 1     | 2, 6–11 | dated launch decision recorded in this document                     | absent → STOP, NO-GO                          |
-| L1         | 3, 4    | refs, clean state, `ci.yml`-only listing, Actions enabled           | mismatch → STOP, NO-GO                        |
-| L2–L3      | 3, 11   | snapshot bytes, blob digest, workflow check outputs                 | exit ≠ 0 or digest mismatch → STOP, NO-GO     |
-| L4–L6      | 9, 11   | manifest bytes, record bytes, preflight output                      | not `PREFLIGHT: COMPLETE` → STOP, NO-GO       |
-| L7–L8      | 3, 11   | pre-push hashes, remote head = `campaign_commit`                    | before launch → STOP; after launch → Branch C |
-| L9–L10     | 11      | the one run, per-job `run_attempt` metadata                         | not exactly one run or attempt ≠ 1 → Branch C |
-| L11        | 2, 10   | 59 artifact files, or recovery output                               | missing, expired or fallback-only → not A/B   |
-| L12        | 12      | accounting output                                                   | not `accounting: COMPLETE` → Branch C         |
-| L13        | 9       | cohort output, the human-read topology                              | `COHORT: BRANCH C` → Branch C                 |
-| L14        | —       | the branch statement, worded as in preregistration § 6              | any earlier failure → Branch C                |
+| checkpoint | rows    | evidence kept                                                       | fail-closed result                                         |
+| ---------- | ------- | ------------------------------------------------------------------- | ---------------------------------------------------------- |
+| G0.1–G0.3  | 8       | owner scope authorization, billing facts, 2655 job-minute approval  | not `VERIFIED` → STOP, NO-GO                               |
+| G0.4       | 6       | effective concurrency from account evidence                         | not `VERIFIED` → STOP, NO-GO                               |
+| G0.5       | 7       | queue evidence and its recorded adequacy basis                      | not `VERIFIED` → STOP, NO-GO                               |
+| G0.6       | 2, 10   | byte-for-byte download of an existing artifact from the launch host | not demonstrated → STOP, NO-GO                             |
+| Gate 1     | 2, 6–11 | dated launch decision recorded in this document                     | absent → STOP, NO-GO                                       |
+| L1         | 3, 4    | refs, clean state, `ci.yml`-only listing, Actions enabled           | mismatch → STOP, NO-GO                                     |
+| L2–L3      | 3, 11   | snapshot bytes, blob digest, workflow check outputs                 | exit ≠ 0 or digest mismatch → STOP, NO-GO                  |
+| L4–L6      | 9, 11   | manifest bytes, record bytes, preflight output                      | not `PREFLIGHT: COMPLETE` → STOP, NO-GO                    |
+| L7–L8      | 3, 11   | pre-push hashes, remote head = `campaign_commit`                    | before launch → STOP; after launch → Branch C              |
+| L9–L10     | 11      | the one run, per-job `run_attempt` metadata                         | not exactly one run or attempt ≠ 1 → Branch C              |
+| L11        | 2, 10   | 59 artifact files, or recovery output and its 59 materialized files | missing, expired, or fallback not `RESULT: PASS` → not A/B |
+| L12        | 12      | accounting output                                                   | not `accounting: COMPLETE` → Branch C                      |
+| L13        | 9       | cohort output, the human-read topology                              | `COHORT: BRANCH C` → Branch C                              |
+| L14        | —       | the branch statement, worded as in preregistration § 6              | any earlier failure → Branch C                             |
 
 ### 13.6 Status after this section
 
@@ -837,3 +848,102 @@ Nothing above was performed, and no live fact was established. The table in § 5
   L1.
 
 **The verdict stays NO-GO.**
+
+---
+
+## 14. Update — opt-in materialization of fallback-recovered reports (2026-09-17)
+
+This section records a code change, not a live probe. §§ 1–12 are unchanged. In § 13, only L11,
+L12, the abort rules and the L11 row of the evidence matrix changed. Nothing was downloaded, no
+GitHub API or network was called, no workflow was installed, pushed, dispatched or rerun, and **no
+real log, report or campaign evidence exists**.
+
+**The gap.** `recover:aggregation-campaign-logs` (§ 10) validated and accounted for recovered
+reports only in memory and wrote nothing. The image-cohort review (§ 11) and the accounting command
+(§ 8) read report **files**. So a campaign retrieved through the log fallback could not reach
+Branch A or B with committed tools (§ 13, L11 as first written).
+
+**Added.** One explicit opt-in form of the same command:
+
+`pnpm run recover:aggregation-campaign-logs -- --output-dir <new-directory> <job-log> [<job-log> ...]`
+
+- **The read-only form is unchanged.** Without `--output-dir` the command writes nothing, and its
+  output and exit codes are identical to before.
+- **Option syntax:** exactly one `--output-dir` followed by a value that is non-empty and does not
+  start with `-`. Anything else exits `2` before any file is read: no value, `--output-dir=…`, a
+  repeated option, an empty or `-`-prefixed value, or any other option. The option consumes the next
+  argument, so a log path placed there becomes the destination. The remaining logs then cannot
+  account for 59 slots, and nothing is written.
+- **When files are written:** only when recovery is clean **and** the unchanged accounting is
+  complete (59 slots, zero blockers, zero missing, zero rejected inputs, no commit or topology disagreement).
+  Otherwise the output ends with
+  `materialization: NOT WRITTEN - recovery or accounting is not complete; nothing was created`, the
+  exit is `1`, and the file system is not touched.
+- **What is written:** `slot-01.txt` … `slot-59.txt`. Each name comes from the integer slot that the
+  unchanged `parseSlotReport` read from that report. No name comes from a path, input order, job
+  name or text. Each file's bytes are exactly the accepted recovered string, UTF-8, including its
+  final LF. The recovery library now keeps each accepted string bound to its parsed slot, and the
+  plan re-checks every binding with `parseSlotReport` before anything is written. No second parser
+  exists.
+- **How it is written, fail-closed and non-destructive:**
+  1. The destination must not exist in any form (file, directory, symlink or junction), checked
+     with `lstat`, which never follows a link. Its parent must be an existing directory that is not
+     a link.
+  2. One uniquely named staging directory (`mkdtemp`) is created in that parent. The command checks
+     that it lies directly inside the intended parent before writing anything.
+  3. Each report is created with exclusive creation (`wx`, which never overwrites or follows an
+     existing entry), read back and compared byte for byte. The staging directory must then hold
+     exactly the 59 names.
+  4. The destination is checked again, and one `rename` puts the complete directory in place. No
+     partial destination is ever visible.
+  5. On any failure before that rename, the command removes only the files it created, then its own
+     staging directory with a non-recursive `rmdir`. A foreign entry is never removed. It never
+     overwrites, merges with, cleans or deletes a destination.
+- **Diagnostics** are fixed sentences, with exit `1`:
+  - `output path already exists`;
+  - `output parent is not an existing directory that is not a link`;
+  - `report file could not be created exclusively`;
+  - the other reasons in `MATERIALIZATION_REASON`;
+  - a cleanup state: `nothing was created`, `owned staging state was removed` or
+    `owned staging state could not be fully removed`.
+
+  No path, report content, commit, timestamp or run value is added. The accounting section still
+  prints the one campaign commit, exactly as the read-only form always has.
+
+**Residual race, stated rather than hidden.** Node has no portable no-replace directory rename. A
+directory created at the destination by another process **between** the final check and the rename
+could, on POSIX, be replaced if it is empty. A non-empty directory, a file or a link makes the rename
+fail, and Windows refuses to rename onto an existing directory. The window is one system call wide.
+Use a destination path that nothing else writes to.
+
+**Tests:** `scripts/aggregation-campaign-log-recovery.test.mjs`, **26/26** (the 17 existing tests
+unchanged, plus 9 new ones). They cover:
+
+- the unchanged read-only output, with no file system call;
+- slot binding, deterministic names and exact bytes under shuffled logs and regrouped reports;
+- refusal of incomplete, rejected, duplicate, provenance-inconsistent, blocked and edited campaigns,
+  and of tampered bindings;
+- option syntax (exit `2`, nothing read or written);
+- existing file, directory and link destinations;
+- unusable parents;
+- exclusive-create, read-back, foreign-entry, late-destination, rename, unlink, `mkdtemp` and
+  outside-staging faults, through an injected in-memory file system, including that every mutation
+  stays in owned staging and no partial destination appears;
+- a real-file-system CLI run: 59 exact files, no staging residue, and a repeat, an existing file, an
+  existing empty directory and a junction or symlink each refused unchanged;
+- leakage checks.
+
+An end-to-end **synthetic** test feeds the 59 materialized files to the unchanged accounting command
+(`COMPLETE`, identical to accounting over the rendered reports) and to the image-cohort review with
+a synthetic nine-field manifest (`COHORT: CONSISTENT`). A one-byte edit of one file forces
+`COHORT: BRANCH C`. The five campaign tool test files together pass **87/87** (baseline 78/78).
+
+**Still not proven, so nothing changes:**
+
+- that a real run-log archive is retrievable for a 59-job run;
+- that recovered text equals the uploaded artifact bytes (§ 2.5 item 1);
+- any real 59-job recovery;
+- any real runner-image cohort.
+
+The synthetic fixtures are contract evidence only. **Row 9 stays `UNVERIFIED`, row 10 `BLOCKED`,
+row 11 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict stays NO-GO.**

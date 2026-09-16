@@ -10,9 +10,18 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -21,7 +30,11 @@ import {
   SLOT_STATE,
   accountCampaign,
   formatAccounting,
+  parseSlotReport,
 } from './aggregation-campaign-accounting-lib.mjs';
+import { runAccountingCli } from './aggregation-campaign-accounting.mjs';
+import { COHORT_MANIFEST_SCHEMA } from './aggregation-campaign-image-cohort-lib.mjs';
+import { runImageCohortCli } from './aggregation-campaign-image-cohort.mjs';
 import {
   CALIBRATION_REPORT_FOOTER,
   CALIBRATION_REPORT_HEADER,
@@ -36,13 +49,22 @@ import {
 } from './aggregation-evidence-lib.mjs';
 import {
   LOG_RECOVERY_LIMITS,
+  MATERIALIZATION_CLEANUP,
+  MATERIALIZATION_REASON,
   RECOVERY_REASON,
   extractReportCandidates,
+  formatMaterialization,
   formatRecovery,
+  planReportFiles,
   recoverAndAccount,
   recoverCalibrationReports,
+  reportFileName,
 } from './aggregation-campaign-log-recovery-lib.mjs';
-import { runLogRecoveryCli } from './aggregation-campaign-log-recovery.mjs';
+import {
+  STAGING_PREFIX,
+  materializeReportFiles,
+  runLogRecoveryCli,
+} from './aggregation-campaign-log-recovery.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
@@ -733,4 +755,653 @@ test('the recovery command stays outside pnpm verify, the test phases and ordina
   const ci = readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8');
   assert.ok(!ci.includes('aggregation-campaign-log-recovery'));
   assert.ok(!ci.includes('recover:aggregation-campaign-logs'));
+});
+
+// ---------------------------------------------------------------------------
+// Opt-in materialization (`--output-dir`) — synthetic logs, temporary or fake file systems
+
+const SLOT_NAMES = Array.from({ length: CAMPAIGN_SLOT_COUNT }, (_, index) =>
+  reportFileName(index + 1),
+);
+
+/** A deterministic permutation, so "shuffled" is reproducible. */
+const shuffled = (items, seed = 7) => {
+  const out = [...items];
+  let state = seed;
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    state = (state * 1103515245 + 12345) % 2147483648;
+    const j = state % (i + 1);
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+};
+
+/** In-memory log files for the CLI value: path → text. */
+const memoryLogs = (texts, prefix = 'mem/private-log-') => {
+  const files = new Map(texts.map((text, index) => [`${prefix}${index}.txt`, text]));
+  return {
+    paths: [...files.keys()],
+    sizeOf: (path) => Buffer.byteLength(files.get(path), 'utf8'),
+    readText: (path) => files.get(path),
+  };
+};
+
+/** A file system adapter that records every call and allows none. */
+const forbiddenFs = () => {
+  const calls = [];
+  const fs = new Proxy(
+    {},
+    {
+      get: (_, name) => () => {
+        calls.push(String(name));
+        throw new Error('unexpected file system call');
+      },
+    },
+  );
+  return { fs, calls };
+};
+
+/** An in-memory file system with fault injection; paths are plain strings. */
+class FakeFs {
+  constructor({ dirs = [], files = [], links = [], faults = {} } = {}) {
+    this.dirs = new Set(dirs);
+    this.files = new Map(files);
+    this.links = new Set(links);
+    this.faults = faults;
+    this.calls = [];
+    this.writes = 0;
+  }
+
+  static error(code) {
+    return Object.assign(new Error(code), { code });
+  }
+
+  lstat(path) {
+    this.calls.push(['lstat', path]);
+    const forced = this.faults.lstatError?.(path);
+    if (forced) throw FakeFs.error(forced);
+    let kind = null;
+    if (this.links.has(path)) kind = 'link';
+    else if (this.dirs.has(path)) kind = 'dir';
+    else if (this.files.has(path)) kind = 'file';
+    if (kind === null) throw FakeFs.error('ENOENT');
+    return { isDirectory: () => kind === 'dir', isSymbolicLink: () => kind === 'link' };
+  }
+
+  mkdtemp(prefix) {
+    this.calls.push(['mkdtemp', prefix]);
+    if (this.faults.mkdtempThrows) throw FakeFs.error('EACCES');
+    const path = this.faults.mkdtempPath ?? `${prefix}Ab12Cd`;
+    this.dirs.add(path);
+    return path;
+  }
+
+  writeExclusive(path, bytes) {
+    this.calls.push(['writeExclusive', path]);
+    this.writes += 1;
+    if (this.writes === this.faults.failWriteAt) throw FakeFs.error('EIO');
+    if (this.files.has(path) || this.dirs.has(path) || this.links.has(path)) {
+      throw FakeFs.error('EEXIST');
+    }
+    this.files.set(path, Buffer.from(bytes));
+    if (this.writes === this.faults.injectEntryAfterWrite) {
+      this.files.set(join(dirname(path), 'foreign.txt'), Buffer.from('not ours\n'));
+    }
+    if (this.writes === this.faults.targetAppearsAfterWrite) this.dirs.add(this.faults.target);
+  }
+
+  readBytes(path) {
+    this.calls.push(['readBytes', path]);
+    const bytes = this.files.get(path);
+    if (!bytes) throw FakeFs.error('ENOENT');
+    if (this.faults.corruptReadOf === basename(path)) {
+      return Buffer.concat([bytes, Buffer.from(' ')]);
+    }
+    return Buffer.from(bytes);
+  }
+
+  readdir(path) {
+    this.calls.push(['readdir', path]);
+    return [...this.files.keys()]
+      .filter((file) => dirname(file) === path)
+      .map((file) => basename(file));
+  }
+
+  rename(from, to) {
+    this.calls.push(['rename', from, to]);
+    if (this.faults.renameThrows) throw FakeFs.error('EPERM');
+    for (const [path, bytes] of [...this.files]) {
+      if (dirname(path) === from) {
+        this.files.delete(path);
+        this.files.set(join(to, basename(path)), bytes);
+      }
+    }
+    this.dirs.delete(from);
+    this.dirs.add(to);
+  }
+
+  unlink(path) {
+    this.calls.push(['unlink', path]);
+    if (this.faults.unlinkThrows) throw FakeFs.error('EPERM');
+    if (!this.files.delete(path)) throw FakeFs.error('ENOENT');
+  }
+
+  rmdir(path) {
+    this.calls.push(['rmdir', path]);
+    if ([...this.files.keys()].some((file) => dirname(file) === path)) {
+      throw FakeFs.error('ENOTEMPTY');
+    }
+    if (!this.dirs.delete(path)) throw FakeFs.error('ENOENT');
+  }
+}
+
+const FAKE_PARENT = resolve('fake-materialization-root');
+const FAKE_TARGET = join(FAKE_PARENT, 'recovered');
+const FAKE_STAGING = join(FAKE_PARENT, `${STAGING_PREFIX}Ab12Cd`);
+const MUTATING_CALLS = ['mkdtemp', 'writeExclusive', 'rename', 'unlink', 'rmdir'];
+
+const completePlan = () =>
+  planReportFiles(recoverAndAccount(fullCampaignLogs().map((text) => ({ text }))));
+
+/** Every mutating call stays inside the owned staging directory or is the one rename. */
+function assertOnlyOwnedMutations(fake) {
+  for (const [name, path, to] of fake.calls) {
+    if (name === 'writeExclusive' || name === 'unlink') assert.equal(dirname(path), FAKE_STAGING);
+    if (name === 'rmdir') assert.equal(path, FAKE_STAGING);
+    if (name === 'rename') assert.deepEqual([path, to], [FAKE_STAGING, FAKE_TARGET]);
+  }
+}
+
+const withSlot = (texts, index, text) => texts.map((old, i) => (i === index ? text : old));
+
+/** Campaigns that must never be written, each as log texts. */
+const unwritableCampaigns = () => {
+  const base = fullCampaignLogs();
+  return [
+    ['58 slots', base.slice(0, 58)],
+    ['a report-free extra log', [...base, 'job output only\n']],
+    ['a rejected extra log', [...base, `${CALIBRATION_REPORT_FOOTER}\n`]],
+    ['duplicate slot', withSlot(base, 1, jobLog(report(1)))],
+    ['commit mismatch', withSlot(base, 20, jobLog(report(21, { commit: 'd'.repeat(40) })))],
+    [
+      'topology mismatch',
+      withSlot(
+        base,
+        30,
+        jobLog(report(31, { topology: { ...TOPOLOGY, kernel: '6.18.0-1-azure' } })),
+      ),
+    ],
+    ['blocker', withSlot(base, 11, jobLog(report(12, { kind: 'product' })))],
+    [
+      'edited report',
+      withSlot(
+        base,
+        5,
+        mutate(base[5], 'stress: passed=1 failed=0 of 1', 'stress: passed=2 failed=0 of 1'),
+      ),
+    ],
+  ];
+};
+
+test('materialize: the read-only form is unchanged and never touches the output file system', () => {
+  for (const texts of [fullCampaignLogs(), fullCampaignLogs().slice(0, 58)]) {
+    const logs = memoryLogs(texts);
+    const { fs, calls } = forbiddenFs();
+    const cli = runLogRecoveryCli({
+      argv: logs.paths,
+      sizeOf: logs.sizeOf,
+      readText: logs.readText,
+      fs,
+    });
+    const direct = recoverAndAccount(texts.map((text) => ({ text })));
+    assert.equal(cli.output, formatRecovery(direct));
+    assert.equal(cli.exitCode, direct.exitCode);
+    assert.deepEqual(calls, []);
+    assert.ok(!cli.output.includes('materialization'));
+  }
+  const usage = runLogRecoveryCli({ argv: [] });
+  assert.equal(usage.exitCode, 2);
+  assert.match(usage.output, /\[--output-dir <new-directory>\] <job-log> \[<job-log> \.\.\.\]/);
+});
+
+test('materialize: each accepted string is bound to its parsed slot; names and bytes ignore input order', () => {
+  const logs = withSlot(
+    fullCampaignLogs(),
+    10,
+    jobLog(report(11, { kind: 'event' }), { prefixed: true, crlf: true, red: true }),
+  );
+  const result = recoverAndAccount(logs.map((text) => ({ text })));
+  assert.equal(result.recovery.slotReports.length, CAMPAIGN_SLOT_COUNT);
+  assert.deepEqual(
+    result.recovery.slotReports.map(({ text }) => text).sort(),
+    result.recovery.reports,
+    'the bound strings are exactly the recovered reports',
+  );
+  const plan = planReportFiles(result);
+  assert.equal(plan.ok, true);
+  assert.deepEqual(
+    plan.files.map(({ name }) => name),
+    SLOT_NAMES,
+  );
+  assert.equal(SLOT_NAMES[0], 'slot-01.txt');
+  assert.equal(SLOT_NAMES[58], 'slot-59.txt');
+  for (const file of plan.files) {
+    const expected = file.slot === 11 ? report(11, { kind: 'event' }) : report(file.slot);
+    assert.equal(file.text, expected, `slot ${file.slot} bytes are the rendered report`);
+    assert.equal(parseSlotReport(file.text).report.slot, file.slot);
+    assert.match(file.name, /^slot-[0-5]\d\.txt$/);
+  }
+
+  const mapping = (texts) =>
+    planReportFiles(recoverAndAccount(texts.map((text) => ({ text })))).files.map(
+      ({ name, text }) => [name, text],
+    );
+  const baseline = mapping(logs);
+  assert.deepEqual(mapping(shuffled(logs)), baseline, 'shuffled logs');
+  assert.deepEqual(mapping(shuffled(logs, 99).reverse()), baseline, 'another order');
+  const grouped = [];
+  const order = shuffled(logs, 3);
+  for (let i = 0; i < order.length; i += 7) grouped.push(order.slice(i, i + 7).join(''));
+  assert.deepEqual(mapping(grouped), baseline, 'shuffled reports grouped into fewer logs');
+
+  for (const bad of [0, 60, 1.5, '1', -1, Number.NaN]) {
+    assert.throws(() => reportFileName(bad), RangeError, String(bad));
+  }
+});
+
+test('materialize: only a clean, complete, one-to-one bound recovery yields a plan', () => {
+  for (const [label, texts] of unwritableCampaigns()) {
+    assert.deepEqual(
+      planReportFiles(recoverAndAccount(texts.map((text) => ({ text })))),
+      { ok: false, reason: MATERIALIZATION_REASON.notComplete },
+      label,
+    );
+  }
+
+  // A result that claims completeness but binds wrongly is still refused.
+  const good = recoverAndAccount(fullCampaignLogs().map((text) => ({ text })));
+  const entries = good.recovery.slotReports;
+  const tampered = (slotReports) => ({ ...good, recovery: { ...good.recovery, slotReports } });
+  for (const [label, slotReports] of [
+    ['one binding missing', entries.slice(1)],
+    ['a slot bound twice', [entries[0], ...entries.slice(0, 58)]],
+    ['text bound to the wrong slot', withSlot(entries, 0, { slot: 1, text: entries[1].text })],
+    ['edited text', withSlot(entries, 0, { slot: 1, text: entries[0].text.replace('\n', '\r\n') })],
+    ['not an array', undefined],
+  ]) {
+    assert.deepEqual(
+      planReportFiles(tampered(slotReports)),
+      { ok: false, reason: MATERIALIZATION_REASON.binding },
+      label,
+    );
+  }
+  assert.equal(planReportFiles({ ...good, ok: false }).reason, MATERIALIZATION_REASON.notComplete);
+  assert.equal(planReportFiles(undefined).reason, MATERIALIZATION_REASON.notComplete);
+});
+
+test('materialize: option syntax errors exit 2 before any read or write and echo no value', () => {
+  const logs = memoryLogs(fullCampaignLogs());
+  for (const argv of [
+    ['--output-dir'],
+    ['--output-dir', '', ...logs.paths],
+    ['--output-dir', '--', ...logs.paths],
+    ['--output-dir', '-private-dir', ...logs.paths],
+    ['--output-dir=private-dir', ...logs.paths],
+    ['--output-dir', 'private-a', '--output-dir', 'private-b', ...logs.paths],
+    ['--output-dir', 'private-a'],
+    ['--out', 'private-a', ...logs.paths],
+  ]) {
+    const touched = [];
+    const { fs, calls } = forbiddenFs();
+    const result = runLogRecoveryCli({
+      argv,
+      sizeOf: (path) => touched.push(path),
+      readText: (path) => touched.push(path),
+      fs,
+    });
+    const label = JSON.stringify(argv.slice(0, 5));
+    assert.equal(result.exitCode, 2, label);
+    assert.match(result.output, /usage:/, label);
+    assert.ok(!result.output.includes('private'), label);
+    assert.deepEqual(touched, [], label);
+    assert.deepEqual(calls, [], label);
+  }
+
+  // Accepted before, between or after the logs, and after pnpm's forwarded `--`.
+  for (const argv of [
+    ['--', '--output-dir', FAKE_TARGET, ...logs.paths],
+    [...logs.paths.slice(0, 30), '--output-dir', FAKE_TARGET, ...logs.paths.slice(30)],
+    [...logs.paths, '--output-dir', FAKE_TARGET],
+  ]) {
+    const fake = new FakeFs({ dirs: [FAKE_PARENT] });
+    const result = runLogRecoveryCli({
+      argv,
+      sizeOf: logs.sizeOf,
+      readText: logs.readText,
+      fs: fake,
+    });
+    assert.equal(result.exitCode, 0, result.output);
+    assert.deepEqual(
+      [...fake.files.keys()].map((path) => [dirname(path), basename(path)]),
+      SLOT_NAMES.map((name) => [FAKE_TARGET, name]),
+    );
+  }
+});
+
+test('materialize: incomplete, rejected, duplicate or inconsistent campaigns touch no file system', () => {
+  for (const [label, texts] of unwritableCampaigns()) {
+    const logs = memoryLogs(texts);
+    const { fs, calls } = forbiddenFs();
+    const result = runLogRecoveryCli({
+      argv: ['--output-dir', 'private-out', ...logs.paths],
+      sizeOf: logs.sizeOf,
+      readText: logs.readText,
+      fs,
+    });
+    assert.equal(result.exitCode, 1, label);
+    assert.deepEqual(calls, [], label);
+    assert.match(
+      result.output,
+      /\nmaterialization: NOT WRITTEN - recovery or accounting is not complete; nothing was created\nRESULT: FAIL\n$/,
+      label,
+    );
+    const legacy = formatRecovery(recoverAndAccount(texts.map((text) => ({ text }))));
+    assert.ok(result.output.startsWith(legacy.slice(0, legacy.lastIndexOf('RESULT: '))), label);
+  }
+  const { fs, calls } = forbiddenFs();
+  const unreadable = runLogRecoveryCli({
+    argv: ['--output-dir', 'private-out', 'missing-private.log'],
+    sizeOf: () => {
+      throw new Error('ENOENT');
+    },
+    fs,
+  });
+  assert.equal(unreadable.exitCode, 1);
+  assert.deepEqual(calls, []);
+});
+
+test('materialize: a destination that exists in any form, or an unusable parent, is refused untouched', () => {
+  const { files } = completePlan();
+  const refused = (fake, outputDir = FAKE_TARGET) => {
+    const outcome = materializeReportFiles({ outputDir, files, fs: fake });
+    assert.equal(outcome.written, false);
+    assert.equal(outcome.cleanup, MATERIALIZATION_CLEANUP.none);
+    assert.ok(!fake.calls.some(([name]) => MUTATING_CALLS.includes(name)));
+    return outcome.reason;
+  };
+  for (const [label, fake] of [
+    ['existing directory', new FakeFs({ dirs: [FAKE_PARENT, FAKE_TARGET] })],
+    [
+      'existing file',
+      new FakeFs({ dirs: [FAKE_PARENT], files: [[FAKE_TARGET, Buffer.from('keep')]] }),
+    ],
+    ['symlink or junction', new FakeFs({ dirs: [FAKE_PARENT], links: [FAKE_TARGET] })],
+  ]) {
+    assert.equal(refused(fake), MATERIALIZATION_REASON.exists, label);
+  }
+  const denied = new FakeFs({
+    dirs: [FAKE_PARENT],
+    faults: { lstatError: (path) => (path === FAKE_TARGET ? 'EACCES' : null) },
+  });
+  assert.equal(refused(denied), MATERIALIZATION_REASON.uncheckable);
+  assert.equal(refused(new FakeFs({ links: [FAKE_PARENT] })), MATERIALIZATION_REASON.parent);
+  assert.equal(
+    refused(new FakeFs({ files: [[FAKE_PARENT, Buffer.from('x')]] })),
+    MATERIALIZATION_REASON.parent,
+  );
+  assert.equal(refused(new FakeFs()), MATERIALIZATION_REASON.parent, 'missing parent');
+  assert.equal(refused(new FakeFs(), resolve('/')), MATERIALIZATION_REASON.invalidName, 'root');
+});
+
+test('materialize: failures after staging remove only owned state and never expose a partial output', () => {
+  const { files } = completePlan();
+  const run = (faults) => {
+    const fake = new FakeFs({ dirs: [FAKE_PARENT], faults: { target: FAKE_TARGET, ...faults } });
+    const outcome = materializeReportFiles({ outputDir: FAKE_TARGET, files, fs: fake });
+    assertOnlyOwnedMutations(fake);
+    assert.equal(outcome.written, false);
+    assert.ok(![...fake.files.keys()].some((path) => dirname(path) === FAKE_TARGET));
+    assert.ok(!fake.calls.some(([name]) => name === 'rename') || faults.renameThrows);
+    const line = formatMaterialization(outcome);
+    assert.match(line, /^materialization: FAILED - /);
+    for (const leak of [FAKE_PARENT, 'recovered', STAGING_PREFIX, 'Ab12Cd']) {
+      assert.ok(!line.includes(leak), leak);
+    }
+    return { fake, outcome };
+  };
+  const removed = (fake) => {
+    assert.equal(fake.files.size, 0);
+    assert.ok(!fake.dirs.has(FAKE_STAGING));
+  };
+
+  const failedWrite = run({ failWriteAt: 30 });
+  assert.equal(failedWrite.outcome.reason, MATERIALIZATION_REASON.create);
+  assert.equal(failedWrite.outcome.cleanup, MATERIALIZATION_CLEANUP.removed);
+  assert.equal(failedWrite.fake.calls.filter(([name]) => name === 'unlink').length, 29);
+  removed(failedWrite.fake);
+
+  const corrupt = run({ corruptReadOf: 'slot-17.txt' });
+  assert.equal(corrupt.outcome.reason, MATERIALIZATION_REASON.verify);
+  assert.equal(corrupt.outcome.cleanup, MATERIALIZATION_CLEANUP.removed);
+  removed(corrupt.fake);
+
+  const foreign = run({ injectEntryAfterWrite: 59 });
+  assert.equal(foreign.outcome.reason, MATERIALIZATION_REASON.entries);
+  assert.equal(foreign.outcome.cleanup, MATERIALIZATION_CLEANUP.incomplete);
+  assert.deepEqual([...foreign.fake.files.keys()], [join(FAKE_STAGING, 'foreign.txt')]);
+  assert.ok(foreign.fake.dirs.has(FAKE_STAGING), 'never removed recursively');
+
+  const lateTarget = run({ targetAppearsAfterWrite: 59 });
+  assert.equal(lateTarget.outcome.reason, MATERIALIZATION_REASON.exists);
+  assert.equal(lateTarget.outcome.cleanup, MATERIALIZATION_CLEANUP.removed);
+  assert.ok(lateTarget.fake.dirs.has(FAKE_TARGET), 'the concurrently created directory is kept');
+  removed(lateTarget.fake);
+
+  const renameFails = run({ renameThrows: true });
+  assert.equal(renameFails.outcome.reason, MATERIALIZATION_REASON.rename);
+  assert.equal(renameFails.outcome.cleanup, MATERIALIZATION_CLEANUP.removed);
+  removed(renameFails.fake);
+
+  const unlinkFails = run({ failWriteAt: 3, unlinkThrows: true });
+  assert.equal(unlinkFails.outcome.cleanup, MATERIALIZATION_CLEANUP.incomplete);
+
+  const noStaging = run({ mkdtempThrows: true });
+  assert.deepEqual(noStaging.outcome, {
+    written: false,
+    reason: MATERIALIZATION_REASON.staging,
+    cleanup: MATERIALIZATION_CLEANUP.none,
+  });
+
+  const outside = new FakeFs({
+    dirs: [FAKE_PARENT],
+    faults: { mkdtempPath: resolve('elsewhere', `${STAGING_PREFIX}Zz9`) },
+  });
+  assert.deepEqual(materializeReportFiles({ outputDir: FAKE_TARGET, files, fs: outside }), {
+    written: false,
+    reason: MATERIALIZATION_REASON.stagingOutside,
+    cleanup: MATERIALIZATION_CLEANUP.notRemoved,
+  });
+  assert.ok(
+    !outside.calls.some(([name]) => ['writeExclusive', 'unlink', 'rmdir', 'rename'].includes(name)),
+  );
+
+  const success = new FakeFs({ dirs: [FAKE_PARENT] });
+  assert.deepEqual(materializeReportFiles({ outputDir: FAKE_TARGET, files, fs: success }), {
+    written: true,
+    count: CAMPAIGN_SLOT_COUNT,
+  });
+  assertOnlyOwnedMutations(success);
+  assert.ok(!success.dirs.has(FAKE_STAGING));
+  assert.equal(success.calls.filter(([name]) => name === 'rename').length, 1);
+});
+
+test('materialize: the real CLI writes 59 exact files once, and a repeat or existing path is never overwritten', () => {
+  const root = tempDir();
+  const logDir = join(root, 'private-logs');
+  mkdirSync(logDir);
+  const texts = withSlot(
+    fullCampaignLogs(),
+    10,
+    jobLog(report(11, { kind: 'event' }), { prefixed: true, crlf: true, red: true }),
+  );
+  const paths = shuffled(
+    texts.map((text, index) => {
+      const path = join(logDir, `private-job-${index}.log`);
+      writeFileSync(path, text);
+      return path;
+    }),
+  );
+  const out = join(root, 'recovered-private');
+  const run = (args) => spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8' });
+
+  const legacy = run(paths);
+  assert.equal(legacy.status, 0);
+  assert.deepEqual(readdirSync(root), ['private-logs'], 'the read-only form wrote nothing');
+
+  const first = run(['--output-dir', out, ...paths]);
+  assert.equal(first.status, 0, first.stdout);
+  assert.equal(first.stderr, '');
+  assert.ok(first.stdout.startsWith(legacy.stdout.slice(0, legacy.stdout.lastIndexOf('RESULT: '))));
+  assert.match(
+    first.stdout,
+    /\nmaterialization: WRITTEN - 59 report files slot-01\.txt\.\.slot-59\.txt in a newly created output directory\nRESULT: PASS\n$/,
+  );
+  assert.deepEqual(readdirSync(root).sort(), ['private-logs', 'recovered-private']);
+  assert.deepEqual(readdirSync(out).sort(), SLOT_NAMES);
+  for (let slot = 1; slot <= CAMPAIGN_SLOT_COUNT; slot += 1) {
+    const expected = slot === 11 ? report(11, { kind: 'event' }) : report(slot);
+    assert.ok(
+      readFileSync(join(out, reportFileName(slot))).equals(Buffer.from(expected, 'utf8')),
+      `slot ${slot}`,
+    );
+  }
+  for (const leak of [root, 'private', '2026-09-16T01:00', STAGING_PREFIX]) {
+    assert.ok(!first.stdout.includes(leak), leak);
+  }
+  // The commit appears only where the unchanged accounting already prints it;
+  // everything the materialization adds carries no recovered value.
+  const added = first.stdout.slice(legacy.stdout.lastIndexOf('RESULT: '));
+  for (const leak of [root, COMMIT, STAGING_PREFIX, 'recovered-private']) {
+    assert.ok(!added.includes(leak), leak);
+  }
+  assert.equal(
+    first.stdout.split(COMMIT).length,
+    legacy.stdout.split(COMMIT).length,
+    'no additional commit occurrence',
+  );
+
+  const snapshot = () =>
+    SLOT_NAMES.map((name) => [
+      name,
+      readFileSync(join(out, name)),
+      statSync(join(out, name)).mtimeMs,
+    ]);
+  const before = snapshot();
+  const repeat = run(['--output-dir', out, ...shuffled(paths, 11)]);
+  assert.equal(repeat.status, 1);
+  assert.match(
+    repeat.stdout,
+    /\nmaterialization: FAILED - output path already exists; nothing was created\nRESULT: FAIL\n$/,
+  );
+  assert.deepEqual(snapshot(), before, 'the existing output is unchanged');
+
+  const fileTarget = join(root, 'private-file');
+  writeFileSync(fileTarget, 'keep me\n');
+  const onFile = run(['--output-dir', fileTarget, ...paths]);
+  assert.equal(onFile.status, 1);
+  assert.equal(readFileSync(fileTarget, 'utf8'), 'keep me\n');
+
+  const emptyDir = join(root, 'private-empty');
+  mkdirSync(emptyDir);
+  assert.equal(run(['--output-dir', emptyDir, ...paths]).status, 1);
+  assert.deepEqual(
+    readdirSync(emptyDir),
+    [],
+    'an existing empty directory is neither filled nor merged',
+  );
+
+  const linkTarget = join(root, 'private-link');
+  let linked = false;
+  try {
+    symlinkSync(emptyDir, linkTarget, 'junction');
+    linked = true;
+  } catch {
+    // The platform may refuse to create a link; the fake file system covers the rule.
+  }
+  if (linked) {
+    const onLink = run(['--output-dir', linkTarget, ...paths]);
+    assert.equal(onLink.status, 1);
+    assert.match(onLink.stdout, /output path already exists/);
+    assert.deepEqual(readdirSync(emptyDir), [], 'nothing is written through a link');
+  }
+
+  const noParent = run(['--output-dir', join(root, 'missing-private', 'out'), ...paths]);
+  assert.equal(noParent.status, 1);
+  assert.match(noParent.stdout, /output parent is not an existing directory that is not a link/);
+
+  assert.ok(
+    !readdirSync(root).some((name) => name.startsWith(STAGING_PREFIX)),
+    'no staging residue',
+  );
+  for (const result of [repeat, onFile, noParent]) {
+    assert.ok(!result.stdout.includes(root));
+    assert.ok(!result.stdout.includes('private'));
+  }
+});
+
+test('materialize: synthetic materialized files pass the unchanged accounting and image-cohort commands', () => {
+  const root = tempDir();
+  const texts = withSlot(
+    fullCampaignLogs(),
+    10,
+    jobLog(report(11, { kind: 'event' }), { prefixed: true, red: true }),
+  );
+  const logs = memoryLogs(texts);
+  const out = join(root, 'recovered');
+  const cli = runLogRecoveryCli({
+    argv: ['--output-dir', out, ...shuffled(logs.paths)],
+    sizeOf: logs.sizeOf,
+    readText: logs.readText,
+  });
+  assert.equal(cli.exitCode, 0, cli.output);
+  const files = SLOT_NAMES.map((name) => join(out, name));
+
+  const accounting = runAccountingCli({ argv: shuffled(files, 5) });
+  assert.equal(accounting.exitCode, 0, accounting.output);
+  assert.match(accounting.output, /totals: non-events=58 events=1 blockers=0 missing=0/);
+  const rendered = accountCampaign(
+    Array.from({ length: CAMPAIGN_SLOT_COUNT }, (_, i) => ({
+      text: i === 10 ? report(11, { kind: 'event' }) : report(i + 1),
+    })),
+  );
+  assert.equal(
+    accounting.output,
+    formatAccounting(rendered),
+    'files account like the rendered reports',
+  );
+
+  // A synthetic nine-field manifest: illustrative values, not an observed release state.
+  const manifestPath = join(root, 'synthetic-manifest.json');
+  const manifest = {
+    schema: COHORT_MANIFEST_SCHEMA,
+    observed_at: '2026-09-15T08:00:00Z',
+    runner_label: 'ubuntu-24.04',
+    current_image_release: 'ubuntu24/20260907.300',
+    current_image_published_at: '2026-09-08T09:34:53Z',
+    previous_image_release: 'ubuntu24/20260831.293',
+    previous_image_published_at: '2026-09-01T09:00:00Z',
+    branch_c_on_topology_mismatch_acknowledged: true,
+    campaign_commit: COMMIT,
+  };
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const now = new Date('2026-09-17T00:00:00Z');
+  const cohort = runImageCohortCli({ argv: [manifestPath, ...shuffled(files, 13)], now });
+  assert.equal(cohort.exitCode, 0, cohort.output);
+  assert.match(cohort.output, /COHORT: CONSISTENT/);
+
+  // One changed byte in one materialized file is no longer a consistent cohort.
+  writeFileSync(files[3], readFileSync(files[3], 'utf8').replace('pairs: 1;', 'pairs: 2;'));
+  const edited = runImageCohortCli({ argv: [manifestPath, ...files], now });
+  assert.equal(edited.exitCode, 1);
+  assert.match(edited.output, /COHORT: BRANCH C/);
 });
