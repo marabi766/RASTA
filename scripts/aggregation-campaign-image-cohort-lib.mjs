@@ -187,6 +187,19 @@ function scanFlatObject(text) {
   return entries;
 }
 
+/**
+ * The same flat-object reading for other ADR-055 records with the same
+ * raw-JSON rules: `{ ok: true, entries }` in text order, or `{ ok: false }`.
+ */
+export function parseFlatJsonObject(text) {
+  try {
+    return { ok: true, entries: scanFlatObject(String(text)) };
+  } catch (error) {
+    if (!(error instanceof ManifestSyntaxError) && !(error instanceof SyntaxError)) throw error;
+    return { ok: false };
+  }
+}
+
 /** Milliseconds for a real whole-second UTC calendar instant, or `null`. */
 function utcSecond(value) {
   const match = UTC_SECOND.exec(value);

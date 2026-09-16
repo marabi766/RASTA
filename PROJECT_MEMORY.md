@@ -1133,6 +1133,24 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 > حل‌نشده‌اند، پس **NO-GO**. هیچ دانلود، فراخوان شبکه/GitHub، Workflow، کمپین، Docker/PostgreSQL، `ci.yml`، فازهای
 > تست یا Backlog تغییر نکرد. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز است.
 >
+> **به‌روزرسانی 2026-09-16 (ADR-055 — قرارداد بستهٔ Preflight اجرا با پیوند بایتی؛ حکم NO-GO):** ابزار دستی
+> `pnpm run check:aggregation-campaign-preflight -- <launch-record> <workflow-snapshot> <image-cohort-manifest>`
+> (`scripts/aggregation-campaign-preflight.mjs` + کتابخانهٔ خالص) دقیقاً سه فایل را پس از بررسی اندازه بایتی
+> می‌خواند و چیزی نمی‌نویسد. Launch Record ‏JSON تخت با ۱۰ فیلد ثابت است (`schema`
+> ‏`adr-055-launch-preflight-record/v1`، `campaign_commit`، SHA-256 ِ Workflow و Manifest، `primary_retrieval`
+> ‏`per-slot-uploaded-artifacts` و پنج تأیید `true` برای `run_attempt == 1`، نااهلی Rerun/Retry/Re-dispatch، Fallback
+> آرشیو Log، نابرابری اثبات‌نشدهٔ آن با بایت Artifact و اثبات‌نشدگی دسترس‌پذیری بازیابی) و با Scanner خام Manifest
+> ‏Cohort (صادرات تازهٔ `parseFlatJsonObject`) خوانده می‌شود. `PREFLIGHT: COMPLETE` (خروج `0`) فقط با Record پذیرفته،
+> برابری SHA-256 بایت‌های دقیق هر دو فایل (بی نرمال‌سازی)، گذر `validateWorkflowDraft` و `validateCohortManifest`
+> بی‌تغییر در زمان اجرای فرمان، و برابری Commit ِ Record با Manifest؛ وگرنه `PREFLIGHT: REJECTED` (`1`) و خطای
+> استفاده `2`. مسیر، Digest، Commit، زمان یا محتوا چاپ نمی‌شود. آزمون تازه **۱۲/۱۲** با پیش‌نویس ثبت‌شده و Record/
+> Manifest **ساختگی**؛ ۱۴ جهش منبع (پیوندهای Digest، Hash نرمال‌شده، پیوند Commit، دو اعتبارسنج، تأییدها) شکار شد؛
+> از ۱۲ جهش دستی دیگر ۱۱ شکار و یکی هم‌ارز. بیرون از `pnpm verify` و CI. هیچ Launch Record یا Manifest واقعی وجود
+> ندارد و نصب Snapshot، Retry درونی GitHub، `run_attempt` واقعی، دسترس‌پذیری Artifact/آرشیو و برابری بایتی بازیابی
+> اثبات نشده است. سطر ۹ `UNVERIFIED`، سطر ۱۰ `BLOCKED`، سطر ۱۱ `UNVERIFIED`، سطرهای ۲/۶/۷/۸ حل‌نشده، پس **NO-GO**.
+> هیچ دانلود، فراخوان شبکه/GitHub، نصب یا اجرای Workflow، کمپین، Docker/PostgreSQL، `ci.yml`، فازهای تست یا Backlog
+> تغییر نکرد. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز است.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

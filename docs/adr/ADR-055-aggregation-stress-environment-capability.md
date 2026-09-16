@@ -1543,6 +1543,55 @@ Harness واقعی درون قاب Log **ساختگی** کار می‌کند. ا
 
 ---
 
+## وضعیت پیاده‌سازی — 2026-09-16: قرارداد بستهٔ Preflight اجرا با پیوند بایتی — **حکم همچنان NO-GO**
+
+> **این ADR همچنان `Proposed` است و حکم اجرا همچنان NO-GO.** این گام فقط آماده‌سازی آفلاین است. هیچ Workflowی
+> ساخته، نصب، Push، Dispatch یا Rerun نشد؛ هیچ Artifact یا Log دانلود نشد؛ هیچ API ‏GitHub یا شبکه‌ای فراخوانده نشد؛
+> هیچ کمپین، اندازه‌گیری یا Docker/PostgreSQL اجرا نشد؛ و **هیچ Launch Record یا Manifest واقعی وجود ندارد.** دست
+> نخوردند: اعتبارسنج Workflow، پیش‌نویس Workflow، شمارش Slot و طبقه‌بندی آن، بازیابی Log، طراحی آماری و Branchهای
+> A/B/C، `ci.yml`، فازهای تست، `pnpm verify`، `planning/backlog.json` و Artifactهای اندازه‌گیری.
+
+**چرا.** بررسی Workflow و بازبینی Cohort ‏Image هر کدام فقط یک ورودی را جداگانه می‌سنجیدند. چیزی فایل قرار به نصب
+را به Manifest بازبینی‌شده، Commit کمپین و سیاست Retry و بازیابی پذیرفته‌شده گره نمی‌زد.
+
+**ابزار.** `pnpm run check:aggregation-campaign-preflight -- <launch-record> <workflow-snapshot> <image-cohort-manifest>`
+(`scripts/aggregation-campaign-preflight.mjs` + کتابخانهٔ خالص `aggregation-campaign-preflight-lib.mjs`) دستی است و
+بیرون از `pnpm verify`، فازهای تست و CI می‌ماند. دقیقاً سه فایل موضعی می‌گیرد، اندازهٔ هر کدام را پیش از خواندن بررسی
+می‌کند (Record ‏۴ KiB، Workflow ‏۲۵۶ KiB، Manifest ‏۴ KiB)، آن‌ها را بایتی می‌خواند، چیزی نمی‌نویسد و هیچ مسیر، Digest،
+Commit، زمان یا محتوایی چاپ نمی‌کند. خروج `0` فقط برای `PREFLIGHT: COMPLETE`، `1` برای `PREFLIGHT: REJECTED` و `2`
+برای خطای استفاده.
+
+**Launch Record** یک شیء JSON تخت با دقیقاً این ۱۰ فیلد است: `schema` (`adr-055-launch-preflight-record/v1`)،
+`campaign_commit` (۴۰ هگز کوچک)، `workflow_snapshot_sha256` و `image_cohort_manifest_sha256` (۶۴ هگز کوچک)،
+`primary_retrieval` (دقیقاً `per-slot-uploaded-artifacts`) و پنج بولی که باید `true` باشند:
+`require_run_attempt_one`، `rerun_retry_redispatch_ineligible_acknowledged`،
+`run_log_archive_fallback_acknowledged`، `fallback_not_artifact_byte_equality_acknowledged` و
+`retrieval_availability_not_proven_acknowledged`. با همان Scanner خام Manifest ‏Cohort خوانده می‌شود (تابع صادرشدهٔ
+تازهٔ `parseFlatJsonObject`؛ خروجی CLI ‏Cohort بی‌تغییر). فیلد تکراری (حتی با Escape)، ناشناخته، غایب یا با نوع
+نادرست، BOM، Comment، دادهٔ پسین، تودرتویی، عدد، `null` یا UTF-8 نامعتبر رد می‌شود. هیچ فیلد Account، Run، Billing،
+زمان یا نسخهٔ Image ندارد.
+
+**آنچه اکنون مکانیکی اجبار می‌شود.** `PREFLIGHT: COMPLETE` فقط وقتی: Record پذیرفته باشد؛ SHA-256 بایت‌های دقیق
+Workflow برابر Digest ثبت‌شده باشد (بی نرمال‌سازی؛ یک بایت، پایان سطر یا Newline پایانی پیوند را می‌شکند)؛
+`validateWorkflowDraft` بی‌تغییر روی همان Snapshot بگذرد؛ SHA-256 بایت‌های دقیق Manifest برابر Digest ثبت‌شده باشد؛
+`validateCohortManifest` بی‌تغییر آن را در زمان اجرای فرمان بپذیرد؛ و `campaign_commit` ِ Record برابر Manifest باشد.
+مشکلات Workflow فقط شمرده می‌شوند و مشکلات Manifest همان رشته‌های ثابت بازبینی Cohort‌اند.
+
+**آزمون.** `scripts/aggregation-campaign-preflight.test.mjs` ‏**۱۲/۱۲**، با پیش‌نویس Workflow ثبت‌شده بایت‌به‌بایت و
+Record و Manifest **ساختگی**. ۱۴ جهش روی منبع واقعی کتابخانه (در کپی موقت) نشان می‌دهند دور زدن هر یک از دو پیوند
+Digest، Hash روی متن نرمال‌شده، دور زدن پیوند Commit، نادیده گرفتن یا دور زدن اعتبارسنج Workflow، دور زدن اعتبارسنج
+Manifest، یا حذف بررسی تأییدها و بازیابی (از جمله هر یک از پنج تأیید جداگانه) شکار می‌شود. ۱۲ جهش دستی دیگر هم زده
+شد: ۱۱ شکار شد و تنها بازمانده (حذف شرط پذیرش Manifest از تصمیم نهایی) هم‌ارز است، چون پیوند Commit فقط از Manifest
+پذیرفته‌شده ساخته می‌شود.
+
+**مرز صادقانه.** اثبات **نشده‌ها:** نصب شدن Snapshot؛ نبودن Retry درونی GitHub؛ `run_attempt` ‏`1` برای هر اجرا؛
+دسترس‌پذیری Artifact یا آرشیو Log؛ برابری متن بازیابی‌شده با بایت‌های Artifact؛ بازیابی واقعی ۵۹ Job؛ و برابری مقادیر
+Manifest با وضعیت واقعی Release. پس **سطر ۹ `UNVERIFIED`، سطر ۱۰ `BLOCKED`، سطر ۱۱ `UNVERIFIED`** و سطرهای ۲، ۶، ۷
+و ۸ حل‌نشده می‌مانند. **حکم NO-GO می‌ماند.** ADR-055 و ADR-053 همچنان `Proposed`، AUD-004 باز، `COM-009` همچنان
+`READY`/۱۳.
+
+---
+
 ## Rollout، Rollback و رصدپذیری
 
 - **امروز (`Proposed`): هیچ تغییری در رفتار زمان اجرا یا CI.** نه Preflight، نه Classifier، نه دروازه. ابزارهای موجود —

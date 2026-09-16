@@ -479,3 +479,84 @@ rewrites the minority topology to the majority, would pass where the real review
    the single topology.
 
 **Rows 2, 6, 7, 8, 9, 10 and 11 remain unresolved. The verdict stays NO-GO.**
+
+---
+
+## 12. Update — launch preflight bundle contract (later on 2026-09-16)
+
+This section records a code change, not a live probe. §§ 1–5 above are the gate as it was run and
+are not rewritten. Nothing was downloaded, no GitHub API or network was called, no workflow was
+installed, pushed, dispatched or rerun, and **no real launch record or image-cohort manifest
+exists**.
+
+**Added.** `pnpm run check:aggregation-campaign-preflight -- <launch-record> <workflow-snapshot> <image-cohort-manifest>`
+(`scripts/aggregation-campaign-preflight.mjs` and its pure library). It is manual and is not part of
+`pnpm verify`, the test phases or `ci.yml`. It takes exactly three positional files, checks each size
+before reading (record 4 KiB, workflow 256 KiB, manifest 4 KiB), reads them as bytes, writes nothing,
+and never prints a path, digest, commit, timestamp or file content. Exit `0` only for
+`PREFLIGHT: COMPLETE`, `1` for `PREFLIGHT: REJECTED`, `2` for a usage error.
+
+**Why.** The workflow check (§ 9) and the image-cohort review (§ 11) each validate one launch input
+on its own. Nothing tied the file to be installed to the manifest that was reviewed, the commit
+being launched, or the retry and retrieval policy accepted for the launch.
+
+**The launch record** is one flat JSON object with exactly these fields. It is read with the same
+raw-JSON scanner as the image-cohort manifest, so a duplicate (including an escaped spelling), an
+unknown, missing or mistyped field, a BOM, comment, trailing data, nesting, a number or `null`, or
+invalid UTF-8 rejects it:
+
+| field                                              | rule                                         |
+| -------------------------------------------------- | -------------------------------------------- |
+| `schema`                                           | exactly `adr-055-launch-preflight-record/v1` |
+| `campaign_commit`                                  | 40 lowercase hex characters                  |
+| `workflow_snapshot_sha256`                         | 64 lowercase hex characters                  |
+| `image_cohort_manifest_sha256`                     | 64 lowercase hex characters                  |
+| `require_run_attempt_one`                          | JSON `true`                                  |
+| `rerun_retry_redispatch_ineligible_acknowledged`   | JSON `true`                                  |
+| `primary_retrieval`                                | exactly `per-slot-uploaded-artifacts`        |
+| `run_log_archive_fallback_acknowledged`            | JSON `true`                                  |
+| `fallback_not_artifact_byte_equality_acknowledged` | JSON `true`                                  |
+| `retrieval_availability_not_proven_acknowledged`   | JSON `true`                                  |
+
+It has no account, run, billing, timestamp or image-version field.
+
+**What is now mechanically enforced.** `PREFLIGHT: COMPLETE` requires all of:
+
+1. an accepted launch record;
+2. SHA-256 of the exact workflow bytes equal to `workflow_snapshot_sha256`, with no normalisation, so
+   one changed byte, a line ending or a trailing newline breaks the link;
+3. the unchanged `validateWorkflowDraft` passing on that snapshot (59-slot matrix, `ubuntu-24.04`,
+   45 minutes, push-only, first-step `run_attempt` refusal, one measurement, one `if: always()`
+   upload, pinned actions and the rest of the § 9 contract);
+4. SHA-256 of the exact manifest bytes equal to `image_cohort_manifest_sha256`;
+5. the unchanged `validateCohortManifest` accepting the manifest at the time the command runs;
+6. the record's `campaign_commit` equal to the manifest's.
+
+Workflow problems are counted, not printed; manifest problems are the image-cohort review's fixed
+strings. The only library change outside the new files is one exported wrapper,
+`parseFlatJsonObject`, around the image-cohort manifest scanner; the image-cohort CLI output is
+unchanged (its tests still pass 15/15).
+
+**Tests:** `scripts/aggregation-campaign-preflight.test.mjs`, **12/12**, using the committed workflow
+draft byte for byte and **synthetic** records and manifests. They cover a complete bundle, digest
+breaks from trailing newline, whitespace, comment, CRLF and field-order changes, commit mismatch,
+workflow and manifest validator failures under a matching digest, every missing, duplicate, mistyped
+and unknown record field, every false acknowledgment, bad enums, digests, commit and schema,
+malformed JSON, invalid UTF-8, oversized and unreadable inputs that are never read, argument errors,
+exit codes, leakage and no filesystem writes. Fourteen source-level mutants of the library, run from
+a temporary copy, prove that bypassing either digest link, hashing normalised text, bypassing the
+commit linkage, ignoring or bypassing the workflow validator, bypassing the manifest validator, or
+dropping the acknowledgment or retrieval checks (including each of the five acknowledgments
+separately) is caught.
+
+**Still live, and not proven by this check:**
+
+- that the supplied snapshot is, or ever will be, the installed workflow;
+- that GitHub never retries hosted-runner infrastructure internally, or that any run has
+  `run_attempt` `1`;
+- artifact reachability, run-log archive availability, equality of recovered log text with
+  artifact bytes, or any real 59-job recovery;
+- that the manifest's values match GitHub's real release state.
+
+**Row 9 stays `UNVERIFIED`, row 10 `BLOCKED`, row 11 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved.
+The verdict stays NO-GO.**
