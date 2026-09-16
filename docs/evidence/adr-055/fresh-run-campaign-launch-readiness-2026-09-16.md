@@ -214,7 +214,7 @@ unresolved, so the verdict is unchanged.
    **Implemented later on 2026-09-16 (§ 8).**
 5. **Image cohort:** a launch timed and documented against the runner-image release state, with
    the Branch C consequence of any topology mismatch accepted in advance. **Manifest contract and
-   post-run cohort check implemented on 2026-09-17 (§ 11); the real pre-launch snapshot and the real
+   post-run cohort check implemented later on 2026-09-16 (§ 11); the real pre-launch snapshot and the real
    59-report check are still outstanding.**
 6. **Retry prohibition at job level:** verified in the workflow itself when it is drafted, including
    a check that every run's `run_attempt` is `1`. **Draft and static check implemented later on
@@ -411,7 +411,7 @@ NO-GO.**
 
 ---
 
-## 11. Update — row 9: image-cohort review contract (2026-09-17)
+## 11. Update — row 9: image-cohort review contract (later on 2026-09-16)
 
 This section records a code change, not a live probe. §§ 1–5 above are the gate as it was run and
 are not rewritten; the only other edit is a note on prerequisite 5 in § 6. Nothing was downloaded,

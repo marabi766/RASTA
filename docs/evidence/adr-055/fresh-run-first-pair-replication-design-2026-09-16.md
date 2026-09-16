@@ -444,7 +444,7 @@ campaigns share a byte-identical `topology:` line (Ubuntu 24.04.5 LTS, image
 do **not** all report the same topology, the slots are not comparable and § 6 Branch C applies. The
 future review must check this across all 59 artifacts, not assume it.
 
-**Cohort review, added 2026-09-17 after this preregistration.** That check now has a committed tool:
+**Cohort review, added 2026-09-16 after this preregistration.** That check now has a committed tool:
 `pnpm run review:aggregation-campaign-image-cohort -- <review-manifest> <report> …`. It validates a
 pre-launch release-snapshot manifest, runs the § 8.4 accounting, and prints `COHORT: BRANCH C` unless
 the accounting is complete with one commit and one byte-identical measured topology. Its fixtures

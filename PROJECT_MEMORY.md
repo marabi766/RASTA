@@ -1116,7 +1116,7 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 > فازهای تست یا Backlog تغییر نکرد. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز
 > است.
 >
-> **به‌روزرسانی 2026-09-17 (ADR-055 — قرارداد بازبینی Cohort ‏Runner/Image؛ سطر ۹ همچنان `UNVERIFIED`، حکم
+> **به‌روزرسانی 2026-09-16 (ADR-055 — قرارداد بازبینی Cohort ‏Runner/Image؛ سطر ۹ همچنان `UNVERIFIED`، حکم
 > NO-GO):** ابزار دستی `pnpm run review:aggregation-campaign-image-cohort -- <review-manifest> <report> …`
 > (`scripts/aggregation-campaign-image-cohort.mjs` + کتابخانهٔ خالص) دو نیمهٔ جدا دارد: (۱) Manifest ‏JSON پیش از
 > اجرا با ۹ فیلد ثابت (`schema` ‏`adr-055-image-cohort-review/v1`، `observed_at`، `runner_label` ‏`ubuntu-24.04`،
