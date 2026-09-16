@@ -347,6 +347,12 @@ with `pnpm run check:aggregation-campaign-workflow -- <draft>`. The check is sta
 exits `0` only when the whole contract holds. A launch must run the same check on the installed copy
 before pushing it. No design value in this section or in §§ 3–7 and § 9 changed.
 
+**Offline log recovery, added 2026-09-16 after this preregistration.** The § 9.3 fallback now has a
+committed tool: `pnpm run recover:aggregation-campaign-logs -- <job-log> …`. It recovers each report
+between the calibration header and footer, removes only the § 9.3 log-line prefix and CRLF line framing, validates each
+report with the same strict parser as a downloaded artifact, and runs the § 8.4 accounting. Its
+fixtures are synthetic, and no design value changed.
+
 ### 8.4 How the aggregation/review step counts 59 slots
 
 **A red job is neither missing nor green, and the counting step must not read job conclusions at

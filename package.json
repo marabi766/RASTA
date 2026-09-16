@@ -38,6 +38,7 @@
     "calibrate:aggregation-stress": "node scripts/aggregation-evidence.mjs --calibrate",
     "account:aggregation-campaign": "node scripts/aggregation-campaign-accounting.mjs",
     "check:aggregation-campaign-workflow": "node scripts/aggregation-campaign-workflow.mjs",
+    "recover:aggregation-campaign-logs": "node scripts/aggregation-campaign-log-recovery.mjs",
     "test:grafana-dashboard-lib": "node --test scripts/check-grafana-dashboard.test.mjs",
     "check:grafana-dashboard": "node scripts/check-grafana-dashboard.mjs",
     "test:grafana-live-isolation-lib": "node --test scripts/verify-grafana-dashboard-isolation.test.mjs",

@@ -188,7 +188,7 @@ for a 418 expected / 2655 ceiling job-minute exposure exists in this repository.
 | 8   | billing / allowance / spending authorization     | **BLOCKED**    | billing endpoints HTTP 404, `user` scope required and not requested (§ 2.2); no owner authorization recorded (§ 4)                                                                                                                                                                           |
 | 9   | runner / image comparability plan                | **UNVERIFIED** | today's jobs are on `20260907.300.1` (§ 2.4) but images update weekly with a 2–3 day rollout and no version pin (§ 3); the newest release is 8 days old, so a roll-forward during the campaign is plausible. Only the 59 resulting `topology:` lines can validate it; a mismatch is Branch C |
 | 10  | artifact retrieval                               | **BLOCKED**    | artifact download and artifact zip both timed out (§ 2.5); log fallback reproduced the committed text byte-identically but not against artifact bytes, without a reference-free boundary rule, validator or 59-job demonstration (§ 2.5 items 1–4)                                           |
-| 11  | retry prohibition                                | **UNVERIFIED** | harness contract rejects all seven retry spellings (52/52, § 1), but the matrix workflow does not exist, so job-level no-retry and manual re-run detection (`run_attempt`) cannot be checked yet.; draft later statically checked (§ 9), installed workflow not yet reviewed                 |
+| 11  | retry prohibition                                | **UNVERIFIED** | harness contract rejects all seven retry spellings (52/52, § 1), but the matrix workflow does not exist, so job-level no-retry and manual re-run detection (`run_attempt`) cannot be checked yet; draft later statically checked (§ 9), installed workflow not yet reviewed                  |
 | 12  | account for all 59 indices from artifact content | **VERIFIED**   | implemented later on 2026-09-16, not a live probe: reports carry `campaign_slot=<n>` from the required `--slot`; `account:aggregation-campaign` resolves `1..59` from content (§ 8). `UNVERIFIED` at gate time (§ 2.6)                                                                       |
 
 **Overall: NO-GO.** At gate time rows 2, 6, 7, 8, 9, 10, 11 and 12 were not `VERIFIED`. After the
@@ -201,7 +201,9 @@ unresolved, so the verdict is unchanged.
 
 1. **Retrieval:** a host that can reach `*.blob.core.windows.net`, proven by downloading an
    existing ADR-055 artifact byte-for-byte; or a separately reviewed, reference-free and
-   mechanically validated log-recovery procedure demonstrated on a multi-job run.
+   mechanically validated log-recovery procedure demonstrated on a multi-job run. **Offline,
+   reference-free recovery tooling implemented later on 2026-09-16 (§ 10); the demonstration on a
+   real multi-job run is still outstanding.**
 2. **Billing and authorization:** account billing, budget and allowance facts read with an
    appropriately scoped credential that the owner provides deliberately, plus an explicit, recorded
    owner authorization for the 2655 job-minute ceiling.
@@ -320,3 +322,87 @@ Do not push any other change to that file while it is installed. Record that eve
 reports `run_attempt` `1`.
 
 **Rows 2, 6, 7, 8, 9, 10 and 11 remain unresolved. The verdict stays NO-GO.**
+
+---
+
+## 10. Update — row 10: offline, reference-free log recovery (later on 2026-09-16)
+
+This section records a code change, not a live probe. §§ 1–5 above are the gate as it was run; the
+only edit to them is a punctuation fix in row 11 (`yet.;` → `yet;`) with no change of meaning.
+**Nothing was downloaded**: no artifact, no job log and no run archive. No GitHub API or network was
+called, and no workflow was installed, pushed, dispatched or rerun.
+
+**Added.** `pnpm run recover:aggregation-campaign-logs -- <job-log> …`
+(`scripts/aggregation-campaign-log-recovery.mjs` and its pure library). It is manual and is not part
+of `pnpm verify`, the test phases or `ci.yml`. It reads only the log files named on the command line
+and writes nothing.
+
+**What replaced the § 2.5 fragility.** The § 2.5 slice took its length (170 lines) from the
+committed reference report. The recovery contract instead uses:
+
+- **Boundaries:** only the exported `CALIBRATION_REPORT_HEADER` and `CALIBRATION_REPORT_FOOTER`. No
+  reference report, line count, file name, artifact or job name, slot order, job conclusion or colour
+  is read.
+- **Framing, fail-closed:**
+  - Inside one report every line is either unprefixed or carries exactly one valid
+    `YYYY-MM-DDThh:mm:ss.fffffffZ ` prefix (the § 2.5 shape); the two modes never mix.
+  - Line endings inside a report are consistently CRLF or LF, and every report line is terminated.
+  - Only that prefix and the CR of CRLF are removed. Nothing is trimmed, normalised or de-coloured,
+    and the final newline is restored.
+  - Boundary text in any other framing is rejected. So are an orphan footer, a nested header, an
+    unterminated report, a malformed, repeated or mixed timestamp, and any control character in a
+    report (ANSI escapes, NUL, tab, bare CR, BOM, C1).
+  - Unrelated log text outside a report is ignored.
+- **Limits** (named in `LOG_RECOVERY_LIMITS`; a breach rejects, never truncates):
+
+  | limit                      | value   |
+  | -------------------------- | ------- |
+  | logs                       | 128     |
+  | bytes per log              | 64 MiB  |
+  | bytes in total             | 256 MiB |
+  | reports                    | 59      |
+  | lines per report candidate | 200     |
+  | bytes per report candidate | 32 KiB  |
+
+  The CLI checks file sizes before reading, so an oversized log is never read.
+
+- **Validation and accounting:**
+  - Every candidate must pass the unchanged strict `parseSlotReport`. A malformed, edited or
+    truncated report, a report claiming more than one pair, or one whose slot is missing or out of
+    range is a recovery rejection.
+  - The recovered multiset goes to the unchanged `accountCampaign` and `formatAccounting`, so
+    duplicate slots and commit or topology mismatches stay accounting failures.
+  - Output prints the recovery counts separately from the accounting.
+  - Exit `0` only for zero rejections and a complete accounting with zero blockers and zero missing
+    slots. Unreadable input, any rejection, or an incomplete or blocked campaign exits `1`; a usage
+    error exits `2`.
+  - Diagnostics are fixed reasons with counts. They never contain a path, a timestamp or log content.
+
+**Tests:** `scripts/aggregation-campaign-log-recovery.test.mjs`, **17/17**. They use reports rendered
+by the real harness in **synthetic** log framing, and cover:
+
+- byte-exact recovery from plain LF and timestamp-prefixed CRLF logs;
+- multiple reports and logs, and all 59 slots accounting complete;
+- independence from input order and file names;
+- red event reports, recovered exactly like passing ones;
+- the framing, limit, parser, provenance, CLI and leakage failures above.
+
+**Sub-gaps closed:** items 2 and 3 of § 2.5.
+
+- **Item 2:** extraction no longer needs a reference; the report's own boundaries delimit it.
+- **Item 3:** a committed validator now checks every recovered report for completeness, using the same
+  strict parser as downloaded reports.
+- Faithful prefix removal and composition with 59-slot accounting are proven on synthetic input.
+
+**Sub-gaps still open:**
+
+1. Equality between recovered text and the **artifact bytes** (§ 2.5 item 1): the artifact still
+   cannot be downloaded from this host.
+2. A demonstration on a **real multi-job run archive** (§ 2.5 item 4): no such archive exists as
+   tracked evidence, and none was downloaded. The synthetic fixtures are not that demonstration.
+3. **Future archive availability:** the run-level archive route worked in § 2.5, but nothing proves it
+   will work for a 59-job run.
+4. **Direct artifact download itself:** still blocked (§ 2.5).
+
+**Row 10 stays `BLOCKED`. Rows 2, 6, 7, 8, 9, 10 and 11 remain unresolved. The verdict stays
+NO-GO.**
