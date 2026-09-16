@@ -1722,7 +1722,13 @@ export function validateCalibrationContract({ specSource, plan, pairs }) {
     if (args.includes('--passWithNoTests')) {
       problems.push(`pair ${pair} passes with no tests: a missing spec has to fail`);
     }
-    if (args.some((arg) => /^--retry/.test(arg))) {
+    // Both spellings, because runners disagree on it: `--retry` and
+    // `--retryTimes` share a stem, `--retries` does not, and a guard written for
+    // only the first stem let the second through unremarked. The `=value` forms
+    // and a bare flag with its value in the next token are all the same token
+    // here, so matching the flag itself covers them. Still anchored and still
+    // stem-bound: `--retrieve` and `--retro` are not retries.
+    if (args.some((arg) => /^--retr(?:y|ies)/.test(arg))) {
       problems.push(`pair ${pair} retries; a retried sample is not evidence`);
     }
   }

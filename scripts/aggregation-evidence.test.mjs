@@ -612,11 +612,13 @@ test('calibration plan: the legacy evidence plan is untouched', () => {
 test('calibration contract: reordering, inserting, filtering or retrying a pair is caught', () => {
   const pairs = 2;
   const base = planCalibrationRun({ pairs });
-  const expectProblem = (plan, pattern) => {
+  // `note` names the table row under test, so a failing case inside a loop
+  // identifies itself instead of reporting only the pattern it shares.
+  const expectProblem = (plan, pattern, note = '') => {
     const problems = validateCalibrationContract({ specSource, plan, pairs });
     assert.ok(
       problems.some((problem) => pattern.test(problem)),
-      `no problem matched ${pattern}; got:\n${problems.join('\n') || '(none)'}`,
+      `${note ? `${note}: ` : ''}no problem matched ${pattern}; got:\n${problems.join('\n') || '(none)'}`,
     );
   };
 
@@ -650,9 +652,35 @@ test('calibration contract: reordering, inserting, filtering or retrying a pair 
   noTests.find((step) => step.id === calibrationStressId(1)).pnpmArgs.push('--passWithNoTests');
   expectProblem(noTests, /passes with no tests/);
 
-  const retried = structuredClone(base);
-  retried.find((step) => step.id === calibrationStressId(2)).pnpmArgs.push('--retry=2');
-  expectProblem(retried, /retries/);
+  // Every retry spelling a runner might accept, each proved on its own. The
+  // guard once matched only the `--retry` stem, so `--retries` reached the
+  // contract unremarked and a retried sample would have passed as evidence. A
+  // bare flag whose value is the next token is caught by the flag token itself.
+  for (const argv of [
+    ['--retry'],
+    ['--retry=2'],
+    ['--retryTimes'],
+    ['--retryTimes=3'],
+    ['--retries'],
+    ['--retries=2'],
+    ['--retries', '2'],
+  ]) {
+    const retried = structuredClone(base);
+    retried.find((step) => step.id === calibrationStressId(2)).pnpmArgs.push(...argv);
+    expectProblem(retried, /retries/, `${JSON.stringify(argv)} must be refused as a retry`);
+  }
+
+  // ...and nothing that merely starts the same way. A guard that rejected every
+  // `--retr…` argument would report its own prefix, not a retry.
+  for (const neighbour of ['--retrieve', '--retro']) {
+    const plan = structuredClone(base);
+    plan.find((step) => step.id === calibrationStressId(2)).pnpmArgs.push(neighbour);
+    const problems = validateCalibrationContract({ specSource, plan, pairs });
+    assert.ok(
+      !problems.some((problem) => /retries/.test(problem)),
+      `${neighbour} is not a retry; got:\n${problems.join('\n') || '(none)'}`,
+    );
+  }
 
   const namedInstead = structuredClone(base);
   namedInstead[2] = { ...base[2], kind: 'jest-named', jestArgs: ['--selectProjects', 'x'] };
