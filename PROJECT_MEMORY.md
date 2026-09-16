@@ -1038,6 +1038,29 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 > فشار و هر شش Artifact شواهد دست نخوردند. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان
 > `Proposed`؛ AUD-004 باز است. کمپین Pre-Register شدهٔ ۵۹ Slot همچنان **اجرا نشده** است.
 >
+> **به‌روزرسانی 2026-09-16 (ADR-055 — دروازهٔ آمادگی اجرای کمپین ۵۹ Slot؛ فقط‌خواندنی، نتیجه NO-GO):** پیش از
+> هر اجرا، پیش‌شرط‌های عملیاتی با Probeهای فقط‌خواندنی بررسی شدند و در
+> [`docs/evidence/adr-055/fresh-run-campaign-launch-readiness-2026-09-16.md`](docs/evidence/adr-055/fresh-run-campaign-launch-readiness-2026-09-16.md)
+> ثبت شدند. **قاعدهٔ Fail-Closed از پیش:** فقط اگر هر ۱۲ سطر `VERIFIED` باشند GO. **نتیجه: NO-GO.** `VERIFIED`:
+> احراز هویت (`gh auth status` سالم؛ Scopeهای `repo`/`workflow`، بی `user`)، هویت شاخه/Commit (`HEAD` = upstream =
+> Head ‏PR #44 = `3f5cd8b`)، فعال بودن Actions، و پشتیبانی Matrix ۵۹تایی (سقف مستند GitHub ۲۵۶ Job در هر اجرا).
+> `BLOCKED`: شبکه (`api.github.com` پنج از پنج Probe و همهٔ فراخوان‌های فراداده سالم، ولی
+> `*.blob.core.windows.net` در `gh run download`، Zip ‏Artifact و Log تک‌Job هر سه Timeout اتصال)، صورت‌حساب
+> (Endpointهای Billing کاربر HTTP 404 به‌دلیل نبود Scope ‏`user`؛ Scope درخواست نشد؛ مجوز صاحب حساب برای هزینه
+> ثبت نشده)، و بازیابی Artifact. `UNVERIFIED`: هم‌زمانی مؤثر (Plan حساب `null`؛ جدول مستند فقط سقف هر Plan است)،
+> رفتار صف (بزرگ‌ترین هم‌زمانی ثبت‌شده ۵ Job با تأخیر صف ۱–۲ ثانیه)، هم‌سنجی Image (همهٔ Jobهای امروز روی
+> `20260907.300.1`، ولی انتشار هفتگی و بی Pin نسخه)، منع Retry در سطح Job (Workflow هنوز وجود ندارد؛ Harness ‏۵۲/۵۲)،
+> و شمارش ۵۹ اندیس از محتوا (متن گزارش کالیبراسیون **اندیس Slot ندارد**). **Fallback بازیابی از Log:** آرشیو Log
+> سطح Run اجرای `35048202361` دانلود شد و متن بازیابی‌شده با `induced-calibration-0015cpu-github-2026-09-16.txt`
+> **بایت‌به‌بایت** یکی بود (SHA-256 ‏`06150071…`)، اما چون آن فایل خودش از Log بازیابی شده بود این فقط تکرارپذیری
+> است، و مرز پایان گزارش از فایل مرجع آمد؛ پس Fallback همچنان تأییدنشده است. **هزینه بازمحاسبه شد:** انتظار
+> `59 × 425.06 s ≈ 417.98` دقیقهٔ Job، بدترین حالت کراندار Harness ‏`2269.53`، سقف `2655` دقیقهٔ Job. پوشهٔ موقت
+> دانلود بیرون از Repository ساخته و دقیقاً همان حذف شد. **هیچ کمپین، Workflow، اندازه‌گیری، Rerun، Docker/PostgreSQL
+> یا تغییر Credential رخ نداد**؛ طراحی Pre-Register شده، Artifactهای شواهد، Scriptها، `ci.yml`،
+> `docs/14-testing-strategy.md`، `docs/24-open-questions.md` و `planning/backlog.json` دست نخوردند. سرتیتر ADR-055
+> که هنوز «۳۶ آزمون» می‌گفت به **۵۲** (۳۶ Helper + ۱۶ CLI) اصلاح شد؛ شمارش‌های تاریخ‌دار حفظ شدند. `COM-009` همچنان
+> `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز است.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس
