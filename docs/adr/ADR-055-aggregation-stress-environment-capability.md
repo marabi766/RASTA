@@ -1491,6 +1491,58 @@ Harness واقعی درون قاب Log **ساختگی** کار می‌کند. ا
 
 ---
 
+## وضعیت پیاده‌سازی — 2026-09-17: قرارداد بازبینی Cohort ‏Runner/Image — **سطر ۹ همچنان UNVERIFIED، حکم NO-GO**
+
+> **این ADR همچنان `Proposed` است و حکم اجرا همچنان NO-GO.** این گام بخش آفلاین‌پذیر سطر ۹ دروازهٔ آمادگی
+> (مقایسه‌پذیری Runner/Image) را پیاده کرد. هیچ Snapshot واقعی از وضعیت Release ‏Image گرفته نشد، هیچ Artifact یا
+> Log دانلود نشد، هیچ API ‏GitHub یا شبکه‌ای فراخوانده نشد و هیچ Workflowی نصب، Push، Dispatch یا Rerun نشد. هیچ
+> کمپین یا اندازه‌گیری‌ای اجرا نشد و هیچ Docker/PostgreSQL روشن نشد. دست نخوردند: طراحی آماری و Branchهای A/B/C،
+> کتابخانهٔ شمارش Slot و طبقه‌بندی آن، `ci.yml`، فازهای تست، `pnpm verify`، `planning/backlog.json` و Artifactهای
+> اندازه‌گیری.
+
+**ابزار.** `pnpm run review:aggregation-campaign-image-cohort -- <review-manifest> <report> …`
+(`scripts/aggregation-campaign-image-cohort.mjs` + کتابخانهٔ خالص `aggregation-campaign-image-cohort-lib.mjs`)
+دستی است و بیرون از `pnpm verify`، فازهای تست و CI می‌ماند. فقط فایل‌های نام‌برده را می‌خواند، چیزی نمی‌نویسد و
+هیچ مسیر یا مقدار Manifest را چاپ نمی‌کند.
+
+**دو نیمهٔ جدا.**
+
+1. **Snapshot پیش از اجرا:** Manifest ‏JSON با دقیقاً این فیلدها: `schema`
+   (`adr-055-image-cohort-review/v1`)، `observed_at`، `runner_label` (`ubuntu-24.04`)، `current_image_release`،
+   `current_image_published_at`، `previous_image_release`، `previous_image_published_at`،
+   `branch_c_on_topology_mismatch_acknowledged` (باید `true` باشد) و `campaign_commit` (۴۰ هگز کوچک). زمان‌ها
+   UTC با دقت ثانیه‌اند. `observed_at` نباید پس از زمان بازبینی باشد، انتشار قبلی باید پیش از انتشار فعلی و انتشار
+   فعلی نباید پس از `observed_at` باشد. شیء غیرتخت، بیش از ۴ KiB، فیلد تکراری (در متن خام، حتی با Escape)، ناشناخته،
+   غایب یا با نوع نادرست رد می‌شود. هیچ نسخهٔ Image، پنجرهٔ Rollout یا بیشینهٔ عمری در کد نیست. خروجی صریحاً می‌گوید
+   برچسب `runs-on` خانوادهٔ Image را برمی‌گزیند، نه نسخه را، و Snapshot تضمین نمی‌کند هر Job کدام Image را بگیرد.
+2. **Cohort پس از اجرا:** گزارش‌ها از `accountCampaign` و `parseSlotReport` بی‌تغییر می‌گذرند و مقایسهٔ
+   بایت‌به‌بایت `topology:` و Commit همان‌جا بازاستفاده می‌شود. هیچ Parse دوباره‌ای از Topology در کار نیست.
+   Cohort فقط وقتی سازگار است که شمارش کامل باشد (۵۹ گزارش یکتا و Parseپذیر، صفر Blocker، صفر Missing، صفر ورودی
+   رد‌شده)، دقیقاً یک Commit برابر `campaign_commit` و دقیقاً یک Topology اندازه‌گرفته داشته باشد. نام فایل، ترتیب
+   ورودی، نتیجهٔ Job و رأی اکثریت نقشی ندارند.
+
+**نتیجه.** `COHORT: CONSISTENT` (خروج `0`) فقط برای Snapshot پذیرفته و Cohort سازگار؛ هر حالت دیگر
+`COHORT: BRANCH C` (خروج `1`)؛ خطای استفاده `2`. Diagnosticها رشتهٔ ثابت با شمار و برای Cohort یکتا یک Digest
+۱۶-هگزی Topology‌اند. شمار رخداد و غیررخداد چاپ نمی‌شود و هیچ آستانه، p-value یا تفسیری اعمال نمی‌شود.
+
+**آزمون.** `scripts/aggregation-campaign-image-cohort.test.mjs` ‏**۱۵/۱۵**، با گزارش‌های رندرشدهٔ Harness واقعی
+و Manifestهای **ساختگی**. Topology ‏Fixture برابر سطر Artifact ‏induced ثبت‌شده است. پوشش: Cohort سالم، استقلال از
+ترتیب، Roll-forward ‏Image در ۱، ۳ و ۲۹ Slot (بی اکثریت)، رانش در هر ۱۷ فیلد، ناسازگاری Commit، Topology ‏رد‌شده یا
+اندازه‌نگرفته، Blocker، گزارش غایب/تکراری/بدشکل، Manifest بدشکل و خصمانه، ترتیب زمانی، تأیید Branch C، نشت و
+کدهای خروج CLI. Assertionهای جهش‌گونه نشان می‌دهند شمارشی که به یک فیلد Topology بی‌اعتنا باشد یا Topology اقلیت را
+به اکثریت بازنویسی کند، جایی که بازبینی واقعی Branch C می‌دهد، می‌گذرد و شکار می‌شود. ۲۲ جهش دستی روی کتابخانه زده
+شد: ۲۰ شکار شد؛ یک بازمانده (برگرداندن Commit از Manifest رد‌شده) با Assertion تازه شکار شد و دیگری (بررسی کاراکتر
+کنترلی درون رشته) هم‌ارز است، چون `JSON.parse` همان ورودی را رد می‌کند.
+
+**مرز صادقانه.** اثبات **نشده‌ها:** Snapshot واقعی پیش از یک اجرای واقعی؛ اجرای بررسی روی ۵۹ گزارش واقعی؛
+برابری مقادیر Manifest با وضعیت واقعی Release در GitHub و نوشته‌شدن آن پیش از نخستین Job؛ و Pin شدن Image (ممکن
+نیست؛ Roll-forward فقط پس از اجرا کشف و به Branch C برده می‌شود). مقایسه همان هم‌سانی بایتی Preregistration است، پس
+۵۹ سطر یکسان با `runner_image=unknown` هم یک Topology شمرده می‌شود و بازبین انسانی باید آن را بخواند. پس **سطر ۹
+`UNVERIFIED` می‌ماند** و سطرهای ۲ و ۶ تا ۱۱ حل‌نشده‌اند. **حکم NO-GO می‌ماند.** ADR-055 و ADR-053 همچنان
+`Proposed`، AUD-004 باز، `COM-009` همچنان `READY`/۱۳.
+
+---
+
 ## Rollout، Rollback و رصدپذیری
 
 - **امروز (`Proposed`): هیچ تغییری در رفتار زمان اجرا یا CI.** نه Preflight، نه Classifier، نه دروازه. ابزارهای موجود —

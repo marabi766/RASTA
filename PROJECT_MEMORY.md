@@ -1116,6 +1116,23 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 > فازهای تست یا Backlog تغییر نکرد. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز
 > است.
 >
+> **به‌روزرسانی 2026-09-17 (ADR-055 — قرارداد بازبینی Cohort ‏Runner/Image؛ سطر ۹ همچنان `UNVERIFIED`، حکم
+> NO-GO):** ابزار دستی `pnpm run review:aggregation-campaign-image-cohort -- <review-manifest> <report> …`
+> (`scripts/aggregation-campaign-image-cohort.mjs` + کتابخانهٔ خالص) دو نیمهٔ جدا دارد: (۱) Manifest ‏JSON پیش از
+> اجرا با ۹ فیلد ثابت (`schema` ‏`adr-055-image-cohort-review/v1`، `observed_at`، `runner_label` ‏`ubuntu-24.04`،
+> Release و زمان انتشار فعلی و قبلی `ubuntu24/…`، تأیید `true` برای Branch C در ناسازگاری Topology، و
+> `campaign_commit`) که فقط شکل و ترتیب زمانی درونی‌اش بررسی می‌شود (UTC ثانیه‌ای، نه پس از زمان بازبینی، قبلی <
+> فعلی ≤ مشاهده؛ فیلد تکراری در متن خام/ناشناخته/غایب/نوع نادرست رد؛ بدون نسخه، پنجرهٔ Rollout یا بیشینهٔ عمر در
+> کد)؛ (۲) عبور ۵۹ گزارش از `accountCampaign`/`parseSlotReport` بی‌تغییر و الزام شمارش کامل، یک Commit برابر
+> Manifest و یک Topology اندازه‌گرفته. فقط آن‌گاه `COHORT: CONSISTENT` (خروج `0`)، وگرنه `COHORT: BRANCH C` (`1`)
+> و خطای استفاده `2`. مسیر، مقدار Manifest و شمار رخداد چاپ نمی‌شود و کتابخانهٔ شمارش تغییری نکرد. آزمون تازه
+> ‏**۱۵/۱۵** (Manifest **ساختگی**) با Assertionهای جهش‌گونه برای فیلد بی‌اعتنا و رأی اکثریت؛ ۲۲ جهش دستی، ۲۰ شکار،
+> یک بازمانده با Assertion تازه شکار و یکی هم‌ارز. بیرون از `pnpm verify` و CI. سطر ۹ **`UNVERIFIED` می‌ماند**:
+> Snapshot واقعی پیش از اجرا و بررسی ۵۹ گزارش واقعی هنوز انجام نشده، برابری Manifest با وضعیت واقعی GitHub اثبات‌پذیر
+> نیست، Image قابل Pin نیست و ۵۹ سطر یکسان `runner_image=unknown` هم یک Topology شمرده می‌شود. سطرهای ۲ و ۶ تا ۱۱
+> حل‌نشده‌اند، پس **NO-GO**. هیچ دانلود، فراخوان شبکه/GitHub، Workflow، کمپین، Docker/PostgreSQL، `ci.yml`، فازهای
+> تست یا Backlog تغییر نکرد. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز است.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

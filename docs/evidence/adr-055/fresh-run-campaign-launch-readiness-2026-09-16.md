@@ -213,7 +213,9 @@ unresolved, so the verdict is unchanged.
    and a slot-accounting procedure that enumerates `1..59` without reading job conclusions.
    **Implemented later on 2026-09-16 (§ 8).**
 5. **Image cohort:** a launch timed and documented against the runner-image release state, with
-   the Branch C consequence of any topology mismatch accepted in advance.
+   the Branch C consequence of any topology mismatch accepted in advance. **Manifest contract and
+   post-run cohort check implemented on 2026-09-17 (§ 11); the real pre-launch snapshot and the real
+   59-report check are still outstanding.**
 6. **Retry prohibition at job level:** verified in the workflow itself when it is drafted, including
    a check that every run's `run_attempt` is `1`. **Draft and static check implemented later on
    2026-09-16 (§ 9); the review of the installed workflow at launch is still outstanding.**
@@ -406,3 +408,74 @@ by the real harness in **synthetic** log framing, and cover:
 
 **Row 10 stays `BLOCKED`. Rows 2, 6, 7, 8, 9, 10 and 11 remain unresolved. The verdict stays
 NO-GO.**
+
+---
+
+## 11. Update — row 9: image-cohort review contract (2026-09-17)
+
+This section records a code change, not a live probe. §§ 1–5 above are the gate as it was run and
+are not rewritten; the only other edit is a note on prerequisite 5 in § 6. Nothing was downloaded,
+no GitHub API or network was called, no release state was observed, and no workflow was installed,
+pushed, dispatched or rerun.
+
+**Added.** `pnpm run review:aggregation-campaign-image-cohort -- <review-manifest> <report> …`
+(`scripts/aggregation-campaign-image-cohort.mjs` and its pure library). It is manual and is not part
+of `pnpm verify`, the test phases or `ci.yml`. It reads only the named files, writes nothing, and
+never prints a path or a manifest value.
+
+**What is now mechanically enforced.** The review keeps two things separate:
+
+1. **The pre-launch snapshot**, a JSON manifest written before launch. Its fields are exactly:
+
+   | field                                        | rule                                                             |
+   | -------------------------------------------- | ---------------------------------------------------------------- |
+   | `schema`                                     | exactly `adr-055-image-cohort-review/v1`                         |
+   | `observed_at`                                | whole-second UTC (`YYYY-MM-DDThh:mm:ssZ`), not after review time |
+   | `runner_label`                               | exactly `ubuntu-24.04`, the draft's `runs-on`                    |
+   | `current_image_release`                      | `ubuntu24/<8 digits>.<1–6 digits>` (the § 2.4 tag shape)         |
+   | `current_image_published_at`                 | whole-second UTC, not after `observed_at`                        |
+   | `previous_image_release`                     | same shape, different from the current release                   |
+   | `previous_image_published_at`                | whole-second UTC, strictly before the current publication        |
+   | `branch_c_on_topology_mismatch_acknowledged` | JSON `true`                                                      |
+   | `campaign_commit`                            | 40 lowercase hex characters                                      |
+
+   A manifest that is not one flat JSON object of strings and booleans, or that is larger than
+   4 KiB, repeats a field (checked in the raw text, including escaped spellings), or has an unknown,
+   missing or mistyped field, is rejected. No maximum age, rollout window or image version is built
+   in. The output states that the `runs-on` label selects an image family, not a version, so the
+   snapshot cannot guarantee which image any job receives.
+
+2. **The post-run cohort.** The reports go through the unchanged `accountCampaign` and
+   `parseSlotReport`, whose byte-identical `topology:` and commit comparison is reused, not
+   re-implemented. The cohort is consistent only when the accounting is complete (59 uniquely
+   claimed, parseable reports, zero blockers, zero missing, zero rejected inputs), carries exactly
+   one commit equal to `campaign_commit`, and exactly one measured topology. File names, input order,
+   job conclusions and majority voting play no part.
+
+**Result.** `COHORT: CONSISTENT` (exit `0`) only for an accepted snapshot and a consistent cohort.
+Everything else prints `COHORT: BRANCH C` (exit `1`); a usage error exits `2`. Diagnostics are fixed
+strings with counts and, for a single cohort, a 16-hex topology digest. Event and non-event totals
+are not printed. No threshold, p-value or event interpretation is applied.
+
+**Tests:** `scripts/aggregation-campaign-image-cohort.test.mjs`, **15/15**, with reports rendered by
+the real harness and **synthetic** manifests. The fixture topology equals the committed induced
+artifact's line. They cover a clean cohort, order independence, a runner-image roll-forward (1, 3
+and 29 of 59 slots, so no majority is taken), drift in each of the 17 captured fields, commit
+mismatch, refused or unmeasured topology, blockers, missing, duplicate and malformed reports,
+malformed and hostile manifests, chronology, the acknowledgment, leakage and the CLI exit codes.
+Mutation-style assertions show that an accounting blind to any one topology field, or one that
+rewrites the minority topology to the majority, would pass where the real review forces Branch C.
+
+**Not proven, so row 9 stays `UNVERIFIED`:**
+
+1. No real snapshot of the runner-image release state has been taken for an actual launch.
+2. No real 59-report campaign exists, so the post-run check has only run on synthetic reports.
+3. The manifest is checked for shape and internal chronology only. Nothing checks that its values
+   match GitHub's real release state, or that it was written before the first job started.
+4. Neither the label nor the snapshot pins an image, so a roll-forward during the campaign stays
+   possible; the review can only detect it afterwards and force Branch C.
+5. The comparison is the preregistered byte identity. Fifty-nine identical lines that all read
+   `runner_image=unknown` would still count as one topology, so a human reviewer must still read
+   the single topology.
+
+**Rows 2, 6, 7, 8, 9, 10 and 11 remain unresolved. The verdict stays NO-GO.**
