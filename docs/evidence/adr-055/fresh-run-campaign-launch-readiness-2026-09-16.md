@@ -188,7 +188,7 @@ for a 418 expected / 2655 ceiling job-minute exposure exists in this repository.
 | 8   | billing / allowance / spending authorization     | **BLOCKED**    | billing endpoints HTTP 404, `user` scope required and not requested (§ 2.2); no owner authorization recorded (§ 4)                                                                                                                                                                           |
 | 9   | runner / image comparability plan                | **UNVERIFIED** | today's jobs are on `20260907.300.1` (§ 2.4) but images update weekly with a 2–3 day rollout and no version pin (§ 3); the newest release is 8 days old, so a roll-forward during the campaign is plausible. Only the 59 resulting `topology:` lines can validate it; a mismatch is Branch C |
 | 10  | artifact retrieval                               | **BLOCKED**    | artifact download and artifact zip both timed out (§ 2.5); log fallback reproduced the committed text byte-identically but not against artifact bytes, without a reference-free boundary rule, validator or 59-job demonstration (§ 2.5 items 1–4)                                           |
-| 11  | retry prohibition                                | **UNVERIFIED** | harness contract rejects all seven retry spellings (52/52, § 1), but the matrix workflow does not exist, so job-level no-retry and manual re-run detection (`run_attempt`) cannot be checked yet                                                                                             |
+| 11  | retry prohibition                                | **UNVERIFIED** | harness contract rejects all seven retry spellings (52/52, § 1), but the matrix workflow does not exist, so job-level no-retry and manual re-run detection (`run_attempt`) cannot be checked yet.; draft later statically checked (§ 9), installed workflow not yet reviewed                 |
 | 12  | account for all 59 indices from artifact content | **VERIFIED**   | implemented later on 2026-09-16, not a live probe: reports carry `campaign_slot=<n>` from the required `--slot`; `account:aggregation-campaign` resolves `1..59` from content (§ 8). `UNVERIFIED` at gate time (§ 2.6)                                                                       |
 
 **Overall: NO-GO.** At gate time rows 2, 6, 7, 8, 9, 10, 11 and 12 were not `VERIFIED`. After the
@@ -213,7 +213,8 @@ unresolved, so the verdict is unchanged.
 5. **Image cohort:** a launch timed and documented against the runner-image release state, with
    the Branch C consequence of any topology mismatch accepted in advance.
 6. **Retry prohibition at job level:** verified in the workflow itself when it is drafted, including
-   a check that every run's `run_attempt` is `1`.
+   a check that every run's `run_attempt` is `1`. **Draft and static check implemented later on
+   2026-09-16 (§ 9); the review of the installed workflow at launch is still outstanding.**
 
 None of these changes the preregistered design.
 
@@ -251,3 +252,71 @@ and are not rewritten.
 Still not content-verifiable: the quota read-back. A job that fails it stops before measuring and
 leaves no report, so that slot is `missing`, but a report does not itself record the applied
 quota.
+
+---
+
+## 9. Update — row 11: workflow draft and static retry check (later on 2026-09-16)
+
+This section records a code and document change, not a new live probe. §§ 1–5 above are the gate as
+it was run and are not rewritten. Nothing was installed, pushed, dispatched or rerun, and no GitHub
+API was called.
+
+**Added.**
+
+- A reviewed, **non-executable** draft:
+  [`fresh-run-campaign-workflow-draft-2026-09-16.yaml.txt`](fresh-run-campaign-workflow-draft-2026-09-16.yaml.txt).
+  It sits under `docs/evidence/adr-055/` with a `.yaml.txt` extension, so GitHub cannot discover it.
+  `.github/workflows/` still holds only `ci.yml`.
+- A manual static check:
+  `pnpm run check:aggregation-campaign-workflow -- <draft>`
+  (`scripts/aggregation-campaign-workflow.mjs` and its pure library). It reads only the named file,
+  never prints the path, and exits `0` only when the whole contract holds, `1` otherwise and `2` on a
+  usage error. It is not part of `pnpm verify`, the test phases or `ci.yml`.
+
+**What the check proves about the draft.** It uses a narrow parser for the draft's own YAML subset
+and refuses anything outside it, including any duplicate key. On the parsed structure it requires:
+
+- exactly one job with exactly one `postgis/postgis:16-3.4` service container, and a literal `slot`
+  matrix holding each of `1..59` exactly once, with no other axis and no dynamic matrix;
+- `fail-fast: false`, `runs-on: ubuntu-24.04` and `timeout-minutes: 45`;
+- `permissions` of exactly `contents: read`, declared only at top level, and
+  `cancel-in-progress: false`;
+- a single literal `push` trigger on the installed workflow path, never a dispatch or schedule;
+- a **first step** whose shell exits non-zero unless `github.run_attempt` is `1`, with no step
+  condition, before checkout and before measurement;
+- one calibration step whose body captures and re-raises exactly one
+  `calibrate:aggregation-stress -- --pairs 1 --slot "${{ matrix.slot }}" "$RUNNER_TEMP/<slot-named>.txt"`;
+- an `if: always()` upload of that same slot-named report with `if-no-files-found: error`;
+- every `uses:` pinned to a 40-hex commit SHA.
+
+It also rejects:
+
+- `continue-on-error`, extra step or job keys, and step conditions other than the upload's;
+- retry, rerun, re-dispatch or replacement spellings, shell loops and the `gh` CLI;
+- caching, and expression contexts other than `matrix.slot`, `runner.temp`, `github.ref` and `env.*`
+  (so no `secrets`, `fromJSON` or step outputs);
+- token references.
+
+The committed draft passes: CLI exit `0`. `scripts/aggregation-campaign-workflow.test.mjs`
+(**17/17**) rejects every required mutation, runs the CLI exit-code and no-path tests, and proves the
+committed draft passes.
+
+**Why row 11 stays `UNVERIFIED`.** The row is about the retry prohibition of the campaign that
+launches, and this gate's fail-closed rule does not accept a proxy for that. Three things remain
+unproven:
+
+1. **No installed workflow was reviewed.** An uninstalled draft governs no run, and nothing yet shows
+   that the file installed at launch is byte-identical to this draft.
+2. **Static checks do not see GitHub internals.** They cannot prove that GitHub never retries
+   hosted-runner infrastructure internally.
+3. **The guard does not catch a second push.** A second push that touches the installed file starts
+   a new run with `run_attempt` `1`.
+
+What is now proven: the proposed job-level shape carries no retry, rerun, replacement or optional
+stopping, and a manual re-run attempt of any slot exits before checkout and uploads no report.
+
+**Launch requirement this adds.** Run the check against the installed file before its single push.
+Do not push any other change to that file while it is installed. Record that every campaign run
+reports `run_attempt` `1`.
+
+**Rows 2, 6, 7, 8, 9, 10 and 11 remain unresolved. The verdict stays NO-GO.**

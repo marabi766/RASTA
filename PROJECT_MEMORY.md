@@ -1081,6 +1081,24 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 > کمپین، Workflow، اندازه‌گیری، فراخوان GitHub، Docker/PostgreSQL، `ci.yml`، فازهای تست یا Backlog تغییر نکرد.
 > `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز است.
 >
+> **به‌روزرسانی 2026-09-16 (ADR-055 — پیش‌نویس غیراجرایی Workflow کمپین ۵۹ Slot و بررسی ایستای منع Retry؛ سطر
+> ۱۱ همچنان `UNVERIFIED`، حکم NO-GO):** پیش‌نویس
+> `docs/evidence/adr-055/fresh-run-campaign-workflow-draft-2026-09-16.yaml.txt` بیرون از `.github/workflows/`
+> است و پسوند `.yaml.txt` دارد، پس قابل کشف نیست. محتوایش: یک Job، Matrix لفظی `1..59`، `fail-fast: false`،
+> `ubuntu-24.04`، ۴۵ دقیقه، `contents: read`، `cancel-in-progress: false`، و گام نخستی که پیش از Checkout خارج
+> می‌شود مگر `github.run_attempt == 1`. بعد یک اجرای `--pairs 1 --slot "${{ matrix.slot }}"` با کد خروج
+> بازگردانده، Upload با `if: always()` و Actionهای Pin شده به SHA کامل. ابزار دستی
+> `pnpm run check:aggregation-campaign-workflow -- <draft>` (`scripts/aggregation-campaign-workflow.mjs` +
+> کتابخانهٔ خالص) با Parser باریک همان زیرمجموعه کار می‌کند و کلید تکراری یا ساختار ناآشنا را رد می‌کند. کل
+> قرارداد را معنایی بررسی می‌کند؛ خروج `0/1/2` است و مسیر چاپ نمی‌شود. آزمون تازهٔ
+> `scripts/aggregation-campaign-workflow.test.mjs` ‏**۱۷/۱۷** است و بیرون از `pnpm verify` و CI می‌ماند. ۳۱ جهش
+> دستی روی کتابخانه اجرا شد: ۳۰ شکار شدند و تنها بازمانده (بررسی مسیر Trigger) با دو آزمون تازه شکار شد. سطر
+> ۱۱ **`UNVERIFIED` می‌ماند** به سه دلیل: Workflow نصب‌شده بازبینی نشده، Retry درونی GitHub ایستا اثبات‌پذیر
+> نیست، و Push دوم `run_attempt` را دوباره `1` می‌کند. سطرهای ۲ و ۶ تا ۱۱ حل‌نشده‌اند، پس **NO-GO**. § 8.3 طراحی
+> فقط به پیش‌نویس و فرمان اشاره می‌کند و هیچ مقدار طراحی تغییر نکرد. هیچ کمپین، نصب Workflow، اندازه‌گیری،
+> فراخوان API ‏GitHub، Docker/PostgreSQL، `ci.yml`، فازهای تست یا Backlog تغییر نکرد. `COM-009` همچنان
+> `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز است.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

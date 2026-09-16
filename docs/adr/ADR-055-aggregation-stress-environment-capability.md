@@ -1373,6 +1373,69 @@ missing است.
 
 ---
 
+## وضعیت پیاده‌سازی — 2026-09-16: پیش‌نویس غیراجرایی Workflow کمپین و بررسی ایستای منع Retry — **همچنان NO-GO**
+
+> **این ADR همچنان `Proposed` است و حکم اجرا همچنان NO-GO.** این گام فقط برای سطر ۱۱ دروازهٔ آمادگی (منع
+> Retry) کار کرد. **هیچ کمپینی اجرا نشد.** هیچ فایلی زیر `.github/workflows/` ساخته نشد (آن پوشه هنوز فقط
+> `ci.yml` دارد). هیچ Workflowی Push یا Dispatch نشد، هیچ اجرایی Rerun/Cancel/Delete/Approve نشد، هیچ
+> اندازه‌گیری‌ای گرفته نشد، هیچ API ‏GitHub فراخوانده نشد و هیچ Docker/PostgreSQL روشن یا دست‌کاری نشد.
+> طراحی آماری، `ci.yml`، مسیریابی فازهای تست، `pnpm verify`، `planning/backlog.json` و Artifactهای اندازه‌گیری
+> دست نخوردند.
+
+**پیش‌نویس.**
+[`docs/evidence/adr-055/fresh-run-campaign-workflow-draft-2026-09-16.yaml.txt`](../evidence/adr-055/fresh-run-campaign-workflow-draft-2026-09-16.yaml.txt)
+شکل § 8.3 طراحی را به‌صورت متن بازبینی‌پذیر نشان می‌دهد. پسوند `.yaml.txt` است و فایل بیرون از
+`.github/workflows/` است، پس GitHub آن را کشف و اجرا نمی‌کند. محتوایش:
+
+- یک Job با Matrix لفظی `slot: [1..59]`، `fail-fast: false`، `ubuntu-24.04` و `timeout-minutes: 45`؛
+- فقط `permissions: contents: read` و `cancel-in-progress: false`؛
+- یک Trigger ‏`push` که به مسیر نصب آینده محدود است؛
+- یک **گام نخست** که پیش از Checkout با منطق Shell خارج می‌شود، مگر `github.run_attempt` برابر `1` باشد. پس
+  Rerun دستی هر Slot چیزی اندازه نمی‌گیرد و گزارشی Upload نمی‌کند؛
+- یک اجرای `calibrate:aggregation-stress -- --pairs 1 --slot "${{ matrix.slot }}"` با گرفتن و بازگرداندن
+  کد خروج؛
+- Upload همان گزارش Slot با `if: always()` و `if-no-files-found: error`؛
+- همهٔ Actionها Pin شده به SHA کامل ۴۰ رقمی؛
+- بدون Cache، Retry، `continue-on-error` یا Secret.
+
+`ubuntu-24.04` و نبودن Cache انتخاب بازبینی همین پیش‌نویس‌اند، نه مقدار Pre-Register شده. آن Label نسخهٔ
+Image را Pin نمی‌کند، پس سطر ۹ باز می‌ماند.
+
+**بررسی ایستا.** `pnpm run check:aggregation-campaign-workflow -- <draft>`
+(`scripts/aggregation-campaign-workflow.mjs` + کتابخانهٔ خالص `aggregation-campaign-workflow-lib.mjs`) فقط
+همان یک فایل را می‌خواند و مسیر را چاپ نمی‌کند. خروج `0` فقط وقتی است که کل قرارداد برقرار باشد؛ نقض،
+پیش‌نویس بدشکل یا فایل ناخوانا `1` و خطای استفاده `2` می‌دهد. این ابزار YAML Parser عمومی نیست: فقط زیرمجموعهٔ
+باریک همین پیش‌نویس را می‌پذیرد و هر چیز بیرون از آن را رد می‌کند (Tab، CR، Anchor/Alias/Tag، Flow Mapping،
+چند سند، مقدار تهی، و **هر کلید تکراری**؛ هیچ «آخرین مقدار برنده» نیست). روی ساختار Parse‌شده بررسی می‌کند:
+
+- دقیقاً یک Job با دقیقاً یک Service ‏`postgis/postgis:16-3.4`، و `1..59` هر کدام دقیقاً یک بار، بدون محور دیگر
+  و بدون Matrix پویا؛
+- مقدارهای دقیق `fail-fast`، Runner، Timeout، Permission و Concurrency؛
+- جای و اثربخشی نگهبان `run_attempt`؛
+- شکل دقیق بدنهٔ اندازه‌گیری و Invocation، شامل `--pairs 1` و Slot برگرفته مستقیم از `matrix.slot`؛
+- Upload همیشگیِ همان نام گزارش؛
+- Pin کامل SHA؛
+- نبود `continue-on-error`، املاهای Retry/Rerun/Re-dispatch/جایگزینی، حلقهٔ Shell، ‏`gh`، Cache، شرط گام جز
+  Upload، Context بیانی جز `matrix.slot`/`runner.temp`/`github.ref`/`env.*` و ارجاع Token.
+
+`scripts/aggregation-campaign-workflow.test.mjs` ‏**۱۷/۱۷** است: همهٔ جهش‌های لازم، کدهای خروج CLI و افشا
+نشدن مسیر را پوشش می‌دهد و ثابت می‌کند پیش‌نویس Commit‌شده می‌گذرد. این آزمون بیرون از `pnpm verify` و CI است.
+
+**مرز صادقانه.** بررسی ایستا شکل Job پیشنهادی و رد Rerun دستی را اثبات می‌کند. سه چیز را اثبات **نمی‌کند**:
+
+- اینکه GitHub زیرساخت Runner را درونی Retry نمی‌کند؛
+- اینکه پیش‌نویسِ نصب‌نشده بر اجرای واقعی حاکم بوده است؛
+- اینکه Push دوم فایل نصب‌شده (اجرای تازه با `run_attempt` برابر `1`) رخ نداده است.
+
+پس **سطر ۱۱ طبق قاعدهٔ Fail-Closed همان سند `UNVERIFIED` می‌ماند**، تا Workflow دقیقاً نصب‌شده هنگام اجرا
+بازبینی شود. الزام تازه برای تکرار اجرا این است: همین بررسی روی فایل نصب‌شده پیش از تنها Push آن اجرا شود، تا
+وقتی نصب است هیچ تغییر دیگری روی آن Push نشود، و `run_attempt` برابر `1` برای هر اجرا ثبت شود.
+
+**دروازهٔ آمادگی:** سطرهای ۲ و ۶ تا ۱۱ هنوز حل نشده‌اند، پس **حکم NO-GO می‌ماند.** ADR-055 و ADR-053
+همچنان `Proposed`، AUD-004 باز، `COM-009` همچنان `READY`/۱۳.
+
+---
+
 ## Rollout، Rollback و رصدپذیری
 
 - **امروز (`Proposed`): هیچ تغییری در رفتار زمان اجرا یا CI.** نه Preflight، نه Classifier، نه دروازه. ابزارهای موجود —

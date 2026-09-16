@@ -338,6 +338,15 @@ reviewed fix. **No script was changed in this iteration.**
 `pnpm run test:aggregation-evidence-lib` and `pnpm run check:test-phases`, exactly as in `a0db638`,
 so a drifted harness or contract fails before any measurement cost is attributed to the database.
 
+**Reviewed draft, added 2026-09-16 after this preregistration.** The shape above now exists as a
+non-executable draft,
+[`fresh-run-campaign-workflow-draft-2026-09-16.yaml.txt`](fresh-run-campaign-workflow-draft-2026-09-16.yaml.txt)
+(not under `.github/workflows/`, so GitHub cannot run it). Its first step exits non-zero before
+checkout unless `github.run_attempt` is `1`, so a manual re-run of any slot measures nothing. Check it
+with `pnpm run check:aggregation-campaign-workflow -- <draft>`. The check is static and manual, and
+exits `0` only when the whole contract holds. A launch must run the same check on the installed copy
+before pushing it. No design value in this section or in §§ 3–7 and § 9 changed.
+
 ### 8.4 How the aggregation/review step counts 59 slots
 
 **A red job is neither missing nor green, and the counting step must not read job conclusions at
