@@ -55,6 +55,7 @@ export type {
   AuthGuardOptions,
   AuthState,
   AuthenticatedRequest,
+  ServiceAuthorizationRefusal,
   UserTenantMismatch,
 } from './guards/auth.guard';
 
