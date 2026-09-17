@@ -1227,6 +1227,23 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 > Workflow، کمپین، دانلود، فراخوان GitHub/شبکه، `ci.yml`، فاز تست، آستانه یا Backlog تغییر نکرد. `COM-009` همچنان
 > `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز است.
 >
+> **به‌روزرسانی 2026-09-17 (ADR-055 — تمرین ساختگی زنجیرهٔ پس از اجرا؛ حکم NO-GO):** آزمون دستی
+> `scripts/aggregation-campaign-post-run-rehearsal.test.mjs` ‏(**۵/۵**، اجرا با `node --test`، بیرون از `pnpm verify`،
+> فازهای تست و `ci.yml`) چهار فرمان Package واقعی را به ترتیب Runbook ‏§ ۱۳ روی یک Campaign ساختگی ۵۹ Slotی در ریشهٔ
+> موقت Spawn می‌کند: `recover:aggregation-campaign-logs -- --output-dir`، `compare:aggregation-campaign-retrievals` با
+> دو Manifest، `account:aggregation-campaign -- --reports-manifest` و `review:aggregation-campaign-image-cohort` با
+> Manifest ‏JSON و `--reports-manifest`. زنجیرهٔ کامل: `RESULT: PASS` با ۵۹ فایل، `COMPARISON: MATCH`،
+> `accounting: COMPLETE` (برابر شمارش درون‌حافظهٔ بازیابی) و `COHORT: CONSISTENT` با همان Digest ‏Topology؛ بایت‌های
+> بازیابی‌شده Slot به Slot با Artifactهای مستقلِ دارای نام گمراه‌کننده برابرند؛ Snapshot درخت نشان داد فقط بازیابی پوشهٔ
+> تازه و ۵۹ فایل ساخت و بی‌Staging، و بقیه هیچ ننوشتند؛ خروجی‌ها بی‌نشت. شکست‌ها در نخستین گام ارزیاب متوقف می‌شوند:
+> بایت متفاوت → `DIFFERENT` خروج `1`؛ Manifest خراب/تکراری → خروج `2`؛ Blocker یا Topology متفاوت → بازیابی خروج `1`
+> با `NOT WRITTEN`؛ Commit دیگر در Manifest بازبینی → `COHORT: BRANCH C` خروج `1`. نه از ده جهش دستی را همین تمرین
+> و دهمی را آزمون Cohort شکار کرد. هفت فایل آزمون کمپین **۱۲۶/۱۲۶**. کد تولیدی تغییر نکرد. بازیابی هنوز حالت Manifest
+> ندارد و گذر ۵۹ مسیر بلند Log از `pnpm run` روی Windows نشان داده نشده است. Runbook ‏§ ۱۸ سند آمادگی و ADR-055 به‌روز
+> شدند. فقط ترکیب ساختگی ابزارها اثبات شد؛ **هیچ شاهد زنده‌ای وجود ندارد.** سطر ۹ `UNVERIFIED`، سطر ۱۰ `BLOCKED`، سطر ۱۱
+> `UNVERIFIED`، سطرهای ۲/۶/۷/۸ حل‌نشده، **NO-GO**. هیچ Workflow، کمپین، دانلود، فراخوان GitHub/شبکه، `ci.yml`، فاز
+> تست، آستانه یا Backlog تغییر نکرد. `COM-009` همچنان `READY`/۱۳، ADR-053 و ADR-055 همچنان `Proposed`؛ AUD-004 باز است.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس

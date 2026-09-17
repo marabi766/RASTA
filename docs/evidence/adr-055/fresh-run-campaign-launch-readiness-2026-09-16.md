@@ -1263,3 +1263,104 @@ leaked.
 provenance. A report-path manifest is operator-supplied transport and proves none of these. **Row 9
 stays `UNVERIFIED`, row 10 `BLOCKED`, row 11 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The
 verdict stays NO-GO.**
+
+## 18. Update — synthetic rehearsal of the post-run fallback chain (2026-09-17)
+
+This section records a test, not a live probe or a code change. §§ 1–17 are unchanged. No production
+code, package script, workflow, CI definition, threshold, classification or readiness row changed.
+Nothing was downloaded, no GitHub API or network was called, no workflow was installed, pushed,
+dispatched or rerun, and **no real log, artifact, report, manifest, comparison, accounting or review
+exists**.
+
+**Question.** Do the committed tools compose in the § 13 order, with each step's output as the next
+step's input? The order is L11 fallback recovery, then the optional L11 comparison, then L12
+accounting, then L13 review.
+
+**Added.** `scripts/aggregation-campaign-post-run-rehearsal.test.mjs`, **5/5**. It is manual: it is
+run directly with `node --test` and is not referenced by `pnpm verify`, the test phases, a package
+script or `ci.yml`.
+
+**The rehearsal.**
+
+- **Setup.** One new temporary root outside the repository and `artifacts/`, removed in `finally`.
+  It holds:
+  - 59 synthetic reports rendered by the real harness code, including one environment-only event;
+  - 59 job logs, both plain LF and timestamp-prefixed CRLF;
+  - an independently written artifact copy of every report, under file names whose number is never
+    the slot;
+  - three report-path manifests in three shuffled orders, with absolute and relative lines;
+  - a synthetic JSON review manifest.
+- **Commands.** It spawns the four package-script commands read from `package.json`, in order:
+  1. `recover:aggregation-campaign-logs -- --output-dir <new-directory> <job-log> ...`
+  2. `compare:aggregation-campaign-retrievals -- --artifacts-manifest <file> --fallback-manifest <file>`
+  3. `account:aggregation-campaign -- --reports-manifest <file>`
+  4. `review:aggregation-campaign-image-cohort -- <review-manifest> --reports-manifest <file>`
+- **Command-line length.** Passed one by one, either 59-report cohort would exceed the 8191-character
+  `cmd.exe` limit, so steps 2–4 use only manifests.
+- **Stopping rule.** A step passes only on its runbook result. The helper stops after the first step
+  that does not pass.
+
+**Results of the complete chain.**
+
+- Recovery exits `0` with `materialization: WRITTEN - 59 report files …` and `RESULT: PASS`.
+- The comparison exits `0` with `slots_compared=59 identical=59 different=0` and `COMPARISON: MATCH`.
+- Accounting exits `0` with `accounting: COMPLETE`. Its output is identical to the accounting text
+  that recovery printed from memory.
+- The review exits `0` with `COHORT: CONSISTENT`, `commits=1 manifest_commit_match=yes`, and the same
+  topology digest as the accounting.
+
+**Handoff integrity.**
+
+- Every manifest lists exactly the intended 59 files.
+- Accounting and review read the same selected cohort manifest.
+- Recovered bytes equal the independently written artifact bytes for every slot, where slots are read
+  from content.
+- File names and manifest order carry no slot.
+
+**Writes and output.**
+
+- The whole tree is snapshotted after setup and after every command: relative name, type, size,
+  mtime and SHA-256.
+- Recovery adds only its new directory and exactly `slot-01.txt` … `slot-59.txt`. No staging directory
+  remains.
+- The comparison, accounting and review add, remove or change nothing.
+- No command prints a path, private marker, report content, log framing or OS error, and stderr is
+  empty.
+
+**Fail-closed chains.**
+
+| case                                      | stops after | result                                                        |
+| ----------------------------------------- | ----------- | ------------------------------------------------------------- |
+| one changed artifact byte                 | comparison  | exit `1`, `identical=58 different=1`, `COMPARISON: DIFFERENT` |
+| CRLF artifact manifest                    | comparison  | exit `2`, `artifacts manifest: …carriage return…`             |
+| selected manifest naming one report twice | accounting  | exit `2`, duplicate path; review not run                      |
+| a product-assertion blocker in one slot   | recovery    | exit `1`, `blockers=1`, `NOT WRITTEN`, nothing created        |
+| one job on a rolled-forward runner image  | recovery    | exit `1`, topology differs, `NOT WRITTEN`, nothing created    |
+| a review manifest for another commit      | review      | exit `1`, `manifest_commit_match=no`, `COHORT: BRANCH C`      |
+
+Domain failures are exit `1` at the first step that evaluates them, never transport errors. Every
+failing step wrote nothing.
+
+**Mutation check.** Ten hand-made mutants were run against the rehearsal. Nine were caught:
+
+- the helper not stopping after a failed step, or accepting a non-`MATCH` comparison;
+- recovery writing unpadded file names, or placing its output elsewhere;
+- relative manifest lines resolved from the caller's working directory;
+- the comparator ignoring byte differences;
+- the review dropping one listed report;
+- accounting echoing the manifest path, alone and with the leak scan disabled.
+
+The tenth (the review echoing a path on a manifest failure, which this rehearsal does not exercise)
+is caught by the image-cohort suite. All were reverted.
+
+Test totals: the seven campaign tool test files together pass **126/126**. That is the earlier six
+at 121/121 plus the 5 rehearsal tests. The three manifest-enabled suites stay at 66/66.
+
+**Known limit.** Recovery still takes its job logs as explicit paths; it has no manifest mode. The
+rehearsal spawns `node` directly, so it does not show that 59 long log paths fit through `pnpm run`
+on Windows. Operators should keep log paths short there.
+
+**Still not proven, so nothing changes.** The rehearsal establishes synthetic tool composition only.
+It supplies no authorization, billing, concurrency, queue, download, retrievability, provenance,
+freshness, attempt or live campaign evidence. **Row 9 stays `UNVERIFIED`, row 10 `BLOCKED`, row 11
+`UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict stays NO-GO.**
