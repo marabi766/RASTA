@@ -26,6 +26,23 @@
 > `COM-005`، امتیاز، یا درصد پیشرفت پروژه — نیازمند یک تغییر برنامه‌ریزی
 > **جداگانه و قابل ردیابی** است، نه محصول این ADR یا این PR.
 
+> **مرجع تصمیم پذیرش — نقل مستقیم (2026-09-17).** این پذیرش و بستن Q-44 بر
+> پایهٔ قضاوت Agent نیستند؛ عین دستور صاحب محصول در همان نشستی است که این
+> اصلاح‌ها را نوشت، نه یک نشست دیگر یا یک رله شده:
+>
+> > «The product owner has delegated the following decisions. Incorporate
+> > them consistently into the existing documentation-only PR: […] 2.
+> > Resolve Q-44 for the MVP display policy: show `Fulfillment` as
+> > "supplier declaration" and `Shipment` as separate "physical shipment
+> > tracking." […] Once the corrections are internally consistent, change
+> > ADR-056 from Proposed to Accepted as the delegated architecture
+> > decision; this does not accept COM-006 or award points.»
+>
+> نقل‌قول به زبان اصلی دستور (انگلیسی) آمده تا اصالتش دست‌نخورده بماند؛
+> متن کامل شماره‌گذاری‌شدهٔ پنج تصمیم در تاریخچهٔ همان نشست موجود است. هدف
+> این بخش این است که هر بازبین آینده مرجع این تصمیم را در خودِ سند بیابد،
+> نه در حافظهٔ یک مکالمه.
+
 ## Context
 
 `docs/04` § ۴٫۱۱ مأموریت، مالکیت داده، Command/Query و رویدادهای
