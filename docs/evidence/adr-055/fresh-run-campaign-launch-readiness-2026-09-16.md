@@ -767,6 +767,21 @@ the launch.
   A materialization failure (exit `1`) leaves no output directory. Keep its output. The same unedited
   logs may be processed again only into another path that does not exist yet. Nothing already
   written is deleted, renamed or reused. Until a run exits `0`, retrieval is incomplete.
+- **Optional byte comparison, only when both complete sets exist** (_added 2026-09-17, § 15_).
+  - Use it only when all 59 downloaded artifact reports **and** all 59 files of a fallback run that
+    exited `0` are on disk. It is **not** required when the primary artifact set alone is complete;
+    then L12 and L13 run over the artifact files as before.
+  - Record the decision to run it before running it. Once run, keep its output whatever the result.
+  - `[tool]` `pnpm run compare:aggregation-campaign-retrievals -- --artifacts <report> ... --fallback <report> ...`,
+    with the 59 artifact report paths after `--artifacts` and the 59 materialized paths after
+    `--fallback`. On Windows, 118 long paths can exceed the `cmd.exe` command-line limit of `pnpm run`.
+    Then run `node scripts/aggregation-campaign-retrieval-comparison.mjs` with the same arguments.
+  - `COMPARISON: MATCH` (exit `0`) means only that the two supplied byte sets are identical for every
+    slot. It does not show that either source is authentic, retrievable, fresh, from attempt `1` or
+    from the authorized run.
+  - `COMPARISON: DIFFERENT` or `COMPARISON: REJECTED` (exit `1`) is a **STOP**. It cannot be repaired
+    by choosing one side, mixing files from the two sources, editing, re-downloading or
+    re-materializing. The campaign cannot reach Branch A or B (Branch C).
 
 **L12 — slot accounting.**
 
@@ -775,12 +790,14 @@ the launch.
 - It must exit `0` with `accounting: COMPLETE` and an invariant line that ends in `holds`.
 - Anything else (a blocker, missing slot, rejected input or provenance problem) is Branch C. Keep
   the output.
+- The 59 files are always one complete set from one source. Never mix artifact and fallback files.
+  If the optional L11 comparison was run, L12 is allowed only after `COMPARISON: MATCH`.
 
 **L13 — image-cohort review.**
 
 - `[manual/live]` Re-hash the manifest; it must still equal `image_cohort_manifest_sha256`.
 - `[tool]` `pnpm run review:aggregation-campaign-image-cohort -- <image-cohort-manifest> <report> [<report> ...]`,
-  with the same manifest and the same 59 reports as L12.
+  with the same manifest and the same 59 reports as L12 (one set from one source, never mixed).
 - It must exit `0` with `COHORT: CONSISTENT`. Otherwise (`COHORT: BRANCH C`) the result is Branch C.
 - A human reads and records the single measured topology (§ 11, item 5). Keep the output.
 
@@ -814,6 +831,8 @@ from a job conclusion. Every deferral in § 6 stays deferred.
 - **Fallback files:** `--output-dir` never overwrites, merges with, cleans or deletes an existing
   path. A refused or failed materialization leaves no output directory. The tool never removes
   evidence to make room for a retry.
+- **Retrieval comparison:** the comparator only reads. A `DIFFERENT` or `REJECTED` result is kept and
+  is final. No source is chosen, no files are mixed, and nothing is re-run to get `MATCH`.
 - **Records:** a launch record or manifest is real only when produced inside an authorized launch
   window under Gates 0 and 1. The examples in tests are synthetic.
 
@@ -832,6 +851,7 @@ from a job conclusion. Every deferral in § 6 stays deferred.
 | L7–L8      | 3, 11   | pre-push hashes, remote head = `campaign_commit`                    | before launch → STOP; after launch → Branch C              |
 | L9–L10     | 11      | the one run, per-job `run_attempt` metadata                         | not exactly one run or attempt ≠ 1 → Branch C              |
 | L11        | 2, 10   | 59 artifact files, or recovery output and its 59 materialized files | missing, expired, or fallback not `RESULT: PASS` → not A/B |
+| L11 (opt.) | 10      | comparator output, if both complete sets existed and it was run     | `DIFFERENT` or `REJECTED` → not A/B (Branch C)             |
 | L12        | 12      | accounting output                                                   | not `accounting: COMPLETE` → Branch C                      |
 | L13        | 9       | cohort output, the human-read topology                              | `COHORT: BRANCH C` → Branch C                              |
 | L14        | —       | the branch statement, worded as in preregistration § 6              | any earlier failure → Branch C                             |
@@ -947,3 +967,92 @@ a synthetic nine-field manifest (`COHORT: CONSISTENT`). A one-byte edit of one f
 
 The synthetic fixtures are contract evidence only. **Row 9 stays `UNVERIFIED`, row 10 `BLOCKED`,
 row 11 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict stays NO-GO.**
+
+---
+
+## 15. Update — optional byte comparison of artifact and fallback retrievals (2026-09-17)
+
+This section records a code change, not a live probe. §§ 1–12 and § 14 are unchanged. In § 13, only
+L11, L12, L13, the abort rules and the evidence matrix changed. Nothing was downloaded, no GitHub API
+or network was called, no workflow was installed, pushed, dispatched or rerun, and **no real
+artifact, log, report or comparison exists**.
+
+**The gap.** § 14 made the log fallback write report files. But no committed tool could show whether
+those files are byte-identical to the downloaded artifacts when both exist. Comparing them by hand
+risks decoding, line-ending conversion, or pairing files by name instead of by slot.
+
+**Added.** One manual, read-only command:
+
+`pnpm run compare:aggregation-campaign-retrievals -- --artifacts <report> ... --fallback <report> ...`
+
+- **Interface.** `--artifacts` and `--fallback` each appear exactly once, in either order. Each is
+  followed by its cohort's paths, up to the other option or the end. A path belongs to the option
+  before it. Order within a cohort and file names mean nothing. Exit `2`, before any file is checked
+  or read, for:
+  - a missing, repeated or unknown option, or `--artifacts=…` / `--fallback=…`;
+  - a path before the first option, or an option with no path;
+  - an empty path, or a path starting with `-`;
+  - `--` anywhere except before the first option;
+  - the same resolved path in both cohorts (a string check only; it cannot prove the sources differ);
+  - more than 128 paths in a cohort (`LOG_RECOVERY_LIMITS.maxLogs`).
+
+  A usage error prints a fixed reason and the usage line, never an argument.
+
+- **Reading.** Only the named files are read, as raw bytes, each only after its size is at most
+  32 KiB (`LOG_RECOVERY_LIMITS.maxCandidateBytes`). A cohort with other than 59 paths is not read.
+  Nothing is written, no directory is scanned, and no network or GitHub API is called.
+- **Validation, per cohort, alone.** Strict UTF-8 decoding keeps a BOM, so a BOM fails the parser. The
+  unchanged `accountCampaign`, and so `parseSlotReport`, is then applied. A cohort is accepted only
+  with:
+  - exactly 59 inputs, all readable;
+  - complete accounting: no rejected input, blocker, missing or unparseable slot;
+  - exactly one campaign commit and exactly one measured topology;
+  - every report bound one to one to the slot the parser read.
+
+  No second parser exists and no bound was relaxed.
+
+- **Comparison.** For each slot `1..59`, `Buffer.equals` compares the exact bytes of the two
+  cohorts' reports. Nothing is trimmed, normalized, re-rendered, re-encoded or reduced to parsed
+  fields or digests. A CRLF report fails the parser, so its cohort is `REJECTED`.
+- **Outcomes.**
+
+  | output                  | exit | meaning                                                         |
+  | ----------------------- | ---- | --------------------------------------------------------------- |
+  | `COMPARISON: MATCH`     | `0`  | both cohorts accepted, all 59 slots byte-identical              |
+  | `COMPARISON: DIFFERENT` | `1`  | both cohorts accepted, at least one slot differs                |
+  | `COMPARISON: REJECTED`  | `1`  | at least one cohort incomplete or invalid; nothing was compared |
+
+  The output is 8 fixed lines: per-cohort counts (`inputs`, `read`, accounting state), fixed problem
+  sentences, and `slots_compared`, `identical` and `different` counts. It never contains a path,
+  file name, report content, slot of a difference, commit, topology, timestamp or run value.
+
+**Scope.** `MATCH` establishes equality of the supplied bytes only. It is not evidence that either
+source is authentic, retrievable, fresh, from attempt `1` or from the authorized run. The comparator
+is optional (L11) and is not needed when the artifact set alone is complete. Once run, a `DIFFERENT`
+or `REJECTED` result cannot be repaired by mixing sources and cannot reach Branch A or B. Branch
+A/B/C thresholds, eligibility and first-attempt rules are unchanged. The command is outside
+`pnpm verify`, the test phases and `ci.yml`.
+
+**Tests:** `scripts/aggregation-campaign-retrieval-comparison.test.mjs`, **12/12**, all synthetic.
+They cover:
+
+- an exact 59-slot match;
+- shuffled inputs on either side, and swapped cohort labels;
+- a one-byte difference in slot 1, 17 or 59;
+- reports equal in every parsed field but different in bytes;
+- a sampled sweep of single-byte edits that never yields `MATCH`;
+- per side: CRLF, a missing final newline, BOM, a duplicate, a missing or extra report, a malformed
+  report, a blocker, commit and topology inconsistency, oversized, unreadable and non-UTF-8 input;
+- 22 usage errors with zero reads;
+- oversized reports never read, and wrong-count cohorts not read;
+- output leakage;
+- the command staying outside `pnpm verify`, the test phases and CI;
+- a spawned CLI over temporary files: `MATCH`, a one-byte `DIFFERENT`, a CRLF `REJECTED`, with no
+  file created, removed or changed.
+
+The six campaign tool test files together pass **99/99** (baseline 87/87).
+
+**Still not proven, so nothing changes:** that any real artifact set or log archive is retrievable,
+that real recovered reports equal real artifact bytes, and any real 59-job retrieval. **Row 9 stays
+`UNVERIFIED`, row 10 `BLOCKED`, row 11 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict
+stays NO-GO.**
