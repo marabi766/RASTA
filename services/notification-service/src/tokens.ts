@@ -9,3 +9,5 @@
 
 export const ENV = Symbol('NOTIFICATION_ENV');
 export const LOGGER = Symbol('NOTIFICATION_LOGGER');
+/** The address-scrubbing logger every domain component writes through (ADR-054 § 10, R-5). */
+export const SCRUBBED_LOGGER = Symbol('NOTIFICATION_SCRUBBED_LOGGER');
