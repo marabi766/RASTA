@@ -10,7 +10,15 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -31,9 +39,14 @@ import { LOG_RECOVERY_LIMITS } from './aggregation-campaign-log-recovery-lib.mjs
 import {
   COHORT_INPUT_PROBLEM,
   COMPARISON_DECISION,
+  MANIFEST_PROBLEM,
+  MAX_RETRIEVAL_MANIFEST_BYTES,
   RETRIEVAL_COMPARISON_LIMITS,
   compareRetrievals,
+  findPathCollision,
   formatRetrievalComparison,
+  parseRetrievalManifest,
+  retrievalPathKey,
   validateRetrievalCohort,
 } from './aggregation-campaign-retrieval-comparison-lib.mjs';
 import {
@@ -652,6 +665,7 @@ test('cli: usage errors exit 2 before any size check or read, and echo no argume
   }
   assert.deepEqual(parseComparisonArgs(['--artifacts', 'x', '--fallback', 'y']), {
     ok: true,
+    mode: 'paths',
     cohorts: { artifacts: ['x'], fallback: ['y'] },
   });
 });
@@ -792,6 +806,7 @@ test('the comparator stays manual: outside pnpm verify, the test phases and ordi
     './aggregation-campaign-accounting-lib.mjs',
     './aggregation-campaign-log-recovery-lib.mjs',
     './aggregation-evidence-lib.mjs',
+    'node:path',
   ]);
   assert.match(source, /^import \{ readFileSync, statSync \} from 'node:fs';$/m);
   for (const text of [source, lib]) {
@@ -899,4 +914,694 @@ test('cli (spawned): MATCH, one-byte DIFFERENT and REJECTED over temporary files
   const again = run(['--artifacts', ...artifactPaths, '--fallback', ...fallbackPaths]);
   assert.equal(again.status, 0);
   assert.equal(again.stdout, match.stdout);
+});
+
+// ---------------------------------------------------------------------------
+// Explicit paths — checks added alongside manifests, applied to both modes
+
+const NUL = String.fromCharCode(0);
+const TAB = String.fromCharCode(9);
+const CR = String.fromCharCode(13);
+const DEL = String.fromCharCode(127);
+
+test('cli: explicit paths reject a duplicate within a cohort and an overlong path, before any read', () => {
+  const a = Array.from({ length: 59 }, (_, i) => `secret-a-${i}.txt`);
+  const f = Array.from({ length: 59 }, (_, i) => `secret-f-${i}.txt`);
+  const long = `secret-${'x'.repeat(RETRIEVAL_COMPARISON_LIMITS.maxPathBytes)}`;
+  const cases = [
+    [['--artifacts', ...a.slice(1), a[3], '--fallback', ...f], USAGE_ERROR.duplicatePath],
+    [['--artifacts', ...a, '--fallback', ...f.slice(1), `./${f[7]}`], USAGE_ERROR.duplicatePath],
+    [['--artifacts', ...a.slice(1), long, '--fallback', ...f], USAGE_ERROR.pathTooLong],
+    [
+      ['--artifacts', ...a.slice(1), 'SECRET-A-3.TXT', '--fallback', ...f],
+      USAGE_ERROR.duplicatePath,
+      'win32',
+    ],
+    [
+      ['--artifacts', ...a, '--fallback', ...f.slice(1), 'Secret-A-9.txt.'],
+      USAGE_ERROR.sharedPath,
+      'win32',
+    ],
+  ];
+  for (const [argv, reason, platform = 'linux'] of cases) {
+    const calls = [];
+    const record = (path) => calls.push(path) && 10;
+    const result = runRetrievalComparisonCli({
+      argv,
+      platform,
+      cwd: platform === 'win32' ? 'C:\\work' : '/work',
+      sizeOf: record,
+      readBytes: record,
+      manifestSizeOf: record,
+      readManifestBytes: record,
+    });
+    assert.equal(result.exitCode, 2);
+    assert.equal(result.output.split('\n')[0], reason);
+    assert.equal(calls.length, 0);
+    assert.ok(!/secret|xxxx/i.test(result.output));
+  }
+  // On a case-sensitive platform the same spellings are distinct paths.
+  assert.equal(
+    parseComparisonArgs(['--artifacts', ...a.slice(1), 'SECRET-A-3.TXT', '--fallback', ...f], {
+      platform: 'linux',
+      cwd: '/work',
+    }).ok,
+    true,
+  );
+  // A path of exactly the byte limit is accepted.
+  const exact = 'y'.repeat(RETRIEVAL_COMPARISON_LIMITS.maxPathBytes);
+  assert.equal(
+    parseComparisonArgs(['--artifacts', ...a.slice(1), exact, '--fallback', ...f], {
+      platform: 'linux',
+      cwd: '/work',
+    }).ok,
+    true,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Manifest grammar (pure)
+
+const manifestOf = (lines) => Buffer.from(lines.map((line) => `${line}\n`).join(''), 'utf8');
+const LINES = Array.from({ length: 59 }, (_, i) => `reports/r-${String(i).padStart(2, '0')}.bin`);
+const BOM_BYTES = Buffer.from([0xef, 0xbb, 0xbf]);
+
+test('manifest: exactly 59 LF-terminated paths, resolved against the manifest directory', () => {
+  const parsed = parseRetrievalManifest(manifestOf(LINES), { manifestDir: '/runs/art' });
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(
+    parsed.paths,
+    LINES.map((line) => `/runs/art/${line}`),
+  );
+  const mixed = parseRetrievalManifest(
+    manifestOf(['/abs/one.bin', '../up/two.bin', './here/three.bin', ...LINES.slice(3)]),
+    { manifestDir: '/runs/art' },
+  );
+  assert.deepEqual(mixed.paths.slice(0, 3), [
+    '/abs/one.bin',
+    '/runs/up/two.bin',
+    '/runs/art/here/three.bin',
+  ]);
+
+  const windows = parseRetrievalManifest(
+    manifestOf([
+      'D:\\evidence\\a.bin',
+      'C:/x/b.bin',
+      '\\root\\c.bin',
+      'rel\\d.bin',
+      ...LINES.slice(4),
+    ]),
+    { manifestDir: 'C:\\runs\\art', platform: 'win32' },
+  );
+  assert.deepEqual(windows.paths.slice(0, 4), [
+    'D:\\evidence\\a.bin',
+    'C:\\x\\b.bin',
+    'C:\\root\\c.bin',
+    'C:\\runs\\art\\rel\\d.bin',
+  ]);
+
+  // Bounds are inclusive: 1024-byte entries in a manifest of exactly the byte limit are accepted.
+  const widest = Array.from(
+    { length: 59 },
+    (_, i) =>
+      `${String(i).padStart(2, '0')}${'z'.repeat(RETRIEVAL_COMPARISON_LIMITS.maxPathBytes - 2)}`,
+  );
+  const widestBytes = manifestOf(widest);
+  assert.equal(widestBytes.length, MAX_RETRIEVAL_MANIFEST_BYTES);
+  assert.equal(MAX_RETRIEVAL_MANIFEST_BYTES, 59 * 1025);
+  assert.equal(parseRetrievalManifest(widestBytes, { manifestDir: '/m' }).ok, true);
+});
+
+test('manifest: every grammar violation is a fixed problem and never echoes content', () => {
+  const secret = 'secret-line';
+  const body = (lines) => lines.map((line) => `${line}\n`).join('');
+  const withLine = (line, at = 30) => {
+    const copy = [...LINES];
+    copy[at] = line;
+    return manifestOf(copy);
+  };
+  const cases = [
+    ['missing final LF', Buffer.from(body(LINES).slice(0, -1)), MANIFEST_PROBLEM.finalNewline],
+    ['empty', Buffer.alloc(0), MANIFEST_PROBLEM.finalNewline],
+    ['CRLF', Buffer.from(body(LINES).replaceAll('\n', `${CR}\n`)), MANIFEST_PROBLEM.carriageReturn],
+    ['bare CR', withLine(`a${CR}b`), MANIFEST_PROBLEM.carriageReturn],
+    ['BOM', Buffer.concat([BOM_BYTES, manifestOf(LINES)]), MANIFEST_PROBLEM.bom],
+    [
+      'invalid UTF-8',
+      Buffer.concat([manifestOf(LINES.slice(1)), Buffer.from([0x61, 0xff, 0x0a])]),
+      MANIFEST_PROBLEM.notUtf8,
+    ],
+    ['NUL', withLine(`${secret}${NUL}x`), MANIFEST_PROBLEM.control],
+    ['tab', withLine(`${secret}${TAB}x`), MANIFEST_PROBLEM.control],
+    ['DEL', withLine(`${secret}${DEL}`), MANIFEST_PROBLEM.control],
+    ['blank line', withLine(''), MANIFEST_PROBLEM.blankLine],
+    ['blank last line', Buffer.from(`${body(LINES.slice(1))}\n`), MANIFEST_PROBLEM.blankLine],
+    ['leading space', withLine(` ${secret}`), MANIFEST_PROBLEM.whitespace],
+    ['trailing space', withLine(`${secret} `), MANIFEST_PROBLEM.whitespace],
+    ['option-like', withLine(`--${secret}`), MANIFEST_PROBLEM.optionLike],
+    ['dash', withLine('-'), MANIFEST_PROBLEM.optionLike],
+    ['comment', withLine(`# ${secret}`), MANIFEST_PROBLEM.notPlainPath],
+    ['double-quoted', withLine(`"${secret}"`), MANIFEST_PROBLEM.notPlainPath],
+    ['single quote at end', withLine(`${secret}'`), MANIFEST_PROBLEM.notPlainPath],
+    ['https URL', withLine(`https://example.invalid/${secret}`), MANIFEST_PROBLEM.notPlainPath],
+    ['file URL', withLine(`file:///tmp/${secret}`), MANIFEST_PROBLEM.notPlainPath],
+    ['drive-relative', withLine(`C:${secret}`), MANIFEST_PROBLEM.notPlainPath],
+    [
+      'overlong entry',
+      withLine('q'.repeat(RETRIEVAL_COMPARISON_LIMITS.maxPathBytes + 1)),
+      MANIFEST_PROBLEM.entryTooLong,
+    ],
+    ['overlong multibyte entry', withLine('é'.repeat(513)), MANIFEST_PROBLEM.entryTooLong],
+    ['58 lines', manifestOf(LINES.slice(1)), MANIFEST_PROBLEM.lineCount],
+    ['60 lines', manifestOf([...LINES, 'extra.bin']), MANIFEST_PROBLEM.lineCount],
+    ['one line', manifestOf([secret]), MANIFEST_PROBLEM.lineCount],
+    ['oversized', Buffer.alloc(MAX_RETRIEVAL_MANIFEST_BYTES + 1, 0x61), MANIFEST_PROBLEM.tooLarge],
+    ['not bytes', 'reports/r-00.bin\n', MANIFEST_PROBLEM.unreadable],
+  ];
+  for (const [name, bytes, problem] of cases) {
+    assert.deepEqual(
+      parseRetrievalManifest(bytes, { manifestDir: '/runs/art' }),
+      { ok: false, problem },
+      name,
+    );
+    assert.ok(!problem.includes('secret') && !problem.includes('/runs'), name);
+  }
+  assert.equal(
+    parseRetrievalManifest(manifestOf(LINES), { manifestDir: 'relative/dir' }).ok,
+    false,
+    'the manifest directory must be absolute',
+  );
+});
+
+test('manifest: path keys are conservative on Windows and exact on POSIX', () => {
+  const win = { platform: 'win32' };
+  for (const [a, b] of [
+    ['C:\\Data\\Reports\\A.txt', 'c:/data/reports/a.TXT'],
+    ['C:\\data\\a.txt', 'C:\\data\\a.txt.'],
+    ['C:\\data\\a.txt', 'C:\\data\\a.txt  '],
+    ['C:\\data\\dir.\\a.txt', 'C:\\data\\dir\\a.txt'],
+    ['C:\\data\\x\\..\\a.txt', 'C:\\DATA\\A.TXT'],
+  ]) {
+    assert.equal(retrievalPathKey(a, win), retrievalPathKey(b, win), `${a} ~ ${b}`);
+    assert.equal(findPathCollision({ artifacts: [a], fallback: [b] }, win), 'shared');
+    assert.equal(findPathCollision({ artifacts: [a, b], fallback: [] }, win), 'duplicate');
+  }
+  assert.notEqual(
+    retrievalPathKey('C:\\data\\a.txt', win),
+    retrievalPathKey('D:\\data\\a.txt', win),
+  );
+  assert.equal(retrievalPathKey('/x/./y/../a', {}), '/x/a');
+  assert.notEqual(retrievalPathKey('/x/A', {}), retrievalPathKey('/x/a', {}));
+  assert.equal(findPathCollision({ artifacts: ['/x/A'], fallback: ['/x/a'] }, {}), null);
+  assert.equal(
+    findPathCollision({ artifacts: ['/x/a', '/x/b'], fallback: ['/x/b', '/x/b/'] }, {}),
+    'duplicate',
+    'duplicates are reported before sharing',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Manifest mode through the CLI, with injected readers
+
+const reportNames = (prefix, count = 59) =>
+  Array.from({ length: count }, (_, i) => `reports/${prefix}-${String(i).padStart(3, '0')}.bin`);
+
+/**
+ * A fake file system: reports under two run directories and one manifest in
+ * each, listing its reports relatively. Every size check and read is recorded.
+ */
+function manifestFs(
+  artifacts,
+  fallback,
+  { artifactLines, fallbackLines, manifests = {}, manifestSizes = {}, errors = new Set() } = {},
+) {
+  const reports = new Map();
+  const aNames = reportNames('secret-art', artifacts.length);
+  const fNames = reportNames('secret-fb', fallback.length);
+  artifacts.forEach((bytes, i) => reports.set(`/runs/art/${aNames[i]}`, bytes));
+  fallback.forEach((bytes, i) => reports.set(`/runs/fb/${fNames[i]}`, bytes));
+  const files = new Map([
+    ['/runs/art/list.txt', manifests.artifacts ?? manifestOf(artifactLines ?? aNames)],
+    ['/runs/fb/list.txt', manifests.fallback ?? manifestOf(fallbackLines ?? fNames)],
+  ]);
+  const calls = [];
+  const lookup = (map, path) => {
+    if (errors.has(path) || !map.has(path)) throw new Error(`ENOENT ${path}`);
+    return map.get(path);
+  };
+  return {
+    calls,
+    reportCalls: () => calls.filter(([kind]) => kind.startsWith('report')),
+    options: {
+      platform: 'linux',
+      cwd: '/work/elsewhere',
+      sizeOf: (path) => {
+        calls.push(['report-size', path]);
+        return lookup(reports, path).length;
+      },
+      readBytes: (path) => {
+        calls.push(['report-read', path]);
+        return Buffer.from(lookup(reports, path));
+      },
+      manifestSizeOf: (path) => {
+        calls.push(['manifest-size', path]);
+        return path in manifestSizes ? manifestSizes[path] : lookup(files, path).length;
+      },
+      readManifestBytes: (path) => {
+        calls.push(['manifest-read', path]);
+        return Buffer.from(lookup(files, path));
+      },
+    },
+  };
+}
+
+const MANIFEST_ARGV = Object.freeze([
+  '--artifacts-manifest',
+  '../../runs/art/list.txt',
+  '--fallback-manifest',
+  '/runs/fb/list.txt',
+]);
+const runManifest = (fs, argv = MANIFEST_ARGV) =>
+  runRetrievalComparisonCli({ argv: [...argv], ...fs.options });
+
+test('cli manifests: MATCH, DIFFERENT and REJECTED, relative to each manifest, order-free', () => {
+  const fs = manifestFs(cohort(), shuffled(cohort(), 3));
+  const match = runManifest(fs);
+  assert.equal(match.exitCode, 0, match.output);
+  assert.match(match.output, /^COMPARISON: MATCH$/m);
+  assertSafeOutput(match.output, ['secret', 'runs', 'list.txt', 'reports']);
+  // Report paths come from each manifest's own directory, never from the working directory.
+  const reportPaths = fs.reportCalls().map(([, path]) => path);
+  assert.equal(reportPaths.filter((path) => path.startsWith('/runs/art/reports/')).length, 118);
+  assert.equal(reportPaths.filter((path) => path.startsWith('/runs/fb/reports/')).length, 118);
+  assert.ok(!reportPaths.some((path) => path.startsWith('/work')));
+  assert.deepEqual(
+    fs.calls.filter(([kind]) => kind.startsWith('manifest')),
+    [
+      ['manifest-size', '/runs/art/list.txt'],
+      ['manifest-read', '/runs/art/list.txt'],
+      ['manifest-size', '/runs/fb/list.txt'],
+      ['manifest-read', '/runs/fb/list.txt'],
+    ],
+  );
+
+  // Either option order, a leading `--`, and shuffled manifest lines change nothing.
+  const reordered = manifestFs(cohort(), shuffled(cohort(), 3), {
+    artifactLines: shuffled(reportNames('secret-art'), 41),
+    fallbackLines: shuffled(reportNames('secret-fb'), 43),
+  });
+  const again = runManifest(reordered, [
+    '--',
+    ...MANIFEST_ARGV.slice(2),
+    ...MANIFEST_ARGV.slice(0, 2),
+  ]);
+  assert.equal(again.exitCode, 0);
+  assert.equal(again.output, match.output);
+
+  // The same bytes through explicit absolute paths print the same comparison.
+  const explicit = runRetrievalComparisonCli({
+    argv: [
+      '--artifacts',
+      ...reportNames('secret-art').map((name) => `/runs/art/${name}`),
+      '--fallback',
+      ...reportNames('secret-fb').map((name) => `/runs/fb/${name}`),
+    ],
+    ...fs.options,
+  });
+  assert.equal(explicit.output, match.output);
+
+  const different = runManifest(manifestFs(cohort(), cohort({ 44: { second: 45 } })));
+  assert.equal(different.exitCode, 1);
+  assert.match(different.output, /^comparison: slots_compared=59 identical=58 different=1$/m);
+  assert.match(different.output, /^COMPARISON: DIFFERENT$/m);
+  assertSafeOutput(different.output, ['secret', 'runs', '44']);
+
+  const crlf = reportText(12).replaceAll('\n', `${CR}\n`);
+  const rejected = runManifest(manifestFs(cohort({ 12: crlf }), cohort()));
+  assert.equal(rejected.exitCode, 1);
+  assert.match(
+    rejected.output,
+    /^artifacts cohort: REJECTED inputs=59 read=59 accounting=INCOMPLETE$/m,
+  );
+  assert.match(rejected.output, /^COMPARISON: REJECTED$/m);
+  assertSafeOutput(rejected.output, ['secret', 'runs']);
+});
+
+test('cli manifests: a manifest failure on either side exits 2 with zero report reads', () => {
+  const lines = reportNames('secret-x');
+  const text = manifestOf(lines).toString('utf8');
+  const bad = {
+    missingFinalLf: [Buffer.from(text.slice(0, -1)), MANIFEST_PROBLEM.finalNewline],
+    crlf: [Buffer.from(text.replaceAll('\n', `${CR}\n`)), MANIFEST_PROBLEM.carriageReturn],
+    bom: [Buffer.concat([BOM_BYTES, manifestOf(lines)]), MANIFEST_PROBLEM.bom],
+    notUtf8: [
+      Buffer.concat([manifestOf(lines.slice(1)), Buffer.from([0xc3, 0x0a])]),
+      MANIFEST_PROBLEM.notUtf8,
+    ],
+    nul: [manifestOf([...lines.slice(1), `secret${NUL}.bin`]), MANIFEST_PROBLEM.control],
+    blank: [manifestOf([...lines.slice(1), '']), MANIFEST_PROBLEM.blankLine],
+    optionLike: [manifestOf([...lines.slice(1), '--secret']), MANIFEST_PROBLEM.optionLike],
+    url: [
+      manifestOf([...lines.slice(1), 'https://secret.invalid/x']),
+      MANIFEST_PROBLEM.notPlainPath,
+    ],
+    tooFew: [manifestOf(lines.slice(1)), MANIFEST_PROBLEM.lineCount],
+    tooMany: [manifestOf([...lines, 'reports/secret-extra.bin']), MANIFEST_PROBLEM.lineCount],
+    overlong: [manifestOf([...lines.slice(1), 's'.repeat(1025)]), MANIFEST_PROBLEM.entryTooLong],
+  };
+  const expectFailure = (fs, side, problem, name) => {
+    const result = runManifest(fs);
+    assert.equal(result.exitCode, 2, `${name} on ${side}`);
+    const outputLines = result.output.split('\n');
+    assert.equal(outputLines[0], `${side} manifest: ${problem}`, `${name} on ${side}`);
+    assert.match(outputLines[1], /^usage: /);
+    assert.equal(outputLines.length, 3);
+    assert.deepEqual(fs.reportCalls(), [], `${name}: no report is checked or read`);
+    assert.ok(
+      !/secret|runs|list\.txt|ENOENT|work|sss/.test(result.output),
+      `${name}: nothing echoed`,
+    );
+    return fs;
+  };
+  for (const side of ['artifacts', 'fallback']) {
+    const path = side === 'artifacts' ? '/runs/art/list.txt' : '/runs/fb/list.txt';
+    for (const [name, [bytes, problem]] of Object.entries(bad)) {
+      expectFailure(
+        manifestFs(cohort(), cohort(), { manifests: { [side]: bytes } }),
+        side,
+        problem,
+        name,
+      );
+    }
+    // Oversized or unknown size: the manifest itself is never read.
+    for (const size of [MAX_RETRIEVAL_MANIFEST_BYTES + 1, Number.NaN]) {
+      const big = expectFailure(
+        manifestFs(cohort(), cohort(), { manifestSizes: { [path]: size } }),
+        side,
+        MANIFEST_PROBLEM.tooLarge,
+        `size ${size}`,
+      );
+      assert.ok(!big.calls.some(([kind, called]) => kind === 'manifest-read' && called === path));
+    }
+    // Grown between the size check and the read: rejected on the bytes actually read.
+    expectFailure(
+      manifestFs(cohort(), cohort(), {
+        manifests: { [side]: Buffer.alloc(MAX_RETRIEVAL_MANIFEST_BYTES + 1, 0x61) },
+        manifestSizes: { [path]: 10 },
+      }),
+      side,
+      MANIFEST_PROBLEM.tooLarge,
+      'grown',
+    );
+    expectFailure(
+      manifestFs(cohort(), cohort(), { errors: new Set([path]) }),
+      side,
+      MANIFEST_PROBLEM.unreadable,
+      'unreadable',
+    );
+  }
+});
+
+test('cli manifests: duplicates and shared paths are refused after resolution, before any report read', () => {
+  const art = reportNames('secret-art');
+  const fb = reportNames('secret-fb');
+  const cases = [
+    ['duplicate line', { artifactLines: [...art.slice(1), art[5]] }, USAGE_ERROR.duplicatePath],
+    [
+      'duplicate spelling',
+      { fallbackLines: [...fb.slice(1), `x/../${fb[9]}`] },
+      USAGE_ERROR.duplicatePath,
+    ],
+    [
+      'shared absolute',
+      { fallbackLines: [...fb.slice(1), `/runs/art/${art[0]}`] },
+      USAGE_ERROR.sharedPath,
+    ],
+    [
+      'shared relative',
+      { fallbackLines: [...fb.slice(1), `../art/${art[2]}`] },
+      USAGE_ERROR.sharedPath,
+    ],
+  ];
+  for (const [name, options, reason] of cases) {
+    const fs = manifestFs(cohort(), cohort(), options);
+    const result = runManifest(fs);
+    assert.equal(result.exitCode, 2, name);
+    assert.equal(result.output.split('\n')[0], reason, name);
+    assert.deepEqual(fs.reportCalls(), [], name);
+    assert.ok(!/secret|runs/.test(result.output));
+  }
+
+  // Windows spellings that name one file collide under the win32 policy only.
+  const winLines = (prefix, first) => [
+    first,
+    ...Array.from({ length: 58 }, (_, i) => `${prefix}\\r-${i}.bin`),
+  ];
+  const manifests = {
+    art: manifestOf(winLines('art', 'C:\\Evidence\\Secret.bin')),
+    fb: manifestOf(winLines('fb', 'c:/evidence/SECRET.BIN.')),
+  };
+  const pick = (path) => (/art/i.test(path) ? manifests.art : manifests.fb);
+  for (const [platform, cwd, argv, expected] of [
+    [
+      'win32',
+      'C:\\work',
+      [
+        '--artifacts-manifest',
+        'C:\\runs\\art\\list.txt',
+        '--fallback-manifest',
+        'C:\\runs\\fb\\list.txt',
+      ],
+      2,
+    ],
+    [
+      'linux',
+      '/work',
+      ['--artifacts-manifest', '/runs/art/list.txt', '--fallback-manifest', '/runs/fb/list.txt'],
+      1,
+    ],
+  ]) {
+    const reads = [];
+    const result = runRetrievalComparisonCli({
+      argv,
+      platform,
+      cwd,
+      sizeOf: (path) => reads.push(path) && 10,
+      readBytes: (path) => reads.push(path) && Buffer.alloc(0),
+      manifestSizeOf: (path) => pick(path).length,
+      readManifestBytes: (path) => pick(path),
+    });
+    assert.equal(result.exitCode, expected, platform);
+    if (platform === 'win32') {
+      assert.equal(result.output.split('\n')[0], USAGE_ERROR.sharedPath);
+      assert.deepEqual(reads, []);
+    } else {
+      // Case-sensitive: distinct paths, so reports are read (and here rejected as unreadable).
+      assert.match(result.output, /^COMPARISON: REJECTED$/m);
+      assert.equal(reads.length, 118 * 2);
+    }
+    assert.ok(!/secret|evidence|runs/i.test(result.output));
+  }
+});
+
+test('cli manifests: option errors exit 2 before any manifest or report access', () => {
+  const a = Array.from({ length: 59 }, (_, i) => `secret-a-${i}.txt`);
+  const m1 = 'secret-m1';
+  const m2 = 'secret-m2';
+  const cases = [
+    [['--artifacts-manifest', m1], USAGE_ERROR.missingManifest],
+    [['--fallback-manifest', m2], USAGE_ERROR.missingManifest],
+    [['--artifacts-manifest', m1, '--fallback', ...a], USAGE_ERROR.mixedModes],
+    [['--artifacts', ...a, '--fallback-manifest', m2], USAGE_ERROR.mixedModes],
+    [['--fallback-manifest', m2, '--artifacts', ...a], USAGE_ERROR.mixedModes],
+    [
+      ['--artifacts-manifest', m1, '--artifacts-manifest', 'secret-m3', '--fallback-manifest', m2],
+      USAGE_ERROR.repeatedOption,
+    ],
+    [['--artifacts-manifest', m1, '--fallback-manifest'], USAGE_ERROR.manifestValue],
+    [['--artifacts-manifest', '--fallback-manifest', m2], USAGE_ERROR.manifestValue],
+    [['--artifacts-manifest', '', '--fallback-manifest', m2], USAGE_ERROR.manifestValue],
+    [['--artifacts-manifest', '-secret', '--fallback-manifest', m2], USAGE_ERROR.manifestValue],
+    [
+      ['--artifacts-manifest', m1, 'secret-extra', '--fallback-manifest', m2],
+      USAGE_ERROR.extraArgument,
+    ],
+    [
+      ['--artifacts-manifest', m1, '--fallback-manifest', m2, 'secret-extra'],
+      USAGE_ERROR.extraArgument,
+    ],
+    [['--artifacts-manifest=secret-m1', '--fallback-manifest', m2], USAGE_ERROR.inlineValue],
+    [['--artifacts-manifest', m1, '--fallback-manifest=secret-m2'], USAGE_ERROR.inlineValue],
+    [['--artifacts-manifests', m1, '--fallback-manifest', m2], USAGE_ERROR.unknownOption],
+    [['--artifacts-manifest', m1, '--', '--fallback-manifest', m2], USAGE_ERROR.lateSeparator],
+    [
+      ['--artifacts-manifest', 'secret-m', '--fallback-manifest', './secret-m'],
+      USAGE_ERROR.sharedManifest,
+    ],
+    [
+      ['--artifacts-manifest', 's'.repeat(1025), '--fallback-manifest', m2],
+      USAGE_ERROR.pathTooLong,
+    ],
+  ];
+  for (const [argv, reason] of cases) {
+    const calls = [];
+    const record = (path) => calls.push(path) && 10;
+    const result = runRetrievalComparisonCli({
+      argv,
+      platform: 'linux',
+      cwd: '/work',
+      sizeOf: record,
+      readBytes: record,
+      manifestSizeOf: record,
+      readManifestBytes: record,
+    });
+    assert.equal(result.exitCode, 2, JSON.stringify(argv.slice(0, 2)));
+    assert.equal(result.output.split('\n')[0], reason, JSON.stringify(argv.slice(0, 2)));
+    assert.equal(calls.length, 0);
+    assert.ok(!/secret|sss/.test(result.output));
+  }
+  const winShared = parseComparisonArgs(
+    ['--artifacts-manifest', 'D:\\Runs\\List.txt', '--fallback-manifest', 'd:/runs/list.TXT'],
+    { platform: 'win32', cwd: 'C:\\work' },
+  );
+  assert.equal(winShared.ok, false);
+  assert.equal(winShared.output.split('\n')[0], USAGE_ERROR.sharedManifest);
+  assert.deepEqual(
+    parseComparisonArgs(['--fallback-manifest', 'f.txt', '--artifacts-manifest', 'a.txt'], {
+      platform: 'linux',
+      cwd: '/work',
+    }),
+    { ok: true, mode: 'manifest', manifests: { artifacts: 'a.txt', fallback: 'f.txt' } },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The package command in manifest mode, over long real paths
+
+test('cli (spawned package command): manifests carry 118 long paths; MATCH, DIFFERENT, exit 2; nothing written', () => {
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+  const [program, script, ...rest] =
+    pkg.scripts['compare:aggregation-campaign-retrievals'].split(' ');
+  assert.equal(program, 'node');
+  assert.deepEqual(rest, []);
+  const scriptPath = join(repoRoot, script);
+
+  const root = mkdtempSync(join(tmpdir(), 'aggregation-campaign-retrieval-manifest-test-'));
+  temporaryDirs.push(root);
+  assert.ok(!resolve(root).startsWith(repoRoot));
+  const segment = (label) => `${label}-${'long-directory-segment-'.repeat(5)}`.slice(0, 90);
+  const artifactDir = join(root, segment('downloaded-artifacts'));
+  const fallbackDir = join(root, segment('materialized-fallback'));
+  const callerDir = join(root, 'caller');
+  for (const dir of [artifactDir, fallbackDir, callerDir]) mkdirSync(dir);
+
+  const artifactPaths = cohort().map((bytes, i) => {
+    const path = join(artifactDir, `private-artifact-report-${String(i).padStart(2, '0')}.txt`);
+    writeFileSync(path, bytes);
+    return path;
+  });
+  const fallbackNames = shuffled(cohort(), 31).map((bytes, i) => {
+    const name = `private-recovered-report-${String(58 - i).padStart(2, '0')}.txt`;
+    writeFileSync(join(fallbackDir, name), bytes);
+    return name;
+  });
+  const fallbackPaths = fallbackNames.map((name) => join(fallbackDir, name));
+  for (const path of [...artifactPaths, ...fallbackPaths]) {
+    assert.ok(path.length < 250, 'each path stays under the classic Windows MAX_PATH');
+  }
+  const individually = [...artifactPaths, ...fallbackPaths].reduce(
+    (total, path) => total + path.length + 3,
+    0,
+  );
+  assert.ok(individually > 8191, 'passed one by one, the paths exceed the cmd.exe limit');
+
+  // Absolute lines for the artifacts; lines relative to the manifest's directory for the fallback.
+  const artifactManifest = join(root, 'artifacts.manifest');
+  const fallbackManifest = join(fallbackDir, 'fallback.manifest');
+  const malformedManifest = join(root, 'malformed.manifest');
+  writeFileSync(artifactManifest, manifestOf(shuffled(artifactPaths, 17)));
+  writeFileSync(fallbackManifest, manifestOf(fallbackNames));
+  writeFileSync(
+    malformedManifest,
+    Buffer.from(manifestOf(fallbackNames).toString('utf8').replaceAll('\n', `${CR}\n`)),
+  );
+
+  const walk = (dir) =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) return [[full, 'dir'], ...walk(full)];
+      const stats = statSync(full);
+      return [[full, stats.size, stats.mtimeMs, readFileSync(full).toString('base64')]];
+    });
+  const snapshot = () => walk(root).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  const run = (args) => {
+    const around = snapshot();
+    const result = spawnSync(process.execPath, [scriptPath, ...args], {
+      encoding: 'utf8',
+      cwd: callerDir,
+    });
+    assert.deepEqual(snapshot(), around, 'the run created, removed or changed nothing');
+    assert.equal(result.stderr, '');
+    return result;
+  };
+  const leaks = [root, 'private', 'long-directory', '.manifest', repoRoot, 'caller'];
+
+  const match = run([
+    '--',
+    '--artifacts-manifest',
+    artifactManifest,
+    '--fallback-manifest',
+    fallbackManifest,
+  ]);
+  assert.equal(match.status, 0, match.stdout);
+  assert.match(
+    match.stdout,
+    /^comparison: slots_compared=59 identical=59 different=0\nCOMPARISON: MATCH$/m,
+  );
+  assertSafeOutput(match.stdout, leaks);
+
+  // Explicit paths still work when passed directly, with no cmd.exe in between, and agree.
+  const explicit = run(['--artifacts', ...artifactPaths, '--fallback', ...fallbackPaths]);
+  assert.equal(explicit.status, 0);
+  assert.equal(explicit.stdout, match.stdout);
+
+  const target = fallbackPaths[20];
+  const original = readFileSync(target);
+  const at = original.indexOf('.000Z') - 1;
+  writeFileSync(target, flipByte(original, at, original[at] === 0x39 ? -1 : 1));
+  const different = run([
+    '--fallback-manifest',
+    fallbackManifest,
+    '--artifacts-manifest',
+    artifactManifest,
+  ]);
+  assert.equal(different.status, 1);
+  assert.match(
+    different.stdout,
+    /^comparison: slots_compared=59 identical=58 different=1\nCOMPARISON: DIFFERENT$/m,
+  );
+  assertSafeOutput(different.stdout, leaks);
+  writeFileSync(target, original);
+
+  const malformed = run([
+    '--artifacts-manifest',
+    artifactManifest,
+    '--fallback-manifest',
+    malformedManifest,
+  ]);
+  assert.equal(malformed.status, 2);
+  assert.equal(
+    malformed.stdout.split('\n')[0],
+    `fallback manifest: ${MANIFEST_PROBLEM.carriageReturn}`,
+  );
+  for (const leak of leaks) assert.ok(!malformed.stdout.includes(leak));
+
+  const restored = run([
+    '--artifacts-manifest',
+    artifactManifest,
+    '--fallback-manifest',
+    fallbackManifest,
+  ]);
+  assert.equal(restored.status, 0);
+  assert.equal(restored.stdout, match.stdout);
 });

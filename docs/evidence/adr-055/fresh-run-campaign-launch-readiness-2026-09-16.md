@@ -772,10 +772,20 @@ the launch.
     exited `0` are on disk. It is **not** required when the primary artifact set alone is complete;
     then L12 and L13 run over the artifact files as before.
   - Record the decision to run it before running it. Once run, keep its output whatever the result.
-  - `[tool]` `pnpm run compare:aggregation-campaign-retrievals -- --artifacts <report> ... --fallback <report> ...`,
+  - `[tool]`, **recommended, Windows-safe** (_updated 2026-09-17, § 16_):
+    `pnpm run compare:aggregation-campaign-retrievals -- --artifacts-manifest <file> --fallback-manifest <file>`.
+    - Each manifest is a plain path list written by the operator: exactly 59 LF-terminated lines, one
+      report path per line, in the § 16 grammar.
+    - A relative line resolves against the manifest's own directory.
+    - Keep both manifests with the output. A manifest only transports paths. It is **not** evidence
+      and proves nothing about authenticity or provenance.
+  - `[tool]`, still valid:
+    `pnpm run compare:aggregation-campaign-retrievals -- --artifacts <report> ... --fallback <report> ...`,
     with the 59 artifact report paths after `--artifacts` and the 59 materialized paths after
-    `--fallback`. On Windows, 118 long paths can exceed the `cmd.exe` command-line limit of `pnpm run`.
-    Then run `node scripts/aggregation-campaign-retrieval-comparison.mjs` with the same arguments.
+    `--fallback`. On Windows, 118 long paths can exceed the `cmd.exe` command-line limit of
+    `pnpm run`. Use manifests instead.
+  - Exit `2` (a usage or manifest-contract error) compared nothing. Only the invocation or a manifest's
+    path list may be corrected; no report file may change.
   - `COMPARISON: MATCH` (exit `0`) means only that the two supplied byte sets are identical for every
     slot. It does not show that either source is authentic, retrievable, fresh, from attempt `1` or
     from the authorized run.
@@ -851,7 +861,7 @@ from a job conclusion. Every deferral in § 6 stays deferred.
 | L7–L8      | 3, 11   | pre-push hashes, remote head = `campaign_commit`                    | before launch → STOP; after launch → Branch C              |
 | L9–L10     | 11      | the one run, per-job `run_attempt` metadata                         | not exactly one run or attempt ≠ 1 → Branch C              |
 | L11        | 2, 10   | 59 artifact files, or recovery output and its 59 materialized files | missing, expired, or fallback not `RESULT: PASS` → not A/B |
-| L11 (opt.) | 10      | comparator output, if both complete sets existed and it was run     | `DIFFERENT` or `REJECTED` → not A/B (Branch C)             |
+| L11 (opt.) | 10      | comparator output and its two manifests, if it was run              | `DIFFERENT` or `REJECTED` → not A/B (Branch C)             |
 | L12        | 12      | accounting output                                                   | not `accounting: COMPLETE` → Branch C                      |
 | L13        | 9       | cohort output, the human-read topology                              | `COHORT: BRANCH C` → Branch C                              |
 | L14        | —       | the branch statement, worded as in preregistration § 6              | any earlier failure → Branch C                             |
@@ -1051,6 +1061,88 @@ They cover:
   file created, removed or changed.
 
 The six campaign tool test files together pass **99/99** (baseline 87/87).
+
+**Still not proven, so nothing changes:** that any real artifact set or log archive is retrievable,
+that real recovered reports equal real artifact bytes, and any real 59-job retrieval. **Row 9 stays
+`UNVERIFIED`, row 10 `BLOCKED`, row 11 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict
+stays NO-GO.**
+
+---
+
+## 16. Update — bounded cohort manifests for the retrieval comparator (2026-09-17)
+
+This section records a code change, not a live probe. §§ 1–12, § 14 and § 15 are unchanged. In § 13,
+only the L11 comparator bullet and the `L11 (opt.)` matrix row changed. Nothing was downloaded, no
+GitHub API or network was called, no workflow was installed, pushed, dispatched or rerun, and **no
+real artifact, log, report, manifest or comparison exists**.
+
+**The gap.** § 15 recorded that on Windows, `pnpm run` passes arguments through `cmd.exe`, whose
+command line is limited to 8191 characters. 118 long report paths exceed it, so the documented
+package command could fail before the comparator started.
+
+**Added.** A second input mode for the same command. The explicit-path mode is kept.
+
+`pnpm run compare:aggregation-campaign-retrievals -- --artifacts-manifest <file> --fallback-manifest <file>`
+
+- **Options.**
+  - Each manifest option appears exactly once, in either order, followed by exactly one manifest
+    path.
+  - Both cohorts must use the same mode.
+  - Exit `2` before any report is read for: mixed modes; a missing, repeated or unknown option;
+    `--option=value`; a manifest option without one following path (none, empty, or starting with
+    `-`); any extra argument; `--` after the first option; a path over 1024 UTF-8 bytes; the same
+    manifest for both cohorts.
+- **Manifest grammar.**
+  - Strict UTF-8 with no BOM, at most 60 475 bytes (59 × (1024 + 1)).
+  - Exactly 59 lines, each ended by LF. No CR, NUL, tab or other control character.
+  - Each line is one report path of 1–1024 UTF-8 bytes. It has no leading or trailing whitespace and
+    does not start with `-`, `#`, `"` or `'`. It does not end with a quote, is not a `scheme:` URL and
+    is not a Windows drive-relative `C:name`.
+  - There are no comments, quoting or escapes.
+  - An absolute line is used as written. A relative line resolves against the directory holding that
+    manifest, never the caller's working directory.
+  - Line order means nothing. Slots still come only from parsed report content.
+- **Bounded reading.**
+  - Each manifest's size is checked before it is read, and the bytes are checked again after reading.
+  - Only the two named manifests and the 59 + 59 report files they list are read.
+  - Every manifest failure exits `2` with one fixed line, `artifacts manifest: <problem>` or
+    `fallback manifest: <problem>`, and **zero report reads**.
+  - No path, manifest line or OS error is printed. Nothing is written, no directory is scanned and no
+    glob is expanded.
+- **Path collisions, in both modes.** After resolution, the same report path twice in one cohort
+  exits `2` (this is new for explicit paths, which previously ended as `REJECTED`). So does a path
+  present in both cohorts.
+  - **On Windows**, comparison is conservative: separators are normalized, each segment's trailing
+    dots and spaces are dropped, and case is folded.
+  - **On POSIX**, it is exact after normalization.
+  - No filesystem identity is consulted, so hard links, junctions, symlinks and 8.3 short names are not
+    detected.
+  - Explicit paths also gained the 1024-byte path bound.
+- **Unchanged:** per-cohort validation by `accountCampaign` and `parseSlotReport`, slot binding,
+  `Buffer.equals` on the original bytes, the three outcomes and exit codes `0`/`1`, the 8-line
+  output, and the scope. A manifest is operator-supplied transport. It is not evidence and proves
+  nothing about authenticity, provenance, freshness, attempt or authorization.
+
+**Tests:** `scripts/aggregation-campaign-retrieval-comparison.test.mjs`, **21/21**: the 12 earlier
+tests plus 9 new ones, all synthetic. They cover:
+
+- the new explicit-path duplicate and length checks, including Windows case and trailing-dot variants
+  under an injected `win32` policy;
+- manifest grammar and inclusive bounds;
+- 28 grammar violations, each with its fixed problem;
+- Windows and POSIX path keys;
+- manifest `MATCH`, `DIFFERENT` and `REJECTED`, with resolution relative to each manifest, shuffled
+  lines and either option order, and output identical to explicit paths;
+- each manifest failure on either side (11 malformed forms, oversized or unknown size before reading,
+  growth after the size check, unreadable), with zero report reads;
+- duplicates and shared paths after resolution;
+- 18 option errors with no file access;
+- a spawned run of the package script's command in manifest mode over 118 real paths totalling more
+  than 8191 characters: `MATCH`, a one-byte `DIFFERENT`, and a CRLF manifest exiting `2`. Names,
+  sizes, mtimes and bytes were unchanged around every run, and output was leak-scanned.
+
+All 22 hand-made mutants of the new code were caught. The six campaign tool test files together pass
+**108/108** (baseline 99/99).
 
 **Still not proven, so nothing changes:** that any real artifact set or log archive is retrievable,
 that real recovered reports equal real artifact bytes, and any real 59-job retrieval. **Row 9 stays
