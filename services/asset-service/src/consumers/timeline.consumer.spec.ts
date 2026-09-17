@@ -240,6 +240,103 @@ describe('TimelineConsumer', () => {
     });
   });
 
+  describe('ADR-052 phase-2 contract: the marketplace payload changes do not break this consumer', () => {
+    // marketplace-service's ORDER_CREATED, ORDER_CANCELLED and the new
+    // ORDER_DISPUTE_RESOLVED are not in `PROJECTIONS` — this service has
+    // never read any of them — so every shape below must still be a plain
+    // 'SKIPPED', unchanged by the new fields marketplace-service now adds.
+    // A break here would mean this consumer's "ignore what I don't know"
+    // guarantee (the same one the generic test above covers) had quietly
+    // stopped holding for this producer's real payloads.
+
+    it('still skips ORDER_CREATED now that it carries promisedDeliveryAt', async () => {
+      const h = harness();
+      const result = await h.consumer.handle(
+        envelope({
+          eventName: 'ORDER_CREATED',
+          producer: 'marketplace-service',
+          aggregateType: 'Order',
+          payload: {
+            orderId: 'ORD_1',
+            buyerOrganizationId: DEH1,
+            supplierOrganizationId: 'ORG-SUP',
+            totalAmountMinor: '250000',
+            currency: 'IRR',
+            lines: [],
+            createdAt: '2026-09-17T00:00:00.000Z',
+            promisedDeliveryAt: '2026-09-23T00:00:00.000Z',
+          },
+        }),
+      );
+
+      expect(result).toBe('SKIPPED');
+      expect(h.appended).toHaveLength(0);
+    });
+
+    it('still skips ORDER_CANCELLED now that it carries cancellationCause', async () => {
+      const h = harness();
+      const result = await h.consumer.handle(
+        envelope({
+          eventName: 'ORDER_CANCELLED',
+          producer: 'marketplace-service',
+          aggregateType: 'Order',
+          payload: {
+            orderId: 'ORD_1',
+            buyerOrganizationId: DEH1,
+            supplierOrganizationId: 'ORG-SUP',
+            totalAmountMinor: '250000',
+            currency: 'IRR',
+            reason: 'no longer needed',
+            cancelledBy: 'USR-1',
+            cancelledAt: '2026-09-17T00:00:00.000Z',
+            cancellationCause: 'SUPPLIER',
+          },
+        }),
+      );
+
+      expect(result).toBe('SKIPPED');
+      expect(h.appended).toHaveLength(0);
+    });
+
+    it('skips the brand new ORDER_DISPUTE_RESOLVED like any other unprojected event', async () => {
+      const h = harness();
+      const result = await h.consumer.handle(
+        envelope({
+          eventName: 'ORDER_DISPUTE_RESOLVED',
+          producer: 'marketplace-service',
+          aggregateType: 'Order',
+          payload: {
+            orderId: 'ORD_1',
+            disputeId: 'DSP_1',
+            buyerOrganizationId: DEH1,
+            supplierOrganizationId: 'ORG-SUP',
+            outcome: 'REFUND',
+            responsibility: 'SUPPLIER',
+            resolvedBy: 'USR-OPS',
+            resolvedAt: '2026-09-17T00:00:00.000Z',
+          },
+        }),
+      );
+
+      expect(result).toBe('SKIPPED');
+      expect(h.appended).toHaveLength(0);
+    });
+
+    it('still projects ORDER_COMPLETED exactly as before — that contract did not change', async () => {
+      const h = harness();
+      await h.consumer.handle(
+        envelope({
+          eventName: 'ORDER_COMPLETED',
+          producer: 'marketplace-service',
+          payload: { assetId: ASSET_ID, totalMinor: '99000' },
+        }),
+      );
+
+      expect(h.appended).toHaveLength(1);
+      expect(h.appended[0]).toMatchObject({ category: 'COST', eventName: 'ORDER_COMPLETED' });
+    });
+  });
+
   describe('description', () => {
     it('uses a human-readable field from the payload when there is one', async () => {
       const h = harness();
