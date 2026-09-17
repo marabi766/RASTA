@@ -1,8 +1,10 @@
 import {
   MARKETPLACE_EVENTS,
   MARKETPLACE_EVENT_SCHEMAS,
+  orderCancelledPayload,
   orderCompletedPayload,
   orderCreatedPayload,
+  orderDisputeResolvedPayload,
   orderReceiptConfirmedPayload,
   validateMarketplacePayload,
 } from './events';
@@ -19,7 +21,7 @@ import {
 const NAMES = Object.values(MARKETPLACE_EVENTS);
 
 describe('the catalogue', () => {
-  it('publishes exactly the nine events docs/04 § 4.8 lists', () => {
+  it('publishes the nine events docs/04 § 4.8 lists plus ORDER_DISPUTE_RESOLVED (ADR-052 § 1-b)', () => {
     expect([...NAMES].sort()).toEqual(
       [
         'OFFER_PUBLISHED',
@@ -28,6 +30,7 @@ describe('the catalogue', () => {
         'ORDER_CONFIRMED',
         'ORDER_CREATED',
         'ORDER_DISPUTED',
+        'ORDER_DISPUTE_RESOLVED',
         'ORDER_FULFILLED',
         'ORDER_RECEIPT_CONFIRMED',
         'REVIEW_SUBMITTED',
@@ -196,6 +199,120 @@ describe('ORDER_CREATED', () => {
     });
 
     expect(parsed.lines[0]?.offerVersion).toBe(4);
+  });
+});
+
+describe('ORDER_CREATED carries the supplier’s promise (ADR-052 § 1-a)', () => {
+  const base = {
+    orderId: 'ORD_1',
+    buyerOrganizationId: 'ORG-A',
+    supplierOrganizationId: 'ORG-B',
+    totalAmountMinor: '500000',
+    currency: 'IRR',
+    lines: [
+      {
+        offerId: 'OFR_1',
+        productId: 'PRD_1',
+        quantity: 1,
+        unitPriceMinor: '500000',
+        lineTotalMinor: '500000',
+        offerVersion: 1,
+      },
+    ],
+    createdAt: '2026-08-29T00:00:00.000Z',
+  };
+
+  it('accepts a promised delivery date', () => {
+    const parsed = orderCreatedPayload.parse({
+      ...base,
+      promisedDeliveryAt: '2026-09-05T00:00:00.000Z',
+    });
+    expect(parsed.promisedDeliveryAt).toBe('2026-09-05T00:00:00.000Z');
+  });
+
+  it('still accepts a payload with no promised date — an additive field, not a version bump', () => {
+    // docs/07 § 7.8: an added optional field keeps eventVersion unchanged, so
+    // an event published before this change must still parse.
+    const parsed = orderCreatedPayload.parse(base);
+    expect(parsed.promisedDeliveryAt).toBeUndefined();
+  });
+});
+
+describe('ORDER_CANCELLED carries a structured cause (ADR-052 §§ 1-c, 4)', () => {
+  const base = {
+    orderId: 'ORD_1',
+    buyerOrganizationId: 'ORG-A',
+    supplierOrganizationId: 'ORG-B',
+    totalAmountMinor: '500000',
+    currency: 'IRR',
+    reason: 'no longer needed',
+    cancelledBy: 'USR-1',
+    cancelledAt: '2026-08-29T00:00:00.000Z',
+  };
+
+  it.each(['SUPPLIER', 'BUYER', 'PLATFORM', 'UNDETERMINED'])(
+    'accepts %s as a cause',
+    (cancellationCause) => {
+      expect(orderCancelledPayload.safeParse({ ...base, cancellationCause }).success).toBe(true);
+    },
+  );
+
+  it('refuses a value outside the closed enum rather than defaulting it', () => {
+    // Rule 14: an invalid value is rejected, never coerced into a valid one.
+    expect(orderCancelledPayload.safeParse({ ...base, cancellationCause: 'WEATHER' }).success).toBe(
+      false,
+    );
+  });
+
+  it('still accepts a payload with no cause — an additive field, not a version bump', () => {
+    expect(orderCancelledPayload.safeParse(base).success).toBe(true);
+  });
+});
+
+describe('ORDER_DISPUTE_RESOLVED (ADR-052 § 1-b)', () => {
+  const base = {
+    orderId: 'ORD_1',
+    disputeId: 'DSP_1',
+    buyerOrganizationId: 'ORG-A',
+    supplierOrganizationId: 'ORG-B',
+    outcome: 'REFUND' as const,
+    responsibility: 'SUPPLIER' as const,
+    resolvedBy: 'USR-OPS',
+    resolvedAt: '2026-08-29T00:00:00.000Z',
+  };
+
+  it('is the event today’s resolve endpoint never publishes', () => {
+    // ADR-052 § 2: "POST /v1/orders/{id}/disputes/resolve exists today and
+    // publishes nothing." This is the fix; the parse succeeding is the proof
+    // the contract exists.
+    expect(orderDisputeResolvedPayload.parse(base).orderId).toBe('ORD_1');
+  });
+
+  it.each(['SUPPLIER', 'BUYER', 'PLATFORM', 'UNDETERMINED'])(
+    'accepts %s as a responsibility',
+    (responsibility) => {
+      expect(orderDisputeResolvedPayload.safeParse({ ...base, responsibility }).success).toBe(true);
+    },
+  );
+
+  it('refuses a responsibility outside the closed enum', () => {
+    expect(
+      orderDisputeResolvedPayload.safeParse({ ...base, responsibility: 'NOBODY_KNOWS' }).success,
+    ).toBe(false);
+  });
+
+  it('requires a responsibility — this field is not optional', () => {
+    // Unlike the additive fields above, this event is new: there is no
+    // pre-existing publisher to stay compatible with, so the field the whole
+    // event exists to carry is mandatory from version 1.
+    const { responsibility: _omitted, ...withoutResponsibility } = base;
+    expect(orderDisputeResolvedPayload.safeParse(withoutResponsibility).success).toBe(false);
+  });
+
+  it('refuses an outcome outside SETTLE or REFUND', () => {
+    expect(
+      orderDisputeResolvedPayload.safeParse({ ...base, outcome: 'SPLIT_THE_DIFFERENCE' }).success,
+    ).toBe(false);
   });
 });
 

@@ -25,6 +25,8 @@ export interface PriceableOffer {
   readonly minimumQuantity: number;
   readonly version: number;
   readonly status: string;
+  /** The supplier's advertised lead time, in days (ADR-052 § 1-a). */
+  readonly leadTimeDays: number;
 }
 
 export interface RequestedLine {
@@ -47,6 +49,14 @@ export interface PricedOrder {
   readonly currency: string;
   readonly totalAmountMinor: bigint;
   readonly lines: readonly PricedLine[];
+  /**
+   * The slowest lead time among the priced lines, in days (ADR-052 § 1-a).
+   *
+   * The order's promise is the slowest one it makes: a supplier who commits
+   * several parts with different lead times has committed to the last one
+   * arriving, not to their average.
+   */
+  readonly maxLeadTimeDays: number;
 }
 
 /**
@@ -70,6 +80,7 @@ export function priceOrder(
   let supplier: string | undefined;
   let currency: string | undefined;
   let total = 0n;
+  let maxLeadTimeDays = 0;
 
   for (const line of requested) {
     if (seen.has(line.offerId)) {
@@ -129,6 +140,7 @@ export function priceOrder(
 
     const lineTotal = offer.unitPriceMinor * BigInt(line.quantity);
     total += lineTotal;
+    maxLeadTimeDays = Math.max(maxLeadTimeDays, offer.leadTimeDays);
 
     lines.push({
       offerId: offer.id,
@@ -153,6 +165,7 @@ export function priceOrder(
     currency: currency as string,
     totalAmountMinor: total,
     lines,
+    maxLeadTimeDays,
   };
 }
 

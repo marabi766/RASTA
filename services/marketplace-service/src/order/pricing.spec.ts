@@ -24,6 +24,7 @@ function offer(overrides: Partial<PriceableOffer> = {}): PriceableOffer {
     minimumQuantity: 1,
     version: 3,
     status: 'PUBLISHED',
+    leadTimeDays: 3,
     ...overrides,
   };
 }
@@ -191,6 +192,40 @@ describe('there is no price the client can influence', () => {
     // product document does not state, and inventing one would be inventing a
     // commercial fact (AGENTS.md § 9).
     expect(many.totalAmountMinor).toBe(cheap.totalAmountMinor * 4n);
+  });
+});
+
+describe('the promised delivery date takes the slowest line (ADR-052 § 1-a)', () => {
+  it('reports a single line’s lead time', () => {
+    const priced = priceOrder(
+      [{ offerId: 'OFR_1', quantity: 1 }],
+      catalogue(offer({ leadTimeDays: 5 })),
+    );
+    expect(priced.maxLeadTimeDays).toBe(5);
+  });
+
+  it('takes the slowest of several lines, not the average', () => {
+    // A supplier promising a fast part and a slow one has committed to the
+    // slow one arriving. Averaging would understate the promise.
+    const priced = priceOrder(
+      [
+        { offerId: 'OFR_1', quantity: 1 },
+        { offerId: 'OFR_2', quantity: 1 },
+      ],
+      catalogue(
+        offer({ leadTimeDays: 2 }),
+        offer({ id: 'OFR_2', productId: 'PRD_2', leadTimeDays: 9 }),
+      ),
+    );
+    expect(priced.maxLeadTimeDays).toBe(9);
+  });
+
+  it('is zero for a same-day offer', () => {
+    const priced = priceOrder(
+      [{ offerId: 'OFR_1', quantity: 1 }],
+      catalogue(offer({ leadTimeDays: 0 })),
+    );
+    expect(priced.maxLeadTimeDays).toBe(0);
   });
 });
 
