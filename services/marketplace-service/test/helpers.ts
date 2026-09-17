@@ -32,6 +32,53 @@ export function newPrisma(): PrismaService {
   return new PrismaService(databaseUrl());
 }
 
+/** `null` when no broker is configured, so a Kafka suite can skip rather than fail. */
+export function brokers(): string[] | null {
+  const raw = process.env.KAFKA_BROKERS;
+  if (!raw) return null;
+  return raw
+    .split(',')
+    .map((broker) => broker.trim())
+    .filter(Boolean);
+}
+
+/** A ULID-suffixed identifier, unique per call. */
+export function id(prefix: string): string {
+  return `${prefix}_${ulid()}`;
+}
+
+/**
+ * Polls `check` until it returns a truthy value, or throws on timeout.
+ *
+ * Used instead of a fixed sleep to read a real Kafka consumer's buffer: the
+ * broker's delivery latency is not bounded tightly enough for a sleep to be
+ * both fast and reliable.
+ */
+export async function waitFor<T>(
+  description: string,
+  check: () => Promise<T | null | undefined>,
+  timeoutMs = 30_000,
+  intervalMs = 250,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let last: unknown;
+
+  while (Date.now() < deadline) {
+    try {
+      const result = await check();
+      if (result) return result;
+    } catch (error) {
+      last = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(
+    `Timed out after ${timeoutMs}ms waiting for ${description}` +
+      (last ? `; last error: ${String(last)}` : ''),
+  );
+}
+
 export function testEnv(): MarketplaceEnv {
   return loadMarketplaceEnv({
     ...process.env,
