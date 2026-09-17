@@ -71,7 +71,7 @@
 | [052](adr/ADR-052-supplier-performance-scoring.md)       | امتیاز عملکرد تأمین‌کننده                        | Accepted     | **بستن Q-12**، Phase 2 پیاده نشده                          |
 | [053](adr/ADR-053-audit-service-append-only-evidence.md) | سرویس حسابرسی — شواهد فقط‌الحاقی                 | **Proposed** | **بستن نقض S-06**، تا AUD-003 پیاده                        |
 | [054](adr/ADR-054-notification-service-delivery.md)      | سرویس اعلان — تحویل و ترجیحات                    | **Proposed** | Q-37 انتشار ایمیل را مسدود می‌کند                          |
-| [056](adr/ADR-056-inventory-forward-logistics.md)        | مرز، صحت موجودی و لجستیک رفت `inventory-service` | **Proposed** | **رد Redis Redlock (§ ۴)**، تفکیک `Shipment`/`Fulfillment` |
+| [056](adr/ADR-056-inventory-forward-logistics.md)        | مرز، صحت موجودی و لجستیک رفت `inventory-service` | **Accepted** | **رد Redis Redlock (§ ۴)**، تفکیک `Shipment`/`Fulfillment` |
 
 ---
 
@@ -511,7 +511,7 @@ Mailpit است و پشت Profile های `tools`/`all` قرار دارد، پس `
 
 ---
 
-### ADR-056 — مرز، صحت موجودی و لجستیک رفت `inventory-service` (Proposed — 2026-09-17)
+### ADR-056 — مرز، صحت موجودی و لجستیک رفت `inventory-service` (Accepted — 2026-09-17)
 
 **چه چیزی تصمیم گرفته شد؟** `inventory-service` مالک `warehouse`،
 `stock_item`، `stock_movement` (دفتر الحاقی + Trigger تغییرناپذیری)،
@@ -531,7 +531,11 @@ Mailpit است و پشت Profile های `tools`/`all` قرار دارد، پس `
 **دوم و مستقلی** است: حرکت فیزیکی واقعی از انبار پلتفرم. یک سفارش با حمل
 مستقیم تأمین‌کننده هرگز `Shipment` نخواهد داشت و هیچ کدی اجازه ندارد برای آن
 یکی ساختگی بسازد. قاعدهٔ نمایش ترکیبی این دو در UI حدس زده نشد —
-**Q-44** ثبت شد.
+**Q-44** ثبت و با پاسخ صاحب محصول (2026-09-17) بسته شد: `Fulfillment` زیر
+برچسب «اعلام تأمین‌کننده» (هرگز به‌تنهایی اثبات تحویل نیست)، `Shipment` زیر
+برچسب «رهگیری محموله فیزیکی»، و ناهم‌خوانی میان دو رکورد یک نشانگر خنثی
+می‌گیرد نه انتخاب خودکار — UI‌اش همچنان نزد `marketplace-service` پیاده
+نشده.
 
 **یافتهٔ دوم.** `docs/04` § ۴٫۱۱ مأموریت را «انبار مرکزی اتحادیه» و مرز
 امنیتی را «فقط `UNION_ADMIN`» نوشته بود — فرض تک‌مالکی که با
@@ -553,8 +557,10 @@ Organization-Agnostic (ADR-012) در تناقض است. این ADR سه ستون
 ADR؛ مشابه، `PurchaseOrderReceiptConsumer` منتظر ساخت `procurement-service`
 می‌ماند.
 
-**آنچه پیاده نشده.** همه چیز. `services/inventory-service` وجود ندارد.
-برنامهٔ اجرا در
+**آنچه پیاده نشده.** همه چیز. `services/inventory-service` وجود ندارد. صاحب
+محصول این ADR را **Accepted** کرد — یعنی طراحی تصویب شد، نه اینکه کدی
+نوشته شده باشد. برنامهٔ اجرا در
 [ADR-056 implementation plan](adr/ADR-056-implementation-plan.md) آمده،
-تفکیک‌شده به فاز A (بدون‌وابستگی) و فاز B (محموله/رهگیری)، و `COM-006`
-همچنان `READY` با ۲۱ امتیاز بدون تغییر می‌ماند.
+تفکیک‌شده به فاز A (بدون‌وابستگی)، فاز B (محموله/رهگیری) و یک گام صریح
+شواهد پذیرش (§ ۱۲) که تعریف Port خالی را کافی نمی‌داند؛ `COM-006` همچنان
+`READY` با ۲۱ امتیاز بدون تغییر می‌ماند تا آن شواهد واقعاً تأیید شوند.
