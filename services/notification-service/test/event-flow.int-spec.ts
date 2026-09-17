@@ -175,7 +175,15 @@ describeWithKafka('event flow over Kafka', () => {
       intentId: intent.id,
       ruleKey: 'maintenance.due',
     });
-    expect(w.recipients.queries.at(-1)?.correlationId).toBe(envelope.correlationId);
+    // The worker is cross-tenant, so the last query may belong to another
+    // suite's event on the shared broker; the claim is that *this* intent's
+    // resolution asked identity under *this* event's correlation id.
+    expect(
+      w.recipients.queries.some(
+        (query) =>
+          query.organizationId === organizationId && query.correlationId === envelope.correlationId,
+      ),
+    ).toBe(true);
   }, 150_000);
 
   it('the same eventId published twice is one intent (layer 1)', async () => {
