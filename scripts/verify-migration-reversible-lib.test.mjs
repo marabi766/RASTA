@@ -226,3 +226,63 @@ test('no expected object names an object no migration creates', () => {
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// notification-service — NTF-001's initial migration
+// ---------------------------------------------------------------------------
+
+const NTF_001 = '20260917090000_init_notification';
+
+function ntf001(file) {
+  return readFileSync(
+    join(ROOT, 'services', 'notification-service', 'prisma', 'migrations', NTF_001, file),
+    'utf8',
+  );
+}
+
+test('the notification dedupe foreign key is deferred, and the verifier names it', () => {
+  // The consumer decides "fresh window or repeat" in one statement that names
+  // the intent it is about to write. Only a deferred check lets that statement
+  // precede the row; an immediate one would refuse every ingest. Asserted on
+  // the SQL because a table-only check could not tell the two apart.
+  const up = ntf001('migration.sql');
+  assert.match(
+    up,
+    /ADD CONSTRAINT "notification_dedupe_intent_id_fkey"[\s\S]*?DEFERRABLE INITIALLY DEFERRED/,
+  );
+  assert.ok(EXPECTED.notification.constraints.includes('notification_dedupe_intent_id_fkey'));
+});
+
+test('every notification object the verifier asserts is created by NTF-001 and dropped by its down script', () => {
+  const up = ntf001('migration.sql');
+  const down = ntf001('down.sql');
+  const { tables, triggers, functions, types } = EXPECTED.notification;
+
+  for (const name of [...tables, ...types]) {
+    assert.ok(up.includes(`"${name}"`), `${name} is not created by ${NTF_001}`);
+    assert.match(
+      down,
+      new RegExp(`DROP (TABLE|TYPE) IF EXISTS "${name}"`),
+      `${name} is not dropped by down.sql`,
+    );
+  }
+  for (const name of triggers) {
+    assert.match(down, new RegExp(`DROP TRIGGER IF EXISTS "${name}"`));
+  }
+  for (const name of functions) {
+    assert.match(up, new RegExp(`CREATE OR REPLACE FUNCTION ${name}\(\)`));
+    assert.match(down, new RegExp(`DROP FUNCTION IF EXISTS ${name}\(\)`));
+  }
+  assert.match(
+    down,
+    new RegExp(`DELETE FROM "_prisma_migrations" WHERE "migration_name" = '${NTF_001}'`),
+  );
+});
+
+test('the notification schema declares no outbox, so the outbox discovery guard stays silent on it', () => {
+  const schema = readFileSync(
+    join(ROOT, 'services', 'notification-service', 'prisma', 'schema.prisma'),
+    'utf8',
+  );
+  assert.doesNotMatch(schema, /model\s+OutboxMessage\b/);
+});
