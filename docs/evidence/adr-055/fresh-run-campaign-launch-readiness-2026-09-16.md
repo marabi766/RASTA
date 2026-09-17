@@ -1469,3 +1469,186 @@ the campaign, their completeness, authenticity or provenance.
 retrievability, provenance, freshness, attempt or live campaign evidence exists. **Row 9 stays
 `UNVERIFIED`, row 10 `BLOCKED`, row 11 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict
 stays NO-GO.**
+
+## 20. Appendix — L11–L13 operator command card (2026-09-17)
+
+This appendix is **procedure, not evidence**. It condenses § 13 L11–L13 as updated by §§ 14–19 into
+one page. It adds no step, removes none, and changes no rule. Where this card and § 13 seem to
+differ, § 13 governs and the difference is a defect to report. §§ 1–19 are unchanged. Nothing here
+was executed: no workflow was installed or run, nothing was downloaded, no GitHub API or network was
+called, and **no real log, manifest, report, snapshot or tool output exists**.
+
+The four marked command blocks below are checked by the manual static test
+`scripts/aggregation-campaign-command-card.test.mjs`. It checks them against `package.json`, the
+exported argument parsers of the four tools, and their real output text. It runs no command on real
+inputs.
+
+### 20.1 Rules for every command on this card
+
+- **When.** Only inside an authorized launch window, after L10, in the order below, under every rule
+  of § 13.1.
+- **Absolute paths only.** Write every placeholder (`<new-directory>`, each manifest,
+  `<image-cohort-manifest>`) as an absolute path. `pnpm run` runs the script from the repository
+  root, so a relative argument resolves there, not in the shell's directory. A relative line
+  _inside_ a manifest resolves against that manifest's own directory.
+- **Exit codes.**
+  - `0` is the only pass.
+  - `1` is a failed check. Keep the output. The step's consequence below applies.
+  - `2` is a usage or manifest-contract error. Nothing was checked, compared or written.
+- **After exit `2`.** Only the command line, or a manifest's path list, may be corrected before the
+  same step is run again. An exit-`2` correction **never** edits, re-saves, renames, re-encodes,
+  re-downloads, re-materializes, replaces or deletes any job log, artifact, report, JSON snapshot,
+  output directory or kept tool output.
+- **Keep byte-exact.**
+  - The original job logs and artifacts.
+  - Every manifest exactly as used, including one refused with exit `2`.
+  - Every tool output.
+  - The output directory of a successful recovery.
+  - Nothing is kept under `.github/workflows/`.
+
+### 20.2 Three kinds of input file — never interchangeable
+
+| file                                                                                                               | used by                                                        | what it is                                                                      | entries              | byte bound |
+| ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------- | ---------- |
+| **job-log manifest** `<job-log-manifest>`                                                                          | step 1 only (`--logs-manifest`)                                | plain path list of every kept job log                                           | **1–128** lines      | 131 200    |
+| **report-path manifest** `<artifacts-report-manifest>`, `<fallback-report-manifest>`, `<selected-report-manifest>` | step 2 (one per source), steps 3 and 4 (the same selected one) | plain path list of one source's reports                                         | **exactly 59** lines | 60 475     |
+| **image-cohort JSON snapshot** `<image-cohort-manifest>`                                                           | step 4 only, first argument                                    | the L4 flat JSON object with its nine fields, hashed in L5; **not** a path list | —                    | 4 KiB      |
+
+- **Both path lists** share one grammar:
+  - strict UTF-8 without BOM, LF line endings and a final LF;
+  - one path of 1–1024 UTF-8 bytes per line;
+  - no blank line, padding, CR or other control character, comment, quoting, `-` prefix, URL or
+    drive-relative `C:name`.
+- **Resolution and duplicates.**
+  - A relative line resolves against the manifest's own directory. Line order means nothing.
+  - The same path twice after resolution exits `2`. On Windows, case and trailing dots and spaces are
+    ignored. Links, junctions and 8.3 names are not detected.
+- **Status.** A manifest is operator-supplied transport. It is **not** evidence of which files belong
+  to the campaign, or of their completeness, authenticity or provenance.
+
+### 20.3 Step 1 — L11 fallback recovery, only if the primary artifacts are unavailable
+
+**Run it only when** the 59 per-slot artifacts cannot be retrieved, the fallback is acknowledged in
+the launch record, and the job logs are kept byte-exact.
+
+- `<new-directory>` must not exist yet.
+- Its parent must be an existing, non-link directory outside the tracked tree and outside
+  `.github/workflows/`.
+- `<job-log-manifest>` lists every kept job log.
+
+<!-- command-card:L11-recover -->
+
+```text
+pnpm run recover:aggregation-campaign-logs -- --output-dir <new-directory> --logs-manifest <job-log-manifest>
+```
+
+- **Pass — exit `0`.** All three lines are required:
+  - `accounting: COMPLETE - every slot resolved from content, zero blockers, zero missing`
+  - `materialization: WRITTEN - 59 report files slot-01.txt..slot-59.txt in a newly created output directory`
+  - `RESULT: PASS`, as the last line.
+  - Steps 3 and 4 then use `<new-directory>/slot-01.txt` … `slot-59.txt` as the one fallback source.
+- **Exit `1` — `RESULT: FAIL`.**
+  - Causes include `materialization: NOT WRITTEN` or `FAILED`, an unreadable or oversized log, a
+    rejection, and an incomplete or blocked accounting.
+  - The materialization line states what was cleaned up. Nothing is deleted by hand to make room for
+    a retry.
+  - Retrieval stays incomplete, and a slot that is never retrieved is `missing` (Branch C).
+  - The same unedited logs may be processed again only into another path that does not exist yet.
+    Nothing already written is deleted, renamed or reused.
+- **Exit `2`.** The output is `logs manifest: <problem>`, or a fixed usage error. No log was read and
+  nothing was written.
+
+### 20.4 Step 2 — optional L11 byte comparison, only when both complete sources exist
+
+**Run it only when** all 59 downloaded artifact reports **and** all 59 files of a step 1 run that
+exited `0` are on disk, **and** the decision to compare was recorded before running it. Once run, its
+output is kept whatever the result.
+
+- `<artifacts-report-manifest>` lists the 59 artifact reports.
+- `<fallback-report-manifest>` lists the 59 materialized files.
+- The two manifests are different files, and the two sources share no path.
+
+<!-- command-card:L11-compare -->
+
+```text
+pnpm run compare:aggregation-campaign-retrievals -- --artifacts-manifest <artifacts-report-manifest> --fallback-manifest <fallback-report-manifest>
+```
+
+- **Pass — exit `0`.** All four lines are required:
+  - `artifacts cohort: ACCEPTED inputs=59 read=59 accounting=COMPLETE`
+  - `fallback cohort: ACCEPTED inputs=59 read=59 accounting=COMPLETE`
+  - `comparison: slots_compared=59 identical=59 different=0`
+  - `COMPARISON: MATCH`
+- **Exit `1` — `COMPARISON: DIFFERENT` or `COMPARISON: REJECTED`.**
+  - This is a **STOP**, and the campaign is **Branch C**.
+  - It is **not** permission to choose a source.
+  - It cannot be repaired by mixing files, editing, re-downloading, re-materializing or re-running.
+- **Exit `2`.** The output is `artifacts manifest: <problem>`, `fallback manifest: <problem>`, or a
+  fixed usage error. Nothing was compared.
+
+### 20.5 Step 3 — L12 accounting of one complete, unmixed 59-report source
+
+**The input is one complete set of 59 reports from one source:** the downloaded artifacts, or the
+files of a step 1 run that exited `0`. Never mix the two.
+
+- If step 2 was run, step 3 is allowed only after `COMPARISON: MATCH`.
+- This card does not choose between two matching sets. Record which single source
+  `<selected-report-manifest>` lists.
+
+<!-- command-card:L12-account -->
+
+```text
+pnpm run account:aggregation-campaign -- --reports-manifest <selected-report-manifest>
+```
+
+- **Pass — exit `0`.** Both lines are required:
+  - an `invariant:` line ending in `= 59 (expected 59) holds`;
+  - `accounting: COMPLETE - every slot resolved from content, zero blockers, zero missing`.
+- **Exit `1`.** The output is `accounting: INCOMPLETE - …`: a blocker, a missing slot, a rejected
+  input or a provenance problem. The result is **Branch C**.
+- **Exit `2`.** The output is `reports manifest: <problem>`, or a fixed usage error. No report was
+  read.
+
+### 20.6 Step 4 — L13 image-cohort review of that same source, after the snapshot hash check
+
+**Before running**, `[manual/live]`:
+
+- Compute the SHA-256 of the exact `<image-cohort-manifest>` bytes. It must equal
+  `image_cohort_manifest_sha256` in the launch record.
+- A mismatch, or a hash that cannot be computed, is a failed check. Do not run the review; the result
+  is **Branch C**.
+
+**Inputs.** The JSON snapshot comes first. `<selected-report-manifest>` is the same file used in
+step 3.
+
+<!-- command-card:L13-review -->
+
+```text
+pnpm run review:aggregation-campaign-image-cohort -- <image-cohort-manifest> --reports-manifest <selected-report-manifest>
+```
+
+- **Pass — exit `0`.** All three lines are required:
+  - `pre-launch snapshot: ACCEPTED`
+  - `commits=1 manifest_commit_match=yes`
+  - `COHORT: CONSISTENT`
+  - A human then reads and records the single measured topology (§ 11, item 5).
+- **Exit `1`.** The output is `COHORT: BRANCH C`, whatever the reason. The result is **Branch C**.
+- **Exit `2`.** The output is `reports manifest: <problem>`, or a fixed usage error. Neither the
+  snapshot nor any report was read.
+
+### 20.7 What no line on this card proves
+
+None of these outcomes shows that any log, artifact or report is authentic, retrievable, from the
+authorized run, fresh, or from attempt `1`:
+
+- a manifest that parses;
+- a `WRITTEN` materialization;
+- `COMPARISON: MATCH`;
+- `accounting: COMPLETE`;
+- `COHORT: CONSISTENT`.
+
+None of them grants Branch A or B. A branch is stated only under L14, and only when L10 proved
+attempt `1`, L12 is `COMPLETE` and L13 is `CONSISTENT`.
+
+**Status.** This card establishes no live fact. **Row 9 stays `UNVERIFIED`, row 10 `BLOCKED`, row 11
+`UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict stays NO-GO.**
