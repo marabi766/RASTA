@@ -1,0 +1,380 @@
+// notification-service — delivery of what other services decided matters
+// (ADR-054).
+//
+// NTF-001 implements the in-app half of the pipeline: a domain event becomes a
+// `notification_intent`, the intent is resolved to recipients through
+// identity-service's authenticated API, and each authorised recipient gets one
+// `notification_delivery` on the `IN_APP` channel whose effect is one
+// `in_app_notification` row. Semantic deduplication (`notification_dedupe`)
+// sits in front of all of it, because the insurance expiry sweep re-publishes
+// the same fact roughly 120 times with 120 distinct event ids (ADR § Context).
+//
+// ## Ownership
+//
+// Everything here belongs to this service alone (AGENTS.md A-01). `userId` and
+// `organizationId` are plain external identifiers; the authority for who is a
+// recipient is identity-service, consulted over REST at resolution time and
+// snapshotted into `recipient_resolution` (ADR § 2). No email address is
+// stored by NTF-001: `email_snapshot` exists as the column ADR § 2 defines and
+// is written by nothing until the email channel (NTF-004) has a reason to read
+// it. Resolving *who* is this story; *where* is the next one.
+//
+// ## What Prisma cannot express, and where it lives instead
+//
+// Every CHECK constraint, the partial indexes, the append-only trigger on
+// `delivery_attempt` and the deferrable foreign key on `notification_dedupe`
+// are hand-written at the end of `migrations/*/migration.sql`. If
+// `prisma migrate dev` ever proposes dropping a `ck_*`, `ux_*` or `ix_*`
+// object, that hunk is Prisma not seeing them, not drift (PROJECT_MEMORY § 30).
+//
+// ## What is deliberately absent
+//
+//   OutboxMessage       NTF-004 publishes `NOTIFICATION_SENT` / `_FAILED` from a
+//                       standard outbox. Nothing in NTF-001 publishes, so no
+//                       outbox exists yet — and `verify-outbox-claim-migration`'s
+//                       discovery guard correctly ignores a schema without one.
+//   EMAIL channel       `NotificationChannel` holds `IN_APP` only. An enum value
+//                       no code path can write is a claim of a capability the
+//                       platform does not have (docs/24 Q-07, ADR § 6); NTF-004
+//                       adds `EMAIL` with the adapter that uses it.
+//   NotificationPreference, NotificationTemplate
+//                       NTF-003 and NTF-004 respectively.
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../src/generated/prisma"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum NotificationSeverity {
+  INFO
+  WARNING
+  CRITICAL
+
+  @@map("notification_severity")
+}
+
+enum NotificationClassification {
+  ROUTINE
+  MANDATORY
+
+  @@map("notification_classification")
+}
+
+/// `PENDING → RESOLVED → DISPATCHED`; `SUPPRESSED` and `DISCARDED` are
+/// terminal (ADR § 4). For the in-app channel resolution and dispatch commit
+/// together, so `RESOLVED` is passed through inside one transaction and is
+/// observable only as `resolved_at` being set.
+enum IntentStatus {
+  PENDING
+  RESOLVED
+  DISPATCHED
+  SUPPRESSED
+  DISCARDED
+
+  @@map("intent_status")
+}
+
+enum ResolutionSource {
+  IDENTITY_API
+  EVENT_PAYLOAD
+  CONFIGURED_ROLE
+
+  @@map("resolution_source")
+}
+
+/// `IN_APP` only, on purpose — see the file header.
+enum NotificationChannel {
+  IN_APP
+
+  @@map("notification_channel")
+}
+
+enum DeliveryStatus {
+  QUEUED
+  SENDING
+  SENT
+  DELIVERED
+  FAILED
+  DEAD
+  SUPPRESSED
+
+  @@map("delivery_status")
+}
+
+enum AttemptOutcome {
+  SUCCESS
+  TRANSIENT_FAILURE
+  PERMANENT_FAILURE
+
+  @@map("attempt_outcome")
+}
+
+// ---------------------------------------------------------------------------
+// Consumer idempotency (AGENTS.md A-09) — layer 1 of ADR-054 § 3
+// ---------------------------------------------------------------------------
+
+/// Written in the same transaction as the intent, so a redelivered message is
+/// recognised by its `eventId` and skipped. On its own this is insufficient:
+/// the 120 sweep emissions are 120 *distinct* event ids, which is what
+/// `notification_dedupe` exists for.
+model ProcessedEvent {
+  eventId      String   @map("event_id") @db.VarChar(64)
+  consumerName String   @map("consumer_name") @db.VarChar(128)
+  processedAt  DateTime @default(now()) @map("processed_at") @db.Timestamptz(6)
+
+  @@id([eventId, consumerName])
+  @@map("processed_event")
+}
+
+// ---------------------------------------------------------------------------
+// Intent — one per source event that a rule turned into "tell somebody"
+// ---------------------------------------------------------------------------
+
+model NotificationIntent {
+  /// ULID with the `NTI` prefix, generated here.
+  id             String @id @db.VarChar(64)
+  organizationId String @map("organization_id") @db.VarChar(128)
+
+  // Source provenance (ADR § 4). Enough to walk from an in-app row back to the
+  // exact Kafka message and the domain action that caused it.
+  sourceEventId      String  @map("source_event_id") @db.VarChar(64)
+  sourceEventName    String  @map("source_event_name") @db.VarChar(128)
+  sourceTopic        String  @map("source_topic") @db.VarChar(128)
+  sourcePartitionKey String  @map("source_partition_key") @db.VarChar(256)
+  /// ADR-051 `streamSeq`, when the producer sent one. Drives the staleness
+  /// guard (ADR § 8) and nothing else; null degrades to today's behaviour.
+  sourceStreamSeq    BigInt? @map("source_stream_seq")
+  /// Domain time, from the envelope — never the time this service saw it.
+  occurredAt         DateTime @map("occurred_at") @db.Timestamptz(6)
+  correlationId      String  @map("correlation_id") @db.VarChar(128)
+  causationId        String? @map("causation_id") @db.VarChar(128)
+
+  // What the rule decided.
+  ruleKey        String                     @map("rule_key") @db.VarChar(128)
+  templateKey    String                     @map("template_key") @db.VarChar(128)
+  severity       NotificationSeverity
+  classification NotificationClassification
+
+  /// What the notification is *about* — the policy, the inspection, the
+  /// schedule — not the event. The semantic dedupe key is built from these.
+  subjectType String @map("subject_type") @db.VarChar(64)
+  subjectId   String @map("subject_id") @db.VarChar(128)
+  /// SHA-256 hex of `organizationId | ruleKey | subjectType | subjectId | bucket`.
+  dedupeKey   String @map("dedupe_key") @db.VarChar(64)
+
+  /// Only keys the rule's allowlist admits, dropped at ingest (ADR § 10).
+  contextData Json @map("context_data")
+
+  status IntentStatus @default(PENDING)
+
+  // Recipient resolution is a REST call that fails independently of consuming
+  // the event, so it is retried by a claim-based worker (ADR-050 shape, ADR-054
+  // § 1) rather than on the Kafka partition.
+  resolutionAttempts Int       @default(0) @map("resolution_attempts")
+  /// Null on a `PENDING` intent means "due now"; set only when a resolution
+  /// attempt is deferred. The worker compares against the database clock, so
+  /// a fresh intent never waits on host/database clock skew.
+  nextResolutionAt   DateTime? @map("next_resolution_at") @db.Timestamptz(6)
+  /// A bounded class name — `UNREACHABLE`, `REFUSED`, … — never a message.
+  lastResolutionError String?  @map("last_resolution_error") @db.VarChar(64)
+  claimToken         String?   @map("claim_token") @db.VarChar(64)
+  claimOwner         String?   @map("claim_owner") @db.VarChar(128)
+  claimExpiresAt     DateTime? @map("claim_expires_at") @db.Timestamptz(6)
+
+  resolvedAt        DateTime? @map("resolved_at") @db.Timestamptz(6)
+  dispatchedAt      DateTime? @map("dispatched_at") @db.Timestamptz(6)
+  /// Set exactly when `status` is `SUPPRESSED` or `DISCARDED` — the answer to
+  /// "nobody was told, and this is why" (ADR § 4).
+  terminalReason    String?   @map("terminal_reason") @db.VarChar(64)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  resolutions RecipientResolution[]
+  deliveries  NotificationDelivery[]
+  inApp       InAppNotification[]
+
+  @@unique([sourceEventId], map: "ux_intent_source_event")
+  @@index([organizationId, status, nextResolutionAt], map: "ix_intent_org_status_next")
+  @@index([organizationId, dedupeKey], map: "ix_intent_org_dedupe")
+  @@index([organizationId, sourceTopic, sourcePartitionKey, subjectId], map: "ix_intent_stream_subject")
+  @@map("notification_intent")
+}
+
+// ---------------------------------------------------------------------------
+// Semantic deduplication — layer 2 of ADR-054 § 3
+// ---------------------------------------------------------------------------
+
+/// One row per `(organization, rule, subject, window bucket)`. A repeat inside
+/// the window bumps `seen_count` and creates nothing; `seen_count` climbing is
+/// the signal of a badly tuned rule and is exported as a metric.
+///
+/// Rows are pruned after `NOTIFICATION_DEDUPE_RETENTION_DAYS` (NTF-005). An
+/// event replayed after its key was pruned notifies again — a declared bound,
+/// not a silent one (ADR § 3, § 8).
+model NotificationDedupe {
+  dedupeKey      String   @id @map("dedupe_key") @db.VarChar(64)
+  organizationId String   @map("organization_id") @db.VarChar(128)
+  /// The intent this window first produced. The foreign key is DEFERRABLE
+  /// INITIALLY DEFERRED (hand-written in the migration) so the consumer can
+  /// decide "fresh or repeat" *before* it writes the intent, in one statement.
+  intentId       String   @map("intent_id") @db.VarChar(64)
+  firstSeenAt    DateTime @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt     DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  seenCount      Int      @default(1) @map("seen_count")
+  expiresAt      DateTime @map("expires_at") @db.Timestamptz(6)
+
+  @@index([organizationId, expiresAt], map: "ix_dedupe_org_expiry")
+  @@map("notification_dedupe")
+}
+
+// ---------------------------------------------------------------------------
+// Recipient snapshot — immutable once written (ADR § 2)
+// ---------------------------------------------------------------------------
+
+model RecipientResolution {
+  id             String @id @db.VarChar(64)
+  intentId       String @map("intent_id") @db.VarChar(64)
+  organizationId String @map("organization_id") @db.VarChar(128)
+  userId         String @map("user_id") @db.VarChar(128)
+
+  /// The role that made this user a recipient, when the rule was role-based.
+  resolvedRole String? @map("resolved_role") @db.VarChar(64)
+  /// Reserved for NTF-004. Null in every row NTF-001 writes — see the header.
+  emailSnapshot    String? @map("email_snapshot") @db.VarChar(320)
+  localeSnapshot   String  @default("fa-IR") @map("locale_snapshot") @db.VarChar(16)
+  timezoneSnapshot String  @default("Asia/Tehran") @map("timezone_snapshot") @db.VarChar(64)
+
+  resolvedAt       DateTime         @map("resolved_at") @db.Timestamptz(6)
+  resolutionSource ResolutionSource @map("resolution_source")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  intent NotificationIntent @relation(fields: [intentId], references: [id], onDelete: Restrict)
+
+  @@unique([intentId, userId], map: "ux_resolution_intent_user")
+  @@index([organizationId, userId], map: "ix_resolution_org_user")
+  @@map("recipient_resolution")
+}
+
+// ---------------------------------------------------------------------------
+// Delivery — one per (intent, recipient, channel); the unit success belongs to
+// ---------------------------------------------------------------------------
+
+/// There is no aggregate "the intent succeeded" flag anywhere. Success is a
+/// property of each delivery (ADR § 4).
+model NotificationDelivery {
+  id             String              @id @db.VarChar(64)
+  intentId       String              @map("intent_id") @db.VarChar(64)
+  organizationId String              @map("organization_id") @db.VarChar(128)
+  userId         String              @map("user_id") @db.VarChar(128)
+  channel        NotificationChannel
+  status         DeliveryStatus      @default(QUEUED)
+
+  templateKey     String @map("template_key") @db.VarChar(128)
+  templateVersion Int    @map("template_version")
+
+  attemptCount  Int       @default(0) @map("attempt_count")
+  maxAttempts   Int       @map("max_attempts")
+  nextAttemptAt DateTime? @map("next_attempt_at") @db.Timestamptz(6)
+  scheduledFor  DateTime? @map("scheduled_for") @db.Timestamptz(6)
+
+  /// Non-null exactly when `status = SUPPRESSED`. Suppression is a decision,
+  /// not a failure, and carries zero attempts (invariant 2).
+  suppressionReason String? @map("suppression_reason") @db.VarChar(64)
+  /// Bounded class of the last failure — never a message body.
+  lastErrorClass    String? @map("last_error_class") @db.VarChar(64)
+
+  sentAt      DateTime? @map("sent_at") @db.Timestamptz(6)
+  deliveredAt DateTime? @map("delivered_at") @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  intent   NotificationIntent @relation(fields: [intentId], references: [id], onDelete: Restrict)
+  attempts DeliveryAttempt[]
+  inApp    InAppNotification?
+
+  /// Invariant 6: exactly one delivery per `(intent, user, channel)`, so a
+  /// replayed consumer cannot create a second one.
+  @@unique([intentId, userId, channel], map: "ux_delivery_intent_user_channel")
+  @@index([organizationId, userId], map: "ix_delivery_org_user")
+  @@index([channel, status, nextAttemptAt], map: "ix_delivery_channel_status_next")
+  @@map("notification_delivery")
+}
+
+/// Append-only child row. A trigger refuses UPDATE (hand-written in the
+/// migration); DELETE stays possible only so the retention sweep (NTF-005)
+/// can remove a delivery with its attempts.
+model DeliveryAttempt {
+  id             String         @id @db.VarChar(64)
+  deliveryId     String         @map("delivery_id") @db.VarChar(64)
+  organizationId String         @map("organization_id") @db.VarChar(128)
+  attemptNo      Int            @map("attempt_no")
+  outcome        AttemptOutcome
+  errorClass     String?        @map("error_class") @db.VarChar(64)
+  startedAt      DateTime       @map("started_at") @db.Timestamptz(6)
+  finishedAt     DateTime       @map("finished_at") @db.Timestamptz(6)
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  delivery NotificationDelivery @relation(fields: [deliveryId], references: [id], onDelete: Restrict)
+
+  @@unique([deliveryId, attemptNo], map: "ux_attempt_delivery_no")
+  @@map("delivery_attempt")
+}
+
+// ---------------------------------------------------------------------------
+// In-app notification — what a person eventually sees (ADR § 4)
+// ---------------------------------------------------------------------------
+
+/// State is derived, never stored: `UNREAD` is both timestamps null, `READ` is
+/// `read_at` set, `DISMISSED` is `dismissed_at` set (and dismiss implies read,
+/// which `ck_in_app_dismiss_implies_read` enforces), `EXPIRED` is
+/// `expires_at < now()`. A stored status column would be a second copy of the
+/// same facts that could disagree with them.
+model InAppNotification {
+  id             String @id @db.VarChar(64)
+  deliveryId     String @unique(map: "ux_in_app_delivery") @map("delivery_id") @db.VarChar(64)
+  intentId       String @map("intent_id") @db.VarChar(64)
+  organizationId String @map("organization_id") @db.VarChar(128)
+  /// Ownership is the user, not only the tenant (ADR § 11, S-03).
+  userId         String @map("user_id") @db.VarChar(128)
+
+  ruleKey        String                     @map("rule_key") @db.VarChar(128)
+  severity       NotificationSeverity
+  classification NotificationClassification
+  subjectType    String                     @map("subject_type") @db.VarChar(64)
+  subjectId      String                     @map("subject_id") @db.VarChar(128)
+
+  /// Rendered plain text. No markup is ever interpreted from these.
+  title String @db.VarChar(200)
+  body  String @db.VarChar(2000)
+  /// A path the web app resolves against its own origin — never an absolute
+  /// URL. Refused by `ck_in_app_action_path_relative`, not only by a DTO.
+  actionPath String? @map("action_path") @db.VarChar(512)
+
+  /// Domain time of the source event, carried through for display.
+  occurredAt  DateTime  @map("occurred_at") @db.Timestamptz(6)
+  readAt      DateTime? @map("read_at") @db.Timestamptz(6)
+  dismissedAt DateTime? @map("dismissed_at") @db.Timestamptz(6)
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  delivery NotificationDelivery @relation(fields: [deliveryId], references: [id], onDelete: Restrict)
+  intent   NotificationIntent   @relation(fields: [intentId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, userId, createdAt(sort: Desc)], map: "ix_in_app_owner_created")
+  @@index([organizationId, expiresAt], map: "ix_in_app_org_expiry")
+  @@map("in_app_notification")
+}
