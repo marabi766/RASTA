@@ -187,6 +187,7 @@ describe('tenant isolation (real database)', () => {
           wiring.orders.resolveDispute(order.id, {
             outcome: 'REFUND',
             resolution: 'I have decided in my own favour',
+            responsibility: 'SUPPLIER',
           }),
         ),
       ).rejects.toThrow(expect.objectContaining({ code: 'FORBIDDEN' }));
