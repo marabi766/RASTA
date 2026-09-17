@@ -60,8 +60,10 @@
  *
  * Manual, optional and outside every gate: nothing in `pnpm verify`, the test
  * phases or CI runs it. A match establishes equality of the supplied bytes
- * only. All comparison and manifest logic is in
- * `aggregation-campaign-retrieval-comparison-lib.mjs`.
+ * only. All comparison logic is in
+ * `aggregation-campaign-retrieval-comparison-lib.mjs`; the manifest grammar,
+ * bounds and path collision policy are in
+ * `aggregation-campaign-report-manifest-lib.mjs`.
  */
 import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -69,13 +71,15 @@ import { fileURLToPath } from 'node:url';
 
 import { CAMPAIGN_SLOT_COUNT } from './aggregation-campaign-accounting-lib.mjs';
 import {
-  MANIFEST_PROBLEM,
+  exceedsPathBytes,
+  findPathCollision,
+  loadReportManifest,
+  pathApiFor,
+} from './aggregation-campaign-report-manifest-lib.mjs';
+import {
   RETRIEVAL_COMPARISON_LIMITS,
   compareRetrievals,
-  findPathCollision,
   formatRetrievalComparison,
-  parseRetrievalManifest,
-  pathApiFor,
 } from './aggregation-campaign-retrieval-comparison-lib.mjs';
 
 const USAGE =
@@ -114,7 +118,6 @@ export const USAGE_ERROR = Object.freeze({
 });
 
 const usage = (reason) => ({ ok: false, exitCode: 2, output: `${reason}\n${USAGE}\n` });
-const tooLong = (path, limits) => Buffer.byteLength(path, 'utf8') > limits.maxPathBytes;
 
 /**
  * Splits arguments into one of the two modes, deterministically, or a usage
@@ -134,7 +137,7 @@ export function parseComparisonArgs(
   for (const arg of (Array.isArray(argv) ? argv : []).map(String)) {
     if (awaitingManifest !== null) {
       if (arg === '' || arg.startsWith('-')) return usage(USAGE_ERROR.manifestValue);
-      if (tooLong(arg, limits)) return usage(USAGE_ERROR.pathTooLong);
+      if (exceedsPathBytes(arg, limits)) return usage(USAGE_ERROR.pathTooLong);
       manifests[awaitingManifest] = arg;
       awaitingManifest = null;
       continue;
@@ -168,7 +171,7 @@ export function parseComparisonArgs(
     if (arg === '') return usage(USAGE_ERROR.emptyPath);
     if (Object.keys(manifests).length > 0) return usage(USAGE_ERROR.extraArgument);
     if (current === null) return usage(USAGE_ERROR.pathBeforeOption);
-    if (tooLong(arg, limits)) return usage(USAGE_ERROR.pathTooLong);
+    if (exceedsPathBytes(arg, limits)) return usage(USAGE_ERROR.pathTooLong);
     cohorts[current].push(arg);
   }
   if (awaitingManifest !== null) return usage(USAGE_ERROR.manifestValue);
@@ -241,23 +244,13 @@ export function runRetrievalComparisonCli({
 
   let reportPaths = parsed.cohorts;
   if (parsed.mode === 'manifest') {
-    const api = pathApiFor(platform);
-    const maxManifestBytes = CAMPAIGN_SLOT_COUNT * (limits.maxPathBytes + 1);
     reportPaths = {};
     for (const name of COHORT_NAMES) {
-      const manifestPath = api.resolve(cwd, parsed.manifests[name]);
-      let bytes;
-      try {
-        if (!(manifestSizeOf(manifestPath) <= maxManifestBytes)) {
-          return usage(`${name} manifest: ${MANIFEST_PROBLEM.tooLarge}`);
-        }
-        bytes = readManifestBytes(manifestPath);
-      } catch {
-        return usage(`${name} manifest: ${MANIFEST_PROBLEM.unreadable}`);
-      }
-      const manifest = parseRetrievalManifest(bytes, {
-        manifestDir: api.dirname(manifestPath),
+      const manifest = loadReportManifest(parsed.manifests[name], {
+        sizeOf: manifestSizeOf,
+        readBytes: readManifestBytes,
         platform,
+        cwd,
         limits,
       });
       if (!manifest.ok) return usage(`${name} manifest: ${manifest.problem}`);

@@ -54,6 +54,7 @@ import {
   parseComparisonArgs,
   runRetrievalComparisonCli,
 } from './aggregation-campaign-retrieval-comparison.mjs';
+import * as reportManifest from './aggregation-campaign-report-manifest-lib.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
@@ -793,10 +794,15 @@ test('the comparator stays manual: outside pnpm verify, the test phases and ordi
   // Read-only by construction: the only file system imports are a size check and a file read.
   const source = readFileSync(CLI, 'utf8');
   const lib = readFileSync(join(here, 'aggregation-campaign-retrieval-comparison-lib.mjs'), 'utf8');
+  const manifestLib = readFileSync(
+    join(here, 'aggregation-campaign-report-manifest-lib.mjs'),
+    'utf8',
+  );
   const specifiers = (text) =>
     [...text.matchAll(/^(?:import .*|\}) from '([^']+)';$/gm)].map((m) => m[1]).sort();
   assert.deepEqual(specifiers(source), [
     './aggregation-campaign-accounting-lib.mjs',
+    './aggregation-campaign-report-manifest-lib.mjs',
     './aggregation-campaign-retrieval-comparison-lib.mjs',
     'node:fs',
     'node:path',
@@ -805,11 +811,17 @@ test('the comparator stays manual: outside pnpm verify, the test phases and ordi
   assert.deepEqual(specifiers(lib), [
     './aggregation-campaign-accounting-lib.mjs',
     './aggregation-campaign-log-recovery-lib.mjs',
+    './aggregation-campaign-report-manifest-lib.mjs',
+    './aggregation-campaign-report-manifest-lib.mjs',
     './aggregation-evidence-lib.mjs',
+  ]);
+  // The shared manifest contract has no file system import and no comparator dependency.
+  assert.deepEqual(specifiers(manifestLib), [
+    './aggregation-campaign-accounting-lib.mjs',
     'node:path',
   ]);
   assert.match(source, /^import \{ readFileSync, statSync \} from 'node:fs';$/m);
-  for (const text of [source, lib]) {
+  for (const text of [source, lib, manifestLib]) {
     assert.ok(!/writeFile|mkdir|rename|unlink|rmSync|readdir|opendir|fetch\(/.test(text));
   }
 });
@@ -1091,6 +1103,29 @@ test('manifest: every grammar violation is a fixed problem and never echoes cont
     false,
     'the manifest directory must be absolute',
   );
+});
+
+test('manifest: the comparator uses the shared report-path manifest contract, not a copy', () => {
+  assert.equal(parseRetrievalManifest, reportManifest.parseReportManifest);
+  assert.equal(retrievalPathKey, reportManifest.reportPathKey);
+  assert.equal(findPathCollision, reportManifest.findPathCollision);
+  assert.equal(MANIFEST_PROBLEM, reportManifest.REPORT_MANIFEST_PROBLEM);
+  assert.equal(MAX_RETRIEVAL_MANIFEST_BYTES, reportManifest.MAX_REPORT_MANIFEST_BYTES);
+  assert.equal(
+    RETRIEVAL_COMPARISON_LIMITS.maxPathBytes,
+    reportManifest.REPORT_PATH_LIMITS.maxPathBytes,
+  );
+  const source = readFileSync(
+    join(here, 'aggregation-campaign-retrieval-comparison-lib.mjs'),
+    'utf8',
+  );
+  for (const forked of ['MANIFEST_CONTROL', 'NOT_PLAIN_PATH', 'toLowerCase', 'node:path']) {
+    assert.ok(!source.includes(forked), 'no manifest rule is redefined in the comparator');
+  }
+  const cli = readFileSync(CLI, 'utf8');
+  for (const forked of ['maxManifestBytes', 'dirname', 'parseRetrievalManifest']) {
+    assert.ok(!cli.includes(forked), 'the CLI loads manifests only through the shared contract');
+  }
 });
 
 test('manifest: path keys are conservative on Windows and exact on POSIX', () => {

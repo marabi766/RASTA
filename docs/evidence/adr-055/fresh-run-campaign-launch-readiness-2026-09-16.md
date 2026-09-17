@@ -795,9 +795,20 @@ the launch.
 
 **L12 — slot accounting.**
 
-- `[tool]` `pnpm run account:aggregation-campaign -- <report> [<report> ...]`, with all 59 report files:
-  the downloaded artifact files, or the 59 files materialized by the L11 fallback.
+- The input is all 59 report files: the downloaded artifact files, or the 59 files materialized by
+  the L11 fallback.
+- `[tool]`, **recommended, Windows-safe** (_updated 2026-09-17, § 17_):
+  `pnpm run account:aggregation-campaign -- --reports-manifest <file>`.
+  - `<file>` is a **report-path manifest**: a plain list of the 59 report paths written by the
+    operator, in the § 16 grammar. A relative line resolves against the manifest's own directory.
+  - Keep it with the output. It only transports paths. It is **not** evidence and proves nothing
+    about authenticity or provenance.
+- `[tool]`, still valid: `pnpm run account:aggregation-campaign -- <report> [<report> ...]`. On
+  Windows, 59 long paths can exceed the `cmd.exe` command-line limit of `pnpm run`. Use the
+  manifest instead.
 - It must exit `0` with `accounting: COMPLETE` and an invariant line that ends in `holds`.
+- Exit `2` (a usage or report-path-manifest error) accounted nothing. Only the invocation or the
+  manifest's path list may be corrected; no report file may change.
 - Anything else (a blocker, missing slot, rejected input or provenance problem) is Branch C. Keep
   the output.
 - The 59 files are always one complete set from one source. Never mix artifact and fallback files.
@@ -806,8 +817,17 @@ the launch.
 **L13 — image-cohort review.**
 
 - `[manual/live]` Re-hash the manifest; it must still equal `image_cohort_manifest_sha256`.
-- `[tool]` `pnpm run review:aggregation-campaign-image-cohort -- <image-cohort-manifest> <report> [<report> ...]`,
-  with the same manifest and the same 59 reports as L12 (one set from one source, never mixed).
+- The input is the same image-cohort manifest and the same 59 reports as L12 (one set from one
+  source, never mixed).
+- `[tool]`, **recommended, Windows-safe** (_updated 2026-09-17, § 17_):
+  `pnpm run review:aggregation-campaign-image-cohort -- <image-cohort-manifest> --reports-manifest <file>`.
+  - `<image-cohort-manifest>` is the L4 JSON snapshot. It is unchanged and still comes first.
+  - `<file>` is a separate **report-path manifest**: the same kind of plain path list as in L12, not
+    the JSON snapshot. It is not evidence either.
+- `[tool]`, still valid:
+  `pnpm run review:aggregation-campaign-image-cohort -- <image-cohort-manifest> <report> [<report> ...]`.
+- Exit `2` (a usage or report-path-manifest error) reviewed nothing. Only the invocation or the path
+  list may be corrected; the JSON snapshot and the reports may not change.
 - It must exit `0` with `COHORT: CONSISTENT`. Otherwise (`COHORT: BRANCH C`) the result is Branch C.
 - A human reads and records the single measured topology (§ 11, item 5). Keep the output.
 
@@ -862,8 +882,8 @@ from a job conclusion. Every deferral in § 6 stays deferred.
 | L9–L10     | 11      | the one run, per-job `run_attempt` metadata                         | not exactly one run or attempt ≠ 1 → Branch C              |
 | L11        | 2, 10   | 59 artifact files, or recovery output and its 59 materialized files | missing, expired, or fallback not `RESULT: PASS` → not A/B |
 | L11 (opt.) | 10      | comparator output and its two manifests, if it was run              | `DIFFERENT` or `REJECTED` → not A/B (Branch C)             |
-| L12        | 12      | accounting output                                                   | not `accounting: COMPLETE` → Branch C                      |
-| L13        | 9       | cohort output, the human-read topology                              | `COHORT: BRANCH C` → Branch C                              |
+| L12        | 12      | accounting output, and its report-path manifest if one was used     | not `accounting: COMPLETE` → Branch C                      |
+| L13        | 9       | cohort output, human-read topology, report-path manifest if used    | `COHORT: BRANCH C` → Branch C                              |
 | L14        | —       | the branch statement, worded as in preregistration § 6              | any earlier failure → Branch C                             |
 
 ### 13.6 Status after this section
@@ -1148,3 +1168,98 @@ All 22 hand-made mutants of the new code were caught. The six campaign tool test
 that real recovered reports equal real artifact bytes, and any real 59-job retrieval. **Row 9 stays
 `UNVERIFIED`, row 10 `BLOCKED`, row 11 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict
 stays NO-GO.**
+
+## 17. Update — report-path manifests for slot accounting and image-cohort review (2026-09-17)
+
+This section records a code change, not a live probe. §§ 1–12 and §§ 14–16 are unchanged. In § 13,
+only the L12 and L13 tool bullets and their matrix rows changed. Nothing was downloaded, no GitHub API
+or network was called, no workflow was installed, pushed, dispatched or rerun, and **no real report,
+report-path manifest, image-cohort manifest, accounting or review exists**.
+
+**The gap.** § 16 removed the `cmd.exe` 8191-character obstacle for the comparator only. L12 and L13
+still passed 59 long report paths through `pnpm run`, which can exceed the same limit on Windows.
+
+**Added.** One more input mode for each command. The explicit-path forms are kept.
+
+- `pnpm run account:aggregation-campaign -- --reports-manifest <file>`
+- `pnpm run review:aggregation-campaign-image-cohort -- <image-cohort-manifest> --reports-manifest <file>`
+
+**One shared contract.** The § 16 grammar, byte bounds, path resolution and duplicate policy moved
+unchanged into `scripts/aggregation-campaign-report-manifest-lib.mjs`. The comparator, accounting and
+image-cohort commands all use that module, so no rule has a second copy. The comparator's output and
+tests are unchanged. The module holds only parsing, path arithmetic and constants.
+
+- **Report-path manifest.**
+  - Strict UTF-8 without BOM, at most 60 475 bytes, exactly 59 LF-terminated lines.
+  - Each line is one report path of 1–1024 UTF-8 bytes. It has no CR, control character, padding,
+    comment, quoting, escape, `-` prefix, URL or `C:name`.
+  - A relative line resolves against the manifest's own directory. Line order means nothing.
+- **Not the image-cohort manifest.** The L4 JSON snapshot keeps its own validator, its 4 KiB bound and
+  its meaning, and still comes first.
+  - A path list given as the snapshot is a rejected snapshot (`COHORT: BRANCH C`).
+  - A snapshot given as `--reports-manifest` breaks the path-list grammar (exit `2`).
+- **Options.** `--reports-manifest` appears once, followed by exactly one path and nothing else. A
+  leading `--` is accepted only before the first real argument. These exit `2` before any report is
+  read (and, for the review, before the JSON snapshot is read):
+  - mixed modes;
+  - a repeated, unknown or inline option (`--reports-manifest=value`);
+  - a missing, empty or `-`-prefixed manifest path, or one over 1024 UTF-8 bytes;
+  - any extra argument, or a late `--`;
+  - for the review, `--reports-manifest` before the snapshot.
+- **Bounded reading.**
+  - The manifest's size is checked before it is read. A size that is too large, unknown or not a
+    byte count is refused unread. The bytes are checked again after reading.
+  - Every manifest failure exits `2` with one fixed line, `reports manifest: <problem>`, and **zero
+    report reads**.
+  - Only the named files and the 59 listed reports are read. Nothing is written, no directory is
+    scanned and no glob is expanded. No path, argument, manifest line or OS error is printed.
+- **Explicit paths, tightened consistently.** These now exit `2` before any read:
+  - an empty path, or a path over 1024 UTF-8 bytes;
+  - more than 128 paths. This is `LOG_RECOVERY_LIMITS.maxLogs`, the bound the image-cohort review
+    and the comparator already had; accounting had none. The bound is not 59, so an unexpected
+    extra report still reaches accounting and is reported there (exit `1`), as before;
+  - a late `--`.
+  - An unknown option still exits `2`, but accounting no longer echoes it.
+- **Duplicates, in both modes.** The same report path twice after resolution exits `2` before any read.
+  - **On Windows**, comparison is conservative: separators are normalized, each segment's trailing
+    dots and spaces are dropped, and case is folded.
+  - **On POSIX**, it is exact after normalization.
+  - Hard links, junctions, symlinks and 8.3 short names are not detected.
+- **Unchanged.**
+  - Fewer than 59 explicit reports still produce the ordinary accounting with missing slots (exit
+    `1`), and an incomplete review is still `COHORT: BRANCH C`.
+  - Slots come only from `parseSlotReport` and `accountCampaign`. The review still calls
+    `validateCohortManifest` and `reviewImageCohort`.
+  - Output, classifications, topology and chronology checks, thresholds, eligibility and Branch rules
+    are unchanged. Exit codes `0` and `1` mean what they meant.
+
+**Tests**, all synthetic: accounting **24/24** (17 + 7), image-cohort **20/20** (15 + 5), comparator
+**22/22** (21 + 1; the new test proves the comparator re-exports the shared contract rather than a
+copy). They cover:
+
+- explicit behavior kept, and explicit syntax, bound and duplicate errors;
+- manifest success over 59 long relative paths, from another working directory, in shuffled order,
+  with output identical to explicit paths;
+- unchanged domain failures;
+- 19 grammar violations, and oversized, unknown-size, post-read-growth and unreadable manifests;
+- overlong entries and arguments;
+- POSIX and injected Windows duplicates;
+- option errors;
+- zero report reads on every failure, and fixed diagnostics;
+- a spawned run of each package script's command over 59 real paths totalling more than 8191
+  characters: success, one domain failure and one exit `2`. Names, sizes, mtimes and bytes were
+  unchanged around every run.
+
+All 25 hand-made mutants of the new code were caught. The six campaign tool test files together pass
+**121/121** (baseline 108/108).
+
+A manual run of the real `pnpm run` commands on Windows used a temporary synthetic cohort: 59 paths
+per set, about 11 300 characters if passed one by one. Through manifests it gave
+`accounting: COMPLETE`, `COHORT: CONSISTENT` and `COMPARISON: MATCH`. One product-failure report gave
+exit `1` in each command, and a CRLF manifest gave exit `2` in each. No file changed and no path
+leaked.
+
+**Still not proven, so nothing changes:** any real report set, its retrieval, its authenticity or its
+provenance. A report-path manifest is operator-supplied transport and proves none of these. **Row 9
+stays `UNVERIFIED`, row 10 `BLOCKED`, row 11 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The
+verdict stays NO-GO.**

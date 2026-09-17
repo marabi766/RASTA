@@ -9,7 +9,15 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -30,8 +38,13 @@ import {
 import {
   MAX_REPORT_BYTES,
   MAX_REPORT_PATHS,
+  USAGE_ERROR,
   runImageCohortCli,
 } from './aggregation-campaign-image-cohort.mjs';
+import {
+  MAX_REPORT_MANIFEST_BYTES,
+  REPORT_MANIFEST_PROBLEM,
+} from './aggregation-campaign-report-manifest-lib.mjs';
 import {
   LAUNCHER,
   PROCESS_OUTCOME,
@@ -801,4 +814,539 @@ test('cohort CLI: explicit files in, one decision out, nothing written or named'
     [...before, 'past-snapshot.json', 'slot-drift.txt'].sort(),
     'the review writes nothing',
   );
+});
+
+// ---------------------------------------------------------------------------
+// Report-path manifests: a second way to name the 59 reports, distinct from the JSON review manifest
+
+const NUL = String.fromCharCode(0);
+const TAB = String.fromCharCode(9);
+const CR = String.fromCharCode(13);
+const DEL = String.fromCharCode(127);
+const BOM_BYTES = Buffer.from([0xef, 0xbb, 0xbf]);
+const manifestOf = (lines) => Buffer.from(lines.map((line) => `${line}\n`).join(''), 'utf8');
+
+const shuffled = (items, seed = 11) => {
+  const out = [...items];
+  let state = seed;
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    state = (state * 1103515245 + 12345) % 2147483648;
+    const j = state % (i + 1);
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+};
+
+const RUN_DIR = '/runs/campaign';
+const LIST_PATH = `${RUN_DIR}/list.txt`;
+const REVIEW_PATH = '/runs/launch/snapshot.json';
+const CALLER = '/work/elsewhere';
+const LIST_ARGV = Object.freeze([
+  '--',
+  REVIEW_PATH,
+  '--reports-manifest',
+  '../../runs/campaign/list.txt',
+]);
+/** Long relative report names; a name never matches the slot inside its report. */
+const NAMES = Array.from(
+  { length: CAMPAIGN_SLOT_COUNT },
+  (_, index) =>
+    `reports/secret-${'long-directory-segment-'.repeat(4)}/report-${String(58 - index).padStart(3, '0')}.txt`,
+);
+
+/**
+ * A fake file system: the JSON review manifest at `REVIEW_PATH`, `texts[i]` at
+ * `RUN_DIR/NAMES[i]`, and one report-path manifest listing `lines`. Every size
+ * check and read is recorded under its kind.
+ */
+function cohortFs(texts, options = {}) {
+  const {
+    lines = NAMES,
+    list = manifestOf(lines),
+    review = manifestText(),
+    extraFiles = [],
+    errors = new Set(),
+    platform = 'linux',
+    cwd = CALLER,
+    listPath = LIST_PATH,
+  } = options;
+  const files = new Map([
+    [REVIEW_PATH, review],
+    ...texts.map((text, index) => [`${RUN_DIR}/${NAMES[index]}`, text]),
+    ...extraFiles,
+  ]);
+  const calls = [];
+  const missing = (path) => {
+    throw new Error(`ENOENT secret ${path}`);
+  };
+  const kindOf = (path) => (path === REVIEW_PATH ? 'review' : 'report');
+  return {
+    calls,
+    paths: texts.map((_, index) => `${RUN_DIR}/${NAMES[index]}`),
+    kinds: () => calls.map(([kind]) => kind),
+    reviewOrReportAccess: () => calls.filter(([kind]) => !kind.startsWith('list')),
+    options: {
+      platform,
+      cwd,
+      now: NOW,
+      sizeOf: (path) => {
+        calls.push([`${kindOf(path)}-size`, path]);
+        if (errors.has(path) || !files.has(path)) missing(path);
+        if (path === REVIEW_PATH && Object.hasOwn(options, 'reviewSize')) {
+          return options.reviewSize;
+        }
+        return Buffer.byteLength(files.get(path));
+      },
+      readText: (path) => {
+        calls.push([`${kindOf(path)}-read`, path]);
+        if (errors.has(path) || !files.has(path)) missing(path);
+        return files.get(path);
+      },
+      reportsManifestSizeOf: (path) => {
+        calls.push(['list-size', path]);
+        if (errors.has(path) || path !== listPath) missing(path);
+        return Object.hasOwn(options, 'listSize') ? options.listSize : list.length;
+      },
+      readReportsManifestBytes: (path) => {
+        calls.push(['list-read', path]);
+        if (errors.has(path) || path !== listPath) missing(path);
+        return Buffer.from(list);
+      },
+    },
+  };
+}
+
+const runCohortFs = (fs, argv = LIST_ARGV) => runImageCohortCli({ argv, ...fs.options });
+
+/** Exit 2, one fixed reason plus the usage line, nothing else read and nothing supplied echoed. */
+const assertCohortUsage = (result, reason, fs, label) => {
+  assert.equal(result.exitCode, 2, label);
+  const lines = result.output.split('\n');
+  assert.equal(lines.length, 3, label);
+  assert.equal(lines[0], reason, label);
+  assert.match(lines[1], /^usage: node scripts\/aggregation-campaign-image-cohort\.mjs /, label);
+  assert.deepEqual(fs.reviewOrReportAccess(), [], `${label}: neither manifest nor report is read`);
+  assert.ok(
+    !/secret|runs|work|list\.txt|snapshot|ENOENT|reports\/|\\|é/i.test(result.output),
+    `${label}: nothing supplied is echoed`,
+  );
+};
+
+test('cohort CLI manifest: the JSON review manifest stays first and distinct; listed reports give exactly the explicit decision', () => {
+  const texts = campaign();
+  const explicitFs = cohortFs(texts);
+  const explicit = runImageCohortCli({
+    argv: [REVIEW_PATH, ...explicitFs.paths],
+    ...explicitFs.options,
+  });
+  assert.ok(isConsistent(review(texts)));
+  assert.equal(explicit.output, formatCohortReview(review(texts)));
+
+  const fs = cohortFs(texts, { lines: shuffled(NAMES, 9) });
+  const viaList = runCohortFs(fs);
+  assert.equal(viaList.exitCode, 0);
+  assert.equal(viaList.output, explicit.output);
+  assertSafeOutput(viaList.output, ['secret', '/runs/', 'list.txt']);
+  // The report-path manifest first, then the review manifest and the reports exactly as before.
+  assert.deepEqual(fs.kinds().slice(0, 4), [
+    'list-size',
+    'list-read',
+    'review-size',
+    'review-read',
+  ]);
+  assert.deepEqual(
+    fs.kinds().slice(4),
+    Array.from({ length: CAMPAIGN_SLOT_COUNT }, () => ['report-size', 'report-read']).flat(),
+  );
+
+  // Unchanged Branch C results: drift, a snapshot the JSON validator rejects, an oversized
+  // review manifest that is never read, an unreadable listed report.
+  const drifted = campaign({ 3: { topology: { ...TOPOLOGY, runner_image: DRIFT.runner_image } } });
+  const variants = [
+    ['drift', drifted, {}],
+    ['rejected snapshot', texts, { review: manifestText({ schema: 'x' }) }],
+    ['oversized review manifest', texts, { reviewSize: MAX_MANIFEST_BYTES + 1 }],
+    ['unreadable report', texts, { errors: new Set([`${RUN_DIR}/${NAMES[12]}`]) }],
+  ];
+  for (const [label, cohortTexts, over] of variants) {
+    const listed = cohortFs(cohortTexts, { ...over, lines: shuffled(NAMES, 4) });
+    const named = cohortFs(cohortTexts, over);
+    const a = runCohortFs(listed);
+    const b = runImageCohortCli({ argv: [REVIEW_PATH, ...named.paths], ...named.options });
+    assert.equal(a.exitCode, 1, label);
+    assert.match(a.output, /^COHORT: BRANCH C$/m, label);
+    assert.equal(a.output, b.output, label);
+    assertSafeOutput(a.output, ['secret', '/runs/', 'list.txt']);
+    if (label === 'oversized review manifest') {
+      assert.match(a.output, /manifest exceeds the byte limit/);
+      assert.ok(!listed.kinds().includes('review-read'), 'the oversized review manifest is unread');
+    }
+  }
+
+  // The two manifests are not interchangeable. A path list given as the review manifest is a
+  // snapshot the JSON validator rejects (exit 1); a JSON snapshot given as the report-path
+  // manifest breaks the path-list grammar (exit 2) before anything else is read.
+  const swappedReview = cohortFs(texts, {
+    extraFiles: [[LIST_PATH, manifestOf(NAMES).toString()]],
+  });
+  const listAsReview = runCohortFs(swappedReview, [LIST_PATH, '--reports-manifest', LIST_PATH]);
+  assert.equal(listAsReview.exitCode, 1);
+  assert.match(listAsReview.output, /^pre-launch snapshot: REJECTED$/m);
+  assert.match(listAsReview.output, /^COHORT: BRANCH C$/m);
+  const jsonAsList = cohortFs(texts, { list: Buffer.from(manifestText()), listPath: REVIEW_PATH });
+  assertCohortUsage(
+    runCohortFs(jsonAsList, [REVIEW_PATH, '--reports-manifest', REVIEW_PATH]),
+    `reports manifest: ${REPORT_MANIFEST_PROBLEM.whitespace}`,
+    jsonAsList,
+    'JSON snapshot as a path list',
+  );
+
+  // Explicit, incomplete input keeps its Branch C result.
+  const short = cohortFs(texts);
+  const incomplete = runImageCohortCli({
+    argv: [REVIEW_PATH, ...short.paths.slice(1)],
+    ...short.options,
+  });
+  assert.equal(incomplete.exitCode, 1);
+  assert.equal(incomplete.output, formatCohortReview(review(texts.slice(1))));
+});
+
+test('cohort CLI manifest: every report-path manifest failure exits 2 before the review manifest or any report is read', () => {
+  const texts = campaign();
+  const P = REPORT_MANIFEST_PROBLEM;
+  const body = manifestOf(NAMES).toString('utf8');
+  const withLine = (line, at = 30) => {
+    const copy = [...NAMES];
+    copy[at] = line;
+    return manifestOf(copy);
+  };
+  const failures = [
+    ['missing final LF', { list: Buffer.from(body.slice(0, -1)) }, P.finalNewline],
+    ['CRLF', { list: Buffer.from(body.replaceAll('\n', `${CR}\n`)) }, P.carriageReturn],
+    ['BOM', { list: Buffer.concat([BOM_BYTES, manifestOf(NAMES)]) }, P.bom],
+    [
+      'invalid UTF-8',
+      { list: Buffer.concat([manifestOf(NAMES.slice(1)), Buffer.from([0xc3, 0x0a])]) },
+      P.notUtf8,
+    ],
+    ['NUL', { list: withLine(`secret${NUL}.txt`) }, P.control],
+    ['tab', { list: withLine(`secret${TAB}.txt`) }, P.control],
+    ['DEL', { list: withLine(`secret${DEL}`) }, P.control],
+    ['blank line', { list: withLine('') }, P.blankLine],
+    ['padded line', { list: withLine(' secret.txt') }, P.whitespace],
+    ['option-like', { list: withLine('-secret') }, P.optionLike],
+    ['comment', { list: withLine('#secret') }, P.notPlainPath],
+    ['quoted', { list: withLine("'secret.txt'") }, P.notPlainPath],
+    ['URL', { list: withLine('file:///secret.txt') }, P.notPlainPath],
+    ['drive-relative', { list: withLine('D:secret.txt') }, P.notPlainPath],
+    ['overlong entry', { list: withLine('é'.repeat(513)) }, P.entryTooLong],
+    ['58 lines', { list: manifestOf(NAMES.slice(1)) }, P.lineCount],
+    ['60 lines', { list: manifestOf([...NAMES, 'secret.txt']) }, P.lineCount],
+    ['oversized', { listSize: MAX_REPORT_MANIFEST_BYTES + 1 }, P.tooLarge, true],
+    ['unknown size', { listSize: Number.NaN }, P.tooLarge, true],
+    ['no size', { listSize: undefined }, P.tooLarge, true],
+    [
+      'grown after the size check',
+      { list: Buffer.alloc(MAX_REPORT_MANIFEST_BYTES + 1, 0x61), listSize: 10 },
+      P.tooLarge,
+    ],
+    ['unreadable', { errors: new Set([LIST_PATH]) }, P.unreadable, true],
+  ].map(([label, over, problem, unread]) => [label, over, `reports manifest: ${problem}`, unread]);
+  failures.push(
+    ['duplicate line', { lines: [...NAMES.slice(1), NAMES[5]] }, USAGE_ERROR.duplicatePath],
+    [
+      'duplicate after normalization',
+      { lines: [...NAMES.slice(1), `../campaign/${NAMES[5]}`] },
+      USAGE_ERROR.duplicatePath,
+    ],
+  );
+  const winList = 'D:\\Runs\\List.txt';
+  for (const variant of [
+    'REPORTS\\A.TXT',
+    'reports\\a.txt.',
+    'reports. \\a.txt',
+    'd:/runs/reports/a.txt',
+  ]) {
+    failures.push([
+      `Windows ${variant}`,
+      {
+        lines: [...NAMES.slice(2), 'reports\\a.txt', variant],
+        platform: 'win32',
+        cwd: 'C:\\Work',
+        listPath: winList,
+        argv: ['C:\\Launch\\snapshot.json', '--reports-manifest', winList],
+      },
+      USAGE_ERROR.duplicatePath,
+    ]);
+  }
+  for (const [label, over, reason, unread] of failures) {
+    const fs = cohortFs(texts, over);
+    assertCohortUsage(runCohortFs(fs, over.argv), reason, fs, label);
+    if (unread) assert.ok(!fs.kinds().includes('list-read'), `${label}: path list unread`);
+  }
+});
+
+test('cohort CLI: option errors and explicit-path tightening exit 2 before any file access', () => {
+  const texts = campaign();
+  const long = `secret${'s'.repeat(1019)}`;
+  const cases = [
+    ['no argument', [], USAGE_ERROR.noManifest],
+    ['only a separator', ['--'], USAGE_ERROR.noManifest],
+    ['no report', ['--', 'm.json'], USAGE_ERROR.noReport],
+    [
+      'option before the review manifest',
+      ['--reports-manifest', 'list.txt'],
+      USAGE_ERROR.optionBeforeManifest,
+    ],
+    [
+      'option before the review manifest, then it',
+      ['--', '--reports-manifest', 'list.txt', 'm.json'],
+      USAGE_ERROR.optionBeforeManifest,
+    ],
+    [
+      'mixed, reports first',
+      ['m.json', 'r.txt', '--reports-manifest', 'list.txt'],
+      USAGE_ERROR.mixedModes,
+    ],
+    [
+      'mixed, manifest first',
+      ['m.json', '--reports-manifest', 'list.txt', 'r.txt'],
+      USAGE_ERROR.extraArgument,
+    ],
+    [
+      'repeated',
+      ['m.json', '--reports-manifest', 'list.txt', '--reports-manifest', 'list.txt'],
+      USAGE_ERROR.repeatedOption,
+    ],
+    ['missing value', ['m.json', '--reports-manifest'], USAGE_ERROR.manifestValue],
+    ['empty value', ['m.json', '--reports-manifest', ''], USAGE_ERROR.manifestValue],
+    ['option-like value', ['m.json', '--reports-manifest', '--secret'], USAGE_ERROR.manifestValue],
+    ['inline value', ['m.json', '--reports-manifest=secret.txt'], USAGE_ERROR.inlineValue],
+    ['unknown option', ['m.json', '--reports', 'secret.txt'], USAGE_ERROR.unknownOption],
+    [
+      'extra option',
+      ['m.json', '--reports-manifest', 'list.txt', '--json'],
+      USAGE_ERROR.unknownOption,
+    ],
+    [
+      'extra values',
+      ['m.json', '--reports-manifest', 'list.txt', 'a.txt', 'b.txt'],
+      USAGE_ERROR.extraArgument,
+    ],
+    ['late separator', ['m.json', '--', 'r.txt'], USAGE_ERROR.lateSeparator],
+    [
+      'late separator after the list',
+      ['m.json', '--reports-manifest', 'list.txt', '--'],
+      USAGE_ERROR.lateSeparator,
+    ],
+    ['overlong list path', ['m.json', '--reports-manifest', long], USAGE_ERROR.pathTooLong],
+    ['overlong review manifest path', [long, 'r.txt'], USAGE_ERROR.pathTooLong],
+    ['overlong report path', ['m.json', 'r.txt', long], USAGE_ERROR.pathTooLong],
+    ['empty review manifest path', ['', 'r.txt'], USAGE_ERROR.emptyPath],
+    ['empty report path', ['m.json', ''], USAGE_ERROR.emptyPath],
+    [
+      'too many reports',
+      ['m.json', ...Array.from({ length: MAX_REPORT_PATHS + 1 }, (_, i) => `r${i}.txt`)],
+      USAGE_ERROR.tooManyPaths,
+    ],
+    [
+      'duplicate report',
+      ['m.json', 'secret/r.txt', `${CALLER}/secret/x/../r.txt`],
+      USAGE_ERROR.duplicatePath,
+    ],
+  ];
+  const windows = { platform: 'win32', cwd: 'C:\\Work' };
+  for (const [a, b] of [
+    ['C:\\Runs\\R.txt', 'c:/runs/r.TXT'],
+    ['C:\\runs\\r.txt', 'C:\\runs\\r.txt. .'],
+    ['runs\\r.txt', 'C:\\WORK\\RUNS.\\r.txt'],
+  ]) {
+    cases.push([`Windows ${a} ~ ${b}`, ['m.json', a, b], USAGE_ERROR.duplicatePath, windows]);
+  }
+  for (const [label, argv, reason, over] of cases) {
+    const fs = cohortFs(texts, over);
+    assertCohortUsage(runCohortFs(fs, argv), reason, fs, label);
+    assert.deepEqual(fs.calls, [], `${label}: no file access at all`);
+  }
+
+  // Inclusive bounds: the maximum report count and a 1024-byte path are still reviewed (Branch C).
+  const many = cohortFs(texts);
+  const atLimit = runCohortFs(many, [
+    REVIEW_PATH,
+    ...Array.from({ length: MAX_REPORT_PATHS }, (_, i) => `/absent/${i}.txt`),
+  ]);
+  assert.equal(atLimit.exitCode, 1);
+  assert.match(atLimit.output, /^COHORT: BRANCH C$/m);
+  const edge = cohortFs(texts);
+  const atBound = runCohortFs(edge, [REVIEW_PATH, `/${'s'.repeat(1023)}`]);
+  assert.equal(atBound.exitCode, 1);
+  // POSIX case-only variants are different files.
+  const posixCase = cohortFs(texts);
+  assert.equal(runCohortFs(posixCase, [REVIEW_PATH, '/r/A.txt', '/r/a.txt']).exitCode, 1);
+  assert.equal(posixCase.kinds().filter((kind) => kind === 'report-size').length, 2);
+});
+
+test('the cohort review stays manual and read-only, and shares the manifest contract rather than the comparator', () => {
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+  assert.equal(
+    pkg.scripts['review:aggregation-campaign-image-cohort'],
+    'node scripts/aggregation-campaign-image-cohort.mjs',
+  );
+  for (const [name, command] of Object.entries(pkg.scripts)) {
+    if (name === 'review:aggregation-campaign-image-cohort') continue;
+    assert.ok(!command.includes('aggregation-campaign-image-cohort'), name);
+    assert.ok(!command.includes('review:aggregation-campaign-image-cohort'), name);
+  }
+  for (const file of [
+    '.github/workflows/ci.yml',
+    'scripts/run-test-phases.mjs',
+    'scripts/test-phases-lib.mjs',
+    'scripts/check-test-phases.mjs',
+  ]) {
+    const text = readFileSync(join(repoRoot, file), 'utf8');
+    assert.ok(!text.includes('aggregation-campaign-image-cohort'), file);
+    assert.ok(!text.includes('review:aggregation-campaign-image-cohort'), file);
+    assert.ok(!text.includes('report-manifest'), file);
+  }
+  assert.deepEqual(readdirSync(join(repoRoot, '.github', 'workflows')), ['ci.yml']);
+
+  const specifiers = (text) =>
+    [...text.matchAll(/^(?:import .*|\}) from '([^']+)';$/gm)].map((m) => m[1]).sort();
+  const cli = readFileSync(CLI, 'utf8');
+  assert.deepEqual(specifiers(cli), [
+    './aggregation-campaign-image-cohort-lib.mjs',
+    './aggregation-campaign-log-recovery-lib.mjs',
+    './aggregation-campaign-report-manifest-lib.mjs',
+    'node:fs',
+    'node:path',
+    'node:url',
+  ]);
+  assert.match(cli, /^import \{ readFileSync, statSync \} from 'node:fs';$/m);
+  assert.ok(!/writeFile|mkdir|rename|unlink|rmSync|readdir|opendir|globSync|fetch\(/.test(cli));
+  // The JSON review manifest keeps its own bound and validator.
+  assert.equal(MAX_MANIFEST_BYTES, 4 * 1024);
+  assert.notEqual(MAX_MANIFEST_BYTES, MAX_REPORT_MANIFEST_BYTES);
+});
+
+test('cohort review (spawned package command): a report-path manifest carries 59 long paths; CONSISTENT, BRANCH C, exit 2; nothing written', () => {
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+  const [program, script, ...rest] =
+    pkg.scripts['review:aggregation-campaign-image-cohort'].split(' ');
+  assert.equal(program, 'node');
+  assert.deepEqual(rest, []);
+  const scriptPath = join(repoRoot, script);
+
+  const root = mkdtempSync(join(tmpdir(), 'aggregation-campaign-image-cohort-manifest-test-'));
+  temporaryDirs.push(root);
+  assert.ok(!resolve(root).startsWith(repoRoot));
+  const segment = `private-reports-${'long-directory-segment-'.repeat(5)}`.slice(0, 90);
+  const reportDir = join(root, segment);
+  const callerDir = join(root, 'caller');
+  for (const dir of [reportDir, callerDir]) mkdirSync(dir);
+
+  const texts = campaign();
+  const names = texts.map((text, i) => {
+    const name = `private-campaign-report-${String(58 - i).padStart(2, '0')}.txt`;
+    writeFileSync(join(reportDir, name), text);
+    return name;
+  });
+  const paths = names.map((name) => join(reportDir, name));
+  for (const path of paths) assert.ok(path.length < 250, 'each path is under classic MAX_PATH');
+  const individually = paths.reduce((total, path) => total + path.length + 3, 0);
+  assert.ok(individually > 8191, 'passed one by one, the paths exceed the cmd.exe limit');
+
+  // A spawned process reads the real clock, so its synthetic snapshot is safely in the past.
+  const snapshotPath = join(root, 'private-snapshot.json');
+  writeFileSync(
+    snapshotPath,
+    manifestText({
+      observed_at: '2026-01-15T00:00:00Z',
+      current_image_release: 'ubuntu24/20260112.100',
+      current_image_published_at: '2026-01-13T00:00:00Z',
+      previous_image_release: 'ubuntu24/20260105.90',
+      previous_image_published_at: '2026-01-06T00:00:00Z',
+    }),
+  );
+  const list = join(root, 'reports.manifest');
+  const malformed = join(root, 'malformed.manifest');
+  writeFileSync(list, manifestOf(shuffled(names, 13).map((name) => `${segment}/${name}`)));
+  writeFileSync(
+    malformed,
+    manifestOf(
+      [...names.slice(1), names[1]].map((name, i) => `${segment}/${i === 58 ? './' : ''}${name}`),
+    ),
+  );
+
+  const walk = (dir) =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) return [[full, 'dir'], ...walk(full)];
+      const stats = statSync(full);
+      return [[full, stats.size, stats.mtimeMs, readFileSync(full).toString('base64')]];
+    });
+  const snapshot = () => walk(root).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  const run = (args) => {
+    const around = snapshot();
+    const result = spawnSync(process.execPath, [scriptPath, ...args], {
+      encoding: 'utf8',
+      cwd: callerDir,
+      timeout: 60_000,
+    });
+    assert.deepEqual(snapshot(), around, 'the run created, removed or changed nothing');
+    assert.equal(result.stderr, '');
+    return result;
+  };
+  const leaks = [
+    root,
+    'private',
+    'long-directory',
+    '.manifest',
+    'snapshot.json',
+    repoRoot,
+    'caller',
+  ];
+
+  // Relative paths from a different working directory; relative lines from the list's directory.
+  const consistent = run([
+    '--',
+    '../private-snapshot.json',
+    '--reports-manifest',
+    '../reports.manifest',
+  ]);
+  assert.equal(consistent.status, 0, consistent.stdout);
+  assert.match(consistent.stdout, /^COHORT: CONSISTENT$/m);
+  assertSafeOutput(consistent.stdout, leaks);
+
+  // One drifted report is the unchanged domain result: Branch C, exit 1.
+  const target = paths[33];
+  const original = readFileSync(target);
+  const slot = Number(/campaign_slot=(\d+)/.exec(original.toString('utf8'))[1]);
+  writeFileSync(
+    target,
+    report(slot, { topology: { ...TOPOLOGY, runner_image: DRIFT.runner_image } }),
+  );
+  const branchC = run([snapshotPath, '--reports-manifest', list]);
+  assert.equal(branchC.status, 1);
+  assert.match(branchC.stdout, /^COHORT: BRANCH C$/m);
+  assertSafeOutput(branchC.stdout, leaks);
+  writeFileSync(target, original);
+
+  // A path list with a repeated report is refused before anything else is read.
+  const refused = run(['--', snapshotPath, '--reports-manifest', malformed]);
+  assert.equal(refused.status, 2);
+  assert.equal(refused.stdout.split('\n')[0], USAGE_ERROR.duplicatePath);
+  for (const leak of leaks) assert.ok(!refused.stdout.includes(leak));
+  const crlf = join(callerDir, 'crlf-list');
+  writeFileSync(crlf, Buffer.from(manifestOf(names).toString('utf8').replaceAll('\n', `${CR}\n`)));
+  const grammar = run([snapshotPath, '--reports-manifest', 'crlf-list']);
+  assert.equal(grammar.status, 2);
+  assert.equal(
+    grammar.stdout.split('\n')[0],
+    `reports manifest: ${REPORT_MANIFEST_PROBLEM.carriageReturn}`,
+  );
+  for (const leak of leaks) assert.ok(!grammar.stdout.includes(leak));
+
+  const restored = run([snapshotPath, '--reports-manifest', list]);
+  assert.equal(restored.status, 0);
+  assert.equal(restored.stdout, consistent.stdout);
 });

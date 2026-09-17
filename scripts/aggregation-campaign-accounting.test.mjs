@@ -9,7 +9,15 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -25,7 +33,20 @@ import {
   parseSlotReport,
   readCampaignSlot,
 } from './aggregation-campaign-accounting-lib.mjs';
-import { runAccountingCli } from './aggregation-campaign-accounting.mjs';
+import {
+  MAX_REPORT_PATHS,
+  USAGE_ERROR,
+  runAccountingCli,
+} from './aggregation-campaign-accounting.mjs';
+import {
+  MAX_REPORT_MANIFEST_BYTES,
+  REPORT_MANIFEST_PROBLEM,
+  REPORT_PATH_LIMITS,
+  exceedsPathBytes,
+  findPathCollision,
+  loadReportManifest,
+  reportPathKey,
+} from './aggregation-campaign-report-manifest-lib.mjs';
 import {
   FAILURE_CATEGORY_PARTITION,
   INFRASTRUCTURE_CATEGORY,
@@ -685,4 +706,652 @@ test('accounting CLI: a committed pre-slot evidence artifact is rejected, and le
   assert.match(result.output, /rejected inputs: no campaign_slot field=1/);
   assert.match(result.output, /totals: non-events=0 events=0 blockers=0 missing=59/);
   assert.equal(readFileSync(path, 'utf8'), before, 'accounting only reads');
+});
+
+// ---------------------------------------------------------------------------
+// Report-path manifests: the shared bounded transport, then both input modes
+
+const NUL = String.fromCharCode(0);
+const TAB = String.fromCharCode(9);
+const CR = String.fromCharCode(13);
+const DEL = String.fromCharCode(127);
+const BOM_BYTES = Buffer.from([0xef, 0xbb, 0xbf]);
+const manifestOf = (lines) => Buffer.from(lines.map((line) => `${line}\n`).join(''), 'utf8');
+
+const shuffled = (items, seed = 11) => {
+  const out = [...items];
+  let state = seed;
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    state = (state * 1103515245 + 12345) % 2147483648;
+    const j = state % (i + 1);
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+};
+
+const RUN_DIR = '/runs/campaign';
+const MANIFEST_PATH = `${RUN_DIR}/list.txt`;
+const CALLER = '/work/elsewhere';
+const MANIFEST_ARGV = Object.freeze(['--', '--reports-manifest', '../../runs/campaign/list.txt']);
+/** Long relative report names; a name never matches the slot inside its report. */
+const NAMES = Array.from(
+  { length: CAMPAIGN_SLOT_COUNT },
+  (_, index) =>
+    `reports/secret-${'long-directory-segment-'.repeat(4)}/report-${String(58 - index).padStart(3, '0')}.txt`,
+);
+
+/**
+ * A fake file system: `texts[i]` lives at `RUN_DIR/NAMES[i]`, and one manifest
+ * lists `lines` (default: `NAMES`). Every size check and read is recorded.
+ */
+function accountingFs(texts, options = {}) {
+  const {
+    lines = NAMES,
+    manifest = manifestOf(lines),
+    errors = new Set(),
+    platform = 'linux',
+    cwd = CALLER,
+    manifestPath = MANIFEST_PATH,
+  } = options;
+  const reports = new Map(texts.map((text, index) => [`${RUN_DIR}/${NAMES[index]}`, text]));
+  const calls = [];
+  const missing = (path) => {
+    throw new Error(`ENOENT secret ${path}`);
+  };
+  return {
+    calls,
+    paths: [...reports.keys()],
+    reportReads: () => calls.filter(([kind]) => kind === 'report-read'),
+    options: {
+      platform,
+      cwd,
+      readText: (path) => {
+        calls.push(['report-read', path]);
+        if (errors.has(path) || !reports.has(path)) missing(path);
+        return reports.get(path);
+      },
+      manifestSizeOf: (path) => {
+        calls.push(['manifest-size', path]);
+        if (errors.has(path) || path !== manifestPath) missing(path);
+        return Object.hasOwn(options, 'manifestSize') ? options.manifestSize : manifest.length;
+      },
+      readManifestBytes: (path) => {
+        calls.push(['manifest-read', path]);
+        if (errors.has(path) || path !== manifestPath) missing(path);
+        return Buffer.from(manifest);
+      },
+    },
+  };
+}
+
+const runFs = (fs, argv = MANIFEST_ARGV) => runAccountingCli({ argv, ...fs.options });
+
+/** Exit 2, one fixed reason plus the usage line, no report read and nothing supplied echoed. */
+const assertUsageFailure = (result, reason, fs, label) => {
+  assert.equal(result.exitCode, 2, label);
+  const lines = result.output.split('\n');
+  assert.equal(lines.length, 3, label);
+  assert.equal(lines[0], reason, label);
+  assert.match(lines[1], /^usage: node scripts\/aggregation-campaign-accounting\.mjs /, label);
+  assert.deepEqual(fs.reportReads(), [], `${label}: no report is read`);
+  assert.ok(
+    !/secret|runs|work|list\.txt|ENOENT|EACCES|reports\/|\\|é/i.test(result.output),
+    `${label}: nothing supplied is echoed`,
+  );
+};
+
+test('report-path manifest: the shared load is bounded before and after reading and resolves from the manifest directory', () => {
+  const lines = Array.from({ length: CAMPAIGN_SLOT_COUNT }, (_, i) => `r/${i}.txt`);
+  const bytes = manifestOf(lines);
+  const calls = [];
+  const io = (size, content = bytes) => ({
+    sizeOf: (path) => {
+      calls.push(['size', path]);
+      return size;
+    },
+    readBytes: (path) => {
+      calls.push(['read', path]);
+      return content;
+    },
+  });
+
+  // The manifest path resolves from the caller; its lines from the manifest's own directory.
+  assert.deepEqual(
+    loadReportManifest('../m/list.txt', { ...io(bytes.length), cwd: '/work/caller' }),
+    { ok: true, paths: lines.map((line) => `/work/m/${line}`) },
+  );
+  assert.deepEqual(calls, [
+    ['size', '/work/m/list.txt'],
+    ['read', '/work/m/list.txt'],
+  ]);
+  const windows = loadReportManifest('..\\m\\list.txt', {
+    ...io(bytes.length, manifestOf(['Sub\\a.txt', 'D:\\x\\b.txt', ...lines.slice(2)])),
+    cwd: 'C:\\work\\caller',
+    platform: 'win32',
+  });
+  assert.deepEqual(windows.paths.slice(0, 3), [
+    'C:\\work\\m\\Sub\\a.txt',
+    'D:\\x\\b.txt',
+    'C:\\work\\m\\r\\2.txt',
+  ]);
+
+  // Inclusive bounds: exactly the byte limit is read and accepted.
+  const widest = manifestOf(
+    Array.from(
+      { length: CAMPAIGN_SLOT_COUNT },
+      (_, i) => `${String(i).padStart(2, '0')}${'z'.repeat(REPORT_PATH_LIMITS.maxPathBytes - 2)}`,
+    ),
+  );
+  assert.equal(widest.length, MAX_REPORT_MANIFEST_BYTES);
+  assert.equal(MAX_REPORT_MANIFEST_BYTES, 59 * 1025);
+  assert.equal(loadReportManifest('/m/list', { ...io(widest.length, widest), cwd: '/' }).ok, true);
+
+  // A size that is too large, unknown or not a byte count refuses without reading.
+  for (const size of [MAX_REPORT_MANIFEST_BYTES + 1, Number.NaN, undefined, null, '10', -1, 1.5]) {
+    calls.length = 0;
+    assert.deepEqual(
+      loadReportManifest('/m/list', { ...io(size), cwd: '/' }),
+      { ok: false, problem: REPORT_MANIFEST_PROBLEM.tooLarge },
+      String(size),
+    );
+    assert.deepEqual(calls, [['size', '/m/list']], `${String(size)}: never read`);
+  }
+  // Growth after the size check is refused on the bytes actually read.
+  assert.deepEqual(
+    loadReportManifest('/m/list', {
+      ...io(10, Buffer.alloc(MAX_REPORT_MANIFEST_BYTES + 1, 0x61)),
+      cwd: '/',
+    }),
+    { ok: false, problem: REPORT_MANIFEST_PROBLEM.tooLarge },
+  );
+  // A size check or read that throws, or a read that returns no bytes, is unreadable.
+  const thrown = () => {
+    throw new Error('EACCES secret');
+  };
+  for (const broken of [
+    { sizeOf: thrown, readBytes: () => bytes },
+    { sizeOf: () => 10, readBytes: thrown },
+    { sizeOf: () => 10, readBytes: () => 'r/0.txt\n' },
+  ]) {
+    assert.deepEqual(loadReportManifest('/m/list', { ...broken, cwd: '/' }), {
+      ok: false,
+      problem: REPORT_MANIFEST_PROBLEM.unreadable,
+    });
+  }
+
+  // The path bound is inclusive and counts UTF-8 bytes.
+  assert.equal(REPORT_PATH_LIMITS.maxPathBytes, 1024);
+  assert.equal(exceedsPathBytes('a'.repeat(1024)), false);
+  assert.equal(exceedsPathBytes('a'.repeat(1025)), true);
+  assert.equal(exceedsPathBytes('é'.repeat(512)), false);
+  assert.equal(exceedsPathBytes('é'.repeat(513)), true);
+
+  // One path list: POSIX is exact after normalization; Windows is conservative.
+  assert.equal(findPathCollision({ reports: ['/r/a', '/r/./a'] }), 'duplicate');
+  assert.equal(findPathCollision({ reports: ['/r/a', '/r/x/../a/'] }), 'duplicate');
+  assert.equal(findPathCollision({ reports: ['/r/a', '/r/A'] }), null);
+  const win = { platform: 'win32' };
+  for (const variant of [
+    'c:\\R\\A.TXT',
+    'C:/r/a.txt.',
+    'C:\\r\\a.txt  ',
+    'C:\\r.\\a.txt',
+    'C:\\r \\a.txt',
+    'C:\\r\\x\\..\\a.txt',
+  ]) {
+    assert.equal(reportPathKey(variant, win), reportPathKey('C:\\r\\a.txt', win), variant);
+    assert.equal(findPathCollision({ reports: ['C:\\r\\a.txt', variant] }, win), 'duplicate');
+  }
+  assert.equal(findPathCollision({ reports: ['C:\\r\\a.txt', 'D:\\r\\a.txt'] }, win), null);
+  assert.equal(findPathCollision({ one: ['/a'], two: ['/b', '/a/'] }), 'shared');
+  assert.equal(findPathCollision({ one: ['/a', '/a'], two: ['/a'] }), 'duplicate');
+});
+
+test('accounting CLI: explicit paths keep their accounting; syntax and duplicates exit 2 before any read', () => {
+  const texts = campaign();
+  const fs = accountingFs(texts);
+  const explicit = runAccountingCli({ argv: ['--', ...fs.paths], ...fs.options });
+  assert.equal(explicit.exitCode, 0);
+  assert.equal(explicit.output, formatAccounting(account(texts)));
+  assert.equal(fs.reportReads().length, CAMPAIGN_SLOT_COUNT);
+  assert.equal(
+    fs.calls.length,
+    CAMPAIGN_SLOT_COUNT,
+    'explicit paths never touch a manifest reader',
+  );
+
+  // Fewer readable inputs still run the unchanged accounting and report the missing slots.
+  const partial = accountingFs(texts);
+  const fewer = runAccountingCli({
+    argv: [...partial.paths.slice(1), `${RUN_DIR}/reports/secret-absent.txt`],
+    ...partial.options,
+  });
+  assert.equal(fewer.exitCode, 1);
+  assert.equal(
+    fewer.output,
+    formatAccounting(
+      accountCampaign([...texts.slice(1).map((text) => ({ text })), { unreadable: true }]),
+    ),
+  );
+  assert.match(fewer.output, /^slot 1: missing - no report claims this slot$/m);
+  const short = accountingFs(texts);
+  const twenty = runAccountingCli({ argv: short.paths.slice(0, 20), ...short.options });
+  assert.equal(twenty.exitCode, 1);
+  assert.equal(twenty.output, formatAccounting(account(texts.slice(0, 20))));
+
+  // Bounds are inclusive: a 1024-byte path and the maximum path count are still accounted.
+  const edge = accountingFs(texts);
+  const at = runAccountingCli({ argv: [`/${'s'.repeat(1023)}`], ...edge.options });
+  assert.equal(at.exitCode, 1);
+  assert.match(at.output, /rejected inputs: unreadable input=1/);
+  assert.equal(MAX_REPORT_PATHS, 128);
+  const many = accountingFs(texts);
+  const atLimit = runAccountingCli({
+    argv: Array.from({ length: MAX_REPORT_PATHS }, (_, i) => `/absent/${i}.txt`),
+    ...many.options,
+  });
+  assert.equal(atLimit.exitCode, 1);
+  assert.equal(many.reportReads().length, MAX_REPORT_PATHS);
+
+  // POSIX paths that differ only in case are different files, so both are read.
+  const posixCase = accountingFs(texts);
+  const distinct = runAccountingCli({
+    argv: ['/r/Report.txt', '/r/report.txt'],
+    ...posixCase.options,
+  });
+  assert.equal(distinct.exitCode, 1);
+  assert.equal(posixCase.reportReads().length, 2);
+
+  const cases = [
+    ['overlong path', [`/${'secret'.repeat(171)}`], USAGE_ERROR.pathTooLong],
+    ['overlong multibyte path', ['é'.repeat(513)], USAGE_ERROR.pathTooLong],
+    [
+      'too many paths',
+      Array.from({ length: MAX_REPORT_PATHS + 1 }, (_, i) => `secret-${i}.txt`),
+      USAGE_ERROR.tooManyPaths,
+    ],
+    ['duplicate', ['secret/a.txt', './secret/a.txt'], USAGE_ERROR.duplicatePath],
+    [
+      'duplicate absolute',
+      [`${CALLER}/secret/a.txt`, 'secret/b/../a.txt'],
+      USAGE_ERROR.duplicatePath,
+    ],
+    ['empty path', ['secret.txt', ''], USAGE_ERROR.emptyPath],
+    ['late separator', ['secret.txt', '--', 'other.txt'], USAGE_ERROR.lateSeparator],
+    ['option-like path', ['secret.txt', '-secret.txt'], USAGE_ERROR.unknownOption],
+    ['unknown option echoes nothing', ['--json=secret', 'secret.txt'], USAGE_ERROR.unknownOption],
+    ['no path', [], USAGE_ERROR.noReport],
+    ['only separators', ['--', '--'], USAGE_ERROR.noReport],
+  ];
+  const windows = { platform: 'win32', cwd: 'C:\\Work\\Caller' };
+  for (const [a, b] of [
+    ['C:\\Runs\\Report.txt', 'c:\\runs\\report.TXT'],
+    ['C:\\runs\\report.txt', 'C:\\runs\\report.txt.'],
+    ['C:\\runs\\report.txt', 'C:\\runs\\report.txt  '],
+    ['C:\\runs \\report.txt', 'C:\\runs\\report.txt'],
+    ['..\\Runs\\report.txt', 'C:/work/runs/REPORT.txt'],
+    ['reports.\\a.txt', 'C:\\work\\caller\\reports\\a.txt'],
+  ]) {
+    cases.push([`Windows ${a} ~ ${b}`, [a, b], USAGE_ERROR.duplicatePath, windows]);
+  }
+  for (const [label, argv, reason, over] of cases) {
+    const probe = accountingFs(texts, over);
+    assertUsageFailure(runAccountingCli({ argv, ...probe.options }), reason, probe, label);
+    assert.deepEqual(probe.calls, [], `${label}: no file access at all`);
+  }
+});
+
+test('accounting CLI manifest: 59 long relative paths in any order give exactly the explicit accounting', () => {
+  const texts = campaign();
+  assert.ok(NAMES.every((name) => Buffer.byteLength(`${RUN_DIR}/${name}`) > 120));
+  const explicitFs = accountingFs(texts);
+  const explicit = runAccountingCli({ argv: explicitFs.paths, ...explicitFs.options });
+
+  const fs = accountingFs(texts, { lines: shuffled(NAMES, 7) });
+  const viaManifest = runFs(fs);
+  assert.equal(viaManifest.exitCode, 0);
+  assert.equal(viaManifest.output, explicit.output);
+  assert.equal(viaManifest.output, formatAccounting(account(texts)));
+  // One size check, then one read of the manifest, before any report; each listed report once.
+  assert.deepEqual(fs.calls.slice(0, 2), [
+    ['manifest-size', MANIFEST_PATH],
+    ['manifest-read', MANIFEST_PATH],
+  ]);
+  assert.equal(fs.calls.length, 2 + CAMPAIGN_SLOT_COUNT);
+  assert.deepEqual(
+    fs
+      .reportReads()
+      .map(([, path]) => path)
+      .sort(),
+    [...fs.paths].sort(),
+  );
+
+  // Absolute and `./` lines, no forwarded separator: the same result.
+  const mixed = accountingFs(texts, {
+    lines: NAMES.map((name, i) => (i % 2 === 0 ? `./${name}` : `${RUN_DIR}/${name}`)),
+  });
+  assert.equal(runFs(mixed, ['--reports-manifest', MANIFEST_PATH]).output, explicit.output);
+
+  // Domain failures are unchanged: a blocker, a duplicate slot claim, a foreign commit and an
+  // unreadable listed report are accounted exactly as with explicit paths, and exit 1.
+  const failing = campaign({
+    7: { kind: 'product' },
+    9: reportFor(8),
+    30: { render: { commit: OTHER_COMMIT } },
+  });
+  const unreadable = new Set([`${RUN_DIR}/${NAMES[40]}`]);
+  const badManifest = accountingFs(failing, { lines: shuffled(NAMES, 3), errors: unreadable });
+  const badExplicit = accountingFs(failing, { errors: unreadable });
+  const bad = runFs(badManifest);
+  assert.equal(bad.exitCode, 1);
+  assert.equal(
+    bad.output,
+    runAccountingCli({ argv: badExplicit.paths, ...badExplicit.options }).output,
+  );
+  assert.match(bad.output, /unreadable input=1/);
+  assert.match(bad.output, /accounting: INCOMPLETE/);
+  assert.equal(badManifest.reportReads().length, CAMPAIGN_SLOT_COUNT);
+  for (const text of [viaManifest.output, bad.output]) {
+    assert.ok(!/secret|runs|work|list\.txt|ENOENT|reports\//.test(text), 'no path is printed');
+  }
+});
+
+test('accounting CLI manifest: grammar, size, read and duplicate failures exit 2 with zero report reads', () => {
+  const texts = campaign();
+  const P = REPORT_MANIFEST_PROBLEM;
+  const body = manifestOf(NAMES).toString('utf8');
+  const withLine = (line, at = 30) => {
+    const copy = [...NAMES];
+    copy[at] = line;
+    return manifestOf(copy);
+  };
+  const grammar = [
+    ['missing final LF', Buffer.from(body.slice(0, -1)), P.finalNewline],
+    ['empty', Buffer.alloc(0), P.finalNewline],
+    ['CRLF', Buffer.from(body.replaceAll('\n', `${CR}\n`)), P.carriageReturn],
+    ['BOM', Buffer.concat([BOM_BYTES, manifestOf(NAMES)]), P.bom],
+    [
+      'invalid UTF-8',
+      Buffer.concat([manifestOf(NAMES.slice(1)), Buffer.from([0x61, 0xff, 0x0a])]),
+      P.notUtf8,
+    ],
+    ['NUL', withLine(`secret${NUL}.txt`), P.control],
+    ['tab', withLine(`secret${TAB}.txt`), P.control],
+    ['DEL', withLine(`secret${DEL}`), P.control],
+    ['blank line', withLine(''), P.blankLine],
+    ['leading space', withLine(' secret.txt'), P.whitespace],
+    ['trailing space', withLine('secret.txt '), P.whitespace],
+    ['option-like', withLine('--secret'), P.optionLike],
+    ['comment', withLine('# secret'), P.notPlainPath],
+    ['quoted', withLine('"secret.txt"'), P.notPlainPath],
+    ['URL', withLine('https://secret.invalid/r.txt'), P.notPlainPath],
+    ['drive-relative', withLine('C:secret.txt'), P.notPlainPath],
+    ['overlong entry', withLine('s'.repeat(1025)), P.entryTooLong],
+    ['58 lines', manifestOf(NAMES.slice(1)), P.lineCount],
+    ['60 lines', manifestOf([...NAMES, 'reports/secret-extra.txt']), P.lineCount],
+  ];
+  const failures = [
+    ...grammar.map(([label, manifest, problem]) => [
+      label,
+      { manifest },
+      `reports manifest: ${problem}`,
+    ]),
+    [
+      'oversized',
+      { manifestSize: MAX_REPORT_MANIFEST_BYTES + 1 },
+      `reports manifest: ${P.tooLarge}`,
+      true,
+    ],
+    ['unknown size', { manifestSize: Number.NaN }, `reports manifest: ${P.tooLarge}`, true],
+    ['no size', { manifestSize: undefined }, `reports manifest: ${P.tooLarge}`, true],
+    [
+      'grown after the size check',
+      { manifest: Buffer.alloc(MAX_REPORT_MANIFEST_BYTES + 1, 0x61), manifestSize: 10 },
+      `reports manifest: ${P.tooLarge}`,
+    ],
+    ['unreadable', { errors: new Set([MANIFEST_PATH]) }, `reports manifest: ${P.unreadable}`, true],
+    ['duplicate line', { lines: [...NAMES.slice(1), NAMES[5]] }, USAGE_ERROR.duplicatePath],
+    [
+      'duplicate ./ line',
+      { lines: [...NAMES.slice(1), `./${NAMES[5]}`] },
+      USAGE_ERROR.duplicatePath,
+    ],
+    [
+      'duplicate after normalization',
+      { lines: [...NAMES.slice(1), `${RUN_DIR}/x/../${NAMES[5]}`] },
+      USAGE_ERROR.duplicatePath,
+    ],
+  ];
+  const winManifest = 'D:\\Runs\\List.txt';
+  for (const variant of [
+    'REPORTS\\A.TXT',
+    'reports\\a.txt.',
+    'reports.\\a.txt',
+    'reports \\a.txt',
+    'd:/runs/reports/a.txt',
+    'reports/a.txt',
+  ]) {
+    failures.push([
+      `Windows ${variant}`,
+      {
+        lines: [...NAMES.slice(2), 'reports\\a.txt', variant],
+        platform: 'win32',
+        cwd: 'C:\\Work',
+        manifestPath: winManifest,
+        argv: ['--reports-manifest', winManifest],
+      },
+      USAGE_ERROR.duplicatePath,
+    ]);
+  }
+  for (const [label, over, reason, unread] of failures) {
+    const fs = accountingFs(texts, over);
+    assertUsageFailure(runFs(fs, over.argv), reason, fs, label);
+    if (unread) {
+      assert.ok(!fs.calls.some(([kind]) => kind === 'manifest-read'), `${label}: manifest unread`);
+    }
+  }
+
+  // The same case-only spelling under POSIX is two files: both are read, and accounting decides.
+  const posixCase = accountingFs(texts, {
+    lines: [...NAMES.slice(2), 'reports/a.txt', 'REPORTS/A.TXT'],
+  });
+  assert.equal(runFs(posixCase).exitCode, 1);
+  assert.equal(posixCase.reportReads().length, CAMPAIGN_SLOT_COUNT);
+});
+
+test('accounting CLI manifest: option errors exit 2 before any manifest or report access', () => {
+  const cases = [
+    ['mixed, path first', ['secret.txt', '--reports-manifest', 'list.txt'], USAGE_ERROR.mixedModes],
+    [
+      'mixed, manifest first',
+      ['--reports-manifest', 'list.txt', 'secret.txt'],
+      USAGE_ERROR.extraArgument,
+    ],
+    [
+      'repeated',
+      ['--reports-manifest', 'list.txt', '--reports-manifest', 'secret.txt'],
+      USAGE_ERROR.repeatedOption,
+    ],
+    ['missing value', ['--', '--reports-manifest'], USAGE_ERROR.manifestValue],
+    ['empty value', ['--reports-manifest', ''], USAGE_ERROR.manifestValue],
+    ['option-like value', ['--reports-manifest', '--secret'], USAGE_ERROR.manifestValue],
+    ['dash value', ['--reports-manifest', '-'], USAGE_ERROR.manifestValue],
+    ['separator value', ['--reports-manifest', '--', 'list.txt'], USAGE_ERROR.manifestValue],
+    ['inline value', ['--reports-manifest=secret.txt'], USAGE_ERROR.inlineValue],
+    ['inline empty value', ['--reports-manifest='], USAGE_ERROR.inlineValue],
+    ['unknown option', ['--reports', 'secret.txt'], USAGE_ERROR.unknownOption],
+    ['near miss', ['--report-manifest', 'secret.txt'], USAGE_ERROR.unknownOption],
+    ['short option', ['-m', 'secret.txt'], USAGE_ERROR.unknownOption],
+    [
+      'extra values',
+      ['--reports-manifest', 'list.txt', 'secret.txt', 'more.txt'],
+      USAGE_ERROR.extraArgument,
+    ],
+    ['extra option', ['--reports-manifest', 'list.txt', '--json'], USAGE_ERROR.unknownOption],
+    ['late separator', ['--reports-manifest', 'list.txt', '--'], USAGE_ERROR.lateSeparator],
+    [
+      'overlong manifest path',
+      ['--reports-manifest', `secret${'s'.repeat(1019)}`],
+      USAGE_ERROR.pathTooLong,
+    ],
+  ];
+  for (const [label, argv, reason] of cases) {
+    const fs = accountingFs(campaign());
+    assertUsageFailure(runFs(fs, argv), reason, fs, label);
+    assert.deepEqual(fs.calls, [], `${label}: no file access at all`);
+  }
+  // A 1024-byte manifest path is accepted syntax: only then is the manifest itself consulted.
+  const edge = accountingFs(campaign());
+  const at = runFs(edge, ['--reports-manifest', `/${'s'.repeat(1023)}`]);
+  assertUsageFailure(at, `reports manifest: ${REPORT_MANIFEST_PROBLEM.unreadable}`, edge, 'edge');
+  assert.deepEqual(
+    edge.calls.map(([kind]) => kind),
+    ['manifest-size'],
+  );
+});
+
+test('accounting stays manual and read-only, and shares the manifest contract rather than the comparator', () => {
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+  assert.equal(
+    pkg.scripts['account:aggregation-campaign'],
+    'node scripts/aggregation-campaign-accounting.mjs',
+  );
+  for (const [name, command] of Object.entries(pkg.scripts)) {
+    if (name === 'account:aggregation-campaign') continue;
+    assert.ok(!command.includes('aggregation-campaign-accounting'), name);
+    assert.ok(!command.includes('account:aggregation-campaign'), name);
+  }
+  for (const file of [
+    '.github/workflows/ci.yml',
+    'scripts/run-test-phases.mjs',
+    'scripts/test-phases-lib.mjs',
+    'scripts/check-test-phases.mjs',
+  ]) {
+    const text = readFileSync(join(repoRoot, file), 'utf8');
+    assert.ok(!text.includes('aggregation-campaign-accounting'), file);
+    assert.ok(!text.includes('account:aggregation-campaign'), file);
+    assert.ok(!text.includes('report-manifest'), file);
+  }
+  assert.deepEqual(readdirSync(join(repoRoot, '.github', 'workflows')), ['ci.yml']);
+
+  const specifiers = (text) =>
+    [...text.matchAll(/^(?:import .*|\}) from '([^']+)';$/gm)].map((m) => m[1]).sort();
+  const cli = readFileSync(join(here, 'aggregation-campaign-accounting.mjs'), 'utf8');
+  const manifestLib = readFileSync(
+    join(here, 'aggregation-campaign-report-manifest-lib.mjs'),
+    'utf8',
+  );
+  assert.deepEqual(specifiers(cli), [
+    './aggregation-campaign-accounting-lib.mjs',
+    './aggregation-campaign-log-recovery-lib.mjs',
+    './aggregation-campaign-report-manifest-lib.mjs',
+    'node:fs',
+    'node:path',
+    'node:url',
+  ]);
+  assert.deepEqual(specifiers(manifestLib), [
+    './aggregation-campaign-accounting-lib.mjs',
+    'node:path',
+  ]);
+  assert.ok(
+    !readFileSync(join(here, 'aggregation-campaign-accounting-lib.mjs'), 'utf8').includes(
+      'report-manifest',
+    ),
+    'no cycle: the accounting library does not import the manifest contract',
+  );
+  assert.match(cli, /^import \{ readFileSync, statSync \} from 'node:fs';$/m);
+  for (const text of [cli, manifestLib]) {
+    assert.ok(!/writeFile|mkdir|rename|unlink|rmSync|readdir|opendir|globSync|fetch\(/.test(text));
+  }
+});
+
+test('accounting (spawned package command): a report-path manifest carries 59 long paths; COMPLETE, blocker, exit 2; nothing written', () => {
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+  const [program, script, ...rest] = pkg.scripts['account:aggregation-campaign'].split(' ');
+  assert.equal(program, 'node');
+  assert.deepEqual(rest, []);
+  const scriptPath = join(repoRoot, script);
+
+  const root = mkdtempSync(join(tmpdir(), 'aggregation-campaign-accounting-manifest-test-'));
+  temporaryDirs.push(root);
+  assert.ok(!resolve(root).startsWith(repoRoot));
+  const segment = `private-reports-${'long-directory-segment-'.repeat(5)}`.slice(0, 90);
+  const reportDir = join(root, segment);
+  const callerDir = join(root, 'caller');
+  for (const dir of [reportDir, callerDir]) mkdirSync(dir);
+
+  // File names deliberately disagree with content and the listing order is shuffled.
+  const texts = campaign();
+  const names = texts.map((text, i) => {
+    const name = `private-campaign-report-${String(58 - i).padStart(2, '0')}.txt`;
+    writeFileSync(join(reportDir, name), text);
+    return name;
+  });
+  const paths = names.map((name) => join(reportDir, name));
+  for (const path of paths) assert.ok(path.length < 250, 'each path is under classic MAX_PATH');
+  const individually = paths.reduce((total, path) => total + path.length + 3, 0);
+  assert.ok(individually > 8191, 'passed one by one, the paths exceed the cmd.exe limit');
+
+  const manifest = join(root, 'reports.manifest');
+  const malformed = join(root, 'malformed.manifest');
+  writeFileSync(manifest, manifestOf(shuffled(names, 5).map((name) => `${segment}/${name}`)));
+  writeFileSync(
+    malformed,
+    Buffer.from(manifestOf(names).toString('utf8').replaceAll('\n', `${CR}\n`)),
+  );
+
+  const walk = (dir) =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) return [[full, 'dir'], ...walk(full)];
+      const stats = statSync(full);
+      return [[full, stats.size, stats.mtimeMs, readFileSync(full).toString('base64')]];
+    });
+  const snapshot = () => walk(root).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  const run = (args) => {
+    const around = snapshot();
+    const result = spawnSync(process.execPath, [scriptPath, ...args], {
+      encoding: 'utf8',
+      cwd: callerDir,
+      timeout: 60_000,
+    });
+    assert.deepEqual(snapshot(), around, 'the run created, removed or changed nothing');
+    assert.equal(result.stderr, '');
+    return result;
+  };
+  const leaks = [root, 'private', 'long-directory', '.manifest', repoRoot, 'caller', 'ENOENT'];
+  const assertNoLeak = (text) => {
+    for (const leak of leaks) assert.ok(!text.includes(leak), 'nothing supplied is echoed');
+  };
+
+  // Relative manifest path from a different working directory; relative lines from the manifest.
+  const complete = run(['--', '--reports-manifest', '../reports.manifest']);
+  assert.equal(complete.status, 0, complete.stdout);
+  assert.match(complete.stdout, /accounting: COMPLETE/);
+  assert.match(complete.stdout, /totals: non-events=59 events=0 blockers=0 missing=0/);
+  assert.equal(complete.stdout, formatAccounting(account(texts)));
+  assertNoLeak(complete.stdout);
+
+  // A product failure in one report is an unchanged domain result: a blocker, exit 1.
+  const target = paths[20];
+  const original = readFileSync(target);
+  const slot = Number(/campaign_slot=(\d+)/.exec(original.toString('utf8'))[1]);
+  writeFileSync(target, reportFor(slot, 'product'));
+  const blocker = run(['--reports-manifest', manifest]);
+  assert.equal(blocker.status, 1);
+  assert.match(blocker.stdout, /totals: non-events=58 events=0 blockers=1 missing=0/);
+  assertNoLeak(blocker.stdout);
+  writeFileSync(target, original);
+
+  const broken = run(['--', '--reports-manifest', malformed]);
+  assert.equal(broken.status, 2);
+  assert.equal(
+    broken.stdout.split('\n')[0],
+    `reports manifest: ${REPORT_MANIFEST_PROBLEM.carriageReturn}`,
+  );
+  assertNoLeak(broken.stdout);
+
+  const restored = run(['--reports-manifest', manifest]);
+  assert.equal(restored.status, 0);
+  assert.equal(restored.stdout, complete.stdout);
 });
