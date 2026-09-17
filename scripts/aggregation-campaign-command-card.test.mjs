@@ -2,22 +2,36 @@
  * Static contract test of the ADR-055 L11–L13 operator command card
  * (launch-readiness § 20).
  *
- * The card is read as text. Its four marked commands are checked against
- * `package.json` and the exported argument parsers of the four tools: the
- * exact package script, the forwarded `--`, the manifest option grammar, and
- * which placeholder lands in which role. Its pass and failure lines are checked
+ * The card is read as text. Its four marked commands are read with a small,
+ * strict reader for their one fixed template grammar (bare tokens, and path
+ * placeholders each enclosed in one pair of double quotes), not a shell parser.
+ * They are checked against `package.json` and the exported argument parsers of
+ * the four tools: the exact package script, the forwarded `--`, the manifest
+ * option grammar, and which placeholder lands in which role, with absolute
+ * replacement paths that contain spaces. Its pass and failure lines are checked
  * against the tools' own output text: formatters for the pass lines, and
  * in-process CLI runs with injected, failing reads for exit `1` and exit `2`.
  * Deliberate drift cases prove that the check fails when the card drifts.
  *
- * Offline and manual: run it directly with `node --test`. It reads only the
- * runbook, `package.json` and the CI and test-phase definitions. Every CLI run
- * here gets injected reads that name no real file, writes nothing, and calls no
- * network, GitHub, account or billing API. Nothing here is campaign evidence.
+ * On Windows only, the exact quoted commands are also run through `cmd.exe`
+ * with `pnpm`, over absolute paths with spaces in a test-owned temporary
+ * directory that names no manifest that exists; each must stop at its manifest
+ * contract (exit `2`), not at a usage error from a split argument.
+ *
+ * Offline and manual: run it directly with `node --test`. It reads the runbook,
+ * `package.json` and the CI and test-phase definitions. The in-process CLI runs
+ * get injected reads that name no real file and write nothing. The Windows
+ * shell run reads and writes nothing outside its own temporary directory, which
+ * it removes, and prints no supplied path. Nothing calls a network, GitHub,
+ * account or billing API. Nothing here is campaign evidence.
  */
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { Buffer } from 'node:buffer';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, posix, resolve, win32 } from 'node:path';
+import process from 'node:process';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -115,8 +129,22 @@ const CARD_STEPS = Object.freeze([
   },
 ]);
 
+/** The four marked commands exactly as the card must give them. */
+const CARD_COMMANDS = Object.freeze({
+  recover:
+    'pnpm run recover:aggregation-campaign-logs -- --output-dir "<new-directory>" --logs-manifest "<job-log-manifest>"',
+  compare:
+    'pnpm run compare:aggregation-campaign-retrievals -- --artifacts-manifest "<artifacts-report-manifest>" --fallback-manifest "<fallback-report-manifest>"',
+  account:
+    'pnpm run account:aggregation-campaign -- --reports-manifest "<selected-report-manifest>"',
+  review:
+    'pnpm run review:aggregation-campaign-image-cohort -- "<image-cohort-manifest>" --reports-manifest "<selected-report-manifest>"',
+});
+
 const PLACEHOLDER = /^<[a-z][a-z-]*>$/;
 const OPTION = /^--[a-z][a-z-]*$/;
+/** A bare token of the template: program, verb, script, `--` or an option. */
+const BARE = /^[A-Za-z0-9:_-]+$/;
 
 /** The card section: from its heading to the next top-level heading or the end. */
 function cardSection(text) {
@@ -147,12 +175,56 @@ function markedCommands(section) {
   return { markers, commands };
 }
 
-/** A distinct absolute value for each placeholder; `long` makes each 1024 bytes. */
+/**
+ * A distinct absolute value for each placeholder, containing spaces; `long`
+ * makes each exactly 1024 UTF-8 bytes, the per-path limit of every tool.
+ */
 const valueFor = (placeholder, { long = false, platform = 'posix' } = {}) => {
   const name = placeholder.slice(1, -1);
-  const base = platform === 'win32' ? `C:\\card\\${name}` : `/card/${name}`;
-  return long ? `${base}-${'x'.repeat(MAX_PATH_BYTES - base.length - 1)}` : base;
+  const base =
+    platform === 'win32' ? `C:\\card operator\\${name} path` : `/card operator/${name} path`;
+  return long ? `${base} ${'x'.repeat(MAX_PATH_BYTES - Buffer.byteLength(base) - 1)}` : base;
 };
+
+/**
+ * Reads one command of the card's fixed template grammar into tokens. Tokens
+ * are separated by exactly one space. A token is either bare (no quote
+ * character) or one pair of double quotes around its text, followed by a space
+ * or the end. There is no escaping and no other quoting: this reads the four
+ * templates, it is not a shell parser. Returns `{ tokens, problems }`, where
+ * each token is `{ text, quoted }` with the quotes removed.
+ */
+function readTemplate(command) {
+  const tokens = [];
+  let at = 0;
+  while (at < command.length) {
+    if (tokens.length > 0) {
+      if (command[at] !== ' ') return { tokens, problems: ['tokens are not separated by a space'] };
+      at += 1;
+    }
+    if (at === command.length || command[at] === ' ') {
+      return { tokens, problems: ['empty token (repeated or edge space)'] };
+    }
+    if (command[at] === '"') {
+      const close = command.indexOf('"', at + 1);
+      if (close === -1) return { tokens, problems: ['unbalanced double quote'] };
+      tokens.push({ text: command.slice(at + 1, close), quoted: true });
+      at = close + 1;
+      continue;
+    }
+    const space = command.indexOf(' ', at);
+    const end = space === -1 ? command.length : space;
+    const text = command.slice(at, end);
+    if (text.includes('"')) return { tokens, problems: ['stray double quote in a bare token'] };
+    tokens.push({ text, quoted: false });
+    at = end;
+  }
+  return { tokens, problems: tokens.length === 0 ? ['empty command'] : [] };
+}
+
+/** The command line with every quoted placeholder's text replaced, quotes kept. */
+const renderCommand = (tokens, valueOf) =>
+  tokens.map(({ text, quoted }) => (quoted ? `"${valueOf(text)}"` : text)).join(' ');
 
 /**
  * Checks one command line against its expected step. Returns problem strings,
@@ -161,39 +233,50 @@ const valueFor = (placeholder, { long = false, platform = 'posix' } = {}) => {
 function checkCommand(step, command, pkg) {
   const problems = [];
   const fail = (problem) => problems.push(`${step.id}: ${problem}`);
-  const tokens = command.split(' ');
-  if (tokens.some((token) => token === '')) fail('empty token (repeated or edge space)');
+  const { tokens, problems: syntax } = readTemplate(command);
+  if (syntax.length > 0) {
+    for (const problem of syntax) fail(problem);
+    return problems;
+  }
+  for (const { text, quoted } of tokens) {
+    if (quoted && !PLACEHOLDER.test(text)) fail('quoted text is not a single placeholder');
+    if (!quoted && (text.includes('<') || text.includes('>'))) {
+      fail('placeholder is not double-quoted');
+    } else if (!quoted && !BARE.test(text)) {
+      fail('bare token is outside the template grammar');
+    }
+  }
   const [program, verb, script, separator, ...args] = tokens;
-  if (program !== 'pnpm' || verb !== 'run') fail('not a `pnpm run` command');
-  if (script !== step.script) fail('wrong package script');
+  const bare = (token, value) => token !== undefined && !token.quoted && token.text === value;
+  if (!bare(program, 'pnpm') || !bare(verb, 'run')) fail('not a `pnpm run` command');
+  if (!bare(script, step.script)) fail('wrong package script');
   if (pkg.scripts?.[step.script] !== `node ${step.file}`) {
     fail('package script does not run the expected file');
   }
   if (!existsSync(join(repoRoot, step.file))) fail('script file does not exist');
-  if (separator !== '--') fail('arguments are not forwarded after `--`');
+  if (!bare(separator, '--')) fail('arguments are not forwarded after `--`');
 
-  const used = args.filter((arg) => PLACEHOLDER.test(arg));
-  for (const arg of args) {
-    if (!PLACEHOLDER.test(arg) && !OPTION.test(arg))
-      fail('argument is neither option nor placeholder');
+  for (const { text, quoted } of args) {
+    if (!quoted && !OPTION.test(text)) fail('argument is neither option nor quoted placeholder');
   }
+  const used = args.filter(({ quoted }) => quoted).map(({ text }) => text);
   if (
     used.length !== step.placeholders.length ||
     [...used].sort().join() !== [...step.placeholders].sort().join()
   ) {
-    fail('placeholders differ from the expected set');
+    fail('placeholders differ from the expected set, each exactly once');
   }
   if (problems.length > 0) return problems;
 
   for (const platform of ['posix', 'win32']) {
     for (const long of [false, true]) {
-      const argv = args.map((arg) =>
-        PLACEHOLDER.test(arg) ? valueFor(arg, { long, platform }) : arg,
-      );
+      const valueOf = (placeholder) => valueFor(placeholder, { long, platform });
+      // The decoded placeholder is replaced; the quotes are shell syntax and never reach argv.
+      const argv = args.map(({ text, quoted }) => (quoted ? valueOf(text) : text));
       // `pnpm run <script> -- …` forwards the separator itself.
       const parsed = step.parse(['--', ...argv], {
         platform,
-        cwd: platform === 'win32' ? 'C:\\card-caller' : PARSE_OPTIONS.cwd,
+        cwd: platform === 'win32' ? 'C:\\card caller' : '/card caller',
       });
       const label = `${platform}${long ? ' with 1024-byte paths' : ''}`;
       if (!parsed.ok) {
@@ -203,15 +286,12 @@ function checkCommand(step, command, pkg) {
       if (parsed.mode !== 'manifest') fail(`not the manifest mode (${label})`);
       const roles = step.roles(parsed);
       for (const placeholder of step.placeholders) {
-        if (roles[placeholder] !== valueFor(placeholder, { long, platform })) {
+        if (roles[placeholder] !== valueOf(placeholder)) {
           fail(`${placeholder} is not in its role (${label})`);
         }
       }
-      if (long) {
-        const length = ['pnpm', 'run', step.script, '--', ...argv]
-          .map((word) => word.length + 3)
-          .reduce((a, b) => a + b, 0);
-        if (length >= CMD_EXE_LIMIT) fail('longest command line reaches the cmd.exe limit');
+      if (long && renderCommand(tokens, valueOf).length >= CMD_EXE_LIMIT) {
+        fail('longest command line reaches the cmd.exe limit');
       }
     }
   }
@@ -530,12 +610,7 @@ test('card: the four marked commands are exact package scripts, in runbook order
   assert.equal(markers, 4);
   assert.deepEqual(
     commands.map(({ command }) => command),
-    [
-      'pnpm run recover:aggregation-campaign-logs -- --output-dir <new-directory> --logs-manifest <job-log-manifest>',
-      'pnpm run compare:aggregation-campaign-retrievals -- --artifacts-manifest <artifacts-report-manifest> --fallback-manifest <fallback-report-manifest>',
-      'pnpm run account:aggregation-campaign -- --reports-manifest <selected-report-manifest>',
-      'pnpm run review:aggregation-campaign-image-cohort -- <image-cohort-manifest> --reports-manifest <selected-report-manifest>',
-    ],
+    Object.values(CARD_COMMANDS),
   );
   // Each command sits in its own step subsection, whose heading names the step.
   const parts = subsections(section);
@@ -622,6 +697,11 @@ test('card: rules, manifest kinds, bounds and non-claims match the implemented c
   assert.ok(kinds.heading.startsWith('### 20.2 '));
 
   assert.match(rules.body, /as an absolute path/);
+  assert.match(rules.body, /\*\*Keep the double quotes\*\*/);
+  assert.match(rules.body, /keep both\s+quotes, so a path that contains spaces stays one argument/);
+  assert.match(rules.body, /The quotes are shell syntax, not part of\s+the path/);
+  assert.match(rules.body, /Do not end a quoted path with `\\`/);
+  assert.match(rules.body, /Lines\s+_inside_ a manifest are never quoted/);
   assert.match(rules.body, /`pnpm run` runs the script from the repository\s+root/);
   assert.match(rules.body, /An exit-`2` correction \*\*never\*\* edits/);
   for (const kept of ['job log', 'artifact', 'report', 'JSON snapshot', 'output directory']) {
@@ -657,6 +737,94 @@ test('card: rules, manifest kinds, bounds and non-claims match the implemented c
   assert.match(nonClaims.body, /Row 9 stays `UNVERIFIED`, row 10 `BLOCKED`, row 11\s+`UNVERIFIED`/);
 });
 
+test('card: path placeholders are decoded from their quotes and replaced by absolute paths with spaces, up to 1024 bytes', () => {
+  const { commands } = markedCommands(cardSection(runbookText()));
+  for (const { id, command } of commands) {
+    const step = CARD_STEPS.find((candidate) => candidate.id === id);
+    const { tokens, problems } = readTemplate(command);
+    assert.deepEqual(problems, [], id);
+    const quoted = tokens.filter((token) => token.quoted).map(({ text }) => text);
+    assert.deepEqual([...quoted].sort(), [...step.placeholders].sort(), id);
+    assert.ok(!tokens.some(({ text }) => text.includes('"')), `${id}: no quote survives decoding`);
+
+    for (const platform of ['posix', 'win32']) {
+      const api = platform === 'win32' ? win32 : posix;
+      for (const long of [false, true]) {
+        const valueOf = (placeholder) => valueFor(placeholder, { long, platform });
+        for (const placeholder of step.placeholders) {
+          const value = valueOf(placeholder);
+          assert.ok(api.isAbsolute(value), `${id} ${placeholder} is absolute (${platform})`);
+          assert.ok(value.includes(' '), `${id} ${placeholder} contains a space`);
+          assert.ok(!value.includes('"') && !value.endsWith('\\'), `${id} ${placeholder}`);
+          if (long) assert.equal(Buffer.byteLength(value), MAX_PATH_BYTES, `${id} ${placeholder}`);
+        }
+        const line = renderCommand(tokens, valueOf);
+        assert.ok(line.length < CMD_EXE_LIMIT, `${id} stays below the cmd.exe limit (${platform})`);
+        // Each value appears once, inside its quotes.
+        for (const placeholder of step.placeholders) {
+          assert.equal(
+            line.split(`"${valueOf(placeholder)}"`).length - 1,
+            1,
+            `${id} ${placeholder}`,
+          );
+        }
+      }
+    }
+  }
+  // One more byte is refused by every parser that bounds a manifest path, so 1024 is the boundary.
+  const over = (placeholder) => `${valueFor(placeholder, { long: true, platform: 'win32' })}x`;
+  const refuse = [
+    parseRecoveryArgs(['--', '--logs-manifest', over('<job-log-manifest>')], { platform: 'win32' }),
+    parseAccountingArgs(['--', '--reports-manifest', over('<selected-report-manifest>')], {
+      platform: 'win32',
+    }),
+    parseImageCohortArgs(
+      ['--', 'C:\\snapshot.json', '--reports-manifest', over('<selected-report-manifest>')],
+      { platform: 'win32' },
+    ),
+    parseComparisonArgs(
+      [
+        '--',
+        '--artifacts-manifest',
+        over('<artifacts-report-manifest>'),
+        '--fallback-manifest',
+        'C:\\f.list',
+      ],
+      { platform: 'win32' },
+    ),
+  ];
+  for (const parsed of refuse) {
+    assert.equal(parsed.exitCode, 2);
+    assert.equal(parsed.output.split('\n')[0], 'path exceeds the path byte limit');
+  }
+});
+
+test('runbook § 13: the recommended L11–L13 manifest commands quote their path placeholders like the card', () => {
+  const text = runbookText();
+  const start = text.indexOf('\n## 13. Launch runbook');
+  const end = text.indexOf('\n## 14. ', start);
+  assert.ok(start >= 0 && end > start, '§ 13 exists');
+  const procedure = text.slice(start, end);
+  for (const recommended of [
+    '`pnpm run recover:aggregation-campaign-logs -- --output-dir "<new-directory>" --logs-manifest "<file>"`',
+    '`pnpm run compare:aggregation-campaign-retrievals -- --artifacts-manifest "<file>" --fallback-manifest "<file>"`',
+    '`pnpm run account:aggregation-campaign -- --reports-manifest "<file>"`',
+    '`pnpm run review:aggregation-campaign-image-cohort -- "<image-cohort-manifest>" --reports-manifest "<file>"`',
+  ]) {
+    assert.equal(procedure.split(recommended).length - 1, 1, recommended);
+  }
+  for (const unquoted of [
+    '--output-dir <new-directory> --logs-manifest',
+    '--logs-manifest <',
+    '--artifacts-manifest <',
+    '--fallback-manifest <',
+    '--reports-manifest <',
+  ]) {
+    assert.ok(!procedure.includes(unquoted), unquoted);
+  }
+  assert.match(procedure, /every path placeholder is written in\s+double quotes/);
+});
+
 test('card drift: wrong script, option, order, missing argument, swapped roles or package drift are all caught', () => {
   const text = runbookText();
   const pkg = packageJson();
@@ -665,14 +833,7 @@ test('card drift: wrong script, option, order, missing argument, swapped roles o
     assert.ok(at >= 0 && source.indexOf(from, at + 1) === -1, `unique anchor: ${from}`);
     return source.slice(0, at) + to + source.slice(at + from.length);
   };
-  const recover =
-    'pnpm run recover:aggregation-campaign-logs -- --output-dir <new-directory> --logs-manifest <job-log-manifest>';
-  const compare =
-    'pnpm run compare:aggregation-campaign-retrievals -- --artifacts-manifest <artifacts-report-manifest> --fallback-manifest <fallback-report-manifest>';
-  const account =
-    'pnpm run account:aggregation-campaign -- --reports-manifest <selected-report-manifest>';
-  const review =
-    'pnpm run review:aggregation-campaign-image-cohort -- <image-cohort-manifest> --reports-manifest <selected-report-manifest>';
+  const { recover, compare, account, review } = CARD_COMMANDS;
 
   const drifts = [
     [
@@ -697,27 +858,27 @@ test('card drift: wrong script, option, order, missing argument, swapped roles o
       'inline manifest value',
       account,
       account.replace(
-        '--reports-manifest <selected-report-manifest>',
-        '--reports-manifest=<selected-report-manifest>',
+        '--reports-manifest "<selected-report-manifest>"',
+        '--reports-manifest="<selected-report-manifest>"',
       ),
-      /neither option nor placeholder|placeholders differ/,
+      /stray double quote/,
     ],
     [
       'recovery without --output-dir',
       recover,
-      recover.replace('--output-dir <new-directory> ', ''),
+      recover.replace('--output-dir "<new-directory>" ', ''),
       /placeholders differ/,
     ],
     [
       'recovery with an explicit log instead of a manifest',
       recover,
-      recover.replace('--logs-manifest <job-log-manifest>', '<job-log-manifest>'),
+      recover.replace('--logs-manifest "<job-log-manifest>"', '"<job-log-manifest>"'),
       /not the manifest mode/,
     ],
     [
       'comparison missing its fallback manifest',
       compare,
-      compare.replace(' --fallback-manifest <fallback-report-manifest>', ''),
+      compare.replace(' --fallback-manifest "<fallback-report-manifest>"', ''),
       /placeholders differ/,
     ],
     [
@@ -747,7 +908,7 @@ test('card drift: wrong script, option, order, missing argument, swapped roles o
     [
       'review with the report manifest first',
       review,
-      'pnpm run review:aggregation-campaign-image-cohort -- --reports-manifest <selected-report-manifest> <image-cohort-manifest>',
+      'pnpm run review:aggregation-campaign-image-cohort -- --reports-manifest "<selected-report-manifest>" "<image-cohort-manifest>"',
       /parser refuses/,
     ],
     [
@@ -768,7 +929,7 @@ test('card drift: wrong script, option, order, missing argument, swapped roles o
     [
       'accounting over explicit reports',
       account,
-      'pnpm run account:aggregation-campaign -- <selected-report-manifest>',
+      'pnpm run account:aggregation-campaign -- "<selected-report-manifest>"',
       /not the manifest mode/,
     ],
     ['missing forwarded separator', account, account.replace(' -- ', ' '), /not forwarded/],
@@ -784,6 +945,84 @@ test('card drift: wrong script, option, order, missing argument, swapped roles o
       account.replace(' --reports-manifest', '  --reports-manifest'),
       /empty token/,
     ],
+    [
+      'swapped recovery roles',
+      recover,
+      recover
+        .replace('<new-directory>', '<TMP>')
+        .replace('<job-log-manifest>', '<new-directory>')
+        .replace('<TMP>', '<job-log-manifest>'),
+      /is not in its role/,
+    ],
+    [
+      'unquoted recovery output directory',
+      recover,
+      recover.replace('"<new-directory>"', '<new-directory>'),
+      /placeholder is not double-quoted/,
+    ],
+    [
+      'unquoted fallback manifest',
+      compare,
+      compare.replace('"<fallback-report-manifest>"', '<fallback-report-manifest>'),
+      /placeholder is not double-quoted/,
+    ],
+    [
+      'unquoted selected report manifest',
+      account,
+      account.replace('"<selected-report-manifest>"', '<selected-report-manifest>'),
+      /placeholder is not double-quoted/,
+    ],
+    [
+      'unquoted image-cohort snapshot',
+      review,
+      review.replace('"<image-cohort-manifest>"', '<image-cohort-manifest>'),
+      /placeholder is not double-quoted/,
+    ],
+    [
+      'single quotes instead of double quotes',
+      account,
+      account.replace('"<selected-report-manifest>"', "'<selected-report-manifest>'"),
+      /placeholder is not double-quoted/,
+    ],
+    [
+      'missing closing quote',
+      account,
+      account.replace('"<selected-report-manifest>"', '"<selected-report-manifest>'),
+      /unbalanced double quote/,
+    ],
+    [
+      'missing opening quote',
+      compare,
+      compare.replace('"<artifacts-report-manifest>"', '<artifacts-report-manifest>"'),
+      /stray double quote/,
+    ],
+    [
+      'quotes spanning an option',
+      review,
+      review.replace(
+        '"<image-cohort-manifest>" --reports-manifest "<selected-report-manifest>"',
+        '"<image-cohort-manifest> --reports-manifest" "<selected-report-manifest>"',
+      ),
+      /quoted text is not a single placeholder/,
+    ],
+    [
+      'quote glued to the next token',
+      recover,
+      recover.replace('"<new-directory>" --logs-manifest', '"<new-directory>"--logs-manifest'),
+      /not separated by a space/,
+    ],
+    [
+      'quoted option',
+      recover,
+      recover.replace('--logs-manifest', '"--logs-manifest"'),
+      /quoted text is not a single placeholder/,
+    ],
+    [
+      'placeholder used twice',
+      review,
+      review.replace('"<image-cohort-manifest>"', '"<selected-report-manifest>"'),
+      /placeholders differ from the expected set, each exactly once/,
+    ],
   ];
   for (const [label, from, to, expected] of drifts) {
     const problems = checkCommandCard(replaceOnce(text, from, to), pkg);
@@ -791,6 +1030,14 @@ test('card drift: wrong script, option, order, missing argument, swapped roles o
       problems.some((problem) => expected.test(problem)),
       `${label}: ${problems.join(' | ')}`,
     );
+  }
+
+  // The card as first written, with every placeholder unquoted: all four commands are rejected.
+  const section = cardSection(text);
+  const unquotedCard = text.replace(section, section.replaceAll('"<', '<').replaceAll('>"', '>'));
+  const unquotedProblems = checkCommandCard(unquotedCard, pkg);
+  for (const { id } of CARD_STEPS) {
+    assert.ok(unquotedProblems.includes(`${id}: placeholder is not double-quoted`), id);
   }
 
   // Structural drift: order, missing or unmarked commands, a malformed block, no card at all.
@@ -848,6 +1095,102 @@ test('card drift: wrong script, option, order, missing argument, swapped roles o
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// The Windows shell boundary: the exact quoted commands through cmd.exe and pnpm
+
+/** Every entry under `root`, relative and sorted, so an added or removed entry is seen. */
+const listTree = (root) => readdirSync(root, { recursive: true }).map(String).sort();
+
+/**
+ * Runs one full command line through the shell Node uses on Windows (`cmd.exe
+ * /d /s /c`), from the repository root as the card's `pnpm run` expects. The
+ * output is returned to the caller only; it is never printed, because pnpm
+ * echoes the forwarded arguments.
+ */
+const runThroughCmd = (command) =>
+  spawnSync(command, { cwd: repoRoot, shell: true, encoding: 'utf8', timeout: 120_000 });
+
+test(
+  'card (Windows cmd.exe boundary): the exact quoted commands keep absolute paths with spaces whole and stop at each manifest contract, exit 2; recovery writes nothing',
+  { skip: process.platform !== 'win32' && 'the cmd.exe boundary exists only on Windows' },
+  () => {
+    const root = mkdtempSync(join(tmpdir(), 'adr-055 command card '));
+    try {
+      // Only characters cmd.exe gives no meaning, so the only quoting in play is the card's.
+      assert.match(root, /^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$/, 'the temporary root is plain');
+      const inputs = join(root, 'operator inputs');
+      mkdirSync(inputs);
+      // Nothing is created at any of these paths: every manifest is missing on purpose.
+      const values = {
+        '<new-directory>': join(inputs, 'recovered reports'),
+        '<job-log-manifest>': join(inputs, 'job logs.list'),
+        '<artifacts-report-manifest>': join(inputs, 'artifact reports.list'),
+        '<fallback-report-manifest>': join(inputs, 'fallback reports.list'),
+        '<selected-report-manifest>': join(inputs, 'selected reports.list'),
+        '<image-cohort-manifest>': join(inputs, 'image cohort.json'),
+      };
+      const unreadable = PATH_MANIFEST_PROBLEM.unreadable;
+      const expectedFirstLine = {
+        'L11-recover': `logs manifest: ${unreadable}`,
+        'L11-compare': `artifacts manifest: ${unreadable}`,
+        'L12-account': `reports manifest: ${unreadable}`,
+        'L13-review': `reports manifest: ${unreadable}`,
+      };
+      const before = listTree(root);
+      assert.deepEqual(before, ['operator inputs']);
+
+      // Only a card that passes the static check is run: a bare `<…>` would be cmd.exe redirection.
+      const text = runbookText();
+      assert.deepEqual(
+        checkCommandCard(text, packageJson()),
+        [],
+        'the card passes the static check',
+      );
+      const { commands } = markedCommands(cardSection(text));
+      assert.equal(commands.length, CARD_STEPS.length);
+      const rendered = {};
+      for (const { id, command } of commands) {
+        const { tokens, problems } = readTemplate(command);
+        assert.deepEqual(problems, [], id);
+        rendered[id] = renderCommand(tokens, (placeholder) => values[placeholder]);
+        assert.ok(!/[<>|&^%]/.test(rendered[id]), `${id}: no cmd.exe metacharacter remains`);
+        assert.ok(rendered[id].length < CMD_EXE_LIMIT, id);
+
+        const result = runThroughCmd(rendered[id]);
+        assert.equal(result.error, undefined, `${id}: the shell started`);
+        const firstLine = result.stdout.split(/\r?\n/)[0];
+        // The tool's fixed sentence names no path; anything else is withheld from the message.
+        const shown = Object.values(values).some((value) => firstLine.includes(value))
+          ? '<withheld>'
+          : firstLine;
+        assert.equal(shown, expectedFirstLine[id], `${id}: reached its manifest contract`);
+        assert.equal(result.status, 2, `${id}: manifest-contract exit`);
+        assert.deepEqual(listTree(root), before, `${id}: nothing was written`);
+      }
+      assert.ok(!existsSync(values['<new-directory>']), 'no output directory was created');
+
+      // Controls: the same boundary visibly misreads the command when the card's rule is broken.
+      const unquoted = runThroughCmd(rendered['L12-account'].replaceAll('"', ''));
+      assert.notEqual(
+        unquoted.stdout.split(/\r?\n/)[0],
+        expectedFirstLine['L12-account'],
+        'an unquoted path with spaces is split before the tool sees it',
+      );
+      const trailing = runThroughCmd(
+        rendered['L13-review'].replace(`"${values['<image-cohort-manifest>']}"`, `"${inputs}\\"`),
+      );
+      assert.notEqual(
+        trailing.stdout.split(/\r?\n/)[0],
+        expectedFirstLine['L13-review'],
+        'a backslash before the closing quote swallows the rest of the command',
+      );
+      assert.deepEqual(listTree(root), before, 'the controls wrote nothing');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test('card: the static test stays manual — outside pnpm verify, the test phases and ordinary CI; no workflow added', () => {
   const pkg = packageJson();

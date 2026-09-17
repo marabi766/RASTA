@@ -746,6 +746,9 @@ the launch.
 
 **L11 — retrieval.**
 
+_Corrected 2026-09-17 (§ 21):_ in the recommended manifest commands of L11–L13, every path placeholder is written in
+double quotes. Replace only the placeholder and keep the quotes (§ 20.1).
+
 - **Primary `[manual/live]`.** Download all 59 per-slot artifacts `adr-055-fresh-run-slot-<n>` before
   the draft's 3-day `retention-days` expires. Keep the exact bytes of every file.
 - **Fallback, acknowledged in the record.** Use it only when the artifacts cannot be retrieved.
@@ -754,7 +757,7 @@ the launch.
     with every job log. `<new-directory>` must not exist yet. Its parent must be an existing,
     non-link directory outside the tracked tree and outside `.github/workflows/`.
   - _Updated 2026-09-17 (§ 19), recommended on Windows:_
-    `pnpm run recover:aggregation-campaign-logs -- --output-dir <new-directory> --logs-manifest <file>`,
+    `pnpm run recover:aggregation-campaign-logs -- --output-dir "<new-directory>" --logs-manifest "<file>"`,
     where `<file>` lists every job log, one path per line. Keep the manifest with the output.
   - It must exit `0` with a `materialization: WRITTEN - 59 report files …` line and `RESULT: PASS`.
     Keep the output and the directory unedited.
@@ -776,7 +779,7 @@ the launch.
     then L12 and L13 run over the artifact files as before.
   - Record the decision to run it before running it. Once run, keep its output whatever the result.
   - `[tool]`, **recommended, Windows-safe** (_updated 2026-09-17, § 16_):
-    `pnpm run compare:aggregation-campaign-retrievals -- --artifacts-manifest <file> --fallback-manifest <file>`.
+    `pnpm run compare:aggregation-campaign-retrievals -- --artifacts-manifest "<file>" --fallback-manifest "<file>"`.
     - Each manifest is a plain path list written by the operator: exactly 59 LF-terminated lines, one
       report path per line, in the § 16 grammar.
     - A relative line resolves against the manifest's own directory.
@@ -801,7 +804,7 @@ the launch.
 - The input is all 59 report files: the downloaded artifact files, or the 59 files materialized by
   the L11 fallback.
 - `[tool]`, **recommended, Windows-safe** (_updated 2026-09-17, § 17_):
-  `pnpm run account:aggregation-campaign -- --reports-manifest <file>`.
+  `pnpm run account:aggregation-campaign -- --reports-manifest "<file>"`.
   - `<file>` is a **report-path manifest**: a plain list of the 59 report paths written by the
     operator, in the § 16 grammar. A relative line resolves against the manifest's own directory.
   - Keep it with the output. It only transports paths. It is **not** evidence and proves nothing
@@ -823,7 +826,7 @@ the launch.
 - The input is the same image-cohort manifest and the same 59 reports as L12 (one set from one
   source, never mixed).
 - `[tool]`, **recommended, Windows-safe** (_updated 2026-09-17, § 17_):
-  `pnpm run review:aggregation-campaign-image-cohort -- <image-cohort-manifest> --reports-manifest <file>`.
+  `pnpm run review:aggregation-campaign-image-cohort -- "<image-cohort-manifest>" --reports-manifest "<file>"`.
   - `<image-cohort-manifest>` is the L4 JSON snapshot. It is unchanged and still comes first.
   - `<file>` is a separate **report-path manifest**: the same kind of plain path list as in L12, not
     the JSON snapshot. It is not evidence either.
@@ -1491,6 +1494,12 @@ inputs.
   `<image-cohort-manifest>`) as an absolute path. `pnpm run` runs the script from the repository
   root, so a relative argument resolves there, not in the shell's directory. A relative line
   _inside_ a manifest resolves against that manifest's own directory.
+- **Keep the double quotes** (_corrected 2026-09-17, § 21_). Every path placeholder in a marked command
+  is enclosed in double quotes. Replace only the placeholder, including its `<` and `>`, and keep both
+  quotes, so a path that contains spaces stays one argument. The quotes are shell syntax, not part of
+  the path: the tool receives the path without them. Do not end a quoted path with `\`. On Windows a
+  `\` directly before the closing quote escapes it, and the rest of the command is misread. Lines
+  _inside_ a manifest are never quoted.
 - **Exit codes.**
   - `0` is the only pass.
   - `1` is a failed check. Keep the output. The step's consequence below applies.
@@ -1539,7 +1548,7 @@ the launch record, and the job logs are kept byte-exact.
 <!-- command-card:L11-recover -->
 
 ```text
-pnpm run recover:aggregation-campaign-logs -- --output-dir <new-directory> --logs-manifest <job-log-manifest>
+pnpm run recover:aggregation-campaign-logs -- --output-dir "<new-directory>" --logs-manifest "<job-log-manifest>"
 ```
 
 - **Pass — exit `0`.** All three lines are required:
@@ -1571,7 +1580,7 @@ output is kept whatever the result.
 <!-- command-card:L11-compare -->
 
 ```text
-pnpm run compare:aggregation-campaign-retrievals -- --artifacts-manifest <artifacts-report-manifest> --fallback-manifest <fallback-report-manifest>
+pnpm run compare:aggregation-campaign-retrievals -- --artifacts-manifest "<artifacts-report-manifest>" --fallback-manifest "<fallback-report-manifest>"
 ```
 
 - **Pass — exit `0`.** All four lines are required:
@@ -1598,7 +1607,7 @@ files of a step 1 run that exited `0`. Never mix the two.
 <!-- command-card:L12-account -->
 
 ```text
-pnpm run account:aggregation-campaign -- --reports-manifest <selected-report-manifest>
+pnpm run account:aggregation-campaign -- --reports-manifest "<selected-report-manifest>"
 ```
 
 - **Pass — exit `0`.** Both lines are required:
@@ -1624,7 +1633,7 @@ step 3.
 <!-- command-card:L13-review -->
 
 ```text
-pnpm run review:aggregation-campaign-image-cohort -- <image-cohort-manifest> --reports-manifest <selected-report-manifest>
+pnpm run review:aggregation-campaign-image-cohort -- "<image-cohort-manifest>" --reports-manifest "<selected-report-manifest>"
 ```
 
 - **Pass — exit `0`.** All three lines are required:
@@ -1651,4 +1660,47 @@ None of them grants Branch A or B. A branch is stated only under L14, and only w
 attempt `1`, L12 is `COMPLETE` and L13 is `CONSISTENT`.
 
 **Status.** This card establishes no live fact. **Row 9 stays `UNVERIFIED`, row 10 `BLOCKED`, row 11
+`UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict stays NO-GO.**
+
+## 21. Update — command-quoting correction for § 13 L11–L13 and the § 20 card (2026-09-17)
+
+This is a **correction of procedure text and of a test blind spot, not evidence**. Nothing was installed, pushed,
+dispatched, downloaded or run on a real input, and no live fact was established.
+
+- **Defect.** § 20 called its four manifest-based commands Windows-safe and required absolute paths, but wrote every
+  path placeholder unquoted, as did the recommended manifest commands of § 13 L11–L13. A real absolute path that
+  contains a space would be split by the invoking shell into several arguments before any tool's parser saw it. The
+  result would be a usage error or a different mode, not the intended manifest run.
+- **Why the check missed it.** The § 20 static test split each command on spaces and replaced placeholders only with
+  paths that contain no space, so it could not observe the split.
+- **Correction.** Every path placeholder is now double-quoted in the four marked card commands and in the four
+  recommended manifest commands of § 13 L11–L13: the recovery output directory, the job-log manifest, both comparison
+  manifests, the selected report manifest and the image-cohort JSON snapshot. § 20.1 now says:
+  - keep both quotes when replacing a placeholder;
+  - the quotes are shell syntax, not part of the path;
+  - never end a quoted path with `\`;
+  - lines inside a manifest are never quoted.
+- **Unchanged.** No other command form, bound, threshold, classification or rule changed. The still-valid explicit-path
+  forms in § 13 and the historical text of §§ 14–19 are unchanged; where they differ, § 13 and § 20 govern.
+- **Test.** `scripts/aggregation-campaign-command-card.test.mjs` (manual, 8 tests) now:
+  - reads each command with a strict reader for the fixed template grammar, not a shell parser. Bare tokens are the
+    package, verb, script, `--` and options. Each path placeholder occurs exactly once, in its role, inside one
+    balanced pair of double quotes;
+  - replaces the decoded placeholder, not the quotes, with absolute POSIX and Windows paths that contain spaces, up to
+    exactly 1024 bytes (one byte more is refused by every parser), then calls the real exported parser. The longest
+    command line stays below 8191 characters;
+  - checks that § 13 L11–L13 gives the same quoted forms;
+  - rejects drift: an unquoted placeholder in each command and in the whole card as first written, single quotes, a
+    missing opening or closing quote, quotes spanning an option, a quote glued to the next token, a quoted option, a
+    placeholder used twice, and swapped roles;
+  - on Windows only, runs the four exact quoted commands through `cmd.exe` and `pnpm` from the repository root. It uses
+    absolute paths with spaces in a test-owned temporary directory, where no manifest exists. Each command reaches its
+    manifest contract (`logs manifest:`, `artifacts manifest:` or `reports manifest:` followed by
+    `manifest could not be read`) and exits `2`. No output directory is created and nothing is written. Two controls
+    show that the same boundary misreads the command without the quotes, or with a `\` before a closing quote. No
+    supplied path is printed, and the temporary directory is removed.
+- **Not covered.** PowerShell and other shells are not exercised. Paths that contain `"`, `%` or other `cmd.exe`
+  metacharacters were not tested.
+
+**Status.** This correction establishes no live fact. **Row 9 stays `UNVERIFIED`, row 10 `BLOCKED`, row 11
 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict stays NO-GO.**
