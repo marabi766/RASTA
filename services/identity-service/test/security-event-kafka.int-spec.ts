@@ -18,7 +18,13 @@ import { AuditTrailPublisher } from '../src/security-events/audit-trail.publishe
 import { REFUSAL_SITES, type RefusalSiteName } from '../src/security-events/refusal-sites';
 import { SECURITY_EVENT_RELAY } from '../src/security-events/security-event.relay';
 import { RUN_TAG, atFreshWindow, id, waitFor, waitForWindowClose } from './helpers';
-import { startIdentityApi, userToken, type Caller, type IdentityApiHarness } from './api-helpers';
+import {
+  serviceToken,
+  startIdentityApi,
+  userToken,
+  type Caller,
+  type IdentityApiHarness,
+} from './api-helpers';
 import { startAuditStub } from './audit-stub';
 
 /**
@@ -464,6 +470,7 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
       const expected: Record<RefusalSiteName, [string, string]> = {
         SWITCH_ACTIVE_ORGANIZATION: ['identity.active_organization.switch', 'User'],
         AUTH_TENANT_MISMATCH: ['identity.tenant_context.select', 'User'],
+        SERVICE_CALLER_FORBIDDEN: ['identity.service_call.authorize', 'Service'],
         LIST_USERS: ['identity.users.list', 'User'],
         CREATE_USER: ['identity.users.create', 'User'],
         ADD_MEMBERSHIP: ['identity.memberships.create', 'Membership'],
@@ -600,6 +607,203 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
       expect(observer.deliveriesOf(eventId)).toHaveLength(1);
     },
     DELIVERY_TIMEOUT_MS + 60_000,
+  );
+
+  it(
+    'the verified service caller refusal: repeated refusals in one window become one contract-valid FORBIDDEN event with their count, merged with nothing else',
+    async () => {
+      // AUD-004 Phase C11. The platform `AuthGuard` refuses a verified
+      // internal `SERVICE` token on an endpoint that carries no
+      // `@AllowService`. The actor on the wire is the token's signed subject
+      // and the tenant its signed `org_id` — the unsigned `X-Organization-Id`
+      // each probe also sends is never read, and never published.
+      const site = REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN;
+      // Tagged, because a service row's actor id *is* the caller's name.
+      const serviceName = (label: string): string => `svc_${RUN_TAG}_${label}_${ulid().slice(-8)}`;
+      const callerService = serviceName('caller');
+      const otherService = serviceName('other');
+      const tenant = id('ORG');
+      const otherTenant = id('ORG');
+      const person: Caller = { userId: id('USR'), organizationId: tenant, roles: ['AUDITOR'] };
+      const callSecret = `service-call-secret-${RUN_TAG}`;
+      await atFreshWindow(identity.prisma, WINDOW_SECONDS, 2_000);
+
+      const paths = ['/v1/users/me', '/v1/users', `/v1/users/USR-${callSecret}`];
+      const correlations: string[] = [];
+      const tokens: string[] = [];
+      const unsigned: string[] = [];
+
+      /** One refusal of a verified service token; returns nothing but its effect. */
+      const callAsService = async (
+        service: string,
+        organizationId: string | undefined,
+        path = '/v1/users/me',
+      ): Promise<string> => {
+        const correlationId = id('COR');
+        const token = await serviceToken(service, organizationId);
+        const headerOrganization = `ORG-UNSIGNED-${RUN_TAG}-${ulid()}`;
+        tokens.push(token);
+        unsigned.push(headerOrganization);
+
+        const response = await request(identity.app.getHttpServer())
+          .get(`${path}?q=${callSecret}`)
+          .set('x-internal-token', token)
+          .set('user-agent', USER_AGENT)
+          .set('x-correlation-id', correlationId)
+          .set('traceparent', TRACEPARENT)
+          .set('x-organization-id', headerOrganization);
+
+        expect(response.status).toBe(403);
+        expect(response.body).toMatchObject({
+          code: ERROR_CODES.FORBIDDEN,
+          message: 'This endpoint is not callable by another service',
+          correlationId,
+        });
+        return correlationId;
+      };
+
+      for (const path of paths) {
+        correlations.push(await callAsService(callerService, tenant, path));
+      }
+
+      // In the same window, three refusals that must each stay their own row:
+      // the same service for another tenant, another service for this tenant,
+      // and the same service with a platform-wide token — plus one user
+      // refusal, whose actor kind, action and code all differ.
+      await callAsService(callerService, otherTenant);
+      await callAsService(otherService, tenant);
+      await callAsService(callerService, undefined);
+
+      const userCorrelation = id('COR');
+      const userRefusal = await request(identity.app.getHttpServer())
+        .get('/v1/users/me')
+        .set('authorization', `Bearer ${userToken(person)}`)
+        .set('user-agent', USER_AGENT)
+        .set('x-correlation-id', userCorrelation)
+        .set('x-organization-id', `ORG-REJECTED-${RUN_TAG}-${ulid()}`);
+      expect(userRefusal.status).toBe(403);
+      expect(userRefusal.body.code).toBe(ERROR_CODES.TENANT_MISMATCH);
+
+      const serviceRows = await identity.prisma.client.securityEventOutbox.findMany({
+        where: { actorId: { in: [callerService, otherService] } },
+      });
+      const userRows = await identity.prisma.client.securityEventOutbox.findMany({
+        where: { actorId: person.userId },
+      });
+      expect(serviceRows).toHaveLength(4);
+      expect(userRows).toHaveLength(1);
+
+      const aggregated = serviceRows.find(
+        (row) => row.actorId === callerService && row.organizationId === tenant,
+      )!;
+      const platformRow = serviceRows.find((row) => row.organizationId === null)!;
+      const otherTenantRow = serviceRows.find((row) => row.organizationId === otherTenant)!;
+      const otherServiceRow = serviceRows.find((row) => row.actorId === otherService)!;
+      expect(aggregated.occurrenceCount).toBe(3);
+      for (const row of [platformRow, otherTenantRow, otherServiceRow, userRows[0]!]) {
+        expect(row.occurrenceCount).toBe(1);
+      }
+      // Five decisions, five rows: aggregation merged only what belongs
+      // together.
+      expect(new Set([...serviceRows, ...userRows].map((row) => row.id)).size).toBe(5);
+
+      const deliveryOf = async (eventId: string): Promise<ObservedMessage> => {
+        const [found] = await waitFor(
+          `a delivery of ${eventId}`,
+          async () => {
+            const seen = observer.deliveriesOf(eventId);
+            return seen.length > 0 ? seen : null;
+          },
+          DELIVERY_TIMEOUT_MS,
+        );
+        return found!;
+      };
+
+      const { envelope, delivery } = await deliveryOf(aggregated.id);
+      expect(delivery.topic).toBe(AUDIT_TRAIL_TOPIC);
+      expect(envelope.eventName).toBe(AUDIT_EVENT_RECORDED);
+      expect(envelope.eventId).toBe(aggregated.id);
+      // The token's signed tenant, and the first occurrence's correlation.
+      expect(envelope.tenantId).toBe(tenant);
+      expect(envelope.correlationId).toBe(correlations[0]);
+
+      const payload = auditTrailPayloadSchemaV1.parse(envelope.payload);
+      expect(payload).toMatchObject({
+        actor: { type: 'SERVICE', id: callerService, roles: ['SERVICE'] },
+        organizationId: tenant,
+        action: site.action,
+        resourceType: site.resourceType,
+        resourceId: callerService,
+        outcome: 'REFUSED',
+        errorCode: 'FORBIDDEN',
+        reason: site.reason,
+        occurrenceCount: 3,
+      });
+
+      // A platform-wide service token is published as a platform event: no
+      // tenant on the envelope, none in the payload, and no invented one.
+      const platform = await deliveryOf(platformRow.id);
+      expect(platform.envelope.tenantId).toBeUndefined();
+      const platformPayload = auditTrailPayloadSchemaV1.parse(platform.envelope.payload);
+      expect(platformPayload.organizationId).toBeUndefined();
+      expect(platformPayload).toMatchObject({
+        actor: { type: 'SERVICE', id: callerService, roles: ['SERVICE'] },
+        action: site.action,
+        errorCode: 'FORBIDDEN',
+        occurrenceCount: 1,
+      });
+
+      // Neither the other tenant's, the other service's, nor the user's
+      // refusal was merged into this event — each is its own message.
+      const otherTenantEvent = await deliveryOf(otherTenantRow.id);
+      expect(otherTenantEvent.envelope.tenantId).toBe(otherTenant);
+      expect(auditTrailPayloadSchemaV1.parse(otherTenantEvent.envelope.payload)).toMatchObject({
+        actor: { type: 'SERVICE', id: callerService },
+        occurrenceCount: 1,
+      });
+
+      const otherServiceEvent = await deliveryOf(otherServiceRow.id);
+      expect(auditTrailPayloadSchemaV1.parse(otherServiceEvent.envelope.payload)).toMatchObject({
+        actor: { type: 'SERVICE', id: otherService, roles: ['SERVICE'] },
+        organizationId: tenant,
+        occurrenceCount: 1,
+      });
+
+      const userEvent = await deliveryOf(userRows[0]!.id);
+      expect(auditTrailPayloadSchemaV1.parse(userEvent.envelope.payload)).toMatchObject({
+        actor: { type: 'USER', id: person.userId, roles: ['AUDITOR'] },
+        action: REFUSAL_SITES.AUTH_TENANT_MISMATCH.action,
+        errorCode: 'TENANT_MISMATCH',
+        occurrenceCount: 1,
+      });
+
+      // Nothing the caller controls reached the wire: not the internal tokens,
+      // not the unsigned header, not the endpoints, not the refusal's text.
+      const wire = JSON.stringify(
+        [envelope, platform.envelope, otherTenantEvent.envelope, otherServiceEvent.envelope].map(
+          (seen) => ({ seen, payload: seen.payload }),
+        ),
+      );
+      for (const leaked of [
+        ...tokens,
+        ...unsigned,
+        callSecret,
+        '/v1/users',
+        'not callable by another service',
+      ]) {
+        expect(wire).not.toContain(leaked);
+      }
+
+      await waitFor(
+        'the service refusal row to be acknowledged',
+        async () => (await rowOf(aggregated.id)).publishedAt,
+        DELIVERY_TIMEOUT_MS,
+      );
+      expect(await rowOf(aggregated.id)).toMatchObject({ occurrenceCount: 3 });
+      await sleep(500);
+      expect(observer.deliveriesOf(aggregated.id)).toHaveLength(1);
+    },
+    DELIVERY_TIMEOUT_MS + 120_000,
   );
 
   it(

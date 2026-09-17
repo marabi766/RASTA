@@ -3,6 +3,7 @@ import type { ArgumentsHost, ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
 import { ERROR_CODES } from '@rasta/contracts';
 import {
+  ALLOW_SERVICE_KEY,
   AllExceptionsFilter,
   AuthGuard,
   InternalTokenService,
@@ -10,20 +11,31 @@ import {
   runWithContext,
   type AuthGuardOptions,
   type RequestContext,
+  type ServiceAuthorizationRefusal,
   type UserTenantMismatch,
 } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
-import { markAuthGuardTenantMismatch, withAuthGuardRefusalAudit } from './auth-guard-refusal';
-import { markRefusal, refusalSiteOf, trustedAttributionOf, REFUSAL_SITES } from './refusal-sites';
+import {
+  markAuthGuardServiceForbidden,
+  markAuthGuardTenantMismatch,
+  withAuthGuardRefusalAudit,
+} from './auth-guard-refusal';
+import {
+  markRefusal,
+  refusalSiteOf,
+  trustedAttributionOf,
+  REFUSAL_SITES,
+  type TrustedRefusalAttribution,
+} from './refusal-sites';
 
 /**
- * identity-service's marking of the platform `AuthGuard`'s own tenant refusal
- * (AUD-004 Phase C10) — the ninth site, and the first whose decider is the auth
- * guard.
+ * identity-service's marking of the platform `AuthGuard`'s own refusals: the
+ * user-token tenant refusal (AUD-004 Phase C10) and the verified service
+ * caller's `FORBIDDEN` (Phase C11).
  *
- * Two things are proved here, because the phase rests on both:
+ * Two things are proved here, because both phases rest on them:
  *
- *  1. **Only that refusal is marked**, and only with attribution the shared
+ *  1. **Only those refusals are marked**, and only with attribution the shared
  *     guard verified. Nothing is ever taken from the header, the token, the
  *     URL or the error's own context, and a refusal that cannot be attributed
  *     exactly is left unmarked rather than attributed approximately.
@@ -43,6 +55,11 @@ const ORG_HEADER_SENTINEL = 'ORG_HEADER_SENTINEL';
 const USER_ID = 'USR_VERIFIED';
 const SUBJECT = 'kc-subject-sentinel';
 const TOKEN = 'user-token-sentinel';
+const CALLER_SERVICE = 'fleet-service';
+
+/** The user-token attribution's user id, or `undefined` for any other value. */
+const userIdOf = (attribution: TrustedRefusalAttribution | undefined): string | undefined =>
+  attribution?.actorType === 'USER' ? attribution.userId : undefined;
 
 interface Claims {
   sub: string;
@@ -76,11 +93,19 @@ function executionFor(headers: Record<string, string | undefined>): ExecutionCon
   } as unknown as ExecutionContext;
 }
 
+const internalTokens = new InternalTokenService(SECRET, 'rasta-internal', 300);
+
+/** A reflector for an endpoint with the given `@AllowService` metadata, or none. */
+const reflectorAllowing = (allowService: string[] | undefined): Reflector =>
+  ({
+    getAllAndOverride: (key: string) => (key === ALLOW_SERVICE_KEY ? allowService : undefined),
+  }) as unknown as Reflector;
+
 /** The platform options this service builds, minus the audit observation. */
 function platformOptions(claims: Claims): AuthGuardOptions {
   return {
     serviceName: THIS_SERVICE,
-    internalTokens: new InternalTokenService(SECRET, 'rasta-internal', 300),
+    internalTokens,
     tokenVerifier: {
       verifyUserToken: async (candidate: string) => {
         if (candidate !== TOKEN) throw new RastaError('TOKEN_INVALID', 'Token is not valid');
@@ -114,8 +139,9 @@ interface Attempt {
 async function attempt(
   options: AuthGuardOptions,
   headers: Record<string, string>,
+  endpointReflector: Reflector = reflector,
 ): Promise<Attempt> {
-  const guard = new AuthGuard(reflector, options);
+  const guard = new AuthGuard(endpointReflector, options);
   return runWithContext(requestContext(), async () => {
     try {
       return { allowed: await guard.canActivate(executionFor(headers)) };
@@ -180,6 +206,7 @@ describe('markAuthGuardTenantMismatch', () => {
 
     expect(refusalSiteOf(refusal.error)).toBe(REFUSAL_SITES.AUTH_TENANT_MISMATCH);
     expect(trustedAttributionOf(refusal.error)).toEqual({
+      actorType: 'USER',
       userId: USER_ID,
       organizationId: ORG_ACTIVE,
       roles: ['FLEET_MANAGER'],
@@ -292,7 +319,7 @@ describe('markAuthGuardTenantMismatch', () => {
     markAuthGuardTenantMismatch(guardRefusal);
     markAuthGuardTenantMismatch({ ...guardRefusal, userId: 'USR_SOMEONE_ELSE' });
 
-    expect(trustedAttributionOf(guardRefusal.error)?.userId).toBe(USER_ID);
+    expect(userIdOf(trustedAttributionOf(guardRefusal.error))).toBe(USER_ID);
   });
 
   it('throws nothing, whatever it is handed', () => {
@@ -312,9 +339,11 @@ describe('withAuthGuardRefusalAudit', () => {
     expect(wrapped.tokenVerifier).toBe(base.tokenVerifier);
     expect(wrapped.internalTokens).toBe(base.internalTokens);
     expect(wrapped.onUserTenantMismatch).toBe(markAuthGuardTenantMismatch);
+    expect(wrapped.onServiceAuthorizationRefusal).toBe(markAuthGuardServiceForbidden);
     // The caller's own options object is not mutated: another service sharing
     // a base configuration does not silently acquire identity's audit policy.
     expect(base.onUserTenantMismatch).toBeUndefined();
+    expect(base.onServiceAuthorizationRefusal).toBeUndefined();
   });
 });
 
@@ -376,6 +405,7 @@ describe('the configured guard, against the bare platform guard', () => {
     );
 
     expect(trustedAttributionOf(error)).toEqual({
+      actorType: 'USER',
       userId: USER_ID,
       organizationId: ORG_ACTIVE,
       roles: ['FLEET_MANAGER', 'ORGANIZATION_ADMIN'],
@@ -392,7 +422,7 @@ describe('the configured guard, against the bare platform guard', () => {
       mismatchHeaders,
     );
 
-    expect(trustedAttributionOf(error)?.userId).toBe(SUBJECT);
+    expect(userIdOf(trustedAttributionOf(error))).toBe(SUBJECT);
   });
 
   it('marks nothing when the verified token has no active organization', async () => {
@@ -452,8 +482,210 @@ describe('the configured guard, against the bare platform guard', () => {
     );
 
     expect(first.error).not.toBe(second.error);
-    expect(trustedAttributionOf(first.error)?.userId).toBe(USER_ID);
-    expect(trustedAttributionOf(second.error)?.userId).toBe('USR_OTHER');
+    expect(userIdOf(trustedAttributionOf(first.error))).toBe(USER_ID);
+    expect(userIdOf(trustedAttributionOf(second.error))).toBe('USR_OTHER');
     expect(trustedAttributionOf(second.error)?.organizationId).toBe(ORG_SECOND);
+  });
+});
+
+describe('markAuthGuardServiceForbidden (Phase C11)', () => {
+  const refusalFor = (
+    overrides: Partial<ServiceAuthorizationRefusal> = {},
+  ): ServiceAuthorizationRefusal => ({
+    error: RastaError.forbidden('This endpoint is not callable by another service'),
+    callerService: CALLER_SERVICE,
+    organizationId: ORG_ACTIVE,
+    ...overrides,
+  });
+
+  it('marks the refusal as the service caller site, with the signed caller and tenant', () => {
+    const refusal = refusalFor();
+
+    markAuthGuardServiceForbidden(refusal);
+
+    expect(refusalSiteOf(refusal.error)).toBe(REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN);
+    expect(trustedAttributionOf(refusal.error)).toEqual({
+      actorType: 'SERVICE',
+      callerService: CALLER_SERVICE,
+      organizationId: ORG_ACTIVE,
+    });
+  });
+
+  it('marks a platform-wide service token as a null tenant', () => {
+    const refusal = refusalFor({ organizationId: undefined });
+
+    markAuthGuardServiceForbidden(refusal);
+
+    expect(refusalSiteOf(refusal.error)).toBe(REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN);
+    expect(trustedAttributionOf(refusal.error)).toEqual({
+      actorType: 'SERVICE',
+      callerService: CALLER_SERVICE,
+      organizationId: null,
+    });
+  });
+
+  it.each<[string, Partial<ServiceAuthorizationRefusal>]>([
+    ['no calling service', { callerService: '' }],
+    ['a blank calling service', { callerService: '   ' }],
+    ['a non-string calling service', { callerService: 42 as unknown as string }],
+    ['a blank signed tenant', { organizationId: '  ' }],
+    ['a non-string signed tenant', { organizationId: 7 as unknown as string }],
+  ])('fails closed and marks nothing for %s', (_label, overrides) => {
+    const refusal = refusalFor(overrides);
+
+    markAuthGuardServiceForbidden(refusal);
+
+    expect(refusalSiteOf(refusal.error)).toBeUndefined();
+    expect(trustedAttributionOf(refusal.error)).toBeUndefined();
+  });
+
+  it.each<[string, unknown]>([
+    // The same status, a different decision: never inferred from 403 alone.
+    ['a service tenant refusal', RastaError.serviceTenantContextInvalid('HEADER_CLAIM_MISMATCH')],
+    ['a user tenant refusal', RastaError.tenantMismatch(ORG_HEADER_SENTINEL, [ORG_ACTIVE])],
+    ['an INSUFFICIENT_ROLE', RastaError.insufficientRole(['UNION_ADMIN'], [])],
+    ['a 401', RastaError.unauthenticated()],
+    ['a plain Error', new Error('FORBIDDEN')],
+    ['a FORBIDDEN-shaped object', { code: 'FORBIDDEN', status: 403 }],
+  ])('marks nothing for %s', (_label, error) => {
+    const refusal = refusalFor({ error: error as RastaError });
+
+    markAuthGuardServiceForbidden(refusal);
+
+    expect(refusalSiteOf(refusal.error)).toBeUndefined();
+  });
+
+  it('never marks twice, and never over another decider’s mark', () => {
+    // A FORBIDDEN some other decider has already marked (forced here: no route
+    // site uses that code today) is left exactly as that decider marked it.
+    const domainForbidden = markRefusal(RastaError.forbidden(), 'LIST_USERS');
+
+    markAuthGuardServiceForbidden(refusalFor({ error: domainForbidden }));
+    expect(refusalSiteOf(domainForbidden)).toBe(REFUSAL_SITES.LIST_USERS);
+    expect(trustedAttributionOf(domainForbidden)).toBeUndefined();
+
+    const first = refusalFor();
+    markAuthGuardServiceForbidden(first);
+    markAuthGuardServiceForbidden({ ...first, callerService: 'asset-service' });
+    expect(trustedAttributionOf(first.error)).toMatchObject({ callerService: CALLER_SERVICE });
+  });
+
+  it('never mutates or adds fields to the error', () => {
+    const plain = RastaError.forbidden('This endpoint is not callable by another service');
+    const refusal = refusalFor();
+
+    markAuthGuardServiceForbidden(refusal);
+
+    expect(Object.keys(refusal.error).sort()).toEqual(Object.keys(plain).sort());
+    expect(JSON.stringify(refusal.error)).toBe(JSON.stringify(plain));
+  });
+
+  it('throws nothing, whatever it is handed', () => {
+    expect(() =>
+      markAuthGuardServiceForbidden(undefined as unknown as ServiceAuthorizationRefusal),
+    ).not.toThrow();
+    expect(() =>
+      markAuthGuardServiceForbidden({} as unknown as ServiceAuthorizationRefusal),
+    ).not.toThrow();
+  });
+});
+
+describe('the configured guard, against the bare platform guard, for a verified service caller', () => {
+  const serviceHeaders = async (organizationId?: string, caller = CALLER_SERVICE) => ({
+    'x-internal-token': await internalTokens.issue(caller, THIS_SERVICE, 'SERVICE', organizationId),
+    // Unsigned, and never attribution: the FORBIDDEN is decided before it is
+    // even compared with the signed claim.
+    'x-organization-id': ORG_HEADER_SENTINEL,
+  });
+
+  it.each<[string, string[] | undefined]>([
+    ['an endpoint with no @AllowService', undefined],
+    ['an allowlist that excludes the caller', ['asset-service']],
+  ])('refuses %s identically, and marks only identity’s error', async (_label, allowed) => {
+    const headers = await serviceHeaders(ORG_ACTIVE);
+    const endpoint = reflectorAllowing(allowed);
+    const mine = await attempt(
+      withAuthGuardRefusalAudit(platformOptions(claimsFor())),
+      headers,
+      endpoint,
+    );
+    const plain = await attempt(platformOptions(claimsFor()), headers, endpoint);
+
+    const marked = mine.error as RastaError;
+    const unmarked = plain.error as RastaError;
+
+    expect(mine.allowed).toBeUndefined();
+    expect(plain.allowed).toBeUndefined();
+    expect(marked.code).toBe(ERROR_CODES.FORBIDDEN);
+    expect([marked.status, marked.code, marked.message]).toEqual([
+      unmarked.status,
+      unmarked.code,
+      unmarked.message,
+    ]);
+    expect(Object.keys(marked).sort()).toEqual(Object.keys(unmarked).sort());
+    expect(JSON.stringify(marked)).toBe(JSON.stringify(unmarked));
+    expect(platformHttpResponse(marked, requestContext())).toEqual(
+      platformHttpResponse(unmarked, requestContext()),
+    );
+
+    expect(refusalSiteOf(marked)).toBe(REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN);
+    expect(refusalSiteOf(unmarked)).toBeUndefined();
+    expect(trustedAttributionOf(marked)).toEqual({
+      actorType: 'SERVICE',
+      callerService: CALLER_SERVICE,
+      organizationId: ORG_ACTIVE,
+    });
+  });
+
+  it('attributes a platform-wide token to no tenant, and nothing from the request', async () => {
+    const headers = await serviceHeaders(undefined);
+    const { error } = await attempt(
+      withAuthGuardRefusalAudit(platformOptions(claimsFor())),
+      headers,
+    );
+
+    expect(trustedAttributionOf(error)).toEqual({
+      actorType: 'SERVICE',
+      callerService: CALLER_SERVICE,
+      organizationId: null,
+    });
+    const serialised = JSON.stringify(trustedAttributionOf(error));
+    for (const leaked of [ORG_HEADER_SENTINEL, headers['x-internal-token'], '/v1/users/me']) {
+      expect(serialised).not.toContain(leaked);
+    }
+  });
+
+  it('marks nothing for an accepted service call or a service tenant refusal', async () => {
+    const configured = withAuthGuardRefusalAudit(platformOptions(claimsFor()));
+    const accepted = await attempt(
+      configured,
+      { 'x-internal-token': await internalTokens.issue(CALLER_SERVICE, THIS_SERVICE, 'SERVICE') },
+      reflectorAllowing([CALLER_SERVICE]),
+    );
+    const tenantRefused = await attempt(
+      configured,
+      await serviceHeaders(ORG_ACTIVE),
+      reflectorAllowing([CALLER_SERVICE]),
+    );
+
+    expect(accepted.allowed).toBe(true);
+    expect((tenantRefused.error as RastaError).code).toBe('SERVICE_TENANT_CONTEXT_INVALID');
+    expect(refusalSiteOf(tenantRefused.error)).toBeUndefined();
+  });
+
+  it('marks nothing for a forged service token or a relay token', async () => {
+    const configured = withAuthGuardRefusalAudit(platformOptions(claimsFor()));
+    const forger = new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300);
+    const forged = await attempt(configured, {
+      'x-internal-token': await forger.issue(CALLER_SERVICE, THIS_SERVICE, 'SERVICE', ORG_ACTIVE),
+    });
+    const relayed = await attempt(configured, {
+      'x-internal-token': await internalTokens.issue('api-gateway', THIS_SERVICE, 'RELAY'),
+    });
+
+    expect((forged.error as RastaError).status).toBe(401);
+    expect((relayed.error as RastaError).status).toBe(401);
+    expect(refusalSiteOf(forged.error)).toBeUndefined();
+    expect(refusalSiteOf(relayed.error)).toBeUndefined();
   });
 });

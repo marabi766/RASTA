@@ -5,7 +5,12 @@ import {
   toSecurityEventOutboxRow,
   type SecurityEventRecord,
 } from './audit-trail-envelope';
-import { refusalSiteOf, trustedAttributionOf, type RefusalSite } from './refusal-sites';
+import {
+  refusalSiteOf,
+  trustedAttributionOf,
+  type GuardRefusalSite,
+  type RefusalSite,
+} from './refusal-sites';
 
 /**
  * The decision the refusal filter makes, as a pure function (ADR-053 § 4).
@@ -17,12 +22,13 @@ import { refusalSiteOf, trustedAttributionOf, type RefusalSite } from './refusal
  *
  *   action, resourceType,   the refusal site (`refusal-sites.ts`) — code, never
  *   reason, errorCode       the URL or the body
- *   actor id, roles,        the verified token: through the frozen request
- *   organization            context the auth guard upgraded, or — for the one
- *                           site the guard itself decides, before there is any
- *                           such context — through the trusted attribution that
- *                           guard's seam supplied (Phase C10)
- *   resource id             the actor's own user id (the site says which)
+ *   actor type, id, roles,  the verified token: through the frozen request
+ *   organization            context the auth guard upgraded, or — for the
+ *                           sites the guard itself decides, before there is
+ *                           any such context — through the trusted attribution
+ *                           that guard's seams supplied (Phases C10, C11)
+ *   resource id             the actor's own id — user or calling service (the
+ *                           site says which)
  *   ip, user agent,         the request-context middleware — bounded and
  *   correlation, trace      shape-checked here, or left out
  *
@@ -55,6 +61,13 @@ const SPAN_ID = /^[0-9a-f]{16}$/;
 /** The first printable code point, and DEL — the C0 controls sit below the one. */
 const FIRST_PRINTABLE_CODE = 0x20;
 const DELETE_CODE = 0x7f;
+
+/**
+ * The roles recorded for a service actor: exactly the ones the platform
+ * `AuthGuard` grants every verified service caller (`roles: ['SERVICE']`).
+ * Code-authored — a service token carries no role claim to copy.
+ */
+const SERVICE_ACTOR_ROLES: readonly string[] = Object.freeze(['SERVICE']);
 
 /** Why a marked refusal was not captured. Closed, so it is safe in a log line. */
 export const CAPTURE_SKIP_REASONS = {
@@ -152,6 +165,60 @@ function producerVersionOf(version: string): string {
     : FALLBACK_PRODUCER_VERSION;
 }
 
+/** Who a capture is attributed to, and the tenant it is filed under. */
+interface Attribution {
+  actorType: 'USER' | 'SERVICE';
+  actorId: string;
+  roles: readonly string[];
+  /** `undefined` is a platform row. */
+  organizationId: string | undefined;
+}
+
+/**
+ * The attribution of an auth-guard site, from the trusted values that guard's
+ * seam supplied — or `undefined` when there is none that matches the site
+ * exactly.
+ *
+ * The site decides which kind of actor it records (`resource`) and what an
+ * untenanted attribution means (`withoutTenant`); an attribution of the other
+ * kind is never re-read as this one.
+ */
+function guardAttributionOf(site: GuardRefusalSite, exception: unknown): Attribution | undefined {
+  const trusted = trustedAttributionOf(exception);
+  if (trusted === undefined) return undefined;
+
+  if (trusted.actorType === 'USER') {
+    if (site.resource !== 'ACTOR_USER') return undefined;
+    // The tenant the caller legitimately acts for, never the one they asked
+    // for and were refused.
+    if (!isNonBlank(trusted.userId) || !isNonBlank(trusted.organizationId)) return undefined;
+    return {
+      actorType: 'USER',
+      actorId: trusted.userId,
+      roles: trusted.roles,
+      organizationId: trusted.organizationId,
+    };
+  }
+
+  if (site.resource !== 'ACTOR_SERVICE' || !isNonBlank(trusted.callerService)) return undefined;
+  // The token's signed tenant, or none. A blank one is not "none": it is a
+  // claim this capture cannot interpret, so it is not recorded at all.
+  let organizationId: string | undefined;
+  if (trusted.organizationId === null) {
+    if (site.withoutTenant !== 'PLATFORM') return undefined;
+  } else if (isNonBlank(trusted.organizationId)) {
+    organizationId = trusted.organizationId;
+  } else {
+    return undefined;
+  }
+  return {
+    actorType: 'SERVICE',
+    actorId: trusted.callerService,
+    roles: SERVICE_ACTOR_ROLES,
+    organizationId,
+  };
+}
+
 /**
  * Decides whether one exception becomes one `security_event_outbox` row, and
  * builds that row if so.
@@ -171,8 +238,8 @@ export function decideCapture(
   const skip = (reason: CaptureSkipReason): CaptureDecision => ({ kind: 'SKIP', site, reason });
 
   // The platform filter's final classification must be the one the site
-  // declares. A marked error that somehow left as anything but `403
-  // TENANT_MISMATCH` is not the refusal this site describes.
+  // declares. A marked error that somehow left with any other status or code
+  // is not the refusal this site describes.
   if (observation.status !== site.status || observation.code !== site.errorCode) {
     return skip(CAPTURE_SKIP_REASONS.CLASSIFICATION_MISMATCH);
   }
@@ -187,9 +254,7 @@ export function decideCapture(
     );
   }
 
-  let actorId: string;
-  let claimedRoles: readonly string[];
-  let organizationId: string | undefined;
+  let attribution: Attribution;
 
   if (site.decidedBy === 'AUTH_GUARD') {
     // Route-agnostic, and only here: this refusal precedes controller
@@ -197,20 +262,10 @@ export function decideCapture(
     // nothing (`refusal-sites.ts`). The attribution comes from the shared
     // guard's own verified token, because at this point the request context
     // has not been upgraded and still says ANONYMOUS. A marked error without
-    // it is not this refusal and is not recorded.
-    const attribution = trustedAttributionOf(observation.exception);
-    if (
-      attribution === undefined ||
-      !isNonBlank(attribution.userId) ||
-      !isNonBlank(attribution.organizationId)
-    ) {
-      return skip(CAPTURE_SKIP_REASONS.UNATTRIBUTABLE);
-    }
-    actorId = attribution.userId;
-    claimedRoles = attribution.roles;
-    // The tenant the caller legitimately acts for, never the one they asked
-    // for and were refused.
-    organizationId = attribution.organizationId;
+    // a matching one is not this refusal and is not recorded.
+    const trusted = guardAttributionOf(site, observation.exception);
+    if (trusted === undefined) return skip(CAPTURE_SKIP_REASONS.UNATTRIBUTABLE);
+    attribution = trusted;
   } else {
     if (observation.method !== site.method || observation.route !== site.route) {
       return skip(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
@@ -221,12 +276,16 @@ export function decideCapture(
     if (context.authType !== 'USER' || !isNonBlank(context.userId)) {
       return skip(CAPTURE_SKIP_REASONS.NOT_AUTHENTICATED_USER);
     }
-    actorId = context.userId;
-    claimedRoles = context.roles;
-    organizationId = context.organizationId;
+    attribution = {
+      actorType: 'USER',
+      actorId: context.userId,
+      roles: context.roles,
+      organizationId: context.organizationId,
+    };
   }
 
-  const roles = rolesOf(claimedRoles);
+  const { actorType, actorId, organizationId } = attribution;
+  const roles = rolesOf(attribution.roles);
   if (
     actorId.length > ACTOR_ID_MAX_LENGTH ||
     roles === null ||
@@ -240,11 +299,13 @@ export function decideCapture(
   const draft: SecurityEventDraft = {
     id,
     organizationId: organizationId ?? null,
-    actorType: 'USER',
+    actorType,
     actorId,
     actorRoles: roles,
     action: site.action,
     resourceType: site.resourceType,
+    // Every site's resource is its own actor — the user, or the calling
+    // service — never anything the request names.
     resourceId: actorId,
     errorCode: site.errorCode,
     reason: site.reason,

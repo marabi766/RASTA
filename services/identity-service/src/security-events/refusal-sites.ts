@@ -3,7 +3,7 @@ import type { RastaError } from '@rasta/nest-common';
 
 /**
  * The refusals this service records as audit evidence (ADR-053 § 4,
- * AUD-004 Phases C1–C10) — a fixed allowlist, and the only source of the audit
+ * AUD-004 Phases C1–C11) — a fixed allowlist, and the only source of the audit
  * `action`, `resourceType` and `reason` those records carry.
  *
  * ## Why an allowlist, and why it is attached where the decision is made
@@ -31,31 +31,41 @@ import type { RastaError } from '@rasta/nest-common';
  *   ROLES_GUARD       a denial by the platform `RolesGuard`, marked by
  *                     `IdentityRolesGuard` after the shared guard decided —
  *                     the shared guard itself knows nothing of this table.
- *   AUTH_GUARD        the platform `AuthGuard`'s own tenant refusal, marked by
- *                     `markAuthGuardTenantMismatch` through that guard's generic
- *                     observation seam (`auth-guard-refusal.ts`).
+ *   AUTH_GUARD        the platform `AuthGuard`'s own refusals — a user token's
+ *                     tenant mismatch and a verified service caller's
+ *                     `FORBIDDEN` — marked through that guard's generic
+ *                     observation seams (`auth-guard-refusal.ts`).
  *
- * ## Why one site is route-agnostic
+ * ## Why the auth guard's sites are route-agnostic
  *
  * The two guard deciders differ in *when* they decide. A role denial happens on
  * a matched route, so its site names that route and the filter checks it. The
  * auth guard decides **before** any controller authorization, on every
  * authenticated request whatever it was aimed at, so no route identifies it —
  * pinning it to one would silently drop the same refusal made anywhere else.
- * Its site therefore carries `method: null` and `route: null`, and the filter
- * skips the route check for it and for nothing else (`refusal-capture.ts`).
+ * Its sites therefore carry `method: null` and `route: null`, and the filter
+ * skips the route check for them and for nothing else (`refusal-capture.ts`).
  *
  * That is only safe because such a site cannot be marked from request data:
  * `markGuardRefusal` demands a trusted actor and tenant that only the shared
  * guard's post-verification seam can supply, and a mark without them is never
  * captured.
  *
- * Nine sites are instrumented. Every other `403` in this service — and in every
+ * Ten sites are instrumented. Every other `403` in this service — and in every
  * other service — is not recorded yet (ADR-053 plan § 8, R-2).
  */
 
-/** Which trusted value names the refused resource. Never request input. */
-export type RefusalResourceSource = 'ACTOR_USER';
+/**
+ * Which trusted value names the refused resource. Never request input.
+ *
+ *   ACTOR_USER     the verified user's own id
+ *   ACTOR_SERVICE  the verified calling service's name (Phase C11)
+ *
+ * It also fixes the kind of actor a site may be attributed to: a site whose
+ * resource is the acting user is never recorded against a service, and the
+ * reverse (`decideCapture`).
+ */
+export type RefusalResourceSource = 'ACTOR_USER' | 'ACTOR_SERVICE';
 
 /** Who makes the refusal decision, and so who may mark it. */
 export type RefusalDecider = 'IDENTITY_SERVICE' | 'ROLES_GUARD' | 'AUTH_GUARD';
@@ -77,6 +87,8 @@ interface RefusalSiteBase {
 /** A refusal made on one matched route, and recorded only on that route. */
 export interface RouteRefusalSite extends RefusalSiteBase {
   readonly decidedBy: 'IDENTITY_SERVICE' | 'ROLES_GUARD';
+  /** Route sites read the upgraded request context, which only a user has here. */
+  readonly resource: 'ACTOR_USER';
   readonly method: 'GET' | 'POST';
   /** The route template Express reports as `req.route.path`, version prefix included. */
   readonly route: string;
@@ -92,6 +104,18 @@ export interface GuardRefusalSite extends RefusalSiteBase {
   readonly decidedBy: 'AUTH_GUARD';
   readonly method: null;
   readonly route: null;
+  /**
+   * What happens when the trusted attribution carries no tenant at all.
+   *
+   *   SKIP      not recorded: such a refusal is not attributable
+   *             (`AUTH_TENANT_MISMATCH`)
+   *   PLATFORM  recorded as a platform row, `organizationId = null`
+   *             (`SERVICE_CALLER_FORBIDDEN`, Q-55)
+   *
+   * Policy, not logic: a product-owner answer that changes it is a one-value
+   * edit to the table below and nothing else.
+   */
+  readonly withoutTenant: 'SKIP' | 'PLATFORM';
 }
 
 export type RefusalSite = RouteRefusalSite | GuardRefusalSite;
@@ -353,8 +377,44 @@ export const REFUSAL_SITES = {
     action: 'identity.tenant_context.select',
     resourceType: 'User',
     resource: 'ACTOR_USER',
+    withoutTenant: 'SKIP',
     reason:
       'Organization selection refused: the requested organization is outside the verified token memberships',
+  },
+
+  /**
+   * Any request carrying a **verified** `SERVICE` internal token refused by the
+   * platform `AuthGuard` with `403 FORBIDDEN` — the endpoint carries no
+   * `@AllowService`, or its allowlist excludes the calling service — AUD-004
+   * Phase C11, and the first site whose actor is a service.
+   *
+   * **Route-agnostic** for the same reason as `AUTH_TENANT_MISMATCH`: the guard
+   * decides before any controller authorization. Both of the guard's
+   * `FORBIDDEN` decisions are this one site, because both say the same thing —
+   * this service may not call this endpoint — and neither the endpoint nor its
+   * allowlist is recorded.
+   *
+   * The actor and the resource are the calling service, named by the token's
+   * signed subject. The tenant is the token's **signed** `org_id`; a
+   * platform-wide token with none is recorded as a platform row
+   * (`withoutTenant: 'PLATFORM'`) — a verified service acting for no tenant is
+   * a real, attributable platform context, unlike a user with no active
+   * organization. The unsigned `X-Organization-Id` header is never read.
+   * Attribution, action, resource type and reason are a Temporary Decision
+   * (`docs/24-open-questions.md` Q-55).
+   */
+  SERVICE_CALLER_FORBIDDEN: {
+    key: 'identity.service_caller_forbidden',
+    method: null,
+    route: null,
+    status: 403,
+    errorCode: ERROR_CODES.FORBIDDEN,
+    decidedBy: 'AUTH_GUARD',
+    action: 'identity.service_call.authorize',
+    resourceType: 'Service',
+    resource: 'ACTOR_SERVICE',
+    withoutTenant: 'PLATFORM',
+    reason: 'Service call refused: the verified calling service is not permitted on this endpoint',
   },
 } as const satisfies Record<string, RefusalSite>;
 
@@ -375,17 +435,41 @@ export type GuardRefusalSiteName = Exclude<RefusalSiteName, RouteRefusalSiteName
  * verified token — the only attribution a route-agnostic site has.
  *
  * Deliberately not the request context: when the auth guard refuses, the
- * context still says `ANONYMOUS`, because it is upgraded only once the tenant
- * resolves. Reading it there would file every tenant probe as unattributable;
- * reading the header, or decoding the token again here, would invent an actor
- * this service never verified.
+ * context still says `ANONYMOUS`, because it is upgraded only after the guard
+ * admits the request. Reading it there would file every such refusal as
+ * unattributable; reading a header, or decoding the token again here, would
+ * invent an actor this service never verified.
+ *
+ * Discriminated by the kind of verified token, because the two carry different
+ * trusted facts: a user token has roles and an active organization; a service
+ * token has a signed caller name and, optionally, a signed tenant.
  */
-export interface TrustedRefusalAttribution {
+export type TrustedRefusalAttribution = TrustedUserAttribution | TrustedServiceAttribution;
+
+export interface TrustedUserAttribution {
+  readonly actorType: 'USER';
   readonly userId: string;
   /** The verified token's active organization. Never the rejected header. */
   readonly organizationId: string;
   readonly roles: readonly string[];
 }
+
+export interface TrustedServiceAttribution {
+  readonly actorType: 'SERVICE';
+  /** The verified internal token's signed subject. */
+  readonly callerService: string;
+  /**
+   * The verified internal token's signed `org_id`, or `null` for a
+   * platform-wide token. Never the unsigned `X-Organization-Id` header.
+   */
+  readonly organizationId: string | null;
+}
+
+/** The attribution a guard site demands, by the kind of actor it records. */
+export type AttributionFor<Name extends GuardRefusalSiteName> =
+  (typeof REFUSAL_SITES)[Name]['resource'] extends 'ACTOR_SERVICE'
+    ? TrustedServiceAttribution
+    : TrustedUserAttribution;
 
 /**
  * Error → site. A `WeakMap` rather than a property on the error, so the thrown
@@ -415,22 +499,32 @@ export function markRefusal<T extends RastaError>(error: T, site: RouteRefusalSi
  * An error already marked is left alone. One refusal is one decision, and the
  * decider that marked it first is the one that made it.
  */
-export function markGuardRefusal<T extends RastaError>(
+export function markGuardRefusal<T extends RastaError, Name extends GuardRefusalSiteName>(
   error: T,
-  site: GuardRefusalSiteName,
-  attribution: TrustedRefusalAttribution,
+  site: Name,
+  attribution: AttributionFor<Name>,
 ): T {
   if (marks.has(error)) return error;
   marks.set(error, site);
-  attributions.set(
-    error,
-    Object.freeze({
-      userId: attribution.userId,
-      organizationId: attribution.organizationId,
-      roles: Object.freeze([...attribution.roles]),
-    }),
-  );
+  attributions.set(error, frozenCopyOf(attribution));
   return error;
+}
+
+/** A frozen copy, so nothing the marker still holds can rewrite evidence. */
+function frozenCopyOf(attribution: TrustedRefusalAttribution): TrustedRefusalAttribution {
+  if (attribution.actorType === 'SERVICE') {
+    return Object.freeze({
+      actorType: 'SERVICE',
+      callerService: attribution.callerService,
+      organizationId: attribution.organizationId,
+    });
+  }
+  return Object.freeze({
+    actorType: 'USER',
+    userId: attribution.userId,
+    organizationId: attribution.organizationId,
+    roles: Object.freeze([...attribution.roles]),
+  });
 }
 
 /** The trusted attribution a guard refusal was marked with, if it was. */

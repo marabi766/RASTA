@@ -1,12 +1,14 @@
 import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError, type RequestContext } from '@rasta/nest-common';
 import { CAPTURE_SKIP_REASONS, decideCapture, type RefusalObservation } from './refusal-capture';
+import { sameAggregationIdentity } from './refusal-aggregation';
 import {
   markGuardRefusal,
   markRefusal,
   REFUSAL_SITES,
   type RefusalSiteName,
   type RouteRefusalSiteName,
+  type TrustedServiceAttribution,
 } from './refusal-sites';
 
 /**
@@ -719,7 +721,12 @@ describe('decideCapture', () => {
       markGuardRefusal(
         RastaError.tenantMismatch(REJECTED_ORG, [TRUSTED_ORG]),
         'AUTH_TENANT_MISMATCH',
-        { userId: TRUSTED_USER, organizationId: TRUSTED_ORG, roles: ['FLEET_MANAGER'] },
+        {
+          actorType: 'USER',
+          userId: TRUSTED_USER,
+          organizationId: TRUSTED_ORG,
+          roles: ['FLEET_MANAGER'],
+        },
       );
 
     /**
@@ -857,7 +864,7 @@ describe('decideCapture', () => {
       const exception = markGuardRefusal(
         RastaError.tenantMismatch(REJECTED_ORG, []),
         'AUTH_TENANT_MISMATCH',
-        { userId, organizationId, roles },
+        { actorType: 'USER', userId, organizationId, roles },
       );
 
       expect(skipReason(observeGuard({ exception }))).toBe(CAPTURE_SKIP_REASONS.UNATTRIBUTABLE);
@@ -883,6 +890,229 @@ describe('decideCapture', () => {
       expect(
         skipReason(observeGuard({ exception: domain, method: 'GET', route: '/v1/users/me' })),
       ).toBe(CAPTURE_SKIP_REASONS.ROUTE_MISMATCH);
+    });
+  });
+
+  describe('the service caller site, whose actor is a service (AUD-004 Phase C11)', () => {
+    const serviceSite = REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN;
+    const CALLER = 'fleet-service';
+    /** The service token's **signed** `org_id`. */
+    const SIGNED_ORG = 'ORG_SIGNED_IN_SERVICE_TOKEN';
+    /** Never signed, never attribution: what `X-Organization-Id` may claim. */
+    const HEADER_ORG = 'ORG_UNSIGNED_HEADER_SENTINEL';
+
+    const refused = (attribution: Partial<TrustedServiceAttribution> = {}): RastaError =>
+      markGuardRefusal(
+        RastaError.forbidden('This endpoint is not callable by another service'),
+        'SERVICE_CALLER_FORBIDDEN',
+        {
+          actorType: 'SERVICE',
+          callerService: CALLER,
+          organizationId: SIGNED_ORG,
+          ...attribution,
+        },
+      );
+
+    /**
+     * The context as it really is when the guard refuses a service caller: the
+     * middleware's, never upgraded, so anonymous — and here carrying the
+     * unsigned header and a query secret, neither of which may be recorded.
+     */
+    const serviceContext = (overrides: Partial<RequestContext> = {}): RequestContext =>
+      context({
+        authType: 'ANONYMOUS',
+        userId: undefined,
+        organizationId: undefined,
+        organizationIds: [],
+        roles: [],
+        method: 'GET',
+        path: `/v1/users?organizationId=${HEADER_ORG}&token=${QUERY_SECRET}`,
+        ...overrides,
+      });
+
+    const observeService = (overrides: Partial<RefusalObservation> = {}): RefusalObservation => ({
+      exception: refused(),
+      status: 403,
+      code: ERROR_CODES.FORBIDDEN,
+      method: 'GET',
+      route: '/v1/users',
+      context: serviceContext(),
+      ...overrides,
+    });
+
+    it('records the verified calling service as the actor, with code-authored SERVICE roles', () => {
+      expect(captured(observeService())).toEqual({
+        id: EVENT_ID,
+        // The token's signed tenant — never the header the URL or the request
+        // carries.
+        organizationId: SIGNED_ORG,
+        actorType: 'SERVICE',
+        actorId: CALLER,
+        // A service token carries no role claim; the guard grants exactly this
+        // one, and the capture authors it rather than copying anything.
+        actorRoles: ['SERVICE'],
+        action: 'identity.service_call.authorize',
+        resourceType: 'Service',
+        // The caller is its own resource: the endpoint it aimed at is not
+        // recorded.
+        resourceId: CALLER,
+        errorCode: 'FORBIDDEN',
+        reason: serviceSite.reason,
+        sourceIp: '203.0.113.7',
+        sourceUserAgent: 'Mozilla/5.0 (identity unit)',
+        correlationId: 'COR_01J9ZC00000000000000000001',
+        traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+        producerVersion: '1.4.2',
+        occurredAt: NOW,
+        occurrenceCount: 1,
+      });
+    });
+
+    it('records a platform row for a service token with no signed tenant', () => {
+      // `withoutTenant: 'PLATFORM'` (Q-55): a verified service acting for no
+      // tenant is an attributable platform context, not an unattributable one.
+      expect(
+        captured(observeService({ exception: refused({ organizationId: null }) })),
+      ).toMatchObject({ organizationId: null, actorType: 'SERVICE', actorId: CALLER });
+    });
+
+    it.each([
+      ['no matched route at all', { method: undefined, route: undefined }],
+      ['an instrumented roles-guard route', { method: 'GET', route: '/v1/users' }],
+      [
+        'a route belonging to another site',
+        { method: 'POST', route: '/v1/memberships/:id/revoke' },
+      ],
+      ['a concrete URL', { method: 'GET', route: '/v1/users/USR_X' }],
+    ])('captures the same record on %s, because the guard decides before routing', (_l, over) => {
+      expect(captured(observeService(over))).toMatchObject({
+        actorType: 'SERVICE',
+        actorId: CALLER,
+        action: serviceSite.action,
+        resourceId: CALLER,
+        organizationId: SIGNED_ORG,
+      });
+    });
+
+    it('records neither the unsigned header, the URL, nor the error’s text', () => {
+      const serialised = JSON.stringify(captured(observeService()));
+      for (const leaked of [
+        HEADER_ORG,
+        QUERY_SECRET,
+        '/v1/users',
+        'organizationId=',
+        refused().message,
+      ]) {
+        expect(serialised).not.toContain(leaked);
+      }
+      expect(serialised).not.toContain('internalContext');
+    });
+
+    it('never shares an aggregation identity with a user refusal, another caller or another tenant', () => {
+      const mine = captured(observeService());
+      const userRefusal = captured(observe());
+      const otherCaller = captured(
+        observeService({ exception: refused({ callerService: 'asset-service' }) }),
+      );
+      const otherTenant = captured(
+        observeService({ exception: refused({ organizationId: 'ORG_OTHER_TENANT' }) }),
+      );
+      const platform = captured(observeService({ exception: refused({ organizationId: null }) }));
+
+      for (const other of [userRefusal, otherCaller, otherTenant, platform]) {
+        expect(sameAggregationIdentity(mine, other)).toBe(false);
+      }
+      // Two refusals of the same caller, for the same tenant, are one row.
+      expect(sameAggregationIdentity(mine, captured(observeService()))).toBe(true);
+      // The user refusal differs in actor *kind* as well as in id and action.
+      expect(userRefusal.actorType).toBe('USER');
+      expect(`${mine.action}|${mine.resourceType}|${mine.errorCode}`).not.toBe(
+        `${userRefusal.action}|${userRefusal.resourceType}|${userRefusal.errorCode}`,
+      );
+    });
+
+    it.each([
+      ['a TENANT_MISMATCH classification', { code: ERROR_CODES.TENANT_MISMATCH }],
+      [
+        'a SERVICE_TENANT_CONTEXT_INVALID classification',
+        { code: ERROR_CODES.SERVICE_TENANT_CONTEXT_INVALID },
+      ],
+      ['a 401', { status: 401, code: ERROR_CODES.UNAUTHENTICATED }],
+      ['a 500', { status: 500, code: ERROR_CODES.INTERNAL_ERROR }],
+    ])('skips a marked refusal classified as %s', (_label, overrides) => {
+      expect(skipReason(observeService(overrides))).toBe(
+        CAPTURE_SKIP_REASONS.CLASSIFICATION_MISMATCH,
+      );
+    });
+
+    it.each<[string, Partial<TrustedServiceAttribution>]>([
+      ['a blank calling service', { callerService: '   ' }],
+      ['an empty calling service', { callerService: '' }],
+      ['a blank signed tenant', { organizationId: '   ' }],
+      ['an oversized calling service', { callerService: 'S'.repeat(257) }],
+      ['an oversized signed tenant', { organizationId: 'O'.repeat(129) }],
+    ])('fails closed on %s in the attribution', (_label, attribution) => {
+      expect(skipReason(observeService({ exception: refused(attribution) }))).toBe(
+        CAPTURE_SKIP_REASONS.UNATTRIBUTABLE,
+      );
+    });
+
+    it('never reads a user attribution as a service one, or the reverse', () => {
+      // Only reachable by forcing the type: each marker is bound to its own
+      // site. The capture must still refuse rather than guess an actor.
+      const forceMark = markGuardRefusal as unknown as (
+        error: RastaError,
+        site: RefusalSiteName,
+        attribution: unknown,
+      ) => RastaError;
+
+      const serviceSiteWithUser = forceMark(
+        RastaError.forbidden('This endpoint is not callable by another service'),
+        'SERVICE_CALLER_FORBIDDEN',
+        { actorType: 'USER', userId: 'USR_A', organizationId: 'ORG_A', roles: ['FLEET_MANAGER'] },
+      );
+      const userSiteWithService = forceMark(
+        RastaError.tenantMismatch('ORG_X', []),
+        'AUTH_TENANT_MISMATCH',
+        { actorType: 'SERVICE', callerService: CALLER, organizationId: SIGNED_ORG },
+      );
+
+      expect(skipReason(observeService({ exception: serviceSiteWithUser }))).toBe(
+        CAPTURE_SKIP_REASONS.UNATTRIBUTABLE,
+      );
+      expect(
+        skipReason(
+          observeService({ exception: userSiteWithService, code: ERROR_CODES.TENANT_MISMATCH }),
+        ),
+      ).toBe(CAPTURE_SKIP_REASONS.UNATTRIBUTABLE);
+    });
+
+    it('fails closed when the site is marked without any trusted attribution', () => {
+      const forced = (markRefusal as (error: RastaError, site: RefusalSiteName) => RastaError)(
+        RastaError.forbidden(),
+        'SERVICE_CALLER_FORBIDDEN',
+      );
+
+      expect(skipReason(observeService({ exception: forced }))).toBe(
+        CAPTURE_SKIP_REASONS.UNATTRIBUTABLE,
+      );
+    });
+
+    it('fails closed with no request context, so nothing is recorded uncorrelated', () => {
+      expect(skipReason(observeService({ context: undefined }))).toBe(
+        CAPTURE_SKIP_REASONS.UNATTRIBUTABLE,
+      );
+    });
+
+    it('never captures an unmarked FORBIDDEN, whatever the route', () => {
+      expect(
+        decideCapture(
+          observeService({
+            exception: RastaError.forbidden('This endpoint is not callable by another service'),
+          }),
+          ENVIRONMENT,
+        ),
+      ).toEqual({ kind: 'NOT_A_REFUSAL_SITE' });
     });
   });
 

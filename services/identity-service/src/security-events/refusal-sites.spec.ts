@@ -9,8 +9,8 @@ import {
   REFUSAL_SITES,
 } from './refusal-sites';
 
-describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C10)', () => {
-  it('instruments exactly nine refusal sites', () => {
+describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C11)', () => {
+  it('instruments exactly ten refusal sites', () => {
     expect(Object.keys(REFUSAL_SITES)).toEqual([
       'SWITCH_ACTIVE_ORGANIZATION',
       'LIST_USERS',
@@ -21,6 +21,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C10)', () =>
       'APPROVE_REGISTRATION_REQUEST',
       'REJECT_REGISTRATION_REQUEST',
       'AUTH_TENANT_MISMATCH',
+      'SERVICE_CALLER_FORBIDDEN',
     ]);
   });
 
@@ -169,21 +170,49 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C10)', () =>
       resourceType: 'User',
       // The caller, never the organization the rejected header named.
       resource: 'ACTOR_USER',
+      // A user token with no active organization is not attributable.
+      withoutTenant: 'SKIP',
       reason:
         'Organization selection refused: the requested organization is outside the verified token memberships',
     });
   });
 
-  it('is the only route-agnostic site, and the only one the auth guard decides', () => {
+  it('pins the verified service caller refusal to no route at all, 403 and FORBIDDEN (Phase C11)', () => {
+    expect(REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN).toEqual({
+      key: 'identity.service_caller_forbidden',
+      // Route-agnostic: the shared auth guard refuses before any controller
+      // authorization, whichever endpoint the service aimed at.
+      method: null,
+      route: null,
+      status: 403,
+      errorCode: ERROR_CODES.FORBIDDEN,
+      decidedBy: 'AUTH_GUARD',
+      action: 'identity.service_call.authorize',
+      resourceType: 'Service',
+      // The verified calling service — never the endpoint or its allowlist.
+      resource: 'ACTOR_SERVICE',
+      // A platform-wide service token is a platform row (Q-55).
+      withoutTenant: 'PLATFORM',
+      reason:
+        'Service call refused: the verified calling service is not permitted on this endpoint',
+    });
+  });
+
+  it('keeps the two auth guard sites the only route-agnostic ones, and the only service actor site', () => {
+    const guardSites = [REFUSAL_SITES.AUTH_TENANT_MISMATCH, REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN];
     const routeless = Object.values(REFUSAL_SITES).filter(
       (site) => site.method === null || site.route === null,
     );
     const guardDecided = Object.values(REFUSAL_SITES).filter(
       (site) => site.decidedBy === 'AUTH_GUARD',
     );
+    const serviceActor = Object.values(REFUSAL_SITES).filter(
+      (site) => site.resource === 'ACTOR_SERVICE',
+    );
 
-    expect(routeless).toEqual([REFUSAL_SITES.AUTH_TENANT_MISMATCH]);
-    expect(guardDecided).toEqual([REFUSAL_SITES.AUTH_TENANT_MISMATCH]);
+    expect(routeless).toEqual(guardSites);
+    expect(guardDecided).toEqual(guardSites);
+    expect(serviceActor).toEqual([REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN]);
     // Every other site still names both, so "no route" can never be the
     // accidental state of a site whose template was forgotten.
     for (const site of Object.values(REFUSAL_SITES)) {
@@ -231,10 +260,12 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C10)', () =>
     expect(rolesGuardSites).toHaveLength(roleGuarded.length);
   });
 
-  it('names no role, no query value and no URL in any site’s fixed evidence', () => {
+  it('names no role, no query value, no URL and no service in any site’s fixed evidence', () => {
     for (const site of Object.values(REFUSAL_SITES)) {
       for (const text of [site.action, site.resourceType, site.reason]) {
         expect(text).not.toMatch(/ORGANIZATION_ADMIN|UNION_ADMIN|SYSTEM_ADMIN|\?|\/v1\/|:id/);
+        // A caller or an allowlist entry is attribution, never fixed text.
+        expect(text).not.toMatch(/[a-z]+-service|AllowService/);
       }
     }
   });
@@ -351,7 +382,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C10)', () =>
     const identities = Object.values(REFUSAL_SITES).map(
       (site) => `${site.action}|${site.resourceType}|${site.errorCode}`,
     );
-    expect(identities).toHaveLength(9);
+    expect(identities).toHaveLength(10);
     expect(new Set(identities).size).toBe(identities.length);
   });
 
@@ -364,10 +395,23 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C10)', () =>
     expect(create.key).not.toBe(list.key);
   });
 
-  it('keeps every site key and route template unique per method', () => {
+  it('keeps every site key, and every route site’s template, unique per method', () => {
     const sites = Object.values(REFUSAL_SITES);
     expect(new Set(sites.map((site) => site.key)).size).toBe(sites.length);
-    expect(new Set(sites.map((site) => `${site.method} ${site.route}`)).size).toBe(sites.length);
+    // The route-agnostic sites share "no route"; their decision, not a route,
+    // is what tells them apart (their code, action and actor kind).
+    const routed = sites.filter((site) => site.decidedBy !== 'AUTH_GUARD');
+    expect(new Set(routed.map((site) => `${site.method} ${site.route}`)).size).toBe(routed.length);
+  });
+
+  it('keeps the two auth guard sites apart by code, action, resource type and actor kind', () => {
+    const tenant = REFUSAL_SITES.AUTH_TENANT_MISMATCH;
+    const service = REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN;
+    expect(service.errorCode).not.toBe(tenant.errorCode);
+    expect(service.action).not.toBe(tenant.action);
+    expect(service.resourceType).not.toBe(tenant.resourceType);
+    expect(service.resource).not.toBe(tenant.resource);
+    expect(service.withoutTenant).not.toBe(tenant.withoutTenant);
   });
 
   it('marks an error without changing anything the platform filter reads', () => {
@@ -458,6 +502,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C10)', () =>
 
   describe('the auth guard site is marked only with trusted attribution (Phase C10)', () => {
     const attribution = {
+      actorType: 'USER' as const,
       userId: 'USR_TRUSTED',
       organizationId: 'ORG_ACTIVE',
       roles: ['FLEET_MANAGER'],
@@ -490,6 +535,7 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C10)', () =>
       roles.push('SYSTEM_ADMIN');
 
       expect(trustedAttributionOf(error)).toEqual({
+        actorType: 'USER',
         userId: 'USR_TRUSTED',
         organizationId: 'ORG_ACTIVE',
         roles: ['FLEET_MANAGER'],
@@ -533,6 +579,73 @@ describe('refusal site allowlist (ADR-053 § 4, AUD-004 Phases C1–C10)', () =>
       // The auth guard's refusal for a different request: same class, same
       // code, no mark.
       const other = RastaError.tenantMismatch('ORG_HEADER_SENTINEL', []);
+      expect(refusalSiteOf(other)).toBeUndefined();
+      expect(trustedAttributionOf(other)).toBeUndefined();
+    });
+  });
+
+  describe('the service caller site is marked only with trusted service attribution (Phase C11)', () => {
+    const service = {
+      actorType: 'SERVICE' as const,
+      callerService: 'fleet-service',
+      organizationId: 'ORG_SIGNED',
+    };
+
+    it('marks the refusal and keeps it byte-for-byte what it was', () => {
+      const plain = RastaError.forbidden('This endpoint is not callable by another service');
+      const marked = markGuardRefusal(
+        RastaError.forbidden('This endpoint is not callable by another service'),
+        'SERVICE_CALLER_FORBIDDEN',
+        service,
+      );
+
+      expect(refusalSiteOf(marked)).toBe(REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN);
+      expect(marked.constructor).toBe(plain.constructor);
+      expect(marked.internalContext).toEqual(plain.internalContext);
+      expect(Object.keys(marked).sort()).toEqual(Object.keys(plain).sort());
+      expect(JSON.stringify(marked)).toBe(JSON.stringify(plain));
+    });
+
+    it('carries the signed caller and tenant, frozen, with no user fields', () => {
+      const error = markGuardRefusal(RastaError.forbidden(), 'SERVICE_CALLER_FORBIDDEN', service);
+      const attribution = trustedAttributionOf(error);
+
+      expect(attribution).toEqual({
+        actorType: 'SERVICE',
+        callerService: 'fleet-service',
+        organizationId: 'ORG_SIGNED',
+      });
+      expect(Object.isFrozen(attribution)).toBe(true);
+    });
+
+    it('carries a platform-wide token as a null tenant, not an invented one', () => {
+      const error = markGuardRefusal(RastaError.forbidden(), 'SERVICE_CALLER_FORBIDDEN', {
+        ...service,
+        organizationId: null,
+      });
+
+      expect(trustedAttributionOf(error)).toEqual({
+        actorType: 'SERVICE',
+        callerService: 'fleet-service',
+        organizationId: null,
+      });
+    });
+
+    it('never re-marks an error another site already marked', () => {
+      const error = markGuardRefusal(RastaError.forbidden(), 'SERVICE_CALLER_FORBIDDEN', service);
+      markGuardRefusal(error, 'SERVICE_CALLER_FORBIDDEN', {
+        ...service,
+        callerService: 'asset-service',
+      });
+
+      expect(trustedAttributionOf(error)).toMatchObject({ callerService: 'fleet-service' });
+      expect(refusalSiteOf(error)).toBe(REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN);
+    });
+
+    it('recognises only the instance that was marked', () => {
+      markGuardRefusal(RastaError.forbidden(), 'SERVICE_CALLER_FORBIDDEN', service);
+      const other = RastaError.forbidden();
+
       expect(refusalSiteOf(other)).toBeUndefined();
       expect(trustedAttributionOf(other)).toBeUndefined();
     });

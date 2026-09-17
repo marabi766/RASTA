@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { ulid } from 'ulid';
 import { ERROR_CODES } from '@rasta/contracts';
+import { securityEventCapturesTotal } from '../src/observability/security-event.metrics';
 import { REFUSAL_SITES } from '../src/security-events/refusal-sites';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import {
@@ -13,8 +14,9 @@ import {
 import { atFreshWindow, waitForWindowClose } from './helpers';
 
 /**
- * The auth guard's own tenant refusal → `security_event_outbox`, against a real
- * PostgreSQL (ADR-053 § 4, AUD-004 Phase C10).
+ * The auth guard's own refusals → `security_event_outbox`, against a real
+ * PostgreSQL: a user token's tenant refusal (ADR-053 § 4, AUD-004 Phase C10)
+ * and a verified service caller's `FORBIDDEN` (Phase C11).
  *
  * Every refusal here is a real request through the real `AppModule`: the global
  * `AuthGuard` — the platform's, wired with this service's observation seam
@@ -39,7 +41,15 @@ import { atFreshWindow, waitForWindowClose } from './helpers';
 
 const TAG = ulid().slice(-10);
 const tagged = (prefix: string): string => `${prefix}_${TAG}_${ulid()}`;
+/**
+ * A calling service whose name carries this run's tag, so its rows — whose
+ * actor id **is** that name — belong to this run alone on a shared database,
+ * and are removed by the same cleanup. The production name `fleet-service` is
+ * used once, where the exact recorded actor is what is being proved.
+ */
+const taggedService = (label: string): string => `svc_${TAG}_${label}`;
 const SITE = REFUSAL_SITES.AUTH_TENANT_MISMATCH;
+const SERVICE_SITE = REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN;
 const SWITCH_SITE = REFUSAL_SITES.SWITCH_ACTIVE_ORGANIZATION;
 const WINDOW_SECONDS = 2;
 
@@ -107,7 +117,10 @@ describe('auth-guard tenant refusals → security_event_outbox (real PostgreSQL)
 
   afterAll(async () => {
     await prisma.client.$executeRawUnsafe(
-      'DELETE FROM security_event_outbox WHERE actor_id LIKE $1',
+      // A service caller's actor id is its own name, which carries the tag only
+      // for the callers this suite mints; the one row written as the production
+      // `fleet-service` is reached by its correlation id instead.
+      'DELETE FROM security_event_outbox WHERE actor_id LIKE $1 OR correlation_id LIKE $1',
       `%_${TAG}_%`,
     );
     await harness?.close();
@@ -327,18 +340,23 @@ describe('auth-guard tenant refusals → security_event_outbox (real PostgreSQL)
     expect(unattributable.status).toBe(403);
     expect(unattributable.body.code).toBe(ERROR_CODES.TENANT_MISMATCH);
 
-    // A service caller. identity-service exposes no `@AllowService` endpoint,
-    // so the guard refuses it with FORBIDDEN before any tenant check — a
-    // different decision, and not this site. (The service tenant refusal
-    // itself is proved in `@rasta/nest-common`'s own guard specs.)
+    // A service caller is refused with FORBIDDEN before any tenant check — a
+    // different decision, and its own site (Phase C11, below), so it is never
+    // this one.
     const serviceCorrelation = tagged('COR');
     const asService = await request(harness.app.getHttpServer())
       .get('/v1/users/me')
-      .set('x-internal-token', await serviceToken('fleet-service', home))
+      .set('x-internal-token', await serviceToken(taggedService('a'), home))
       .set('x-correlation-id', serviceCorrelation)
       .set('x-organization-id', rejectedOrg());
     expect(asService.status).toBe(403);
     expect(asService.body.code).toBe(ERROR_CODES.FORBIDDEN);
+    expect(
+      await prisma.client.securityEventOutbox.findMany({
+        where: { correlationId: serviceCorrelation },
+        select: { action: true },
+      }),
+    ).toEqual([{ action: SERVICE_SITE.action }]);
 
     // No credentials at all: a 401 has no attributable actor.
     const anonymousCorrelation = tagged('COR');
@@ -353,7 +371,7 @@ describe('auth-guard tenant refusals → security_event_outbox (real PostgreSQL)
     }
     expect(
       await prisma.client.securityEventOutbox.count({
-        where: { correlationId: { in: [serviceCorrelation, anonymousCorrelation] } },
+        where: { correlationId: anonymousCorrelation },
       }),
     ).toBe(0);
   });
@@ -385,5 +403,228 @@ describe('auth-guard tenant refusals → security_event_outbox (real PostgreSQL)
     const closed = await claimOnly('itest-closed');
     expect(closed.mine).toHaveLength(1);
     expect(await harness.store.markPublished([row!.id], closed.token!)).toBe(1);
+  });
+
+  /**
+   * The guard's other refusal: a **verified** internal `SERVICE` token calling
+   * an endpoint that carries no `@AllowService` (AUD-004 Phase C11).
+   *
+   * identity-service exposes no service-callable endpoint today, so every one
+   * of these is the first of the guard's two `FORBIDDEN` decisions. The second
+   * — an allowlist that excludes the caller — is the same site and is proved
+   * against the shared guard in `@rasta/nest-common` and in this service's own
+   * unit specs, because no route here can reach it.
+   *
+   * The actor is the token's signed subject and the tenant its signed `org_id`
+   * — never the unsigned `X-Organization-Id` header, which the refusal is
+   * decided before even reading.
+   */
+  describe('a verified service caller’s FORBIDDEN (AUD-004 Phase C11)', () => {
+    /** One request carrying a genuine internal `SERVICE` token. */
+    async function callAsService(
+      callerService: string,
+      organizationId: string | undefined,
+      options: ProbeOptions & { api?: IdentityApiHarness } = {},
+    ) {
+      const api = options.api ?? harness;
+      const call = request(api.app.getHttpServer())
+        [options.method ?? 'get'](`${options.path ?? '/v1/users/me'}${options.query ?? ''}`)
+        .set('user-agent', USER_AGENT)
+        .set('x-correlation-id', options.correlationId ?? tagged('COR'))
+        .set('traceparent', TRACEPARENT)
+        .set(
+          'x-internal-token',
+          options.token ?? (await serviceToken(callerService, organizationId)),
+        );
+      for (const [name, value] of Object.entries(options.headers ?? {})) call.set(name, value);
+      return call;
+    }
+
+    const withoutTimestamp = (body: unknown): Record<string, unknown> => {
+      const { timestamp, ...rest } = body as Record<string, unknown>;
+      expect(typeof timestamp).toBe('string');
+      return rest;
+    };
+
+    const captureCount = async (outcome: string): Promise<number> => {
+      const metric = await securityEventCapturesTotal.get();
+      return metric.values.find((value) => value.labels.outcome === outcome)?.value ?? 0;
+    };
+
+    it('records the calling service under its token’s signed tenant, and answers the exact unchanged 403', async () => {
+      const signedOrg = tagged('ORG');
+      const correlationId = tagged('COR');
+      const requested = rejectedOrg();
+      // The one place the production caller name is used: the recorded actor
+      // is what is being proved.
+      const token = await serviceToken('fleet-service', signedOrg);
+
+      const response = await callAsService('fleet-service', signedOrg, {
+        token,
+        correlationId,
+        query: `?access_token=${QUERY_SECRET}`,
+        headers: { cookie: `session=${COOKIE_SECRET}`, 'x-organization-id': requested },
+      });
+
+      // Byte for byte the refusal the platform has always given.
+      expect(response.status).toBe(403);
+      expect(withoutTimestamp(response.body)).toEqual({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'This endpoint is not callable by another service',
+        correlationId,
+        traceId: '1af7651916cd43dd8448eb211c80319c',
+        path: `/v1/users/me?access_token=${QUERY_SECRET}`,
+      });
+
+      const rows = await prisma.client.securityEventOutbox.findMany({ where: { correlationId } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        // The token's signed `org_id`, never the header it was sent with.
+        organizationId: signedOrg,
+        actorType: 'SERVICE',
+        actorId: 'fleet-service',
+        actorRoles: ['SERVICE'],
+        action: SERVICE_SITE.action,
+        resourceType: SERVICE_SITE.resourceType,
+        resourceId: 'fleet-service',
+        errorCode: 'FORBIDDEN',
+        reason: SERVICE_SITE.reason,
+        sourceUserAgent: USER_AGENT,
+        correlationId,
+        traceparent: TRACEPARENT,
+        occurrenceCount: 1,
+        publishedAt: null,
+      });
+
+      const everything = await rawRow(rows[0]!.id);
+      for (const leaked of [
+        requested,
+        QUERY_SECRET,
+        COOKIE_SECRET,
+        token,
+        'access_token',
+        '/v1/users/me',
+        'not callable by another service',
+      ]) {
+        expect(everything).not.toContain(leaked);
+      }
+    });
+
+    it('counts one service’s refusals at several endpoints into one row (route-agnostic)', async () => {
+      const callerService = taggedService('probe');
+      const signedOrg = tagged('ORG');
+      await atFreshWindow(prisma, WINDOW_SECONDS, 1_500);
+
+      const paths: [ProbeOptions['method'], string][] = [
+        ['get', '/v1/users/me'],
+        ['get', '/v1/users'],
+        ['post', `/v1/registration-requests/${tagged('REG')}/reject`],
+      ];
+      for (const [method, path] of paths) {
+        const response = await callAsService(callerService, signedOrg, { method, path });
+        expect(response.status).toBe(403);
+        expect(response.body.code).toBe(ERROR_CODES.FORBIDDEN);
+      }
+
+      const rows = await rowsFor(callerService);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.occurrenceCount).toBe(3);
+      expect(rows[0]!.action).toBe(SERVICE_SITE.action);
+
+      const everything = await rawRow(rows[0]!.id);
+      for (const [, path] of paths) expect(everything).not.toContain(path);
+    });
+
+    it('tenant isolation: never merges two services, two tenants, a platform token or a user refusal', async () => {
+      const first = taggedService('first');
+      const second = taggedService('second');
+      const orgA = tagged('ORG');
+      const orgB = tagged('ORG');
+      const person = caller(orgA);
+      await atFreshWindow(prisma, WINDOW_SECONDS, 1_800);
+
+      // The same service for two tenants, a second service, the same service
+      // with a platform-wide token, and a user refused in the same window.
+      expect((await callAsService(first, orgA)).status).toBe(403);
+      expect((await callAsService(first, orgB)).status).toBe(403);
+      expect((await callAsService(second, orgA)).status).toBe(403);
+      expect((await callAsService(first, undefined)).status).toBe(403);
+      expect((await probe(person, rejectedOrg())).status).toBe(403);
+
+      const firstRows = await rowsFor(first);
+      expect(firstRows.map((row) => `${row.organizationId} ${row.occurrenceCount}`).sort()).toEqual(
+        [`${orgA} 1`, `${orgB} 1`, 'null 1'].sort(),
+      );
+      const secondRows = await rowsFor(second);
+      expect(secondRows).toHaveLength(1);
+      expect(secondRows[0]).toMatchObject({ organizationId: orgA, actorId: second });
+
+      // The user's refusal in the same window and tenant is its own row, with
+      // its own actor kind, action and code.
+      const userRows = await rowsFor(person.userId);
+      expect(userRows).toHaveLength(1);
+      expect(userRows[0]).toMatchObject({
+        organizationId: orgA,
+        actorType: 'USER',
+        action: SITE.action,
+        errorCode: 'TENANT_MISMATCH',
+      });
+
+      // A tenant-scoped read sees only its own tenant's rows, and the platform
+      // row belongs to neither tenant.
+      const inA = await prisma.client.securityEventOutbox.findMany({
+        where: { organizationId: orgA, actorId: { in: [first, second] } },
+      });
+      expect(inA.map((row) => row.actorId).sort()).toEqual([first, second].sort());
+      const platform = await prisma.client.securityEventOutbox.findMany({
+        where: { organizationId: null, actorId: first },
+      });
+      expect(platform).toHaveLength(1);
+      expect(platform[0]).toMatchObject({ actorType: 'SERVICE', action: SERVICE_SITE.action });
+    });
+
+    it('returns the identical 403 when the capture fails, and records nothing', async () => {
+      const failing = await startIdentityApi({
+        securityEventStore: {
+          capture: async () => {
+            throw Object.assign(new Error(`connection refused near ${QUERY_SECRET}`), {
+              name: 'PrismaClientInitializationError',
+            });
+          },
+          pendingCount: async () => 0,
+          activeLeaseCount: async () => 0,
+          oldestPendingAgeSeconds: async () => 0,
+          aggregationBacklog: async () => ({
+            openWindows: 0,
+            closedBacklog: 0,
+            closedBacklogAgeSeconds: 0,
+          }),
+        },
+      });
+
+      try {
+        const correlationId = tagged('COR');
+        const signedOrg = tagged('ORG');
+        const recorded = taggedService('recorded');
+        const unrecorded = taggedService('unrecorded');
+
+        const baseline = await callAsService(recorded, signedOrg, { correlationId });
+        const failuresBefore = await captureCount('failed');
+        const failed = await callAsService(unrecorded, signedOrg, { correlationId, api: failing });
+
+        // The authorization result is the guard's, and a failed capture never
+        // replaces it.
+        expect(failed.status).toBe(403);
+        expect(failed.status).toBe(baseline.status);
+        expect(withoutTimestamp(failed.body)).toEqual(withoutTimestamp(baseline.body));
+        expect(failed.body.code).toBe(ERROR_CODES.FORBIDDEN);
+        expect(await captureCount('failed')).toBe(failuresBefore + 1);
+
+        expect(await rowsFor(unrecorded)).toHaveLength(0);
+        expect(await rowsFor(recorded)).toHaveLength(1);
+      } finally {
+        await failing.close();
+      }
+    });
   });
 });

@@ -1,10 +1,16 @@
 import { ERROR_CODES } from '@rasta/contracts';
-import { RastaError, type AuthGuardOptions, type UserTenantMismatch } from '@rasta/nest-common';
+import {
+  RastaError,
+  type AuthGuardOptions,
+  type ServiceAuthorizationRefusal,
+  type UserTenantMismatch,
+} from '@rasta/nest-common';
 import { markGuardRefusal, refusalSiteOf } from './refusal-sites';
 
 /**
- * identity-service's audit marking for the platform `AuthGuard`'s own tenant
- * refusal (ADR-053 § 4, AUD-004 Phase C10).
+ * identity-service's audit marking for the platform `AuthGuard`'s own refusals
+ * (ADR-053 § 4): a user token's tenant mismatch (AUD-004 Phase C10) and a
+ * verified service caller's `FORBIDDEN` (Phase C11).
  *
  * ## Why a catch-and-mark wrapper was not enough
  *
@@ -13,7 +19,7 @@ import { markGuardRefusal, refusalSiteOf } from './refusal-sites';
  * and reads the verified caller back out of the request context, which the auth
  * guard has already upgraded by then.
  *
- * The auth guard's tenant refusal is thrown **before** either of those exists.
+ * The auth guard's refusals are thrown **before** either of those exists.
  * `request.rastaAuth` is unassigned, and the request context still says
  * `ANONYMOUS`, because it is upgraded only after `resolveOrganization` returns.
  * So a subclass or filter catching the error would hold a refusal with no
@@ -23,12 +29,12 @@ import { markGuardRefusal, refusalSiteOf } from './refusal-sites';
  * or something evidence must never carry. Capturing from those would not be
  * weaker evidence; it would be forged evidence.
  *
- * Hence the shared guard gained one generic, optional seam
- * (`AuthGuardOptions.onUserTenantMismatch`): it states who it refused, from the
- * token it has just verified itself. All the audit policy — which refusals are
+ * Hence the shared guard gained generic, optional seams
+ * (`AuthGuardOptions.onUserTenantMismatch` and `onServiceAuthorizationRefusal`):
+ * each states who it refused, from the token it has just verified itself. All the audit policy — which refusals are
  * allowlisted, what the record says, what is fail-closed — stays here (A-03).
  * The shared package still knows nothing about audit or identity, and every
- * other service is unchanged, because none of them sets the seam.
+ * other service is unchanged, because none of them sets either seam.
  *
  * ## What this adds, and what it cannot do
  *
@@ -73,6 +79,7 @@ export function markAuthGuardTenantMismatch(refusal: UserTenantMismatch): void {
     if (refusalSiteOf(error) !== undefined) return;
 
     markGuardRefusal(error, 'AUTH_TENANT_MISMATCH', {
+      actorType: 'USER',
       userId,
       organizationId: activeOrganizationId,
       roles,
@@ -85,6 +92,42 @@ export function markAuthGuardTenantMismatch(refusal: UserTenantMismatch): void {
 }
 
 /**
+ * Marks the shared guard's verified service `FORBIDDEN` as the
+ * `SERVICE_CALLER_FORBIDDEN` site, when it is attributable.
+ *
+ * Fail-closed in the same sense as the user-token marking, and checked only
+ * against the seam's own trusted values:
+ *
+ *   - the code is exactly `FORBIDDEN` — the status alone says nothing, and a
+ *     `SERVICE_TENANT_CONTEXT_INVALID` is a different decision;
+ *   - the calling service, the internal token's signed subject, is non-blank;
+ *   - the signed tenant is either absent — recorded as a platform row, by the
+ *     site's policy — or a non-blank string; nothing else is interpreted;
+ *   - the error is not already marked.
+ *
+ * The unsigned `X-Organization-Id` header, the token text and the error's
+ * message are not inputs here at all.
+ */
+export function markAuthGuardServiceForbidden(refusal: ServiceAuthorizationRefusal): void {
+  try {
+    const { error, callerService, organizationId } = refusal;
+
+    if (!(error instanceof RastaError) || error.code !== ERROR_CODES.FORBIDDEN) return;
+    if (!isNonBlank(callerService)) return;
+    if (organizationId !== undefined && !isNonBlank(organizationId)) return;
+    if (refusalSiteOf(error) !== undefined) return;
+
+    markGuardRefusal(error, 'SERVICE_CALLER_FORBIDDEN', {
+      actorType: 'SERVICE',
+      callerService,
+      organizationId: organizationId ?? null,
+    });
+  } catch {
+    // Never let audit marking change or replace the refusal being thrown.
+  }
+}
+
+/**
  * The service's `AuthGuardOptions`, with refusal-audit observation attached.
  *
  * One function rather than an inline property at the composition root, so the
@@ -92,5 +135,9 @@ export function markAuthGuardTenantMismatch(refusal: UserTenantMismatch): void {
  * while production is unobserved.
  */
 export function withAuthGuardRefusalAudit(options: AuthGuardOptions): AuthGuardOptions {
-  return { ...options, onUserTenantMismatch: markAuthGuardTenantMismatch };
+  return {
+    ...options,
+    onUserTenantMismatch: markAuthGuardTenantMismatch,
+    onServiceAuthorizationRefusal: markAuthGuardServiceForbidden,
+  };
 }
