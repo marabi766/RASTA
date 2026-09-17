@@ -3,10 +3,14 @@
  * (launch-readiness runbook § 13, L11 → L13), run over the real package
  * commands in their documented order:
  *
- *   1. `recover:aggregation-campaign-logs -- --output-dir <new-directory> <job-log> ...`
+ *   1. `recover:aggregation-campaign-logs -- --output-dir <new-directory> --logs-manifest <file>`
  *   2. `compare:aggregation-campaign-retrievals -- --artifacts-manifest <file> --fallback-manifest <file>`
  *   3. `account:aggregation-campaign -- --reports-manifest <file>`
  *   4. `review:aggregation-campaign-image-cohort -- <review-manifest> --reports-manifest <file>`
+ *
+ * Step 1 runs through `pnpm run` itself, so on Windows its arguments pass
+ * through `cmd.exe`; the 59 long job-log paths reach it only via the manifest.
+ * Steps 2–4 spawn `node` with the script path read from `package.json`.
  *
  * It proves only that the committed tools compose: each step's output is the
  * next step's input, the handoffs carry exactly the intended 59 files, and the
@@ -40,8 +44,10 @@ import { fileURLToPath } from 'node:url';
 
 import { CAMPAIGN_SLOT_COUNT, parseSlotReport } from './aggregation-campaign-accounting-lib.mjs';
 import { COHORT_MANIFEST_SCHEMA } from './aggregation-campaign-image-cohort-lib.mjs';
+import { LOG_RECOVERY_LIMITS } from './aggregation-campaign-log-recovery-lib.mjs';
 import {
   REPORT_MANIFEST_PROBLEM,
+  parsePathManifest,
   parseReportManifest,
 } from './aggregation-campaign-report-manifest-lib.mjs';
 import {
@@ -88,6 +94,24 @@ const scriptOf = (step) => {
   assert.equal(program, 'node', name);
   assert.deepEqual(rest, [], name);
   return join(repoRoot, script);
+};
+
+/**
+ * `pnpm --silent run <package script> -- <args>`, spawned from `cwd`. `--dir`
+ * names the repository, so the script itself runs there, where neither the
+ * caller's nor the repository's directory resolves a manifest line.
+ */
+const spawnPackageScript = (step, args, cwd) => {
+  const [name] = OPERATIONAL_SCRIPTS[step];
+  const argv = ['--dir', repoRoot, '--silent', 'run', name, '--', ...args];
+  const options = { cwd, encoding: 'utf8', timeout: 120_000 };
+  if (process.platform !== 'win32') return spawnSync('pnpm', argv, options);
+  // pnpm is a .cmd shim on Windows and runs through cmd.exe: only arguments that need no quoting
+  // are passed, and the whole command line stays far below the limit.
+  for (const arg of argv) assert.match(arg, /^[\w:\\/.~-]+$/, 'argument needs no cmd.exe quoting');
+  const command = ['pnpm', ...argv].join(' ');
+  assert.ok(command.length < 1024, 'the pnpm command line is short');
+  return spawnSync(command, { ...options, shell: true });
 };
 
 // ---------------------------------------------------------------------------
@@ -265,7 +289,8 @@ function createCampaign({
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), TEMP_PREFIX));
   const dirs = {
-    logs: join(root, 'private-job-logs'),
+    // Long enough that 59 job-log paths passed one by one would overflow cmd.exe.
+    logs: join(root, long('private-job-logs')),
     artifacts: join(root, long('private-downloaded-artifacts')),
     manifests: join(root, 'private-manifests'),
     selection: join(root, 'private-selection'),
@@ -299,14 +324,19 @@ function createCampaign({
     recoveredPaths.push(join(recovered, `slot-${String(slot).padStart(2, '0')}.txt`));
   });
 
-  // Three manifests, three orders, absolute and relative lines. The selected cohort (accounting
-  // and review) is the recovered one, listed again from another directory.
+  // Four manifests, four orders, absolute and relative lines. The job logs are listed for recovery;
+  // the selected cohort (accounting and review) is the recovered one, listed again from another
+  // directory.
   const manifests = {
+    logs: join(dirs.manifests, 'logs-private.list'),
     artifacts: join(dirs.manifests, 'artifacts-private.list'),
     fallback: join(dirs.manifests, 'fallback-private.list'),
     selected: join(dirs.selection, 'selected-private.list'),
   };
   const bodies = {
+    logs: manifestOf(
+      shuffled(logPaths, 5).map((path) => relative(dirs.manifests, path).split(sep).join('/')),
+    ),
     artifacts: manifestOf(
       shuffled(artifactPaths, 17).map((path) =>
         relative(dirs.manifests, path).split(sep).join('/'),
@@ -430,7 +460,8 @@ function rehearsalPlan(campaign) {
   return [
     {
       step: 'recover',
-      args: ['--', '--output-dir', campaign.recovered, ...shuffled(campaign.logPaths, 5)],
+      viaPnpm: true,
+      args: ['--output-dir', campaign.recovered, '--logs-manifest', campaign.manifests.logs],
       passed: (r) => r.status === 0 && /\nRESULT: PASS\n$/.test(r.stdout),
     },
     {
@@ -462,12 +493,14 @@ function rehearse(campaign) {
   const initial = snapshotTree(campaign.root);
   let before = initial;
   const steps = [];
-  for (const { step, args, passed } of rehearsalPlan(campaign)) {
-    const result = spawnSync(process.execPath, [scriptOf(step), ...args], {
-      cwd: campaign.dirs.caller,
-      encoding: 'utf8',
-      timeout: 120_000,
-    });
+  for (const { step, viaPnpm, args, passed } of rehearsalPlan(campaign)) {
+    const result = viaPnpm
+      ? spawnPackageScript(step, args, campaign.dirs.caller)
+      : spawnSync(process.execPath, [scriptOf(step), ...args], {
+          cwd: campaign.dirs.caller,
+          encoding: 'utf8',
+          timeout: 120_000,
+        });
     const after = snapshotTree(campaign.root);
     const record = {
       step,
@@ -546,11 +579,23 @@ test('rehearsal: the fallback path composes end to end through manifests; outcom
     const logs = campaign.logPaths.map((path) => readFileSync(path, 'utf8'));
     assert.ok(logs.some((text) => !text.includes(CR) && !text.startsWith('2026-')));
     assert.ok(logs.some((text) => text.includes(`${CR}\n`) && text.startsWith('2026-09-16T02:')));
+    // Recovery, spawned through `pnpm run`, receives its 59 long job logs only by manifest too.
+    assert.ok(quotedLength(campaign.logPaths) > CMD_EXE_LIMIT);
     assert.ok(quotedLength(campaign.artifactPaths) > CMD_EXE_LIMIT);
     assert.ok(quotedLength(campaign.recoveredPaths) > CMD_EXE_LIMIT);
-    for (const path of [...campaign.artifactPaths, ...campaign.recoveredPaths]) {
+    for (const path of [
+      ...campaign.logPaths,
+      ...campaign.artifactPaths,
+      ...campaign.recoveredPaths,
+    ]) {
       assert.ok(path.length < 250, 'each path stays under classic MAX_PATH');
+      assert.ok(Buffer.byteLength(path) <= 1024, 'each path is within the manifest entry bound');
     }
+    assert.equal(
+      pkg.scripts['recover:aggregation-campaign-logs'],
+      'node scripts/aggregation-campaign-log-recovery.mjs',
+      'recovery runs the unchanged operational package script',
+    );
 
     const run = rehearse(campaign);
     assert.deepEqual(run.names, ['recover', 'compare', 'account', 'review']);
@@ -626,6 +671,28 @@ test('rehearsal: the fallback path composes end to end through manifests; outcom
       assert.deepEqual(record.changes, NO_CHANGE, `${record.step} wrote nothing`);
     }
 
+    // Recovery got one manifest path and no log path; the manifest lists exactly the 59 logs,
+    // shuffled, as lines relative to its own directory.
+    assert.deepEqual(recover.args, [
+      '--output-dir',
+      campaign.recovered,
+      '--logs-manifest',
+      campaign.manifests.logs,
+    ]);
+    const logLines = readFileSync(campaign.manifests.logs, 'utf8').slice(0, -1).split('\n');
+    assert.ok(logLines.every((line) => line.startsWith('../') && !line.includes(campaign.root)));
+    const logsListed = parsePathManifest(readFileSync(campaign.manifests.logs), {
+      manifestDir: dirname(campaign.manifests.logs),
+      platform: process.platform,
+      minEntries: 1,
+      maxEntries: LOG_RECOVERY_LIMITS.maxLogs,
+      countProblem: 'count',
+    });
+    assert.equal(logsListed.ok, true);
+    assert.deepEqual([...logsListed.paths].sort(), [...campaign.logPaths].sort());
+    assert.notDeepEqual(logsListed.paths, campaign.logPaths);
+    assert.notDeepEqual(logsListed.paths, [...logsListed.paths].sort());
+
     // Handoffs: every manifest lists exactly the intended 59 files, in a shuffled order.
     const listed = (name) =>
       parseReportManifest(readFileSync(campaign.manifests[name]), {
@@ -698,7 +765,29 @@ test('rehearsal: a one-byte artifact difference is DIFFERENT and stops before ac
   });
 });
 
-test('rehearsal: a malformed report-path manifest exits 2 at the step that reads it, changes nothing and stops the chain', () => {
+test('rehearsal: a malformed job-log or report-path manifest exits 2 at the step that reads it, changes nothing and stops the chain', () => {
+  // The job-log manifest names one log twice (once more after `./`): recovery, run through pnpm,
+  // refuses it before reading any log, creates nothing, and nothing after it runs.
+  withCampaign(
+    {
+      manifestOverrides: {
+        logs: (body) => {
+          const [first, ...rest] = body.slice(0, -1).split('\n');
+          return manifestOf([first, ...rest, `./${first}`]);
+        },
+      },
+    },
+    (campaign) => {
+      const run = rehearse(campaign);
+      assert.deepEqual(run.names, ['recover']);
+      const [recover] = run.steps;
+      assert.equal(recover.status, 2);
+      assert.equal(firstLine(recover.stdout), 'the same job-log path is listed twice');
+      assert.deepEqual(recover.changes, NO_CHANGE, 'no output directory and no staging residue');
+      assertNoLeak(campaign, recover);
+    },
+  );
+
   // A CRLF artifact manifest: the comparator refuses it before reading any report.
   withCampaign(
     { manifestOverrides: { artifacts: (body) => body.replaceAll('\n', `${CR}\n`) } },
@@ -795,6 +884,22 @@ test('the rehearsal stays manual: outside pnpm verify, the test phases and ordin
   for (const [name, command] of Object.values(OPERATIONAL_SCRIPTS)) {
     assert.equal(pkg.scripts[name], command, name);
   }
+  // `--logs-manifest` is an argument to the existing recovery script, not a new package script.
+  assert.equal(
+    pkg.scripts['recover:aggregation-campaign-logs'],
+    'node scripts/aggregation-campaign-log-recovery.mjs',
+  );
+  assert.deepEqual(
+    Object.keys(pkg.scripts).filter((name) => name.includes('aggregation-campaign')),
+    [
+      'account:aggregation-campaign',
+      'check:aggregation-campaign-workflow',
+      'recover:aggregation-campaign-logs',
+      'review:aggregation-campaign-image-cohort',
+      'check:aggregation-campaign-preflight',
+      'compare:aggregation-campaign-retrievals',
+    ],
+  );
   for (const [name, command] of Object.entries(pkg.scripts)) {
     assert.ok(!command.includes('post-run-rehearsal'), name);
   }

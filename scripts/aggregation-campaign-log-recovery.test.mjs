@@ -10,7 +10,9 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -21,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, posix, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -62,9 +64,21 @@ import {
 } from './aggregation-campaign-log-recovery-lib.mjs';
 import {
   STAGING_PREFIX,
+  USAGE_ERROR,
+  logsManifestCountProblem,
   materializeReportFiles,
+  parseRecoveryArgs,
   runLogRecoveryCli,
 } from './aggregation-campaign-log-recovery.mjs';
+import {
+  MAX_REPORT_MANIFEST_BYTES,
+  PATH_MANIFEST_PROBLEM,
+  REPORT_MANIFEST_PROBLEM,
+  loadPathManifest,
+  parsePathManifest,
+  parseReportManifest,
+  pathManifestMaxBytes,
+} from './aggregation-campaign-report-manifest-lib.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
@@ -1404,4 +1418,790 @@ test('materialize: synthetic materialized files pass the unchanged accounting an
   const edited = runImageCohortCli({ argv: [manifestPath, ...files], now });
   assert.equal(edited.exitCode, 1);
   assert.match(edited.output, /COHORT: BRANCH C/);
+});
+
+// ---------------------------------------------------------------------------
+// Job-log manifests (`--logs-manifest`) — injected file systems, or temporary files only
+
+const USAGE_LINE = runLogRecoveryCli({ argv: [] }).output.split('\n')[1];
+const listOf = (lines) => lines.map((line) => `${line}\n`).join('');
+
+const POSIX_CWD = '/private-caller/nested';
+const POSIX_MANIFEST = '/private-campaign/lists/private-logs.list';
+const POSIX_LOG_DIR = '/private-campaign/job-logs';
+const WIN_CWD = 'C:\\private-caller\\nested';
+const WIN_MANIFEST = 'D:\\private-campaign\\lists\\private-logs.list';
+
+/**
+ * Injected manifest and log reads that record every access in order. `logs`
+ * maps a resolved path to its text; `sizes` may report another size for a log.
+ */
+function logManifestHarness({
+  logs = new Map(),
+  bytes = Buffer.alloc(0),
+  sizes = new Map(),
+  platform = 'posix',
+  cwd = POSIX_CWD,
+  ...manifest
+} = {}) {
+  const events = [];
+  const missing = () => Object.assign(new Error('ENOENT: /private-campaign'), { code: 'ENOENT' });
+  const options = {
+    platform,
+    cwd,
+    manifestSizeOf: (path) => {
+      events.push(['manifestSize', path]);
+      if (manifest.statThrows) throw missing();
+      return 'size' in manifest ? manifest.size : bytes.length;
+    },
+    readManifestBytes: (path) => {
+      events.push(['manifestRead', path]);
+      if (manifest.readThrows) throw missing();
+      return bytes;
+    },
+    sizeOf: (path) => {
+      events.push(['logSize', path]);
+      if (sizes.has(path)) return sizes.get(path);
+      if (!logs.has(path)) throw missing();
+      return Buffer.byteLength(logs.get(path), 'utf8');
+    },
+    readText: (path) => {
+      events.push(['logRead', path]);
+      if (!logs.has(path)) throw missing();
+      return logs.get(path);
+    },
+  };
+  const logEvents = () => events.filter(([kind]) => kind.startsWith('log'));
+  return { events, options, logEvents };
+}
+
+/** 59 in-memory logs listed by a manifest of shuffled lines relative to the manifest's directory. */
+function memoryLogCampaign(texts = fullCampaignLogs(), seed = 7) {
+  const logs = new Map(
+    texts.map((text, index) => [
+      `${POSIX_LOG_DIR}/private-job-${String(index).padStart(2, '0')}.log`,
+      text,
+    ]),
+  );
+  const order = shuffled([...logs.keys()], seed);
+  const lines = order.map((path) => `../job-logs/${posix.basename(path)}`);
+  return { logs, order, lines, bytes: Buffer.from(listOf(lines), 'utf8') };
+}
+
+test('logs manifest: the shared bounded primitive keeps the report-manifest contract and counts 1..maxLogs', () => {
+  assert.deepEqual(Object.keys(REPORT_MANIFEST_PROBLEM), [
+    ...Object.keys(PATH_MANIFEST_PROBLEM),
+    'lineCount',
+  ]);
+  assert.deepEqual(REPORT_MANIFEST_PROBLEM, {
+    ...PATH_MANIFEST_PROBLEM,
+    lineCount: 'manifest does not list exactly 59 report paths',
+  });
+  assert.equal(MAX_REPORT_MANIFEST_BYTES, 60475);
+  assert.equal(pathManifestMaxBytes(CAMPAIGN_SLOT_COUNT), MAX_REPORT_MANIFEST_BYTES);
+  assert.equal(pathManifestMaxBytes(LOG_RECOVERY_LIMITS.maxLogs), 131200);
+  assert.equal(
+    logsManifestCountProblem(),
+    'manifest does not list between 1 and 128 job-log paths',
+  );
+
+  const range = {
+    manifestDir: '/private-campaign/lists',
+    minEntries: 1,
+    maxEntries: LOG_RECOVERY_LIMITS.maxLogs,
+    countProblem: logsManifestCountProblem(),
+  };
+  const lines = (count) =>
+    Buffer.from(listOf(Array.from({ length: count }, (_, i) => `logs/${i}.log`)));
+  for (const count of [1, 58, 59, 60, 128]) {
+    const parsed = parsePathManifest(lines(count), range);
+    assert.equal(parsed.ok, true, String(count));
+    assert.equal(parsed.paths.length, count);
+    assert.equal(parsed.paths[0], '/private-campaign/lists/logs/0.log');
+  }
+  assert.deepEqual(parsePathManifest(lines(129), range), {
+    ok: false,
+    problem: logsManifestCountProblem(),
+  });
+  // The report manifest still insists on exactly 59.
+  for (const count of [1, 58, 60]) {
+    assert.deepEqual(parseReportManifest(lines(count), { manifestDir: range.manifestDir }), {
+      ok: false,
+      problem: REPORT_MANIFEST_PROBLEM.lineCount,
+    });
+  }
+  assert.equal(parseReportManifest(lines(59), { manifestDir: range.manifestDir }).ok, true);
+
+  // A malformed range is a programming error, refused before any access.
+  for (const [minEntries, maxEntries] of [
+    [0, 1],
+    [2, 1],
+    [1, Number.NaN],
+    [1.5, 2],
+    [undefined, 128],
+  ]) {
+    assert.throws(
+      () => parsePathManifest(lines(1), { ...range, minEntries, maxEntries }),
+      RangeError,
+    );
+    const touched = [];
+    assert.throws(
+      () =>
+        loadPathManifest('private.list', {
+          ...range,
+          minEntries,
+          maxEntries,
+          cwd: '/private-caller',
+          sizeOf: (path) => touched.push(path),
+          readBytes: (path) => touched.push(path),
+        }),
+      RangeError,
+    );
+    assert.deepEqual(touched, []);
+  }
+});
+
+test('logs manifest: argument grammar — accepted orders, and every usage error exits 2 with a fixed line before any read or write', () => {
+  const parse = (argv) => parseRecoveryArgs(argv, { platform: 'posix', cwd: POSIX_CWD });
+  const m = 'private.list';
+  const o = 'private-out';
+  // Every accepted manifest order.
+  for (const [argv, outputDir] of [
+    [['--logs-manifest', m], undefined],
+    [['--', '--logs-manifest', m], undefined],
+    [['--output-dir', o, '--logs-manifest', m], o],
+    [['--logs-manifest', m, '--output-dir', o], o],
+    [['--', '--output-dir', o, '--logs-manifest', m], o],
+    [['--', '--logs-manifest', m, '--output-dir', o], o],
+  ]) {
+    assert.deepEqual(parse(argv), { ok: true, mode: 'manifest', manifest: m, outputDir });
+  }
+  // Every accepted explicit order is unchanged: before, between or after the logs.
+  const logs = ['private-a.log', 'private-b.log', 'private-c.log'];
+  for (const [argv, outputDir] of [
+    [logs, undefined],
+    [['--', ...logs], undefined],
+    [['--output-dir', o, ...logs], o],
+    [['--', '--output-dir', o, ...logs], o],
+    [[logs[0], '--output-dir', o, ...logs.slice(1)], o],
+    [[...logs, '--output-dir', o], o],
+  ]) {
+    assert.deepEqual(parse(argv), { ok: true, mode: 'paths', paths: logs, outputDir });
+  }
+  const maxPaths = Array.from(
+    { length: LOG_RECOVERY_LIMITS.maxLogs },
+    (_, i) => `private-${i}.log`,
+  );
+  assert.equal(parse(maxPaths).ok, true);
+  assert.equal(parse(['p'.repeat(1024)]).ok, true);
+  assert.equal(parse(['--logs-manifest', 'p'.repeat(1024)]).ok, true);
+
+  const E = USAGE_ERROR;
+  const cases = [
+    [['--logs-manifest'], E.manifestValue],
+    [['--logs-manifest', ''], E.manifestValue],
+    [['--logs-manifest', '-private.list'], E.manifestValue],
+    [['--logs-manifest', '--'], E.manifestValue],
+    [['--logs-manifest', '--output-dir', o], E.manifestValue],
+    [['--logs-manifest', 'é'.repeat(513)], E.pathTooLong],
+    [['--logs-manifest=private.list'], E.inlineValue],
+    [['--logs-manifest=', m], E.inlineValue],
+    [['--logs-manifest', m, '--logs-manifest', 'private-b.list'], E.manifestRepeated],
+    [['--logs-manifest', m, '--logs-manifest'], E.manifestRepeated],
+    [['--logs-manifest', m, 'private.log'], E.extraArgument],
+    [['--logs-manifest', m, '--output-dir', o, 'private.log'], E.extraArgument],
+    [['--logs-manifest', m, ''], E.extraArgument],
+    [['private.log', '--logs-manifest', m], E.mixedModes],
+    [['--output-dir', o, 'private.log', '--logs-manifest', m], E.mixedModes],
+    [['--logs-manifest', m, '--'], E.lateSeparator],
+    [['--', '--', '--logs-manifest', m], E.lateSeparator],
+    [['--output-dir', o, '--', '--logs-manifest', m], E.lateSeparator],
+    [['private.log', '--', 'private-b.log'], E.lateSeparator],
+    [['--', '--', 'private.log'], E.lateSeparator],
+    [['--logs-manifest', m, '--output-dir'], E.outputValue],
+    [['--logs-manifest', m, '--output-dir', '-private'], E.outputValue],
+    [['--output-dir', o, '--logs-manifest', m, '--output-dir', 'private-p'], E.outputRepeated],
+    [['--logs-manifest', m, '--json'], E.unknownOption],
+    [['--output-dir=private', '--logs-manifest', m], E.unknownOption],
+    [['--logs', m], E.unknownOption],
+    [['-private.log'], E.unknownOption],
+    [[], E.noLog],
+    [['--'], E.noLog],
+    [['--output-dir', o], E.noLog],
+    [[''], E.emptyPath],
+    [['private.log', ''], E.emptyPath],
+    [['é'.repeat(513)], E.pathTooLong],
+    [[...maxPaths, 'private-extra.log'], E.tooManyPaths],
+    [['private.log', 'private.log'], E.duplicatePath],
+  ];
+  for (const [argv, message] of cases) {
+    const label = JSON.stringify(argv.slice(0, 6));
+    const parsed = parse(argv);
+    assert.equal(parsed.ok, false, label);
+    const h = logManifestHarness();
+    const { fs, calls } = forbiddenFs();
+    const result = runLogRecoveryCli({ argv, ...h.options, fs });
+    assert.equal(result.exitCode, 2, label);
+    assert.equal(result.output, `${message}\n${USAGE_LINE}\n`, label);
+    assert.equal(parsed.output, result.output, label);
+    assert.deepEqual(h.events, [], `${label}: no manifest or log access`);
+    assert.deepEqual(calls, [], `${label}: no output file system call`);
+    for (const leak of ['private', 'é', '.list', '.log']) {
+      assert.ok(!result.output.includes(leak), `${label} leaks ${leak}`);
+    }
+  }
+  assert.equal(new Set(Object.values(USAGE_ERROR)).size, Object.keys(USAGE_ERROR).length);
+  assert.match(USAGE_LINE, / \| \[--output-dir <new-directory>\] --logs-manifest <file>$/);
+});
+
+test('logs manifest: grammar, size, growth and read failures exit 2 with zero log reads and zero writes', () => {
+  const P = PATH_MANIFEST_PROBLEM;
+  const good = '../job-logs/private-job-00.log';
+  const other = '../job-logs/private-job-01.log';
+  const MAX = pathManifestMaxBytes(LOG_RECOVERY_LIMITS.maxLogs);
+  const bytesOf = (value) => (Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8'));
+  const cases = [
+    ['BOM', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), bytesOf(`${good}\n`)]), P.bom],
+    ['UTF-16LE', Buffer.from(`${good}\n`, 'utf16le'), P.control],
+    [
+      'invalid UTF-8',
+      Buffer.concat([
+        bytesOf('../job-logs/private-'),
+        Buffer.from([0xc3, 0x28]),
+        bytesOf('.log\n'),
+      ]),
+      P.notUtf8,
+    ],
+    ['CRLF', `${good}\r\n${other}\r\n`, P.carriageReturn],
+    ['lone CR', `${good}\r`, P.carriageReturn],
+    ['NUL', `${good}${NUL}\n`, P.control],
+    ['tab', `${good}\t\n`, P.control],
+    ['ESC', `${ESC}${good}\n`, P.control],
+    ['DEL', `${good}\u007f\n`, P.control],
+    ['no final LF', `${good}\n${other}`, P.finalNewline],
+    ['empty', '', P.finalNewline],
+    ['only LF', '\n', P.blankLine],
+    ['blank line', `${good}\n\n${other}\n`, P.blankLine],
+    ['trailing blank line', `${good}\n\n`, P.blankLine],
+    ['leading space', ` ${good}\n`, P.whitespace],
+    ['trailing space', `${good} \n`, P.whitespace],
+    ['no-break space', `${good}\u00a0\n`, P.whitespace],
+    ['option-like', '-private-job.log\n', P.optionLike],
+    ['comment', `# ${good}\n`, P.notPlainPath],
+    ['double quoted', `"${good}"\n`, P.notPlainPath],
+    ['single quoted', `'${good}'\n`, P.notPlainPath],
+    ['URL', 'https://example.invalid/private-job.log\n', P.notPlainPath],
+    ['file URL', 'file:///private-campaign/job.log\n', P.notPlainPath],
+    ['drive-relative', 'C:private-job.log\n', P.notPlainPath],
+    ['entry over 1024 bytes', `${'é'.repeat(513)}\n`, P.entryTooLong],
+    [
+      '129 entries',
+      listOf(Array.from({ length: 129 }, (_, i) => `../job-logs/private-${i}.log`)),
+      logsManifestCountProblem(),
+    ],
+  ].map(([label, body, problem]) => [label, { bytes: bytesOf(body) }, problem]);
+  const small = Buffer.from(`${good}\n`);
+  cases.push(
+    ['stat over the byte limit', { bytes: small, size: MAX + 1 }, P.tooLarge],
+    ['stat unknown (NaN)', { bytes: small, size: Number.NaN }, P.tooLarge],
+    ['stat negative', { bytes: small, size: -1 }, P.tooLarge],
+    ['stat fractional', { bytes: small, size: 1.5 }, P.tooLarge],
+    ['stat not a number', { bytes: small, size: '12' }, P.tooLarge],
+    ['stat bigint', { bytes: small, size: 12n }, P.tooLarge],
+    ['growth after the size check', { bytes: Buffer.alloc(MAX + 1, 0x61), size: 10 }, P.tooLarge],
+    ['stat fails', { bytes: small, statThrows: true }, P.unreadable],
+    ['read fails', { bytes: small, readThrows: true }, P.unreadable],
+    ['read returns no bytes', { bytes: 'not a buffer' }, P.unreadable],
+  );
+  const refusedUnread = new Set([
+    'stat over the byte limit',
+    'stat unknown (NaN)',
+    'stat negative',
+    'stat fractional',
+    'stat not a number',
+    'stat bigint',
+    'stat fails',
+  ]);
+
+  for (const [label, manifest, problem] of cases) {
+    for (const argv of [
+      ['--logs-manifest', POSIX_MANIFEST],
+      ['--', '--output-dir', 'private-out', '--logs-manifest', POSIX_MANIFEST],
+    ]) {
+      const campaign = memoryLogCampaign();
+      const h = logManifestHarness({ logs: campaign.logs, ...manifest });
+      const { fs, calls } = forbiddenFs();
+      const result = runLogRecoveryCli({ argv, ...h.options, fs });
+      const name = `${label} (${argv.length} arguments)`;
+      assert.equal(result.exitCode, 2, name);
+      assert.equal(result.output, `logs manifest: ${problem}\n${USAGE_LINE}\n`, name);
+      assert.deepEqual(h.logEvents(), [], `${name}: no log size or read`);
+      assert.deepEqual(calls, [], `${name}: no output file system call`);
+      assert.deepEqual(
+        h.events.map(([kind]) => kind),
+        refusedUnread.has(label) ? ['manifestSize'] : ['manifestSize', 'manifestRead'],
+        `${name}: only the named manifest, unread when its size is refused`,
+      );
+      for (const [, path] of h.events) assert.equal(path, POSIX_MANIFEST, name);
+      for (const leak of ['private', 'job-logs', 'ENOENT', 'é', 'https', '#']) {
+        assert.ok(!result.output.includes(leak), `${name} leaks ${leak}`);
+      }
+    }
+  }
+});
+
+test('logs manifest: exact bounds; listed logs that are missing or oversized stay exit-1 recovery failures, sized before any read', () => {
+  // 128 entries of exactly 1024 bytes: 131 200 bytes, the largest accepted manifest.
+  const padded = Array.from({ length: LOG_RECOVERY_LIMITS.maxLogs }, (_, i) => {
+    const head = `../job-logs/${String(i).padStart(3, '0')}-`;
+    return `${head}${'x'.repeat(1024 - head.length)}`;
+  });
+  const largest = Buffer.from(listOf(padded));
+  assert.equal(largest.length, 131200);
+  const bound = logManifestHarness({ bytes: largest });
+  const { fs, calls } = forbiddenFs();
+  const allMissing = runLogRecoveryCli({
+    argv: ['--logs-manifest', POSIX_MANIFEST, '--output-dir', 'private-out'],
+    ...bound.options,
+    fs,
+  });
+  assert.equal(allMissing.exitCode, 1, 'a listed log that cannot be read is a recovery failure');
+  assert.match(allMissing.output, /^recovery: logs=128 readable_logs=0 recovered_reports=0 /m);
+  assert.match(allMissing.output, /log could not be read x128/);
+  assert.match(allMissing.output, /\nmaterialization: NOT WRITTEN - .*\nRESULT: FAIL\n$/);
+  assert.deepEqual(calls, []);
+  assert.equal(bound.logEvents().length, LOG_RECOVERY_LIMITS.maxLogs);
+  assert.ok(bound.logEvents().every(([kind]) => kind === 'logSize'));
+  assert.ok(!allMissing.output.includes('xxxx') && !allMissing.output.includes('ENOENT'));
+
+  const oneMore = logManifestHarness({
+    bytes: Buffer.from(listOf([...padded.slice(0, -1), `${padded.at(-1)}x`])),
+  });
+  const refused = runLogRecoveryCli({
+    argv: ['--logs-manifest', POSIX_MANIFEST],
+    ...oneMore.options,
+  });
+  assert.equal(refused.exitCode, 2);
+  assert.equal(refused.output.split('\n')[0], `logs manifest: ${PATH_MANIFEST_PROBLEM.tooLarge}`);
+  assert.deepEqual(oneMore.logEvents(), []);
+
+  const campaign = memoryLogCampaign();
+  const sizedBeforeRead = (harness) => {
+    const kinds = harness.logEvents().map(([kind]) => kind);
+    const firstRead = kinds.indexOf('logRead');
+    assert.ok(firstRead === -1 || !kinds.slice(firstRead).includes('logSize'));
+  };
+
+  // One listed log missing: a 60th line that names nothing.
+  const missing = logManifestHarness({
+    logs: campaign.logs,
+    bytes: Buffer.from(listOf([...campaign.lines, '../job-logs/private-gone.log'])),
+  });
+  const missingResult = runLogRecoveryCli({
+    argv: ['--logs-manifest', POSIX_MANIFEST],
+    ...missing.options,
+  });
+  assert.equal(missingResult.exitCode, 1);
+  assert.match(missingResult.output, /^recovery: logs=60 readable_logs=59 recovered_reports=59 /m);
+  assert.match(missingResult.output, /log could not be read x1/);
+  sizedBeforeRead(missing);
+
+  // One listed log over the per-log bound is sized and never read; nothing is written.
+  const huge = campaign.order[17];
+  const oversized = logManifestHarness({
+    logs: campaign.logs,
+    bytes: campaign.bytes,
+    sizes: new Map([[huge, LOG_RECOVERY_LIMITS.maxLogBytes + 1]]),
+  });
+  const { fs: noFs, calls: noCalls } = forbiddenFs();
+  const oversizedResult = runLogRecoveryCli({
+    argv: ['--output-dir', 'private-out', '--logs-manifest', POSIX_MANIFEST],
+    ...oversized.options,
+    fs: noFs,
+  });
+  assert.equal(oversizedResult.exitCode, 1);
+  assert.match(oversizedResult.output, /log exceeds the recovery byte limit x1/);
+  assert.match(oversizedResult.output, /\nmaterialization: NOT WRITTEN - .*\nRESULT: FAIL\n$/);
+  assert.ok(!oversized.logEvents().some(([kind, path]) => kind === 'logRead' && path === huge));
+  assert.deepEqual(noCalls, []);
+  sizedBeforeRead(oversized);
+
+  // Together over the aggregate bound: no log is read at all.
+  const together = logManifestHarness({
+    logs: campaign.logs,
+    bytes: campaign.bytes,
+    sizes: new Map(campaign.order.map((path) => [path, 5 * 1024 * 1024])),
+  });
+  const togetherResult = runLogRecoveryCli({
+    argv: ['--logs-manifest', POSIX_MANIFEST],
+    ...together.options,
+  });
+  assert.equal(togetherResult.exitCode, 1);
+  assert.match(togetherResult.output, /logs together exceed the recovery byte limit x1/);
+  assert.ok(together.logEvents().every(([kind]) => kind === 'logSize'));
+  assert.equal(together.logEvents().length, CAMPAIGN_SLOT_COUNT);
+
+  for (const result of [missingResult, oversizedResult, togetherResult]) {
+    for (const leak of ['private', 'job-logs', 'ENOENT']) assert.ok(!result.output.includes(leak));
+  }
+});
+
+test('logs manifest: duplicate log paths after resolution exit 2 before any log read, on POSIX and injected Windows semantics', () => {
+  const attempt = ({ lines, argv, platform = 'posix', cwd = POSIX_CWD }) => {
+    const h = logManifestHarness({
+      ...(lines ? { bytes: Buffer.from(listOf(lines)) } : {}),
+      platform,
+      cwd,
+    });
+    const { fs, calls } = forbiddenFs();
+    const result = runLogRecoveryCli({ argv, ...h.options, fs });
+    return { result, h, calls };
+  };
+  const assertDuplicate = (label, run) => {
+    assert.equal(run.result.exitCode, 2, label);
+    assert.equal(run.result.output, `${USAGE_ERROR.duplicatePath}\n${USAGE_LINE}\n`, label);
+    assert.deepEqual(run.h.logEvents(), [], label);
+    assert.deepEqual(run.calls, [], label);
+  };
+  const assertDistinct = (label, run) => {
+    assert.equal(run.result.exitCode, 1, `${label}: not a duplicate, so the logs are sized`);
+    assert.ok(run.h.logEvents().length >= 2, label);
+    assert.ok(!run.result.output.includes('private'), label);
+  };
+
+  const posixManifest = (lines) => ({
+    lines,
+    argv: ['--output-dir', 'private-out', '--logs-manifest', POSIX_MANIFEST],
+  });
+  for (const lines of [
+    ['../job-logs/private-a.log', './../job-logs/private-a.log'],
+    ['../job-logs/private-a.log', '/private-campaign/job-logs/private-a.log'],
+    ['../job-logs/private-a.log', '../job-logs/sub/../private-a.log'],
+    ['../job-logs/private-a.log', '../job-logs//private-a.log'],
+    ['../job-logs/private-a.log', '../job-logs/private-b.log', '../job-logs/private-a.log/'],
+  ]) {
+    assertDuplicate(`posix manifest ${lines.join(' ')}`, attempt(posixManifest(lines)));
+  }
+  for (const lines of [
+    ['../job-logs/private-a.log', '../job-logs/PRIVATE-A.log'],
+    ['../job-logs/private-a.log', '../job-logs/private-a.log.'],
+  ]) {
+    assertDistinct(`posix manifest ${lines.join(' ')}`, attempt(posixManifest(lines)));
+  }
+
+  const winManifest = (lines) => ({
+    lines,
+    argv: ['--logs-manifest', WIN_MANIFEST],
+    platform: 'win32',
+    cwd: WIN_CWD,
+  });
+  for (const lines of [
+    ['..\\job-logs\\private-a.log', '../JOB-LOGS/PRIVATE-A.LOG'],
+    ['..\\job-logs\\private-a.log', 'D:\\private-campaign\\job-logs\\private-a.log.'],
+    ['..\\job-logs\\private-a.log', 'd:/private-campaign/job-logs/private-a.log'],
+    ['..\\job-logs\\private-a.log', '..\\job-logs \\private-a.log...'],
+  ]) {
+    assertDuplicate(`win32 manifest ${lines.join(' ')}`, attempt(winManifest(lines)));
+  }
+  assertDistinct(
+    'win32 manifest distinct names',
+    attempt(winManifest(['..\\job-logs\\private-a.log', '..\\job-logs\\private-b.log'])),
+  );
+
+  // Explicit paths are compared after resolution against the working directory, in both semantics.
+  for (const argv of [
+    ['logs/private-a.log', './logs/private-a.log'],
+    ['logs/private-a.log', `${POSIX_CWD}/logs/private-a.log`],
+    ['--output-dir', 'private-out', 'logs/private-a.log', 'logs/x/../private-a.log'],
+  ]) {
+    assertDuplicate(`posix explicit ${argv.join(' ')}`, attempt({ argv }));
+  }
+  assertDistinct(
+    'posix explicit case differs',
+    attempt({ argv: ['logs/private-a.log', 'logs/Private-A.log'] }),
+  );
+  for (const argv of [
+    ['logs\\private-a.log', 'LOGS/PRIVATE-A.log.'],
+    ['logs\\private-a.log', `${WIN_CWD}\\logs\\private-a.log`],
+  ]) {
+    assertDuplicate(
+      `win32 explicit ${argv.join(' ')}`,
+      attempt({ argv, platform: 'win32', cwd: WIN_CWD }),
+    );
+  }
+});
+
+test('logs manifest: shuffled relative lines resolve against the manifest directory, reach recovery in line order, and equal explicit mode', () => {
+  const campaign = memoryLogCampaign(
+    withSlot(
+      fullCampaignLogs(),
+      10,
+      jobLog(report(11, { kind: 'event' }), { prefixed: true, crlf: true, red: true }),
+    ),
+  );
+  assert.notDeepEqual(campaign.order, [...campaign.order].sort(), 'the manifest is shuffled');
+  const explicit = logManifestHarness({ logs: campaign.logs });
+  const baseline = runLogRecoveryCli({
+    argv: campaign.order,
+    ...explicit.options,
+    fs: forbiddenFs().fs,
+  });
+  assert.equal(baseline.exitCode, 0, baseline.output);
+  assert.equal(
+    baseline.output,
+    formatRecovery(
+      recoverAndAccount(campaign.order.map((path) => ({ text: campaign.logs.get(path) }))),
+    ),
+  );
+  const expectedLogEvents = [
+    ...campaign.order.map((path) => ['logSize', path]),
+    ...campaign.order.map((path) => ['logRead', path]),
+  ];
+  assert.deepEqual(explicit.logEvents(), expectedLogEvents);
+
+  // Read-only. The manifest path itself resolves against the caller; its lines never do.
+  for (const argv of [
+    ['--logs-manifest', POSIX_MANIFEST],
+    ['--', '--logs-manifest', '../../private-campaign/lists/private-logs.list'],
+  ]) {
+    const h = logManifestHarness({ logs: campaign.logs, bytes: campaign.bytes });
+    const { fs, calls } = forbiddenFs();
+    const result = runLogRecoveryCli({ argv, ...h.options, fs });
+    assert.equal(result.exitCode, 0, result.output);
+    assert.equal(result.output, baseline.output, 'identical to explicit mode');
+    assert.deepEqual(calls, []);
+    assert.deepEqual(h.events.slice(0, 2), [
+      ['manifestSize', POSIX_MANIFEST],
+      ['manifestRead', POSIX_MANIFEST],
+    ]);
+    assert.deepEqual(
+      h.events.slice(2),
+      expectedLogEvents,
+      'sizes first, then reads, in line order',
+    );
+  }
+
+  // Resolving the same lines against the caller's directory would name nothing that exists.
+  const callerRelative = logManifestHarness({
+    logs: new Map(
+      [...campaign.logs].map(([path, text]) => [
+        posix.resolve(POSIX_CWD, `../job-logs/${posix.basename(path)}`),
+        text,
+      ]),
+    ),
+    bytes: campaign.bytes,
+  });
+  const wrongBase = runLogRecoveryCli({
+    argv: ['--logs-manifest', POSIX_MANIFEST],
+    ...callerRelative.options,
+  });
+  assert.equal(wrongBase.exitCode, 1);
+  assert.match(wrongBase.output, /log could not be read x59/);
+
+  // Materializing, with --output-dir before or after the manifest option.
+  const explicitFake = new FakeFs({ dirs: [FAKE_PARENT] });
+  const explicitWritten = runLogRecoveryCli({
+    argv: ['--output-dir', FAKE_TARGET, ...campaign.order],
+    ...logManifestHarness({ logs: campaign.logs }).options,
+    fs: explicitFake,
+  });
+  assert.equal(explicitWritten.exitCode, 0, explicitWritten.output);
+  for (const argv of [
+    ['--', '--output-dir', FAKE_TARGET, '--logs-manifest', POSIX_MANIFEST],
+    ['--logs-manifest', POSIX_MANIFEST, '--output-dir', FAKE_TARGET],
+  ]) {
+    const h = logManifestHarness({ logs: campaign.logs, bytes: campaign.bytes });
+    const fake = new FakeFs({ dirs: [FAKE_PARENT] });
+    const result = runLogRecoveryCli({ argv, ...h.options, fs: fake });
+    assert.equal(result.exitCode, 0, result.output);
+    assert.equal(result.output, explicitWritten.output);
+    assert.match(result.output, /\nmaterialization: WRITTEN - 59 report files .*\nRESULT: PASS\n$/);
+    assert.deepEqual(
+      [...fake.files.keys()].map((path) => [dirname(path), basename(path)]),
+      SLOT_NAMES.map((name) => [FAKE_TARGET, name]),
+    );
+    for (let slot = 1; slot <= CAMPAIGN_SLOT_COUNT; slot += 1) {
+      const expected = slot === 11 ? report(11, { kind: 'event' }) : report(slot);
+      assert.ok(
+        fake.files.get(join(FAKE_TARGET, reportFileName(slot))).equals(Buffer.from(expected)),
+      );
+    }
+    assertOnlyOwnedMutations(fake);
+    assert.deepEqual(fake.calls, explicitFake.calls, 'the same output calls as explicit mode');
+    for (const leak of ['private', 'job-logs', STAGING_PREFIX, FAKE_PARENT]) {
+      assert.ok(!result.output.includes(leak), leak);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The real package command, spawned through pnpm with one short manifest path
+
+const CMD_EXE_LIMIT = 8191;
+const RECOVERY_SCRIPT = 'recover:aggregation-campaign-logs';
+
+/** `pnpm --silent run recover:aggregation-campaign-logs -- <args>`, spawned from `cwd`. */
+function runPackageRecovery(args, cwd) {
+  const argv = ['--dir', repoRoot, '--silent', 'run', RECOVERY_SCRIPT, '--', ...args];
+  const options = { cwd, encoding: 'utf8', timeout: 120_000 };
+  if (process.platform !== 'win32') return spawnSync('pnpm', argv, options);
+  // pnpm is a .cmd shim on Windows and runs through cmd.exe: only arguments that need no quoting
+  // are passed, and the whole command line stays short.
+  for (const arg of argv) assert.match(arg, /^[\w:\\/.~-]+$/, 'argument needs no cmd.exe quoting');
+  const command = ['pnpm', ...argv].join(' ');
+  assert.ok(command.length < 1024, 'the command line is short');
+  return spawnSync(command, { ...options, shell: true });
+}
+
+/** Relative name → type, size, mtime and SHA-256 for every entry under `root`. */
+function snapshotTree(root) {
+  const entries = new Map();
+  const walk = (dir) => {
+    for (const name of readdirSync(dir).sort()) {
+      const full = join(dir, name);
+      const rel = relative(root, full).split(sep).join('/');
+      const stats = lstatSync(full);
+      if (stats.isDirectory()) {
+        entries.set(rel, { type: 'dir', mtimeMs: stats.mtimeMs });
+        walk(full);
+      } else {
+        const bytes = stats.isFile() ? readFileSync(full) : Buffer.alloc(0);
+        entries.set(rel, {
+          type: stats.isFile() ? 'file' : 'other',
+          size: stats.size,
+          mtimeMs: stats.mtimeMs,
+          sha256: createHash('sha256').update(bytes).digest('hex'),
+        });
+      }
+    }
+  };
+  walk(root);
+  return entries;
+}
+
+/** Every added, removed or changed relative name between two snapshots. */
+function treeChanges(before, after) {
+  const added = [...after.keys()].filter((name) => !before.has(name)).sort();
+  const removed = [...before.keys()].filter((name) => !after.has(name)).sort();
+  const changed = [...after.keys()]
+    .filter(
+      (name) =>
+        before.has(name) && JSON.stringify(before.get(name)) !== JSON.stringify(after.get(name)),
+    )
+    .sort();
+  return { added, removed, changed };
+}
+
+const UNCHANGED = Object.freeze({ added: [], removed: [], changed: [] });
+
+test('logs manifest (spawned pnpm package command): 59 long log paths travel through one short manifest path; read-only writes nothing, --output-dir creates only its directory', () => {
+  const root = tempDir();
+  const segment = `${'long-directory-segment-'.repeat(2)}ab`;
+  const logDir = join(root, 'private-job-logs', segment, segment);
+  const caller = join(root, 'private-caller', 'nested');
+  mkdirSync(logDir, { recursive: true });
+  mkdirSync(caller, { recursive: true });
+  const texts = withSlot(
+    fullCampaignLogs(),
+    10,
+    jobLog(report(11, { kind: 'event' }), { prefixed: true, crlf: true, red: true }),
+  );
+  const logPaths = texts.map((text, index) => {
+    const path = join(logDir, `private-job-${String(index).padStart(2, '0')}.log`);
+    writeFileSync(path, text);
+    return path;
+  });
+  const order = shuffled(logPaths, 23);
+  assert.notDeepEqual(order, logPaths);
+  const lines = order.map((path) => relative(root, path).split(sep).join('/'));
+  const manifest = join(root, 'm.list');
+  writeFileSync(manifest, listOf(lines));
+  const crlfManifest = join(root, 'crlf.list');
+  writeFileSync(crlfManifest, listOf(lines).replaceAll('\n', '\r\n'));
+
+  // Passed one by one, the logs alone would overflow cmd.exe; each path stays bounded.
+  const explicitLength = logPaths.reduce((total, path) => total + path.length + 3, 0);
+  assert.ok(explicitLength > CMD_EXE_LIMIT, `explicit form is ${explicitLength} characters`);
+  for (const path of logPaths) {
+    assert.ok(path.length < 250 && Buffer.byteLength(path) <= 1024, 'each path is bounded');
+  }
+  assert.ok(manifest.length < 200, 'one short manifest path');
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+  assert.equal(
+    pkg.scripts[RECOVERY_SCRIPT],
+    'node scripts/aggregation-campaign-log-recovery.mjs',
+    'the operational package script is unchanged',
+  );
+
+  const assertClean = (label, result) => {
+    assert.equal(result.stderr, '', `${label}: nothing on stderr`);
+    for (const leak of [
+      root,
+      basename(root),
+      'private',
+      'long-directory-segment',
+      '.list',
+      '.log',
+      STAGING_PREFIX,
+      'ENOENT',
+      'Error:',
+      '    at ',
+    ]) {
+      assert.ok(!result.stdout.includes(leak), `${label} leaks ${leak}`);
+    }
+  };
+
+  // Read-only: exit 0, the same output as the in-process explicit form, and no change at all.
+  const before = snapshotTree(root);
+  const readOnly = runPackageRecovery(['--logs-manifest', manifest], caller);
+  assert.equal(readOnly.status, 0, readOnly.stdout + readOnly.stderr);
+  assert.match(
+    readOnly.stdout,
+    /^recovery: logs=59 readable_logs=59 recovered_reports=59 rejections=0$/m,
+  );
+  assert.match(readOnly.stdout, /\nRESULT: PASS\n$/);
+  assert.equal(readOnly.stdout, runLogRecoveryCli({ argv: order }).output);
+  assertClean('read-only', readOnly);
+  const afterReadOnly = snapshotTree(root);
+  assert.deepEqual(treeChanges(before, afterReadOnly), UNCHANGED);
+
+  // A malformed manifest: exit 2 through pnpm, one fixed line, and no change.
+  const malformed = runPackageRecovery(['--logs-manifest', crlfManifest], caller);
+  assert.equal(malformed.status, 2);
+  assert.equal(
+    malformed.stdout,
+    `logs manifest: ${PATH_MANIFEST_PROBLEM.carriageReturn}\n${USAGE_LINE}\n`,
+  );
+  assertClean('malformed', malformed);
+  const afterMalformed = snapshotTree(root);
+  assert.deepEqual(treeChanges(afterReadOnly, afterMalformed), UNCHANGED);
+
+  // Materializing: only the requested directory and exactly its 59 reports appear.
+  const outName = 'private-recovered';
+  const written = runPackageRecovery(
+    ['--output-dir', join(root, outName), '--logs-manifest', manifest],
+    caller,
+  );
+  assert.equal(written.status, 0, written.stdout + written.stderr);
+  assert.match(
+    written.stdout,
+    /\nmaterialization: WRITTEN - 59 report files slot-01\.txt\.\.slot-59\.txt in a newly created output directory\nRESULT: PASS\n$/,
+  );
+  assertClean('materializing', written);
+  const afterWritten = snapshotTree(root);
+  assert.deepEqual(treeChanges(afterMalformed, afterWritten), {
+    added: [outName, ...SLOT_NAMES.map((name) => `${outName}/${name}`)].sort(),
+    removed: [],
+    changed: [],
+  });
+  for (let slot = 1; slot <= CAMPAIGN_SLOT_COUNT; slot += 1) {
+    const expected = Buffer.from(slot === 11 ? report(11, { kind: 'event' }) : report(slot));
+    const entry = afterWritten.get(`${outName}/${reportFileName(slot)}`);
+    assert.equal(entry.size, expected.length, `slot ${slot} size`);
+    assert.equal(
+      entry.sha256,
+      createHash('sha256').update(expected).digest('hex'),
+      `slot ${slot} bytes`,
+    );
+  }
 });

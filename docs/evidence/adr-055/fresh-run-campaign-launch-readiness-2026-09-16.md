@@ -753,6 +753,9 @@ the launch.
   - `[tool]` `pnpm run recover:aggregation-campaign-logs -- --output-dir <new-directory> <job-log> [<job-log> ...]`,
     with every job log. `<new-directory>` must not exist yet. Its parent must be an existing,
     non-link directory outside the tracked tree and outside `.github/workflows/`.
+  - _Updated 2026-09-17 (§ 19), recommended on Windows:_
+    `pnpm run recover:aggregation-campaign-logs -- --output-dir <new-directory> --logs-manifest <file>`,
+    where `<file>` lists every job log, one path per line. Keep the manifest with the output.
   - It must exit `0` with a `materialization: WRITTEN - 59 report files …` line and `RESULT: PASS`.
     Keep the output and the directory unedited.
   - _Updated 2026-09-17 (§ 14):_ the recovered reports are now written as files, so L12 and L13 run
@@ -1364,3 +1367,105 @@ on Windows. Operators should keep log paths short there.
 It supplies no authorization, billing, concurrency, queue, download, retrievability, provenance,
 freshness, attempt or live campaign evidence. **Row 9 stays `UNVERIFIED`, row 10 `BLOCKED`, row 11
 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict stays NO-GO.**
+
+## 19. Update — job-log path manifests for fallback recovery (2026-09-17)
+
+This section records a code change, not a live probe. §§ 1–18 are unchanged, except for one dated
+note under the L11 fallback tool bullet in § 13. Nothing was downloaded, no GitHub API or network was
+called, no workflow was installed, pushed, dispatched or rerun, and **no real log, job-log manifest,
+recovery or materialized report exists**.
+
+**The gap.** § 18 recorded the last `cmd.exe` obstacle: recovery took its job logs only as explicit
+paths. Passed through `pnpm run` on Windows, 59 long log paths can exceed the 8191-character command
+line.
+
+**Added.** One more input mode for the same package script. The explicit form is kept.
+
+- `pnpm run recover:aggregation-campaign-logs -- --logs-manifest <file>` (read-only)
+- `pnpm run recover:aggregation-campaign-logs -- --output-dir <new-directory> --logs-manifest <file>`
+
+**One shared contract.** `scripts/aggregation-campaign-report-manifest-lib.mjs` now exposes the § 17
+grammar as a bounded path-manifest primitive (`parsePathManifest`, `loadPathManifest`) with a caller-
+given entry range. The report-manifest exports are thin wrappers with exactly 59 entries. Their
+sentences, bounds and results are unchanged, and the three report-manifest suites still pass
+**66/66**. The module still holds only parsing, path arithmetic and constants.
+
+- **Job-log manifest.**
+  - The § 17 grammar: strict UTF-8 without BOM, LF only and a final LF, one path of 1–1024 UTF-8
+    bytes per line, no CR, control character, padding, blank line, comment, quoting, `-` prefix, URL
+    or `C:name`.
+  - **1 to 128 lines** (`LOG_RECOVERY_LIMITS.maxLogs`), not exactly 59: one log may hold several
+    reports, and slots are still accounted from content. At most 131 200 bytes.
+  - A relative line resolves against the manifest's own directory. Logs are recovered in line
+    order, which means nothing, just like explicit order.
+- **Options.** `--output-dir <new-directory>` may appear once, before or after
+  `--logs-manifest <file>` (or before, between or after explicit logs, as before). One leading `--`
+  is accepted. These exit `2` with one fixed line, before any log is read and before any output
+  file system call:
+  - mixed modes, or any argument after the manifest path;
+  - a repeated, unknown or inline option (`--logs-manifest=value`);
+  - a missing, empty or `-`-prefixed manifest path, or one over 1024 UTF-8 bytes;
+  - a late or repeated `--`.
+- **Bounded reading.**
+  - The manifest's size is checked before it is read. A size that is too large, unknown or not a
+    byte count is refused unread. The bytes are checked again after reading, so growth is refused.
+  - Every manifest failure exits `2` with `logs manifest: <problem>`, **zero log reads and zero
+    materialization calls**.
+  - After parsing, every listed log is sized before any is read, as before. An individually
+    oversized log is never read, and no log is read when the aggregate limit is exceeded.
+  - Only the named manifest and the listed logs are read. No directory is scanned, no glob is
+    expanded, and no path, argument, manifest line or OS error is printed.
+- **Explicit paths, tightened consistently with § 17.** These now exit `2` before any read:
+  - an empty path, or one over 1024 UTF-8 bytes;
+  - more than 128 paths (before: exit `1` from the recovery limit, after sizing);
+  - a late `--` (before: ignored);
+  - the same log twice (before: exit `1` as a duplicate slot, after reading).
+  - The explicit success forms, their output and their exit codes are unchanged.
+- **Duplicates, in both modes.** The same log path twice after resolution exits `2` before any read.
+  - **On Windows**, comparison is conservative: separators are normalized, each segment's trailing
+    dots and spaces are dropped, and case is folded.
+  - **On POSIX**, it is exact after normalization.
+  - Hard links, junctions, symlinks and 8.3 short names are not detected.
+- **Unchanged.**
+  - A listed log that cannot be read or is too large is still a recovery failure (exit `1`),
+    counted and never named.
+  - Recovery, rejection accounting, slot binding, report bytes, the output, and the all-or-nothing
+    materialization with its staging cleanup.
+  - Exit codes `0` and `1` mean what they meant.
+
+**Tests**, all synthetic. The recovery suite is **33/33** (26 + 7), covering:
+
+- the shared primitive and the unchanged report-manifest contract;
+- every accepted option order in both modes, and 35 usage errors with fixed lines;
+- 26 grammar violations, and oversized, unknown-size, post-read-growth and unreadable manifests,
+  each in read-only and materializing form with zero log reads and zero output calls;
+- the exact 131 200-byte bound, and missing, oversized and aggregate-oversized listed logs (exit
+  `1`, sized before any read);
+- POSIX and injected Windows duplicates in both modes;
+- shuffled relative lines from another working directory, reaching recovery in line order, with
+  output and output calls identical to explicit mode;
+- a real spawned `pnpm --silent run recover:aggregation-campaign-logs -- …` over 59 log paths of
+  213 characters each on the Windows host used (12 744 characters if passed one by one) through one
+  short manifest path. Read-only gave `RESULT: PASS` and changed nothing. A CRLF manifest gave exit `2`.
+  With `--output-dir`, the only additions were the new directory and its 59 reports. Names, sizes,
+  mtimes and SHA-256 were snapshotted around every run.
+
+The post-run rehearsal (§ 18) now runs recovery through that same package script with
+`--logs-manifest`. The 59 log paths (189 characters each on that host) would total 11 328 characters if passed one by one, and the
+manifest is shuffled and relative. Commands run from a directory where caller-relative resolution
+finds nothing. The rehearsal adds one case, a job-log manifest naming one log twice: exit `2`,
+nothing created, chain stopped. All earlier chain, fail-closed, no-write, cleanup and leak
+assertions are kept. It is still manual: **5/5**.
+
+Test totals: recovery and rehearsal together **38/38** (baseline 31/31); the seven campaign tool test
+files together **133/133** (baseline 126/126). Fifteen hand-made mutants of the new code were all
+caught.
+
+**What this closes.** Only the offline Windows argument-transport gap named in § 18. A job-log
+manifest is operator-supplied transport, not evidence: it proves nothing about which logs belong to
+the campaign, their completeness, authenticity or provenance.
+
+**Still not proven, so nothing changes.** No authorization, billing, concurrency, queue, download,
+retrievability, provenance, freshness, attempt or live campaign evidence exists. **Row 9 stays
+`UNVERIFIED`, row 10 `BLOCKED`, row 11 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict
+stays NO-GO.**
