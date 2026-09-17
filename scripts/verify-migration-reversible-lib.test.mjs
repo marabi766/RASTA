@@ -253,9 +253,11 @@ test('the notification dedupe foreign key is deferred, and the verifier names it
   assert.ok(EXPECTED.notification.constraints.includes('notification_dedupe_intent_id_fkey'));
 });
 
-test('every notification object the verifier asserts is created by NTF-001 and dropped by its down script', () => {
-  const up = ntf001('migration.sql');
-  const down = ntf001('down.sql');
+test('every notification object the verifier asserts is created by a notification migration and dropped by its down script', () => {
+  // Every migration's SQL, concatenated: NTF-001's tables and enums, and the
+  // trigger pairs NTF-001 and NTF-002 each add.
+  const up = migrationSql('notification');
+  const down = migrationSql('notification', 'down.sql');
   const { tables, triggers, functions, types } = EXPECTED.notification;
 
   for (const name of [...tables, ...types]) {
@@ -276,6 +278,15 @@ test('every notification object the verifier asserts is created by NTF-001 and d
   assert.match(
     down,
     new RegExp(`DELETE FROM "_prisma_migrations" WHERE "migration_name" = '${NTF_001}'`),
+  );
+  // NTF-002's migration is a trigger pair and nothing else, so an inventory
+  // that did not name both would make that whole migration invisible to the
+  // up → down → up proof.
+  assert.ok(EXPECTED.notification.triggers.includes('in_app_notification_state_write_once'));
+  assert.ok(EXPECTED.notification.functions.includes('refuse_in_app_state_regression'));
+  assert.match(
+    down,
+    /DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20260917150000_in_app_read_state_write_once'/,
   );
 });
 
