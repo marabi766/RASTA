@@ -4,18 +4,26 @@ import {
   type NestModule,
   type OnModuleInit,
 } from '@nestjs/common';
-import { APP_FILTER } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { hostname } from 'node:os';
 import {
   AllExceptionsFilter,
+  AuthGuard,
+  AUTH_OPTIONS,
   EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
   RequestContextMiddleware,
+  RolesGuard,
+  TokenVerifier,
   toLogContext,
+  type AuthGuardOptions,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { HealthController } from './health/health.controller';
+import { NotificationController } from './api/notification.controller';
+import { NotificationApiService } from './api/notification.service';
+import { InAppRepository } from './api/in-app.repository';
 import { PrismaService } from './prisma/prisma.service';
 import { NotificationRepository } from './notification/notification.repository';
 import { DispatcherConsumer } from './intake/dispatcher.consumer';
@@ -36,22 +44,26 @@ import {
 } from './config/env';
 
 /**
- * notification-service wiring — NTF-001, the in-app half of ADR-054.
+ * notification-service wiring — NTF-001 and NTF-002, the in-app half of ADR-054.
  *
  * ## What is here
  *
  * One consumer group over the two source topics that carry the three
  * supported events, a repository whose two transactions are the whole
  * idempotency story, a resolution worker that calls identity-service on its
- * own clock, and the intake/dedupe metrics.
+ * own clock, the intake/dedupe metrics, and — NTF-002 — the read API over a
+ * person's own in-app rows behind the global guards.
  *
- * ## No `AuthGuard` is registered, and that is still not a hole
+ * ## The guards are global, and the health probes are the only exception
  *
- * The only routes are the two health probes, `@Public` in every service on the
- * platform. The first non-public endpoint arrives with the read API in
- * NTF-002, and the global guard lands with it. `InternalTokenService` is
- * registered for the **outbound** direction only: it mints the `SERVICE` token
- * identity-service verifies.
+ * NTF-002 brings the read API, and with it `AuthGuard` then `RolesGuard`, in
+ * that order: authenticate, then authorize. Registered globally so an endpoint
+ * is closed unless it says otherwise (AGENTS.md S-02), which is why the two
+ * probes carry `@Public` with a stated reason and nothing else does. No route
+ * here carries `@AllowService`: a service has no inbox. `InternalTokenService`
+ * therefore serves two directions — it mints the `SERVICE` token
+ * identity-service verifies, and it lets `AuthGuard` recognise (and refuse) a
+ * service token on the inbox.
  *
  * ## No outbox, still
  *
@@ -67,7 +79,7 @@ import {
  * be mistaken for working.
  */
 @Module({
-  controllers: [HealthController],
+  controllers: [HealthController, NotificationController],
   providers: [
     { provide: ENV, useFactory: (): NotificationEnv => loadNotificationEnv() },
 
@@ -109,6 +121,8 @@ import {
     },
 
     NotificationRepository,
+    InAppRepository,
+    NotificationApiService,
 
     {
       provide: InternalTokenService,
@@ -119,6 +133,23 @@ import {
           env.INTERNAL_TOKEN_ISSUER,
           env.INTERNAL_TOKEN_TTL_SECONDS,
         ),
+    },
+
+    {
+      provide: AUTH_OPTIONS,
+      inject: [ENV, InternalTokenService],
+      useFactory: (
+        env: NotificationEnv,
+        internalTokens: InternalTokenService,
+      ): AuthGuardOptions => ({
+        serviceName: SERVICE_NAME,
+        tokenVerifier: new TokenVerifier({
+          jwksUri: env.OIDC_JWKS_URI,
+          issuer: env.OIDC_ISSUER_URL,
+          audience: env.OIDC_AUDIENCE,
+        }),
+        internalTokens,
+      }),
     },
 
     {
@@ -197,6 +228,10 @@ import {
         ),
     },
 
+    // Authenticate, then authorize. Global, so an endpoint is closed unless it
+    // opts out with `@Public` (AGENTS.md A-12, S-02).
+    { provide: APP_GUARD, useClass: AuthGuard },
+    { provide: APP_GUARD, useClass: RolesGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
 })

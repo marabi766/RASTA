@@ -26,7 +26,14 @@ const FORBIDDEN_LABELS = [
   'subject_id',
 ];
 
-const ALLOWED_LABELS = new Set(['event_name', 'rule_key', 'channel', 'status', 'reason']);
+const ALLOWED_LABELS = new Set([
+  'event_name',
+  'rule_key',
+  'channel',
+  'status',
+  'reason',
+  'transition',
+]);
 
 describe('notification metrics carry no identifying labels', () => {
   const ours = () =>

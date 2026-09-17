@@ -118,3 +118,20 @@ export const RESOLUTION_FAILURE_REASONS = {
 
 export type ResolutionFailureReason =
   (typeof RESOLUTION_FAILURE_REASONS)[keyof typeof RESOLUTION_FAILURE_REASONS];
+
+/**
+ * NTF-002. State changes a person makes to their own in-app rows, by kind.
+ * `transition` is a closed three-value set; no id, no user, no tenant.
+ */
+export const notificationInAppTransitionsTotal = new Counter({
+  name: 'rasta_notification_in_app_transitions_total',
+  help: 'In-app notification state transitions made through the read API',
+  labelNames: ['transition'] as const,
+  registers: [registry],
+});
+
+export const IN_APP_TRANSITIONS = {
+  READ: 'READ',
+  DISMISSED: 'DISMISSED',
+  READ_ALL: 'READ_ALL',
+} as const;

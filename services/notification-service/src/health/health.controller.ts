@@ -1,4 +1,5 @@
 import { Controller, Get, HttpStatus, Res, VERSION_NEUTRAL } from '@nestjs/common';
+import { ApiExcludeController } from '@nestjs/swagger';
 import { Public } from '@rasta/nest-common';
 import type { Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
@@ -33,6 +34,11 @@ import { SERVICE_NAME } from '../config/env';
  * probe says which channel it means rather than letting "delivers" be read
  * as more than it is.
  */
+// Not in the published contract: the probes are orchestrator plumbing on the
+// internal network, and `enrichOpenApiDocument()` stamps bearer security on
+// every operation it finds — publishing two `@Public` routes as protected
+// would be a contract that contradicts the router.
+@ApiExcludeController()
 @Controller({ path: 'health', version: VERSION_NEUTRAL })
 export class HealthController {
   private readonly startedAt = Date.now();
