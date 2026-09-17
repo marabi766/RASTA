@@ -54,7 +54,10 @@ describe('recipient resolution failure and recovery', () => {
     );
 
     w.recipients.failWith = new RecipientResolutionError('UNREACHABLE', 'identity is down');
-    await expect(w.worker.tick()).resolves.toBe(1);
+    // The claim is cross-tenant by design, so on a shared broker another
+    // suite's intents may ride along in the same tick; every assertion below
+    // is on this organization's rows, never on the tick's count.
+    await expect(w.worker.tick()).resolves.toBeGreaterThanOrEqual(1);
 
     let rows = await rowsFor(w.prisma, organizationId);
     let intent = rows.intents[0]!;
@@ -68,8 +71,13 @@ describe('recipient resolution failure and recovery', () => {
     expect(rows.deliveries).toHaveLength(0);
     expect(rows.inApp).toHaveLength(0);
 
-    // Not due yet, so a second tick claims nothing.
-    await expect(w.worker.tick()).resolves.toBe(0);
+    // Not due yet, so a second tick leaves it exactly as it was.
+    await w.worker.tick();
+    expect((await rowsFor(w.prisma, organizationId)).intents[0]).toMatchObject({
+      status: 'PENDING',
+      resolutionAttempts: 1,
+      claimToken: null,
+    });
 
     // Make it due again, with identity still down: the count climbs.
     await runUnscoped('the test makes a deferred intent due immediately', () =>
@@ -79,7 +87,7 @@ describe('recipient resolution failure and recovery', () => {
       }),
     );
     w.recipients.failWith = new RecipientResolutionError('REFUSED', 'identity answered 503');
-    await expect(w.worker.tick()).resolves.toBe(1);
+    await expect(w.worker.tick()).resolves.toBeGreaterThanOrEqual(1);
     intent = (await rowsFor(w.prisma, organizationId)).intents[0]!;
     expect(intent.resolutionAttempts).toBe(2);
     expect(intent.lastResolutionError).toBe('REFUSED');
@@ -95,7 +103,7 @@ describe('recipient resolution failure and recovery', () => {
         data: { nextResolutionAt: null },
       }),
     );
-    await expect(w.worker.tick()).resolves.toBe(1);
+    await expect(w.worker.tick()).resolves.toBeGreaterThanOrEqual(1);
 
     rows = await rowsFor(w.prisma, organizationId);
     intent = rows.intents[0]!;

@@ -65,7 +65,13 @@ describe('tenant isolation', () => {
     const rowsB = await rowsFor(w.prisma, b);
     expect(rowsA.inApp.map((row) => row.userId)).toEqual([userA]);
     expect(rowsB.inApp.map((row) => row.userId)).toEqual([userB]);
-    expect(w.recipients.queries.map((query) => query.organizationId).sort()).toEqual([a, b].sort());
+    // Resolution asked identity about each tenant separately. Other suites'
+    // intents may be claimed by the same (cross-tenant) worker, so only the
+    // queries for these two tenants are counted.
+    const asked = w.recipients.queries
+      .map((query) => query.organizationId)
+      .filter((organizationId) => organizationId === a || organizationId === b);
+    expect(asked.sort()).toEqual([a, b].sort());
   });
 
   it("a list issued as tenant A contains none of tenant B's rows — asserted on the body", async () => {
