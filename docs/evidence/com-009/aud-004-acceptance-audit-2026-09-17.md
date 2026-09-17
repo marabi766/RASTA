@@ -104,6 +104,10 @@ Legend:
 **Ops is "none" for every row**: nothing is deployed, and alerting exists only in local Prometheus. **PO is "none" for
 every row.**
 
+> **Addendum 2026-09-17 (same day, later in the branch):** rows 1a, 5 and 11 were written before AUD-004 Phase C11
+> existed. Phase C11 has since been implemented on this branch; what changed, and what did **not**, is in § 7. The table
+> itself is left as the dated snapshot it was.
+
 ### 4.1 AUD-004 — plan § 5 Given/When/Then and § 7 gate
 
 | #   | Criterion (source)                                                                                                                                | Scope | Implementation                                                                                                                                                                                                                                                        | Executable proof (CI `35222180680` unless noted)                                                                                                                                                                                                                                                                                                                                         | Gap                                                                                                                                                                                                                                                                       |
@@ -174,6 +178,9 @@ identity-service. Reuse the existing capture, aggregation, outbox, relay and con
 **Alternative that avoids the engineering task:** the product owner records a dated decision that service-token refusals
 belong with R-2. Rows 1a, 5 and 11 then become OOS, and the verdict becomes (B).
 
+> **Status 2026-09-17:** this task was carried out on this branch — see § 7. The alternative was not taken, and no
+> product-owner decision was recorded.
+
 ## 6. Review decisions the product owner must still make, even after § 5
 
 1. Separate the product PR at `eca638d` per § 2, or review PR #44 as a whole.
@@ -184,3 +191,41 @@ belong with R-2. Rows 1a, 5 and 11 then become OOS, and the verdict becomes (B).
 5. Accept that Trivy, Alertmanager, production scrape, broker authentication and export are post-merge or deployment
    proofs, or name their owners.
 6. The identity coverage bar (docs/14: 90 %) and the committed identity OpenAPI document.
+
+## 7. Phase C11 closure note (2026-09-17, later the same day)
+
+The blocker of § 5 was closed by an engineering change on this branch, not by a decision. The audit's verdict about
+**acceptance** is unchanged: COM-009 / AUD-004 stays unaccepted, ADR-053 and ADR-055 stay `Proposed`, the 13 points stay
+unawarded, and Ops and PO proof stay **none** for every row.
+
+**What was implemented.** The tenth refusal site, `SERVICE_CALLER_FORBIDDEN`: the platform `AuthGuard`'s `403 FORBIDDEN`
+for a caller whose internal `SERVICE` token the guard itself verified — either because the endpoint carries no
+`@AllowService`, or because its allowlist excludes the caller. Route-agnostic, like `AUTH_TENANT_MISMATCH`, and the
+first site whose actor is not a human: `actorType = SERVICE`, `actorId` and `resourceId` = the token's signed subject,
+`actorRoles = ['SERVICE']` (code-authored — a service token carries no role claim). The tenant is the token's **signed**
+`org_id`; a platform-wide token with none is recorded as a platform row (`organizationId = null`). The unsigned
+`X-Organization-Id` is never read for attribution. Action, resource type, reason and the null-tenant policy are a
+Temporary Decision, recorded as **Q-55** in `docs/24-open-questions.md` before being relied on.
+
+**Exact proof, all executed locally on 2026-09-17 (not a CI run):**
+
+| Proof                                                                                   | Result                                                                                                                                                                                                                                                                                                                                             |
+| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/nest-common` unit (incl. new `src/guards/auth.guard.service-refusal.spec.ts`) | 9 suites / **167 tests passed** — the seam fires for both post-verification `FORBIDDEN` decisions and for nothing else; observer throw/rejection/absence cannot change the error or the decision                                                                                                                                                   |
+| identity unit (incl. `refusal-sites`, `refusal-capture`, `auth-guard-refusal`)          | 20 suites / **778 tests passed** — ten sites, discriminated `USER \| SERVICE` attribution, fail-closed validation, aggregation-key isolation, nullable platform tenant, no request-controlled value                                                                                                                                                |
+| identity integration `test/security-event-auth-guard.int-spec.ts`                       | **11 tests passed** — the row (`SERVICE` / `fleet-service` / `['SERVICE']` / `FORBIDDEN` / signed tenant), byte-identical `403`, `row_to_json` free of token, cookie, header, URL and message; and a **failed-capture** case (store throws) that returns the identical `403` and writes nothing                                                    |
+| identity integration, whole project                                                     | 6 suites / **95 tests passed**, zero skipped; exclusive aggregation-stress suite **22 passed**                                                                                                                                                                                                                                                     |
+| identity integration `test/security-event-kafka.int-spec.ts`                            | **12 tests passed** — one contract-valid `rasta.audit.trail.v1` event with `occurrenceCount = 3`, `actor {type: SERVICE, id, roles: ['SERVICE']}`, `REFUSED`, `FORBIDDEN`; the platform-token event carries no `tenantId` and no `organizationId`; a user refusal, another service and another tenant in the same window stay four separate events |
+| `@rasta/nest-common` and identity typecheck, lint, build                                | all green                                                                                                                                                                                                                                                                                                                                          |
+
+**What this closes, and what it does not.**
+
+- **Row 1a** now covers **ten** sites; the reachable `FORBIDDEN` is recorded. Row **5** loses its "9 recorded sites"
+  qualifier for the same reason.
+- **Row 11** is now half closed: `FORBIDDEN` is implemented and proven; `SERVICE_TENANT_CONTEXT_INVALID` remains
+  **unreachable** on identity, and deliberately so — no `@AllowService` endpoint was invented to make it reachable. It
+  still needs the decision named in § 6.3.
+- **Unchanged:** the audit event contract, the database schema and every migration; the recorder, aggregation, relay,
+  envelope, consumer and runbook; R-2 scope; the gateway-first caveat; and every other unresolved item in § 4 and § 6.
+- **Not claimed:** any deployed or operational proof, any product-owner acceptance, any CI result for this change beyond
+  what the PR's own checks report after it is pushed.

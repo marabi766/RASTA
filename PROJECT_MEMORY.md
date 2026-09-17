@@ -1296,6 +1296,19 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 > **وجود ندارد**. PR #44 تنها حامل AUD-004 است؛ طرح جداسازی بی‌تخریب: شاخهٔ تازه روی `eca638d` (CI `34876451873` سبز).
 > ADR-055 در `Proposed / NO-GO` متوقف شد. `COM-009` همچنان `READY`/۱۳؛ ADR-053 و ADR-055 `Proposed`.
 >
+> **به‌روزرسانی 2026-09-17 (AUD-004 Phase C11 — ثبت `403 FORBIDDEN`ِ فراخوانِ سرویسِ تأییدشده در identity):** مانع
+> قابل‌دسترسِ ممیزی بالا بسته شد. `identity-service` اکنون **ده** محل رد دارد؛ محل تازه `SERVICE_CALLER_FORBIDDEN` است:
+> Route-agnostic، `action = identity.service_call.authorize`، `resourceType = Service`، Actor از نوع **`SERVICE`** با
+> شناسهٔ سرویسِ فراخوان (Subjectِ امضاشدهٔ Token) و `actorRoles = ['SERVICE']`ِ کد-نوشته، مستأجر از `org_id`ِ **امضاشده** و
+> برای Tokenِ پلتفرم‌گستر ردیف پلتفرمی (`organizationId = null`). `AuthGuardOptions` در `@rasta/nest-common` درز عمومی دوم
+> گرفت (`onServiceAuthorizationRefusal`) با همان تضمین‌های درز اول؛ تمام سیاست حسابرسی در identity ماند (A-03) و هیچ
+> سرویس دیگری تغییر رفتار نداد. انتساب مورد اعتماد حالا Union تفکیک‌شدهٔ `USER | SERVICE` است و `decideCapture` هرگز یکی
+> را به‌جای دیگری نمی‌خواند. **قرارداد رویداد، Schema و Migration دست نخوردند** (قرارداد v1 از پیش Actorِ `SERVICE` و رویداد
+> بی‌مستأجر را می‌پذیرد). تصمیم موقت در `docs/24-open-questions.md` **Q-55** ثبت شد. شواهدِ اجراشده: nest-common ۹/۱۶۷،
+> واحد identity ۲۰/۷۷۸، یکپارچگی identity ۶ Suite/۹۵ تست (auth-guard ۱۱، Kafka ۱۲) و Suite انحصاری تجمیع ۲۲ — همه سبز،
+> شامل شکستِ ثبت که همان `403` را بی‌تغییر برمی‌گرداند. `SERVICE_TENANT_CONTEXT_INVALID` همچنان در identity دست‌نیافتنی
+> است و عمداً Endpointی برایش ساخته نشد. `COM-009` همچنان `READY`/۱۳ و پذیرفته نشده؛ ADR-053 و ADR-055 `Proposed`.
+>
 > **به‌روزرسانی 2026-09-13 (Seriesهای صفر برای هشدارهای شمارنده — رفع نقطهٔ کور نخستین افزایش):** `prom-client` Series
 > برچسب‌دار را فقط با نخستین مقدار صادر می‌کند، پس نخستین رخدادِ هر ترکیب پس از شروع فرایند با ۱ متولد و از `increase` پنهان
 > می‌ماند. اکنون هر ترکیب کرانداری که هشداری را می‌راند با `inc(labels, 0)` از پیش با صفر صادر می‌شود (صفر اضافه می‌کند، پس
