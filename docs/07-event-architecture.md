@@ -339,6 +339,7 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 | `ORDER_COMPLETED`                   | marketplace | supplier (امتیاز) · asset · analytics                         |
 | `ORDER_CANCELLED`                   | marketplace | inventory (آزادسازی) · notification                           |
 | `ORDER_DISPUTED`                    | marketplace | notification · supplier · analytics                           |
+| `ORDER_DISPUTE_RESOLVED`            | marketplace | supplier (امتیاز)                                             |
 | `REVIEW_SUBMITTED`                  | marketplace | supplier (امتیاز) · analytics                                 |
 | `DEMAND_SUBMITTED`                  | procurement | analytics                                                     |
 | `DEMAND_AGGREGATED`                 | procurement | notification · analytics                                      |
@@ -355,15 +356,23 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 
 > **`PERFORMANCE_SCORE_UPDATED` هنوز منتشر نمی‌شود.** فرمول امتیاز در
 > 2026-09-07 تصویب شد ([ADR-052](adr/ADR-052-supplier-performance-scoring.md)،
-> بستن Q-12) اما Supplier Phase 2 شروع نشده. تا آن روز هیچ تولیدکننده‌ای این
-> رویداد را منتشر نمی‌کند و marketplace تأمین‌کننده را `UNRATED` نشان می‌دهد —
-> **هیچ رتبه‌ای اختراع نمی‌شود**.
+> بستن Q-12) و COM-005 گام ۱ (تولیدکننده‌ها، در marketplace) از سه زیرگام
+> پیاده شد — اما `supplier-service` دست‌نخورده ماند و هیچ جدول امتیاز، نسخهٔ
+> فرمول یا Consumeری برای این تولیدکننده‌ها ساخته نشده (گام‌های ۲ تا ۸ برنامه).
+> تا آن روز هیچ‌کس این رویداد را منتشر نمی‌کند و marketplace تأمین‌کننده را
+> `UNRATED` نشان می‌دهد — **هیچ رتبه‌ای اختراع نمی‌شود**.
 >
 > در جهت مخالف هم: از شش رویدادی که کاتالوگ برای مصرف supplier نام می‌برد،
 > `CONTRACT_COMPLETED` و `CONTRACTOR_RATED` هیچ تولیدکننده‌ای ندارند
-> (`contract-service` و `construction-service` وجود ندارند)، و
-> `ORDER_DISPUTED`/`ORDER_CANCELLED` انتساب ساخت‌یافتهٔ مسئولیت ندارند، پس زیر
-> قاعدهٔ ۱۳ ADR-052 قابل شمارش نیستند. جزئیات در ADR-052 § ۲.
+> (`contract-service` و `construction-service` وجود ندارند). `ORDER_CANCELLED`
+> و رویداد تازهٔ `ORDER_DISPUTE_RESOLVED` اکنون انتساب ساخت‌یافتهٔ مسئولیت
+> دارند (`cancellationCause` / `responsibility`، enum بسته:
+> `SUPPLIER | BUYER | PLATFORM | UNDETERMINED`) — قاعدهٔ ۱۳ ADR-052 دیگر آن دو
+> را منع نمی‌کند، وقتی Consumer‌ای برایشان ساخته شود. `ORDER_DISPUTED` (طرح
+> اختلاف، نه حلش) هنوز نتیجه‌ای ندارد و همچنان زیر قاعدهٔ ۱۳ قابل شمارش نیست.
+> سیگنال کیفیت (۳۰٪ وزن) پاسخ‌نداده مانده (Q-56)، پس پوشش حداکثر ۷۰٪ است — از
+> حد ۵۰٪ قاعدهٔ ۱۵ عبور می‌کند. جزئیات در ADR-052 § ۲ و
+> `docs/adr/ADR-052-implementation-plan.md` § گام ۱.
 
 **مرز مالی واقعی بازارگاه.** Hold، تأیید تسویه، Refund و Settlement با فرمان
 سرویس‌به‌سرویس احراز‌شده از Activityهای Temporal انجام می‌شوند؛ economic رویدادهای
