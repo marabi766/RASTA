@@ -1,6 +1,6 @@
 # ADR-054 — برنامهٔ پیاده‌سازی (notification-service)
 
-- **وضعیت:** برنامه — **NTF-001 پیاده شده و در PR پیش‌نویس (2026-09-17)؛ پذیرش نشده.** NTF-002 تا NTF-005 شروع نشده.
+- **وضعیت:** برنامه — **NTF-001 و NTF-002 پیاده شده و در PR پیش‌نویس (2026-09-17)؛ پذیرش نشده.** NTF-003 تا NTF-005 شروع نشده.
 - **مرجع تصمیم:** [ADR-054](ADR-054-notification-service-delivery.md)
 - **قلم مرتبط:** `COM-008` — **`READY` می‌ماند و ۱۳ امتیازش دست نمی‌خورد** تا همهٔ گام‌های زیر پیاده و پذیرفته شوند.
 - **پیش‌نیاز مشترک:** [گام صفر — ثبت مشترک](ADR-053-implementation-plan.md#گام-صفر--ثبت-مشترک-پیشنیاز-هر-دو-بدون-story-point) در برنامهٔ ADR-053. **باید اتمیک و پیش از این شاخه فرود بیاید.**
@@ -100,6 +100,16 @@ Endpoint `@Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')` دارد و هیچ `@Allo
 مالکیت سطح Object؛ صفحه‌بندی Cursor (`limit` پیش‌فرض ۲۵، حداکثر ۲۰۰، بالاتر → `VALIDATION_FAILED`)؛ OpenAPI تولیدشده،
 Commit‌شده و **تست‌شده**؛ راستی‌آزمایی مسیر Gateway.
 **وابستگی:** NTF-001.
+
+> **پیاده‌سازی 2026-09-17** (شاخهٔ `feat/notification-read-api`، روی `feat/notification-service`): هر شش Endpoint پشت
+> `AuthGuard` + `RolesGuard` سراسری، بدون هیچ `@Public`/`@AllowService`/`@Roles`؛ گزارهٔ مالکیت
+> `userId = ctx.userId AND organizationId = ctx.organizationId` در هر Query؛ Cursor مبهم `(createdAt, id)` بدون Scope و با
+> بررسی رفت‌وبرگشت (Cursor دستکاری‌شده → `VALIDATION_FAILED`)؛ فیلتر `state=UNREAD|READ|DISMISSED`؛ ردیف منقضی همه‌جا نامرئی.
+> قرارداد در `docs/api/notification-service.openapi.json` Commit شده و `test/openapi.int-spec.ts` آن را با برنامهٔ واقعی
+> مقایسه می‌کند. Migration `20260917150000_in_app_read_state_write_once`: `read_at`/`dismissed_at` یک‌بارنویس در پایگاه داده.
+> **رکورد حسابرسی برای read/dismiss منتشر نمی‌شود**: این سرویس تا NTF-004 Outbox ندارد و کاتالوگ چنین رویدادی ندارد؛ هر گذار
+> در Log ساخت‌یافته (با Correlation، مستأجر، کاربر) و متریک `rasta_notification_in_app_transitions_total` ثبت می‌شود و خودِ
+> ردیف — با Trigger یک‌بارنویس — رکورد «چه کسی، کِی» است. تصمیم دربارهٔ رویداد `NOTIFICATION_READ`، اگر لازم شد، با NTF-004.
 
 ## ۴. NTF-003 — ترجیحات با سیاست اعلان الزامی
 
