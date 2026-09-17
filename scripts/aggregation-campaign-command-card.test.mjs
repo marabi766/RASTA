@@ -16,7 +16,12 @@
  * On Windows only, the exact quoted commands are also run through `cmd.exe`
  * with `pnpm`, over absolute paths with spaces in a test-owned temporary
  * directory that names no manifest that exists; each must stop at its manifest
- * contract (exit `2`), not at a usage error from a split argument.
+ * contract (exit `2`), not at a usage error from a split argument. A package
+ * manager preflight comes first: a `pnpm` that cmd.exe resolves is preferred;
+ * otherwise the Corepack launcher next to the active Node executable is exposed
+ * as a test-owned `pnpm.cmd` shim on a PATH prepended for child processes only.
+ * Each spawn is checked for a runner failure (shell, timeout, unresolved pnpm,
+ * script not started) with fixed sentences before its output is judged.
  *
  * Offline and manual: run it directly with `node --test`. It reads the runbook,
  * `package.json` and the CI and test-phase definitions. The in-process CLI runs
@@ -28,7 +33,15 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix, resolve, win32 } from 'node:path';
 import process from 'node:process';
@@ -1102,19 +1115,310 @@ test('card drift: wrong script, option, order, missing argument, swapped roles o
 /** Every entry under `root`, relative and sorted, so an added or removed entry is seen. */
 const listTree = (root) => readdirSync(root, { recursive: true }).map(String).sort();
 
+/** The pnpm version `package.json` declares in `packageManager`. */
+const declaredPnpmVersion = (pkg) => /^pnpm@(\d+\.\d+\.\d+)$/.exec(pkg.packageManager ?? '')?.[1];
+
+/** The one fixed failure when no usable pnpm exists; it names the prerequisite, never a path. */
+const RUNNER_UNAVAILABLE =
+  'runner boundary: no usable pnpm - neither `pnpm` resolved by cmd.exe nor the Corepack launcher of the active Node installation reports the pnpm version declared in package.json';
+
+/** Fixed runner-boundary failures of one shell spawn; none of them carries output or a path. */
+const RUNNER_FAILURE = Object.freeze({
+  spawn: 'runner boundary: cmd.exe could not be started',
+  stopped: 'runner boundary: the command timed out or was stopped by a signal',
+  noStatus: 'runner boundary: the command ended without a numeric exit status',
+  notFound: 'runner boundary: cmd.exe could not resolve pnpm',
+  noScript: 'runner boundary: pnpm did not start the package script',
+});
+
+/** A launcher path this test will quote into a `.cmd` file: absolute, plain, and `corepack.cmd`. */
+const PLAIN_LAUNCHER = /^[A-Za-z]:\\[A-Za-z0-9 _.()~\\-]+\\corepack\.cmd$/;
+
+/**
+ * The Corepack launcher installed next to the active Node executable, or
+ * `null` when it is absent or its path is not plain enough to quote. Only
+ * `process.execPath` is used: no caller supplies a runner path.
+ */
+const corepackLauncherFor = (execPath, exists) => {
+  const launcher = win32.join(win32.dirname(execPath), 'corepack.cmd');
+  return PLAIN_LAUNCHER.test(launcher) && exists(launcher) ? launcher : null;
+};
+
+/**
+ * Chooses the package manager for the boundary run. A directly resolved pnpm
+ * is preferred; otherwise the Corepack launcher. Each is usable only when its
+ * probe reports exactly the declared version. Probes return trimmed version
+ * text or `null`, and are injected so the choice is testable without the host.
+ */
+function selectPackageManager({ declaredVersion, probeDirect, corepackLauncher, probeCorepack }) {
+  if (declaredVersion === undefined) return { ok: false, diagnostic: RUNNER_UNAVAILABLE };
+  if (probeDirect() === declaredVersion) return { ok: true, kind: 'direct' };
+  if (corepackLauncher !== null && probeCorepack(corepackLauncher) === declaredVersion) {
+    return { ok: true, kind: 'corepack', launcher: corepackLauncher };
+  }
+  return { ok: false, diagnostic: RUNNER_UNAVAILABLE };
+}
+
+/**
+ * The test-owned `pnpm.cmd`: one line that hands every argument, unchanged, to
+ * `"<corepack.cmd>" pnpm`. No block, no `call`, so `%*` is expanded once and
+ * the launcher's exit code is the shim's.
+ */
+const pnpmShimText = (launcher) => {
+  assert.ok(PLAIN_LAUNCHER.test(launcher), 'the Corepack launcher path is plain');
+  return `@"${launcher}" pnpm %*\r\n`;
+};
+
+/** A copy of `env` with `dir` prepended to its one PATH entry; `env` itself is untouched. */
+const childEnvWithPathPrefix = (env, dir) => {
+  const key = Object.keys(env).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH';
+  return { ...env, [key]: env[key] ? `${dir};${env[key]}` : dir };
+};
+
 /**
  * Runs one full command line through the shell Node uses on Windows (`cmd.exe
- * /d /s /c`), from the repository root as the card's `pnpm run` expects. The
- * output is returned to the caller only; it is never printed, because pnpm
- * echoes the forwarded arguments.
+ * /d /s /c`), from the repository root as the card's `pnpm run` expects, with
+ * the given child environment. The output is returned to the caller only; it
+ * is never printed, because pnpm echoes the forwarded arguments.
  */
-const runThroughCmd = (command) =>
-  spawnSync(command, { cwd: repoRoot, shell: true, encoding: 'utf8', timeout: 120_000 });
+const runThroughCmd = (command, env) =>
+  spawnSync(command, { cwd: repoRoot, env, shell: true, encoding: 'utf8', timeout: 120_000 });
+
+/** Trimmed stdout of a successful `--version` run, or `null`. */
+const versionOf = (result) =>
+  result.error === undefined && result.status === 0 ? result.stdout.trim() : null;
+
+/**
+ * Separates a runner failure from the tool's own result: `null` when cmd.exe
+ * started, pnpm was found, and pnpm started the step's script file; otherwise
+ * one fixed `RUNNER_FAILURE` sentence. stderr is only matched, never returned.
+ */
+function runnerFailure(result, scriptFile) {
+  if (result.error !== undefined && result.error?.code !== 'ETIMEDOUT') return RUNNER_FAILURE.spawn;
+  if (result.error?.code === 'ETIMEDOUT' || result.signal) return RUNNER_FAILURE.stopped;
+  if (typeof result.status !== 'number') return RUNNER_FAILURE.noStatus;
+  const stderr = typeof result.stderr === 'string' ? result.stderr : '';
+  if (/is not recognized as an internal or external command/.test(stderr)) {
+    return RUNNER_FAILURE.notFound;
+  }
+  // pnpm announces the script it starts on stderr as `$ node <file> <args>`.
+  const started = stderr.split(/\r?\n/).some((line) => line.startsWith(`$ node ${scriptFile} `));
+  return started ? null : RUNNER_FAILURE.noScript;
+}
+
+/**
+ * Prepares the package manager, then, and only then, runs the commands `ids` name, in order.
+ * `prepare` returns `selectPackageManager`'s result plus the child `env`;
+ * `run(id, env)` launches one command. A failed preparation throws the fixed
+ * diagnostic before any command is launched.
+ */
+function runAfterRunnerPreflight({ prepare, run, ids }) {
+  const runner = prepare();
+  if (!runner.ok) assert.fail(runner.diagnostic);
+  return { runner, results: ids.map((id) => run(id, runner.env)) };
+}
+
+test('card runner resolution: direct pnpm is preferred, Corepack is the fallback, and an unusable runner fails first with a fixed diagnostic', () => {
+  const declaredVersion = declaredPnpmVersion(packageJson());
+  assert.equal(declaredVersion, '11.22.0', 'package.json declares the pnpm version');
+  const launcher = 'C:\\Program Files\\nodejs\\corepack.cmd';
+
+  const calls = [];
+  const probe = (name, answer) => (argument) => {
+    calls.push(name);
+    if (argument !== undefined) assert.equal(argument, launcher);
+    return answer;
+  };
+  assert.deepEqual(
+    selectPackageManager({
+      declaredVersion,
+      probeDirect: probe('direct', declaredVersion),
+      corepackLauncher: launcher,
+      probeCorepack: probe('corepack', declaredVersion),
+    }),
+    { ok: true, kind: 'direct' },
+  );
+  assert.deepEqual(calls, ['direct'], 'a usable direct pnpm is not second-guessed');
+
+  for (const directAnswer of [null, '10.0.0']) {
+    calls.length = 0;
+    assert.deepEqual(
+      selectPackageManager({
+        declaredVersion,
+        probeDirect: probe('direct', directAnswer),
+        corepackLauncher: launcher,
+        probeCorepack: probe('corepack', declaredVersion),
+      }),
+      { ok: true, kind: 'corepack', launcher },
+      `fallback when direct pnpm answers ${directAnswer}`,
+    );
+    assert.deepEqual(calls, ['direct', 'corepack']);
+  }
+
+  for (const [label, options] of [
+    ['no launcher', { corepackLauncher: null, probeCorepack: probe('corepack', declaredVersion) }],
+    ['launcher fails', { corepackLauncher: launcher, probeCorepack: probe('corepack', null) }],
+    ['launcher wrong', { corepackLauncher: launcher, probeCorepack: probe('corepack', '9.9.9') }],
+  ]) {
+    assert.deepEqual(
+      selectPackageManager({ declaredVersion, probeDirect: probe('direct', null), ...options }),
+      { ok: false, diagnostic: RUNNER_UNAVAILABLE },
+      label,
+    );
+  }
+  assert.deepEqual(
+    selectPackageManager({
+      declaredVersion: undefined,
+      probeDirect: probe('direct', '11.22.0'),
+      corepackLauncher: launcher,
+      probeCorepack: probe('corepack', '11.22.0'),
+    }),
+    { ok: false, diagnostic: RUNNER_UNAVAILABLE },
+  );
+
+  // The launcher comes only from the Node executable's own directory, and must be plain and present.
+  const present = () => true;
+  assert.equal(corepackLauncherFor('C:\\Program Files\\nodejs\\node.exe', present), launcher);
+  assert.equal(
+    corepackLauncherFor('C:\\Program Files\\nodejs\\node.exe', () => false),
+    null,
+  );
+  assert.equal(corepackLauncherFor('C:\\odd%dir\\node.exe', present), null);
+  assert.equal(corepackLauncherFor('C:\\odd"dir\\node.exe', present), null);
+  assert.equal(corepackLauncherFor('C:\\a&b\\node.exe', present), null);
+
+  // The shim is one quoted line that forwards every argument.
+  assert.equal(pnpmShimText(launcher), '@"C:\\Program Files\\nodejs\\corepack.cmd" pnpm %*\r\n');
+  assert.throws(() => pnpmShimText('C:\\odd%dir\\corepack.cmd'));
+
+  // The child environment is a copy with only PATH prefixed, under its existing key.
+  const env = Object.freeze({ Path: 'C:\\one;C:\\two', OTHER: 'kept' });
+  assert.deepEqual(childEnvWithPathPrefix(env, 'C:\\shim dir'), {
+    Path: 'C:\\shim dir;C:\\one;C:\\two',
+    OTHER: 'kept',
+  });
+  assert.deepEqual(env, { Path: 'C:\\one;C:\\two', OTHER: 'kept' }, 'the source is untouched');
+
+  // Runner failures are told apart from the tool's result, with fixed sentences only.
+  const file = 'scripts/aggregation-campaign-accounting.mjs';
+  const secret = 'C:\\Users\\someone\\secret dir\\selected reports.list';
+  const started = `$ node ${file} "--" "--reports-manifest" "${secret}"\n`;
+  const outcomes = [
+    [{ error: new Error(secret), status: null, signal: null }, RUNNER_FAILURE.spawn],
+    [
+      {
+        error: Object.assign(new Error(secret), { code: 'ETIMEDOUT' }),
+        status: null,
+        signal: 'SIGTERM',
+      },
+      RUNNER_FAILURE.stopped,
+    ],
+    [{ status: null, signal: 'SIGKILL', stderr: started }, RUNNER_FAILURE.stopped],
+    [{ status: null, signal: null, stderr: started }, RUNNER_FAILURE.noStatus],
+    [
+      {
+        status: 1,
+        signal: null,
+        stderr: "'pnpm' is not recognized as an internal or external command,\r\n",
+      },
+      RUNNER_FAILURE.notFound,
+    ],
+    [{ status: 1, signal: null, stderr: `Usage Error: ${secret}\n` }, RUNNER_FAILURE.noScript],
+    [
+      {
+        status: 1,
+        signal: null,
+        stderr: '$ node scripts/aggregation-campaign-image-cohort.mjs x\n',
+      },
+      RUNNER_FAILURE.noScript,
+    ],
+    [{ status: 2, signal: null, stdout: '', stderr: started }, null],
+  ];
+  for (const [result, expected] of outcomes) {
+    const failure = runnerFailure(result, file);
+    assert.equal(failure, expected);
+    assert.ok(failure === null || !failure.includes('secret'), 'no supplied text is echoed');
+  }
+
+  // An unusable runner stops before any command is launched, with the fixed diagnostic only.
+  const launched = [];
+  assert.throws(
+    () =>
+      runAfterRunnerPreflight({
+        prepare: () => ({
+          ...selectPackageManager({
+            declaredVersion,
+            probeDirect: () => null,
+            corepackLauncher: null,
+            probeCorepack: () => null,
+          }),
+          env: { PATH: secret },
+        }),
+        run: (id) => launched.push(id),
+        ids: CARD_STEPS.map(({ id }) => id),
+      }),
+    (error) => error instanceof assert.AssertionError && error.message === RUNNER_UNAVAILABLE,
+  );
+  assert.deepEqual(launched, [], 'no card command was launched');
+  assert.ok(!RUNNER_UNAVAILABLE.includes(':\\'), 'the diagnostic names no path');
+});
+
+test(
+  'card runner resolution (Windows cmd.exe): the test-owned pnpm.cmd shim forwards the exact pnpm run arguments to its launcher',
+  { skip: process.platform !== 'win32' && 'the cmd.exe boundary exists only on Windows' },
+  () => {
+    const root = mkdtempSync(join(tmpdir(), 'adr-055 runner shim '));
+    try {
+      assert.match(root, /^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$/, 'the temporary root is plain');
+      // A stand-in launcher named corepack.cmd that only reports the arguments it received.
+      assert.match(process.execPath, /^[A-Za-z]:\\[A-Za-z0-9 _.()~\\-]+\\node\.exe$/i);
+      const launcherDir = join(root, 'launcher');
+      const shimDir = join(root, 'shim');
+      mkdirSync(launcherDir);
+      mkdirSync(shimDir);
+      const capture = join(launcherDir, 'capture.mjs');
+      writeFileSync(capture, 'process.stdout.write(JSON.stringify(process.argv.slice(2)));\n');
+      const launcher = join(launcherDir, 'corepack.cmd');
+      writeFileSync(launcher, `@"${process.execPath}" "${capture}" %*\r\n`);
+      writeFileSync(join(shimDir, 'pnpm.cmd'), pnpmShimText(launcher));
+
+      const card = CARD_COMMANDS.recover;
+      const { tokens } = readTemplate(card);
+      const values = {
+        '<new-directory>': join(root, 'operator inputs', 'recovered reports'),
+        '<job-log-manifest>': join(root, 'operator inputs', 'job logs.list'),
+      };
+      const command = renderCommand(tokens, (placeholder) => values[placeholder]);
+      assert.ok(!/[<>|&^%]/.test(command), 'no cmd.exe metacharacter remains');
+
+      const result = runThroughCmd(command, childEnvWithPathPrefix(process.env, shimDir));
+      assert.equal(result.error, undefined, 'cmd.exe started');
+      assert.equal(result.status, 0, 'the stand-in launcher ran through the shim');
+      assert.deepEqual(
+        JSON.parse(result.stdout),
+        [
+          'pnpm',
+          'run',
+          'recover:aggregation-campaign-logs',
+          '--',
+          '--output-dir',
+          values['<new-directory>'],
+          '--logs-manifest',
+          values['<job-log-manifest>'],
+        ],
+        'the shim forwards every argument unchanged, each path whole and without quotes',
+      );
+      assert.ok(!existsSync(join(root, 'operator inputs')), 'nothing was created');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   'card (Windows cmd.exe boundary): the exact quoted commands keep absolute paths with spaces whole and stop at each manifest contract, exit 2; recovery writes nothing',
   { skip: process.platform !== 'win32' && 'the cmd.exe boundary exists only on Windows' },
-  () => {
+  (t) => {
     const root = mkdtempSync(join(tmpdir(), 'adr-055 command card '));
     try {
       // Only characters cmd.exe gives no meaning, so the only quoting in play is the card's.
@@ -1137,16 +1441,11 @@ test(
         'L12-account': `reports manifest: ${unreadable}`,
         'L13-review': `reports manifest: ${unreadable}`,
       };
-      const before = listTree(root);
-      assert.deepEqual(before, ['operator inputs']);
 
       // Only a card that passes the static check is run: a bare `<…>` would be cmd.exe redirection.
       const text = runbookText();
-      assert.deepEqual(
-        checkCommandCard(text, packageJson()),
-        [],
-        'the card passes the static check',
-      );
+      const pkg = packageJson();
+      assert.deepEqual(checkCommandCard(text, pkg), [], 'the card passes the static check');
       const { commands } = markedCommands(cardSection(text));
       assert.equal(commands.length, CARD_STEPS.length);
       const rendered = {};
@@ -1156,36 +1455,83 @@ test(
         rendered[id] = renderCommand(tokens, (placeholder) => values[placeholder]);
         assert.ok(!/[<>|&^%]/.test(rendered[id]), `${id}: no cmd.exe metacharacter remains`);
         assert.ok(rendered[id].length < CMD_EXE_LIMIT, id);
+      }
+      const fileOf = (id) => CARD_STEPS.find((step) => step.id === id).file;
 
-        const result = runThroughCmd(rendered[id]);
-        assert.equal(result.error, undefined, `${id}: the shell started`);
-        const firstLine = result.stdout.split(/\r?\n/)[0];
+      /** The command's result, after proving the runner, not the card, decided nothing. */
+      const runCard = (id, env, command = rendered[id]) => {
+        const result = runThroughCmd(command, env);
+        assert.equal(runnerFailure(result, fileOf(id)), null, `${id}: runner boundary`);
+        return { status: result.status, firstLine: result.stdout.split(/\r?\n/)[0] };
+      };
+
+      // Package-manager preflight, before any card command.
+      const { runner, results } = runAfterRunnerPreflight({
+        prepare: () => {
+          const declaredVersion = declaredPnpmVersion(pkg);
+          const env = { ...process.env };
+          const selected = selectPackageManager({
+            declaredVersion,
+            probeDirect: () => versionOf(runThroughCmd('pnpm --version', env)),
+            corepackLauncher: corepackLauncherFor(process.execPath, existsSync),
+            probeCorepack: (launcher) =>
+              versionOf(runThroughCmd(`"${launcher}" pnpm --version`, env)),
+          });
+          if (!selected.ok || selected.kind === 'direct') return { ...selected, env };
+          const shimDir = join(root, 'pnpm shim');
+          mkdirSync(shimDir);
+          writeFileSync(join(shimDir, 'pnpm.cmd'), pnpmShimText(selected.launcher));
+          const shimmed = childEnvWithPathPrefix(env, shimDir);
+          // The shim itself must answer as pnpm through cmd.exe, exactly as the card calls it.
+          if (versionOf(runThroughCmd('pnpm --version', shimmed)) !== declaredVersion) {
+            return { ok: false, diagnostic: RUNNER_UNAVAILABLE };
+          }
+          return { ...selected, env: shimmed };
+        },
+        run: (id, env) => runCard(id, env),
+        ids: commands.map(({ id }) => id),
+      });
+      t.diagnostic(`package manager: ${runner.kind}`);
+      const fixtures =
+        runner.kind === 'corepack'
+          ? ['operator inputs', 'pnpm shim', join('pnpm shim', 'pnpm.cmd')].sort()
+          : ['operator inputs'];
+      assert.deepEqual(listTree(root), fixtures, 'only the test fixtures exist');
+
+      commands.forEach(({ id }, index) => {
+        const { status, firstLine } = results[index];
         // The tool's fixed sentence names no path; anything else is withheld from the message.
         const shown = Object.values(values).some((value) => firstLine.includes(value))
           ? '<withheld>'
           : firstLine;
         assert.equal(shown, expectedFirstLine[id], `${id}: reached its manifest contract`);
-        assert.equal(result.status, 2, `${id}: manifest-contract exit`);
-        assert.deepEqual(listTree(root), before, `${id}: nothing was written`);
-      }
+        assert.equal(status, 2, `${id}: manifest-contract exit`);
+      });
+      assert.deepEqual(listTree(root), fixtures, 'the card commands wrote nothing');
       assert.ok(!existsSync(values['<new-directory>']), 'no output directory was created');
 
       // Controls: the same boundary visibly misreads the command when the card's rule is broken.
-      const unquoted = runThroughCmd(rendered['L12-account'].replaceAll('"', ''));
+      const unquoted = runCard(
+        'L12-account',
+        runner.env,
+        rendered['L12-account'].replaceAll('"', ''),
+      );
       assert.notEqual(
-        unquoted.stdout.split(/\r?\n/)[0],
+        unquoted.firstLine,
         expectedFirstLine['L12-account'],
         'an unquoted path with spaces is split before the tool sees it',
       );
-      const trailing = runThroughCmd(
+      const trailing = runCard(
+        'L13-review',
+        runner.env,
         rendered['L13-review'].replace(`"${values['<image-cohort-manifest>']}"`, `"${inputs}\\"`),
       );
       assert.notEqual(
-        trailing.stdout.split(/\r?\n/)[0],
+        trailing.firstLine,
         expectedFirstLine['L13-review'],
         'a backslash before the closing quote swallows the rest of the command',
       );
-      assert.deepEqual(listTree(root), before, 'the controls wrote nothing');
+      assert.deepEqual(listTree(root), fixtures, 'the controls wrote nothing');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

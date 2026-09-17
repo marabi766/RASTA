@@ -1701,6 +1701,21 @@ dispatched, downloaded or run on a real input, and no live fact was established.
     supplied path is printed, and the temporary directory is removed.
 - **Not covered.** PowerShell and other shells are not exercised. Paths that contain `"`, `%` or other `cmd.exe`
   metacharacters were not tested.
+- **Correction, later on 2026-09-17 — test-harness hardening, no live evidence.** On a host where `cmd.exe` resolves no
+  `pnpm`, although the repository-declared pnpm works through Corepack, the Windows smoke test failed 7/8. It reported
+  an empty first line at `L11-recover` as a missed manifest contract, when in fact `pnpm` had never started. The test
+  now:
+  - runs a package-manager preflight before any card command. A `pnpm` resolved by `cmd.exe` is preferred. Otherwise
+    the Corepack launcher next to the active Node executable is used, through a test-owned `pnpm.cmd` shim under the
+    test's temporary directory, on a PATH prepended for child processes only. Either must report the pnpm version
+    declared in `package.json`; if neither does, the test fails once with a fixed diagnostic;
+  - checks every spawn for a runner failure before judging its output: the shell not starting, a timeout or signal,
+    no numeric exit status, `pnpm` not resolved, or pnpm not starting the step's script. Each failure is reported with
+    a fixed sentence and no path or raw output;
+  - counts the shim in its zero-write baseline, and covers runner selection, shim argument forwarding and the
+    fail-first diagnostic with focused cases.
+
+  The test file now has 10 tests. The card commands, § 13 and every readiness row are unchanged.
 
 **Status.** This correction establishes no live fact. **Row 9 stays `UNVERIFIED`, row 10 `BLOCKED`, row 11
 `UNVERIFIED`, and rows 2, 6, 7 and 8 unresolved. The verdict stays NO-GO.**
