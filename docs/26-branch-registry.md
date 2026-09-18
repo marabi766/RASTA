@@ -55,12 +55,12 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                                | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                                |
-| ----------------------------------- | ------------------------------------------------ | ---- | --- | -------------- | ------------------------------------------------------------------------------------ |
-| `docs/ci-serialization-and-backlog` | `F:\Rasta-Parallel\docs-branch-registry`         | C0   | —   | ۰ / ۰          | قاعدهٔ سریالی‌بودن ادغام‌ها + تازه‌سازی `planning/backlog.json`                      |
-| `docs/audit-immutable-archive`      | `F:\Rasta-Parallel\audit-immutable-archive-docs` | —    | —   | ۱ / ۱۶۷        | **متوقف، نیازمند اقدام:** `ADR-055` تکراری دارد (باید `ADR-057` شود) و یک `Q-44` سوم |
-| `demo/investor-preview`             | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید         |
-| `design/claude-design`              | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                |
+| شاخه                           | Worktree                                         | نشست | PR                                                | ahead / behind | وضعیت                                                                        |
+| ------------------------------ | ------------------------------------------------ | ---- | ------------------------------------------------- | -------------- | ---------------------------------------------------------------------------- |
+| `feat/web-foundation`          | `F:\Rasta-Parallel\exp-001-web-foundation`       | C0   | —                                                 | ۰ / ۰          | `EXP-001` PR الف — Workspace `apps/web` و زنجیرهٔ کیفیت (`ADR-058`)          |
+| `docs/audit-immutable-archive` | `F:\Rasta-Parallel\audit-immutable-archive-docs` | C0   | [#53](https://github.com/marabi766/RASTA/pull/53) | — / ۰          | بازشماری به `ADR-057` و `Q-58` انجام شد؛ منتظر CI                            |
+| `demo/investor-preview`        | `F:\Rasta-Parallel\investor-demo`                | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
+| `design/claude-design`         | پوشهٔ موقت در `%TEMP%`                           | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
 
 ## شاخه‌های بازنشسته
 
@@ -141,7 +141,8 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 | ۰۵۵   | `feat/audit-service-aud-004-contract` | روی `main` (`9fa75cc`)                                      |
 | ۰۵۶   | `docs/inventory-logistics-adr`        | روی `main` (`f2eb8fa`)                                      |
 | ۰۵۷   | `docs/audit-immutable-archive`        | **رزرو** — شاخه هنوز به‌غلط ۰۵۵ را دارد و باید بازشماری کند |
-| ۰۵۸+  | آزاد                                  | —                                                           |
+| ۰۵۸   | `feat/web-foundation`                 | مصرف شد — جای پورتال وب و مرز Design System                 |
+| ۰۵۹+  | آزاد                                  | —                                                           |
 
 ### پرسش‌های باز `Q-NN`
 

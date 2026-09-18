@@ -1,0 +1,13 @@
+@import 'tailwindcss';
+
+/*
+ * The design tokens of docs/16 § 16.4 — brand and neutral ramps, semantic
+ * colours, surfaces, the 1.25 type scale, the 4px spacing base, radii, shadows
+ * and motion — arrive in the next change, together with the local Vazirmatn
+ * font and the Persian presentation layer.
+ *
+ * This file currently does one thing: it brings Tailwind in, so the workspace
+ * builds and the quality chain has something real to run against. No component
+ * hard-codes a colour, a spacing or a size in the meantime, because no
+ * component exists yet to do so.
+ */
