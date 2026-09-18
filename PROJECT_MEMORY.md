@@ -59,7 +59,7 @@
 > می‌شوند. ثبت یک `INSERT … ON CONFLICT` روی Index یکتای جزئی ردیف‌های هرگز Claim‌نشده است؛ Claim ردیف را از آن Index
 > بیرون می‌برد، پس ردی که با Claim مسابقه دهد جانشین تازه می‌سازد و Trigger `tg_security_event_outbox_guard` تغییر ردیف
 > Claim‌شده را رد می‌کند (Migration افزایشی `20260911130000_security_event_outbox_aggregation`). شمارش در Envelope از ستون
-> خوانده می‌شود؛ Contract v1 و `audit-service` دست نخوردند. ip/User-Agent/نقش‌ها عمداً در شناسه نیستند — **Q-44**.
+> خوانده می‌شود؛ Contract v1 و `audit-service` دست نخوردند. ip/User-Agent/نقش‌ها عمداً در شناسه نیستند — **Q-57**.
 > `turbo.json` اکنون `KAFKA_BROKERS` را به وظیفهٔ `test` می‌دهد، پس `pnpm test`/`pnpm verify` آزمون‌های Kafka identity را
 > دیگر بی‌صدا Skip نمی‌کنند. **یافتهٔ عملیاتی:** همهٔ ردهای یک کاوش روی یک ردیف قفل می‌گیرند و گذردهی آن ردیف با تأخیر Commit
 > محدود است — روی Volume توسعهٔ Docker Desktop با pgbench حدود ۲۳ تا ۲۹ ثبت در ثانیه (۱۱۴۲ با `synchronous_commit=off`)؛ ثبت

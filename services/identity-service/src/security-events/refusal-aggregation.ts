@@ -62,7 +62,7 @@ export interface AggregationDimensions {
  * verified token, the action, resource type and error code from the fixed
  * refusal site, the resource id from the token. Ip, user agent, correlation id,
  * trace, roles and producer version are deliberately absent — see
- * `docs/24-open-questions.md` Q-44 — so a caller cannot split one probe into
+ * `docs/24-open-questions.md` Q-57 — so a caller cannot split one probe into
  * many rows by rotating a header, and the key never holds a value the caller
  * chose.
  */
