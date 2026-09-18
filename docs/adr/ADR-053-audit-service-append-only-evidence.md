@@ -18,9 +18,12 @@
 >
 > **آنچه هنوز پیاده نیست:** رکورد جبرانی § ۷ (`audit.correction`) — این سرویس نه Producer دارد، نه Outbox، نه API نوشتن،
 > پس `correctionOf` ستونی بی‌اثر است؛ مصرف‌کنندهٔ `rasta.audit.trail.v1` (مسیر B، AUD-004)؛ صادرات؛ و **امضا** (§ ۶).
-> زنجیره **Tamper-Evident** است، نه Tamper-Proof. `COM-009` همچنان `READY` با ۱۳ امتیاز است.
+> زنجیره **Tamper-Evident** است، نه Tamper-Proof. `COM-009` از 2026-09-18 `ACCEPTED` است با ۱۳ امتیاز.
 > جزئیات گام‌به‌گام در [برنامهٔ پیاده‌سازی](ADR-053-implementation-plan.md) § ۴ و Runbook
 > [`audit-chain-divergence.md`](../runbooks/audit-chain-divergence.md).
+>
+> سخت‌سازی پس از MVP با Checkpoint امضاشدهٔ KMS/HSM و بایگانی WORM در مرز اعتماد مستقل، در
+> [ADR-057](ADR-057-audit-external-anchoring-and-immutable-archive.md) ثبت شده و هنوز پیاده نشده است.
 >
 > **وضعیت پیاده‌سازی — 2026-09-11 (AUD-004 Phase A — فقط قرارداد).** پیاده‌سازی این تصمیم شروع شده، **نه پذیرشش**؛
 > ADR همچنان `Proposed` می‌ماند. `packages/contracts/src/events/audit-trail.ts` رویداد `AUDIT_EVENT_RECORDED`

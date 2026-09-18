@@ -55,12 +55,12 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                                | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                                |
-| ----------------------------------- | ------------------------------------------------ | ---- | --- | -------------- | ------------------------------------------------------------------------------------ |
-| `docs/ci-serialization-and-backlog` | `F:\Rasta-Parallel\docs-branch-registry`         | C0   | —   | ۰ / ۰          | قاعدهٔ سریالی‌بودن ادغام‌ها + تازه‌سازی `planning/backlog.json`                      |
-| `docs/audit-immutable-archive`      | `F:\Rasta-Parallel\audit-immutable-archive-docs` | —    | —   | ۱ / ۱۶۷        | **متوقف، نیازمند اقدام:** `ADR-055` تکراری دارد (باید `ADR-057` شود) و یک `Q-44` سوم |
-| `demo/investor-preview`             | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید         |
-| `design/claude-design`              | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                |
+| شاخه                                | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                        |
+| ----------------------------------- | ------------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------- |
+| `docs/ci-serialization-and-backlog` | `F:\Rasta-Parallel\docs-branch-registry`         | C0   | —   | ۰ / ۰          | قاعدهٔ سریالی‌بودن ادغام‌ها + تازه‌سازی `planning/backlog.json`              |
+| `docs/audit-immutable-archive`      | `F:\Rasta-Parallel\audit-immutable-archive-docs` | C0   | —   | — / ۰          | بازشماری شد به `ADR-057` و `Q-58`؛ با `main` همگام است و آمادهٔ بازبینی      |
+| `demo/investor-preview`             | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
+| `design/claude-design`              | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
 
 ## شاخه‌های بازنشسته
 
@@ -135,13 +135,13 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 
 ### ADR
 
-| شماره | مالک                                  | وضعیت                                                       |
-| ----- | ------------------------------------- | ----------------------------------------------------------- |
-| ۰۵۴   | `feat/notification-service`           | روی `main` (`cc89660`)                                      |
-| ۰۵۵   | `feat/audit-service-aud-004-contract` | روی `main` (`9fa75cc`)                                      |
-| ۰۵۶   | `docs/inventory-logistics-adr`        | روی `main` (`f2eb8fa`)                                      |
-| ۰۵۷   | `docs/audit-immutable-archive`        | **رزرو** — شاخه هنوز به‌غلط ۰۵۵ را دارد و باید بازشماری کند |
-| ۰۵۸+  | آزاد                                  | —                                                           |
+| شماره | مالک                                  | وضعیت                              |
+| ----- | ------------------------------------- | ---------------------------------- |
+| ۰۵۴   | `feat/notification-service`           | روی `main` (`cc89660`)             |
+| ۰۵۵   | `feat/audit-service-aud-004-contract` | روی `main` (`9fa75cc`)             |
+| ۰۵۶   | `docs/inventory-logistics-adr`        | روی `main` (`f2eb8fa`)             |
+| ۰۵۷   | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از ۰۵۵ انجام شد |
+| ۰۵۸+  | آزاد                                  | —                                  |
 
 ### پرسش‌های باز `Q-NN`
 
@@ -151,7 +151,8 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 | Q-45 … Q-55 | `feat/audit-service-aud-004-contract` | روی `main`                                                                             |
 | Q-56        | `feat/supplier-performance-phase2`    | روی `main` (`f7252d3`)                                                                 |
 | Q-57        | `feat/audit-service-aud-004-contract` | روی `main`                                                                             |
-| Q-58+       | آزاد                                  | —                                                                                      |
+| Q-58        | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                   |
+| Q-59+       | آزاد                                  | —                                                                                      |
 
 > **چرا Q-44 قابل جابه‌جایی نیست:** یک ADR ادغام‌شده آن را به‌عنوان مرجع
 > پذیرش نقل کرده. نقل‌قول را نمی‌شود ویرایش کرد بی‌آنکه سند دروغ شود. هر
