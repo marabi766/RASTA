@@ -108,7 +108,7 @@ Logهای مالی).
 | `rasta_outbox_lease_reclaimed_total`    | Counter   | service                              |
 | `rasta_outbox_claim_attempts_total`     | Counter   | service                              |
 | `rasta_outbox_leases_active`            | Gauge     | service                              |
-| `rasta_dlq_messages_total`              | Counter   | topic, reason                        |
+| `rasta_dlq_messages_total`              | Counter   | service, topic (مبدأ), reason        |
 | `rasta_event_validation_failures_total` | Counter   | topic, event_name                    |
 | `temporal_workflow_completed_total`     | Counter   | workflow_type, task_queue            |
 | `temporal_activity_retries_total`       | Counter   | activity_type                        |
@@ -265,6 +265,163 @@ POST /v1/orders                                    [gateway]        45ms
 **CONSTRAINT.** هر هشدار باید **Runbook** داشته باشد. هشدار بدون دستورالعمل پاسخ،
 نویز است و به‌مرور نادیده گرفته می‌شود. → [`runbooks/`](runbooks/)
 
+### وضعیت اجرا — قواعد موجود در مخزن (2026-09-13)
+
+دو جدول بالا **هدف** است. تنها قواعد نوشته‌شده، سیزده هشدار و یک Recording Rule (روی هم چهارده قاعده) زنجیرهٔ شواهد حسابرسی در
+[`../infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`](../infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml)
+هستند که `prometheus.yml` با `rule_files` بارشان می‌کند:
+
+| هشدار                                    | شدت        | شرط                                                                                                                                                                                                                                                                                                     | Runbook                                                      |
+| ---------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `RastaDeadLetterMessagePublished`        | `warning`  | `sum by (service, topic, reason) (increase(rasta_dlq_messages_total[5m])) > 0`                                                                                                                                                                                                                          | [replay-dlq](runbooks/replay-dlq.md)                         |
+| `RastaAuditIngestionFailure`             | `warning`  | `sum by (reason) (increase(rasta_audit_ingestion_failures_total[5m])) > 0`                                                                                                                                                                                                                              | [audit-gap-detected](runbooks/audit-gap-detected.md)         |
+| `RastaAuditIngestionLagHigh`             | `warning`  | `histogram_quantile(0.95, sum by (le, source_topic) (rate(rasta_audit_ingestion_lag_seconds_bucket[5m]))) > 60` با `for: 5m`                                                                                                                                                                            | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
+| `RastaAuditProducerSilent`               | `warning`  | `(max by (source_service) (rasta_audit_expected_active_producer == 1) and on (source_service) max by (source_service) (rasta_audit_expected_active_producer offset 6h == 1)) unless on (source_service) (sum by (source_service) (increase(rasta_audit_records_ingested_total[6h])) > 0)` با `for: 30m` | [audit-gap-detected](runbooks/audit-gap-detected.md)         |
+| `RastaAuditServiceMetricsUnavailable`    | `warning`  | `min by (job) (up{job="audit-service"}) == 0 or absent(up{job="audit-service"})` با `for: 2m`                                                                                                                                                                                                           | [audit-gap-detected](runbooks/audit-gap-detected.md)         |
+| `RastaAuditChainDivergence`              | `critical` | `sum by (reason, scope) (increase(rasta_audit_chain_verification_failures_total[5m])) > 0`                                                                                                                                                                                                              | [audit-chain-divergence](runbooks/audit-chain-divergence.md) |
+| `RastaSecurityEventCaptureGap`           | `critical` | `sum by (outcome) (increase(rasta_security_event_captures_total{outcome=~"failed\|timeout"}[5m])) > 0`                                                                                                                                                                                                  | [security-event-outbox](runbooks/security-event-outbox.md)   |
+| `RastaSecurityEventClosedBacklogStale`   | `warning`  | `rasta_security_event_outbox_closed_backlog_age_seconds > 60`                                                                                                                                                                                                                                           | [security-event-outbox](runbooks/security-event-outbox.md)   |
+| `RastaSecurityEventPublishFailure`       | `warning`  | `sum by (reason) (increase(rasta_security_event_publish_failures_total[5m])) > 0`                                                                                                                                                                                                                       | [security-event-outbox](runbooks/security-event-outbox.md)   |
+| `RastaIdentityServiceMetricsUnavailable` | `warning`  | `min by (job) (up{job="identity-service"}) == 0 or absent(up{job="identity-service"})` با `for: 2m`                                                                                                                                                                                                     | [security-event-outbox](runbooks/security-event-outbox.md)   |
+| `RastaAuditConsumerLag`                  | `warning`  | `sum by (consumergroup, topic) (clamp_min(kafka_consumergroup_lag{consumergroup=~"audit-service\\.(domain-projector\|trail)"}, 0)) > 0` با `for: 5m`                                                                                                                                                    | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
+| `RastaKafkaExporterUnavailable`          | `warning`  | `min by (job) (up{job="kafka-exporter"}) == 0 or absent(up{job="kafka-exporter"})` با `for: 2m`                                                                                                                                                                                                         | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
+| `RastaAuditConsumerGroupMetricsMissing`  | `warning`  | `(absent(kafka_consumergroup_lag{consumergroup="audit-service.domain-projector"}) or absent(kafka_consumergroup_lag{consumergroup="audit-service.trail"})) and on () (min(up{job="kafka-exporter"}) == 1)` با `for: 5m`                                                                                 | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
+
+هشدارهای شمارنده `for` ندارند، چون قرارداد هر متریک می‌گوید هر افزایش اقدام‌پذیر است؛ استثنا `RastaAuditProducerSilent` است که بر
+**نبودِ** افزایش هشدار می‌دهد. رفتار هر سیزده هشدار و Recording Rule با
+`promtool test rules` در CI اثبات می‌شود ([`14-testing-strategy.md`](14-testing-strategy.md) § ۱۴٫۱۱). **مرز:** این قواعد را فقط
+Prometheus **محلی** Compose ارزیابی می‌کند؛ مخزن **Alertmanager ندارد**، پس هیچ اعلانی تحویل نمی‌شود؛ Scrape محیط واقعی
+در مخزن نیست. تنها داشبورد موجود، داشبورد **محلی** `Rasta Audit Evidence` است (§ ۱۳٫۷) که همین قواعد و متریک‌ها را نشان می‌دهد.
+
+**تأخیر شواهد از سمت سرویس — Histogram.** `rasta_audit_ingestion_lag_seconds{source_topic}` همان‌گونه که ADR-053 § ۱۳ می‌خواهد
+یک **Histogram** است و در `/metrics` به شکل `rasta_audit_ingestion_lag_seconds_bucket{source_topic,le}`، `_sum{source_topic}` و
+`_count{source_topic}` صادر می‌شود:
+
+- **مقدار:** `max(0, now - occurredAt)` به ثانیه، یک‌بار برای هر ردیف که `DomainProjectorConsumer` (مسیر A) یا
+  `AuditTrailConsumer` (مسیر B) با نتیجهٔ `WRITTEN` نوشت. ساعت جلوتر Producer به صفر Clamp می‌شود؛ `DUPLICATE`، Envelope
+  ردشده و شکست پایگاه داده هیچ مشاهده‌ای ندارند.
+- **Bucketها** (`AUDIT_INGESTION_LAG_BUCKETS`): `1, 5, 15, 30, 60, 120, 300, 900, 3600` و `+Inf` خودکار. `60` مرز دقیق است، چون
+  `histogram_quantile` درون Bucket درون‌یابی می‌کند و آستانه نباید حدس باشد؛ زیر آن «زنده» از «یکی دو Retry عقب» جدا می‌شود و بالای
+  آن ۲، ۵، ۱۵ و ۶۰ دقیقه نشان می‌دهد مصرف‌کنندهٔ کند تا کجا عقب افتاده است.
+- **Cardinality:** فقط `source_topic` با ۱۱ مقدار (ده `DOMAIN_TOPICS` و `rasta.audit.trail.v1`)، که هنگام بار شدن ماژول با
+  `zero()` صادر می‌شوند — بی مشاهدهٔ ساختگی: ۱۱ × (۹ مرز + `+Inf`) + ۱۱ `_sum` + ۱۱ `_count` = ۱۳۲ Series.
+- **هشدار** `RastaAuditIngestionLagHigh`: p95 به‌ازای `source_topic` از جمع Bucketهای همهٔ Instanceها در پنجرهٔ `rate` پنج‌دقیقه‌ای،
+  بالای ۶۰ ثانیه، با `for: 5m`؛ Labelها فقط `source_topic` و `severity`. بی مشاهده، Quantile برابر `NaN` است و نمی‌سوزد.
+- **تفاوت با Lag کافکا:** این فاصلهٔ زمانی شواهدِ **نوشته‌شده** است؛ `kafka_consumergroup_lag` تعداد رکوردِ **هنوز مصرف‌نشده**.
+  مصرف‌کننده‌ای که متوقف است هیچ مشاهده‌ای ندارد، پس این هشدار ساکت است و `RastaAuditConsumerLag` و دو هشدار از دست رفتن
+  سیگنال آن را می‌بینند. p95 بالا با Lag کافکای صفر یعنی رویدادها دیر به Kafka رسیده‌اند (Outbox/Relay تولیدکننده).
+
+**ساکت شدن تولیدکنندهٔ مورد انتظار — Opt-in.** ADR-053 § ۱۳ از `rasta_audit_records_ingested_total` می‌خواهد «ساکت شدن یک
+سرویس» را نشان دهد. هیچ سندی نمی‌گوید کدام سرویس باید پیوسته رویداد حسابرسی بفرستد یا چه سکوتی مشروع است
+([`24-open-questions.md`](24-open-questions.md) Q-54)، پس این هشدار فقط برای تولیدکننده‌ای کار می‌کند که صریحاً پیکربندی شده است:
+
+- **برچسب `source_service` کراندار است.** پیش از این تغییر، Label مستقیماً `envelope.producer` بود — رشته‌ای که تولیدکننده می‌نویسد
+  و فقط طولش (۱۲۸) محدود است — پس هر رشتهٔ تازه یک Series تازه می‌ساخت و ادعای «کراندار» درست نبود. اکنون
+  `services/audit-service/src/audit/audit-producer-topology.ts` تنها منبع توپولوژی است: ده Topic مسیر A با مالک دقیق
+  (`rasta.identity.v1`→`identity-service`، `rasta.organization.v1`→`organization-service`، `rasta.asset.v1` و
+  `rasta.insurance.v1`→`asset-service`، `rasta.fleet.v1`→`fleet-service`، `rasta.maintenance.v1`→`maintenance-service`،
+  `rasta.marketplace.v1`→`marketplace-service`، `rasta.economic.v1`→`economic-service`، `rasta.document.v1`→`document-service`،
+  `rasta.supplier.v1`→`supplier-service`) و تولیدکنندگان مسیر B (امروز فقط `identity-service`). `DOMAIN_TOPICS`، مجموعهٔ مجاز
+  پیکربندی و Seriesهای صفر از همین فهرست مشتق می‌شوند. مسیر A نام مالک را فقط وقتی `producer` با مالکِ **Topic تحویل** یکی باشد
+  برچسب می‌زند؛ مسیر B فقط برای تولیدکنندهٔ شناخته‌شدهٔ Trail؛ هر چیز دیگر (نام دلخواه، بلند، نام معتبر روی Topic دیگر) زیر
+  `unknown`. `source_service` حداکثر ۱۰ مقدار دارد (۹ سرویس + `unknown`)، `source_topic` ۱۱ و `outcome` سه. **ردیف ذخیره‌شده
+  تغییری نمی‌کند:** `source_service` در `audit_event` همان ادعای تولیدکننده (با همان حد ۱۲۸) است؛ این سخت‌سازی Label است، نه
+  سانسور شواهد.
+- **پیکربندی:** `AUDIT_EXPECTED_ACTIVE_PRODUCERS` (CSV، در `.env.example`). پیش‌فرض **خالی** است، یعنی هیچ هشداری فعال نیست.
+  ورودی‌ها Trim و Deduplicate می‌شوند؛ نام ناشناخته (از جمله `unknown` و حروف بزرگ دیگر) و عنصر خالی (`a,,b`، ویرگول انتهایی)
+  راه‌اندازی را متوقف می‌کنند و پیام خطا فقط شمارهٔ عنصر و مجموعهٔ مجاز را می‌گوید، نه متن ردشده. نتیجه آرایهٔ Frozen است.
+- **Exposition:** پس از اعتبارسنجی پیکربندی و پیش از شروع هر دو Consumer، `AppModule.onModuleInit` تابع
+  `initializeExpectedProducerSeries` را صدا می‌زند: `rasta_audit_expected_active_producer{source_service} 1` فقط برای سرویس‌های
+  پیکربندی‌شده (Gauge پیش از آن Reset می‌شود تا دقیقاً همان مجموعه را بگوید)، و هر Tuple
+  `rasta_audit_records_ingested_total{source_service,source_topic,outcome}` همان سرویس‌ها با `inc(labels, 0)` — هرگز رویداد
+  ساختگی مثبت؛ تکرار آن شمارش واقعی را پاک نمی‌کند. با مجموعهٔ خالی هیچ‌کدام صادر نمی‌شود؛ با هر ۹ سرویس، ۹ Series اطلاعات و
+  ۳۳ Tuple شمارنده (۱۱ Topic × ۳ Outcome). به `rasta_audit_records_ingested_total` هیچ Label تازه‌ای اضافه نشد.
+- **هشدار** `RastaAuditProducerSilent` (`warning`، گروه `rasta-audit-evidence`، Labelها فقط `source_service` و `severity`):
+  Gate فعلی **و** Gate شش ساعت پیش (`offset 6h`، درون Lookback پنج‌دقیقه‌ای) باید `1` باشند، و `unless` هر افزایش مثبت
+  در `[6h]` جمع‌شده به‌ازای `source_service` روی همهٔ Topicها، Outcomeها و Instanceها. با `for: 30m` آستانهٔ مؤثر **۶ ساعت و ۳۰
+  دقیقه بی هیچ ردیف** است. پنجره در قاعدهٔ checked-in ثابت است (Prometheus آن را از Runtime نمی‌خواند)؛ فقط مجموعهٔ مورد انتظار
+  Runtime-configurable است. انتخاب عملیاتی محلی است، نه حقوقی یا کسب‌وکاری.
+- **زمان‌بندی و Startup:** نخستین ارزیابی Pending ممکن ۶ ساعت پس از نخستین Scrapeی است که تولیدکننده را مورد انتظار دید و
+  Firing ۳۰ دقیقه بعد، پس نخستین Scrape یا تولیدکنندهٔ تازه پیکربندی‌شده روی Rangeی که هنوز پنجره را نمی‌پوشاند نمی‌سوزد. پس از
+  یک ردیف، شرط تا خروج آخرین نمونهٔ پیش از آن از پنجره (حدود ۶ ساعت) نادرست است و Pending را از نو آغاز می‌کند. `increase`
+  Reset شمارنده در Restart را افزایش نمی‌شمارد (۷→۰ ساکت می‌ماند)، ولی ردیفی که پیش از نخستین Scrape پس از Restart نوشته شد
+  (۷→۱) شمرده می‌شود. تولیدکنندهٔ پیکربندی‌شده بی هیچ Series شمارنده هم ساکت است و می‌سوزد. Instanceهای متعدد یک هشدار می‌دهند
+  و اجتماع مجموعه‌های پیکربندی‌شدهٔ آن‌ها Gate است. اگر audit-service Scrape نشود Gate غایب است و این هشدار **ساکت** می‌ماند؛
+  آن حالت را `RastaAuditServiceMetricsUnavailable` (پایین) اعلام می‌کند.
+- **مرز:** این هشدار فقط نبودِ ردیف از تولیدکننده‌ای را ثابت می‌کند که صریحاً «ترافیک‌دار» اعلام شده؛ **نمی‌تواند** ثابت کند هر
+  عملیات تغییر وضعیت رویدادی منتشر کرده است. Heartbeat تولیدکننده، تطبیق Gap حسابرسی و Alertmanager وجود ندارند؛ داشبورد محلی § ۱۳٫۷ فقط وضعیت همین هشدار را نشان می‌دهد.
+
+**Lag و عمق DLQ از سمت Broker.** سرویس `kafka-exporter` در `docker-compose.yml` (`danielqsj/kafka-exporter:v1.9.0`، Profile
+`observability`/`all`، متصل به `kafka:9094`، **بی Port میزبان**) را Job `kafka-exporter` در `prometheus.yml` از شبکهٔ Compose با
+`scrape_interval: 30s` و `scrape_timeout: 25s` می‌خواند (پاسخ Exporter روی Broker محلی با صدها گروه آزمونی ۲ تا ۹ ثانیه طول کشید).
+متریک‌ها و Labelهای واقعیِ خوانده‌شده از `/metrics` همین نسخه:
+
+| متریک Exporter                         | Label                             | معنا                                                                             |
+| -------------------------------------- | --------------------------------- | -------------------------------------------------------------------------------- |
+| `kafka_consumergroup_lag`              | `consumergroup, partition, topic` | جدیدترین Offset منهای Offset Commit‌شدهٔ گروه؛ **`-1`** برای Partition بی Commit |
+| `kafka_consumergroup_lag_sum`          | `consumergroup, topic`            | جمع Lag همان Topic (ردیف‌های `-1` را کنار می‌گذارد)                              |
+| `kafka_consumergroup_current_offset`   | `consumergroup, partition, topic` | Offset Commit‌شدهٔ گروه                                                          |
+| `kafka_consumergroup_members`          | `consumergroup`                   | تعداد عضو زندهٔ گروه (`0` = هیچ مصرف‌کننده‌ای متصل نیست)                         |
+| `kafka_topic_partition_current_offset` | `partition, topic`                | جدیدترین Offset Partition                                                        |
+| `kafka_topic_partition_oldest_offset`  | `partition, topic`                | قدیمی‌ترین Offset نگه‌داشته‌شدهٔ Partition                                       |
+
+- `RastaAuditConsumerLag` فقط دو گروه ثابت `audit-service.domain-projector` و `audit-service.trail` را می‌بیند، `-1` را پیش از
+  جمع به صفر می‌برد (نامعلوم است، نه جلوتر)، به‌ازای `consumergroup, topic` جمع می‌زند و فقط وقتی Lag در **همهٔ** ارزیابی‌های
+  ۵ دقیقه مثبت بماند می‌سوزد؛ عقب‌ماندگی گذرا که به صفر برگردد `for` را از نو آغاز می‌کند.
+- Recording Rule `topic:kafka_topic_retained_records:sum` =
+  `sum by (topic) (clamp_min(kafka_topic_partition_current_offset{topic="rasta.audit.v1.dlq"} - kafka_topic_partition_oldest_offset{topic="rasta.audit.v1.dlq"}, 0))`
+  تعداد رکوردی است که Kafka هنوز در `rasta.audit.v1.dlq` **نگه می‌دارد**؛ فقط Label `topic` دارد. **این عدد «پیام حل‌نشده» نیست:**
+  مخزن هیچ وضعیت Triage یا تأیید برای پیام DLQ ندارد و عدد فقط با حذف Segmentهای قدیمی به‌دست Retention (۳۰ روز برای این Topic)
+  کم می‌شود. پس عمداً هشداری روی آن نیست؛ `RastaDeadLetterMessagePublished` برای هر نوشتن تازه در DLQ هشدار می‌دهد.
+- **از دست رفتن متریک‌های خود `audit-service`.** همهٔ هشدارهای `rasta_audit_*` (شکست، تأخیر، واگرایی زنجیره، سکوت
+  تولیدکننده) فقط روی نمونه‌های Scrape همین فرایند کار می‌کنند و بی آن‌ها بی‌صدا غیرفعال می‌شوند. پس `host.docker.internal:3115`
+  از Job مشترک `rasta-services` (که اکنون فقط پورت‌های ۳۰۰۰ و ۳۱۰۲ در آن مانده‌اند؛ ۳۱۰۱ در Job `identity-service` است، پایین) به Job اختصاصی **`audit-service`** با همان
+  `metrics_path: /metrics` و `environment: local` منتقل شد و فقط همان‌جا آمده است. نام Job هویت عملیاتی سرویس است: در Job مشترک
+  تنها چیزی که audit-service را جدا می‌کرد نشانی `instance` بود که به استقرار بسته است. هشدار
+  `RastaAuditServiceMetricsUnavailable` (`warning`، `for: 2m`، Label فقط `job` و `severity`) =
+  `min by (job) (up{job="audit-service"}) == 0 or absent(up{job="audit-service"})`:
+  - `up == 0`: Prometheus Target پیکربندی‌شده را دارد ولی Scrape شکست می‌خورد (فرایند خاموش، `/metrics` خطا، شبکه).
+  - `absent`: هیچ Series `up{job="audit-service"}` نیست — Job در `prometheus.yml` نیست، بار نشده، یا Target برداشته شده (پس از
+    نشانگر Staleness). همان تک Label `job` را می‌دهد.
+  - **Replica:** `min by (job)` است، نه `max`: شکست Scrape **هر** Instance پیکربندی‌شده کافی است، چون شمارنده‌ها محلی فرایندند و
+    بی آن Instance تاریخچهٔ جمع ناقص است، حتی اگر Instance دیگر سالم باشد. چند Instance همیشه **یک** هشدار می‌دهند.
+  - **زمان‌بندی:** نخستین ارزیابی `up == 0` یا `absent` Pending است و درست ۲ دقیقه بعد Firing؛ یک Scrape موفق میانی تایمر را
+    از نو آغاز می‌کند و قطع دوباره باز ۲ دقیقه می‌خواهد.
+  - **مرز:** فقط از دست رفتن تله‌متری audit-service را ثابت می‌کند؛ نمی‌گوید هر عملیات تغییر وضعیت رویداد حسابرسی منتشر
+    کرده است، و نبودنش نشانهٔ سلامت ingestion نیست.
+- **از دست رفتن متریک‌های `identity-service` (شواهد رد، مسیر B).** سه هشدار `RastaSecurityEventCaptureGap`،
+  `RastaSecurityEventClosedBacklogStale` و `RastaSecurityEventPublishFailure` فقط روی نمونه‌های Scrape همین فرایند کار می‌کنند
+  و بی آن‌ها بی‌صدا غیرفعال می‌شوند. پس `host.docker.internal:3101` از Job مشترک `rasta-services` به Job اختصاصی
+  **`identity-service`** با همان `metrics_path: /metrics` و `environment: local` منتقل شد و فقط همان‌جا آمده است؛ به همان دلیل
+  audit-service، نام Job هویت پایدار عملیاتی سرویس است و `instance` نشانی وابسته به استقرار. هشدار
+  `RastaIdentityServiceMetricsUnavailable` (`warning`، `for: 2m`، گروه `rasta-audit-evidence`، Label فقط `job` و `severity`) =
+  `min by (job) (up{job="identity-service"}) == 0 or absent(up{job="identity-service"})`:
+  - `up == 0`: Prometheus Target پیکربندی‌شده را دارد ولی Scrape شکست می‌خورد (فرایند خاموش، `/metrics` خطا، شبکه).
+  - `absent`: هیچ Series `up{job="identity-service"}` نیست — Job در `prometheus.yml` نیست، Prometheus آن را بار نکرده (مثلاً
+    پیکربندی قدیمی که ۳۱۰۱ را هنوز زیر `rasta-services` می‌خواند)، یا Target برداشته شده (پس از نشانگر Staleness). همان تک Label
+    `job` را می‌دهد.
+  - **Replica:** `min by (job)` است، نه `max`: شکست Scrape **هر** Instance پیکربندی‌شده کافی است، چون شمارنده‌های ثبت و انتشار و
+    Gaugeهای پشتهٔ صف محلی فرایندند و بی آن Instance شواهد جمع ناقص است، حتی اگر Instance دیگر سالم باشد. چند Instance همیشه
+    **یک** هشدار می‌دهند.
+  - **زمان‌بندی:** نخستین ارزیابی `up == 0` یا `absent` Pending است و درست ۲ دقیقه بعد Firing؛ یک Scrape موفق میانی تایمر را
+    از نو آغاز می‌کند و قطع دوباره باز ۲ دقیقه می‌خواهد.
+  - **مرز:** فقط از دست رفتن تله‌متری identity-service را ثابت می‌کند؛ نمی‌گوید هر رد یا تغییر وضعیت شواهد حسابرسی ساخته است.
+    تا وقتی می‌سوزد، سکوت سه هشدار صف ردها نشانهٔ سلامت شواهد رد **نیست**.
+- **از دست رفتن سیگنال.** `RastaAuditConsumerLag` فقط روی Seriesهای موجود کار می‌کند، پس نبودن ورودی دو هشدار جدا و مکمل دارد:
+  - `RastaKafkaExporterUnavailable` (`for: 2m`، Label فقط `job`): Target `kafka-exporter` Scrape نمی‌شود (`up == 0`) یا اصلاً
+    Series `up` ندارد (`absent`)؛ `min by (job)` Label `instance` را حذف می‌کند. در این حالت Lag و عمق DLQ نامعلوم‌اند.
+  - `RastaAuditConsumerGroupMetricsMissing` (`for: 5m`، Label فقط `consumergroup`): Exporter سالم است ولی برای یکی از دو گروه
+    ثابت هیچ Series `kafka_consumergroup_lag` نیست. Exporter برای گروه فقط Topicهایی را که دست‌کم یک Offset Commit‌شده دارند
+    گزارش می‌کند، پس این یعنی Broker هیچ Offset Commit‌شده‌ای برای آن گروه ندارد — مثلاً Broker تازه پیش از اجرای
+    `audit-service`. هر گروه با `absent` روی نام **دقیق** جدا سنجیده می‌شود تا Label `consumergroup` در نتیجه بماند؛ `-1`، صفر
+    و مثبت «موجود»اند. با `and on () (min(up{job="kafka-exporter"}) == 1)` هنگام خرابی Exporter خاموش است تا یک خرابی دو
+    تشخیص نگیرد. اقدام: اجرای/بررسی Consumer واقعی، **هرگز** Reset، Shift یا حذف Offset.
+- **مرز:** Topicی که گروه موجود هیچ Offset در آن ندارد گزارش و هشدار نمی‌شود. Partitionی که گروه هرگز Commit نکرده (`-1`) Lag
+  قابل اندازه‌گیری ندارد. هر ترکیب Label کراندارِ هشدارهای شمارنده پیش از نخستین رخداد با صفر صادر می‌شود (ماژول
+  متریک `audit-service` و `identity-service` هنگام بار شدن، و هر `EventConsumer` دارای Topic DLQ هنگام ساخته شدن)، پس نخستین
+  افزایش واقعی هم هشدار می‌دهد ([`runbooks/README.md`](runbooks/README.md#مقداردهی-صفر-هشدارهای-شمارنده)). باقی ردیف‌های دو
+  جدول بالا هنوز قاعده ندارند.
+
 ---
 
 ## ۱۳٫۷ داشبوردهای Grafana
@@ -278,6 +435,58 @@ POST /v1/orders                                    [gateway]        45ms
 | **Financial Health** | مهندسی + عملیات | حجم تراکنش، نرخ موفقیت، **وضعیت توازن دفتر کل**، تسویه معلق |
 | Business Metrics     | مدیریت پلتفرم   | سفارش، مناقصه، نگهداری، کاربر فعال، کامل بودن داده          |
 | Security             | امنیت           | نرخ ۴۰۱/۴۰۳، برخورد Rate Limit، ورود ناموفق، ناهنجاری       |
+
+### وضعیت اجرا — داشبورد محلی شواهد حسابرسی (2026-09-13)
+
+جدول بالا **هدف** است و هیچ‌کدام از هفت داشبوردش ساخته نشده. تنها داشبورد موجود در مخزن **`Rasta Audit Evidence`** است، فقط برای
+Stack **محلی** Compose (Profile `observability`/`all`):
+
+- **مخاطب:** مهندس یا اپراتور محلی که یکی از Runbookهای شواهد حسابرسی را دنبال می‌کند و می‌خواهد همان سیزده هشدار و یک Recording
+  Rule § ۱۳٫۶ را کنار متریک‌های ورودی‌شان ببیند.
+- **Provisioning پایدار:** Datasource موجود `Prometheus` در
+  [`../infrastructure/docker/grafana/provisioning/datasources/prometheus.yml`](../infrastructure/docker/grafana/provisioning/datasources/prometheus.yml)
+  اکنون UID ثابت **`rasta-prometheus`** دارد (نام، نوع، URL `http://prometheus:9090`، `access: proxy`، پیش‌فرض بودن و
+  `editable` دست نخوردند) و هر Query داشبورد همین UID را صریحاً نام می‌برد — نه جست‌وجوی نام، نه متغیر `${DS_PROMETHEUS}`.
+  Provider فایل [`provisioning/dashboards/rasta.yml`](../infrastructure/docker/grafana/provisioning/dashboards/rasta.yml)
+  داشبوردها را از `/etc/grafana/dashboards` در پوشهٔ **`Rasta`** (`folderUid: rasta`) بار می‌کند، با `disableDeletion: true`،
+  `allowUiUpdates: false` و `updateIntervalSeconds: 10`. JSON در
+  [`../infrastructure/docker/grafana/dashboards/rasta-audit-evidence.json`](../infrastructure/docker/grafana/dashboards/rasta-audit-evidence.json)
+  بیرون از `provisioning/` است (تا Grafana فایل Provider را داشبورد نخواند) و در `docker-compose.yml` فقط‌خواندنی Mount می‌شود.
+  UID داشبورد `rasta-audit-evidence`، Tagها `rasta`/`audit`/`local`، بازهٔ پیش‌فرض ۶ ساعت (پنجرهٔ `RastaAuditProducerSilent`)،
+  Refresh ۳۰ ثانیه، منطقهٔ زمانی UTC، بی متغیر Template.
+- **راه‌اندازی خودبسنده و بی خطا (2026-09-13):** سرویس `grafana` در Compose با `GF_ANALYTICS_REPORTING_ENABLED`،
+  `GF_ANALYTICS_CHECK_FOR_UPDATES`، `GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES` و `GF_NEWS_NEWS_FEED_ENABLED` برابر `'false'` و
+  `GF_PLUGINS_PREINSTALL_DISABLED` و (از 2026-09-14) `GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED` برابر `'true'` (رشتهٔ Quoteشده)
+  گزارش استفاده، بررسی به‌روزرسانی، خبرنامه، دانلود Pluginهای Preinstall و دانلود کلیدهای عمومی امضای Plugin از grafana.com را
+  خاموش می‌کند. Harness زندهٔ `verify-grafana-dashboard-live` از 2026-09-14 همین پیکربندی را روی شبکهٔ Docker ‏`--internal` و بی
+  Port منتشرشده اجرا می‌کند و با Inspect ‏Docker (`Internal=true`، یک شبکه برای هر Container، `publishedPorts=0`) نشان می‌دهد
+  Provisioning، هر ۱۴ Query و Log بی خطا **بی مسیر بیرونی** برقرارند؛ پیش از آن نبودن تماس بیرونی فقط از متغیرها و Log استنباط
+  می‌شد. این فقط دربارهٔ آن Stack یک‌بارمصرف است: شبکهٔ Compose توسعه محدود نشده و سیاست شبکهٔ Production نیست. پوشه‌های `provisioning/plugins` و `provisioning/alerting` هرکدام یک فایل **بی‌اثر**
+  دارند — `apiVersion: 1` و `apps: []`، و فقط `apiVersion: 1` — تا Grafana 11.5.1 برای نبودن آن پوشه‌ها خطا Log نکند؛ هیچ
+  Plugin، Alert Rule، Contact Point، Notification Policy، Template یا Mute Timing فراهم نمی‌کنند. این **Alertmanager یا تحویل
+  اعلان نیست**: هشدارهای حسابرسی همچنان قواعد Prometheus محلی‌اند و به هیچ‌کس تحویل نمی‌شوند.
+- **۱۱ Panel، ۱۴ Query:** (۱) متن مرز؛ (۲) جدول هشدارهای `pending`/`firing` از `ALERTS` با `alertname`/`alertstate`/`severity`
+  که نام **هر سیزده** هشدار را صریحاً دارد؛ (۳) دسترس‌پذیری سه Job ‏`audit-service`، `identity-service` و `kafka-exporter` با
+  همان `min by (job) (up)` هشدارهای Unavailable، و Job بی Series ‏`up` هم با `absent` صفر نشان داده می‌شود؛ (۴) نرخ
+  `rasta_audit_records_ingested_total` به‌ازای `source_service`/`outcome`؛ (۵) p95 تأخیر ورود به‌ازای `source_topic` با همان
+  تجمیع چند Instance و خط آستانهٔ ۶۰ ثانیهٔ `RastaAuditIngestionLagHigh`؛ (۶) Lag دو گروه ثابت `audit-service.domain-projector` و
+  `audit-service.trail` با Clamp همان هشدار؛ (۷) `topic:kafka_topic_retained_records:sum` برای `rasta.audit.v1.dlq` با عنوان صریح
+  «retained offset span» — نه تعداد پیام حل‌نشده، و بی رنگ آستانه چون هشداری ندارد؛ (۸) تولیدکنندگان **صریحاً پیکربندی‌شده** با
+  وضعیت `RastaAuditProducerSilent` (FIRING/PENDING/«no silence alert»)؛ سرویس پیکربندی‌نشده اصلاً نمایش داده نمی‌شود؛ (۹) افزایش ۵
+  دقیقه‌ای شکست ورود، شکست تأیید زنجیره و `rasta_dlq_messages_total` از Job ‏`audit-service`؛ (۱۰) افزایش `failed|timeout` ثبت ردها
+  و شکست انتشار؛ (۱۱) سن پشتهٔ **بسته** با خط ۶۰ ثانیه — `pending_age` پنجرهٔ باز عمداً نیست. هر Panel توضیح دارد، هر Query همان
+  عبارت (یا عبارت پیش از مقایسهٔ `> 0`) هشدار متناظرش است، و هیچ Label یا متنی شناسهٔ مستأجر، Actor، منبع، رویداد، Correlation،
+  Partition، Offset یا متن خطا را نمایش نمی‌دهد.
+- **دسترسی محلی:** `docker compose --profile observability up -d`، سپس `http://localhost:3001/d/rasta-audit-evidence` (پوشهٔ
+  `Rasta`). ورود با Credential محلی Compose است.
+- **اعتبارسنجی:** `pnpm run check:grafana-dashboard` (در `pnpm verify` و Job ‏`quality` در CI) و
+  `pnpm run verify:grafana-dashboard-live` (دستی، Docker) — جزئیات در [`14-testing-strategy.md`](14-testing-strategy.md) § ۱۴٫۱۱.
+
+**مرز:** این داشبورد تله‌متری توسعهٔ محلی است. **Alertmanager و تحویل اعلان وجود ندارند** — هشداری که می‌سوزد فقط در همین داشبورد
+و صفحهٔ هشدارهای Prometheus محلی دیده می‌شود. **نبودن هشدار اثبات نمی‌کند که هر تغییر وضعیت شواهد حسابرسی ساخته است:** هیچ Panel
+رکوردها را یک‌به‌یک تطبیق نمی‌دهد، Heartbeat تولیدکننده وجود ندارد، و «no silence alert» فقط یعنی آن هشدار نمی‌سوزد. Scrape و
+داشبورد محیط واقعی بیرون از مخزن‌اند. Panelهای خالی روی Stack بی سرویس در حال اجرا انتظار می‌رود؛ داده‌ای که Panel با Stack
+کامل نشان می‌دهد در این گام زنده دیده نشد.
 
 ---
 

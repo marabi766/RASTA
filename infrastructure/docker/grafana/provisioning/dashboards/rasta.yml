@@ -1,0 +1,18 @@
+apiVersion: 1
+# Local dashboards for the Compose `observability` profile. The JSON lives
+# outside provisioning/ (infrastructure/docker/grafana/dashboards, mounted
+# read-only at /etc/grafana/dashboards) so Grafana never reads this provider
+# file as a dashboard. The repository is the source of truth: UI deletion and
+# UI saves are refused, and a changed file is picked up within ~10 seconds.
+providers:
+  - name: rasta-local
+    orgId: 1
+    type: file
+    folder: Rasta
+    folderUid: rasta
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 10
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

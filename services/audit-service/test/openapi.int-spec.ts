@@ -49,8 +49,16 @@ describe('the published OpenAPI contract (real application)', () => {
   const VERIFY = '/v1/audit-events/verify';
   const DETAIL = '/v1/audit-events/{id}';
 
-  /** Every published path. Read endpoints only; there is no write operation. */
+  /** The public read endpoints. There is no write operation, on any path. */
   const PATHS = [LIST, VERIFY, DETAIL];
+
+  /**
+   * The internal correction-target lookup (ADR-053 § 7): a fourth *read*, not a
+   * write, reachable only by `identity-service`'s service token and routed
+   * nowhere by the gateway. Pinned apart from `PATHS` because it is
+   * authenticated differently and answers to a different caller.
+   */
+  const INTERNAL = '/v1/internal/audit-events/{id}';
 
   beforeAll(async () => {
     migrator = newMigratorPrisma();
@@ -89,12 +97,28 @@ describe('the published OpenAPI contract (real application)', () => {
   };
 
   describe('the routes it describes', () => {
-    it('publishes exactly the three read endpoints', () => {
+    it('publishes exactly the three read endpoints and the one internal lookup', () => {
       // Sorted on both sides, so this asserts the *set* of published paths and
       // not the order Nest happened to register them in. `LIST` sorts before
       // `DETAIL` because `/v1/audit-events` is a prefix of
       // `/v1/audit-events/{id}`.
-      expect(Object.keys(document.paths ?? {}).sort()).toEqual([...PATHS].sort());
+      expect(Object.keys(document.paths ?? {}).sort()).toEqual([...PATHS, INTERNAL].sort());
+    });
+
+    it('publishes the internal lookup as a read, under the internal-token scheme', () => {
+      // Never bearer: a user token is refused there, and the contract has to
+      // say so rather than describing a door that does not exist.
+      expect(Object.keys(document.paths?.[INTERNAL] ?? {})).toEqual(['get']);
+      expect(operation(INTERNAL).security).toEqual([{ internalToken: [] }]);
+      expect(document.components?.securitySchemes?.internalToken).toMatchObject({
+        type: 'apiKey',
+        in: 'header',
+        name: 'x-internal-token',
+      });
+      // It requires the target's own instant, so the read is one partition.
+      expect(
+        parameters(INTERNAL).find((parameter) => parameter.name === 'occurredAt'),
+      ).toMatchObject({ in: 'query', required: true });
     });
 
     it('publishes `verify` as its own path and not as a record id', () => {
@@ -121,6 +145,31 @@ describe('the published OpenAPI contract (real application)', () => {
       for (const path of PATHS) {
         expect(operation(path).security).toEqual([{ bearer: [] }]);
       }
+    });
+  });
+
+  describe('the scrape target it serves and does not publish', () => {
+    it('answers GET /metrics without a token, in the Prometheus text format', async () => {
+      // Booted from the real `AppModule`, behind the real global guards: a
+      // metrics controller that was never registered, or one the guards close,
+      // cannot answer 200 here.
+      const response = await request(server).get('/metrics');
+
+      expect(response.status).toBe(200);
+      expect(String(response.headers['content-type'])).toMatch(/^text\/plain/);
+      expect(String(response.headers['content-type'])).toContain('version=0.0.4');
+      expect(response.text).toContain('# TYPE rasta_audit_records_ingested_total counter');
+      expect(response.text).toContain('# TYPE rasta_audit_chain_verifications_total counter');
+    });
+
+    it('keeps /metrics, and the probes, out of the published document', () => {
+      // The contract stays the four read paths asserted above. An open route
+      // published here would be stamped with bearer security it does not have.
+      const paths = Object.keys(document.paths ?? {});
+
+      expect(paths).not.toContain('/metrics');
+      expect(paths.some((path) => path.includes('metrics') || path.includes('health'))).toBe(false);
+      expect(paths.sort()).toEqual([...PATHS, INTERNAL].sort());
     });
   });
 

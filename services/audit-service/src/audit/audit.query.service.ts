@@ -84,7 +84,9 @@ export class AuditQueryService {
       cursor: query.cursor,
     });
 
-    const items = page.rows.map(toAuditEventView);
+    // Both link directions, under the scope the page itself was read with.
+    const corrections = await this.repository.findCorrectionIds(scope, page.rows);
+    const items = page.rows.map((row) => toAuditEventView(row, corrections.get(row.id)));
     const last = page.rows.at(-1);
 
     this.record(QUERY_ENDPOINTS.SEARCH, authority, QUERY_OUTCOMES.OK, {
@@ -137,7 +139,8 @@ export class AuditQueryService {
       hasMore: false,
     });
 
-    return toAuditEventView(row);
+    const corrections = await this.repository.findCorrectionIds(scope, [row]);
+    return toAuditEventView(row, corrections.get(row.id));
   }
 
   /**

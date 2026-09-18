@@ -107,5 +107,13 @@ export default defineConfig({
       // creates it.
       dependencies: ['economic-api', 'marketplace-api', 'document-api'],
     },
+    {
+      name: 'identity-audit-api',
+      testDir: './specs/identity',
+      // No dependency on the other four. This project's evidence is found by
+      // its own correlation id, not by "the store is non-empty" the way
+      // `audit-api` is, and it shares no wallet, order or document with
+      // anything else here (AUD-004 Phase C1).
+    },
   ],
 });

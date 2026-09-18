@@ -53,6 +53,8 @@ function row(overrides: Partial<AuditEventRow> = {}): AuditEventRow {
     // a shape this service never produces.
     recordHash: new Uint8Array(32).fill(0x7f),
     previousHash: null,
+    // Selected since AUD-003 correction, published with `correctedBy`.
+    correctionOf: null,
     ...overrides,
   };
 }
@@ -124,16 +126,47 @@ describe('the audit record a caller receives', () => {
     expect(toAuditEventView(row({ organizationId: null })).organizationId).toBeNull();
   });
 
-  it('publishes no digest and no correction field', () => {
+  it('publishes no digest', () => {
     // The digests stay internal even though AUD-003 writes them. A per-row hash
     // invites the wrong check — comparing a record's stored hash against itself
     // proves nothing, because a forger who rewrote the row rewrote the hash
-    // beside it — and `correctionOf` is still never written (AUD-004).
+    // beside it.
     const view = toAuditEventView(row()) as Record<string, unknown>;
 
     expect(view).not.toHaveProperty('recordHash');
     expect(view).not.toHaveProperty('previousHash');
-    expect(view).not.toHaveProperty('correctionOf');
+  });
+
+  describe('both directions of a correction link (AUD-003 correction, ADR-053 § 7)', () => {
+    it('states "corrects nothing" and "corrected by nothing" explicitly, never by omission', () => {
+      const view = toAuditEventView(row());
+
+      expect(view.correctionOf).toBeNull();
+      expect(view.correctedBy).toEqual([]);
+      expect(JSON.parse(JSON.stringify(view))).toMatchObject({
+        correctionOf: null,
+        correctedBy: [],
+      });
+    });
+
+    it('publishes the record a correction corrects', () => {
+      const view = toAuditEventView(
+        row({ action: 'audit.correction', correctionOf: '01JAUDIT0000000000000009' }),
+      );
+
+      expect(view.correctionOf).toBe('01JAUDIT0000000000000009');
+      expect(auditEventViewSchema.parse(view)).toEqual(view);
+    });
+
+    it('publishes the corrections it was handed, in order, as a copy', () => {
+      const links = ['01JCORR00000000000000001', '01JCORR00000000000000002'];
+      const view = toAuditEventView(row(), links);
+
+      expect(view.correctedBy).toEqual(links);
+      links.push('01JCORR00000000000000003');
+      expect(view.correctedBy).toHaveLength(2);
+      expect(auditEventViewSchema.parse(view)).toEqual(view);
+    });
   });
 
   describe('the integrity flag says which of two true things a row is', () => {

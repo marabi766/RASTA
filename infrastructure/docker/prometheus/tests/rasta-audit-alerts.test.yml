@@ -1,0 +1,2130 @@
+# Behaviour tests for rules/rasta-audit-alerts.yml. Not loaded by Prometheus:
+# prometheus.yml's `rule_files` names only rules/rasta-audit-alerts.yml.
+#
+#   docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+#     --entrypoint promtool prom/prometheus:v3.1.0 \
+#     test rules /etc/prometheus/tests/rasta-audit-alerts.test.yml
+#
+# Counter inputs start at a real sample and increment later, so every positive
+# case proves `increase`, not an absolute counter value. Inputs carry the
+# scrape's `job`/`instance`/`environment` labels so that each expected alert
+# also proves which labels the rule keeps.
+
+rule_files:
+  - ../rules/rasta-audit-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------------------
+  # RastaDeadLetterMessagePublished
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_dlq_messages_total{job="audit-service",instance="host.docker.internal:3115",environment="local",service="audit-service",topic="rasta.audit.trail.v1",reason="MAX_RETRIES_EXCEEDED"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      # A counter that is already non-zero but does not move must not fire.
+      - series: 'rasta_dlq_messages_total{job="audit-service",instance="host.docker.internal:3115",environment="local",service="audit-service",topic="rasta.identity.v1",reason="VALIDATION_FAILED"}'
+        values: '7 7 7 7 7 7 7 7 7 7 7'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaDeadLetterMessagePublished
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaDeadLetterMessagePublished
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: audit-service
+              topic: rasta.audit.trail.v1
+              reason: MAX_RETRIES_EXCEEDED
+            exp_annotations:
+              summary: 'A message was published to the dead-letter topic for rasta.audit.trail.v1'
+              description: 'Consumer audit-service dead-lettered a message from rasta.audit.trail.v1 with reason MAX_RETRIES_EXCEEDED in the last 5 minutes. A DLQ message is never routine.'
+              runbook: docs/runbooks/replay-dlq.md
+      # Once the increment has left the 5m window the alert resolves.
+      - eval_time: 10m
+        alertname: RastaDeadLetterMessagePublished
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditIngestionFailure
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_ingestion_failures_total{job="audit-service",instance="host.docker.internal:3115",environment="local",reason="database_error"}'
+        values: '0 0 2 2 2 2 2 2 2 2 2'
+      - series: 'rasta_audit_ingestion_failures_total{job="audit-service",instance="host.docker.internal:3115",environment="local",reason="unmappable_envelope"}'
+        values: '4 4 4 4 4 4 4 4 4 4 4'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaAuditIngestionFailure
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaAuditIngestionFailure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: database_error
+            exp_annotations:
+              summary: 'audit-service failed to write an audit record (database_error)'
+              description: 'rasta_audit_ingestion_failures_total increased with reason database_error in the last 5 minutes: at least one ingestion attempt did not produce an audit_event row.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 10m
+        alertname: RastaAuditIngestionFailure
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditChainDivergence
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_chain_verification_failures_total{job="audit-service",instance="host.docker.internal:3115",environment="local",reason="RECORD_HASH_MISMATCH",scope="organization"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'rasta_audit_chain_verification_failures_total{job="audit-service",instance="host.docker.internal:3115",environment="local",reason="PREVIOUS_HASH_MISMATCH",scope="platform"}'
+        values: '3 3 3 3 3 3 3 3 3 3 3'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaAuditChainDivergence
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaAuditChainDivergence
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              reason: RECORD_HASH_MISMATCH
+              scope: organization
+            exp_annotations:
+              summary: 'Audit chain verification found a divergence (RECORD_HASH_MISMATCH, organization)'
+              description: 'A organization verification reported RECORD_HASH_MISMATCH in the last 5 minutes. Treat as a security incident; never repair the chain.'
+              runbook: docs/runbooks/audit-chain-divergence.md
+      - eval_time: 10m
+        alertname: RastaAuditChainDivergence
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaSecurityEventCaptureGap — positive: failed and timeout
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_security_event_captures_total{job="identity-service",instance="host.docker.internal:3101",environment="local",outcome="failed"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'rasta_security_event_captures_total{job="identity-service",instance="host.docker.internal:3101",environment="local",outcome="timeout"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'rasta_security_event_captures_total{job="identity-service",instance="host.docker.internal:3101",environment="local",outcome="recorded"}'
+        values: '0 5 10 15 20 25 30 35 40 45 50'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaSecurityEventCaptureGap
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaSecurityEventCaptureGap
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              outcome: failed
+            exp_annotations:
+              summary: 'identity-service returned a refusal without audit evidence (failed)'
+              description: 'rasta_security_event_captures_total increased with outcome failed in the last 5 minutes: at least one refusal was not captured into security_event_outbox.'
+              runbook: docs/runbooks/security-event-outbox.md
+          - exp_labels:
+              severity: critical
+              outcome: timeout
+            exp_annotations:
+              summary: 'identity-service returned a refusal without audit evidence (timeout)'
+              description: 'rasta_security_event_captures_total increased with outcome timeout in the last 5 minutes: at least one refusal was not captured into security_event_outbox.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 10m
+        alertname: RastaSecurityEventCaptureGap
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaSecurityEventCaptureGap — negative: recorded and skipped never fire
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_security_event_captures_total{job="identity-service",instance="host.docker.internal:3101",environment="local",outcome="recorded"}'
+        values: '0 5 10 15 20 25 30 35 40 45 50'
+      - series: 'rasta_security_event_captures_total{job="identity-service",instance="host.docker.internal:3101",environment="local",outcome="skipped"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RastaSecurityEventCaptureGap
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaSecurityEventCaptureGap
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaSecurityEventClosedBacklogStale — at or below 60 never fires; the
+  # pending age, however old, is not an input to this alert.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_security_event_outbox_closed_backlog_age_seconds{job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 30 60 60 61 90 0'
+      - series: 'rasta_security_event_outbox_pending_age_seconds{job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '600 600 600 600 600 600 600'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: RastaSecurityEventClosedBacklogStale
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaSecurityEventClosedBacklogStale
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaSecurityEventClosedBacklogStale
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaSecurityEventClosedBacklogStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: identity-service
+              instance: host.docker.internal:3101
+              environment: local
+            exp_annotations:
+              summary: 'A closed security_event_outbox window has waited more than 60 seconds'
+              description: 'The oldest unpublished, closed security_event_outbox row ended its window 61 seconds ago; the relay is not publishing refusal evidence.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 6m
+        alertname: RastaSecurityEventClosedBacklogStale
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaSecurityEventPublishFailure
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_security_event_publish_failures_total{job="identity-service",instance="host.docker.internal:3101",environment="local",reason="publish_error"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'rasta_security_event_publish_failures_total{job="identity-service",instance="host.docker.internal:3101",environment="local",reason="contract_violation"}'
+        values: '2 2 2 2 2 2 2 2 2 2 2'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaSecurityEventPublishFailure
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaSecurityEventPublishFailure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: publish_error
+            exp_annotations:
+              summary: 'Refusal audit events failed to publish (publish_error)'
+              description: 'rasta_security_event_publish_failures_total increased with reason publish_error in the last 5 minutes; the rows were scheduled for retry.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 10m
+        alertname: RastaSecurityEventPublishFailure
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # Regression: the first real event after process start fires.
+  #
+  # Production exports every alert-driving counter tuple at zero when the
+  # process (or the DLQ-enabled consumer) is constructed, and scrapes see that
+  # zero before any event. `_` is "no series yet"; each series then appears at
+  # 0 and its first real event takes it to 1. That 0 -> 1 step is what
+  # `increase` sees, so all five counter alerts fire on the very first event.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_dlq_messages_total{service="audit-service",topic="rasta.identity.v1",reason="VALIDATION_FAILED"}'
+        values: '_ _ 0 1 1'
+      - series: 'rasta_audit_ingestion_failures_total{reason="trail_tenant_mismatch"}'
+        values: '_ _ 0 1 1'
+      - series: 'rasta_audit_chain_verification_failures_total{reason="CHAIN_LENGTH_MISMATCH",scope="platform"}'
+        values: '_ _ 0 1 1'
+      - series: 'rasta_security_event_captures_total{outcome="timeout"}'
+        values: '_ _ 0 1 1'
+      - series: 'rasta_security_event_publish_failures_total{reason="contract_violation"}'
+        values: '_ _ 0 1 1'
+    alert_rule_test:
+      # Exported at zero, nothing has happened yet.
+      - eval_time: 2m
+        alertname: RastaDeadLetterMessagePublished
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaDeadLetterMessagePublished
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: audit-service
+              topic: rasta.identity.v1
+              reason: VALIDATION_FAILED
+            exp_annotations:
+              summary: 'A message was published to the dead-letter topic for rasta.identity.v1'
+              description: 'Consumer audit-service dead-lettered a message from rasta.identity.v1 with reason VALIDATION_FAILED in the last 5 minutes. A DLQ message is never routine.'
+              runbook: docs/runbooks/replay-dlq.md
+      - eval_time: 3m
+        alertname: RastaAuditIngestionFailure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: trail_tenant_mismatch
+            exp_annotations:
+              summary: 'audit-service failed to write an audit record (trail_tenant_mismatch)'
+              description: 'rasta_audit_ingestion_failures_total increased with reason trail_tenant_mismatch in the last 5 minutes: at least one ingestion attempt did not produce an audit_event row.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 3m
+        alertname: RastaAuditChainDivergence
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              reason: CHAIN_LENGTH_MISMATCH
+              scope: platform
+            exp_annotations:
+              summary: 'Audit chain verification found a divergence (CHAIN_LENGTH_MISMATCH, platform)'
+              description: 'A platform verification reported CHAIN_LENGTH_MISMATCH in the last 5 minutes. Treat as a security incident; never repair the chain.'
+              runbook: docs/runbooks/audit-chain-divergence.md
+      - eval_time: 3m
+        alertname: RastaSecurityEventCaptureGap
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              outcome: timeout
+            exp_annotations:
+              summary: 'identity-service returned a refusal without audit evidence (timeout)'
+              description: 'rasta_security_event_captures_total increased with outcome timeout in the last 5 minutes: at least one refusal was not captured into security_event_outbox.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 3m
+        alertname: RastaSecurityEventPublishFailure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: contract_violation
+            exp_annotations:
+              summary: 'Refusal audit events failed to publish (contract_violation)'
+              description: 'rasta_security_event_publish_failures_total increased with reason contract_violation in the last 5 minutes; the rows were scheduled for retry.'
+              runbook: docs/runbooks/security-event-outbox.md
+
+  # Control: why the zero series exist. A series first exported at 1 (no zero
+  # before it) has no earlier sample, so `increase` cannot see that event.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_chain_verification_failures_total{reason="RECORD_HASH_MISMATCH",scope="organization"}'
+        values: '_ _ _ 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RastaAuditChainDivergence
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaAuditChainDivergence
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditIngestionLagHigh — ADR-053 § 13: p95 > 60 s per source_topic.
+  #
+  # Inputs are cumulative `rasta_audit_ingestion_lag_seconds_bucket` series with
+  # the service's real bucket bounds (1 5 15 30 60 120 300 900 3600 +Inf) and
+  # the scrape's `job`/`instance`/`environment`. The first rate needs two
+  # samples, so a condition that holds from the first increment is true from
+  # 1m: pending through 5m, firing at 6m, five minutes later.
+  #
+  # Per minute, per instance:
+  # - rasta.identity.v1, two instances: 189 records in (30,60] and 11 in
+  #   (60,120]. p95 = 60 + 60 * (190 - 189) / 11 = 65.45 > 60 (p50 is 45.9).
+  # - rasta.document.v1: the same from 4m only, so it fires independently at 9m.
+  # - rasta.asset.v1: 19 in (30,60] and 1 in (60,120]. p95 lands exactly on the
+  #   60 bound, which is not above 60 (p99 would be 108).
+  # - rasta.audit.trail.v1: 50 in (15,30]. p95 = 29.25.
+  # - rasta.fleet.v1: one instance as identity, the other 10000 records under
+  #   one second. Buckets are summed before the quantile, so p95 is 9.69: one
+  #   slow instance does not speak for the topic.
+  # - rasta.supplier.v1: exported at zero and never observed. The quantile is
+  #   NaN, which is never above 60.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="30"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="60"}'
+        values: '0 189 378 567 756 945 1134 1323 1512 1701 1890 2079 2268 2457 2646'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="120"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="300"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="900"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="3600"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.identity.v1",le="+Inf"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="30"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="60"}'
+        values: '0 189 378 567 756 945 1134 1323 1512 1701 1890 2079 2268 2457 2646'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="120"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="300"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="900"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="3600"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.identity.v1",le="+Inf"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="30"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="60"}'
+        values: '0 0 0 0 189 378 567 756 945 1134 1323 1512 1701 1890 2079'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="120"}'
+        values: '0 0 0 0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="300"}'
+        values: '0 0 0 0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="900"}'
+        values: '0 0 0 0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="3600"}'
+        values: '0 0 0 0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.document.v1",le="+Inf"}'
+        values: '0 0 0 0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="30"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="60"}'
+        values: '0 19 38 57 76 95 114 133 152 171 190 209 228 247 266'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="120"}'
+        values: '0 20 40 60 80 100 120 140 160 180 200 220 240 260 280'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="300"}'
+        values: '0 20 40 60 80 100 120 140 160 180 200 220 240 260 280'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="900"}'
+        values: '0 20 40 60 80 100 120 140 160 180 200 220 240 260 280'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="3600"}'
+        values: '0 20 40 60 80 100 120 140 160 180 200 220 240 260 280'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.asset.v1",le="+Inf"}'
+        values: '0 20 40 60 80 100 120 140 160 180 200 220 240 260 280'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="30"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="60"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="120"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="300"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="900"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="3600"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.audit.trail.v1",le="+Inf"}'
+        values: '0 50 100 150 200 250 300 350 400 450 500 550 600 650 700'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="30"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="60"}'
+        values: '0 189 378 567 756 945 1134 1323 1512 1701 1890 2079 2268 2457 2646'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="120"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="300"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="900"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="3600"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.fleet.v1",le="+Inf"}'
+        values: '0 200 400 600 800 1000 1200 1400 1600 1800 2000 2200 2400 2600 2800'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="1"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="5"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="15"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="30"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="60"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="120"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="300"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="900"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="3600"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:4115",environment="local",source_topic="rasta.fleet.v1",le="+Inf"}'
+        values: '0 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 110000 120000 130000 140000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="5"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="15"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="30"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="60"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="120"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="300"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="900"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="3600"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.supplier.v1",le="+Inf"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts: []
+      # One alert for identity despite two instances, with only source_topic.
+      - eval_time: 6m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.identity.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.identity.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.identity.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      - eval_time: 8m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.identity.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.identity.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.identity.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      # document became true at 4m and fires on its own schedule.
+      - eval_time: 9m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.document.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.document.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.document.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.identity.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.identity.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.identity.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      - eval_time: 14m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.document.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.document.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.document.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.identity.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.identity.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.identity.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+    promql_expr_test:
+      # alert_rule_test sees only firing alerts; ALERTS shows the pending state.
+      - expr: ALERTS{alertname="RastaAuditIngestionLagHigh"}
+        eval_time: 5m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditIngestionLagHigh",alertstate="pending",severity="warning",source_topic="rasta.document.v1"}'
+            value: 1
+          - labels: 'ALERTS{alertname="RastaAuditIngestionLagHigh",alertstate="pending",severity="warning",source_topic="rasta.identity.v1"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditIngestionLagHigh"}
+        eval_time: 6m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditIngestionLagHigh",alertstate="firing",severity="warning",source_topic="rasta.identity.v1"}'
+            value: 1
+          - labels: 'ALERTS{alertname="RastaAuditIngestionLagHigh",alertstate="pending",severity="warning",source_topic="rasta.document.v1"}'
+            value: 1
+
+  # A high interval that does not last: p95 is 65.45 at 1m-3m, 10000 fast
+  # records at 4m pull it to 33.7, and it stays at or below 47 until the fast
+  # minute leaves the 5m window. True again from 8m, so the `for` restarts
+  # there and fires at 13m, not at 6m.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="1"}'
+        values: '0 0 0 0 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="5"}'
+        values: '0 0 0 0 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="15"}'
+        values: '0 0 0 0 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="30"}'
+        values: '0 0 0 0 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000 10000'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="60"}'
+        values: '0 189 378 567 10567 10756 10945 11134 11323 11512 11701 11890 12079 12268 12457'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="120"}'
+        values: '0 200 400 600 10600 10800 11000 11200 11400 11600 11800 12000 12200 12400 12600'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="300"}'
+        values: '0 200 400 600 10600 10800 11000 11200 11400 11600 11800 12000 12200 12400 12600'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="900"}'
+        values: '0 200 400 600 10600 10800 11000 11200 11400 11600 11800 12000 12200 12400 12600'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="3600"}'
+        values: '0 200 400 600 10600 10800 11000 11200 11400 11600 11800 12000 12200 12400 12600'
+      - series: 'rasta_audit_ingestion_lag_seconds_bucket{job="audit-service",instance="host.docker.internal:3115",environment="local",source_topic="rasta.economic.v1",le="+Inf"}'
+        values: '0 200 400 600 10600 10800 11000 11200 11400 11600 11800 12000 12200 12400 12600'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_topic: rasta.economic.v1
+            exp_annotations:
+              summary: 'Audit ingestion p95 lag above 60 seconds for rasta.economic.v1'
+              description: 'The 95th percentile of seconds from event occurrence to audit row written for rasta.economic.v1 has been above 60 seconds, over a 5-minute window, for at least 5 minutes. Audit evidence for that topic is arriving late.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # No histogram input at all is silent here. A consumer that writes nothing
+  # observes nothing; the broker-side lag and signal-loss alerts cover it.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_ingestion_failures_total{job="audit-service",instance="host.docker.internal:3115",environment="local",reason="database_error"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RastaAuditIngestionLagHigh
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditProducerSilent — an expected producer contributed no row.
+  #
+  # Gate: rasta_audit_expected_active_producer{source_service} 1, which
+  # audit-service exports only for AUDIT_EXPECTED_ACTIVE_PRODUCERS, present now
+  # and 6h ago. Condition: no increase of rasta_audit_records_ingested_total for
+  # that source_service over [6h], summed across topics, outcomes and
+  # instances. `for: 30m`. Series start at 0m, which is the first scrape.
+  #
+  # Main group, 0m-420m:
+  # - identity-service: expected on two audit-service instances, counters on
+  #   both instances, two topics and three outcomes, all flat (one at an old
+  #   non-zero value). The gate first holds at 360m (offset 6h reaches the 0m
+  #   sample), so it is pending 360m-389m and fires at exactly 390m, as one
+  #   alert labelled only source_service and severity.
+  # - fleet-service: old non-zero and zero counters, never declared expected.
+  # - unknown: the fallback label is never declared, however large its count.
+  # - organization-service: declared only from 300m (a newly configured
+  #   producer, counters zero-seeded with it). Its gate needs a sample 6h
+  #   earlier, so it cannot even be pending before 660m.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_expected_active_producer{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="identity-service"}'
+        values: '1x420'
+      - series: 'rasta_audit_expected_active_producer{job="audit-service",instance="audit-b.internal:3115",environment="local",source_service="identity-service"}'
+        values: '1x420'
+      - series: 'rasta_audit_expected_active_producer{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="organization-service"}'
+        values: '_x299 1x120'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="SUCCESS"}'
+        values: '0x420'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="FAILURE"}'
+        values: '0x420'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.audit.trail.v1",outcome="SUCCESS"}'
+        values: '42x420'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="audit-b.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="SUCCESS"}'
+        values: '0x420'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="audit-b.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.audit.trail.v1",outcome="REFUSED"}'
+        values: '0x420'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="fleet-service",source_topic="rasta.fleet.v1",outcome="SUCCESS"}'
+        values: '3x420'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="fleet-service",source_topic="rasta.fleet.v1",outcome="FAILURE"}'
+        values: '0x420'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="unknown",source_topic="rasta.asset.v1",outcome="SUCCESS"}'
+        values: '5x420'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="organization-service",source_topic="rasta.organization.v1",outcome="SUCCESS"}'
+        values: '_x299 0x120'
+    alert_rule_test:
+      # First scrape, and every evaluation before the gate can hold.
+      - eval_time: 0m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 359m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      # Pending, not firing.
+      - eval_time: 360m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 389m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 390m
+        alertname: RastaAuditProducerSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_service: identity-service
+            exp_annotations:
+              summary: 'No audit records from expected producer identity-service for 6h30m'
+              description: 'identity-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 420m
+        alertname: RastaAuditProducerSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_service: identity-service
+            exp_annotations:
+              summary: 'No audit records from expected producer identity-service for 6h30m'
+              description: 'identity-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+    promql_expr_test:
+      # alert_rule_test sees only firing alerts; ALERTS shows the pending state.
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 359m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 360m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="pending",severity="warning",source_service="identity-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 389m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="pending",severity="warning",source_service="identity-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 390m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="firing",severity="warning",source_service="identity-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 420m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="firing",severity="warning",source_service="identity-service"}'
+            value: 1
+
+  # Two producers independently, recovery and a pending reset, 0m-600m.
+  # - identity-service: flat until a row at 450m on rasta.identity.v1 (instance
+  #   A). Fires at 390m, still firing at 449m, resolved at 450m.
+  # - asset-service: declared on both instances. Its only rows are on
+  #   rasta.insurance.v1 with outcome FAILURE on instance B, at 100m and 470m,
+  #   while its instance-A rasta.asset.v1 series stays at 0. The 100m row keeps
+  #   it quiet until the 99m sample leaves the window: pending from 459m. The
+  #   470m row clears that pending state, so it does not fire at 489m, and its
+  #   next possible pending evaluation (830m) is outside the fixture.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_expected_active_producer{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="identity-service"}'
+        values: '1x600'
+      - series: 'rasta_audit_expected_active_producer{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="asset-service"}'
+        values: '1x600'
+      - series: 'rasta_audit_expected_active_producer{job="audit-service",instance="audit-b.internal:3115",environment="local",source_service="asset-service"}'
+        values: '1x600'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="SUCCESS"}'
+        values: '0x449 1x150'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="audit-b.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.audit.trail.v1",outcome="REFUSED"}'
+        values: '0x600'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="asset-service",source_topic="rasta.asset.v1",outcome="SUCCESS"}'
+        values: '0x600'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="audit-b.internal:3115",environment="local",source_service="asset-service",source_topic="rasta.insurance.v1",outcome="FAILURE"}'
+        values: '0x99 1x369 2x130'
+    alert_rule_test:
+      - eval_time: 359m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 390m
+        alertname: RastaAuditProducerSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_service: identity-service
+            exp_annotations:
+              summary: 'No audit records from expected producer identity-service for 6h30m'
+              description: 'identity-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 449m
+        alertname: RastaAuditProducerSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_service: identity-service
+            exp_annotations:
+              summary: 'No audit records from expected producer identity-service for 6h30m'
+              description: 'identity-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      # identity-service wrote a row: resolved.
+      - eval_time: 450m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      # asset-service would fire here had the 470m row not reset pending.
+      - eval_time: 489m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 600m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 389m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="pending",severity="warning",source_service="identity-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 390m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="firing",severity="warning",source_service="identity-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 450m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 458m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 459m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="pending",severity="warning",source_service="asset-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 469m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditProducerSilent",alertstate="pending",severity="warning",source_service="asset-service"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 470m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 489m
+        exp_samples: []
+
+  # Restarts and missing input, 0m-500m. Every declared series here is present
+  # at 0m, so the gate holds from 360m.
+  # - identity-service: audit-service restarted at 200m and re-seeded its
+  #   counter at 0 with no row since (7 -> 0). `increase` treats the drop as a
+  #   reset, not a write: pending 360m, fires 390m.
+  # - asset-service: restarted at 200m and wrote a row before the first
+  #   post-restart scrape (7 -> 1). The reset correction counts that row, so it
+  #   stays quiet until the 199m sample leaves the window (pending at 559m).
+  # - supplier-service: declared, but no counter series at all. It contributed
+  #   no row, so it is silent and fires at 390m.
+  # - document-service: declared until 199m only. With no gate series now it
+  #   never fires, although its counters are flat.
+  # - economic-service: flat counters, never declared.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_expected_active_producer{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="identity-service"}'
+        values: '1x500'
+      - series: 'rasta_audit_expected_active_producer{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="asset-service"}'
+        values: '1x500'
+      - series: 'rasta_audit_expected_active_producer{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="supplier-service"}'
+        values: '1x500'
+      - series: 'rasta_audit_expected_active_producer{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="document-service"}'
+        values: '1x199 _x300'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="SUCCESS"}'
+        values: '7x199 0x300'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="asset-service",source_topic="rasta.asset.v1",outcome="SUCCESS"}'
+        values: '7x199 1x300'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="document-service",source_topic="rasta.document.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="economic-service",source_topic="rasta.economic.v1",outcome="SUCCESS"}'
+        values: '0x500'
+    alert_rule_test:
+      - eval_time: 389m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 390m
+        alertname: RastaAuditProducerSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_service: identity-service
+            exp_annotations:
+              summary: 'No audit records from expected producer identity-service for 6h30m'
+              description: 'identity-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+          - exp_labels:
+              severity: warning
+              source_service: supplier-service
+            exp_annotations:
+              summary: 'No audit records from expected producer supplier-service for 6h30m'
+              description: 'supplier-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 500m
+        alertname: RastaAuditProducerSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_service: identity-service
+            exp_annotations:
+              summary: 'No audit records from expected producer identity-service for 6h30m'
+              description: 'identity-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+          - exp_labels:
+              severity: warning
+              source_service: supplier-service
+            exp_annotations:
+              summary: 'No audit records from expected producer supplier-service for 6h30m'
+              description: 'supplier-service is configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS, but rasta_audit_records_ingested_total has not increased for it on any topic or outcome for at least 6 hours 30 minutes. Either the producer stopped emitting audit events or its events are not reaching audit_event. Silence of other alerts is not evidence of healthy ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+
+  # No expected-producer input at all: every counter below is flat, on two
+  # instances, and nothing fires. Absent gate input never means "every known
+  # service is expected".
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="audit-b.internal:3115",environment="local",source_service="identity-service",source_topic="rasta.identity.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="organization-service",source_topic="rasta.organization.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="audit-b.internal:3115",environment="local",source_service="organization-service",source_topic="rasta.organization.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="asset-service",source_topic="rasta.asset.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="audit-b.internal:3115",environment="local",source_service="asset-service",source_topic="rasta.asset.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="host.docker.internal:3115",environment="local",source_service="supplier-service",source_topic="rasta.supplier.v1",outcome="SUCCESS"}'
+        values: '0x500'
+      - series: 'rasta_audit_records_ingested_total{job="audit-service",instance="audit-b.internal:3115",environment="local",source_service="supplier-service",source_topic="rasta.supplier.v1",outcome="SUCCESS"}'
+        values: '0x500'
+    alert_rule_test:
+      - eval_time: 390m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+      - eval_time: 500m
+        alertname: RastaAuditProducerSilent
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditProducerSilent"}
+        eval_time: 400m
+        exp_samples: []
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditServiceMetricsUnavailable — the dedicated `audit-service` scrape
+  # job is down or missing. `for: 2m`, labels only `job` and `severity`.
+  #
+  # Outage, recovery and a second outage. The audit-service target is up at
+  # 0m-1m, down 2m-5m, up 6m-7m, down 8m-11m and up at 12m. Pending at 2m and
+  # 3m, firing at exactly 4m, resolved at 6m; the second outage starts the
+  # timer again (pending 8m-9m, firing at 10m). The rasta-services and
+  # identity-service targets on the same host (one always down, one always up,
+  # one flapping) never raise or suppress it.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1 1 0 0 0 0 1 1 0 0 0 0 1'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '0x12'
+      - series: 'up{job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '1x12'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3102",environment="local"}'
+        values: '1 0 1 0 1 0 1 0 1 0 1 0 1'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 5m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 6m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 11m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 12m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+    promql_expr_test:
+      # alert_rule_test sees only firing alerts; ALERTS shows the pending state.
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 1m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 2m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="firing",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 6m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 8m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 9m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="firing",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 12m
+        exp_samples: []
+
+  # A healthy audit-service, on two replicas, never fires, however many other
+  # targets are down: every rasta-services target, identity-service and the
+  # Kafka exporter fail for the whole fixture.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="audit-service",instance="audit-b.internal:3115",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '0x10'
+      - series: 'up{job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0x10'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3102",environment="local"}'
+        values: '0x10'
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 10m
+        exp_samples: []
+
+  # No up{job="audit-service"} at all: the job is not configured, or was never
+  # loaded. `== 0` alone would be empty; `absent` supplies the same single
+  # `job` label. Pending at 0m and 1m, firing at 2m. Healthy rasta-services
+  # and identity-service targets (including the address audit-service used to
+  # share a job with) cannot stand in for it.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3102",environment="local"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 10m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 0m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 2m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="firing",job="audit-service",severity="warning"}'
+            value: 1
+
+  # The target disappears from a running Prometheus (removed from
+  # prometheus.yml): Prometheus writes a staleness marker, after which the
+  # selector is empty and `absent` holds. Pending at 2m-3m, firing at 4m.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1 1 stale'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 8m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 1m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 2m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+
+  # Replicas: `min by (job)`. Replica B stops being scraped at 2m while A stays
+  # up, and that alone fires at 4m — its process-local counters are missing
+  # from every aggregate. A fails too from 6m; still exactly one alert, with
+  # only `job` and `severity`, never `instance`. Both recover at 9m.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1 1 1 1 1 1 0 0 0 1 1'
+      - series: 'up{job="audit-service",instance="audit-b.internal:3115",environment="local"}'
+        values: '1 1 0 0 0 0 0 0 0 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 7m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped audit-service metrics for 2 minutes'
+              description: 'The audit-service scrape target has been down or missing for at least 2 minutes. Audit ingestion, ingestion failure, ingestion lag, chain divergence and producer-silence metrics have no trustworthy input while this fires: silence from those alerts is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 9m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="firing",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 7m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="firing",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 9m
+        exp_samples: []
+
+  # Scrape failures shorter than 2 minutes never fire: each run of failures
+  # is interrupted by a successful scrape, which resets the timer.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1 0 1 0 0 1 0 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RastaAuditServiceMetricsUnavailable
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaAuditServiceMetricsUnavailable",alertstate="pending",job="audit-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaAuditServiceMetricsUnavailable"}
+        eval_time: 5m
+        exp_samples: []
+
+  # ---------------------------------------------------------------------------
+  # RastaIdentityServiceMetricsUnavailable — the dedicated `identity-service`
+  # scrape job is down or missing. `for: 2m`, labels only `job` and `severity`.
+  #
+  # Outage, recovery and a second outage. The identity-service target is up at
+  # 0m-1m, down 2m-5m, up 6m-7m, down 8m-11m and up at 12m. Pending at 2m and
+  # 3m, firing at exactly 4m, resolved at 6m; the second outage starts the
+  # timer again (pending 8m-9m, firing at 10m). The rasta-services targets on
+  # the same host (one always down, one flapping) and a healthy audit-service
+  # never raise or suppress it.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'up{job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '1 1 0 0 0 0 1 1 0 0 0 0 1'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '0x12'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3102",environment="local"}'
+        values: '1 0 1 0 1 0 1 0 1 0 1 0 1'
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: identity-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped identity-service metrics for 2 minutes'
+              description: 'The identity-service scrape target has been down or missing for at least 2 minutes. Refusal-evidence capture-gap, closed-backlog and publish-failure metrics have no trustworthy input while this fires: silence from RastaSecurityEventCaptureGap, RastaSecurityEventClosedBacklogStale and RastaSecurityEventPublishFailure is not evidence that refusal evidence is healthy.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 5m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: identity-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped identity-service metrics for 2 minutes'
+              description: 'The identity-service scrape target has been down or missing for at least 2 minutes. Refusal-evidence capture-gap, closed-backlog and publish-failure metrics have no trustworthy input while this fires: silence from RastaSecurityEventCaptureGap, RastaSecurityEventClosedBacklogStale and RastaSecurityEventPublishFailure is not evidence that refusal evidence is healthy.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 6m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: identity-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped identity-service metrics for 2 minutes'
+              description: 'The identity-service scrape target has been down or missing for at least 2 minutes. Refusal-evidence capture-gap, closed-backlog and publish-failure metrics have no trustworthy input while this fires: silence from RastaSecurityEventCaptureGap, RastaSecurityEventClosedBacklogStale and RastaSecurityEventPublishFailure is not evidence that refusal evidence is healthy.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 11m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: identity-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped identity-service metrics for 2 minutes'
+              description: 'The identity-service scrape target has been down or missing for at least 2 minutes. Refusal-evidence capture-gap, closed-backlog and publish-failure metrics have no trustworthy input while this fires: silence from RastaSecurityEventCaptureGap, RastaSecurityEventClosedBacklogStale and RastaSecurityEventPublishFailure is not evidence that refusal evidence is healthy.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 12m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+    promql_expr_test:
+      # alert_rule_test sees only firing alerts; ALERTS shows the pending state.
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 1m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 2m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="pending",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="pending",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="firing",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 6m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 7m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 8m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="pending",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 9m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="pending",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="firing",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 12m
+        exp_samples: []
+
+  # A healthy identity-service, on two replicas, never fires, however many
+  # other targets are down: every rasta-services target, audit-service and the
+  # Kafka exporter fail for the whole fixture.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="identity-service",instance="identity-b.internal:3101",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '0x10'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3102",environment="local"}'
+        values: '0x10'
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '0x10'
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 2m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 10m
+        exp_samples: []
+
+  # No up{job="identity-service"} at all: the job is not configured, or was
+  # never loaded. `== 0` alone would be empty; `absent` supplies the same single
+  # `job` label. Pending at 0m and 1m, firing at 2m. Healthy rasta-services and
+  # audit-service targets cannot stand in for it, including 3101 still scraped
+  # under a stale `rasta-services` configuration Prometheus never reloaded.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3101",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="rasta-services",instance="host.docker.internal:3102",environment="local"}'
+        values: '1x10'
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: identity-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped identity-service metrics for 2 minutes'
+              description: 'The identity-service scrape target has been down or missing for at least 2 minutes. Refusal-evidence capture-gap, closed-backlog and publish-failure metrics have no trustworthy input while this fires: silence from RastaSecurityEventCaptureGap, RastaSecurityEventClosedBacklogStale and RastaSecurityEventPublishFailure is not evidence that refusal evidence is healthy.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 10m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: identity-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped identity-service metrics for 2 minutes'
+              description: 'The identity-service scrape target has been down or missing for at least 2 minutes. Refusal-evidence capture-gap, closed-backlog and publish-failure metrics have no trustworthy input while this fires: silence from RastaSecurityEventCaptureGap, RastaSecurityEventClosedBacklogStale and RastaSecurityEventPublishFailure is not evidence that refusal evidence is healthy.'
+              runbook: docs/runbooks/security-event-outbox.md
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 0m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="pending",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="pending",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 2m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="firing",job="identity-service",severity="warning"}'
+            value: 1
+
+  # The target disappears from a running Prometheus (removed from
+  # prometheus.yml): Prometheus writes a staleness marker, after which the
+  # selector is empty and `absent` holds. Pending at 2m-3m, firing at 4m.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '1 1 stale'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: identity-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped identity-service metrics for 2 minutes'
+              description: 'The identity-service scrape target has been down or missing for at least 2 minutes. Refusal-evidence capture-gap, closed-backlog and publish-failure metrics have no trustworthy input while this fires: silence from RastaSecurityEventCaptureGap, RastaSecurityEventClosedBacklogStale and RastaSecurityEventPublishFailure is not evidence that refusal evidence is healthy.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 8m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: identity-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped identity-service metrics for 2 minutes'
+              description: 'The identity-service scrape target has been down or missing for at least 2 minutes. Refusal-evidence capture-gap, closed-backlog and publish-failure metrics have no trustworthy input while this fires: silence from RastaSecurityEventCaptureGap, RastaSecurityEventClosedBacklogStale and RastaSecurityEventPublishFailure is not evidence that refusal evidence is healthy.'
+              runbook: docs/runbooks/security-event-outbox.md
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 1m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 2m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="pending",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="pending",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="firing",job="identity-service",severity="warning"}'
+            value: 1
+
+  # Replicas: `min by (job)`. Replica B stops being scraped at 2m while A stays
+  # up, and that alone fires at 4m: its process-local capture and publish
+  # counters and backlog gauges are missing from every aggregate. A fails too
+  # from 6m; still exactly one alert, with only `job` and `severity`, never
+  # `instance`. Both recover at 9m.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '1 1 1 1 1 1 0 0 0 1 1'
+      - series: 'up{job="identity-service",instance="identity-b.internal:3101",environment="local"}'
+        values: '1 1 0 0 0 0 0 0 0 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: identity-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped identity-service metrics for 2 minutes'
+              description: 'The identity-service scrape target has been down or missing for at least 2 minutes. Refusal-evidence capture-gap, closed-backlog and publish-failure metrics have no trustworthy input while this fires: silence from RastaSecurityEventCaptureGap, RastaSecurityEventClosedBacklogStale and RastaSecurityEventPublishFailure is not evidence that refusal evidence is healthy.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 7m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: identity-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped identity-service metrics for 2 minutes'
+              description: 'The identity-service scrape target has been down or missing for at least 2 minutes. Refusal-evidence capture-gap, closed-backlog and publish-failure metrics have no trustworthy input while this fires: silence from RastaSecurityEventCaptureGap, RastaSecurityEventClosedBacklogStale and RastaSecurityEventPublishFailure is not evidence that refusal evidence is healthy.'
+              runbook: docs/runbooks/security-event-outbox.md
+      - eval_time: 9m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 2m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="pending",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="pending",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="firing",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 7m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="firing",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 9m
+        exp_samples: []
+
+  # Scrape failures shorter than 2 minutes never fire: each run of failures
+  # is interrupted by a successful scrape, which resets the timer.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '1 0 1 0 0 1 0 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RastaIdentityServiceMetricsUnavailable
+        exp_alerts: []
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="pending",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 5m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 6m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaIdentityServiceMetricsUnavailable",alertstate="pending",job="identity-service",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaIdentityServiceMetricsUnavailable"}
+        eval_time: 7m
+        exp_samples: []
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditConsumerLag — sustained lag on both audit groups fires after 5m.
+  #
+  # Series names and labels are the ones danielqsj/kafka-exporter v1.9.0
+  # serves: kafka_consumergroup_lag{consumergroup,partition,topic}, with -1 for
+  # a partition the group has never committed.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # domain-projector: 5 + (-1 clamped to 0) + 2 = 7, caught up from 7m.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.identity.v1"}'
+        values: '5 5 5 5 5 5 5 0 0 0 0'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="1",topic="rasta.identity.v1"}'
+        values: '-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="2",topic="rasta.identity.v1"}'
+        values: '2 2 2 2 2 2 2 0 0 0 0'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.trail",partition="0",topic="rasta.audit.trail.v1"}'
+        values: '3 3 3 3 3 3 3 3 3 3 3'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.trail",partition="1",topic="rasta.audit.trail.v1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0'
+      # Zero lag never fires.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.asset.v1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0'
+      # Never committed: -1 is unknown, not lag.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.fleet.v1"}'
+        values: '-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1'
+      # Other groups, however far behind, are not audit consumers.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="maintenance-service.usage",partition="0",topic="rasta.asset.v1"}'
+        values: '50 50 50 50 50 50 50 50 50 50 50'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-itest-trail-2XBS1RCJJYC7",partition="0",topic="rasta.audit.trail.v1"}'
+        values: '40 40 40 40 40 40 40 40 40 40 40'
+    alert_rule_test:
+      # Pending, not firing, before 5 minutes.
+      - eval_time: 4m
+        alertname: RastaAuditConsumerLag
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditConsumerLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.domain-projector
+              topic: rasta.identity.v1
+            exp_annotations:
+              summary: 'Audit consumer group audit-service.domain-projector has lagged on rasta.identity.v1 for 5 minutes'
+              description: 'Kafka consumer group audit-service.domain-projector has been behind on rasta.identity.v1 for at least 5 minutes (7 records past its committed offset now). audit_event rows for those records may not exist yet.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.trail
+              topic: rasta.audit.trail.v1
+            exp_annotations:
+              summary: 'Audit consumer group audit-service.trail has lagged on rasta.audit.trail.v1 for 5 minutes'
+              description: 'Kafka consumer group audit-service.trail has been behind on rasta.audit.trail.v1 for at least 5 minutes (3 records past its committed offset now). audit_event rows for those records may not exist yet.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      # domain-projector caught up at 7m and resolves; trail is still behind.
+      - eval_time: 7m
+        alertname: RastaAuditConsumerLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.trail
+              topic: rasta.audit.trail.v1
+            exp_annotations:
+              summary: 'Audit consumer group audit-service.trail has lagged on rasta.audit.trail.v1 for 5 minutes'
+              description: 'Kafka consumer group audit-service.trail has been behind on rasta.audit.trail.v1 for at least 5 minutes (3 records past its committed offset now). audit_event rows for those records may not exist yet.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditConsumerLag — transient lag does not fire, and a single zero
+  # restarts the 5 minutes.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Positive from 1m to 4m, caught up at 5m: never 5 continuous minutes.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.economic.v1"}'
+        values: '0 4 9 4 1 0 0 0 0 0 0 0'
+      # Positive 0m-3m, zero at 4m, positive again from 5m: fires at 10m only.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.trail",partition="2",topic="rasta.audit.trail.v1"}'
+        values: '2 2 2 2 0 2 2 2 2 2 2 2'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RastaAuditConsumerLag
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditConsumerLag
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaAuditConsumerLag
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: RastaAuditConsumerLag
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditConsumerLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.trail
+              topic: rasta.audit.trail.v1
+            exp_annotations:
+              summary: 'Audit consumer group audit-service.trail has lagged on rasta.audit.trail.v1 for 5 minutes'
+              description: 'Kafka consumer group audit-service.trail has been behind on rasta.audit.trail.v1 for at least 5 minutes (2 records past its committed offset now). audit_event rows for those records may not exist yet.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # ---------------------------------------------------------------------------
+  # RastaKafkaExporterUnavailable — a down target is pending before 2 minutes,
+  # fires at 2 minutes with only `job`, and resolves once it is scraped again.
+  # `up{job,instance}` is the series Prometheus writes for every scrape.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '0 0 0 0 0 1 1 1'
+      # Another job being down is not the exporter.
+      - series: 'up{job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kafka-exporter
+            exp_annotations:
+              summary: 'Prometheus has not scraped the Kafka exporter for 2 minutes'
+              description: 'The kafka-exporter scrape target has been down or missing for at least 2 minutes. RastaAuditConsumerLag and the audit DLQ retained-records rule have no input while this fires: their silence is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      - eval_time: 5m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      # The exporter-down state never raises the missing-group alert.
+      - eval_time: 4m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+    promql_expr_test:
+      # alert_rule_test sees only firing alerts; ALERTS shows the pending state.
+      - expr: ALERTS{alertname="RastaKafkaExporterUnavailable"}
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaKafkaExporterUnavailable",alertstate="pending",job="kafka-exporter",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="RastaKafkaExporterUnavailable"}
+        eval_time: 2m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RastaKafkaExporterUnavailable",alertstate="firing",job="kafka-exporter",severity="warning"}'
+            value: 1
+
+  # A scrape failure shorter than 2 minutes never fires.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '1 0 0 1 1 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+
+  # A healthy exporter reporting both audit groups fires neither alert. Zero
+  # and -1 (a partition the group never committed) are present values.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '1x10'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.identity.v1"}'
+        values: '0x10'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.trail",partition="0",topic="rasta.audit.trail.v1"}'
+        values: '-1x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+
+  # No `up{job="kafka-exporter"}` at all: the target is gone from Prometheus.
+  # `== 0` alone would be empty; the alert still fires with the same labels,
+  # and the missing-group alert stays silent because nothing says the exporter
+  # is up.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prometheus",instance="localhost:9090"}'
+        values: '1x6'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kafka-exporter
+            exp_annotations:
+              summary: 'Prometheus has not scraped the Kafka exporter for 2 minutes'
+              description: 'The kafka-exporter scrape target has been down or missing for at least 2 minutes. RastaAuditConsumerLag and the audit DLQ retained-records rule have no input while this fires: their silence is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      - eval_time: 6m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaAuditConsumerGroupMetricsMissing — exporter up, trail group absent.
+  # Only the fixed group name counts: the integration-test group
+  # `audit-itest-trail-…` and another service's group do not stand in for it,
+  # and the present domain-projector group (including a -1 partition) does not
+  # alert.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '1x6'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.identity.v1"}'
+        values: '3x6'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="1",topic="rasta.identity.v1"}'
+        values: '-1x6'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-itest-trail-2XBS1RCJJYC7",partition="0",topic="rasta.audit.trail.v1"}'
+        values: '0x6'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="maintenance-service.usage",partition="0",topic="rasta.asset.v1"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.trail
+            exp_annotations:
+              summary: 'No Kafka lag metrics for audit consumer group audit-service.trail'
+              description: 'kafka-exporter is being scraped but has reported no kafka_consumergroup_lag series for audit-service.trail for at least 5 minutes: the broker holds no committed offsets for that group, so RastaAuditConsumerLag cannot evaluate it. Start or inspect the real audit-service consumer; never reset, delete or shift its offsets.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+      - eval_time: 5m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts: []
+
+  # Exporter up, domain-projector absent; the integration-test projector group
+  # `audit-itest-…` does not stand in for it.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '1x6'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.trail",partition="0",topic="rasta.audit.trail.v1"}'
+        values: '0x6'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-itest-01K4ZJ8S2M7Q",partition="0",topic="rasta.identity.v1"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.domain-projector
+            exp_annotations:
+              summary: 'No Kafka lag metrics for audit consumer group audit-service.domain-projector'
+              description: 'kafka-exporter is being scraped but has reported no kafka_consumergroup_lag series for audit-service.domain-projector for at least 5 minutes: the broker holds no committed offsets for that group, so RastaAuditConsumerLag cannot evaluate it. Start or inspect the real audit-service consumer; never reset, delete or shift its offsets.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # Exporter up and no audit group at all (a fresh broker): one alert per
+  # group, each naming it.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.domain-projector
+            exp_annotations:
+              summary: 'No Kafka lag metrics for audit consumer group audit-service.domain-projector'
+              description: 'kafka-exporter is being scraped but has reported no kafka_consumergroup_lag series for audit-service.domain-projector for at least 5 minutes: the broker holds no committed offsets for that group, so RastaAuditConsumerLag cannot evaluate it. Start or inspect the real audit-service consumer; never reset, delete or shift its offsets.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.trail
+            exp_annotations:
+              summary: 'No Kafka lag metrics for audit consumer group audit-service.trail'
+              description: 'kafka-exporter is being scraped but has reported no kafka_consumergroup_lag series for audit-service.trail for at least 5 minutes: the broker holds no committed offsets for that group, so RastaAuditConsumerLag cannot evaluate it. Start or inspect the real audit-service consumer; never reset, delete or shift its offsets.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # Exporter down with no group series: only RastaKafkaExporterUnavailable
+  # diagnoses it, however long it lasts.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaKafkaExporterUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kafka-exporter
+            exp_annotations:
+              summary: 'Prometheus has not scraped the Kafka exporter for 2 minutes'
+              description: 'The kafka-exporter scrape target has been down or missing for at least 2 minutes. RastaAuditConsumerLag and the audit DLQ retained-records rule have no input while this fires: their silence is not evidence of healthy audit ingestion.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # A group that disappears for less than 5 minutes does not fire, and its
+  # reappearance restarts the 5 minutes. `stale` is the marker Prometheus
+  # writes when a series drops out of a successful scrape.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka-exporter",instance="kafka-exporter:9308"}'
+        values: '1x12'
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.domain-projector",partition="0",topic="rasta.identity.v1"}'
+        values: '0x12'
+      # Absent 1m-4m, back (as -1) at 5m only, absent again from 6m.
+      - series: 'kafka_consumergroup_lag{job="kafka-exporter",instance="kafka-exporter:9308",consumergroup="audit-service.trail",partition="0",topic="rasta.audit.trail.v1"}'
+        values: '0 stale _ _ _ -1 stale _ _ _ _ _ _'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      # Without the reset, pending since 1m would fire here.
+      - eval_time: 6m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: RastaAuditConsumerGroupMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: audit-service.trail
+            exp_annotations:
+              summary: 'No Kafka lag metrics for audit consumer group audit-service.trail'
+              description: 'kafka-exporter is being scraped but has reported no kafka_consumergroup_lag series for audit-service.trail for at least 5 minutes: the broker holds no committed offsets for that group, so RastaAuditConsumerLag cannot evaluate it. Start or inspect the real audit-service consumer; never reset, delete or shift its offsets.'
+              runbook: docs/runbooks/audit-ingestion-lag.md
+
+  # ---------------------------------------------------------------------------
+  # topic:kafka_topic_retained_records:sum — records retained in
+  # rasta.audit.v1.dlq, summed over partitions and labelled by topic only.
+  # Inputs: kafka_topic_partition_current_offset and
+  # kafka_topic_partition_oldest_offset{partition,topic}.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'kafka_topic_partition_current_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="0",topic="rasta.audit.v1.dlq"}'
+        values: '120 130 130'
+      - series: 'kafka_topic_partition_oldest_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="0",topic="rasta.audit.v1.dlq"}'
+        values: '20 20 100'
+      - series: 'kafka_topic_partition_current_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="1",topic="rasta.audit.v1.dlq"}'
+        values: '55 55 55'
+      - series: 'kafka_topic_partition_oldest_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="1",topic="rasta.audit.v1.dlq"}'
+        values: '50 50 50'
+      - series: 'kafka_topic_partition_current_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="2",topic="rasta.audit.v1.dlq"}'
+        values: '30 30 30'
+      - series: 'kafka_topic_partition_oldest_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="2",topic="rasta.audit.v1.dlq"}'
+        values: '30 30 30'
+      # Another dead-letter topic is not recorded.
+      - series: 'kafka_topic_partition_current_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="0",topic="rasta.identity.v1.dlq"}'
+        values: '999 999 999'
+      - series: 'kafka_topic_partition_oldest_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="0",topic="rasta.identity.v1.dlq"}'
+        values: '0 0 0'
+    promql_expr_test:
+      # (120-20) + (55-50) + (30-30)
+      - expr: topic:kafka_topic_retained_records:sum
+        eval_time: 0m
+        exp_samples:
+          - labels: 'topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}'
+            value: 105
+      # A new DLQ write on partition 0.
+      - expr: topic:kafka_topic_retained_records:sum
+        eval_time: 1m
+        exp_samples:
+          - labels: 'topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}'
+            value: 115
+      # Retention deleted old records from partition 0.
+      - expr: topic:kafka_topic_retained_records:sum
+        eval_time: 2m
+        exp_samples:
+          - labels: 'topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}'
+            value: 35
+
+  # Clamp: offsets read at slightly different moments can cross. That partition
+  # counts as 0 and never subtracts from another partition.
+  - interval: 1m
+    input_series:
+      - series: 'kafka_topic_partition_current_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="0",topic="rasta.audit.v1.dlq"}'
+        values: '7 7'
+      - series: 'kafka_topic_partition_oldest_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="0",topic="rasta.audit.v1.dlq"}'
+        values: '10 10'
+      - series: 'kafka_topic_partition_current_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="1",topic="rasta.audit.v1.dlq"}'
+        values: '4 9'
+      - series: 'kafka_topic_partition_oldest_offset{job="kafka-exporter",instance="kafka-exporter:9308",partition="1",topic="rasta.audit.v1.dlq"}'
+        values: '4 4'
+    promql_expr_test:
+      - expr: topic:kafka_topic_retained_records:sum
+        eval_time: 0m
+        exp_samples:
+          - labels: 'topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}'
+            value: 0
+      # 0 (clamped from -3) + 5, not 2.
+      - expr: topic:kafka_topic_retained_records:sum
+        eval_time: 1m
+        exp_samples:
+          - labels: 'topic:kafka_topic_retained_records:sum{topic="rasta.audit.v1.dlq"}'
+            value: 5

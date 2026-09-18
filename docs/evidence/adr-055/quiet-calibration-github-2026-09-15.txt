@@ -1,0 +1,166 @@
+ADR-055 paired calibration - probe immediately followed by the unchanged stress project
+commit=89ebe9943ba9a29d6a7e67beadec8192d14060d5 generated=2026-09-15T16:20:14.085Z
+topology: runner_os="Ubuntu 24.04.5 LTS" runner_image=ubuntu24/20260907.300.1 kernel=6.17.0-1022-azure cpus=4 memory_gib=15.6 docker_storage_driver=overlay2 postgres_image=postgis/postgis:16-3.4 server_version=16.4 (Debian 16.4-1.pgdg110+2) fsync=on synchronous_commit=on wal_level=replica wal_sync_method=fdatasync full_page_writes=on shared_buffers=128MB max_connections=100 max_wal_size=1GB checkpoint_timeout=5min
+pairs: 20; each pair is one 60 s validated WAL probe immediately followed by
+  one fresh unfiltered `pnpm test:aggregation-stress` (aggregation-stress, --runInBand, no retry)
+validity only: VALID / INVALID / INCONCLUSIVE. No threshold, no margin, no capability judgement.
+
+campaign preflight: passed
+  preflight infrastructure (campaign scope, denominator=1 campaign, never per pair): missingEnvironment=0 dockerUnavailable=0 pgbenchUnavailable=0 psqlUnavailable=0 connectionFailure=0 permissionDenied=0 statsUnreadable=0 statsReset=0 timeout=0 failedTransactions=0 controlContamination=0 backgroundWalContamination=0 noProgress=0 harnessError=0 other=0
+
+control (read-only, 10 s): outcome=VALID valid=yes
+  control infrastructure: missingEnvironment=0 dockerUnavailable=0 pgbenchUnavailable=0 psqlUnavailable=0 connectionFailure=0 permissionDenied=0 statsUnreadable=0 statsReset=0 timeout=0 failedTransactions=0 controlContamination=0 backgroundWalContamination=0 noProgress=0 harnessError=0 other=0
+
+pair-1: outcome=VALID
+  probe: transactions=169151 failed=0 tps=2819.37 latency_avg_ms=0.354
+    wal_sync_delta=169228 wal_sync_per_s=2820.47 wal_sync_per_tx=1.0005 wal_records_per_tx=2.103
+    min_interval_tps=475.1 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=20.4
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-2: outcome=VALID
+  probe: transactions=192862 failed=0 tps=3214.58 latency_avg_ms=0.311
+    wal_sync_delta=192868 wal_sync_per_s=3214.47 wal_sync_per_tx=1 wal_records_per_tx=2.001
+    min_interval_tps=1825.9 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=55.6
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-3: outcome=VALID
+  probe: transactions=217197 failed=0 tps=3620.19 latency_avg_ms=0.276
+    wal_sync_delta=217203 wal_sync_per_s=3620.05 wal_sync_per_tx=1 wal_records_per_tx=2.001
+    min_interval_tps=1051.9 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=57.6
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-4: outcome=VALID
+  probe: transactions=227836 failed=0 tps=3797.51 latency_avg_ms=0.263
+    wal_sync_delta=227842 wal_sync_per_s=3797.37 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=1549 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=59.7
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-5: outcome=VALID
+  probe: transactions=184642 failed=0 tps=3075.67 latency_avg_ms=0.325
+    wal_sync_delta=184646 wal_sync_per_s=3077.43 wal_sync_per_tx=1 wal_records_per_tx=2.001
+    min_interval_tps=898 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=55.7
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-6: outcome=VALID
+  probe: transactions=201710 failed=0 tps=3362.06 latency_avg_ms=0.297
+    wal_sync_delta=201714 wal_sync_per_s=3361.9 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=1074 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=59.7
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-7: outcome=VALID
+  probe: transactions=203627 failed=0 tps=3394.01 latency_avg_ms=0.294
+    wal_sync_delta=203632 wal_sync_per_s=3393.87 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=1246.1 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=57.8
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-8: outcome=VALID
+  probe: transactions=203378 failed=0 tps=3389.86 latency_avg_ms=0.295
+    wal_sync_delta=203384 wal_sync_per_s=3389.73 wal_sync_per_tx=1 wal_records_per_tx=2.001
+    min_interval_tps=784.9 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=57.7
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-9: outcome=VALID
+  probe: transactions=179650 failed=0 tps=2994.36 latency_avg_ms=0.334
+    wal_sync_delta=179655 wal_sync_per_s=2994.25 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=631 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=57.4
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-10: outcome=VALID
+  probe: transactions=153085 failed=0 tps=2548.42 latency_avg_ms=0.392
+    wal_sync_delta=153089 wal_sync_per_s=2551.48 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=405 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=57.2
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-11: outcome=VALID
+  probe: transactions=170517 failed=0 tps=2842.15 latency_avg_ms=0.352
+    wal_sync_delta=170521 wal_sync_per_s=2842.02 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=976 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=55.6
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-12: outcome=VALID
+  probe: transactions=199769 failed=0 tps=3321.88 latency_avg_ms=0.301
+    wal_sync_delta=199774 wal_sync_per_s=3329.57 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=1565.9 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=59.6
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-13: outcome=VALID
+  probe: transactions=162010 failed=0 tps=2700.35 latency_avg_ms=0.37
+    wal_sync_delta=162016 wal_sync_per_s=2700.27 wal_sync_per_tx=1 wal_records_per_tx=2.001
+    min_interval_tps=938.7 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=55.4
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-14: outcome=VALID
+  probe: transactions=207015 failed=0 tps=3450.5 latency_avg_ms=0.29
+    wal_sync_delta=207021 wal_sync_per_s=3450.35 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=1073.8 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=57.8
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-15: outcome=VALID
+  probe: transactions=150434 failed=0 tps=2494.8 latency_avg_ms=0.401
+    wal_sync_delta=150439 wal_sync_per_s=2507.32 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=591.1 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=57.3
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-16: outcome=VALID
+  probe: transactions=205725 failed=0 tps=3428.97 latency_avg_ms=0.291
+    wal_sync_delta=205731 wal_sync_per_s=3428.85 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=2174.3 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=57.7
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-17: outcome=VALID
+  probe: transactions=203947 failed=0 tps=3399.34 latency_avg_ms=0.294
+    wal_sync_delta=203954 wal_sync_per_s=3399.23 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=1241 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=57.7
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-18: outcome=VALID
+  probe: transactions=189556 failed=0 tps=3159.48 latency_avg_ms=0.316
+    wal_sync_delta=189562 wal_sync_per_s=3159.37 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=776 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=59.8
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-19: outcome=VALID
+  probe: transactions=211479 failed=0 tps=3524.87 latency_avg_ms=0.283
+    wal_sync_delta=211483 wal_sync_per_s=3524.72 wal_sync_per_tx=1 wal_records_per_tx=2.001
+    min_interval_tps=899 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=55.7
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+pair-20: outcome=VALID
+  probe: transactions=189241 failed=0 tps=3154.22 latency_avg_ms=0.317
+    wal_sync_delta=189247 wal_sync_per_s=3154.12 wal_sync_per_tx=1 wal_records_per_tx=2
+    min_interval_tps=1635 zero_commit_intervals=0 longest_zero_commit_s=0
+  stress: ran=yes result=PASS exit=0 wall_s=59.7
+    suites passed/failed/skipped/total=1/0/0/1 tests passed/failed/skipped/total=22/0/0/22
+    failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+
+outcomes: VALID=20 INVALID=0 INCONCLUSIVE=0
+stress: passed=20 failed=0 of 20
+distributions across every attempted pair:
+  probe_tps: n=20 available=20 unavailable=0 min=2494.8 median=3268.23 max=3797.51
+  probe_min_interval_tps: n=20 available=20 unavailable=0 min=405 median=1013.95 max=2174.3
+  probe_longest_stall_s: n=20 available=20 unavailable=0 min=0 median=0 max=0
+  stress_wall_s: n=20 available=20 unavailable=0 min=20.41 median=57.64 max=59.78
+infrastructure totals across pairs: missingEnvironment=0 dockerUnavailable=0 pgbenchUnavailable=0 psqlUnavailable=0 connectionFailure=0 permissionDenied=0 statsUnreadable=0 statsReset=0 timeout=0 failedTransactions=0 controlContamination=0 backgroundWalContamination=0 noProgress=0 harnessError=0 other=0
+control infrastructure totals: missingEnvironment=0 dockerUnavailable=0 pgbenchUnavailable=0 psqlUnavailable=0 connectionFailure=0 permissionDenied=0 statsUnreadable=0 statsReset=0 timeout=0 failedTransactions=0 controlContamination=0 backgroundWalContamination=0 noProgress=0 harnessError=0 other=0
+preflight infrastructure totals (campaign scope, denominator=1 campaign): missingEnvironment=0 dockerUnavailable=0 pgbenchUnavailable=0 psqlUnavailable=0 connectionFailure=0 permissionDenied=0 statsUnreadable=0 statsReset=0 timeout=0 failedTransactions=0 controlContamination=0 backgroundWalContamination=0 noProgress=0 harnessError=0 other=0
+
+this campaign does not locate a capability boundary and proposes no threshold (ADR-055 § 6).

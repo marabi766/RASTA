@@ -485,15 +485,72 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 
 ## Audit — `rasta.audit.trail.v1`
 
-> **هیچ تولیدکننده و هیچ مصرف‌کننده‌ای امروز وجود ندارد** — `audit-service` ساخته نشده. قرارداد در
-> [ADR-053](../adr/ADR-053-audit-service-append-only-evidence.md) (`Proposed`)، که این Topic را **مسیر دوم** ورودی
-> می‌نامد: مسیر نخست، Projector روی هر ده Topic دامنه‌ای است (`docs/07` § ۷٫۱۰).
+> **وضعیت — 2026-09-11 (AUD-004 Phase C1).** `audit-service` **ساخته شده** (AUD-001..003، `docs/04` § ۴٫۱۵) و مسیر
+> نخستِ ورودی‌اش — Projector روی هر ده Topic دامنه‌ای، `docs/07` § ۷٫۱۰ — زنده است. این Topic **مسیر دوم** است
+> (ADR-053 § ۱)، و آنچه در ادامه می‌آید فقط دربارهٔ همین مسیر دوم صادق است:
+>
+> - **قرارداد وجود دارد (Phase A).** `packages/contracts/src/events/audit-trail.ts` رویداد `AUDIT_EVENT_RECORDED`
+>   (**نسخهٔ ۱**) را با Zod Schema پیاده می‌کند و از `packages/contracts/src/index.ts` صادر می‌شود.
+> - **Consumer وجود دارد (Phase B).** `AuditTrailConsumer` در `audit-service` با گروه ثابت `audit-service.trail` فقط
+>   همین Topic را می‌خواند — جدا از گروه Projector، و بی‌اعتنا به `KAFKA_CONSUMER_GROUP`. پیش از هر نوشتن به‌ترتیب
+>   بررسی می‌کند: Envelope استاندارد Parse شود؛ `eventName === AUDIT_EVENT_RECORDED` و `eventVersion === 1` روی همین
+>   Topic؛ Payload با `auditTrailPayloadSchemaV1`؛ و **توافق مستأجر، بسته در خطا**: `payload.organizationId` دقیقاً
+>   برابر `envelope.tenantId`، یا هر دو غایب برای رکورد پلتفرمی — هر ترکیب دیگر (یک‌طرفه، ناهمسان، تهی) رد می‌شود و
+>   مستأجر هرگز از Actor یا Resource حدس زده نمی‌شود. پیام ردشده **هیچ ردیف و هیچ نشانگر `processed_event`** نمی‌سازد؛
+>   Throw می‌شود، Retry می‌شود و به `rasta.audit.v1.dlq` می‌رود، و خطا/Log فقط مسیر Schema و نام کلید دارد، نه مقدار.
+>   Idempotency روی `(eventId, 'audit-service.trail')` در همان تراکنشِ ردیف و زنجیرهٔ Hash است؛ فضای نام آن از مسیر A
+>   جداست. اصلاح یک **ردیف تازه** با `correction_of` است، هرگز UPDATE.
+> - **یک Producer، برای یک رد (Phase C1).** `identity-service` تنها سرویسی است که روی این Topic می‌نویسد، و فقط یک
+>   رد را: `POST /v1/users/me/active-organization` که با `403 TENANT_MISMATCH` رد می‌شود. Exception Filter ردیف را در
+>   جدول محلی `security_event_outbox` می‌نویسد (تراکنش کوتاه و کراندار؛ شکستش پاسخ `403` را عوض نمی‌کند) و Relay دوم
+>   (ADR-050) آن را پس از اعتبارسنجی Envelope و Payload منتشر می‌کند. مقادیر ثابت این Producer: `outcome = REFUSED`،
+>   `occurrenceCount = 1`، `action = identity.active_organization.switch`، `resourceType = User`، `resourceId` =
+>   شناسهٔ خود کاربر (همان کلید Partition)، مستأجر = سازمانی که فراخوان از طرفش عمل می‌کرد — هرگز سازمان درخواستی.
+> - **وضعیت 2026-09-12 — دو بند بالا دیگر همهٔ امروز نیستند.** Producerِ ردها در `identity-service` اکنون **نُه** محل رد
+>   دارد (AUD-004 Phase C1–C10: محل دامنه‌ای `SWITCH_ACTIVE_ORGANIZATION`، هفت Route دارای `@Roles` و `TENANT_MISMATCH`ِ خودِ
+>   `AuthGuard`) و ردهای یکسان را در یک پنجرهٔ UTC در یک ردیف با `occurrenceCount` تجمیع می‌کند (Phase C2)؛ ردیف فقط پس از
+>   بسته‌شدن پنجره منتشر می‌شود.
+> - **Producerِ اصلاح وجود دارد (نیمهٔ اصلاحِ AUD-003).** `POST /v1/audit-corrections` در `identity-service` (فقط
+>   `SYSTEM_ADMIN`، `Idempotency-Key` الزامی) هدف را از راه Endpoint داخلی `audit-service` اثبات می‌کند و **یک**
+>   `AUDIT_EVENT_RECORDED` v1 را از `outbox_message` **استاندارد** identity — نه `security_event_outbox` — و با Relay
+>   استاندارد (ADR-050) منتشر می‌کند، در همان تراکنشِ رکورد Idempotency. مقادیر ثابت: `action = audit.correction`،
+>   `resourceType = AuditEvent`، `resourceId = correctionOf =` شناسهٔ هدف، `outcome = SUCCESS`، بی `errorCode`، `reason`
+>   الزامی، `changes` با Redaction، `occurrenceCount = 1`؛ Actor و نقش‌ها از Token تأییدشده؛ مستأجر فقط از هدفِ اثبات‌شده
+>   (برای هدفِ پلتفرمی، هم `organizationId` و هم `tenantId` غایب)؛ `aggregateType/aggregateId = AuditEvent`/شناسهٔ هدف و
+>   **کلید Partition = شناسهٔ هدف**. شکل HTTP فرمان تصمیم موقت **Q-53** است.
+> - **هنوز ساخته نشده:** رول‌اوت به هر سرویس دیگر (R-2)، ثبت ردهایی که Gateway یک Hop زودتر می‌گیرد،
+>   `SERVICE_TENANT_CONTEXT_INVALID`/`FORBIDDEN`، صادرات، Purge، امضا و قاعدهٔ هشدار. سطر «همه سرویس‌ها روی این Topic
+>   می‌نویسند» زیر همچنان **نیت طراحی** ADR-053 § ۱ است، نه رفتار امروز — جزئیات در
+>   [ADR-053 implementation plan](../adr/ADR-053-implementation-plan.md) § ۴ و § ۵.
+> - **Runbook (2026-09-12).** رکورد حسابرسیِ مورد انتظار که نرسیده، یا پیام در `rasta.audit.v1.dlq` →
+>   [`audit-gap-detected.md`](../runbooks/audit-gap-detected.md)؛ رکورد ثبت‌شده‌ای که با زنجیره‌اش نمی‌خواند →
+>   [`audit-chain-divergence.md`](../runbooks/audit-chain-divergence.md)؛ صف ردهای identity →
+>   [`security-event-outbox.md`](../runbooks/security-event-outbox.md).
+> - `Proposed`. جزئیات کامل ADR-053 در
+>   [ADR-053](../adr/ADR-053-audit-service-append-only-evidence.md).
 
-**همه سرویس‌ها** روی این Topic می‌نویسند. تنها مصرف‌کننده `audit-service` است.
+**نیت طراحی — چه کسی روی این Topic خواهد نوشت، وقتی Producerها ساخته شوند.** همهٔ سرویس‌ها (ADR-053 § ۱: هر رویداد
+پرامتیاز یا رد که مسیر A ساختاراً نمی‌تواند بسازد). **تنها مصرف‌کننده** `audit-service` است، زیر گروه مصرف‌کنندهٔ
+`audit-service.trail` (ADR-053 § ۱، § ۸).
 
-| رویداد                 | Payload                                                                                                     |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `AUDIT_EVENT_RECORDED` | `actor`, `organizationId`, `action`, `resourceType`, `resourceId`, `outcome`, `changes`, `reason`, `source` |
+**کلید Partition.** قاعدهٔ پیش‌فرض همین سند (ستون «قواعد» بالا): `aggregateId` — که برای یک رکورد معمولی همان
+`resourceId` عمل حسابرسی‌شده است، و برای یک اصلاح همان `correctionOf`. وقتی عملی `resourceId` ندارد، `actor.id`
+جایگزین می‌شود (پیاده‌سازی implementation plan § ۵).
+
+| رویداد                 | نسخه | Payload (v1)                                                                                                                                                                                              |
+| ---------------------- | :--: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AUDIT_EVENT_RECORDED` |  ۱   | `actor {type, id, roles[]}`, `organizationId?`, `action`, `resourceType`, `resourceId`, `outcome`, `errorCode?`, `reason?`, `changes[]?`, `occurrenceCount`, `source? {ip?, userAgent?}`, `correctionOf?` |
+
+**چهار ناورداییِ اصلاح، در Schema اجباری‌اند** (ADR-053 § ۷): `correctionOf` حاضر باشد یعنی `action ===
+'audit.correction'`، `outcome === 'SUCCESS'`، `reason` غیرخالی، و `actor.type === 'USER'` — هرکدام نبود، Schema رد
+می‌کند. **مجوزدهی، Redaction و تجمیعِ ردها در این Schema نیست** — همه سمتِ Producer‌اند (`identity-service`).
+
+**آنچه Consumer افزون بر Schema رد می‌کند — بدون بازنویسی هیچ مقدار.** تغییری در `changes` که میدانش (یا یک بخش نقطه‌دارِ
+آن) در `SENSITIVE_KEYS` از `@rasta/logging` است و مقدار خامِ Scalar به‌جای `{redacted:true}`/`{hash}` دارد؛ `correctionOf`
+بلندتر از ستون ۶۴ نویسه‌ای؛ `occurrenceCount` بیرون از بازهٔ `INTEGER`؛ و شناسه‌های تهی (`actor.id`، `resourceType`،
+`resourceId`، `reason`، `correctionOf`). هرکدام **رد** می‌شود، نه کوتاه یا اصلاح: این جدول تنها جایی است که مقدارِ نشت‌کرده
+هرگز از آن حذف نمی‌شود، و پیوند اصلاحِ کوتاه‌شده به رکوردی اشاره می‌کند که هیچ‌کس نام نبرده. **آنچه Consumer بررسی
+نمی‌کند:** اینکه رکوردِ `correctionOf` واقعاً وجود دارد یا در همان مستأجر است — این بر عهدهٔ Producer فرمان اصلاح است.
 
 ---
 

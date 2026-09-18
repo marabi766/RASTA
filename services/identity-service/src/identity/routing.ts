@@ -1,3 +1,4 @@
+import { AUDIT_EVENT_RECORDED, AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
 import { IDENTITY_EVENTS, type IdentityEventName } from './events';
 
 /**
@@ -25,7 +26,15 @@ import { IDENTITY_EVENTS, type IdentityEventName } from './events';
  * implemented.
  */
 
-export const PARTITION_SCOPES = { AGGREGATE: 'AGGREGATE' } as const;
+export const PARTITION_SCOPES = {
+  AGGREGATE: 'AGGREGATE',
+  /**
+   * AUD-003 correction: an audit correction is ordered by the record it corrects. The key
+   * is the target audit-event id (`correctionOf`), so every correction of one
+   * record is one stream on the trail topic.
+   */
+  AUDIT_TARGET: 'AUDIT_TARGET',
+} as const;
 export type PartitionScope = (typeof PARTITION_SCOPES)[keyof typeof PARTITION_SCOPES];
 
 export interface PartitionDecision {
@@ -34,11 +43,22 @@ export interface PartitionDecision {
 }
 
 /**
+ * Everything this service puts on its standard outbox: its own domain events,
+ * plus the one audit-trail event the correction command produces (AUD-003 correction).
+ *
+ * The correction is deliberately **not** an identity domain event: it is not in
+ * `IDENTITY_EVENTS`, it has no identity payload schema, and it never goes to
+ * `rasta.identity.v1`. It shares only the outbox, the relay and ADR-050's
+ * fencing — which is exactly what ADR-053 § 7 asks of it.
+ */
+export type OutboundEventName = IdentityEventName | typeof AUDIT_EVENT_RECORDED;
+
+/**
  * Every event this service produces, and the scope that orders it.
  *
- * A `Record` over the event union, so adding a name to `IDENTITY_EVENTS` without
- * deciding how it is ordered fails `pnpm typecheck` rather than silently
- * inheriting a default.
+ * A `Record` over the outbound union, so adding a name to `IDENTITY_EVENTS`
+ * without deciding how it is ordered fails `pnpm typecheck` rather than
+ * silently inheriting a default.
  */
 export const PARTITION_SCOPE_OF = {
   USER_REGISTERED: 'AGGREGATE',
@@ -53,7 +73,25 @@ export const PARTITION_SCOPE_OF = {
   REGISTRATION_SUBMITTED: 'AGGREGATE',
   REGISTRATION_APPROVED: 'AGGREGATE',
   REGISTRATION_REJECTED: 'AGGREGATE',
-} as const satisfies Record<IdentityEventName, PartitionScope>;
+  [AUDIT_EVENT_RECORDED]: 'AUDIT_TARGET',
+} as const satisfies Record<OutboundEventName, PartitionScope>;
+
+/**
+ * The topic each outbound event must be written to — checked, not defaulted.
+ *
+ * The audit-trail event goes to `rasta.audit.trail.v1` and nowhere else, and no
+ * identity domain event may ever go there: the trail topic is audit evidence,
+ * and a domain event on it would be dead-lettered by audit-service at best.
+ */
+export function assertTopicFor(eventName: OutboundEventName, topic: string): void {
+  const isTrailEvent = eventName === AUDIT_EVENT_RECORDED;
+  if (isTrailEvent !== (topic === AUDIT_TRAIL_TOPIC)) {
+    throw new Error(
+      `Identity routing: ${eventName} may not be written to topic "${topic}". ` +
+        `Only ${AUDIT_EVENT_RECORDED} belongs on ${AUDIT_TRAIL_TOPIC}, and it belongs nowhere else.`,
+    );
+  }
+}
 
 /**
  * Resolves the partition key for one event.
@@ -64,7 +102,7 @@ export const PARTITION_SCOPE_OF = {
  * sequence together.
  */
 export function resolvePartitionKey(
-  eventName: IdentityEventName,
+  eventName: OutboundEventName,
   aggregateId: string,
 ): PartitionDecision {
   const scope = PARTITION_SCOPE_OF[eventName];

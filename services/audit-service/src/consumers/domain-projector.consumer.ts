@@ -15,6 +15,7 @@ import {
   toOrganizationProjection,
   type OrganizationProjection,
 } from '../audit/organization-projection';
+import { domainSourceServiceLabel } from '../audit/audit-producer-topology';
 import {
   auditIngestionFailuresTotal,
   auditIngestionLagSeconds,
@@ -146,8 +147,12 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
         return;
       }
 
+      // The label is the topic owner's name only when the stored producer claim
+      // agrees with it, otherwise `unknown`; never the raw claim, which is
+      // producer-authored and would make the series count unbounded. The row
+      // written above keeps the claim exactly as the producer sent it.
       auditRecordsIngestedTotal.inc({
-        source_service: record.sourceService,
+        source_service: domainSourceServiceLabel(record.sourceTopic, record.sourceService),
         source_topic: record.sourceTopic,
         outcome: record.outcome,
       });
@@ -157,7 +162,7 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
       // is the evidence", and clamped at zero because a producer clock slightly
       // ahead of the database's would otherwise report negative lag.
       const lagSeconds = Math.max(0, (Date.now() - record.occurredAt.getTime()) / 1000);
-      auditIngestionLagSeconds.set({ source_topic: record.sourceTopic }, lagSeconds);
+      auditIngestionLagSeconds.observe({ source_topic: record.sourceTopic }, lagSeconds);
     } catch (error) {
       auditIngestionFailuresTotal.inc({ reason: INGESTION_FAILURE_REASONS.DATABASE_ERROR });
       // Deliberately rethrown. Retry and DLQ belong to the shared consumer, and
