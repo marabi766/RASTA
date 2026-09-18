@@ -193,9 +193,12 @@ Application services run as Node processes through `pnpm dev`; Compose is intent
 not a complete application deployment.
 
 > [!NOTE]
-> `.env.example` defaults PostgreSQL to `127.0.0.1:5433`. On Windows, Docker Desktop or an excluded host-port range may
-> prevent that binding. Keep the address configurable and follow the current troubleshooting evidence in
-> [`docs/14-testing-strategy.md`](docs/14-testing-strategy.md); do not rewrite `.env` from repository scripts.
+> `.env.example` defaults PostgreSQL to `127.0.0.1:5433` rather than `localhost`, which can resolve to `::1` first against an
+> IPv4-only published port. On Windows, Docker Desktop or an excluded host-port range may prevent that binding; keep the
+> address configurable. Repository scripts do not rewrite your `.env`, so an older copy still using `localhost` must be
+> updated by hand. `pnpm check:local-postgres-config` validates the checked-in `.env.example`, and
+> [`docs/14-testing-strategy.md`](docs/14-testing-strategy.md) § 14.3 contains the `localhost`/IPv6 and Prisma `P2028`
+> troubleshooting evidence.
 
 ### Optional infrastructure profiles
 

@@ -21,6 +21,26 @@
 > زنجیره **Tamper-Evident** است، نه Tamper-Proof. `COM-009` همچنان `READY` با ۱۳ امتیاز است.
 > جزئیات گام‌به‌گام در [برنامهٔ پیاده‌سازی](ADR-053-implementation-plan.md) § ۴ و Runbook
 > [`audit-chain-divergence.md`](../runbooks/audit-chain-divergence.md).
+>
+> **وضعیت پیاده‌سازی — 2026-09-11 (AUD-004 Phase A — فقط قرارداد).** پیاده‌سازی این تصمیم شروع شده، **نه پذیرشش**؛
+> ADR همچنان `Proposed` می‌ماند. `packages/contracts/src/events/audit-trail.ts` رویداد `AUDIT_EVENT_RECORDED`
+> (نسخهٔ ۱) را با Zod Schema **فقط‌Contract** (A-03) پیاده می‌کند — همان نامی که `docs/events/README.md` § Audit از
+> AUD-001 داشته، اکنون دقیق‌شده. **هیچ رفتار زمان اجرا افزوده نشده:** بدون Producer، بدون Consumer، بدون
+> `security_event_outbox`، بدون Endpoint فرمان اصلاح، بدون Migration.
+>
+> **تصمیمِ مالکیت Producer که این فاز می‌گیرد** (تفصیل در [برنامهٔ پیاده‌سازی](ADR-053-implementation-plan.md) § ۵):
+>
+> - **Producer مرجع ردها (§ ۴):** `identity-service` — دقیقاً همان پیشنهادی که برنامهٔ پیاده‌سازی از قبل نام برده بود
+>   («پیشنهاد: `identity-service` — پرارزش‌ترین ردها»). با این فاز، پیشنهاد به تصمیم تبدیل می‌شود.
+> - **مرز Producer نیتِ اصلاح (§ ۷):** نیز `identity-service`، با یک تفاوت مهم — از `outbox_message` **استانداردِ خودش**
+>   استفاده می‌کند (همان ADR-021 که هر رویداد دیگرِ این سرویس با آن منتشر می‌شود)، نه از `security_event_outbox` تازه که
+>   فقط برای ردهای ناهمزمان است. هیچ‌کدام از این دو **پایگاه دادهٔ حسابرسی را نمی‌نویسند** (A-01)، و `audit-service`
+>   نه Producer این رویداد است، نه مصرف‌کنندهٔ رویدادِ خودش.
+>
+> جزئیات کامل — Topic/Group، مالکیت Outbox/تراکنش، رفتار در خطا، نسخه‌بندی Contract، کلید Idempotency، کلید Partition
+> و مرز میان اعتبارسنجی Schema و مجوزدهی/Redaction/تجمیعِ سمت Producer — در
+> [برنامهٔ پیاده‌سازی](ADR-053-implementation-plan.md) § ۵ آمده، نه اینجا: این سند تصمیم است و بازنویسی نمی‌شود؛
+> جزئیات اجرا در سند برنامه‌ریزی‌شده برای همین منظور زندگی می‌کنند.
 
 ---
 

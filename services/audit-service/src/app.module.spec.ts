@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { APP_GUARD } from '@nestjs/core';
+import { AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
 import {
   AuthGuard,
   AUTH_OPTIONS,
@@ -10,8 +11,10 @@ import {
 import { AppModule } from './app.module';
 import { PrismaService } from './prisma/prisma.service';
 import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
+import { AuditTrailConsumer } from './consumers/audit-trail.consumer';
 import { AuditRepository } from './audit/audit.repository';
 import { AuditController } from './audit/audit.controller';
+import { AuditInternalController } from './audit/audit-internal.controller';
 import {
   AuditEventDetailQueryPipe,
   AuditEventQueryPipe,
@@ -19,9 +22,17 @@ import {
 } from './audit/audit.query.pipes';
 import { AuditVerificationService } from './audit/audit.verification.service';
 import { HealthController } from './health/health.controller';
+import { MetricsController } from './observability/metrics.controller';
 import { ENV, LOGGER } from './tokens';
+import { metricsText } from '@rasta/observability';
+import { auditExpectedActiveProducer, auditRecordsIngestedTotal } from './observability/metrics';
 import type { AuditEnv } from './config/env';
-import { DOMAIN_PROJECTOR_CONSUMER, DOMAIN_TOPICS } from './audit/audit.mapper';
+import {
+  AUDIT_DEAD_LETTER_TOPIC,
+  DOMAIN_PROJECTOR_CONSUMER,
+  DOMAIN_TOPICS,
+} from './audit/audit.mapper';
+import { AUDIT_TRAIL_CONSUMER } from './audit/audit-trail.mapper';
 
 /**
  * The composition root, exercised rather than assumed.
@@ -40,6 +51,14 @@ interface FactoryProvider {
   inject?: unknown[];
 }
 
+/** The options an `EventConsumer` was constructed with. */
+interface BuiltConsumerOptions {
+  topics: string[];
+  groupId: string;
+  fromBeginning?: boolean;
+  deadLetterTopic?: string;
+}
+
 // Heterogeneous on purpose: most providers are factory objects, but the two
 // query pipes are registered as bare classes because a class-referenced
 // enhancer is the only form Nest resolves from a route decorator.
@@ -52,6 +71,31 @@ function providerFor(token: unknown): FactoryProvider {
   );
   if (!found) throw new Error(`no provider registered for ${String(token)}`);
   return found;
+}
+
+/**
+ * Builds one of the two consumers through its real factory, then invokes the
+ * builder it was handed — which is what constructs the `EventConsumer`, and
+ * construction opens no socket.
+ */
+function consumerOptions(token: typeof DomainProjectorConsumer | typeof AuditTrailConsumer): {
+  consumer: DomainProjectorConsumer | AuditTrailConsumer;
+  options: BuiltConsumerOptions;
+} {
+  const env = providerFor(ENV).useFactory?.();
+  const logger = providerFor(LOGGER).useFactory?.(env);
+  const repository = new AuditRepository({} as PrismaService);
+
+  const consumer = providerFor(token).useFactory?.(env, logger, repository) as
+    DomainProjectorConsumer | AuditTrailConsumer;
+
+  const built = (
+    consumer as unknown as {
+      createConsumer: (handler: () => Promise<void>) => { options: BuiltConsumerOptions };
+    }
+  ).createConsumer(async () => undefined);
+
+  return { consumer, options: built.options };
 }
 
 /**
@@ -72,6 +116,21 @@ const ENVIRONMENT = {
   INTERNAL_TOKEN_SECRET: 'x'.repeat(48),
 };
 
+/** A consumer stand-in that records when it was started. */
+function startable(name: string, order: string[], fail = false) {
+  return {
+    start: async () => {
+      order.push(name);
+      if (fail) throw new Error('This server does not host this topic-partition');
+    },
+    isRunning: () => !fail,
+  };
+}
+
+const idleRepository = {
+  partitionRowCounts: async () => [{ partition: 'audit_event_default', rows: 0 }],
+} as unknown as AuditRepository;
+
 describe('audit-service composition root', () => {
   const originalEnv = process.env;
 
@@ -83,13 +142,51 @@ describe('audit-service composition root', () => {
     process.env = originalEnv;
   });
 
-  it('registers exactly the health probes and the read API', () => {
-    // Two controllers, and the count is pinned rather than left open: a third
-    // one appearing here is either a write surface `docs/04` § 4.15 forbids or
-    // an export route AUD-002 does not build, and both should have to change
-    // this line before they ship.
+  it('registers exactly the health probes, the metrics scrape target, the read API and the internal target lookup', () => {
+    // Pinned rather than left open: another controller here is either a write
+    // surface `docs/04` § 4.15 forbids or an export route nothing builds yet,
+    // and both should have to change this line before they ship. AUD-004 Phase
+    // B added a consumer, not a controller. AUD-003 correction adds one internal *read*,
+    // reserved for identity-service's service token — still no write surface.
+    // The metrics controller is a single public GET over the shared registry;
+    // `metrics.controller.spec.ts` proves that route over HTTP, and this line is
+    // what proves it is registered at all.
     const controllers = (Reflect.getMetadata('controllers', AppModule) ?? []) as unknown[];
-    expect(controllers).toEqual([HealthController, AuditController]);
+    expect(controllers).toEqual([
+      HealthController,
+      MetricsController,
+      AuditController,
+      AuditInternalController,
+    ]);
+  });
+
+  it('opens no write surface and no export route on any registered controller', () => {
+    // Structural, over every handler of every registered controller: each is a
+    // GET, and no path names an export. Nest stores the method as a
+    // `RequestMethod` number, where GET is 0.
+    const controllers = (Reflect.getMetadata('controllers', AppModule) ?? []) as (new (
+      ...args: never[]
+    ) => object)[];
+
+    for (const controller of controllers) {
+      const prototype = controller.prototype as Record<string, unknown>;
+      const handlers = Object.getOwnPropertyNames(prototype)
+        .filter((name) => name !== 'constructor')
+        .map((name) => prototype[name])
+        .filter((handler) => Reflect.hasMetadata('method', handler as object));
+
+      expect(handlers.length).toBeGreaterThan(0);
+      for (const handler of handlers) {
+        expect(Reflect.getMetadata('method', handler as object)).toBe(0);
+        const path = [
+          Reflect.getMetadata('path', controller),
+          Reflect.getMetadata('path', handler as object),
+        ]
+          .flat()
+          .join('/');
+        expect(path).not.toMatch(/export/i);
+      }
+    }
   });
 
   it('registers the guards globally, authentication before authorization', () => {
@@ -97,7 +194,9 @@ describe('audit-service composition root', () => {
     // only `AuthGuard` populates, so a graph that ran them the other way round
     // would judge roles nobody had verified. Nest runs `APP_GUARD` providers in
     // registration order.
-    const guards = providers.filter((p) => p.provide === APP_GUARD).map((p) => p.useClass);
+    const guards = providers
+      .filter((p) => (p as FactoryProvider).provide === APP_GUARD)
+      .map((p) => (p as FactoryProvider).useClass);
     expect(guards).toEqual([AuthGuard, RolesGuard]);
   });
 
@@ -215,54 +314,129 @@ describe('audit-service composition root', () => {
   it('builds the projector over exactly the ten domain topics', () => {
     // The wiring assertion that matters most: a consumer built over the wrong
     // topic set records the wrong evidence, and nothing else would notice.
-    const env = providerFor(ENV).useFactory?.();
-    const logger = providerFor(LOGGER).useFactory?.(env);
-    const repository = new AuditRepository({} as PrismaService);
+    const { consumer, options } = consumerOptions(DomainProjectorConsumer);
 
-    const projector = providerFor(DomainProjectorConsumer).useFactory?.(
-      env,
-      logger,
-      repository,
-    ) as DomainProjectorConsumer;
-
-    // The factory hands `DomainProjectorConsumer` a builder; invoking it is
-    // what constructs the EventConsumer, and construction opens no socket.
-    const built = (
-      projector as unknown as {
-        createConsumer: (handler: () => Promise<void>) => {
-          options: {
-            topics: string[];
-            groupId: string;
-            fromBeginning?: boolean;
-            deadLetterTopic?: string;
-          };
-        };
-      }
-    ).createConsumer(async () => undefined);
-
-    const { topics, groupId, fromBeginning, deadLetterTopic } = built.options;
-
-    expect(topics).toEqual([...DOMAIN_TOPICS]);
-    expect(groupId).toBe(DOMAIN_PROJECTOR_CONSUMER);
+    expect(consumer).toBeInstanceOf(DomainProjectorConsumer);
+    expect(options.topics).toEqual([...DOMAIN_TOPICS]);
+    expect(options.topics).not.toContain(AUDIT_TRAIL_TOPIC);
+    expect(options.groupId).toBe(DOMAIN_PROJECTOR_CONSUMER);
     // Replay must be safe and must be on: the store rebuilds from the log.
-    expect(fromBeginning).toBe(true);
+    expect(options.fromBeginning).toBe(true);
     // Without this a malformed message is logged and dropped.
-    expect(deadLetterTopic).toBe('rasta.audit.v1.dlq');
-    expect(projector.isRunning()).toBe(false);
+    expect(options.deadLetterTopic).toBe('rasta.audit.v1.dlq');
+    expect(consumer.isRunning()).toBe(false);
+  });
+
+  it('builds the audit-trail consumer over exactly the trail topic, as its own group', () => {
+    // AUD-004 Phase B. Pinned to the literals as well as to the constants, so
+    // renaming a constant cannot quietly move the group or the topic: the group
+    // name is also the path-B `processed_event` key.
+    const { consumer, options } = consumerOptions(AuditTrailConsumer);
+
+    expect(consumer).toBeInstanceOf(AuditTrailConsumer);
+    expect(options.topics).toEqual([AUDIT_TRAIL_TOPIC]);
+    expect(options.topics).toEqual(['rasta.audit.trail.v1']);
+    expect(options.groupId).toBe(AUDIT_TRAIL_CONSUMER);
+    expect(options.groupId).toBe('audit-service.trail');
+    // Replay-safe, and a refused message is kept rather than dropped.
+    expect(options.fromBeginning).toBe(true);
+    expect(options.deadLetterTopic).toBe(AUDIT_DEAD_LETTER_TOPIC);
+    expect(consumer.isRunning()).toBe(false);
+  });
+
+  it('keeps the two paths in separate groups over disjoint topics', () => {
+    // One group over both would share a rebalance and one idempotency
+    // namespace; overlapping topics would record the same message twice under
+    // two contracts.
+    const projector = consumerOptions(DomainProjectorConsumer).options;
+    const trail = consumerOptions(AuditTrailConsumer).options;
+
+    expect(trail.groupId).not.toBe(projector.groupId);
+    expect(trail.topics.filter((topic) => projector.topics.includes(topic))).toEqual([]);
+  });
+
+  it('never lets KAFKA_CONSUMER_GROUP rename either group', () => {
+    // The platform environment has one consumer-group variable and this service
+    // runs two groups. The variable is honoured by the environment loader —
+    // asserted, so this test cannot pass merely because it was ignored — and
+    // read by neither factory.
+    process.env.KAFKA_CONSUMER_GROUP = 'operator-chosen-group';
+    expect((providerFor(ENV).useFactory?.() as AuditEnv).KAFKA_CONSUMER_GROUP).toBe(
+      'operator-chosen-group',
+    );
+
+    expect(consumerOptions(DomainProjectorConsumer).options.groupId).toBe(
+      'audit-service.domain-projector',
+    );
+    expect(consumerOptions(AuditTrailConsumer).options.groupId).toBe('audit-service.trail');
+  });
+
+  it('injects both consumers into the readiness probe', () => {
+    // Nest resolves the controller's constructor from `design:paramtypes`. A
+    // probe whose third parameter lost its type would fail to boot — or, worse,
+    // be handed the wrong object — so the order is asserted on the metadata the
+    // container reads.
+    expect(Reflect.getMetadata('design:paramtypes', HealthController)).toEqual([
+      PrismaService,
+      DomainProjectorConsumer,
+      AuditTrailConsumer,
+    ]);
+  });
+
+  it('gives both consumers a shutdown hook Nest will call', () => {
+    // Stopping on shutdown is each consumer's own `onModuleDestroy`, which Nest
+    // calls for every provider. Both are registered, so both are stopped.
+    expect(providerFor(DomainProjectorConsumer)).toBeDefined();
+    expect(providerFor(AuditTrailConsumer)).toBeDefined();
+    expect(typeof DomainProjectorConsumer.prototype.onModuleDestroy).toBe('function');
+    expect(typeof AuditTrailConsumer.prototype.onModuleDestroy).toBe('function');
+  });
+
+  it('starts both consumers on init, the projector first', async () => {
+    const order: string[] = [];
+    const module = new AppModule(
+      startable('projector', order) as unknown as DomainProjectorConsumer,
+      startable('trail', order) as unknown as AuditTrailConsumer,
+      idleRepository,
+      providerFor(ENV).useFactory?.() as AuditEnv,
+    );
+
+    await module.onModuleInit();
+    await module.onApplicationShutdown();
+
+    expect(order).toEqual(['projector', 'trail']);
+  });
+
+  it('fails startup when the audit-trail consumer cannot start', async () => {
+    // A service that came up with path B silently absent would pass every
+    // check that looked only at path A. The failure propagates, so `main.ts`
+    // exits rather than serving.
+    const order: string[] = [];
+    const module = new AppModule(
+      startable('projector', order) as unknown as DomainProjectorConsumer,
+      startable('trail', order, true) as unknown as AuditTrailConsumer,
+      idleRepository,
+      providerFor(ENV).useFactory?.() as AuditEnv,
+    );
+
+    await expect(module.onModuleInit()).rejects.toThrow(/does not host this topic-partition/);
+    await module.onApplicationShutdown();
+
+    expect(order).toEqual(['projector', 'trail']);
   });
 
   it('stops its capacity sampler on shutdown', async () => {
     // A timer left running keeps the process alive and keeps querying a
     // database that is shutting down.
-    const repository = {
-      partitionRowCounts: async () => [{ partition: 'audit_event_default', rows: 0 }],
-    } as unknown as AuditRepository;
-    const projector = {
-      start: async () => undefined,
-      isRunning: () => true,
-    } as unknown as DomainProjectorConsumer;
+    const order: string[] = [];
+    const projector = startable('projector', order) as unknown as DomainProjectorConsumer;
 
-    const module = new AppModule(projector, repository);
+    const module = new AppModule(
+      projector,
+      startable('trail', order) as unknown as AuditTrailConsumer,
+      idleRepository,
+      providerFor(ENV).useFactory?.() as AuditEnv,
+    );
     await module.onModuleInit();
     await module.onApplicationShutdown();
 
@@ -279,13 +453,94 @@ describe('audit-service composition root', () => {
         throw new Error('catalogue unavailable');
       },
     } as unknown as AuditRepository;
-    const projector = {
-      start: async () => undefined,
-      isRunning: () => true,
-    } as unknown as DomainProjectorConsumer;
+    const order: string[] = [];
 
-    const module = new AppModule(projector, repository);
+    const module = new AppModule(
+      startable('projector', order) as unknown as DomainProjectorConsumer,
+      startable('trail', order) as unknown as AuditTrailConsumer,
+      repository,
+      providerFor(ENV).useFactory?.() as AuditEnv,
+    );
     await expect(module.onModuleInit()).resolves.toBeUndefined();
     await module.onApplicationShutdown();
+  });
+  describe('expected-producer series, seeded from validated configuration', () => {
+    async function exposition(): Promise<string[]> {
+      return (await metricsText())
+        .split('\n')
+        .filter(
+          (line) =>
+            line.startsWith('rasta_audit_expected_active_producer{') ||
+            line.startsWith('rasta_audit_records_ingested_total{'),
+        );
+    }
+
+    afterEach(() => {
+      auditExpectedActiveProducer.reset();
+      auditRecordsIngestedTotal.reset();
+    });
+
+    it('injects the validated environment by its token', () => {
+      expect(Reflect.getMetadata('self:paramtypes', AppModule)).toEqual([{ index: 3, param: ENV }]);
+    });
+
+    it('exports nothing for producer silence under the default empty set', async () => {
+      auditExpectedActiveProducer.reset();
+      auditRecordsIngestedTotal.reset();
+      const order: string[] = [];
+      const module = new AppModule(
+        startable('projector', order) as unknown as DomainProjectorConsumer,
+        startable('trail', order) as unknown as AuditTrailConsumer,
+        idleRepository,
+        providerFor(ENV).useFactory?.() as AuditEnv,
+      );
+
+      await module.onModuleInit();
+      await module.onApplicationShutdown();
+
+      expect(await exposition()).toEqual([]);
+    });
+
+    it('seeds the configured producers before either consumer starts', async () => {
+      process.env = {
+        ...process.env,
+        AUDIT_EXPECTED_ACTIVE_PRODUCERS: ' identity-service, asset-service ,identity-service',
+      };
+      auditExpectedActiveProducer.reset();
+      auditRecordsIngestedTotal.reset();
+      const seenAtStart: string[][] = [];
+      const recording = (name: string) => ({
+        start: async () => {
+          seenAtStart.push([name, ...(await exposition())]);
+        },
+        isRunning: () => true,
+      });
+      const module = new AppModule(
+        recording('projector') as unknown as DomainProjectorConsumer,
+        recording('trail') as unknown as AuditTrailConsumer,
+        idleRepository,
+        providerFor(ENV).useFactory?.() as AuditEnv,
+      );
+
+      await module.onModuleInit();
+      await module.onApplicationShutdown();
+
+      const [projectorStart] = seenAtStart;
+      expect(projectorStart?.[0]).toBe('projector');
+      const lines = projectorStart?.slice(1) ?? [];
+      expect(
+        lines.filter((line) => line.startsWith('rasta_audit_expected_active_producer{')),
+      ).toEqual([
+        'rasta_audit_expected_active_producer{source_service="identity-service"} 1',
+        'rasta_audit_expected_active_producer{source_service="asset-service"} 1',
+      ]);
+      // identity: its domain topic and the trail; asset: asset and insurance.
+      // Two topics each, times three outcomes, all at zero.
+      const counters = lines.filter((line) =>
+        line.startsWith('rasta_audit_records_ingested_total{'),
+      );
+      expect(counters).toHaveLength(12);
+      expect(counters.every((line) => line.endsWith(' 0'))).toBe(true);
+    });
   });
 });

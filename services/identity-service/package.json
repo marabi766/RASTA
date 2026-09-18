@@ -11,9 +11,10 @@
     "start": "node --env-file=../../.env dist/main.js",
     "lint": "eslint src",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "jest --passWithNoTests",
+    "test": "jest --selectProjects unit integration --passWithNoTests --runInBand",
     "test:unit": "jest --selectProjects unit --passWithNoTests",
     "test:integration": "jest --selectProjects integration --passWithNoTests --runInBand",
+    "test:aggregation-stress": "jest --selectProjects aggregation-stress --runInBand",
     "db:generate": "prisma generate",
     "db:migrate": "node --env-file-if-exists=../../.env ../../scripts/prisma.mjs migrate deploy",
     "db:migrate:dev": "node --env-file-if-exists=../../.env ../../scripts/prisma.mjs migrate dev",
@@ -43,6 +44,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@nestjs/testing": "^11.2.3",
     "@rasta/testing": "workspace:*",
     "@swc-node/register": "^1.12.1",
     "@swc/core": "^1.10.7",

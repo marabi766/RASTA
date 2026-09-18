@@ -90,6 +90,8 @@ function auditRow(overrides: Partial<AuditEventRow> = {}): AuditEventRow {
     // actually returns.
     recordHash: new Uint8Array(32).fill(0x2a),
     previousHash: null,
+    // Selected since AUD-003 correction.
+    correctionOf: null,
     ...overrides,
   };
 }
@@ -121,6 +123,8 @@ function stubRepository(options: {
       detailCalls.push({ scope, id });
       return options.detail ?? null;
     },
+    // AUD-003 correction: no corrections unless a test says otherwise.
+    findCorrectionIds: async () => new Map<string, string[]>(),
     isWithinProjectedSubtree: async (root: string, target: string) => {
       subtreeCalls.push({ root, target });
       if (options.subtreeThrows) throw new Error('projection unavailable');
@@ -589,5 +593,80 @@ describe('validation finishes before the repository is reachable', () => {
       expect(details).toContain('7 days');
       expect(details).not.toContain('90 days');
     }
+  });
+});
+
+describe('correction links (AUD-003 correction, ADR-053 § 7)', () => {
+  function withLinks(
+    stub: ReturnType<typeof stubRepository>,
+    links: Map<string, string[]>,
+  ): { scope: AuditReadScope; ids: string[] }[] {
+    const calls: { scope: AuditReadScope; ids: string[] }[] = [];
+    Object.assign(stub.repository, {
+      findCorrectionIds: async (scope: AuditReadScope, targets: { id: string }[]) => {
+        calls.push({ scope, ids: targets.map((target) => target.id) });
+        return links;
+      },
+    });
+    return calls;
+  }
+
+  const ORIGINAL = '01JAUDIT00000000000000A1';
+  const CORRECTION = '01JAUDIT00000000000000C1';
+
+  it('publishes both directions, fetched once for the page under the page’s own scope', async () => {
+    const stub = stubRepository({
+      rows: [
+        auditRow({ id: CORRECTION, organizationId: UNION, correctionOf: ORIGINAL }),
+        auditRow({ id: ORIGINAL, organizationId: UNION }),
+      ],
+    });
+    const calls = withLinks(stub, new Map([[ORIGINAL, [CORRECTION]]]));
+    const service = new AuditQueryService(stub.repository, silentLogger);
+
+    const page = await as({ roles: ['UNION_ADMIN'], organizationId: UNION }, () =>
+      service.search(query()),
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.ids).toEqual([CORRECTION, ORIGINAL]);
+    // Tenant scoping applies to the link exactly as to the page.
+    expect(calls[0]!.scope).toEqual(stub.searchCalls[0]!.scope);
+    expect(calls[0]!.scope).toEqual({ kind: 'ORGANIZATION', organizationId: UNION });
+
+    const [correction, original] = page.items;
+    expect(correction).toMatchObject({ correctionOf: ORIGINAL, correctedBy: [] });
+    expect(original).toMatchObject({ correctionOf: null, correctedBy: [CORRECTION] });
+  });
+
+  it('resolves the detail view’s links under the detail read’s scope', async () => {
+    const stub = stubRepository({ detail: auditRow({ id: ORIGINAL, organizationId: UNION }) });
+    const calls = withLinks(stub, new Map([[ORIGINAL, [CORRECTION]]]));
+    const service = new AuditQueryService(stub.repository, silentLogger);
+
+    const view = await as({ roles: ['UNION_ADMIN'], organizationId: UNION }, () =>
+      service.findOne(ORIGINAL, detailQuery()),
+    );
+
+    expect(view.correctedBy).toEqual([CORRECTION]);
+    expect(calls[0]!.scope).toEqual(stub.detailCalls[0]!.scope);
+  });
+
+  it('passes a SYSTEM_ADMIN’s platform scope through unchanged', async () => {
+    const stub = stubRepository({ rows: [auditRow({ id: ORIGINAL, organizationId: null })] });
+    const calls = withLinks(stub, new Map());
+    const service = new AuditQueryService(stub.repository, silentLogger);
+
+    await as({ roles: ['SYSTEM_ADMIN'] }, () => service.search(query()));
+
+    expect(calls[0]!.scope).toEqual({ kind: 'PLATFORM', organizationId: undefined });
+  });
+
+  it('never looks a link up for a caller it refuses', async () => {
+    const service = new AuditQueryService(forbiddenRepository, silentLogger);
+
+    expect(await codeOf(() => as({ roles: ['AUDITOR'] }, () => service.search(query())))).toBe(
+      'FORBIDDEN',
+    );
   });
 });
