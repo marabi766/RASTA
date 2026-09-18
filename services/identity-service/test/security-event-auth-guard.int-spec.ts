@@ -407,13 +407,13 @@ describe('auth-guard tenant refusals → security_event_outbox (real PostgreSQL)
 
   /**
    * The guard's other refusal: a **verified** internal `SERVICE` token calling
-   * an endpoint that carries no `@AllowService` (AUD-004 Phase C11).
+   * an endpoint it is not permitted to call (AUD-004 Phase C11).
    *
-   * identity-service exposes no service-callable endpoint today, so every one
-   * of these is the first of the guard's two `FORBIDDEN` decisions. The second
-   * — an allowlist that excludes the caller — is the same site and is proved
-   * against the shared guard in `@rasta/nest-common` and in this service's own
-   * unit specs, because no route here can reach it.
+   * Both of the guard's two `FORBIDDEN` decisions are the same site, and
+   * these probes reach both: most identity endpoints carry no `@AllowService`
+   * at all, while `GET /v1/users` has carried one since NTF-001 and refuses a
+   * caller the allowlist excludes. Which sentence comes back differs; the
+   * site, the code and the aggregation do not, which is what is asserted here.
    *
    * The actor is the token's signed subject and the tenant its signed `org_id`
    * — never the unsigned `X-Organization-Id` header, which the refusal is

@@ -1,32 +1,47 @@
-import { Controller, Get, VERSION_NEUTRAL } from '@nestjs/common';
+import { Controller, Get, HttpStatus, Res, VERSION_NEUTRAL } from '@nestjs/common';
 import { Public } from '@rasta/nest-common';
+import type { Response } from 'express';
+import { PrismaService } from '../prisma/prisma.service';
+import { DispatcherConsumer } from '../intake/dispatcher.consumer';
+import { ResolutionWorker } from '../resolution/resolution.worker';
 import { SERVICE_NAME } from '../config/env';
 
 /**
  * Liveness and readiness.
  *
- * ## Why `ready` checks nothing, and why that is honest rather than lazy
+ *   live   — is the process up? Never depends on anything external, or one
+ *            flaky dependency becomes a restart loop across every replica.
  *
- * Every other service in this repository checks a database here, and several
- * report a broker as a degradation. This one checks neither, because it has
- * neither: the scaffold owns no schema, opens no Prisma client, runs no outbox
- * relay and registers no consumer (ADR-054 is `Proposed`; NTF-001 has not
- * started).
+ *   ready  — can this service do its job? NTF-001 gives it three things to
+ *            check, and each one is a real check that can fail:
  *
- * The alternative would be a probe returning `checks: { database: true }` from
- * a constant, which is the failure mode this comment exists to prevent. A
- * readiness probe is read during an incident by somebody deciding whether a
- * dependency is at fault, and one reporting a healthy database this process
- * never opened is worse than no probe at all.
+ *            database   reachable, migrated, and this role can write an intent
+ *                       and read an in-app row (`PrismaService.isHealthy`).
+ *            consumer   the dispatcher group is running. A service that
+ *                       answers health checks while consuming nothing is
+ *                       exactly the failure nobody notices.
+ *            worker     the resolution loop is running. Without it every
+ *                       intent stays `PENDING` forever and nothing errors.
  *
- * So `ready` answers the only question the process can answer — the listener is
- * up — and `dependencies` is empty, which is the true set. When NTF-001 adds
- * the schema, the dispatcher group and the relay, each becomes a real check and
- * readiness starts being able to fail.
+ * Kafka connectivity itself is deliberately *not* a readiness failure: the
+ * broker being briefly unreachable is what consumer retries are for, and
+ * failing readiness would take a recovering service out of rotation.
+ *
+ * `deliversMessages` is kept from the scaffold and is now `true` for the
+ * in-app channel only. No email has ever been sent from this platform, no
+ * provider or sender identity has been chosen (ADR-054 § 6, Q-37), and the
+ * probe says which channel it means rather than letting "delivers" be read
+ * as more than it is.
  */
 @Controller({ path: 'health', version: VERSION_NEUTRAL })
 export class HealthController {
   private readonly startedAt = Date.now();
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly dispatcher: DispatcherConsumer,
+    private readonly worker: ResolutionWorker,
+  ) {}
 
   @Get('live')
   @Public('Liveness probe; exposed only on the internal network')
@@ -40,24 +55,28 @@ export class HealthController {
 
   @Get('ready')
   @Public('Readiness probe; exposed only on the internal network')
-  ready(): {
-    status: string;
+  async ready(@Res({ passthrough: true }) response: Response): Promise<{
+    status: 'ok' | 'unavailable';
     service: string;
-    dependencies: Record<string, never>;
-    implemented: false;
-    deliversMessages: false;
-  } {
+    dependencies: { database: boolean; consumer: boolean; worker: boolean };
+    channels: { IN_APP: true; EMAIL: false };
+    deliversMessages: { IN_APP: true; EMAIL: false };
+  }> {
+    const dependencies = {
+      database: await this.prisma.isHealthy(),
+      consumer: this.dispatcher.isRunning(),
+      worker: this.worker.isRunning(),
+    };
+    const ok = dependencies.database && dependencies.consumer && dependencies.worker;
+
+    if (!ok) response.status(HttpStatus.SERVICE_UNAVAILABLE);
+
     return {
-      status: 'ok',
+      status: ok ? 'ok' : 'unavailable',
       service: SERVICE_NAME,
-      // Empty because it is empty, not because nothing was checked.
-      dependencies: {},
-      implemented: false,
-      // Said separately and said plainly. This platform has never sent an
-      // email, no provider or sender identity has been chosen (ADR-054 § 6,
-      // Q-37), and a service named `notification` answering a green probe is
-      // exactly the thing somebody could mistake for one that delivers.
-      deliversMessages: false,
+      dependencies,
+      channels: { IN_APP: true, EMAIL: false },
+      deliversMessages: { IN_APP: true, EMAIL: false },
     };
   }
 }

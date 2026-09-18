@@ -474,9 +474,29 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 
 ## Notification — `rasta.notification.v1`
 
-> **هیچ تولیدکننده‌ای امروز وجود ندارد** — `notification-service` ساخته نشده. قرارداد در
+> **هیچ تولیدکننده‌ای امروز وجود ندارد.** قرارداد در
 > [ADR-054](../adr/ADR-054-notification-service-delivery.md) (`Proposed`). Payload هیچ نشانی و هیچ متن پیامی حمل
-> نمی‌کند.
+> نمی‌کند. انتشار این دو رویداد از Outbox با NTF-004 می‌آید؛ `notification-service` امروز **هیچ Outboxی ندارد**.
+
+### آنچه `notification-service` مصرف می‌کند — NTF-001 (2026-09-17)
+
+گروه مصرف‌کننده `notification-service.dispatcher` (همان نامی که § ۷٫۱۰ از پیش می‌برد)، `fromBeginning: false`،
+DLQ اختصاصی `rasta.notification.v1.dlq`. **فقط دو Topic و سه رویداد:**
+
+| Topic                  | رویداد                | قاعده                 | Subject               | سطل Dedupe                                                    |
+| ---------------------- | --------------------- | --------------------- | --------------------- | ------------------------------------------------------------- |
+| `rasta.insurance.v1`   | `INSURANCE_EXPIRING`  | `insurance.expiring`  | `InsurancePolicy`     | باند `daysRemaining` روی `{30, 14, 7, 3, 1}`                  |
+| `rasta.insurance.v1`   | `INSPECTION_EXPIRING` | `inspection.expiring` | `TechnicalInspection` | باند `daysRemaining` روی `{30, 14, 7, 3, 1}`                  |
+| `rasta.maintenance.v1` | `MAINTENANCE_DUE`     | `maintenance.due`     | `MaintenanceSchedule` | `state` (`DUE_SOON` و `OVERDUE` دو اعلان‌اند، تکرار یکی نیست) |
+
+- هر رویداد دیگری روی این دو Topic **نادیده گرفته می‌شود** (`SKIPPED`)، نه DLQ. `BREAKDOWN_REPORTED` و
+  `INSPECTION_FAILED` (قاعده‌های ۴ و ۵ برش هشت‌تایی) هنوز مصرف نمی‌شوند.
+- Envelope بدون `tenantId`، Payload مردود از Schema قاعده، یا `organizationId` ناسازگار با `tenantId` → Poison → DLQ با
+  `MAX_RETRIES_EXCEEDED` (رفتار `EventConsumer` مشترک). Idempotency مصرف روی `(eventId, consumerName)`؛ Dedupe معنایی روی
+  `SHA256(organizationId | ruleKey | subjectType | subjectId | bucket)` با نگهداشت ۴۵ روز. `rasta.identity.v1` هنوز مصرف
+  نمی‌شود (`USER_DEACTIVATED`/`MEMBERSHIP_REVOKED` با سرکوب تحویل‌های در انتظار می‌آید).
+- گیرنده‌ها از `GET /v1/users?role=&status=ACTIVE` سرویس identity با Token داخلی `SERVICE` و `org_id` امضاشده حل می‌شوند
+  (`@AllowService('notification-service')`، فقط همان یک Endpoint). **هیچ نشانی‌ای وارد Kafka یا پایگاه دادهٔ notification نمی‌شود.**
 
 | رویداد                | مصرف‌کنندگان | Payload کلیدی                              |
 | --------------------- | ------------ | ------------------------------------------ |

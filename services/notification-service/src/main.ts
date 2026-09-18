@@ -64,12 +64,12 @@ async function bootstrap(): Promise<void> {
 
   await app.listen(env.PORT, '0.0.0.0');
 
-  // Says what it is. A service answering health checks and nothing else is easy
-  // to mistake for a working one, and this line is where an operator looks
-  // first (ADR-054 is Proposed; NTF-001 has not started).
+  // Says what it is, and what it is not. This line is where an operator looks
+  // first: in-app delivery is live (NTF-001); no email has ever been sent from
+  // this platform and no provider has been chosen (ADR-054 § 6, Q-37).
   console.warn(
     `[${SERVICE_NAME}] listening on :${env.PORT} (${env.NODE_ENV}) — ` +
-      'bootstrap scaffold: health probes only, no notification delivery',
+      'in-app notifications from INSURANCE_EXPIRING, INSPECTION_EXPIRING and MAINTENANCE_DUE; no email channel',
   );
 }
 
