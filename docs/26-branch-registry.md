@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۷ (2026-09-18) · **`main` در آن لحظه:** `a84269a`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۷ (2026-09-18) · **`main` در آن لحظه:** `eea7d61`
 
 ---
 
@@ -55,12 +55,11 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                                | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                        |
-| ----------------------------------- | ------------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------- |
-| `docs/ci-serialization-and-backlog` | `F:\Rasta-Parallel\docs-branch-registry`         | C0   | —   | ۰ / ۰          | قاعدهٔ سریالی‌بودن ادغام‌ها + تازه‌سازی `planning/backlog.json`              |
-| `docs/audit-immutable-archive`      | `F:\Rasta-Parallel\audit-immutable-archive-docs` | C0   | —   | — / ۰          | بازشماری شد به `ADR-057` و `Q-58`؛ با `main` همگام است و آمادهٔ بازبینی      |
-| `demo/investor-preview`             | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
-| `design/claude-design`              | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
+| شاخه                    | Worktree                                   | نشست | PR  | ahead / behind | وضعیت                                                                        |
+| ----------------------- | ------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------- |
+| `feat/web-foundation`   | `F:\Rasta-Parallel\exp-001-web-foundation` | C0   | —   | ۱ / ۰          | `EXP-001` PR الف — Workspace `apps/web` و زنجیرهٔ کیفیت (`ADR-058`)          |
+| `demo/investor-preview` | `F:\Rasta-Parallel\investor-demo`          | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
+| `design/claude-design`  | پوشهٔ موقت در `%TEMP%`                     | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
 
 ## شاخه‌های بازنشسته
 
@@ -77,6 +76,8 @@
 | `docs/branch-registry`                | [#49](https://github.com/marabi766/RASTA/pull/49) | `76feb8e`   |
 | `fix/notification-dedupe-window-race` | [#50](https://github.com/marabi766/RASTA/pull/50) | `78ac7b0`   |
 | `docs/project-memory-2026-09-18`      | [#51](https://github.com/marabi766/RASTA/pull/51) | `a84269a`   |
+| `docs/ci-serialization-and-backlog`   | [#52](https://github.com/marabi766/RASTA/pull/52) | `76a1bf7`   |
+| `docs/audit-immutable-archive`        | [#53](https://github.com/marabi766/RASTA/pull/53) | `eea7d61`   |
 | `fix/minio-quay-registry`             | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
@@ -135,13 +136,14 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 
 ### ADR
 
-| شماره | مالک                                  | وضعیت                              |
-| ----- | ------------------------------------- | ---------------------------------- |
-| ۰۵۴   | `feat/notification-service`           | روی `main` (`cc89660`)             |
-| ۰۵۵   | `feat/audit-service-aud-004-contract` | روی `main` (`9fa75cc`)             |
-| ۰۵۶   | `docs/inventory-logistics-adr`        | روی `main` (`f2eb8fa`)             |
-| ۰۵۷   | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از ۰۵۵ انجام شد |
-| ۰۵۸+  | آزاد                                  | —                                  |
+| شماره | مالک                                  | وضعیت                                       |
+| ----- | ------------------------------------- | ------------------------------------------- |
+| ۰۵۴   | `feat/notification-service`           | روی `main` (`cc89660`)                      |
+| ۰۵۵   | `feat/audit-service-aud-004-contract` | روی `main` (`9fa75cc`)                      |
+| ۰۵۶   | `docs/inventory-logistics-adr`        | روی `main` (`f2eb8fa`)                      |
+| ۰۵۷   | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از ۰۵۵ انجام شد          |
+| ۰۵۸   | `feat/web-foundation`                 | مصرف شد — جای پورتال وب و مرز Design System |
+| ۰۵۹+  | آزاد                                  | —                                           |
 
 ### پرسش‌های باز `Q-NN`
 

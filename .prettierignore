@@ -7,6 +7,10 @@ coverage
 pnpm-lock.yaml
 **/src/generated
 docs/api/*.generated.json
+# Written by Next itself and carrying its own "should not be edited" notice. It
+# is committed rather than ignored because `pnpm typecheck` runs before `build`
+# in CI and the tsconfig includes it.
+apps/*/next-env.d.ts
 # Generated deterministically by `pnpm progress:report`; `progress:check` is its formatter gate.
 docs/25-project-progress.md
 # Local agent handoff artifacts, excluded from Git via .git/info/exclude; they must not decide repository formatting quality.

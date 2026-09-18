@@ -35,6 +35,12 @@ overrides:
   # denial of service. @nestjs/platform-express pins multer 2.2.0 exactly, so
   # the patched release has to come from here.
   'multer@<2.3.0': '2.3.0'
+  # GHSA-6g55-p6wh-862q and GHSA-r28c-9q8g-f849 — arbitrary file read and path
+  # traversal through an attacker-controlled `sourceMappingURL` in a CSS
+  # comment. Both are reached only through `next`, which still pins an affected
+  # postcss, so the patched release has to come from here. 8.5.18 is the first
+  # version that closes both.
+  'postcss@<8.5.18': '8.5.18'
 
 # A transitive dependency may not arrive from a git URL or a tarball over
 # http. Everything here comes from the registry, and a sub-dependency that
