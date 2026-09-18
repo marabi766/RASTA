@@ -14,12 +14,16 @@ function copy() {
 test('the repository baseline is valid and preserves the approved horizons', () => {
   assert.deepEqual(validateBacklog(baseline), []);
   const progress = calculateProgress(baseline);
+  // The committed totals are the approved baseline and only an approved scope
+  // or estimate change may move them. The earned figures move whenever an item
+  // is accepted, so they are updated in the same commit as the acceptance —
+  // that coupling is the point: a status change nobody meant to make fails here.
   assert.equal(progress.mvp.committed, 555);
-  assert.equal(progress.mvp.earned, 191);
-  assert.equal(progress.mvp.percent, 34.4);
+  assert.equal(progress.mvp.earned, 204);
+  assert.equal(progress.mvp.percent, 36.8);
   assert.equal(progress.fullProduct.committed, 770);
-  assert.equal(progress.fullProduct.earned, 191);
-  assert.equal(progress.fullProduct.percent, 24.8);
+  assert.equal(progress.fullProduct.earned, 204);
+  assert.equal(progress.fullProduct.percent, 26.5);
 });
 
 test('decomposed features contribute child stories exactly once', () => {
