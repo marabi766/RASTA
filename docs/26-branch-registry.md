@@ -55,14 +55,14 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                               | Worktree                                                 | نشست | PR                                                      | ahead / behind | وضعیت                                                                                |
-| ---------------------------------- | -------------------------------------------------------- | ---- | ------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------ |
-| `feat/notification-read-api`       | `F:\Rasta-Parallel\14050626-C2-W5-notification-read-api` | C2   | [#47](https://github.com/marabi766/RASTA/pull/47) draft | ۵ / ۱۴۸        | `MERGEABLE`؛ اولین CI تاریخ این شاخه سبز شد (`35332758257`)                          |
-| `feat/supplier-performance-phase2` | `F:\Rasta-Parallel\14050626-C3-W4-supplier-phase2`       | C3   | [#48](https://github.com/marabi766/RASTA/pull/48) draft | ۱۰ / ۱۱        | `CONFLICTING` روی `docs/24-open-questions.md`؛ در حال رفع                            |
-| `docs/branch-registry`             | `F:\Rasta-Parallel\docs-branch-registry`                 | C0   | [#49](https://github.com/marabi766/RASTA/pull/49)       | ۱ / ۰          | همین سند؛ فقط مستندات                                                                |
-| `docs/audit-immutable-archive`     | `F:\Rasta-Parallel\audit-immutable-archive-docs`         | —    | —                                                       | ۱ / ۱۶۱        | **متوقف، نیازمند اقدام:** `ADR-055` تکراری دارد (باید `ADR-057` شود) و یک `Q-44` سوم |
-| `demo/investor-preview`            | `F:\Rasta-Parallel\investor-demo`                        | —    | —                                                       | ۳۴ / ۱۶۱       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود                                   |
-| `design/claude-design`             | پوشهٔ موقت در `%TEMP%`                                   | —    | —                                                       | ۷ / ۴۶۸        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                |
+| شاخه                                  | Worktree                                           | نشست | PR                                                      | ahead / behind | وضعیت                                                                                |
+| ------------------------------------- | -------------------------------------------------- | ---- | ------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------ |
+| `feat/supplier-performance-phase2`    | `F:\Rasta-Parallel\14050626-C3-W4-supplier-phase2` | C3   | [#48](https://github.com/marabi766/RASTA/pull/48) draft | ۱۰ / ۱۱        | `CONFLICTING` روی `docs/24-open-questions.md`؛ در حال رفع                            |
+| `docs/branch-registry`                | `F:\Rasta-Parallel\docs-branch-registry`           | C0   | [#49](https://github.com/marabi766/RASTA/pull/49)       | ۱ / ۰          | همین سند؛ فقط مستندات                                                                |
+| `fix/notification-dedupe-window-race` | `F:\Rasta-Parallel\14050626-C2-W3-notification`    | C2   | —                                                       | ۰ / ۰          | رفع شکست `main`: پنجرهٔ dedupe زیر همروندی وارونه می‌شد (`ck_dedupe_window_ordered`) |
+| `docs/audit-immutable-archive`        | `F:\Rasta-Parallel\audit-immutable-archive-docs`   | —    | —                                                       | ۱ / ۱۶۱        | **متوقف، نیازمند اقدام:** `ADR-055` تکراری دارد (باید `ADR-057` شود) و یک `Q-44` سوم |
+| `demo/investor-preview`               | `F:\Rasta-Parallel\investor-demo`                  | —    | —                                                       | ۳۴ / ۱۶۱       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود                                   |
+| `design/claude-design`                | پوشهٔ موقت در `%TEMP%`                             | —    | —                                                       | ۷ / ۴۶۸        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                |
 
 ## شاخه‌های بازنشسته
 
@@ -74,6 +74,7 @@
 | `feat/audit-service-aud-004-contract` | [#44](https://github.com/marabi766/RASTA/pull/44) | `9fa75cc`   |
 | `docs/inventory-logistics-adr`        | [#45](https://github.com/marabi766/RASTA/pull/45) | `f2eb8fa`   |
 | `feat/notification-service`           | [#46](https://github.com/marabi766/RASTA/pull/46) | `cc89660`   |
+| `feat/notification-read-api`          | [#47](https://github.com/marabi766/RASTA/pull/47) | `7389ffd`   |
 | `fix/minio-quay-registry`             | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` عقب است
