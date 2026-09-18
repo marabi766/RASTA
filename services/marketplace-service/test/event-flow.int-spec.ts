@@ -140,6 +140,30 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
     );
   }
 
+  /**
+   * Ticks the relay until this run's own outbox row is published, and returns
+   * it.
+   *
+   * One tick is not enough, and assuming it was is what made this suite fail.
+   * `OutboxRelay.tick()` claims at most `batchSize` — 100 — pending rows per
+   * tick, so a row this test just wrote sits behind any older unpublished
+   * ones and is simply not in the first claim. That is measured, not
+   * hypothetical: this suite failed here on a database carrying 117 rows left
+   * unpublished by earlier work, and passed on the very next run because the
+   * first run's ticks had drained them. CI starts from an empty database, so
+   * CI would never have shown it — the same shape of blind spot as a
+   * migration that only ever met an empty table.
+   */
+  async function drain(eventName: string, orderId: string) {
+    return waitFor(`${eventName} for ${orderId} to be published from the outbox`, async () => {
+      await relay.tick();
+      const row = await prisma.client.outboxMessage.findFirst({
+        where: { aggregateId: orderId, eventName },
+      });
+      return row?.publishedAt ? row : null;
+    });
+  }
+
   it('carries promisedDeliveryAt on ORDER_CREATED from a domain write to a Kafka consumer', async () => {
     const { offerId } = await publishOffer(wiring, org.supplier, { leadTimeDays: 6 });
     const order = await asBuyer(() =>
@@ -151,11 +175,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
     });
     expect(pending.publishedAt).toBeNull();
 
-    await relay.tick();
-
-    const marked = await prisma.client.outboxMessage.findFirstOrThrow({
-      where: { aggregateId: order.id, eventName: 'ORDER_CREATED' },
-    });
+    const marked = await drain('ORDER_CREATED', order.id);
     expect(marked.publishedAt).not.toBeNull();
 
     const envelope = await ownEnvelope('ORDER_CREATED', order.id);
@@ -195,7 +215,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
       }),
     );
 
-    await relay.tick();
+    await drain('ORDER_DISPUTE_RESOLVED', order.id);
     const envelope = await ownEnvelope('ORDER_DISPUTE_RESOLVED', order.id);
 
     expect(envelope.aggregateType).toBe('Order');
@@ -218,7 +238,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
       wiring.orders.markCancelled(order.id, 'no longer needed, over the broker suite'),
     );
 
-    await relay.tick();
+    await drain('ORDER_CANCELLED', order.id);
     const envelope = await ownEnvelope('ORDER_CANCELLED', order.id);
 
     expect(envelope.aggregateType).toBe('Order');
@@ -242,8 +262,8 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
         where: { aggregateId: order.id, eventName: 'ORDER_CANCELLED' },
       });
 
-      await relay.tick();
-      await relay.tick(); // a second tick must not re-publish or re-write the row
+      await drain('ORDER_CANCELLED', order.id);
+      await relay.tick(); // a further tick must not re-publish or re-write the row
 
       const after = await prisma.client.outboxMessage.findFirstOrThrow({
         where: { aggregateId: order.id, eventName: 'ORDER_CANCELLED' },
