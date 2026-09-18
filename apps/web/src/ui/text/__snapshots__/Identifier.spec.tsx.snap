@@ -1,0 +1,35 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`Identifier an order code inside a sentence (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <p>
+    شمارهٔ سفارش 
+    <bdi
+      class="font-mono"
+      dir="auto"
+    >
+      ORD-2026-0148
+    </bdi>
+     ثبت شد.
+  </p>
+</div>
+`;
+
+exports[`Identifier an order code inside a sentence (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <p>
+    شمارهٔ سفارش 
+    <bdi
+      class="font-mono"
+      dir="auto"
+    >
+      ORD-2026-0148
+    </bdi>
+     ثبت شد.
+  </p>
+</div>
+`;

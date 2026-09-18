@@ -32,9 +32,13 @@ module.exports = {
   setupFilesAfterEnv: ['<rootDir>/src/test/setup.ts'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
-    // Jest cannot parse CSS. The portal asserts behaviour and accessibility,
-    // never the stylesheet, so the import is satisfied with an empty module.
+    // Jest cannot parse CSS. Components are asserted on behaviour and
+    // accessibility, never on the stylesheet, so the import is satisfied with
+    // an empty module. `design-tokens.spec.ts` reads the file as text instead,
+    // because the rules it checks are properties of the stylesheet itself.
     '\\.css$': '<rootDir>/src/test/style-stub.cjs',
+    // Resolved at build time by the Next compiler, which does not run here.
+    '^next/font/(?:google|local)$': '<rootDir>/src/test/next-font-stub.cjs',
   },
   clearMocks: true,
   collectCoverageFrom: ['src/**/*.{ts,tsx}', '!src/**/*.spec.{ts,tsx}', '!src/test/**'],
