@@ -613,10 +613,14 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
     'the verified service caller refusal: repeated refusals in one window become one contract-valid FORBIDDEN event with their count, merged with nothing else',
     async () => {
       // AUD-004 Phase C11. The platform `AuthGuard` refuses a verified
-      // internal `SERVICE` token on an endpoint that carries no
-      // `@AllowService`. The actor on the wire is the token's signed subject
-      // and the tenant its signed `org_id` — the unsigned `X-Organization-Id`
-      // each probe also sends is never read, and never published.
+      // internal `SERVICE` token at one refusal site, whether the endpoint
+      // carries no `@AllowService` at all or carries one the caller is absent
+      // from. NTF-001 made `GET /v1/users` service-callable, so these three
+      // probes now cross both of the guard's FORBIDDEN branches and still
+      // aggregate into the one row — which is what this test is about. The
+      // actor on the wire is the token's signed subject and the tenant its
+      // signed `org_id` — the unsigned `X-Organization-Id` each probe also
+      // sends is never read, and never published.
       const site = REFUSAL_SITES.SERVICE_CALLER_FORBIDDEN;
       // Tagged, because a service row's actor id *is* the caller's name.
       const serviceName = (label: string): string => `svc_${RUN_TAG}_${label}_${ulid().slice(-8)}`;
@@ -629,6 +633,19 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
       await atFreshWindow(identity.prisma, WINDOW_SECONDS, 2_000);
 
       const paths = ['/v1/users/me', '/v1/users', `/v1/users/USR-${callSecret}`];
+
+      /**
+       * Which of the guard's two FORBIDDEN refusals a path produces.
+       *
+       * `GET /v1/users` carries `@AllowService('notification-service')` since
+       * NTF-001, so a caller that is not notification-service is refused by the
+       * allowlist rather than by the absence of one. Same site, same code, same
+       * aggregation — only the sentence differs.
+       */
+      const refusalMessage = (path: string): string =>
+        path === '/v1/users'
+          ? 'This service is not permitted to call this endpoint'
+          : 'This endpoint is not callable by another service';
       const correlations: string[] = [];
       const tokens: string[] = [];
       const unsigned: string[] = [];
@@ -656,7 +673,7 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
         expect(response.status).toBe(403);
         expect(response.body).toMatchObject({
           code: ERROR_CODES.FORBIDDEN,
-          message: 'This endpoint is not callable by another service',
+          message: refusalMessage(path),
           correlationId,
         });
         return correlationId;
@@ -790,6 +807,7 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
         callSecret,
         '/v1/users',
         'not callable by another service',
+        'not permitted to call this endpoint',
       ]) {
         expect(wire).not.toContain(leaked);
       }
