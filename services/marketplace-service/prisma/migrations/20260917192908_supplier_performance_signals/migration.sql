@@ -22,6 +22,35 @@ ADD COLUMN     "promised_delivery_at" TIMESTAMP(3);
 ALTER TABLE "order_dispute" ADD COLUMN     "responsibility" "ResponsibilityAttribution";
 
 -- =============================================================================
+-- Backfill, and why it is not optional.
+--
+-- The two constraints above are added to tables that already hold rows. A row
+-- that reached `CANCELLED` — or a dispute that was resolved — before this
+-- migration existed has no cause recorded anywhere: the fact was never
+-- captured, so there is nothing to derive it from. `UNDETERMINED` is precisely
+-- the value the enum carries for "we could not tell", so those rows take it
+-- rather than blocking the migration.
+--
+-- Without this the `ALTER TABLE ... ADD CONSTRAINT` aborts with SQLSTATE 23514
+-- («check constraint … is violated by some row») on any database that already
+-- holds a single cancelled order or resolved dispute. The migration only
+-- appeared to pass before because it had only ever met an empty database.
+--
+-- This runs before the constraints, not after, so the table is already valid
+-- when each `ADD CONSTRAINT` validates it.
+-- =============================================================================
+
+UPDATE "order"
+   SET "cancellation_cause" = 'UNDETERMINED'
+ WHERE "status" = 'CANCELLED'
+   AND "cancellation_cause" IS NULL;
+
+UPDATE "order_dispute"
+   SET "responsibility" = 'UNDETERMINED'
+ WHERE "status" IN ('RESOLVED_SETTLE', 'RESOLVED_REFUND')
+   AND "responsibility" IS NULL;
+
+-- =============================================================================
 -- Rule 14 / rule 13 (ADR-052 § 4): the two derived facts this step introduces
 -- must never be silently absent once the row reaches the state that requires
 -- them. `UNDETERMINED` is the honest "we could not tell" — a real enum value,
