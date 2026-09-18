@@ -1,4 +1,6 @@
 import { ulid } from 'ulid';
+import { runUnscoped } from '@rasta/nest-common';
+import { DISPATCHER_CONSUMER } from '../src/notification/notification.repository';
 import {
   cleanup,
   deliver,
@@ -6,6 +8,7 @@ import {
   newOrganizationId,
   newUserId,
   rowsFor,
+  sleep,
   wire,
   type Wiring,
 } from './helpers';
@@ -102,5 +105,92 @@ describe('concurrency', () => {
     expect(rows.deliveries).toHaveLength(20);
     expect(rows.inApp).toHaveLength(20);
     expect(new Set(rows.inApp.map((row) => row.intentId)).size).toBe(20);
+  }, 120_000);
+
+  /**
+   * The window a transaction that began earlier but wrote later would open
+   * backwards.
+   *
+   * `now()` is `transaction_timestamp()`: fixed when the transaction begins
+   * and constant for its whole life. Transactions serialize on the
+   * `dedupe_key` conflict in commit order, which has nothing to do with the
+   * order they began in — so the `DO UPDATE` branch can run in a transaction
+   * whose `now()` is *older* than the `first_seen_at` an already-committed
+   * transaction wrote. That pair violates `ck_dedupe_window_ordered`, and
+   * before the fix it aborted the ingest with SQLSTATE 23514.
+   *
+   * The interleaving is forced rather than raced. The blocked ingest is pinned
+   * behind an uncommitted `processed_event` row carrying its own event id, so
+   * its transaction has already begun — and its `now()` is already fixed —
+   * while the other ingest begins, opens the window and commits. Releasing the
+   * pin lets it proceed straight to the dedupe upsert with the older clock.
+   */
+  it('an ingest whose transaction began earlier but updates later keeps the window ordered', async () => {
+    const organizationId = newOrganizationId();
+    organizations.push(organizationId);
+    const policyId = `POL_${ulid()}`;
+
+    const lateEventId = ulid();
+    const blocked = insuranceExpiring({
+      organizationId,
+      policyId,
+      daysRemaining: 20,
+      eventId: lateEventId,
+    });
+    const opener = insuranceExpiring({ organizationId, policyId, daysRemaining: 20 });
+
+    class Rollback extends Error {}
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held!: () => void;
+    const pinned = new Promise<void>((resolve) => {
+      held = resolve;
+    });
+
+    // Holds `lateEventId` uncommitted, so the ingest below blocks on it.
+    const pin = runUnscoped('the test pins one ingest behind its own idempotency marker', () =>
+      w.prisma.transaction(
+        async (tx) => {
+          await tx.$executeRaw`
+            INSERT INTO "processed_event" ("event_id", "consumer_name")
+            VALUES (${lateEventId}, ${DISPATCHER_CONSUMER})
+          `;
+          held();
+          await released;
+          throw new Rollback();
+        },
+        { timeout: 60_000, maxWait: 10_000 },
+      ),
+    ).catch((error: unknown) => {
+      if (!(error instanceof Rollback)) throw error;
+    });
+
+    // Only once the marker is genuinely held does the ingest begin, or it
+    // races the pin and inserts the marker itself.
+    await pinned;
+
+    // Begins now and stops at the marker: its `now()` is fixed from here.
+    const blockedIngest = deliver(w, blocked);
+    await sleep(500);
+
+    // Begins later, so its `now()` is strictly newer, and commits first.
+    await deliver(w, opener);
+    await sleep(100);
+
+    release();
+    await pin;
+    await expect(blockedIngest).resolves.not.toThrow();
+
+    const rows = await rowsFor(w.prisma, organizationId);
+    expect(rows.intents).toHaveLength(1);
+    expect(rows.dedupe).toHaveLength(1);
+
+    const window = rows.dedupe[0]!;
+    expect(window.seenCount).toBe(2);
+    // The invariant the constraint enforces, asserted here so a regression
+    // fails on the assertion rather than only on a 23514 from the database.
+    expect(window.firstSeenAt.getTime()).toBeLessThanOrEqual(window.lastSeenAt.getTime());
   }, 120_000);
 });

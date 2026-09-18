@@ -116,6 +116,38 @@ export class NotificationRepository {
       // repeat" and, when the window has expired, reopens it for this intent.
       // The foreign key to the intent is deferred to commit, which is what
       // lets this run before the intent row exists.
+      // `last_seen_at` is written as a running maximum, not as a bare `now()`.
+      //
+      // `now()` is `transaction_timestamp()`: fixed when the transaction
+      // began, constant for its whole life, and unrelated to when this
+      // statement actually runs. Conflicting ingests serialize on
+      // `dedupe_key` in commit order, which is not the order they began in,
+      // so a transaction that began earlier can reach `DO UPDATE` after a
+      // later one has already inserted the row — writing a `last_seen_at`
+      // that precedes the `first_seen_at` beside it and tripping
+      // `ck_dedupe_window_ordered` (SQLSTATE 23514).
+      //
+      // `GREATEST` makes the invariant hold by construction in both branches,
+      // without assuming the clock moves forward:
+      //   repeat  `first_seen_at` is unchanged, and the stored
+      //           `last_seen_at` already dominates it, so the maximum does too.
+      //   reopen  `first_seen_at` becomes `now()`, which the maximum
+      //           dominates by definition.
+      // That independence from clock monotonicity is why this is preferred to
+      // `clock_timestamp()`, which would also be re-evaluated separately in
+      // each of the four window tests below and could decide them
+      // inconsistently.
+      //
+      // Separately, and deliberately left alone here: `expiresAt` below is the
+      // *application* clock, while the window test (`expires_at <= now()`) and
+      // the constraint's second half (`first_seen_at < expires_at`) read the
+      // *database* clock. The two only disagree by clock skew, and
+      // NOTIFICATION_DEDUPE_RETENTION_DAYS is an integer of at least 1, so a
+      // violation would need the application to be a full day behind the
+      // database. That is a latent coupling, not this defect — the row that
+      // failed had seen_count 2, the repeat branch, which does not write
+      // `expires_at` at all. Computing it in SQL would remove the coupling and
+      // is worth doing on its own, with its own tests.
       const expiresAt = new Date(Date.now() + dedupeRetentionDays * DAY_MS);
       const decided = await tx.$queryRaw<{ fresh: boolean; seen_count: number }[]>`
         INSERT INTO "notification_dedupe"
@@ -123,7 +155,8 @@ export class NotificationRepository {
         VALUES
           (${intent.dedupeKey}, ${intent.organizationId}, ${intent.id}, now(), now(), 1, ${expiresAt})
         ON CONFLICT ("dedupe_key") DO UPDATE SET
-          "last_seen_at"  = now(),
+          -- GREATEST, not bare now() -- see the note above this statement.
+          "last_seen_at"  = GREATEST("notification_dedupe"."last_seen_at", now()),
           "seen_count"    = CASE WHEN "notification_dedupe"."expires_at" <= now()
                                  THEN 1 ELSE "notification_dedupe"."seen_count" + 1 END,
           "first_seen_at" = CASE WHEN "notification_dedupe"."expires_at" <= now()
