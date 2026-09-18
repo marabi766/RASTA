@@ -20,19 +20,27 @@
  * that only satisfies the constraint under test would not prove anything about
  * a real database: it has to be an order the service could genuinely have
  * produced.
+ *
+ * `cancellation_cause` is filled in for a `CANCELLED` row (never for
+ * `FUNDS_HELD`, which this helper also produces at the last step below) so
+ * that `ck_order_cancelled_has_cause` — added later by
+ * `20260917192908_supplier_performance_signals` and, unlike
+ * `ck_order_held_has_transaction`, not the constraint this probe exists to
+ * test — never fires here and is mistaken for it.
  */
 export const CANCELLED_BEFORE_HOLD = (id, status = 'CANCELLED') => `
 INSERT INTO "order" (
   "id", "organization_id", "supplier_organization_id", "placed_by", "status",
   "total_amount_minor", "currency", "economic_transaction_id",
   "idempotency_key", "correlation_id",
-  "cancelled_at", "cancellation_reason",
+  "cancelled_at", "cancellation_reason", "cancellation_cause",
   "created_by", "updated_at"
 ) VALUES (
   '${id}', 'ORG-MIGCHECK-BUYER', 'ORG-MIGCHECK-SUPPLIER', 'USR-MIGCHECK', '${status}',
   250000, 'IRR', NULL,
   'KEY-${id}', 'COR-${id}',
   NOW(), 'cancelled before the saga created the obligation',
+  ${status === 'CANCELLED' ? `'BUYER'` : 'NULL'},
   'USR-MIGCHECK', NOW()
 );`;
 
@@ -463,7 +471,15 @@ export const EXPECTED = {
       'ck_order_completed_has_settlement',
       'ck_order_line_total_consistent',
       'ck_offer_available_non_negative',
+      // Added by 20260917192908_supplier_performance_signals (ADR-052 § 1-b,
+      // 1-c). Each keeps a structured attribution from ever being silently
+      // absent once the row reaches the state that requires one — the same
+      // shape as the constraints above, for a fact this step introduces
+      // rather than one the init migration already carried.
+      'ck_order_cancelled_has_cause',
+      'ck_dispute_resolved_has_responsibility',
     ],
+    types: ['ResponsibilityAttribution'],
     dataRollback: MARKETPLACE_DATA_ROLLBACK,
   },
   /**

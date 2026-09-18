@@ -34,6 +34,8 @@ import type {
 } from './dto';
 import type { OrderStatus } from '../generated/prisma';
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 /**
  * The order aggregate's behaviour.
  *
@@ -101,6 +103,7 @@ export class OrderService {
             minimumQuantity: row.minimum_quantity,
             version: row.version,
             status: row.status,
+            leadTimeDays: row.lead_time_days,
           },
         ]),
       );
@@ -114,6 +117,13 @@ export class OrderService {
       }
 
       const orderId = newId(ID_PREFIX.order);
+
+      // The supplier's committed delivery date (ADR-052 § 1-a), fixed now
+      // from the slowest lead time among the offers just priced. One instant
+      // for the stored column and the event payload below, so the two can
+      // never disagree about when "now" was.
+      const createdAt = new Date();
+      const promisedDeliveryAt = new Date(createdAt.getTime() + priced.maxLeadTimeDays * DAY_MS);
 
       // Product names are copied onto the line so a completed order still
       // reads correctly after the product is renamed. Read across the tenant
@@ -140,6 +150,7 @@ export class OrderService {
           idempotencyKey,
           correlationId: context.correlationId,
           createdBy: actor,
+          promisedDeliveryAt,
           lines: {
             create: priced.lines.map((line) => ({
               id: newId(ID_PREFIX.orderLine),
@@ -177,7 +188,8 @@ export class OrderService {
             lineTotalMinor: line.lineTotalMinor.toString(),
             offerVersion: line.offerVersion,
           })),
-          createdAt: new Date().toISOString(),
+          createdAt: createdAt.toISOString(),
+          promisedDeliveryAt: promisedDeliveryAt.toISOString(),
         },
       });
 
@@ -406,6 +418,7 @@ export class OrderService {
   async resolveDispute(orderId: string, dto: ResolveDisputeDto): Promise<OrderView> {
     const context = getContext();
     const target: OrderStatus = dto.outcome === 'SETTLE' ? 'RECEIPT_CONFIRMED' : 'CANCELLING';
+    const resolvedAt = new Date();
 
     return this.transition(orderId, target, {
       // The mirror of the restriction on `confirmReceipt`: an operator resolves
@@ -413,13 +426,28 @@ export class OrderService {
       from: ['DISPUTED'],
       authorise: () => assertDisputeResolver(),
       apply: async (tx, order) => {
+        // Read before the update names the dispute the event below is about —
+        // the same pattern `raiseDispute` uses, and for the same reason: after
+        // `updateMany` flips it away from OPEN, nothing OPEN is left to find.
+        const dispute = await runUnscoped(
+          'an operator resolves the dispute open on either party’s order',
+          () =>
+            tx.orderDispute.findFirst({
+              where: { orderId: order.id, status: 'OPEN' },
+              orderBy: { raisedAt: 'desc' },
+            }),
+        );
+
         await runUnscoped('an operator resolves a dispute on either party’s order', () =>
           tx.orderDispute.updateMany({
             where: { orderId: order.id, status: 'OPEN' },
             data: {
               status: dto.outcome === 'SETTLE' ? 'RESOLVED_SETTLE' : 'RESOLVED_REFUND',
               resolution: dto.resolution,
-              resolvedAt: new Date(),
+              // Chosen by the operator, never derived from `resolution`
+              // (ADR-052 § 4 rule 14).
+              responsibility: dto.responsibility,
+              resolvedAt,
               resolvedBy: context.userId ?? SERVICE_NAME,
             },
           }),
@@ -430,10 +458,32 @@ export class OrderService {
             where: { id: order.id },
             data:
               target === 'CANCELLING'
-                ? { status: target, cancellationReason: dto.resolution }
+                ? {
+                    status: target,
+                    cancellationReason: dto.resolution,
+                    // Propagated from the dispute's own structured
+                    // attribution — not re-decided and not parsed from text.
+                    cancellationCause: dto.responsibility,
+                  }
                 : { status: target },
           }),
         );
+
+        await this.events.enqueue(tx, {
+          eventName: MARKETPLACE_EVENTS.ORDER_DISPUTE_RESOLVED,
+          aggregateId: order.id,
+          organizationId: order.organizationId,
+          payload: {
+            orderId: order.id,
+            disputeId: dispute?.id ?? order.id,
+            buyerOrganizationId: order.organizationId,
+            supplierOrganizationId: order.supplierOrganizationId,
+            outcome: dto.outcome,
+            responsibility: dto.responsibility,
+            resolvedBy: context.userId ?? SERVICE_NAME,
+            resolvedAt: resolvedAt.toISOString(),
+          },
+        });
       },
       reason: dto.resolution,
     });
@@ -446,7 +496,15 @@ export class OrderService {
       apply: async (tx, order) => {
         await tx.order.update({
           where: { id: order.id },
-          data: { status: 'CANCELLING', cancellationReason: dto.reason },
+          data: {
+            status: 'CANCELLING',
+            cancellationReason: dto.reason,
+            // The buyer's own self-service cancellation, with no dispute and
+            // no operator ruling — never the supplier's fault (ADR-052 § 4
+            // rule 13). Fixed by which command this is, not read from
+            // `dto.reason` (rule 14).
+            cancellationCause: 'BUYER',
+          },
         });
       },
       reason: dto.reason,
@@ -639,6 +697,12 @@ export class OrderService {
             reason,
             cancelledBy: getContext().callerService ?? SERVICE_NAME,
             cancelledAt: cancelledAt.toISOString(),
+            // Fixed at `CANCELLING` by `cancel()` or `resolveDispute()`, never
+            // parsed from `reason` (ADR-052 § 4 rule 14). `UNDETERMINED` is
+            // the honest fallback for a row written before this column
+            // existed — it excludes the order from a denominator, never
+            // zeroes it (rule 13).
+            cancellationCause: order.cancellationCause ?? 'UNDETERMINED',
           },
         });
       },

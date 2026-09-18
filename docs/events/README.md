@@ -273,10 +273,18 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 
 ## Marketplace — `rasta.marketplace.v1`
 
-**تولیدکننده واقعی از 2026-08-30.** هر نُه رویداد پیاده و زنده تأیید شده‌اند.
-Schema رسمی در `services/marketplace-service/src/events/events.ts` و اعتبارسنجی
-**پیش از رسیدن به Outbox** انجام می‌شود. `eventVersion` هر نُه، **۱** است —
-قراردادهای تازه‌اند و چیزی برای سازگار بودن با آن وجود ندارد.
+**تولیدکننده واقعی از 2026-08-30.** هر نُه رویداد اولیه پیاده و زنده تأیید
+شده‌اند. Schema رسمی در `services/marketplace-service/src/events/events.ts` و
+اعتبارسنجی **پیش از رسیدن به Outbox** انجام می‌شود. `eventVersion` هر نُه،
+**۱** است — قراردادهای تازه‌اند و چیزی برای سازگار بودن با آن وجود ندارد.
+
+**افزودهٔ ADR-052 Phase 2 گام ۱ (COM-005):** `ORDER_CREATED` و `ORDER_CANCELLED`
+هرکدام یک فیلد اختیاری تازه گرفتند — `promisedDeliveryAt` و
+`cancellationCause` — بدون تغییر `eventVersion` (`docs/07` § ۷٫۸: افزودن فیلد
+اختیاری شکننده نیست). یک رویداد دهم، `ORDER_DISPUTE_RESOLVED`، به کاتالوگ
+افزوده شد؛ `responsibility`‌اش الزامی است چون رویدادی تازه است، نه تغییری روی
+یکی موجود. سیگنال کیفیت (۳۰٪ وزن امتیاز عملکرد) عمداً پیاده نشد — Q-56 باز
+است.
 
 **کلید پارتیشن (ADR-036 روی این دامنه).** هر رویداد چرخه‌عمر سفارش با
 `orderId` پارتیشن می‌شود — همان Invariant که مصرف‌کننده برای بازسازی یک سفارش
@@ -295,17 +303,18 @@ Schema رسمی در `services/marketplace-service/src/events/events.ts` و اع
   `netAmountMinor` را حمل می‌کند — **بازتاب پاسخ تسویه**، نه محاسبه محلی. این
   سرویس نرخ کارمزد را نمی‌داند و نباید به‌نظر برسد که می‌داند (ADR-040 § ۶).
 
-| رویداد                    | مصرف‌کنندگان                                             | Payload کلیدی                                                                  |
-| ------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `OFFER_PUBLISHED`         | search · analytics                                       | `offerId`, `productId`, `supplierOrganizationId`, `price`                      |
-| `ORDER_CREATED`           | **economic (Hold)** · inventory (رزرو) · notification    | `orderId`, `buyerOrganizationId`, `supplierOrganizationId`, `total`, `lines[]` |
-| `ORDER_CONFIRMED`         | notification · analytics                                 | `orderId`                                                                      |
-| `ORDER_FULFILLED`         | notification · inventory                                 | `orderId`, `fulfillmentId`                                                     |
-| `ORDER_RECEIPT_CONFIRMED` | **economic (Release + تسویه + کارمزد)**                  | `orderId`, `confirmedBy`                                                       |
-| `ORDER_COMPLETED`         | economic (پاداش) · supplier (امتیاز) · asset · analytics | `orderId`, `total`                                                             |
-| `ORDER_CANCELLED`         | economic (بازگشت) · inventory (آزادسازی)                 | `orderId`, `reason`                                                            |
-| `ORDER_DISPUTED`          | **economic (توقف تسویه)** · notification · supplier      | `orderId`, `disputeId`, `reason`                                               |
-| `REVIEW_SUBMITTED`        | supplier (امتیاز) · economic (پاداش)                     | `orderId`, `rating`, `criteria`                                                |
+| رویداد                    | مصرف‌کنندگان                                             | Payload کلیدی                                                                                                                   |
+| ------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `OFFER_PUBLISHED`         | search · analytics                                       | `offerId`, `productId`, `supplierOrganizationId`, `price`                                                                       |
+| `ORDER_CREATED`           | **economic (Hold)** · inventory (رزرو) · notification    | `orderId`, `buyerOrganizationId`, `supplierOrganizationId`, `total`, `lines[]`, `promisedDeliveryAt` (اختیاری، ADR-052 § ۱-الف) |
+| `ORDER_CONFIRMED`         | notification · analytics                                 | `orderId`                                                                                                                       |
+| `ORDER_FULFILLED`         | notification · inventory                                 | `orderId`, `fulfillmentId`                                                                                                      |
+| `ORDER_RECEIPT_CONFIRMED` | **economic (Release + تسویه + کارمزد)**                  | `orderId`, `confirmedBy`                                                                                                        |
+| `ORDER_COMPLETED`         | economic (پاداش) · supplier (امتیاز) · asset · analytics | `orderId`, `total`                                                                                                              |
+| `ORDER_CANCELLED`         | economic (بازگشت) · inventory (آزادسازی)                 | `orderId`, `reason`, `cancellationCause` (اختیاری، enum بسته، ADR-052 § ۱-پ)                                                    |
+| `ORDER_DISPUTED`          | **economic (توقف تسویه)** · notification · supplier      | `orderId`, `disputeId`, `reason`                                                                                                |
+| `ORDER_DISPUTE_RESOLVED`  | supplier (امتیاز)                                        | `orderId`, `disputeId`, `outcome`, `responsibility` (enum بسته، الزامی، ADR-052 § ۱-ب)                                          |
+| `REVIEW_SUBMITTED`        | supplier (امتیاز) · economic (پاداش)                     | `orderId`, `rating`, `criteria`                                                                                                 |
 
 ## Procurement — `rasta.procurement.v1`
 

@@ -107,6 +107,16 @@ const PAYLOADS = {
     raisedBy: 'USR-1',
     raisedAt: '2026-08-29T00:00:07.000Z',
   },
+  ORDER_DISPUTE_RESOLVED: {
+    orderId: ORDER,
+    disputeId: 'DSP_1',
+    buyerOrganizationId: BUYER,
+    supplierOrganizationId: SUPPLIER,
+    outcome: 'SETTLE',
+    responsibility: 'BUYER',
+    resolvedBy: 'USR-OPS',
+    resolvedAt: '2026-08-29T00:00:07.500Z',
+  },
   REVIEW_SUBMITTED: {
     reviewId: 'REV_1',
     orderId: ORDER,
@@ -126,6 +136,7 @@ const EXPECTED: { [N in MarketplaceEventName]: { scope: PartitionScope; key: str
   ORDER_COMPLETED: { scope: 'ORDER', key: ORDER },
   ORDER_CANCELLED: { scope: 'ORDER', key: ORDER },
   ORDER_DISPUTED: { scope: 'ORDER', key: ORDER },
+  ORDER_DISPUTE_RESOLVED: { scope: 'ORDER', key: ORDER },
   REVIEW_SUBMITTED: { scope: 'ORDER', key: ORDER },
 };
 
@@ -140,10 +151,10 @@ describe('every published marketplace event has a partition decision', () => {
     expect(resolve(name)).toEqual(EXPECTED[name]);
   });
 
-  it('covers exactly the nine events docs/04 § 4.8 lists', () => {
+  it('covers exactly the ten events this service publishes', () => {
     expect(Object.keys(EXPECTED).sort()).toEqual([...NAMES].sort());
     expect(Object.keys(PARTITION_KEY_POLICY).sort()).toEqual([...NAMES].sort());
-    expect(NAMES).toHaveLength(9);
+    expect(NAMES).toHaveLength(10);
   });
 });
 
@@ -157,6 +168,7 @@ describe('an order is one ordered stream', () => {
       'ORDER_COMPLETED',
       'ORDER_CANCELLED',
       'ORDER_DISPUTED',
+      'ORDER_DISPUTE_RESOLVED',
     ] as const;
 
     expect(new Set(lifecycle.map((name) => resolve(name).key))).toEqual(new Set([ORDER]));
@@ -217,6 +229,7 @@ describe('aggregate identity is separate from partition ordering', () => {
       ORDER_COMPLETED: 'Order',
       ORDER_CANCELLED: 'Order',
       ORDER_DISPUTED: 'Order',
+      ORDER_DISPUTE_RESOLVED: 'Order',
       REVIEW_SUBMITTED: 'Review',
     });
   });

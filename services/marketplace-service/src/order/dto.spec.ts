@@ -1,7 +1,9 @@
 import {
+  cancelOrderSchema,
   createOrderSchema,
   listOrdersQuerySchema,
   raiseDisputeSchema,
+  resolveDisputeSchema,
   submitReviewSchema,
 } from './dto';
 import { createOfferSchema, searchProductsQuerySchema, updateOfferSchema } from '../offer/dto';
@@ -86,6 +88,41 @@ describe('a dispute needs a reason somebody can act on', () => {
       raiseDisputeSchema.safeParse({ reason: 'the delivered part does not match the offer' })
         .success,
     ).toBe(true);
+  });
+});
+
+describe('a cancellation names no cause — the service fixes it (ADR-052 § 1-c)', () => {
+  it('refuses a cause the client tries to set', () => {
+    // Only `BUYER` is ever correct for this endpoint (a self-service
+    // cancellation is never the supplier's fault), so it is not a request
+    // field at all — the schema is `.strict()` and has nowhere to put one.
+    expect(
+      cancelOrderSchema.safeParse({ reason: 'no longer needed', cancellationCause: 'SUPPLIER' })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe('resolving a dispute requires a structured attribution (ADR-052 §§ 1-b, 4)', () => {
+  const valid = { outcome: 'SETTLE' as const, resolution: 'the evidence favours the supplier' };
+
+  it.each(['SUPPLIER', 'BUYER', 'PLATFORM', 'UNDETERMINED'])('accepts %s', (responsibility) => {
+    expect(resolveDisputeSchema.safeParse({ ...valid, responsibility }).success).toBe(true);
+  });
+
+  it('refuses a value outside the closed enum, rather than defaulting it', () => {
+    // Rule 14: an invalid value is a validation error, never silently
+    // coerced into UNDETERMINED or any other member.
+    expect(
+      resolveDisputeSchema.safeParse({ ...valid, responsibility: 'NOBODY_KNOWS' }).success,
+    ).toBe(false);
+  });
+
+  it('refuses a resolution with no responsibility at all', () => {
+    // The whole point of this sub-step: an operator resolving a dispute must
+    // state responsibility explicitly, every time — it is not inferred from
+    // `resolution`'s free text and not defaulted from `outcome`.
+    expect(resolveDisputeSchema.safeParse(valid).success).toBe(false);
   });
 });
 

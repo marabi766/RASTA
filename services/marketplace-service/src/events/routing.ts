@@ -30,6 +30,7 @@ export const AGGREGATE_OF = {
   ORDER_COMPLETED: 'Order',
   ORDER_CANCELLED: 'Order',
   ORDER_DISPUTED: 'Order',
+  ORDER_DISPUTE_RESOLVED: 'Order',
   REVIEW_SUBMITTED: 'Review',
 } as const satisfies Record<MarketplaceEventName, string>;
 
@@ -70,6 +71,7 @@ export const PARTITION_KEY_POLICY: { [N in MarketplaceEventName]: PartitionRule<
   ORDER_COMPLETED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
   ORDER_CANCELLED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
   ORDER_DISPUTED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
+  ORDER_DISPUTE_RESOLVED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
 
   /**
    * Ordered by the order, not by the review.

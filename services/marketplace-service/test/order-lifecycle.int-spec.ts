@@ -268,10 +268,92 @@ describe('order lifecycle (real database)', () => {
       wiring.orders.resolveDispute(order.id, {
         outcome: 'SETTLE',
         resolution: 'the supplier provided evidence of correct delivery',
+        responsibility: 'BUYER',
       }),
     );
     const resolved = await asBuyer(() => wiring.orders.get(order.id));
     expect(resolved.status).toBe('RECEIPT_CONFIRMED');
+
+    // ADR-052 § 1-b: the resolve endpoint publishes nothing today. Selected by
+    // this order's own id, never by "the last row" — a shared outbox table can
+    // hold other runs' rows too (the parallel-agent lesson).
+    const rows = await outboxFor(prisma, org.buyer);
+    const resolvedEvent = rows.find(
+      (row) =>
+        row.eventName === 'ORDER_DISPUTE_RESOLVED' &&
+        (row.payload as { payload?: { orderId?: string } })?.payload?.orderId === order.id,
+    );
+    expect(resolvedEvent).toBeDefined();
+    expect(resolvedEvent?.partitionKey).toBe(order.id);
+    const payload = (resolvedEvent?.payload as { payload: Record<string, unknown> }).payload;
+    expect(payload.outcome).toBe('SETTLE');
+    // The operator's own choice, not inferred from the free-text resolution
+    // ("the supplier provided evidence...") which would suggest the opposite.
+    expect(payload.responsibility).toBe('BUYER');
+  });
+
+  it('refuses a responsibility outside the closed enum, even called directly', async () => {
+    // The HTTP layer's zodPipe would refuse this before it reaches the
+    // service; this proves the same value is refused when a caller (a future
+    // internal RPC, a test) skips that layer and calls the service directly.
+    const { offerId } = await publishOffer(wiring, org.supplier);
+    const order = await placeOrder(offerId, 1);
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asBuyer(() =>
+      wiring.orders.raiseDispute(order.id, { reason: 'the part delivered was the wrong one' }),
+    );
+
+    await expect(
+      asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, () =>
+        wiring.orders.resolveDispute(order.id, {
+          outcome: 'SETTLE',
+          resolution: 'a resolution with a responsibility nobody defined',
+          // @ts-expect-error — exactly the out-of-enum value this test refuses
+          responsibility: 'WEATHER',
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('propagates the dispute’s own responsibility onto the cancellation it causes', async () => {
+    // ADR-052 § 1-c: a REFUND resolution moves the order to CANCELLING and,
+    // once the saga's compensation finishes, to CANCELLED. The cause on that
+    // eventual ORDER_CANCELLED must be the dispute's own structured
+    // responsibility — never re-decided, never parsed from either free-text
+    // field.
+    const { offerId } = await publishOffer(wiring, org.supplier, { availableQuantity: 5 });
+    const order = await placeOrder(offerId, 1);
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asBuyer(() =>
+      wiring.orders.raiseDispute(order.id, { reason: 'the goods never left the warehouse' }),
+    );
+
+    await asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, () =>
+      wiring.orders.resolveDispute(order.id, {
+        outcome: 'REFUND',
+        resolution: 'the supplier never shipped the goods',
+        responsibility: 'SUPPLIER',
+      }),
+    );
+
+    const cancelling = await asBuyer(() => wiring.orders.get(order.id));
+    expect(cancelling.status).toBe('CANCELLING');
+
+    await asSaga(() =>
+      wiring.orders.markCancelled(order.id, 'the supplier never shipped the goods'),
+    );
+
+    const closed = await asBuyer(() => wiring.orders.get(order.id));
+    expect(closed.status).toBe('CANCELLED');
+
+    const rows = await outboxFor(prisma, org.buyer);
+    const cancelledEvent = rows.find(
+      (row) =>
+        row.eventName === 'ORDER_CANCELLED' &&
+        (row.payload as { payload?: { orderId?: string } })?.payload?.orderId === order.id,
+    );
+    const payload = (cancelledEvent?.payload as { payload: Record<string, unknown> }).payload;
+    expect(payload.cancellationCause).toBe('SUPPLIER');
   });
 
   it('refuses to resolve a dispute on an order that has none', async () => {
@@ -284,6 +366,7 @@ describe('order lifecycle (real database)', () => {
         wiring.orders.resolveDispute(order.id, {
           outcome: 'REFUND',
           resolution: 'resolving something that was never disputed',
+          responsibility: 'SUPPLIER',
         }),
       ),
     ).rejects.toThrow(expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }));
@@ -347,6 +430,18 @@ describe('order lifecycle (real database)', () => {
       prisma.client.offer.findUnique({ where: { id: offerId } }),
     );
     expect(offer?.availableQuantity).toBe(6);
+
+    // ADR-052 § 1-c: a direct self-service cancellation is never the
+    // supplier's fault, fixed by which command this is — not read from
+    // "changed our minds", which names no party at all.
+    const rows = await outboxFor(prisma, org.buyer);
+    const cancelledEvent = rows.find(
+      (row) =>
+        row.eventName === 'ORDER_CANCELLED' &&
+        (row.payload as { payload?: { orderId?: string } })?.payload?.orderId === order.id,
+    );
+    const payload = (cancelledEvent?.payload as { payload: Record<string, unknown> }).payload;
+    expect(payload.cancellationCause).toBe('BUYER');
   });
 
   it('still requires a transaction id once money is held', async () => {
@@ -363,6 +458,69 @@ describe('order lifecycle (real database)', () => {
         ),
       ),
     ).rejects.toThrow(/ck_order_held_has_transaction/);
+  });
+
+  it('refuses a CANCELLED order with no cancellation cause, at the database', async () => {
+    // ADR-052 § 4 rule 14: never silently absent. `ck_order_cancelled_has_
+    // cause` is the database's own copy of that rule, independent of every
+    // application-level check above.
+    const { offerId } = await publishOffer(wiring, org.supplier);
+    const order = await placeOrder(offerId, 1);
+
+    await expect(
+      runUnscoped('the suite attempts a cancellation with no cause', () =>
+        prisma.client.$executeRawUnsafe(
+          `UPDATE "order" SET status='CANCELLED', cancelled_at=now(),
+             cancellation_reason='forced by the suite' WHERE id = $1`,
+          order.id,
+        ),
+      ),
+    ).rejects.toThrow(/ck_order_cancelled_has_cause/);
+  });
+
+  it('computes the promised delivery date from the slowest offer, not the average', async () => {
+    // ADR-052 § 1-a. Two lines with different lead times: the promise is the
+    // slower one, because a supplier committing both has committed to the
+    // slower one arriving.
+    const fast = await publishOffer(wiring, org.supplier, {
+      leadTimeDays: 2,
+      name: 'قطعه سریع',
+    });
+    const slow = await publishOffer(wiring, org.supplier, {
+      leadTimeDays: 9,
+      name: 'قطعه دیر',
+    });
+
+    const order = await asBuyer(() =>
+      wiring.orders.place(
+        {
+          lines: [
+            { offerId: fast.offerId, quantity: 1 },
+            { offerId: slow.offerId, quantity: 1 },
+          ],
+        },
+        key('ord-lead'),
+      ),
+    );
+
+    const row = await runUnscoped('the suite reads the promise the service computed', () =>
+      prisma.client.order.findUniqueOrThrow({ where: { id: order.id } }),
+    );
+    expect(row.promisedDeliveryAt).not.toBeNull();
+
+    const rows = await outboxFor(prisma, org.buyer);
+    const created = rows.find(
+      (r) =>
+        r.eventName === 'ORDER_CREATED' &&
+        (r.payload as { payload?: { orderId?: string } })?.payload?.orderId === order.id,
+    );
+    const payload = (created?.payload as { payload: Record<string, unknown> }).payload;
+    expect(payload.promisedDeliveryAt).toBe(row.promisedDeliveryAt!.toISOString());
+
+    const promisedDays = Math.round(
+      (row.promisedDeliveryAt!.getTime() - row.createdAt.getTime()) / (24 * 60 * 60 * 1000),
+    );
+    expect(promisedDays).toBe(9);
   });
 
   it('returns availability when an order is cancelled', async () => {

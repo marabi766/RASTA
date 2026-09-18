@@ -637,7 +637,11 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-resolve-settle'))
-        .send({ outcome: 'SETTLE', resolution: 'the supplier evidenced correct delivery' })
+        .send({
+          outcome: 'SETTLE',
+          resolution: 'the supplier evidenced correct delivery',
+          responsibility: 'BUYER',
+        })
         .expect(200);
 
       expect(resolved.body.status).toBe('RECEIPT_CONFIRMED');
@@ -650,7 +654,11 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-resolve-refund'))
-        .send({ outcome: 'REFUND', resolution: 'the goods were never delivered to the buyer' })
+        .send({
+          outcome: 'REFUND',
+          resolution: 'the goods were never delivered to the buyer',
+          responsibility: 'SUPPLIER',
+        })
         .expect(200);
 
       expect(resolved.body.status).toBe('CANCELLING');
@@ -664,7 +672,38 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-bad-outcome'))
-        .send({ outcome: 'SPLIT_THE_DIFFERENCE', resolution: 'a compromise nobody defined' })
+        .send({
+          outcome: 'SPLIT_THE_DIFFERENCE',
+          resolution: 'a compromise nobody defined',
+          responsibility: 'PLATFORM',
+        })
+        .expect(400);
+    });
+
+    it('refuses a responsibility outside the closed enum with 400', async () => {
+      // ADR-052 § 4 rule 14: an invalid value is rejected, never coerced.
+      const orderId = await disputedOrder();
+
+      await request(http)
+        .post(`/v1/orders/${orderId}/disputes/resolve`)
+        .set('authorization', `Bearer ${platformAdmin()}`)
+        .set('idempotency-key', apiKey('api-bad-responsibility'))
+        .send({
+          outcome: 'SETTLE',
+          resolution: 'a resolution with an invalid attribution',
+          responsibility: 'WEATHER',
+        })
+        .expect(400);
+    });
+
+    it('refuses a resolution with no responsibility at all, with 400', async () => {
+      const orderId = await disputedOrder();
+
+      await request(http)
+        .post(`/v1/orders/${orderId}/disputes/resolve`)
+        .set('authorization', `Bearer ${platformAdmin()}`)
+        .set('idempotency-key', apiKey('api-missing-responsibility'))
+        .send({ outcome: 'SETTLE', resolution: 'a resolution missing its attribution' })
         .expect(400);
     });
 
@@ -676,7 +715,11 @@ describe('order API', () => {
         .post(`/v1/orders/${order.body.id}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-nothing-to-resolve'))
-        .send({ outcome: 'SETTLE', resolution: 'resolving something never disputed' })
+        .send({
+          outcome: 'SETTLE',
+          resolution: 'resolving something never disputed',
+          responsibility: 'UNDETERMINED',
+        })
         .expect(422);
     });
   });

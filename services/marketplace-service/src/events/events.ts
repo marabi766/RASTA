@@ -28,9 +28,13 @@ import { z } from 'zod';
  *
  * ## Version
  *
- * `eventVersion` is **1** for all nine. They are new contracts, not changes to
+ * `eventVersion` is **1** for all ten. Nine are new contracts, not changes to
  * an existing one, so there is nothing to be compatible with yet — and
  * starting anywhere but 1 would imply a v0 that consumers might look for.
+ * `ORDER_DISPUTE_RESOLVED` is the tenth, added later for ADR-052 § 1-b, and
+ * `ORDER_CREATED` / `ORDER_CANCELLED` each gained one optional field for
+ * ADR-052 §§ 1-a / 1-c — additive changes that `docs/07` § 7.8 says do not
+ * bump a version.
  */
 
 export const MARKETPLACE_EVENTS = {
@@ -42,6 +46,7 @@ export const MARKETPLACE_EVENTS = {
   ORDER_COMPLETED: 'ORDER_COMPLETED',
   ORDER_CANCELLED: 'ORDER_CANCELLED',
   ORDER_DISPUTED: 'ORDER_DISPUTED',
+  ORDER_DISPUTE_RESOLVED: 'ORDER_DISPUTE_RESOLVED',
   REVIEW_SUBMITTED: 'REVIEW_SUBMITTED',
 } as const;
 
@@ -51,6 +56,27 @@ export type MarketplaceEventName = (typeof MARKETPLACE_EVENTS)[keyof typeof MARK
 const amountMinor = z.string().regex(/^\d{1,30}$/);
 const currency = z.string().min(3).max(8);
 const isoTimestamp = z.string();
+
+/**
+ * Who a dispute outcome or a cancellation is attributed to (ADR-052 § 4,
+ * rule 13). Closed: an unlisted value is refused, never coerced into one of
+ * these. `UNDETERMINED` is itself a value — "nobody could tell" — not a
+ * stand-in for absence, and ADR-052 § 5 excludes it from a denominator
+ * rather than counting it as zero.
+ *
+ * Shared by `ORDER_DISPUTE_RESOLVED.responsibility` and
+ * `ORDER_CANCELLED.cancellationCause` because they are the same fact asked
+ * from two different moments in the order lifecycle, never derived from
+ * either event's free-text field (rule 14).
+ */
+export const RESPONSIBILITY_ATTRIBUTION = [
+  'SUPPLIER',
+  'BUYER',
+  'PLATFORM',
+  'UNDETERMINED',
+] as const;
+export type ResponsibilityAttribution = (typeof RESPONSIBILITY_ATTRIBUTION)[number];
+const responsibilityAttribution = z.enum(RESPONSIBILITY_ATTRIBUTION);
 
 // ---------------------------------------------------------------------------
 // Offer
@@ -107,6 +133,17 @@ export const orderCreatedPayload = z.object({
     )
     .min(1),
   createdAt: isoTimestamp,
+  /**
+   * The supplier's committed delivery date (ADR-052 § 1-a).
+   *
+   * Fixed at this same instant, from the greatest `leadTimeDays` among the
+   * offers priced into `lines` — a supplier promising several parts commits
+   * to the slowest one, not the average. Optional per `docs/07` § 7.8's
+   * additive-field rule, so `eventVersion` stays 1: every order this service
+   * creates from now on carries it, and only an event published before this
+   * change would ever lack it.
+   */
+  promisedDeliveryAt: isoTimestamp.optional(),
 });
 
 /** The supplier accepted the order. */
@@ -189,6 +226,16 @@ export const orderCancelledPayload = z.object({
   reason: z.string(),
   cancelledBy: z.string(),
   cancelledAt: isoTimestamp,
+  /**
+   * Who the cancellation is attributed to (ADR-052 §§ 1-c, 4 rule 13).
+   *
+   * Fixed by which command cancelled the order — `BUYER` for the buyer's own
+   * self-service cancellation, or the dispute's own `responsibility` when a
+   * `REFUND` resolution closes it — never parsed from `reason` (rule 14).
+   * Optional per `docs/07` § 7.8's additive-field rule, so `eventVersion`
+   * stays 1; only an order cancelled before this change would lack it.
+   */
+  cancellationCause: responsibilityAttribution.optional(),
 });
 
 /**
@@ -206,6 +253,27 @@ export const orderDisputedPayload = z.object({
   reason: z.string(),
   raisedBy: z.string(),
   raisedAt: isoTimestamp,
+});
+
+/**
+ * A platform operator decided a dispute (ADR-052 § 1-b).
+ *
+ * The catalogue sketch never had this event at all: today
+ * `POST /v1/orders/{id}/disputes/resolve` changes state and publishes
+ * nothing, so a supplier's dispute never resolves into a fact anyone outside
+ * this service can see. `responsibility` is the operator's own structured
+ * choice — the same field `OrderDispute.responsibility` persists — never
+ * derived from `resolution`'s free text (rule 14).
+ */
+export const orderDisputeResolvedPayload = z.object({
+  orderId: z.string(),
+  disputeId: z.string(),
+  buyerOrganizationId: z.string(),
+  supplierOrganizationId: z.string(),
+  outcome: z.enum(['SETTLE', 'REFUND']),
+  responsibility: responsibilityAttribution,
+  resolvedBy: z.string(),
+  resolvedAt: isoTimestamp,
 });
 
 /**
@@ -234,6 +302,7 @@ export const MARKETPLACE_EVENT_SCHEMAS = {
   [MARKETPLACE_EVENTS.ORDER_COMPLETED]: orderCompletedPayload,
   [MARKETPLACE_EVENTS.ORDER_CANCELLED]: orderCancelledPayload,
   [MARKETPLACE_EVENTS.ORDER_DISPUTED]: orderDisputedPayload,
+  [MARKETPLACE_EVENTS.ORDER_DISPUTE_RESOLVED]: orderDisputeResolvedPayload,
   [MARKETPLACE_EVENTS.REVIEW_SUBMITTED]: reviewSubmittedPayload,
 } as const satisfies Record<MarketplaceEventName, z.ZodTypeAny>;
 
