@@ -25,7 +25,9 @@ import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { VersioningType } from '@nestjs/common';
 import helmet from 'helmet';
+import { SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import { buildNotificationOpenApiDocument } from './openapi/document';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -55,10 +57,18 @@ async function bootstrap(): Promise<void> {
     });
   }
 
-  // Nothing here accepts a body — the only routes are two GET probes. The limit
-  // is set anyway so the first endpoint that does accept one inherits a bound
-  // rather than the framework default.
+  // No endpoint here accepts a body — every write is a parameterless POST —
+  // so the bound exists for the first one that does, rather than leaving it to
+  // the framework default.
   app.useBodyParser('json', { limit: '64kb' });
+
+  // The published contract, served outside production only (docs/api/README.md).
+  // Built by the same function the committed document and
+  // `test/openapi.int-spec.ts` use, so /docs, the file and the test cannot
+  // describe three different services.
+  if (env.NODE_ENV !== 'production') {
+    SwaggerModule.setup('docs', app, buildNotificationOpenApiDocument(app));
+  }
 
   app.enableShutdownHooks();
 
@@ -69,7 +79,8 @@ async function bootstrap(): Promise<void> {
   // this platform and no provider has been chosen (ADR-054 § 6, Q-37).
   console.warn(
     `[${SERVICE_NAME}] listening on :${env.PORT} (${env.NODE_ENV}) — ` +
-      'in-app notifications from INSURANCE_EXPIRING, INSPECTION_EXPIRING and MAINTENANCE_DUE; no email channel',
+      'in-app notifications from INSURANCE_EXPIRING, INSPECTION_EXPIRING and MAINTENANCE_DUE, ' +
+      'read API at /v1/notifications; no email channel',
   );
 }
 

@@ -405,8 +405,10 @@ export const EXPECTED = {
       'delivery_attempt',
       'in_app_notification',
     ],
-    triggers: ['delivery_attempt_append_only'],
-    functions: ['refuse_attempt_update'],
+    // NTF-002 adds the second pair: read state is write-once. The trigger and
+    // its function are named separately for the same reason as the first pair.
+    triggers: ['delivery_attempt_append_only', 'in_app_notification_state_write_once'],
+    functions: ['refuse_attempt_update', 'refuse_in_app_state_regression'],
     indexes: ['ix_intent_claimable', 'ix_in_app_unread', 'ux_delivery_intent_user_channel'],
     types: [
       'notification_severity',

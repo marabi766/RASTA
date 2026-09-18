@@ -371,3 +371,23 @@ describe('the suppliers prefix', () => {
     }
   });
 });
+
+describe('the notification inbox route (ADR-054 § 11, NTF-002)', () => {
+  it('forwards `notifications` to notification-service for any authenticated caller', () => {
+    // Ownership is the user, decided by the service against the verified
+    // token — so the gateway names no roles here. A role list would either
+    // exclude somebody from their own inbox or claim a control the service
+    // does not delegate. `preferences` (NTF-003) is the same shape.
+    for (const prefix of ['notifications', 'preferences']) {
+      const route = resolveRoute(prefix);
+      expect(route).toBeDefined();
+      expect(route!.service).toBe('notification');
+      expect(route!.roles).toBeUndefined();
+      expect(route!.publicReason).toBeUndefined();
+      expect(route!.requiresIdempotencyKey).toBeUndefined();
+    }
+    // Sub-paths resolve to the same rule: the prefix is the first segment.
+    expect(resolveRoute('/notifications/NTN_1/read')?.service).toBe('notification');
+    expect(resolveRoute('/notifications/unread-count')?.service).toBe('notification');
+  });
+});

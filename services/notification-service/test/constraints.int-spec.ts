@@ -168,6 +168,47 @@ describe('database constraints (ADR-054 § 4, § 10)', () => {
       ).rejects.toEqual(constraint('ck_in_app_text_not_blank'));
     });
 
+    it('makes read state write-once: setting is allowed, rewinding and moving are refused (NTF-002)', async () => {
+      const writeOnce = expect.objectContaining({
+        message: expect.stringContaining('write-once'),
+      });
+      // Setting a null timestamp is the transition the API makes.
+      await expect(
+        sql(
+          Prisma.sql`UPDATE "in_app_notification" SET "read_at" = now() WHERE "delivery_id" = ${deliveryId}`,
+        ),
+      ).resolves.toBe(1);
+      // Un-reading does not exist (ADR-054 § 4).
+      await expect(
+        sql(
+          Prisma.sql`UPDATE "in_app_notification" SET "read_at" = NULL WHERE "delivery_id" = ${deliveryId}`,
+        ),
+      ).rejects.toEqual(writeOnce);
+      // Neither does moving the moment it happened.
+      await expect(
+        sql(
+          Prisma.sql`UPDATE "in_app_notification" SET "read_at" = now() + interval '1 minute' WHERE "delivery_id" = ${deliveryId}`,
+        ),
+      ).rejects.toEqual(writeOnce);
+      // Dismiss on a read row is allowed once, then frozen the same way.
+      await expect(
+        sql(
+          Prisma.sql`UPDATE "in_app_notification" SET "dismissed_at" = now() WHERE "delivery_id" = ${deliveryId}`,
+        ),
+      ).resolves.toBe(1);
+      await expect(
+        sql(
+          Prisma.sql`UPDATE "in_app_notification" SET "dismissed_at" = NULL WHERE "delivery_id" = ${deliveryId}`,
+        ),
+      ).rejects.toEqual(writeOnce);
+      // Other columns stay editable; the trigger is about the two facts only.
+      await expect(
+        sql(
+          Prisma.sql`UPDATE "in_app_notification" SET "title" = 'edited' WHERE "delivery_id" = ${deliveryId}`,
+        ),
+      ).resolves.toBe(1);
+    });
+
     it('refuses a second in-app row for one delivery — invariant 5', async () => {
       await expect(
         sql(Prisma.sql`INSERT INTO "in_app_notification" ("id","delivery_id","intent_id","organization_id","user_id","rule_key","severity","classification","subject_type","subject_id","title","body","occurred_at","expires_at")
