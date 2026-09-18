@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۷ (2026-09-18) · **`main` در آن لحظه:** `eea7d61`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۸ (2026-09-19) · **`main` در آن لحظه:** `8c04477`
 
 ---
 
@@ -55,11 +55,11 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                    | Worktree                                   | نشست | PR  | ahead / behind | وضعیت                                                                        |
-| ----------------------- | ------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------- |
-| `feat/web-foundation`   | `F:\Rasta-Parallel\exp-001-web-foundation` | C0   | —   | ۱ / ۰          | `EXP-001` PR الف — Workspace `apps/web` و زنجیرهٔ کیفیت (`ADR-058`)          |
-| `demo/investor-preview` | `F:\Rasta-Parallel\investor-demo`          | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
-| `design/claude-design`  | پوشهٔ موقت در `%TEMP%`                     | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
+| شاخه                     | Worktree                                   | نشست | PR  | ahead / behind | وضعیت                                                                        |
+| ------------------------ | ------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------- |
+| `feat/web-design-tokens` | `F:\Rasta-Parallel\exp-001-web-foundation` | C0   | —   | ۱ / ۰          | `EXP-001` PR ب — Token های § ۱۶٫۴، فونت Vazirmatn، لایهٔ ارائهٔ فارسی        |
+| `demo/investor-preview`  | `F:\Rasta-Parallel\investor-demo`          | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
+| `design/claude-design`   | پوشهٔ موقت در `%TEMP%`                     | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
 
 ## شاخه‌های بازنشسته
 
@@ -78,6 +78,7 @@
 | `docs/project-memory-2026-09-18`      | [#51](https://github.com/marabi766/RASTA/pull/51) | `a84269a`   |
 | `docs/ci-serialization-and-backlog`   | [#52](https://github.com/marabi766/RASTA/pull/52) | `76a1bf7`   |
 | `docs/audit-immutable-archive`        | [#53](https://github.com/marabi766/RASTA/pull/53) | `eea7d61`   |
+| `feat/web-foundation`                 | [#54](https://github.com/marabi766/RASTA/pull/54) | `8c04477`   |
 | `fix/minio-quay-registry`             | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب

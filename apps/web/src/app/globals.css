@@ -1,13 +1,374 @@
 @import 'tailwindcss';
 
 /*
- * The design tokens of docs/16 § 16.4 — brand and neutral ramps, semantic
- * colours, surfaces, the 1.25 type scale, the 4px spacing base, radii, shadows
- * and motion — arrive in the next change, together with the local Vazirmatn
- * font and the Persian presentation layer.
+ * The design tokens of docs/16 § 16.4.
  *
- * This file currently does one thing: it brings Tailwind in, so the workspace
- * builds and the quality chain has something real to run against. No component
- * hard-codes a colour, a spacing or a size in the meantime, because no
- * component exists yet to do so.
+ * Three rules govern this file, and every one of them is checked by
+ * `tokens.spec.ts` rather than left to discipline:
+ *
+ *   1. No component hard-codes a colour, a spacing or a size. Everything is a
+ *      token, so a change lands in one place.
+ *   2. Dark mode is a *redefinition of these same tokens* under
+ *      `[data-theme="dark"]`. No component carries a light/dark branch, and
+ *      this file deliberately does not configure Tailwind's `dark:` variant —
+ *      a variant that does not exist cannot be reached for.
+ *   3. Layout is written with logical properties. `@theme` gives us Tailwind's
+ *      logical utilities (`ms-*`, `text-start`) for free; the physical ones are
+ *      what a right-to-left document breaks on.
+ *
+ * Two naming notes, because the doc's vocabulary and Tailwind v4's namespaces
+ * do not line up by themselves:
+ *
+ *   - The doc writes `--surface-base`. Tailwind only generates utilities for
+ *     names inside a known namespace, so surfaces live at
+ *     `--color-surface-base` and are reachable as `bg-surface-base`. Same
+ *     token, a name that earns a utility.
+ *   - The doc writes `--space-1 … --space-16` on a 4px base. Tailwind v4
+ *     derives the whole spacing scale from a single `--spacing` value, so
+ *     setting it to `0.25rem` makes `p-1 … p-16` come out at exactly the
+ *     values the doc lists, without a second parallel scale to keep in sync.
  */
+
+@theme {
+  /* ---- Brand: the teal-green of Rasta's identity ------------------------ */
+  /* Written in OKLCH because the ramp has to stay perceptually even. A hex
+   * ramp drifts in lightness between steps, and a StatusBadge built on a
+   * drifting ramp fails contrast at some steps and not others. */
+  --color-primary-50: oklch(0.982 0.018 165);
+  --color-primary-100: oklch(0.955 0.04 165);
+  --color-primary-200: oklch(0.91 0.075 165);
+  --color-primary-300: oklch(0.851 0.11 165);
+  --color-primary-400: oklch(0.774 0.132 165);
+  --color-primary-500: oklch(0.7 0.132 165);
+  --color-primary-600: oklch(0.616 0.117 165);
+  --color-primary-700: oklch(0.522 0.098 165);
+  --color-primary-800: oklch(0.437 0.08 165);
+  --color-primary-900: oklch(0.376 0.066 165);
+  --color-primary-950: oklch(0.269 0.049 165);
+
+  /* ---- Neutral: a faintly cool grey, so brand and grey do not clash ----- */
+  --color-neutral-50: oklch(0.984 0.003 230);
+  --color-neutral-100: oklch(0.968 0.005 230);
+  --color-neutral-200: oklch(0.929 0.008 230);
+  --color-neutral-300: oklch(0.869 0.011 230);
+  --color-neutral-400: oklch(0.704 0.014 230);
+  --color-neutral-500: oklch(0.554 0.014 230);
+  --color-neutral-600: oklch(0.446 0.013 230);
+  --color-neutral-700: oklch(0.372 0.012 230);
+  --color-neutral-800: oklch(0.279 0.011 230);
+  --color-neutral-900: oklch(0.208 0.01 230);
+  --color-neutral-950: oklch(0.129 0.008 230);
+
+  /* ---- Semantic ---------------------------------------------------------
+   * Each meaning carries three tokens, not one: the solid colour, a tint to
+   * sit behind text, and a text colour that reaches WCAG 2.1 AA against that
+   * tint (docs/16 § 16.9). `StatusBadge` and `Alert` need all three, and a
+   * component that had to mix its own tint would be hard-coding a colour. */
+  --color-success: oklch(0.596 0.145 152);
+  --color-success-surface: oklch(0.958 0.037 152);
+  --color-success-text: oklch(0.393 0.098 152);
+
+  --color-warning: oklch(0.706 0.155 70);
+  --color-warning-surface: oklch(0.966 0.048 85);
+  --color-warning-text: oklch(0.414 0.104 62);
+
+  --color-danger: oklch(0.586 0.204 27);
+  --color-danger-surface: oklch(0.955 0.032 20);
+  --color-danger-text: oklch(0.428 0.16 27);
+
+  --color-info: oklch(0.606 0.135 242);
+  --color-info-surface: oklch(0.955 0.03 242);
+  --color-info-text: oklch(0.424 0.107 242);
+
+  /* `DRAFT` and `IDLE` are states too, and they need the same three tokens so
+   * `StatusBadge` can treat every status the same way. */
+  --color-muted: oklch(0.554 0.014 230);
+  --color-muted-surface: oklch(0.968 0.005 230);
+  --color-muted-text: oklch(0.372 0.012 230);
+
+  /* ---- Surfaces and content -------------------------------------------- */
+  --color-surface-base: oklch(1 0 0);
+  --color-surface-raised: oklch(1 0 0);
+  --color-surface-overlay: oklch(1 0 0);
+  --color-surface-sunken: oklch(0.968 0.005 230);
+
+  --color-content: oklch(0.208 0.01 230);
+  --color-content-muted: oklch(0.446 0.013 230);
+  --color-content-subtle: oklch(0.554 0.014 230);
+  --color-content-inverse: oklch(0.984 0.003 230);
+
+  /* Two borders, because they answer to different rules. `border` separates —
+   * a divider, the edge of a card — and WCAG asks nothing of it. `border-strong`
+   * is the boundary of a control, which success criterion 1.4.11 requires to
+   * reach 3:1 against what is behind it, or the control cannot be found. The
+   * two are far apart in value for that reason, not by accident. */
+  --color-border: oklch(0.929 0.008 230);
+  --color-border-strong: oklch(0.554 0.014 230);
+  --color-focus: oklch(0.522 0.098 165); /* primary-700 */
+
+  /* ---- Accent: the brand, picked for a purpose ---------------------------
+   * A ramp is a palette, not a decision. Which step of it a primary button or
+   * a link may use is a decision, and it is different in each theme: the step
+   * that carries white text at 4.5:1 on a light background is far too dark to
+   * read on a dark one. These four tokens make that choice once, in the place
+   * where the theme is known, so a component asks for `accent` and cannot pick
+   * a step that fails contrast. `design-contrast.spec.ts` measures every pair. */
+  --color-accent: oklch(0.522 0.098 165); /* primary-700 */
+  --color-accent-hover: oklch(0.437 0.08 165); /* primary-800 */
+  --color-accent-text: oklch(0.984 0.003 230); /* neutral-50, on the accent fill */
+  --color-accent-on-surface: oklch(0.522 0.098 165); /* the brand as text or an icon */
+
+  /* ---- Typography -------------------------------------------------------
+   * A 1.25 scale from a 1rem base, plus the two smaller sizes an interface
+   * needs below it. docs/16 § 16.4 names the ratio and, in the same line,
+   * illustrates `--text-3xl: 2rem`; the two cannot both hold across seven
+   * steps. The ratio is the rule, so it wins and the resolved values are
+   * written back into docs/16 rather than left to differ between the two. */
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.5;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.5;
+  --text-base: 1rem;
+  --text-base--line-height: 1.75;
+  --text-lg: 1.25rem;
+  --text-lg--line-height: 1.5;
+  --text-xl: 1.5625rem;
+  --text-xl--line-height: 1.4;
+  --text-2xl: 1.953rem;
+  --text-2xl--line-height: 1.3;
+  --text-3xl: 2.441rem;
+  --text-3xl--line-height: 1.2;
+
+  --leading-tight: 1.3;
+  --leading-normal: 1.6;
+  /* Persian text carries more ascenders and descenders than Latin; the
+   * relaxed step is what long body copy actually uses here. */
+  --leading-relaxed: 1.9;
+
+  /* ---- Spacing: 4px base ------------------------------------------------ */
+  --spacing: 0.25rem;
+
+  /* ---- Radius, shadow, motion ------------------------------------------ */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+  --radius-full: 9999px;
+
+  --shadow-sm: 0 1px 2px 0 oklch(0.208 0.01 230 / 0.06);
+  --shadow-md: 0 4px 10px -2px oklch(0.208 0.01 230 / 0.1);
+  --shadow-lg: 0 12px 28px -6px oklch(0.208 0.01 230 / 0.16);
+
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --duration-slow: 400ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ---- Fonts ------------------------------------------------------------
+   * `--font-vazirmatn` is set by `next/font` on the <html> element, which is
+   * why it is referenced rather than declared here, and its value already
+   * carries the metric-matched fallback chain `fonts.ts` asks for. The default
+   * inside `var()` is what covers the other failure: if the variable is not
+   * there at all, the interface still gets a face that renders Arabic script,
+   * rather than an invalid declaration and whatever the browser picks. */
+  --font-sans: var(--font-vazirmatn, 'Segoe UI', Tahoma, 'Noto Sans Arabic', sans-serif);
+  --font-mono: ui-monospace, 'Cascadia Mono', 'Segoe UI Mono', 'Roboto Mono', monospace;
+}
+
+/*
+ * Dark mode, part one: when the operating system asks for it.
+ *
+ * Only tokens are redefined. Nothing below introduces a rule that a light
+ * document does not also have, which is what keeps components free of
+ * branches. Surfaces stop being pure white and step *up* in lightness as they
+ * rise, because in the dark elevation reads as light rather than as shadow.
+ *
+ * `:not([data-theme='light'])` leaves the door open for an explicit choice
+ * later without needing one now.
+ *
+ * The values are written out twice — here and in the `[data-theme='dark']`
+ * block below — because CSS has no way to share a declaration body across a
+ * media query and a selector. The alternatives were worse: `light-dark()`
+ * would collapse the two into one, but it is unsupported on the older Android
+ * browsers docs/16 § 16.2 expects in the field, and an unsupported
+ * `light-dark()` does not degrade — it makes the token invalid and the surface
+ * disappears. An inline script would need a CSP exception. So: duplication,
+ * and `design-tokens.spec.ts` compares the declarations of the two blocks so
+ * they cannot drift apart.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --color-success-surface: oklch(0.29 0.055 152);
+    --color-success-text: oklch(0.84 0.1 152);
+
+    --color-warning-surface: oklch(0.31 0.06 70);
+    --color-warning-text: oklch(0.87 0.11 85);
+
+    --color-danger-surface: oklch(0.31 0.075 27);
+    --color-danger-text: oklch(0.85 0.09 27);
+
+    --color-info-surface: oklch(0.3 0.06 242);
+    --color-info-text: oklch(0.85 0.08 242);
+
+    --color-muted-surface: oklch(0.279 0.011 230);
+    --color-muted-text: oklch(0.869 0.011 230);
+
+    --color-surface-base: oklch(0.169 0.009 230);
+    --color-surface-raised: oklch(0.208 0.01 230);
+    --color-surface-overlay: oklch(0.245 0.011 230);
+    --color-surface-sunken: oklch(0.129 0.008 230);
+
+    --color-content: oklch(0.968 0.005 230);
+    --color-content-muted: oklch(0.775 0.013 230);
+    --color-content-subtle: oklch(0.65 0.014 230);
+    --color-content-inverse: oklch(0.169 0.009 230);
+
+    --color-border: oklch(0.31 0.011 230);
+    --color-border-strong: oklch(0.62 0.014 230);
+    --color-focus: oklch(0.851 0.11 165); /* primary-300 */
+
+    /* The accent moves up the ramp in the dark: the light-mode step is chosen
+     * to carry white text, and here it has to carry near-black on itself. */
+    --color-accent: oklch(0.774 0.132 165); /* primary-400 */
+    --color-accent-hover: oklch(0.851 0.11 165); /* primary-300 */
+    --color-accent-text: oklch(0.269 0.049 165); /* primary-950, on the accent fill */
+    --color-accent-on-surface: oklch(0.851 0.11 165); /* the brand as text or an icon */
+
+    /* The solid semantic colours lift a step: the light-mode values are tuned
+     * against white and go muddy on a dark surface. */
+    --color-success: oklch(0.696 0.148 152);
+    --color-warning: oklch(0.79 0.15 75);
+    --color-danger: oklch(0.68 0.185 27);
+    --color-info: oklch(0.7 0.13 242);
+    --color-muted: oklch(0.65 0.014 230);
+
+    /* A shadow cast by a light source is nearly invisible on a dark surface,
+     * so the same elevation is carried by a deeper, tighter shadow. */
+    --shadow-sm: 0 1px 2px 0 oklch(0 0 0 / 0.4);
+    --shadow-md: 0 4px 10px -2px oklch(0 0 0 / 0.5);
+    --shadow-lg: 0 12px 28px -6px oklch(0 0 0 / 0.6);
+  }
+}
+
+/*
+ * Dark mode, part two: when the document asks for it.
+ *
+ * Identical values to the block above. `design-tokens.spec.ts` enforces that.
+ */
+[data-theme='dark'] {
+  --color-success-surface: oklch(0.29 0.055 152);
+  --color-success-text: oklch(0.84 0.1 152);
+
+  --color-warning-surface: oklch(0.31 0.06 70);
+  --color-warning-text: oklch(0.87 0.11 85);
+
+  --color-danger-surface: oklch(0.31 0.075 27);
+  --color-danger-text: oklch(0.85 0.09 27);
+
+  --color-info-surface: oklch(0.3 0.06 242);
+  --color-info-text: oklch(0.85 0.08 242);
+
+  --color-muted-surface: oklch(0.279 0.011 230);
+  --color-muted-text: oklch(0.869 0.011 230);
+
+  --color-surface-base: oklch(0.169 0.009 230);
+  --color-surface-raised: oklch(0.208 0.01 230);
+  --color-surface-overlay: oklch(0.245 0.011 230);
+  --color-surface-sunken: oklch(0.129 0.008 230);
+
+  --color-content: oklch(0.968 0.005 230);
+  --color-content-muted: oklch(0.775 0.013 230);
+  --color-content-subtle: oklch(0.65 0.014 230);
+  --color-content-inverse: oklch(0.169 0.009 230);
+
+  --color-border: oklch(0.31 0.011 230);
+  --color-border-strong: oklch(0.62 0.014 230);
+  --color-focus: oklch(0.851 0.11 165); /* primary-300 */
+
+  /* The accent moves up the ramp in the dark: the light-mode step is chosen
+   * to carry white text, and here it has to carry near-black on itself. */
+  --color-accent: oklch(0.774 0.132 165); /* primary-400 */
+  --color-accent-hover: oklch(0.851 0.11 165); /* primary-300 */
+  --color-accent-text: oklch(0.269 0.049 165); /* primary-950, on the accent fill */
+  --color-accent-on-surface: oklch(0.851 0.11 165); /* the brand as text or an icon */
+
+  /* The solid semantic colours lift a step: the light-mode values are tuned
+   * against white and go muddy on a dark surface. */
+  --color-success: oklch(0.696 0.148 152);
+  --color-warning: oklch(0.79 0.15 75);
+  --color-danger: oklch(0.68 0.185 27);
+  --color-info: oklch(0.7 0.13 242);
+  --color-muted: oklch(0.65 0.014 230);
+
+  /* A shadow cast by a light source is nearly invisible on a dark surface, so
+   * the same elevation is carried by a deeper, tighter shadow. */
+  --shadow-sm: 0 1px 2px 0 oklch(0 0 0 / 0.4);
+  --shadow-md: 0 4px 10px -2px oklch(0 0 0 / 0.5);
+  --shadow-lg: 0 12px 28px -6px oklch(0 0 0 / 0.6);
+}
+
+/*
+ * Base layer.
+ *
+ * Everything here is a document-level property that has no component to belong
+ * to. Anything that could belong to a component does not go here.
+ */
+@layer base {
+  /*
+   * `color-scheme` is what makes the browser's own furniture — scrollbars,
+   * checkboxes, date pickers, the canvas behind the page — follow the theme.
+   * Announcing both means the default tracks the operating system, exactly as
+   * the token blocks above do, and an explicit choice on the document pins it.
+   */
+  html {
+    color-scheme: light dark;
+  }
+
+  html[data-theme='light'] {
+    color-scheme: light;
+  }
+
+  html[data-theme='dark'] {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-surface-base);
+    color: var(--color-content);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
+    /* Persian numerals are a presentation concern handled in `src/lib/format`,
+     * never a font feature: a font feature would also rewrite the digits of a
+     * copied tracking code or an API identifier. */
+    font-variant-numeric: normal;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /*
+   * A visible focus ring on every keyboard-reachable element. WCAG 2.1 AA
+   * (docs/16 § 16.9) requires it, and `:focus-visible` gives it to keyboard
+   * users without putting a ring on every mouse click.
+   */
+  :focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  /*
+   * Honour the operating system's reduced-motion setting. A platform used on
+   * weak devices over weak connections (docs/16 § 16.2) is exactly where
+   * motion is least welcome.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

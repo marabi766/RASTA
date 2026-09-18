@@ -88,8 +88,9 @@ LTR درست است، در این پروژه شکسته است.
   /* ---- سطح ---- */
   --surface-base / --surface-raised / --surface-overlay / --surface-sunken;
 
-  /* ---- تایپوگرافی (مقیاس ۱٫۲۵) ---- */
-  --text-xs: 0.75rem … --text-3xl: 2rem;
+  /* ---- تایپوگرافی (مقیاس ۱٫۲۵ از پایه ۱rem) ---- */
+  --text-xs: 0.75rem; --text-sm: 0.875rem; --text-base: 1rem;
+  --text-lg: 1.25rem; --text-xl: 1.5625rem; --text-2xl: 1.953rem; --text-3xl: 2.441rem;
   --leading-tight / --leading-normal / --leading-relaxed;
 
   /* ---- فاصله (پایه ۴px) ---- */
@@ -106,8 +107,19 @@ LTR درست است، در این پروژه شکسته است.
 **قاعده.** هیچ رنگ، فاصله یا اندازه‌ای در Component به‌صورت Hard-Code نوشته نمی‌شود.
 همه از Token. این تفاوت میان «Design System» و «مجموعه‌ای از Componentها» است.
 
-**Dark Mode.** Tokenها در `[data-theme="dark"]` بازتعریف می‌شوند. هیچ Component شاخه
-روشن/تیره ندارد.
+**Dark Mode.** Tokenها بازتعریف می‌شوند، یک‌بار برای ترجیح سیستم‌عامل
+(`prefers-color-scheme: dark`، مگر آنکه سند صراحتاً `data-theme="light"` بخواهد) و
+یک‌بار برای انتخاب صریح سند (`[data-theme="dark"]`). هیچ Component شاخه روشن/تیره ندارد.
+
+**Token های هدف‌محور.** رَمپ یک پالت است، نه یک تصمیم. اینکه دکمه اصلی کدام پله را
+بردارد در هر تم فرق می‌کند، چون پله‌ای که در تم روشن متن سفید را با نسبت ۴٫۵:۱ نگه
+می‌دارد در تم تیره خوانا نیست. پس `--color-accent`، `--color-accent-hover`،
+`--color-accent-text` و `--color-accent-on-surface` این انتخاب را یک‌بار و در جایی که
+تم معلوم است انجام می‌دهند. به همین ترتیب `--color-border` جداکننده تزیینی است و
+`--color-border-strong` مرز یک کنترل، که معیار ۱٫۴٫۱۱ برای آن ۳:۱ می‌خواهد.
+
+**اندازه‌گیری، نه ادعا.** همه جفت‌های مجاز در `apps/web/src/design-contrast.spec.ts`
+در هر دو تم محاسبه می‌شوند؛ جفتی که به AA نرسد، Build را می‌شکند.
 
 ### کتابخانه Component
 

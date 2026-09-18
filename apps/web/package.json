@@ -16,6 +16,8 @@
     "clean": "rimraf .next .turbo coverage playwright-report test-results"
   },
   "dependencies": {
+    "@date-fns/tz": "^1.5.0",
+    "date-fns-jalali": "4.4.0-0",
     "next": "15.5.25",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
