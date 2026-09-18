@@ -1,0 +1,27 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`DirectionalIcon wrapping an arrow (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <span
+    aria-hidden="true"
+    class="inline-flex rtl:-scale-x-100"
+  >
+    <svg />
+  </span>
+</div>
+`;
+
+exports[`DirectionalIcon wrapping an arrow (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <span
+    aria-hidden="true"
+    class="inline-flex rtl:-scale-x-100"
+  >
+    <svg />
+  </span>
+</div>
+`;

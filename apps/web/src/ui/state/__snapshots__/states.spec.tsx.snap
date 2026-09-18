@@ -1,0 +1,443 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`EmptyState with a description and an action (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <div
+    class="flex flex-col items-center gap-3 rounded-lg border border-dashed border-border-strong bg-surface-base px-6 py-12 text-center"
+    role="status"
+  >
+    <span
+      aria-hidden="true"
+      class="text-content-subtle"
+    >
+      <svg
+        aria-hidden="true"
+        class="lucide lucide-inbox size-10"
+        fill="none"
+        height="24"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        stroke-width="2"
+        viewBox="0 0 24 24"
+        width="24"
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        <polyline
+          points="22 12 16 12 14 15 10 15 8 12 2 12"
+        />
+        <path
+          d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"
+        />
+      </svg>
+    </span>
+    <p
+      class="text-base font-semibold text-content"
+    >
+      هنوز ماشین‌آلاتی ثبت نشده
+    </p>
+    <p
+      class="max-w-prose text-sm leading-relaxed text-content-muted"
+    >
+      اولین دارایی را ثبت کنید.
+    </p>
+    <div
+      class="mt-2"
+    >
+      <button
+        type="button"
+      >
+        ثبت دارایی
+      </button>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`EmptyState with a description and an action (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <div
+    class="flex flex-col items-center gap-3 rounded-lg border border-dashed border-border-strong bg-surface-base px-6 py-12 text-center"
+    role="status"
+  >
+    <span
+      aria-hidden="true"
+      class="text-content-subtle"
+    >
+      <svg
+        aria-hidden="true"
+        class="lucide lucide-inbox size-10"
+        fill="none"
+        height="24"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        stroke-width="2"
+        viewBox="0 0 24 24"
+        width="24"
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        <polyline
+          points="22 12 16 12 14 15 10 15 8 12 2 12"
+        />
+        <path
+          d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"
+        />
+      </svg>
+    </span>
+    <p
+      class="text-base font-semibold text-content"
+    >
+      هنوز ماشین‌آلاتی ثبت نشده
+    </p>
+    <p
+      class="max-w-prose text-sm leading-relaxed text-content-muted"
+    >
+      اولین دارایی را ثبت کنید.
+    </p>
+    <div
+      class="mt-2"
+    >
+      <button
+        type="button"
+      >
+        ثبت دارایی
+      </button>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`ErrorState with a retry and a correlation id (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <div
+    class="flex flex-col items-center gap-3 rounded-lg border border-danger bg-danger-surface px-6 py-10 text-center"
+    data-error-code="UPSTREAM_TIMEOUT"
+    role="alert"
+  >
+    <svg
+      aria-hidden="true"
+      class="lucide lucide-octagon-alert lucide-alert-octagon size-10 text-danger"
+      fill="none"
+      height="24"
+      stroke="currentColor"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="2"
+      viewBox="0 0 24 24"
+      width="24"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path
+        d="M12 16h.01"
+      />
+      <path
+        d="M12 8v4"
+      />
+      <path
+        d="M15.312 2a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586l-4.688-4.688A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2z"
+      />
+    </svg>
+    <p
+      class="text-base font-semibold text-danger-text"
+    >
+      انجام نشد
+    </p>
+    <p
+      class="max-w-prose text-sm leading-relaxed text-danger-text"
+    >
+      درخواست به نتیجه نرسید. لطفاً دوباره تلاش کنید.
+    </p>
+    <button
+      class="mt-1 rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-text hover:bg-accent-hover"
+      type="button"
+    >
+      تلاش دوباره
+    </button>
+    <p
+      class="mt-2 text-xs text-danger-text"
+    >
+      کد پیگیری برای پشتیبانی: 
+      <bdi
+        class="font-mono"
+        dir="auto"
+      >
+        req-sample-correlation
+      </bdi>
+    </p>
+  </div>
+</div>
+`;
+
+exports[`ErrorState with a retry and a correlation id (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <div
+    class="flex flex-col items-center gap-3 rounded-lg border border-danger bg-danger-surface px-6 py-10 text-center"
+    data-error-code="UPSTREAM_TIMEOUT"
+    role="alert"
+  >
+    <svg
+      aria-hidden="true"
+      class="lucide lucide-octagon-alert lucide-alert-octagon size-10 text-danger"
+      fill="none"
+      height="24"
+      stroke="currentColor"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="2"
+      viewBox="0 0 24 24"
+      width="24"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path
+        d="M12 16h.01"
+      />
+      <path
+        d="M12 8v4"
+      />
+      <path
+        d="M15.312 2a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586l-4.688-4.688A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2z"
+      />
+    </svg>
+    <p
+      class="text-base font-semibold text-danger-text"
+    >
+      انجام نشد
+    </p>
+    <p
+      class="max-w-prose text-sm leading-relaxed text-danger-text"
+    >
+      درخواست به نتیجه نرسید. لطفاً دوباره تلاش کنید.
+    </p>
+    <button
+      class="mt-1 rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-text hover:bg-accent-hover"
+      type="button"
+    >
+      تلاش دوباره
+    </button>
+    <p
+      class="mt-2 text-xs text-danger-text"
+    >
+      کد پیگیری برای پشتیبانی: 
+      <bdi
+        class="font-mono"
+        dir="auto"
+      >
+        req-sample-correlation
+      </bdi>
+    </p>
+  </div>
+</div>
+`;
+
+exports[`LoadingState a table of three rows (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <div
+    aria-busy="true"
+    aria-live="polite"
+    class="flex flex-col gap-3"
+    role="status"
+  >
+    <span
+      class="sr-only"
+    >
+      در حال بارگذاری
+    </span>
+    <div
+      aria-hidden="true"
+      class="animate-pulse rounded-md bg-surface-sunken h-4 w-1/4"
+    />
+    <div
+      aria-hidden="true"
+      class="animate-pulse rounded-md bg-surface-sunken h-12 w-full"
+    />
+    <div
+      aria-hidden="true"
+      class="animate-pulse rounded-md bg-surface-sunken h-12 w-full"
+    />
+    <div
+      aria-hidden="true"
+      class="animate-pulse rounded-md bg-surface-sunken h-12 w-full"
+    />
+  </div>
+</div>
+`;
+
+exports[`LoadingState a table of three rows (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <div
+    aria-busy="true"
+    aria-live="polite"
+    class="flex flex-col gap-3"
+    role="status"
+  >
+    <span
+      class="sr-only"
+    >
+      در حال بارگذاری
+    </span>
+    <div
+      aria-hidden="true"
+      class="animate-pulse rounded-md bg-surface-sunken h-4 w-1/4"
+    />
+    <div
+      aria-hidden="true"
+      class="animate-pulse rounded-md bg-surface-sunken h-12 w-full"
+    />
+    <div
+      aria-hidden="true"
+      class="animate-pulse rounded-md bg-surface-sunken h-12 w-full"
+    />
+    <div
+      aria-hidden="true"
+      class="animate-pulse rounded-md bg-surface-sunken h-12 w-full"
+    />
+  </div>
+</div>
+`;
+
+exports[`NoAccessState with a correlation id (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <div
+    class="flex flex-col items-center gap-3 rounded-lg border border-border bg-surface-sunken px-6 py-10 text-center"
+    role="status"
+  >
+    <svg
+      aria-hidden="true"
+      class="lucide lucide-shield-alert size-10 text-content-subtle"
+      fill="none"
+      height="24"
+      stroke="currentColor"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="2"
+      viewBox="0 0 24 24"
+      width="24"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path
+        d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"
+      />
+      <path
+        d="M12 8v4"
+      />
+      <path
+        d="M12 16h.01"
+      />
+    </svg>
+    <p
+      class="text-base font-semibold text-content"
+    >
+      دسترسی ندارید
+    </p>
+    <p
+      class="max-w-prose text-sm leading-relaxed text-content-muted"
+    >
+      برای دیدن این بخش، دسترسی لازم به حساب شما داده نشده است. اگر فکر می‌کنید اشتباهی رخ داده، با مدیر سازمانتان تماس بگیرید.
+    </p>
+    <p
+      class="mt-2 text-xs text-content-subtle"
+    >
+      کد پیگیری: 
+      <bdi
+        class="font-mono"
+        dir="auto"
+      >
+        req-sample-correlation
+      </bdi>
+    </p>
+  </div>
+</div>
+`;
+
+exports[`NoAccessState with a correlation id (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <div
+    class="flex flex-col items-center gap-3 rounded-lg border border-border bg-surface-sunken px-6 py-10 text-center"
+    role="status"
+  >
+    <svg
+      aria-hidden="true"
+      class="lucide lucide-shield-alert size-10 text-content-subtle"
+      fill="none"
+      height="24"
+      stroke="currentColor"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="2"
+      viewBox="0 0 24 24"
+      width="24"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path
+        d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"
+      />
+      <path
+        d="M12 8v4"
+      />
+      <path
+        d="M12 16h.01"
+      />
+    </svg>
+    <p
+      class="text-base font-semibold text-content"
+    >
+      دسترسی ندارید
+    </p>
+    <p
+      class="max-w-prose text-sm leading-relaxed text-content-muted"
+    >
+      برای دیدن این بخش، دسترسی لازم به حساب شما داده نشده است. اگر فکر می‌کنید اشتباهی رخ داده، با مدیر سازمانتان تماس بگیرید.
+    </p>
+    <p
+      class="mt-2 text-xs text-content-subtle"
+    >
+      کد پیگیری: 
+      <bdi
+        class="font-mono"
+        dir="auto"
+      >
+        req-sample-correlation
+      </bdi>
+    </p>
+  </div>
+</div>
+`;
+
+exports[`Skeleton a half-width text bar (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <div
+    aria-hidden="true"
+    class="animate-pulse rounded-md bg-surface-sunken h-4 w-1/2"
+  />
+</div>
+`;
+
+exports[`Skeleton a half-width text bar (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <div
+    aria-hidden="true"
+    class="animate-pulse rounded-md bg-surface-sunken h-4 w-1/2"
+  />
+</div>
+`;

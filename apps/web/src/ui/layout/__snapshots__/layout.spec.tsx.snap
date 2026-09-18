@@ -1,0 +1,419 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`AppShell the full shell (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <div
+    class="flex min-h-screen flex-col bg-surface-base"
+  >
+    <a
+      class="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:m-2 focus:rounded-md focus:bg-accent focus:px-4 focus:py-2 focus:text-accent-text"
+      href="#main"
+    >
+      پرش به محتوای اصلی
+    </a>
+    <header
+      class="flex items-center justify-between gap-4 border-b border-border bg-surface-raised px-4 py-3"
+    >
+      <div
+        class="flex items-center gap-3"
+      >
+        <span
+          class="text-base font-bold text-content"
+        >
+          رستا
+        </span>
+        <span
+          aria-hidden="true"
+          class="text-content-subtle"
+        >
+          /
+        </span>
+        <span
+          class="text-sm text-content-muted"
+        >
+          دهیاری نمونه
+        </span>
+      </div>
+    </header>
+    <div
+      class="flex flex-1 flex-col md:flex-row"
+    >
+      <nav
+        aria-label="ناوبری اصلی"
+        class="flex flex-col gap-1 border-e border-border bg-surface-raised p-3"
+      >
+        <a
+          aria-current="page"
+          class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors bg-accent text-accent-text font-medium"
+          href="/assets"
+        >
+          ماشین‌آلات
+        </a>
+        <a
+          class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors text-content-muted hover:bg-surface-sunken hover:text-content"
+          href="/orders"
+        >
+          سفارش‌ها
+        </a>
+      </nav>
+      <main
+        class="flex flex-1 flex-col gap-6 p-4 md:p-6"
+        id="main"
+      >
+        <header
+          class="flex flex-col gap-3"
+        >
+          <div
+            class="flex flex-wrap items-start justify-between gap-3"
+          >
+            <div
+              class="flex flex-col gap-1"
+            >
+              <h1
+                class="text-2xl font-bold text-content"
+              >
+                ماشین‌آلات
+              </h1>
+            </div>
+          </div>
+        </header>
+      </main>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`AppShell the full shell (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <div
+    class="flex min-h-screen flex-col bg-surface-base"
+  >
+    <a
+      class="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:m-2 focus:rounded-md focus:bg-accent focus:px-4 focus:py-2 focus:text-accent-text"
+      href="#main"
+    >
+      پرش به محتوای اصلی
+    </a>
+    <header
+      class="flex items-center justify-between gap-4 border-b border-border bg-surface-raised px-4 py-3"
+    >
+      <div
+        class="flex items-center gap-3"
+      >
+        <span
+          class="text-base font-bold text-content"
+        >
+          رستا
+        </span>
+        <span
+          aria-hidden="true"
+          class="text-content-subtle"
+        >
+          /
+        </span>
+        <span
+          class="text-sm text-content-muted"
+        >
+          دهیاری نمونه
+        </span>
+      </div>
+    </header>
+    <div
+      class="flex flex-1 flex-col md:flex-row"
+    >
+      <nav
+        aria-label="ناوبری اصلی"
+        class="flex flex-col gap-1 border-e border-border bg-surface-raised p-3"
+      >
+        <a
+          aria-current="page"
+          class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors bg-accent text-accent-text font-medium"
+          href="/assets"
+        >
+          ماشین‌آلات
+        </a>
+        <a
+          class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors text-content-muted hover:bg-surface-sunken hover:text-content"
+          href="/orders"
+        >
+          سفارش‌ها
+        </a>
+      </nav>
+      <main
+        class="flex flex-1 flex-col gap-6 p-4 md:p-6"
+        id="main"
+      >
+        <header
+          class="flex flex-col gap-3"
+        >
+          <div
+            class="flex flex-wrap items-start justify-between gap-3"
+          >
+            <div
+              class="flex flex-col gap-1"
+            >
+              <h1
+                class="text-2xl font-bold text-content"
+              >
+                ماشین‌آلات
+              </h1>
+            </div>
+          </div>
+        </header>
+      </main>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`Grid three columns (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <div
+    class="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
+  >
+    <div>
+      یک
+    </div>
+    <div>
+      دو
+    </div>
+    <div>
+      سه
+    </div>
+  </div>
+</div>
+`;
+
+exports[`Grid three columns (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <div
+    class="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
+  >
+    <div>
+      یک
+    </div>
+    <div>
+      دو
+    </div>
+    <div>
+      سه
+    </div>
+  </div>
+</div>
+`;
+
+exports[`PageHeader with a description and an action (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <header
+    class="flex flex-col gap-3"
+  >
+    <div
+      class="flex flex-wrap items-start justify-between gap-3"
+    >
+      <div
+        class="flex flex-col gap-1"
+      >
+        <h1
+          class="text-2xl font-bold text-content"
+        >
+          ماشین‌آلات
+        </h1>
+        <p
+          class="text-base leading-relaxed text-content-muted"
+        >
+          ناوگان سازمان
+        </p>
+      </div>
+      <div
+        class="flex items-center gap-2"
+      >
+        <button
+          type="button"
+        >
+          ثبت دارایی
+        </button>
+      </div>
+    </div>
+  </header>
+</div>
+`;
+
+exports[`PageHeader with a description and an action (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <header
+    class="flex flex-col gap-3"
+  >
+    <div
+      class="flex flex-wrap items-start justify-between gap-3"
+    >
+      <div
+        class="flex flex-col gap-1"
+      >
+        <h1
+          class="text-2xl font-bold text-content"
+        >
+          ماشین‌آلات
+        </h1>
+        <p
+          class="text-base leading-relaxed text-content-muted"
+        >
+          ناوگان سازمان
+        </p>
+      </div>
+      <div
+        class="flex items-center gap-2"
+      >
+        <button
+          type="button"
+        >
+          ثبت دارایی
+        </button>
+      </div>
+    </div>
+  </header>
+</div>
+`;
+
+exports[`Section with a description and an action (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <section
+    aria-labelledby="fleet"
+    class="flex flex-col gap-4 rounded-lg border border-border bg-surface-raised p-6 shadow-sm"
+  >
+    <div
+      class="flex flex-wrap items-start justify-between gap-2"
+    >
+      <div
+        class="flex flex-col gap-1"
+      >
+        <h2
+          class="text-lg font-semibold text-content"
+          id="fleet"
+        >
+          ناوگان
+        </h2>
+        <p
+          class="text-sm text-content-muted"
+        >
+          دارایی‌های در سرویس
+        </p>
+      </div>
+      <div
+        class="flex items-center gap-2"
+      >
+        <button
+          type="button"
+        >
+          فیلتر
+        </button>
+      </div>
+    </div>
+    محتوا
+  </section>
+</div>
+`;
+
+exports[`Section with a description and an action (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <section
+    aria-labelledby="fleet"
+    class="flex flex-col gap-4 rounded-lg border border-border bg-surface-raised p-6 shadow-sm"
+  >
+    <div
+      class="flex flex-wrap items-start justify-between gap-2"
+    >
+      <div
+        class="flex flex-col gap-1"
+      >
+        <h2
+          class="text-lg font-semibold text-content"
+          id="fleet"
+        >
+          ناوگان
+        </h2>
+        <p
+          class="text-sm text-content-muted"
+        >
+          دارایی‌های در سرویس
+        </p>
+      </div>
+      <div
+        class="flex items-center gap-2"
+      >
+        <button
+          type="button"
+        >
+          فیلتر
+        </button>
+      </div>
+    </div>
+    محتوا
+  </section>
+</div>
+`;
+
+exports[`Sidebar with a current item (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <nav
+    aria-label="ناوبری اصلی"
+    class="flex flex-col gap-1 border-e border-border bg-surface-raised p-3"
+  >
+    <a
+      aria-current="page"
+      class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors bg-accent text-accent-text font-medium"
+      href="/assets"
+    >
+      ماشین‌آلات
+    </a>
+    <a
+      class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors text-content-muted hover:bg-surface-sunken hover:text-content"
+      href="/orders"
+    >
+      سفارش‌ها
+    </a>
+  </nav>
+</div>
+`;
+
+exports[`Sidebar with a current item (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <nav
+    aria-label="ناوبری اصلی"
+    class="flex flex-col gap-1 border-e border-border bg-surface-raised p-3"
+  >
+    <a
+      aria-current="page"
+      class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors bg-accent text-accent-text font-medium"
+      href="/assets"
+    >
+      ماشین‌آلات
+    </a>
+    <a
+      class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors text-content-muted hover:bg-surface-sunken hover:text-content"
+      href="/orders"
+    >
+      سفارش‌ها
+    </a>
+  </nav>
+</div>
+`;

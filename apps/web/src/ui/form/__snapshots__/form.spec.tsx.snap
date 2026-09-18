@@ -1,0 +1,191 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`MoneyField an empty request form (ltr) 1`] = `
+<div
+  dir="ltr"
+>
+  <form
+    class="flex flex-col gap-4"
+    novalidate=""
+  >
+    <div
+      class="flex flex-col gap-1.5"
+    >
+      <label
+        class="text-sm font-medium text-content"
+        for="_r_m_-control"
+      >
+        عنوان
+        <span
+          aria-hidden="true"
+          class="text-danger"
+        >
+           *
+        </span>
+      </label>
+      <input
+        aria-describedby="_r_m_-hint"
+        aria-required="true"
+        class="w-full rounded-md border border-border-strong bg-surface-base px-3 py-2 text-sm text-content placeholder:text-content-subtle aria-invalid:border-danger"
+        id="_r_m_-control"
+        name="title"
+        type="text"
+      />
+      <p
+        class="text-xs text-content-subtle"
+        id="_r_m_-hint"
+      >
+        نام درخواست
+      </p>
+    </div>
+    <div
+      class="flex flex-col gap-1.5"
+    >
+      <label
+        class="text-sm font-medium text-content"
+        for="_r_n_-control"
+      >
+        مبلغ
+         
+        <span
+          class="font-normal text-content-subtle"
+        >
+          (
+          ریال
+          )
+        </span>
+        <span
+          aria-hidden="true"
+          class="text-danger"
+        >
+           *
+        </span>
+      </label>
+      <div
+        class="flex items-center gap-2"
+      >
+        <input
+          aria-required="true"
+          autocomplete="off"
+          class="w-full rounded-md border border-border-strong bg-surface-base px-3 py-2 text-sm text-content placeholder:text-content-subtle aria-invalid:border-danger"
+          id="_r_n_-control"
+          inputmode="decimal"
+          name="amountMinor"
+          value=""
+        />
+        <span
+          aria-hidden="true"
+          class="shrink-0 text-sm text-content-muted"
+        >
+          ریال
+        </span>
+      </div>
+    </div>
+    <div
+      class="flex flex-wrap items-center gap-2 pt-2"
+    >
+      <button
+        data-testid="submit"
+        type="submit"
+      >
+        ثبت
+      </button>
+    </div>
+  </form>
+</div>
+`;
+
+exports[`MoneyField an empty request form (rtl) 1`] = `
+<div
+  dir="rtl"
+>
+  <form
+    class="flex flex-col gap-4"
+    novalidate=""
+  >
+    <div
+      class="flex flex-col gap-1.5"
+    >
+      <label
+        class="text-sm font-medium text-content"
+        for="_r_k_-control"
+      >
+        عنوان
+        <span
+          aria-hidden="true"
+          class="text-danger"
+        >
+           *
+        </span>
+      </label>
+      <input
+        aria-describedby="_r_k_-hint"
+        aria-required="true"
+        class="w-full rounded-md border border-border-strong bg-surface-base px-3 py-2 text-sm text-content placeholder:text-content-subtle aria-invalid:border-danger"
+        id="_r_k_-control"
+        name="title"
+        type="text"
+      />
+      <p
+        class="text-xs text-content-subtle"
+        id="_r_k_-hint"
+      >
+        نام درخواست
+      </p>
+    </div>
+    <div
+      class="flex flex-col gap-1.5"
+    >
+      <label
+        class="text-sm font-medium text-content"
+        for="_r_l_-control"
+      >
+        مبلغ
+         
+        <span
+          class="font-normal text-content-subtle"
+        >
+          (
+          ریال
+          )
+        </span>
+        <span
+          aria-hidden="true"
+          class="text-danger"
+        >
+           *
+        </span>
+      </label>
+      <div
+        class="flex items-center gap-2"
+      >
+        <input
+          aria-required="true"
+          autocomplete="off"
+          class="w-full rounded-md border border-border-strong bg-surface-base px-3 py-2 text-sm text-content placeholder:text-content-subtle aria-invalid:border-danger"
+          id="_r_l_-control"
+          inputmode="decimal"
+          name="amountMinor"
+          value=""
+        />
+        <span
+          aria-hidden="true"
+          class="shrink-0 text-sm text-content-muted"
+        >
+          ریال
+        </span>
+      </div>
+    </div>
+    <div
+      class="flex flex-wrap items-center gap-2 pt-2"
+    >
+      <button
+        data-testid="submit"
+        type="submit"
+      >
+        ثبت
+      </button>
+    </div>
+  </form>
+</div>
+`;
