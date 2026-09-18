@@ -65,6 +65,21 @@ enum DisputeStatus {
   RESOLVED_REFUND
 }
 
+/// Who a dispute outcome or a cancellation is attributed to (ADR-052 § 4 rule
+/// 13). Closed by design: an invalid value is a validation error, never a
+/// silent default, and `UNDETERMINED` is a real answer — "we could not tell" —
+/// not a stand-in for zero.
+///
+/// Never written by parsing `OrderDispute.resolution` or `Order
+/// .cancellationReason` — both stay free text for a human to read. This is a
+/// separate, structured field the resolver chooses explicitly (rule 14).
+enum ResponsibilityAttribution {
+  SUPPLIER
+  BUYER
+  PLATFORM
+  UNDETERMINED
+}
+
 /// Why a history row exists.
 ///
 /// `REMINDER` rows have `fromStatus == toStatus` on purpose (ADR-043): an
@@ -238,8 +253,20 @@ model Order {
   completedAt DateTime? @map("completed_at")
   cancelledAt DateTime? @map("cancelled_at")
 
+  /// The supplier's committed delivery date (ADR-052 § 1-a), fixed at order
+  /// placement from the greatest `leadTimeDays` among the offers it priced
+  /// against. Distinct from `receiptDueAt` on `ORDER_FULFILLED`: that is the
+  /// buyer's confirmation window (ADR-043), not the supplier's promise.
+  promisedDeliveryAt DateTime? @map("promised_delivery_at")
+
   cancellationReason String? @map("cancellation_reason")
   failureReason      String? @map("failure_reason")
+
+  /// Who a cancellation is attributed to (ADR-052 § 1-c). Fixed by which
+  /// command cancelled the order — `BUYER` for the buyer's own
+  /// self-service cancellation, or the dispute's own `responsibility` when a
+  /// `REFUND` resolution closes it. Never derived from `cancellationReason`.
+  cancellationCause ResponsibilityAttribution? @map("cancellation_cause")
 
   createdAt DateTime @default(now()) @map("created_at")
   createdBy String   @map("created_by")
@@ -369,6 +396,10 @@ model OrderDispute {
   resolution   String?   @map("resolution")
   resolvedAt   DateTime? @map("resolved_at")
   resolvedBy   String?   @map("resolved_by")
+
+  /// Chosen explicitly by the resolving operator, never inferred from
+  /// `resolution` (ADR-052 §§ 1-b, 4 rule 13/14). Null until resolved.
+  responsibility ResponsibilityAttribution? @map("responsibility")
 
   @@index([orderId], map: "ix_dispute_order")
   @@index([organizationId, status], map: "ix_dispute_org_status")

@@ -1,6 +1,6 @@
 # ADR-053 — برنامهٔ پیاده‌سازی (audit-service)
 
-- **وضعیت:** برنامه — **در جریان.** AUD-001 و AUD-002 پیاده شده‌اند؛ از AUD-003 نیمهٔ شواهد دست‌نخوردگی پیاده شده و نیمهٔ اصلاح نه؛ AUD-004 شروع نشده. جزئیات در § ۴ و در جدول پایین همین بخش.
+- **وضعیت:** برنامه — **در جریان.** AUD-001 و AUD-002 پیاده شده‌اند؛ AUD-003 کامل پیاده شده (شواهد دست‌نخوردگی **و** رکورد جبرانی)؛ از AUD-004 **Phase A — قرارداد**، **Phase B — Consumer مسیر B در `audit-service`** و **Phase C1 — Producer مرجع ردها در `identity-service` برای یک محل رد، با `security_event_outbox`** پیاده شده‌اند، و **Phase C2 — تجمیع پنجره‌ای ردهای همان یک محل** نیز، و **Phase C3 — محل رد دوم در identity (`GET /v1/users` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C4 — محل رد سوم (`POST /v1/users` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C5 — محل رد چهارم (`POST /v1/users/:id/memberships` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C6 — محل رد پنجم (`POST /v1/memberships/:id/roles` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C7 — محل رد ششم (`POST /v1/memberships/:id/revoke` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C8 — محل رد هفتم (`POST /v1/registration-requests/:id/approve` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C9 — محل رد هشتم و آخرین Route دارای `@Roles` (`POST /v1/registration-requests/:id/reject` → `403 INSUFFICIENT_ROLE` از `RolesGuard`)**، و **Phase C10 — محل رد نهم و نخستین تصمیم‌گیرندهٔ تازه (`403 TENANT_MISMATCH`ِ خودِ `AuthGuard` پلتفرم، Route-agnostic)**، و **Phase C11 — محل رد دهم و نخستین Actor غیرانسانی (`403 FORBIDDEN`ِ همان `AuthGuard` برای فراخوانِ سرویسِ **تأییدشده**، Route-agnostic)**؛ و فرمان اصلاح (`POST /v1/audit-corrections` در `identity-service`) هم ساخته شده است؛ ولی ثبت ردهای سرویس‌های دیگر (R-2)، ردهایی که Gateway یک Hop زودتر می‌گیرد، ردِ `SERVICE_TENANT_CONTEXT_INVALID` (در identity غیرقابل‌دسترسی، چون هیچ Endpoint دارای `@AllowService` وجود ندارد)، صادرات، Purge ردیف‌های منتشرشدهٔ `security_event_outbox` و امضای زنجیره نه؛ قواعد هشدار Prometheus فقط **محلی** و بی Alertmanager هستند (`infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`). **شکاف داشبورد محلی بسته شد (2026-09-13):** داشبورد Provision‌شدهٔ Grafana ‏`Rasta Audit Evidence` (UID ‏`rasta-audit-evidence`، Datasource ‏`rasta-prometheus`) همان سیزده هشدار، یک Recording Rule و متریک‌های ورودی‌شان را برای Stack محلی نشان می‌دهد، با دروازهٔ قرارداد ایستا در `pnpm verify`/CI و اعتبارسنجی زندهٔ Provisioning و PromQL روی Imageهای Pin‌شده ([`13-observability.md`](../13-observability.md) § ۱۳٫۷)؛ Alertmanager/تحویل اعلان، Scrape محیط واقعی، Heartbeat تولیدکننده و تطبیق رکورد به رکورد همچنان نیستند. Runbook شکاف شواهد: [`audit-gap-detected.md`](../runbooks/audit-gap-detected.md). جزئیات در § ۴، § ۵ و در جدول پایین همین بخش.
 - **مرجع تصمیم:** [ADR-053](ADR-053-audit-service-append-only-evidence.md)
 - **قلم مرتبط:** `COM-009` — **`READY` می‌ماند و ۱۳ امتیازش دست نمی‌خورد** تا همهٔ گام‌های زیر پیاده و پذیرفته شوند.
 - **همراه:** [ADR-054 implementation plan](ADR-054-implementation-plan.md)
@@ -8,16 +8,17 @@
 > این سند **برنامه** است، نه گزارش. متن گام‌ها همان برنامهٔ اولیه است و عمداً بازنویسی نشده؛ تنها چیزی که به‌روز می‌شود،
 > نشانگرهای وضعیت‌اند. هر ادعای «پیاده شد» فقط پس از اجرا و گذشتن از دروازه‌های آن گام معنا دارد.
 
-**وضعیت گام‌ها — 2026-09-10:**
+**وضعیت گام‌ها — 2026-09-13:**
 
-| گام     | وضعیت                                                                                                                                                                                                                            |
-| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| AUD-001 | ✅ **پیاده** — Projector مسیر A روی ده Topic دامنه‌ای، جدول `audit_event` پارتیشن‌بندی‌شده و فقط‌الحاقی در دو لایه                                                                                                               |
-| AUD-002 | ✅ **پیاده** — `GET /v1/audit-events` و `GET /v1/audit-events/{id}`، پنجرهٔ اجباری، صفحه‌بندی Cursor، زیردرخت `UNION_ADMIN` از Projection محلی با Fail-Closed                                                                    |
-| AUD-003 | ⚠️ **نیمه** — زنجیرهٔ Hash، `audit_chain_head`، `GET /v1/audit-events/verify` و متریک‌ها پیاده و روی PostgreSQL واقعی اثبات شده‌اند. **عمل `audit.correction` پیاده نشده** و تا AUD-004 نمی‌تواند باشد (مسیر B، نه نوشتن مستقیم) |
-| AUD-004 | ❌ **شروع نشده** — بدون Producer و بدون مصرف‌کنندهٔ `rasta.audit.trail.v1`                                                                                                                                                       |
+| گام     | وضعیت                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AUD-001 | ✅ **پیاده** — Projector مسیر A روی ده Topic دامنه‌ای، جدول `audit_event` پارتیشن‌بندی‌شده و فقط‌الحاقی در دو لایه                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| AUD-002 | ✅ **پیاده** — `GET /v1/audit-events` و `GET /v1/audit-events/{id}`، پنجرهٔ اجباری، صفحه‌بندی Cursor، زیردرخت `UNION_ADMIN` از Projection محلی با Fail-Closed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| AUD-003 | ✅ **پیاده** — **شواهد دست‌نخوردگی:** زنجیرهٔ Hash به‌ازای (مستأجر، ماه UTC)، `audit_chain_head`، `GET /v1/audit-events/verify` و متریک‌ها، روی PostgreSQL واقعی اثبات‌شده (متریک‌ها در فرایند ثبت و از `GET /metrics` در `audit-service` صادر می‌شوند و هدف Scrape محلی دارند؛ `RastaAuditChainDivergence` و `RastaAuditIngestionFailure` را فقط Prometheus محلی ارزیابی می‌کند، بی Alertmanager). **رکورد جبرانی:** فرمان `POST /v1/audit-corrections` در `identity-service` (فقط `SYSTEM_ADMIN`، `Idempotency-Key` الزامی، هدف و مستأجرش از Endpoint داخلی `audit-service` اثبات می‌شوند) یک `AUDIT_EVENT_RECORDED` v1 از `outbox_message` استاندارد روی مسیر B منتشر می‌کند؛ `audit-service` آن را ردیف تازه‌ای با `correction_of` ثبت می‌کند، اصل را دست نمی‌زند و `correctionOf`/`correctedBy` را در خواندن منتشر می‌کند. `audit-service` خودش فرمان اصلاح نمی‌پذیرد و API نوشتن ندارد. `up → down → up` هر دو Migration اصلاح روی PostgreSQL 16.14 اجرا شد (§ ۴). **بیرون از این گام و هنوز نیست:** امضای زنجیره و انتشار Digest بیرونی                                                                                                                                                                                                                                                                                                                |
+| AUD-004 | 🟡 **Phase A، B و C1–C11 پیاده** — قرارداد `AUDIT_EVENT_RECORDED` v1 (A)؛ `AuditTrailConsumer` با گروه ثابت `audit-service.trail`، اعتبارسنجی Fail-Closed و Idempotent (B)؛ و `identity-service` تنها Producer ردها با **ده** محل رد: `SWITCH_ACTIVE_ORGANIZATION` در دامنه (C1)، هفت Route دارای `@Roles` با `403 INSUFFICIENT_ROLE` از `RolesGuard` (C3–C9)، `403 TENANT_MISMATCH`ِ خودِ `AuthGuard`، Route-agnostic (C10) و `403 FORBIDDEN`ِ همان Guard برای فراخوانِ سرویسِ تأییدشده، Route-agnostic و با Actor از نوع `SERVICE` (C11) — از `security_event_outbox` محلی و Relay دوم ADR-050، با تجمیع پنجره‌ای Configurable (`SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS`، پیش‌فرض ۶۰، بازهٔ ۱..۳۶۰۰؛ C2). شکستِ ثبت، پاسخ `403` را عوض نمی‌کند. بخش Audit کاتالوگ رویدادها به‌روز است و Runbook [`audit-gap-detected.md`](../runbooks/audit-gap-detected.md) وجود دارد؛ نگاشت فایل‌های پذیرش برنامه به آزمون‌های واقعی در § ۷. **هنوز نیست:** ثبت رد در سرویس‌های دیگر (R-2)، ردهای متوقف‌شده در Gateway، `SERVICE_TENANT_CONTEXT_INVALID` (امروز در identity غیرقابل‌دسترسی است؛ هیچ Endpoint دارای `@AllowService` نیست، پس هر فراخوان سرویس پیش از بررسی مستأجر `FORBIDDEN` می‌گیرد)، Purge ردیف‌های منتشرشده، صادرات، Alertmanager/تحویل اعلان و Scrape محیط واقعی (سه هشدار صف ردها فقط در Prometheus محلی ارزیابی می‌شوند). سابقهٔ هر Phase در § ۵ |
 
-> **`COM-009` همچنان `READY` و ۱۳ امتیازی است.** پیاده شدن سه گام از چهار گام، پذیرش صاحب محصول نیست و امتیاز نمی‌دهد.
+> **`COM-009` همچنان `READY` و ۱۳ امتیازی است.** پیاده شدن سه گام و Phaseهای A تا C11 از چهارم، پذیرش صاحب محصول نیست و امتیاز نمی‌دهد؛
+> نوشتن یک Contract هیچ نتیجهٔ قابل‌پذیرش کاربری تحویل نمی‌دهد (`docs/25-progress-governance.md` § ۲۵٫۱، همان استدلال گام صفر).
 > وضعیت خود ADR-053 هم `Proposed` می‌ماند.
 
 ---
@@ -257,6 +258,105 @@ ADR-053 § ۱۰؛ `assertNotAuditor()`؛ OpenAPI تولیدشده، Commit‌ش�
 > Cardinality بالا ندارند و هیچ‌کدام مستأجر، Actor یا منبع را نام نمی‌برند، پس CONSTRAINT سند `docs/13` نقض نشده — ولی این
 > تفاوت باید هنگام پذیرش ADR در § ۱۳ اصلاح شود.
 
+> **پیشرفت — 2026-09-12 (نیمهٔ اصلاح: فرمان `audit.correction`، سرتاسر).** ردیف سومِ جدول بالا — «رکوردی غلط باشد /
+> `SYSTEM_ADMIN` اصلاحی با دلیل ثبت کند» — اکنون پیاده است. AUD-003 با این فاز کامل می‌شود.
+>
+> - **مالکیت و مسیر.** فرمان در `identity-service` است (§ ۵ همین سند از پیش این را تصمیم گرفته بود):
+>   `POST /v1/audit-corrections`، پیشوندی سطح‌بالا در Gateway چون مسیریابی بر نخستین بخش مسیر است و `audit-events` مال
+>   `audit-service` است که API نوشتن ندارد. فقط `SYSTEM_ADMIN` (Gateway و identity، و یک بررسی سوم در خودِ سرویس که Token
+>   سرویس را هم رد می‌کند)، و `Idempotency-Key` الزامی. شکل HTTP تصمیم موقت **Q-53** است؛ محتوای رکورد از ADR-053 § ۷ می‌آید
+>   و حدس زده نشده.
+> - **هیچ نوشتن مستقیمی.** فرمان یک `AUDIT_EVENT_RECORDED` v1 در `outbox_message` **استاندارد** identity می‌نویسد — نه
+>   `security_event_outbox`، نه Outbox تازه، نه دسترسی به پایگاه دادهٔ audit — و Relay استاندارد (ADR-050، بی‌تغییر) آن را
+>   منتشر می‌کند. `aggregateType/aggregateId = AuditEvent`/شناسهٔ هدف، Topic `rasta.audit.trail.v1`، و **کلید Partition و
+>   Stream ADR-051 = شناسهٔ هدف** (`correctionOf`). مسیریابی identity اکنون یک اتحاد صریح است
+>   (`OutboundEventName`)، `AUDIT_EVENT_RECORDED` به `IDENTITY_EVENTS` افزوده **نشده**، و `assertTopicFor` هر رویداد دامنه‌ای
+>   را از Topic حسابرسی و اصلاح را از هر Topic دیگر باز می‌دارد.
+> - **مرز اعتماد هدف (REST، نه پایگاه داده).** `audit-service` یک Endpoint داخلی و باریک گرفت:
+>   `GET /v1/internal/audit-events/{id}?occurredAt=…` با `@AllowService('identity-service')` به‌علاوهٔ یک بررسی دوم که هر
+>   Token کاربر را هم رد می‌کند. سه میدان برمی‌گرداند — شناسه، سازمان (`null` برای رکورد پلتفرمی) و لحظه — و هیچ شاهدی.
+>   `occurredAt` الزامی است چون `audit_event` بر همان ستون پارتیشن‌بندی شده: خواندن یک پارتیشن با کلید اصلی است، و تطابق
+>   **دقیق** شرط است. هدف ناموجود و لحظهٔ ناهم‌خوان هر دو `404`ِ یکسان می‌گیرند. خواندن‌های عمومی همچنان به هیچ Token سرویسی
+>   داده نمی‌شوند. مستأجرِ رکورد اصلاح **فقط** از همین پاسخ کپی می‌شود، هرگز از درخواست؛ برای هدف پلتفرمی، هم
+>   `payload.organizationId` و هم `envelope.tenantId` غایب‌اند (`buildOutboxRow` اکنون `organizationId: null` را «بی‌مستأجر»
+>   می‌فهمد، نه «از Context بگیر» — تنها تغییر بستهٔ مشترک، و عمومی).
+> - **Idempotency واقعی.** جدول تازهٔ `audit_correction_command` با کلید `(actor_id, idempotency_key)` — نه
+>   `idempotency_key` که مستأجر `NOT NULL` دارد و برای فرمانی پلتفرم‌گستر مستأجرِ جانشین می‌خواست (هیچ Sentinel). ردیف فرمان و
+>   ردیف Outbox در **یک تراکنش** نوشته می‌شوند؛ همان کلید + همان درخواست همان `202` را برمی‌گرداند (بایت‌به‌بایت، چون پاسخ با
+>   ترتیب کلید ثابت بازساخته می‌شود)، درخواست متفاوت `409 IDEMPOTENCY_KEY_REUSED` می‌گیرد، و درخواست‌های هم‌زمان یک اثر دارند
+>   (بازندهٔ رقابت روی کلید اصلی می‌شکند و ردیف Outbox خودش را با خود برمی‌گرداند). نگهداشت نامحدود، عمداً و مستند.
+> - **خواندن، هر دو جهت.** هر رکورد اکنون `correctionOf` (nullable) و `correctedBy` (آرایه، خالی وقتی نیست) را منتشر می‌کند.
+>   پیوندها یک‌بار برای هر صفحه و **زیر همان دامنهٔ** آن صفحه خوانده می‌شوند (`organization_id = $1` وقتی مستأجر-محدود است،
+>   بی‌هیچ `OR ... IS NULL`)، با کران پایینِ `occurred_at`ِ قدیمی‌ترین هدف برای هرس پارتیشن و یک Index تازه
+>   (`audit_event_correction_idx`، Migration افزایشی و قابل بازگشت). اصل **بایت‌به‌بایت** دست‌نخورده می‌ماند، Hashاش عوض
+>   نمی‌شود، اصلاح حلقهٔ بعدیِ همان زنجیره است و `verify` همچنان `VALID` می‌دهد.
+>
+> **شواهد.** Unit: `@rasta/nest-common` ۸ Suite/۱۳۴ تست، identity ۱۸ Suite/۷۰۹ تست، audit ۲۱ Suite/۶۱۱ تست، Gateway ۹۱ تست
+> (DTO/Redaction، ساخت دقیق Payload و Envelope، مسیریابی و کلید Stream، مجوزدهی، تصمیم‌های Lookup، پاکسازی خطای Upstream،
+> منطق Replay/Reuse/هم‌زمانی، واگذاری Controller و پیوند خواندن). PostgreSQL واقعی: identity ۷ Suite/۱۰۸ تست (از جمله
+> `audit-correction.int-spec.ts` با ۱۹ تست: هدف مستأجری و پلتفرمی، Replay، بدنهٔ متفاوت، شش درخواست هم‌زمان، هدف ناموجود/
+> لحظهٔ ناهم‌خوان، `503`ِ کراندار، و دو شکستِ شبیه‌سازی‌شده که ردیف Outbox و ردیف فرمان را با هم برمی‌گردانند)، audit ۱۱
+> Suite/۱۷۴ تست (از جمله `correction-linkage.int-spec.ts`: پیوند دوطرفه، نبود نشت میان‌مستأجری، زنجیرهٔ پلتفرمی، و Endpoint
+> داخلی). Kafka واقعی: identity فرمان را از Relay استاندارد روی Topic می‌گذارد و یک پیام معتبر با کلید هدف دیده می‌شود؛
+> audit همان شکل پیام را دو بار می‌گیرد و **یک** ردیف می‌سازد. Black-Box (Playwright، ۱۲ سناریو): `SYSTEM_ADMIN` یک رکورد
+> واقعی را از Gateway اصلاح می‌کند، هر دو جهت پیوند خوانده می‌شوند، اصل بی‌تغییر می‌ماند، Replay/Reuse/نبود کلید/نقش‌های دیگر/
+> هدف ناموجود همگی طبق قرارداد پاسخ می‌گیرند.
+>
+> **آنچه هنوز نیست:** صادرات، Purge ردیف‌های منتشرشده، امضا، قاعدهٔ هشدار، رول‌اوت ثبت ردها به سرویس‌های دیگر (R-2) و ردهایی
+> که Gateway یک Hop زودتر می‌گیرد. `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
+
+> **پیشرفت — 2026-09-12 (برگشت‌پذیری هر دو Migrationِ نیمهٔ اصلاح).** فاز پیشین دو Migration افزایشی آورد که هیچ‌کدام را
+> هیچ Harnessی در این Repository اجرا نمی‌کرد. این فاز آن شکاف را می‌بندد.
+>
+> - **`20260912120000_audit_correction_command` (identity).** `verify-migration-reversible.mjs` کل زنجیرهٔ یک سرویس را
+>   برمی‌گرداند و برای هر Migration یک `down.sql` می‌خواهد؛ Migration نخستِ identity `down.sql` ندارد، پس آن Harness به
+>   **هیچ** Migrationِ identity نمی‌رسد. دو Verifierِ نام‌به‌نامِ موجود (ADR-050/051 و `security_event_outbox`) هم این جدول
+>   را پوشش نمی‌دهند. پس Verifier مستقل تازه‌ای اضافه شد:
+>   `scripts/verify-audit-correction-command-migration.mjs` — روی Schema یک‌بارمصرف در پایگاه دادهٔ خود identity:
+>   `migrate deploy` → اثبات جدول با **امضای دقیق هر هفت ستون** (نوع، طول، دقت، Nullability، Default)، کلید مرکب با
+>   `pg_get_constraintdef` (نه با نام، چون فقط تعریف، ترتیب `(actor_id, idempotency_key)` را از عکسش جدا می‌کند)، ردیف
+>   Ledger خودش، ردیف Ledger **هر** Migration دیگر، و هر شیء پیش‌موجودی که باید سرپا بماند (ده جدول از جمله
+>   `idempotency_key`ِ مستأجری که این فرمان عمداً از آن استفاده نمی‌کند، و `security_event_outbox` با Trigger و تابعش) →
+>   آزمودن یکتایی کلید، اینکه Actor واقعاً جزء کلید است، هر `NOT NULL`، هر دو طول اعلام‌شده (`CHAR(64)` و `VARCHAR(26)`)،
+>   Default ستون `created_at`، و JSONB بودن `response_body` → `down.sql` → اثبات نبودِ جدول و ردیف Ledger **و بودنِ** همهٔ
+>   بقیه → `migrate deploy` دوباره که **باید** همین Migration را اعمال کند.
+> - **`20260912120000_audit_event_correction_index` (audit).** این Migration فقط یک Index می‌سازد — همان شکلی که Harness
+>   موجود به آن کور بود: Indexی که نگاشت `EXPECTED` نامش را نبرد، Indexی است که اثبات `up` هرگز نمی‌جویدش، اثبات `down`
+>   هرگز دلتنگش نمی‌شود و `up` دوم هرگز بازش نمی‌گرداند. `audit_event_correction_idx` به همان نگاشت افزوده شد.
+> - **هر دو `down.sql` ردیف `_prisma_migrations` خودشان را پاک می‌کنند.** پیش‌تر نمی‌کردند، و این تنها یک نقص آراستگی نبود:
+>   `migrate deploy` فقط از همین Ledger تصمیم می‌گیرد چه اعمال کند، پس Rollbackی که ردیف را جا بگذارد، Migration را
+>   **برای همیشه غیرقابل‌اعمال** می‌کند. تستی افزوده شد که این را برای **هر** Migrationِ audit می‌خواهد — و می‌خواهد که هر
+>   `down.sql` فقط ردیف خودش را پاک کند، نه ردیف دیگری.
+> - **ثبت در دروازه.** `test:migration` ریشه اکنون Verifier تازه را هم صدا می‌زند (CI از پیش `DATABASE_URL_IDENTITY` را به
+>   همان Step می‌داد، پس Workflow تغییری نخواست)، و `verify` تستِ واحدِ تازه (`test:audit-correction-lib`) را.
+>
+> **اجرای واقعی — 2026-09-12 (هر دو اثبات سبز).** Docker Desktop این ماشین همچنان بالا نمی‌آید، پس هر دو اثبات روی Cluster
+> یک‌بارمصرفِ **PostgreSQL 16.14 بومی** اجرا شد: `initdb` (UTF-8، `trust`) در پوشه‌ای یکتا زیر Temp، گوش‌دادن فقط روی
+> `127.0.0.1:5399` (پورت 5433 در بازهٔ Excluded Port ویندوز 5433–5532 بود و `bind` با Permission denied رد شد)، سرویس
+> PostgreSQL روی 5432 دست‌نخورده. نقش‌ها و پایگاه‌ها فقط همان‌ها که لازم بود: `rasta_identity`، `rasta_audit`، و
+> `rasta_audit_migrator` بی‌عضویت در `rasta_audit`، با Schemaِ `audit` در مالکیت Migrator و فقط `USAGE` برای `rasta_audit`
+> — مطابق `00-init-databases.sh`. `DATABASE_URL` در هر دو اجرا Unset بود تا URLِ ویژهٔ سرویس جایگزین نشود.
+>
+> - **نقص یافته و رفع‌شده (Commit `5808941`).** نخستین اجرای Verifier identity نشان داد Probeهای رد نمی‌توانستند سبز شوند:
+>   متن خروجی `prisma db execute` را می‌جستند، و Prisma 6.19.3 خطای PostgreSQL را چاپ نمی‌کند — برای `NOT NULL` فقط
+>   `Failing row contains (…)`، و برای طول زیاد جملهٔ یکسان `P2000 … Column: (not available)` برای هر دو ستونِ `CHAR(64)` و
+>   `VARCHAR(26)`. اکنون هر Probe در بلوک `DO` اجرا می‌شود که با `GET STACKED DIAGNOSTICS` یک خط از SQLSTATE، جدول، ستون،
+>   Constraint و پیامِ خودِ PostgreSQL برمی‌گرداند؛ پذیرفته‌شدنِ دستور نشانگری جدا دارد. ۵ تست واحد تازه؛ هیچ ادعایی حذف یا
+>   سست نشد. `migrate deploy` دوم اکنون نام Migrationِ دوباره‌اعمال‌شده را چاپ می‌کند.
+> - **identity:** `DATABASE_URL_IDENTITY=postgresql://rasta_identity@127.0.0.1:5399/rasta_identity?schema=public node
+scripts/verify-audit-correction-command-migration.mjs` — خروج 0؛ `up → down → up in 39250ms` (Wall 39.4s)، با
+>   `re-applied 20260912120000_audit_correction_command`. اجرای پیشینِ همان کد پیش از افزودن آن خط چاپی: 61994ms، سبز.
+> - **audit:** `DATABASE_URL_AUDIT=postgresql://rasta_audit@127.0.0.1:5399/rasta_audit?schema=audit node
+scripts/verify-migration-reversible.mjs audit` — همان شکل URL که Step CI می‌دهد، نه `DATABASE_URL_AUDIT_MIGRATOR`؛ خروج
+>   0؛ کل زنجیرهٔ چهار Migration، `up → down → up in 20406ms` (Wall 20.7s)، با `audit_event_correction_idx` در نگاشت `EXPECTED`.
+> - **پاک‌سازی:** پس از هر CLI، پرس‌وجوی صریح `pg_namespace` نشان داد `audit_correction_command_check` و `migration_check`
+>   باقی نماندند و Schemaهای واقعی `public`/`audit` هیچ Relationی نگرفتند. Cluster متوقف و فقط پوشهٔ خودش حذف شد.
+> - **تست واحد:** `node --test scripts/verify-audit-correction-command-lib.test.mjs scripts/verify-migration-reversible-lib.test.mjs`
+>   — ۳۷ تست، ۳۷ سبز.
+>
+> **آنچه همچنان اجرا نشده:** `pnpm test:migration` کامل ریشه (پایگاه و نقشِ هر نُه سرویس را می‌خواهد و در این نشست تلاش نشد) و
+> `pnpm verify` کامل روی این ماشین. سبز بودن این دو اثبات هدفمند، سبز بودن آن دو دروازه نیست.
+
 **As a** اپراتور پلتفرم، **I want** بتوانم اثبات کنم یک بازه از رکوردها تغییر نکرده، و رکورد غلط را بی‌آنکه گفتهٔ قبلی‌اش پاک
 شود اصلاح کنم، **so that** یکپارچگی انبار نشان‌دادنی باشد نه ادعاشده.
 
@@ -271,6 +371,663 @@ ADR-053 § ۱۰؛ `assertNotAuditor()`؛ OpenAPI تولیدشده، Commit‌ش�
 **وابستگی:** AUD-001.
 
 ## ۵. AUD-004 — قرارداد صریح حسابرسی و حسابرسی ردها
+
+> **پیشرفت — 2026-09-11 (Phase A — فقط قرارداد و تصمیمِ مالکیت Producer، بدون رفتار زمان اجرا).**
+> `packages/contracts/src/events/audit-trail.ts` رویداد `AUDIT_EVENT_RECORDED` (نسخهٔ ۱) را با Zod Schema پیاده می‌کند
+> و از `packages/contracts/src/index.ts` صادر می‌شود. **هیچ Producer، هیچ Consumer، هیچ `security_event_outbox`، هیچ
+> Endpoint فرمان اصلاح و هیچ Migration در این فاز ساخته نشد** — دقیقاً همان مرزی که این گام از AUD-004 برایش برنامه‌ریزی
+> شده بود.
+>
+> **تصمیمِ مالکیت Producer — دو مرز، هر دو `identity-service`، به دو دلیل متفاوت:**
+>
+> | مرز                                        | سرویس              | چرا این سرویس، نه یک سرویس تازه یا `audit-service`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+> | ------------------------------------------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+> | Producer مرجع ردها (§ Given/When/Then زیر) | `identity-service` | همین سند از قبل این را پیشنهاد کرده بود («پرارزش‌ترین ردها»، بند دامنهٔ بالا). این فاز پیشنهاد را به تصمیم تبدیل می‌کند، بدون تغییر دلیلش.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+> | Producer نیتِ اصلاح (ADR-053 § ۷)          | `identity-service` | `services/identity-service/src/outbox/` از قبل `OutboxMessage` استاندارد (ADR-021) و یک Relay کارکننده دارد — همان مسیری که `USER_REGISTERED` و بقیهٔ رویدادهای `rasta.identity.v1` از آن منتشر می‌شوند. `identity-service` مالک `User`/`Role`/`Membership` است، پس منبع حقیقتِ «چه کسی `SYSTEM_ADMIN` است» هم همان‌جاست. `audit-service` **نمی‌تواند** این نقش را بگیرد — کارِ صریحی که این Task ممنوع کرده («Do not invent an audit-service write API or make audit-service produce and consume its own correction event») و خودش هم توضیحی معماری دارد: سرویسی که تنها مسیر نوشتنش مصرف Kafka است (§ ۲) نمی‌تواند همان لحظه فرمان بپذیرد، اصلش را بنویسد **و** رویداد اصلاحش را هم منتشر کند — این یعنی نوشتن مستقیم، دقیقاً همان چیزی که § ۷ برایش رکورد جبرانی طراحی شده تا جایگزینش شود. ساختن یک سرویس تازه فقط برای این فرمان هم رد شد: بدون آن، هیچ سرویس دیگری کاری نمی‌ماند که نکرده باشد، و § Over-Engineering در `AGENTS.md` تجمیع بدون توجیه ثبت‌شده را ممنوع می‌کند — این توجیه همان است که در همین ردیف نوشته شده. |
+>
+> **این یک تصمیمِ Repository-Evidence است، نه یک Placeholder تحت § ۹ `AGENTS.md`.** ابهامی که آن بخش برایش «ثبت در
+> `docs/24` + تصمیم موقت» می‌خواهد وقتی است که پاسخ از معماری موجود در نمی‌آید؛ اینجا `identity-service` از پیش هر دو
+> پیش‌نیاز را دارد (Outbox کارکننده + مالکیت نقش)، پس چیزی برای نامشخص ماندن نیست. هیچ Q-XX تازه‌ای در
+> `docs/24-open-questions.md` باز نشد.
+>
+> **جزئیات سیم که این فاز مشخص می‌کند:**
+>
+> - **Topic/Group.** بدون تغییر نسبت به § ۱ ADR: `rasta.audit.trail.v1`؛ تنها گروه مصرف‌کننده `audit-service.trail`
+>   (هنوز مصرف‌کننده‌ای نوشته نشده).
+> - **مالکیت Outbox/تراکنش.** هر دو Producer در **پایگاه دادهٔ خودِ `identity-service`** (`rasta_identity`) و در
+>   تراکنش خودشان می‌نویسند — هرگز در `rasta_audit` (A-01). Producer مرجع ردها جدول تازهٔ محلی `security_event_outbox`
+>   می‌گیرد (ADR-053 § ۴)، چون باید از **تراکنش کوتاه و مستقل خودش** بنویسد، نه از تراکنش دامنه‌ای‌ای که اصلاً وجود
+>   ندارد (رد پیش از هر تراکنش رخ می‌دهد). Producer نیتِ اصلاح از `outbox_message` **استانداردِ همین سرویس** استفاده
+>   می‌کند — همان جدولی که `USER_REGISTERED` با آن منتشر می‌شود — چون فرمان اصلاح یک عمل دامنه‌ایِ معمولی
+>   (`SYSTEM_ADMIN` چیزی را تأیید می‌کند) با یک تراکنش واقعی پیش از خودش است؛ ساختن جدول Outbox دومی برایش تکرار بی‌دلیل
+>   همان مکانیسم است.
+> - **رفتار در خطا — دو قاعدهٔ متفاوت، برای دو نوع فراخوان متفاوت.** ردهای § ۴: نوشتن حسابرسی هرگز مسیر Auth را مسدود
+>   نمی‌کند و شکستش رد را سهل‌گیرانه نمی‌کند — «فراخوان همیشه رد می‌شود» (جدول Given/When/Then زیر، ردیف اول؛
+>   `AGENTS.md` A-12). نیتِ اصلاح **متفاوت** است: این یک فرمان عمدیِ `SYSTEM_ADMIN` است، نه یک رد در مسیر بحرانیِ
+>   دسترس‌پذیری، پس نوشتن Outboxش **در همان تراکنشِ فرمان** می‌نشیند (ADR-021 معمول) — اگر بنویسد شکست بخورد، کل فرمان
+>   Rollback می‌شود و `SYSTEM_ADMIN` خطای صریح می‌گیرد، نه اینکه اصلاحی «به‌ظاهر ثبت‌شده» غیب شود. هیچ‌کدام از این دو
+>   قاعده تازه نیست؛ این فاز فقط می‌نویسد که کدام قاعده به کدام مرز تعلق دارد.
+> - **نسخه‌بندی Contract.** `AUDIT_EVENT_RECORDED_VERSION = 1`. تغییری که شکل پذیرفته‌شدهٔ نسخهٔ ۱ را عوض کند نسخهٔ ۲
+>   می‌شود (`auditTrailPayloadSchemaV1` کنار `auditTrailPayloadSchemaV2`)، نه ویرایش بی‌صدای همین Schema — همان قاعده‌ای
+>   که `audit.canonical.ts`ِ AUD-003 برای `CANONICAL_VERSION` دارد.
+> - **کلید Idempotency.** بدون تغییر نسبت به هر رویداد دیگر پلتفرم: `envelope.eventId` (ULID)، خوانده‌شده در جدول
+>   مصرف‌کنندهٔ `processed_event` (ADR-053 § ۸). ردیف حسابرسیِ نوشته‌شده هم `UNIQUE(occurred_at, source_event_id,
+source_topic)` خودش را دارد — دو لایهٔ مستقل، همان چیزی که مسیر A از قبل دارد.
+> - **کلید Partition.** قاعدهٔ پیش‌فرض کاتالوگ رویدادها (`docs/events/README.md` § قواعد: `aggregateId`) بدون انحراف
+>   اعمال می‌شود: `aggregateId` برای یک رکورد معمولی همان `resourceId` عمل حسابرسی‌شده است، و برای یک اصلاح همان
+>   `correctionOf` (شناسهٔ رکوردی که اصلاح می‌شود) — نه یک کلید تازه. وقتی عملی اصلاً `resourceId` ندارد (یک رد بدون
+>   منبع آدرس‌پذیر، یا یک عمل صرفاً پلتفرمی)، Producer به `actor.id` برمی‌گردد؛ این همان الگویی است که
+>   `rasta.economic.v1` برای `PAYMENT_AUTHORIZED`/`PAYMENT_FAILED` به‌کار می‌برد (کلید صریح، مستند، وقتی Aggregate واقعی
+>   وجود ندارد).
+> - **قواعد مستأجر.** `payload.organizationId` باید همان `envelope.tenantId` باشد؛ هر دو با هم غایب‌اند فقط برای عمل
+>   واقعاً پلتفرمی (ADR-053 §§ ۵، ۱۰). این Schema این دو را با هم بررسی نمی‌کند — هر پیام را جدا اعتبارسنجی می‌کند، نه
+>   Envelopeاش را — و توافق میان آن دو مسئولیت Producer است؛ تست سطح Envelope در `audit-trail.spec.ts` این را با
+>   `parseEnvelope` نشان می‌دهد.
+> - **مرز میان اعتبارسنجی Schema و مجوزدهی/Redaction/تجمیعِ سمت Producer.** این فایل شکل سیم را می‌بندد: چهار وضعیت
+>   `outcome`، الگوی نقطه‌دار `action`، سقف ۵۰ تغییرِ `changes` و دو نشانهٔ امنِ آن (`{redacted:true}`/`{hash}`)، و چهار
+>   ناورداییِ اصلاح. **آنچه اینجا نیست:** اینکه فراخوان‌کننده واقعاً `SYSTEM_ADMIN` است (کار Guard سمت Producer، از
+>   Token تأییدشده)، اینکه کدام میدان از `SENSITIVE_KEYS` باید Redact شود پیش از رسیدن به `changes` (کار Producer، از
+>   `packages/logging/src/redaction.ts` — این بسته یک وابستگی تازه به `@rasta/logging` نمی‌گیرد)، و اینکه ۵۰۰ رد در یک
+>   دقیقه چطور به یک ردیف با `occurrenceCount=500` تبدیل می‌شود (کار Flusherِ Producer، پنجره‌ای، هنوز نانوشته).
+
+> **پیشرفت — 2026-09-11 (Phase B — Consumer مسیر B در `audit-service`؛ بدون Producer).**
+> `services/audit-service/src/consumers/audit-trail.consumer.ts` (`AuditTrailConsumer`) و
+> `src/audit/audit-trail.mapper.ts` پیاده شدند: گروه ثابت `audit-service.trail` فقط روی `AUDIT_TRAIL_TOPIC` — جدا از گروه
+> Projector (`audit-service.domain-projector`)، و هیچ‌کدام از `KAFKA_CONSUMER_GROUP` خوانده نمی‌شوند. هر دو Consumer در
+> `AppModule` ساخته، در Bootstrap شروع و در Shutdown متوقف می‌شوند، و Readiness فقط وقتی `200` است که `database`،
+> `projector` و `trail` هر سه درست باشند. **هیچ Producer، هیچ `security_event_outbox`، هیچ تجمیع ردها، هیچ Endpoint
+> فرمان اصلاح، هیچ API نوشتن حسابرسی و هیچ Migration در این فاز ساخته نشد**؛ Topic از پیش در `create-topics.sh` و هر دو
+> فهرست Topic در CI بود.
+>
+> **مرز اعتبارسنجی، به همین ترتیب، پیش از هر نوشتن:**
+>
+> 1. Envelope استاندارد دوباره Parse می‌شود، حتی پس از `EventConsumer`.
+> 2. `eventName === AUDIT_EVENT_RECORDED`، `eventVersion === AUDIT_EVENT_RECORDED_VERSION`، و Topic تحویل همان
+>    `rasta.audit.trail.v1`.
+> 3. Payload با `auditTrailPayloadSchemaV1`.
+> 4. توافق مستأجر، بسته در خطا: هر دو حاضر و دقیقاً برابر (بدون نرمال‌سازی حروف)، یا هر دو غایب برای رکورد پلتفرمی؛
+>    یک‌طرفه، ناهمسان یا تهی رد می‌شود؛ مستأجر هرگز از Actor، Resource یا Aggregate حدس زده نمی‌شود.
+> 5. کنترل‌های ستون — رد، نه کوتاه‌سازی: شناسهٔ تهی، `correctionOf` بیش از ۶۴ نویسه، `occurrenceCount` بیرون از
+>    `INTEGER`؛ و تغییرِ میدانی از `SENSITIVE_KEYS` با مقدار خام (کنترل دفاعی — Redaction همچنان کار Producer است).
+>
+> رد یعنی Throw، سپس Retry و `rasta.audit.v1.dlq`؛ هیچ ردیف و هیچ نشانگر `processed_event`. پیام خطا — که در Log و Header
+> `x-dlq-error` می‌نشیند — فقط مسیر Schema، کد Zod و عبارت ثابت دارد، هرگز پیام Zod که مقدار دریافتی را نقل می‌کند؛ خطای
+> پایگاه داده به `AuditTrailPersistenceError` با نام کلاس و کد `P####` تبدیل می‌شود و خطای اصلی فقط `cause` است. متریک‌ها
+> پنج مقدار بستهٔ تازه برای `reason` گرفتند و هیچ برچسب تازه‌ای نه.
+>
+> **نگاشت و زنجیره.** همهٔ میدان‌های مسیر B به ستون‌های موجود `audit_event` می‌روند (نوع/شناسه/نقش‌های Actor، سازمان،
+> `action`، Resource، `outcome`، `errorCode`، `reason`، `changes`، `occurrenceCount`، ip و User-Agent، `correctionOf`)، و
+> ستون‌های Envelope از همان تابع مشترکِ مسیر A (`toEnvelopeProvenance`) می‌آیند. `CANONICAL_FIELDS`ِ AUD-003 همهٔ این
+> ستون‌ها را از پیش پوشش می‌داد و Repository تا امروز برایشان null می‌نوشت، پس **`CANONICAL_VERSION` تغییر نکرد** و Hash
+> هر ردیف مسیر A دقیقاً همان است. نوشتن فقط از `AuditRepository.ingest`، با نام مصرف‌کنندهٔ `audit-service.trail` و بدون
+> Projection سلسله‌مراتب. اصلاح یک ردیف تازه با `correction_of` است؛ ردیف اصلی دست نمی‌خورد.
+>
+> **شواهد.** Unit: `audit-trail.mapper.spec.ts`، `audit-trail.consumer.spec.ts` و به‌روزرسانی Composition-root، Health و
+> Metrics. PostgreSQL: `test/trail-ingestion.int-spec.ts` — همهٔ ستون‌ها و بازمحاسبهٔ Hash پس از رفت‌وبرگشت JSONB، زنجیرهٔ
+> مستأجر و پلتفرم، اصلاحِ پیوندی، تحویل تکراری و هم‌زمان، جدایی از فضای نام مسیر A، و دو شکست تراکنش. Kafka: بلوک تازه در
+> `test/kafka-projector.int-spec.ts` — Envelope واقعی به ردیف؛ Envelope بدشکل به `VALIDATION_FAILED`؛ Payload بدشکل و
+> مستأجر ناهمسان به `MAX_RETRIES_EXCEEDED` بدون نشت مقدار در Header و بدون ردیف یا نشانگر؛ و Partition ادامه می‌دهد.
+>
+> **آنچه Consumer عمداً بررسی نمی‌کند:** اینکه `correctionOf` به رکوردی موجود و در همان مستأجر اشاره کند. این پرسش باید
+> پیش از صدور رویداد در Producer فرمان اصلاح پاسخ بگیرد؛ در Consumer، خواندن با شناسه بدون پنجرهٔ زمانی همهٔ پارتیشن‌ها را
+> اسکن می‌کند. `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
+
+> **پیشرفت — 2026-09-11 (Phase C1 — Producer مرجع ردها در `identity-service`، فقط یک محل رد).**
+> `identity-service` اکنون یک رد واقعی را به‌عنوان شاهد ثبت و روی `rasta.audit.trail.v1` منتشر می‌کند:
+> `POST /v1/users/me/active-organization` وقتی `IdentityService.switchActiveOrganization()` با
+> `403 TENANT_MISMATCH` رد می‌کند (فراخوان عضویت فعال در سازمان درخواستی ندارد).
+>
+> - **صف جدا، نه `outbox_message`.** جدول محلی `security_event_outbox` (Migration افزایشی و قابل بازگشت
+>   `20260911120000_security_event_outbox`، با `down.sql`) فقط ستون‌های کراندار دارد: شناسه‌ها، نوع و نقش‌های Actor،
+>   `action`/`resourceType`/`resourceId` ثابت، کد خطا، دلیل ثابت، ip و User-Agent، Correlation/Trace، زمان رخداد و وضعیت
+>   تحویل ADR-050. هیچ JSON، بدنهٔ درخواست، Token، پاسخ یا پیام Exception جایی برای ذخیره ندارد؛ ۱۳ CHECK و ۳ Index جزئی.
+>   مسیر رویداد دامنه‌ای (`IdentityRepository.enqueueEvent`، توالی B3، Relay معمول) دست نخورد و `AUDIT_EVENT_RECORDED` به
+>   `routing.ts` افزوده نشد.
+> - **ثبت در مرز Exception Filter.** `RefusalAuditExceptionFilter` پاسخ فیلتر پلتفرم را اول می‌سازد و نگه می‌دارد،
+>   ثبت را با **طبقه‌بندی نهایی همان پاسخ** اجرا می‌کند و سپس دقیقاً همان پاسخ را می‌فرستد. ثبت فقط وقتی رخ می‌دهد که خطا
+>   در محل تصمیم با یک Site از فهرست ثابت `refusal-sites.ts` علامت خورده باشد **و** وضعیت/کد، متد و الگوی Route با آن Site
+>   بخواند **و** فراخوان کاربر احرازشده باشد. `action`، `resourceType` و `reason` از Site می‌آیند؛ Actor، نقش‌ها، مستأجر،
+>   ip/User-Agent، Correlation و Trace از RequestContext مورد اعتماد؛ `resourceId` شناسهٔ خود کاربر است و **سازمان درخواستی
+>   (ورودی مهاجم) هیچ‌جا ذخیره نمی‌شود**. `401`، `403`های دیگر و `TENANT_MISMATCH`ِ خودِ AuthGuard ثبت نمی‌شوند.
+> - **Best-effort و کراندار.** درج در تراکنش کوتاه خودش با `statement_timeout` و `maxWait` و یک Deadline سخت
+>   (`SECURITY_EVENT_CAPTURE_TIMEOUT_MS`، پیش‌فرض ۲۵۰، بازه ۱۰..۵۰۰۰). موفقیت، Timeout و شکست همه همان `403` با همان بدنه را
+>   برمی‌گردانند؛ Kafka و audit-service روی مسیر تصمیم نیستند. متریک `rasta_security_event_captures_total{outcome}` با
+>   چهار مقدار بسته؛ Logها فقط Site، نتیجه، دلیل بسته، کلاس خطا و کد Prisma/SQLSTATE دارند.
+> - **Flusher.** نمونهٔ دوم `OutboxRelay` پلتفرم (Claim، Lease، تمدید، Ack حصارکشی‌شده با Token، Backoff با ساعت پایگاه
+>   داده، Shutdown کراندار — همان ADR-050) روی Store محلی این جدول، با `AuditTrailPublisher` که هر ردیف را پیش از انتشار با
+>   Envelope استاندارد، `auditTrailPayloadSchemaV1`، ثابت‌های نام/نسخه/Topic، `outcome = REFUSED`، `occurrenceCount = 1` و
+>   توافق دقیق مستأجر Envelope/Payload اعتبارسنجی می‌کند. کلید Partition همان `resourceId` (شناسهٔ کاربر) است. در
+>   `AppModule` شروع و متوقف می‌شود؛ Readiness تغییری نکرد (ADR-021). شکست انتشار ردیف را قابل تکرار نگه می‌دارد.
+> - **بدون تغییر در `packages/*`** — Relay از قبل فقط سازوکار انتقال/Claim بود (A-03)؛ SQL این جدول محلی است (A-01).
+>
+> **شواهد.** Unit (identity، ۱۵۴ تست): فهرست Site، تصمیم ثبت و نگاشت، Envelope و اعتبارسنجی Contract، Recorder
+> (Timeout/شکست/برچسب کراندار/Log امن)، Filter (پاسخ یکسان در هر چهار حالت)، Relay (Retry، Ack حصارکشی‌شده، Shutdown)،
+> Composition root و Env. PostgreSQL واقعی (`test/security-event-outbox.int-spec.ts`، ۷ تست): ثبت بادوام از Endpoint واقعی
+> بدون هیچ مقدار درخواست در هیچ ستون، جداسازی مستأجر، عدم ثبت `401`/`403` دیگر/رد Guard/Switch موفق، `403` یکسان هنگام
+> Timeout واقعی پشت `LOCK TABLE` و هنگام شکست درج، بازپس‌گیری Lease و حصار Worker کهنه، Retry پس از شکست انتشار. Kafka واقعی
+> (`test/security-event-kafka.int-spec.ts`، ۲ تست — نسخهٔ اصلاح‌شده، زیر را ببینید): Endpoint واقعی → Relay واقعی →
+> `rasta.audit.trail.v1`، مشاهده‌شده به‌عنوان ناظر بیرونی با `EventConsumer` عمومی `@rasta/nest-common` و اعتبارسنجی با
+> `auditTrailPayloadSchemaV1` عمومی از `@rasta/contracts` — بدون وارد کردن کد `audit-service`؛ Envelope و Payload معتبر با
+> نقش‌ها، مستأجر، کد خطا، ip/User-Agent، `occurrenceCount = 1` و بدون مقدار حساس؛ تحویل دوباره توسط دو Worker حصار Worker
+> کهنه را ثابت می‌کند و دو پیام معتبر واقعی روی Kafka می‌گذارد (نه یک `audit_event`؛ آن ادعا مال `audit-service` است، پایین
+> را ببینید). Migration: `scripts/verify-security-event-outbox-migration.mjs` (up → down → up در Schema یک‌بارمصرف، هر
+> CHECK روی ردیف آزموده)، ثبت‌شده در `test:migration`. Runbook: [`security-event-outbox.md`](../runbooks/security-event-outbox.md).
+>
+> **آنچه هنوز نیست — صریح:** تجمیع پنجره‌ای ردها (هر رد یک ردیف است)؛ هر `403` دیگر در identity و **رول‌اوت به هر سرویس
+> دیگر** (R-2)؛ فرمان اصلاح (`audit.correction`)؛ صادرات؛ Purge ردیف‌های منتشرشده؛ قاعدهٔ هشدار Prometheus.
+> `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
+>
+> **اصلاح — 2026-09-11 (Phase C1 سخت‌سازی معماری: حذف وابستگی میان‌سرویسی از آزمون).** جملهٔ بالا دربارهٔ Kafka —
+> نسخهٔ نخست این فاز — وضعیتی را توصیف می‌کرد که با `AGENTS.md` A-02 در تعارض بود:
+> `test/refusal-audit-flow.int-spec.ts` شش مسیر از `services/audit-service/src/**` و `test/**` را مستقیم وارد می‌کرد
+> (`PrismaService`، `AuditRepository`، `AuditTrailConsumer`، `audit.mapper`، `audit-trail.mapper`، `test/helpers`) تا
+> هر دو نیمهٔ جریان را در یک فایل براند. توجیه نوشته‌شدهٔ آن زمان — «فقط در `test/`، نه در مسیر زمان اجرا» — نادرست بود:
+> A-02 صریحاً از هیچ استثنایی برای فایل آزمون نام نمی‌برد، و چیزی که این Import می‌ساخت دقیقاً همان وابستگی ساختاری‌ای
+> بود که A-02 برای جلوگیری از آن نوشته شده — تغییری در `audit-service/src` که این فایل identity را هم می‌شکند، بدون
+> هیچ قرارداد Kafka یا REST میانشان. § ۷ زیر (Test topology نهایی) و `scripts/check-service-boundaries.mjs` این را
+> اصلاح می‌کنند و از تکرارش جلوگیری می‌کنند.
+
+> **پیشرفت — 2026-09-11 (Phase C2 — تجمیع پنجره‌ای ردها، همان یک محل رد در `identity-service`).**
+> جملهٔ «تجمیع پنجره‌ای ردها (هر رد یک ردیف است)» در فهرست «آنچه هنوز نیست» بالا وضعیت پیش از این فاز است و عمداً
+> بازنویسی نشده. اکنون ۵۰۰ رد یکسان در یک پنجره **یک** ردیف `security_event_outbox` با `occurrence_count = 500` و **یک**
+> رویداد `AUDIT_EVENT_RECORDED` با `occurrenceCount = 500` می‌سازد. فقط `SWITCH_ACTIVE_ORGANIZATION`؛ هیچ محل رد یا سرویس
+> تازه‌ای ابزارگذاری نشد، Contract نسخهٔ ۱ و `audit-service` دست نخوردند.
+>
+> - **شناسهٔ تجمیع.** `organization_id` (مستأجری که فراخوان برایش عمل می‌کرد؛ `NULL` پلتفرمی، و دو `NULL` یکی شمرده
+>   می‌شوند)، `actor_type`، `actor_id`، `action`، `resource_type`، `resource_id`، `error_code` و پنجره
+>   (`window_started_at`، `window_ends_at`). ip، User-Agent، Correlation، Trace، نقش‌ها و نسخهٔ Producer **در شناسه
+>   نیستند** — دو مورد نخست را فراخوان انتخاب می‌کند و کلیدکردن بر آن‌ها تجمیع را با چرخاندن یک Header دورزدنی می‌کرد؛ ردیف
+>   نمونهٔ **نخستین رخداد** را نگه می‌دارد. سازمان درخواستی (ورودی مهاجم)، بدنه، Token و پیام Exception ستون نیستند، پس
+>   کلید هم نیستند. ADR سه‌تایی `(actorId, path, errorCode)` را می‌گوید و بقیه را نه → **Q-57** در
+>   [`docs/24-open-questions.md`](../24-open-questions.md) با تصمیم موقت و Configurable.
+> - **زمان و پنجره.** پنجره `[آغاز، پایان)` UTC هم‌تراز با Epoch، به طول `SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS`
+>   (پیش‌فرض ۶۰ — همان «۵۰۰ کاوش در یک دقیقه» ADR — بازهٔ ۱..۳۶۰۰). پنجره را **ساعت پایگاه داده** تعیین می‌کند
+>   (`date_bin` روی `statement_timestamp()` گردشده به میلی‌ثانیه)، نه ساعت برنامه. `occurred_at` = نخستین رخداد، با همان
+>   ساعت. مرزها روی سیم نمی‌روند.
+> - **ثبت اتمیک.** یک `INSERT … ON CONFLICT … DO UPDATE SET occurrence_count = occurrence_count + 1` روی Index یکتای جزئی
+>   `ux_security_event_outbox_open_bucket` (`NULLS NOT DISTINCT`) که فقط ردیف‌های **منتشرنشده، هرگز Claim‌نشده و زیر سقف
+>   INTEGER** را می‌پوشاند؛ در یک تراکنش Batch کوتاه با همان `statement_timeout`. PostgreSQL برای نویسنده‌های هم‌زمان دقیقاً
+>   یک درج و بقیه را افزایش تضمین می‌کند؛ هیچ تجمیع‌گر درون‌حافظه یا Timer وجود ندارد، پس Restart چیزی گم نمی‌کند.
+> - **مرز Claim.** Relay فقط ردیفی را Claim می‌کند که `window_ends_at <= now` پایگاه داده (Index
+>   `ix_security_event_outbox_closed_windows`). Claim کردن `claim_count` را از صفر بالا می‌برد و ردیف را از Index ثبت بیرون
+>   می‌برد؛ ردی که با Claim مسابقه دهد روی قفل ردیف منتظر می‌ماند و یا پیش از Commit‌شدن Claim شمرده می‌شود یا ردیف جانشین
+>   تازه می‌سازد — هرگز گم نمی‌شود و هرگز رویداد در حال انتشار را عوض نمی‌کند. Trigger `tg_security_event_outbox_guard`
+>   ستون‌های شواهد و پنجره را تغییرناپذیر می‌کند، شمارش را فقط رو به بالا و فقط پیش از نخستین Claim اجازه می‌دهد و کاهش
+>   `claim_count` را رد می‌کند. توکن ADR-050، تمدید/بازپس‌گیری Lease، Backoff، Shutdown کراندار و At-Least-Once بی‌تغییرند.
+> - **سرریز.** در `2147483647` ردیف از Index بیرون می‌رود و رد بعدی ردیف جانشین در همان پنجره می‌سازد؛ `403` تغییر نمی‌کند.
+> - **Migration.** `20260911130000_security_event_outbox_aggregation` (افزایشی، با `down.sql`): سه ستون، پنج CHECK
+>   (بازهٔ شمارش، مرز پنجره ≤ ۱ ساعت، رخداد درون پنجره، تجمیع فقط در پنجرهٔ ≥ ۱ ثانیه، انتشار فقط پس از Claim)، دو Index و
+>   Trigger. ردیف‌های پیشین پنجرهٔ تک‌لحظه‌ای `[occurred_at، +1ms)` با شمارش ۱ می‌گیرند و بیرون از Index ثبت می‌مانند.
+> - **Envelope.** `occurrenceCount` از ستون پایدار خوانده می‌شود؛ اعتبارسنجی به‌جای «دقیقاً ۱» بازهٔ ۱..`INTEGER` را می‌پذیرد.
+>   `eventId` = شناسهٔ ULID ردیف، کلید Partition، توافق مستأجر و Redaction بی‌تغییرند؛ تحویل دوباره همان `eventId` و همان
+>   شمارش را دارد چون ردیف Claim‌شده دیگر عوض نمی‌شود.
+> - **اثر عملیاتی.** هر رد دست‌کم تا پایان پنجره‌اش (+ یک Poll Relay) دیرتر به دفتر حسابرسی می‌رسد. همهٔ ردهای یک کاوش روی
+>   یک ردیف قفل می‌گیرند، پس گذردهی آن ردیف با تأخیر Commit پایگاه داده (WAL flush) محدود است — روی Volume توسعهٔ Docker
+>   Desktop با pgbench: حدود ۲۹ Commit در ثانیه تک‌کلاینت و ۲۳ در ثانیه با ۴۰ کلاینت (میانگین ۱٫۷۵ ثانیه)، در برابر ۱۱۴۲ در
+>   ثانیه با `synchronous_commit=off`. ثبتی که از `SECURITY_EVENT_CAPTURE_TIMEOUT_MS` بگذرد `timeout` شمرده می‌شود و `403` همان
+>   است؛ `synchronous_commit` عمداً عوض نشد (پایداری شواهد).
+> - **متریک‌ها (برچسب بسته).** `rasta_security_event_aggregations_total{result=created|incremented|ceiling_reached}`؛
+>   Gaugeهای `rasta_security_event_outbox_open_windows`، `…_closed_backlog_total` و `…_closed_backlog_age_seconds` (هشدار
+>   باید روی سن پشتهٔ پنجره‌های بسته باشد، نه `pending_age` که اکنون تا طول پنجره طبیعی است). Runbook:
+>   [`security-event-outbox.md`](../runbooks/security-event-outbox.md).
+> - **دروازهٔ Turbo.** وظیفهٔ `test` در `turbo.json` اکنون `KAFKA_BROKERS` را عبور می‌دهد و `test`ِ identity با
+>   `--runInBand` اجرا می‌شود؛ پیش از این `pnpm test`/`pnpm verify` آزمون‌های Kafka identity را بی‌صدا Skip می‌کردند.
+>
+> **شواهد.** Unit (identity، ۲۲۳ تست): تعریف شناسه و پنجره، مرزها، بستن پنجره، سقف شمارش، Envelope با شمارش پایدار، Recorder
+> (نتیجهٔ تجمیع، Timeout/شکست بدون نتیجه، برچسب بسته، Telemetry بی‌اثر روی پاسخ)، Filter، Relay، Env. PostgreSQL واقعی
+> (`test/security-event-aggregation.int-spec.ts`، ۲۲ تست): تجمیع ترتیبی از Endpoint واقعی با نمونهٔ نخستین رخداد، **دقیقاً
+> ۵۰۰ رد هم‌زمان از Endpoint → یک ردیف با شمارش ۵۰۰**، ۵۰۰ ثبت هم‌زمان از چهار کلاینت مستقل با شمارش‌های ۱..۵۰۰ بی‌فاصله،
+> پایداری پنجرهٔ باز پس از Restart، جداسازی مستأجر/Actor/فعل/Resource/کد خطا/پنجره، سقف INTEGER و جانشین (و `403` یکسان)،
+> Claim فقط پس از بسته‌شدن، ثبتِ منتظر پشت Claim → جانشین، Claim از روی ردیف قفل‌شده می‌پرد، مسابقهٔ ثبت/بستن/Claim بدون
+> ازدست‌رفتن و بدون تغییر ردیف Claim‌شده، حصار Lease روی ردیف تجمیع‌شده، و قیود جدول. Kafka واقعی
+> (`test/security-event-kafka.int-spec.ts`): پنجرهٔ باز منتشر نمی‌شود، سپس یک پیام معتبر با `occurrenceCount = 3`؛ تحویل
+> دوباره همان `eventId` و شمارش. Migration: `scripts/verify-security-event-outbox-migration.mjs` هر دو Migration را up → down
+> → up می‌کند (شامل Backfill ردیف‌های C1). Black-Box: `tests/e2e/specs/identity/01-refusal-audit-trail.e2e-spec.ts` —
+> ۵ رد واقعی از Gateway → یک رکورد `audit_event` با `occurrenceCount = 5`.
+>
+> **آنچه هنوز نیست — صریح:** هر `403` دیگر در identity و **رول‌اوت به هر سرویس دیگر** (R-2)؛ فرمان اصلاح
+> (`audit.correction`)؛ صادرات؛ Purge ردیف‌های منتشرشده؛ قاعدهٔ هشدار Prometheus. `COM-009` همچنان `READY` و ۱۳ امتیازی است
+> و ADR-053 `Proposed` می‌ماند.
+
+> **پیشرفت — 2026-09-12 (Phase C3 — محل رد دوم در `identity-service`: `GET /v1/users` → `403 INSUFFICIENT_ROLE`).**
+> `identity-service` اکنون **دقیقاً دو** محل رد را ثبت می‌کند. محل تازه ردِ `RolesGuard` پلتفرم برای فهرست کاربران است
+> (`@Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')`؛ `SYSTEM_ADMIN` همیشه مجاز). جملهٔ «Phase C1 exactly one site» و فهرست‌های
+> «آنچه هنوز نیست» بالا وضعیت پیش از این فاز است و عمداً بازنویسی نشده.
+>
+> - **فرادادهٔ ثابت محل (`refusal-sites.ts`، `LIST_USERS`).** `key = identity.list_users`، `GET`، الگوی Route
+>   `/v1/users`، `403`، `INSUFFICIENT_ROLE`، `decidedBy = ROLES_GUARD`، `action = identity.users.list`،
+>   `resourceType = User`، `resourceId` = شناسهٔ کاربرِ خودِ فراخوان از Token، `reason` ثابت. فعل و معنای Resource برای
+>   خواندن یک مجموعه در مخزن تعریف نشده بود → **Q-45** با تصمیم موقت و برگشت‌پذیر در
+>   [`docs/24-open-questions.md`](../24-open-questions.md).
+> - **سازوکار علامت‌گذاری.** Guard محلی `IdentityRolesGuard` جای `RolesGuard` سراسری را در `AppModule` می‌گیرد (ترتیب
+>   `AuthGuard` → Guard نقش حفظ شد) و **هر** تصمیم را به یک نمونهٔ `RolesGuard` پلتفرم می‌سپارد — Public، بدون `@Roles`،
+>   فراخوان سرویسی، `SYSTEM_ADMIN` و نبود Context همه منطق همان Guard مشترک‌اند، نه کپی آن. فقط وقتی Guard مشترک
+>   `RastaError` با `INSUFFICIENT_ROLE` پرتاب کند **و** متد و الگوی Route مطابق Express (`req.method`، `req.route.path` —
+>   الگو، نه URL) با یک محل `ROLES_GUARD` فهرست بخواند، **همان شیء خطا** با `markRefusal` (WeakMap) علامت می‌خورد و بی‌تغییر
+>   دوباره پرتاب می‌شود؛ خطای علامت‌گذاری هرگز رد را عوض نمی‌کند. `packages/nest-common` هیچ تغییری نکرد (A-03) و از هیچ
+>   محل identity خبر ندارد.
+> - **ثبت و تجمیع.** همان Filter، همان `decideCapture` (طبقه‌بندی نهایی، متد و Route باید با محل بخوانند)، همان شناسهٔ
+>   تجمیع و پنجرهٔ ساعت پایگاه داده، همان Relay و Envelope. بدون Migration، بدون تغییر Contract، `audit-service` یا بستهٔ
+>   مشترک. نقش‌های لازم Endpoint، Context درونی خطا (`required`/`actual`)، Query، URL، Token و پیام خطا در هیچ ستون، کلید،
+>   Log یا برچسب متریک نیستند؛ نقش‌های **خودِ** Actor مثل محل نخست از Token مورد اعتماد ثبت می‌شوند (شاهد لازم § ۴).
+>
+> **شواهد.** Unit (identity، ۲۶۸ تست): Guard (علامت روی Route دقیق؛ نبودِ علامت روی متد/الگوی دیگر، نبودِ Route،
+> URL خام، غیر HTTP، خطای دیگر؛ همان شیء و همان شکل خطا؛ برابری کامل تصمیم با `RolesGuard` برای نقش‌های مجاز،
+> `SYSTEM_ADMIN`، فراخوان سرویسی، Public و نبود Context → `401` بی‌علامت)، فهرست محل‌ها، `decideCapture`، Filter و سیم‌کشی
+> `AppModule`. PostgreSQL واقعی (`test/security-event-role-refusal.int-spec.ts`، ۷ تست): ثبت از Endpoint واقعی بدون
+> نقش لازم/Query/Token/متن خطا در ستون‌ها، شکل پاسخ یکسان با رد نقشِ ثبت‌نشده، تجمیع ترتیبی در پنجرهٔ ۲ ثانیه‌ای و ردیف تازه
+> در پنجرهٔ بعد، جداسازی مستأجر/Actor/محل، عدم ثبت برای نقش‌های مجاز و برای `POST /v1/users`،
+> `POST /v1/users/:id/memberships` و `POST /v1/memberships/:id/revoke`، و Claim فقط پس از بسته‌شدن با Envelope معتبر.
+> Kafka واقعی: سه رد در یک پنجره → یک پیام معتبر با `occurrenceCount = 3` و `INSUFFICIENT_ROLE`. Black-Box:
+> `province.auditor` پنج بار `GET /v1/users` از Gateway → یک `audit_event` با `occurrenceCount = 5` که خودش نمی‌تواند بخواند.
+>
+> **آنچه هنوز نیست — صریح:** در identity: `INSUFFICIENT_ROLE` روی شش Route دیگر (`POST /v1/users`،
+> `POST /v1/users/:id/memberships`، `POST /v1/memberships/:id/roles`، `POST /v1/memberships/:id/revoke`،
+> `POST /v1/registration-requests/:id/approve` و `/reject`)، `TENANT_MISMATCH`ِ خودِ AuthGuard و
+> `SERVICE_TENANT_CONTEXT_INVALID`/`FORBIDDEN`؛ رول‌اوت به هر سرویس دیگر (R-2)؛ فرمان اصلاح؛ صادرات؛ Purge؛ قاعدهٔ هشدار
+> Prometheus. `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
+
+> **پیشرفت — 2026-09-12 (Phase C4 — محل رد سوم در `identity-service`: `POST /v1/users` → `403 INSUFFICIENT_ROLE`).**
+> `identity-service` اکنون **دقیقاً سه** محل رد را ثبت می‌کند. محل تازه ردِ `RolesGuard` پلتفرم برای ساختن کاربر است
+> (`@Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')`؛ `SYSTEM_ADMIN` همیشه مجاز). جملهٔ «دقیقاً دو» و فهرست «آنچه هنوز نیست»
+> بلوک C3 بالا وضعیت پیش از این فاز است و عمداً بازنویسی نشده.
+>
+> - **فرادادهٔ ثابت محل (`refusal-sites.ts`، `CREATE_USER`).** `key = identity.create_user`، `POST`، الگوی Route
+>   `/v1/users`، `403`، `INSUFFICIENT_ROLE`، `decidedBy = ROLES_GUARD`، `action = identity.users.create`،
+>   `resourceType = User`، `resourceId` = شناسهٔ کاربرِ خودِ فراخوان از Token (`ACTOR_USER`)، `reason` ثابت. ردِ ساختن
+>   رکورد ساخته‌شده‌ای ندارد و کاربرِ توصیف‌شده در بدنه ورودی مهاجم است؛ فعل و معنای Resource در مخزن تعریف نشده بود →
+>   **Q-46** با تصمیم موقت و برگشت‌پذیر در [`docs/24-open-questions.md`](../24-open-questions.md).
+> - **سازوکار.** `IdentityRolesGuard` و `rolesGuardSiteFor` **بی‌تغییر**‌اند (فقط کامنت): همان تفویض کامل به `RolesGuard`
+>   مشترک، و علامت فقط وقتی Guard مشترک `INSUFFICIENT_ROLE` پرتاب کند و متد و الگوی Route مطابق Express دقیقاً `POST` و
+>   `/v1/users` باشند. `GET` روی همان الگو `LIST_USERS` می‌ماند؛ `PUT`/`PATCH`، متد با حروف کوچک، اسلش پایانی، URL خام و
+>   الگوهای تودرتو (`/v1/users/:id/memberships`) علامت نمی‌خورند. همان شیء خطا دوباره پرتاب می‌شود. `packages/nest-common`
+>   تغییری نکرد.
+> - **ثبت و تجمیع.** همان Filter، `decideCapture`، شناسهٔ تجمیع، پنجرهٔ ساعت پایگاه داده، Relay و Envelope. بدون
+>   Migration و بدون تغییر Schema، Contract، `audit-service`، بستهٔ مشترک، CI یا Turbo. Guard پیش از خواندن بدنه رد
+>   می‌کند؛ هیچ میدان بدنه، نقش لازم Endpoint، Context درونی خطا، Query، URL، Token، Cookie یا پیام خطا در ستون، کلید
+>   تجمیع، Log یا برچسب متریک نیست. Runbook `security-event-outbox.md` تغییر نکرد: رفتار عملیاتی همان است.
+>
+> **شواهد.** Unit (identity، ۲۹۸ تست در ۱۱ Suite): فهرست دقیقاً سه محل، یافتن دقیق `POST /v1/users` و نیافتن هم‌سایه‌ها،
+> یکتایی شناسهٔ تجمیع، علامت روی همان شیء خطا با سریال‌سازی یکسان و بدون متن بدنه، برابری کامل تصمیم Guard با `RolesGuard`
+> روی Endpoint ساختن، و `decideCapture`/Filter برای `CREATE_USER`. PostgreSQL واقعی
+> (`test/security-event-role-refusal.int-spec.ts`، ۱۲ تست): ثبت از Endpoint واقعی با انتساب مورد اعتماد و بدون بدنه، نقش
+> لازم، Query، Cookie، Token یا متن خطا در هیچ ستون؛ پاسخ هم‌شکل با ردِ ثبت‌نشدهٔ `POST /v1/users/:id/memberships`؛ تجمیع
+> ترتیبی با بدنه‌های متفاوت در پنجرهٔ ۲ ثانیه‌ای و ردیف تازه در پنجرهٔ بعد؛ جداسازی مستأجر/Actor و جدایی از هر دو محل دیگر؛
+> عدم ثبت برای `ORGANIZATION_ADMIN`/`UNION_ADMIN`/`SYSTEM_ADMIN` (به اعتبارسنجی `400` می‌رسند)؛ عدم ثبت برای
+> `POST /v1/users/:id/memberships`، `POST /v1/memberships/:id/roles` و `/revoke`؛ Claim فقط پس از بسته‌شدن پنجره. Kafka
+> واقعی (`test/security-event-kafka.int-spec.ts`، ۴ تست): سه رد `POST /v1/users` در یک پنجره → یک پیام معتبر
+> `AUDIT_EVENT_RECORDED` با `occurrenceCount = 3`، `identity.users.create` و بدون محتوای درخواست. Black-Box: `province.auditor`
+> پنج بار `POST /v1/users` از Gateway → یک `audit_event` با `occurrenceCount = 5`، بدون متن بدنه، که خودش نمی‌تواند بخواند.
+>
+> **آنچه هنوز نیست — صریح:** در identity: `INSUFFICIENT_ROLE` روی پنج Route دیگر (`POST /v1/users/:id/memberships`،
+> `POST /v1/memberships/:id/roles`، `POST /v1/memberships/:id/revoke`، `POST /v1/registration-requests/:id/approve` و
+> `/reject`)، `TENANT_MISMATCH`ِ خودِ AuthGuard و `SERVICE_TENANT_CONTEXT_INVALID`/`FORBIDDEN`؛ رول‌اوت به هر سرویس دیگر
+> (R-2)؛ فرمان اصلاح؛ صادرات؛ Purge؛ قاعدهٔ هشدار Prometheus. `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053
+> `Proposed` می‌ماند.
+
+> **پیشرفت — 2026-09-12 (Phase C5 — محل رد چهارم در `identity-service`: `POST /v1/users/:id/memberships` → `403 INSUFFICIENT_ROLE`).**
+> `identity-service` اکنون **دقیقاً چهار** محل رد را ثبت می‌کند. محل تازه ردِ `RolesGuard` پلتفرم برای افزودن عضویت یک
+> کاربر است (`@Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')`؛ `SYSTEM_ADMIN` همیشه مجاز) — نخستین محلی که الگوی Route آن
+> پارامتر مسیر دارد. جملهٔ «دقیقاً سه» و فهرست «آنچه هنوز نیست» بلوک C4 بالا وضعیت پیش از این فاز است و عمداً بازنویسی نشده.
+>
+> - **فرادادهٔ ثابت محل (`refusal-sites.ts`، `ADD_MEMBERSHIP`).** `key = identity.add_membership`، `POST`، الگوی Route
+>   `/v1/users/:id/memberships`، `403`، `INSUFFICIENT_ROLE`، `decidedBy = ROLES_GUARD`،
+>   `action = identity.memberships.create`، `resourceType = Membership`، `resourceId` = شناسهٔ کاربرِ خودِ فراخوان از
+>   Token (`ACTOR_USER`)، `reason` ثابت. مخزن هیچ معنای رسمی ندارد: `docs/events/README.md` فقط رویداد موفقِ
+>   `MEMBERSHIP_CREATED` (Aggregate `User`) را دارد و `ACTION_BY_EVENT_NAME` در `audit-service` عمداً خالی است → **Q-47**
+>   با تصمیم موقت و برگشت‌پذیر در [`docs/24-open-questions.md`](../24-open-questions.md).
+> - **چرا Resource فراخوان است.** Guard پیش از وجود هر عضویتی و پیش از خواندن یا اعتبارسنجی شناسهٔ مسیر و بدنه رد می‌کند؛
+>   کاربر هدف و سازمان/نقش‌های بدنه ورودی مهاجم‌اند. شناسهٔ مسیر، پارامترها، بدنه، سازمان هدف، نقش‌های درخواستی یا لازم،
+>   Context درونی خطا، URL/Query، Token، Cookie و متن خطا در هیچ ستون، کلید تجمیع، Log یا برچسب متریک نیستند؛ پس کاوش با
+>   هدف‌های متفاوت در یک پنجره **یک** ردیف به‌ازای Actor می‌شود.
+> - **سازوکار.** `IdentityRolesGuard` و `rolesGuardSiteFor` **بی‌تغییر**‌اند: تفویض کامل به `RolesGuard` مشترک، و علامت فقط
+>   وقتی Guard مشترک `INSUFFICIENT_ROLE` پرتاب کند و متد و الگوی Route مطابق Express دقیقاً `POST` و
+>   `/v1/users/:id/memberships` باشند. متد با حروف کوچک، `GET`/`PUT`، URL خام، اسلش پایانی، نام پارامتر دیگر
+>   (`:userId`)، الگوی عمیق‌تر و Routeهای `/v1/memberships/:id/roles`/`revoke` و `/v1/registration-requests/:id/approve`/`reject`
+>   علامت نمی‌خورند. همان شیء خطا دوباره پرتاب می‌شود؛ پاسخ پلتفرم (که مسیرِ خودِ فراخوان را در `path` به خودش برمی‌گرداند،
+>   مانند هر Route دیگر) تغییری نکرد. بدون Migration و بدون تغییر Schema، Contract، `audit-service`، بستهٔ مشترک، CI، Turbo،
+>   Controller یا Service دامنه. Runbook `security-event-outbox.md` تغییر نکرد: رفتار عملیاتی همان است.
+>
+> **شواهد.** Unit (identity، ۳۴۰ تست در ۱۱ Suite): فهرست دقیقاً چهار محل، یافتن دقیق الگوی عضویت و نیافتن ۲۶ هم‌سایه،
+> یکتایی شناسهٔ تجمیع/کلید/Route، `decideCapture` با شناسهٔ Actor و نه شناسهٔ مسیر یا بدنه، علامت روی همان شیء خطا با سریال‌سازی
+> یکسان، و برابری کامل تصمیم Guard با `RolesGuard` روی Endpoint عضویت. PostgreSQL واقعی
+> (`test/security-event-role-refusal.int-spec.ts`، ۱۷ تست): ثبت با انتساب مورد اعتماد و بدون شناسهٔ مسیر، بدنه، نقش، Query،
+> Cookie، Token، URL یا متن خطا در هیچ ستون؛ پاسخ هم‌شکل با ردِ ثبت‌نشدهٔ `POST /v1/memberships/:id/roles`؛ تجمیع ترتیبی با
+> هدف‌ها و بدنه‌های متفاوت در پنجرهٔ ۲ ثانیه‌ای و ردیف تازه در پنجرهٔ بعد؛ جداسازی مستأجر/Actor و جدایی از هر سه محل دیگر؛
+> عدم ثبت برای `ORGANIZATION_ADMIN`/`UNION_ADMIN`/`SYSTEM_ADMIN` (به اعتبارسنجی `400` می‌رسند)؛ عدم ثبت برای
+> `POST /v1/memberships/:id/roles`/`revoke` و `/v1/registration-requests/:id/approve`/`reject`؛ Claim فقط پس از بسته‌شدن
+> پنجره. Kafka واقعی (`test/security-event-kafka.int-spec.ts`، ۵ تست): سه رد با هدف‌های متفاوت در یک پنجره → یک پیام معتبر
+> `AUDIT_EVENT_RECORDED` با `occurrenceCount = 3`، `identity.memberships.create`/`Membership` و بدون محتوای درخواست.
+> Black-Box: `province.auditor` پنج بار با پنج هدف و پنج بدنهٔ متفاوت از Gateway → یک `audit_event` با `occurrenceCount = 5`
+> و `resourceId = actorId`، بی هیچ هدف یا متن بدنه، که خودش نمی‌تواند بخواند.
+>
+> **آنچه هنوز نیست — صریح:** در identity: `INSUFFICIENT_ROLE` روی چهار Route دیگر (`POST /v1/memberships/:id/roles`،
+> `POST /v1/memberships/:id/revoke`، `POST /v1/registration-requests/:id/approve` و `/reject`)، `TENANT_MISMATCH`ِ خودِ
+> AuthGuard و `SERVICE_TENANT_CONTEXT_INVALID`/`FORBIDDEN`؛ رول‌اوت به هر سرویس دیگر (R-2)؛ فرمان اصلاح؛ صادرات؛ Purge؛
+> قاعدهٔ هشدار Prometheus. `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
+
+> **پیشرفت — 2026-09-12 (Phase C6 — محل رد پنجم در `identity-service`: `POST /v1/memberships/:id/roles` → `403 INSUFFICIENT_ROLE`).**
+> `identity-service` اکنون **دقیقاً پنج** محل رد را ثبت می‌کند. محل تازه ردِ `RolesGuard` پلتفرم برای جایگزینی نقش‌های یک
+> عضویت است (`@Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')`؛ `SYSTEM_ADMIN` همیشه مجاز). جملهٔ «دقیقاً چهار» و فهرست
+> «آنچه هنوز نیست» بلوک C5 بالا وضعیت پیش از این فاز است و عمداً بازنویسی نشده.
+>
+> - **فرادادهٔ ثابت محل (`refusal-sites.ts`، `UPDATE_MEMBERSHIP_ROLES`).** `key = identity.update_membership_roles`، `POST`،
+>   الگوی Route `/v1/memberships/:id/roles`، `403`، `INSUFFICIENT_ROLE`، `decidedBy = ROLES_GUARD`،
+>   `action = identity.memberships.roles.replace`، `resourceType = Membership`، `resourceId` = شناسهٔ کاربرِ خودِ فراخوان از
+>   Token (`ACTOR_USER`)، `reason` ثابت. مخزن هیچ معنای رسمی ندارد: `docs/events/README.md` و `docs/07-event-architecture.md`
+>   فقط رویدادهای موفقِ `ROLE_ASSIGNED`/`ROLE_REVOKED` را دارند و `ACTION_BY_EVENT_NAME` در `audit-service` عمداً خالی است →
+>   **Q-48** با تصمیم موقت و برگشت‌پذیر در [`docs/24-open-questions.md`](../24-open-questions.md). فعل از
+>   `identity.memberships.create` جداست تا شواهد دو محل هرگز در یک ردیف ادغام نشوند.
+> - **چرا Resource فراخوان است.** Guard پیش از یافتن عضویتِ مسیر و پیش از خواندن یا اعتبارسنجی بدنه رد می‌کند؛ شناسهٔ عضویت و
+>   نقش‌ها/دلیلِ بدنه ورودی مهاجم‌اند و عضویت ممکن است وجود نداشته باشد. شناسهٔ مسیر، پارامترها، بدنه، نقش‌های درخواستی یا لازم،
+>   Context درونی خطا، URL/Query، Token، Cookie و متن خطا در هیچ ستون، کلید تجمیع، Log یا برچسب متریک نیستند؛ پس کاوش با
+>   شناسه‌های متفاوت در یک پنجره **یک** ردیف به‌ازای Actor می‌شود.
+> - **سازوکار.** `IdentityRolesGuard` و `rolesGuardSiteFor` **بی‌تغییر**‌اند: تفویض کامل به `RolesGuard` مشترک — که تنها
+>   پیاده‌سازی مجوزدهی می‌ماند — و علامت فقط وقتی Guard مشترک `INSUFFICIENT_ROLE` پرتاب کند و متد و الگوی Route مطابق Express
+>   دقیقاً `POST` و `/v1/memberships/:id/roles` باشند. متد با حروف کوچک، `GET`/`PUT`/`PATCH`، URL خام، اسلش پایانی، نام
+>   پارامتر دیگر (`:membershipId`)، الگوی عمیق‌تر، مجموعهٔ `/v1/memberships` و Routeهای `/v1/memberships/:id/revoke` و
+>   `/v1/registration-requests/:id/approve`/`reject` علامت نمی‌خورند. همان شیء خطا دوباره پرتاب می‌شود و پاسخ پلتفرم تغییری
+>   نکرد. بدون Migration و بدون تغییر Schema، Contract، `audit-service`، بستهٔ مشترک، CI، Turbo، Controller یا Service دامنه.
+>   Runbook `security-event-outbox.md` تغییر نکرد: رفتار عملیاتی همان است. مقایسه‌گرِ «پاسخ بی‌تغییر» در آزمون‌ها به
+>   `POST /v1/memberships/:id/revoke` منتقل شد، که ثبت‌نشده می‌ماند.
+>
+> **شواهد.** Unit (identity، ۳۸۱ تست در ۱۱ Suite): فهرست دقیقاً پنج محل، یافتن دقیق الگوی نقش‌ها و نیافتن هم‌سایه‌ها
+> (حروف کوچک، `GET`/`PUT`/`PATCH`، اسلش پایانی، `:membershipId`، الگوی عمیق‌تر، URL مشخص، Query، مجموعهٔ عضویت‌ها، `/revoke`،
+> approve/reject و محل قبلیِ عضویت کاربر)، یکتایی شناسهٔ تجمیع/کلید/Route، `decideCapture` با شناسهٔ Actor و نه شناسهٔ مسیر یا
+> بدنه، علامت روی همان شیء خطا با سریال‌سازی یکسان، رد شدنِ خطای بی‌علامت، و برابری کامل تصمیم Guard با `RolesGuard` روی
+> Endpoint نقش‌ها برای هر دو نقش مجاز، `SYSTEM_ADMIN`، فراخوان سرویس، نقش غیرمجاز، بی‌نقش و بی‌Context. PostgreSQL واقعی
+> (`test/security-event-role-refusal.int-spec.ts`، ۲۲ تست): ثبت با انتساب مورد اعتماد و بدون شناسهٔ مسیر، بدنه، نقش، Query،
+> Cookie، Token، URL یا متن خطا در هیچ ستون؛ پاسخ هم‌شکل با ردِ ثبت‌نشدهٔ `POST /v1/memberships/:id/revoke`؛ تجمیع با
+> شناسه‌ها و بدنه‌های متفاوت در پنجرهٔ ۲ ثانیه‌ای و ردیف تازه در پنجرهٔ بعد؛ جداسازی مستأجر/Actor و جدایی از هر چهار محل دیگر؛
+> عدم ثبت برای `ORGANIZATION_ADMIN`/`UNION_ADMIN`/`SYSTEM_ADMIN` (به اعتبارسنجی `400` می‌رسند)؛ عدم ثبت برای `/revoke` و
+> approve/reject؛ Claim فقط پس از بسته‌شدن پنجره. Kafka واقعی (`test/security-event-kafka.int-spec.ts`، ۶ تست، اجراشده و
+> Skip‌نشده): سه رد با شناسه‌ها و بدنه‌های متفاوت در یک پنجره → یک پیام معتبر `AUDIT_EVENT_RECORDED` با `occurrenceCount = 3`،
+> `identity.memberships.roles.replace`/`Membership` و بدون محتوای درخواست. Black-Box (Playwright `identity-audit-api`،
+> ۶ تست، صفر Skip): `province.auditor` پنج بار با پنج شناسهٔ عضویت و پنج بدنهٔ متفاوت از Gateway → یک `audit_event` با
+> `occurrenceCount = 5` و `resourceId = actorId`، بی هیچ شناسه یا متن بدنه، پایدار، که خودش نمی‌تواند بخواند.
+>
+> **آنچه هنوز نیست — صریح:** در identity: `INSUFFICIENT_ROLE` روی سه Route دیگر (`POST /v1/memberships/:id/revoke`،
+> `POST /v1/registration-requests/:id/approve` و `/reject`)، `TENANT_MISMATCH`ِ خودِ AuthGuard و
+> `SERVICE_TENANT_CONTEXT_INVALID`/`FORBIDDEN`؛ رول‌اوت به هر سرویس دیگر (R-2)؛ فرمان اصلاح؛ صادرات؛ Purge؛ قاعدهٔ هشدار
+> Prometheus. `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
+
+> **پیشرفت — 2026-09-12 (Phase C7 — محل رد ششم در `identity-service`: `POST /v1/memberships/:id/revoke` → `403 INSUFFICIENT_ROLE`).**
+> `identity-service` اکنون **دقیقاً شش** محل رد را ثبت می‌کند. محل تازه ردِ `RolesGuard` پلتفرم برای لغو یک عضویت است
+> (`@Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')`؛ `SYSTEM_ADMIN` همیشه مجاز). جملهٔ «دقیقاً پنج» و فهرست «آنچه هنوز نیست»
+> بلوک C6 بالا وضعیت پیش از این فاز است و عمداً بازنویسی نشده.
+>
+> - **فرادادهٔ ثابت محل (`refusal-sites.ts`، `REVOKE_MEMBERSHIP`).** `key = identity.revoke_membership`، `POST`، الگوی Route
+>   `/v1/memberships/:id/revoke`، `403`، `INSUFFICIENT_ROLE`، `decidedBy = ROLES_GUARD`،
+>   `action = identity.memberships.revoke`، `resourceType = Membership`، `resourceId` = شناسهٔ کاربرِ خودِ فراخوان از Token
+>   (`ACTOR_USER`)، `reason` ثابت. مخزن معنای رسمیِ فرمانِ ردشده ندارد: `docs/events/README.md` فقط رویداد **موفقِ**
+>   `MEMBERSHIP_REVOKED` (Aggregate `User`) را دارد — نامِ لغوی که رخ داده، نه فعلِ فرمانی که رد شده — و
+>   `ACTION_BY_EVENT_NAME` در `audit-service` عمداً خالی است → **Q-49** با تصمیم موقت و برگشت‌پذیر در
+>   [`docs/24-open-questions.md`](../24-open-questions.md). فعل از `identity.memberships.create` و
+>   `identity.memberships.roles.replace` جداست تا شواهد سه محلِ `Membership` هرگز در یک ردیف ادغام نشوند.
+> - **چرا Resource فراخوان است.** Guard پیش از یافتن عضویتِ مسیر و پیش از خواندن یا اعتبارسنجی بدنه رد می‌کند؛ شناسهٔ عضویت و
+>   دلیلِ بدنه ورودی مهاجم‌اند و عضویت ممکن است وجود نداشته باشد. شناسهٔ مسیر، پارامترها، بدنه، نقش‌های لازم، Context درونی
+>   خطا، URL/Query، Token، Cookie و متن خطا در هیچ ستون، کلید تجمیع، Log یا برچسب متریک نیستند؛ پس کاوش با شناسه‌ها و
+>   دلیل‌های متفاوت در یک پنجره **یک** ردیف به‌ازای Actor می‌شود.
+> - **سازوکار.** `IdentityRolesGuard` و `rolesGuardSiteFor` **بی‌تغییر**‌اند: تفویض کامل به `RolesGuard` مشترک — که تنها
+>   پیاده‌سازی مجوزدهی می‌ماند — و علامت فقط وقتی Guard مشترک `INSUFFICIENT_ROLE` پرتاب کند و متد و الگوی Route مطابق Express
+>   دقیقاً `POST` و `/v1/memberships/:id/revoke` باشند. متد با حروف کوچک، `GET`/`PUT`/`PATCH`، URL خام، اسلش پایانی، نام
+>   پارامتر دیگر (`:membershipId`)، الگوی عمیق‌تر، مجموعهٔ `/v1/memberships`، الگوی `/roles` و Routeهای
+>   `/v1/registration-requests/:id/approve`/`reject` علامت نمی‌خورند. همان شیء خطا دوباره پرتاب می‌شود و پاسخ پلتفرم تغییری
+>   نکرد. بدون Migration و بدون تغییر Schema، Contract، `audit-service`، بستهٔ مشترک، CI، Turbo، Controller یا Service دامنه.
+>   Runbook `security-event-outbox.md` تغییر نکرد: رفتار عملیاتی همان است. مقایسه‌گرِ «پاسخ بی‌تغییر» در آزمون‌ها به
+>   `POST /v1/registration-requests/:id/approve` منتقل شد، که ثبت‌نشده می‌ماند.
+>
+> **شواهد.** Unit (identity، ۴۲۳ تست در ۱۱ Suite): فهرست دقیقاً شش محل، یافتن دقیق الگوی لغو و نیافتن هم‌سایه‌ها (حروف کوچک،
+> `GET`/`PUT`/`PATCH`، اسلش پایانی، `:membershipId`، الگوی عمیق‌تر، URL مشخص، Query، مجموعهٔ عضویت‌ها، `/roles` و
+> approve/reject)، یکتایی شناسهٔ تجمیع/کلید/Route برای هر شش محل و جدایی سه محلِ `Membership` تنها با فعل، `decideCapture` با
+> شناسهٔ Actor و نه شناسهٔ مسیر یا دلیلِ بدنه، علامت روی همان شیء خطا با سریال‌سازی یکسان، رد شدنِ خطای بی‌علامت، و برابری کامل
+> تصمیم Guard با `RolesGuard` روی Endpoint لغو برای هر دو نقش مجاز، `SYSTEM_ADMIN`، فراخوان سرویس، نقش غیرمجاز، بی‌نقش و
+> بی‌Context. PostgreSQL واقعی (`test/security-event-role-refusal.int-spec.ts`، ۲۷ تست): ثبت با انتساب مورد اعتماد و بدون
+> شناسهٔ مسیر، دلیلِ بدنه، نقش، Query، Cookie، Token، URL یا متن خطا در هیچ ستون؛ پاسخ هم‌شکل با ردِ ثبت‌نشدهٔ
+> `POST /v1/registration-requests/:id/approve`؛ تجمیع با شناسه‌ها و دلیل‌های متفاوت در پنجرهٔ ۲ ثانیه‌ای و ردیف تازه در پنجرهٔ
+> بعد؛ جداسازی مستأجر/Actor و جدایی از هر پنج محل دیگر؛ عدم ثبت برای `ORGANIZATION_ADMIN`/`UNION_ADMIN`/`SYSTEM_ADMIN` (به
+> اعتبارسنجی `400` می‌رسند)؛ عدم ثبت برای approve/reject؛ Claim فقط پس از بسته‌شدن پنجره. Kafka واقعی
+> (`test/security-event-kafka.int-spec.ts`، ۷ تست، اجراشده و Skip‌نشده): سه رد با شناسه‌ها و دلیل‌های متفاوت در یک پنجره → یک
+> پیام معتبر `AUDIT_EVENT_RECORDED` با `occurrenceCount = 3`، `identity.memberships.revoke`/`Membership` و بدون محتوای
+> درخواست. Black-Box (Playwright `identity-audit-api`، ۷ تست، صفر Skip): `province.auditor` پنج بار با پنج شناسهٔ عضویت و پنج
+> دلیل متفاوت از Gateway → یک `audit_event` با `occurrenceCount = 5` و `resourceId = actorId`، بی هیچ شناسه یا متن بدنه،
+> پایدار، که خودش نمی‌تواند بخواند.
+>
+> **آنچه هنوز نیست — صریح:** در identity: `INSUFFICIENT_ROLE` روی دو Route دیگر
+> (`POST /v1/registration-requests/:id/approve` و `/reject`)، `TENANT_MISMATCH`ِ خودِ AuthGuard و
+> `SERVICE_TENANT_CONTEXT_INVALID`/`FORBIDDEN`؛ رول‌اوت به هر سرویس دیگر (R-2)؛ فرمان اصلاح؛ صادرات؛ Purge؛ قاعدهٔ هشدار
+> Prometheus. `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
+
+> **پیشرفت — 2026-09-12 (Phase C8 — محل رد هفتم در `identity-service`: `POST /v1/registration-requests/:id/approve` → `403 INSUFFICIENT_ROLE`).**
+> `identity-service` اکنون **دقیقاً هفت** محل رد را ثبت می‌کند. محل تازه ردِ `RolesGuard` پلتفرم برای تأیید یک درخواست
+> ثبت‌نام است (`@Roles('UNION_ADMIN')`؛ `SYSTEM_ADMIN` همیشه مجاز) — نخستین محلی که Endpointش **یک** نقش می‌خواهد، پس
+> `ORGANIZATION_ADMIN` که در هر پنج محل پیشینِ `RolesGuard` مجاز است اینجا رد و ثبت می‌شود. جملهٔ «دقیقاً شش» و فهرست «آنچه
+> هنوز نیست» بلوک C7 بالا وضعیت پیش از این فاز است و عمداً بازنویسی نشده.
+>
+> - **فرادادهٔ ثابت محل (`refusal-sites.ts`، `APPROVE_REGISTRATION_REQUEST`).** `key = identity.approve_registration_request`،
+>   `POST`، الگوی Route `/v1/registration-requests/:id/approve`، `403`، `INSUFFICIENT_ROLE`، `decidedBy = ROLES_GUARD`،
+>   `action = identity.registration_requests.approve`، `resourceType = RegistrationRequest`، `resourceId` = شناسهٔ کاربرِ خودِ
+>   فراخوان از Token (`ACTOR_USER`)، `reason` ثابت. مخزن معنای رسمیِ فرمانِ ردشده ندارد: فرمان `ApproveRegistration`
+>   (`docs/04`) و رویداد موفقِ `REGISTRATION_APPROVED` (`src/identity/events.ts`) نامِ تأییدی‌اند که رخ داده، نه فعلِ فرمانی که
+>   رد شده، و `ACTION_BY_EVENT_NAME` در `audit-service` عمداً خالی است → **Q-50** با تصمیم موقت و برگشت‌پذیر در
+>   [`docs/24-open-questions.md`](../24-open-questions.md).
+> - **چرا Resource فراخوان است.** Guard پیش از یافتن درخواستِ مسیر و پیش از خواندن یا اعتبارسنجی بدنه رد می‌کند؛ شناسهٔ درخواست
+>   و نقش‌ها/سازمانِ بدنه ورودی مهاجم‌اند و درخواست ممکن است وجود نداشته باشد. شناسهٔ مسیر، پارامترها، بدنه، نقش لازم، Context
+>   درونی خطا، URL/Query، Token، Cookie و متن خطا در هیچ ستون، کلید تجمیع، Log یا برچسب متریک نیستند؛ پس کاوش با شناسه‌ها و
+>   بدنه‌های متفاوت در یک پنجره **یک** ردیف به‌ازای Actor می‌شود.
+> - **سازوکار.** `IdentityRolesGuard` و `rolesGuardSiteFor` **بی‌تغییر**‌اند: تفویض کامل به `RolesGuard` مشترک — که تنها
+>   پیاده‌سازی مجوزدهی می‌ماند — و علامت فقط وقتی Guard مشترک `INSUFFICIENT_ROLE` پرتاب کند و متد و الگوی Route مطابق Express
+>   دقیقاً `POST` و `/v1/registration-requests/:id/approve` باشند. متد با حروف کوچک، `GET`/`PUT`/`PATCH`، URL خام، Query، اسلش
+>   پایانی، نام پارامتر دیگر (`:requestId`)، الگوی عمیق‌تر، مجموعهٔ `/v1/registration-requests` و Route هم‌خانوادهٔ `/reject`
+>   علامت نمی‌خورند. همان شیء خطا دوباره پرتاب می‌شود و پاسخ پلتفرم تغییری نکرد. بدون Migration و بدون تغییر Schema، Contract،
+>   `audit-service`، بستهٔ مشترک، CI، Turbo، Controller یا Service دامنه. Runbook `security-event-outbox.md` تغییر نکرد: رفتار
+>   عملیاتی همان است. مقایسه‌گرِ «پاسخ بی‌تغییر» و تنها کاوشِ منفی اکنون `POST /v1/registration-requests/:id/reject` است —
+>   هم‌متد، هم‌پیشوند و با همان یک نقش لازم؛ فقط فهرست مجاز این دو را از هم جدا می‌کند.
+> - **محدودیت نرخ Gateway.** پیشوند `registration-requests` در Gateway برای هر کاربر ۵ فراخوان در ساعت دارد
+>   (`services/api-gateway/src/config/routes.ts`). سناریوی Black-Box دقیقاً بودجهٔ یک Actor را خرج می‌کند، پس مقایسهٔ `/reject`
+>   با Actor ردشدهٔ دوم (`dehyari.admin.b`) انجام می‌شود؛ محدودیت نه بالا برده شد و نه دور زده شد. هر فازی که `/reject` را
+>   ابزارگذاری کند باید همین بودجه را در نظر بگیرد.
+>
+> **شواهد.** Unit (identity، ۴۷۶ تست در ۱۱ Suite): فهرست دقیقاً هفت محل، یافتن دقیق الگوی تأیید و نیافتن هم‌سایه‌ها (حروف
+> کوچک، `GET`/`PUT`/`PATCH`، URL مشخص، Query، اسلش پایانی، `:requestId`، الگوی عمیق‌تر، مجموعه، `/reject`، الگوهای عضویت و
+> بی‌Route)، یکتایی شناسهٔ تجمیع/کلید/Route برای هر هفت محل، `decideCapture` با شناسهٔ Actor و نه شناسهٔ مسیر یا بدنه، علامت
+> روی همان شیء خطا با سریال‌سازی یکسان، رد شدنِ خطای بی‌علامت، و برابری کامل تصمیم Guard با `RolesGuard` روی Endpoint تأیید
+> برای `UNION_ADMIN`، `SYSTEM_ADMIN`، `ORGANIZATION_ADMIN` (رد)، فراخوان سرویس، نقش غیرمجاز، بی‌نقش و بی‌Context. PostgreSQL
+> واقعی (`test/security-event-role-refusal.int-spec.ts`، ۳۳ تست): ثبت با انتساب مورد اعتماد و بدون شناسهٔ مسیر، بدنه، نقش،
+> Query، Cookie، Token، URL یا متن خطا در هیچ ستون؛ پاسخ هم‌شکل با ردِ ثبت‌نشدهٔ `/reject`؛ تجمیع با شناسه‌ها و بدنه‌های متفاوت
+> در پنجرهٔ ۲ ثانیه‌ای و ردیف تازه در پنجرهٔ بعد؛ جداسازی مستأجر/Actor و جدایی از هر شش محل دیگر؛ عدم ثبت برای
+> `UNION_ADMIN`/`SYSTEM_ADMIN` (بدنهٔ نامعتبر → `400`، بدنهٔ خالیِ معتبر → `404` از دامنه)؛ رد و ثبت `ORGANIZATION_ADMIN`؛ عدم
+> ثبت برای `/reject`؛ Claim فقط پس از بسته‌شدن پنجره. آزمون جداسازی مستأجر اکنون شمارش‌ها را به‌ازای (فعل، مستأجر) جمع
+> می‌زند، چون با هفت محل Burst آن ممکن است مرز پنجرهٔ ۲ ثانیه‌ای را رد کند؛ ویژگی تجمیع به‌ازای هر محل و دو سوی مرز جداگانه
+> اثبات شده است. Kafka واقعی (`test/security-event-kafka.int-spec.ts`، ۸ تست، اجراشده و Skip‌نشده): سه رد با شناسه‌ها و
+> بدنه‌های متفاوت در یک پنجره → یک پیام معتبر `AUDIT_EVENT_RECORDED` با `occurrenceCount = 3`،
+> `identity.registration_requests.approve`/`RegistrationRequest` و بدون محتوای درخواست. Black-Box (Playwright
+> `identity-audit-api`، ۸ تست، صفر Skip): `province.auditor` (بدون `UNION_ADMIN`) پنج بار با پنج شناسهٔ درخواست و پنج راز
+> بدنهٔ متفاوت از Gateway → یک `audit_event` با `occurrenceCount = 5` و `resourceId = actorId`، بی هیچ شناسه یا راز بدنه،
+> پایدار، که خودش نمی‌تواند بخواند؛ ردِ `/reject` کنار آن همان `403` را می‌دهد و هیچ رکوردی نمی‌سازد.
+>
+> **آنچه هنوز نیست — صریح:** در identity: `INSUFFICIENT_ROLE` روی Route باقی‌ماندهٔ
+> `POST /v1/registration-requests/:id/reject`، `TENANT_MISMATCH`ِ خودِ AuthGuard و `SERVICE_TENANT_CONTEXT_INVALID`/`FORBIDDEN`؛
+> رول‌اوت به هر سرویس دیگر (R-2)؛ فرمان اصلاح؛ صادرات؛ Purge؛ قاعدهٔ هشدار Prometheus. `COM-009` همچنان `READY` و ۱۳
+> امتیازی است و ADR-053 `Proposed` می‌ماند.
+
+> **پیشرفت — 2026-09-12 (Phase C9 — محل رد هشتم و آخرین Route دارای `@Roles` در `identity-service`: `POST /v1/registration-requests/:id/reject` → `403 INSUFFICIENT_ROLE`).**
+> `identity-service` اکنون **دقیقاً هشت** محل رد را ثبت می‌کند و **هیچ Route دارای `@Roles` در آن ابزارگذاری‌نشده نمانده است**
+> (هفت Route از `RolesGuard` به‌علاوهٔ محل تصمیم دامنه‌ای `SWITCH_ACTIVE_ORGANIZATION`). محل تازه ردِ `RolesGuard` پلتفرم برای
+> ردِ یک درخواست ثبت‌نام است (`@Roles('UNION_ADMIN')`؛ `SYSTEM_ADMIN` همیشه مجاز؛ `ORGANIZATION_ADMIN` رد و ثبت می‌شود). جملهٔ
+> «دقیقاً هفت» و فهرست «آنچه هنوز نیست» بلوک C8 بالا وضعیت پیش از این فاز است و عمداً بازنویسی نشده.
+>
+> - **فرادادهٔ ثابت محل (`refusal-sites.ts`، `REJECT_REGISTRATION_REQUEST`).** `key = identity.reject_registration_request`،
+>   `POST`، الگوی Route `/v1/registration-requests/:id/reject`، `403`، `INSUFFICIENT_ROLE`، `decidedBy = ROLES_GUARD`،
+>   `action = identity.registration_requests.reject`، `resourceType = RegistrationRequest`، `resourceId` = شناسهٔ کاربرِ خودِ
+>   فراخوان از Token (`ACTOR_USER`)، `reason` ثابت. مخزن معنای رسمیِ فرمانِ ردشده ندارد: `IdentityService.rejectRegistration` و
+>   رویداد موفقِ `REGISTRATION_REJECTED` ردی را نام می‌برند که انجام شد، و `ACTION_BY_EVENT_NAME` در `audit-service` عمداً خالی
+>   است → **Q-51** با تصمیم موقت و برگشت‌پذیر در [`docs/24-open-questions.md`](../24-open-questions.md). فعل از
+>   `identity.registration_requests.approve` جداست تا دو نتیجهٔ یک بازبینی هرگز در یک ردیف ادغام نشوند.
+> - **چرا Resource فراخوان است.** Guard پیش از یافتن درخواستِ مسیر و پیش از خواندن یا اعتبارسنجی بدنه — از جمله دلیلِ رد — رد
+>   می‌کند؛ همهٔ آن ورودی مهاجم است و درخواست ممکن است وجود نداشته باشد. شناسهٔ مسیر، دلیل، نقش لازم، Context درونی خطا،
+>   URL/Query، Token، Cookie و متن خطا در هیچ ستون، کلید تجمیع، Log یا برچسب متریک نیستند.
+> - **سازوکار.** `IdentityRolesGuard`، `rolesGuardSiteFor`، ثبت، تجمیع، Relay، Envelope، Contract و Consumer **بی‌تغییر**‌اند؛
+>   `RolesGuard` مشترک تنها پیاده‌سازی مجوزدهی می‌ماند. فقط `INSUFFICIENT_ROLE` خودِ Guard مشترک روی دقیقاً `POST` و
+>   `/v1/registration-requests/:id/reject` علامت می‌خورد و همان شیء خطا دوباره پرتاب می‌شود. بدون Migration و بدون تغییر Schema،
+>   Contract، `audit-service`، بستهٔ مشترک، CI، Turbo، نرخ‌های Gateway، Controller یا Service دامنه. Runbook
+>   `security-event-outbox.md` تغییر نکرد: رفتار عملیاتی همان است.
+> - **چرا شاهدِ «پاسخ بی‌تغییر» عوض شد.** تا C8 مقایسه‌گر یک ردِ واقعیِ ثبت‌نشده از همان Guard بود (آخرین بار `/reject`). با
+>   ابزارگذاری آخرین Route دارای `@Roles`، دیگر هیچ ردِ HTTP ثبت‌نشده‌ای در این سرویس برای مقایسه نمانده، و ساختن یکی (Endpoint
+>   آزمایشی) یا قرض گرفتن ردِ سرویسی دیگر ممنوع است. پس هم‌ارزی **مستقیم** اثبات می‌شود: در `identity-roles.guard.spec.ts`
+>   `RolesGuard` پلتفرم و `IdentityRolesGuard` با همان فراخوانِ ردشده و همان فراداده اجرا می‌شوند و برای هر محل علامت‌خورده
+>   کلاس، وضعیت، کد، پیام، Context درونی، سریال‌سازی و **پاسخ HTTP ساخته‌شده به‌دست `AllExceptionsFilter` پلتفرم**
+>   (`{code, message, correlationId, path}` به‌علاوهٔ `timestamp`) یکسان است و تنها تفاوت، علامتِ بیرون‌ازباندِ `WeakMap` است؛
+>   بازپرتابِ همان شیء با Spy اثبات می‌شود. در Integration و E2E پاسخ به شکل تثبیت‌شدهٔ دقیق خود سنجیده می‌شود (`403`، فقط
+>   فیلدهای پلتفرم، `INSUFFICIENT_ROLE`، پیام پلتفرم، Correlation Id و Path) و کاوش‌های منفی به Near-Missهای Route (`404`، بی‌ردیف)
+>   و `TENANT_MISMATCH`ِ خودِ AuthGuard روی یک Route ابزارگذاری‌شده (بی‌علامت، بی‌ردیف) تبدیل شدند.
+> - **بودجهٔ نرخ Gateway.** پیشوند `registration-requests` برای هر کاربر ۵ فراخوان در ساعت دارد. سناریوهای Black-Box هرکدام
+>   Actor خود را دارند: `province.auditor` ۵ (C8)، `dehyari.admin` ۵ (C9) و `dehyari.admin.b` ۴ (سناریوی جدایی تأیید/رد)؛ کاوشِ
+>   تک‌فراخوانِ C8 با `dehyari.admin.b` حذف شد چون `/reject` دیگر ثبت‌نشده نیست. محدودیت نه بالا برده، نه Reset و نه دور زده شد.
+>
+> **شواهد.** Unit (identity، ۵۱۹ تست در ۱۱ Suite): فهرست دقیقاً هشت محل به ترتیب، هر Route دارای `@Roles` در فهرست مجاز، یافتن دقیق
+> الگوی رد و نیافتن هم‌سایه‌ها (حروف کوچک، `GET`/`PUT`/`PATCH`، URL مشخص، Query، اسلش پایانی، `:requestId`، الگوی عمیق‌تر،
+> `/approve` در برابر `/reject`، مجموعه، الگوهای عضویت و بی‌Route)، یکتایی کلید/متد-Route/شناسهٔ تجمیع برای هر هشت محل،
+> `decideCapture` با شناسهٔ Actor و بی هیچ محتوای درخواست/سیاست/خطا، رد شدنِ خطای بی‌علامت، برابری کامل تصمیم Guard با
+> `RolesGuard` برای `UNION_ADMIN`، `SYSTEM_ADMIN`، `ORGANIZATION_ADMIN` (رد)، فراخوان سرویس، نقش غیرمجاز، بی‌نقش و بی‌Context، و
+> مقایسه‌گرِ مستقیمِ بالا. PostgreSQL واقعی (`test/security-event-role-refusal.int-spec.ts`، ۴۰ تست؛ کل Integration در ۵ Suite، ۸۰
+> تست، صفر Skip): ثبت با انتساب مورد اعتماد و بدون هیچ Sentinel در هیچ ستون (`row_to_json`)؛ تجمیع با شناسه‌ها و دلیل‌های متفاوت
+> در پنجرهٔ ۲ ثانیه‌ای و ردیف تازه در پنجرهٔ بعد؛ جداسازی مستأجر/Actor در هر هشت محل؛ جدایی ردیف تأیید و رد برای یک Actor در
+> یک پنجره؛ `UNION_ADMIN`/`SYSTEM_ADMIN` به اعتبارسنجی (`400`) و دامنه (`404`) می‌رسند و ثبت نمی‌شوند؛ رد و ثبت
+> `ORGANIZATION_ADMIN`؛ Claim فقط پس از بسته‌شدن پنجره. Kafka واقعی (`test/security-event-kafka.int-spec.ts`، ۹ تست، اجراشده و
+> Skip‌نشده): سه رد با شناسه‌ها و دلیل‌های متفاوت → یک پیام معتبر `AUDIT_EVENT_RECORDED` با `occurrenceCount = 3`،
+> `identity.registration_requests.reject`/`RegistrationRequest` و بدون محتوای درخواست. Black-Box (Playwright `identity-audit-api`، ۱۰ تست، صفر Skip): `dehyari.admin` (بدون `UNION_ADMIN`) پنج بار با پنج شناسهٔ درخواست و پنج دلیل متفاوت از Gateway → یک `audit_event` با `occurrenceCount = 5`، `identity.registration_requests.reject` و `resourceId = actorId`، بی هیچ شناسه یا دلیل، پایدار، که خودش نمی‌تواند بخواند؛ و `dehyari.admin.b` با دو تأیید و دو رد در یک پنجره → دو رکورد جدا (هرکدام با شمارش ۲) با همان Actor و مستأجر.
+>
+> **آنچه هنوز نیست — صریح:** در identity هیچ Route دارای `@Roles` باقی نمانده، ولی `TENANT_MISMATCH`ِ خودِ AuthGuard و
+> `SERVICE_TENANT_CONTEXT_INVALID`/`FORBIDDEN` ثبت نمی‌شوند؛ رول‌اوت به هر سرویس دیگر (R-2)؛ فرمان اصلاح؛ صادرات؛ Purge؛ قاعدهٔ
+> هشدار Prometheus. `COM-009` همچنان `READY` و ۱۳ امتیازی است و ADR-053 `Proposed` می‌ماند.
+
+> **پیشرفت — 2026-09-12 (Phase C10 — محل رد نهم و نخستین تصمیم‌گیرندهٔ تازه: `TENANT_MISMATCH`ِ خودِ `AuthGuard` در `identity-service`).**
+> `identity-service` اکنون **دقیقاً نُه** محل رد را ثبت می‌کند: هفت Route دارای `@Roles`، محل تصمیم دامنه‌ای
+> `SWITCH_ACTIVE_ORGANIZATION` و — تازه — ردِ خودِ `AuthGuard` پلتفرم وقتی Token **تأییدشده**ای با `X-Organization-Id`
+> بیرون از عضویت‌هایش درخواست می‌دهد. تا C9 همین رد عمداً «کاوش منفیِ بی‌علامت» بود؛ حالا محل رد است. جمله‌های «دقیقاً
+> هشت» در بلوک C9 بالا وضعیت پیش از این فاز است و عمداً بازنویسی نشده.
+>
+> - **چرا Wrapper صرفِ Catch کافی نبود (هستهٔ این فاز).** هر محل پیشین را می‌شد با گرفتن خطای یک تصمیم و خواندن
+>   Context درخواست علامت زد، چون `AuthGuard` آن Context را پیش‌تر ارتقا داده بود. خودِ ردِ مستأجرِ `AuthGuard` **پیش از**
+>   آن رخ می‌دهد: `request.rastaAuth` هنوز مقدار نگرفته و Context هنوز `ANONYMOUS` است. پس یک Wrapper یا Subclass که فقط
+>   خطا را بگیرد، ردی در دست دارد **بدون Actor و بدون مستأجرِ قابل اعتماد**، و تنها مقادیر در دسترسش Headerِ ردشده،
+>   Tokenِ رمزگشایی‌نشده و `internalContext` خطا هستند — هر سه یا ورودی مهاجم‌اند یا چیزی که شواهد هرگز نباید داشته باشد.
+>   ثبت از روی آن‌ها «شواهد ضعیف‌تر» نبود، **شواهد جعلی** بود.
+> - **درز عمومی و کمینه در `packages/nest-common` (A-03).** `AuthGuardOptions` یک فیلد اختیاری تازه گرفت:
+>   `onUserTenantMismatch?: (refusal: UserTenantMismatch) => void`. Guard مشترک درست پیش از پرتاب، از Tokenی که همین حالا
+>   خودش تأیید کرده می‌گوید چه کسی را رد کرد: `{ error, userId, activeOrganizationId, roles }` و نه بیشتر — نه Claimهای خام،
+>   نه Token، نه فهرست عضویت، نه Headerِ درخواستی. فراخوانی همگام، حداکثر یک‌بار، و هرچه پرتاب یا Reject کند بلعیده می‌شود
+>   (`Promise` هم مهار می‌شود تا Rejection بی‌صاحب به فرایند نرسد). هیچ سرویس دیگری این فیلد را ست نمی‌کند، پس رفتارشان
+>   ذره‌ای عوض نشده. تأیید Token، حل مستأجر و قواعد عضویت **تکرار نشده‌اند**؛ `AuthGuard` مشترک تنها مرجع احراز هویت و حل
+>   مستأجر می‌ماند. تمام سیاست حسابرسی (فهرست مجاز، معنا، Fail-Closed، ماندگاری) در identity است:
+>   `security-events/auth-guard-refusal.ts`.
+> - **فرادادهٔ ثابت محل (`refusal-sites.ts`، `AUTH_TENANT_MISMATCH`).** `key = identity.auth_tenant_mismatch`، `403`،
+>   `TENANT_MISMATCH`، `decidedBy = AUTH_GUARD`، `action = identity.tenant_context.select`، `resourceType = User`،
+>   `resourceId` = شناسهٔ کاربرِ تأییدشده، `organizationId` = **سازمان فعالِ Token** (هرگز Headerِ ردشده)، `reason` ثابت.
+>   مخزن هیچ فعل حسابرسی رسمی‌ای برای این رد ندارد → **Q-52** با تصمیم موقت و برگشت‌پذیر.
+> - **انتساب مورد اعتماد، وگرنه هیچ.** `markGuardRefusal` جدا از `markRefusal` است و در امضایش انتساب می‌خواهد؛
+>   `decideCapture` هم بدون آن ثبت نمی‌کند (`UNATTRIBUTABLE`). اگر Token سازمان فعال نداشته باشد **Fail-Closed**: رد
+>   می‌شود، ثبت نمی‌شود. خطایی که تصمیم‌گیرندهٔ دیگری علامت زده هرگز دوباره علامت یا بازانتساب نمی‌شود.
+> - **Route-agnostic، عامدانه.** این رد پیش از مجوزدهی Controller گرفته می‌شود و روی **هر** Route محافظت‌شده ممکن است،
+>   پس محلش `method: null` و `route: null` دارد و فیلتر تنها برای همین محل بررسی Route را رد می‌کند. اگر به یک Route
+>   میخ می‌شد، همان رد روی بقیهٔ Endpointها بی‌صدا گم می‌شد. طبقه‌بندی (`403` + `TENANT_MISMATCH`) همچنان بررسی می‌شود، و
+>   `TENANT_MISMATCH`ِ بی‌علامت یا علامت‌خورده به‌دست تصمیم‌گیرندهٔ دیگر هرگز اینجا ثبت نمی‌شود.
+> - **پاسخ بی‌تغییر.** علامت فقط در `WeakMap` است. در `auth-guard-refusal.spec.ts` همان درخواست به `AuthGuard`ِ
+>   پیکربندی‌شدهٔ Production و به `AuthGuard`ِ خام پلتفرم داده می‌شود: کلاس، وضعیت، کد، پیام، `internalContext`،
+>   کلیدها، `JSON.stringify` و **پاسخ HTTPِ ساختهٔ `AllExceptionsFilter`** یکسان‌اند؛ تنها تفاوت، علامت بیرون‌ازباند است.
+> - **سازوکار بی‌تغییر.** ثبت‌کننده، تجمیع، Relay، Envelope، Contract، Consumer، Schema و Migrationها دست نخوردند.
+>   Runbook هم تغییر نکرد: رفتار عملیاتی همان است.
+> - **توپولوژی — صادقانه.** `api-gateway` همان `AuthGuard` مشترک را اجرا می‌کند و `X-Organization-Id` را فقط به‌شکلِ
+>   مستأجرِ **حل‌شده** به سرویس‌ها می‌دهد، پس هیچ درخواستی با Header ناهم‌خوان از راه Gateway به identity نمی‌رسد؛ Gateway
+>   خودش یک Hop زودتر رد می‌کند و هنوز Producer ابزارگذاری‌شده نیست (R-2). بنابراین این محل، در توپولوژی امروز،
+>   فراخوان‌هایی را ثبت می‌کند که از Gateway نیامده‌اند. سناریوی Black-Box هر دو نیمه را می‌سنجد: از راه Gateway (رد
+>   Gateway، بدون هیچ رکورد identity) و مستقیم به Listener خودِ `identity-service` (رد identity، یک رکورد تجمیع‌شده).
+>   تماس مستقیم، استثنای برچسب‌خوردهٔ خودِ Suite است (`CallOptions.baseUrl`) و هیچ محدودیتی را بالا نمی‌برد، Reset
+>   نمی‌کند و دور نمی‌زند.
+> - **بودجهٔ نرخ Gateway.** C10 هیچ فراخوانی به پیشوند `registration-requests` اضافه نمی‌کند؛ تنها فراخوان Gatewayاش یک
+>   خواندن `users` با `dehyari.admin.b` روی پیش‌فرض پلتفرم (۳۰۰ در دقیقه به‌ازای کاربر) است و پنج کاوش ثبت‌شونده مستقیم
+>   به identity می‌روند. بودجه‌های C1–C9 دست‌نخورده‌اند.
+>
+> **شواهد.** `@rasta/nest-common` (۷ Suite، ۱۳۱ تست): درز دقیقاً یک‌بار و تنها برای همان رد فراخوانی می‌شود — انتخاب
+> پذیرفته‌شده، بی‌Header، Token نبود/نامعتبر/منقضی، ناشناس و Relay، `SERVICE_TENANT_CONTEXT_INVALID` و `FORBIDDEN` هیچ‌کدام
+> آن را صدا نمی‌زنند؛ بار درز فقط `{error, userId, activeOrganizationId, roles}` است و Headerِ ردشده/عضویت/Token در آن
+> نیست؛ نبودِ درز رفتار را بی‌تغییر می‌گذارد؛ درزِ پرتاب‌کننده و درزِ Rejectکننده بلعیده می‌شوند و همان خطا پرتاب می‌شود؛ و
+> بستهٔ مشترک هیچ Import مربوط به identity/audit ندارد. Unit identity (۱۲ Suite، ۵۷۷ تست): دقیقاً نُه محل به ترتیب، پین
+> فرادادهٔ محل تازه، یکتایی کلید/شناسهٔ تجمیع برای هر نُه، تنها محل Route-agnostic و تنها محل `AUTH_GUARD`، جدایی دو محل
+> `TENANT_MISMATCH`، علامت‌گذاری فقط با انتساب مورد اعتماد و Fail-Closed بدون آن، بی‌علامت‌ماندنِ هر رد دیگر، بازپرتاب همان
+> شیء، مقایسهٔ مستقیم با `AuthGuard` خام و برابری دقیق پاسخ Filter، و ثبت روی هر Route بدون هیچ داده‌ای از درخواست.
+> PostgreSQL واقعی (`test/security-event-auth-guard.int-spec.ts`، ۷ تست؛ کل Integration در ۶ Suite، ۸۸ تست، صفر Skip):
+> کاربرِ فعال در سازمان A با Header سازمان B همان `403` دقیق و بی‌تغییر می‌گیرد و یک ردیف زیر A ثبت می‌شود؛ Sentinelهای
+> متفاوتِ سازمانِ ردشده در یک پنجره یک ردیف و در پنجرهٔ بعد ردیف تازه می‌سازند؛ کاوش چهار Endpoint متفاوت یک ردیف است؛
+> Actorها و مستأجرهای فعال از هم جدا می‌مانند؛ `row_to_json` هیچ Headerِ ردشده، عضویت، Token، Cookie، URL/Query، متن یا
+> Context خطا و هیچ Sentinel ندارد؛ انتخابِ پذیرفته‌شدهٔ یک عضویت واقعی چیزی نمی‌نویسد؛ ردِ دامنه‌ای در همان پنجره ردیف
+> جداگانهٔ خودش را دارد؛ و ردِ غیرقابل‌انتساب، فراخوان سرویس و درخواست ناشناس ثبت نمی‌شوند. Kafka واقعی (۱۰ تست، اجراشده و
+> Skip‌نشده): سه کاوش با سه سازمانِ ردشدهٔ متفاوت روی سه Endpoint → یک پیام معتبر `AUDIT_EVENT_RECORDED` با
+> `occurrenceCount = 3`، `identity.tenant_context.select`/`User`، Actor و Resource تأییدشده، مستأجر فعال، `REFUSED`،
+> `TENANT_MISMATCH` و بدون هیچ داده‌ای از درخواست.
+>
+> **آنچه هنوز نیست — صریح:** `SERVICE_TENANT_CONTEXT_INVALID`/`FORBIDDEN` (در identity هیچ Endpoint دارای
+> `@AllowService` نیست، پس فراخوان سرویس همیشه پیش از بررسی مستأجر `FORBIDDEN` می‌گیرد)؛ ردهای متوقف‌شده در Gateway؛
+> رول‌اوت به هر سرویس دیگر (R-2)؛ فرمان اصلاح؛ صادرات؛ Purge؛ قاعدهٔ هشدار Prometheus. `COM-009` همچنان `READY` و ۱۳
+> امتیازی است و ADR-053 `Proposed` می‌ماند.
+
+> **پیشرفت — 2026-09-17 (Phase C11 — محل رد دهم و نخستین Actor غیرانسانی: `403 FORBIDDEN`ِ فراخوانِ سرویسِ **تأییدشده**
+> در `identity-service`).** `identity-service` اکنون **دقیقاً ده** محل رد را ثبت می‌کند. محل تازه همان `AuthGuard`
+> پلتفرم است، ولی تصمیم دیگری از آن: Token داخلی `SERVICE`ی که گارد **خودش تأیید کرده** و بعد رد می‌کند، چون Endpoint
+> `@AllowService` ندارد یا Allowlist آن نام فراخوان را در بر نمی‌گیرد. تا C10 این رد ثبت نمی‌شد، و ممیزی
+> `docs/evidence/com-009/aud-004-acceptance-audit-2026-09-17.md` آن را تنها مسدودکنندهٔ **قابل‌دسترسِ** AUD-004 شناخت.
+> جمله‌های «دقیقاً نُه» در بلوک C10 بالا وضعیت پیش از این فاز است و عمداً بازنویسی نشده.
+>
+> - **درز دوم و باز هم عمومی در `packages/nest-common` (A-03).** `AuthGuardOptions` فیلد اختیاری
+>   `onServiceAuthorizationRefusal?: (refusal: ServiceAuthorizationRefusal) => void` گرفت، با همان تضمین‌های
+>   `onUserTenantMismatch`: اختیاری، همگام، حداکثر یک‌بار، و هر Throw یا Rejectی بلعیده می‌شود. بارش تنها
+>   `{ error, callerService, organizationId }` است — خودِ خطای بی‌تغییر، Subjectِ امضاشدهٔ Token، و `org_id`ِ **امضاشده**
+>   اگر باشد. نه Token، نه Allowlist، نه Endpoint، نه Headerِ بی‌امضا. برای Tokenِ جعلی/منقضی، Token `RELAY`، ردِ
+>   Token کاربر، فراخوانِ پذیرفته‌شده و `SERVICE_TENANT_CONTEXT_INVALID` **صدا زده نمی‌شود**. بستهٔ مشترک همچنان هیچ
+>   Import مربوط به identity/audit ندارد و هیچ سرویس دیگری این فیلد را ست نمی‌کند.
+> - **فرادادهٔ ثابت محل (`refusal-sites.ts`، `SERVICE_CALLER_FORBIDDEN`).** `key = identity.service_caller_forbidden`،
+>   `403`، `FORBIDDEN`، `decidedBy = AUTH_GUARD`، `method = null`، `route = null`،
+>   `action = identity.service_call.authorize`، `resourceType = Service`، `resource = ACTOR_SERVICE` و `reason` ثابت.
+>   هر دو تصمیم `FORBIDDEN` گارد یک محل‌اند، چون یک چیز می‌گویند؛ کدام‌یک بوده ثبت نمی‌شود. مخزن هیچ فعل حسابرسی رسمی‌ای
+>   برای این رد ندارد → **Q-55** با تصمیم موقت و برگشت‌پذیر.
+> - **Actor از نوع `SERVICE`، و مستأجرِ امضاشده یا هیچ.** `actorType = SERVICE`، `actorId` و `resourceId` = نام سرویسِ
+>   فراخوان، و `actorRoles = ['SERVICE']` — مقداری **کد-نوشته**، چون Token سرویس Claim نقشی ندارد. `organizationId`
+>   همان `org_id`ِ امضاشده است؛ Tokenِ پلتفرم‌گسترِ بی‌مستأجر یک **ردیف پلتفرمی** (`organizationId = null`) می‌سازد. این
+>   سیاست است نه منطق: ورودی محل یک مقدار `withoutTenant: 'SKIP' | 'PLATFORM'` دارد و C10 همچنان `SKIP` است، چون کاربرِ
+>   بدون سازمان فعال غیرقابل‌انتساب است. `X-Organization-Id`ِ بی‌امضا هرگز خوانده نمی‌شود — این رد پیش از آن گرفته می‌شود.
+> - **انتساب تفکیک‌شده (`USER | SERVICE`).** `TrustedRefusalAttribution` حالا یک Union تفکیک‌شده است و
+>   `markGuardRefusal` به‌ازای هر محل، نوع انتساب همان محل را می‌خواهد (`AttributionFor<Name>`). `decideCapture` انتساب
+>   کاربری را هرگز به‌جای سرویسی نمی‌خواند و برعکس؛ ناهم‌خوانی یعنی `UNATTRIBUTABLE` و هیچ ردیفی. نُه محل پیشین و رفتارشان
+>   دست‌نخورده‌اند.
+> - **قرارداد و Schema بی‌تغییر.** `auditTrailPayloadSchemaV1` از پیش Actorِ `SERVICE` و رویدادِ بی‌مستأجر را می‌پذیرد و
+>   ستون `organization_id` از پیش Nullable است، پس نه Migration لازم شد و نه تغییر قرارداد. ثبت‌کننده، تجمیع، Relay،
+>   Envelope، Consumer و Runbook هم دست نخوردند.
+> - **پاسخ بی‌تغییر.** علامت فقط در `WeakMap` است. همان درخواست به گاردِ پیکربندی‌شدهٔ Production و به گاردِ خام پلتفرم
+>   داده می‌شود: کلاس، وضعیت، کد، پیام، `internalContext`، کلیدها، `JSON.stringify` و پاسخ HTTPِ `AllExceptionsFilter`
+>   یکسان‌اند. شکست ثبت هم همان `403` را بایت‌به‌بایت برمی‌گرداند و تصمیم مجوزدهی را عوض نمی‌کند.
+>
+> **شواهد (همه در این نشست اجرا شدند).** `@rasta/nest-common` (۹ Suite، ۱۶۷ تست): درز برای **هر دو** تصمیم `FORBIDDEN`
+> پس از تأیید Token صدا زده می‌شود و برای Tokenِ جعلی، منقضی، Token سرویسِ صادرشده برای سرویس دیگر، `RELAY`، ردِ کاربر،
+> فراخوان پذیرفته‌شده و `SERVICE_TENANT_CONTEXT_INVALID` صدا زده نمی‌شود؛ بار درز فقط سه میدان دارد و Frozen است؛ نبودِ
+> درز، درزِ پرتاب‌کننده و درزِ Rejectکننده هیچ‌کدام خطا یا تصمیم را عوض نمی‌کنند. Unit identity (۲۰ Suite، ۷۷۸ تست):
+> ده محل به ترتیب، پین فرادادهٔ محل تازه، جدایی دو محل `AUTH_GUARD` از راه کد/فعل/نوع Resource/Actor، انتساب سرویسی
+> Frozen و Fail-Closed برای نام خالی یا مستأجرِ خالی، ردیف پلتفرمی برای Tokenِ بی‌مستأجر، جدا ماندن کلید تجمیع از ردِ
+> کاربر و از سرویس یا مستأجرِ دیگر، و نبودِ هر مقدار درخواست‌محور در Draft. PostgreSQL واقعی
+> (`test/security-event-auth-guard.int-spec.ts`، ۱۱ تست؛ کل Integration: ۶ Suite، ۹۵ تست، صفر Skip؛ به‌علاوهٔ Suite
+> انحصاری تجمیع: ۲۲ تست): فراخوان سرویسِ تأییدشده همان `403 FORBIDDEN` دقیق را می‌گیرد و یک ردیف با
+> `actorType = SERVICE`، `actorId = fleet-service`، `actorRoles = ['SERVICE']` و مستأجرِ امضاشده ثبت می‌شود؛
+> `row_to_json` هیچ Token، Cookie، Header، URL/Query یا متن خطا ندارد؛ سه Endpoint متفاوت یک ردیف‌اند؛ دو سرویس، دو
+> مستأجر، Tokenِ پلتفرم‌گستر و ردِ کاربر هرگز ادغام نمی‌شوند؛ و **شکست ثبت** (Storeی که Throw می‌کند) همان `403` را با
+> بدنهٔ یکسان برمی‌گرداند و هیچ ردیفی نمی‌نویسد. Kafka واقعی (۱۲ تست): پنج تصمیم در یک پنجره → پنج پیام جدا؛ پیامِ
+> تجمیع‌شده `occurrenceCount = 3`، `actor {type: SERVICE, id, roles: ['SERVICE']}`، `identity.service_call.authorize`/
+> `Service`، `REFUSED`، `FORBIDDEN` و مستأجرِ امضاشده دارد؛ Tokenِ پلتفرم‌گستر پیامی بدون `tenantId` و بدون
+> `organizationId` می‌سازد؛ و هیچ مقدار درخواست‌محوری روی سیم نیست.
+>
+> **آنچه هنوز نیست — صریح:** `SERVICE_TENANT_CONTEXT_INVALID` (امروز در identity **غیرقابل‌دسترس** است؛ ساختن یک
+> Endpoint دارای `@AllowService` فقط برای دسترس‌پذیرکردنش عمداً انجام نشد)؛ ردهای متوقف‌شده در Gateway؛ رول‌اوت به هر
+> سرویس دیگر (R-2)؛ صادرات؛ Purge؛ Alertmanager. `COM-009` همچنان `READY` و ۱۳ امتیازی است، ADR-053 `Proposed` می‌ماند،
+> و هیچ پذیرشی از صاحب محصول ثبت نشده است.
 
 **As a** بازبین امنیتی، **I want** ردها و اعمال پرامتیاز با نقش‌های Actor، مبدأ و نتیجه ثبت شوند، **so that** یک تلاش دسترسی
 ردشده شواهد باشد، نه خط Logی که در سی روز منقضی می‌شود.
@@ -410,15 +1167,32 @@ Topic. `tests/e2e/specs/audit/01-query-authorization.e2e-spec.ts`.
 | AUD-004 | `refusal-flow.int-spec.ts` شامل موردِ «نوشتن ناموفق همچنان رد می‌کند» · `changes-redaction.spec.ts` · بخش Audit کاتالوگ رویدادها به‌روز                                                                        |
 | همه     | `pnpm verify` سبز · دروازهٔ پوشش ۷۵٪ در CI · Trivy صفر CRITICAL · هیچ TODO در مسیر اصلی                                                                                                                        |
 
+> **نگاشت شواهد پذیرش — 2026-09-12.** جدول بالا و ماتریس § ۶ برنامهٔ اولیه‌اند و عمداً بازنویسی نشده‌اند. دو فایلی که
+> دروازهٔ AUD-004 نام می‌برد — `refusal-flow.int-spec.ts` و `changes-redaction.spec.ts` — با این نام‌ها ساخته **نشدند**؛
+> رفتارشان در این آزمون‌ها اثبات می‌شود، و آزمون تکراری فقط برای ساختن نام قدیمی افزوده نشد:
+>
+> | فایل برنامه                 | ادعا                                                  | آزمون واقعی                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+> | --------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+> | `refusal-flow.int-spec.ts`  | یک `403` واقعی رکورد `REFUSED` می‌سازد                | identity: `test/security-event-outbox.int-spec.ts` (C1)، `test/security-event-role-refusal.int-spec.ts` (C3–C9)، `test/security-event-auth-guard.int-spec.ts` (C10 و C11)، `test/security-event-aggregation.int-spec.ts` (تجمیع) روی PostgreSQL واقعی؛ `test/security-event-kafka.int-spec.ts` تا Kafka واقعی. audit: `test/trail-ingestion.int-spec.ts` و بخش مسیر B در `test/kafka-projector.int-spec.ts`. Black-Box از Gateway تا رکورد: `tests/e2e/specs/identity/01-refusal-audit-trail.e2e-spec.ts` |
+> | `refusal-flow.int-spec.ts`  | نوشتن ناموفق حسابرسی همچنان رد می‌کند                 | `test/security-event-outbox.int-spec.ts` — «a failed capture returns the identical 403 TENANT_MISMATCH» (Statement Timeout پشت قفل، و شکست خود Insert)؛ `test/security-event-aggregation.int-spec.ts` (ردیف در سقف)؛ واحد: `src/security-events/refusal-audit.recorder.spec.ts` (ثبت ناموفق یا Timeout هرگز Throw نمی‌کند) و `src/security-events/refusal-audit.filter.spec.ts` (پاسخ فقط تا سقف زمانی ثبت نگه داشته می‌شود)                                                                              |
+> | `changes-redaction.spec.ts` | میدان حساس Redact می‌شود                              | identity: `src/audit-correction/correction-payload.spec.ts` (`redactChanges` پیش از ساختن Payload). ردها اصلاً `changes` ندارند (`audit-trail-envelope.ts`). audit: `src/audit/audit-trail.mapper.spec.ts` مقدار خامِ میدان `SENSITIVE_KEYS` را **رد** می‌کند، نه اصلاح                                                                                                                                                                                                                                   |
+> | `changes-redaction.spec.ts` | سقف ۵۰ تغییر؛ میدان اعلام‌نشده غایب است نه Redact‌شده | `packages/contracts/src/events/audit-trail.spec.ts` (مرز ۵۰ و ۵۱، کلیدهای اعلام‌نشده، Dump خام Payload)                                                                                                                                                                                                                                                                                                                                                                                                   |
+> | `changes-redaction.spec.ts` | میدان‌های پیشنهاد مهرشده                              | `packages/logging/src/redaction.spec.ts` («covers the sealed bid fields») — همان `SENSITIVE_KEYS` که هر دو سمت بالا می‌خوانند                                                                                                                                                                                                                                                                                                                                                                             |
+> | Runbook                     | `audit-gap-detected.md`                               | [`docs/runbooks/audit-gap-detected.md`](../runbooks/audit-gap-detected.md) — فقط بر قابلیت‌های موجود                                                                                                                                                                                                                                                                                                                                                                                                      |
+>
+> این نگاشت می‌گوید شواهد **کجاست**، نه اینکه در این نشست اجرا شده باشد؛ `pnpm verify` و `pnpm test:migration` کامل
+> ریشه روی این ماشین هنوز کامل اجرا نشده‌اند، و `COM-009` و ADR-053 همان‌طور که بالا آمده می‌مانند.
+
 ---
 
 ## ۸. ریسک‌های باز
 
-| #        | ریسک                                                                                           | پاسخ                                                                                                                                      |
-| -------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| **R-1**  | **حذف شدن از حسابرسی کاهش یافته، حذف نشده.** عملی که رویداد منتشر نمی‌کند نامرئی است           | A-08 انتشار را برای تغییر وضعیت الزام می‌کند؛ شمارندهٔ ورودی به‌ازای سرویس یک سرویس ساکت را تشخیص می‌دهد. **پذیرفته با پایش، و گفته‌شده** |
-| **R-2**  | **حسابرسی ردها فقط در یک سرویس فرود می‌آید.** رول‌اوت به هشت سرویس دیگر بیرون از ۱۳ امتیاز است | اینجا و در AUD-004 صریح نام‌برده شد، نه پنهان در برآورد. یک قلم Backlog مستقل با امتیاز خودش                                              |
-| **R-6**  | **Script بازپخش DLQ که Runbook نام می‌برد وجود ندارد** (ADR-051 `:341-346`)                    | Runbook حسابرسی رویهٔ دستی را می‌نویسد و ابزاری را فرض نمی‌کند                                                                            |
-| **R-8**  | **رشد انبار مدل‌سازی نشده است**                                                                | پارتیشن ماهانه از روز اول؛ `rasta_audit_partition_rows`؛ انتقال سرد در ۱۳ ماه. پیش از Pilot بازنگری شود                                   |
-| **R-9**  | **نگهداشت Kafka پشتیبان حسابرسی نیست** — Topic دامنه‌ای ۷ روز                                  | ADR-053 § ۸ صریح گفته. پایگاه داده + پشتیبان `docs/05` § ۵٫۱۰ رکورد بادوام است                                                            |
-| **R-11** | **بازگشت Migration شواهد را نابود می‌کند**                                                     | ADR-053 § Consequences آن را می‌نویسد تا در یک حادثه کشف نشود                                                                             |
+| #        | ریسک                                                                                                     | پاسخ                                                                                                                                        |
+| -------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| **R-1**  | **حذف شدن از حسابرسی کاهش یافته، حذف نشده.** عملی که رویداد منتشر نمی‌کند نامرئی است                     | A-08 انتشار را برای تغییر وضعیت الزام می‌کند؛ شمارندهٔ ورودی به‌ازای سرویس یک سرویس ساکت را تشخیص می‌دهد. **پذیرفته با پایش، و گفته‌شده**   |
+| **R-2**  | **حسابرسی ردها فقط در یک سرویس فرود می‌آید.** رول‌اوت به هشت سرویس دیگر بیرون از ۱۳ امتیاز است           | اینجا و در AUD-004 صریح نام‌برده شد، نه پنهان در برآورد. یک قلم Backlog مستقل با امتیاز خودش                                                |
+| **R-6**  | **Script بازپخش DLQ که Runbook نام می‌برد وجود ندارد** (ADR-051 `:341-346`)                              | Runbook حسابرسی رویهٔ دستی را می‌نویسد و ابزاری را فرض نمی‌کند                                                                              |
+| **R-8**  | **رشد انبار مدل‌سازی نشده است**                                                                          | پارتیشن ماهانه از روز اول؛ `rasta_audit_partition_rows`؛ انتقال سرد در ۱۳ ماه. پیش از Pilot بازنگری شود                                     |
+| **R-9**  | **نگهداشت Kafka پشتیبان حسابرسی نیست** — Topic دامنه‌ای ۷ روز                                            | ADR-053 § ۸ صریح گفته. پایگاه داده + پشتیبان `docs/05` § ۵٫۱۰ رکورد بادوام است                                                              |
+| **R-11** | **بازگشت Migration شواهد را نابود می‌کند**                                                               | ADR-053 § Consequences آن را می‌نویسد تا در یک حادثه کشف نشود                                                                               |
+| **R-12** | **شکست محیطیِ اثبات فشار تجمیع از شکست محصول جدا نیست** — فاز انحصاری AUD-004 روی تأخیر Commit سریال است | [ADR-055](ADR-055-aggregation-stress-environment-capability.md) (`Proposed`) — پیگیری مهندسی، بیرون از ۱۳ امتیاز؛ **بی آستانه و بی دروازه** |

@@ -1,0 +1,222 @@
+# ADR-055 fresh-run first-pair replication — REVIEW DRAFT, NOT A WORKFLOW.
+#
+# This file is deliberately **not installed**. Its extension is `.yaml.txt` and
+# it lives under `docs/evidence/adr-055/`, so GitHub Actions cannot discover or
+# run it. Nothing here was launched, pushed or dispatched. It exists so the
+# preregistered campaign shape
+# (`fresh-run-first-pair-replication-design-2026-09-16.md` §§ 4, 7, 8.3, 9) can
+# be reviewed and statically checked before any launch iteration:
+#
+#   pnpm run check:aggregation-campaign-workflow -- <path to this file>
+#
+# The checker (`scripts/aggregation-campaign-workflow-lib.mjs`) parses only the
+# narrow YAML subset used here and exits 0 only when the whole contract holds:
+# one job, a literal matrix `slot: 1..59`, `fail-fast: false`, `ubuntu-24.04`,
+# a 45-minute job bound, `contents: read` only, `cancel-in-progress: false`, a
+# first step that refuses any `github.run_attempt` other than 1, exactly one
+# `--pairs 1 --slot ${{ matrix.slot }}` calibration, an `if: always()` report
+# upload, and every action pinned to a full commit SHA — with no
+# continue-on-error, retry, loop, dynamic matrix, caching, secret or write
+# permission anywhere.
+#
+# **What a static check cannot show.** It cannot show that GitHub never retries
+# hosted-runner infrastructure internally, and it cannot show that this draft
+# governed an actual run. A future launch iteration must install a
+# byte-identical copy at the one path named under `on.push.paths`, run the
+# checker against that installed file before pushing, push it exactly once,
+# never push another change to that file while it is installed, and delete it in
+# the same iteration after evidence capture. A second push that touches the file
+# would start a new run whose `run_attempt` is 1 again; the guard below cannot
+# detect that, so the launch review must.
+#
+# **Why the first step is the guard.** Preregistration § 4 forbids any rerun of
+# a slot. GitHub lets a person re-run a failed job or a whole run; the re-run
+# carries `github.run_attempt >= 2`. The guard exits non-zero before checkout, so
+# a re-run attempt never reaches a database, a quota or a measurement, and its
+# upload step finds no report and fails. A re-run slot therefore stays red and
+# produces no second report.
+#
+# Everything below the guard follows the temporary workflow of commit `a0db638`.
+# Preregistered differences: 59 one-pair slots instead of one 20-pair job, 45
+# minutes instead of 180, `--slot`, and slot-named reports and artifacts. Two
+# further differences are review choices of this draft, not preregistered values:
+# the explicit `ubuntu-24.04` label instead of `ubuntu-latest` (the OS label
+# today's jobs already resolve to; it pins no image version, so readiness row 9
+# stays open), and no dependency cache, so no slot restores state saved by
+# another. The trigger path filter, workflow/job names and the guard step are
+# new as well.
+name: ADR-055 fresh-run first-pair replication (59 slots, no retry)
+
+on:
+  push:
+    branches: [feat/audit-service-aud-004-contract]
+    paths: [.github/workflows/adr-055-fresh-run-first-pair.yml]
+
+concurrency:
+  # Never cancel: a half-measured campaign is a dataset with a hole in it.
+  group: adr-055-fresh-run-first-pair-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+  PNPM_VERSION: '11.22.0'
+  # The preregistered induced condition, § 7: 15 000 µs per 1 000 000 µs on
+  # the PostgreSQL service container only.
+  CPU_PERIOD_US: '1000000'
+  CPU_QUOTA_US: '15000'
+
+jobs:
+  fresh-run-first-pair:
+    name: ADR-055 fresh-run slot ${{ matrix.slot }} of 59
+    runs-on: ubuntu-24.04
+    # Preregistration § 9.1: 2308 s fully bounded worst case per job, so the
+    # harness's own 30-minute step bound — not this job bound — stops a hung
+    # stress run and the report stays writable.
+    timeout-minutes: 45
+    strategy:
+      # A qualifying event is a red job by design; cancelling the other 58
+      # would turn one measured event into 58 missing slots.
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59]
+
+    # Exactly one service container per slot: a fresh PostgreSQL, nothing else.
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: rasta
+          POSTGRES_PASSWORD: rasta_ci_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rasta"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Refuse any attempt other than the first
+        # Effective shell logic, not a step condition: a skipped guard would be
+        # a silent pass. Runs before checkout and before any measurement.
+        run: |
+          if [ "${{ github.run_attempt }}" != "1" ]; then
+            echo 'github.run_attempt is not 1; a second attempt of a campaign slot is not evidence' >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Harness tests (no infrastructure)
+        # Before the quota: a drifted harness or contract fails before any
+        # measurement cost is attributed to the database (§ 8.3).
+        run: |
+          pnpm run test:aggregation-evidence-lib
+          pnpm run check:test-phases
+
+      - name: Provision databases, roles and extensions
+        env:
+          PGPASSWORD: rasta_ci_password
+          POSTGRES_USER: rasta
+          POSTGRES_SERVICE_PASSWORD: rasta_ci_service_password
+        run: |
+          export PGHOST=localhost PGPORT=5432
+          psql -U rasta -d postgres -c "SELECT 1" >/dev/null
+          bash infrastructure/docker/postgres/00-init-databases.sh
+
+      - name: Generate and build identity-service dependencies
+        run: |
+          pnpm --filter @rasta/identity-service run db:generate
+          pnpm exec turbo run build --filter=@rasta/identity-service^...
+
+      - name: Apply identity migrations
+        run: pnpm --filter @rasta/identity-service run db:migrate
+        env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+
+      - name: Apply and verify the induced 0.015 CPU constraint
+        # Mandatory quota read-back (§ 7): exactly two HostConfig fields, and
+        # the slot stops here, before measuring, if either differs.
+        run: |
+          set -euo pipefail
+          ids="$(docker ps --quiet --filter "ancestor=postgis/postgis:16-3.4")"
+          count="$(printf '%s' "$ids" | grep -c . || true)"
+          if [ "$count" -ne 1 ]; then
+            echo "expected exactly one postgis/postgis:16-3.4 container, found $count" >&2
+            exit 1
+          fi
+          docker update --cpu-period "$CPU_PERIOD_US" --cpu-quota "$CPU_QUOTA_US" "$ids" >/dev/null
+          period="$(docker inspect --format '{{.HostConfig.CpuPeriod}}' "$ids")"
+          quota="$(docker inspect --format '{{.HostConfig.CpuQuota}}' "$ids")"
+          echo "applied_cpu_period_us=$period"
+          echo "applied_cpu_quota_us=$quota"
+          if [ "$period" != "$CPU_PERIOD_US" ] || [ "$quota" != "$CPU_QUOTA_US" ]; then
+            echo "induced condition did not apply exactly; refusing to measure" >&2
+            exit 1
+          fi
+
+      - name: Environment provenance
+        env:
+          PGPASSWORD: rasta_ci_password
+        run: |
+          echo "runner_image=${ImageOS:-unknown}/${ImageVersion:-unknown}"
+          echo "kernel=$(uname -r)"
+          echo "cpus=$(nproc)"
+          echo "memory_gib=$(awk '/MemTotal/ {printf "%.1f", $2/1048576}' /proc/meminfo)"
+          echo "docker_storage_driver=$(docker info --format '{{.Driver}}')"
+          echo "containers_running=$(docker ps -q | wc -l)"
+          echo "container_images:"
+          docker ps --format '{{.Image}}' | sed 's/^/  /'
+          echo "induced_cpu_period_us=$CPU_PERIOD_US"
+          echo "induced_cpu_quota_us=$CPU_QUOTA_US"
+          psql -h 127.0.0.1 -p 5432 -U rasta -d postgres -X -A -t -q -c \
+            "SELECT format('%s=%s', name, setting) FROM pg_settings
+             WHERE name IN ('server_version','fsync','synchronous_commit',
+                            'wal_level','wal_sync_method','full_page_writes',
+                            'shared_buffers','max_connections','max_wal_size',
+                            'checkpoint_timeout')
+             ORDER BY name"
+
+      - name: One-pair calibration for this slot
+        # A non-zero exit is a legitimate outcome. The status is captured only
+        # so the upload still runs, then re-raised unchanged.
+        run: |
+          set +e
+          pnpm run calibrate:aggregation-stress -- --pairs 1 --slot "${{ matrix.slot }}" "$RUNNER_TEMP/adr-055-fresh-run-slot-${{ matrix.slot }}.txt"
+          status=$?
+          set -e
+          echo "campaign_exit=$status"
+          exit "$status"
+        env:
+          NODE_ENV: test
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          EVIDENCE_PG_IMAGE: postgis/postgis:16-3.4
+
+      - name: Upload this slot's calibration report
+        # `always()`: a red slot is exactly the slot whose report matters.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: adr-055-fresh-run-slot-${{ matrix.slot }}
+          path: ${{ runner.temp }}/adr-055-fresh-run-slot-${{ matrix.slot }}.txt
+          retention-days: 3
+          if-no-files-found: error

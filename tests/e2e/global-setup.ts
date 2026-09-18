@@ -86,6 +86,22 @@ export default async function globalSetup(): Promise<void> {
       120_000,
     );
 
+    // ---- identity-service -----------------------------------------------------
+    // AUD-004 Phase C1: the refusal scenario needs identity-service's refusal
+    // relay actually running, or a refusal published nothing and the audit
+    // scenario times out blaming the wrong component (see audit-service
+    // above for the same reasoning on its own consumer).
+    await waitFor(
+      `identity-service to be ready at ${config.identityUrl}/health/ready`,
+      async () => {
+        const response = await context.get(`${config.identityUrl}/health/ready`, {
+          failOnStatusCode: false,
+        });
+        return response.status() === 200;
+      },
+      120_000,
+    );
+
     // ---- Keycloak -----------------------------------------------------------
     await waitFor(
       `Keycloak realm ${config.realm} to be reachable`,

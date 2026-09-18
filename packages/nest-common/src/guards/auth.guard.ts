@@ -1,7 +1,13 @@
 import { Injectable, Inject, type CanActivate, type ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '../errors/rasta-error';
-import { TokenVerifier, InternalTokenService } from '../auth/token-verifier';
+import {
+  TokenVerifier,
+  InternalTokenService,
+  type ServiceClaims,
+  type UserClaims,
+} from '../auth/token-verifier';
 import { IS_PUBLIC_KEY, ALLOW_SERVICE_KEY } from '../decorators';
 import { upgradeContext, type RequestContext } from '../context/request-context';
 
@@ -12,6 +18,81 @@ export interface AuthGuardOptions {
   serviceName: string;
   tokenVerifier: TokenVerifier;
   internalTokens?: InternalTokenService;
+  /**
+   * Told when a **verified** user token asks, in `X-Organization-Id`, to act
+   * for an organization outside its memberships — the `TENANT_MISMATCH`
+   * refusal below — just before that refusal is thrown.
+   *
+   * Optional, and absent in every service that does not set it: the guard
+   * behaves exactly as without it. It observes a decision already made; it
+   * cannot make, change or replace one. It is called synchronously, at most
+   * once per request, and anything it throws or rejects with is swallowed — the
+   * original refusal is thrown either way.
+   *
+   * What it is given is deliberately narrow (see `UserTenantMismatch`): the
+   * refusal about to be thrown and the verified caller. Not the claims, the
+   * token, the membership list or the requested header.
+   */
+  onUserTenantMismatch?: (refusal: UserTenantMismatch) => void;
+  /**
+   * Told when a **verified** `SERVICE` internal token is refused with
+   * `FORBIDDEN` — the endpoint carries no `@AllowService`, or its allowlist
+   * excludes the calling service — just before that refusal is thrown.
+   *
+   * The same promises as `onUserTenantMismatch`: optional, absent in every
+   * service that does not set it, observation only, called synchronously at
+   * most once per request, and anything it throws or rejects with is
+   * swallowed. It never fires for an unverifiable or `RELAY` token, for an
+   * accepted call, or for `SERVICE_TENANT_CONTEXT_INVALID`.
+   *
+   * What it is given is deliberately narrow (see
+   * `ServiceAuthorizationRefusal`): the refusal and the signed claims that name
+   * the caller. Not the token, the allowlist or any header.
+   */
+  onServiceAuthorizationRefusal?: (refusal: ServiceAuthorizationRefusal) => void;
+}
+
+/**
+ * The one post-verification refusal `AuthGuardOptions.onUserTenantMismatch`
+ * observes. Frozen, and built only from values the guard has already verified.
+ *
+ * The guard throws before any request state exists — no `request.rastaAuth`,
+ * no upgraded request context — so without this the refusal would carry no
+ * trustworthy actor at all, and an observer would have to re-verify the token
+ * or read the header to find one. Neither is acceptable; this is the guard
+ * saying who it refused, once.
+ */
+export interface UserTenantMismatch {
+  /** The very error the guard is about to throw, unchanged. */
+  readonly error: RastaError;
+  /** The verified caller: the same id a successful request would carry. */
+  readonly userId: string;
+  /** The verified token's active organization — never the rejected header. */
+  readonly activeOrganizationId: string | undefined;
+  /** The verified token's roles. */
+  readonly roles: readonly string[];
+}
+
+/**
+ * The post-verification service refusal
+ * `AuthGuardOptions.onServiceAuthorizationRefusal` observes. Frozen, and built
+ * only from the internal token the guard has just verified.
+ *
+ * Like `UserTenantMismatch`, it exists because the refusal is thrown before
+ * `request.rastaAuth` or an upgraded request context exist, so nothing
+ * downstream could otherwise say who was refused without re-verifying the
+ * token or trusting a header.
+ */
+export interface ServiceAuthorizationRefusal {
+  /** The very error the guard is about to throw, unchanged. */
+  readonly error: RastaError;
+  /** The verified calling service: the token's signed subject. */
+  readonly callerService: string;
+  /**
+   * The token's **signed** `org_id`, or `undefined` for a platform-wide token.
+   * Never the unsigned `X-Organization-Id` header.
+   */
+  readonly organizationId: string | undefined;
 }
 
 /**
@@ -79,12 +160,24 @@ export class AuthGuard implements CanActivate {
 
     const claims = await this.options.tokenVerifier.verifyUserToken(bearer);
 
+    // Prefer the platform id. Falling back to the IdP subject keeps an
+    // account provisioned outside the platform usable rather than broken.
+    const userId = claims.rastaUserId ?? claims.sub;
+
     const requested = headerValue(request, 'x-organization-id');
-    const organizationId = resolveOrganization(
-      requested,
-      claims.organizationId,
-      claims.organizationIds,
-    );
+    let organizationId: string | undefined;
+    try {
+      organizationId = resolveOrganization(
+        requested,
+        claims.organizationId,
+        claims.organizationIds,
+      );
+    } catch (error) {
+      // The refusal is already decided. All this does is say who it was
+      // decided against, before the throw discards that knowledge.
+      this.reportTenantMismatch(error, userId, claims);
+      throw error;
+    }
 
     const organizationIds = mergeMemberships(
       organizationId,
@@ -94,9 +187,7 @@ export class AuthGuard implements CanActivate {
 
     const state: AuthState = {
       authType: 'USER',
-      // Prefer the platform id. Falling back to the IdP subject keeps an
-      // account provisioned outside the platform usable rather than broken.
-      userId: claims.rastaUserId ?? claims.sub,
+      userId,
       subject: claims.sub,
       organizationId,
       organizationIds,
@@ -117,6 +208,43 @@ export class AuthGuard implements CanActivate {
     });
 
     return true;
+  }
+
+  /**
+   * Hands the refusal to `onUserTenantMismatch`, if a service set one.
+   *
+   * Only the user-token mismatch reaches it. A service token's
+   * `SERVICE_TENANT_CONTEXT_INVALID`, a `FORBIDDEN`, a bad token and an
+   * anonymous request are all decided elsewhere and are not this refusal.
+   */
+  private reportTenantMismatch(error: unknown, userId: string, claims: UserClaims): void {
+    const observe = this.options.onUserTenantMismatch;
+    if (observe === undefined) return;
+    if (!(error instanceof RastaError) || error.code !== ERROR_CODES.TENANT_MISMATCH) return;
+
+    notifyObserver(observe, {
+      error,
+      userId,
+      activeOrganizationId: claims.organizationId,
+      roles: Object.freeze([...claims.roles]),
+    });
+  }
+
+  /**
+   * Hands a verified service caller's `FORBIDDEN` to
+   * `onServiceAuthorizationRefusal`, if a service set one, and returns the
+   * error unchanged for the caller to throw.
+   */
+  private serviceRefusal(error: RastaError, claims: ServiceClaims): RastaError {
+    const observe = this.options.onServiceAuthorizationRefusal;
+    if (observe !== undefined) {
+      notifyObserver(observe, {
+        error,
+        callerService: claims.callerService,
+        organizationId: claims.organizationId,
+      });
+    }
+    return error;
   }
 
   private async authenticateInternal(
@@ -162,10 +290,16 @@ export class AuthGuard implements CanActivate {
     // itself grant access to any endpoint. Zero Trust means the callee still
     // decides. See ADR-020.
     if (!allowed) {
-      throw RastaError.forbidden('This endpoint is not callable by another service');
+      throw this.serviceRefusal(
+        RastaError.forbidden('This endpoint is not callable by another service'),
+        claims,
+      );
     }
     if (allowed.length > 0 && !allowed.includes(claims.callerService)) {
-      throw RastaError.forbidden('This service is not permitted to call this endpoint');
+      throw this.serviceRefusal(
+        RastaError.forbidden('This service is not permitted to call this endpoint'),
+        claims,
+      );
     }
 
     // The tenant comes from the **signed** claim, never from the header
@@ -194,6 +328,25 @@ export class AuthGuard implements CanActivate {
       organizationId: claims.organizationId,
       roles: ['SERVICE'],
     };
+  }
+}
+
+/**
+ * Calls an observation seam with a frozen value.
+ *
+ * Best-effort in the strongest sense: nothing the observer does — throwing,
+ * rejecting or hanging on to the value — can change the error the caller
+ * receives, because the decision is made before this runs and nothing here
+ * returns into it.
+ */
+function notifyObserver<T extends object>(observe: (value: T) => void, value: T): void {
+  try {
+    const outcome: unknown = observe(Object.freeze(value));
+    // An observer declared `void` may still be `async`. An unhandled
+    // rejection from audit bookkeeping must not reach the process.
+    if (outcome instanceof Promise) void outcome.catch(() => undefined);
+  } catch {
+    // Never let observation change or replace the refusal being thrown.
   }
 }
 

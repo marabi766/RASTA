@@ -44,7 +44,8 @@ export class OrderRepository {
       'a buyer prices offers owned by suppliers; the object-level check is in pricing and access',
       () => tx.$queryRaw<LockedOfferRow[]>`
         SELECT id, organization_id, product_id, unit_price_minor, currency,
-               available_quantity, minimum_quantity, version, status::text AS status
+               available_quantity, minimum_quantity, version, status::text AS status,
+               lead_time_days
         FROM "offer"
         WHERE id = ANY(${ordered}::text[])
         ORDER BY id
@@ -116,7 +117,8 @@ export class OrderRepository {
       'an order is locked for transition by either of its two parties',
       () => tx.$queryRaw<RawLockedOrderRow[]>`
         SELECT id, organization_id, supplier_organization_id, status::text AS status,
-               total_amount_minor, currency, economic_transaction_id, correlation_id
+               total_amount_minor, currency, economic_transaction_id, correlation_id,
+               cancellation_cause::text AS cancellation_cause
         FROM "order"
         WHERE id = ${orderId}
         FOR UPDATE
@@ -138,6 +140,7 @@ export class OrderRepository {
       currency: row.currency,
       economicTransactionId: row.economic_transaction_id,
       correlationId: row.correlation_id,
+      cancellationCause: row.cancellation_cause,
     };
   }
 
@@ -209,6 +212,7 @@ export interface LockedOfferRow {
   minimum_quantity: number;
   version: number;
   status: string;
+  lead_time_days: number;
 }
 
 /** The raw shape `FOR UPDATE` returns, before it is mapped. */
@@ -221,6 +225,7 @@ interface RawLockedOrderRow {
   currency: string;
   economic_transaction_id: string | null;
   correlation_id: string;
+  cancellation_cause: string | null;
 }
 
 export interface LockedOrderRow {
@@ -232,4 +237,10 @@ export interface LockedOrderRow {
   currency: string;
   economicTransactionId: string | null;
   correlationId: string;
+  /**
+   * Set at `CANCELLING` by whichever command got the order there (ADR-052
+   * § 1-c); read back by `markCancelled` once the saga's compensation
+   * finishes. Null for every order that never entered `CANCELLING`.
+   */
+  cancellationCause: string | null;
 }

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { RESPONSIBILITY_ATTRIBUTION } from '../events/events';
 
 /**
  * Request and response shapes for orders.
@@ -90,6 +91,16 @@ export const resolveDisputeSchema = z
      */
     outcome: z.enum(['SETTLE', 'REFUND']),
     resolution: z.string().trim().min(10).max(1000),
+    /**
+     * Who the operator holds responsible (ADR-052 §§ 1-b, 4 rule 13).
+     *
+     * Required, not inferred from `resolution` and not defaulted from
+     * `outcome`: rule 14 forbids reading responsibility out of free text, and
+     * `outcome` alone does not decide it — a `SETTLE` can still follow a
+     * `PLATFORM` mistake, and a `REFUND` can follow one the platform never
+     * caused. The operator states it, every time.
+     */
+    responsibility: z.enum(RESPONSIBILITY_ATTRIBUTION),
   })
   .strict();
 

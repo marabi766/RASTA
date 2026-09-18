@@ -35,7 +35,12 @@ export interface OutboxMessageInput<TPayload = unknown> {
    */
   partitionKey?: string;
   aggregateVersion?: number;
-  organizationId?: string;
+  /**
+   * The tenant the event belongs to. Omitted: the request context's tenant, as
+   * before. `null`: explicitly none — a genuinely platform-scoped event, which
+   * must not inherit whatever tenant the acting user happens to have selected.
+   */
+  organizationId?: string | null;
   /** The event that caused this one, for causal tracing. */
   causationId?: string;
   occurredAt?: Date;
@@ -131,7 +136,11 @@ export function buildOutboxRow<TPayload>(
   const eventId = ulid();
   const occurredAt = input.occurredAt ?? new Date();
   const correlationId = context?.correlationId ?? eventId;
-  const organizationId = input.organizationId ?? context?.organizationId ?? null;
+  // `null` is an explicit "no tenant"; only an omitted value falls back.
+  const organizationId =
+    input.organizationId === null
+      ? null
+      : (input.organizationId ?? context?.organizationId ?? null);
 
   const envelope: EventEnvelope<TPayload> = {
     eventId,

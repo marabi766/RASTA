@@ -1,0 +1,911 @@
+{
+  "uid": "rasta-audit-evidence",
+  "title": "Rasta Audit Evidence",
+  "description": "Local development telemetry for the audit evidence pipeline. There is no Alertmanager and no notification delivery. Absence of alerts is not proof that every state change produced audit evidence.",
+  "tags": ["rasta", "audit", "local"],
+  "editable": false,
+  "graphTooltip": 1,
+  "liveNow": false,
+  "refresh": "30s",
+  "schemaVersion": 40,
+  "version": 1,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["30s", "1m", "5m", "15m"]
+  },
+  "timezone": "utc",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Scope and limits",
+      "description": "What this dashboard can and cannot show.",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Local development telemetry only.** Every panel reads the local Compose Prometheus and the 13 `Rasta*` audit-evidence alerts and one recording rule in `infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`. This is not production scrape configuration.\n\n- **There is no Alertmanager and no notification delivery.** A firing alert is visible here and on the local Prometheus alerts page, and nowhere else.\n- **Absence of alerts is not proof that every state change produced audit evidence.** No panel reconciles individual records; a missing record has no signal of its own.\n- A scrape job shown as DOWN or MISSING means the alerts that read it have no trustworthy input. Runbooks: `docs/runbooks/`."
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Audit evidence alerts pending or firing",
+      "description": "One row per pending or firing Rasta audit-evidence alert, from the Prometheus ALERTS series, aggregated to alert name, state and severity. An empty table means none of the 13 alerts is pending or firing in the local Prometheus; it is not proof of complete audit evidence.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rasta-prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 14,
+        "x": 0,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "alertstate"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "firing": {
+                        "color": "red",
+                        "index": 0
+                      },
+                      "pending": {
+                        "color": "orange",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "severity"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "critical": {
+                        "color": "red",
+                        "index": 0
+                      },
+                      "warning": {
+                        "color": "orange",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": ["sum"],
+          "countRows": false,
+          "fields": ""
+        },
+        "sortBy": [
+          {
+            "displayName": "severity",
+            "desc": false
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true
+            },
+            "indexByName": {
+              "alertname": 0,
+              "alertstate": 1,
+              "severity": 2
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "sum by (alertname, alertstate, severity) (ALERTS{alertname=~\"RastaDeadLetterMessagePublished|RastaAuditIngestionFailure|RastaAuditIngestionLagHigh|RastaAuditChainDivergence|RastaSecurityEventCaptureGap|RastaSecurityEventClosedBacklogStale|RastaSecurityEventPublishFailure|RastaIdentityServiceMetricsUnavailable|RastaAuditProducerSilent|RastaAuditServiceMetricsUnavailable|RastaAuditConsumerLag|RastaKafkaExporterUnavailable|RastaAuditConsumerGroupMetricsMissing\"})",
+          "legendFormat": "{{alertname}}",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Scrape jobs available",
+      "description": "min by job of up for the audit-service, identity-service and kafka-exporter scrape jobs, as the three metrics-unavailable alerts compute it: one down instance makes the job DOWN. A job with no up series at all is also shown as 0. While a job is DOWN or MISSING, the alerts that read it are silent without meaning anything is healthy; the alerts themselves wait 2 minutes before firing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rasta-prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 10,
+        "x": 14,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN or MISSING",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "min by (job) (up{job=~\"audit-service|identity-service|kafka-exporter\"}) or (absent(up{job=\"audit-service\"}) * 0) or (absent(up{job=\"identity-service\"}) * 0) or (absent(up{job=\"kafka-exporter\"}) * 0)",
+          "legendFormat": "{{job}}",
+          "range": false,
+          "instant": true,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Audit rows written by source service and outcome",
+      "description": "Per-second rate of rasta_audit_records_ingested_total, summed by the bounded source_service and outcome labels; source topic and scrape labels are aggregated away. Zero-initialised series show as a flat zero line, not as missing data.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rasta-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "sum by (source_service, outcome) (rate(rasta_audit_records_ingested_total[$__rate_interval]))",
+          "legendFormat": "{{source_service}} {{outcome}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Audit ingestion lag p95 by source topic",
+      "description": "histogram_quantile(0.95) over a 5-minute rate of rasta_audit_ingestion_lag_seconds_bucket, summed by le and source_topic across all instances exactly as RastaAuditIngestionLagHigh computes it. The red line is that alert's 60 second threshold; the alert also requires it to hold for 5 minutes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rasta-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, source_topic) (rate(rasta_audit_ingestion_lag_seconds_bucket[5m])))",
+          "legendFormat": "{{source_topic}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Audit consumer group lag",
+      "description": "Records past the committed position for the two fixed audit consumer groups, by group and topic, with unknown (-1) clamped to zero before summing, as RastaAuditConsumerLag computes it. That alert fires only when lag stays above zero for 5 minutes. No line for a group means kafka-exporter reports no committed position for it (RastaAuditConsumerGroupMetricsMissing).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rasta-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "sum by (consumergroup, topic) (clamp_min(kafka_consumergroup_lag{consumergroup=\"audit-service.domain-projector\"}, 0))",
+          "legendFormat": "{{consumergroup}} {{topic}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "sum by (consumergroup, topic) (clamp_min(kafka_consumergroup_lag{consumergroup=\"audit-service.trail\"}, 0))",
+          "legendFormat": "{{consumergroup}} {{topic}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Audit DLQ retained offset span",
+      "description": "The recording rule topic:kafka_topic_retained_records:sum for rasta.audit.v1.dlq: newest minus oldest retained position, summed over the topic. This is a retained offset span, not a count of unresolved messages: nothing in the repository tracks DLQ triage, and the number only falls when retention removes old segments. No alert reads it, so no colour threshold is applied. New DLQ writes appear in the failures panel as RastaDeadLetterMessagePublished input.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rasta-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "sum by (topic) (topic:kafka_topic_retained_records:sum{topic=\"rasta.audit.v1.dlq\"})",
+          "legendFormat": "{{topic}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Expected producers silent",
+      "description": "Only services explicitly configured in AUDIT_EXPECTED_ACTIVE_PRODUCERS appear; unconfigured producers are never shown or marked unhealthy. The value is the RastaAuditProducerSilent alert state: FIRING, PENDING, or \"no silence alert\". \"no silence alert\" is not a heartbeat: the alert needs the producer configured now and 6 hours ago, and detects only total silence, never a single missing record.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rasta-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "no silence alert",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "PENDING",
+                  "color": "orange",
+                  "index": 1
+                },
+                "2": {
+                  "text": "FIRING",
+                  "color": "red",
+                  "index": 2
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "(max by (source_service) (ALERTS{alertname=\"RastaAuditProducerSilent\", alertstate=\"firing\"}) * 2) or max by (source_service) (ALERTS{alertname=\"RastaAuditProducerSilent\", alertstate=\"pending\"}) or (max by (source_service) (rasta_audit_expected_active_producer == 1) * 0)",
+          "legendFormat": "{{source_service}}",
+          "range": false,
+          "instant": true,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Audit ingestion, chain verification and DLQ failures (5m increase)",
+      "description": "5-minute increase of rasta_audit_ingestion_failures_total by reason, rasta_audit_chain_verification_failures_total by reason and scope, and rasta_dlq_messages_total from the audit-service scrape job by service, source topic and reason. These are the expressions of RastaAuditIngestionFailure, RastaAuditChainDivergence and RastaDeadLetterMessagePublished before their > 0 comparison, so any value above zero is that alert's condition.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rasta-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.001
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "sum by (reason) (increase(rasta_audit_ingestion_failures_total[5m]))",
+          "legendFormat": "ingestion {{reason}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "sum by (reason, scope) (increase(rasta_audit_chain_verification_failures_total[5m]))",
+          "legendFormat": "chain {{scope}} {{reason}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "sum by (service, topic, reason) (increase(rasta_dlq_messages_total{job=\"audit-service\"}[5m]))",
+          "legendFormat": "dlq {{service}} {{topic}} {{reason}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Refusal evidence capture gaps and publish failures (5m increase)",
+      "description": "5-minute increase of identity-service rasta_security_event_captures_total with outcome failed or timeout (a refusal returned without evidence), and of rasta_security_event_publish_failures_total by reason. These are the expressions of RastaSecurityEventCaptureGap and RastaSecurityEventPublishFailure before their > 0 comparison.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rasta-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.001
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "sum by (outcome) (increase(rasta_security_event_captures_total{outcome=~\"failed|timeout\"}[5m]))",
+          "legendFormat": "capture {{outcome}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "sum by (reason) (increase(rasta_security_event_publish_failures_total[5m]))",
+          "legendFormat": "publish {{reason}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Closed refusal evidence backlog age",
+      "description": "Largest rasta_security_event_outbox_closed_backlog_age_seconds across identity-service instances: seconds since the aggregation window of the oldest unpublished, closed row ended. The red line is RastaSecurityEventClosedBacklogStale's 60 second threshold. The open-window pending age is deliberately not shown: it sits near the aggregation window by design and says nothing about backlog health.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rasta-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rasta-prometheus"
+          },
+          "expr": "max(rasta_security_event_outbox_closed_backlog_age_seconds)",
+          "legendFormat": "oldest closed window",
+          "range": true,
+          "instant": false
+        }
+      ]
+    }
+  ]
+}

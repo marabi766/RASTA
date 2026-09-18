@@ -155,7 +155,7 @@ services:
   # ------------------------------------------------------------ object storage
   minio:
     <<: *restart
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     container_name: rasta-minio
     command: ['server', '/data', '--console-address', ':9001']
     environment:
@@ -173,7 +173,7 @@ services:
       retries: 12
 
   minio-init:
-    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
     container_name: rasta-minio-init
     depends_on:
       minio:
@@ -384,9 +384,27 @@ services:
       - '--storage.tsdb.retention.time=7d'
     volumes:
       - ./infrastructure/docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infrastructure/docker/prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
     ports:
       - '9090:9090'
+    profiles: ['observability', 'all']
+
+  # Broker-side Kafka metrics for the local Prometheus: consumer-group offsets
+  # and lag, and each partition's oldest/newest offset. Reached only over the
+  # Compose network (prometheus.yml job `kafka-exporter`), so no host port.
+  # --offset.show-all (also the default) keeps groups with no live member, so a
+  # stopped consumer still shows its lag instead of disappearing.
+  kafka-exporter:
+    <<: *restart
+    image: danielqsj/kafka-exporter:v1.9.0
+    container_name: rasta-kafka-exporter
+    command:
+      - '--kafka.server=kafka:9094'
+      - '--offset.show-all'
+    depends_on:
+      kafka:
+        condition: service_healthy
     profiles: ['observability', 'all']
 
   grafana:
@@ -397,8 +415,21 @@ services:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin_dev_password
       GF_USERS_ALLOW_SIGN_UP: 'false'
+      # Local stack: no usage reporting, update or news checks, no download of
+      # Grafana 11's preinstalled app plugins, and no download of the plugin
+      # signature public keys from grafana.com. Quoted so YAML keeps them
+      # strings. Enforced by scripts/check-grafana-dashboard-lib.mjs.
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false'
+      GF_NEWS_NEWS_FEED_ENABLED: 'false'
+      GF_PLUGINS_PREINSTALL_DISABLED: 'true'
+      GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: 'true'
     volumes:
       - ./infrastructure/docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      # Dashboard JSON, loaded by provisioning/dashboards/rasta.yml. Kept out of
+      # provisioning/ so the provider YAML is never parsed as a dashboard.
+      - ./infrastructure/docker/grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
       - '3001:3000'

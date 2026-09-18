@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # =============================================================================
-# notification-service — bootstrap scaffold
+# notification-service — NTF-001 (ADR-054)
 #
 # Built from the repository root, because a pnpm workspace resolves through the
 # root lockfile and the linked @rasta/* packages. Building from the service
@@ -16,10 +16,10 @@
 # (PROJECT_MEMORY § 22). `pnpm run ci:image-matrix` fails the build if the two
 # ever drift apart again.
 #
-# What this image runs is a health-probe process and nothing else. ADR-054 is
-# Proposed and NTF-001 has not started: no schema, no consumer, no outbox, no templates, no email.
-# The image exists so the build and scan gates are real from the first commit,
-# not to suggest the service does anything yet.
+# What this image runs: the dispatcher consumer group over the insurance and
+# maintenance topics, the recipient-resolution worker, and the health probes.
+# It delivers in-app notifications only. No email channel exists (NTF-004,
+# blocked by Q-37), no read API yet (NTF-002), no outbox.
 # =============================================================================
 
 # ---- deps -------------------------------------------------------------------
@@ -54,9 +54,9 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 FROM deps AS build
 WORKDIR /app
 
-# Compiles this service and its workspace dependencies in dependency order.
-# There is no `prisma generate` step, unlike every other service here: this one
-# owns no schema and pulls in no Prisma client.
+# Generates the Prisma client, then compiles this service and its workspace
+# dependencies in dependency order. The client is generated into `src/generated`
+# and copied into `dist` by the package's own build script.
 RUN pnpm --filter @rasta/notification-service... build
 
 # `pnpm deploy` rather than `prune`, and the difference matters.
@@ -70,7 +70,10 @@ RUN pnpm --filter @rasta/notification-service... build
 # `deploy` produces a self-contained directory with a complete, flattened
 # node_modules — workspace dependencies included — which is exactly what a
 # runtime image needs.
-RUN CI=true pnpm --filter @rasta/notification-service deploy --prod --legacy /deploy
+# The Prisma engine cache is mounted here too: `deploy` re-runs postinstall
+# scripts, and re-downloading the engine binary would make the build depend on
+# a CDN staying up.
+RUN --mount=type=cache,id=prisma-engines,target=/root/.cache/prisma     CI=true pnpm --filter @rasta/notification-service deploy --prod --legacy /deploy
 
 # ---- runtime ----------------------------------------------------------------
 FROM node:22-alpine AS runtime
@@ -108,10 +111,9 @@ USER rasta
 
 EXPOSE 3113
 
-# Probes readiness rather than liveness, matching every other service here. This
-# scaffold's readiness has no dependency to fail on yet and says so in its own
-# payload; when NTF-001 adds the schema and the consumer, this probe starts
-# being able to report them without the Dockerfile changing.
+# Probes readiness rather than liveness, matching every other service here.
+# Readiness fails when the database is unreachable or unmigrated, or when the
+# consumer group or the resolution worker is not running.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3113)+'/health/ready',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 

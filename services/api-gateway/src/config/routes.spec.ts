@@ -94,6 +94,24 @@ describe('routing table integrity', () => {
     }
   });
 
+  it('routes the audit correction command to identity, SYSTEM_ADMIN only, with a mandatory key', () => {
+    const route = ROUTES.find((r) => r.prefix === 'audit-corrections');
+    expect(route).toEqual({
+      prefix: 'audit-corrections',
+      service: 'identity',
+      roles: ['SYSTEM_ADMIN'],
+      requiresIdempotencyKey: true,
+    });
+    expect(resolveRoute('/audit-corrections')).toBe(route);
+    // Never public, never UNION_ADMIN, never the oversight role.
+    expect(route?.publicReason).toBeUndefined();
+    expect(route?.roles).not.toContain('UNION_ADMIN');
+    expect(route?.roles).not.toContain('AUDITOR');
+    // And the evidence store's own prefix stays read-only and at audit-service.
+    expect(resolveRoute('/audit-events')?.service).toBe('audit');
+    expect(ROUTES.find((r) => r.prefix === 'audit-events')?.requiresIdempotencyKey).toBeUndefined();
+  });
+
   it('routes the document prefix to document-service', () => {
     const route = ROUTES.find((r) => r.prefix === 'documents');
     expect(route?.service).toBe('document');
@@ -351,5 +369,25 @@ describe('the suppliers prefix', () => {
     } else {
       expect(route.roles).toBeUndefined();
     }
+  });
+});
+
+describe('the notification inbox route (ADR-054 § 11, NTF-002)', () => {
+  it('forwards `notifications` to notification-service for any authenticated caller', () => {
+    // Ownership is the user, decided by the service against the verified
+    // token — so the gateway names no roles here. A role list would either
+    // exclude somebody from their own inbox or claim a control the service
+    // does not delegate. `preferences` (NTF-003) is the same shape.
+    for (const prefix of ['notifications', 'preferences']) {
+      const route = resolveRoute(prefix);
+      expect(route).toBeDefined();
+      expect(route!.service).toBe('notification');
+      expect(route!.roles).toBeUndefined();
+      expect(route!.publicReason).toBeUndefined();
+      expect(route!.requiresIdempotencyKey).toBeUndefined();
+    }
+    // Sub-paths resolve to the same rule: the prefix is the first segment.
+    expect(resolveRoute('/notifications/NTN_1/read')?.service).toBe('notification');
+    expect(resolveRoute('/notifications/unread-count')?.service).toBe('notification');
   });
 });

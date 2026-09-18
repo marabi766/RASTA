@@ -1,0 +1,16 @@
+ADR-055 constrained aggregation stress cost observation
+purpose: planning-only; not ADR-055 section 6 paired evidence
+scope: one fresh unfiltered `pnpm run test:aggregation-stress` process, bounded,
+  under one fixed external CPU quota on the PostgreSQL container only
+not collected: no probe, no control, no pair, no distribution, no retry, no second quota
+not decided: no threshold, no safety margin, no capability judgement, no runtime or CI policy
+commit=62062f3e861ab63408e1766251d153d51ecb7761 observed_at_utc=2026-09-15T21:34:22.766Z
+topology: runner_os=Ubuntu 24.04.5 LTS runner_image=ubuntu24/20260907.300.1 kernel=6.17.0-1022-azure cpus=4 memory_gib=15.6 docker_storage_driver=overlay2 containers_running=1 container_images=postgis/postgis:16-3.4 checkpoint_timeout=300 fsync=on full_page_writes=on max_connections=100 max_wal_size=1024 server_version=16.4 (Debian 16.4-1.pgdg110+2) shared_buffers=16384 synchronous_commit=on wal_level=replica wal_sync_method=fdatasync
+constraint: scope=postgres-service-container-only cpus=0.05 requested_cpu_period_us=1000000 requested_cpu_quota_us=50000 verified_cpu_period_us=1000000 verified_cpu_quota_us=50000
+process: outcome=completed timed_out=no exit_status=0 bound_s=1800
+  started_utc=2026-09-15T21:32:54.790Z ended_utc=2026-09-15T21:34:22.765Z wall_s=88.0
+suite: jest_report=present
+  suites passed/failed/skipped/total=1/0/0/1
+  tests passed/failed/skipped/total=22/0/0/22
+  failures: sqlstate57014=0 jestTimeout=0 secondRowOrWindowCrossing=0 countSequence=0 finalRow=0 otherDatabaseError=0 other=0
+  infrastructure: missingEnvironment=0 dockerUnavailable=0 pgbenchUnavailable=0 psqlUnavailable=0 connectionFailure=0 permissionDenied=0 statsUnreadable=0 statsReset=0 timeout=0 failedTransactions=0 controlContamination=0 backgroundWalContamination=0 noProgress=0 harnessError=0 other=0
