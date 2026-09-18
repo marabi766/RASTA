@@ -581,7 +581,7 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 13,
-      "status": "READY",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Every state-changing action can be traced to actor, time, origin and correlation",
         "Audit records are append-only and object-authorized"

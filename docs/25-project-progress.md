@@ -12,9 +12,9 @@
 
 | Horizon | Earned SP | Committed SP | Remaining SP | Progress | Accepted units | Active units | Features | Stories |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| MVP | 191 | 555 | 364 | 34.4% | 19 | 40 | 36 | 5 |
+| MVP | 204 | 555 | 351 | 36.8% | 20 | 40 | 36 | 5 |
 | Post-MVP only | 0 | 215 | 215 | 0% | 0 | 11 | 11 | 0 |
-| Full product | 191 | 770 | 579 | 24.8% | 19 | 51 | 47 | 5 |
+| Full product | 204 | 770 | 566 | 26.5% | 20 | 51 | 47 | 5 |
 
 ## Progress by epic
 
@@ -23,7 +23,7 @@
 | EP-PLATFORM | Platform foundation and engineering | MVP | 57 | 57 | 100% | 5 | 0 |
 | EP-CORE | Identity, organization and core fleet | MVP | 55 | 55 | 100% | 5 | 0 |
 | EP-OPERATIONS | Maintenance and field operations | MVP | 21 | 21 | 100% | 1 | 0 |
-| EP-COMMERCE | Economic, marketplace and supply chain | MVP | 58 | 181 | 32% | 12 | 5 |
+| EP-COMMERCE | Economic, marketplace and supply chain | MVP | 71 | 181 | 39.2% | 12 | 5 |
 | EP-CONSTRUCTION | Construction and contracts | MVP | 0 | 63 | 0% | 3 | 0 |
 | EP-EXPERIENCE | Web, mobile and user experience | MVP | 0 | 89 | 0% | 5 | 0 |
 | EP-OPERABILITY | Operability, hardening and pilot | MVP | 0 | 89 | 0% | 5 | 0 |
@@ -38,10 +38,10 @@
 | Status | Delivery units | Story Points |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 18 | 317 |
+| READY | 17 | 304 |
 | IN_PROGRESS | 1 | 21 |
 | BLOCKED | 4 | 60 |
-| ACCEPTED | 19 | 191 |
+| ACCEPTED | 20 | 204 |
 | CANCELLED | 0 | 0 |
 
 A delivery unit is a User Story under a decomposed Feature, or the Feature itself while it has not yet been decomposed. This table is the accounting view and never double-counts parent and child points.
@@ -51,10 +51,10 @@ A delivery unit is a User Story under a decomposed Feature, or the Feature itsel
 | Status | Features | Baseline SP |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 18 | 317 |
+| READY | 17 | 304 |
 | IN_PROGRESS | 1 | 21 |
 | BLOCKED | 4 | 60 |
-| ACCEPTED | 15 | 191 |
+| ACCEPTED | 16 | 204 |
 | CANCELLED | 0 | 0 |
 
 ## User Story state
