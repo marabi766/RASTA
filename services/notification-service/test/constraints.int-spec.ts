@@ -282,6 +282,12 @@ describe('database constraints (ADR-054 § 4, § 10)', () => {
 
     it('defers the intent foreign key to commit, so the decision can precede the row', async () => {
       const key = createHash('sha256').update(ulid()).digest('hex');
+      // A second key of the same shape, drawn independently. Deriving it by
+      // overwriting the last character of `key` collided with `key` itself
+      // one time in sixteen — whenever the digest already ended in that
+      // character — and the duplicate insert then raised a unique violation
+      // instead of the foreign-key refusal this asserts.
+      const absentKey = createHash('sha256').update(ulid()).digest('hex');
       const phantom = `NTI_${ulid()}`;
       // Inside one transaction: a dedupe row naming an intent that does not
       // exist yet, then the intent. Commit succeeds only because the check is
@@ -297,7 +303,7 @@ describe('database constraints (ADR-054 § 4, § 10)', () => {
       await expect(
         runUnscoped('constraint probe exercises the deferred foreign key', () =>
           w.prisma.transaction(async (tx) => {
-            await tx.$executeRaw`INSERT INTO "notification_dedupe" ("dedupe_key","organization_id","intent_id","expires_at") VALUES (${key.replace(/.$/, 'f')}, ${organizationId}, ${`NTI_${ulid()}`}, now() + interval '1 day')`;
+            await tx.$executeRaw`INSERT INTO "notification_dedupe" ("dedupe_key","organization_id","intent_id","expires_at") VALUES (${absentKey}, ${organizationId}, ${`NTI_${ulid()}`}, now() + interval '1 day')`;
           }),
         ),
       ).rejects.toEqual(
