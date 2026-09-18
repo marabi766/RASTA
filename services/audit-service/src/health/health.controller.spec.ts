@@ -3,17 +3,19 @@ import type { Response } from 'express';
 import { HealthController } from './health.controller';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { DomainProjectorConsumer } from '../consumers/domain-projector.consumer';
+import type { AuditTrailConsumer } from '../consumers/audit-trail.consumer';
 import { SERVICE_NAME } from '../config/env';
 
-function build(database: boolean, projectorRunning: boolean) {
+function build(database: boolean, projectorRunning: boolean, trailRunning = true) {
   const prisma = { isHealthy: async () => database } as unknown as PrismaService;
   const projector = { isRunning: () => projectorRunning } as unknown as DomainProjectorConsumer;
+  const trail = { isRunning: () => trailRunning } as unknown as AuditTrailConsumer;
 
   let status: number | undefined;
   const response = { status: (code: number) => (status = code) } as unknown as Response;
 
   return {
-    controller: new HealthController(prisma, projector),
+    controller: new HealthController(prisma, projector, trail),
     response,
     statusOf: () => status,
   };
@@ -24,20 +26,20 @@ describe('audit-service health probes', () => {
     // Liveness must never depend on anything external: a failing liveness
     // probe restarts the container, so one flaky dependency would become a
     // restart loop across every replica.
-    const live = build(false, false).controller.live();
+    const live = build(false, false, false).controller.live();
 
     expect(live.status).toBe('ok');
     expect(live.service).toBe(SERVICE_NAME);
     expect(live.uptimeSeconds).toBeGreaterThanOrEqual(0);
   });
 
-  it('is ready when the database accepts writes and the projector is running', async () => {
-    const { controller, response, statusOf } = build(true, true);
+  it('is ready when the database accepts writes and both consumers are running', async () => {
+    const { controller, response, statusOf } = build(true, true, true);
 
     const ready = await controller.ready(response);
 
     expect(ready.status).toBe('ok');
-    expect(ready.checks).toEqual({ database: true, projector: true });
+    expect(ready.checks).toEqual({ database: true, projector: true, trail: true });
     expect(statusOf()).toBe(HttpStatus.OK);
   });
 
@@ -65,6 +67,28 @@ describe('audit-service health probes', () => {
 
     expect(ready.status).toBe('unavailable');
     expect(ready.checks.projector).toBe(false);
+    expect(statusOf()).toBe(HttpStatus.SERVICE_UNAVAILABLE);
+  });
+
+  it('is not ready when the audit-trail consumer is not running, however healthy the projector is', async () => {
+    // AUD-004 Phase B. The negative control for a combined flag: with a healthy
+    // database and a running projector, a stopped trail must still fail
+    // readiness, and the payload must say which of the two it was.
+    const { controller, response, statusOf } = build(true, true, false);
+
+    const ready = await controller.ready(response);
+
+    expect(ready.status).toBe('unavailable');
+    expect(ready.checks).toEqual({ database: true, projector: true, trail: false });
+    expect(statusOf()).toBe(HttpStatus.SERVICE_UNAVAILABLE);
+  });
+
+  it('is not ready when neither consumer is running', async () => {
+    const { controller, response, statusOf } = build(true, false, false);
+
+    const ready = await controller.ready(response);
+
+    expect(ready.checks).toEqual({ database: true, projector: false, trail: false });
     expect(statusOf()).toBe(HttpStatus.SERVICE_UNAVAILABLE);
   });
 

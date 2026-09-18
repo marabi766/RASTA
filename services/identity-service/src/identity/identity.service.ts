@@ -7,6 +7,7 @@ import { IDENTITY_EVENTS, validateIdentityPayload } from './events';
 import { IDENTITY_TOPIC } from '../config/env';
 import { KeycloakAdminClient } from '../keycloak/keycloak.client';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+import { markRefusal } from '../security-events/refusal-sites';
 import type {
   ApproveRegistrationDto,
   CreateMembershipDto,
@@ -400,7 +401,14 @@ export class IdentityService {
 
     const membership = await this.repository.findMembership(context.userId, dto.organizationId);
     if (!membership || membership.status !== 'ACTIVE') {
-      throw RastaError.tenantMismatch(dto.organizationId, []);
+      // Marked as the one refusal this service records as audit evidence
+      // (ADR-053 § 4). The mark changes nothing about the error or its `403`;
+      // it only tells the exception filter that *this* decision is the one the
+      // allowlist in `refusal-sites.ts` describes.
+      throw markRefusal(
+        RastaError.tenantMismatch(dto.organizationId, []),
+        'SWITCH_ACTIVE_ORGANIZATION',
+      );
     }
 
     const user = await runUnscoped('a user may switch between organizations they belong to', () =>

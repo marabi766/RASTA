@@ -460,3 +460,20 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 | `rasta_event_processing_duration`  | p99 > ۵ ثانیه               |
 | `rasta_event_validation_failures`  | > ۰ → هشدار (نقض قرارداد)   |
 | `rasta_duplicate_events_total`     | پایش (سلامت At-Least-Once)  |
+
+**وضعیت اجرا (2026-09-13).** از این جدول فقط ردیف `rasta_dlq_messages_total` قاعدهٔ نوشته‌شده دارد:
+`RastaDeadLetterMessagePublished` (`sum by (service, topic, reason) (increase(rasta_dlq_messages_total[5m])) > 0`، بی `for`) در
+`infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`. همان فایل هشدارهای شکست ورود و واگرایی زنجیرهٔ حسابرسی و
+صف ردهای identity را هم دارد ([`runbooks/README.md`](runbooks/README.md#قواعد-هشدار-موجود-در-مخزن)).
+
+ردیف Lag فقط برای **دو گروه حسابرسی** قاعده دارد و آستانهٔ آن متفاوت است. Lag از سمت Broker با `kafka-exporter`
+(`danielqsj/kafka-exporter:v1.9.0`) خوانده می‌شود، نه با متریک `kafka_consumer_lag` خود سرویس. `RastaAuditConsumerLag` هنگامی
+می‌سوزد که `sum by (consumergroup, topic) (clamp_min(kafka_consumergroup_lag{consumergroup=~"audit-service\\.(domain-projector|trail)"}, 0)) > 0`
+پنج دقیقهٔ پیوسته برقرار بماند ([`runbooks/audit-ingestion-lag.md`](runbooks/audit-ingestion-lag.md)). چون آن هشدار بی ورودی
+ساکت است، `RastaKafkaExporterUnavailable` (Exporter دو دقیقه Scrape نشده یا Target نیست) و `RastaAuditConsumerGroupMetricsMissing`
+(Exporter سالم، ولی یکی از دو گروه پنج دقیقه هیچ Series Lag ندارد) نبودن سیگنال را صریح می‌کنند. Recording Rule
+`topic:kafka_topic_retained_records:sum` تعداد رکوردی را که Kafka در `rasta.audit.v1.dlq` نگه می‌دارد نشان می‌دهد — نه تعداد پیام
+حل‌نشده؛ هیچ وضعیت Triage برای پیام DLQ وجود ندارد و هشداری روی این عدد نیست. Lag گروه‌های دیگر، سن Outbox عمومی، مدت پردازش و
+شکست اعتبارسنجی هنوز قاعده ندارند. این قواعد را فقط Prometheus **محلی** Compose ارزیابی می‌کند؛ مخزن
+**Alertmanager ندارد** و هیچ اعلانی تحویل نمی‌شود. `EventConsumer` دارای Topic DLQ هنگام ساخته شدن هر ترکیب
+`clientId` × Topic مبدأ × `DlqReason` را با صفر صادر می‌کند، پس نخستین پیام DLQ هم هشدار می‌دهد.

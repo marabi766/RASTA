@@ -129,7 +129,12 @@ test('the audit entry names every object AUD-003 adds', () => {
     'audit_chain_head_forward_only',
     'audit_chain_head_no_truncate',
   ]);
-  assert.deepEqual(indexes.sort(), ['audit_chain_head_month_idx', 'audit_event_chain_idx']);
+  assert.deepEqual(indexes.toSorted(), [
+    'audit_chain_head_month_idx',
+    'audit_event_chain_idx',
+    // The correction half, added by 20260912120000_audit_event_correction_index.
+    'audit_event_correction_idx',
+  ]);
   assert.deepEqual(types, ['audit_chain_scope']);
   // Both trigger functions, not only AUD-003's: the AUD-001 one carries the
   // append-only refusal and is dropped by the same chain reversal, so leaving
@@ -285,4 +290,74 @@ test('the notification schema declares no outbox, so the outbox discovery guard 
     'utf8',
   );
   assert.doesNotMatch(schema, /model\s+OutboxMessage\b/);
+});
+
+// ---------------------------------------------------------------------------
+// The AUD-003 correction index
+// ---------------------------------------------------------------------------
+//
+// `20260912120000_audit_event_correction_index` adds one index and nothing
+// else, which is precisely the shape this harness was blind to. An index the
+// `EXPECTED` map does not name is an index the up assertion never looks for,
+// the down assertion never misses, and the second `up` never has to restore —
+// so a `down.sql` that drops the index but leaves its `_prisma_migrations` row
+// behind produces a green run over a schema that is missing the index for good.
+// Both halves are asserted here: the name is in the inventory, and the down
+// script removes its own ledger row.
+
+const CORRECTION_INDEX_MIGRATION = '20260912120000_audit_event_correction_index';
+
+function auditMigration(name, file) {
+  return readFileSync(
+    join(ROOT, 'services', 'audit-service', 'prisma', 'migrations', name, file),
+    'utf8',
+  );
+}
+
+test('the audit entry names the correction index AUD-003 adds', () => {
+  assert.ok(
+    EXPECTED.audit.indexes.includes('audit_event_correction_idx'),
+    'audit_event_correction_idx is not asserted by the verifier, so the reversibility ' +
+      'gate cannot notice it going missing',
+  );
+});
+
+test('the correction index migration creates the index the verifier asserts', () => {
+  assert.match(
+    auditMigration(CORRECTION_INDEX_MIGRATION, 'migration.sql'),
+    /CREATE INDEX audit_event_correction_idx\b/,
+  );
+});
+
+test('the correction index down script drops the index and its own ledger row', () => {
+  const down = auditMigration(CORRECTION_INDEX_MIGRATION, 'down.sql');
+
+  assert.match(down, /DROP INDEX IF EXISTS audit_event_correction_idx\b/);
+  assert.match(
+    down,
+    new RegExp(`DELETE FROM "_prisma_migrations"[\\s\\S]*${CORRECTION_INDEX_MIGRATION}`),
+    'the down script leaves its _prisma_migrations row behind, so `migrate deploy` ' +
+      'considers the migration applied and the second `up` restores nothing',
+  );
+});
+
+test('every audit migration reverses its own ledger row, and only its own', () => {
+  const dir = join(ROOT, 'services', 'audit-service', 'prisma', 'migrations');
+  const names = readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+
+  assert.ok(names.length > 0);
+
+  for (const name of names) {
+    const down = auditMigration(name, 'down.sql');
+    const deleted = [...down.matchAll(/"migration_name"\s*=\s*'([^']+)'/g)].map((m) => m[1]);
+
+    assert.deepEqual(
+      deleted,
+      [name],
+      `${name}/down.sql must delete exactly its own _prisma_migrations row`,
+    );
+  }
 });

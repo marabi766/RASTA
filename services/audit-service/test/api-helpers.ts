@@ -9,6 +9,7 @@ import {
 } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
+import { AuditTrailConsumer } from '../src/consumers/audit-trail.consumer';
 import { DomainProjectorConsumer } from '../src/consumers/domain-projector.consumer';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { runtimeUrl } from './helpers';
@@ -26,14 +27,15 @@ import { runtimeUrl } from './helpers';
  * real graph here — which is what makes "no `POST /v1/audit-events` route
  * exists" a fact about the service rather than about this file.
  *
- * ## Two overrides, and why neither is a shortcut
+ * ## The overrides, and why none is a shortcut
  *
- * **The projector.** Replaced with an inert object. A real one subscribes to
- * ten topics and replays each from the beginning, which needs a broker these
- * suites do not; its behaviour is covered against a real broker by
- * `kafka-projector.int-spec.ts` and branch by branch by its unit spec. Nothing
- * asserted here depends on it: rows are seeded through the database, which is
- * real.
+ * **The two consumers.** Replaced with inert objects. The real ones subscribe
+ * to eleven topics between them and replay each from the beginning, which needs
+ * a broker these suites do not; their behaviour is covered against a real
+ * broker by `kafka-projector.int-spec.ts`, against a real database by
+ * `ingestion.int-spec.ts` and `trail-ingestion.int-spec.ts`, and branch by
+ * branch by their unit specs. Nothing asserted here depends on them: rows are
+ * seeded through the database, which is real.
  *
  * **The token verifier.** Replaced with one that reads a base64 claims blob.
  * This is the one place in these suites where a signature is not checked, and
@@ -168,8 +170,13 @@ function applyEnvironment(maxQueryWindowDays?: number): void {
   }
 }
 
-/** A projector that connects to nothing. See the note on the overrides above. */
-const inertProjector = {
+/**
+ * A consumer that connects to nothing. See the note on the overrides above.
+ *
+ * One object for both paths, because both expose the same lifecycle and
+ * neither's behaviour is under test here.
+ */
+const inertConsumer = {
   start: async (): Promise<void> => undefined,
   onModuleDestroy: async (): Promise<void> => undefined,
   isRunning: (): boolean => false,
@@ -191,7 +198,9 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(DomainProjectorConsumer)
-    .useValue(inertProjector)
+    .useValue(inertConsumer)
+    .overrideProvider(AuditTrailConsumer)
+    .useValue(inertConsumer)
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
       factory: (): AuthGuardOptions => ({

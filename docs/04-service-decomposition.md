@@ -322,21 +322,31 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 
 ## ۴٫۱۱ inventory-service
 
-| بُعد             | مشخصات                                                                                                                                                                   |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Mission**      | انبار مرکزی اتحادیه و رهگیری تحویل — از عرضه‌کننده تا کاربر نهایی.                                                                                                       |
-| **مسئولیت‌ها**   | انبار (با موقعیت PostGIS) · موجودی و رزرو · حرکت موجودی · ماژول `logistics`: محموله، مسیر، رهگیری، شریک حمل                                                              |
-| **مالکیت داده**  | `warehouse` · `stock_item` · `stock_movement` · `stock_reservation` · `shipment` · `shipment_leg` · `tracking_event`                                                     |
-| **داخل نیست**    | تعریف کالا (نزد `marketplace`) · سفارش خرید (نزد `procurement`)                                                                                                          |
-| **Commands**     | `CreateWarehouse` · `ReceiveStock` · `ReserveStock` · `ReleaseReservation` · `IssueStock` · `CreateShipment` · `RecordTrackingEvent` · `ConfirmDelivery`                 |
-| **Queries**      | `GetStockLevel` · `ListMovements` · `GetShipment` · `TrackShipment` · `FindNearestWarehouse`                                                                             |
-| **REST**         | `POST /warehouses` · `GET /warehouses` · `GET /stock` · `POST /stock/reservations` · `POST /shipments` · `GET /shipments/{id}/tracking` · `POST /shipments/{id}/deliver` |
-| **Publishes**    | `STOCK_RECEIVED` · `STOCK_RESERVED` · `STOCK_RELEASED` · `STOCK_ISSUED` · `LOW_STOCK_DETECTED` · `SHIPMENT_CREATED` · `SHIPMENT_DISPATCHED` · `SHIPMENT_DELIVERED`       |
-| **Consumes**     | `ORDER_CREATED` (رزرو) · `ORDER_CANCELLED` (آزادسازی) · `GOODS_RECEIVED` · `PURCHASE_ORDER_ISSUED`                                                                       |
-| **Dependencies** | PostgreSQL + PostGIS · Kafka · Redis (قفل توزیع‌شده برای رزرو)                                                                                                           |
-| **مرز امنیتی**   | موجودی انبار مرکزی فقط برای `UNION_ADMIN`. کاربر فقط محموله‌های خود را رهگیری می‌کند.                                                                                    |
-| **Scale**        | نوشتن متوسط. **رزرو موجودی نیازمند قفل** — Redis Redlock + بررسی خوش‌بینانه در پایگاه داده.                                                                              |
-| **Failure**      | افت آن رزرو را می‌خواباند → سفارش‌ها در Saga منتظر می‌مانند و پس از Timeout جبران می‌شوند.                                                                               |
+| بُعد             | مشخصات                                                                                                                                                                                                                                             |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Mission**      | انبار و رهگیری تحویل — از عرضه‌کننده تا کاربر نهایی. یک انبار می‌تواند نزد هر نوع سازمانی باشد (اتحادیه، شرکت، سازمان دولتی یا ملی)؛ مالکیت از `ownerOrganizationId` می‌آید، نه از یک فرض ساختاری تک‌مالکی (ADR-056 § ۵).                          |
+| **مسئولیت‌ها**   | انبار (با موقعیت PostGIS) · موجودی و رزرو · حرکت موجودی · ماژول `logistics`: محموله، مسیر، رهگیری، شریک حمل                                                                                                                                        |
+| **مالکیت داده**  | `warehouse` · `stock_item` · `stock_movement` · `stock_reservation` · `shipment` · `shipment_leg` · `tracking_event`                                                                                                                               |
+| **داخل نیست**    | تعریف کالا (نزد `marketplace`) · سفارش خرید (نزد `procurement`)                                                                                                                                                                                    |
+| **Commands**     | `CreateWarehouse` · `ReceiveStock` · `ReserveStock` · `ReleaseReservation` · `IssueStock` · `CreateShipment` · `RecordTrackingEvent` · `ConfirmDelivery`                                                                                           |
+| **Queries**      | `GetStockLevel` · `ListMovements` · `GetShipment` · `TrackShipment` · `FindNearestWarehouse`                                                                                                                                                       |
+| **REST**         | `POST /warehouses` · `GET /warehouses` · `GET /stock` · `POST /stock/reservations` · `POST /shipments` · `GET /shipments/{id}/tracking` · `POST /shipments/{id}/deliver`                                                                           |
+| **Publishes**    | `STOCK_RECEIVED` · `STOCK_RESERVED` · `STOCK_RELEASED` · `STOCK_ISSUED` · `LOW_STOCK_DETECTED` · `SHIPMENT_CREATED` · `SHIPMENT_DISPATCHED` · `SHIPMENT_DELIVERED`                                                                                 |
+| **Consumes**     | `ORDER_CREATED` (رزرو) · `ORDER_CANCELLED` (آزادسازی) · `GOODS_RECEIVED` · `PURCHASE_ORDER_ISSUED`                                                                                                                                                 |
+| **Dependencies** | PostgreSQL + PostGIS · Kafka                                                                                                                                                                                                                       |
+| **مرز امنیتی**   | خواندن/نوشتن موجودی یک انبار: عضویت در `warehouse.ownerOrganizationId` + نقش پیکربندی‌شدهٔ آن سازمان (نه یک نقش سراسری تنها). کاربر فقط محموله‌هایی را رهگیری می‌کند که گیرنده یا مالک انبار مبدأش باشد. مرز کامل و آزمون‌های منفی در ADR-056 § ۵. |
+| **Scale**        | نوشتن متوسط. **رزرو موجودی با قفل ردیف PostgreSQL** (`SELECT ... FOR UPDATE`، ترتیب صعودی `stock_item.id`) در همان تراکنش که مانده را به‌روز می‌کند — نه Redis Redlock.                                                                            |
+| **Failure**      | افت آن رزرو را می‌خواباند → سفارش‌ها در Saga منتظر می‌مانند و پس از Timeout جبران می‌شوند.                                                                                                                                                         |
+
+> **اصلاح 2026-09-17 (ADR-056).** این جدول پیش‌تر «انبار مرکزی اتحادیه» و «فقط
+> `UNION_ADMIN`» نوشته بود — یک فرض تک‌مالکی که با اصل Organization-Agnostic
+> (ADR-012) در تناقض بود — و رزرو موجودی را به Redis Redlock وابسته کرده بود،
+> بدون آنکه چنین تغییر Stack ای ADR داشته باشد. ADR-056 هر دو را با سه ستون
+> مالکیت/دارندگی/گیرندگی مستقل و قفل ردیف PostgreSQL جایگزین کرد؛ ردیف‌های
+> Mission، مرز امنیتی، Dependencies و Scale بالا با آن ADR اصلاح شدند. ردیف
+> `Consumes` (`ORDER_CREATED`/`ORDER_CANCELLED`) هنوز طراحی هدف است، نه رفتار
+> امروز: ADR-041 § ۲ و ADR-056 § ۷ هر دو ثبت کرده‌اند که این مصرف‌کننده هنوز
+> فعال نشده — گام `RESERVE_STOCK` در Saga سفارش `DEFERRED` می‌ماند.
 
 ---
 
@@ -509,12 +519,21 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 > Producer دارد، نه Outbox، نه API نوشتن، پس `correctionOf` ستونی بی‌اثر است که همیشه `null` نوشته می‌شود؛ هیچ **صادرات**؛
 > هیچ انتشار Digest بیرونی؛ هیچ امضا؛ هیچ تجمیع ردها؛ و هیچ مصرف‌کنندهٔ `rasta.audit.trail.v1` (مسیر B — AUD-004؛ به همین
 > دلیل یک جست‌وجوی ردشده هنوز خودش رکورد `REFUSED` نمی‌سازد). `COM-009` همچنان `READY` است و ۱۳ امتیازش داده نشده.
+>
+> **به‌روزرسانی 2026-09-12 — بند «آنچه هنوز نیست» بالا بخشی‌اش گذشته است.** مسیر B مصرف می‌شود (AUD-004 Phase B)، ردها از
+> نُه محل در `identity-service` با تجمیع پنجره‌ای ثبت می‌شوند (C1–C10)، و **رکورد جبرانی پیاده شد (نیمهٔ اصلاحِ AUD-003):**
+> فرمان `POST /v1/audit-corrections` در `identity-service` (فقط `SYSTEM_ADMIN`، `Idempotency-Key` الزامی، تصمیم موقت
+> Q-53) هدف را از راه Endpoint داخلی و باریک `GET /v1/internal/audit-events/{id}` همین سرویس — فقط توکن سرویسِ
+> `identity-service`، سه میدان، بی‌هیچ شاهد — اثبات می‌کند و یک `AUDIT_EVENT_RECORDED` v1 از `outbox_message` استاندارد خودش
+> منتشر می‌کند. این سرویس آن را رکورد **تازهٔ** زنجیرشده با `correction_of` می‌نویسد؛ اصل و Hashاش دست‌نخورده می‌مانند؛ و هر
+> رکورد اکنون `correctionOf` و `correctedBy[]` را با همان دامنهٔ مستأجرِ خودِ رکورد منتشر می‌کند. **این سرویس همچنان هیچ
+> API نوشتنی ندارد.** هنوز نیست: صادرات، Digest بیرونی، امضا، Purge و هشدار.
 
 | بُعد            | مشخصات                                                                                                                                                                                                                                   |
 | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Mission**     | سابقه تغییرناپذیر «چه کسی، چه کرد، کِی، از کجا، با چه نتیجه‌ای».                                                                                                                                                                         |
 | **مالکیت داده** | `audit_event` — **فقط الحاقی**؛ بدون UPDATE و بدون DELETE                                                                                                                                                                                |
-| **REST**        | `GET /audit-events` (فیلتر بر actor، resource، action، بازه) · `GET /audit-events/{id}` · `GET /audit-events/verify`                                                                                                                     |
+| **REST**        | `GET /audit-events` (فیلتر بر actor، resource، action، بازه) · `GET /audit-events/{id}` · `GET /audit-events/verify` · داخلی: `GET /v1/internal/audit-events/{id}` (فقط توکن سرویسِ `identity-service`؛ اثبات هدف اصلاح)                 |
 | **Consumes**    | **دو مسیر:** هر ده Topic دامنه‌ای (Projector) + `rasta.audit.trail.v1` (قرارداد صریح). ADR-053                                                                                                                                           |
 | **مرز امنیتی**  | نوشتن فقط از Kafka (بدون API نوشتن). خواندن `SYSTEM_ADMIN` و `UNION_ADMIN`؛ صادرات فقط `SYSTEM_ADMIN`.                                                                                                                                   |
 | **ADR**         | [ADR-053](adr/ADR-053-audit-service-append-only-evidence.md) — `Proposed`. **AUD-001 و AUD-002 پیاده شدند؛ از AUD-003 نیمهٔ شواهد دست‌نخوردگی (زنجیرهٔ Hash + `verify`) پیاده شد و نیمهٔ اصلاح نه — وابسته به مسیر B؛ AUD-004 هنوز نه.** |

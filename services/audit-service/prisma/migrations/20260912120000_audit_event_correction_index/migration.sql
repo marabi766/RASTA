@@ -1,0 +1,19 @@
+-- AUD-003 correction -- the access path for `correctedBy` (ADR-053 § 7).
+--
+-- Additive only: one index, no column, no data change, nothing backfilled.
+--
+-- Every read now publishes both directions of a correction link. `correctionOf`
+-- is a column of the row itself; `correctedBy` is the set of later rows whose
+-- `correction_of` names it, fetched once per page under the page's own scope and
+-- bounded below by the earliest target's `occurred_at` (a correction is always
+-- minted after what it corrects). This index turns that lookup into an index
+-- probe per partition instead of a scan of every partition since the target.
+--
+-- Created on the partitioned parent, so PostgreSQL creates the matching index
+-- on every existing partition and on every partition attached later. Plain
+-- `CREATE INDEX` rather than `CONCURRENTLY`, which PostgreSQL does not support
+-- on a partitioned table; the table is append-only and the lock is brief.
+--
+-- The append-only controls are untouched: an index is not a row, and neither
+-- the privilege split nor `audit_event_append_only` is involved.
+CREATE INDEX audit_event_correction_idx ON audit_event (correction_of, occurred_at);

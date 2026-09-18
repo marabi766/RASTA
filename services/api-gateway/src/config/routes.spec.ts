@@ -94,6 +94,24 @@ describe('routing table integrity', () => {
     }
   });
 
+  it('routes the audit correction command to identity, SYSTEM_ADMIN only, with a mandatory key', () => {
+    const route = ROUTES.find((r) => r.prefix === 'audit-corrections');
+    expect(route).toEqual({
+      prefix: 'audit-corrections',
+      service: 'identity',
+      roles: ['SYSTEM_ADMIN'],
+      requiresIdempotencyKey: true,
+    });
+    expect(resolveRoute('/audit-corrections')).toBe(route);
+    // Never public, never UNION_ADMIN, never the oversight role.
+    expect(route?.publicReason).toBeUndefined();
+    expect(route?.roles).not.toContain('UNION_ADMIN');
+    expect(route?.roles).not.toContain('AUDITOR');
+    // And the evidence store's own prefix stays read-only and at audit-service.
+    expect(resolveRoute('/audit-events')?.service).toBe('audit');
+    expect(ROUTES.find((r) => r.prefix === 'audit-events')?.requiresIdempotencyKey).toBeUndefined();
+  });
+
   it('routes the document prefix to document-service', () => {
     const route = ROUTES.find((r) => r.prefix === 'documents');
     expect(route?.service).toBe('document');

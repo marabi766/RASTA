@@ -319,6 +319,14 @@ export const EXPECTED = {
       'audit_event_chain_idx',
       // "Which chains does this month hold" — the parent index, not a clone.
       'audit_chain_head_month_idx',
+      // AUD-003's correction half: the access path for `correctedBy`. Every
+      // read publishes both directions of a correction link, and the reverse
+      // direction is "which later rows name this one" — an index probe per
+      // partition with this, a scan of every partition since the target
+      // without it. It is listed for a second reason too: its migration adds
+      // one index and nothing else, so an inventory that does not name it
+      // makes that whole migration invisible to the up → down → up proof.
+      'audit_event_correction_idx',
     ],
     types: ['audit_chain_scope'],
     // The two trigger functions, named separately from the triggers that call

@@ -2,11 +2,13 @@ import type { EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import { SENSITIVE_KEYS } from '@rasta/logging';
 import {
+  AUDIT_DEAD_LETTER_TOPIC,
   DOMAIN_PROJECTOR_CONSUMER,
   DOMAIN_TOPICS,
   describePayloadKeys,
   isSensitiveKey,
   toAuditEventRecord,
+  toEnvelopeProvenance,
 } from './audit.mapper';
 
 function envelope(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
@@ -58,6 +60,13 @@ describe('the ten subscribed topics', () => {
   it('names the consumer group ADR-053 specifies', () => {
     expect(DOMAIN_PROJECTOR_CONSUMER).toBe('audit-service.domain-projector');
   });
+
+  it("dead-letters into audit's own topic, which the topic-creation lines provision", () => {
+    // Shared by both consumers. A dead-letter topic that did not exist would
+    // stall the partition on the first refused message instead of keeping it.
+    expect(AUDIT_DEAD_LETTER_TOPIC).toBe('rasta.audit.v1.dlq');
+    expect(DOMAIN_TOPICS).not.toContain(AUDIT_DEAD_LETTER_TOPIC);
+  });
 });
 
 describe('mapping an envelope to an audit record', () => {
@@ -108,6 +117,35 @@ describe('mapping an envelope to an audit record', () => {
 
     expect(a.id).not.toBe(b.id);
     expect(a.id).not.toBe(a.sourceEventId);
+  });
+
+  it('takes every envelope-derived column from the provenance function path B shares', () => {
+    // AUD-004 Phase B extracted this so the two paths cannot drift on what
+    // the source event, the topic or the causal chain means. Asserted here on
+    // path A so the extraction is proved behaviour-preserving, not assumed.
+    const source = envelope({ causationId: 'cause-1', traceparent: '00-abc-def-01', streamSeq: 9 });
+    const { id: _recordId, ...record } = toAuditEventRecord(source, delivery());
+    const { id: provenanceId, ...provenance } = toEnvelopeProvenance(source, delivery());
+
+    expect(record).toEqual(expect.objectContaining(provenance));
+    expect(provenanceId).not.toBe(source.eventId);
+  });
+
+  it('never gives a path-A record a path-B key', () => {
+    // A domain envelope has nothing to put in these, and a key that is absent
+    // rather than null is what keeps "no payload can reach the row" structural.
+    const record = toAuditEventRecord(envelope(), delivery());
+
+    for (const key of [
+      'errorCode',
+      'reason',
+      'changes',
+      'sourceIp',
+      'sourceUserAgent',
+      'correctionOf',
+    ]) {
+      expect(Object.keys(record)).not.toContain(key);
+    }
   });
 
   describe('actor provenance is never ambiguous (ADR § 5)', () => {
