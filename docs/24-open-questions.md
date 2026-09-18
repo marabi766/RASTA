@@ -1423,13 +1423,16 @@ Actor و هم نقش‌ها باید از جای دیگری بیایند؛ (۳) 
 `services/identity-service/src/security-events/refusal-aggregation.ts`) و Index یکتای جزئی در یک Migration افزایشی. حمل
 مرزهای پنجره روی سیم: نسخهٔ ۲ Contract. هیچ‌کدام تغییر معماری نیست.
 
-**شمارهٔ پیشین و یک ارجاع کهنهٔ عمدی.** این پرسش تا پیش از Merge با `main` (PR #45) شمارهٔ `Q-44` داشت. `main` مستقلاً همان
-شماره را به قاعدهٔ نمایش `Fulfillment`/`Shipment` داده بود و آن شماره در نقل مستقیم و Verbatim صاحب محصول در
-[`ADR-056`](adr/ADR-056-inventory-forward-logistics.md) آمده است؛ نقل قول کسی را نمی‌توان ویرایش کرد، پس `Q-44` نزد آن ماند و
-این پرسش `Q-57` شد (`Q-56` نزد شاخهٔ `feat/supplier-performance-phase2` رزرو است). ارجاع‌های متنی به‌روز شدند، اما Comment
-داخل Migration **اعمال‌شدهٔ** `20260911130000_security_event_outbox_aggregation/migration.sql` همچنان `Q-44` می‌نویسد و
-**عمداً** اصلاح نشده: Prisma برای هر Migration اعمال‌شده Checksum نگه می‌دارد و ویرایش فایل، هر `migrate dev` یا
-`migrate deploy` بعدی را با خطای «تغییر یافته» روبه‌رو می‌کند. کهنگی این Comment ظاهری است و هیچ رفتاری را عوض نمی‌کند.
+**شمارهٔ پیشین و یک ارجاع کهنهٔ عمدی.** این پرسش تا پیش از Merge با `main` (PR #45) شمارهٔ `Q-44` داشت. `main` مستقلاً
+همان شماره را به قاعدهٔ نمایش `Fulfillment`/`Shipment` داده بود و آن شماره در نقل مستقیم و Verbatim صاحب محصول در
+[`ADR-056`](adr/ADR-056-inventory-forward-logistics.md) آمده است؛ نقل قول کسی را نمی‌توان ویرایش کرد، پس `Q-44` نزد آن
+ماند و این پرسش `Q-57` شد (`Q-56` نزد شاخهٔ `feat/supplier-performance-phase2` رزرو است). ارجاع‌های متنی به‌روز شدند،
+اما Comment داخل Migration **اعمال‌شدهٔ**
+`services/identity-service/prisma/migrations/20260911130000_security_event_outbox_aggregation/migration.sql` همچنان
+`(docs/24-open-questions.md Q-44)` می‌نویسد. **آن ارجاع را `Q-57` — یعنی همین پرسش — بخوانید، نه `Q-44` را، که پس از
+این Merge پرسش بستهٔ دیگری دربارهٔ نمایش تحویل است.** عمداً اصلاح نشده: Prisma برای هر Migration اعمال‌شده Checksum
+نگه می‌دارد و ویرایش فایل، هر `migrate dev` یا `migrate deploy` بعدی را با خطای «تغییر یافته» روبه‌رو می‌کند. کهنگی
+این Comment ظاهری است و هیچ رفتاری را عوض نمی‌کند.
 
 **مسدود نمی‌کند.**
 
