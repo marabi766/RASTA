@@ -377,6 +377,80 @@ export const EXPECTED = {
       'audit_chain_head_hash_is_sha256',
     ],
   },
+  /**
+   * notification-service, registered the moment it had a real migration to
+   * verify and not before (ADR-053 plan, Step Zero: a vacuous entry is worse
+   * than none).
+   *
+   * The constraints listed are ADR-054 § 4's delivery invariants made
+   * structural, plus the two the semantic dedupe and the claim worker rest on.
+   * `ck_delivery_suppressed_shape` is what makes "suppression is a decision,
+   * not a failure" true of the row; `ux_delivery_intent_user_channel` is
+   * invariant 6, the last line against a replayed consumer; and
+   * `ck_in_app_action_path_relative` is the open-redirect refusal ADR § 10
+   * wants at the database, not only in a DTO. A down script that dropped any
+   * of them while the forward migration forgot to restore it would leave a
+   * delivery table that enforces nothing while looking untouched.
+   *
+   * `notification_dedupe_intent_id_fkey` is listed by name for a reason the
+   * others are not: it is the one foreign key hand-written after Prisma's
+   * block, because it must be DEFERRABLE INITIALLY DEFERRED for the consumer's
+   * single-statement dedupe decision to precede the intent row. A forward
+   * migration that recreated it as an immediate constraint would pass a
+   * table-only check and break every ingest.
+   *
+   * The trigger and its function are named separately, for the same reason
+   * audit's are: a `DROP TRIGGER` without the matching `DROP FUNCTION` leaves a
+   * `refuse_attempt_update()` behind that the second `up` then fails to CREATE.
+   */
+  notification: {
+    tables: [
+      'processed_event',
+      'notification_intent',
+      'notification_dedupe',
+      'recipient_resolution',
+      'notification_delivery',
+      'delivery_attempt',
+      'in_app_notification',
+    ],
+    // NTF-002 adds the second pair: read state is write-once. The trigger and
+    // its function are named separately for the same reason as the first pair.
+    triggers: ['delivery_attempt_append_only', 'in_app_notification_state_write_once'],
+    functions: ['refuse_attempt_update', 'refuse_in_app_state_regression'],
+    indexes: ['ix_intent_claimable', 'ix_in_app_unread', 'ux_delivery_intent_user_channel'],
+    types: [
+      'notification_severity',
+      'notification_classification',
+      'intent_status',
+      'resolution_source',
+      'notification_channel',
+      'delivery_status',
+      'attempt_outcome',
+    ],
+    constraints: [
+      'notification_dedupe_intent_id_fkey',
+      'ck_intent_terminal_reason',
+      'ck_intent_dispatched_is_resolved',
+      'ck_intent_claim_triple',
+      'ck_intent_claim_only_when_pending',
+      'ck_intent_attempts_nonneg',
+      'ck_intent_dedupe_key_is_sha256',
+      'ck_dedupe_seen_count_positive',
+      'ck_dedupe_window_ordered',
+      'ck_delivery_suppressed_shape',
+      'ck_delivery_sent_has_timestamp',
+      'ck_delivery_dead_exhausted',
+      'ck_delivery_attempts_bounded',
+      'ck_delivery_next_attempt_only_when_open',
+      'ck_attempt_no_positive',
+      'ck_attempt_ordered',
+      'ck_attempt_error_class_shape',
+      'ck_in_app_dismiss_implies_read',
+      'ck_in_app_action_path_relative',
+      'ck_in_app_text_not_blank',
+      'ck_in_app_expires_after_created',
+    ],
+  },
   economic: {
     tables: ['wallet', 'ledger_account', 'journal', 'ledger_entry', 'transaction', 'settlement'],
     triggers: ['trg_ledger_entry_immutable', 'trg_journal_immutable', 'trg_journal_balanced'],

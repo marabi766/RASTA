@@ -37,6 +37,7 @@
 | 23  | [Risks & Trade-offs](23-risks-and-tradeoffs.md)                  | چه چیزی را آگاهانه معاوضه کردیم                             |
 | 24  | [Open Questions](24-open-questions.md)                           | چه چیزی نیازمند تصمیم انسانی است                            |
 | 25  | [Progress Governance](25-progress-governance.md)                 | Backlog، Story Point و درصد رسمی پیشرفت چگونه محاسبه می‌شود |
+| 26  | [Branch Registry](26-branch-registry.md)                         | کدام شاخه کجاست، چه چیزی را لمس می‌کند و چطور تداخل نکنیم   |
 
 ## پوشه‌های تکمیلی
 

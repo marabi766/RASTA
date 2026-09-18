@@ -25,7 +25,9 @@ import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { VersioningType } from '@nestjs/common';
 import helmet from 'helmet';
+import { SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import { buildNotificationOpenApiDocument } from './openapi/document';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -55,21 +57,30 @@ async function bootstrap(): Promise<void> {
     });
   }
 
-  // Nothing here accepts a body — the only routes are two GET probes. The limit
-  // is set anyway so the first endpoint that does accept one inherits a bound
-  // rather than the framework default.
+  // No endpoint here accepts a body — every write is a parameterless POST —
+  // so the bound exists for the first one that does, rather than leaving it to
+  // the framework default.
   app.useBodyParser('json', { limit: '64kb' });
+
+  // The published contract, served outside production only (docs/api/README.md).
+  // Built by the same function the committed document and
+  // `test/openapi.int-spec.ts` use, so /docs, the file and the test cannot
+  // describe three different services.
+  if (env.NODE_ENV !== 'production') {
+    SwaggerModule.setup('docs', app, buildNotificationOpenApiDocument(app));
+  }
 
   app.enableShutdownHooks();
 
   await app.listen(env.PORT, '0.0.0.0');
 
-  // Says what it is. A service answering health checks and nothing else is easy
-  // to mistake for a working one, and this line is where an operator looks
-  // first (ADR-054 is Proposed; NTF-001 has not started).
+  // Says what it is, and what it is not. This line is where an operator looks
+  // first: in-app delivery is live (NTF-001); no email has ever been sent from
+  // this platform and no provider has been chosen (ADR-054 § 6, Q-37).
   console.warn(
     `[${SERVICE_NAME}] listening on :${env.PORT} (${env.NODE_ENV}) — ` +
-      'bootstrap scaffold: health probes only, no notification delivery',
+      'in-app notifications from INSURANCE_EXPIRING, INSPECTION_EXPIRING and MAINTENANCE_DUE, ' +
+      'read API at /v1/notifications; no email channel',
   );
 }
 

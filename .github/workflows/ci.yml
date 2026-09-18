@@ -516,29 +516,28 @@ jobs:
         # the three-way collision the shared-registration step exists to avoid
         # (ADR-053 plan, Step Zero).
         #
-        # `notification` is deliberately absent from three other multi-service
-        # steps, because none of those would use it:
+        # `audit` and `notification` are both registered in `Migration
+        # reversibility` too, each the moment it had a real migration to
+        # reverse and not before — a vacuous entry is worse than none. `audit`
+        # arrived there with AUD-001 and `notification` with NTF-001, both
+        # under the whole-chain `verify-migration-reversible.mjs <service>`.
+        # `identity` is registered there as well, by the two named verifiers
+        # that reach the migrations the whole-chain harness cannot — AUD-004's
+        # `security_event_outbox` and AUD-003's `audit_correction_command`. All
+        # three services' urls are therefore present in that step.
         #
-        #   Migration reversibility  runs `pnpm test:migration`. `notification`
-        #                            is not registered there — it has no real
-        #                            migration to reverse yet, and a vacuous
-        #                            entry is worse than none. `audit` *is*
-        #                            registered (whole-chain
-        #                            `verify-migration-reversible.mjs audit`),
-        #                            and so is `identity`, by the two named
-        #                            verifiers that reach the migrations the
-        #                            whole-chain harness cannot — AUD-004's
-        #                            `security_event_outbox` and AUD-003's
-        #                            `audit_correction_command`. Both services'
-        #                            urls are therefore present in that step.
+        # `notification` is deliberately absent from two other multi-service
+        # steps, because neither would use it:
+        #
         #   Outbox B3                passes every url it touches explicitly and
-        #                            `notification` owns no outbox today.
+        #                            `notification` owns no outbox today (its
+        #                            own arrives with NTF-004).
         #   E2E `Apply migrations`   carries only the services that job
         #                            actually starts (five, since AUD-004
         #                            Phase C1 added identity-service).
         #
         # A url present in a step that cannot use it reads as registration that
-        # has happened. For `notification` it has not.
+        # has happened. For `notification` in those two steps it has not.
         run: pnpm run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
@@ -704,6 +703,19 @@ jobs:
           # role genuinely cannot delete.
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
 
+      - name: Notification coverage gate
+        # `docs/14` § 14.2 puts notification-service in the 75% band, gated from
+        # its first real story (ADR-054 plan § 7.8). Measured across both
+        # projects because the properties NTF-001 rests on — the semantic
+        # dedupe upsert, the deferred foreign key, the fenced claim, the CHECK
+        # constraints — live in PostgreSQL, and a unit-only number would reward
+        # mocking exactly the system this service's correctness depends on.
+        run: pnpm --filter @rasta/notification-service run test:coverage
+        env:
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
+
       - name: Test independence (F-25)
         # Runs every test in maintenance's event-flow suite on its own and
         # requires it to pass alone.
@@ -808,7 +820,7 @@ jobs:
         # own job because this is where a migrated database already exists.
         run: pnpm run test:migration
         env:
-          # All nine, not only the five the whole-chain checks cover. ADR-050
+          # All nine, not only the six the whole-chain checks cover. ADR-050
           # adds its claim columns to every service-owned database, and
           # `verify-outbox-claim-migration.mjs --in-place` reverses that one
           # migration on each of them — so a missing url here is a database
@@ -837,6 +849,7 @@ jobs:
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
 

@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Public, Roles, zodPipe } from '@rasta/nest-common';
+import { AllowService, Public, Roles, zodPipe } from '@rasta/nest-common';
 import { IdentityService } from './identity.service';
 import {
   approveRegistrationSchema,
@@ -51,8 +51,19 @@ export class UserController {
     return this.identity.switchActiveOrganization(dto);
   }
 
+  /**
+   * Also callable by notification-service, and by no other service.
+   *
+   * ADR-054 § 1: recipients are resolved through this endpoint with a
+   * `SERVICE` token whose `org_id` claim is signed (ADR-035), so the
+   * membership query is scoped to the organization the token was minted for
+   * and to nothing else. This widens no human's access — `@Roles` still
+   * decides every user token exactly as before — and a service token from any
+   * caller not named here is refused by `AuthGuard` (ADR-020).
+   */
   @Get()
   @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
+  @AllowService('notification-service')
   @ApiOperation({ summary: 'List users in the requesting organization' })
   list(@Query(zodPipe(listUsersQuerySchema)) query: ListUsersQuery) {
     return this.identity.listUsers(query);

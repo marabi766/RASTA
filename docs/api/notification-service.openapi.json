@@ -1,0 +1,913 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/v1/notifications": {
+      "get": {
+        "description": "Only rows belonging to the authenticated user in the active organization, newest first, paged by an opaque cursor that carries a position and no scope. Omitting `state` returns the inbox (everything not dismissed); `UNREAD`, `READ` and `DISMISSED` narrow it. Expired rows are never returned. `limit` defaults to 25 and may not exceed 200.",
+        "operationId": "NotificationController_list_v1",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25,
+              "description": "Page size. Defaults to 25; above 200 is refused."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "Opaque position from the previous page’s `nextCursor`."
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["UNREAD", "READ", "DISMISSED"],
+              "description": "UNREAD, READ or DISMISSED. Omitted: every non-dismissed row."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": ["UNREAD", "READ", "DISMISSED"]
+                          },
+                          "ruleKey": {
+                            "type": "string"
+                          },
+                          "severity": {
+                            "type": "string",
+                            "enum": ["INFO", "WARNING", "CRITICAL"]
+                          },
+                          "classification": {
+                            "type": "string",
+                            "enum": ["ROUTINE", "MANDATORY"]
+                          },
+                          "subjectType": {
+                            "type": "string"
+                          },
+                          "subjectId": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "actionPath": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "occurredAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "readAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "nullable": true
+                          },
+                          "dismissedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "nullable": true
+                          },
+                          "expiresAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "state",
+                          "ruleKey",
+                          "severity",
+                          "classification",
+                          "subjectType",
+                          "subjectId",
+                          "title",
+                          "body",
+                          "actionPath",
+                          "occurredAt",
+                          "createdAt",
+                          "readAt",
+                          "dismissedAt",
+                          "expiresAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. `limit` is an integer from 1 to 200; an unknown query parameter is refused rather than ignored; an invalid, edited or unparseable `cursor` lands here too, as does an `id` that is not a prefixed ULID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a service-to-service token (no endpoint here grants one), or a user token that names no active organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List the caller’s own in-app notifications",
+        "tags": ["notifications"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/notifications/unread-count": {
+      "get": {
+        "description": "Counts unread, undismissed, unexpired rows and stops at 99: `{ count: 99, capped: true }` means \"at least 99\". A badge does not need the exact number, and an unbounded count on a hot path is a load problem waiting to happen (ADR-054 § 4).",
+        "operationId": "NotificationController_unreadCount_v1",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "capped": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["count", "capped"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. `limit` is an integer from 1 to 200; an unknown query parameter is refused rather than ignored; an invalid, edited or unparseable `cursor` lands here too, as does an `id` that is not a prefixed ULID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a service-to-service token (no endpoint here grants one), or a user token that names no active organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "How many unread notifications the caller has, capped at 99",
+        "tags": ["notifications"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/notifications/read-all": {
+      "post": {
+        "description": "Scoped to the authenticated user in the active organization; rows in the caller’s other organizations and every other person’s rows are untouched. Answers how many rows changed, which is 0 on a repeat call.",
+        "operationId": "NotificationController_readAll_v1",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "updated": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": ["updated"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. `limit` is an integer from 1 to 200; an unknown query parameter is refused rather than ignored; an invalid, edited or unparseable `cursor` lands here too, as does an `id` that is not a prefixed ULID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a service-to-service token (no endpoint here grants one), or a user token that names no active organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Mark every unread notification of the caller as read",
+        "tags": ["notifications"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/notifications/{id}": {
+      "get": {
+        "description": "A row that belongs to somebody else — in this organization or any other — answers `404` exactly as an id that does not exist, so a row’s existence is never disclosed by the difference between two statuses (docs/06 § 6.7).",
+        "operationId": "NotificationController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "The notification’s identifier, a prefixed ULID.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[0-9A-Za-z_-]+$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": ["UNREAD", "READ", "DISMISSED"]
+                    },
+                    "ruleKey": {
+                      "type": "string"
+                    },
+                    "severity": {
+                      "type": "string",
+                      "enum": ["INFO", "WARNING", "CRITICAL"]
+                    },
+                    "classification": {
+                      "type": "string",
+                      "enum": ["ROUTINE", "MANDATORY"]
+                    },
+                    "subjectType": {
+                      "type": "string"
+                    },
+                    "subjectId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "body": {
+                      "type": "string"
+                    },
+                    "actionPath": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "occurredAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "readAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "dismissedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "state",
+                    "ruleKey",
+                    "severity",
+                    "classification",
+                    "subjectType",
+                    "subjectId",
+                    "title",
+                    "body",
+                    "actionPath",
+                    "occurredAt",
+                    "createdAt",
+                    "readAt",
+                    "dismissedAt",
+                    "expiresAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. `limit` is an integer from 1 to 200; an unknown query parameter is refused rather than ignored; an invalid, edited or unparseable `cursor` lands here too, as does an `id` that is not a prefixed ULID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a service-to-service token (no endpoint here grants one), or a user token that names no active organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "One of the caller’s own notifications",
+        "tags": ["notifications"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/notifications/{id}/read": {
+      "post": {
+        "description": "Idempotent and monotonic: a second call answers `200` with the original `readAt` and changes nothing. There is no un-read transition (ADR-054 § 4).",
+        "operationId": "NotificationController_markRead_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "The notification’s identifier, a prefixed ULID.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[0-9A-Za-z_-]+$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": ["UNREAD", "READ", "DISMISSED"]
+                    },
+                    "ruleKey": {
+                      "type": "string"
+                    },
+                    "severity": {
+                      "type": "string",
+                      "enum": ["INFO", "WARNING", "CRITICAL"]
+                    },
+                    "classification": {
+                      "type": "string",
+                      "enum": ["ROUTINE", "MANDATORY"]
+                    },
+                    "subjectType": {
+                      "type": "string"
+                    },
+                    "subjectId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "body": {
+                      "type": "string"
+                    },
+                    "actionPath": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "occurredAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "readAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "dismissedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "state",
+                    "ruleKey",
+                    "severity",
+                    "classification",
+                    "subjectType",
+                    "subjectId",
+                    "title",
+                    "body",
+                    "actionPath",
+                    "occurredAt",
+                    "createdAt",
+                    "readAt",
+                    "dismissedAt",
+                    "expiresAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. `limit` is an integer from 1 to 200; an unknown query parameter is refused rather than ignored; an invalid, edited or unparseable `cursor` lands here too, as does an `id` that is not a prefixed ULID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a service-to-service token (no endpoint here grants one), or a user token that names no active organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Mark one notification as read",
+        "tags": ["notifications"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/notifications/{id}/dismiss": {
+      "post": {
+        "description": "Sets `dismissedAt`, and `readAt` too if it was unset — dismiss means read. The row is not deleted; it leaves the inbox and stays readable under `state=DISMISSED` until retention (ADR-054 § 4). Idempotent: a second call answers `200` with the original timestamps.",
+        "operationId": "NotificationController_dismiss_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "The notification’s identifier, a prefixed ULID.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[0-9A-Za-z_-]+$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": ["UNREAD", "READ", "DISMISSED"]
+                    },
+                    "ruleKey": {
+                      "type": "string"
+                    },
+                    "severity": {
+                      "type": "string",
+                      "enum": ["INFO", "WARNING", "CRITICAL"]
+                    },
+                    "classification": {
+                      "type": "string",
+                      "enum": ["ROUTINE", "MANDATORY"]
+                    },
+                    "subjectType": {
+                      "type": "string"
+                    },
+                    "subjectId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "body": {
+                      "type": "string"
+                    },
+                    "actionPath": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "occurredAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "readAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "dismissedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "state",
+                    "ruleKey",
+                    "severity",
+                    "classification",
+                    "subjectType",
+                    "subjectId",
+                    "title",
+                    "body",
+                    "actionPath",
+                    "occurredAt",
+                    "createdAt",
+                    "readAt",
+                    "dismissedAt",
+                    "expiresAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. `limit` is an integer from 1 to 200; an unknown query parameter is refused rather than ignored; an invalid, edited or unparseable `cursor` lands here too, as does an `id` that is not a prefixed ULID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a service-to-service token (no endpoint here grants one), or a user token that names no active organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Dismiss one notification",
+        "tags": ["notifications"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "Rasta — Notification Service",
+    "description": "The in-app inbox. Every endpoint returns or changes the authenticated user’s own notifications in the organization the request acts for, and nothing else: there is no administrative view of another person’s inbox, no way to name a tenant, and no DELETE — dismissing removes a row from the inbox and keeps it until retention. Reading is idempotent and monotonic; there is no un-read. Notifications are created by consuming domain events (INSURANCE_EXPIRING, INSPECTION_EXPIRING, MAINTENANCE_DUE) with semantic deduplication (ADR-054). No email is sent by this platform: no provider or sender identity has been chosen (docs/24 Q-37), and preferences are not implemented (NTF-003).",
+    "version": "0.1.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "type": "http"
+      }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "correlationId": {
+            "type": "string"
+          },
+          "details": {
+            "type": "array",
+            "items": {}
+          }
+        },
+        "required": ["code", "message"],
+        "additionalProperties": false
+      }
+    }
+  }
+}
