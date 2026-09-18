@@ -2,7 +2,7 @@
   "$schema": "./backlog.schema.json",
   "version": 2,
   "project": "RASTA",
-  "asOf": "2026-09-01",
+  "asOf": "2026-09-18",
   "governance": {
     "baselineState": "APPROVED",
     "approvedBy": "Product Owner",
@@ -485,8 +485,22 @@
         "Configurable performance scoring supplies marketplace rating without invented verification"
       ],
       "dependencies": ["COM-004"],
-      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
-      "evidence": []
+      "sourceRefs": [
+        "docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰",
+        "docs/adr/ADR-052-implementation-plan.md"
+      ],
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/48",
+          "note": "ADR-052 phase 2 step 1 only: delivery promise, dispute resolution with structured attribution, structured cancellation cause. Sub-step 1-د, the quality component at 30% weight, is deliberately absent because Q-56 is open and its answer is a product decision — so the second acceptance criterion is not met and the item stays IN_PROGRESS."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/35362526476",
+          "note": "First run to cover every phase-2 commit, including the real-Kafka producer tests and the asset-service contract tests"
+        }
+      ]
     },
     {
       "id": "COM-006",
@@ -527,14 +541,38 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 13,
-      "status": "READY",
+      "status": "BLOCKED",
       "acceptanceCriteria": [
         "Domain events produce idempotent in-app notifications",
         "Email delivery respects user preferences and records delivery outcome"
       ],
       "dependencies": ["PLAT-003"],
-      "sourceRefs": ["docs/04-service-decomposition.md#notification-service-p0"],
-      "evidence": []
+      "sourceRefs": [
+        "docs/04-service-decomposition.md#notification-service-p0",
+        "docs/adr/ADR-054-notification-service-delivery.md"
+      ],
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/46",
+          "note": "NTF-001: the first acceptance criterion is met — domain events produce idempotent in-app notifications, deduplicated on content with the daysRemaining banding of ADR-054"
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/47",
+          "note": "NTF-002: read API and write-once read state, enforced in the database rather than in the service"
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/35372805765",
+          "note": "Green on main at a84269a; 180 unit and 70 integration tests for this service"
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "BLOCKED, not READY, for two reasons. (1) The second acceptance criterion has no implementation: services/notification-service/src has no channel, mail or email module at all, and Q-37 — which email provider — is an open blocking question. (2) NTF-002 publishes no domain event for read or dismiss, so audit-service never observes either action; closing that deviation is a product-owner decision, still open on 2026-09-18."
+        }
+      ]
     },
     {
       "id": "COM-009",
@@ -549,8 +587,32 @@
         "Audit records are append-only and object-authorized"
       ],
       "dependencies": ["PLAT-003"],
-      "sourceRefs": ["docs/04-service-decomposition.md#audit-service-p0"],
-      "evidence": []
+      "sourceRefs": [
+        "docs/04-service-decomposition.md#audit-service-p0",
+        "docs/adr/ADR-053-audit-service-append-only-evidence.md"
+      ],
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/44",
+          "note": "AUD-004: the explicit AUDIT_EVENT_RECORDED contract, refusal aggregation, and phase C11 over the AuthGuard refusal paths"
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/35372805765",
+          "note": "Green on main at a84269a; 717 unit and 177 integration tests for this service"
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/evidence/com-009/aud-004-acceptance-audit-2026-09-17.md",
+          "note": "Dated acceptance audit. Its verdict (A) named one in-scope blocker — identity-service not recording its reachable 403 FORBIDDEN refusal of a service caller. That blocker is closed: phase C11 added the SERVICE_CALLER_FORBIDDEN refusal site and PR #44 merged it as 9fa75cc."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "PROJECT_MEMORY.md",
+          "note": "The second acceptance criterion holds: append-only is enforced in three layers (REVOKE, trigger, hash chain per organization and month). The first criterion is platform-wide and two producer-side gaps remain, both tracked elsewhere: D-011 in § 22, where a maintenance schedule change publishes no event at all; and COM-008, where notification-service publishes no domain topic, so no state change inside it reaches audit. audit-service itself subscribes to all ten domain topics that exist."
+        }
+      ]
     },
     {
       "id": "COM-010",
