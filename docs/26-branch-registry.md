@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۷ (2026-09-18) · **`main` در آن لحظه:** `a84269a`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۷ (2026-09-18) · **`main` در آن لحظه:** `eea7d61`
 
 ---
 
@@ -55,12 +55,11 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                           | Worktree                                         | نشست | PR                                                | ahead / behind | وضعیت                                                                        |
-| ------------------------------ | ------------------------------------------------ | ---- | ------------------------------------------------- | -------------- | ---------------------------------------------------------------------------- |
-| `feat/web-foundation`          | `F:\Rasta-Parallel\exp-001-web-foundation`       | C0   | —                                                 | ۰ / ۰          | `EXP-001` PR الف — Workspace `apps/web` و زنجیرهٔ کیفیت (`ADR-058`)          |
-| `docs/audit-immutable-archive` | `F:\Rasta-Parallel\audit-immutable-archive-docs` | C0   | [#53](https://github.com/marabi766/RASTA/pull/53) | — / ۰          | بازشماری به `ADR-057` و `Q-58` انجام شد؛ منتظر CI                            |
-| `demo/investor-preview`        | `F:\Rasta-Parallel\investor-demo`                | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
-| `design/claude-design`         | پوشهٔ موقت در `%TEMP%`                           | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
+| شاخه                    | Worktree                                   | نشست | PR  | ahead / behind | وضعیت                                                                        |
+| ----------------------- | ------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------- |
+| `feat/web-foundation`   | `F:\Rasta-Parallel\exp-001-web-foundation` | C0   | —   | ۱ / ۰          | `EXP-001` PR الف — Workspace `apps/web` و زنجیرهٔ کیفیت (`ADR-058`)          |
+| `demo/investor-preview` | `F:\Rasta-Parallel\investor-demo`          | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
+| `design/claude-design`  | پوشهٔ موقت در `%TEMP%`                     | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
 
 ## شاخه‌های بازنشسته
 
@@ -77,6 +76,8 @@
 | `docs/branch-registry`                | [#49](https://github.com/marabi766/RASTA/pull/49) | `76feb8e`   |
 | `fix/notification-dedupe-window-race` | [#50](https://github.com/marabi766/RASTA/pull/50) | `78ac7b0`   |
 | `docs/project-memory-2026-09-18`      | [#51](https://github.com/marabi766/RASTA/pull/51) | `a84269a`   |
+| `docs/ci-serialization-and-backlog`   | [#52](https://github.com/marabi766/RASTA/pull/52) | `76a1bf7`   |
+| `docs/audit-immutable-archive`        | [#53](https://github.com/marabi766/RASTA/pull/53) | `eea7d61`   |
 | `fix/minio-quay-registry`             | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
@@ -135,14 +136,14 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 
 ### ADR
 
-| شماره | مالک                                  | وضعیت                                                       |
-| ----- | ------------------------------------- | ----------------------------------------------------------- |
-| ۰۵۴   | `feat/notification-service`           | روی `main` (`cc89660`)                                      |
-| ۰۵۵   | `feat/audit-service-aud-004-contract` | روی `main` (`9fa75cc`)                                      |
-| ۰۵۶   | `docs/inventory-logistics-adr`        | روی `main` (`f2eb8fa`)                                      |
-| ۰۵۷   | `docs/audit-immutable-archive`        | **رزرو** — شاخه هنوز به‌غلط ۰۵۵ را دارد و باید بازشماری کند |
-| ۰۵۸   | `feat/web-foundation`                 | مصرف شد — جای پورتال وب و مرز Design System                 |
-| ۰۵۹+  | آزاد                                  | —                                                           |
+| شماره | مالک                                  | وضعیت                                       |
+| ----- | ------------------------------------- | ------------------------------------------- |
+| ۰۵۴   | `feat/notification-service`           | روی `main` (`cc89660`)                      |
+| ۰۵۵   | `feat/audit-service-aud-004-contract` | روی `main` (`9fa75cc`)                      |
+| ۰۵۶   | `docs/inventory-logistics-adr`        | روی `main` (`f2eb8fa`)                      |
+| ۰۵۷   | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از ۰۵۵ انجام شد          |
+| ۰۵۸   | `feat/web-foundation`                 | مصرف شد — جای پورتال وب و مرز Design System |
+| ۰۵۹+  | آزاد                                  | —                                           |
 
 ### پرسش‌های باز `Q-NN`
 
@@ -152,7 +153,8 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 | Q-45 … Q-55 | `feat/audit-service-aud-004-contract` | روی `main`                                                                             |
 | Q-56        | `feat/supplier-performance-phase2`    | روی `main` (`f7252d3`)                                                                 |
 | Q-57        | `feat/audit-service-aud-004-contract` | روی `main`                                                                             |
-| Q-58+       | آزاد                                  | —                                                                                      |
+| Q-58        | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                   |
+| Q-59+       | آزاد                                  | —                                                                                      |
 
 > **چرا Q-44 قابل جابه‌جایی نیست:** یک ADR ادغام‌شده آن را به‌عنوان مرجع
 > پذیرش نقل کرده. نقل‌قول را نمی‌شود ویرایش کرد بی‌آنکه سند دروغ شود. هر

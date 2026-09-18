@@ -68,11 +68,8 @@
 | [054](adr/ADR-054-notification-service-delivery.md)                   | سرویس اعلان — تحویل و ترجیحات                    | **Proposed** | Q-37 انتشار ایمیل را مسدود می‌کند                          |
 | [055](adr/ADR-055-aggregation-stress-environment-capability.md)       | پیش‌شرط توانایی محیط برای فشار تجمیع             | **Proposed** | طراحی بدون آستانه؛ هیچ دروازه‌ای فعال نشد                  |
 | [056](adr/ADR-056-inventory-forward-logistics.md)                     | مرز، صحت موجودی و لجستیک رفت `inventory-service` | **Accepted** | **رد Redis Redlock (§ ۴)**، تفکیک `Shipment`/`Fulfillment` |
+| [057](adr/ADR-057-audit-external-anchoring-and-immutable-archive.md)  | لنگرگذاری خارجی و بایگانی تغییرناپذیر Audit      | **Proposed** | KMS/HSM، WORM، مقاومت مستقل در برابر دست‌کاری              |
 | [058](adr/ADR-058-web-portal-placement-and-design-system-boundary.md) | جای پورتال وب و مرز Design System                | **Accepted** | `apps/web` روی `main`؛ مرز استخراج به `packages/ui`        |
-
-> **`ADR-057` اینجا نیست** — روی شاخهٔ `docs/audit-immutable-archive` است و با
-> ادغام آن اضافه می‌شود. شمارهٔ ۰۵۷ در `docs/26-branch-registry.md § ۲۶٫۵` برای
-> همان شاخه رزرو شده، پس این فهرست از ۰۵۸ ادامه می‌دهد.
 
 ---
 
