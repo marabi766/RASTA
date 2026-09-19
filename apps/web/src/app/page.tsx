@@ -1,5 +1,19 @@
 import { formatJalaliDateLong, formatMoney } from '@/lib/format';
-import { Identifier } from '@/ui/text/Identifier';
+import {
+  Alert,
+  AppShell,
+  EmptyState,
+  ErrorState,
+  Grid,
+  Identifier,
+  LoadingState,
+  NoAccessState,
+  PageHeader,
+  Section,
+  Sidebar,
+  StatusBadge,
+  TopBar,
+} from '@/ui';
 
 /**
  * The portal's entry route.
@@ -9,13 +23,19 @@ import { Identifier } from '@/ui/text/Identifier';
  * nothing behind it worked would be the kind of claim this repository does not
  * make.
  *
- * What it does do now is exercise the foundation in a browser rather than only
- * in a test — the tokens, the right-to-left document, the Persian typeface,
- * and each of the presentation rules of docs/16 § 16.3 and § 16.5: money as a
- * string turned into Persian digits, a UTC instant turned into a Jalali date,
- * and a Latin identifier isolated inside Persian text. If any of those is
- * wrong, it is wrong here, visibly, on the first page anyone opens.
+ * What it does is put the foundation in front of a browser rather than only in
+ * front of a test — the shell, the tokens in both themes, the Persian typeface,
+ * the status language of docs/16 § 16.5, and **all three mandatory states side
+ * by side**. Those three are the ones that normally exist only in a design
+ * file until the first screen needs them in a hurry; here they are built, seen
+ * and snapshotted before any screen depends on them.
  */
+const NAV = [
+  { href: '/', label: 'خانه' },
+  { href: '/assets', label: 'ماشین‌آلات' },
+  { href: '/orders', label: 'سفارش‌ها' },
+];
+
 export default function HomePage() {
   // Fixed sample values, not live data. The API for these screens does not
   // exist yet, and a number that looked live would be a worse placeholder than
@@ -24,34 +44,30 @@ export default function HomePage() {
   const sampleInstant = '2026-09-18T21:30:00Z';
 
   return (
-    <main className="mx-auto flex max-w-3xl flex-col gap-8 p-8">
-      <header className="flex flex-col gap-2">
-        <h1 className="text-3xl font-bold text-content">رستا</h1>
-        <p className="text-base leading-relaxed text-content-muted">
-          پایهٔ پورتال برپا شده است. صفحه‌های دامنه‌ای هنوز ساخته نشده‌اند و در داستان‌های بعدی
-          می‌آیند.
-        </p>
-      </header>
+    <AppShell
+      topBar={<TopBar organizationName="دهیاری نمونه" />}
+      sidebar={<Sidebar items={NAV} currentHref="/" />}
+    >
+      <PageHeader
+        title="رستا"
+        description="پایهٔ پورتال برپا شده است. صفحه‌های دامنه‌ای در داستان‌های بعدی می‌آیند."
+      />
 
-      <section
-        aria-labelledby="foundation-heading"
-        className="flex flex-col gap-4 rounded-lg border border-border bg-surface-raised p-6 shadow-sm"
-      >
-        <h2 id="foundation-heading" className="text-lg font-semibold text-content">
-          لایهٔ ارائهٔ فارسی
-        </h2>
+      <Alert tone="info" title="این صفحه نمونه است">
+        داده‌های زیر ثابت‌اند و از سرویسی نمی‌آیند. هدفشان این است که پایهٔ ظاهری و لایهٔ ارائهٔ
+        فارسی در مرورگر دیده شود، نه فرض.
+      </Alert>
 
+      <Section headingId="presentation" title="لایهٔ ارائهٔ فارسی">
         <dl className="flex flex-col gap-4">
           <div className="flex flex-col gap-1">
             <dt className="text-sm text-content-subtle">مبلغ</dt>
             <dd className="text-xl text-content">{formatMoney(sampleAmount)}</dd>
           </div>
-
           <div className="flex flex-col gap-1">
             <dt className="text-sm text-content-subtle">تاریخ</dt>
             <dd className="text-xl text-content">{formatJalaliDateLong(sampleInstant)}</dd>
           </div>
-
           <div className="flex flex-col gap-1">
             <dt className="text-sm text-content-subtle">شناسه</dt>
             <dd className="text-xl text-content">
@@ -59,7 +75,29 @@ export default function HomePage() {
             </dd>
           </div>
         </dl>
-      </section>
-    </main>
+      </Section>
+
+      <Section headingId="statuses" title="زبان بصری وضعیت">
+        <div className="flex flex-wrap gap-2">
+          <StatusBadge status="ACTIVE" />
+          <StatusBadge status="PENDING_APPROVAL" />
+          <StatusBadge status="REJECTED" />
+          <StatusBadge status="IN_MAINTENANCE" />
+          <StatusBadge status="DRAFT" />
+        </div>
+      </Section>
+
+      <Section headingId="states" title="سه حالت اجباری">
+        <Grid columns={2}>
+          <LoadingState variant="list" rows={2} />
+          <EmptyState
+            title="هنوز ماشین‌آلاتی ثبت نشده"
+            description="اولین دارایی را ثبت کنید تا اینجا دیده شود."
+          />
+          <ErrorState correlationId="req-sample-correlation" code="UPSTREAM_TIMEOUT" />
+          <NoAccessState />
+        </Grid>
+      </Section>
+    </AppShell>
   );
 }
