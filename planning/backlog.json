@@ -2,7 +2,7 @@
   "$schema": "./backlog.schema.json",
   "version": 2,
   "project": "RASTA",
-  "asOf": "2026-09-18",
+  "asOf": "2026-09-19",
   "governance": {
     "baselineState": "APPROVED",
     "approvedBy": "Product Owner",
@@ -571,6 +571,11 @@
           "kind": "DOCUMENT",
           "ref": "docs/24-open-questions.md",
           "note": "BLOCKED, not READY, for two reasons. (1) The second acceptance criterion has no implementation: services/notification-service/src has no channel, mail or email module at all, and Q-37 — which email provider — is an open blocking question. (2) NTF-002 publishes no domain event for read or dismiss, so audit-service never observes either action; closing that deviation is a product-owner decision, still open on 2026-09-18."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/58",
+          "note": "Blocker (2) is closed. notification-service now publishes NOTIFICATION_READ, NOTIFICATION_DISMISSED and NOTIFICATION_ALL_READ from a transactional outbox, in the same transaction as the state change and only when a row actually moved, and audit-service subscribes to rasta.notification.v1. ADR-054 § 3 offered two ways out and the written exception was rejected: S-06 is a security rule, and a documented exception lowers the platform audit floor permanently. Blocker (1) stands — there is still no channel, mail or email module, and Q-37 is open."
         }
       ]
     },
@@ -717,14 +722,50 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 13,
-      "status": "READY",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Production web uses documented tokens and accessible components",
         "RTL, Persian dates and empty, loading and error states are verified"
       ],
       "dependencies": ["CORE-003"],
       "sourceRefs": ["docs/16-ui-architecture.md"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/54",
+          "note": "PR الف — the apps/web workspace and the quality chain: Next.js 15 App Router, React 19, TS strict, jsx-a11y as errors, jest-axe, and ADR-058 recording why the design system lives in apps/web/src/ui with a written extraction path"
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/55",
+          "note": "PR ب — every token of docs/16 § 16.4 in OKLCH, dark mode as a token redefinition under both prefers-color-scheme and [data-theme], Vazirmatn self-hosted by next/font with no runtime CDN, and the Persian presentation layer: Persian digits, Jalali dates with an explicit time zone, money as bigint strings with no parseFloat"
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/56",
+          "note": "PR پ — Radix-based layout, feedback and form components, and the three mandatory states of docs/16 § 16.4: EmptyState, LoadingState (a skeleton shaped like the content, not a spinner) and ErrorState (which requires correlationId), plus Skeleton and NoAccessState"
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/design-contrast.spec.ts",
+          "note": "Both acceptance criteria measured rather than asserted: every colour pair the system puts together reaches WCAG 2.1 AA in both themes, computed from OKLCH through linear sRGB. It found two real failures — white on the primary button at 3.34:1 and the control border at 1.48:1 — and both were fixed before merge"
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/test/directions.tsx",
+          "note": "docs/16 § 16.3 requires every component to be snapshotted in both writing directions; 30 two-direction snapshots hold that line, alongside jest-axe on every component and 283 tests in total"
+        },
+        {
+          "kind": "RUNTIME",
+          "ref": "http://localhost:3212 (local production build, 2026-09-19)",
+          "note": "Seen in a browser rather than assumed: dir=rtl on the document, Vazirmatn served from our own origin with no request to fonts.gstatic.com, ۱۰٬۰۰۰٬۰۰۰ ریال, ۲۸ شهریور ۱۴۰۵ in Tehran time, all three states on screen, and both themes at phone width with no horizontal overflow"
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/35407547283",
+          "note": "Green on the final EXP-001 branch before merge to main at e7b0372"
+        }
+      ]
     },
     {
       "id": "EXP-002",

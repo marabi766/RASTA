@@ -19,11 +19,11 @@ test('the repository baseline is valid and preserves the approved horizons', () 
   // is accepted, so they are updated in the same commit as the acceptance —
   // that coupling is the point: a status change nobody meant to make fails here.
   assert.equal(progress.mvp.committed, 555);
-  assert.equal(progress.mvp.earned, 204);
-  assert.equal(progress.mvp.percent, 36.8);
+  assert.equal(progress.mvp.earned, 217);
+  assert.equal(progress.mvp.percent, 39.1);
   assert.equal(progress.fullProduct.committed, 770);
-  assert.equal(progress.fullProduct.earned, 204);
-  assert.equal(progress.fullProduct.percent, 26.5);
+  assert.equal(progress.fullProduct.earned, 217);
+  assert.equal(progress.fullProduct.percent, 28.2);
 });
 
 test('decomposed features contribute child stories exactly once', () => {
