@@ -28,6 +28,24 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
   private readonly kafka: Kafka;
   private producer?: Producer;
   private connecting?: Promise<Producer>;
+  /**
+   * The producer object of a connect that has not resolved yet.
+   *
+   * `producer` is set only once `connect()` succeeds, and `connect()` retries
+   * on timers of its own. Without a handle on the object *before* that, a
+   * shutdown that lands during a connect has nothing to close, and those
+   * timers hold the process open until the retry budget runs out.
+   */
+  private pendingProducer?: Producer;
+  /**
+   * Set by `onModuleDestroy`. After it, this publisher opens nothing.
+   *
+   * The relay stops on shutdown, but a tick already in flight can still reach
+   * `publish()` afterwards — `OutboxRelay.stop()` waits only for a bounded
+   * grace. Without this flag that tick opens a *new* connection to a broker
+   * the application has just finished leaving.
+   */
+  private destroyed = false;
 
   constructor(private readonly options: KafkaPublisherOptions) {
     this.kafka = new Kafka({
@@ -39,6 +57,12 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
   }
 
   private async getProducer(): Promise<Producer> {
+    if (this.destroyed) {
+      // A refusal rather than a connection. The caller is the relay, which
+      // treats a publish failure as "retry this row later" — and later, for a
+      // publisher that has been destroyed, means a different process.
+      throw new Error('Kafka publisher has been shut down and will not open a new producer');
+    }
     if (this.producer) return this.producer;
     // Guard against a thundering herd of concurrent first-calls each opening
     // their own producer.
@@ -48,8 +72,13 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
         maxInFlightRequests: 1,
         allowAutoTopicCreation: false,
       });
+      // Recorded before the await, so a shutdown during the connect has
+      // something to disconnect. `connect()` retries on its own timers and
+      // nothing else can cancel them.
+      this.pendingProducer = producer;
       await producer.connect();
       this.producer = producer;
+      this.pendingProducer = undefined;
       this.logger.log(`Kafka producer connected to ${this.options.brokers.join(', ')}`);
       return producer;
     })();
@@ -58,6 +87,7 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
       return await this.connecting;
     } catch (error) {
       this.connecting = undefined;
+      this.pendingProducer = undefined;
       throw error;
     }
   }
@@ -102,7 +132,27 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
     }
   }
 
+  /**
+   * Closes whatever is open, including a connect that has not landed.
+   *
+   * Both halves matter and they fail differently. Leaving a *connected*
+   * producer open leaks a socket. Leaving a *connecting* one open leaks the
+   * retry timers behind `connect()`, which keep the event loop alive with no
+   * socket to show for it — a process that will not exit and gives no reason
+   * why.
+   */
   async onModuleDestroy(): Promise<void> {
+    this.destroyed = true;
+    this.connecting = undefined;
+
+    const pending = this.pendingProducer;
+    this.pendingProducer = undefined;
+    if (pending) {
+      // `disconnect()` on a producer that is still connecting cancels the
+      // retry rather than waiting it out.
+      await pending.disconnect().catch(() => undefined);
+    }
+
     if (this.producer) {
       await this.producer.disconnect();
       this.producer = undefined;
