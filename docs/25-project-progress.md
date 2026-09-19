@@ -2,7 +2,7 @@
 
 > Generated from `planning/backlog.json`. Do not edit this report directly.
 
-- As of: **2026-09-18**
+- As of: **2026-09-19**
 - Baseline: **APPROVED** — Approved by **Product Owner**.
 - Earned-points rule: only **ACCEPTED delivery units** earn points; in-progress work earns zero.
 - Decomposition rule: a decomposed Feature contributes its child Stories, never its own points again. An undecomposed Feature remains a legacy delivery unit.
@@ -12,9 +12,9 @@
 
 | Horizon | Earned SP | Committed SP | Remaining SP | Progress | Accepted units | Active units | Features | Stories |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| MVP | 204 | 555 | 351 | 36.8% | 20 | 40 | 36 | 5 |
+| MVP | 217 | 555 | 338 | 39.1% | 21 | 40 | 36 | 5 |
 | Post-MVP only | 0 | 215 | 215 | 0% | 0 | 11 | 11 | 0 |
-| Full product | 204 | 770 | 566 | 26.5% | 20 | 51 | 47 | 5 |
+| Full product | 217 | 770 | 553 | 28.2% | 21 | 51 | 47 | 5 |
 
 ## Progress by epic
 
@@ -25,7 +25,7 @@
 | EP-OPERATIONS | Maintenance and field operations | MVP | 21 | 21 | 100% | 1 | 0 |
 | EP-COMMERCE | Economic, marketplace and supply chain | MVP | 71 | 181 | 39.2% | 12 | 5 |
 | EP-CONSTRUCTION | Construction and contracts | MVP | 0 | 63 | 0% | 3 | 0 |
-| EP-EXPERIENCE | Web, mobile and user experience | MVP | 0 | 89 | 0% | 5 | 0 |
+| EP-EXPERIENCE | Web, mobile and user experience | MVP | 13 | 89 | 14.6% | 5 | 0 |
 | EP-OPERABILITY | Operability, hardening and pilot | MVP | 0 | 89 | 0% | 5 | 0 |
 | EP-INSURANCE | Commercial insurance | POST_MVP | 0 | 42 | 0% | 2 | 0 |
 | EP-ENGAGEMENT | Participation, reward and ranking | POST_MVP | 0 | 34 | 0% | 2 | 0 |
@@ -38,10 +38,10 @@
 | Status | Delivery units | Story Points |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 17 | 304 |
+| READY | 16 | 291 |
 | IN_PROGRESS | 1 | 21 |
 | BLOCKED | 4 | 60 |
-| ACCEPTED | 20 | 204 |
+| ACCEPTED | 21 | 217 |
 | CANCELLED | 0 | 0 |
 
 A delivery unit is a User Story under a decomposed Feature, or the Feature itself while it has not yet been decomposed. This table is the accounting view and never double-counts parent and child points.
@@ -51,10 +51,10 @@ A delivery unit is a User Story under a decomposed Feature, or the Feature itsel
 | Status | Features | Baseline SP |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 17 | 304 |
+| READY | 16 | 291 |
 | IN_PROGRESS | 1 | 21 |
 | BLOCKED | 4 | 60 |
-| ACCEPTED | 16 | 204 |
+| ACCEPTED | 17 | 217 |
 | CANCELLED | 0 | 0 |
 
 ## User Story state
