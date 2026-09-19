@@ -102,6 +102,17 @@ export const notificationOldestPendingAgeSeconds = new Gauge({
 export const SUPPRESSION_REASONS = {
   NO_ELIGIBLE_RECIPIENT: 'NO_ELIGIBLE_RECIPIENT',
   RULE_UNKNOWN: 'RULE_UNKNOWN',
+  /**
+   * The person asked not to receive this (NTF-003).
+   *
+   * Unlike the two above, this suppresses one *delivery* rather than the whole
+   * intent: the notification was produced and the other recipients still get
+   * it. One bounded value rather than one per winning layer — the label is a
+   * metric dimension and the column is a `VARCHAR(64)`. Which rung of the
+   * ladder decided belongs in the preferences API, where a person can ask
+   * about their own settings, not in a counter anyone can scrape.
+   */
+  PREFERENCE_OPT_OUT: 'PREFERENCE_OPT_OUT',
 } as const;
 
 export const DISCARD_REASONS = {

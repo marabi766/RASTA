@@ -17,6 +17,13 @@ import {
   readAllResultSchema,
   unreadCountSchema,
 } from '../api/notification.view';
+import { PreferencesController } from '../preferences/preferences.controller';
+import { PreferencesService } from '../preferences/preferences.service';
+import {
+  effectiveQuerySchema,
+  preferenceInputSchema,
+  replacePreferencesSchema,
+} from '../preferences/preferences.dto';
 
 /**
  * Fills in what Nest cannot see.
@@ -55,6 +62,27 @@ const apiErrorSchema = z
   })
   .strict();
 
+/**
+ * The preference responses, described here rather than in a view file.
+ *
+ * The other endpoints serialise through `notification.view.ts`, which exists
+ * because an in-app row has to be reshaped before it leaves. A preference does
+ * not: what the service returns is what it stored, so a separate view would be
+ * a file that only restated the schema. These two are the published shape.
+ */
+const preferenceListSchema = z.object({ preferences: z.array(preferenceInputSchema) }).strict();
+
+const effectivePreferenceSchema = z
+  .object({
+    ruleKey: z.string(),
+    channel: z.string(),
+    enabled: z.boolean(),
+    /** `MANDATORY_POLICY`, `RULE`, `CATEGORY`, `GLOBAL` or `CHANNEL_DEFAULT`. */
+    decidedBy: z.string(),
+    overridable: z.boolean(),
+  })
+  .strict();
+
 /** Success responses, each with the status the handler actually answers. */
 const RESPONSE_BODIES: Record<string, { status: '200'; schema: z.ZodTypeAny }> = {
   'GET /v1/notifications': { status: '200', schema: notificationPageSchema },
@@ -63,11 +91,20 @@ const RESPONSE_BODIES: Record<string, { status: '200'; schema: z.ZodTypeAny }> =
   'GET /v1/notifications/{id}': { status: '200', schema: notificationViewSchema },
   'POST /v1/notifications/{id}/read': { status: '200', schema: notificationViewSchema },
   'POST /v1/notifications/{id}/dismiss': { status: '200', schema: notificationViewSchema },
+  'GET /v1/preferences': { status: '200', schema: preferenceListSchema },
+  'PUT /v1/preferences': { status: '200', schema: preferenceListSchema },
+  'GET /v1/preferences/effective': { status: '200', schema: effectivePreferenceSchema },
 };
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/notifications': listNotificationsQuerySchema,
   'POST /v1/notifications/read-all': readAllQuerySchema,
+  'GET /v1/preferences/effective': effectiveQuerySchema,
+};
+
+/** Request bodies, from the very schemas the pipe validates with. */
+const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
+  'PUT /v1/preferences': replacePreferencesSchema,
 };
 
 /** Paths whose `{id}` is validated by `notificationIdSchema`. */
@@ -80,15 +117,29 @@ const ID_PATHS = new Set([
 /**
  * The reachable error statuses, and only those.
  *
- * Each one is produced by a code path `test/openapi.int-spec.ts` exercises.
- * `409` and `422` are absent: nothing here conflicts, and the preference
- * rules that refuse on a business rule are NTF-003.
+ * Each one is produced by a code path `test/openapi.int-spec.ts` exercises,
+ * and that suite also asserts the converse: a documented status that nothing
+ * can produce is removed rather than left standing.
+ *
+ * `409` and `422` are absent, for different reasons.
+ *
+ * Nothing here conflicts, so there is no `409` and there is no plan for one.
+ *
+ * `422` is the one worth explaining. NTF-003 implements the refusal ADR-054
+ * § 5 calls for — turning off a channel a `MANDATORY` rule delivers on is
+ * refused rather than stored and ignored — and `preferences.service.ts` throws
+ * it, with unit tests in `precedence.spec.ts` holding the rule. It is not
+ * documented because **no rule is `MANDATORY` today**: all three are `ROUTINE`,
+ * so the deployed service cannot return it. Publishing a status a caller can
+ * never receive is the same failure this whole design argues against — a
+ * contract claiming a behaviour that does not exist. It is added the day the
+ * first mandatory rule lands, with the `422` its integration test reaches.
  */
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The request does not match the published schema. `limit` is an integer from 1 to 200; an unknown query parameter is refused rather than ignored; an invalid, edited or unparseable `cursor` lands here too, as does an `id` that is not a prefixed ULID.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
   403: 'Authenticated, but not permitted: a service-to-service token (no endpoint here grants one), or a user token that names no active organization.',
-  404: 'Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.',
+  404: 'Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses. A preference naming a rule this service does not have lands here too: the shape was right, the thing named was not.',
   500: 'Unexpected server error.',
 };
 
@@ -99,8 +150,11 @@ const DESCRIPTION =
   'dismissing removes a row from the inbox and keeps it until retention. Reading is ' +
   'idempotent and monotonic; there is no un-read. Notifications are created by consuming ' +
   'domain events (INSURANCE_EXPIRING, INSPECTION_EXPIRING, MAINTENANCE_DUE) with semantic ' +
-  'deduplication (ADR-054). No email is sent by this platform: no provider or sender identity ' +
-  'has been chosen (docs/24 Q-37), and preferences are not implemented (NTF-003).';
+  'deduplication (ADR-054). Preferences decide who is told: a five-layer ladder — platform ' +
+  'mandatory policy, then rule, category and global preferences, then the channel default — ' +
+  'resolved per organization, so the same person can silence one tenant without silencing ' +
+  'another. No email is sent by this platform: no provider or sender identity has been ' +
+  'chosen (docs/24 Q-37), so IN_APP is the only channel a preference can name.';
 
 /** Builds the finished document for a booted application. */
 export function buildNotificationOpenApiDocument(app: INestApplication): OpenAPIObject {
@@ -123,8 +177,11 @@ export function buildNotificationOpenApiDocument(app: INestApplication): OpenAPI
  * only; the integration test builds from the real `AppModule`.
  */
 @Module({
-  controllers: [NotificationController],
-  providers: [{ provide: NotificationApiService, useValue: {} }],
+  controllers: [NotificationController, PreferencesController],
+  providers: [
+    { provide: NotificationApiService, useValue: {} },
+    { provide: PreferencesService, useValue: {} },
+  ],
 })
 class DocumentationModule {}
 
@@ -162,6 +219,14 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
             ? { ...parameter, required: true, schema: toJsonSchema(notificationIdSchema) }
             : parameter,
         );
+      }
+
+      const body = REQUEST_BODIES[key];
+      if (body) {
+        operation.requestBody = {
+          required: true,
+          content: { 'application/json': { schema: toJsonSchema(body) } },
+        };
       }
 
       const response = RESPONSE_BODIES[key];

@@ -47,7 +47,7 @@ describe('the committed OpenAPI document', () => {
     expect(committed).toBe(generated);
   });
 
-  it('publishes the six endpoints, all closed, all answering 200', () => {
+  it('publishes the nine endpoints, all closed, all answering 200', () => {
     const document = buildNotificationOpenApiDocument(app);
     const operations = Object.entries(document.paths ?? {}).flatMap(([path, item]) =>
       Object.entries(
@@ -58,9 +58,14 @@ describe('the committed OpenAPI document', () => {
       'GET /v1/notifications',
       'GET /v1/notifications/unread-count',
       'GET /v1/notifications/{id}',
+      // NTF-003 adds three, under the same rule as the six above: closed by
+      // default, no `@AllowService`, and the caller's own rows only.
+      'GET /v1/preferences',
+      'GET /v1/preferences/effective',
       'POST /v1/notifications/read-all',
       'POST /v1/notifications/{id}/dismiss',
       'POST /v1/notifications/{id}/read',
+      'PUT /v1/preferences',
     ]);
     for (const { operation } of operations) {
       expect(operation.security).toEqual([{ bearer: [] }]);

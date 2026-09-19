@@ -50,8 +50,9 @@
 //                       no code path can write is a claim of a capability the
 //                       platform does not have (docs/24 Q-07, ADR § 6); NTF-004
 //                       adds `EMAIL` with the adapter that uses it.
-//   NotificationPreference, NotificationTemplate
-//                       NTF-003 and NTF-004 respectively.
+//   NotificationTemplate
+//                       NTF-004. `NotificationPreference` arrived with NTF-003;
+//                       see its own comment for what it deliberately leaves out.
 
 generator client {
   provider      = "prisma-client-js"
@@ -468,4 +469,71 @@ model OutboxStreamSequence {
 
   @@id([topic, partitionKey])
   @@map("outbox_stream_sequence")
+}
+
+// ---------------------------------------------------------------------------
+// Preferences (NTF-003, ADR-054 § 5)
+// ---------------------------------------------------------------------------
+
+/// Which scope a preference row speaks for. The narrower one wins.
+enum PreferenceScope {
+  GLOBAL
+  CATEGORY
+  RULE
+
+  @@map("preference_scope")
+}
+
+/// One person's choice about one channel, at one level of specificity.
+///
+/// ## Preferences are per tenant, and that is a decision rather than a detail
+///
+/// The key carries `organization_id`. One human administering three dehyaris is
+/// one `User` with three `Membership`s, and they have to be able to silence the
+/// routine noise of one organization without silencing the others. A
+/// user-global preference would make that impossible, and the person would
+/// either put up with the noise or turn everything off — both of which end with
+/// a notification nobody reads.
+///
+/// ## What is deliberately absent
+///
+///   quiet hours   ADR-054 § 5 puts `quietHoursStart`, `quietHoursEnd` and
+///                 `timezone` on this table. They are not here yet, and the
+///                 reason is that quiet hours are a property of a channel that
+///                 *interrupts* somebody. `IN_APP` does not: a notification sits
+///                 in an inbox until it is opened. Deferring one would hide a
+///                 row that already exists and make the unread count wrong,
+///                 which is worse than the problem it solves. They arrive with
+///                 the email channel (NTF-004), which is the first channel that
+///                 can wake a person at two in the morning.
+///
+///   EMAIL         `NotificationChannel` still holds `IN_APP` only. A
+///                 preference for a channel the platform cannot deliver on
+///                 would be a control that claims an effect it does not have
+///                 (docs/24 Q-07).
+model NotificationPreference {
+  /// ULID with the `NPF` prefix.
+  id             String @id @db.VarChar(64)
+  organizationId String @map("organization_id") @db.VarChar(128)
+  userId         String @map("user_id") @db.VarChar(128)
+
+  scope    PreferenceScope
+  /// Null exactly when `scope = GLOBAL`; the category name or the `ruleKey`
+  /// otherwise. `ck_preference_scope_key_shape` refuses the other combinations.
+  scopeKey String?         @map("scope_key") @db.VarChar(128)
+
+  channel NotificationChannel
+  enabled Boolean
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  /// Who last set it. Always the owner today — these endpoints are self-only.
+  updatedBy String   @map("updated_by") @db.VarChar(128)
+
+  /// One row per person, per tenant, per scope, per channel. The resolver reads
+  /// at most one row per layer, so a duplicate would make the winning layer
+  /// depend on row order.
+  @@unique([userId, organizationId, scope, scopeKey, channel], map: "ux_preference_owner_scope_channel")
+  @@index([organizationId, userId], map: "ix_preference_owner")
+  @@map("notification_preference")
 }

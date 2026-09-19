@@ -38,6 +38,7 @@ describe('the tenant guard covers this service schema', () => {
       'NotificationDedupe',
       'NotificationDelivery',
       'NotificationIntent',
+      'NotificationPreference',
       'OutboxMessage',
       'OutboxStreamSequence',
       'ProcessedEvent',
@@ -122,9 +123,20 @@ describe('the schema says what this service does and does not do', () => {
     expect(values).toEqual(['IN_APP']);
   });
 
-  it('declares no preference or template model yet', () => {
+  /**
+   * NTF-003 brought the preference model; the template model is still NTF-004's.
+   *
+   * Splitting the old single assertion rather than loosening it: "no preference
+   * *or* template" passed for two different reasons, and an assertion that can
+   * pass for a reason you did not mean is one that stops testing the other.
+   */
+  it('declares the preference model', () => {
+    expect([...models(SCHEMA).keys()]).toContain('NotificationPreference');
+  });
+
+  it('declares no template model yet — that is NTF-004', () => {
     const names = [...models(SCHEMA).keys()];
-    expect(names.filter((name) => /Preference|Template/.test(name))).toEqual([]);
+    expect(names.filter((name) => /Template/.test(name))).toEqual([]);
   });
 
   it('uses no cascading delete anywhere', () => {
