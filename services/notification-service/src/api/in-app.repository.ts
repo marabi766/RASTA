@@ -1,7 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import type { InAppNotification, Prisma } from '../generated/prisma';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { NotificationActor } from '../access/access';
+import { EventPublisher } from '../events/publisher';
+import { NOTIFICATION_EVENTS } from '../events/published';
 import type { InAppState } from './notification.dto';
 import type { NotificationCursor } from './notification.cursor';
 
@@ -33,6 +35,23 @@ import type { NotificationCursor } from './notification.cursor';
  * retention is hidden by default (ADR-054 § 4) and removed by the sweep
  * (NTF-005); it is never listed, and acting on it is a 404 like any other row
  * the caller cannot see.
+ *
+ * ## Every transition announces itself, in the same transaction
+ *
+ * `AGENTS.md` S-06 requires an audit record for every state-changing action,
+ * and `audit-service` has one input: the event log. `ADR-054 § 3` recorded the
+ * absence of these events as a deviation from a binding rule and refused to
+ * accept `NTF-002` until it closed. The event is written here rather than in
+ * the service layer for a reason that is not stylistic: **only this file knows
+ * whether anything actually moved**.
+ *
+ * The conditional update is what makes these endpoints idempotent, and it is
+ * also what makes "did this call change the world" a number rather than a
+ * guess. Two concurrent requests can both see an unread row, both call
+ * `markRead`, and exactly one `UPDATE` will match. Publishing from the service
+ * layer — which sees only the row afterwards — would announce the same read
+ * twice. Publishing on `count > 0`, inside the transaction that produced the
+ * count, announces it once or not at all.
  */
 
 const IN_APP_ORDER: Prisma.InAppNotificationOrderByWithRelationInput[] = [
@@ -50,7 +69,10 @@ export interface ListPageInput {
 
 @Injectable()
 export class InAppRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: EventPublisher,
+  ) {}
 
   private owned(actor: NotificationActor, now: Date): Prisma.InAppNotificationWhereInput {
     return {
@@ -130,19 +152,38 @@ export class InAppRepository {
   }
 
   /**
-   * Sets `readAt` if unset. Returns the row afterwards, or null when the
-   * caller owns no such row — the two outcomes a 404 must not distinguish.
+   * Sets `readAt` if unset, and announces the read when it moved a row.
+   *
+   * Returns the row afterwards, or null when the caller owns no such row — the
+   * two outcomes a 404 must not distinguish.
    */
   async markRead(
     actor: NotificationActor,
     id: string,
     now: Date,
   ): Promise<InAppNotification | null> {
-    await this.prisma.client.inAppNotification.updateMany({
-      where: { ...this.owned(actor, now), id, readAt: null },
-      data: { readAt: now },
+    return this.prisma.transaction(async (tx) => {
+      const moved = await tx.inAppNotification.updateMany({
+        where: { ...this.owned(actor, now), id, readAt: null },
+        data: { readAt: now },
+      });
+
+      if (moved.count > 0) {
+        await this.events.enqueue(tx, {
+          eventName: NOTIFICATION_EVENTS.NOTIFICATION_READ,
+          aggregateId: id,
+          organizationId: actor.organizationId,
+          payload: {
+            notificationId: id,
+            organizationId: actor.organizationId,
+            userId: actor.userId,
+            occurredAt: now.toISOString(),
+          },
+        });
+      }
+
+      return this.findOwnedIn(tx, actor, id, now);
     });
-    return this.findOwned(actor, id, now);
   }
 
   /**
@@ -150,29 +191,90 @@ export class InAppRepository {
    * means read (ADR-054 § 4), and `ck_in_app_dismiss_implies_read` refuses the
    * alternative. Two statements rather than one so a row that was already
    * read keeps its original `readAt` — the trigger would refuse moving it.
+   *
+   * One event, not two. A dismissal that also marked the row read is a single
+   * action a person took, and `markedReadByDismissal` says which of the two
+   * shapes it had. Emitting a separate `NOTIFICATION_READ` alongside it would
+   * make one click look like two decisions in the audit trail.
    */
   async dismiss(
     actor: NotificationActor,
     id: string,
     now: Date,
   ): Promise<InAppNotification | null> {
-    await this.prisma.client.inAppNotification.updateMany({
-      where: { ...this.owned(actor, now), id, readAt: null, dismissedAt: null },
-      data: { readAt: now, dismissedAt: now },
+    return this.prisma.transaction(async (tx) => {
+      const readAndDismissed = await tx.inAppNotification.updateMany({
+        where: { ...this.owned(actor, now), id, readAt: null, dismissedAt: null },
+        data: { readAt: now, dismissedAt: now },
+      });
+      const dismissedOnly = await tx.inAppNotification.updateMany({
+        where: { ...this.owned(actor, now), id, dismissedAt: null },
+        data: { dismissedAt: now },
+      });
+
+      const moved = readAndDismissed.count + dismissedOnly.count;
+      if (moved > 0) {
+        await this.events.enqueue(tx, {
+          eventName: NOTIFICATION_EVENTS.NOTIFICATION_DISMISSED,
+          aggregateId: id,
+          organizationId: actor.organizationId,
+          payload: {
+            notificationId: id,
+            markedReadByDismissal: readAndDismissed.count > 0,
+            organizationId: actor.organizationId,
+            userId: actor.userId,
+            occurredAt: now.toISOString(),
+          },
+        });
+      }
+
+      return this.findOwnedIn(tx, actor, id, now);
     });
-    await this.prisma.client.inAppNotification.updateMany({
-      where: { ...this.owned(actor, now), id, dismissedAt: null },
-      data: { dismissedAt: now },
-    });
-    return this.findOwned(actor, id, now);
   }
 
-  /** Every unread, undismissed row of this actor becomes read. Returns how many. */
+  /**
+   * Every unread, undismissed row of this actor becomes read. Returns how many.
+   *
+   * One event carrying the count, not one per row. A person with two hundred
+   * unread notifications would otherwise produce two hundred events for a
+   * single click, which tells an auditor less than one event saying exactly
+   * that. A call that moved nothing announces nothing: an audit record for an
+   * action with no effect is noise that makes the real records harder to find.
+   */
   async markAllRead(actor: NotificationActor, now: Date): Promise<number> {
-    const result = await this.prisma.client.inAppNotification.updateMany({
-      where: { ...this.owned(actor, now), readAt: null, dismissedAt: null },
-      data: { readAt: now },
+    return this.prisma.transaction(async (tx) => {
+      const result = await tx.inAppNotification.updateMany({
+        where: { ...this.owned(actor, now), readAt: null, dismissedAt: null },
+        data: { readAt: now },
+      });
+
+      if (result.count > 0) {
+        await this.events.enqueue(tx, {
+          eventName: NOTIFICATION_EVENTS.NOTIFICATION_ALL_READ,
+          // The inbox, not any one row: naming an arbitrary notification would
+          // attach the whole action to whichever row happened to be first.
+          aggregateId: `${actor.organizationId}:${actor.userId}`,
+          organizationId: actor.organizationId,
+          payload: {
+            count: result.count,
+            organizationId: actor.organizationId,
+            userId: actor.userId,
+            occurredAt: now.toISOString(),
+          },
+        });
+      }
+
+      return result.count;
     });
-    return result.count;
+  }
+
+  /** `findOwned`, bound to a transaction so a caller reads its own writes. */
+  private findOwnedIn(
+    tx: ExtendedPrismaClient,
+    actor: NotificationActor,
+    id: string,
+    now: Date,
+  ): Promise<InAppNotification | null> {
+    return tx.inAppNotification.findFirst({ where: { ...this.owned(actor, now), id } });
   }
 }

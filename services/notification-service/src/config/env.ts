@@ -22,6 +22,16 @@ export const IDENTITY_SERVICE = 'identity-service';
  */
 export const DISPATCHER_CONSUMER_GROUP = 'notification-service.dispatcher';
 
+/**
+ * The domain topic this service publishes on.
+ *
+ * It had none until `NTF-002`'s audit events: this service consumed and never
+ * produced, so only the dead-letter topic below existed. The name follows the
+ * platform's `rasta.<domain>.v1` form, which is what `audit-service` subscribes
+ * to and what `create-topics.sh` already creates.
+ */
+export const NOTIFICATION_TOPIC = 'rasta.notification.v1';
+
 /** This service's own dead-letter topic (`create-topics.sh`). */
 export const NOTIFICATION_DLQ_TOPIC = 'rasta.notification.v1.dlq';
 

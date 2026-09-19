@@ -27,12 +27,25 @@
 // `prisma migrate dev` ever proposes dropping a `ck_*`, `ux_*` or `ix_*`
 // object, that hunk is Prisma not seeing them, not drift (PROJECT_MEMORY § 30).
 //
+// ## The outbox arrived early, and why
+//
+// NTF-001 shipped without one: this service consumed events and published none.
+// `ADR-054 § 3` then recorded that as a **deviation from a binding rule** rather
+// than a scope decision — reading and dismissing a notification are state
+// changes, `AGENTS.md` S-06 requires an audit record for each, and
+// `audit-service` has exactly one input, the event log. So the outbox came with
+// NTF-002's three `NOTIFICATION_*` audit events rather than waiting for NTF-004,
+// which will reuse it for `NOTIFICATION_SENT` / `_FAILED`.
+//
+// Because it arrived in a migration of its own rather than under the shared
+// names `verify-outbox-claim-migration.mjs` addresses, that verifier defers to
+// `verify-migration-reversible.mjs notification`, which checks both outbox
+// tables and the five claim constraints. Its discovery guard is what refuses a
+// service that owns an outbox and is checked by nothing — and it is what caught
+// this change before it merged.
+//
 // ## What is deliberately absent
 //
-//   OutboxMessage       NTF-004 publishes `NOTIFICATION_SENT` / `_FAILED` from a
-//                       standard outbox. Nothing in NTF-001 publishes, so no
-//                       outbox exists yet — and `verify-outbox-claim-migration`'s
-//                       discovery guard correctly ignores a schema without one.
 //   EMAIL channel       `NotificationChannel` holds `IN_APP` only. An enum value
 //                       no code path can write is a claim of a capability the
 //                       platform does not have (docs/24 Q-07, ADR § 6); NTF-004
@@ -147,17 +160,17 @@ model NotificationIntent {
 
   // Source provenance (ADR § 4). Enough to walk from an in-app row back to the
   // exact Kafka message and the domain action that caused it.
-  sourceEventId      String  @map("source_event_id") @db.VarChar(64)
-  sourceEventName    String  @map("source_event_name") @db.VarChar(128)
-  sourceTopic        String  @map("source_topic") @db.VarChar(128)
-  sourcePartitionKey String  @map("source_partition_key") @db.VarChar(256)
+  sourceEventId      String   @map("source_event_id") @db.VarChar(64)
+  sourceEventName    String   @map("source_event_name") @db.VarChar(128)
+  sourceTopic        String   @map("source_topic") @db.VarChar(128)
+  sourcePartitionKey String   @map("source_partition_key") @db.VarChar(256)
   /// ADR-051 `streamSeq`, when the producer sent one. Drives the staleness
   /// guard (ADR § 8) and nothing else; null degrades to today's behaviour.
-  sourceStreamSeq    BigInt? @map("source_stream_seq")
+  sourceStreamSeq    BigInt?  @map("source_stream_seq")
   /// Domain time, from the envelope — never the time this service saw it.
   occurredAt         DateTime @map("occurred_at") @db.Timestamptz(6)
-  correlationId      String  @map("correlation_id") @db.VarChar(128)
-  causationId        String? @map("causation_id") @db.VarChar(128)
+  correlationId      String   @map("correlation_id") @db.VarChar(128)
+  causationId        String?  @map("causation_id") @db.VarChar(128)
 
   // What the rule decided.
   ruleKey        String                     @map("rule_key") @db.VarChar(128)
@@ -180,22 +193,22 @@ model NotificationIntent {
   // Recipient resolution is a REST call that fails independently of consuming
   // the event, so it is retried by a claim-based worker (ADR-050 shape, ADR-054
   // § 1) rather than on the Kafka partition.
-  resolutionAttempts Int       @default(0) @map("resolution_attempts")
+  resolutionAttempts  Int       @default(0) @map("resolution_attempts")
   /// Null on a `PENDING` intent means "due now"; set only when a resolution
   /// attempt is deferred. The worker compares against the database clock, so
   /// a fresh intent never waits on host/database clock skew.
-  nextResolutionAt   DateTime? @map("next_resolution_at") @db.Timestamptz(6)
+  nextResolutionAt    DateTime? @map("next_resolution_at") @db.Timestamptz(6)
   /// A bounded class name — `UNREACHABLE`, `REFUSED`, … — never a message.
-  lastResolutionError String?  @map("last_resolution_error") @db.VarChar(64)
-  claimToken         String?   @map("claim_token") @db.VarChar(64)
-  claimOwner         String?   @map("claim_owner") @db.VarChar(128)
-  claimExpiresAt     DateTime? @map("claim_expires_at") @db.Timestamptz(6)
+  lastResolutionError String?   @map("last_resolution_error") @db.VarChar(64)
+  claimToken          String?   @map("claim_token") @db.VarChar(64)
+  claimOwner          String?   @map("claim_owner") @db.VarChar(128)
+  claimExpiresAt      DateTime? @map("claim_expires_at") @db.Timestamptz(6)
 
-  resolvedAt        DateTime? @map("resolved_at") @db.Timestamptz(6)
-  dispatchedAt      DateTime? @map("dispatched_at") @db.Timestamptz(6)
+  resolvedAt     DateTime? @map("resolved_at") @db.Timestamptz(6)
+  dispatchedAt   DateTime? @map("dispatched_at") @db.Timestamptz(6)
   /// Set exactly when `status` is `SUPPRESSED` or `DISCARDED` — the answer to
   /// "nobody was told, and this is why" (ADR § 4).
-  terminalReason    String?   @map("terminal_reason") @db.VarChar(64)
+  terminalReason String?   @map("terminal_reason") @db.VarChar(64)
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -249,7 +262,7 @@ model RecipientResolution {
   userId         String @map("user_id") @db.VarChar(128)
 
   /// The role that made this user a recipient, when the rule was role-based.
-  resolvedRole String? @map("resolved_role") @db.VarChar(64)
+  resolvedRole     String? @map("resolved_role") @db.VarChar(64)
   /// Reserved for NTF-004. Null in every row NTF-001 writes — see the header.
   emailSnapshot    String? @map("email_snapshot") @db.VarChar(320)
   localeSnapshot   String  @default("fa-IR") @map("locale_snapshot") @db.VarChar(16)
@@ -357,8 +370,8 @@ model InAppNotification {
   subjectId      String                     @map("subject_id") @db.VarChar(128)
 
   /// Rendered plain text. No markup is ever interpreted from these.
-  title String @db.VarChar(200)
-  body  String @db.VarChar(2000)
+  title      String  @db.VarChar(200)
+  body       String  @db.VarChar(2000)
   /// A path the web app resolves against its own origin — never an absolute
   /// URL. Refused by `ck_in_app_action_path_relative`, not only by a DTO.
   actionPath String? @map("action_path") @db.VarChar(512)
@@ -377,4 +390,82 @@ model InAppNotification {
   @@index([organizationId, userId, createdAt(sort: Desc)], map: "ix_in_app_owner_created")
   @@index([organizationId, expiresAt], map: "ix_in_app_org_expiry")
   @@map("in_app_notification")
+}
+
+// ---------------------------------------------------------------------------
+// Transactional outbox (ADR-021, ADR-050, ADR-051 Phase B3)
+//
+// This service consumed events for its whole life and published none, so it
+// had no outbox. `ADR-054 § 3` recorded why that became a problem: reading and
+// dismissing an in-app notification are state changes, `AGENTS.md` S-06 says
+// every state change produces an audit record, and `audit-service` has exactly
+// one input — the event log. The deviation was accepted as a draft state only,
+// and `NTF-002` could not be accepted until it closed.
+//
+// Nothing here is service-specific and nothing here may become
+// service-specific: the claim protocol lives in `@rasta/nest-common`, and a
+// locally-tuned variant is the divergence ADR-050 was written to end.
+// ---------------------------------------------------------------------------
+
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic        String
+  /// What the message is ordered by — the recipient, for every event this
+  /// service publishes. One person's read and dismiss of the same notification
+  /// have to arrive in the order they happened, and Kafka orders within a
+  /// partition and nowhere else.
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  publishedAt DateTime? @map("published_at")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  /// ADR-050 durable claim. `claimToken` is the only fence: every mutation
+  /// matches on it exactly. `claimOwner` is diagnostic metadata that no
+  /// decision reads. `claimExpiresAt` decides eligibility for reclamation and
+  /// nothing else.
+  claimToken     String?   @map("claim_token")
+  claimOwner     String?   @map("claim_owner")
+  claimExpiresAt DateTime? @map("claim_expires_at")
+  claimCount     Int       @default(0) @map("claim_count")
+  nextAttemptAt  DateTime? @map("next_attempt_at")
+
+  /// ADR-051. `streamSeq` is this row's position in its stream
+  /// (`topic + partitionKey`, never the aggregate — § C-7), allocated inside
+  /// the writing transaction. `isStreamHead` stays unset until Phase B4.
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
+
+  @@index([publishedAt, createdAt], map: "ix_outbox_pending")
+  @@map("outbox_message")
+}
+
+/// One row per ordered stream (`topic + partitionKey`).
+///
+/// A table rather than a BIGSERIAL: `nextval()` is non-transactional, so a
+/// rollback burns a number and leaves a gap indistinguishable from a lost
+/// event. A row rolls back with its transaction, and its row lock is held to
+/// commit — which is what makes allocation order equal commit order.
+model OutboxStreamSequence {
+  topic        String
+  partitionKey String @map("partition_key")
+
+  nextSeq      BigInt @default(1) @map("next_seq")
+  publishedSeq BigInt @default(0) @map("published_seq")
+
+  @@id([topic, partitionKey])
+  @@map("outbox_stream_sequence")
 }
