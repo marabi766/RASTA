@@ -111,6 +111,12 @@ const FOLDED_INITIAL_MIGRATION = {
     'Folds the domain schema, ADR-050 and ADR-051 B1 into 20260905120000_init_supplier. ' +
     'Its outbox objects are verified by scripts/verify-migration-reversible.mjs supplier, ' +
     'whose EXPECTED.supplier constraint list carries the claim triple and the published-row rule.',
+  notification:
+    'Gained an outbox late — with NTF-002 audit events rather than at scaffold time — so its ' +
+    'claim objects arrived in a migration of its own, 20260919060000_notification_outbox, and ' +
+    'not under the shared names this verifier addresses. Verified by ' +
+    'scripts/verify-migration-reversible.mjs notification, whose EXPECTED.notification lists ' +
+    'both outbox tables and the same five claim constraints supplier is checked against.',
 };
 
 /**

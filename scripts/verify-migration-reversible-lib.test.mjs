@@ -295,12 +295,46 @@ test('every notification object the verifier asserts is created by a notificatio
   );
 });
 
-test('the notification schema declares no outbox, so the outbox discovery guard stays silent on it', () => {
+/**
+ * This assertion used to say the opposite, and the change is the point.
+ *
+ * notification-service had no outbox because it consumed events and published
+ * none. `NTF-002`'s audit events gave it one, which put it in front of
+ * `verify-outbox-claim-migration.mjs`'s discovery guard — a guard whose whole
+ * job is to refuse a service that owns an outbox and is checked by nothing. It
+ * did exactly that, in CI, on the first push of this change.
+ *
+ * The outbox arrived in a migration of its own rather than under the shared
+ * names that verifier addresses, so it is accounted for the way supplier's is:
+ * named in `FOLDED_INITIAL_MIGRATION` with the gate that does check it, and
+ * listed in `EXPECTED.notification` so that gate really does.
+ */
+test('the notification outbox is verified by this gate, since the claim verifier defers to it', () => {
   const schema = readFileSync(
     join(ROOT, 'services', 'notification-service', 'prisma', 'schema.prisma'),
     'utf8',
   );
-  assert.doesNotMatch(schema, /model\s+OutboxMessage\b/);
+  assert.match(schema, /model\s+OutboxMessage\b/);
+
+  // The two tables, so a down script that forgot them fails the round trip.
+  assert.ok(EXPECTED.notification.tables.includes('outbox_message'));
+  assert.ok(EXPECTED.notification.tables.includes('outbox_stream_sequence'));
+
+  // The same five claim constraints supplier is checked against. Listing the
+  // tables alone would pass a table check while leaving an outbox that
+  // enforces nothing.
+  for (const constraint of [
+    'ck_outbox_claim_triple',
+    'ck_outbox_claim_count_nonneg',
+    'ck_outbox_attempts_nonneg',
+    'ck_outbox_published_is_clean',
+    'ck_outbox_next_attempt_requires_failure',
+  ]) {
+    assert.ok(
+      EXPECTED.notification.constraints.includes(constraint),
+      `EXPECTED.notification must check ${constraint}`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

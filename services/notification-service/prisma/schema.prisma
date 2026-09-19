@@ -27,12 +27,25 @@
 // `prisma migrate dev` ever proposes dropping a `ck_*`, `ux_*` or `ix_*`
 // object, that hunk is Prisma not seeing them, not drift (PROJECT_MEMORY § 30).
 //
+// ## The outbox arrived early, and why
+//
+// NTF-001 shipped without one: this service consumed events and published none.
+// `ADR-054 § 3` then recorded that as a **deviation from a binding rule** rather
+// than a scope decision — reading and dismissing a notification are state
+// changes, `AGENTS.md` S-06 requires an audit record for each, and
+// `audit-service` has exactly one input, the event log. So the outbox came with
+// NTF-002's three `NOTIFICATION_*` audit events rather than waiting for NTF-004,
+// which will reuse it for `NOTIFICATION_SENT` / `_FAILED`.
+//
+// Because it arrived in a migration of its own rather than under the shared
+// names `verify-outbox-claim-migration.mjs` addresses, that verifier defers to
+// `verify-migration-reversible.mjs notification`, which checks both outbox
+// tables and the five claim constraints. Its discovery guard is what refuses a
+// service that owns an outbox and is checked by nothing — and it is what caught
+// this change before it merged.
+//
 // ## What is deliberately absent
 //
-//   OutboxMessage       NTF-004 publishes `NOTIFICATION_SENT` / `_FAILED` from a
-//                       standard outbox. Nothing in NTF-001 publishes, so no
-//                       outbox exists yet — and `verify-outbox-claim-migration`'s
-//                       discovery guard correctly ignores a schema without one.
 //   EMAIL channel       `NotificationChannel` holds `IN_APP` only. An enum value
 //                       no code path can write is a claim of a capability the
 //                       platform does not have (docs/24 Q-07, ADR § 6); NTF-004

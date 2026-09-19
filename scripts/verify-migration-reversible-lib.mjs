@@ -456,6 +456,17 @@ export const EXPECTED = {
       'ck_in_app_action_path_relative',
       'ck_in_app_text_not_blank',
       'ck_in_app_expires_after_created',
+      // The outbox's own invariants, listed for the same reason supplier's are:
+      // this is the gate that verifies them. `verify-outbox-claim-migration.mjs`
+      // addresses migrations by name and this service's outbox arrived in one of
+      // its own (`20260919060000_notification_outbox`), so that verifier defers
+      // here — and a claim triple or a published-row rule that a down script
+      // dropped and a forward migration forgot would otherwise be invisible.
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_published_is_clean',
+      'ck_outbox_next_attempt_requires_failure',
     ],
   },
   economic: {
