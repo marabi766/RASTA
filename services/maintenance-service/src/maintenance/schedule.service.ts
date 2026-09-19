@@ -4,10 +4,12 @@ import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
 import { MaintenanceRepository, isUniqueViolation } from './maintenance.repository';
 import { assessDue, type MeterReading, type ScheduleRule } from './due';
+import { MAINTENANCE_EVENTS, validateMaintenancePayload } from './events';
 import { MAINTAINABLE_ASSET_STATUSES } from './lifecycle';
 import { toScheduleView, type ScheduleRow } from './views';
 import { ENV } from '../tokens';
-import type { MaintenanceEnv } from '../config/env';
+import { MAINTENANCE_TOPIC, type MaintenanceEnv } from '../config/env';
+import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import type {
   ChangeScheduleStatusDto,
   CreateScheduleDto,
@@ -34,6 +36,28 @@ import type {
  *                      overdue machine as compliant, and nothing about the
  *                      screen would look wrong.
  */
+/**
+ * The editable fields of a schedule rule, in the order `updateScheduleSchema`
+ * declares them.
+ *
+ * Typed against `UpdateScheduleDto` rather than written as loose strings, so a
+ * field added to the DTO and forgotten here — which would leave that edit
+ * unreported in the audit trail — is a type error rather than a silent gap.
+ */
+const SCHEDULE_RULE_FIELDS = [
+  'title',
+  'intervalDays',
+  'intervalHours',
+  'intervalKilometres',
+  'leadDays',
+  'leadHours',
+  'leadKilometres',
+  'lastServicedAt',
+  'lastServicedHourMeter',
+  'lastServicedOdometer',
+  'notes',
+] as const satisfies readonly (keyof UpdateScheduleDto)[];
+
 @Injectable()
 export class ScheduleService {
   constructor(
@@ -155,27 +179,45 @@ export class ScheduleService {
     const now = new Date();
 
     try {
-      const created = await this.repository.client.maintenanceSchedule.create({
-        data: {
-          id,
-          organizationId,
-          assetId: dto.assetId,
-          title: dto.title,
-          maintenanceType: dto.maintenanceType,
-          recurrence: dto.recurrence,
-          intervalDays: dto.intervalDays ?? null,
-          intervalHours: dto.intervalHours ?? null,
-          intervalKilometres: dto.intervalKilometres ?? null,
-          leadDays: this.resolveLeadDays(dto),
-          leadHours: dto.leadHours ?? null,
-          leadKilometres: dto.leadKilometres ?? null,
-          lastServicedAt: dto.lastServicedAt ? new Date(dto.lastServicedAt) : now,
-          lastServicedHourMeter: dto.lastServicedHourMeter ?? meter?.hourMeter?.toString() ?? null,
-          lastServicedOdometer: dto.lastServicedOdometer ?? meter?.odometer?.toString() ?? null,
-          notes: dto.notes ?? null,
-          createdBy: actor,
-          updatedBy: actor,
-        },
+      // The row and the event announcing it commit together or not at all
+      // (AGENTS.md A-08). A schedule that exists with no record of its
+      // creation is exactly the gap D-011 described.
+      const created = await this.repository.transaction(async (tx) => {
+        const row = await tx.maintenanceSchedule.create({
+          data: {
+            id,
+            organizationId,
+            assetId: dto.assetId,
+            title: dto.title,
+            maintenanceType: dto.maintenanceType,
+            recurrence: dto.recurrence,
+            intervalDays: dto.intervalDays ?? null,
+            intervalHours: dto.intervalHours ?? null,
+            intervalKilometres: dto.intervalKilometres ?? null,
+            leadDays: this.resolveLeadDays(dto),
+            leadHours: dto.leadHours ?? null,
+            leadKilometres: dto.leadKilometres ?? null,
+            lastServicedAt: dto.lastServicedAt ? new Date(dto.lastServicedAt) : now,
+            lastServicedHourMeter:
+              dto.lastServicedHourMeter ?? meter?.hourMeter?.toString() ?? null,
+            lastServicedOdometer: dto.lastServicedOdometer ?? meter?.odometer?.toString() ?? null,
+            notes: dto.notes ?? null,
+            createdBy: actor,
+            updatedBy: actor,
+          },
+        });
+
+        await this.announceScheduleChange(tx, {
+          schedule: row as ScheduleRow,
+          change: 'CREATED',
+          previousStatus: null,
+          reason: null,
+          changedFields: [],
+          changedAt: now,
+          actor,
+        });
+
+        return row;
       });
 
       return toScheduleView(created as ScheduleRow, asset.name ?? null);
@@ -236,34 +278,58 @@ export class ScheduleService {
       );
     }
 
-    const updated = await this.repository.client.maintenanceSchedule.update({
-      where: { id },
-      data: {
-        ...(dto.title !== undefined ? { title: dto.title } : {}),
-        ...(dto.intervalDays !== undefined ? { intervalDays: dto.intervalDays } : {}),
-        ...(dto.intervalHours !== undefined ? { intervalHours: dto.intervalHours } : {}),
-        ...(dto.intervalKilometres !== undefined
-          ? { intervalKilometres: dto.intervalKilometres }
-          : {}),
-        ...(dto.leadDays !== undefined ? { leadDays: dto.leadDays } : {}),
-        ...(dto.leadHours !== undefined ? { leadHours: dto.leadHours } : {}),
-        ...(dto.leadKilometres !== undefined ? { leadKilometres: dto.leadKilometres } : {}),
-        ...(dto.lastServicedAt !== undefined
-          ? { lastServicedAt: dto.lastServicedAt ? new Date(dto.lastServicedAt) : null }
-          : {}),
-        ...(dto.lastServicedHourMeter !== undefined
-          ? { lastServicedHourMeter: dto.lastServicedHourMeter }
-          : {}),
-        ...(dto.lastServicedOdometer !== undefined
-          ? { lastServicedOdometer: dto.lastServicedOdometer }
-          : {}),
-        ...(dto.notes !== undefined ? { notes: dto.notes } : {}),
-        // The due point has moved, so the announcement made against the old
-        // one is stale. Cleared rather than left, or the schedule would go
-        // quiet until it was next served.
-        dueAnnouncedAt: null,
-        updatedBy: actor,
-      },
+    // Which fields the caller actually moved. Read off the DTO rather than by
+    // comparing rows, because a `PATCH` that sets a field to the value it
+    // already had is still an edit somebody made and should be able to explain.
+    const changedFields = SCHEDULE_RULE_FIELDS.filter((field) => dto[field] !== undefined);
+
+    const changedAt = new Date();
+
+    const updated = await this.repository.transaction(async (tx) => {
+      const row = await tx.maintenanceSchedule.update({
+        where: { id },
+        data: {
+          ...(dto.title !== undefined ? { title: dto.title } : {}),
+          ...(dto.intervalDays !== undefined ? { intervalDays: dto.intervalDays } : {}),
+          ...(dto.intervalHours !== undefined ? { intervalHours: dto.intervalHours } : {}),
+          ...(dto.intervalKilometres !== undefined
+            ? { intervalKilometres: dto.intervalKilometres }
+            : {}),
+          ...(dto.leadDays !== undefined ? { leadDays: dto.leadDays } : {}),
+          ...(dto.leadHours !== undefined ? { leadHours: dto.leadHours } : {}),
+          ...(dto.leadKilometres !== undefined ? { leadKilometres: dto.leadKilometres } : {}),
+          ...(dto.lastServicedAt !== undefined
+            ? { lastServicedAt: dto.lastServicedAt ? new Date(dto.lastServicedAt) : null }
+            : {}),
+          ...(dto.lastServicedHourMeter !== undefined
+            ? { lastServicedHourMeter: dto.lastServicedHourMeter }
+            : {}),
+          ...(dto.lastServicedOdometer !== undefined
+            ? { lastServicedOdometer: dto.lastServicedOdometer }
+            : {}),
+          ...(dto.notes !== undefined ? { notes: dto.notes } : {}),
+          // The due point has moved, so the announcement made against the old
+          // one is stale. Cleared rather than left, or the schedule would go
+          // quiet until it was next served.
+          dueAnnouncedAt: null,
+          updatedBy: actor,
+        },
+      });
+
+      await this.announceScheduleChange(tx, {
+        schedule: row as ScheduleRow,
+        change: 'UPDATED',
+        // An edit does not move the status, so both sides are the same value
+        // rather than one of them being null — the transition is real, it is
+        // just the identity one.
+        previousStatus: schedule.status,
+        reason: null,
+        changedFields,
+        changedAt,
+        actor,
+      });
+
+      return row;
     });
 
     return toScheduleView(updated as ScheduleRow);
@@ -299,17 +365,36 @@ export class ScheduleService {
     }
 
     const actor = getContext().userId ?? 'SYSTEM';
+    const changedAt = new Date();
 
-    const updated = await this.repository.client.maintenanceSchedule.update({
-      where: { id },
-      data: {
-        status: dto.status,
-        notes: appendReason(schedule.notes, dto.status, dto.reason),
-        // Resuming a paused schedule must be able to announce again: the world
-        // moved on while it was off.
-        dueAnnouncedAt: null,
-        updatedBy: actor,
-      },
+    const updated = await this.repository.transaction(async (tx) => {
+      const row = await tx.maintenanceSchedule.update({
+        where: { id },
+        data: {
+          status: dto.status,
+          notes: appendReason(schedule.notes, dto.status, dto.reason),
+          // Resuming a paused schedule must be able to announce again: the
+          // world moved on while it was off.
+          dueAnnouncedAt: null,
+          updatedBy: actor,
+        },
+      });
+
+      // This is the transition D-011 was written about: a schedule switched
+      // off is a machine that quietly stops being serviced. The reason the
+      // DTO already requires now leaves this service instead of only being
+      // appended to a notes column nobody audits.
+      await this.announceScheduleChange(tx, {
+        schedule: row as ScheduleRow,
+        change: 'STATUS_CHANGED',
+        previousStatus: schedule.status,
+        reason: dto.reason,
+        changedFields: ['status'],
+        changedAt,
+        actor,
+      });
+
+      return row;
     });
 
     return toScheduleView(updated as ScheduleRow);
@@ -318,6 +403,48 @@ export class ScheduleService {
   // =========================================================================
   // Internals
   // =========================================================================
+
+  /**
+   * Writes the audit event for a change to a schedule, inside the caller's
+   * transaction.
+   *
+   * One place rather than three, so the three write paths cannot drift into
+   * announcing different things — and so a fourth write path added later has
+   * an obvious thing to call. `enqueueEvent` validates the payload before the
+   * row is inserted, so a malformed event never reaches the log.
+   */
+  private async announceScheduleChange(
+    tx: ExtendedPrismaClient,
+    input: {
+      schedule: ScheduleRow;
+      change: 'CREATED' | 'UPDATED' | 'STATUS_CHANGED';
+      previousStatus: string | null;
+      reason: string | null;
+      changedFields: readonly string[];
+      changedAt: Date;
+      actor: string;
+    },
+  ): Promise<void> {
+    await this.repository.enqueueEvent(tx, {
+      aggregateType: 'MaintenanceSchedule',
+      aggregateId: input.schedule.id,
+      eventName: MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED,
+      topic: MAINTENANCE_TOPIC,
+      organizationId: input.schedule.organizationId,
+      payload: validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED, {
+        scheduleId: input.schedule.id,
+        assetId: input.schedule.assetId,
+        organizationId: input.schedule.organizationId,
+        change: input.change,
+        status: input.schedule.status,
+        previousStatus: input.previousStatus,
+        reason: input.reason,
+        changedFields: [...input.changedFields],
+        changedAt: input.changedAt.toISOString(),
+        changedBy: input.actor,
+      }),
+    });
+  }
 
   /**
    * Refuses a machine this tenant may not raise maintenance for.
