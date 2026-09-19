@@ -28,14 +28,36 @@ export const TENANT_SCOPED_MODELS = [
 ] as const;
 
 /**
- * Models that carry no organization column and are therefore not guarded.
+ * Models the tenant guard does not scope, each with its reason.
  *
  * Named rather than merely left out, so the spec can compare the guarded set
- * against the schema exactly. `ProcessedEvent` is keyed by
- * `(eventId, consumerName)` alone: an idempotency marker for a message, not a
- * tenant row.
+ * against the schema exactly and an auditor can enumerate the crossings.
+ *
+ *   `ProcessedEvent`         keyed by `(eventId, consumerName)` alone: an
+ *                            idempotency marker for a message, not a tenant
+ *                            row. It carries no organization column at all.
+ *
+ *   `OutboxMessage`          platform plumbing, and the one exemption here
+ *                            that is not free. It *does* carry an organization
+ *                            column, but it is claimed, published and
+ *                            acknowledged by a relay running on a timer with
+ *                            no request context, so a guard would refuse every
+ *                            one of those statements. Every write to it goes
+ *                            through `runUnscoped` with a written reason
+ *                            (`src/events/publisher.ts`), and the column is
+ *                            there for filtering rather than for isolation.
+ *                            The same exemption, for the same reason, exists
+ *                            in every service that has an outbox.
+ *
+ *   `OutboxStreamSequence`   the counter behind the outbox. Keyed by
+ *                            `(topic, partitionKey)` and deliberately without
+ *                            a tenant column: a stream is a transport concept.
  */
-export const TENANT_SCOPE_EXEMPT_MODELS = ['ProcessedEvent'] as const;
+export const TENANT_SCOPE_EXEMPT_MODELS = [
+  'OutboxMessage',
+  'OutboxStreamSequence',
+  'ProcessedEvent',
+] as const;
 
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 

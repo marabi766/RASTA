@@ -38,6 +38,8 @@ describe('the tenant guard covers this service schema', () => {
       'NotificationDedupe',
       'NotificationDelivery',
       'NotificationIntent',
+      'OutboxMessage',
+      'OutboxStreamSequence',
       'ProcessedEvent',
       'RecipientResolution',
     ]);
@@ -55,9 +57,36 @@ describe('the tenant guard covers this service schema', () => {
     expect([...TENANT_SCOPED_MODELS].filter((model) => !defined.has(model))).toEqual([]);
   });
 
-  it('exempts only the idempotency marker, which carries no tenant column', () => {
-    expect([...TENANT_SCOPE_EXEMPT_MODELS]).toEqual(['ProcessedEvent']);
-    expect(modelsWithTenantColumn(SCHEMA)).not.toContain('ProcessedEvent');
+  it('exempts exactly three models, and names each one', () => {
+    expect([...TENANT_SCOPE_EXEMPT_MODELS]).toEqual([
+      'OutboxMessage',
+      'OutboxStreamSequence',
+      'ProcessedEvent',
+    ]);
+  });
+
+  // Two of the three carry no organization column at all, so exempting them
+  // costs nothing.
+  it.each(['ProcessedEvent', 'OutboxStreamSequence'])(
+    'exempts %s, which has no tenant',
+    (model) => {
+      expect(modelsWithTenantColumn(SCHEMA)).not.toContain(model);
+    },
+  );
+
+  /**
+   * `OutboxMessage` is the one exemption that gives something up, so it is
+   * asserted rather than assumed.
+   *
+   * It carries an organization column and is still unscoped, because the relay
+   * that claims, publishes and acknowledges its rows runs on a timer with no
+   * request context — a guard would refuse every one of those statements. The
+   * crossing is declared at each write with `runUnscoped` and a written reason.
+   */
+  it('exempts the outbox deliberately, even though it does carry a tenant column', () => {
+    expect(modelsWithTenantColumn(SCHEMA)).toContain('OutboxMessage');
+    expect(TENANT_SCOPE_EXEMPT_MODELS).toContain('OutboxMessage');
+    expect(TENANT_SCOPED_MODELS).not.toContain('OutboxMessage');
   });
 
   it('guards the children that could have reached the tenant through a join', () => {
@@ -67,9 +96,21 @@ describe('the tenant guard covers this service schema', () => {
   });
 });
 
-describe('the schema says what NTF-001 does not do', () => {
-  it('declares no outbox, so the discovery guard correctly ignores this service', () => {
-    expect(SCHEMA).not.toMatch(/model\s+OutboxMessage\b/);
+describe('the schema says what this service does and does not do', () => {
+  /**
+   * This assertion used to say the opposite.
+   *
+   * `NTF-001` shipped with no outbox because this service consumed events and
+   * published none, and the test pinned that as a fact about the design.
+   * `ADR-054 § 3` then recorded why it could not stay that way: reading and
+   * dismissing a notification are state changes, `AGENTS.md` S-06 requires an
+   * audit record for every state change, and `audit-service` has one input —
+   * the event log. The absence was a deviation from a binding rule, accepted
+   * only as a draft state, and `NTF-002` could not be accepted until it closed.
+   */
+  it('declares an outbox, because its state changes have to reach the audit trail', () => {
+    expect(SCHEMA).toMatch(/model\s+OutboxMessage\b/);
+    expect(SCHEMA).toMatch(/model\s+OutboxStreamSequence\b/);
   });
 
   it('holds IN_APP as the only channel value', () => {

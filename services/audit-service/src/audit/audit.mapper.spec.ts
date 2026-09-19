@@ -48,8 +48,9 @@ describe('the ten subscribed topics', () => {
       'rasta.economic.v1',
       'rasta.document.v1',
       'rasta.supplier.v1',
+      'rasta.notification.v1',
     ]);
-    expect(DOMAIN_TOPICS).toHaveLength(10);
+    expect(DOMAIN_TOPICS).toHaveLength(11);
   });
 
   it('subscribes to no topic this service itself produces', () => {

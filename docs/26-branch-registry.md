@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۸ (2026-09-19) · **`main` در آن لحظه:** `e7b0372`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۸ (2026-09-19) · **`main` در آن لحظه:** `18946a2`
 
 ---
 
@@ -55,33 +55,34 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                                    | Worktree                                   | نشست | PR  | ahead / behind | وضعیت                                                                              |
-| --------------------------------------- | ------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------------- |
-| `feat/maintenance-schedule-audit-event` | `F:\Rasta-Parallel\exp-001-web-foundation` | C0   | —   | ۱ / ۰          | بستن `D-011` — رویداد `MAINTENANCE_SCHEDULE_CHANGED` برای رد حسابرسی برنامهٔ سرویس |
-| `demo/investor-preview`                 | `F:\Rasta-Parallel\investor-demo`          | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید       |
-| `design/claude-design`                  | پوشهٔ موقت در `%TEMP%`                     | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                              |
+| شاخه                             | Worktree                                   | نشست | PR  | ahead / behind | وضعیت                                                                        |
+| -------------------------------- | ------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------- |
+| `feat/notification-outbox-audit` | `F:\Rasta-Parallel\exp-001-web-foundation` | C0   | —   | ۱ / ۰          | بستن انحراف حسابرسی `ADR-054 § ۳` — Outbox و سه رویداد `NOTIFICATION_*`      |
+| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`          | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
+| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                     | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
 
 ## شاخه‌های بازنشسته
 
 این‌ها `ahead=0` هستند، یعنی محتوایشان کاملاً روی `main` است و می‌توان حذفشان
 کرد. تا وقتی حذف نشده‌اند در این جدول می‌مانند تا کسی دوباره رویشان کار نکند.
 
-| شاخه                                  | PR                                                | ادغام شد در |
-| ------------------------------------- | ------------------------------------------------- | ----------- |
-| `feat/audit-service-aud-004-contract` | [#44](https://github.com/marabi766/RASTA/pull/44) | `9fa75cc`   |
-| `docs/inventory-logistics-adr`        | [#45](https://github.com/marabi766/RASTA/pull/45) | `f2eb8fa`   |
-| `feat/notification-service`           | [#46](https://github.com/marabi766/RASTA/pull/46) | `cc89660`   |
-| `feat/notification-read-api`          | [#47](https://github.com/marabi766/RASTA/pull/47) | `7389ffd`   |
-| `feat/supplier-performance-phase2`    | [#48](https://github.com/marabi766/RASTA/pull/48) | `f7252d3`   |
-| `docs/branch-registry`                | [#49](https://github.com/marabi766/RASTA/pull/49) | `76feb8e`   |
-| `fix/notification-dedupe-window-race` | [#50](https://github.com/marabi766/RASTA/pull/50) | `78ac7b0`   |
-| `docs/project-memory-2026-09-18`      | [#51](https://github.com/marabi766/RASTA/pull/51) | `a84269a`   |
-| `docs/ci-serialization-and-backlog`   | [#52](https://github.com/marabi766/RASTA/pull/52) | `76a1bf7`   |
-| `docs/audit-immutable-archive`        | [#53](https://github.com/marabi766/RASTA/pull/53) | `eea7d61`   |
-| `feat/web-foundation`                 | [#54](https://github.com/marabi766/RASTA/pull/54) | `8c04477`   |
-| `feat/web-design-tokens`              | [#55](https://github.com/marabi766/RASTA/pull/55) | `4b15725`   |
-| `feat/web-component-library`          | [#56](https://github.com/marabi766/RASTA/pull/56) | `e7b0372`   |
-| `fix/minio-quay-registry`             | —                                                 | پیش‌تر      |
+| شاخه                                    | PR                                                | ادغام شد در |
+| --------------------------------------- | ------------------------------------------------- | ----------- |
+| `feat/audit-service-aud-004-contract`   | [#44](https://github.com/marabi766/RASTA/pull/44) | `9fa75cc`   |
+| `docs/inventory-logistics-adr`          | [#45](https://github.com/marabi766/RASTA/pull/45) | `f2eb8fa`   |
+| `feat/notification-service`             | [#46](https://github.com/marabi766/RASTA/pull/46) | `cc89660`   |
+| `feat/notification-read-api`            | [#47](https://github.com/marabi766/RASTA/pull/47) | `7389ffd`   |
+| `feat/supplier-performance-phase2`      | [#48](https://github.com/marabi766/RASTA/pull/48) | `f7252d3`   |
+| `docs/branch-registry`                  | [#49](https://github.com/marabi766/RASTA/pull/49) | `76feb8e`   |
+| `fix/notification-dedupe-window-race`   | [#50](https://github.com/marabi766/RASTA/pull/50) | `78ac7b0`   |
+| `docs/project-memory-2026-09-18`        | [#51](https://github.com/marabi766/RASTA/pull/51) | `a84269a`   |
+| `docs/ci-serialization-and-backlog`     | [#52](https://github.com/marabi766/RASTA/pull/52) | `76a1bf7`   |
+| `docs/audit-immutable-archive`          | [#53](https://github.com/marabi766/RASTA/pull/53) | `eea7d61`   |
+| `feat/web-foundation`                   | [#54](https://github.com/marabi766/RASTA/pull/54) | `8c04477`   |
+| `feat/web-design-tokens`                | [#55](https://github.com/marabi766/RASTA/pull/55) | `4b15725`   |
+| `feat/web-component-library`            | [#56](https://github.com/marabi766/RASTA/pull/56) | `e7b0372`   |
+| `feat/maintenance-schedule-audit-event` | [#57](https://github.com/marabi766/RASTA/pull/57) | `18946a2`   |
+| `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
 > است و می‌ماند. هیچ Worktreeای `main` را checkout نکرده، پس `git fetch` آن ref

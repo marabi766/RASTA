@@ -20,7 +20,7 @@ import { DOMAIN_TOPICS } from './audit.mapper';
  * wrong makes the silence alert watch the wrong service.
  */
 describe('audit producer topology', () => {
-  it('maps each of the ten path-A topics to exactly its owning service', () => {
+  it('maps each of the eleven path-A topics to exactly its owning service', () => {
     expect(AUDIT_DOMAIN_TOPIC_OWNERS.map(({ topic, owner }) => [topic, owner])).toEqual([
       ['rasta.identity.v1', 'identity-service'],
       ['rasta.organization.v1', 'organization-service'],
@@ -32,12 +32,15 @@ describe('audit producer topology', () => {
       ['rasta.economic.v1', 'economic-service'],
       ['rasta.document.v1', 'document-service'],
       ['rasta.supplier.v1', 'supplier-service'],
+      // Added with NTF-002's audit events. Before them this service consumed
+      // and never produced, so there was nothing on this topic to subscribe to.
+      ['rasta.notification.v1', 'notification-service'],
     ]);
   });
 
   it('is the source the subscription list is derived from, not a copy of it', () => {
     expect([...DOMAIN_TOPICS]).toEqual(AUDIT_DOMAIN_TOPIC_OWNERS.map((entry) => entry.topic));
-    expect(new Set(DOMAIN_TOPICS).size).toBe(10);
+    expect(new Set(DOMAIN_TOPICS).size).toBe(11);
     expect(DOMAIN_TOPICS).not.toContain(AUDIT_TRAIL_TOPIC);
   });
 
@@ -45,7 +48,7 @@ describe('audit producer topology', () => {
     expect([...AUDIT_TRAIL_PRODUCERS]).toEqual(['identity-service']);
   });
 
-  it('deduplicates the known producers into nine services', () => {
+  it('deduplicates the known producers into ten services', () => {
     expect([...AUDIT_SOURCE_SERVICES]).toEqual([
       'identity-service',
       'organization-service',
@@ -56,14 +59,15 @@ describe('audit producer topology', () => {
       'economic-service',
       'document-service',
       'supplier-service',
+      'notification-service',
     ]);
-    expect(new Set(AUDIT_SOURCE_SERVICES).size).toBe(9);
+    expect(new Set(AUDIT_SOURCE_SERVICES).size).toBe(10);
   });
 
-  it('pins the complete metric label set: nine services and one fallback', () => {
+  it('pins the complete metric label set: ten services and one fallback', () => {
     expect(AUDIT_UNKNOWN_SOURCE_SERVICE).toBe('unknown');
     expect([...AUDIT_SOURCE_SERVICE_LABELS]).toEqual([...AUDIT_SOURCE_SERVICES, 'unknown']);
-    expect(AUDIT_SOURCE_SERVICE_LABELS).toHaveLength(10);
+    expect(AUDIT_SOURCE_SERVICE_LABELS).toHaveLength(11);
     expect(isAuditSourceService(AUDIT_UNKNOWN_SOURCE_SERVICE)).toBe(false);
   });
 
@@ -129,7 +133,8 @@ describe('audit producer topology', () => {
     expect(sourceTopicsOf('identity-service')).toEqual(['rasta.identity.v1', AUDIT_TRAIL_TOPIC]);
     expect(sourceTopicsOf('asset-service')).toEqual(['rasta.asset.v1', 'rasta.insurance.v1']);
     expect(sourceTopicsOf('supplier-service')).toEqual(['rasta.supplier.v1']);
-    expect(AUDIT_SOURCE_SERVICES.flatMap((service) => sourceTopicsOf(service))).toHaveLength(11);
+    expect(sourceTopicsOf('notification-service')).toEqual(['rasta.notification.v1']);
+    expect(AUDIT_SOURCE_SERVICES.flatMap((service) => sourceTopicsOf(service))).toHaveLength(12);
     expect(Object.isFrozen(sourceTopicsOf('asset-service'))).toBe(true);
   });
 });

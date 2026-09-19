@@ -13,6 +13,7 @@ import {
   EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxRelay,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -24,6 +25,9 @@ import { HealthController } from './health/health.controller';
 import { NotificationController } from './api/notification.controller';
 import { NotificationApiService } from './api/notification.service';
 import { InAppRepository } from './api/in-app.repository';
+import { EventPublisher } from './events/publisher';
+import { KafkaEventPublisher } from './outbox/kafka.publisher';
+import { PrismaOutboxStore } from './outbox/outbox.store';
 import { PrismaService } from './prisma/prisma.service';
 import { NotificationRepository } from './notification/notification.repository';
 import { DispatcherConsumer } from './intake/dispatcher.consumer';
@@ -121,8 +125,46 @@ import {
     },
 
     NotificationRepository,
+    EventPublisher,
     InAppRepository,
     NotificationApiService,
+
+    // The outbox, added with NTF-002's audit events. This service consumed for
+    // its whole life and produced nothing, so none of this existed until the
+    // in-app transitions had to be announced (ADR-054 § 3, AGENTS.md S-06).
+    PrismaOutboxStore,
+    {
+      provide: KafkaEventPublisher,
+      inject: [ENV],
+      useFactory: (env: NotificationEnv): KafkaEventPublisher =>
+        new KafkaEventPublisher({
+          brokers: brokersOf(env),
+          clientId: `${env.KAFKA_CLIENT_ID}-outbox`,
+        }),
+    },
+    {
+      provide: OutboxRelay,
+      inject: [PrismaOutboxStore, KafkaEventPublisher, ENV, LOGGER],
+      useFactory: (
+        store: PrismaOutboxStore,
+        publisher: KafkaEventPublisher,
+        env: NotificationEnv,
+        logger: Logger,
+      ): OutboxRelay =>
+        new OutboxRelay({
+          store,
+          publisher,
+          pollIntervalMs: env.OUTBOX_POLL_INTERVAL_MS,
+          batchSize: env.OUTBOX_BATCH_SIZE,
+          leaseSeconds: env.OUTBOX_CLAIM_LEASE_SECONDS,
+          backoff: {
+            baseSeconds: env.OUTBOX_CLAIM_BACKOFF_SECONDS,
+            maxSeconds: env.OUTBOX_CLAIM_BACKOFF_MAX_SECONDS,
+          },
+          shutdownGraceSeconds: env.OUTBOX_SHUTDOWN_GRACE_SECONDS,
+          logger,
+        }),
+    },
 
     {
       provide: InternalTokenService,
@@ -239,6 +281,7 @@ export class AppModule implements NestModule, OnModuleInit {
   constructor(
     private readonly dispatcher: DispatcherConsumer,
     private readonly worker: ResolutionWorker,
+    private readonly relay: OutboxRelay,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -248,5 +291,11 @@ export class AppModule implements NestModule, OnModuleInit {
   async onModuleInit(): Promise<void> {
     await this.dispatcher.start();
     this.worker.start();
+    // Started after the consumer and the worker, and deliberately last: the
+    // relay only ever drains rows that are already committed, so nothing it
+    // publishes depends on either of them being up. If it fails to start, the
+    // rows stay in the table and are picked up by the next process — which is
+    // the property an outbox exists for.
+    this.relay.start();
   }
 }

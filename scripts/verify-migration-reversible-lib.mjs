@@ -412,6 +412,13 @@ export const EXPECTED = {
       'notification_delivery',
       'delivery_attempt',
       'in_app_notification',
+      // The outbox arrived with NTF-002's audit events. Before them this
+      // service consumed and never produced, so it had none — which is the
+      // deviation ADR-054 § 3 recorded against AGENTS.md S-06. Listed here so
+      // a down script that forgot to drop them, or a forward migration that
+      // forgot to recreate them, fails the round trip rather than a review.
+      'outbox_message',
+      'outbox_stream_sequence',
     ],
     // NTF-002 adds the second pair: read state is write-once. The trigger and
     // its function are named separately for the same reason as the first pair.
