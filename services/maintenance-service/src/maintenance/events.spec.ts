@@ -218,3 +218,101 @@ describe('the published catalogue', () => {
     }
   });
 });
+
+/**
+ * `MAINTENANCE_SCHEDULE_CHANGED` — the event that closes `D-011`.
+ *
+ * Its contract is different in kind from the other nine. Those exist because a
+ * named consumer needs them; this one exists because `AGENTS.md` S-06 requires
+ * every state-changing action to leave an audit record, and a service schedule
+ * — the rule that decides how often a machine is serviced — could be created,
+ * re-intervalled or switched off with nothing reaching the log at all.
+ *
+ * `audit-service` records every domain envelope it receives, including names it
+ * does not recognise, so the guarantee holds the moment this is published. What
+ * these tests defend is the *content*: an audit record that cannot answer who,
+ * when and why is a record that satisfies the letter of the rule and none of
+ * its purpose.
+ */
+describe('MAINTENANCE_SCHEDULE_CHANGED', () => {
+  const valid = {
+    scheduleId: 'MSC_01ABC',
+    assetId: 'AST-0001',
+    organizationId: 'ORG-1',
+    change: 'STATUS_CHANGED' as const,
+    status: 'PAUSED',
+    previousStatus: 'ACTIVE',
+    reason: 'دستگاه تا پایان فصل خارج از ناوگان است',
+    changedFields: ['status'],
+    changedAt: '2026-09-19T06:00:00.000Z',
+    changedBy: 'USR-7',
+  };
+
+  it('accepts a status change with its reason', () => {
+    expect(
+      validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED, valid),
+    ).toMatchObject({ change: 'STATUS_CHANGED', previousStatus: 'ACTIVE', status: 'PAUSED' });
+  });
+
+  it('accepts a creation, which has no previous status and no reason', () => {
+    expect(
+      validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED, {
+        ...valid,
+        change: 'CREATED',
+        status: 'ACTIVE',
+        previousStatus: null,
+        reason: null,
+        changedFields: [],
+      }),
+    ).toMatchObject({ change: 'CREATED', previousStatus: null });
+  });
+
+  it('accepts an edit, which names the fields that moved', () => {
+    expect(
+      validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED, {
+        ...valid,
+        change: 'UPDATED',
+        status: 'ACTIVE',
+        previousStatus: 'ACTIVE',
+        reason: null,
+        changedFields: ['intervalHours', 'leadHours'],
+      }),
+    ).toMatchObject({ changedFields: ['intervalHours', 'leadHours'] });
+  });
+
+  // The whole point of the event. A record that cannot name the actor answers
+  // "something changed" and nothing an auditor asked.
+  it.each([
+    'scheduleId',
+    'assetId',
+    'organizationId',
+    'change',
+    'status',
+    'changedAt',
+    'changedBy',
+  ])('refuses a payload without %s', (field) => {
+    const { [field]: _removed, ...rest } = valid as Record<string, unknown>;
+    expect(() =>
+      validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED, rest),
+    ).toThrow();
+  });
+
+  it('refuses a change kind it does not know', () => {
+    expect(() =>
+      validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED, {
+        ...valid,
+        change: 'DELETED',
+      }),
+    ).toThrow();
+  });
+
+  // `previousStatus` and `reason` are nullable, not optional. A publisher that
+  // simply omitted them would produce a record whose silence is ambiguous:
+  // "there was no reason" and "nobody recorded one" are different facts.
+  it.each(['previousStatus', 'reason'])('requires %s to be present, even as null', (field) => {
+    const { [field]: _removed, ...rest } = valid as Record<string, unknown>;
+    expect(() =>
+      validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED, rest),
+    ).toThrow();
+  });
+});

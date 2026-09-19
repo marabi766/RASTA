@@ -52,6 +52,7 @@ export const MAINTENANCE_EVENTS = {
   MAINTENANCE_COMPLETED: 'MAINTENANCE_COMPLETED',
   MAINTENANCE_APPROVED: 'MAINTENANCE_APPROVED',
   MAINTENANCE_CANCELLED: 'MAINTENANCE_CANCELLED',
+  MAINTENANCE_SCHEDULE_CHANGED: 'MAINTENANCE_SCHEDULE_CHANGED',
 } as const;
 
 export type MaintenanceEventName = (typeof MAINTENANCE_EVENTS)[keyof typeof MAINTENANCE_EVENTS];
@@ -226,6 +227,56 @@ export const maintenanceCancelledPayload = z.object({
   previousStatus: z.string(),
 });
 
+/**
+ * A service rule was created, edited, paused, resumed or archived.
+ *
+ * This event exists to close `D-011`, and the gap it closes is worth stating
+ * plainly. A maintenance schedule decides how often a machine is serviced.
+ * Until now, creating one, changing its interval or quietly switching it off
+ * produced no event at all — the reason was appended to the `notes` column and
+ * nothing else. `audit-service` has one input, the event log, so the single
+ * most consequential decision in this service was the one it could never see.
+ * `AGENTS.md` S-06 says every state-changing action produces an audit record;
+ * this is that record.
+ *
+ * ## What it carries, and what it deliberately does not
+ *
+ * The status transition is given in full — `previousStatus` and `status` — and
+ * `reason` alongside it, because "who turned this off and why" is the question
+ * an auditor actually asks, and the DTO already requires a reason for exactly
+ * that reason.
+ *
+ * The rest of the rule is reported as **field names only**, in `changedFields`.
+ * Not the values. An event log is read and retained by every service, and
+ * copying the whole rule into it on every edit would duplicate this service's
+ * data into a place no consumer needs it and nobody can correct it. The names
+ * answer "what kind of change was this"; the schedule itself, which this
+ * service owns, answers "to what".
+ *
+ * A consumer that needs before-and-after values should ask for them through
+ * the API rather than have them pushed into a durable log — and that is a
+ * decision to revisit only with a consumer that actually exists.
+ */
+export const maintenanceScheduleChangedPayload = z.object({
+  scheduleId: z.string(),
+  /** Load-bearing: every maintenance event is partitioned by it. */
+  assetId: z.string(),
+  organizationId: z.string(),
+  /** `CREATED`, `UPDATED` or `STATUS_CHANGED`. */
+  change: z.enum(['CREATED', 'UPDATED', 'STATUS_CHANGED']),
+  /** The status after the change. */
+  status: z.string(),
+  /** The status before it. Null on creation, which had none. */
+  previousStatus: z.string().nullable(),
+  /** Why, for a status change. Null for the other two, which carry no reason. */
+  reason: z.string().nullable(),
+  /** Which fields of the rule moved. Names only — see the note above. */
+  changedFields: z.array(z.string()),
+  changedAt: z.string(),
+  /** The user who made the change, or `SYSTEM`. */
+  changedBy: z.string(),
+});
+
 export const MAINTENANCE_EVENT_SCHEMAS = {
   [MAINTENANCE_EVENTS.MAINTENANCE_DUE]: maintenanceDuePayload,
   [MAINTENANCE_EVENTS.BREAKDOWN_REPORTED]: breakdownReportedPayload,
@@ -236,6 +287,7 @@ export const MAINTENANCE_EVENT_SCHEMAS = {
   [MAINTENANCE_EVENTS.MAINTENANCE_COMPLETED]: maintenanceCompletedPayload,
   [MAINTENANCE_EVENTS.MAINTENANCE_APPROVED]: maintenanceApprovedPayload,
   [MAINTENANCE_EVENTS.MAINTENANCE_CANCELLED]: maintenanceCancelledPayload,
+  [MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED]: maintenanceScheduleChangedPayload,
 } as const satisfies Record<MaintenanceEventName, z.ZodTypeAny>;
 
 /**

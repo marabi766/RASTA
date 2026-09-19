@@ -194,30 +194,47 @@ Consumer Group: `fleet-service.asset-sync`. Topicها: `rasta.asset.v1` ·
 
 ## Maintenance — `rasta.maintenance.v1`
 
-> **پیاده‌شده و LIVE VERIFIED (2026-08-28).** `maintenance-service` هر ۹ رویداد
-> زیر را تولید می‌کند. جدول این بخش پیش از ساخت سرویس نوشته شده بود و اینجا با
+> **پیاده‌شده و LIVE VERIFIED (2026-08-28).** `maintenance-service` نُه رویداد
+> نخست زیر را تولید می‌کند؛ دهمی، `MAINTENANCE_SCHEDULE_CHANGED`، در 2026-09-19
+> برای بستن `D-011` افزوده شد.
+> جدول این بخش پیش از ساخت سرویس نوشته شده بود و اینجا با
 > کد Sync شده — سه تفاوت که پیروی تحت‌اللفظی از نسخه پیشین، مصرف‌کننده‌ها را
 > بی‌صدا می‌شکست، در پی جدول توضیح داده شده است.
 
-| رویداد                  | Aggregate           | مصرف‌کنندگان                                 | Payload                                                                                                                                             |
-| ----------------------- | ------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MAINTENANCE_DUE`       | MaintenanceSchedule | **notification** · fleet · analytics         | `scheduleId`, `assetId`, `organizationId`, `title`, `basis`, `state`, `dueBy`, `dueAtMeter`                                                         |
-| `BREAKDOWN_REPORTED`    | MaintenanceRequest  | notification · asset · analytics             | `requestId`, `assetId`, `organizationId`, `severity`, `title`, `reportedAt`                                                                         |
-| `MAINTENANCE_CREATED`   | MaintenanceRequest  | **asset** (پرونده) · analytics               | `requestId`, `assetId`, `organizationId`, `type`, `title`, `scheduleId`, `dueDate`, `reportedAt`                                                    |
-| `WORKSHOP_ASSIGNED`     | RepairOrder         | notification · supplier                      | `requestId`, `repairOrderId`, `assetId`, `organizationId`, `workshopOrganizationId`, `assignedAt`                                                   |
-| `MAINTENANCE_STARTED`   | MaintenanceRequest  | **fleet** (در دسترس بودن) · **asset**        | `requestId`, `repairOrderId`, `assetId`, `organizationId`, `startedAt`, `workshopOrganizationId`                                                    |
-| `REPAIR_COMPLETED`      | RepairOrder         | asset · supplier (امتیاز) · analytics        | `repairOrderId`, `requestId`, `assetId`, `organizationId`, `workshopOrganizationId`, `completedAt`, **`totalCostMinor`**, `currency`                |
-| `MAINTENANCE_COMPLETED` | MaintenanceRequest  | **asset** · **fleet** · economic · analytics | `requestId`, `assetId`, `organizationId`, `type`, `scheduleId`, `completedAt`, `downtimeMinutes`, **`totalCostMinor`**, `currency`                  |
-| `MAINTENANCE_APPROVED`  | MaintenanceRequest  | **economic (مجوز تسویه)** · analytics        | `requestId`, `assetId`, `organizationId`, `approvedBy`, `approvedAt`, `workshopOrganizationId`, **`totalCostMinor`**, `currency`, `costBreakdown[]` |
-| `MAINTENANCE_CANCELLED` | MaintenanceRequest  | asset · notification · audit · analytics     | `requestId`, `assetId`, `organizationId`, `cancelledAt`, `reason`, `previousStatus`                                                                 |
+| رویداد                         | Aggregate           | مصرف‌کنندگان                                 | Payload                                                                                                                                             |
+| ------------------------------ | ------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MAINTENANCE_DUE`              | MaintenanceSchedule | **notification** · fleet · analytics         | `scheduleId`, `assetId`, `organizationId`, `title`, `basis`, `state`, `dueBy`, `dueAtMeter`                                                         |
+| `BREAKDOWN_REPORTED`           | MaintenanceRequest  | notification · asset · analytics             | `requestId`, `assetId`, `organizationId`, `severity`, `title`, `reportedAt`                                                                         |
+| `MAINTENANCE_CREATED`          | MaintenanceRequest  | **asset** (پرونده) · analytics               | `requestId`, `assetId`, `organizationId`, `type`, `title`, `scheduleId`, `dueDate`, `reportedAt`                                                    |
+| `WORKSHOP_ASSIGNED`            | RepairOrder         | notification · supplier                      | `requestId`, `repairOrderId`, `assetId`, `organizationId`, `workshopOrganizationId`, `assignedAt`                                                   |
+| `MAINTENANCE_STARTED`          | MaintenanceRequest  | **fleet** (در دسترس بودن) · **asset**        | `requestId`, `repairOrderId`, `assetId`, `organizationId`, `startedAt`, `workshopOrganizationId`                                                    |
+| `REPAIR_COMPLETED`             | RepairOrder         | asset · supplier (امتیاز) · analytics        | `repairOrderId`, `requestId`, `assetId`, `organizationId`, `workshopOrganizationId`, `completedAt`, **`totalCostMinor`**, `currency`                |
+| `MAINTENANCE_COMPLETED`        | MaintenanceRequest  | **asset** · **fleet** · economic · analytics | `requestId`, `assetId`, `organizationId`, `type`, `scheduleId`, `completedAt`, `downtimeMinutes`, **`totalCostMinor`**, `currency`                  |
+| `MAINTENANCE_APPROVED`         | MaintenanceRequest  | **economic (مجوز تسویه)** · analytics        | `requestId`, `assetId`, `organizationId`, `approvedBy`, `approvedAt`, `workshopOrganizationId`, **`totalCostMinor`**, `currency`, `costBreakdown[]` |
+| `MAINTENANCE_CANCELLED`        | MaintenanceRequest  | asset · notification · audit · analytics     | `requestId`, `assetId`, `organizationId`, `cancelledAt`, `reason`, `previousStatus`                                                                 |
+| `MAINTENANCE_SCHEDULE_CHANGED` | MaintenanceSchedule | **audit** · analytics                        | `scheduleId`, `assetId`, `organizationId`, `change`, `status`, `previousStatus`, `reason`, `changedFields[]`, `changedAt`, `changedBy`              |
 
-**کلید پارتیشن هر نُه رویداد `assetId` است، نه `aggregateId`** — همان استثنای
+**`MAINTENANCE_SCHEDULE_CHANGED` رویداد دهم است و برای بستن `D-011` اضافه شد.**
+برنامهٔ سرویس تعیین می‌کند دستگاهی هر چند وقت سرویس می‌شود؛ تا پیش از این،
+ساخت، ویرایش و خاموش‌کردن آن هیچ رویدادی تولید نمی‌کرد و دلیلش فقط به ستون
+`notes` الحاق می‌شد. `audit-service` تنها ورودی‌اش رویداد است، پس پرپیامدترین
+تصمیم این سرویس دقیقاً همانی بود که هرگز نمی‌دید — و `AGENTS.md` S-06 می‌گوید
+هر تغییر وضعیت رکورد حسابرسی تولید می‌کند.
+
+`changedFields` فقط **نام** فیلدهای تغییرکرده را دارد، نه مقدارشان — همان قاعده‌ای
+که `ASSET_UPDATED` از پیش رعایت می‌کند (بالاتر در همین سند). لاگ رویداد را هر
+سرویسی می‌خواند و نگه می‌دارد؛ کپی‌کردن کل قاعده در آن، دادهٔ این سرویس را
+جایی تکثیر می‌کند که هیچ مصرف‌کننده‌ای لازمش ندارد و هیچ‌کس نمی‌تواند اصلاحش کند.
+گذار وضعیت اما کامل می‌آید (`previousStatus` و `status` و `reason`)، چون پرسشی
+که یک حسابرس واقعاً می‌پرسد همین است: چه کسی این را خاموش کرد و چرا.
+
+**کلید پارتیشن هر ده رویداد `assetId` است، نه `aggregateId`** — همان استثنای
 آگاهانه‌ای که `rasta.fleet.v1` دارد. هر مصرف‌کننده درباره **یک دستگاه** استدلال
 می‌کند، و ترتیب فقط درون یک پارتیشن تضمین می‌شود. اگر `MAINTENANCE_STARTED` و
 `MAINTENANCE_COMPLETED` یک دستگاه روی دو پارتیشن می‌نشستند، دستگاه تعمیرشده
 می‌توانست برای همیشه در `IN_MAINTENANCE` بماند.
 
-**هر نُه رویداد `assetId` حمل می‌کنند — بدون استثنا.** ستون Payload نسخه پیشین
+**هر ده رویداد `assetId` حمل می‌کنند — بدون استثنا.** ستون Payload نسخه پیشین
 این سند برای `MAINTENANCE_DUE`، `WORKSHOP_ASSIGNED` و `MAINTENANCE_APPROVED`
 آن را نیاورده بود. پیروی تحت‌اللفظی از آن، رویدادی می‌ساخت که `TimelineConsumer`
 در `asset-service` نمی‌تواند به چیزی بچسباند (`timelineSourceSchema` بدون
