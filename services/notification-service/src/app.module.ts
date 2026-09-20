@@ -24,6 +24,9 @@ import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging
 import { HealthController } from './health/health.controller';
 import { NotificationController } from './api/notification.controller';
 import { NotificationApiService } from './api/notification.service';
+import { PreferencesController } from './preferences/preferences.controller';
+import { PreferencesRepository } from './preferences/preferences.repository';
+import { PreferencesService } from './preferences/preferences.service';
 import { InAppRepository } from './api/in-app.repository';
 import { EventPublisher } from './events/publisher';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
@@ -69,12 +72,14 @@ import {
  * identity-service verifies, and it lets `AuthGuard` recognise (and refuse) a
  * service token on the inbox.
  *
- * ## No outbox, still
+ * ## The outbox, and why it arrived before the email channel
  *
- * NTF-004 publishes `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` from a standard
- * outbox. Nothing here publishes, so the schema declares no `OutboxMessage`
- * and the discovery guard in `verify-outbox-claim-migration.mjs` correctly
- * ignores this service.
+ * NTF-002's audit events needed it: reading and dismissing a notification are
+ * state changes, `AGENTS.md` S-06 requires an audit record for each, and
+ * `audit-service` reads nothing but the event log. `ADR-054 § 3` recorded that
+ * absence as a deviation from a binding rule rather than a scope decision, so
+ * the outbox came with those three events instead of waiting for NTF-004, which
+ * will reuse it for `NOTIFICATION_SENT` / `NOTIFICATION_FAILED`.
  *
  * ## `allowAutoTopicCreation: false`, and why a missing topic must be fatal
  *
@@ -83,7 +88,7 @@ import {
  * be mistaken for working.
  */
 @Module({
-  controllers: [HealthController, NotificationController],
+  controllers: [HealthController, NotificationController, PreferencesController],
   providers: [
     { provide: ENV, useFactory: (): NotificationEnv => loadNotificationEnv() },
 
@@ -128,6 +133,8 @@ import {
     EventPublisher,
     InAppRepository,
     NotificationApiService,
+    PreferencesRepository,
+    PreferencesService,
 
     // The outbox, added with NTF-002's audit events. This service consumed for
     // its whole life and produced nothing, so none of this existed until the

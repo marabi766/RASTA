@@ -175,7 +175,7 @@
             }
           },
           "404": {
-            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.",
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses. A preference naming a rule this service does not have lands here too: the shape was right, the thing named was not.",
             "content": {
               "application/json": {
                 "schema": {
@@ -262,7 +262,7 @@
             }
           },
           "404": {
-            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.",
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses. A preference naming a rule this service does not have lands here too: the shape was right, the thing named was not.",
             "content": {
               "application/json": {
                 "schema": {
@@ -346,7 +346,7 @@
             }
           },
           "404": {
-            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.",
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses. A preference naming a rule this service does not have lands here too: the shape was right, the thing named was not.",
             "content": {
               "application/json": {
                 "schema": {
@@ -511,7 +511,7 @@
             }
           },
           "404": {
-            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.",
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses. A preference naming a rule this service does not have lands here too: the shape was right, the thing named was not.",
             "content": {
               "application/json": {
                 "schema": {
@@ -676,7 +676,7 @@
             }
           },
           "404": {
-            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.",
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses. A preference naming a rule this service does not have lands here too: the shape was right, the thing named was not.",
             "content": {
               "application/json": {
                 "schema": {
@@ -841,7 +841,7 @@
             }
           },
           "404": {
-            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses.",
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses. A preference naming a rule this service does not have lands here too: the shape was right, the thing named was not.",
             "content": {
               "application/json": {
                 "schema": {
@@ -869,11 +869,381 @@
           }
         ]
       }
+    },
+    "/v1/preferences": {
+      "get": {
+        "description": "Only the rows this person has stored for the active organization. Preferences are per tenant: the same human in another organization has a separate set, so silencing one does not silence the others. An empty list means every channel falls to its configured default.",
+        "operationId": "PreferencesController_listOwn_v1",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "preferences": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "scope": {
+                            "type": "string",
+                            "enum": ["GLOBAL", "CATEGORY", "RULE"]
+                          },
+                          "scopeKey": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "nullable": true
+                          },
+                          "channel": {
+                            "type": "string",
+                            "enum": ["IN_APP"]
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": ["scope", "channel", "enabled"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["preferences"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. `limit` is an integer from 1 to 200; an unknown query parameter is refused rather than ignored; an invalid, edited or unparseable `cursor` lands here too, as does an `id` that is not a prefixed ULID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a service-to-service token (no endpoint here grants one), or a user token that names no active organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses. A preference naming a rule this service does not have lands here too: the shape was right, the thing named was not.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List the caller’s own notification preferences",
+        "tags": ["notification-preferences"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "description": "A whole replacement rather than a patch: a settings screen sends what it shows, and a row left out is removed. Turning off a channel that a mandatory rule delivers on is refused with 422 rather than stored and ignored — a control that shows \"off\" while the notification still arrives claims an effect it does not have. Nothing is written unless every entry is allowed.",
+        "operationId": "PreferencesController_replaceOwn_v1",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "preferences": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "scope": {
+                            "type": "string",
+                            "enum": ["GLOBAL", "CATEGORY", "RULE"]
+                          },
+                          "scopeKey": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "nullable": true
+                          },
+                          "channel": {
+                            "type": "string",
+                            "enum": ["IN_APP"]
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": ["scope", "channel", "enabled"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["preferences"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. `limit` is an integer from 1 to 200; an unknown query parameter is refused rather than ignored; an invalid, edited or unparseable `cursor` lands here too, as does an `id` that is not a prefixed ULID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a service-to-service token (no endpoint here grants one), or a user token that names no active organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses. A preference naming a rule this service does not have lands here too: the shape was right, the thing named was not.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Replace the caller’s own notification preferences",
+        "tags": ["notification-preferences"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "preferences": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "scope": {
+                          "type": "string",
+                          "enum": ["GLOBAL", "CATEGORY", "RULE"]
+                        },
+                        "scopeKey": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "nullable": true
+                        },
+                        "channel": {
+                          "type": "string",
+                          "enum": ["IN_APP"]
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": ["scope", "channel", "enabled"],
+                      "additionalProperties": false
+                    },
+                    "maxItems": 200
+                  }
+                },
+                "required": ["preferences"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/preferences/effective": {
+      "get": {
+        "description": "Returns whether this rule would be delivered on this channel for the caller, which rung of the precedence ladder decided — MANDATORY_POLICY, RULE, CATEGORY, GLOBAL or CHANNEL_DEFAULT — and whether the caller may change it. The winning layer is part of the answer on purpose: a preference system nobody can inspect is a preference system nobody believes.",
+        "operationId": "PreferencesController_effective_v1",
+        "parameters": [
+          {
+            "name": "ruleKey",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["IN_APP"],
+              "default": "IN_APP"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ruleKey": {
+                      "type": "string"
+                    },
+                    "channel": {
+                      "type": "string"
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "decidedBy": {
+                      "type": "string"
+                    },
+                    "overridable": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["ruleKey", "channel", "enabled", "decidedBy", "overridable"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. `limit` is an integer from 1 to 200; an unknown query parameter is refused rather than ignored; an invalid, edited or unparseable `cursor` lands here too, as does an `id` that is not a prefixed ULID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a service-to-service token (no endpoint here grants one), or a user token that names no active organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses. A preference naming a rule this service does not have lands here too: the shape was right, the thing named was not.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Resolve one rule and channel, with the layer that decided",
+        "tags": ["notification-preferences"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
     }
   },
   "info": {
     "title": "Rasta — Notification Service",
-    "description": "The in-app inbox. Every endpoint returns or changes the authenticated user’s own notifications in the organization the request acts for, and nothing else: there is no administrative view of another person’s inbox, no way to name a tenant, and no DELETE — dismissing removes a row from the inbox and keeps it until retention. Reading is idempotent and monotonic; there is no un-read. Notifications are created by consuming domain events (INSURANCE_EXPIRING, INSPECTION_EXPIRING, MAINTENANCE_DUE) with semantic deduplication (ADR-054). No email is sent by this platform: no provider or sender identity has been chosen (docs/24 Q-37), and preferences are not implemented (NTF-003).",
+    "description": "The in-app inbox. Every endpoint returns or changes the authenticated user’s own notifications in the organization the request acts for, and nothing else: there is no administrative view of another person’s inbox, no way to name a tenant, and no DELETE — dismissing removes a row from the inbox and keeps it until retention. Reading is idempotent and monotonic; there is no un-read. Notifications are created by consuming domain events (INSURANCE_EXPIRING, INSPECTION_EXPIRING, MAINTENANCE_DUE) with semantic deduplication (ADR-054). Preferences decide who is told: a five-layer ladder — platform mandatory policy, then rule, category and global preferences, then the channel default — resolved per organization, so the same person can silence one tenant without silencing another. No email is sent by this platform: no provider or sender identity has been chosen (docs/24 Q-37), so IN_APP is the only channel a preference can name.",
     "version": "0.1.0",
     "contact": {}
   },

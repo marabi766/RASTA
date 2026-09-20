@@ -5,6 +5,12 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import { newId, type IntentInput } from '../intake/intake';
 import type { RenderedInApp } from '../rules/render';
 import { DISCARD_REASONS } from '../observability/metrics';
+import {
+  resolvePreference,
+  type ChannelDefaults,
+  type PreferenceRow,
+  type RuleFacts,
+} from '../preferences/precedence';
 
 /**
  * Every write this service makes, and the two invariants each one protects.
@@ -317,7 +323,15 @@ export class NotificationRepository {
     rendered: RenderedInApp | RenderFailure;
     templateVersion: number;
     inAppTtlDays: number;
-  }): Promise<{ deliveries: number; inApp: number }> {
+    /**
+     * What the preference ladder needs to know about the rule that fired
+     * (NTF-003, ADR-054 § 5). Passed in rather than looked up here, so this
+     * repository stays a writer and the rule catalogue stays the caller's.
+     */
+    rule: RuleFacts;
+    /** The channel defaults of ADR-054 § 5 — configuration, not a constant. */
+    channelDefaults: ChannelDefaults;
+  }): Promise<{ deliveries: number; inApp: number; suppressed: number }> {
     const { intent, recipients, rendered } = input;
     const now = new Date();
     const failure = 'errorClass' in rendered ? rendered : null;
@@ -342,10 +356,33 @@ export class NotificationRepository {
       const deliveries: Prisma.NotificationDeliveryCreateManyInput[] = [];
       const attempts: Prisma.DeliveryAttemptCreateManyInput[] = [];
       const inApp: Prisma.InAppNotificationCreateManyInput[] = [];
+      let suppressed = 0;
+
+      // One read for the whole dispatch rather than one per recipient per
+      // layer. Preferences are per tenant, so this is already scoped to the
+      // intent's organization by the guard as well as by the predicate.
+      const preferenceRows = await tx.notificationPreference.findMany({
+        where: {
+          organizationId: intent.organizationId,
+          userId: { in: recipients.map((recipient) => recipient.userId) },
+          channel: IN_APP,
+        },
+        select: { userId: true, scope: true, scopeKey: true, channel: true, enabled: true },
+      });
+      const preferencesByUser = new Map<string, PreferenceRow[]>();
+      for (const stored of preferenceRows) {
+        const own = preferencesByUser.get(stored.userId) ?? [];
+        own.push(stored);
+        preferencesByUser.set(stored.userId, own);
+      }
 
       for (const recipient of recipients) {
         const deliveryId = newId('delivery');
 
+        // The resolution is written whichever way the ladder falls. It records
+        // that this person *was* entitled to the notification, which stays true
+        // even when they have asked not to receive it — and without it a
+        // suppressed delivery would have no explanation of why it existed.
         resolutions.push({
           id: newId('resolution'),
           intentId: intent.id,
@@ -355,6 +392,35 @@ export class NotificationRepository {
           resolvedAt: now,
           resolutionSource: 'IDENTITY_API',
         });
+
+        const decision = resolvePreference(
+          preferencesByUser.get(recipient.userId) ?? [],
+          input.rule,
+          IN_APP,
+          input.channelDefaults,
+        );
+
+        if (!decision.enabled) {
+          // Suppression is a decision, not a failure: zero attempts, a bounded
+          // reason, and no in-app row (`ck_delivery_suppressed_shape`). The row
+          // exists so the person can be told *why* nothing arrived, which is
+          // the difference between a preference system and a silent drop.
+          suppressed += 1;
+          deliveries.push({
+            id: deliveryId,
+            intentId: intent.id,
+            organizationId: intent.organizationId,
+            userId: recipient.userId,
+            channel: IN_APP,
+            status: 'SUPPRESSED',
+            templateKey: intent.templateKey,
+            templateVersion: input.templateVersion,
+            attemptCount: 0,
+            maxAttempts: IN_APP_MAX_ATTEMPTS,
+            suppressionReason: decision.suppressionReason,
+          });
+          continue;
+        }
 
         deliveries.push({
           id: deliveryId,
@@ -412,7 +478,7 @@ export class NotificationRepository {
         await tx.inAppNotification.createMany({ data: inApp });
       }
 
-      return { deliveries: deliveries.length, inApp: inApp.length };
+      return { deliveries: deliveries.length, inApp: inApp.length, suppressed };
     }, DISPATCH_TRANSACTION);
   }
 

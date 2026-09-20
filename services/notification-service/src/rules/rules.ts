@@ -43,6 +43,23 @@ export const SUBSCRIBED_TOPICS: readonly string[] = [
 export type Severity = 'INFO' | 'WARNING' | 'CRITICAL';
 export type Classification = 'ROUTINE' | 'MANDATORY';
 
+/**
+ * The bucket a person turns off when they mean "this kind of thing"
+ * (NTF-003, ADR-054 § 5, layer 3 of the ladder).
+ *
+ * Coarser than a `ruleKey` on purpose. Somebody who does not want expiry
+ * reminders should not have to find and disable `insurance.expiring` and
+ * `inspection.expiring` separately, and should not start receiving them again
+ * the day a third expiry rule ships.
+ *
+ * A closed set rather than a free string: it is the `scope_key` of a stored
+ * preference, so a typo would create a row the ladder never looks for — present
+ * in the table, invisible in effect, and impossible to explain to the person
+ * who set it.
+ */
+export const NOTIFICATION_CATEGORIES = ['EXPIRY', 'MAINTENANCE'] as const;
+export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
+
 export interface NotificationRule<TPayload = unknown> {
   readonly ruleKey: string;
   readonly eventName: string;
@@ -60,6 +77,16 @@ export interface NotificationRule<TPayload = unknown> {
   readonly contextAllowlist: readonly string[];
   readonly severity: Severity;
   readonly classification: Classification;
+  /** Layer 3 of the preference ladder. See `NotificationCategory`. */
+  readonly category: NotificationCategory;
+  /**
+   * Channels a `MANDATORY` rule delivers on whatever the person prefers.
+   *
+   * Per rule rather than one constant, because Q-38 is a product question and
+   * its recorded answer promises it can change "بدون Migration، بدون تغییر
+   * دامنه". Empty on a `ROUTINE` rule, where the ladder never consults it.
+   */
+  readonly mandatoryChannels: readonly 'IN_APP'[];
   /**
    * Which memberships in the event's organization are recipients, resolved
    * through identity-service. A user holding several listed roles is one
@@ -175,6 +202,8 @@ export const INSURANCE_EXPIRING_RULE: NotificationRule<z.infer<typeof insuranceE
   contextAllowlist: ['assetId', 'policyId', 'insurerName', 'validTo', 'daysRemaining'],
   severity: 'WARNING',
   classification: 'ROUTINE',
+  category: 'EXPIRY',
+  mandatoryChannels: [],
   recipientRoles: ASSET_WARNING_RECIPIENTS,
   template: insuranceExpiringTemplate,
 };
@@ -191,6 +220,8 @@ export const INSPECTION_EXPIRING_RULE: NotificationRule<z.infer<typeof inspectio
     contextAllowlist: ['assetId', 'inspectionId', 'validTo', 'daysRemaining'],
     severity: 'WARNING',
     classification: 'ROUTINE',
+    category: 'EXPIRY',
+    mandatoryChannels: [],
     recipientRoles: ASSET_WARNING_RECIPIENTS,
     template: inspectionExpiringTemplate,
   };
@@ -209,6 +240,8 @@ export const MAINTENANCE_DUE_RULE: NotificationRule<z.infer<typeof maintenanceDu
   contextAllowlist: ['scheduleId', 'assetId', 'title', 'basis', 'state', 'dueBy', 'dueAtMeter'],
   severity: 'WARNING',
   classification: 'ROUTINE',
+  category: 'MAINTENANCE',
+  mandatoryChannels: [],
   recipientRoles: ASSET_WARNING_RECIPIENTS,
   template: maintenanceDueTemplate,
 };

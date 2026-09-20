@@ -25,6 +25,11 @@ export const TENANT_SCOPED_MODELS = [
   'NotificationDelivery',
   'DeliveryAttempt',
   'InAppNotification',
+  // Preferences are per tenant, not per user (ADR-054 § 5): one human with
+  // three memberships silences one organization without silencing the others.
+  // The guard is what makes that true of every query rather than of the ones
+  // somebody remembered to scope.
+  'NotificationPreference',
 ] as const;
 
 /**

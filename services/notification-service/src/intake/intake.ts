@@ -32,6 +32,7 @@ export const ID_PREFIX = {
   delivery: 'NTD',
   attempt: 'NTA',
   inApp: 'NTN',
+  preference: 'NPF',
 } as const;
 
 export function newId(prefix: keyof typeof ID_PREFIX): string {
