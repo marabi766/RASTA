@@ -11,6 +11,7 @@ import { renderInApp, RenderError, type RenderedInApp } from '../rules/render';
 import type { ContextData } from '../rules/context-sanitiser';
 import type { ScrubbedLogger } from '../logging/scrub';
 import { nextResolutionAt } from './backoff';
+import { CHANNEL_DEFAULTS } from '../preferences/defaults';
 import { SERVICE_NAME } from '../config/env';
 import {
   notificationDeliveriesTotal,
@@ -198,11 +199,32 @@ export class ResolutionWorker implements OnApplicationShutdown {
         rendered,
         templateVersion: TEMPLATE_CATALOGUE_VERSION,
         inAppTtlDays: this.options.inAppTtlDays,
+        rule: {
+          ruleKey: rule.ruleKey,
+          category: rule.category,
+          classification: rule.classification,
+          severity: rule.severity,
+          mandatoryChannels: rule.mandatoryChannels,
+        },
+        channelDefaults: CHANNEL_DEFAULTS,
       });
       const status = 'errorClass' in rendered ? 'FAILED' : 'SENT';
-      notificationDeliveriesTotal.inc({ channel: 'IN_APP', status }, written.deliveries);
+      // Counted apart, because they are different facts. A suppressed delivery
+      // was neither sent nor failed; folding it into either would make the
+      // delivery success rate a number about preferences rather than delivery.
+      const delivered = written.deliveries - written.suppressed;
+      if (delivered > 0) {
+        notificationDeliveriesTotal.inc({ channel: 'IN_APP', status }, delivered);
+      }
+      if (written.suppressed > 0) {
+        notificationDeliveriesTotal.inc(
+          { channel: 'IN_APP', status: 'SUPPRESSED' },
+          written.suppressed,
+        );
+      }
       this.logger.info(
-        `Intent ${intent.id} (${rule.ruleKey}) dispatched: ${written.deliveries} in-app deliveries ${status}, ${written.inApp} rows`,
+        `Intent ${intent.id} (${rule.ruleKey}) dispatched: ${delivered} in-app deliveries ${status}, ` +
+          `${written.suppressed} suppressed by preference, ${written.inApp} rows`,
       );
     } catch (error) {
       if (error instanceof LeaseLostError) {

@@ -412,6 +412,8 @@ export const EXPECTED = {
       'notification_delivery',
       'delivery_attempt',
       'in_app_notification',
+      // NTF-003.
+      'notification_preference',
       // The outbox arrived with NTF-002's audit events. Before them this
       // service consumed and never produced, so it had none — which is the
       // deviation ADR-054 § 3 recorded against AGENTS.md S-06. Listed here so
@@ -424,8 +426,18 @@ export const EXPECTED = {
     // its function are named separately for the same reason as the first pair.
     triggers: ['delivery_attempt_append_only', 'in_app_notification_state_write_once'],
     functions: ['refuse_attempt_update', 'refuse_in_app_state_regression'],
-    indexes: ['ix_intent_claimable', 'ix_in_app_unread', 'ux_delivery_intent_user_channel'],
+    indexes: [
+      'ix_intent_claimable',
+      'ix_in_app_unread',
+      'ux_delivery_intent_user_channel',
+      // NTF-003. The partial unique index is the half of the uniqueness rule
+      // the composite one cannot express, because PostgreSQL treats NULLs as
+      // distinct: without it two GLOBAL rows for one channel are both legal and
+      // the winning layer depends on row order.
+      'ux_preference_global_channel',
+    ],
     types: [
+      'preference_scope',
       'notification_severity',
       'notification_classification',
       'intent_status',
@@ -456,6 +468,10 @@ export const EXPECTED = {
       'ck_in_app_action_path_relative',
       'ck_in_app_text_not_blank',
       'ck_in_app_expires_after_created',
+      // NTF-003. `ck_preference_scope_key_shape` is what keeps a GLOBAL row
+      // from carrying a key, or a RULE row from lacking one — either of which
+      // would sit in the unique index under a shape the ladder never looks for.
+      'ck_preference_scope_key_shape',
       // The outbox's own invariants, listed for the same reason supplier's are:
       // this is the gate that verifies them. `verify-outbox-claim-migration.mjs`
       // addresses migrations by name and this service's outbox arrived in one of

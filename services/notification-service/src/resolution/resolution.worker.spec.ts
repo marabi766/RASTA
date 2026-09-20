@@ -104,7 +104,14 @@ function fakeRepository(claimed: NotificationIntent[]): FakeRepository {
         if (state.dispatchError) throw state.dispatchError;
         state.dispatched.push(input);
         const failed = 'errorClass' in input.rendered;
-        return { deliveries: input.recipients.length, inApp: failed ? 0 : input.recipients.length };
+        return {
+          deliveries: input.recipients.length,
+          inApp: failed ? 0 : input.recipients.length,
+          // The stub never suppresses. The preference ladder is exercised
+          // exhaustively in `precedence.spec.ts` and against a real database in
+          // the integration suite; deciding it here would be testing the fake.
+          suppressed: 0,
+        };
       },
     ),
     pendingSummary: jest.fn(async () => ({ pending: 0, oldestAgeSeconds: 0 })),

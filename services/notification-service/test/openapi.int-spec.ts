@@ -49,6 +49,10 @@ describe('the published OpenAPI contract (real application)', () => {
     'GET /v1/notifications/{id}',
     'POST /v1/notifications/{id}/read',
     'POST /v1/notifications/{id}/dismiss',
+    // NTF-003. Same rule as the six above: closed by default, self-only.
+    'GET /v1/preferences',
+    'PUT /v1/preferences',
+    'GET /v1/preferences/effective',
   ];
 
   beforeAll(async () => {
