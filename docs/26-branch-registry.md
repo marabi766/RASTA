@@ -55,12 +55,13 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                         | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                                                    |
-| ---------------------------- | ------------------------------------------------ | ---- | --- | -------------- | -------------------------------------------------------------------------------------------------------- |
-| `chore/test-task-unit-only`  | `F:\Rasta\.claude\worktrees\stoic-lamarr-5f1baa` | —    | —   | ۲ / ۰          | یکدست‌کردن `test` (فقط `unit`) تا `pnpm verify` بدون پایگاه داده اجرا شود                                |
-| `claude/quirky-curie-15d850` | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —   | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`؛ **همان دو `package.json` را لمس می‌کند** |
-| `demo/investor-preview`      | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                             |
-| `design/claude-design`       | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                    |
+| شاخه                               | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                                                                                              |
+| ---------------------------------- | ------------------------------------------------ | ---- | --- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chore/test-task-unit-only`        | `F:\Rasta\.claude\worktrees\stoic-lamarr-5f1baa` | —    | —   | ۲ / ۰          | یکدست‌کردن `test` (فقط `unit`) تا `pnpm verify` بدون پایگاه داده اجرا شود                                                                          |
+| `claude/quirky-curie-15d850`       | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —   | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`؛ **همان دو `package.json` را لمس می‌کند**                                           |
+| `docs/frontend-gate-and-web-state` | `F:\Rasta-Parallel\docs-frontend-gate`           | —    | —   | ۱ / ۰          | برداشتن دروازهٔ کهنهٔ «UI فقط با تأیید موردی» و اصلاح هر جملهٔ `apps/` در `PROJECT_MEMORY.md` و `CLAUDE.md`؛ **`PROJECT_MEMORY.md` را لمس می‌کند** |
+| `demo/investor-preview`            | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                       |
+| `design/claude-design`             | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                              |
 
 ## شاخه‌های بازنشسته
 
