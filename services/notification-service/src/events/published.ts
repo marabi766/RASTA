@@ -30,6 +30,10 @@ export const NOTIFICATION_EVENTS = {
   NOTIFICATION_READ: 'NOTIFICATION_READ',
   NOTIFICATION_DISMISSED: 'NOTIFICATION_DISMISSED',
   NOTIFICATION_ALL_READ: 'NOTIFICATION_ALL_READ',
+  /** NTF-004. A message left this platform for a person. */
+  NOTIFICATION_SENT: 'NOTIFICATION_SENT',
+  /** NTF-004. A message did not, and will not without somebody acting. */
+  NOTIFICATION_FAILED: 'NOTIFICATION_FAILED',
 } as const;
 
 export type NotificationEventName = (typeof NOTIFICATION_EVENTS)[keyof typeof NOTIFICATION_EVENTS];
@@ -87,10 +91,60 @@ export const notificationAllReadPayload = z.object({
   ...actorFields,
 });
 
+/**
+ * A message was accepted by a mail server (NTF-004).
+ *
+ * "Sent" is precise and deliberately modest: a server took responsibility for
+ * it. It is not "delivered", it is not "read", and this platform has no way to
+ * learn either — the `DELIVERED` status on the delivery row exists for a
+ * channel that can report one, and email as configured here cannot.
+ *
+ * Carries no address and no rendered text. `renderedHash` is a SHA-256, which
+ * answers "was this the message" for anybody holding the message, and tells
+ * somebody holding only the event nothing at all (ADR-054 § 10.4).
+ */
+export const notificationSentPayload = z.object({
+  deliveryId: z.string(),
+  intentId: z.string(),
+  channel: z.enum(['EMAIL']),
+  templateKey: z.string(),
+  templateVersion: z.number().int().positive(),
+  attemptNo: z.number().int().positive(),
+  renderedHash: z.string().regex(/^[0-9a-f]{64}$/),
+  ...actorFields,
+});
+
+/**
+ * A message will not arrive (NTF-004).
+ *
+ * Published once, at the end: on a permanent failure, or when the attempts are
+ * spent and the delivery is `DEAD`. Not on each transient failure — a mail
+ * server that is briefly away would otherwise fill the audit log with events
+ * about a message that arrives five minutes later.
+ *
+ * `errorClass` is a bounded class from the channel's own vocabulary, never a
+ * server's text: a remote party's message is not a field this platform can
+ * promise anything about, and it is exactly where addresses and internal
+ * hostnames leak from.
+ */
+export const notificationFailedPayload = z.object({
+  deliveryId: z.string(),
+  intentId: z.string(),
+  channel: z.enum(['EMAIL']),
+  templateKey: z.string(),
+  attempts: z.number().int().nonnegative(),
+  errorClass: z.string().max(64),
+  /** `FAILED` for a permanent refusal, `DEAD` once the ladder is spent. */
+  finalStatus: z.enum(['FAILED', 'DEAD']),
+  ...actorFields,
+});
+
 export const NOTIFICATION_EVENT_SCHEMAS = {
   [NOTIFICATION_EVENTS.NOTIFICATION_READ]: notificationReadPayload,
   [NOTIFICATION_EVENTS.NOTIFICATION_DISMISSED]: notificationDismissedPayload,
   [NOTIFICATION_EVENTS.NOTIFICATION_ALL_READ]: notificationAllReadPayload,
+  [NOTIFICATION_EVENTS.NOTIFICATION_SENT]: notificationSentPayload,
+  [NOTIFICATION_EVENTS.NOTIFICATION_FAILED]: notificationFailedPayload,
 } as const satisfies Record<NotificationEventName, z.ZodTypeAny>;
 
 /**
@@ -104,6 +158,10 @@ export const AGGREGATE_OF = {
   NOTIFICATION_READ: 'InAppNotification',
   NOTIFICATION_DISMISSED: 'InAppNotification',
   NOTIFICATION_ALL_READ: 'NotificationInbox',
+  // The delivery, not the notification: one intent can produce a delivery per
+  // channel, and "the email failed" is a fact about one of them.
+  NOTIFICATION_SENT: 'NotificationDelivery',
+  NOTIFICATION_FAILED: 'NotificationDelivery',
 } as const satisfies Record<NotificationEventName, string>;
 
 /**

@@ -30,6 +30,9 @@ export const TENANT_SCOPED_MODELS = [
   // The guard is what makes that true of every query rather than of the ones
   // somebody remembered to scope.
   'NotificationPreference',
+  // A quiet window is one person's, inside one tenant, for the same reason a
+  // preference is (NTF-004).
+  'NotificationQuietHours',
 ] as const;
 
 /**
@@ -62,6 +65,14 @@ export const TENANT_SCOPE_EXEMPT_MODELS = [
   'OutboxMessage',
   'OutboxStreamSequence',
   'ProcessedEvent',
+  // The email templates and their published versions (NTF-004). Platform
+  // configuration, identical for every tenant, seeded from the code catalogue
+  // and written by nothing else. They carry no organization column, so this is
+  // an exemption in name only — it is here because the spec compares the
+  // guarded set against the whole schema and an unnamed model would be an
+  // omission rather than a decision.
+  'NotificationTemplate',
+  'NotificationTemplateVersion',
 ] as const;
 
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;

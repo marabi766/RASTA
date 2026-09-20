@@ -33,6 +33,12 @@ const ALLOWED_LABELS = new Set([
   'status',
   'reason',
   'transition',
+  // NTF-004. Both are closed sets the mail channel port declares: the
+  // three-value send outcome and the nine-value failure vocabulary. Neither is
+  // ever built from a mail server's own text, which is where an address or an
+  // internal hostname would otherwise reach a scrape.
+  'outcome',
+  'error_class',
 ]);
 
 describe('notification metrics carry no identifying labels', () => {
@@ -50,6 +56,10 @@ describe('notification metrics carry no identifying labels', () => {
         'rasta_notification_recipient_truncated_total',
         'rasta_notification_recipient_resolution_failures_total',
         'rasta_notification_intents_pending',
+        // NTF-004. The second is what an operator is alerted on: a dead
+        // delivery is a person who was meant to be told something and was not.
+        'rasta_notification_mail_attempts_total',
+        'rasta_notification_mail_dead_total',
       ]),
     );
   });

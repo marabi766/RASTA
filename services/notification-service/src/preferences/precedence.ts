@@ -33,7 +33,10 @@ import type { Classification, Severity } from '../rules/rules';
  * claiming the right to put mail in a box nobody asked for.
  */
 
-export type Channel = 'IN_APP';
+export type Channel = 'IN_APP' | 'EMAIL';
+
+/** Channels that can reach somebody who is not looking at the application. */
+export const INTERRUPTING_CHANNELS: readonly Channel[] = ['EMAIL'];
 
 /** The layers, narrowest first. The order is the contract. */
 export const PREFERENCE_LAYERS = [
