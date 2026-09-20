@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۹ (2026-09-20) · **`main` در آن لحظه:** `e6d509e`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۹ (2026-09-20) · **`main` در آن لحظه:** `37c48c2`
 
 ---
 
@@ -55,11 +55,12 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                    | Worktree                                   | نشست | PR  | ahead / behind | وضعیت                                                                        |
-| ----------------------- | ------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------- |
-| `docs/state-2026-09-20` | `F:\Rasta-Parallel\exp-001-web-foundation` | C0   | —   | ۱ / ۰          | ثبت وضعیت پس از PR #60 — `PROJECT_MEMORY § ۲۶`، `§ ۲۹` و همین رجیستری        |
-| `demo/investor-preview` | `F:\Rasta-Parallel\investor-demo`          | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
-| `design/claude-design`  | پوشهٔ موقت در `%TEMP%`                     | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
+| شاخه                         | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                                                    |
+| ---------------------------- | ------------------------------------------------ | ---- | --- | -------------- | -------------------------------------------------------------------------------------------------------- |
+| `chore/test-task-unit-only`  | `F:\Rasta\.claude\worktrees\stoic-lamarr-5f1baa` | —    | —   | ۲ / ۰          | یکدست‌کردن `test` (فقط `unit`) تا `pnpm verify` بدون پایگاه داده اجرا شود                                |
+| `claude/quirky-curie-15d850` | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —   | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`؛ **همان دو `package.json` را لمس می‌کند** |
+| `demo/investor-preview`      | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                             |
+| `design/claude-design`       | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                    |
 
 ## شاخه‌های بازنشسته
 
@@ -85,6 +86,7 @@
 | `feat/notification-outbox-audit`        | [#58](https://github.com/marabi766/RASTA/pull/58) | `419afde`   |
 | `docs/state-2026-09-19`                 | [#59](https://github.com/marabi766/RASTA/pull/59) | `8a80ce5`   |
 | `feat/notification-preferences`         | [#60](https://github.com/marabi766/RASTA/pull/60) | `e6d509e`   |
+| `docs/state-2026-09-20`                 | [#61](https://github.com/marabi766/RASTA/pull/61) | `37c48c2`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
