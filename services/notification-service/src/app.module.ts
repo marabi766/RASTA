@@ -40,7 +40,9 @@ import { CachedRecipientPort } from './recipients/cached-recipient.port';
 import { RECIPIENT_PORT, type RecipientPort } from './recipients/recipient.port';
 import { SUBSCRIBED_TOPICS } from './rules/rules';
 import { withAddressScrubbing, type ScrubbedLogger } from './logging/scrub';
-import { ENV, LOGGER, SCRUBBED_LOGGER } from './tokens';
+import { ENV, LOGGER, MAIL_CHANNEL, SCRUBBED_LOGGER } from './tokens';
+import type { MailChannel } from './channels/mail.channel.port';
+import { SmtpMailChannel } from './channels/smtp.mail.channel';
 import {
   brokersOf,
   DISPATCHER_CONSUMER_GROUP,
@@ -135,6 +137,37 @@ import {
     NotificationApiService,
     PreferencesRepository,
     PreferencesService,
+
+    /**
+     * The mail channel behind its port (ADR-054 § 6, `docs/24` Q-37).
+     *
+     * `NOTIFICATION_MAIL_ADAPTER` accepts `smtp` alone and refuses boot on
+     * anything else, so this factory has one branch today and that enum is
+     * where a second one would start.
+     *
+     * **`deliversToRealRecipients` is a constant `false`, not configuration.**
+     * A flag that may hold only one value is a control claiming an effect it
+     * does not have — the argument of Q-07, which this service has already
+     * applied twice. Making it true is a code change, in review, on the day
+     * Q-37 is answered and a provider and sender identity actually exist.
+     * Until then nothing here may point at a human.
+     */
+    {
+      provide: MAIL_CHANNEL,
+      inject: [ENV],
+      useFactory: (env: NotificationEnv): MailChannel =>
+        new SmtpMailChannel({
+          host: env.NOTIFICATION_SMTP_HOST,
+          port: env.NOTIFICATION_SMTP_PORT,
+          secure: env.NOTIFICATION_SMTP_SECURE,
+          user: env.NOTIFICATION_SMTP_USER || null,
+          password: env.NOTIFICATION_SMTP_PASSWORD || null,
+          fromAddress: env.NOTIFICATION_MAIL_FROM_ADDRESS,
+          fromName: env.NOTIFICATION_MAIL_FROM_NAME,
+          timeoutMs: env.NOTIFICATION_SMTP_TIMEOUT_MS,
+          deliversToRealRecipients: false,
+        }),
+    },
 
     // The outbox, added with NTF-002's audit events. This service consumed for
     // its whole life and produced nothing, so none of this existed until the

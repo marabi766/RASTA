@@ -113,6 +113,63 @@ export const notificationEnvSchema = baseEnvSchema
       .min(1)
       .max(86_400)
       .default(600),
+
+    // Mail channel (ADR-054 § 6, `docs/24` Q-37) ---------------------------
+    /**
+     * Which adapter is bound behind `MailChannel`.
+     *
+     * `smtp` is the only accepted value, and any other **refuses boot** —
+     * exactly as `ECONOMIC_PAYMENT_PROVIDER` does for `mock` (ADR-024). The
+     * failure this prevents is the worst one available here: an environment
+     * configured for a real provider falling back silently to a development
+     * one and reporting that it told people things it did not tell them.
+     *
+     * Widening this enum is how a provider is chosen, and it is not an
+     * engineering decision — Q-37 stays open until somebody with the authority
+     * to sign a contract makes it.
+     */
+    NOTIFICATION_MAIL_ADAPTER: z.enum(['smtp']).default('smtp'),
+
+    NOTIFICATION_SMTP_HOST: z.string().min(1).default('localhost'),
+    NOTIFICATION_SMTP_PORT: z.coerce.number().int().min(1).max(65_535).default(1025),
+    /** Implicit TLS on connect. False for Mailpit; true for a submission port. */
+    NOTIFICATION_SMTP_SECURE: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+    /** Both or neither. A user with no password is a misconfiguration, not anonymous auth. */
+    NOTIFICATION_SMTP_USER: z.string().default(''),
+    NOTIFICATION_SMTP_PASSWORD: z.string().default(''),
+    NOTIFICATION_SMTP_TIMEOUT_MS: z.coerce.number().int().min(100).max(120_000).default(10_000),
+
+    /**
+     * The sender identity, which **has no real default and must not get one**.
+     *
+     * No sender identity has been chosen for this platform (Q-37), so the
+     * shipped value is a `.invalid` address: RFC 2606 reserves that TLD so it
+     * can never resolve, anywhere, by accident. A misconfigured deployment
+     * therefore fails to send rather than sending as somebody.
+     *
+     * Choosing a real domain here is half of answering Q-37; the other half is
+     * the provider that is allowed to send for it.
+     */
+    NOTIFICATION_MAIL_FROM_ADDRESS: z.string().min(3).default('notifications@rasta.invalid'),
+    NOTIFICATION_MAIL_FROM_NAME: z.string().default('رستا'),
+  })
+  .superRefine((env, ctx) => {
+    // Credentials are a pair. One without the other is a deployment that
+    // believes it is authenticating and is not — and an anonymous session to a
+    // relay that expected a login fails later, further away, and less clearly.
+    const user = env.NOTIFICATION_SMTP_USER.length > 0;
+    const password = env.NOTIFICATION_SMTP_PASSWORD.length > 0;
+    if (user !== password) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['NOTIFICATION_SMTP_USER'],
+        message:
+          'NOTIFICATION_SMTP_USER and NOTIFICATION_SMTP_PASSWORD must be set together or not at all',
+      });
+    }
   });
 
 export type NotificationEnv = z.infer<typeof notificationEnvSchema>;
