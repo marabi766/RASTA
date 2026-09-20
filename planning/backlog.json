@@ -2,7 +2,7 @@
   "$schema": "./backlog.schema.json",
   "version": 2,
   "project": "RASTA",
-  "asOf": "2026-09-19",
+  "asOf": "2026-09-21",
   "governance": {
     "baselineState": "APPROVED",
     "approvedBy": "Product Owner",
@@ -541,7 +541,7 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 13,
-      "status": "BLOCKED",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Domain events produce idempotent in-app notifications",
         "Email delivery respects user preferences and records delivery outcome"
@@ -576,6 +576,31 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/58",
           "note": "Blocker (2) is closed. notification-service now publishes NOTIFICATION_READ, NOTIFICATION_DISMISSED and NOTIFICATION_ALL_READ from a transactional outbox, in the same transaction as the state change and only when a row actually moved, and audit-service subscribes to rasta.notification.v1. ADR-054 § 3 offered two ways out and the written exception was rejected: S-06 is a security rule, and a documented exception lowers the platform audit floor permanently. Blocker (1) stands — there is still no channel, mail or email module, and Q-37 is open."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/60",
+          "note": "NTF-003: notification preferences with the five-layer precedence ladder (MANDATORY_POLICY, RULE, CATEGORY, GLOBAL, CHANNEL_DEFAULT), a reversible migration, and the GET /v1/preferences/effective endpoint that returns the winning layer. Q-38 was answered and implemented in the same change as per-rule mandatoryChannels. Quiet hours were deliberately deferred to NTF-004 and the deviation is recorded in the ADR-054 implementation plan."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/35476698542",
+          "note": "Green for NTF-003 before merge at e6d509e."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/63",
+          "note": "The first piece of NTF-004, and only that piece: a MailChannel port with a closed set of failure reasons, an SMTP adapter that refuses header injection and a second recipient before a socket opens, SMTP 4xx/5xx retry classification, and an integration suite against a real Mailpit. Three independent locks keep it from reaching a human: the shipped sender is an RFC 2606 .invalid address, deliversToRealRecipients is a constant in app.module.ts rather than a setting, and env.spec.ts asserts that no environment variable matching REAL_RECIPIENT|PRODUCTION_MAIL|MAIL_ENABLED|SEND_REAL exists."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/35536333183",
+          "note": "All seven jobs green on the merge ref of #63, including integration and the economic end-to-end path."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/adr/ADR-054-implementation-plan.md",
+          "note": "Status on 2026-09-21: blocker (1) of the 2026-09-18 note is closed — the channel module now exists. What remains of COM-008 is unbuilt work, not a blocker: Persian RTL templates, retry and backoff, suppression, the NOTIFICATION_SENT and NOTIFICATION_FAILED events, delivery-outcome recording, and the quiet hours deferred from NTF-003. Whether COM-008 may be ACCEPTED while Q-37 (which email provider, which sender identity) is still open is a product-owner decision and is not assumed here."
         }
       ]
     },
@@ -1674,6 +1699,14 @@
       "recordedBy": "Codex",
       "approvalRef": "Product owner instruction in the Codex project-management task on 2026-08-31",
       "recordIds": ["COM-004", "DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-005"]
+    },
+    {
+      "date": "2026-09-21",
+      "type": "STATUS_CORRECTED",
+      "reason": "COM-008 moves from BLOCKED to IN_PROGRESS. Both blockers recorded on 2026-09-18 are gone: the audit deviation was closed by PR #58, and the absence of any channel, mail or email module was closed by PR #63. What is left is work nobody has written yet, which is IN_PROGRESS, not BLOCKED. The item still earns zero points until its second acceptance criterion is met and proven.",
+      "recordedBy": "Claude Opus 5",
+      "approvalRef": "Product owner instruction in the Claude Code session on 2026-09-21 to carry out the listed steps in order",
+      "recordIds": ["COM-008"]
     }
   ]
 }
