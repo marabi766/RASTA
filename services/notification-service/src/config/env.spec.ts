@@ -95,12 +95,80 @@ describe('notification-service configuration', () => {
     ).toThrow();
   });
 
-  it('has no email provider or sender setting: Q-37 is open', () => {
-    // A key with a default would settle Q-37 silently (AGENTS.md § 9).
-    const env = loadNotificationEnv(REQUIRED);
-    for (const key of Object.keys(env)) {
-      expect(key).not.toMatch(/SMTP|MAIL|SENDER|FROM_ADDRESS/i);
-    }
+  /**
+   * Q-37 is still open, and the settings below do not close it.
+   *
+   * This suite used to assert that no `SMTP` or `MAIL` key existed at all, on
+   * the grounds that a key with a default would settle Q-37 silently. The port
+   * and its SMTP adapter now exist, so that assertion stopped being true — and
+   * deleting it would have thrown away the invariant it protected. The
+   * invariant was never "there are no mail settings". It is **no default may
+   * make this platform able to write to a real person**, and that is what is
+   * asserted here instead.
+   */
+  describe('the mail channel settings, and what they still refuse', () => {
+    it('accepts only the smtp adapter and refuses boot on anything else', () => {
+      // The shape ADR-054 § 6 names, with `ECONOMIC_PAYMENT_PROVIDER` as the
+      // precedent: a silent fallback to a development adapter in an
+      // environment that expected a real provider is the worst failure here.
+      expect(loadNotificationEnv(REQUIRED).NOTIFICATION_MAIL_ADAPTER).toBe('smtp');
+      expect(() =>
+        loadNotificationEnv({ ...REQUIRED, NOTIFICATION_MAIL_ADAPTER: 'sendgrid' }),
+      ).toThrow();
+      expect(() =>
+        loadNotificationEnv({ ...REQUIRED, NOTIFICATION_MAIL_ADAPTER: 'ses' }),
+      ).toThrow();
+    });
+
+    it('defaults the sender to an address that cannot resolve anywhere', () => {
+      // RFC 2606 reserves `.invalid`. No sender identity has been chosen, so
+      // the shipped default must be one that fails rather than one that sends
+      // as somebody.
+      expect(loadNotificationEnv(REQUIRED).NOTIFICATION_MAIL_FROM_ADDRESS).toMatch(/\.invalid$/);
+    });
+
+    it('defaults to the local development server and to no credentials', () => {
+      const env = loadNotificationEnv(REQUIRED);
+      expect(env.NOTIFICATION_SMTP_PORT).toBe(1025); // Mailpit
+      expect(env.NOTIFICATION_SMTP_SECURE).toBe(false);
+      expect(env.NOTIFICATION_SMTP_USER).toBe('');
+      expect(env.NOTIFICATION_SMTP_PASSWORD).toBe('');
+    });
+
+    it('refuses a username without a password, and a password without a username', () => {
+      // One without the other is a deployment that believes it authenticates
+      // and does not.
+      expect(() => loadNotificationEnv({ ...REQUIRED, NOTIFICATION_SMTP_USER: 'relay' })).toThrow();
+      expect(() =>
+        loadNotificationEnv({ ...REQUIRED, NOTIFICATION_SMTP_PASSWORD: 'hunter2' }),
+      ).toThrow();
+      expect(() =>
+        loadNotificationEnv({
+          ...REQUIRED,
+          NOTIFICATION_SMTP_USER: 'relay',
+          NOTIFICATION_SMTP_PASSWORD: 'hunter2',
+        }),
+      ).not.toThrow();
+    });
+
+    it('has no setting that turns on delivery to real recipients', () => {
+      // The decision Q-37 gates is deliberately not configurable. Whether this
+      // platform may write to a human is a code change under review, not an
+      // environment variable somebody can flip at three in the morning.
+      const env = loadNotificationEnv(REQUIRED);
+      for (const key of Object.keys(env)) {
+        expect(key).not.toMatch(/REAL_RECIPIENT|PRODUCTION_MAIL|MAIL_ENABLED|SEND_REAL/i);
+      }
+    });
+
+    it('bounds the smtp timeout so a misconfiguration cannot disable it', () => {
+      expect(() =>
+        loadNotificationEnv({ ...REQUIRED, NOTIFICATION_SMTP_TIMEOUT_MS: '0' }),
+      ).toThrow();
+      expect(() =>
+        loadNotificationEnv({ ...REQUIRED, NOTIFICATION_SMTP_TIMEOUT_MS: '999999' }),
+      ).toThrow();
+    });
   });
 
   it('rejects an out-of-range port instead of coercing it', () => {

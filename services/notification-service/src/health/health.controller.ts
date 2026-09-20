@@ -2,7 +2,10 @@ import { Controller, Get, HttpStatus, Res, VERSION_NEUTRAL } from '@nestjs/commo
 import { ApiExcludeController } from '@nestjs/swagger';
 import { Public } from '@rasta/nest-common';
 import type { Response } from 'express';
+import { Inject } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { MAIL_CHANNEL } from '../tokens';
+import type { MailChannel, MailChannelHealth } from '../channels/mail.channel.port';
 import { DispatcherConsumer } from '../intake/dispatcher.consumer';
 import { ResolutionWorker } from '../resolution/resolution.worker';
 import { SERVICE_NAME } from '../config/env';
@@ -33,6 +36,14 @@ import { SERVICE_NAME } from '../config/env';
  * provider or sender identity has been chosen (ADR-054 § 6, Q-37), and the
  * probe says which channel it means rather than letting "delivers" be read
  * as more than it is.
+ *
+ * `mailChannel` reports the SMTP adapter that now exists behind the
+ * `MailChannel` port, and it is deliberately a **separate** field from the two
+ * above. "A mail server is reachable" and "this platform sends email" are
+ * different facts, and collapsing them is the exact misreading Q-37 warns
+ * about: the adapter can greet Mailpit all day while `EMAIL: false` stays
+ * true, because no rule produces an email delivery and
+ * `deliversToRealRecipients` is `false`.
  */
 // Not in the published contract: the probes are orchestrator plumbing on the
 // internal network, and `enrichOpenApiDocument()` stamps bearer security on
@@ -47,6 +58,7 @@ export class HealthController {
     private readonly prisma: PrismaService,
     private readonly dispatcher: DispatcherConsumer,
     private readonly worker: ResolutionWorker,
+    @Inject(MAIL_CHANNEL) private readonly mail: MailChannel,
   ) {}
 
   @Get('live')
@@ -67,6 +79,7 @@ export class HealthController {
     dependencies: { database: boolean; consumer: boolean; worker: boolean };
     channels: { IN_APP: true; EMAIL: false };
     deliversMessages: { IN_APP: true; EMAIL: false };
+    mailChannel: MailChannelHealth;
   }> {
     const dependencies = {
       database: await this.prisma.isHealthy(),
@@ -74,6 +87,13 @@ export class HealthController {
       worker: this.worker.isRunning(),
     };
     const ok = dependencies.database && dependencies.consumer && dependencies.worker;
+
+    // Reported, never a readiness failure. Mailpit lives behind a compose
+    // profile `pnpm infra:up` does not start, so depending on it would leave
+    // every default stack permanently unready — the same reasoning that keeps
+    // Kafka out of `dependencies`. It is also not yet load-bearing: nothing
+    // sends email, so an unreachable server costs nothing today.
+    const mailChannel = await this.mail.health();
 
     if (!ok) response.status(HttpStatus.SERVICE_UNAVAILABLE);
 
@@ -83,6 +103,7 @@ export class HealthController {
       dependencies,
       channels: { IN_APP: true, EMAIL: false },
       deliversMessages: { IN_APP: true, EMAIL: false },
+      mailChannel,
     };
   }
 }
