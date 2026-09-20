@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Fails if identity's aggregation stress spec could run in the parallel test
- * phase, twice, or not at all.
+ * phase, twice, or not at all — or if any services/* `test` script would need
+ * a database, which would make `pnpm verify` require `pnpm infra:up`.
  *
  *   node scripts/check-test-phases.mjs
  *
@@ -13,7 +14,12 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { EXCLUSIVE_PHASE, stripJsonComments, validateTestPhases } from './test-phases-lib.mjs';
+import {
+  EXCLUSIVE_PHASE,
+  stripJsonComments,
+  validateInfraFreeTestTask,
+  validateTestPhases,
+} from './test-phases-lib.mjs';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -33,7 +39,17 @@ export function readTestPhaseInputs(root = repositoryRoot) {
   const identityPackage = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'));
   const turbo = JSON.parse(stripJsonComments(readFileSync(join(root, 'turbo.json'), 'utf8')));
   const jestConfig = createRequire(import.meta.url)(join(packageDir, 'jest.config.js'));
+  const servicesDir = join(root, 'services');
+  const serviceScripts = Object.fromEntries(
+    readdirSync(servicesDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => [
+        `services/${entry.name}`,
+        JSON.parse(readFileSync(join(servicesDir, entry.name, 'package.json'), 'utf8')).scripts,
+      ]),
+  );
   return {
+    serviceScripts,
     rootScripts: rootPackage.scripts,
     turboTasks: turbo.tasks,
     identityScripts: identityPackage.scripts,
@@ -47,7 +63,8 @@ export function readTestPhaseInputs(root = repositoryRoot) {
 function main() {
   let problems;
   try {
-    problems = validateTestPhases(readTestPhaseInputs());
+    const inputs = readTestPhaseInputs();
+    problems = [...validateInfraFreeTestTask(inputs.serviceScripts), ...validateTestPhases(inputs)];
   } catch (error) {
     console.error(
       `test phases: cannot read the orchestration files — refusing to pass (${error.message})`,
@@ -63,7 +80,8 @@ function main() {
 
   console.warn(
     `test phases: ${EXCLUSIVE_PHASE.packageDir}/${EXCLUSIVE_PHASE.spec} runs once, alone, after the workspace phase ` +
-      '(pnpm test, pnpm test:integration, pnpm verify, CI)',
+      '(pnpm test:integration and CI, never pnpm test); every services/* "test" selects the unit project only, ' +
+      'so pnpm test and pnpm verify need no database',
   );
 }
 

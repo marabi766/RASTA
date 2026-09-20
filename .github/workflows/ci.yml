@@ -768,10 +768,12 @@ jobs:
         # happen, and `cap` is the anti-fraud reward ceiling. A failure in any
         # of them is a financial defect, not a flaky test.
         #
-        # Both commands go through the two-phase orchestrator, so the pattern
-        # also filters identity-service's aggregation stress spec, run alone
-        # after the parallel phase; `concurren` is what selects its two
-        # 500-write proofs in the second command (`check:test-phases`).
+        # Both commands go through the orchestrator, but only
+        # `test:integration` has the exclusive phase — the aggregation stress
+        # spec needs a real PostgreSQL, and `pnpm test` (so `pnpm verify`) must
+        # run without one. So the stress spec is filtered and run alone by the
+        # second command, where `concurren` selects its two 500-write proofs
+        # (`check:test-phases`). The first command is unit suites only.
         run: |
           pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"
           pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)"

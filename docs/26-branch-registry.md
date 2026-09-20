@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۹ (2026-09-20) · **`main` در آن لحظه:** `37c48c2`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۹ (2026-09-20) · **`main` در آن لحظه:** `f7755e0`
 
 ---
 
@@ -55,11 +55,12 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                             | Worktree                                   | نشست | PR  | ahead / behind | وضعیت                                                                        |
-| -------------------------------- | ------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------- |
-| `feat/notification-mail-channel` | `F:\Rasta-Parallel\exp-001-web-foundation` | C0   | —   | ۱ / ۰          | `Q-37` — Port `MailChannel` و Adapter SMTP؛ **نه** بقیهٔ `NTF-004`           |
-| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`          | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
-| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                     | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
+| شاخه                             | Worktree                                         | نشست | PR                                                | ahead / behind | وضعیت                                                                        |
+| -------------------------------- | ------------------------------------------------ | ---- | ------------------------------------------------- | -------------- | ---------------------------------------------------------------------------- |
+| `feat/notification-mail-channel` | `F:\Rasta-Parallel\exp-001-web-foundation`       | C0   | [#63](https://github.com/marabi766/RASTA/pull/63) | ۲ / ۰          | `Q-37` — Port `MailChannel` و Adapter SMTP؛ **نه** بقیهٔ `NTF-004`           |
+| `claude/quirky-curie-15d850`     | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —                                                 | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`               |
+| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`                | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
+| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                           | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
 
 ## شاخه‌های بازنشسته
 
@@ -86,6 +87,7 @@
 | `docs/state-2026-09-19`                 | [#59](https://github.com/marabi766/RASTA/pull/59) | `8a80ce5`   |
 | `feat/notification-preferences`         | [#60](https://github.com/marabi766/RASTA/pull/60) | `e6d509e`   |
 | `docs/state-2026-09-20`                 | [#61](https://github.com/marabi766/RASTA/pull/61) | `37c48c2`   |
+| `chore/test-task-unit-only`             | [#62](https://github.com/marabi766/RASTA/pull/62) | `f7755e0`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
