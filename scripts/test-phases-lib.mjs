@@ -205,23 +205,47 @@ export function selectedProjects(words) {
 const asArray = (value) => (value === undefined ? [] : Array.isArray(value) ? value : [value]);
 
 /**
+ * One jest search root as a package-relative directory, or `null` when it
+ * falls outside the package and so can hold none of its files.
+ *
+ * Both config shapes in this repository land here. Six services set `rootDir`
+ * to `'src'`/`'test'` directly; the other six set it to `__dirname` — an
+ * absolute path — and name `roots: ['<rootDir>/test']`, because jest resolves
+ * coverage globs against `rootDir`, so `src/**` under `rootDir: 'src'` became
+ * `src/src/**` and collected nothing. Reading only the first shape reported
+ * the second's projects as empty, which is indistinguishable from a service
+ * that has written no spec.
+ */
+function packageRelativeRoot(value, packageDir) {
+  const normalized = String(value).replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!/^([A-Za-z]:)?\//.test(normalized)) return normalized === '.' ? '' : normalized;
+  const marker = `/${packageDir.replace(/\\/g, '/')}`;
+  const at = normalized.lastIndexOf(marker);
+  return at === -1 ? null : normalized.slice(at + marker.length).replace(/^\//, '');
+}
+
+/**
  * The files a jest project would collect, from a package-relative file list.
  *
- * Jest searches the project's `rootDir` and matches `testRegex` and
- * `testPathIgnorePatterns` against the absolute path; a synthetic absolute
- * path with forward slashes is used, so a pattern that relies on a platform
- * separator is treated as not matching anything it would miss on Linux.
+ * Jest searches the project's `roots` — `rootDir` when none are named — and
+ * matches `testRegex` and `testPathIgnorePatterns` against the absolute path;
+ * a synthetic absolute path with forward slashes is used, so a pattern that
+ * relies on a platform separator is treated as not matching anything it would
+ * miss on Linux.
  */
 export function projectFiles(project, files, packageDir) {
-  const root = `${String(project.rootDir ?? '.')
-    .replace(/\\/g, '/')
-    .replace(/\/$/, '')}/`;
+  const rootDir = String(project.rootDir ?? '.');
+  const named = asArray(project.roots);
+  const prefixes = (named.length > 0 ? named : [rootDir])
+    .map((root) => packageRelativeRoot(String(root).replace('<rootDir>', rootDir), packageDir))
+    .filter((root) => root !== null)
+    .map((root) => (root === '' ? '' : `${root}/`));
   const regexes = asArray(project.testRegex).map((pattern) => new RegExp(pattern));
   const ignores = asArray(project.testPathIgnorePatterns ?? ['/node_modules/']).map(
     (pattern) => new RegExp(pattern),
   );
   return files.filter((file) => {
-    if (root !== './' && !file.startsWith(root)) return false;
+    if (!prefixes.some((prefix) => file.startsWith(prefix))) return false;
     const absolute = `/repo/${packageDir}/${file}`;
     return (
       regexes.some((regex) => regex.test(absolute)) &&
@@ -600,5 +624,71 @@ export function validateTestPhases({
     }
   }
 
+  return problems;
+}
+
+/** The jest project every service's `test:integration` selects. */
+export const INTEGRATION_PROJECT = 'integration';
+
+/**
+ * Checks that `--passWithNoTests` survives only where it is still true.
+ *
+ * `docs/14` forbids the flag on the integration project, because deleting the
+ * last integration spec has to break the build rather than report a green run
+ * over nothing. The flag is nonetheless legitimate for as long as a service's
+ * integration project is genuinely empty: without it, `pnpm test:integration`
+ * fails permanently for a service that has not written its first spec yet.
+ *
+ * So the rule is a biconditional, and that is what makes it self-maintaining:
+ * the flag is allowed exactly while the project collects no file. A service
+ * that writes its first integration spec fails this gate until the flag goes,
+ * and a service that deletes its last one fails `test:integration` itself.
+ *
+ * It had drifted in the direction the prose could not catch. `identity` and
+ * `organization` kept the flag while their integration projects grew to six
+ * and one spec, so from that point either service could have lost every
+ * integration test and still reported green — and the docs/14 note still
+ * described all four services as empty, which two of them had stopped being.
+ *
+ * Takes, per package directory, the `scripts`, the jest `projects` and the
+ * package-relative file list, so the emptiness is read from the files jest
+ * would actually collect rather than from a count written down somewhere.
+ *
+ * Returns problem strings; empty means the contract holds.
+ */
+export function validatePassWithNoTests(services) {
+  const problems = [];
+  for (const [packageDir, service] of Object.entries(services ?? {})) {
+    const jest = scriptCommands(service?.scripts?.['test:integration']).find(
+      (words) => words[0] === 'jest',
+    );
+    if (!jest) {
+      problems.push(`${packageDir} script "test:integration" must run jest`);
+      continue;
+    }
+    const projects = selectedProjects(jest);
+    if (projects === null || !projects.includes(INTEGRATION_PROJECT)) {
+      problems.push(
+        `${packageDir} script "test:integration" must select the "${INTEGRATION_PROJECT}" project ` +
+          `(selects "${projects === null ? '' : projects.join(' ')}")`,
+      );
+      continue;
+    }
+    const collected = (service.jestProjects ?? [])
+      .filter((project) => projects.includes(project.displayName))
+      .flatMap((project) => projectFiles(project, service.files ?? [], packageDir));
+    const permits = jest.includes('--passWithNoTests');
+    if (permits && collected.length > 0) {
+      problems.push(
+        `${packageDir} script "test:integration" passes with no tests, but its selected project(s) ` +
+          `collect ${collected.length} spec(s); deleting the last one must break the build (docs/14)`,
+      );
+    } else if (!permits && collected.length === 0) {
+      problems.push(
+        `${packageDir} script "test:integration" selects no spec at all and would fail every run; ` +
+          'keep --passWithNoTests until this service has its first integration spec (docs/14)',
+      );
+    }
+  }
   return problems;
 }
