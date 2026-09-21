@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۳۰ (2026-09-21) · **`main` در آن لحظه:** `a49f871`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۳۱ (2026-09-22) · **`main` در آن لحظه:** `c4de97b`
 
 ---
 
@@ -55,12 +55,11 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                             | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                              |
-| -------------------------------- | ------------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `feat/asset-insurance-claim-api` | `F:\Rasta-Parallel\asset-insurance-claim-api`    | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `a49f871` — API ادعای خسارت بیمه در `asset-service`؛ **`Q-59` را می‌برد و `docs/24` را لمس می‌کند**                                               |
-| `claude/quirky-curie-15d850`     | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —   | ۱ / ۰          | تکمیل شد و با `origin/main` هم‌گام شد (`chore/test-task-unit-only` تا آن زمان با PR #62 روی `main` نشسته بود)؛ تداخل متنی روی `scripts/test-phases-*` دستی حل شد؛ آمادهٔ Push و PR |
-| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                       |
-| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                              |
+| شاخه                             | Worktree                                      | نشست | PR                                                | ahead / behind | وضعیت                                                                                                                                |
+| -------------------------------- | --------------------------------------------- | ---- | ------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `feat/asset-insurance-claim-api` | `F:\Rasta-Parallel\asset-insurance-claim-api` | Opus | [#71](https://github.com/marabi766/RASTA/pull/71) | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `a49f871` — API ادعای خسارت بیمه در `asset-service`؛ **`Q-59` را می‌برد و `docs/24` را لمس می‌کند** |
+| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`             | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                         |
+| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                        | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                |
 
 ## شاخه‌های بازنشسته
 
@@ -93,6 +92,8 @@
 | `feat/web-session-and-shell`            | [#66](https://github.com/marabi766/RASTA/pull/66) | `3cf79aa`   |
 | `docs/frontend-gate-and-web-state`      | [#64](https://github.com/marabi766/RASTA/pull/64) | `df54a43`   |
 | `feat/web-asset-surfaces`               | [#67](https://github.com/marabi766/RASTA/pull/67) | `6ea1260`   |
+| `chore/api-gateway-dockerfile`          | [#70](https://github.com/marabi766/RASTA/pull/70) | `c4de97b`   |
+| `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
