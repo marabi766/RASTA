@@ -61,7 +61,7 @@
 | `claude/quirky-curie-15d850` | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —   | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`                      |
 | `demo/investor-preview`      | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید        |
 | `design/claude-design`       | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                               |
-| `chore/api-gateway-dockerfile` | `F:\Rasta-Parallel\api-gateway-dockerfile`     | —    | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `a49f871` — افزودن Dockerfile و ردیف Matrix CI برای `api-gateway` |
+| `chore/api-gateway-dockerfile` | `F:\Rasta-Parallel\api-gateway-dockerfile`     | —    | [#70](https://github.com/marabi766/RASTA/pull/70) | ۲ / ۰          | افزودن Dockerfile و ردیف Matrix CI برای `api-gateway`؛ `pnpm run ci:image-matrix`، Build+Health زنده، lint و typecheck سبز |
 
 ## شاخه‌های بازنشسته
 
