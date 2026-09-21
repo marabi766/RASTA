@@ -15,6 +15,7 @@ import {
   stressProofTitles,
   stripJsonComments,
   validateInfraFreeTestTask,
+  validatePassWithNoTests,
   validateTestPhases,
   workflowStepCommands,
 } from './test-phases-lib.mjs';
@@ -110,6 +111,28 @@ test('projectFiles applies rootDir, testRegex and testPathIgnorePatterns', () =>
     testPathIgnorePatterns: ['a\\.int'],
   };
   assert.deepEqual(projectFiles(project, files, 'services/x'), [SPEC]);
+});
+
+test('projectFiles reads the absolute-rootDir-plus-roots shape half the services use', () => {
+  // Six services set `rootDir: __dirname` and name `roots: ['<rootDir>/test']`
+  // to keep coverage globs resolving. Reading `rootDir` alone matched no
+  // package-relative file at all and reported those projects as empty — which
+  // is exactly what `--passWithNoTests` is allowed for, so the gate below
+  // would have excused the flag on six services that have integration specs.
+  const files = ['src/a.spec.ts', 'test/a.int-spec.ts', 'test/b.int-spec.ts'];
+  const project = {
+    rootDir: 'F:/Rasta/services/x',
+    roots: ['<rootDir>/test'],
+    testRegex: '.*\\.int-spec\\.ts$',
+  };
+  assert.deepEqual(projectFiles(project, files, 'services/x'), [
+    'test/a.int-spec.ts',
+    'test/b.int-spec.ts',
+  ]);
+
+  // A root outside the package contributes nothing rather than everything.
+  const elsewhere = { ...project, roots: ['/somewhere/else/test'] };
+  assert.deepEqual(projectFiles(elsewhere, files, 'services/x'), []);
 });
 
 test('workflowStepCommands reads inline and block run scalars, dropping comments', () => {
@@ -364,9 +387,17 @@ test('calibration: deleting the manual entry point is rejected, not silently acc
   assert.deepEqual(validateTestPhases(real()), []);
 });
 
+// ---------------------------------------------------------------------------
+// phase one stays infra-free: every services/* "test" selects "unit" only
+// ---------------------------------------------------------------------------
+
+/** `validateInfraFreeTestTask` takes a packageDir -> scripts map. */
+const serviceScripts = (services) =>
+  Object.fromEntries(Object.entries(services).map(([packageDir, service]) => [packageDir, service.scripts]));
+
 test('phase one stays infra-free: every services/* "test" selects the unit project only', () => {
   // The real repository, which is the point: this rule guards `pnpm verify`.
-  assert.deepEqual(validateInfraFreeTestTask(real().serviceScripts), []);
+  assert.deepEqual(validateInfraFreeTestTask(serviceScripts(real().services)), []);
 
   const problems = (scripts) => validateInfraFreeTestTask(scripts).join('\n');
 
@@ -395,4 +426,70 @@ test('phase one stays infra-free: every services/* "test" selects the unit proje
     validateInfraFreeTestTask({ 'services/f': { test: 'jest --selectProjects unit --ci' } }),
     [],
   );
+});
+
+// ---------------------------------------------------------------------------
+// `--passWithNoTests` on the integration project
+// ---------------------------------------------------------------------------
+
+/** The real services, deep-copied, so a mutation never leaks between tests. */
+const services = () => structuredClone(readTestPhaseInputs().services);
+
+function expectServiceProblem(inputs, pattern) {
+  const problems = validatePassWithNoTests(inputs);
+  assert.ok(
+    problems.some((problem) => pattern.test(problem)),
+    `no problem matched ${pattern}; got:\n${problems.join('\n') || '(none)'}`,
+  );
+}
+
+test('passWithNoTests: the real repository holds the rule', () => {
+  assert.deepEqual(validatePassWithNoTests(services()), []);
+});
+
+test('passWithNoTests: the flag is refused once the project collects a spec', () => {
+  // This is the drift the rule exists for: identity and organization kept the
+  // flag while their integration projects grew to six and one spec, so either
+  // could have lost every integration test and still reported green.
+  for (const service of ['services/identity-service', 'services/organization-service']) {
+    const relapsed = services();
+    relapsed[service].scripts['test:integration'] =
+      'jest --selectProjects integration --passWithNoTests --runInBand';
+    expectServiceProblem(relapsed, new RegExp(`${service}.*deleting the last one must break`));
+  }
+});
+
+test('passWithNoTests: the flag stays legitimate while the project is empty', () => {
+  // api-gateway is the one service that has written no integration spec yet.
+  // Without the flag its `test:integration` would fail on every run, which is
+  // a permanently red gate rather than a rule anyone could follow.
+  assert.deepEqual(
+    validatePassWithNoTests({ 'services/api-gateway': services()['services/api-gateway'] }),
+    [],
+  );
+
+  const stripped = services();
+  stripped['services/api-gateway'].scripts['test:integration'] =
+    'jest --selectProjects integration --runInBand';
+  expectServiceProblem(stripped, /api-gateway.*selects no spec at all/);
+});
+
+test("passWithNoTests: the first spec in an empty service's project forces the flag out", () => {
+  // The other half of the biconditional, and what makes the rule
+  // self-maintaining: api-gateway keeps the flag only until it writes one.
+  const firstSpec = services();
+  firstSpec['services/api-gateway'].files.push('test/gateway-routing.int-spec.ts');
+  expectServiceProblem(firstSpec, /api-gateway.*collect 1 spec\(s\)/);
+});
+
+test('passWithNoTests: a script that runs no jest, or the wrong project, is refused', () => {
+  const notJest = services();
+  notJest['services/asset-service'].scripts['test:integration'] = 'echo skipped';
+  expectServiceProblem(notJest, /asset-service script "test:integration" must run jest/);
+
+  // A bare `jest` selects every project, so the emptiness this rule reads
+  // would be some other project's.
+  const bare = services();
+  bare['services/asset-service'].scripts['test:integration'] = 'jest --runInBand';
+  expectServiceProblem(bare, /asset-service.*must select the "integration" project/);
 });

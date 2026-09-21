@@ -480,9 +480,17 @@ Retry، Artifact تجمیعیِ Redactشده، حفظ خروج غیرصفر و �
 
 دو قاعده که از فاز ناوگان درآمد و در نگهداری هم رعایت شد:
 
-- **`--passWithNoTests` روی Project Integration ممنوع.** حذف آخرین تست باید
-  Build را بشکند. چهار سرویس دیگر (`identity`، `organization`، `asset`،
-  `api-gateway`) هنوز این Flag را دارند و Project شان تهی است.
+- **`--passWithNoTests` روی Project Integration فقط تا نخستین Spec (2026-09-20).**
+  حذف آخرین تست باید Build را بشکند، پس این Flag تنها جایی مجاز است که Project
+  ‏Integration سرویس هنوز تهی باشد — وگرنه یک اجرای سبز روی هیچ گزارش می‌شود.
+  امروز تنها `api-gateway` چنین است. `asset` آن را در 2026-09-01 برداشت؛ `identity` و
+  `organization` آن را تا امروز نگه داشته بودند در حالی که Project شان دیگر تهی
+  نبود (به ترتیب ۶ و ۱ Spec)، یعنی هر کدام می‌توانست همه تست‌های Integration خود
+  را از دست بدهد و باز سبز بماند. Flag از هر دو برداشته شد.
+  این یک تناظر دوسویه است و همین خودنگهدارش می‌کند: `pnpm check:test-phases`
+  ایستا هر `services/*` را می‌خواند و هم Flag روی Project ناتهی را رد می‌کند و هم
+  نبود Flag روی Project تهی را — پس نخستین Spec در `api-gateway` همان‌جا
+  Build را می‌شکند تا Flag برداشته شود.
 - **`test` فقط Project Unit را اجرا کند**، تا `pnpm verify` روی ماشین بدون
   Docker قابل اجرا بماند. Suite Integration یک دروازه جداست که CI صریحاً در
   برابر سرویس‌های Provision‌شده اجرا می‌کند.
