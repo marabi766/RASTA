@@ -851,6 +851,21 @@
           "kind": "DOCUMENT",
           "ref": "docs/16-ui-architecture.md",
           "note": "Still unbuilt, and not claimed: /organizations, /assets, /assets/[id], /drivers, /usage, /maintenance and /maintenance/[id]. EXP-002 is not finished by this change; its first acceptance criterion — core operational workflows usable at documented permissions — needs those screens."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/67",
+          "note": "The first two operational screens: /assets, with filters and cursor paging carried entirely in the URL so a filtered list is a link somebody can send, and /assets/[id], the electronic dossier — identity, every compliance blocker rather than the first, costs, and recent activity. Both are fetched on the server through the gateway and both are pure functions of the read result."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/app/assets/assets.spec.tsx",
+          "note": "Fourteen screen tests covering the states a developer never reaches by accident: a filter that matched nothing worded differently from a tenant with no assets, a forbidden read rendered as a refusal, an outage rendered with its correlation id, an unknown status shown as it arrived rather than hidden, and a missing asset answered exactly as another tenant’s asset is. Both screens pass jest-axe."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/server/assets.spec.ts",
+          "note": "Nine server tests: only the filters the caller set reach the gateway, the asset id is percent-encoded into the path rather than interpolated, every compliance blocker survives, money stays a string, and the coordinate, document references and raw event detail in the dossier response are all dropped before anything can render them."
         }
       ]
     },

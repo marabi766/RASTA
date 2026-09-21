@@ -158,13 +158,18 @@ ErrorState   — پیام قابل فهم + دکمه تلاش دوباره + cor
 
 هر وضعیت در پلتفرم یک رنگ و یک نماد ثابت دارد، در همه صفحات:
 
-| وضعیت                                                  | رنگ     |
-| ------------------------------------------------------ | ------- |
-| `ACTIVE` · `APPROVED` · `COMPLETED` · `SETTLED`        | success |
-| `PENDING_APPROVAL` · `BID_OPEN` · `IN_PROGRESS`        | warning |
-| `REJECTED` · `CANCELLED` · `FAILED` · `OUT_OF_SERVICE` | danger  |
-| `DRAFT` · `IDLE`                                       | neutral |
-| `IN_MAINTENANCE` · `EVALUATION`                        | info    |
+| وضعیت                                                                     | رنگ     |
+| ------------------------------------------------------------------------- | ------- |
+| `ACTIVE` · `APPROVED` · `COMPLETED` · `SETTLED` · `ASSIGNED`              | success |
+| `PENDING_APPROVAL` · `BID_OPEN` · `IN_PROGRESS`                           | warning |
+| `REJECTED` · `CANCELLED` · `FAILED` · `OUT_OF_SERVICE` · `DECOMMISSIONED` | danger  |
+| `DRAFT` · `IDLE` · `REGISTERED`                                           | neutral |
+| `IN_MAINTENANCE` · `EVALUATION`                                           | info    |
+
+> **سه وضعیت در 2026-09-21 افزوده شد (`EXP-002`).** `ASSIGNED`، `REGISTERED` و `DECOMMISSIONED` وضعیت‌های واقعی
+> `asset-service` بودند و این جدول نامشان نبرده بود، پس هر سه به رنگ پیش‌فرض `neutral` می‌افتادند. برای دوتاشان
+> آن رنگ غلط بود: یک دستگاهِ تخصیص‌یافته در حال کار است، و یک دستگاهِ از رده خارج برای همیشه رفته — و کسی که
+> فهرست را برای پیدا کردن دستگاهِ قابل استفاده می‌خواند، این دو را نباید کنار «بیکار» ببیند.
 
 ### WorkflowStepper — گردش‌کار قابل مشاهده
 
