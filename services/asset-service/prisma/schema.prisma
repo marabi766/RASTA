@@ -353,10 +353,14 @@ enum PolicyStatus {
   CANCELLED
 }
 
-/// A claim against a policy.
+/// A claim against a policy (پرونده خسارت).
 ///
-/// Phase one records and tracks; settlement through the platform is deferred
-/// pending the regulatory review the product document requires (docs/24 Q-09).
+/// Phase one records and tracks: submission, review, an explicit decision by
+/// the configured authority, and the fact that settlement happened. Paying the
+/// claim is not done here and never will be — money moves only in
+/// economic-service (AGENTS.md A-06/A-07), so `SETTLED` records an outcome,
+/// it does not perform one. Who may decide, and up to what amount, is an open
+/// product question with a configurable temporary answer (docs/24 Q-59).
 model InsuranceClaim {
   id String @id
 
@@ -373,6 +377,18 @@ model InsuranceClaim {
 
   status ClaimStatus @default(SUBMITTED)
 
+  /// The decision, kept on the row rather than only on the event: a reader of
+  /// the claim must not have to replay a topic to learn who decided and why.
+  decidedAt     DateTime? @map("decided_at")
+  decidedBy     String?   @map("decided_by")
+  decisionNotes String?   @map("decision_notes")
+
+  /// When settlement was recorded, and the reference under which it happened
+  /// elsewhere — an insurer's payment reference or an economic-service
+  /// transaction id. Never an amount moved by this service.
+  settledAt           DateTime? @map("settled_at")
+  settlementReference String?   @map("settlement_reference")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
   createdBy String   @map("created_by")
@@ -382,6 +398,8 @@ model InsuranceClaim {
 
   @@index([policyId])
   @@index([organizationId, status])
+  /// The list a dossier reads: every claim on one machine, newest incident first.
+  @@index([assetId, incidentAt(sort: Desc)])
   @@map("insurance_claim")
 }
 

@@ -4,6 +4,7 @@ import { Roles, zodPipe } from '@rasta/nest-common';
 import { ApiQueryFromSchema } from '../openapi/query-parameters';
 import { AssetService } from './asset.service';
 import { InsuranceService } from '../insurance/insurance.service';
+import { ClaimService } from '../insurance/claim.service';
 import {
   activateAssetSchema,
   attachDocumentSchema,
@@ -11,10 +12,14 @@ import {
   createAssetSchema,
   createInspectionSchema,
   createPolicySchema,
+  decideClaimSchema,
   decommissionSchema,
   listAssetsQuerySchema,
   nearbyQuerySchema,
+  recordClaimSettlementSchema,
   recordLocationSchema,
+  reviewClaimSchema,
+  submitClaimSchema,
   timelineQuerySchema,
   transferAssetSchema,
   updateAssetSchema,
@@ -24,10 +29,14 @@ import {
   type CreateAssetDto,
   type CreateInspectionDto,
   type CreatePolicyDto,
+  type DecideClaimDto,
   type DecommissionDto,
   type ListAssetsQuery,
   type NearbyQuery,
+  type RecordClaimSettlementDto,
   type RecordLocationDto,
+  type ReviewClaimDto,
+  type SubmitClaimDto,
   type TimelineQuery,
   type TransferAssetDto,
   type UpdateAssetDto,
@@ -51,6 +60,7 @@ export class AssetController {
   constructor(
     private readonly assets: AssetService,
     private readonly insurance: InsuranceService,
+    private readonly claims: ClaimService,
   ) {}
 
   // ---- Reads --------------------------------------------------------------
@@ -98,6 +108,18 @@ export class AssetController {
   @ApiOperation({ summary: 'Technical inspections on this asset' })
   inspections(@Param('id') id: string) {
     return this.insurance.listInspections(id);
+  }
+
+  @Get(':id/insurance-claims')
+  @ApiOperation({ summary: 'Insurance claims on this asset, newest incident first' })
+  claimList(@Param('id') id: string) {
+    return this.claims.listClaims(id);
+  }
+
+  @Get(':id/insurance-claims/:claimId')
+  @ApiOperation({ summary: 'One claim, with the history of every status it has been in' })
+  claim(@Param('id') id: string, @Param('claimId') claimId: string) {
+    return this.claims.getClaim(id, claimId);
   }
 
   // ---- Writes -------------------------------------------------------------
@@ -186,5 +208,59 @@ export class AssetController {
     @Body(zodPipe(createInspectionSchema)) dto: CreateInspectionDto,
   ) {
     return this.insurance.recordInspection(id, dto);
+  }
+
+  // ---- Claims -------------------------------------------------------------
+  //
+  // Filing and reviewing a claim sit with the same roles that record the
+  // policy. Deciding it, and recording that it was settled, do not carry a
+  // static @Roles: the deciding authority is configuration
+  // (INSURANCE_CLAIM_DECISION_ROLES, docs/24 Q-59), and ClaimService enforces
+  // it before reading the claim. A static list here would either duplicate
+  // that configuration or contradict it.
+
+  @Post(':id/insurance-claims')
+  @Roles('ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN')
+  @ApiOperation({ summary: 'File a claim against one of this asset’s policies' })
+  submitClaim(@Param('id') id: string, @Body(zodPipe(submitClaimSchema)) dto: SubmitClaimDto) {
+    return this.claims.submitClaim(id, dto);
+  }
+
+  @Post(':id/insurance-claims/:claimId/review')
+  @HttpCode(200)
+  @Roles('ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN')
+  @ApiOperation({ summary: 'Take the claim under review' })
+  reviewClaim(
+    @Param('id') id: string,
+    @Param('claimId') claimId: string,
+    @Body(zodPipe(reviewClaimSchema)) dto: ReviewClaimDto,
+  ) {
+    return this.claims.startReview(id, claimId, dto);
+  }
+
+  @Post(':id/insurance-claims/:claimId/decision')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Approve or reject the claim — the configured deciding roles only (Q-59)',
+  })
+  decideClaim(
+    @Param('id') id: string,
+    @Param('claimId') claimId: string,
+    @Body(zodPipe(decideClaimSchema)) dto: DecideClaimDto,
+  ) {
+    return this.claims.decide(id, claimId, dto);
+  }
+
+  @Post(':id/insurance-claims/:claimId/settlement')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Record that an approved claim was settled elsewhere. No money moves here (ADR-046).',
+  })
+  recordClaimSettlement(
+    @Param('id') id: string,
+    @Param('claimId') claimId: string,
+    @Body(zodPipe(recordClaimSettlementSchema)) dto: RecordClaimSettlementDto,
+  ) {
+    return this.claims.recordSettlement(id, claimId, dto);
   }
 }

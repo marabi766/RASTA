@@ -40,6 +40,7 @@ export const ID_PREFIXES = {
   laborEntry: 'LBR',
   maintenanceCost: 'MCS',
   insurancePolicy: 'INS',
+  insuranceClaim: 'CLM',
   supplier: 'SUP',
   product: 'PRD',
   offer: 'OFR',

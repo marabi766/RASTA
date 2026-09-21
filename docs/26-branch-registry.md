@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۲۹ (2026-09-20) · **`main` در آن لحظه:** `f7755e0`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۳۱ (2026-09-22) · **`main` در آن لحظه:** `c4de97b`
 
 ---
 
@@ -55,11 +55,11 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                           | Worktree                                   | نشست | PR                                                | ahead / behind | وضعیت                                                                                                                      |
-| ------------------------------ | ------------------------------------------ | ---- | ------------------------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `demo/investor-preview`        | `F:\Rasta-Parallel\investor-demo`          | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                               |
-| `design/claude-design`         | پوشهٔ موقت در `%TEMP%`                     | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                      |
-| `chore/api-gateway-dockerfile` | `F:\Rasta-Parallel\api-gateway-dockerfile` | —    | [#70](https://github.com/marabi766/RASTA/pull/70) | ۲ / ۰          | افزودن Dockerfile و ردیف Matrix CI برای `api-gateway`؛ `pnpm run ci:image-matrix`، Build+Health زنده، lint و typecheck سبز |
+| شاخه                             | Worktree                                      | نشست | PR                                                | ahead / behind | وضعیت                                                                                                                                |
+| -------------------------------- | --------------------------------------------- | ---- | ------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `feat/asset-insurance-claim-api` | `F:\Rasta-Parallel\asset-insurance-claim-api` | Opus | [#71](https://github.com/marabi766/RASTA/pull/71) | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `a49f871` — API ادعای خسارت بیمه در `asset-service`؛ **`Q-59` را می‌برد و `docs/24` را لمس می‌کند** |
+| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`             | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                         |
+| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                        | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                |
 
 ## شاخه‌های بازنشسته
 
@@ -92,6 +92,7 @@
 | `feat/web-session-and-shell`            | [#66](https://github.com/marabi766/RASTA/pull/66) | `3cf79aa`   |
 | `docs/frontend-gate-and-web-state`      | [#64](https://github.com/marabi766/RASTA/pull/64) | `df54a43`   |
 | `feat/web-asset-surfaces`               | [#67](https://github.com/marabi766/RASTA/pull/67) | `6ea1260`   |
+| `chore/api-gateway-dockerfile`          | [#70](https://github.com/marabi766/RASTA/pull/70) | `c4de97b`   |
 | `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
@@ -170,7 +171,8 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 | Q-56        | `feat/supplier-performance-phase2`    | روی `main` (`f7252d3`)                                                                 |
 | Q-57        | `feat/audit-service-aud-004-contract` | روی `main`                                                                             |
 | Q-58        | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                   |
-| Q-59+       | آزاد                                  | —                                                                                      |
+| Q-59        | `feat/asset-insurance-claim-api`      | **رزرو شد** (2026-09-21) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه         |
+| Q-60+       | آزاد                                  | —                                                                                      |
 
 > **چرا Q-44 قابل جابه‌جایی نیست:** یک ADR ادغام‌شده آن را به‌عنوان مرجع
 > پذیرش نقل کرده. نقل‌قول را نمی‌شود ویرایش کرد بی‌آنکه سند دروغ شود. هر

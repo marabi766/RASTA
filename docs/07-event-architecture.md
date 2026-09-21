@@ -305,27 +305,31 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 
 ### Asset · Fleet · Maintenance · Insurance
 
-| رویداد                                | Producer    | مصرف‌کنندگان اصلی                                                   |
-| ------------------------------------- | ----------- | ------------------------------------------------------------------- |
-| `ASSET_CREATED`                       | asset       | fleet · analytics · audit · search                                  |
-| `ASSET_ACTIVATED`                     | asset       | fleet · analytics                                                   |
-| `ASSET_UPDATED`                       | asset       | fleet · search · analytics                                          |
-| `ASSET_TRANSFERRED`                   | asset       | fleet · analytics · audit                                           |
-| `ASSET_STATUS_CHANGED`                | asset       | fleet · construction · analytics                                    |
-| `ASSET_DECOMMISSIONED`                | asset       | fleet · maintenance · analytics                                     |
-| `USAGE_RECORDED`                      | fleet       | **maintenance (محرک سرویس)** · asset · economic (پاداش) · analytics |
-| `ASSET_ASSIGNED` / `ASSIGNMENT_ENDED` | fleet       | asset · analytics                                                   |
-| `AVAILABILITY_CHANGED`                | fleet       | construction · analytics                                            |
-| `MAINTENANCE_DUE`                     | maintenance | **notification** · fleet · analytics                                |
-| `BREAKDOWN_REPORTED`                  | maintenance | notification · asset · analytics                                    |
-| `MAINTENANCE_CREATED`                 | maintenance | asset · analytics                                                   |
-| `WORKSHOP_ASSIGNED`                   | maintenance | notification · supplier                                             |
-| `REPAIR_COMPLETED`                    | maintenance | asset · supplier (امتیاز) · analytics                               |
-| `MAINTENANCE_COMPLETED`               | maintenance | asset · economic (پاداش) · analytics                                |
-| `MAINTENANCE_APPROVED`                | maintenance | **economic (مجوز تسویه)** · analytics                               |
-| `INSURANCE_RECORDED`                  | asset       | notification · analytics                                            |
-| `INSURANCE_EXPIRING`                  | asset       | **notification** · analytics                                        |
-| `INSPECTION_EXPIRING`                 | asset       | notification                                                        |
+| رویداد                                | Producer                | مصرف‌کنندگان اصلی                                                      |
+| ------------------------------------- | ----------------------- | ---------------------------------------------------------------------- |
+| `ASSET_CREATED`                       | asset                   | fleet · analytics · audit · search                                     |
+| `ASSET_ACTIVATED`                     | asset                   | fleet · analytics                                                      |
+| `ASSET_UPDATED`                       | asset                   | fleet · search · analytics                                             |
+| `ASSET_TRANSFERRED`                   | asset                   | fleet · analytics · audit                                              |
+| `ASSET_STATUS_CHANGED`                | asset                   | fleet · construction · analytics                                       |
+| `ASSET_DECOMMISSIONED`                | asset                   | fleet · maintenance · analytics                                        |
+| `USAGE_RECORDED`                      | fleet                   | **maintenance (محرک سرویس)** · asset · economic (پاداش) · analytics    |
+| `ASSET_ASSIGNED` / `ASSIGNMENT_ENDED` | fleet                   | asset · analytics                                                      |
+| `AVAILABILITY_CHANGED`                | fleet                   | construction · analytics                                               |
+| `MAINTENANCE_DUE`                     | maintenance             | **notification** · fleet · analytics                                   |
+| `BREAKDOWN_REPORTED`                  | maintenance             | notification · asset · analytics                                       |
+| `MAINTENANCE_CREATED`                 | maintenance             | asset · analytics                                                      |
+| `WORKSHOP_ASSIGNED`                   | maintenance             | notification · supplier                                                |
+| `REPAIR_COMPLETED`                    | maintenance             | asset · supplier (امتیاز) · analytics                                  |
+| `MAINTENANCE_COMPLETED`               | maintenance             | asset · economic (پاداش) · analytics                                   |
+| `MAINTENANCE_APPROVED`                | maintenance             | **economic (مجوز تسویه)** · analytics                                  |
+| `INSURANCE_RECORDED`                  | asset                   | notification · analytics                                               |
+| `INSURANCE_EXPIRING`                  | asset                   | **notification** · analytics                                           |
+| `INSPECTION_EXPIRING`                 | asset                   | notification                                                           |
+| `INSURANCE_CLAIM_OPENED`              | asset (ماژول insurance) | notification · analytics                                               |
+| `INSURANCE_CLAIM_REVIEW_STARTED`      | asset (ماژول insurance) | audit · analytics                                                      |
+| `INSURANCE_CLAIM_DECIDED`             | asset (ماژول insurance) | **economic (مبلغ تأییدشده، بدون حرکت پول)** · notification · analytics |
+| `INSURANCE_CLAIM_SETTLEMENT_RECORDED` | asset (ماژول insurance) | economic · analytics — ثبت واقعیت تسویه، نه اجرای آن                   |
 
 ### Marketplace · Procurement · Supplier · Inventory
 
@@ -407,18 +411,18 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 این رویدادها مقصد Contract هستند و تا ساخته‌شدن سرویس مالک، Topic یا Handler خالی برایشان
 ایجاد نمی‌شود. Schema واقعی را همیشه Producer تعریف می‌کند.
 
-| رویداد                                                          | Producer هدف | Consumerهای هدف                                  |
-| --------------------------------------------------------------- | ------------ | ------------------------------------------------ |
-| `INSURANCE_QUOTE_REQUESTED`                                     | insurance    | notification · analytics                         |
-| `INSURANCE_OFFER_RECEIVED`                                      | insurance    | notification                                     |
-| `INSURANCE_POLICY_ISSUED` / `INSURANCE_POLICY_RENEWED`          | insurance    | asset · economic · notification · analytics      |
-| `INSURANCE_CLAIM_OPENED` / `INSURANCE_CLAIM_DECIDED`            | insurance    | asset · economic · notification · analytics      |
-| `PARTICIPATION_SCORE_UPDATED`                                   | reward       | notification · analytics                         |
-| `REWARD_BENEFIT_REDEEMED`                                       | reward       | economic · notification · analytics              |
-| `SCORE_APPEAL_OPENED` / `SCORE_APPEAL_DECIDED`                  | reward       | notification · audit                             |
-| `RETURN_REQUESTED` / `RETURN_AUTHORIZED`                        | marketplace  | inventory · supplier · notification              |
-| `RETURN_RECEIVED` / `RETURN_INSPECTED` / `RETURN_DISPOSITIONED` | inventory    | marketplace · supplier · economic · analytics    |
-| `WARRANTY_CLAIM_OPENED` / `WARRANTY_CLAIM_DECIDED`              | marketplace  | supplier · maintenance · economic · notification |
+| رویداد                                                          | Producer هدف | Consumerهای هدف                                                                                                                                                        |
+| --------------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `INSURANCE_QUOTE_REQUESTED`                                     | insurance    | notification · analytics                                                                                                                                               |
+| `INSURANCE_OFFER_RECEIVED`                                      | insurance    | notification                                                                                                                                                           |
+| `INSURANCE_POLICY_ISSUED` / `INSURANCE_POLICY_RENEWED`          | insurance    | asset · economic · notification · analytics                                                                                                                            |
+| `INSURANCE_CLAIM_OPENED` / `INSURANCE_CLAIM_DECIDED`            | insurance    | asset · economic · notification · analytics — **امروز از ماژول insurance داخل asset روی `rasta.insurance.v1` منتشر می‌شوند** (Q-59)؛ با استخراج، Topic با ماژول می‌رود |
+| `PARTICIPATION_SCORE_UPDATED`                                   | reward       | notification · analytics                                                                                                                                               |
+| `REWARD_BENEFIT_REDEEMED`                                       | reward       | economic · notification · analytics                                                                                                                                    |
+| `SCORE_APPEAL_OPENED` / `SCORE_APPEAL_DECIDED`                  | reward       | notification · audit                                                                                                                                                   |
+| `RETURN_REQUESTED` / `RETURN_AUTHORIZED`                        | marketplace  | inventory · supplier · notification                                                                                                                                    |
+| `RETURN_RECEIVED` / `RETURN_INSPECTED` / `RETURN_DISPOSITIONED` | inventory    | marketplace · supplier · economic · analytics                                                                                                                          |
+| `WARRANTY_CLAIM_OPENED` / `WARRANTY_CLAIM_DECIDED`              | marketplace  | supplier · maintenance · economic · notification                                                                                                                       |
 
 ### Economic
 

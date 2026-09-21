@@ -36,6 +36,7 @@ import { AssetRepository } from './asset/asset.repository';
 import { AssetService } from './asset/asset.service';
 import { AssetController } from './asset/asset.controller';
 import { InsuranceService } from './insurance/insurance.service';
+import { ClaimService } from './insurance/claim.service';
 import { TimelineConsumer } from './consumers/timeline.consumer';
 import { HealthController, MetricsController } from './health/health.controller';
 import { loadAssetEnv, SERVICE_NAME, type AssetEnv } from './config/env';
@@ -108,6 +109,16 @@ const CONSUMED_TOPICS = [
       inject: [AssetRepository, AssetService, ENV],
       useFactory: (repository: AssetRepository, assets: AssetService, env: AssetEnv) =>
         new InsuranceService(repository, assets, env.EXPIRY_WARNING_DAYS),
+    },
+
+    {
+      provide: ClaimService,
+      inject: [AssetRepository, AssetService, ENV],
+      useFactory: (repository: AssetRepository, assets: AssetService, env: AssetEnv) =>
+        new ClaimService(repository, assets, {
+          decisionRoles: env.INSURANCE_CLAIM_DECISION_ROLES,
+          approvalCeilingMinor: env.INSURANCE_CLAIM_APPROVAL_CEILING_MINOR,
+        }),
     },
 
     {

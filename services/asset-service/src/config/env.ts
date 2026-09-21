@@ -25,6 +25,36 @@ export const assetEnvSchema = baseEnvSchema
      * is the client's call, not the platform's.
      */
     EXPIRY_WARNING_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+
+    /**
+     * Who may decide an insurance claim and record its settlement.
+     *
+     * The product document names no approval authority for claims, and the
+     * platform does not invent one (AGENTS.md § 1, principle 2): the roles come
+     * from configuration and the question is recorded as docs/24 Q-59. The
+     * default is the narrow reading — the organization's own administrators —
+     * not the fleet manager who files the claim.
+     */
+    INSURANCE_CLAIM_DECISION_ROLES: z
+      .string()
+      .default('ORGANIZATION_ADMIN,UNION_ADMIN')
+      .transform((raw) => raw.split(',').map((role) => role.trim()))
+      .pipe(z.array(z.string().regex(/^[A-Z][A-Z0-9_]*$/)).nonempty()),
+
+    /**
+     * The largest amount the configured roles may approve, in minor units.
+     *
+     * Empty means no ceiling. When a higher authority exists for larger claims
+     * it is set here, and an approval above it is refused rather than granted
+     * by whoever happened to hold the role (Q-59). Parsed as a bigint: rial
+     * amounts leave the safe-integer range quickly.
+     */
+    INSURANCE_CLAIM_APPROVAL_CEILING_MINOR: z
+      .string()
+      .trim()
+      .regex(/^\d{0,30}$/, 'Must be a non-negative integer in minor units, or empty')
+      .default('')
+      .transform((raw) => (raw === '' ? null : BigInt(raw))),
   });
 
 export type AssetEnv = z.infer<typeof assetEnvSchema>;

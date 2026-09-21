@@ -55,13 +55,19 @@ export const PARTITION_SCOPE_OF = {
   ASSET_LOCATION_RECORDED: 'AGGREGATE',
   ASSET_DOCUMENT_ATTACHED: 'AGGREGATE',
 
-  // rasta.insurance.v1 — one stream per policy or inspection
+  // rasta.insurance.v1 — one stream per policy, inspection or claim
   INSURANCE_RECORDED: 'AGGREGATE',
   INSURANCE_EXPIRING: 'AGGREGATE',
   INSURANCE_EXPIRED: 'AGGREGATE',
   INSPECTION_RECORDED: 'AGGREGATE',
   INSPECTION_EXPIRING: 'AGGREGATE',
   INSPECTION_FAILED: 'AGGREGATE',
+  // A claim's four transitions share one stream, keyed by the claim id, so a
+  // consumer sees OPENED before DECIDED before SETTLEMENT_RECORDED.
+  INSURANCE_CLAIM_OPENED: 'AGGREGATE',
+  INSURANCE_CLAIM_REVIEW_STARTED: 'AGGREGATE',
+  INSURANCE_CLAIM_DECIDED: 'AGGREGATE',
+  INSURANCE_CLAIM_SETTLEMENT_RECORDED: 'AGGREGATE',
 } as const satisfies Record<AssetEventName | InsuranceEventName, PartitionScope>;
 
 /**
