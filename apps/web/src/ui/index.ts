@@ -21,6 +21,9 @@ export { Sidebar } from './layout/Sidebar';
 export type { SidebarItem } from './layout/Sidebar';
 export { TopBar } from './layout/TopBar';
 
+export { Button, ButtonLink } from './action/Button';
+export type { ButtonTone } from './action/Button';
+
 export { Alert } from './feedback/Alert';
 export type { AlertTone } from './feedback/Alert';
 export { STATUS_TONES, StatusBadge } from './feedback/StatusBadge';

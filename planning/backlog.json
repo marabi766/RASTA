@@ -819,14 +819,40 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 21,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Core operational workflows are usable at documented permissions",
         "Desktop and supported mobile viewports pass accessibility and tenant-isolation E2E"
       ],
       "dependencies": ["EXP-001", "OPS-001"],
       "sourceRefs": ["docs/16-ui-architecture.md#۱۶۶-نقشه-صفحات"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/adr/ADR-059-web-session-and-token-custody.md",
+          "note": "The portal runs the OIDC flow on its own server: no access token and no refresh token ever reaches browser JavaScript. Written because docs/16 contradicted itself — section 16.1 named a browser library and section 16.11 required the refresh token in an HttpOnly cookie, which a browser library cannot write. The rule won and the tool changed."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/66",
+          "note": "The session and the shell: the OIDC flow in Next.js route handlers with PKCE, state and nonce; an AES-256-GCM sealed session cookie that is HttpOnly, Secure and SameSite=Strict; a server-side gateway client that refuses any origin but the gateway; /login; and a dashboard that shows the signed-in person, their active organization and their effective roles, fetched through the gateway on the server."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/server",
+          "note": "67 server tests: the session cookie refuses a tampered, foreign-key, truncated or stale-shaped value and leaves no token readable; PKCE derives S256 correctly; the id token is refused for a wrong nonce, a wrong audience and a wrong key; the gateway client refuses a service port, another host and another port, and never fetches when it refuses; and the identity schema drops the email and phone identity returns. 354 portal tests in total."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/e2e/login.spec.ts",
+          "note": "The first browser job in this repository, running against a production build in CI as apps/web/playwright.config.ts said it would from EXP-001. It asserts only what a browser can: the document is served dir=rtl lang=fa, the way in works with JavaScript disabled, and localStorage and sessionStorage are both empty — which is ADR-059 central claim, provable only here."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/16-ui-architecture.md",
+          "note": "Still unbuilt, and not claimed: /organizations, /assets, /assets/[id], /drivers, /usage, /maintenance and /maintenance/[id]. EXP-002 is not finished by this change; its first acceptance criterion — core operational workflows usable at documented permissions — needs those screens."
+        }
+      ]
     },
     {
       "id": "EXP-003",
@@ -1727,6 +1753,14 @@
       "recordedBy": "Claude Opus 5",
       "approvalRef": "Product owner instruction in the Claude Code session on 2026-09-21 to carry out the listed steps in order",
       "recordIds": ["COM-008"]
+    },
+    {
+      "date": "2026-09-21",
+      "type": "STATUS_CORRECTED",
+      "reason": "EXP-002 moves from READY to IN_PROGRESS. The session, the app shell and the first real screen have landed; the domain surfaces it also covers have not. The item earns zero points until both acceptance criteria are met.",
+      "recordedBy": "Claude Opus 5",
+      "approvalRef": "Product owner standing authority for quality and security decisions, Claude Code session 2026-09-21",
+      "recordIds": ["EXP-002"]
     }
   ]
 }

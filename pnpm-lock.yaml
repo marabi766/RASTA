@@ -66,6 +66,9 @@ importers:
       date-fns-jalali:
         specifier: 4.4.0-0
         version: 4.4.0-0
+      jose:
+        specifier: ^5.9.6
+        version: 5.10.0
       lucide-react:
         specifier: ^1.47.0
         version: 1.47.0(react@19.3.0)
