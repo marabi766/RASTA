@@ -159,8 +159,8 @@ Hard-Code کردن نرخ کارمزد یا مرجع موافقت.
 | `audit-service`        | 3115 | AuditEvent (فقط الحاقی)                              | P0  |
 | `analytics-service`    | 3116 | ReadModel، KPI Snapshot                              | P1  |
 
-Frontend: `apps/web` (3200) — پورتال کاربر: پایه و Design System ساخته شده
-(ADR-058)، صفحه‌های دامنه‌ای با `EXP-002` می‌آیند · `apps/admin` (3201) —
+Frontend: `apps/web` (3200) — پورتال کاربر: Design System (ADR-058)، ورود با
+نشست سمت سرور (ADR-059)، داشبورد و صفحه‌های دارایی؛ بقیهٔ `EXP-002` در راه · `apps/admin` (3201) —
 کنسول اپراتور: هنوز ساخته نشده، عمداً موکول (ADR-058 § ۲).
 
 **قاعده:** یک سرویس هرگز پایگاه داده سرویس دیگر را نمی‌خواند. فقط REST یا Event.

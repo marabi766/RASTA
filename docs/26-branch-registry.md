@@ -55,12 +55,12 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                         | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                                                            |
-| ---------------------------- | ------------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `feat/web-asset-surfaces`    | `F:\Rasta-Parallel\exp-001-web-foundation`       | C0   | —   | ۱ / ۰          | `EXP-002` ب — فهرست ماشین‌آلات و پروندهٔ دارایی؛ **`PROJECT_MEMORY.md` و `planning/backlog.json` را لمس می‌کند** |
-| `claude/quirky-curie-15d850` | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —   | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`                                                   |
-| `demo/investor-preview`      | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                     |
-| `design/claude-design`       | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                            |
+| شاخه                         | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                               |
+| ---------------------------- | ------------------------------------------------ | ---- | --- | -------------- | ----------------------------------------------------------------------------------- |
+| `docs/state-2026-09-21`      | `F:\Rasta-Parallel\exp-001-web-foundation`       | C0   | —   | ۱ / ۰          | هم‌خوانی اسناد با `main` پس از PR #64 تا #67؛ **`PROJECT_MEMORY.md` را لمس می‌کند** |
+| `claude/quirky-curie-15d850` | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —   | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`                      |
+| `demo/investor-preview`      | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید        |
+| `design/claude-design`       | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                               |
 
 ## شاخه‌های بازنشسته
 
@@ -92,6 +92,7 @@
 | `feat/notification-email-delivery`      | [#65](https://github.com/marabi766/RASTA/pull/65) | `db39f30`   |
 | `feat/web-session-and-shell`            | [#66](https://github.com/marabi766/RASTA/pull/66) | `3cf79aa`   |
 | `docs/frontend-gate-and-web-state`      | [#64](https://github.com/marabi766/RASTA/pull/64) | `df54a43`   |
+| `feat/web-asset-surfaces`               | [#67](https://github.com/marabi766/RASTA/pull/67) | `6ea1260`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
@@ -150,14 +151,15 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 
 ### ADR
 
-| شماره | مالک                                  | وضعیت                                       |
-| ----- | ------------------------------------- | ------------------------------------------- |
-| ۰۵۴   | `feat/notification-service`           | روی `main` (`cc89660`)                      |
-| ۰۵۵   | `feat/audit-service-aud-004-contract` | روی `main` (`9fa75cc`)                      |
-| ۰۵۶   | `docs/inventory-logistics-adr`        | روی `main` (`f2eb8fa`)                      |
-| ۰۵۷   | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از ۰۵۵ انجام شد          |
-| ۰۵۸   | `feat/web-foundation`                 | مصرف شد — جای پورتال وب و مرز Design System |
-| ۰۵۹+  | آزاد                                  | —                                           |
+| شماره | مالک                                  | وضعیت                                           |
+| ----- | ------------------------------------- | ----------------------------------------------- |
+| ۰۵۴   | `feat/notification-service`           | روی `main` (`cc89660`)                          |
+| ۰۵۵   | `feat/audit-service-aud-004-contract` | روی `main` (`9fa75cc`)                          |
+| ۰۵۶   | `docs/inventory-logistics-adr`        | روی `main` (`f2eb8fa`)                          |
+| ۰۵۷   | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از ۰۵۵ انجام شد              |
+| ۰۵۸   | `feat/web-foundation`                 | مصرف شد — جای پورتال وب و مرز Design System     |
+| ۰۵۹   | `feat/web-session-and-shell`          | روی `main` (`3cf79aa`) — نگهداشت توکن در پورتال |
+| ۰۶۰+  | آزاد                                  | —                                               |
 
 ### پرسش‌های باز `Q-NN`
 
