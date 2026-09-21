@@ -2661,10 +2661,20 @@ POST /v1/assets/:id/transfer          POST /v1/assets/:id/decommission
 POST /v1/assets/:id/locations         POST /v1/assets/:id/documents
 POST /v1/assets/:id/insurance-policies
 POST /v1/assets/:id/inspections
+GET  /v1/assets/:id/insurance-claims  GET  /v1/assets/:id/insurance-claims/:claimId
+POST /v1/assets/:id/insurance-claims  POST /v1/assets/:id/insurance-claims/:claimId/review
+POST /v1/assets/:id/insurance-claims/:claimId/decision
+POST /v1/assets/:id/insurance-claims/:claimId/settlement
 ```
 
-هیچ Endpoint ای برای `InsuranceClaim` نیست — جدول در Migration هست، بدون
-Controller/Service (بخش ۱۸، Gap).
+**به‌روزرسانی 2026-09-21:** `InsuranceClaim` دیگر جدول بی‌API نیست. شش مسیر
+بالا روی شاخهٔ `feat/asset-insurance-claim-api` پیاده شدند: ثبت، شروع بررسی،
+تصمیم صریح مرجع پیکربندی‌شده (`INSURANCE_CLAIM_DECISION_ROLES`، سقف
+`INSURANCE_CLAIM_APPROVAL_CEILING_MINOR` — Q-59) و **ثبت** تسویه‌ای که جای
+دیگری انجام شده؛ چهار رویداد `INSURANCE_CLAIM_*` روی `rasta.insurance.v1`،
+Migration `20260921120000_insurance_claim_decision` با `down.sql` و سه CHECK.
+هیچ پولی در `asset-service` جابه‌جا نمی‌شود. جملهٔ پیشین («هیچ Endpoint ای
+نیست») وضعیت تا آن روز را توصیف می‌کرد.
 
 ### fleet-service (`3104`)
 
@@ -3304,7 +3314,7 @@ live-verify-17  WALLET_OPENED         actor=USR-SEED-DEHYARI-ADMIN
 | D-027 | ترتیب معنایی هر جریان (`topic + partitionKey`) تضمین نشده                        | متوسط                           | **شش** مسیر مستقل وارونگی، اندازه‌گیری‌شده (پایین). برخورد میلی‌ثانیه‌ای کوچک‌ترین‌شان است؛ مهم‌ترین، واگرایی ترتیب Commit از `created_at` است | [ADR-051](docs/adr/ADR-051-outbox-semantic-ordering.md) **`Accepted`** (2026-09-04) و **Q-36 بسته شد**؛ **B1 (Schema)، B2 (ابزار Backfill) و B3 (تخصیص سمت تولیدکننده) پیاده شدند (2026-09-05)**، ولی **B4–B6 نه** — هیچ مصرف‌کننده یا Claim ای `stream_seq` را اجبار نمی‌کند، پس هیچ تضمین ترتیبی در زمان اجرا برقرار نیست و این مورد باز می‌ماند |
 | D-021 | هیچ Endpoint در `document-service` `@AllowService` ندارد                         | متوسط                           | `asset`، `contract` و `construction` شناسه سند نگه می‌دارند اما فراداده‌اش را نمی‌توانند بخوانند                                               | پیش‌فرض بسته درست است؛ باز کردنش یعنی افزودن آگاهانه یک Allowlist به‌ازای هر Endpoint با تست خودش                                                                                                                                                                                                                                                  |
 | —     | `openapi/zod-schema.ts` در سه سرویس بایت‌به‌بایت تکرار شده                       | پایین                           | یک اصلاح باید سه‌جا اعمال شود                                                                                                                  | Utility خالص و بدون دانش دامنه است، پس جایش `packages/` است (A-03)؛ استخراجش سه سرویس را هم‌زمان لمس می‌کند                                                                                                                                                                                                                                        |
-| —     | `InsuranceClaim` جدول بدون API                                                   | پایین                           | داده قابل‌ثبت نیست از راه سرویس                                                                                                                | Controller/Service لازم است، هروقت claim-flow اولویت شد                                                                                                                                                                                                                                                                                            |
+| —     | ~~`InsuranceClaim` جدول بدون API~~                                               | —                               | ✅ بسته شد 2026-09-21 — API ادعای خسارت پایه روی `feat/asset-insurance-claim-api` (Q-59)                                                       | —                                                                                                                                                                                                                                                                                                                                                  |
 | —     | `mission` و رویدادهای `MISSION_*` پیاده نشدند                                    | پایین                           | تحلیل «ناوگان داخلی در برابر برون‌سپاری» هنوز داده مأموریت ندارد                                                                               | عمدی — به `construction-service` گره خورده که وجود ندارد؛ ADR-026 § Consequences                                                                                                                                                                                                                                                                   |
 
 ### D-028 — پنجرهٔ Dedupe اعلان زیر همروندی وارونه می‌شد — رفع شد (2026-09-18) ✅
@@ -5213,15 +5223,15 @@ Temporal ‏`rasta-order`.
 
 ### کارهای مستقل و کوچک‌تر
 
-| کار                                                         | چرا                                     |
-| ----------------------------------------------------------- | --------------------------------------- |
-| Dockerfile برای `api-gateway`                               | تنها سرویسی که ندارد؛ در CI Matrix نیست |
-| حذف `--passWithNoTests` از چهار سرویس دیگر                  | Project Integration شان تهی است         |
-| D-008 (Supply-Chain)                                        | سه قاعده Semgrep که Lockfile رد می‌کند  |
-| D-006 (تصادم پورت Redis روی این ماشین)                      | فقط محیط توسعه                          |
-| ~~D-011 (رویداد نداشتن تغییر برنامه سرویس)~~                | ✅ بسته شد 2026-09-19 — PR #57          |
-| `InsuranceClaim` بدون API در `asset-service`                | جدول هست، Controller نیست               |
-| Q-24 / Q-25 — تصمیم انسانی درباره دسترسی اپراتور و تعمیرگاه | هر دو مسدودکننده پورتال تعمیرگاه‌اند    |
+| کار                                                         | چرا                                                                   |
+| ----------------------------------------------------------- | --------------------------------------------------------------------- |
+| Dockerfile برای `api-gateway`                               | تنها سرویسی که ندارد؛ در CI Matrix نیست                               |
+| حذف `--passWithNoTests` از چهار سرویس دیگر                  | Project Integration شان تهی است                                       |
+| D-008 (Supply-Chain)                                        | سه قاعده Semgrep که Lockfile رد می‌کند                                |
+| D-006 (تصادم پورت Redis روی این ماشین)                      | فقط محیط توسعه                                                        |
+| ~~D-011 (رویداد نداشتن تغییر برنامه سرویس)~~                | ✅ بسته شد 2026-09-19 — PR #57                                        |
+| ~~`InsuranceClaim` بدون API در `asset-service`~~            | ✅ پیاده شد 2026-09-21 — شاخهٔ `feat/asset-insurance-claim-api`، Q-59 |
+| Q-24 / Q-25 — تصمیم انسانی درباره دسترسی اپراتور و تعمیرگاه | هر دو مسدودکننده پورتال تعمیرگاه‌اند                                  |
 
 **هیچ‌کدام از این‌ها را خودکار شروع نکن.**
 

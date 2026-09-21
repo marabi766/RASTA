@@ -55,13 +55,13 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                         | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                               |
-| ---------------------------- | ------------------------------------------------ | ---- | --- | -------------- | ----------------------------------------------------------------------------------- |
-| `docs/state-2026-09-21`      | `F:\Rasta-Parallel\exp-001-web-foundation`       | C0   | —   | ۱ / ۰          | هم‌خوانی اسناد با `main` پس از PR #64 تا #67؛ **`PROJECT_MEMORY.md` را لمس می‌کند** |
-| `feat/asset-insurance-claim-api` | `F:\Rasta-Parallel\asset-insurance-claim-api` | Opus | — | ۰ / ۰ | تازه ساخته شد از `origin/main` @ `a49f871` — API ادعای خسارت بیمه در `asset-service`؛ **`Q-59` را می‌برد و `docs/24` را لمس می‌کند** |
-| `claude/quirky-curie-15d850` | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —   | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`                      |
-| `demo/investor-preview`      | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید        |
-| `design/claude-design`       | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                               |
+| شاخه                             | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                                                                                |
+| -------------------------------- | ------------------------------------------------ | ---- | --- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `docs/state-2026-09-21`          | `F:\Rasta-Parallel\exp-001-web-foundation`       | C0   | —   | ۱ / ۰          | هم‌خوانی اسناد با `main` پس از PR #64 تا #67؛ **`PROJECT_MEMORY.md` را لمس می‌کند**                                                  |
+| `feat/asset-insurance-claim-api` | `F:\Rasta-Parallel\asset-insurance-claim-api`    | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `a49f871` — API ادعای خسارت بیمه در `asset-service`؛ **`Q-59` را می‌برد و `docs/24` را لمس می‌کند** |
+| `claude/quirky-curie-15d850`     | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —   | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`                                                                       |
+| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                         |
+| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                |
 
 ## شاخه‌های بازنشسته
 
@@ -171,7 +171,7 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 | Q-56        | `feat/supplier-performance-phase2`    | روی `main` (`f7252d3`)                                                                 |
 | Q-57        | `feat/audit-service-aud-004-contract` | روی `main`                                                                             |
 | Q-58        | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                   |
-| Q-59        | `feat/asset-insurance-claim-api`      | **رزرو شد** (2026-09-21) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه          |
+| Q-59        | `feat/asset-insurance-claim-api`      | **رزرو شد** (2026-09-21) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه         |
 | Q-60+       | آزاد                                  | —                                                                                      |
 
 > **چرا Q-44 قابل جابه‌جایی نیست:** یک ADR ادغام‌شده آن را به‌عنوان مرجع
