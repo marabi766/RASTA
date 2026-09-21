@@ -203,6 +203,63 @@ jobs:
               --exclude-rule package_managers.pnpm.pnpm-trust-policy.pnpm-trust-policy
 
   # ---------------------------------------------------------------------------
+  # The portal in a real browser (EXP-002, ADR-059).
+  #
+  # Its own job because it needs a browser binary and a production build, and
+  # neither belongs in `quality`. It runs against `next start`, not the dev
+  # server: those are different programs, and a browser job passing against a
+  # dev server would pass on code that could not ship.
+  #
+  # No database, no Keycloak, no gateway. The only page it visits is `/login`,
+  # which a visitor without a cookie reaches without any of them — and the
+  # three things it asserts are the three only a browser can show: the document
+  # is right-to-left, the way in needs no JavaScript, and **nothing is in
+  # browser storage**, which is ADR-059's central claim.
+  # ---------------------------------------------------------------------------
+  web-browser:
+    name: Portal in a browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build the portal
+        # `...` so the workspace packages it imports are built first. Without
+        # it the type checker inside `next build` cannot find
+        # `@rasta/contracts`, whose declarations are a build output — which is
+        # invisible locally, where they are already on disk.
+        run: pnpm exec turbo run build --filter=@rasta/web...
+
+      # Chromium only. A second engine doubles the job for a page whose
+      # behaviour is server-rendered HTML and one link.
+      - name: Install the browser
+        run: pnpm --filter @rasta/web exec playwright install --with-deps chromium
+
+      - name: Run the browser suite
+        run: pnpm --filter @rasta/web exec playwright test
+
+      - name: Playwright report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-playwright-report
+          path: apps/web/playwright-report
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
   # Prometheus configuration and alert rules. Its own job so the Docker pull
   # stays out of `quality`. Same image as the `prometheus` service in
   # docker-compose.yml, with the whole directory mounted where that service

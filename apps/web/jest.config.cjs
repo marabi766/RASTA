@@ -27,6 +27,11 @@ module.exports = {
   // A browser bundle is tested in a browser-shaped environment. `node` would
   // let a component that touches `document` pass here and fail in a browser.
   testEnvironment: 'jsdom',
+  // jsdom resolves a package's `browser` export condition, and `jose` answers
+  // that with an ES module Jest cannot parse. The portal's use of `jose` is
+  // server-side only (ADR-059), so asking for the `node` condition resolves the
+  // CommonJS build *and* matches the runtime the code actually runs in.
+  testEnvironmentOptions: { customExportConditions: ['node'] },
   testRegex: '.*\\.spec\\.tsx?$',
   transform: { '^.+\\.(t|j)sx?$': ['@swc/jest', swcOptions] },
   setupFilesAfterEnv: ['<rootDir>/src/test/setup.ts'],

@@ -38,8 +38,8 @@
 | Status | Delivery units | Story Points |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 16 | 291 |
-| IN_PROGRESS | 2 | 34 |
+| READY | 15 | 270 |
+| IN_PROGRESS | 3 | 55 |
 | BLOCKED | 3 | 47 |
 | ACCEPTED | 21 | 217 |
 | CANCELLED | 0 | 0 |
@@ -51,8 +51,8 @@ A delivery unit is a User Story under a decomposed Feature, or the Feature itsel
 | Status | Features | Baseline SP |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 16 | 291 |
-| IN_PROGRESS | 2 | 34 |
+| READY | 15 | 270 |
+| IN_PROGRESS | 3 | 55 |
 | BLOCKED | 3 | 47 |
 | ACCEPTED | 17 | 217 |
 | CANCELLED | 0 | 0 |
