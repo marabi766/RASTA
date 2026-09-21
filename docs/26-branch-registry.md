@@ -55,12 +55,12 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                         | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                                                                        |
-| ---------------------------- | ------------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `feat/web-session-and-shell` | `F:\Rasta-Parallel\exp-001-web-foundation`       | C0   | —   | ۱ / ۰          | `EXP-002` الف — نشست سمت سرور، `/login` و داشبورد؛ **`ci.yml`، `PROJECT_MEMORY.md` و `planning/backlog.json` را لمس می‌کند** |
-| `claude/quirky-curie-15d850` | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —   | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`                                                               |
-| `demo/investor-preview`      | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                 |
-| `design/claude-design`       | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                        |
+| شاخه                         | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                                                            |
+| ---------------------------- | ------------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `feat/web-asset-surfaces`    | `F:\Rasta-Parallel\exp-001-web-foundation`       | C0   | —   | ۱ / ۰          | `EXP-002` ب — فهرست ماشین‌آلات و پروندهٔ دارایی؛ **`PROJECT_MEMORY.md` و `planning/backlog.json` را لمس می‌کند** |
+| `claude/quirky-curie-15d850` | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —   | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`                                                   |
+| `demo/investor-preview`      | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                     |
+| `design/claude-design`       | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                            |
 
 ## شاخه‌های بازنشسته
 
@@ -90,6 +90,7 @@
 | `chore/test-task-unit-only`             | [#62](https://github.com/marabi766/RASTA/pull/62) | `f7755e0`   |
 | `feat/notification-mail-channel`        | [#63](https://github.com/marabi766/RASTA/pull/63) | `bcd3cd5`   |
 | `feat/notification-email-delivery`      | [#65](https://github.com/marabi766/RASTA/pull/65) | `db39f30`   |
+| `feat/web-session-and-shell`            | [#66](https://github.com/marabi766/RASTA/pull/66) | `3cf79aa`   |
 | `docs/frontend-gate-and-web-state`      | [#64](https://github.com/marabi766/RASTA/pull/64) | `df54a43`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 

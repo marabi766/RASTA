@@ -14,6 +14,7 @@ import {
 } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { activeMembership, displayName, fetchCurrentUser } from '@/server/identity';
+import { PORTAL_NAV } from './nav';
 
 /**
  * The dashboard (docs/16 § 16.6, `/`).
@@ -36,13 +37,6 @@ import { activeMembership, displayName, fetchCurrentUser } from '@/server/identi
  * organization you are acting for, and what that organization has granted you.
  */
 export const dynamic = 'force-dynamic';
-
-const NAV = [
-  { href: '/', label: 'خانه' },
-  { href: '/assets', label: 'ماشین‌آلات' },
-  { href: '/maintenance', label: 'نگهداری' },
-  { href: '/notifications', label: 'اعلان‌ها' },
-];
 
 export default async function HomePage() {
   const session = await currentSession();
@@ -67,7 +61,7 @@ export default async function HomePage() {
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={NAV} currentHref="/" />}
+      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/" />}
     >
       <PageHeader title="خانه" description="وضعیت حساب و سازمان فعال شما." />
 
@@ -139,9 +133,10 @@ export default async function HomePage() {
         </>
       ) : null}
 
-      <Alert tone="info" title="صفحه‌های عملیاتی در راه‌اند">
-        فهرست ماشین‌آلات، پروندهٔ دارایی و نگهداری در همین داستان و داستان‌های بعدی اضافه می‌شوند.
-        این صفحه فقط چیزی را نشان می‌دهد که امروز واقعاً پشتش داده هست.
+      <Alert tone="info" title="بقیهٔ صفحه‌های عملیاتی در راه‌اند">
+        فهرست ماشین‌آلات و پروندهٔ الکترونیکی دارایی آماده‌اند. راننده و تخصیص، ثبت کارکرد و نگهداری
+        در داستان‌های بعدی می‌آیند — و تا آن روز در ناوبری نمی‌نشینند، چون پیوند به صفحه‌ای که پاسخ
+        نمی‌دهد یک قول است که محصول به آن عمل نمی‌کند.
       </Alert>
     </AppShell>
   );
