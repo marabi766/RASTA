@@ -237,7 +237,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Build the portal
-        run: pnpm --filter @rasta/web build
+        # `...` so the workspace packages it imports are built first. Without
+        # it the type checker inside `next build` cannot find
+        # `@rasta/contracts`, whose declarations are a build output — which is
+        # invisible locally, where they are already on disk.
+        run: pnpm exec turbo run build --filter=@rasta/web...
 
       # Chromium only. A second engine doubles the job for a page whose
       # behaviour is server-rendered HTML and one link.

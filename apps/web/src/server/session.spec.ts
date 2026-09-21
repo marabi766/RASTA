@@ -65,6 +65,17 @@ describe('sealing and opening', () => {
     expect(openSession(bytes.toString('base64url'), SECRET)).toBeNull();
   });
 
+  it('refuses a cookie whose authentication tag was shortened', () => {
+    // A short tag is a weak tag: sixteen bytes make a forgery a one-in-2^128
+    // event, four bytes make it one in 2^32. Both halves of the cipher state
+    // the length, so a caller cannot present a shorter one and have it
+    // verified against its own length.
+    const sealed = sealSession(session(), SECRET);
+    const raw = Buffer.from(sealed, 'base64url');
+    const shortened = Buffer.concat([raw.subarray(0, 12), raw.subarray(12, 16), raw.subarray(28)]);
+    expect(openSession(shortened.toString('base64url'), SECRET)).toBeNull();
+  });
+
   it('refuses a truncated cookie', () => {
     const sealed = sealSession(session(), SECRET);
     expect(openSession(sealed.slice(0, 8), SECRET)).toBeNull();

@@ -15,6 +15,14 @@ import { z } from 'zod';
  * has to validate. The nonce is fresh per seal, which is not optional for GCM
  * — reusing one with the same key breaks the cipher outright.
  *
+ * The authentication tag length is stated to both halves rather than left to
+ * the default. Node will otherwise verify against whatever length the tag it
+ * is handed happens to be, and a short tag is a weak tag: sixteen bytes is a
+ * one-in-2^128 forgery, four bytes is one in 2^32. The slice below already
+ * takes exactly sixteen, so this is belt and braces — and it is the pair of
+ * them, because a rule that only the reader enforces is a rule that stops
+ * being enforced the day somebody refactors the reader.
+ *
  * ## What is not in here
  *
  * No roles. They are inside the access token, the gateway and each service
@@ -86,7 +94,7 @@ function keyFrom(secret: string): Buffer {
  */
 export function seal(value: unknown, secret: string): string {
   const nonce = randomBytes(NONCE_BYTES);
-  const cipher = createCipheriv(ALGORITHM, keyFrom(secret), nonce);
+  const cipher = createCipheriv(ALGORITHM, keyFrom(secret), nonce, { authTagLength: TAG_BYTES });
   const body = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()]);
   return Buffer.concat([nonce, cipher.getAuthTag(), body]).toString('base64url');
 }
@@ -101,7 +109,9 @@ export function open<T>(sealed: string, secret: string, schema: z.ZodType<T>): T
     const tag = raw.subarray(NONCE_BYTES, NONCE_BYTES + TAG_BYTES);
     const body = raw.subarray(NONCE_BYTES + TAG_BYTES);
 
-    const decipher = createDecipheriv(ALGORITHM, keyFrom(secret), nonce);
+    const decipher = createDecipheriv(ALGORITHM, keyFrom(secret), nonce, {
+      authTagLength: TAG_BYTES,
+    });
     decipher.setAuthTag(tag);
     const opened = Buffer.concat([decipher.update(body), decipher.final()]).toString('utf8');
 
