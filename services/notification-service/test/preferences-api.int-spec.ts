@@ -115,8 +115,13 @@ describe('notification preferences API (real application)', () => {
       ],
       ['an unknown scope', { scope: 'EVERYTHING', channel: 'IN_APP', enabled: false }],
       [
+        // This row named EMAIL until NTF-004 gave that channel a worker. The
+        // invariant is not "EMAIL is refused" — it is that a preference may
+        // only name a channel something can actually deliver on, or the
+        // setting claims an effect it does not have (Q-07). SMS is that
+        // channel today: Q-15 has no answer and there is no adapter.
         'a channel the platform cannot deliver on',
-        { scope: 'GLOBAL', channel: 'EMAIL', enabled: false },
+        { scope: 'GLOBAL', channel: 'SMS', enabled: false },
       ],
     ])('refuses %s with 400', async (_label, preference) => {
       const token = userToken(newUserId(), organization());

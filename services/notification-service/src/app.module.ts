@@ -1,4 +1,5 @@
 import {
+  Inject,
   Module,
   type MiddlewareConsumer,
   type NestModule,
@@ -361,7 +362,7 @@ export class AppModule implements NestModule, OnModuleInit {
     private readonly relay: OutboxRelay,
     private readonly mailWorker: MailWorker,
     private readonly prisma: PrismaService,
-    private readonly bootLogger: ScrubbedLogger,
+    @Inject(SCRUBBED_LOGGER) private readonly bootLogger: ScrubbedLogger,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {

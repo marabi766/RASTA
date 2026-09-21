@@ -225,10 +225,16 @@ jobs:
             check config /etc/prometheus/prometheus.yml
 
       - name: Test alert rule behaviour
+        # Every file under `tests/`, expanded inside the container rather than
+        # named one by one here. A service that adds alert rules now adds its
+        # test file and nothing else: naming them individually made this step
+        # one more line every such change had to touch, and a test file
+        # somebody forgot to name would have read as a tested rule that
+        # nothing actually runs.
         run: |
           docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
-            --entrypoint promtool prom/prometheus:v3.1.0 \
-            test rules /etc/prometheus/tests/rasta-audit-alerts.test.yml
+            --entrypoint sh prom/prometheus:v3.1.0 \
+            -c 'promtool test rules /etc/prometheus/tests/*.test.yml'
 
   # ---------------------------------------------------------------------------
   # Integration and the security tests that need a real database.

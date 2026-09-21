@@ -5,6 +5,13 @@ import { newId } from '../intake/intake';
 import type { PreferenceInput } from './preferences.dto';
 import type { PreferenceRow } from './precedence';
 
+/** The stored shape of a quiet window: minutes from local midnight, and a zone. */
+export interface QuietHoursRow {
+  readonly startMinute: number;
+  readonly endMinute: number;
+  readonly timezone: string;
+}
+
 /**
  * The caller's own preference rows, for one tenant.
  *
@@ -37,6 +44,46 @@ export class PreferencesRepository {
    * preferences at all — which would silently restore every default they had
    * turned off.
    */
+  /**
+   * The caller's own quiet window, or null.
+   *
+   * Keyed by `(user, organization)` rather than living on a preference row —
+   * see the NTF-004 migration header for why that shape could not answer which
+   * of three rows a delivery obeys.
+   */
+  async quietHours(actor: NotificationActor): Promise<QuietHoursRow | null> {
+    const row = await this.prisma.client.notificationQuietHours.findUnique({
+      where: {
+        userId_organizationId: { userId: actor.userId, organizationId: actor.organizationId },
+      },
+      select: { startMinute: true, endMinute: true, timezone: true },
+    });
+    return row ?? null;
+  }
+
+  /** Sets or clears it. `null` is "no quiet window", which is the default state. */
+  async replaceQuietHours(actor: NotificationActor, window: QuietHoursRow | null): Promise<void> {
+    if (!window) {
+      await this.prisma.client.notificationQuietHours.deleteMany({
+        where: { userId: actor.userId, organizationId: actor.organizationId },
+      });
+      return;
+    }
+
+    await this.prisma.client.notificationQuietHours.upsert({
+      where: {
+        userId_organizationId: { userId: actor.userId, organizationId: actor.organizationId },
+      },
+      create: {
+        userId: actor.userId,
+        organizationId: actor.organizationId,
+        ...window,
+        updatedBy: actor.userId,
+      },
+      update: { ...window, updatedBy: actor.userId },
+    });
+  }
+
   async replaceOwn(
     actor: NotificationActor,
     preferences: readonly PreferenceInput[],

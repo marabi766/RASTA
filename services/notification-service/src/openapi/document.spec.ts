@@ -47,7 +47,7 @@ describe('the committed OpenAPI document', () => {
     expect(committed).toBe(generated);
   });
 
-  it('publishes the nine endpoints, all closed, all answering 200', () => {
+  it('publishes the eleven endpoints, all closed, all answering 200', () => {
     const document = buildNotificationOpenApiDocument(app);
     const operations = Object.entries(document.paths ?? {}).flatMap(([path, item]) =>
       Object.entries(
@@ -62,10 +62,14 @@ describe('the committed OpenAPI document', () => {
       // default, no `@AllowService`, and the caller's own rows only.
       'GET /v1/preferences',
       'GET /v1/preferences/effective',
+      // NTF-004 adds the quiet window NTF-003 deferred, under the same rule
+      // again: the caller's own, and nobody else's.
+      'GET /v1/preferences/quiet-hours',
       'POST /v1/notifications/read-all',
       'POST /v1/notifications/{id}/dismiss',
       'POST /v1/notifications/{id}/read',
       'PUT /v1/preferences',
+      'PUT /v1/preferences/quiet-hours',
     ]);
     for (const { operation } of operations) {
       expect(operation.security).toEqual([{ bearer: [] }]);
@@ -75,7 +79,12 @@ describe('the committed OpenAPI document', () => {
         expect(operation.responses[status]).toBeDefined();
     }
     expect(document.info.version).toBe(CONTRACT_VERSION);
-    expect(document.info.description).toContain('No email is sent');
+    // The description said "No email is sent by this platform" until NTF-004.
+    // It has to keep saying what is still true — that nothing here points at a
+    // real recipient — without saying the part that no longer is.
+    expect(document.info.description).toContain('Q-37');
+    expect(document.info.description).toContain('deliversToRealRecipients as false');
+    expect(document.info.description).not.toContain('No email is sent');
   });
 
   it('publishes `limit`, `cursor` and `state` on the list and `id` as a required path parameter', () => {

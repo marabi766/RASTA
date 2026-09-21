@@ -153,8 +153,11 @@ const DESCRIPTION =
   'deduplication (ADR-054). Preferences decide who is told: a five-layer ladder — platform ' +
   'mandatory policy, then rule, category and global preferences, then the channel default — ' +
   'resolved per organization, so the same person can silence one tenant without silencing ' +
-  'another. No email is sent by this platform: no provider or sender identity has been ' +
-  'chosen (docs/24 Q-37), so IN_APP is the only channel a preference can name.';
+  'another. Email is delivered against a development mail server only: no production ' +
+  'provider and no sender identity have been chosen (docs/24 Q-37), the shipped sender ' +
+  'is an unresolvable .invalid address, and the readiness probe reports ' +
+  'deliversToRealRecipients as false. Quiet hours defer an email into the end of the ' +
+  'window rather than dropping it, and a CRITICAL notification ignores them.';
 
 /** Builds the finished document for a booted application. */
 export function buildNotificationOpenApiDocument(app: INestApplication): OpenAPIObject {

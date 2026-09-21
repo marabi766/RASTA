@@ -13,6 +13,7 @@ import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { DispatcherConsumer } from '../src/intake/dispatcher.consumer';
 import { ResolutionWorker } from '../src/resolution/resolution.worker';
+import { MailWorker } from '../src/channels/mail.worker';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { newId } from '../src/intake/intake';
 import { databaseUrl } from './helpers';
@@ -147,6 +148,12 @@ export async function startApi(): Promise<ApiHarness> {
     .overrideProvider(DispatcherConsumer)
     .useValue(inertConsumer)
     .overrideProvider(ResolutionWorker)
+    .useValue(inertWorker)
+    // The mail worker is inert here for the same reason the other two are:
+    // these suites drive HTTP, and a timer that opens sockets to a mail server
+    // would make them depend on one being up. Its own behaviour is proved in
+    // `email-delivery.int-spec.ts`, against a real Mailpit.
+    .overrideProvider(MailWorker)
     .useValue(inertWorker)
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
