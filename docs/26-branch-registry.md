@@ -55,12 +55,12 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                             | Worktree                                         | نشست | PR                                                | ahead / behind | وضعیت                                                                        |
-| -------------------------------- | ------------------------------------------------ | ---- | ------------------------------------------------- | -------------- | ---------------------------------------------------------------------------- |
-| `feat/notification-mail-channel` | `F:\Rasta-Parallel\exp-001-web-foundation`       | C0   | [#63](https://github.com/marabi766/RASTA/pull/63) | ۲ / ۰          | `Q-37` — Port `MailChannel` و Adapter SMTP؛ **نه** بقیهٔ `NTF-004`           |
-| `claude/quirky-curie-15d850`     | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —                                                 | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`               |
-| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`                | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
-| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                           | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
+| شاخه                               | Worktree                                         | نشست | PR                                                | ahead / behind | وضعیت                                                                                                         |
+| ---------------------------------- | ------------------------------------------------ | ---- | ------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------- |
+| `docs/frontend-gate-and-web-state` | `F:\Rasta-Parallel\docs-frontend-gate`           | —    | [#64](https://github.com/marabi766/RASTA/pull/64) | ۲ / ۰          | برداشتن دروازهٔ کهنهٔ «UI فقط با تأیید موردی» و اصلاح هر جملهٔ `apps/`؛ **`PROJECT_MEMORY.md` را لمس می‌کند** |
+| `claude/quirky-curie-15d850`       | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —                                                 | ۰ / ۰          | **در حال کار** — حذف `--passWithNoTests` از `test:integration`                                                |
+| `demo/investor-preview`            | `F:\Rasta-Parallel\investor-demo`                | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                  |
+| `design/claude-design`             | پوشهٔ موقت در `%TEMP%`                           | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                         |
 
 ## شاخه‌های بازنشسته
 
@@ -88,6 +88,7 @@
 | `feat/notification-preferences`         | [#60](https://github.com/marabi766/RASTA/pull/60) | `e6d509e`   |
 | `docs/state-2026-09-20`                 | [#61](https://github.com/marabi766/RASTA/pull/61) | `37c48c2`   |
 | `chore/test-task-unit-only`             | [#62](https://github.com/marabi766/RASTA/pull/62) | `f7755e0`   |
+| `feat/notification-mail-channel`        | [#63](https://github.com/marabi766/RASTA/pull/63) | `bcd3cd5`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب

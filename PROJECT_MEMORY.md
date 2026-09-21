@@ -1665,8 +1665,15 @@ Runner واقعی GitHub Actions اجرا شدند و سبز بودند. این 
 `NTF-002`، بخش ۲۲). سبزی CI و پذیرش محصول دو ستون جدا هستند و هرگز نباید در
 یک خانه نوشته شوند.
 
-**دربارهٔ Frontend:** جدول پایین‌تر می‌گوید `apps/web` و `apps/admin` «پوشه
-خالی»اند. این دیگر درست نیست — پوشهٔ `apps/` **اصلاً وجود ندارد**.
+**دربارهٔ Frontend — تصحیح 2026-09-21.** این یادداشت تا امروز می‌گفت پوشهٔ
+`apps/` «اصلاً وجود ندارد». آن جمله از 2026-09-19 نادرست است: `EXP-001` با
+PR #54، #55 و #56 روی `main` نشست. امروز `apps/web` یک Workspace واقعی است
+(`@rasta/web` — Next.js 15، React 19، Tailwind 4، فارسی و راست‌به‌چپ) با
+**۲۸۳ تست واحد در ۱۳ Suite، اجراشده و سبز روی همین Commit در 2026-09-21**،
+و ADR-058 جای آن را در مخزن تثبیت کرده است. آنچه هنوز وجود **ندارد** دو
+چیز است: هیچ صفحهٔ دامنه‌ای ساخته نشده (آن `EXP-002` است)، و `apps/admin`
+هنوز نیست — ADR-058 § ۲ عمداً تا رسیدن مصرف‌کنندهٔ دوم موکولش کرده. ردیف
+جدول پایین‌تر مطابق همین واقعیت بازنویسی شد.
 
 ---
 
@@ -1722,7 +1729,8 @@ Runner واقعی GitHub Actions اجرا شدند و سبز بودند. این 
 | **`AUDITOR` هیچ دسترسی اقتصادی ندارد**                           |                          ✅                           |             ✅             | ✅ زنده با توکن واقعی: کیف پول `403`، تراکنش `403`، تراز آزمایشی `403`                                                                                                                                                                                                     |
 | **Maintenance → Kafka → economic (مسیر مرده پیشین)**             |                          ✅                           |         ✅ (۹ تست)         | ✅ **زنده** — `MAINTENANCE_APPROVED` → تعهد `PENDING_SETTLEMENT`، و **صفر حرکت پول**                                                                                                                                                                                       |
 | **پرداخت شبیه‌سازی‌شده، با اعلام صریح**                          |                          ✅                           |             ✅             | ✅ زنده: `simulated: true` روی پاسخ، ردیف و رویداد؛ شکست قابل تحریک → `INSUFFICIENT_FUNDS`                                                                                                                                                                                 |
-| Frontend (`apps/web`, `apps/admin`)                              |                          ❌                           |             —              | NOT_STARTED — پوشه خالی                                                                                                                                                                                                                                                    |
+| **پورتال کاربر (`apps/web`) — پایه و Design System**             |                          ✅                           |   ✅ (۲۸۳ تست، ۱۳ Suite)   | ❌ هنوز نه — هیچ صفحهٔ دامنه‌ای وجود ندارد؛ Harness مرورگر در `apps/web/playwright.config.ts` آماده است و با `EXP-002` به CI می‌پیوندد (ADR-058)                                                                                                                           |
+| کنسول اپراتور (`apps/admin`)                                     |                          ❌                           |             —              | NOT_STARTED — عمداً موکول (ADR-058 § ۲): مصرف‌کنندهٔ دوم هنوز لازم نشده                                                                                                                                                                                                    |
 | Integration Tests (`*.int-spec.ts`)                              | ✅ ۳۰ Suite (fleet ۴، maintenance ۵، **economic ۲۱**) |             —              | ✅ **۳۲۸** — ۷۳ پیشین + ۲۵۵ economic                                                                                                                                                                                                                                       |
 | E2E Tests (`tests/e2e`, Playwright)                              |                          ✅                           |       ✅ (۶۴ سناریو)       | ✅ **زنده** — Gateway + economic + marketplace + PostgreSQL + Kafka + Temporal + توکن واقعی Keycloak                                                                                                                                                                       |
 | marketplace-service                                              |                          ✅                           | ✅ ۲۲۴ واحد + ۱۴۱ یکپارچگی | ✅ ۱۷ سناریوی E2E؛ Branch Coverage ۷۷٫۶۲٪ با دروازه ۷۵٪ در CI                                                                                                                                                                                                              |
@@ -1756,7 +1764,7 @@ tenant-scope، business logic) → Postgres (نوشتن + Outbox در یک Trans
 | -------------- | -------------------------------------------------------------------------- |
 | زبان           | TypeScript 5.9 strict، Node 22/24                                          |
 | Backend        | NestJS 11، Zod برای Validation                                             |
-| Frontend       | Next.js 15 (برنامه‌ریزی‌شده — کد نساخته)                                   |
+| Frontend       | Next.js 15 + React 19 + Tailwind 4 — `apps/web` روی `main` (ADR-058)       |
 | Database       | PostgreSQL 16 + PostGIS 3.4 + ltree + pg_trgm + pgcrypto، Prisma 6         |
 | Message Bus    | Kafka 3.9 KRaft (`apache/kafka:3.9.0`)                                     |
 | Cache          | Redis 7.4                                                                  |
@@ -1781,7 +1789,9 @@ services/
   fleet-service/          IMPLEMENTED — کد، تست و تأیید زنده کامل
   maintenance-service/    IMPLEMENTED — کد، تست و تأیید زنده کامل
   economic-service/       IMPLEMENTED — کد، تست و تأیید زنده کامل
-  (9 سرویس دیگر)          NOT_STARTED — حتی پوشه هم وجود ندارد
+  marketplace/document/supplier/notification/audit-service  IMPLEMENTED
+  (۵ سرویس دیگر)          NOT_STARTED — procurement، inventory، construction،
+                          contract، analytics (بخش ۲۷)
 
 packages/
   contracts/    شیء‌های مشترک: ID، Money، Error، Event Envelope
@@ -1792,12 +1802,14 @@ packages/
   testing/      Matcher/Context مشترک برای تست (کم‌استفاده)
 
 apps/
-  web/    NOT_STARTED — پوشه خالی
-  admin/  NOT_STARTED — پوشه خالی
+  web/    IMPLEMENTED — پایهٔ پورتال: Design System، قالب‌بندی فارسی/جلالی،
+          ۲۸۳ تست واحد. هنوز هیچ صفحهٔ دامنه‌ای ندارد (EXP-002)
+  admin/  NOT_STARTED — عمداً موکول (ADR-058 § ۲)
 
 tests/
   e2e/    IMPLEMENTED — @rasta/e2e: Playwright Config، Global Setup،
-          ۶۴ سناریو روی Stack واقعی (بدون Browser تا ساخته‌شدن apps/web)
+          ۶۴ سناریو روی Stack واقعی (بدون Browser؛ Project مرورگر جداگانه
+          در `apps/web` زندگی می‌کند و با EXP-002 به CI می‌پیوندد)
 
 infrastructure/
   docker/   Postgres Init، Kafka Topics، Keycloak Realm — IMPLEMENTED
@@ -2890,6 +2902,13 @@ Suite نگهداری در نخستین اجرا **هیچ باگ تولیدی ن�
 **چرا API و نه Browser:** `apps/web` پوشه خالی است. تست Browser باید صفحه‌ای
 را Drive کند که وجود ندارد. `APIRequestContext` همان Stack واقعی را می‌زند و
 Harness برای Browser آماده است (یک Project دوم در همان Config).
+
+> **تصحیح 2026-09-21 — جملهٔ بالا برای تاریخ خودش درست بود و امروز نیست.**
+> `apps/web` از 2026-09-19 وجود دارد. استدلال اما هنوز برقرار است، با یک
+> دلیل تازه: صفحهٔ دامنه‌ای هنوز ساخته نشده، پس تست مرورگر همچنان چیزی برای
+> Drive کردن ندارد. Harness مرورگر عمداً در `apps/web/playwright.config.ts`
+> نشست — نه در `tests/e2e` — و خودِ آن فایل می‌گوید با `EXP-002` به CI
+> می‌پیوندد.
 
 ### ✅ CI/CD — **CI VERIFIED** (به‌روزشده برای فاز اقتصادی)
 
@@ -4275,8 +4294,11 @@ un\` — فایل‌های صفر-بایتی از نوع ReparsePoint که از
   کوچک، Kafka برای حجم کم، Temporal سنگین، رد Kong/APISIX، Prisma به‌ازای سرویس).
 - Testcontainers نصب نشده — تست‌های Integration به‌جایش روی Stack ‏`infra:up`
   و روی Service Container های CI اجرا می‌شوند. تصمیم آگاهانه، نه شکاف.
-- **Playwright نصب شد** (2026-08-29). Project ‏`web` تا ساخته‌شدن `apps/web`
-  اضافه نمی‌شود؛ Harness آماده است.
+- **Playwright نصب شد** (2026-08-29). **به‌روزرسانی 2026-09-21:** `apps/web`
+  ساخته شد و Config مرورگر خودش را دارد (`apps/web/playwright.config.ts`،
+  `pnpm --filter @rasta/web test:ui`). هنوز در CI نیست و این یک بدهی آگاهانه
+  است: یک Job مرورگر که هیچ صفحه‌ای ندارد، هیچ ادعایی را نمی‌سنجد. با نخستین
+  صفحهٔ واقعی (`EXP-002`) به Pipeline می‌پیوندد.
 - Production mTLS و Database RLS — Planned، نه Implemented (بخش ۲۰).
 
 ---
@@ -4525,6 +4547,12 @@ ADR-001 (Microservices)، ADR-004/005 (Database + Ownership)، ADR-006
 
 ## ۲۷. Not Yet Implemented
 
+> **به‌روزرسانی 2026-09-21.** ردیف Frontend این فهرست دیگر درست نیست.
+> `apps/web` از 2026-09-19 روی `main` است (`EXP-001`، PR #54/#55/#56،
+> ADR-058) و ۲۸۳ تست واحد دارد. آنچه از تجربهٔ کاربر باقی مانده، **صفحه‌های
+> دامنه‌ای** است (`EXP-002` تا `EXP-005`)، نه خودِ Workspace. `apps/admin`
+> همچنان ساخته نشده و ADR-058 § ۲ آن را موکول نگه داشته است.
+>
 > **به‌روزرسانی 2026-09-18.** `notification` و `audit` هم Merge شدند.
 > **باقی‌ماندهٔ درست: `procurement` · `inventory` · `construction` · `contract` ·
 > `analytics`**، و هر دو Frontend — که پوشهٔ `apps/` برایشان حتی ساخته نشده.
@@ -4539,7 +4567,9 @@ ADR-001 (Microservices)، ADR-004/005 (Database + Ownership)، ADR-006
 >
 > **پیشین (2026-08-29):** `economic-service` از این فهرست خارج شد.
 
-- Frontend (`apps/web`, `apps/admin`) — پوشه خالی، هیچ خط کدی نیست
+- Frontend — **صفحه‌های دامنه‌ای** (`EXP-002` تا `EXP-005`): پایهٔ `apps/web`
+  هست، ولی هیچ صفحه‌ای که یک انسان با آن کار کند ساخته نشده. `apps/admin`
+  اصلاً وجود ندارد (ADR-058 § ۲)
 - ۷ سرویس Backend باقی‌مانده: `procurement`، `inventory`، `construction`،
   `contract`، `notification`، `audit`، `analytics`
 - `notification-service` و `audit-service` — تصمیم معماری‌شان ثبت شد (ADR-054 و
@@ -4597,6 +4627,12 @@ ADR-001 (Microservices)، ADR-004/005 (Database + Ownership)، ADR-006
 > امروز را § ۷ و § ۲۹ می‌گویند. دو ردیف آخر دیگر درست نیستند: دوازده سرویس
 > ساخته شده‌اند، و از 2026-09-19 `apps/web` وجود دارد و `EXP-001` پذیرفته شده
 > است (PR #54، #55، #56).
+>
+> **و ردیف آخر یک چیز دیگر هم می‌گفت که امروز غلط است:** «UI پشت دروازهٔ
+> تأیید صریح کاربر است». آن دروازه باز شده و بازشدنش ثبت است — ADR-058 با
+> وضعیت `Accepted` و با تصریح «تأیید صریح مدیر پروژه» در 2026-09-18. آنچه
+> جای آن دروازه را گرفته، قاعدهٔ § ۳۰ است: ترتیب از `EXP-002` به بعد از
+> Backlog می‌آید، نه از یک تأیید موردی برای هر صفحه.
 
 ---
 
@@ -5032,7 +5068,27 @@ Temporal ‏`rasta-order`.
 - پیش از اعلام «انجام شد»، تست کن؛ برای رفتار میان‌سرویسی، Live Verification
   زنده انجام بده — یک ادعای «قبلاً تست شد» بدون Evidence تازه در Repository،
   کافی نیست.
-- بدون تأیید صریح کاربر، UI پیاده نکن.
+- **UI دیگر پشت یک دروازهٔ تأیید موردی نیست.** قاعدهٔ پیشین این بود: «بدون
+  تأیید صریح کاربر، UI پیاده نکن». آن تأیید در 2026-09-18 داده شد و در
+  ADR-058 ثبت است (`Accepted`، «با تأیید صریح مدیر پروژه»)، و `EXP-001` روی
+  `main` نشست. نگه‌داشتن آن جمله یعنی گرفتن تأییدی که قبلاً گرفته شده. آنچه
+  جایش را می‌گیرد، چهار قید است که هر چهار اثبات‌پذیرند:
+  - **ترتیب از Backlog می‌آید، نه از حدس** — `EXP-002` → `EXP-003` →
+    `EXP-004` → `EXP-005` در `planning/backlog.json`. صفحه‌ای که قلم Backlog
+    ندارد ساخته نمی‌شود، و هر قلم وقتی تمام است که معیارهای پذیرش خودش سبز
+    باشند.
+  - **هیچ صفحه‌ای قابلیتی را ادعا نمی‌کند که Backend ندارد** — همان اصل Q-07
+    که در این مخزن بارها اعمال شده: کنترلی که اثر ندارد، ادعای دروغ قابلیت
+    است. اگر قابلیتی نیست، صفحه نبودنش را می‌گوید؛ دکمهٔ تزئینی نمی‌گذارد.
+  - **مرورگر فقط با API Gateway حرف می‌زند** (ADR-058 § ۳) — هیچ Fetch ای به
+    پورت یک سرویس، چون همهٔ کنترل‌های عرضی آن‌جا زندگی می‌کنند.
+  - **قاعدهٔ کسب‌وکاری اختراع نمی‌شود** — متن، آستانه، گردش تأیید و هر چیزی که
+    سند محصول دربارهٔ آن ساکت است → `docs/24-open-questions.md`، نه یک مقدار
+    Hard-Code شده در یک صفحه.
+
+  `apps/admin` از این قاعده بیرون است: ساخته‌شدنش هنوز تصمیم گرفته نشده و
+  ADR-058 § ۲ عمداً موکولش کرده — تا آن تصمیم، شروع نمی‌شود.
+
 - **پیش از شروع هر کار غیرپیش‌پاافتاده، این فایل (`PROJECT_MEMORY.md`) و
   سند معماری مرتبط را بخوان.**
 

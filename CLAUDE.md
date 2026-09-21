@@ -18,7 +18,7 @@
 
 **رستا** — پلتفرم چندمستأجری مدیریت ناوگان، زنجیره تأمین، خدمات و عملیات عمرانی.
 Monorepo مبتنی بر TypeScript با ۱۶ Microservice برنامه‌ریزی‌شده (NestJS؛ وضعیت واقعی
-پیاده‌سازی هرکدام در `PROJECT_MEMORY.md` بخش ۷)، دو Frontend (Next.js، هنوز نساخته) و
+پیاده‌سازی هرکدام در `PROJECT_MEMORY.md` بخش ۷)، دو Frontend (Next.js — `apps/web` از 2026-09-19 روی `main`، `apps/admin` هنوز نه) و
 زیرساخت رویدادمحور (Kafka + Temporal).
 
 | منبع                        | مسیر                             |
@@ -159,7 +159,9 @@ Hard-Code کردن نرخ کارمزد یا مرجع موافقت.
 | `audit-service`        | 3115 | AuditEvent (فقط الحاقی)                              | P0  |
 | `analytics-service`    | 3116 | ReadModel، KPI Snapshot                              | P1  |
 
-Frontend: `apps/web` (3200) — پورتال کاربر · `apps/admin` (3201) — کنسول اپراتور.
+Frontend: `apps/web` (3200) — پورتال کاربر: پایه و Design System ساخته شده
+(ADR-058)، صفحه‌های دامنه‌ای با `EXP-002` می‌آیند · `apps/admin` (3201) —
+کنسول اپراتور: هنوز ساخته نشده، عمداً موکول (ADR-058 § ۲).
 
 **قاعده:** یک سرویس هرگز پایگاه داده سرویس دیگر را نمی‌خواند. فقط REST یا Event.
 
