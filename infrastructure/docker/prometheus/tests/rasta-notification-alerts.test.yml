@@ -1,0 +1,65 @@
+# Behaviour tests for rules/rasta-notification-alerts.yml.
+#
+#   docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+#     --entrypoint promtool prom/prometheus:v3.1.0 \
+#     test rules /etc/prometheus/tests/rasta-notification-alerts.test.yml
+#
+# Counter inputs start at a real sample and move later, so every positive case
+# proves `increase` rather than an absolute counter value — the same shape the
+# audit tests use, and for the same reason: a counter that is already high and
+# is no longer moving describes a problem that has stopped.
+#
+# Inputs carry the scrape's job/instance/environment labels so each expected
+# alert also proves which labels the rule keeps and which it drops.
+
+rule_files:
+  - ../rules/rasta-notification-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------------------
+  # RastaNotificationDeliveryDead
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_notification_mail_dead_total{job="notification-service",instance="host.docker.internal:3113",environment="local",error_class="CONNECTION_FAILED"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      # Already non-zero and standing still: a provider outage that ended is
+      # not an outage.
+      - series: 'rasta_notification_mail_dead_total{job="notification-service",instance="host.docker.internal:3113",environment="local",error_class="RECIPIENT_REJECTED"}'
+        values: '4 4 4 4 4 4 4 4 4 4 4'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaNotificationDeliveryDead
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaNotificationDeliveryDead
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              error_class: CONNECTION_FAILED
+            exp_annotations:
+              summary: 'A notification was abandoned after every retry (CONNECTION_FAILED)'
+              description: 'notification-service exhausted the full retry ladder for at least one email delivery in the last 5 minutes, classified CONNECTION_FAILED. Somebody who was entitled to a notification did not receive it, and nothing retries it now. The delivery row holds who and which notification; this alert deliberately carries neither.'
+              runbook: docs/runbooks/notification-provider-outage.md
+      # Six minutes after the increment the 5m window no longer contains it.
+      - eval_time: 9m
+        alertname: RastaNotificationDeliveryDead
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # A delivery that is merely retrying must not fire this alert.
+  #
+  # The distinction the whole rule rests on: transient failures are the normal
+  # working of a retry ladder, and alerting on them would page somebody every
+  # time a mail server was briefly busy.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_notification_mail_attempts_total{job="notification-service",instance="host.docker.internal:3113",environment="local",outcome="TRANSIENT_FAILURE"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RastaNotificationDeliveryDead
+        exp_alerts: []

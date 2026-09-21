@@ -1,7 +1,7 @@
 import { render } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
-import HomePage from './page';
+import { LoginScreen } from './login/LoginScreen';
 import RootLayout, { metadata } from './layout';
 
 /**
@@ -30,17 +30,57 @@ describe('the document shell', () => {
   });
 });
 
-describe('the entry route', () => {
+/**
+ * The page under test is `/login` rather than `/`.
+ *
+ * `/` became a real screen in EXP-002: it reads the session and, without one,
+ * redirects. Rendering it here would test the redirect. `/login` is the page
+ * an unauthenticated visitor actually sees, it needs no session, and it is the
+ * first thing every user of this product meets — which makes it the right
+ * place for the accessibility assertion to live.
+ */
+describe('the way in', () => {
+  const renderLogin = (reason?: string) => render(<LoginScreen reason={reason} />);
+
   it('renders one top-level heading', () => {
-    const { getByRole } = render(<HomePage />);
-    expect(getByRole('heading', { level: 1 })).toHaveTextContent('رستا');
+    const { getByRole } = renderLogin();
+    expect(getByRole('heading', { level: 1 })).toHaveTextContent('ورود به رستا');
+  });
+
+  it('offers a way in that needs no javascript', () => {
+    // A link, not a scripted button: the page works on a slow connection with
+    // scripts blocked, and a content security policy can forbid inline script
+    // without breaking the entrance.
+    const { getByRole } = renderLogin();
+    expect(getByRole('link', { name: /ورود با حساب سازمانی/ })).toHaveAttribute(
+      'href',
+      '/auth/login',
+    );
+  });
+
+  it('says plainly that no password is typed here', () => {
+    const { getByText } = renderLogin();
+    expect(getByText(/گذرواژهٔ شما هرگز به این پورتال وارد نمی‌شود/)).toBeInTheDocument();
+  });
+
+  it('explains a refusal it recognises', () => {
+    expect(
+      renderLogin('state_mismatch').getByText(/دوباره از همین صفحه شروع کنید/),
+    ).toBeInTheDocument();
+  });
+
+  it('says nothing at all about a code it does not recognise', () => {
+    // Whatever arrives in a query string is somebody else's text until this
+    // map has agreed to it. An unknown code renders no banner rather than
+    // being echoed back onto the page.
+    expect(renderLogin('<script>alert(1)</script>').queryByRole('alert')).toBeNull();
   });
 
   // docs/16 § 16.9 commits this product to WCAG 2.1 AA. The assertion is here
   // from the first page so that accessibility is a property the suite already
   // checks, rather than an audit someone schedules later.
   it('has no accessibility violations', async () => {
-    const { container } = render(<HomePage />);
+    const { container } = renderLogin();
     expect(await axe(container)).toHaveNoViolations();
   });
 });

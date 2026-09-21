@@ -212,7 +212,7 @@ export function maintenanceDue(input: {
  */
 export class FakeRecipientPort implements RecipientPort {
   readonly queries: RecipientQuery[] = [];
-  readonly answers = new Map<string, { userId: string; role: string }[]>();
+  readonly answers = new Map<string, { userId: string; role: string; email?: string | null }[]>();
   failWith?: Error;
   truncated = false;
 
@@ -220,7 +220,20 @@ export class FakeRecipientPort implements RecipientPort {
     this.queries.push(query);
     if (this.failWith) throw this.failWith;
     return {
-      recipients: (this.answers.get(query.organizationId) ?? []).slice(0, query.limit),
+      // `email` defaults to a `.invalid` address derived from the user id: a
+      // suite that does not care still gets an emailable recipient, and one
+      // that does states the address it means. `null` is written explicitly by
+      // the suites that test a recipient identity holds no address for.
+      recipients: (this.answers.get(query.organizationId) ?? [])
+        .slice(0, query.limit)
+        .map((candidate) => ({
+          userId: candidate.userId,
+          role: candidate.role,
+          email:
+            candidate.email === undefined
+              ? `${candidate.userId.toLowerCase()}@example.invalid`
+              : candidate.email,
+        })),
       truncated: this.truncated,
     };
   }
@@ -304,13 +317,25 @@ export async function cleanup(prisma: PrismaService, organizationIds: string[]):
     await prisma.client.recipientResolution.deleteMany({ where });
     await prisma.client.notificationDedupe.deleteMany({ where });
     await prisma.client.notificationIntent.deleteMany({ where });
+    await prisma.client.notificationQuietHours.deleteMany({ where });
     await prisma.client.processedEvent.deleteMany({
       where: { eventId: { in: intents.map((intent) => intent.sourceEventId) } },
     });
   });
 }
 
-/** Every row one organization holds, read without a tenant context — for assertions only. */
+/**
+ * Every row one organization holds, read without a tenant context — for
+ * assertions only.
+ *
+ * `deliveries` is the **in-app** rows, and the narrowing is deliberate. Every
+ * suite that reads this field was written when a recipient produced one
+ * delivery, and each of their expected counts is a statement about the in-app
+ * half. NTF-004 added a second row per recipient; widening this field would
+ * have doubled every one of those numbers and made each assertion mean
+ * something its author did not write. The email rows are `emailDeliveries`,
+ * asserted where they are the subject.
+ */
 export function rowsFor(prisma: PrismaService, organizationId: string) {
   return runUnscoped("integration assertions read one organization's rows directly", async () => ({
     intents: await prisma.client.notificationIntent.findMany({
@@ -319,7 +344,13 @@ export function rowsFor(prisma: PrismaService, organizationId: string) {
     }),
     dedupe: await prisma.client.notificationDedupe.findMany({ where: { organizationId } }),
     resolutions: await prisma.client.recipientResolution.findMany({ where: { organizationId } }),
-    deliveries: await prisma.client.notificationDelivery.findMany({ where: { organizationId } }),
+    deliveries: await prisma.client.notificationDelivery.findMany({
+      where: { organizationId, channel: 'IN_APP' },
+    }),
+    emailDeliveries: await prisma.client.notificationDelivery.findMany({
+      where: { organizationId, channel: 'EMAIL' },
+      orderBy: { createdAt: 'asc' },
+    }),
     attempts: await prisma.client.deliveryAttempt.findMany({ where: { organizationId } }),
     inApp: await prisma.client.inAppNotification.findMany({
       where: { organizationId },

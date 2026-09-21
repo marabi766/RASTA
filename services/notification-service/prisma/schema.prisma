@@ -44,15 +44,24 @@
 // service that owns an outbox and is checked by nothing — and it is what caught
 // this change before it merged.
 //
-// ## What is deliberately absent
+// ## What NTF-004 added, and what is still deliberately absent
 //
-//   EMAIL channel       `NotificationChannel` holds `IN_APP` only. An enum value
-//                       no code path can write is a claim of a capability the
-//                       platform does not have (docs/24 Q-07, ADR § 6); NTF-004
-//                       adds `EMAIL` with the adapter that uses it.
-//   NotificationTemplate
-//                       NTF-004. `NotificationPreference` arrived with NTF-003;
-//                       see its own comment for what it deliberately leaves out.
+// `EMAIL` is now a channel, with the templates it renders from, the quiet
+// window it respects and the claim its worker fences on. It waited for the
+// worker that writes it: an enum value no code path can write is a claim of a
+// capability the platform does not have (docs/24 Q-07, ADR § 6).
+//
+// Still absent, and each for a stated reason:
+//
+//   SMS channel         Q-15 has no answer and there is no adapter. The same
+//                       rule that gated `EMAIL` gates this one.
+//   template authoring  The template rows are seeded from the code catalogue
+//                       and written by nothing else (ADR § 10.2). Reading is
+//                       diagnosis; writing is authorship, and no requirement
+//                       asks for it.
+//   circuit breaker,    ADR § 7 names both in NTF-004's scope; neither is in
+//   outbound rate limit its acceptance criteria, and neither is built. The
+//                       deviation is recorded in the implementation plan § 5.
 
 generator client {
   provider      = "prisma-client-js"
@@ -106,9 +115,15 @@ enum ResolutionSource {
   @@map("resolution_source")
 }
 
-/// `IN_APP` only, on purpose — see the file header.
+/// `IN_APP` and, since NTF-004, `EMAIL`.
+///
+/// `EMAIL` waited until the worker that writes it existed. An enum value no
+/// code path can write is a claim of a capability the platform does not have
+/// (docs/24 Q-07) — and the same rule is why `SMS` is not here: Q-15 has no
+/// answer and no adapter.
 enum NotificationChannel {
   IN_APP
+  EMAIL
 
   @@map("notification_channel")
 }
@@ -308,6 +323,15 @@ model NotificationDelivery {
   suppressionReason String? @map("suppression_reason") @db.VarChar(64)
   /// Bounded class of the last failure — never a message body.
   lastErrorClass    String? @map("last_error_class") @db.VarChar(64)
+  /// SHA-256 of the rendered message, written when a sending channel succeeds.
+  /// The body itself is never stored (ADR-054 § 10.4).
+  renderedHash      String? @map("rendered_hash") @db.VarChar(64)
+
+  /// ADR-050 durable claim, used by the channels that send *later* than they
+  /// are written. `IN_APP` never fills these: its delivery is the insert.
+  claimToken     String?   @map("claim_token") @db.VarChar(64)
+  claimOwner     String?   @map("claim_owner") @db.VarChar(128)
+  claimExpiresAt DateTime? @map("claim_expires_at") @db.Timestamptz(6)
 
   sentAt      DateTime? @map("sent_at") @db.Timestamptz(6)
   deliveredAt DateTime? @map("delivered_at") @db.Timestamptz(6)
@@ -536,4 +560,94 @@ model NotificationPreference {
   @@unique([userId, organizationId, scope, scopeKey, channel], map: "ux_preference_owner_scope_channel")
   @@index([organizationId, userId], map: "ix_preference_owner")
   @@map("notification_preference")
+}
+
+// ---------------------------------------------------------------------------
+// Templates (NTF-004, ADR-054 § 10)
+//
+// Seeded configuration, not authored content. `docs/17:113` requires only
+// "event → notification, respecting the user's settings"; an authoring API
+// would add a template-injection surface, an approval question and a
+// versioning UI against no stated requirement (ADR § 10.2). The rows are
+// written by the seeder from the code catalogue at boot and by nothing else.
+// ---------------------------------------------------------------------------
+
+model NotificationTemplate {
+  templateKey String              @map("template_key") @db.VarChar(128)
+  channel     NotificationChannel
+  name        String              @db.VarChar(200)
+  description String?             @db.VarChar(500)
+  isActive    Boolean             @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  versions NotificationTemplateVersion[]
+
+  @@id([templateKey, channel])
+  @@map("notification_template")
+}
+
+/// A published version is immutable — a trigger refuses UPDATE. Editing means
+/// publishing a new version, because a delivery references
+/// `(templateKey, version)` and "exactly what did we send them" has to survive
+/// the next edit.
+model NotificationTemplateVersion {
+  templateKey String              @map("template_key") @db.VarChar(128)
+  channel     NotificationChannel
+  version     Int
+  /// Exact locale, falling back to `fa-IR`, then failing permanently. Never a
+  /// half-translated message (ADR § 10.4).
+  locale      String              @db.VarChar(16)
+
+  subjectTemplate String @map("subject_template") @db.VarChar(500)
+  bodyTemplate    String @map("body_template")
+  /// Every variable the renderer refuses to leave blank.
+  requiredVariables Json @map("required_variables")
+  /// SHA-256 over subject, body and the required-variable list. The seeder
+  /// compares it and refuses to boot when a published version's text has
+  /// changed underneath its number.
+  contentHash String @map("content_hash") @db.VarChar(64)
+
+  createdBy   String   @map("created_by") @db.VarChar(128)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  publishedAt DateTime @default(now()) @map("published_at") @db.Timestamptz(6)
+
+  template NotificationTemplate @relation(fields: [templateKey, channel], references: [templateKey, channel], onDelete: Restrict, onUpdate: Cascade, map: "fk_template_version_template")
+
+  @@id([templateKey, channel, version, locale])
+  @@map("notification_template_version")
+}
+
+// ---------------------------------------------------------------------------
+// Quiet hours (NTF-004, ADR-054 § 5)
+//
+// One row per person per tenant, rather than the per-scope columns the ADR
+// draws on `notification_preference` — see the migration header for why that
+// shape could not answer which of three rows a delivery obeys.
+//
+// Quiet hours **defer, they never drop**: a delivery due inside the window is
+// written with `scheduledFor` at the window's end. And a `CRITICAL`
+// notification passes straight through, because a breakdown at two in the
+// morning is exactly when somebody has to know.
+// ---------------------------------------------------------------------------
+
+model NotificationQuietHours {
+  organizationId String @map("organization_id") @db.VarChar(128)
+  userId         String @map("user_id") @db.VarChar(128)
+
+  /// Minutes from local midnight. The window may wrap: `1320 → 420` is
+  /// 22:00–07:00 and is the ordinary case.
+  startMinute Int    @map("start_minute") @db.SmallInt
+  endMinute   Int    @map("end_minute") @db.SmallInt
+  /// The zone the window is read in, not the zone anything is stored in.
+  timezone    String @default("Asia/Tehran") @db.VarChar(64)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  updatedBy String   @map("updated_by") @db.VarChar(128)
+
+  @@id([userId, organizationId])
+  @@index([organizationId], map: "ix_quiet_hours_org")
+  @@map("notification_quiet_hours")
 }

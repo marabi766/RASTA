@@ -1,9 +1,9 @@
 /**
- * The two-phase test run: every workspace test task in parallel, then the
- * database stress proofs alone.
+ * The two-phase test run: every workspace test task in parallel, then — for
+ * `test:integration` — the database stress proofs alone.
  *
- * Why there is a second phase at all. `pnpm test` and `pnpm test:integration`
- * run each service's suites concurrently through turbo, against one
+ * Why there is a second phase at all. `pnpm test:integration` runs each
+ * service's suites concurrently through turbo, against one
  * PostgreSQL. identity-service's `security-event-aggregation.int-spec.ts`
  * holds two deliberate 500-write proofs that serialize on one hot row, so
  * their pace is the database's commit latency. Measured on 2026-09-14
@@ -16,11 +16,17 @@
  * how much unrelated I/O a shared volume absorbs — so they run once, after
  * every other workspace test task has finished.
  *
+ * Why only `test:integration` has it. The spec needs a real PostgreSQL, and
+ * `pnpm verify` runs `pnpm test`, which `docs/14` requires to stay runnable
+ * on a machine without Docker. `test` therefore stops after the workspace
+ * phase; `validateInfraFreeTestTask` keeps each service's `test` unit-only for
+ * the same reason.
+ *
  * This file is pure: the orchestrator (`run-test-phases.mjs`) and the contract
  * gate (`check-test-phases.mjs`) read the real files and hand them in.
  */
 
-/** The root tasks that run in two phases. */
+/** The root tasks the orchestrator accepts. Only `test:integration` runs phase two. */
 export const WORKSPACE_TASKS = Object.freeze(['test', 'test:integration']);
 
 /** The orchestrator the root scripts must invoke, relative to the repository root. */
@@ -51,14 +57,26 @@ export const CI_STEPS = Object.freeze({
 export const CALIBRATION_SCRIPT = 'calibrate:aggregation-stress';
 
 /**
- * Turns the orchestrator's argv into the two turbo invocations it runs.
+ * Turns the orchestrator's argv into the turbo invocations it runs.
  *
- * `pnpm run test -- --testNamePattern=X` reaches the orchestrator as
- * `test -- --testNamePattern=X`; everything after `--` is forwarded to both
- * phases, so a filtered CI gate filters the exclusive phase exactly as it
- * filters the parallel one. Anything else is refused: a turbo `--filter` here
- * would silently decide whether the stress proofs run, and a filtered workspace
- * run is `pnpm exec turbo run <task> --filter …` by name.
+ * `test` runs the workspace phase alone; `test:integration` runs it and then
+ * the exclusive phase. The stress spec is an `.int-spec.ts` against a real
+ * PostgreSQL, so it belongs to the integration task — and `pnpm verify` runs
+ * `pnpm test`, which `docs/14` requires to stay runnable without Docker.
+ * Until 2026-09-20 `test` ran the exclusive phase too, so `verify` on a
+ * machine with no database died there. That was invisible for as long as the
+ * workspace phase died first on `DATABASE_URL_ORGANIZATION`.
+ *
+ * The proofs lose no coverage: CI's `Integration tests` step runs
+ * `test:integration` unfiltered, and its `${CI_STEPS.security}` step runs
+ * `test:integration -- --testNamePattern=…`, whose `concurren` selects them.
+ *
+ * `pnpm run test:integration -- --testNamePattern=X` reaches the orchestrator
+ * as `test:integration -- --testNamePattern=X`; everything after `--` is
+ * forwarded to every phase, so a filtered CI gate filters the exclusive phase
+ * exactly as it filters the parallel one. Anything else is refused: a turbo
+ * `--filter` here would silently decide whether the stress proofs run, and a
+ * filtered workspace run is `pnpm exec turbo run <task> --filter …` by name.
  */
 export function planTestRun(argv) {
   const [task, ...rest] = argv;
@@ -79,13 +97,14 @@ export function planTestRun(argv) {
   }
   const forwarded = separator === -1 ? [] : rest.slice(separator + 1);
   const passthrough = forwarded.length > 0 ? ['--', ...forwarded] : [];
-  return [
-    { phase: 'workspace', args: ['run', task, ...passthrough] },
-    {
+  const plan = [{ phase: 'workspace', args: ['run', task, ...passthrough] }];
+  if (task === 'test:integration') {
+    plan.push({
       phase: 'exclusive',
       args: ['run', EXCLUSIVE_PHASE.task, `--filter=${EXCLUSIVE_PHASE.package}`, ...passthrough],
-    },
-  ];
+    });
+  }
+  return plan;
 }
 
 /** Splits one shell command line into words, honouring single and double quotes. */
@@ -300,9 +319,62 @@ const isTurboRunOf = (words, tasks) => {
   return at !== -1 && words[at + 1] === 'run' && tasks.includes(words[at + 2]);
 };
 
+/** The one jest project the parallel `test` phase may select: it needs no database. */
+export const UNIT_PROJECT = 'unit';
+
+/**
+ * Checks that phase one needs no infrastructure.
+ *
+ * `CLAUDE.md` documents `pnpm test:unit` as the infra-free task, `pnpm
+ * test:integration` as the one wanting `pnpm infra:up`, and `pnpm verify` as
+ * the pre-commit gate — and `verify` runs `pnpm test`. So `test` has to stay
+ * on the infra-free side of that line.
+ *
+ * It had drifted. Until 2026-09-20 organization's `test` was a bare `jest`
+ * and identity's selected `unit integration`, so those two ran their
+ * integration suites under `test` while the other nine did not. `pnpm verify`
+ * from a shell without `.env` exported therefore died in
+ * `organization-service` on a missing `DATABASE_URL_ORGANIZATION` — and
+ * because `test` sits second-to-last in the chain, it took `build` with it.
+ *
+ * A bare `jest` is the trap: selecting no project selects *every* project,
+ * so a service passes this silently until someone adds its first integration
+ * spec. Naming the project is what makes the requirement visible.
+ *
+ * Scoped to `services/*`, which is where the unit/integration project split
+ * lives; `packages/*` have no integration project to select.
+ *
+ * Returns problem strings; empty means the contract holds.
+ */
+export function validateInfraFreeTestTask(serviceScripts) {
+  const problems = [];
+  for (const [packageDir, scripts] of Object.entries(serviceScripts ?? {})) {
+    const jest = scriptCommands(scripts?.test).find((words) => words[0] === 'jest');
+    if (!jest) {
+      problems.push(`${packageDir} script "test" must run jest`);
+      continue;
+    }
+    const projects = selectedProjects(jest);
+    if (projects === null) {
+      problems.push(
+        `${packageDir} script "test" names no project, so it selects every one — ` +
+          `including "integration", which needs a database; select "${UNIT_PROJECT}"`,
+      );
+    } else if (!sameWords(projects, [UNIT_PROJECT])) {
+      problems.push(
+        `${packageDir} script "test" must select exactly the "${UNIT_PROJECT}" project ` +
+          `(selects "${projects.join(' ')}"); integration suites run through "test:integration"`,
+      );
+    }
+  }
+  return problems;
+}
+
 /**
  * Checks that the stress spec runs exactly once, alone, after the workspace
- * phase — in `pnpm test`, `pnpm test:integration`, `pnpm verify` and CI.
+ * phase of `pnpm test:integration` — and so in CI. It is deliberately absent
+ * from `pnpm test` and `pnpm verify`, which need no database; what keeps it
+ * out of *their* parallel phase is checked here too.
  *
  * Returns problem strings; empty means the contract holds.
  */

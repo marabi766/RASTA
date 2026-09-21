@@ -14,6 +14,7 @@ import {
   shellWords,
   stressProofTitles,
   stripJsonComments,
+  validateInfraFreeTestTask,
   validatePassWithNoTests,
   validateTestPhases,
   workflowStepCommands,
@@ -43,18 +44,18 @@ const replaceOnce = (text, from, to) => {
 // The orchestrator's plan
 // ---------------------------------------------------------------------------
 
-test('plan: a bare task runs the workspace phase, then the stress task alone', () => {
-  assert.deepEqual(planTestRun(['test']), [
-    { phase: 'workspace', args: ['run', 'test'] },
+test('plan: only test:integration reaches the stress task, and it goes last', () => {
+  // `test` stops after the workspace phase. The stress spec needs a real
+  // PostgreSQL, and `pnpm verify` runs `pnpm test`.
+  assert.deepEqual(planTestRun(['test']), [{ phase: 'workspace', args: ['run', 'test'] }]);
+
+  assert.deepEqual(planTestRun(['test:integration']), [
+    { phase: 'workspace', args: ['run', 'test:integration'] },
     {
       phase: 'exclusive',
       args: ['run', 'test:aggregation-stress', '--filter=@rasta/identity-service'],
     },
   ]);
-  assert.deepEqual(
-    planTestRun(['test:integration']).map((step) => step.args[1]),
-    ['test:integration', 'test:aggregation-stress'],
-  );
 });
 
 test('plan: arguments after `--` reach both phases unchanged, quotes and spaces included', () => {
@@ -221,14 +222,26 @@ test('the stress spec allowed back into the parallel identity phase is caught', 
   bare.identityScripts.test = 'jest --passWithNoTests --runInBand';
   expectProblem(bare, /identity script "test" selects the "aggregation-stress" project/);
 
-  // The integration project no longer ignoring the spec.
+  // The integration project no longer ignoring the spec. `test` selects only
+  // the unit project, so the parallel route that would pick the spec up here
+  // is `test:integration`.
   const unignored = real();
-  const integration = unignored.jestProjects.find(
-    (project) => project.displayName === 'integration',
-  );
-  integration.testPathIgnorePatterns = ['/node_modules/'];
-  expectProblem(unignored, /"integration" \(selected by "test"\) collects .*parallel phase/);
+  const unignore = (inputs) => {
+    inputs.jestProjects.find(
+      (project) => project.displayName === 'integration',
+    ).testPathIgnorePatterns = ['/node_modules/'];
+    return inputs;
+  };
+  unignore(unignored);
   expectProblem(unignored, /"integration" \(selected by "test:integration"\) collects/);
+
+  // And `test` widened back to the integration project — the pre-2026-09-20
+  // shape, when identity's `test` selected `unit integration` and so needed a
+  // database. Both the widening and the unignoring are required to reach the
+  // spec through `test`, so the fixture applies both.
+  const widened = unignore(real());
+  widened.identityScripts.test = 'jest --selectProjects unit integration --runInBand';
+  expectProblem(widened, /"integration" \(selected by "test"\) collects .*parallel phase/);
 });
 
 test('an exclusive phase that selects nothing, or the wrong thing, is caught', () => {
@@ -372,6 +385,47 @@ test('calibration: deleting the manual entry point is rejected, not silently acc
 
   // And the real repository still has it, so the rule is not vacuously green.
   assert.deepEqual(validateTestPhases(real()), []);
+});
+
+// ---------------------------------------------------------------------------
+// phase one stays infra-free: every services/* "test" selects "unit" only
+// ---------------------------------------------------------------------------
+
+/** `validateInfraFreeTestTask` takes a packageDir -> scripts map. */
+const serviceScripts = (services) =>
+  Object.fromEntries(Object.entries(services).map(([packageDir, service]) => [packageDir, service.scripts]));
+
+test('phase one stays infra-free: every services/* "test" selects the unit project only', () => {
+  // The real repository, which is the point: this rule guards `pnpm verify`.
+  assert.deepEqual(validateInfraFreeTestTask(serviceScripts(real().services)), []);
+
+  const problems = (scripts) => validateInfraFreeTestTask(scripts).join('\n');
+
+  // The two shapes that actually drifted, both caught. The bare `jest` is the
+  // quieter one — it passes while a service happens to have no integration
+  // spec, then needs a database the day someone writes the first.
+  assert.match(
+    problems({ 'services/a': { test: 'jest --passWithNoTests' } }),
+    /names no project, so it selects every one/,
+  );
+  assert.match(
+    problems({ 'services/b': { test: 'jest --selectProjects unit integration --runInBand' } }),
+    /must select exactly the "unit" project \(selects "unit integration"\)/,
+  );
+
+  // A `test` that is not jest at all cannot be read, so it is not waved through.
+  assert.match(problems({ 'services/c': { test: 'echo skipped' } }), /must run jest/);
+  assert.match(problems({ 'services/d': {} }), /must run jest/);
+
+  // The long flag is required, not style preference: `-p` is jest's shorthand
+  // for it, and reading only `--selectProjects` means a `-p` script would be
+  // judged by a flag it never wrote. Refusing it keeps the rule honest about
+  // what it read, and every script in the repository already writes it out.
+  assert.match(problems({ 'services/e': { test: 'jest -p unit' } }), /names no project/);
+  assert.deepEqual(
+    validateInfraFreeTestTask({ 'services/f': { test: 'jest --selectProjects unit --ci' } }),
+    [],
+  );
 });
 
 // ---------------------------------------------------------------------------

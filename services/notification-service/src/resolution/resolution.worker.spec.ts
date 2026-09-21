@@ -70,7 +70,7 @@ interface FakeRepository {
   claimed: NotificationIntent[];
   deferred: { id: string; errorClass: string; nextResolutionAt: Date }[];
   suppressed: { id: string; reason: string }[];
-  dispatched: Parameters<NotificationRepository['dispatchInApp']>[0][];
+  dispatched: Parameters<NotificationRepository['dispatch']>[0][];
   contextsSeen: (string | undefined)[];
   dispatchError?: Error;
 }
@@ -98,31 +98,37 @@ function fakeRepository(claimed: NotificationIntent[]): FakeRepository {
       state.suppressed.push({ id: row.id, reason });
       return true;
     }),
-    dispatchInApp: jest.fn(
-      async (input: Parameters<NotificationRepository['dispatchInApp']>[0]) => {
-        state.contextsSeen.push(tryGetContext()?.organizationId);
-        if (state.dispatchError) throw state.dispatchError;
-        state.dispatched.push(input);
-        const failed = 'errorClass' in input.rendered;
-        return {
-          deliveries: input.recipients.length,
-          inApp: failed ? 0 : input.recipients.length,
-          // The stub never suppresses. The preference ladder is exercised
-          // exhaustively in `precedence.spec.ts` and against a real database in
-          // the integration suite; deciding it here would be testing the fake.
-          suppressed: 0,
-        };
-      },
-    ),
+    dispatch: jest.fn(async (input: Parameters<NotificationRepository['dispatch']>[0]) => {
+      state.contextsSeen.push(tryGetContext()?.organizationId);
+      if (state.dispatchError) throw state.dispatchError;
+      state.dispatched.push(input);
+      const failed = 'errorClass' in input.rendered;
+      const emailable = input.emailTemplate
+        ? input.recipients.filter((recipient) => recipient.email).length
+        : 0;
+      return {
+        // Two rows per recipient now: one per channel.
+        deliveries: input.recipients.length * 2,
+        inApp: failed ? 0 : input.recipients.length,
+        // The stub never suppresses in-app. The preference ladder is exercised
+        // exhaustively in `precedence.spec.ts` and against a real database in
+        // the integration suite; deciding it here would be testing the fake.
+        inAppSuppressed: 0,
+        emailQueued: emailable,
+        emailSuppressed: input.recipients.length - emailable,
+        emailDeferred: 0,
+      };
+    }),
     pendingSummary: jest.fn(async () => ({ pending: 0, oldestAgeSeconds: 0 })),
   } as unknown as NotificationRepository;
   return state;
 }
 
 function port(
-  handler: (
-    query: RecipientQuery,
-  ) => Promise<{ recipients: { userId: string; role: string }[]; truncated: boolean }>,
+  handler: (query: RecipientQuery) => Promise<{
+    recipients: { userId: string; role: string; email?: string | null }[];
+    truncated: boolean;
+  }>,
 ): RecipientPort & { queries: RecipientQuery[] } {
   const queries: RecipientQuery[] = [];
   return {
@@ -153,8 +159,8 @@ describe('ResolutionWorker', () => {
     const repo = fakeRepository([intent()]);
     const recipients = port(async () => ({
       recipients: [
-        { userId: 'USR_1', role: 'FLEET_MANAGER' },
-        { userId: 'USR_2', role: 'ORGANIZATION_ADMIN' },
+        { userId: 'USR_1', role: 'FLEET_MANAGER', email: 'usr1@example.test' },
+        { userId: 'USR_2', role: 'ORGANIZATION_ADMIN', email: 'usr2@example.test' },
       ],
       truncated: false,
     }));
@@ -175,8 +181,8 @@ describe('ResolutionWorker', () => {
     expect(repo.dispatched).toHaveLength(1);
     const dispatched = repo.dispatched[0]!;
     expect(dispatched.recipients).toEqual([
-      { userId: 'USR_1', role: 'FLEET_MANAGER' },
-      { userId: 'USR_2', role: 'ORGANIZATION_ADMIN' },
+      { userId: 'USR_1', role: 'FLEET_MANAGER', email: 'usr1@example.test' },
+      { userId: 'USR_2', role: 'ORGANIZATION_ADMIN', email: 'usr2@example.test' },
     ]);
     expect('title' in dispatched.rendered && dispatched.rendered.body).toContain('AST_1');
     expect(dispatched.inAppTtlDays).toBe(60);
@@ -260,7 +266,7 @@ describe('ResolutionWorker', () => {
   it('records a render failure on every delivery instead of dead-lettering anything', async () => {
     const repo = fakeRepository([intent({ contextData: { assetId: 'AST_1' } })]);
     const recipients = port(async () => ({
-      recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER' }],
+      recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER', email: 'usr1@example.test' }],
       truncated: false,
     }));
     const logger = silent();
@@ -284,7 +290,7 @@ describe('ResolutionWorker', () => {
   it('counts and warns when the recipient list was truncated, and still dispatches', async () => {
     const repo = fakeRepository([intent()]);
     const recipients = port(async () => ({
-      recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER' }],
+      recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER', email: 'usr1@example.test' }],
       truncated: true,
     }));
     const logger = silent();
@@ -308,7 +314,7 @@ describe('ResolutionWorker', () => {
     const repo = fakeRepository([intent()]);
     repo.dispatchError = new LeaseLostError('NTI_1');
     const recipients = port(async () => ({
-      recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER' }],
+      recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER', email: 'usr1@example.test' }],
       truncated: false,
     }));
     const logger = silent();
@@ -330,7 +336,7 @@ describe('ResolutionWorker', () => {
     const repo = fakeRepository([intent()]);
     repo.dispatchError = new Error('disk full');
     const recipients = port(async () => ({
-      recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER' }],
+      recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER', email: 'usr1@example.test' }],
       truncated: false,
     }));
     const worker = new ResolutionWorker(repo.repository, recipients, options, silent());
@@ -344,7 +350,7 @@ describe('ResolutionWorker', () => {
       intent({ id: 'NTI_B', organizationId: 'ORG_B' }),
     ]);
     const recipients = port(async (query) => ({
-      recipients: [{ userId: `USR_${query.organizationId}`, role: 'FLEET_MANAGER' }],
+      recipients: [{ userId: `USR_${query.organizationId}`, role: 'FLEET_MANAGER', email: null }],
       truncated: false,
     }));
     const worker = new ResolutionWorker(repo.repository, recipients, options, silent());

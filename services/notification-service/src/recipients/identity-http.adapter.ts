@@ -33,12 +33,22 @@ import {
  *
  * ## What is kept from the response, and what is not
  *
- * identity's user view carries `email`, `phone` and names. The response
- * schema below is a non-strict Zod object, and Zod **strips** keys it does
- * not declare — so nothing past `id`, `status` and `roles` survives parsing.
- * No address enters this process's data model, no address can reach a log
- * line, and `email_snapshot` stays null until the story that needs it
- * (NTF-004) reads it on purpose.
+ * identity's user view carries `email`, `phone` and names. The response schema
+ * below is a non-strict Zod object and Zod **strips** keys it does not
+ * declare, so the declared list is the whole of what enters this process.
+ *
+ * That list used to be `id`, `status` and `roles`, and this comment used to
+ * say no address enters the data model at all. NTF-004 is the story it named:
+ * an email channel has to know where to write, so `email` is declared now and
+ * nothing else is. `phone` stays undeclared — Q-15 has no answer and there is
+ * no SMS adapter, so a number kept "for later" would be personal data this
+ * service holds for a purpose it cannot name.
+ *
+ * The address is used for exactly two things: `email_snapshot` on the
+ * recipient resolution, and addressing the message. It is never logged. The
+ * platform redactor does not cover `email` (ADR-054 § 10.6), so this service
+ * scrubs it in its own logger, and `scrub.spec.ts` is what holds that to
+ * account.
  */
 
 const userPageSchema = z.object({
@@ -47,6 +57,10 @@ const userPageSchema = z.object({
       id: z.string().min(1),
       status: z.string(),
       roles: z.array(z.string()).default([]),
+      // Optional rather than required: an identity deployment that stops
+      // returning addresses has to degrade to "nobody is emailable", not to a
+      // malformed-response failure that stops the in-app half working too.
+      email: z.string().email().optional(),
     }),
   ),
   nextCursor: z.string().nullable().optional(),
@@ -99,7 +113,7 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
             truncated = true;
             break;
           }
-          merged.set(user.id, { userId: user.id, role });
+          merged.set(user.id, { userId: user.id, role, email: user.email ?? null });
         }
 
         if (truncated || !result.hasMore || !result.nextCursor) break;

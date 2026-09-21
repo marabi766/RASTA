@@ -900,7 +900,7 @@
                           },
                           "channel": {
                             "type": "string",
-                            "enum": ["IN_APP"]
+                            "enum": ["IN_APP", "EMAIL"]
                           },
                           "enabled": {
                             "type": "boolean"
@@ -1005,7 +1005,7 @@
                           },
                           "channel": {
                             "type": "string",
-                            "enum": ["IN_APP"]
+                            "enum": ["IN_APP", "EMAIL"]
                           },
                           "enabled": {
                             "type": "boolean"
@@ -1104,7 +1104,7 @@
                         },
                         "channel": {
                           "type": "string",
-                          "enum": ["IN_APP"]
+                          "enum": ["IN_APP", "EMAIL"]
                         },
                         "enabled": {
                           "type": "boolean"
@@ -1122,6 +1122,142 @@
             }
           }
         }
+      }
+    },
+    "/v1/preferences/quiet-hours": {
+      "get": {
+        "description": "The hours in which an interrupting channel waits. Returned in the zone it was set in, as HH:MM. `null` means no quiet window, which is what every recipient has until they set one. Quiet hours defer and never drop: a message due inside the window is sent when it ends, and a CRITICAL notification is sent regardless.",
+        "operationId": "PreferencesController_quietHours_v1",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "400": {
+            "description": "The request does not match the published schema. `limit` is an integer from 1 to 200; an unknown query parameter is refused rather than ignored; an invalid, edited or unparseable `cursor` lands here too, as does an `id` that is not a prefixed ULID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a service-to-service token (no endpoint here grants one), or a user token that names no active organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses. A preference naming a rule this service does not have lands here too: the shape was right, the thing named was not.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read the caller’s own quiet window",
+        "tags": ["notification-preferences"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "description": "A window may wrap midnight — 22:00 to 07:00 is the ordinary case. Its start and end must differ, because a window whose bounds are equal is either zero minutes or the whole day depending on who reads it, and one of those two readings silences a person permanently. Send `null` to clear it. In-app notifications are never affected: they wait in an inbox and interrupt nobody.",
+        "operationId": "PreferencesController_replaceQuietHours_v1",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "400": {
+            "description": "The request does not match the published schema. `limit` is an integer from 1 to 200; an unknown query parameter is refused rather than ignored; an invalid, edited or unparseable `cursor` lands here too, as does an `id` that is not a prefixed ULID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a service-to-service token (no endpoint here grants one), or a user token that names no active organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found. Also returned for a notification that belongs to another person — in this organization or any other — or that has expired, so a row’s existence is never disclosed by the difference between two statuses. A preference naming a rule this service does not have lands here too: the shape was right, the thing named was not.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Set or clear the caller’s own quiet window",
+        "tags": ["notification-preferences"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/preferences/effective": {
@@ -1145,7 +1281,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": ["IN_APP"],
+              "enum": ["IN_APP", "EMAIL"],
               "default": "IN_APP"
             }
           }
@@ -1243,7 +1379,7 @@
   },
   "info": {
     "title": "Rasta — Notification Service",
-    "description": "The in-app inbox. Every endpoint returns or changes the authenticated user’s own notifications in the organization the request acts for, and nothing else: there is no administrative view of another person’s inbox, no way to name a tenant, and no DELETE — dismissing removes a row from the inbox and keeps it until retention. Reading is idempotent and monotonic; there is no un-read. Notifications are created by consuming domain events (INSURANCE_EXPIRING, INSPECTION_EXPIRING, MAINTENANCE_DUE) with semantic deduplication (ADR-054). Preferences decide who is told: a five-layer ladder — platform mandatory policy, then rule, category and global preferences, then the channel default — resolved per organization, so the same person can silence one tenant without silencing another. No email is sent by this platform: no provider or sender identity has been chosen (docs/24 Q-37), so IN_APP is the only channel a preference can name.",
+    "description": "The in-app inbox. Every endpoint returns or changes the authenticated user’s own notifications in the organization the request acts for, and nothing else: there is no administrative view of another person’s inbox, no way to name a tenant, and no DELETE — dismissing removes a row from the inbox and keeps it until retention. Reading is idempotent and monotonic; there is no un-read. Notifications are created by consuming domain events (INSURANCE_EXPIRING, INSPECTION_EXPIRING, MAINTENANCE_DUE) with semantic deduplication (ADR-054). Preferences decide who is told: a five-layer ladder — platform mandatory policy, then rule, category and global preferences, then the channel default — resolved per organization, so the same person can silence one tenant without silencing another. Email is delivered against a development mail server only: no production provider and no sender identity have been chosen (docs/24 Q-37), the shipped sender is an unresolvable .invalid address, and the readiness probe reports deliversToRealRecipients as false. Quiet hours defer an email into the end of the window rather than dropping it, and a CRITICAL notification ignores them.",
     "version": "0.1.0",
     "contact": {}
   },

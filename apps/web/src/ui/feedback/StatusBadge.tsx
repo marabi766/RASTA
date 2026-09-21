@@ -58,6 +58,9 @@ export const STATUS_TONES: Readonly<Record<string, StatusTone>> = {
   APPROVED: 'success',
   COMPLETED: 'success',
   SETTLED: 'success',
+  // An assigned machine is a working machine. EXP-002 added the three asset
+  // statuses docs/16 § 16.5 had not tabulated; the table there now names them.
+  ASSIGNED: 'success',
 
   PENDING_APPROVAL: 'warning',
   BID_OPEN: 'warning',
@@ -67,9 +70,14 @@ export const STATUS_TONES: Readonly<Record<string, StatusTone>> = {
   CANCELLED: 'danger',
   FAILED: 'danger',
   OUT_OF_SERVICE: 'danger',
+  // Terminal: the machine is gone from service for good, which is closer to
+  // "refused" than to "idle" for somebody scanning a list for something to use.
+  DECOMMISSIONED: 'danger',
 
   DRAFT: 'neutral',
   IDLE: 'neutral',
+  // Registered but not yet commissioned — on the books, not in service.
+  REGISTERED: 'neutral',
 
   IN_MAINTENANCE: 'info',
   EVALUATION: 'info',
@@ -90,6 +98,9 @@ const STATUS_LABELS: Readonly<Record<string, string>> = {
   OUT_OF_SERVICE: 'خارج از سرویس',
   DRAFT: 'پیش‌نویس',
   IDLE: 'بیکار',
+  REGISTERED: 'ثبت‌شده',
+  ASSIGNED: 'تخصیص‌یافته',
+  DECOMMISSIONED: 'از رده خارج',
   IN_MAINTENANCE: 'در تعمیر',
   EVALUATION: 'در ارزیابی',
 };

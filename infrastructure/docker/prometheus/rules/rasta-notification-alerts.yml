@@ -1,0 +1,46 @@
+# Alert rules for notification delivery, evaluated by the local Prometheus in
+# docker-compose.yml (`observability` profile).
+#
+# Local-only, exactly like the audit rules next door: there is no Alertmanager
+# in this repository, so a firing alert is visible at
+# http://localhost:9090/alerts and nowhere else. Production routing is a
+# deployment concern this file does not provide.
+#
+# Behaviour is proven by tests/rasta-notification-alerts.test.yml:
+#   promtool test rules /etc/prometheus/tests/rasta-notification-alerts.test.yml
+#
+# Why a delivery that died is worth waking somebody: every other failure in
+# this service retries. A DEAD delivery is the end of the ladder — a person who
+# was meant to be told their insurance expires, or that a machine is overdue
+# for service, and was not. Nothing downstream notices on its own, because from
+# the platform's point of view the work completed.
+#
+# `sum by` keeps exactly the bounded labels the metric declares and drops the
+# scrape's own job/instance/environment. `error_class` is the closed
+# vocabulary the mail channel port defines, never a mail server's own text: a
+# label built from a remote party's message is how a metric acquires unbounded
+# cardinality, and here it is also where an address would reach a scrape.
+
+groups:
+  - name: rasta-notification-delivery
+    rules:
+      # Any increase is actionable and no `for` is used, for the same reason
+      # the audit counter alerts do not use one: the metric's contract is that
+      # it only moves when a message was abandoned, so a delay would hide the
+      # very first one.
+      - alert: RastaNotificationDeliveryDead
+        expr: sum by (error_class) (increase(rasta_notification_mail_dead_total[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'A notification was abandoned after every retry ({{ $labels.error_class }})'
+          description: 'notification-service exhausted the full retry ladder for at least one email delivery in the last 5 minutes, classified {{ $labels.error_class }}. Somebody who was entitled to a notification did not receive it, and nothing retries it now. The delivery row holds who and which notification; this alert deliberately carries neither.'
+          runbook: docs/runbooks/notification-provider-outage.md
+
+      # Not an alert in itself: a permanent failure is a single message
+      # refused, which is ordinary — a mailbox that no longer exists, a message
+      # a server would not take. It is recorded so the ratio is available to
+      # anybody looking at the dead-delivery alert above, and so a sudden
+      # change in the mix of outcomes is visible on a dashboard.
+      - record: notification:mail_attempts:rate5m
+        expr: sum by (outcome) (rate(rasta_notification_mail_attempts_total[5m]))

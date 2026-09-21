@@ -53,6 +53,9 @@ describe('the published OpenAPI contract (real application)', () => {
     'GET /v1/preferences',
     'PUT /v1/preferences',
     'GET /v1/preferences/effective',
+    // NTF-004. The quiet window NTF-003 deferred, under the same rule again.
+    'GET /v1/preferences/quiet-hours',
+    'PUT /v1/preferences/quiet-hours',
   ];
 
   beforeAll(async () => {

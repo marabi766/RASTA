@@ -15,6 +15,17 @@ export interface RecipientCandidate {
   readonly userId: string;
   /** The role that made this user a recipient — the first listed role that matched. */
   readonly role: string;
+  /**
+   * Where a sending channel would write, snapshotted at resolution time
+   * (NTF-004, ADR-054 § 2).
+   *
+   * Null when identity holds no address for this person. That is an ordinary
+   * outcome and not a failure: they stay a recipient, they get their in-app
+   * notification, and the email delivery is suppressed with a reason naming
+   * which of the two happened. Treating it as an error would let one person
+   * without an address stop the intent for everybody else on it.
+   */
+  readonly email: string | null;
 }
 
 export interface RecipientResolution {

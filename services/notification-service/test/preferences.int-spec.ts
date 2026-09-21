@@ -51,6 +51,8 @@ describe('preferences decide who is told', () => {
     scope: 'GLOBAL' | 'CATEGORY' | 'RULE';
     scopeKey: string | null;
     enabled: boolean;
+    /** Defaults to `IN_APP`, which is what every test written before NTF-004 meant. */
+    channel?: 'IN_APP' | 'EMAIL';
   }): Promise<void> {
     await runUnscoped('a test seeding a preference the way the API writes it', () =>
       w.prisma.client.notificationPreference.create({
@@ -60,7 +62,7 @@ describe('preferences decide who is told', () => {
           userId: input.userId,
           scope: input.scope,
           scopeKey: input.scopeKey,
-          channel: 'IN_APP',
+          channel: input.channel ?? 'IN_APP',
           enabled: input.enabled,
           updatedBy: input.userId,
         },
@@ -81,10 +83,27 @@ describe('preferences decide who is told', () => {
     await w.worker.tick();
   }
 
+  /**
+   * The in-app rows only.
+   *
+   * Narrowed when NTF-004 gave every recipient a second delivery. Every
+   * assertion below is about an `IN_APP` preference deciding an `IN_APP`
+   * delivery, and counting both channels here would make each expected number
+   * twice what the test is actually about. The email channel has its own
+   * assertions at the end of this file.
+   */
   const deliveriesFor = (organizationId: string) =>
     runUnscoped('a test reading its own run rows', () =>
       w.prisma.client.notificationDelivery.findMany({
-        where: { organizationId },
+        where: { organizationId, channel: 'IN_APP' },
+        orderBy: { createdAt: 'asc' },
+      }),
+    );
+
+  const emailDeliveriesFor = (organizationId: string) =>
+    runUnscoped('a test reading its own run rows', () =>
+      w.prisma.client.notificationDelivery.findMany({
+        where: { organizationId, channel: 'EMAIL' },
         orderBy: { createdAt: 'asc' },
       }),
     );
@@ -279,6 +298,100 @@ describe('preferences decide who is told', () => {
           enabled: false,
         }),
       ).rejects.toThrow();
+    });
+  });
+  /**
+   * NTF-004 — the second channel, and the three ways it can decline to write.
+   *
+   * The ladder is the same one; what is new is that an email delivery can be
+   * suppressed for reasons that have nothing to do with a preference, and each
+   * of those has to be distinguishable from somebody having opted out. An
+   * operator looking at a tenant that receives no email needs to know whether
+   * people turned it off, whether identity holds no addresses, or whether a
+   * rule was added without email text.
+   */
+  describe('the email channel writes its own row, with its own reason', () => {
+    it('queues an email beside the in-app delivery when nobody has said otherwise', async () => {
+      const org = organization();
+      const user = newUserId();
+
+      await notify(org, [user]);
+
+      const email = await emailDeliveriesFor(org);
+      expect(email).toHaveLength(1);
+      expect(email[0]).toMatchObject({
+        status: 'QUEUED',
+        attemptCount: 0,
+        maxAttempts: 6,
+        suppressionReason: null,
+        sentAt: null,
+        // Queued is not sent. Nothing left this platform inside the dispatch
+        // transaction, and the row says so.
+        renderedHash: null,
+      });
+      expect(email[0]!.nextAttemptAt).not.toBeNull();
+      // The in-app half is untouched by any of it.
+      expect(await deliveriesFor(org)).toHaveLength(1);
+    });
+
+    it('suppresses the email and keeps the in-app row when the person opted out of email', async () => {
+      const org = organization();
+      const user = newUserId();
+      await storePreference({
+        organizationId: org,
+        userId: user,
+        scope: 'GLOBAL',
+        scopeKey: null,
+        enabled: false,
+        channel: 'EMAIL',
+      });
+
+      await notify(org, [user]);
+
+      expect((await emailDeliveriesFor(org))[0]).toMatchObject({
+        status: 'SUPPRESSED',
+        suppressionReason: 'PREFERENCE_OPT_OUT',
+        attemptCount: 0,
+      });
+      // Turning off email must not turn off the inbox. They are separate
+      // rungs of separate ladders, and conflating them would silence a person
+      // who asked for one thing.
+      expect((await deliveriesFor(org))[0]).toMatchObject({ status: 'SENT' });
+    });
+
+    it('suppresses with NO_ADDRESS when identity holds none, and still notifies in-app', async () => {
+      const org = organization();
+      const user = newUserId();
+      w.recipients.answers.set(org, [{ userId: user, role: 'FLEET_MANAGER', email: null }]);
+      await deliver(
+        w,
+        insuranceExpiring({ organizationId: org, policyId: `POL_${ulid()}`, daysRemaining: 20 }),
+      );
+      await w.worker.tick();
+
+      expect((await emailDeliveriesFor(org))[0]).toMatchObject({
+        status: 'SUPPRESSED',
+        suppressionReason: 'NO_ADDRESS',
+      });
+      expect((await deliveriesFor(org))[0]).toMatchObject({ status: 'SENT' });
+    });
+
+    it('snapshots the address on the resolution, so the row can answer where it wrote', async () => {
+      const org = organization();
+      const user = newUserId();
+      w.recipients.answers.set(org, [
+        { userId: user, role: 'FLEET_MANAGER', email: 'someone@example.invalid' },
+      ]);
+      await deliver(
+        w,
+        insuranceExpiring({ organizationId: org, policyId: `POL_${ulid()}`, daysRemaining: 20 }),
+      );
+      await w.worker.tick();
+
+      const resolutions = await runUnscoped('a test reading its own run rows', () =>
+        w.prisma.client.recipientResolution.findMany({ where: { organizationId: org } }),
+      );
+      expect(resolutions[0]!.emailSnapshot).toBe('someone@example.invalid');
     });
   });
 });

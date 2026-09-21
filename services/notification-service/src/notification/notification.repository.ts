@@ -4,7 +4,8 @@ import { Prisma, type NotificationIntent } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { newId, type IntentInput } from '../intake/intake';
 import type { RenderedInApp } from '../rules/render';
-import { DISCARD_REASONS } from '../observability/metrics';
+import { applyQuietHours } from '../channels/quiet-hours';
+import { DISCARD_REASONS, SUPPRESSION_REASONS } from '../observability/metrics';
 import {
   resolvePreference,
   type ChannelDefaults,
@@ -41,11 +42,60 @@ export type IngestOutcome =
 export interface ResolvedRecipient {
   readonly userId: string;
   readonly role: string;
+  /** Snapshotted at resolution time; null when identity holds no address. */
+  readonly email: string | null;
 }
 
 /** A render failure recorded against every delivery rather than any event. */
 export interface RenderFailure {
   readonly errorClass: string;
+}
+
+/**
+ * What one dispatch wrote, counted per channel.
+ *
+ * Deliberately not one `suppressed` number across both channels: a person who
+ * turned email off and still has their in-app notification is one suppression
+ * and one delivery, and a single counter makes that indistinguishable from
+ * somebody who received nothing at all.
+ */
+export interface DispatchSummary {
+  /** Every delivery row written, both channels, whatever their status. */
+  readonly deliveries: number;
+  /** In-app rows a person can actually see. */
+  readonly inApp: number;
+  readonly inAppSuppressed: number;
+  readonly emailQueued: number;
+  readonly emailSuppressed: number;
+  /** Of the queued ones, how many wait for a quiet window to end. */
+  readonly emailDeferred: number;
+}
+
+/**
+ * One email delivery, with everything the sender needs and nothing else.
+ *
+ * Flat and joined at claim time rather than loaded through relations: the
+ * worker holds a lease while it works, and three round trips per message is
+ * three chances for the lease to expire mid-send.
+ */
+export interface SendableDelivery {
+  readonly id: string;
+  readonly organizationId: string;
+  readonly userId: string;
+  readonly intentId: string;
+  readonly templateKey: string;
+  readonly templateVersion: number;
+  readonly attemptCount: number;
+  readonly maxAttempts: number;
+  readonly claimToken: string;
+  /** From the resolution snapshot. Null only if the snapshot itself is missing. */
+  readonly email: string | null;
+  readonly locale: string;
+  readonly timezone: string;
+  readonly severity: 'INFO' | 'WARNING' | 'CRITICAL';
+  readonly ruleKey: string;
+  readonly contextData: unknown;
+  readonly correlationId: string;
 }
 
 /** Thrown when the fence refuses: another worker holds this intent now. */
@@ -56,10 +106,17 @@ export class LeaseLostError extends Error {
   }
 }
 
-/** The channel this story delivers on. The enum holds nothing else yet. */
 const IN_APP = 'IN_APP' as const;
+const EMAIL = 'EMAIL' as const;
 /** In-app delivery is a database insert: one attempt, no retry ladder. */
 const IN_APP_MAX_ATTEMPTS = 1;
+/**
+ * Six attempts for email: the five waits of ADR-054 § 7 — 1s, 5s, 30s, 2m,
+ * 10m — and the attempt each one leads to. `ck_delivery_dead_exhausted`
+ * refuses a `DEAD` row before they are spent, so this number and that ladder
+ * cannot drift apart without the database saying so.
+ */
+export const EMAIL_MAX_ATTEMPTS = 6;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -307,17 +364,28 @@ export class NotificationRepository {
   }
 
   /**
-   * The dispatch write for the in-app channel: snapshot, deliveries, attempts
-   * and the rows a person sees, in one transaction fenced on the claim.
+   * The dispatch write: snapshot, deliveries, attempts and the rows a person
+   * sees, in one transaction fenced on the claim.
    *
-   * For `IN_APP` the delivery *is* the insert, so each delivery is written
-   * already `SENT` with its one `SUCCESS` attempt — invariant 1 holds on the
-   * row from the moment it exists. A render failure writes every delivery
-   * `FAILED` with a `PERMANENT_FAILURE` attempt instead and no in-app row: the
-   * event was fine, the template was not, and the record says exactly that
-   * (ADR-054 § 9).
+   * The two channels leave this transaction in different states, and that
+   * asymmetry is the design rather than an accident of implementation.
+   *
+   *   `IN_APP`  the delivery *is* the insert, so the row is written already
+   *             `SENT` with its one `SUCCESS` attempt — invariant 1 holds from
+   *             the moment it exists. A render failure writes `FAILED` with a
+   *             `PERMANENT_FAILURE` attempt and no in-app row: the event was
+   *             fine and the template was not (ADR-054 § 9).
+   *   `EMAIL`   the row is written `QUEUED` with zero attempts and a due time.
+   *             Nothing is sent here. A mail server is a remote party with its
+   *             own latency and its own outages, and holding a database
+   *             transaction open across one is how a slow provider becomes a
+   *             connection-pool outage (ADR § 7).
+   *
+   * Quiet hours are applied here rather than at send time because the decision
+   * belongs with the row: `scheduledFor` records *why* a delivery is not due
+   * yet, and the worker re-checks the window before it sends anyway.
    */
-  async dispatchInApp(input: {
+  async dispatch(input: {
     intent: NotificationIntent;
     recipients: readonly ResolvedRecipient[];
     rendered: RenderedInApp | RenderFailure;
@@ -331,7 +399,15 @@ export class NotificationRepository {
     rule: RuleFacts;
     /** The channel defaults of ADR-054 § 5 — configuration, not a constant. */
     channelDefaults: ChannelDefaults;
-  }): Promise<{ deliveries: number; inApp: number; suppressed: number }> {
+    /**
+     * The email text this rule renders, or null when it has none.
+     *
+     * Null is not "skip email": it writes a suppressed row naming
+     * `NO_EMAIL_TEMPLATE`, because a rule added without email text would
+     * otherwise produce a silence indistinguishable from an outage.
+     */
+    emailTemplate: { key: string; version: number } | null;
+  }): Promise<DispatchSummary> {
     const { intent, recipients, rendered } = input;
     const now = new Date();
     const failure = 'errorClass' in rendered ? rendered : null;
@@ -356,17 +432,20 @@ export class NotificationRepository {
       const deliveries: Prisma.NotificationDeliveryCreateManyInput[] = [];
       const attempts: Prisma.DeliveryAttemptCreateManyInput[] = [];
       const inApp: Prisma.InAppNotificationCreateManyInput[] = [];
-      let suppressed = 0;
+      let inAppSuppressed = 0;
+      let emailSuppressed = 0;
+      let emailQueued = 0;
+      let emailDeferred = 0;
+
+      const userIds = recipients.map((recipient) => recipient.userId);
 
       // One read for the whole dispatch rather than one per recipient per
       // layer. Preferences are per tenant, so this is already scoped to the
-      // intent's organization by the guard as well as by the predicate.
+      // intent's organization by the guard as well as by the predicate. Both
+      // channels are read in the same statement: the ladder filters by channel
+      // itself, and two queries would be two round trips for one decision.
       const preferenceRows = await tx.notificationPreference.findMany({
-        where: {
-          organizationId: intent.organizationId,
-          userId: { in: recipients.map((recipient) => recipient.userId) },
-          channel: IN_APP,
-        },
+        where: { organizationId: intent.organizationId, userId: { in: userIds } },
         select: { userId: true, scope: true, scopeKey: true, channel: true, enabled: true },
       });
       const preferencesByUser = new Map<string, PreferenceRow[]>();
@@ -375,6 +454,13 @@ export class NotificationRepository {
         own.push(stored);
         preferencesByUser.set(stored.userId, own);
       }
+
+      // Quiet windows, read once for the same reason.
+      const quietRows = await tx.notificationQuietHours.findMany({
+        where: { organizationId: intent.organizationId, userId: { in: userIds } },
+        select: { userId: true, startMinute: true, endMinute: true, timezone: true },
+      });
+      const quietByUser = new Map(quietRows.map((row) => [row.userId, row]));
 
       for (const recipient of recipients) {
         const deliveryId = newId('delivery');
@@ -389,10 +475,81 @@ export class NotificationRepository {
           organizationId: intent.organizationId,
           userId: recipient.userId,
           resolvedRole: recipient.role,
+          // Snapshotted at resolution, never read again from identity: a
+          // message has to be answerable for where it went, and an address
+          // looked up at send time answers a different question than the one
+          // the notification was resolved against (ADR-054 § 2).
+          emailSnapshot: recipient.email,
           resolvedAt: now,
           resolutionSource: 'IDENTITY_API',
         });
 
+        // --- the email half, decided but not sent -------------------------
+        const emailDecision = resolvePreference(
+          preferencesByUser.get(recipient.userId) ?? [],
+          input.rule,
+          EMAIL,
+          input.channelDefaults,
+        );
+        const emailSuppression = !emailDecision.enabled
+          ? emailDecision.suppressionReason
+          : !input.emailTemplate
+            ? SUPPRESSION_REASONS.NO_EMAIL_TEMPLATE
+            : !recipient.email
+              ? SUPPRESSION_REASONS.NO_ADDRESS
+              : null;
+
+        const emailDeliveryId = newId('delivery');
+        if (emailSuppression) {
+          emailSuppressed += 1;
+          deliveries.push({
+            id: emailDeliveryId,
+            intentId: intent.id,
+            organizationId: intent.organizationId,
+            userId: recipient.userId,
+            channel: EMAIL,
+            status: 'SUPPRESSED',
+            templateKey: input.emailTemplate?.key ?? intent.templateKey,
+            templateVersion: input.emailTemplate?.version ?? input.templateVersion,
+            attemptCount: 0,
+            maxAttempts: EMAIL_MAX_ATTEMPTS,
+            suppressionReason: emailSuppression,
+          });
+        } else {
+          const quiet = quietByUser.get(recipient.userId);
+          const { scheduledFor, deferred } = applyQuietHours(
+            now,
+            intent.severity,
+            quiet
+              ? {
+                  startMinute: quiet.startMinute,
+                  endMinute: quiet.endMinute,
+                  timezone: quiet.timezone,
+                }
+              : null,
+          );
+          if (deferred) emailDeferred += 1;
+          emailQueued += 1;
+
+          deliveries.push({
+            id: emailDeliveryId,
+            intentId: intent.id,
+            organizationId: intent.organizationId,
+            userId: recipient.userId,
+            channel: EMAIL,
+            status: 'QUEUED',
+            // `input.emailTemplate` is non-null here: a null one produced a
+            // suppressed row above.
+            templateKey: (input.emailTemplate as { key: string; version: number }).key,
+            templateVersion: (input.emailTemplate as { key: string; version: number }).version,
+            attemptCount: 0,
+            maxAttempts: EMAIL_MAX_ATTEMPTS,
+            scheduledFor,
+            nextAttemptAt: scheduledFor ?? now,
+          });
+        }
+
+        // --- the in-app half, decided and delivered in the same breath -----
         const decision = resolvePreference(
           preferencesByUser.get(recipient.userId) ?? [],
           input.rule,
@@ -405,7 +562,7 @@ export class NotificationRepository {
           // reason, and no in-app row (`ck_delivery_suppressed_shape`). The row
           // exists so the person can be told *why* nothing arrived, which is
           // the difference between a preference system and a silent drop.
-          suppressed += 1;
+          inAppSuppressed += 1;
           deliveries.push({
             id: deliveryId,
             intentId: intent.id,
@@ -478,8 +635,221 @@ export class NotificationRepository {
         await tx.inAppNotification.createMany({ data: inApp });
       }
 
-      return { deliveries: deliveries.length, inApp: inApp.length, suppressed };
+      return {
+        deliveries: deliveries.length,
+        inApp: inApp.length,
+        inAppSuppressed,
+        emailQueued,
+        emailSuppressed,
+        emailDeferred,
+      };
     }, DISPATCH_TRANSACTION);
+  }
+
+  // =========================================================================
+  // The email queue (NTF-004)
+  // =========================================================================
+
+  /**
+   * Claims email deliveries that are due, across every tenant.
+   *
+   * The same shape as `claimPending` and for the same reasons (ADR-050): a
+   * durable lease rather than a row lock, so the claim survives the
+   * transaction and a crashed worker's rows become claimable again when the
+   * lease runs out. `SENDING` is claimable too, and that is deliberate — a
+   * worker that died between marking a row `SENDING` and recording its attempt
+   * would otherwise leave it stuck there for ever.
+   *
+   * What this can cost is stated rather than hidden: a process that sent a
+   * message and died before committing the attempt will send that message
+   * again when the lease expires. The alternative — marking sent before
+   * sending — loses messages instead, and a duplicate expiry reminder is a
+   * smaller harm than a missing one (ADR § 7).
+   */
+  async claimSendable(
+    owner: string,
+    batchSize: number,
+    leaseSeconds: number,
+  ): Promise<SendableDelivery[]> {
+    return runUnscoped(
+      'the mail worker claims due deliveries across tenants; each is sent in its own tenant context',
+      async () => {
+        const claimed = await this.prisma.client.$queryRaw<{ id: string }[]>`
+          WITH "candidates" AS (
+            SELECT "id"
+              FROM "notification_delivery"
+             WHERE "channel" = 'EMAIL'
+               AND "status" IN ('QUEUED', 'SENDING')
+               AND ("next_attempt_at" IS NULL OR "next_attempt_at" <= now())
+               AND ("claim_expires_at" IS NULL OR "claim_expires_at" <= now())
+             ORDER BY "next_attempt_at" ASC NULLS FIRST, "created_at" ASC
+             LIMIT ${batchSize}
+               FOR UPDATE SKIP LOCKED
+          )
+          UPDATE "notification_delivery" AS "d"
+             SET "claim_token"      = gen_random_uuid()::text,
+                 "claim_owner"      = ${owner},
+                 "claim_expires_at" = now() + make_interval(secs => ${leaseSeconds}),
+                 "status"           = 'SENDING',
+                 "updated_at"       = now()
+            FROM "candidates"
+           WHERE "d"."id" = "candidates"."id"
+          RETURNING "d"."id"
+        `;
+        if (claimed.length === 0) return [];
+
+        // The address and the locale come from the resolution snapshot, joined
+        // here rather than looked up from identity: the snapshot is what this
+        // notification was resolved against, and asking identity again would
+        // answer a different question (ADR § 2).
+        return this.prisma.client.$queryRaw<SendableDelivery[]>`
+          SELECT "d"."id",
+                 "d"."organization_id"  AS "organizationId",
+                 "d"."user_id"          AS "userId",
+                 "d"."intent_id"        AS "intentId",
+                 "d"."template_key"     AS "templateKey",
+                 "d"."template_version" AS "templateVersion",
+                 "d"."attempt_count"    AS "attemptCount",
+                 "d"."max_attempts"     AS "maxAttempts",
+                 "d"."claim_token"      AS "claimToken",
+                 "r"."email_snapshot"   AS "email",
+                 "r"."locale_snapshot"  AS "locale",
+                 "r"."timezone_snapshot" AS "timezone",
+                 "i"."severity"::text   AS "severity",
+                 "i"."rule_key"         AS "ruleKey",
+                 "i"."context_data"     AS "contextData",
+                 "i"."correlation_id"   AS "correlationId"
+            FROM "notification_delivery" AS "d"
+            JOIN "notification_intent" AS "i" ON "i"."id" = "d"."intent_id"
+            LEFT JOIN "recipient_resolution" AS "r"
+              ON "r"."intent_id" = "d"."intent_id" AND "r"."user_id" = "d"."user_id"
+           WHERE "d"."id" IN (${Prisma.join(claimed.map((row) => row.id))})
+           ORDER BY "d"."next_attempt_at" ASC NULLS FIRST, "d"."created_at" ASC
+        `;
+      },
+    );
+  }
+
+  /**
+   * Records one attempt and whatever it decided about the delivery.
+   *
+   * Every write is fenced on the claim token, so a worker whose lease was
+   * taken over while it talked to a mail server changes nothing — including
+   * the attempt row, which is written inside the same transaction as the
+   * status change rather than before it. An attempt recorded by a worker that
+   * no longer owns the row would be a second opinion in an append-only table.
+   *
+   * `publish` runs in the same transaction, so the outcome and the event
+   * announcing it commit together (AGENTS.md A-08).
+   */
+  async settleAttempt(input: {
+    delivery: Pick<
+      SendableDelivery,
+      'id' | 'organizationId' | 'claimToken' | 'attemptCount' | 'maxAttempts'
+    >;
+    outcome: 'SUCCESS' | 'TRANSIENT_FAILURE' | 'PERMANENT_FAILURE';
+    errorClass: string | null;
+    startedAt: Date;
+    finishedAt: Date;
+    /** Set only on success — the SHA-256 of what was sent, never the text. */
+    renderedHash?: string;
+    /** When to try again. Null on a terminal outcome. */
+    nextAttemptAt: Date | null;
+    publish?: (tx: ExtendedPrismaClient) => Promise<unknown>;
+  }): Promise<'SENT' | 'FAILED' | 'DEAD' | 'RETRY' | 'LEASE_LOST'> {
+    const { delivery } = input;
+    const attemptNo = delivery.attemptCount + 1;
+
+    return this.prisma.transaction(async (tx) => {
+      const settled = await this.resolveTerminal(input, attemptNo);
+
+      const fenced = await tx.notificationDelivery.updateMany({
+        where: { id: delivery.id, claimToken: delivery.claimToken, status: 'SENDING' },
+        data: {
+          status: settled.status,
+          attemptCount: attemptNo,
+          lastErrorClass: input.errorClass,
+          renderedHash: input.renderedHash ?? undefined,
+          sentAt: settled.status === 'SENT' ? input.finishedAt : undefined,
+          // A retry keeps its due time; a terminal row must not carry one
+          // (`ck_delivery_next_attempt_only_when_open`).
+          nextAttemptAt: settled.status === 'QUEUED' ? input.nextAttemptAt : null,
+          claimToken: null,
+          claimOwner: null,
+          claimExpiresAt: null,
+        },
+      });
+      if (fenced.count !== 1) throw new LeaseLostError(delivery.id);
+
+      await tx.deliveryAttempt.create({
+        data: {
+          id: newId('attempt'),
+          deliveryId: delivery.id,
+          organizationId: delivery.organizationId,
+          attemptNo,
+          outcome: input.outcome,
+          errorClass: input.errorClass,
+          startedAt: input.startedAt,
+          finishedAt: input.finishedAt,
+        },
+      });
+
+      if (input.publish) await input.publish(tx);
+      return settled.reported;
+    }, DISPATCH_TRANSACTION);
+  }
+
+  /**
+   * Which terminal state one attempt leaves behind.
+   *
+   * `DEAD` only once the attempts are genuinely spent, which the database also
+   * refuses to accept otherwise (`ck_delivery_dead_exhausted`): the ladder and
+   * the constraint have to agree, and the constraint is the one that cannot be
+   * forgotten.
+   */
+  private async resolveTerminal(
+    input: { outcome: string; delivery: Pick<SendableDelivery, 'maxAttempts'> },
+    attemptNo: number,
+  ): Promise<{
+    status: 'SENT' | 'FAILED' | 'DEAD' | 'QUEUED';
+    reported: 'SENT' | 'FAILED' | 'DEAD' | 'RETRY';
+  }> {
+    if (input.outcome === 'SUCCESS') return { status: 'SENT', reported: 'SENT' };
+    if (input.outcome === 'PERMANENT_FAILURE') return { status: 'FAILED', reported: 'FAILED' };
+    if (attemptNo >= input.delivery.maxAttempts) return { status: 'DEAD', reported: 'DEAD' };
+    return { status: 'QUEUED', reported: 'RETRY' };
+  }
+
+  /** The quiet window a recipient holds, if any. Read again at send time. */
+  async quietWindowFor(
+    organizationId: string,
+    userId: string,
+  ): Promise<{ startMinute: number; endMinute: number; timezone: string } | null> {
+    const row = await this.prisma.client.notificationQuietHours.findUnique({
+      where: { userId_organizationId: { userId, organizationId } },
+      select: { startMinute: true, endMinute: true, timezone: true },
+    });
+    return row ?? null;
+  }
+
+  /** Hands a claimed delivery back untouched — a deferral is not an attempt. */
+  async releaseUntil(
+    delivery: Pick<SendableDelivery, 'id' | 'claimToken'>,
+    nextAttemptAt: Date,
+    scheduledFor: Date | null,
+  ): Promise<boolean> {
+    const result = await this.prisma.client.notificationDelivery.updateMany({
+      where: { id: delivery.id, claimToken: delivery.claimToken, status: 'SENDING' },
+      data: {
+        status: 'QUEUED',
+        nextAttemptAt,
+        scheduledFor: scheduledFor ?? undefined,
+        claimToken: null,
+        claimOwner: null,
+        claimExpiresAt: null,
+      },
+    });
+    return result.count === 1;
   }
 
   // =========================================================================

@@ -10,6 +10,7 @@ global:
 # still passes the config check. tests/ is never listed here.
 rule_files:
   - rules/rasta-audit-alerts.yml
+  - rules/rasta-notification-alerts.yml
 
 scrape_configs:
   - job_name: prometheus

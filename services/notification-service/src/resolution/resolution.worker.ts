@@ -8,6 +8,7 @@ import type { RecipientPort } from '../recipients/recipient.port';
 import { RecipientResolutionError } from '../recipients/recipient.port';
 import { ruleForKey, TEMPLATE_CATALOGUE_VERSION, type NotificationRule } from '../rules/rules';
 import { renderInApp, RenderError, type RenderedInApp } from '../rules/render';
+import { emailTemplateForRule } from '../channels/email-templates';
 import type { ContextData } from '../rules/context-sanitiser';
 import type { ScrubbedLogger } from '../logging/scrub';
 import { nextResolutionAt } from './backoff';
@@ -190,10 +191,12 @@ export class ResolutionWorker implements OnApplicationShutdown {
     const recipients: ResolvedRecipient[] = resolved.recipients.map((candidate) => ({
       userId: candidate.userId,
       role: candidate.role,
+      email: candidate.email,
     }));
+    const emailTemplate = emailTemplateForRule(rule.ruleKey);
 
     try {
-      const written = await this.repository.dispatchInApp({
+      const written = await this.repository.dispatch({
         intent,
         recipients,
         rendered,
@@ -207,24 +210,46 @@ export class ResolutionWorker implements OnApplicationShutdown {
           mandatoryChannels: rule.mandatoryChannels,
         },
         channelDefaults: CHANNEL_DEFAULTS,
+        emailTemplate: emailTemplate
+          ? { key: emailTemplate.key, version: emailTemplate.version }
+          : null,
       });
       const status = 'errorClass' in rendered ? 'FAILED' : 'SENT';
       // Counted apart, because they are different facts. A suppressed delivery
       // was neither sent nor failed; folding it into either would make the
       // delivery success rate a number about preferences rather than delivery.
-      const delivered = written.deliveries - written.suppressed;
+      //
+      // Email is counted apart from in-app for a second reason: an email row
+      // leaves this transaction **queued**, not delivered. Counting it as sent
+      // here would make the success rate a measurement of this service's
+      // willingness to try.
+      const delivered = recipients.length - written.inAppSuppressed;
       if (delivered > 0) {
         notificationDeliveriesTotal.inc({ channel: 'IN_APP', status }, delivered);
       }
-      if (written.suppressed > 0) {
+      if (written.inAppSuppressed > 0) {
         notificationDeliveriesTotal.inc(
           { channel: 'IN_APP', status: 'SUPPRESSED' },
-          written.suppressed,
+          written.inAppSuppressed,
+        );
+      }
+      if (written.emailQueued > 0) {
+        notificationDeliveriesTotal.inc(
+          { channel: 'EMAIL', status: 'QUEUED' },
+          written.emailQueued,
+        );
+      }
+      if (written.emailSuppressed > 0) {
+        notificationDeliveriesTotal.inc(
+          { channel: 'EMAIL', status: 'SUPPRESSED' },
+          written.emailSuppressed,
         );
       }
       this.logger.info(
         `Intent ${intent.id} (${rule.ruleKey}) dispatched: ${delivered} in-app deliveries ${status}, ` +
-          `${written.suppressed} suppressed by preference, ${written.inApp} rows`,
+          `${written.inAppSuppressed} suppressed by preference, ${written.inApp} rows, ` +
+          `${written.emailQueued} email queued (${written.emailDeferred} until quiet hours end), ` +
+          `${written.emailSuppressed} email suppressed`,
       );
     } catch (error) {
       if (error instanceof LeaseLostError) {

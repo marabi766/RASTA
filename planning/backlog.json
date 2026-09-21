@@ -2,7 +2,7 @@
   "$schema": "./backlog.schema.json",
   "version": 2,
   "project": "RASTA",
-  "asOf": "2026-09-19",
+  "asOf": "2026-09-21",
   "governance": {
     "baselineState": "APPROVED",
     "approvedBy": "Product Owner",
@@ -541,7 +541,7 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 13,
-      "status": "BLOCKED",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Domain events produce idempotent in-app notifications",
         "Email delivery respects user preferences and records delivery outcome"
@@ -576,6 +576,51 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/58",
           "note": "Blocker (2) is closed. notification-service now publishes NOTIFICATION_READ, NOTIFICATION_DISMISSED and NOTIFICATION_ALL_READ from a transactional outbox, in the same transaction as the state change and only when a row actually moved, and audit-service subscribes to rasta.notification.v1. ADR-054 § 3 offered two ways out and the written exception was rejected: S-06 is a security rule, and a documented exception lowers the platform audit floor permanently. Blocker (1) stands — there is still no channel, mail or email module, and Q-37 is open."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/60",
+          "note": "NTF-003: notification preferences with the five-layer precedence ladder (MANDATORY_POLICY, RULE, CATEGORY, GLOBAL, CHANNEL_DEFAULT), a reversible migration, and the GET /v1/preferences/effective endpoint that returns the winning layer. Q-38 was answered and implemented in the same change as per-rule mandatoryChannels. Quiet hours were deliberately deferred to NTF-004 and the deviation is recorded in the ADR-054 implementation plan."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/35476698542",
+          "note": "Green for NTF-003 before merge at e6d509e."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/63",
+          "note": "The first piece of NTF-004, and only that piece: a MailChannel port with a closed set of failure reasons, an SMTP adapter that refuses header injection and a second recipient before a socket opens, SMTP 4xx/5xx retry classification, and an integration suite against a real Mailpit. Three independent locks keep it from reaching a human: the shipped sender is an RFC 2606 .invalid address, deliversToRealRecipients is a constant in app.module.ts rather than a setting, and env.spec.ts asserts that no environment variable matching REAL_RECIPIENT|PRODUCTION_MAIL|MAIL_ENABLED|SEND_REAL exists."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/35536333183",
+          "note": "All seven jobs green on the merge ref of #63, including integration and the economic end-to-end path."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/adr/ADR-054-implementation-plan.md",
+          "note": "Status on 2026-09-21: blocker (1) of the 2026-09-18 note is closed — the channel module now exists. What remains of COM-008 is unbuilt work, not a blocker: Persian RTL templates, retry and backoff, suppression, the NOTIFICATION_SENT and NOTIFICATION_FAILED events, delivery-outcome recording, and the quiet hours deferred from NTF-003. Whether COM-008 may be ACCEPTED while Q-37 (which email provider, which sender identity) is still open is a product-owner decision and is not assumed here."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/65",
+          "note": "NTF-004 in full: the EMAIL channel value together with the worker that writes it, two template tables whose published versions are immutable and are seeded from the code catalogue, Persian right-to-left rendering with Persian digits and Hijri-Shamsi dates in the recipient timezone, the quiet hours NTF-003 deferred with two new endpoints, a claim-based mail worker on the 1s/5s/30s/2m/10m ladder with jitter, and NOTIFICATION_SENT and NOTIFICATION_FAILED published from the outbox in the same transaction as the outcome."
+        },
+        {
+          "kind": "TEST",
+          "ref": "services/notification-service/test/email-delivery.int-spec.ts",
+          "note": "Six cases against a real PostgreSQL and a real Mailpit, asserted through Mailpit HTTP API rather than the adapter return value: sent and recorded and announced once; Persian right-to-left with a Jalali date on the wire; a dead port retried and announced to nobody; the ladder ending in DEAD with exactly one NOTIFICATION_FAILED; a quiet window holding a message without spending an attempt; and a published template version whose text changed refusing to seed. 279 unit and 120 integration tests pass locally."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/adr/ADR-054-implementation-plan.md",
+          "note": "Three named deviations, none hidden: the per-channel circuit breaker and outbound rate limit of ADR-054 section 7 are not built and are not in the acceptance criteria; quiet hours live in their own table rather than as columns on notification_preference, because that table holds one row per scope and the ADR shape allowed one person three contradictory windows for one channel; and the two read-only template diagnostic endpoints are deferred to NTF-005."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "Q-37 remains open and all three locks hold: deliversToRealRecipients is a constant false in app.module.ts, the shipped sender is an RFC 2606 .invalid address, and env.spec.ts proves no environment variable matching REAL_RECIPIENT|PRODUCTION_MAIL|MAIL_ENABLED|SEND_REAL exists. No email has reached a real person. Whether COM-008 may be ACCEPTED while the procurement half of Q-37 — which provider, which domain, which sender identity — is unanswered is a product-owner decision and is not assumed here."
         }
       ]
     },
@@ -774,14 +819,55 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 21,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Core operational workflows are usable at documented permissions",
         "Desktop and supported mobile viewports pass accessibility and tenant-isolation E2E"
       ],
       "dependencies": ["EXP-001", "OPS-001"],
       "sourceRefs": ["docs/16-ui-architecture.md#۱۶۶-نقشه-صفحات"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/adr/ADR-059-web-session-and-token-custody.md",
+          "note": "The portal runs the OIDC flow on its own server: no access token and no refresh token ever reaches browser JavaScript. Written because docs/16 contradicted itself — section 16.1 named a browser library and section 16.11 required the refresh token in an HttpOnly cookie, which a browser library cannot write. The rule won and the tool changed."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/66",
+          "note": "The session and the shell: the OIDC flow in Next.js route handlers with PKCE, state and nonce; an AES-256-GCM sealed session cookie that is HttpOnly, Secure and SameSite=Strict; a server-side gateway client that refuses any origin but the gateway; /login; and a dashboard that shows the signed-in person, their active organization and their effective roles, fetched through the gateway on the server."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/server",
+          "note": "67 server tests: the session cookie refuses a tampered, foreign-key, truncated or stale-shaped value and leaves no token readable; PKCE derives S256 correctly; the id token is refused for a wrong nonce, a wrong audience and a wrong key; the gateway client refuses a service port, another host and another port, and never fetches when it refuses; and the identity schema drops the email and phone identity returns. 354 portal tests in total."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/e2e/login.spec.ts",
+          "note": "The first browser job in this repository, running against a production build in CI as apps/web/playwright.config.ts said it would from EXP-001. It asserts only what a browser can: the document is served dir=rtl lang=fa, the way in works with JavaScript disabled, and localStorage and sessionStorage are both empty — which is ADR-059 central claim, provable only here."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/16-ui-architecture.md",
+          "note": "Still unbuilt, and not claimed: /organizations, /assets, /assets/[id], /drivers, /usage, /maintenance and /maintenance/[id]. EXP-002 is not finished by this change; its first acceptance criterion — core operational workflows usable at documented permissions — needs those screens."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/67",
+          "note": "The first two operational screens: /assets, with filters and cursor paging carried entirely in the URL so a filtered list is a link somebody can send, and /assets/[id], the electronic dossier — identity, every compliance blocker rather than the first, costs, and recent activity. Both are fetched on the server through the gateway and both are pure functions of the read result."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/app/assets/assets.spec.tsx",
+          "note": "Fourteen screen tests covering the states a developer never reaches by accident: a filter that matched nothing worded differently from a tenant with no assets, a forbidden read rendered as a refusal, an outage rendered with its correlation id, an unknown status shown as it arrived rather than hidden, and a missing asset answered exactly as another tenant’s asset is. Both screens pass jest-axe."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/server/assets.spec.ts",
+          "note": "Nine server tests: only the filters the caller set reach the gateway, the asset id is percent-encoded into the path rather than interpolated, every compliance blocker survives, money stays a string, and the coordinate, document references and raw event detail in the dossier response are all dropped before anything can render them."
+        }
+      ]
     },
     {
       "id": "EXP-003",
@@ -1674,6 +1760,22 @@
       "recordedBy": "Codex",
       "approvalRef": "Product owner instruction in the Codex project-management task on 2026-08-31",
       "recordIds": ["COM-004", "DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-005"]
+    },
+    {
+      "date": "2026-09-21",
+      "type": "STATUS_CORRECTED",
+      "reason": "COM-008 moves from BLOCKED to IN_PROGRESS. Both blockers recorded on 2026-09-18 are gone: the audit deviation was closed by PR #58, and the absence of any channel, mail or email module was closed by PR #63. What is left is work nobody has written yet, which is IN_PROGRESS, not BLOCKED. The item still earns zero points until its second acceptance criterion is met and proven.",
+      "recordedBy": "Claude Opus 5",
+      "approvalRef": "Product owner instruction in the Claude Code session on 2026-09-21 to carry out the listed steps in order",
+      "recordIds": ["COM-008"]
+    },
+    {
+      "date": "2026-09-21",
+      "type": "STATUS_CORRECTED",
+      "reason": "EXP-002 moves from READY to IN_PROGRESS. The session, the app shell and the first real screen have landed; the domain surfaces it also covers have not. The item earns zero points until both acceptance criteria are met.",
+      "recordedBy": "Claude Opus 5",
+      "approvalRef": "Product owner standing authority for quality and security decisions, Claude Code session 2026-09-21",
+      "recordIds": ["EXP-002"]
     }
   ]
 }

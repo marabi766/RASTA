@@ -1,4 +1,5 @@
 import {
+  Inject,
   Module,
   type MiddlewareConsumer,
   type NestModule,
@@ -40,7 +41,12 @@ import { CachedRecipientPort } from './recipients/cached-recipient.port';
 import { RECIPIENT_PORT, type RecipientPort } from './recipients/recipient.port';
 import { SUBSCRIBED_TOPICS } from './rules/rules';
 import { withAddressScrubbing, type ScrubbedLogger } from './logging/scrub';
-import { ENV, LOGGER, SCRUBBED_LOGGER } from './tokens';
+import { ENV, LOGGER, MAIL_CHANNEL, SCRUBBED_LOGGER } from './tokens';
+import type { MailChannel } from './channels/mail.channel.port';
+import { SmtpMailChannel } from './channels/smtp.mail.channel';
+import { MailWorker } from './channels/mail.worker';
+import { templateReader } from './channels/template.reader';
+import { seedEmailTemplates } from './channels/template.seeder';
 import {
   brokersOf,
   DISPATCHER_CONSUMER_GROUP,
@@ -135,6 +141,37 @@ import {
     NotificationApiService,
     PreferencesRepository,
     PreferencesService,
+
+    /**
+     * The mail channel behind its port (ADR-054 § 6, `docs/24` Q-37).
+     *
+     * `NOTIFICATION_MAIL_ADAPTER` accepts `smtp` alone and refuses boot on
+     * anything else, so this factory has one branch today and that enum is
+     * where a second one would start.
+     *
+     * **`deliversToRealRecipients` is a constant `false`, not configuration.**
+     * A flag that may hold only one value is a control claiming an effect it
+     * does not have — the argument of Q-07, which this service has already
+     * applied twice. Making it true is a code change, in review, on the day
+     * Q-37 is answered and a provider and sender identity actually exist.
+     * Until then nothing here may point at a human.
+     */
+    {
+      provide: MAIL_CHANNEL,
+      inject: [ENV],
+      useFactory: (env: NotificationEnv): MailChannel =>
+        new SmtpMailChannel({
+          host: env.NOTIFICATION_SMTP_HOST,
+          port: env.NOTIFICATION_SMTP_PORT,
+          secure: env.NOTIFICATION_SMTP_SECURE,
+          user: env.NOTIFICATION_SMTP_USER || null,
+          password: env.NOTIFICATION_SMTP_PASSWORD || null,
+          fromAddress: env.NOTIFICATION_MAIL_FROM_ADDRESS,
+          fromName: env.NOTIFICATION_MAIL_FROM_NAME,
+          timeoutMs: env.NOTIFICATION_SMTP_TIMEOUT_MS,
+          deliversToRealRecipients: false,
+        }),
+    },
 
     // The outbox, added with NTF-002's audit events. This service consumed for
     // its whole life and produced nothing, so none of this existed until the
@@ -253,6 +290,40 @@ import {
     },
 
     {
+      provide: MailWorker,
+      inject: [
+        ENV,
+        SCRUBBED_LOGGER,
+        NotificationRepository,
+        MAIL_CHANNEL,
+        EventPublisher,
+        PrismaService,
+      ],
+      useFactory: (
+        env: NotificationEnv,
+        logger: ScrubbedLogger,
+        repository: NotificationRepository,
+        mail: MailChannel,
+        publisher: EventPublisher,
+        prisma: PrismaService,
+      ): MailWorker =>
+        new MailWorker(
+          repository,
+          mail,
+          publisher,
+          templateReader(prisma),
+          {
+            pollIntervalMs: env.NOTIFICATION_MAIL_POLL_INTERVAL_MS,
+            batchSize: env.NOTIFICATION_MAIL_BATCH_SIZE,
+            leaseSeconds: env.NOTIFICATION_MAIL_LEASE_SECONDS,
+            backoffMaxSeconds: env.NOTIFICATION_MAIL_BACKOFF_MAX_SECONDS,
+            owner: `${SERVICE_NAME}@${hostname()}#${process.pid}`,
+          },
+          logger,
+        ),
+    },
+
+    {
       provide: ResolutionWorker,
       inject: [ENV, SCRUBBED_LOGGER, NotificationRepository, RECIPIENT_PORT],
       useFactory: (
@@ -289,6 +360,9 @@ export class AppModule implements NestModule, OnModuleInit {
     private readonly dispatcher: DispatcherConsumer,
     private readonly worker: ResolutionWorker,
     private readonly relay: OutboxRelay,
+    private readonly mailWorker: MailWorker,
+    private readonly prisma: PrismaService,
+    @Inject(SCRUBBED_LOGGER) private readonly bootLogger: ScrubbedLogger,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -296,8 +370,18 @@ export class AppModule implements NestModule, OnModuleInit {
   }
 
   async onModuleInit(): Promise<void> {
+    // First, and before anything can try to render: the template catalogue.
+    // A published version whose text changed without its number **refuses the
+    // boot** rather than sending a message nobody can account for later
+    // (`template.seeder.ts`).
+    const seeded = await seedEmailTemplates(this.prisma.client);
+    this.bootLogger.info(
+      `Email templates: ${seeded.published} published, ${seeded.unchanged} already current`,
+    );
+
     await this.dispatcher.start();
     this.worker.start();
+    this.mailWorker.start();
     // Started after the consumer and the worker, and deliberately last: the
     // relay only ever drains rows that are already committed, so nothing it
     // publishes depends on either of them being up. If it fails to start, the

@@ -142,9 +142,10 @@ URL باید صریحاً IPv4 باشد. **نشانه:** Prisma `P2028` (`Unable
 در سطح ADR است.
 
 **اثبات فشار تجمیع رد در فاز انحصاری (2026-09-14).** `pnpm test` و `pnpm test:integration` دیگر مستقیم `turbo run` نیستند؛
-`scripts/run-test-phases.mjs` آنها را در دو فاز اجرا می‌کند: (۱) **فاز Workspace** — همان `turbo run <task>` موازی برای همهٔ
+`scripts/run-test-phases.mjs` آنها را فازبندی می‌کند: (۱) **فاز Workspace** — همان `turbo run <task>` موازی برای همهٔ
 بسته‌ها، که Project ‏`integration` در `identity-service` در آن `security-event-aggregation.int-spec.ts` را کنار می‌گذارد؛ (۲) **فاز
-انحصاری** — فقط پس از پایان فاز ۱ (حتی اگر شکست خورده باشد، تا شکستی نامرتبط شاهد فشار را پنهان نکند؛ کد خروج همان نخستین شکست است)، `turbo run test:aggregation-stress --filter=@rasta/identity-service` که Project ‏Jest
+انحصاری** — **فقط برای `test:integration`** (از 2026-09-20؛ این Spec یک `.int-spec.ts` روی PostgreSQL واقعی است و `pnpm test` —
+و از راه آن `pnpm verify` — باید بی Docker اجرا شود)، فقط پس از پایان فاز ۱ (حتی اگر شکست خورده باشد، تا شکستی نامرتبط شاهد فشار را پنهان نکند؛ کد خروج همان نخستین شکست است)، `turbo run test:aggregation-stress --filter=@rasta/identity-service` که Project ‏Jest
 `aggregation-stress` را با `--runInBand`، بی `--passWithNoTests` و بی Cache ‏Turbo اجرا می‌کند. هر فاز با زمان UTC در Log اعلام
 می‌شود. آرگومان‌های پس از `--` (مثل `--testNamePattern` گام امنیتی CI) به هر دو فاز می‌رسند؛ گزینهٔ پیش از `--` (مثل `--filter`)
 رد می‌شود، چون تصمیم می‌گرفت فاز انحصاری اجرا شود یا نه — اجرای فیلترشده بی فاز انحصاری `pnpm exec turbo run <task> --filter …`
@@ -493,6 +494,17 @@ Retry، Artifact تجمیعیِ Redactشده، حفظ خروج غیرصفر و �
 - **`test` فقط Project Unit را اجرا کند**، تا `pnpm verify` روی ماشین بدون
   Docker قابل اجرا بماند. Suite Integration یک دروازه جداست که CI صریحاً در
   برابر سرویس‌های Provision‌شده اجرا می‌کند.
+
+از 2026-09-20 قاعدهٔ دوم دیگر توصیه نیست، **اجبار ایستا** است:
+`validateInfraFreeTestTask` در `scripts/test-phases-lib.mjs` اسکریپت `test` هر
+`services/*` را می‌خواند و اگر دقیقاً Project `unit` را انتخاب نکند، `pnpm
+check:test-phases` (در `pnpm verify` و Job ‏`quality`) می‌شکند. سه انحراف را
+همان‌جا گرفت: `organization` و `api-gateway` `jest` برهنه داشتند — که هر Project
+را انتخاب می‌کند — و `identity` صراحتاً `unit integration`. نتیجه‌اش این بود که
+`pnpm verify` در Shell بدون `.env` روی `DATABASE_URL_ORGANIZATION` می‌مرد و چون
+`test` یکی‌مانده‌به‌آخر زنجیره است، `build` را هم با خود می‌برد. `jest` برهنه
+خطرناک‌تر است: تا روزی که سرویس اولین Spec Integration خود را بگیرد، بی‌صدا سبز
+می‌ماند.
 
 ```typescript
 describe('AssetRepository (integration)', () => {

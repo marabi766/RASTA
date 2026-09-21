@@ -414,6 +414,11 @@ export const EXPECTED = {
       'in_app_notification',
       // NTF-003.
       'notification_preference',
+      // NTF-004. The templates the email channel renders from, their immutable
+      // published versions, and the quiet window a delivery defers into.
+      'notification_template',
+      'notification_template_version',
+      'notification_quiet_hours',
       // The outbox arrived with NTF-002's audit events. Before them this
       // service consumed and never produced, so it had none — which is the
       // deviation ADR-054 § 3 recorded against AGENTS.md S-06. Listed here so
@@ -424,8 +429,18 @@ export const EXPECTED = {
     ],
     // NTF-002 adds the second pair: read state is write-once. The trigger and
     // its function are named separately for the same reason as the first pair.
-    triggers: ['delivery_attempt_append_only', 'in_app_notification_state_write_once'],
-    functions: ['refuse_attempt_update', 'refuse_in_app_state_regression'],
+    triggers: [
+      'delivery_attempt_append_only',
+      'in_app_notification_state_write_once',
+      // NTF-004. A published template version is immutable; editing means
+      // publishing a new version, because a delivery cites `(key, version)`.
+      'trg_template_version_immutable',
+    ],
+    functions: [
+      'refuse_attempt_update',
+      'refuse_in_app_state_regression',
+      'notification_template_version_immutable',
+    ],
     indexes: [
       'ix_intent_claimable',
       'ix_in_app_unread',
@@ -435,6 +450,10 @@ export const EXPECTED = {
       // distinct: without it two GLOBAL rows for one channel are both legal and
       // the winning layer depends on row order.
       'ux_preference_global_channel',
+      // NTF-004. The predicate the mail worker claims on. Without it the
+      // sweep is a sequential scan of every delivery this service has ever
+      // written, most of which are in-app rows it will never send.
+      'ix_delivery_sendable',
     ],
     types: [
       'preference_scope',
@@ -446,6 +465,10 @@ export const EXPECTED = {
       'delivery_status',
       'attempt_outcome',
     ],
+    // NTF-004 widened `notification_channel` with `EMAIL`, and the down script
+    // has to rebuild the type to take it away again. A type-name check cannot
+    // see that; this can.
+    enumValues: [['notification_channel', 'EMAIL']],
     constraints: [
       'notification_dedupe_intent_id_fkey',
       'ck_intent_terminal_reason',
@@ -638,7 +661,15 @@ export const EXPECTED = {
  * re-applied at all.
  */
 export function assertionScript(expected, present, schema) {
-  const { tables, triggers, constraints, indexes = [], types = [], functions = [] } = expected;
+  const {
+    tables,
+    triggers,
+    constraints,
+    indexes = [],
+    types = [],
+    functions = [],
+    enumValues = [],
+  } = expected;
   const not = present ? 'NOT ' : '';
   const verb = present ? 'missing' : 'still present';
 
@@ -693,6 +724,22 @@ export function assertionScript(expected, present, schema) {
                          JOIN pg_namespace n ON n.oid = p.pronamespace
                        WHERE n.nspname = '${schema}' AND p.proname = '${name}') THEN
         RAISE EXCEPTION 'function % is ${verb}', '${name}';
+      END IF;`,
+    ),
+    // A *value* inside an enum, which a type-name check cannot see. PostgreSQL
+    // has no `ALTER TYPE ... DROP VALUE`, so a down script that has to remove
+    // one rebuilds the whole type and re-points every column at the new one.
+    // That is several statements in a specific order, and every way of getting
+    // it wrong leaves a type with the right name — which is all the check above
+    // ever asked about.
+    ...enumValues.map(
+      ([type, value]) => `
+      IF ${not}EXISTS (SELECT 1 FROM pg_enum e
+                         JOIN pg_type t ON t.oid = e.enumtypid
+                         JOIN pg_namespace n ON n.oid = t.typnamespace
+                       WHERE n.nspname = '${schema}' AND t.typname = '${type}'
+                         AND e.enumlabel = '${value}') THEN
+        RAISE EXCEPTION 'enum value %.% is ${verb}', '${type}', '${value}';
       END IF;`,
     ),
   ].join('\n');

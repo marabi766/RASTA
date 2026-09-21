@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /**
  * Fails if identity's aggregation stress spec could run in the parallel test
- * phase, twice, or not at all — or if any services/* `test:integration` would
- * pass over a project that is no longer empty.
+ * phase, twice, or not at all; if any services/* `test` script would need a
+ * database, which would make `pnpm verify` require `pnpm infra:up`; or if any
+ * services/* `test:integration` would pass over a project that is no longer
+ * empty.
  *
  *   node scripts/check-test-phases.mjs
  *
@@ -18,6 +20,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   EXCLUSIVE_PHASE,
   stripJsonComments,
+  validateInfraFreeTestTask,
   validatePassWithNoTests,
   validateTestPhases,
 } from './test-phases-lib.mjs';
@@ -37,7 +40,8 @@ function listFiles(base, dir) {
  * Every `services/*` package, in the shape `validatePassWithNoTests` takes:
  * its scripts, its jest projects and its package-relative file list. A
  * service is read from disk rather than from a list here, so adding one puts
- * it under the gate without editing this file.
+ * it under the gate without editing this file. `validateInfraFreeTestTask`
+ * needs only the `scripts` of this same shape.
  */
 function readServices(root) {
   const servicesDir = join(root, 'services');
@@ -88,7 +92,14 @@ function main() {
   let problems;
   try {
     const inputs = readTestPhaseInputs();
-    problems = [...validateTestPhases(inputs), ...validatePassWithNoTests(inputs.services)];
+    const serviceScripts = Object.fromEntries(
+      Object.entries(inputs.services).map(([packageDir, service]) => [packageDir, service.scripts]),
+    );
+    problems = [
+      ...validateInfraFreeTestTask(serviceScripts),
+      ...validateTestPhases(inputs),
+      ...validatePassWithNoTests(inputs.services),
+    ];
   } catch (error) {
     console.error(
       `test phases: cannot read the orchestration files — refusing to pass (${error.message})`,
@@ -104,8 +115,9 @@ function main() {
 
   console.warn(
     `test phases: ${EXCLUSIVE_PHASE.packageDir}/${EXCLUSIVE_PHASE.spec} runs once, alone, after the workspace phase ` +
-      '(pnpm test, pnpm test:integration, pnpm verify, CI); every services/* "test:integration" passes ' +
-      'with no tests only while its integration project is empty',
+      '(pnpm test:integration and CI, never pnpm test); every services/* "test" selects the unit project only, ' +
+      'so pnpm test and pnpm verify need no database; every services/* "test:integration" passes with no tests ' +
+      'only while its integration project is empty',
   );
 }
 

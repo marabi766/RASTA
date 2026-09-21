@@ -1,17 +1,25 @@
 import { Body, Controller, Get, Put, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { zodPipe } from '@rasta/nest-common';
-import { PreferencesService, type EffectivePreferenceView } from './preferences.service';
+import {
+  PreferencesService,
+  type EffectivePreferenceView,
+  type QuietHoursView,
+} from './preferences.service';
 import {
   effectiveQuerySchema,
   replacePreferencesSchema,
+  replaceQuietHoursSchema,
   type EffectiveQuery,
   type ReplacePreferencesDto,
+  type ReplaceQuietHoursDto,
 } from './preferences.dto';
 
 /**
- * Notification preferences — three endpoints, all "the caller's own" (ADR-054
- * § 5, § 11).
+ * Notification preferences — five endpoints, all "the caller's own" (ADR-054
+ * § 5, § 11). The last two are the quiet window NTF-003 deferred and NTF-004
+ * owes: the first channel that can wake somebody is the first one for which
+ * "not now" is a meaningful answer.
  *
  * Closed by default like the inbox: `AuthGuard` and `RolesGuard` are global,
  * nothing here carries `@Public`, `@AllowService` or `@Roles`. Every
@@ -58,6 +66,37 @@ export class PreferencesController {
   })
   replaceOwn(@Body(zodPipe(replacePreferencesSchema)) body: ReplacePreferencesDto) {
     return this.preferences.replaceOwn(body.preferences);
+  }
+
+  @Get('quiet-hours')
+  @ApiOperation({
+    summary: 'Read the caller’s own quiet window',
+    description:
+      'The hours in which an interrupting channel waits. Returned in the zone ' +
+      'it was set in, as HH:MM. `null` means no quiet window, which is what ' +
+      'every recipient has until they set one. Quiet hours defer and never ' +
+      'drop: a message due inside the window is sent when it ends, and a ' +
+      'CRITICAL notification is sent regardless.',
+  })
+  quietHours(): Promise<QuietHoursView> {
+    return this.preferences.quietHours();
+  }
+
+  @Put('quiet-hours')
+  @ApiOperation({
+    summary: 'Set or clear the caller’s own quiet window',
+    description:
+      'A window may wrap midnight — 22:00 to 07:00 is the ordinary case. Its ' +
+      'start and end must differ, because a window whose bounds are equal is ' +
+      'either zero minutes or the whole day depending on who reads it, and one ' +
+      'of those two readings silences a person permanently. Send `null` to ' +
+      'clear it. In-app notifications are never affected: they wait in an inbox ' +
+      'and interrupt nobody.',
+  })
+  replaceQuietHours(
+    @Body(zodPipe(replaceQuietHoursSchema)) body: ReplaceQuietHoursDto,
+  ): Promise<QuietHoursView> {
+    return this.preferences.replaceQuietHours(body.quietHours);
   }
 
   @Get('effective')

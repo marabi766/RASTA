@@ -113,7 +113,56 @@ export const SUPPRESSION_REASONS = {
    * about their own settings, not in a counter anyone can scrape.
    */
   PREFERENCE_OPT_OUT: 'PREFERENCE_OPT_OUT',
+  /**
+   * identity holds no address for this person (NTF-004).
+   *
+   * Suppressed rather than failed, and the difference is not cosmetic:
+   * nothing went wrong, there is nothing to retry, and counting it as a
+   * delivery failure would turn the email success rate into a number about how
+   * complete the user directory is.
+   */
+  NO_ADDRESS: 'NO_ADDRESS',
+  /**
+   * The rule that fired has no email text (NTF-004).
+   *
+   * All three rules ship with one. A fourth added without one would otherwise
+   * produce a silence that looks exactly like an outage; the row says which it
+   * was.
+   */
+  NO_EMAIL_TEMPLATE: 'NO_EMAIL_TEMPLATE',
 } as const;
+
+/**
+ * NTF-004. Every attempt against a mail server, by what it decided.
+ *
+ * `outcome` is the port's own three-value vocabulary and never the server's
+ * text. A label built from a remote party's message is how a metric acquires
+ * unbounded cardinality — and, here, how an address would reach a scrape.
+ */
+export const notificationMailAttemptsTotal = new Counter({
+  name: 'rasta_notification_mail_attempts_total',
+  help: 'Email send attempts, by outcome',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
+/**
+ * NTF-004. Deliveries that exhausted their attempts, by failure class.
+ *
+ * The signal an operator is alerted on (ADR-054 § 7, § 12): a dead delivery is
+ * a person who was meant to be told something and was not. Separate from the
+ * delivery counter above because this is the one that has to wake somebody —
+ * folding it into a status label would make the alert depend on a query nobody
+ * writes correctly at three in the morning.
+ *
+ * `error_class` is the closed set the channel port declares.
+ */
+export const notificationMailDeadTotal = new Counter({
+  name: 'rasta_notification_mail_dead_total',
+  help: 'Email deliveries that exhausted every attempt',
+  labelNames: ['error_class'] as const,
+  registers: [registry],
+});
 
 export const DISCARD_REASONS = {
   STALE_STREAM_SEQ: 'STALE_STREAM_SEQ',

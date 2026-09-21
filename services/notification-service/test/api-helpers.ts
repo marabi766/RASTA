@@ -13,6 +13,8 @@ import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { DispatcherConsumer } from '../src/intake/dispatcher.consumer';
 import { ResolutionWorker } from '../src/resolution/resolution.worker';
+import { MailWorker } from '../src/channels/mail.worker';
+import { OutboxRelay } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { newId } from '../src/intake/intake';
 import { databaseUrl } from './helpers';
@@ -147,6 +149,25 @@ export async function startApi(): Promise<ApiHarness> {
     .overrideProvider(DispatcherConsumer)
     .useValue(inertConsumer)
     .overrideProvider(ResolutionWorker)
+    .useValue(inertWorker)
+    // The mail worker is inert here for the same reason the other two are:
+    // these suites drive HTTP, and a timer that opens sockets to a mail server
+    // would make them depend on one being up. Its own behaviour is proved in
+    // `email-delivery.int-spec.ts`, against a real Mailpit.
+    .overrideProvider(MailWorker)
+    .useValue(inertWorker)
+    // And the outbox relay, which is the one that actually bit.
+    //
+    // These suites assert the outbox **rows** a request writes, inside the
+    // transaction that writes them. Whether a relay later publishes them to
+    // Kafka is a different claim, proved in the event-flow suite against a
+    // real broker. Left running, its timer keeps ticking after the suite ends
+    // and kafkajs logs a connection error into a torn-down environment —
+    // which Jest reports as "Cannot log after tests are done" and fails the
+    // whole run with, **after every test has passed**. That failure is
+    // timing-dependent, so it appeared as an unrelated red on somebody else's
+    // pull request rather than on the change that introduced it.
+    .overrideProvider(OutboxRelay)
     .useValue(inertWorker)
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({

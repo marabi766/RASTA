@@ -1,103 +1,143 @@
-import { formatJalaliDateLong, formatMoney } from '@/lib/format';
+import { redirect } from 'next/navigation';
 import {
   Alert,
   AppShell,
-  EmptyState,
+  Button,
   ErrorState,
   Grid,
   Identifier,
-  LoadingState,
-  NoAccessState,
   PageHeader,
   Section,
   Sidebar,
   StatusBadge,
   TopBar,
 } from '@/ui';
+import { currentSession } from '@/server/current-session';
+import { activeMembership, displayName, fetchCurrentUser } from '@/server/identity';
+import { PORTAL_NAV } from './nav';
 
 /**
- * The portal's entry route.
+ * The dashboard (docs/16 § 16.6, `/`).
  *
- * It is still a placeholder and still says so on screen: the domain screens
- * belong to `EXP-002` through `EXP-004`, and a page that looked finished while
- * nothing behind it worked would be the kind of claim this repository does not
- * make.
+ * The first screen in this portal that shows something real. It replaces the
+ * placeholder EXP-001 left here, which said in its own comment that the domain
+ * screens belonged to EXP-002 and that a page looking finished while nothing
+ * behind it worked would be a claim this repository does not make.
  *
- * What it does is put the foundation in front of a browser rather than only in
- * front of a test — the shell, the tokens in both themes, the Persian typeface,
- * the status language of docs/16 § 16.5, and **all three mandatory states side
- * by side**. Those three are the ones that normally exist only in a design
- * file until the first screen needs them in a hurry; here they are built, seen
- * and snapshotted before any screen depends on them.
+ * Everything on it is fetched on the server, through the gateway, with the
+ * session's own token. No token and no fetch ever happens in the browser
+ * (ADR-059).
+ *
+ * ## What it deliberately still does not do
+ *
+ * It does not summarise assets, work orders or notifications. Those screens
+ * are the rest of `EXP-002` and the stories after it, and a dashboard tile
+ * with a plausible number behind it would be exactly the claim the placeholder
+ * refused to make. What it shows is what is true today: who you are, which
+ * organization you are acting for, and what that organization has granted you.
  */
-const NAV = [
-  { href: '/', label: 'خانه' },
-  { href: '/assets', label: 'ماشین‌آلات' },
-  { href: '/orders', label: 'سفارش‌ها' },
-];
+export const dynamic = 'force-dynamic';
 
-export default function HomePage() {
-  // Fixed sample values, not live data. The API for these screens does not
-  // exist yet, and a number that looked live would be a worse placeholder than
-  // one that plainly is not.
-  const sampleAmount = '10000000';
-  const sampleInstant = '2026-09-18T21:30:00Z';
+export default async function HomePage() {
+  const session = await currentSession();
+  // Not a guard in the security sense — the gateway and every service decide
+  // that independently. This is so a signed-out person sees a way in instead
+  // of an error (docs/16 § 16.11).
+  if (!session) redirect('/login');
+
+  const result = await fetchCurrentUser(session);
 
   return (
     <AppShell
-      topBar={<TopBar organizationName="دهیاری نمونه" />}
-      sidebar={<Sidebar items={NAV} currentHref="/" />}
+      topBar={
+        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+          <form method="post" action="/auth/logout">
+            {/* ADR-059 § 5: SameSite=Strict plus a token, because "almost
+                always" is not a guarantee for a state change. */}
+            <input type="hidden" name="csrf" value={session.csrfToken} />
+            <Button type="submit" tone="secondary">
+              خروج
+            </Button>
+          </form>
+        </TopBar>
+      }
+      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/" />}
     >
-      <PageHeader
-        title="رستا"
-        description="پایهٔ پورتال برپا شده است. صفحه‌های دامنه‌ای در داستان‌های بعدی می‌آیند."
-      />
+      <PageHeader title="خانه" description="وضعیت حساب و سازمان فعال شما." />
 
-      <Alert tone="info" title="این صفحه نمونه است">
-        داده‌های زیر ثابت‌اند و از سرویسی نمی‌آیند. هدفشان این است که پایهٔ ظاهری و لایهٔ ارائهٔ
-        فارسی در مرورگر دیده شود، نه فرض.
+      {result.kind === 'UNAVAILABLE' ? (
+        <ErrorState correlationId={result.correlationId} code={`UPSTREAM_${result.status}`} />
+      ) : null}
+
+      {result.kind === 'MALFORMED' ? (
+        <ErrorState correlationId={result.correlationId} code="CONTRACT_MISMATCH" />
+      ) : null}
+
+      {result.kind === 'USER' ? (
+        <>
+          <Section headingId="account" title="حساب شما">
+            <Grid columns={2}>
+              <dl className="flex flex-col gap-4">
+                <div className="flex flex-col gap-1">
+                  <dt className="text-sm text-content-subtle">نام</dt>
+                  <dd className="text-xl text-content">{displayName(result.user)}</dd>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <dt className="text-sm text-content-subtle">نام کاربری</dt>
+                  <dd className="text-content">
+                    <Identifier>{result.user.username}</Identifier>
+                  </dd>
+                </div>
+              </dl>
+              <dl className="flex flex-col gap-4">
+                <div className="flex flex-col gap-1">
+                  <dt className="text-sm text-content-subtle">وضعیت حساب</dt>
+                  <dd>
+                    <StatusBadge status={result.user.status} />
+                  </dd>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <dt className="text-sm text-content-subtle">سازمان فعال</dt>
+                  <dd className="text-content">
+                    {result.user.activeOrganizationId ? (
+                      <Identifier>{result.user.activeOrganizationId}</Identifier>
+                    ) : (
+                      'انتخاب نشده'
+                    )}
+                  </dd>
+                </div>
+              </dl>
+            </Grid>
+          </Section>
+
+          <Section headingId="roles" title="دسترسی شما در این سازمان">
+            {result.user.effectiveRoles.length > 0 ? (
+              <ul className="flex flex-wrap gap-2">
+                {result.user.effectiveRoles.map((role) => (
+                  <li key={role}>
+                    <Identifier>{role}</Identifier>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <Alert tone="info" title="نقشی در این سازمان ثبت نشده">
+                تا وقتی مدیر سازمان نقشی به شما ندهد، صفحه‌های عملیاتی چیزی نشان نمی‌دهند.
+              </Alert>
+            )}
+            <p className="mt-4 text-sm text-content-muted">
+              {activeMembership(result.user)
+                ? 'این فهرست از سرویس هویت می‌آید و مرجع مجوزدهی نیست؛ هر درخواست جداگانه در سرور بررسی می‌شود.'
+                : 'عضویتی برای سازمان فعال یافت نشد.'}
+            </p>
+          </Section>
+        </>
+      ) : null}
+
+      <Alert tone="info" title="بقیهٔ صفحه‌های عملیاتی در راه‌اند">
+        فهرست ماشین‌آلات و پروندهٔ الکترونیکی دارایی آماده‌اند. راننده و تخصیص، ثبت کارکرد و نگهداری
+        در داستان‌های بعدی می‌آیند — و تا آن روز در ناوبری نمی‌نشینند، چون پیوند به صفحه‌ای که پاسخ
+        نمی‌دهد یک قول است که محصول به آن عمل نمی‌کند.
       </Alert>
-
-      <Section headingId="presentation" title="لایهٔ ارائهٔ فارسی">
-        <dl className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1">
-            <dt className="text-sm text-content-subtle">مبلغ</dt>
-            <dd className="text-xl text-content">{formatMoney(sampleAmount)}</dd>
-          </div>
-          <div className="flex flex-col gap-1">
-            <dt className="text-sm text-content-subtle">تاریخ</dt>
-            <dd className="text-xl text-content">{formatJalaliDateLong(sampleInstant)}</dd>
-          </div>
-          <div className="flex flex-col gap-1">
-            <dt className="text-sm text-content-subtle">شناسه</dt>
-            <dd className="text-xl text-content">
-              <Identifier>ORD-2026-0148</Identifier>
-            </dd>
-          </div>
-        </dl>
-      </Section>
-
-      <Section headingId="statuses" title="زبان بصری وضعیت">
-        <div className="flex flex-wrap gap-2">
-          <StatusBadge status="ACTIVE" />
-          <StatusBadge status="PENDING_APPROVAL" />
-          <StatusBadge status="REJECTED" />
-          <StatusBadge status="IN_MAINTENANCE" />
-          <StatusBadge status="DRAFT" />
-        </div>
-      </Section>
-
-      <Section headingId="states" title="سه حالت اجباری">
-        <Grid columns={2}>
-          <LoadingState variant="list" rows={2} />
-          <EmptyState
-            title="هنوز ماشین‌آلاتی ثبت نشده"
-            description="اولین دارایی را ثبت کنید تا اینجا دیده شود."
-          />
-          <ErrorState correlationId="req-sample-correlation" code="UPSTREAM_TIMEOUT" />
-          <NoAccessState />
-        </Grid>
-      </Section>
     </AppShell>
   );
 }
