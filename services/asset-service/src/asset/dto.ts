@@ -413,4 +413,129 @@ export const createInspectionSchema = z
 
 export type CreateInspectionDto = z.infer<typeof createInspectionSchema>;
 
+// ---------------------------------------------------------------------------
+// Claims
+// ---------------------------------------------------------------------------
+
+export const CLAIM_STATUSES = [
+  'SUBMITTED',
+  'UNDER_REVIEW',
+  'APPROVED',
+  'REJECTED',
+  'SETTLED',
+] as const;
+
+export type ClaimStatus = (typeof CLAIM_STATUSES)[number];
+
+const policyId = seedIdSchema(ID_PREFIXES.insurancePolicy);
+
+export const submitClaimSchema = z
+  .object({
+    /** The policy the incident is claimed under. It must belong to this asset. */
+    policyId,
+    /** The insurer's file number, where one has been issued already. */
+    claimNumber: z.string().trim().min(1).max(64).optional(),
+    description: z.string().trim().min(10).max(2000),
+    incidentAt: z.string().datetime(),
+    claimedAmountMinor: amountMinorSchema.optional(),
+  })
+  .strict()
+  .refine((v) => new Date(v.incidentAt) <= new Date(), {
+    message: 'incidentAt cannot be in the future',
+    path: ['incidentAt'],
+  });
+
+export type SubmitClaimDto = z.infer<typeof submitClaimSchema>;
+
+export const reviewClaimSchema = z
+  .object({
+    notes: z.string().trim().min(1).max(1000).optional(),
+  })
+  .strict();
+
+export type ReviewClaimDto = z.infer<typeof reviewClaimSchema>;
+
+/**
+ * The explicit decision.
+ *
+ * A rejection carries a reason and never an amount; an approval may carry the
+ * authorised amount. Both halves are enforced here and again by CHECK
+ * constraints on the row, because a rejected claim with an amount on it is the
+ * one shape that could later be read as money owed.
+ */
+export const decideClaimSchema = z
+  .object({
+    decision: z.enum(['APPROVED', 'REJECTED']),
+    approvedAmountMinor: amountMinorSchema.optional(),
+    notes: z.string().trim().min(3).max(1000).optional(),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if (v.decision === 'REJECTED' && v.approvedAmountMinor !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['approvedAmountMinor'],
+        message: 'A rejected claim cannot carry an approved amount',
+      });
+    }
+    if (v.decision === 'REJECTED' && !v.notes) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['notes'],
+        message: 'A rejection must state its reason',
+      });
+    }
+  });
+
+export type DecideClaimDto = z.infer<typeof decideClaimSchema>;
+
+export const recordClaimSettlementSchema = z
+  .object({
+    settledAt: z.string().datetime().optional(),
+    /** The reference under which settlement happened elsewhere — the insurer's
+     *  payment reference or an economic-service transaction id. */
+    settlementReference: z.string().trim().min(1).max(120).optional(),
+    notes: z.string().trim().min(1).max(1000).optional(),
+  })
+  .strict()
+  .refine((v) => !v.settledAt || new Date(v.settledAt) <= new Date(), {
+    message: 'settledAt cannot be in the future',
+    path: ['settledAt'],
+  });
+
+export type RecordClaimSettlementDto = z.infer<typeof recordClaimSettlementSchema>;
+
+export interface InsuranceClaimView {
+  id: string;
+  assetId: string;
+  policyId: string;
+  claimNumber: string | null;
+  description: string;
+  incidentAt: string;
+  claimedAmountMinor: string | null;
+  approvedAmountMinor: string | null;
+  status: string;
+  decidedAt: string | null;
+  decidedBy: string | null;
+  decisionNotes: string | null;
+  settledAt: string | null;
+  settlementReference: string | null;
+  submittedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One status the claim has been in, as the dossier recorded it. */
+export interface ClaimHistoryEntryView {
+  status: string;
+  occurredAt: string;
+  actor: string | null;
+  notes: string | null;
+}
+
+export interface InsuranceClaimDetailView extends InsuranceClaimView {
+  /** Oldest first: the story of the claim in the order it happened. */
+  history: ClaimHistoryEntryView[];
+}
+
 export { assetId as assetIdSchema };

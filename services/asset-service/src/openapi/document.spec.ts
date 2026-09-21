@@ -4,6 +4,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AssetController } from '../asset/asset.controller';
 import { AssetService } from '../asset/asset.service';
 import { InsuranceService } from '../insurance/insurance.service';
+import { ClaimService } from '../insurance/claim.service';
 
 /**
  * The document this service actually serves.
@@ -22,6 +23,7 @@ async function buildDocument() {
     providers: [
       { provide: AssetService, useValue: {} },
       { provide: InsuranceService, useValue: {} },
+      { provide: ClaimService, useValue: {} },
     ],
   }).compile();
 

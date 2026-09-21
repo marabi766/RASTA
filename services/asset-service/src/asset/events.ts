@@ -28,6 +28,16 @@ export const INSURANCE_EVENTS = {
   INSPECTION_RECORDED: 'INSPECTION_RECORDED',
   INSPECTION_EXPIRING: 'INSPECTION_EXPIRING',
   INSPECTION_FAILED: 'INSPECTION_FAILED',
+  /**
+   * Claims. docs/07 names `INSURANCE_CLAIM_OPENED` and `INSURANCE_CLAIM_DECIDED`
+   * as the target contract with the insurance module as producer; the two
+   * intermediate facts — review started, settlement recorded — are named too,
+   * so an audit consumer sees every transition rather than only the ends.
+   */
+  INSURANCE_CLAIM_OPENED: 'INSURANCE_CLAIM_OPENED',
+  INSURANCE_CLAIM_REVIEW_STARTED: 'INSURANCE_CLAIM_REVIEW_STARTED',
+  INSURANCE_CLAIM_DECIDED: 'INSURANCE_CLAIM_DECIDED',
+  INSURANCE_CLAIM_SETTLEMENT_RECORDED: 'INSURANCE_CLAIM_SETTLEMENT_RECORDED',
 } as const;
 
 export type AssetEventName = (typeof ASSET_EVENTS)[keyof typeof ASSET_EVENTS];
@@ -178,6 +188,68 @@ export const inspectionFailedPayload = z.object({
   notes: z.string().nullable(),
 });
 
+// ---------------------------------------------------------------------------
+// Claim payloads
+// ---------------------------------------------------------------------------
+
+/** Rial amounts travel as strings (ADR-022); a JSON number loses digits. */
+const amountMinorOnTheWire = z
+  .string()
+  .regex(/^\d{1,30}$/)
+  .nullable();
+
+export const insuranceClaimOpenedPayload = z.object({
+  assetId: z.string(),
+  organizationId: z.string(),
+  claimId: z.string(),
+  policyId: z.string(),
+  incidentAt: z.string(),
+  claimedAmountMinor: amountMinorOnTheWire,
+});
+
+export const insuranceClaimReviewStartedPayload = z.object({
+  assetId: z.string(),
+  organizationId: z.string(),
+  claimId: z.string(),
+  policyId: z.string(),
+  reviewedBy: z.string(),
+});
+
+/**
+ * The explicit decision of the configured authority (docs/24 Q-59).
+ *
+ * Carries the decider and the amount because economic-service — when it takes
+ * settlement over — needs the authorised figure and who authorised it, and
+ * should not have to call back for either. `notes` is the stated reason; a
+ * rejection always has one.
+ */
+export const insuranceClaimDecidedPayload = z.object({
+  assetId: z.string(),
+  organizationId: z.string(),
+  claimId: z.string(),
+  policyId: z.string(),
+  decision: z.enum(['APPROVED', 'REJECTED']),
+  approvedAmountMinor: amountMinorOnTheWire,
+  decidedBy: z.string(),
+  decidedAt: z.string(),
+  notes: z.string().nullable(),
+});
+
+/**
+ * Settlement *recorded*, not performed. This service never moves money; the
+ * event says a settlement happened elsewhere and under which reference.
+ */
+export const insuranceClaimSettlementRecordedPayload = z.object({
+  assetId: z.string(),
+  organizationId: z.string(),
+  claimId: z.string(),
+  policyId: z.string(),
+  approvedAmountMinor: amountMinorOnTheWire,
+  settledAt: z.string(),
+  settlementReference: z.string().nullable(),
+  recordedBy: z.string(),
+});
+
 export const ASSET_EVENT_SCHEMAS = {
   [ASSET_EVENTS.ASSET_CREATED]: assetCreatedPayload,
   [ASSET_EVENTS.ASSET_UPDATED]: assetUpdatedPayload,
@@ -196,6 +268,10 @@ export const INSURANCE_EVENT_SCHEMAS = {
   [INSURANCE_EVENTS.INSPECTION_RECORDED]: inspectionRecordedPayload,
   [INSURANCE_EVENTS.INSPECTION_EXPIRING]: inspectionExpiringPayload,
   [INSURANCE_EVENTS.INSPECTION_FAILED]: inspectionFailedPayload,
+  [INSURANCE_EVENTS.INSURANCE_CLAIM_OPENED]: insuranceClaimOpenedPayload,
+  [INSURANCE_EVENTS.INSURANCE_CLAIM_REVIEW_STARTED]: insuranceClaimReviewStartedPayload,
+  [INSURANCE_EVENTS.INSURANCE_CLAIM_DECIDED]: insuranceClaimDecidedPayload,
+  [INSURANCE_EVENTS.INSURANCE_CLAIM_SETTLEMENT_RECORDED]: insuranceClaimSettlementRecordedPayload,
 } as const satisfies Record<InsuranceEventName, z.ZodTypeAny>;
 
 /** Validates before the payload reaches the outbox, so a malformed event never
