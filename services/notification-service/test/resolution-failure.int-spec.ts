@@ -117,7 +117,9 @@ describe('recipient resolution failure and recovery', () => {
         userId: user,
         resolvedRole: 'FLEET_MANAGER',
         resolutionSource: 'IDENTITY_API',
-        emailSnapshot: null,
+        // Written since NTF-004: the address a delivery can be held to, taken
+        // once at resolution rather than looked up again at send time.
+        emailSnapshot: expect.stringContaining('@'),
       }),
     ]);
     expect(rows.deliveries).toEqual([
@@ -223,12 +225,21 @@ describe('recipient resolution failure and recovery', () => {
     // The repository-level fence is what did that.
     await expect(
       asWorker(organizationId, () =>
-        w.repository.dispatchInApp({
+        w.repository.dispatch({
           intent: stale!,
-          recipients: [{ userId: user, role: 'FLEET_MANAGER' }],
+          recipients: [{ userId: user, role: 'FLEET_MANAGER', email: null }],
           rendered: { title: 't', body: 'b', actionPath: null },
           templateVersion: 1,
           inAppTtlDays: 1,
+          rule: {
+            ruleKey: 'insurance.expiring',
+            category: 'EXPIRY',
+            classification: 'ROUTINE',
+            severity: 'WARNING',
+            mandatoryChannels: [],
+          },
+          channelDefaults: () => true,
+          emailTemplate: null,
         }),
       ),
     ).rejects.toBeInstanceOf(LeaseLostError);

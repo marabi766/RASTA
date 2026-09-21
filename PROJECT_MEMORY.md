@@ -1648,7 +1648,7 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 | `supplier-service`     | ۴۱۷       | ۱۲۶          |
 | `marketplace-service`  | ۲۸۱       | ۱۵۳          |
 | `document-service`     | ۲۸۱       | ۱۷۵          |
-| `notification-service` | ۱۸۰       | ۷۰           |
+| `notification-service` | ۲۷۹       | ۱۲۰          |
 | `maintenance-service`  | ۱۲۲       | ۴۳           |
 | `asset-service`        | ۹۹        | ۶            |
 | `api-gateway`          | ۹۲        | —            |
@@ -1843,14 +1843,14 @@ scripts/
 وجود دارند، و شمارش تست‌های جدول بالا هم از اجرای سبز `35364991343` عقب است.
 جدول معتبر، جدول § ۳ است. تفاوت‌های مهم:
 
-| سرویس                  | وضعیت واقعی امروز                                                                                                                                 |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `marketplace-service`  | IMPLEMENTED · TESTED · **CI VERIFIED** — ۲۸۱ واحد + ۱۵۳ یکپارچگی؛ فاز ۲ `ADR-052` گام ۱ روی `main`                                                |
-| `supplier-service`     | IMPLEMENTED · TESTED · **CI VERIFIED** — ۴۱۷ واحد + ۱۲۶ یکپارچگی                                                                                  |
-| `audit-service`        | IMPLEMENTED · TESTED · **CI VERIFIED** — ۷۱۷ واحد + ۱۷۷ یکپارچگی؛ `AUD-004` روی `main` (`ADR-053`، `ADR-055`)                                     |
-| `notification-service` | IMPLEMENTED · TESTED · **CI VERIFIED** — ۲۰۸ واحد + ۱۱۰ یکپارچگی؛ `NTF-001`، `NTF-002` و `NTF-003` هر سه روی `main` (`ADR-054`؛ PR #46، #47، #60) |
-| `identity-service`     | شمارش جدول بالا (۱۴ واحد) به‌شدت کهنه بود؛ امروز ۷۸۹ واحد + ۹۵ یکپارچگی — رشد از `AUD-004` و رویدادهای امنیتی می‌آید                              |
-| `api-gateway`          | همچنان **بدون Dockerfile** — تنها سرویسی که در Matrix ساخت نیست                                                                                   |
+| سرویس                  | وضعیت واقعی امروز                                                                                                                                                                                                         |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `marketplace-service`  | IMPLEMENTED · TESTED · **CI VERIFIED** — ۲۸۱ واحد + ۱۵۳ یکپارچگی؛ فاز ۲ `ADR-052` گام ۱ روی `main`                                                                                                                        |
+| `supplier-service`     | IMPLEMENTED · TESTED · **CI VERIFIED** — ۴۱۷ واحد + ۱۲۶ یکپارچگی                                                                                                                                                          |
+| `audit-service`        | IMPLEMENTED · TESTED · **CI VERIFIED** — ۷۱۷ واحد + ۱۷۷ یکپارچگی؛ `AUD-004` روی `main` (`ADR-053`، `ADR-055`)                                                                                                             |
+| `notification-service` | IMPLEMENTED · TESTED · **CI VERIFIED** — ۲۷۹ واحد + ۱۲۰ یکپارچگی؛ `NTF-001` تا `NTF-004` روی `main` (`ADR-054`؛ PR #46، #47، #60، #63). ایمیل فقط در برابر Mailpit: `deliversToRealRecipients` ثابتِ `false` و `Q-37` باز |
+| `identity-service`     | شمارش جدول بالا (۱۴ واحد) به‌شدت کهنه بود؛ امروز ۷۸۹ واحد + ۹۵ یکپارچگی — رشد از `AUD-004` و رویدادهای امنیتی می‌آید                                                                                                      |
+| `api-gateway`          | همچنان **بدون Dockerfile** — تنها سرویسی که در Matrix ساخت نیست                                                                                                                                                           |
 
 **چهار سرویس باقی‌مانده در MVP:** `procurement` (COM-007) · `inventory`
 (COM-006) · `construction` (CON-001..003) · `contract`. به‌علاوهٔ `analytics`
@@ -4481,6 +4481,10 @@ ADR-001 (Microservices)، ADR-004/005 (Database + Ownership)، ADR-006
 
 ### به‌روزرسانی 2026-09-20
 
+- **`notification-service`** — `NTF-004`: کانال ایمیل کامل — قالب‌های
+  نسخه‌دار و تغییرناپذیر، Render فارسی راست‌به‌چپ، ساعات سکوت، نردبان تلاش مجدد
+  با Jitter، و رویدادهای `NOTIFICATION_SENT` و `NOTIFICATION_FAILED`. روی
+  Mailpit واقعی اثبات شد؛ به هیچ گیرندهٔ واقعی نشانه نمی‌رود (`Q-37` باز)
 - **`notification-service`** — `NTF-003`: ترجیحات اعلان به‌ازای مستأجر، نردبان
   تقدم پنج‌لایه به‌صورت تابع خالص، و سه Endpoint که یکی‌شان **لایهٔ برنده** را
   برمی‌گرداند. ترجیح خاموش یک تحویل `SUPPRESSED` با دلیل می‌سازد، نه ردیف غایب.
@@ -4637,6 +4641,44 @@ ADR-001 (Microservices)، ADR-004/005 (Database + Ownership)، ADR-006
 ---
 
 ## ۲۹. Immediate Next Task
+
+### به‌روزرسانی 2026-09-21 — `NTF-004` پیاده شد: این پلتفرم حالا ایمیل می‌فرستد
+
+**به Mailpit، و فقط به Mailpit.** کانال ایمیل کامل شد: مقدار `EMAIL` در Enum
+کانال همراه Worker ای که می‌نویسدش، دو جدول قالب با نسخهٔ تغییرناپذیر و Seed از
+کاتالوگ کد، Render فارسی راست‌به‌چپ با رقم فارسی و تاریخ هجری شمسی در منطقهٔ زمانی
+گیرنده، ساعات سکوت (همان که `NTF-003` موکولش کرده بود) با دو Endpoint تازه،
+Worker مبتنی بر Claim با نردبان `۱s → ۵s → ۳۰s → ۲m → ۱۰m` و Jitter، و انتشار
+`NOTIFICATION_SENT` و `NOTIFICATION_FAILED` از Outbox در همان تراکنشِ نتیجه.
+
+**شواهد، و تفکیکشان.** محلی روی Postgres و Mailpit واقعی: ۲۷۹ واحد و ۱۲۰
+یکپارچگی سبز، به‌علاوهٔ `verify-migration-reversible.mjs notification` سبز —
+up → down → up روی Schema یک‌بارمصرف، با پنج Migration این سرویس. قاعدهٔ هشدار
+`RastaNotificationDeliveryDead` با `promtool test rules` سبز. **CI هنوز روی این
+شاخه اجرا نشده بود وقتی این خط نوشته شد**؛ شمارهٔ اجرا پس از سبزشدن اینجا
+می‌نشیند.
+
+> **یک تصمیم در Verifier، که ارزش نگه‌داشتن دارد.** PostgreSQL
+> `ALTER TYPE ... DROP VALUE` ندارد، پس برگرداندن این Migration یعنی بازساختن
+> کامل `notification_channel` و جابه‌جا کردن هر ستونی که از آن استفاده می‌کند —
+> چند دستور با ترتیب مشخص، و **هر شکل اشتباهش تایپی با نام درست باقی می‌گذارد**،
+> که تنها چیزی بود که بررسی پیشین می‌پرسید. `enumValues` به
+> `verify-migration-reversible-lib.mjs` اضافه شد و دربارهٔ خودِ Label می‌پرسد.
+> بدون آن، up → down → up سبز می‌شد در حالی که `EMAIL` هرگز نرفته بود.
+
+> **سه انحراف ثبت‌شده، در `ADR-054-implementation-plan § ۵`.** Circuit Breaker و
+> سقف نرخ خروجی ساخته نشدند (در معیارهای پذیرش نیستند)؛ ساعات سکوت جدول خودش را
+> دارد نه ستون روی جدول ترجیحات (چون شکل ADR اجازه می‌داد یک نفر سه پنجرهٔ
+> متناقض داشته باشد)؛ و دو Endpoint فقط‌خواندنی عیب‌یابی قالب به `NTF-005`
+> موکول شدند.
+
+> **`Q-37` همچنان باز است، و سه قفلش دست‌نخورده.** `deliversToRealRecipients`
+> ثابتِ `false` است، فرستندهٔ پیش‌فرض `rasta.invalid` است، و `env.spec.ts`
+> اثبات می‌کند هیچ متغیر محیطی‌ای این را روشن نمی‌کند. **هیچ ایمیلی به یک انسان
+> واقعی نرفته است.** اینکه `COM-008` با باز بودن `Q-37` پذیرفته می‌شود یا نه،
+> تصمیم صاحب محصول است.
+
+---
 
 ### به‌روزرسانی 2026-09-20 — `NTF-003` پیاده شد، و `Q-38` بسته شد
 

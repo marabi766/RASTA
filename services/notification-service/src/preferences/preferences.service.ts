@@ -5,7 +5,13 @@ import { ruleForKey } from '../rules/rules';
 import { CHANNEL_DEFAULTS } from './defaults';
 import { isOverridable, resolvePreference, type Channel } from './precedence';
 import { PreferencesRepository } from './preferences.repository';
-import type { EffectiveQuery, PreferenceInput } from './preferences.dto';
+import {
+  clockToMinutes,
+  minutesToClock,
+  type EffectiveQuery,
+  type PreferenceInput,
+  type QuietHoursDto,
+} from './preferences.dto';
 
 /**
  * The preference API (ADR-054 § 5, NTF-003).
@@ -39,6 +45,10 @@ export interface EffectivePreferenceView {
   readonly overridable: boolean;
 }
 
+export interface QuietHoursView {
+  readonly quietHours: QuietHoursDto | null;
+}
+
 export interface PreferenceView {
   readonly scope: string;
   readonly scopeKey: string | null;
@@ -49,6 +59,49 @@ export interface PreferenceView {
 @Injectable()
 export class PreferencesService {
   constructor(private readonly repository: PreferencesRepository) {}
+
+  /**
+   * The caller's quiet window (NTF-004).
+   *
+   * Returned as `HH:MM` in the zone it was set in, which is how it was given.
+   * Converting to the reader's zone would answer a question nobody asked and
+   * make "the window I set" and "the window I see" two different strings.
+   */
+  async quietHours(): Promise<QuietHoursView> {
+    const row = await this.repository.quietHours(resolveActor());
+    return {
+      quietHours: row
+        ? {
+            start: minutesToClock(row.startMinute),
+            end: minutesToClock(row.endMinute),
+            timezone: row.timezone,
+          }
+        : null,
+    };
+  }
+
+  /**
+   * Sets or clears it.
+   *
+   * No refusal here of the kind `replaceOwn` has, and that asymmetry is
+   * deliberate: a quiet window never silences anything. It defers, and a
+   * `CRITICAL` notification ignores it altogether, so there is no mandatory
+   * policy for it to collide with.
+   */
+  async replaceQuietHours(window: QuietHoursDto | null): Promise<QuietHoursView> {
+    const actor = resolveActor();
+    await this.repository.replaceQuietHours(
+      actor,
+      window
+        ? {
+            startMinute: clockToMinutes(window.start),
+            endMinute: clockToMinutes(window.end),
+            timezone: window.timezone,
+          }
+        : null,
+    );
+    return { quietHours: window };
+  }
 
   async listOwn(): Promise<{ preferences: PreferenceView[] }> {
     const actor = resolveActor();

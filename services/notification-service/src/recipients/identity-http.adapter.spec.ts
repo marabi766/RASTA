@@ -70,7 +70,7 @@ describe('IdentityHttpRecipientAdapter', () => {
     const result = await adapter.resolve(query);
 
     expect(result).toEqual({
-      recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER' }],
+      recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER', email: 'usr_1@example.test' }],
       truncated: false,
     });
     expect(calls).toHaveLength(2);
@@ -94,7 +94,19 @@ describe('IdentityHttpRecipientAdapter', () => {
     ).rejects.toThrow();
   });
 
-  it('retains user ids and roles only — never the email, phone or name identity returns', async () => {
+  /**
+   * This test used to assert that **no** address survived parsing, and
+   * widening it rather than deleting it is the point.
+   *
+   * The invariant was never "the address is dropped". It is **nothing is kept
+   * that no code path needs** — and NTF-004 gave the address a use: the email
+   * channel has to know where to write, and the resolution snapshot has to
+   * record where it wrote. What has no use is still dropped, and that is what
+   * is asserted here: no phone, because Q-15 has no answer and there is no SMS
+   * adapter, and no names, because a notification addresses a person by their
+   * address and not by their identity record.
+   */
+  it('retains the address, the id and the role — and nothing else identity returns', async () => {
     const { fetch } = fakeFetch(() =>
       jsonResponse({ items: [user('USR_1', ['FLEET_MANAGER'])], hasMore: false }),
     );
@@ -107,10 +119,31 @@ describe('IdentityHttpRecipientAdapter', () => {
     const result = await adapter.resolve({ ...query, roles: ['FLEET_MANAGER'] });
 
     const serialised = JSON.stringify(result);
-    expect(serialised).not.toContain('@example.test');
     expect(serialised).not.toContain('+98000');
     expect(serialised).not.toContain('First');
-    expect(Object.keys(result.recipients[0]!).sort()).toEqual(['role', 'userId']);
+    expect(serialised).not.toContain('Last');
+    expect(serialised).not.toContain('u-USR_1');
+    expect(Object.keys(result.recipients[0]!).sort()).toEqual(['email', 'role', 'userId']);
+    expect(result.recipients[0]!.email).toBe('usr_1@example.test');
+  });
+
+  it('keeps a recipient who has no address, rather than dropping them', async () => {
+    // A person without an address is still a recipient: they get their in-app
+    // notification, and the email delivery is suppressed with a reason. The
+    // opposite — dropping them here — would make one incomplete identity
+    // record silently remove somebody from a notification they are entitled
+    // to, and nothing downstream could tell that had happened.
+    const { email: _omitted, ...withoutEmail } = user('USR_2', ['FLEET_MANAGER']);
+    const { fetch } = fakeFetch(() => jsonResponse({ items: [withoutEmail], hasMore: false }));
+    const adapter = new IdentityHttpRecipientAdapter(
+      { baseUrl: 'http://identity.test', timeoutMs: 1000 },
+      tokens,
+      fetch,
+    );
+
+    const result = await adapter.resolve({ ...query, roles: ['FLEET_MANAGER'] });
+
+    expect(result.recipients).toEqual([{ userId: 'USR_2', role: 'FLEET_MANAGER', email: null }]);
   });
 
   it('merges a user holding several roles once, credited to the first role that matched', async () => {
@@ -127,7 +160,9 @@ describe('IdentityHttpRecipientAdapter', () => {
     );
 
     const result = await adapter.resolve(query);
-    expect(result.recipients).toEqual([{ userId: 'USR_1', role: 'FLEET_MANAGER' }]);
+    expect(result.recipients).toEqual([
+      { userId: 'USR_1', role: 'FLEET_MANAGER', email: 'usr_1@example.test' },
+    ]);
   });
 
   it('follows the cursor across pages', async () => {

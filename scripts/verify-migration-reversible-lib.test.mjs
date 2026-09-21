@@ -62,6 +62,7 @@ const SAMPLE = {
   indexes: ['i_one'],
   types: ['y_one'],
   functions: ['f_one'],
+  enumValues: [['y_one', 'V_ONE']],
 };
 
 /** How many object kinds `SAMPLE` names — one check each. */
@@ -81,6 +82,10 @@ test('assertionScript looks each object kind up in the catalog it lives in', () 
   // has to be asked about by name or an orphan goes unnoticed until the second
   // `up` fails to create it.
   assert.match(script, /pg_proc p[\s\S]*p\.proname = 'f_one'/);
+  // A value inside an enum. The type-name check above passes whatever the
+  // labels are, so a down script that rebuilt `notification_channel` and put
+  // `EMAIL` back would look like a clean rollback.
+  assert.match(script, /pg_enum e[\s\S]*e\.enumlabel = 'V_ONE'/);
 
   // And every one of them is scoped to the throwaway schema, never to the
   // search path — a check that found the object in the real schema would
@@ -102,6 +107,20 @@ test('assertionScript inverts the test, not merely the wording, for absence', ()
   assert.equal((absent.match(/is still present/g) ?? []).length, SAMPLE_KINDS);
 });
 
+test('assertionScript asks about an enum value in the type it belongs to', () => {
+  // Two different enums may legally carry the same label, so the check has to
+  // name both — otherwise removing `EMAIL` from one type would be reported as
+  // done while it still stood in the other.
+  const script = assertionScript(
+    { tables: [], triggers: [], constraints: [], enumValues: [['a_type', 'SHARED']] },
+    false,
+    SCHEMA,
+  );
+
+  assert.match(script, /t\.typname = 'a_type'[\s\S]*e\.enumlabel = 'SHARED'/);
+  assert.match(script, /enum value %\.% is still present/);
+});
+
 test('assertionScript stays silent about object kinds a service does not list', () => {
   // The four services that predate AUD-003 declare neither key, and adding the
   // two kinds must not make their scripts assert anything new.
@@ -114,6 +133,7 @@ test('assertionScript stays silent about object kinds a service does not list', 
   assert.doesNotMatch(script, /pg_class/);
   assert.doesNotMatch(script, /pg_type/);
   assert.doesNotMatch(script, /pg_proc/);
+  assert.doesNotMatch(script, /pg_enum/);
   assert.match(script, /tablename = 't_one'/);
 });
 
@@ -280,6 +300,18 @@ test('every notification object the verifier asserts is created by a notificatio
     assert.match(up, new RegExp(`CREATE OR REPLACE FUNCTION ${name}\(\)`));
     assert.match(down, new RegExp(`DROP FUNCTION IF EXISTS ${name}\(\)`));
   }
+  // NTF-004 widened an existing enum instead of creating a type, which the
+  // loop above cannot see: `notification_channel` is created by NTF-001 and
+  // dropped by its down script whether or not `EMAIL` was ever added to it.
+  for (const [type, value] of EXPECTED.notification.enumValues) {
+    assert.match(up, new RegExp(`ALTER TYPE "${type}" ADD VALUE IF NOT EXISTS '${value}'`));
+    // PostgreSQL cannot drop an enum value, so the only honest reversal is a
+    // rebuild — and a rebuild that forgot to move a column would leave the
+    // schema unusable rather than merely un-reversed.
+    assert.match(down, new RegExp(`ALTER TYPE "${type}" RENAME TO`));
+    assert.match(down, new RegExp(`CREATE TYPE "${type}" AS ENUM`));
+  }
+
   assert.match(
     down,
     new RegExp(`DELETE FROM "_prisma_migrations" WHERE "migration_name" = '${NTF_001}'`),

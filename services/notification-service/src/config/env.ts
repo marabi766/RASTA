@@ -49,12 +49,14 @@ export const NOTIFICATION_DLQ_TOPIC = 'rasta.notification.v1.dlq';
  * No route here yet verifies an inbound token — the first one arrives with the
  * read API in NTF-002, together with the global `AuthGuard`.
  *
- * **No email provider setting appears here, and that is a decision, not an
- * omission.** ADR-054 § 6 records Q-37 — no production provider and no sender
- * identity has been chosen — as open. A key with a default would settle it
- * silently, because whatever ships as the default becomes the policy every
- * deployment runs (AGENTS.md § 9). NTF-004 is built against Mailpit and must
- * not target real recipients until Q-37 is answered.
+ * **The mail settings below do not answer Q-37, and are shaped so they
+ * cannot.** ADR-054 § 6 records that question — which production provider,
+ * which sender identity — as open, and it stays open: the adapter enum accepts
+ * one value and refuses boot on any other, and the shipped sender is a
+ * `.invalid` address that can never resolve. What a default settles becomes
+ * the policy every deployment runs (AGENTS.md § 9), so the default here is one
+ * that fails rather than one that sends as somebody. NTF-004 is built and
+ * proven against Mailpit.
  *
  * Every tunable below has a bounded range so a misconfiguration cannot
  * disable the control it belongs to.
@@ -113,6 +115,24 @@ export const notificationEnvSchema = baseEnvSchema
       .min(1)
       .max(86_400)
       .default(600),
+
+    // Mail worker — the same claim shape, against a mail server (NTF-004).
+    //
+    // Its own tunables rather than the resolution worker's, because the two
+    // wait on different things: identity answers in milliseconds, a mail
+    // server may take seconds per message. Sharing a lease length would size
+    // one of them wrongly, and the one sized wrongly would be the one whose
+    // leases expire mid-send.
+    NOTIFICATION_MAIL_POLL_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(2_000),
+    /**
+     * How many messages one tick may send.
+     *
+     * Small on purpose: a tick sends them one after another, and a batch of
+     * fifty against a slow server holds a lease long enough to lose it.
+     */
+    NOTIFICATION_MAIL_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
+    NOTIFICATION_MAIL_LEASE_SECONDS: z.coerce.number().int().min(10).max(3_600).default(120),
+    NOTIFICATION_MAIL_BACKOFF_MAX_SECONDS: z.coerce.number().int().min(1).max(86_400).default(600),
 
     // Mail channel (ADR-054 § 6, `docs/24` Q-37) ---------------------------
     /**

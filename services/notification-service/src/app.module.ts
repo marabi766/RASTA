@@ -1,4 +1,5 @@
 import {
+  Inject,
   Module,
   type MiddlewareConsumer,
   type NestModule,
@@ -43,6 +44,9 @@ import { withAddressScrubbing, type ScrubbedLogger } from './logging/scrub';
 import { ENV, LOGGER, MAIL_CHANNEL, SCRUBBED_LOGGER } from './tokens';
 import type { MailChannel } from './channels/mail.channel.port';
 import { SmtpMailChannel } from './channels/smtp.mail.channel';
+import { MailWorker } from './channels/mail.worker';
+import { templateReader } from './channels/template.reader';
+import { seedEmailTemplates } from './channels/template.seeder';
 import {
   brokersOf,
   DISPATCHER_CONSUMER_GROUP,
@@ -286,6 +290,40 @@ import {
     },
 
     {
+      provide: MailWorker,
+      inject: [
+        ENV,
+        SCRUBBED_LOGGER,
+        NotificationRepository,
+        MAIL_CHANNEL,
+        EventPublisher,
+        PrismaService,
+      ],
+      useFactory: (
+        env: NotificationEnv,
+        logger: ScrubbedLogger,
+        repository: NotificationRepository,
+        mail: MailChannel,
+        publisher: EventPublisher,
+        prisma: PrismaService,
+      ): MailWorker =>
+        new MailWorker(
+          repository,
+          mail,
+          publisher,
+          templateReader(prisma),
+          {
+            pollIntervalMs: env.NOTIFICATION_MAIL_POLL_INTERVAL_MS,
+            batchSize: env.NOTIFICATION_MAIL_BATCH_SIZE,
+            leaseSeconds: env.NOTIFICATION_MAIL_LEASE_SECONDS,
+            backoffMaxSeconds: env.NOTIFICATION_MAIL_BACKOFF_MAX_SECONDS,
+            owner: `${SERVICE_NAME}@${hostname()}#${process.pid}`,
+          },
+          logger,
+        ),
+    },
+
+    {
       provide: ResolutionWorker,
       inject: [ENV, SCRUBBED_LOGGER, NotificationRepository, RECIPIENT_PORT],
       useFactory: (
@@ -322,6 +360,9 @@ export class AppModule implements NestModule, OnModuleInit {
     private readonly dispatcher: DispatcherConsumer,
     private readonly worker: ResolutionWorker,
     private readonly relay: OutboxRelay,
+    private readonly mailWorker: MailWorker,
+    private readonly prisma: PrismaService,
+    @Inject(SCRUBBED_LOGGER) private readonly bootLogger: ScrubbedLogger,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -329,8 +370,18 @@ export class AppModule implements NestModule, OnModuleInit {
   }
 
   async onModuleInit(): Promise<void> {
+    // First, and before anything can try to render: the template catalogue.
+    // A published version whose text changed without its number **refuses the
+    // boot** rather than sending a message nobody can account for later
+    // (`template.seeder.ts`).
+    const seeded = await seedEmailTemplates(this.prisma.client);
+    this.bootLogger.info(
+      `Email templates: ${seeded.published} published, ${seeded.unchanged} already current`,
+    );
+
     await this.dispatcher.start();
     this.worker.start();
+    this.mailWorker.start();
     // Started after the consumer and the worker, and deliberately last: the
     // relay only ever drains rows that are already committed, so nothing it
     // publishes depends on either of them being up. If it fails to start, the

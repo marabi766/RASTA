@@ -39,6 +39,9 @@ describe('the tenant guard covers this service schema', () => {
       'NotificationDelivery',
       'NotificationIntent',
       'NotificationPreference',
+      'NotificationQuietHours',
+      'NotificationTemplate',
+      'NotificationTemplateVersion',
       'OutboxMessage',
       'OutboxStreamSequence',
       'ProcessedEvent',
@@ -58,22 +61,32 @@ describe('the tenant guard covers this service schema', () => {
     expect([...TENANT_SCOPED_MODELS].filter((model) => !defined.has(model))).toEqual([]);
   });
 
-  it('exempts exactly three models, and names each one', () => {
+  it('exempts exactly five models, and names each one', () => {
+    // Asserted in full rather than by membership: a model added to the schema
+    // and quietly added here too would otherwise never be read by anybody, and
+    // "unscoped" is the one property in this file that must not be acquirable
+    // without a reviewer noticing.
     expect([...TENANT_SCOPE_EXEMPT_MODELS]).toEqual([
       'OutboxMessage',
       'OutboxStreamSequence',
       'ProcessedEvent',
+      'NotificationTemplate',
+      'NotificationTemplateVersion',
     ]);
   });
 
-  // Two of the three carry no organization column at all, so exempting them
-  // costs nothing.
-  it.each(['ProcessedEvent', 'OutboxStreamSequence'])(
-    'exempts %s, which has no tenant',
-    (model) => {
-      expect(modelsWithTenantColumn(SCHEMA)).not.toContain(model);
-    },
-  );
+  // Four of the five carry no organization column at all, so exempting them
+  // costs nothing. The template pair is platform configuration: the same text
+  // for every tenant, seeded from the code catalogue and written by nothing
+  // else.
+  it.each([
+    'ProcessedEvent',
+    'OutboxStreamSequence',
+    'NotificationTemplate',
+    'NotificationTemplateVersion',
+  ])('exempts %s, which has no tenant', (model) => {
+    expect(modelsWithTenantColumn(SCHEMA)).not.toContain(model);
+  });
 
   /**
    * `OutboxMessage` is the one exemption that gives something up, so it is
@@ -114,13 +127,25 @@ describe('the schema says what this service does and does not do', () => {
     expect(SCHEMA).toMatch(/model\s+OutboxStreamSequence\b/);
   });
 
-  it('holds IN_APP as the only channel value', () => {
+  /**
+   * This assertion used to read `toEqual(['IN_APP'])`, and widening it rather
+   * than deleting it is the point.
+   *
+   * The invariant was never "there is one channel". It is **no channel value
+   * exists that no code path can write** — the Q-07 rule this service has
+   * already applied to an enum value, to a configuration flag and to a
+   * preference row. NTF-004 gave `EMAIL` a writer, so `EMAIL` may exist.
+   * `SMS` may not: Q-15 has no answer and there is no adapter.
+   */
+  it('holds exactly the channels something can actually deliver on', () => {
     const channel = SCHEMA.match(/enum NotificationChannel \{([\s\S]*?)\}/)?.[1] ?? '';
     const values = channel
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => /^[A-Z_]+$/.test(line));
-    expect(values).toEqual(['IN_APP']);
+    expect(values).toEqual(['IN_APP', 'EMAIL']);
+    expect(values).not.toContain('SMS');
+    expect(values).not.toContain('PUSH');
   });
 
   /**
@@ -134,9 +159,35 @@ describe('the schema says what this service does and does not do', () => {
     expect([...models(SCHEMA).keys()]).toContain('NotificationPreference');
   });
 
-  it('declares no template model yet — that is NTF-004', () => {
+  /**
+   * The inversion NTF-004 promised, with the invariant kept.
+   *
+   * The old assertion — no template model — was a statement about scope. What
+   * matters now is the property the tables have to carry: a published version
+   * is immutable, so a delivery citing `(templateKey, version)` still answers
+   * "exactly what did we send them" after the text is next edited. Hence the
+   * content hash, and hence a key that makes a new version a row rather than
+   * an update.
+   */
+  it('declares the template model, with versions that can be pinned', () => {
     const names = [...models(SCHEMA).keys()];
-    expect(names.filter((name) => /Template/.test(name))).toEqual([]);
+    expect(names).toContain('NotificationTemplate');
+    expect(names).toContain('NotificationTemplateVersion');
+
+    const version = models(SCHEMA).get('NotificationTemplateVersion') ?? '';
+    expect(version).toMatch(/contentHash/);
+    expect(version).toMatch(/@@id\(\[templateKey, channel, version, locale\]\)/);
+  });
+
+  it('keeps a quiet window per person per tenant, not per preference row', () => {
+    // ADR-054 § 5 draws quiet hours as columns on the preference table, which
+    // holds one row per scope per channel — so one person could hold three
+    // windows for one channel with nothing saying which a delivery obeys. The
+    // deviation is recorded in the migration header and in the plan; this is
+    // what makes it visible in the schema rather than only in prose.
+    const quiet = models(SCHEMA).get('NotificationQuietHours') ?? '';
+    expect(quiet).toMatch(/@@id\(\[userId, organizationId\]\)/);
+    expect(models(SCHEMA).get('NotificationPreference') ?? '').not.toMatch(/quietHours/);
   });
 
   it('uses no cascading delete anywhere', () => {

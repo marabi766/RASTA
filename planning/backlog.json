@@ -601,6 +601,26 @@
           "kind": "DOCUMENT",
           "ref": "docs/adr/ADR-054-implementation-plan.md",
           "note": "Status on 2026-09-21: blocker (1) of the 2026-09-18 note is closed — the channel module now exists. What remains of COM-008 is unbuilt work, not a blocker: Persian RTL templates, retry and backoff, suppression, the NOTIFICATION_SENT and NOTIFICATION_FAILED events, delivery-outcome recording, and the quiet hours deferred from NTF-003. Whether COM-008 may be ACCEPTED while Q-37 (which email provider, which sender identity) is still open is a product-owner decision and is not assumed here."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/65",
+          "note": "NTF-004 in full: the EMAIL channel value together with the worker that writes it, two template tables whose published versions are immutable and are seeded from the code catalogue, Persian right-to-left rendering with Persian digits and Hijri-Shamsi dates in the recipient timezone, the quiet hours NTF-003 deferred with two new endpoints, a claim-based mail worker on the 1s/5s/30s/2m/10m ladder with jitter, and NOTIFICATION_SENT and NOTIFICATION_FAILED published from the outbox in the same transaction as the outcome."
+        },
+        {
+          "kind": "TEST",
+          "ref": "services/notification-service/test/email-delivery.int-spec.ts",
+          "note": "Six cases against a real PostgreSQL and a real Mailpit, asserted through Mailpit HTTP API rather than the adapter return value: sent and recorded and announced once; Persian right-to-left with a Jalali date on the wire; a dead port retried and announced to nobody; the ladder ending in DEAD with exactly one NOTIFICATION_FAILED; a quiet window holding a message without spending an attempt; and a published template version whose text changed refusing to seed. 279 unit and 120 integration tests pass locally."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/adr/ADR-054-implementation-plan.md",
+          "note": "Three named deviations, none hidden: the per-channel circuit breaker and outbound rate limit of ADR-054 section 7 are not built and are not in the acceptance criteria; quiet hours live in their own table rather than as columns on notification_preference, because that table holds one row per scope and the ADR shape allowed one person three contradictory windows for one channel; and the two read-only template diagnostic endpoints are deferred to NTF-005."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "Q-37 remains open and all three locks hold: deliversToRealRecipients is a constant false in app.module.ts, the shipped sender is an RFC 2606 .invalid address, and env.spec.ts proves no environment variable matching REAL_RECIPIENT|PRODUCTION_MAIL|MAIL_ENABLED|SEND_REAL exists. No email has reached a real person. Whether COM-008 may be ACCEPTED while the procurement half of Q-37 — which provider, which domain, which sender identity — is unanswered is a product-owner decision and is not assumed here."
         }
       ]
     },
