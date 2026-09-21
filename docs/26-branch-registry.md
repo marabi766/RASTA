@@ -55,11 +55,11 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                         | Worktree                                         | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                              |
-| ---------------------------- | ------------------------------------------------ | ---- | --- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude/quirky-curie-15d850` | `F:\Rasta\.claude\worktrees\quirky-curie-15d850` | —    | —   | ۱ / ۰          | تکمیل شد و با `origin/main` هم‌گام شد (`chore/test-task-unit-only` تا آن زمان با PR #62 روی `main` نشسته بود)؛ تداخل متنی روی `scripts/test-phases-*` دستی حل شد؛ آمادهٔ Push و PR |
-| `demo/investor-preview`      | `F:\Rasta-Parallel\investor-demo`                | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                       |
-| `design/claude-design`       | پوشهٔ موقت در `%TEMP%`                           | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                              |
+| شاخه                           | Worktree                                   | نشست | PR                                                | ahead / behind | وضعیت                                                                                                                      |
+| ------------------------------ | ------------------------------------------ | ---- | ------------------------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `demo/investor-preview`        | `F:\Rasta-Parallel\investor-demo`          | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                               |
+| `design/claude-design`         | پوشهٔ موقت در `%TEMP%`                     | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                      |
+| `chore/api-gateway-dockerfile` | `F:\Rasta-Parallel\api-gateway-dockerfile` | —    | [#70](https://github.com/marabi766/RASTA/pull/70) | ۲ / ۰          | افزودن Dockerfile و ردیف Matrix CI برای `api-gateway`؛ `pnpm run ci:image-matrix`، Build+Health زنده، lint و typecheck سبز |
 
 ## شاخه‌های بازنشسته
 
@@ -92,6 +92,7 @@
 | `feat/web-session-and-shell`            | [#66](https://github.com/marabi766/RASTA/pull/66) | `3cf79aa`   |
 | `docs/frontend-gate-and-web-state`      | [#64](https://github.com/marabi766/RASTA/pull/64) | `df54a43`   |
 | `feat/web-asset-surfaces`               | [#67](https://github.com/marabi766/RASTA/pull/67) | `6ea1260`   |
+| `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
