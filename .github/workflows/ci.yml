@@ -1546,6 +1546,7 @@ jobs:
         # the scan gate cover what we actually deploy.
         service:
           [
+            api-gateway,
             identity-service,
             organization-service,
             asset-service,
