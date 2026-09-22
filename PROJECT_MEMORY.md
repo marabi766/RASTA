@@ -2452,8 +2452,10 @@ Credential دیگری مستقیم سراغ شیء برود و تمام بررس
   `access.ts` جداگانه رد می‌شود.
 - خواندن میان‌مستأجری `404` می‌گیرد، نه `403` — یک رد، وجود سند را تأیید می‌کند.
 - Intent آپلود حتی برای اپراتور پلتفرم قابل بازخرید میان‌مستأجری نیست.
-- **هیچ Endpointی `@AllowService` ندارد** — هیچ سرویسی نمی‌تواند این API را صدا
-  بزند. پیش‌فرض درست و بسته است، و یک Gap واقعی: بخش ۲۲.
+- **یک Endpoint `@AllowService` دارد** — `GET /v1/documents/{id}` را
+  `asset-service` می‌تواند صدا بزند، تنها آن Endpoint و تنها آن سرویس
+  (D-021، بخش ۲۲). بقیهٔ Endpoint ها همچنان بسته‌اند: پیش‌فرض درست، باز
+  شده فقط جایی که یک نیاز واقعی نام‌گذاری شد.
 
 ### تست‌ها
 
@@ -3309,15 +3311,61 @@ live-verify-17  WALLET_OPENED         actor=USR-SEED-DEHYARI-ADMIN
 | D-006 | Redis محلی Windows روی پورت ۶۳۷۹ با Redis داکری تصادم دارد                                            | بالا (فقط محیط توسعه این ماشین) | تست زنده Rate Limiting/Idempotency از راه `localhost:6379` غیرقابل‌اعتماد                                                                                                                          | استفاده از `docker exec rasta-redis redis-cli` مستقیم؛ یا تغییر `REDIS_PORT` مثل الگوی Postgres                                                                                                                                                                                                                                                    |
 | D-008 | ~~سه قاعده Supply-Chain که Lockfile فعلی رد می‌کند~~                                                  | —                               | ✅ بسته شد 2026-09-22 — `minimumReleaseAge` و `trustPolicy: no-downgrade` روشن؛ چهار هشدار Trust بررسی‌شده و پین‌شده به نسخه در `trustPolicyExclude`؛ هیچ `--exclude-rule` در CI (`docs/23` D-008) | —                                                                                                                                                                                                                                                                                                                                                  |
 | —     | تنها `api-gateway` هنوز `--passWithNoTests` دارد و Project Integration اش واقعاً تهی است (2026-09-20) | پایین                           | سهم آن از مرحله Integration در CI یعنی «چیزی نشکست»، نه «مسیر داده تست شد»؛ `identity` و `organization` در 2026-09-20 Flag را از دست دادند و `asset` در 2026-09-01                                 | نوشتن نخستین `*.int-spec.ts` برای `api-gateway`؛ `pnpm check:test-phases` همان‌جا Build را می‌شکند تا Flag هم برداشته شود                                                                                                                                                                                                                          |
-| —     | `api-gateway` هیچ Dockerfile ندارد                                                                    | متوسط                           | نمی‌توان آن را Containerize کرد                                                                                                                                                                    | نوشتن Dockerfile لازم است                                                                                                                                                                                                                                                                                                                          |
+| —     | ~~`api-gateway` هیچ Dockerfile ندارد~~                                                                | —                               | ✅ بسته شد 2026-09-21 — `services/api-gateway/Dockerfile` و ردیف Matrix CI روی `main` (PR #70، `c4de97b`)؛ Build+Health زنده تأیید شد                                                              | —                                                                                                                                                                                                                                                                                                                                                  |
 | D-011 | تغییر برنامه سرویس در `maintenance` هیچ رویدادی تولید نمی‌کند                                         | متوسط (امروز پایین)             | خاموش کردن بی‌صدای یک برنامه سرویس را `audit-service` هرگز نمی‌بیند                                                                                                                                | دلیل در ستون `notes` می‌ماند؛ هنگام ساخت `audit-service` رویداد لازم است                                                                                                                                                                                                                                                                           |
 | D-012 | کنتور کارکرد هرگز عقب نمی‌رود                                                                         | پایین                           | پس از تعویض کنتور، برنامه‌های کارکردمحور جلوتر از عدد روی دستگاه‌اند                                                                                                                               | مسیر پشتیبانی‌شده: `PATCH /v1/maintenance-schedules/{id}` با `lastServicedHourMeter`                                                                                                                                                                                                                                                               |
 | —     | `fleet` و `maintenance` هنوز `partitionKey` را در Call Site می‌نویسند                                 | پایین                           | قاعده ترتیب آنجا توصیه است نه قاعده — رویداد تازه بی‌صدا کلید Aggregate می‌گیرد                                                                                                                    | ADR-036 الگو را نشان داد (`events/routing.ts`)؛ اعمالش روی آن دو، Task جدا                                                                                                                                                                                                                                                                         |
 | D-027 | ترتیب معنایی هر جریان (`topic + partitionKey`) تضمین نشده                                             | متوسط                           | **شش** مسیر مستقل وارونگی، اندازه‌گیری‌شده (پایین). برخورد میلی‌ثانیه‌ای کوچک‌ترین‌شان است؛ مهم‌ترین، واگرایی ترتیب Commit از `created_at` است                                                     | [ADR-051](docs/adr/ADR-051-outbox-semantic-ordering.md) **`Accepted`** (2026-09-04) و **Q-36 بسته شد**؛ **B1 (Schema)، B2 (ابزار Backfill) و B3 (تخصیص سمت تولیدکننده) پیاده شدند (2026-09-05)**، ولی **B4–B6 نه** — هیچ مصرف‌کننده یا Claim ای `stream_seq` را اجبار نمی‌کند، پس هیچ تضمین ترتیبی در زمان اجرا برقرار نیست و این مورد باز می‌ماند |
-| D-021 | هیچ Endpoint در `document-service` `@AllowService` ندارد                                              | متوسط                           | `asset`، `contract` و `construction` شناسه سند نگه می‌دارند اما فراداده‌اش را نمی‌توانند بخوانند                                                                                                   | پیش‌فرض بسته درست است؛ باز کردنش یعنی افزودن آگاهانه یک Allowlist به‌ازای هر Endpoint با تست خودش                                                                                                                                                                                                                                                  |
+| D-021 | ~~هیچ Endpoint در `document-service` `@AllowService` ندارد~~                                          | —                               | ✅ بسته شد 2026-09-22 — `@AllowService('asset-service')` روی `GET /v1/documents/{id}` (تنها Endpoint خواندن-با-شناسه)؛ شرح کامل زیر همین بخش                                                       | —                                                                                                                                                                                                                                                                                                                                                  |
 | —     | `openapi/zod-schema.ts` در سه سرویس بایت‌به‌بایت تکرار شده                                            | پایین                           | یک اصلاح باید سه‌جا اعمال شود                                                                                                                                                                      | Utility خالص و بدون دانش دامنه است، پس جایش `packages/` است (A-03)؛ استخراجش سه سرویس را هم‌زمان لمس می‌کند                                                                                                                                                                                                                                        |
 | —     | ~~`InsuranceClaim` جدول بدون API~~                                                                    | —                               | ✅ بسته شد 2026-09-21 — API ادعای خسارت پایه روی `feat/asset-insurance-claim-api` (Q-59)                                                                                                           | —                                                                                                                                                                                                                                                                                                                                                  |
 | —     | `mission` و رویدادهای `MISSION_*` پیاده نشدند                                                         | پایین                           | تحلیل «ناوگان داخلی در برابر برون‌سپاری» هنوز داده مأموریت ندارد                                                                                                                                   | عمدی — به `construction-service` گره خورده که وجود ندارد؛ ADR-026 § Consequences                                                                                                                                                                                                                                                                   |
+
+### D-021 — `document-service` هیچ Endpoint قابل‌فراخوانی توسط سرویس دیگر نداشت — رفع شد (2026-09-22) ✅
+
+پیش‌فرض بسته درست بود، ولی نتیجه‌اش این بود که `asset-service` شناسهٔ سندی که
+خودش نگه می‌دارد (بیمه‌نامه، گزارش معاینه) را نمی‌توانست بخواند — نه یک نقص
+Endpoint خاص، بلکه غیاب کامل `@AllowService` در این سرویس. تست موجود
+`is not callable by another service at all, valid token or not` در
+`test/api-document.int-spec.ts` همین شکاف را عمداً مستند کرده بود.
+
+**بسته شد با دقیقاً یک ورودی، نه یک الگوی عمومی.** `GET /v1/documents/{id}`
+اکنون `@AllowService('asset-service')` دارد — تنها Endpoint این کنترلر، و تنها
+سرویسی که امروز واقعاً نیاز دارد. `contract-service` و `construction-service`
+که حافظهٔ پروژه به‌عنوان مصرف‌کنندهٔ آینده نام می‌برد، هنوز ساخته نشده‌اند
+(`ls services/` خالی برای هر دو)، پس نامشان به Allowlist اضافه **نشد** —
+اضافه‌کردنشان امروز یعنی اختراع دامنه برای فراخواننده‌ای که هنوز چیزی صدا
+نمی‌زند.
+
+**چیزی در `access.ts` عوض نشد.** `assertDocumentReadable` از پیش هر دو سمت را
+درست می‌گرفت: `hasAnyRole` برای `authType === 'SERVICE'` عبور می‌دهد،
+`hasPlatformScope()` برایش همیشه `false` برمی‌گرداند (پس یک سرویس هرگز از
+مسیر Platform-Scope میان‌تنانتی نمی‌خواند)، و مقایسهٔ نهایی
+`getOrganizationId() !== document.organizationId` از **ادعای امضاشدهٔ** توکن
+می‌آید (ADR-035)، نه از هدر. یعنی همان قرارداد ۴۰۴-نه-۴۰۳ که یک کاربر
+میان‌تنانتی می‌گیرد، بدون هیچ تغییری برای یک سرویس هم برقرار بود. `RolesGuard`
+هم از قبل `authType === 'SERVICE'` را از بررسی `@Roles` معاف می‌کرد و تصمیم را
+به `AuthGuard`/`@AllowService` واگذار می‌کرد (همان الگوی `GET /v1/users` در
+`identity-service`، ADR-054 § ۱). تنها چیزی که واقعاً غایب بود، خودِ دکوراتور
+روی این یک Endpoint بود.
+
+**تست.** `test/api-document.int-spec.ts` بازنویسی شد: تست قدیمی که می‌گفت
+«هیچ سرویسی از هیچ Endpointای نمی‌تواند بخواند» جایش را به تستی داد که تأیید
+می‌کند این ادعا برای **هر Endpoint جز یکی** هنوز برقرار است (`list`،
+`upload-url`، `finalize`، `download-url`، `delete` — همه با توکن معتبر
+`asset-service` هنوز `403`). یک `describe` تازه سه مسیر مثبت/منفی را روی همان
+Endpoint می‌سنجد: خواندن درون‌تنانتی `200`، خواندن میان‌تنانتی `404` (نه
+`403`)، و توکن یک سرویس دیگر (`marketplace-service`) `403`. تضمین‌های عمومی‌تر
+— اینکه توکن Relay هرگز `@AllowService` را ارضا نمی‌کند، اینکه Audience اشتباه
+`401` می‌گیرد — از قبل در `packages/nest-common/src/guards/auth.guard.access.spec.ts`
+اثبات‌اند و اینجا دوباره ساخته نشدند.
+
+**آنچه ساخته نشد، عمداً.** سمت فراخوانی — یک HTTP Client/Adapter واقعی در
+`asset-service` که از این Endpoint استفاده کند — بیرون از دامنهٔ این کار است؛
+جایی که فراداده سند در `asset-service` نشان داده می‌شود هنوز طراحی نشده. این
+Task فقط سمت **پذیرنده** را ثابت می‌کند، دقیقاً مثل مرز `@AllowService`
+`audit-service` که `test/authorization.int-spec.ts` بدون هیچ فراخوانندهٔ
+واقعی‌ای ثابتش می‌کند.
 
 ### D-028 — پنجرهٔ Dedupe اعلان زیر همروندی وارونه می‌شد — رفع شد (2026-09-18) ✅
 
@@ -4674,7 +4722,6 @@ Code + PKCE` در Route Handler های سرور، نشست در Cookie مهرش�
   (ADR-027)
 - پورتال `WORKSHOP` و احراز صلاحیت تعمیرگاه (Q-25) — Port نام‌گذاری شده، بدون
   پیاده‌سازی
-- Dockerfile برای `api-gateway`
 
 ---
 
@@ -5227,7 +5274,7 @@ Temporal ‏`rasta-order`.
 
 | کار                                                         | چرا                                                                                                                                |
 | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Dockerfile برای `api-gateway`                               | تنها سرویسی که ندارد؛ در CI Matrix نیست                                                                                            |
+| ~~Dockerfile برای `api-gateway`~~                           | ✅ بسته شد 2026-09-21 — PR #70، `c4de97b`                                                                                          |
 | ~~حذف `--passWithNoTests` از چهار سرویس دیگر~~              | ✅ بسته شد 2026-09-20 — تنها `api-gateway` مانده که Project اش واقعاً تهی است؛ `pnpm check:test-phases` تناظر را ایستا نگه می‌دارد |
 | ~~D-008 (Supply-Chain)~~                                    | ✅ بسته شد 2026-09-22 — شاخهٔ `fix/supply-chain-trust-policy`                                                                      |
 | D-006 (تصادم پورت Redis روی این ماشین)                      | فقط محیط توسعه                                                                                                                     |

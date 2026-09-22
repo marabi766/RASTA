@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۳۱ (2026-09-22) · **`main` در آن لحظه:** `fa14ef4`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۳۱ (2026-09-22) · **`main` در آن لحظه:** `3f68d76`
 
 ---
 
@@ -94,6 +94,7 @@
 | `feat/web-asset-surfaces`               | [#67](https://github.com/marabi766/RASTA/pull/67) | `6ea1260`   |
 | `chore/api-gateway-dockerfile`          | [#70](https://github.com/marabi766/RASTA/pull/70) | `c4de97b`   |
 | `feat/asset-insurance-claim-api`        | [#71](https://github.com/marabi766/RASTA/pull/71) | `fa14ef4`   |
+| `fix/document-service-allow-asset-read` | [#72](https://github.com/marabi766/RASTA/pull/72) | `3f68d76`   |
 | `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
