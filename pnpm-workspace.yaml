@@ -46,3 +46,39 @@ overrides:
 # http. Everything here comes from the registry, and a sub-dependency that
 # suddenly does not is worth stopping on.
 blockExoticSubdeps: true
+
+# --- Supply-chain policy (D-008, docs/23) ---------------------------------
+# Both settings are also what the two Semgrep registry rules in CI's
+# "Static analysis" step demand (pnpm-minimum-release-age, pnpm-trust-policy).
+# pnpm re-verifies every lockfile entry against them on each install, so a
+# lockfile committed under a weaker local policy fails CI rather than slipping
+# through (trustLockfile stays at its default, false).
+
+# Seven days, in minutes. A malicious release is usually pulled within hours;
+# a week is the window in which the community, not this project, catches it.
+minimumReleaseAge: 10080
+# Strict: if no version in a requested range is old enough, the install fails
+# instead of quietly taking the newest one. (This is the default once
+# minimumReleaseAge is set explicitly; written out so nobody has to know that.)
+minimumReleaseAgeStrict: true
+# Named exceptions only — a package that must track the newest release goes
+# here with the advisory or reason that justifies it, pinned to a version so
+# the exception dies with it. Empty today: deepmerge-ts@8.0.2, the security
+# pin that once needed one, aged out of the window on its own.
+minimumReleaseAgeExclude: []
+
+# Refuse a version whose publish carried weaker trust evidence (no provenance
+# attestation) than an earlier-published version of the same package — the
+# shape a hijacked maintainer account produces.
+trustPolicy: no-downgrade
+# Four releases reviewed on 2026-09-22 and judged legitimate (docs/23 D-008,
+# per-package evidence there). Each is a maintenance-line release a
+# long-standing maintainer published by hand, from a commit that exists in the
+# upstream repository, between CI releases that carry provenance. Pinned to the
+# exact version: a *different* release of the same package with the same shape
+# is flagged again and reviewed again.
+trustPolicyExclude:
+  - chokidar@4.0.3
+  - pino@9.14.0
+  - semver@6.3.1
+  - undici-types@6.21.0

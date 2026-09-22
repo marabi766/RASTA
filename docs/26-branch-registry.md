@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۳۱ (2026-09-22) · **`main` در آن لحظه:** `c4de97b`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۳۱ (2026-09-22) · **`main` در آن لحظه:** `9e0b769`
 
 ---
 
@@ -55,14 +55,11 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                                    | Worktree                                          | نشست      | PR                                                | ahead / behind | وضعیت                                                                                                                                                                                     |
-| --------------------------------------- | ------------------------------------------------- | --------- | ------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `feat/web-write-path-and-usage`         | `F:\Rasta-Parallel\web-write-path`                | Opus      | —                                                 | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `3f68d76` — زیرساخت نوشتن پورتال (CSRF، Idempotency، نگاشت خطای اعتبارسنجی) و صفحهٔ `/usage`؛ **`nav.ts`، `PROJECT_MEMORY.md` و این فایل را لمس می‌کند** |
-| `feat/asset-insurance-claim-api`        | `F:\Rasta-Parallel\asset-insurance-claim-api`     | Opus      | [#71](https://github.com/marabi766/RASTA/pull/71) | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `a49f871` — API ادعای خسارت بیمه در `asset-service`؛ **`Q-59` را می‌برد و `docs/24` را لمس می‌کند**                                                      |
-| `fix/supply-chain-trust-policy`         | [#74](https://github.com/marabi766/RASTA/pull/74) | `9e0b769` |
-| `demo/investor-preview`                 | `F:\Rasta-Parallel\investor-demo`                 | —         | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                              |
-| `design/claude-design`                  | پوشهٔ موقت در `%TEMP%`                            | —         | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                     |
-| `fix/document-service-allow-asset-read` | `F:\Rasta-Parallel\document-service-allow-asset`  | —         | [#72](https://github.com/marabi766/RASTA/pull/72) | ۲ / ۰          | بستن D-021: `@AllowService('asset-service')` روی `GET /v1/documents/{id}`؛ Unit+Integration واقعی سبز، lint و typecheck سبز                                                               |
+| شاخه                            | Worktree                           | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                                     |
+| ------------------------------- | ---------------------------------- | ---- | --- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `feat/web-write-path-and-usage` | `F:\Rasta-Parallel\web-write-path` | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `3f68d76` — زیرساخت نوشتن پورتال (CSRF، Idempotency، نگاشت خطای اعتبارسنجی) و صفحهٔ `/usage`؛ **`nav.ts`، `PROJECT_MEMORY.md` و این فایل را لمس می‌کند** |
+| `demo/investor-preview`         | `F:\Rasta-Parallel\investor-demo`  | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                              |
+| `design/claude-design`          | پوشهٔ موقت در `%TEMP%`             | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                     |
 
 ## شاخه‌های بازنشسته
 
@@ -96,6 +93,9 @@
 | `docs/frontend-gate-and-web-state`      | [#64](https://github.com/marabi766/RASTA/pull/64) | `df54a43`   |
 | `feat/web-asset-surfaces`               | [#67](https://github.com/marabi766/RASTA/pull/67) | `6ea1260`   |
 | `chore/api-gateway-dockerfile`          | [#70](https://github.com/marabi766/RASTA/pull/70) | `c4de97b`   |
+| `feat/asset-insurance-claim-api`        | [#71](https://github.com/marabi766/RASTA/pull/71) | `fa14ef4`   |
+| `fix/document-service-allow-asset-read` | [#72](https://github.com/marabi766/RASTA/pull/72) | `3f68d76`   |
+| `fix/supply-chain-trust-policy`         | [#74](https://github.com/marabi766/RASTA/pull/74) | `9e0b769`   |
 | `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
@@ -174,7 +174,7 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 | Q-56        | `feat/supplier-performance-phase2`    | روی `main` (`f7252d3`)                                                                 |
 | Q-57        | `feat/audit-service-aud-004-contract` | روی `main`                                                                             |
 | Q-58        | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                   |
-| Q-59        | `feat/asset-insurance-claim-api`      | **رزرو شد** (2026-09-21) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه         |
+| Q-59        | `feat/asset-insurance-claim-api`      | روی `main` (`fa14ef4`) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه           |
 | Q-60+       | آزاد                                  | —                                                                                      |
 
 > **چرا Q-44 قابل جابه‌جایی نیست:** یک ADR ادغام‌شده آن را به‌عنوان مرجع
