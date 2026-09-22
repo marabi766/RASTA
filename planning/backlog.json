@@ -869,7 +869,7 @@
         },
         {
           "kind": "PR",
-          "ref": "https://github.com/marabi766/RASTA/pull/PENDING",
+          "ref": "https://github.com/marabi766/RASTA/pull/75",
           "note": "The write path and the first screen that uses it: a CSRF token bound to the sealed session and checked before any gateway call, a server-minted submission id sent as Idempotency-Key and as clientReference, service validation details mapped back onto the field that caused them, and a plain form post to a server action so the whole thing works with JavaScript disabled. /usage is the proof."
         },
         {
