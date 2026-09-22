@@ -108,6 +108,25 @@ const COST_CATEGORIES: Readonly<Record<string, string>> = {
   OTHER: 'سایر',
 };
 
+/** `DRIVER_STATUSES`, `services/fleet-service/src/fleet/driver-lifecycle.ts`. */
+const DRIVER_STATUSES: Readonly<Record<string, string>> = {
+  ACTIVE: 'فعال',
+  SUSPENDED: 'معلق',
+  DEACTIVATED: 'از رده خارج',
+};
+
+/**
+ * `ASSIGNMENT_END_REASONS`, `services/fleet-service/src/fleet/dto.ts`. Also
+ * the vocabulary an assignment's own `endReason` carries once it has ended.
+ */
+const ASSIGNMENT_END_REASONS: Readonly<Record<string, string>> = {
+  COMPLETED: 'پایان کار',
+  CANCELLED: 'لغوشده',
+  DRIVER_UNAVAILABLE: 'راننده در دسترس نیست',
+  ASSET_UNAVAILABLE: 'ماشین در دسترس نیست',
+  REASSIGNED: 'تخصیص مجدد',
+};
+
 function lookup(table: Readonly<Record<string, string>>, value: string): string {
   return table[value] ?? value;
 }
@@ -123,6 +142,9 @@ export const repairOrderStatusLabel = (value: string): string =>
   lookup(REPAIR_ORDER_STATUSES, value);
 export const severityLabel = (value: string): string => lookup(SEVERITIES, value);
 export const costCategoryLabel = (value: string): string => lookup(COST_CATEGORIES, value);
+export const driverStatusLabel = (value: string): string => lookup(DRIVER_STATUSES, value);
+export const assignmentEndReasonLabel = (value: string): string =>
+  lookup(ASSIGNMENT_END_REASONS, value);
 
 /** The options a filter offers, in the order a person reads them. */
 export const assetTypeOptions = Object.entries(ASSET_TYPES).map(([value, label]) => ({
@@ -148,3 +170,12 @@ export const severityOptions = Object.entries(SEVERITIES).map(([value, label]) =
   value,
   label,
 }));
+
+export const driverStatusOptions = Object.entries(DRIVER_STATUSES).map(([value, label]) => ({
+  value,
+  label,
+}));
+
+export const assignmentEndReasonOptions = Object.entries(ASSIGNMENT_END_REASONS).map(
+  ([value, label]) => ({ value, label }),
+);

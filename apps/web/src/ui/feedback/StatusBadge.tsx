@@ -68,6 +68,9 @@ export const STATUS_TONES: Readonly<Record<string, StatusTone>> = {
   // A maintenance request just reported, not yet referred anywhere — the
   // status a fleet manager most needs to notice (EXP-002).
   OPEN: 'warning',
+  // A driver barred pending review — not terminal, unlike DEACTIVATED below,
+  // so it reads as "needs attention" rather than "gone" (EXP-002).
+  SUSPENDED: 'warning',
 
   REJECTED: 'danger',
   CANCELLED: 'danger',
@@ -76,6 +79,8 @@ export const STATUS_TONES: Readonly<Record<string, StatusTone>> = {
   // Terminal: the machine is gone from service for good, which is closer to
   // "refused" than to "idle" for somebody scanning a list for something to use.
   DECOMMISSIONED: 'danger',
+  // The same terminality, for a driver rather than a machine (EXP-002).
+  DEACTIVATED: 'danger',
 
   DRAFT: 'neutral',
   IDLE: 'neutral',
@@ -107,6 +112,8 @@ const STATUS_LABELS: Readonly<Record<string, string>> = {
   IN_MAINTENANCE: 'در تعمیر',
   EVALUATION: 'در ارزیابی',
   OPEN: 'باز',
+  SUSPENDED: 'معلق',
+  DEACTIVATED: 'از رده خارج',
 };
 
 export function StatusBadge({
