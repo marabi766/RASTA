@@ -14,5 +14,6 @@ import type { SidebarItem } from '@/ui';
 export const PORTAL_NAV: readonly SidebarItem[] = [
   { href: '/', label: 'خانه' },
   { href: '/assets', label: 'ماشین‌آلات' },
+  { href: '/usage', label: 'ثبت کارکرد' },
   { href: '/maintenance', label: 'نگهداری و تعمیرات' },
 ];

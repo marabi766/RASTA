@@ -2,7 +2,7 @@
 
 > Generated from `planning/backlog.json`. Do not edit this report directly.
 
-- As of: **2026-09-21**
+- As of: **2026-09-22**
 - Baseline: **APPROVED** — Approved by **Product Owner**.
 - Earned-points rule: only **ACCEPTED delivery units** earn points; in-progress work earns zero.
 - Decomposition rule: a decomposed Feature contributes its child Stories, never its own points again. An undecomposed Feature remains a legacy delivery unit.

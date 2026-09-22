@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۳۱ (2026-09-22) · **`main` در آن لحظه:** `3f68d76`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۳۱ (2026-09-22) · **`main` در آن لحظه:** `239ae23`
 
 ---
 
@@ -55,12 +55,12 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                            | Worktree                                      | نشست | PR                                                | ahead / behind | وضعیت                                                                                                                                                       |
-| ------------------------------- | --------------------------------------------- | ---- | ------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fix/supply-chain-trust-policy` | `F:\Rasta-Parallel\supply-chain-trust-review` | Opus | —                                                 | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `fa14ef4` — D-008: بازبینی سه قاعدهٔ Supply-Chain کنارگذاشته‌شده؛ **`pnpm-lock.yaml`، `ci.yml` و `docs/23` را لمس می‌کند** |
-| `demo/investor-preview`         | `F:\Rasta-Parallel\investor-demo`             | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                |
-| `design/claude-design`          | پوشهٔ موقت در `%TEMP%`                        | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                       |
-| `feat/web-maintenance-surfaces` | `F:\Rasta-Parallel\web-maintenance-surfaces`  | —    | [#73](https://github.com/marabi766/RASTA/pull/73) | ۲ / ۰          | `EXP-002`: `/maintenance` و `/maintenance/[id]`؛ فقط خواندن؛ ۴۰۳ تست سبز، lint/typecheck/build سبز؛ زنده تأیید نشد                                          |
+| شاخه                            | Worktree                                      | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                                     |
+| ------------------------------- | --------------------------------------------- | ---- | --- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `feat/web-write-path-and-usage` | `F:\Rasta-Parallel\web-write-path`            | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `3f68d76` — زیرساخت نوشتن پورتال (CSRF، Idempotency، نگاشت خطای اعتبارسنجی) و صفحهٔ `/usage`؛ **`nav.ts`، `PROJECT_MEMORY.md` و این فایل را لمس می‌کند** |
+| `fix/supply-chain-trust-policy` | `F:\Rasta-Parallel\supply-chain-trust-review` | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `fa14ef4` — D-008: بازبینی سه قاعدهٔ Supply-Chain کنارگذاشته‌شده؛ **`pnpm-lock.yaml`، `ci.yml` و `docs/23` را لمس می‌کند**                               |
+| `demo/investor-preview`         | `F:\Rasta-Parallel\investor-demo`             | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                              |
+| `design/claude-design`          | پوشهٔ موقت در `%TEMP%`                        | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                     |
 
 ## شاخه‌های بازنشسته
 
@@ -96,6 +96,8 @@
 | `chore/api-gateway-dockerfile`          | [#70](https://github.com/marabi766/RASTA/pull/70) | `c4de97b`   |
 | `feat/asset-insurance-claim-api`        | [#71](https://github.com/marabi766/RASTA/pull/71) | `fa14ef4`   |
 | `fix/document-service-allow-asset-read` | [#72](https://github.com/marabi766/RASTA/pull/72) | `3f68d76`   |
+| `fix/supply-chain-trust-policy`         | [#74](https://github.com/marabi766/RASTA/pull/74) | `9e0b769`   |
+| `feat/web-maintenance-surfaces`         | [#73](https://github.com/marabi766/RASTA/pull/73) | `239ae23`   |
 | `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 

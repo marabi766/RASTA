@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 
 /**
  * The only way this portal reaches the platform (ADR-058 § 3, ADR-059 § 3).
@@ -23,10 +24,32 @@ export class GatewayOriginError extends Error {
   }
 }
 
+/**
+ * The part of a platform error a screen may act on (docs/06 § 6 envelope).
+ *
+ * Parsed with a schema that keeps four fields and drops the rest, and only
+ * when the response says it is JSON. A 4xx body is where a service explains a
+ * refusal — which field, and why — and a form that could not read it would
+ * have to answer every rejection with the same sentence. What is *not* kept:
+ * anything else the body might carry. The same rule as every read module —
+ * a field that never enters this process cannot be rendered or logged.
+ */
+export const gatewayProblemSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+  details: z
+    .array(z.object({ path: z.string(), message: z.string(), code: z.string().optional() }))
+    .optional(),
+});
+
+export type GatewayProblem = z.infer<typeof gatewayProblemSchema>;
+
 export class GatewayRequestError extends Error {
   constructor(
     readonly status: number,
     readonly correlationId: string,
+    /** Present when the response carried a well-formed platform error. */
+    readonly problem: GatewayProblem | null = null,
   ) {
     super(`The gateway answered ${status}`);
     this.name = 'GatewayRequestError';
@@ -60,6 +83,13 @@ export interface GatewayCall {
   readonly body?: unknown;
   /** Reused when the caller already has one; a fresh one otherwise. */
   readonly correlationId?: string;
+  /**
+   * Sent as `Idempotency-Key`. The gateway requires it on the prefixes whose
+   * effects are financial or irreversible (docs/06 § 6.8) and ignores it
+   * elsewhere, so a write always sends its submission id and the decision
+   * about which routes need one stays where it belongs — in the gateway.
+   */
+  readonly idempotencyKey?: string;
   readonly fetchImpl?: typeof fetch;
 }
 
@@ -87,18 +117,34 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
       authorization: `Bearer ${call.accessToken}`,
       'x-correlation-id': correlationId,
       ...(call.body === undefined ? {} : { 'content-type': 'application/json' }),
+      ...(call.idempotencyKey === undefined ? {} : { 'idempotency-key': call.idempotencyKey }),
     },
     body: call.body === undefined ? undefined : JSON.stringify(call.body),
     cache: 'no-store',
   });
 
   if (!response.ok) {
-    // The status and the correlation id, and nothing from the body. The body
-    // can carry a tenant's data, and this error is rendered to a person —
-    // `docs/16 § ۱۶٫۱۱` puts the correlation id in the error state precisely
-    // so support can find the rest without the page showing it.
-    throw new GatewayRequestError(response.status, correlationId);
+    // The status, the correlation id, and — for a 4xx that explains itself —
+    // the platform error's code, message and field details, through a schema
+    // that keeps nothing else. `docs/16 § ۱۶٫۱۱` puts the correlation id in
+    // the error state so support can find the rest without the page showing
+    // it; a 5xx body is never read at all.
+    throw new GatewayRequestError(
+      response.status,
+      correlationId,
+      response.status < 500 ? await readProblem(response) : null,
+    );
   }
 
   return { data: (await response.json()) as T, correlationId };
+}
+
+async function readProblem(response: Response): Promise<GatewayProblem | null> {
+  if (!(response.headers.get('content-type') ?? '').includes('application/json')) return null;
+  try {
+    const parsed = gatewayProblemSchema.safeParse(await response.json());
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
