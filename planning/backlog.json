@@ -2,7 +2,7 @@
   "$schema": "./backlog.schema.json",
   "version": 2,
   "project": "RASTA",
-  "asOf": "2026-09-21",
+  "asOf": "2026-09-22",
   "governance": {
     "baselineState": "APPROVED",
     "approvedBy": "Product Owner",
@@ -866,6 +866,26 @@
           "kind": "TEST",
           "ref": "apps/web/src/server/assets.spec.ts",
           "note": "Nine server tests: only the filters the caller set reach the gateway, the asset id is percent-encoded into the path rather than interpolated, every compliance blocker survives, money stays a string, and the coordinate, document references and raw event detail in the dossier response are all dropped before anything can render them."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/PENDING",
+          "note": "The write path and the first screen that uses it: a CSRF token bound to the sealed session and checked before any gateway call, a server-minted submission id sent as Idempotency-Key and as clientReference, service validation details mapped back onto the field that caused them, and a plain form post to a server action so the whole thing works with JavaScript disabled. /usage is the proof."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/app/usage/actions.spec.ts",
+          "note": "Seventeen tests on the order the handler enforces: no session, no CSRF token, a token from another session, a stale token after a re-login, and a submission id the server did not mint each refuse with nothing called. Two posts of one form carry one client reference; two renders carry two. Nothing token-shaped appears in the state the page renders."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/server/write.spec.ts",
+          "note": "What reaches the wire and what comes back: the Idempotency-Key header, the refusal of any origin but the gateway, a 400 detail landing on its field, a message the portal knows translated and one it does not shown as it arrived, a 422 business rule kept as a sentence, and a 5xx body never read at all."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/16-ui-architecture.md#۱۶۶-نقشه-صفحات",
+          "note": "Still unbuilt and not claimed: /organizations, /drivers, and the maintenance and asset write paths. EXP-002 is not finished by this change; what it adds is the foundation every later form inherits, proven by one screen."
         }
       ]
     },
