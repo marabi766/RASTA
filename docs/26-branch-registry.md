@@ -55,11 +55,12 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                             | Worktree                                      | نشست | PR                                                | ahead / behind | وضعیت                                                                                                                                |
-| -------------------------------- | --------------------------------------------- | ---- | ------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `feat/asset-insurance-claim-api` | `F:\Rasta-Parallel\asset-insurance-claim-api` | Opus | [#71](https://github.com/marabi766/RASTA/pull/71) | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `a49f871` — API ادعای خسارت بیمه در `asset-service`؛ **`Q-59` را می‌برد و `docs/24` را لمس می‌کند** |
-| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`             | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                         |
-| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                        | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                |
+| شاخه                                    | Worktree                                         | نشست | PR                                                | ahead / behind | وضعیت                                                                                                                                |
+| --------------------------------------- | ------------------------------------------------ | ---- | ------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `feat/asset-insurance-claim-api`        | `F:\Rasta-Parallel\asset-insurance-claim-api`    | Opus | [#71](https://github.com/marabi766/RASTA/pull/71) | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `a49f871` — API ادعای خسارت بیمه در `asset-service`؛ **`Q-59` را می‌برد و `docs/24` را لمس می‌کند** |
+| `demo/investor-preview`                 | `F:\Rasta-Parallel\investor-demo`                | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                         |
+| `design/claude-design`                  | پوشهٔ موقت در `%TEMP%`                           | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                |
+| `fix/document-service-allow-asset-read` | `F:\Rasta-Parallel\document-service-allow-asset` | —    | [#72](https://github.com/marabi766/RASTA/pull/72) | ۲ / ۰          | بستن D-021: `@AllowService('asset-service')` روی `GET /v1/documents/{id}`؛ Unit+Integration واقعی سبز، lint و typecheck سبز          |
 
 ## شاخه‌های بازنشسته
 

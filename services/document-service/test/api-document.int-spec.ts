@@ -395,35 +395,92 @@ describe('the document API (real application, real database, real object storage
         .expect(200);
     });
 
-    it('is not callable by another service at all, valid token or not', async () => {
+    it('is not callable by another service at all, valid token or not, on any endpoint but the one D-021 opened', async () => {
       // ADR-020, Zero Trust: a valid internal token proves *which* service is
-      // calling and grants nothing by itself. No endpoint on this controller
-      // carries `@AllowService`, so every service-to-service call is refused.
-      //
-      // That is the correct default and also a real gap: asset-service,
-      // contract-service and construction-service all store document ids and
-      // will eventually need to read the metadata behind them. Opening that
-      // means adding a deliberate `@AllowService` allowlist per endpoint, with
-      // its own tests — not widening anything here. Recorded in
-      // `PROJECT_MEMORY.md` under known issues.
+      // calling and grants nothing by itself. Only `GET /v1/documents/{id}`
+      // carries `@AllowService` (D-021, for asset-service); every other route
+      // on this controller still refuses every service-to-service call,
+      // including one from asset-service itself.
       const { document } = await upload(mvp);
-      const token = await internalToken('asset-service', { organizationId: other });
+      const asAsset = await internalToken('asset-service', { organizationId: org });
 
+      await http(mvp).get('/v1/documents').set('x-internal-token', asAsset).expect(403);
       await http(mvp)
-        .get(`/v1/documents/${document.id}`)
-        .set('x-internal-token', token)
+        .post('/v1/documents/upload-url')
+        .set('x-internal-token', asAsset)
+        .send({
+          documentClass: 'CONTRACT',
+          contentType: 'application/pdf',
+          sizeBytes: 1024,
+          filename: 'contract.pdf',
+        })
+        .expect(403);
+      await http(mvp)
+        .post('/v1/documents')
+        .set('x-internal-token', asAsset)
+        .send({ uploadIntentId: 'does-not-matter' })
+        .expect(403);
+      await http(mvp)
+        .post(`/v1/documents/${document.id}/download-url`)
+        .set('x-internal-token', asAsset)
+        .expect(403);
+      await http(mvp)
+        .delete(`/v1/documents/${document.id}`)
+        .set('x-internal-token', asAsset)
+        .send({ reason: 'test' })
         .expect(403);
     });
 
     it('refuses an internal token minted for a different service', async () => {
       // The audience check. A token another service was given must not work
-      // here even if this endpoint were opened later.
+      // here even though the endpoint is now open to one caller.
       const token = await internalToken('asset-service', {
         organizationId: org,
         targetService: 'economic-service',
       });
 
       await http(mvp).get('/v1/documents').set('x-internal-token', token).expect(401);
+    });
+
+    describe('asset-service reading document metadata (D-021)', () => {
+      it('lets asset-service read a document within its own organization', async () => {
+        const { document } = await upload(mvp, { organizationId: org });
+        const token = await internalToken('asset-service', { organizationId: org });
+
+        const response = await http(mvp)
+          .get(`/v1/documents/${document.id}`)
+          .set('x-internal-token', token)
+          .expect(200);
+
+        expect(response.body.id).toBe(document.id);
+        // Same contract as a human caller: no storage internals leak through
+        // this endpoint just because the caller is a service.
+        expect(response.body.objectKey).toBeUndefined();
+        expect(response.body.bucket).toBeUndefined();
+      });
+
+      it('reports a document in another organization as absent, not forbidden', async () => {
+        // The signed claim decides the tenant (ADR-035), never the header — so
+        // this is the same assertDocumentReadable contract a cross-tenant user
+        // token gets, exercised for a service token instead.
+        const { document } = await upload(mvp, { organizationId: org });
+        const token = await internalToken('asset-service', { organizationId: other });
+
+        await http(mvp)
+          .get(`/v1/documents/${document.id}`)
+          .set('x-internal-token', token)
+          .expect(404);
+      });
+
+      it('refuses a service token minted for a service this endpoint does not name', async () => {
+        const { document } = await upload(mvp, { organizationId: org });
+        const token = await internalToken('marketplace-service', { organizationId: org });
+
+        await http(mvp)
+          .get(`/v1/documents/${document.id}`)
+          .set('x-internal-token', token)
+          .expect(403);
+      });
     });
   });
 

@@ -10,7 +10,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Roles, zodPipe } from '@rasta/nest-common';
+import { AllowService, Roles, zodPipe } from '@rasta/nest-common';
 import { DocumentService } from './document.service';
 import {
   deleteDocumentSchema,
@@ -130,6 +130,28 @@ export class DocumentController {
     return this.documents.list(query);
   }
 
+  /**
+   * Also callable by asset-service, and by no other service (D-021).
+   *
+   * `asset-service` holds document ids on its own records — an insurance
+   * policy, an inspection report — and until now had no way to resolve one:
+   * every endpoint here was closed to every service token, which was the
+   * correct default and also a real gap (`PROJECT_MEMORY.md` § 22).
+   *
+   * The object-level check is unchanged and does the real work: a `SERVICE`
+   * token carries no platform scope (`access.ts`), so `assertDocumentReadable`
+   * still enforces `organizationId` from the token's **signed** claim
+   * (ADR-035) against the document's own — a cross-tenant call gets the same
+   * `404` a stranger's user token would, not a `403` that would confirm the
+   * document exists. This widens no human's access; `@Roles` still decides
+   * every user token exactly as before, and a service token from any caller
+   * not named here is refused by `AuthGuard` (ADR-020).
+   *
+   * `contract-service` and `construction-service` will need the same read
+   * once they exist; neither does today (`ls services/`), so neither is named
+   * here — adding them now would be inventing scope for a caller that cannot
+   * call anything yet.
+   */
   @Get(':id')
   @Roles(
     'SYSTEM_ADMIN',
@@ -140,11 +162,13 @@ export class DocumentController {
     'FLEET_MANAGER',
     'TECHNICIAN',
   )
+  @AllowService('asset-service')
   @ApiOperation({
     summary: 'Read document metadata',
     description:
       'Never returns the object key, the bucket or a URL. A document belonging to another ' +
-      'organization is reported as not found, so its existence is not disclosed.',
+      'organization is reported as not found, so its existence is not disclosed. Also ' +
+      'callable by asset-service with a SERVICE token scoped to its own organization.',
   })
   async get(@Param('id') id: string) {
     return this.documents.get(id);
