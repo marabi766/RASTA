@@ -65,6 +65,9 @@ export const STATUS_TONES: Readonly<Record<string, StatusTone>> = {
   PENDING_APPROVAL: 'warning',
   BID_OPEN: 'warning',
   IN_PROGRESS: 'warning',
+  // A maintenance request just reported, not yet referred anywhere — the
+  // status a fleet manager most needs to notice (EXP-002).
+  OPEN: 'warning',
 
   REJECTED: 'danger',
   CANCELLED: 'danger',
@@ -103,6 +106,7 @@ const STATUS_LABELS: Readonly<Record<string, string>> = {
   DECOMMISSIONED: 'از رده خارج',
   IN_MAINTENANCE: 'در تعمیر',
   EVALUATION: 'در ارزیابی',
+  OPEN: 'باز',
 };
 
 export function StatusBadge({
