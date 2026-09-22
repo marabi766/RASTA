@@ -185,22 +185,22 @@ jobs:
         # every run while scanning nothing, which is the one failure mode worse
         # than having no gate at all.
         #
-        # Three registry-policy rules are excluded, not silenced by accident.
-        # minimumReleaseAge and trustPolicy both reject the lockfile as it
-        # stands — trustPolicy flags four packages as possible takeovers — and
-        # clearing that means re-resolving the tree and judging each one, which
-        # is its own task, tracked as D-008. Excluding them by name keeps the
-        # decision greppable; deleting the ruleset would hide it.
+        # No rule is excluded. Three registry-policy rules were, from
+        # 2026-08-27 to 2026-09-22 (D-008): they ask pnpm-workspace.yaml for
+        # `minimumReleaseAge` and `trustPolicy: no-downgrade` and .npmrc for
+        # `min-release-age`, and the lockfile of the day failed both pnpm
+        # settings. Those settings are now on, with four reviewed, version-
+        # pinned trust exceptions listed beside them — so the policy the rules
+        # check for is the policy pnpm actually enforces on every install, in
+        # the `pnpm install --frozen-lockfile` step above and in every image
+        # build. The per-package evidence is in docs/23 D-008.
         run: |
           docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.175.0 \
             semgrep scan --error --metrics=off \
               --config p/typescript \
               --config p/nodejs \
               --config p/owasp-top-ten \
-              --config p/secrets \
-              --exclude-rule package_managers.npm.npm-missing-minimum-release-age.npm-missing-minimum-release-age \
-              --exclude-rule package_managers.pnpm.pnpm-missing-minimum-release-age.pnpm-minimum-release-age \
-              --exclude-rule package_managers.pnpm.pnpm-trust-policy.pnpm-trust-policy
+              --config p/secrets
 
   # ---------------------------------------------------------------------------
   # The portal in a real browser (EXP-002, ADR-059).
