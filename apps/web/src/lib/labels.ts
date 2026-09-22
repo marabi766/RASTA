@@ -61,6 +61,53 @@ const TIMELINE_CATEGORIES: Readonly<Record<string, string>> = {
   STATUS: 'وضعیت',
 };
 
+/** `docs/17-mvp-scope.md`: planned work versus a reported fault. */
+const MAINTENANCE_TYPES: Readonly<Record<string, string>> = {
+  PREVENTIVE: 'پیشگیرانه',
+  CORRECTIVE: 'اصلاحی',
+};
+
+/**
+ * `REQUEST_STATUS_VALUES` in `services/maintenance-service/src/maintenance/dto.ts`.
+ *
+ * `APPROVED` is worded apart from `COMPLETED`: the product document's mandatory
+ * control is that settlement cannot happen before an owner approves the
+ * finished work and its cost, and the two words on screen should not read as
+ * the same thing.
+ */
+const MAINTENANCE_REQUEST_STATUSES: Readonly<Record<string, string>> = {
+  OPEN: 'باز',
+  IN_PROGRESS: 'در جریان تعمیر',
+  COMPLETED: 'تکمیل‌شده — در انتظار تأیید',
+  APPROVED: 'تأییدشده',
+  CANCELLED: 'لغوشده',
+};
+
+/** `REPAIR_ORDER_STATUS_VALUES`, same file. */
+const REPAIR_ORDER_STATUSES: Readonly<Record<string, string>> = {
+  OPEN: 'ارجاع‌شده',
+  IN_PROGRESS: 'در حال تعمیر',
+  COMPLETED: 'تکمیل‌شده',
+  CANCELLED: 'لغوشده',
+};
+
+/** `BREAKDOWN_SEVERITIES`, same file — only meaningful for a `CORRECTIVE` request. */
+const SEVERITIES: Readonly<Record<string, string>> = {
+  LOW: 'کم',
+  MEDIUM: 'متوسط',
+  HIGH: 'زیاد',
+  CRITICAL: 'بحرانی',
+};
+
+/** `DIRECT_COST_CATEGORIES` plus `PART`/`LABOUR`, the categories a cost line can carry. */
+const COST_CATEGORIES: Readonly<Record<string, string>> = {
+  PART: 'قطعه',
+  LABOUR: 'اجرت',
+  SERVICE: 'خدمت',
+  EXTERNAL_REPAIR: 'تعمیر برون‌سپاری',
+  OTHER: 'سایر',
+};
+
 function lookup(table: Readonly<Record<string, string>>, value: string): string {
   return table[value] ?? value;
 }
@@ -69,6 +116,13 @@ export const assetTypeLabel = (value: string): string => lookup(ASSET_TYPES, val
 export const assetStatusLabel = (value: string): string => lookup(ASSET_STATUSES, value);
 export const blockerLabel = (value: string): string => lookup(COMPLIANCE_BLOCKERS, value);
 export const timelineCategoryLabel = (value: string): string => lookup(TIMELINE_CATEGORIES, value);
+export const maintenanceTypeLabel = (value: string): string => lookup(MAINTENANCE_TYPES, value);
+export const maintenanceRequestStatusLabel = (value: string): string =>
+  lookup(MAINTENANCE_REQUEST_STATUSES, value);
+export const repairOrderStatusLabel = (value: string): string =>
+  lookup(REPAIR_ORDER_STATUSES, value);
+export const severityLabel = (value: string): string => lookup(SEVERITIES, value);
+export const costCategoryLabel = (value: string): string => lookup(COST_CATEGORIES, value);
 
 /** The options a filter offers, in the order a person reads them. */
 export const assetTypeOptions = Object.entries(ASSET_TYPES).map(([value, label]) => ({
@@ -77,6 +131,20 @@ export const assetTypeOptions = Object.entries(ASSET_TYPES).map(([value, label])
 }));
 
 export const assetStatusOptions = Object.entries(ASSET_STATUSES).map(([value, label]) => ({
+  value,
+  label,
+}));
+
+export const maintenanceTypeOptions = Object.entries(MAINTENANCE_TYPES).map(([value, label]) => ({
+  value,
+  label,
+}));
+
+export const maintenanceRequestStatusOptions = Object.entries(MAINTENANCE_REQUEST_STATUSES).map(
+  ([value, label]) => ({ value, label }),
+);
+
+export const severityOptions = Object.entries(SEVERITIES).map(([value, label]) => ({
   value,
   label,
 }));
