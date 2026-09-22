@@ -61,6 +61,7 @@
 | `demo/investor-preview`                 | `F:\Rasta-Parallel\investor-demo`                | —    | —                                                 | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                         |
 | `design/claude-design`                  | پوشهٔ موقت در `%TEMP%`                           | —    | —                                                 | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                |
 | `fix/document-service-allow-asset-read` | `F:\Rasta-Parallel\document-service-allow-asset` | —    | [#72](https://github.com/marabi766/RASTA/pull/72) | ۲ / ۰          | بستن D-021: `@AllowService('asset-service')` روی `GET /v1/documents/{id}`؛ Unit+Integration واقعی سبز، lint و typecheck سبز          |
+| `feat/web-maintenance-surfaces`         | `F:\Rasta-Parallel\web-maintenance-surfaces`     | —    | [#73](https://github.com/marabi766/RASTA/pull/73) | ۱ / ۰          | `EXP-002`: `/maintenance` و `/maintenance/[id]`؛ فقط خواندن؛ ۴۰۳ تست سبز، lint/typecheck/build سبز؛ زنده تأیید نشد                   |
 
 ## شاخه‌های بازنشسته
 
