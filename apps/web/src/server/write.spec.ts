@@ -76,6 +76,26 @@ describe('what reaches the gateway', () => {
     expect(headers['x-correlation-id']).toEqual(expect.any(String));
   });
 
+  it('defaults to POST when no method is given, so the first caller never had to say it', async () => {
+    const fetchImpl = jest.fn(async () => jsonResponse(201, { id: 'USG_1' }));
+    await call(fetchImpl as unknown as typeof fetch);
+    expect((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].method).toBe('POST');
+  });
+
+  it('sends the method a caller states, for an update rather than a create', async () => {
+    const fetchImpl = jest.fn(async () => jsonResponse(200, { id: 'DRV_1' }));
+    await writeThroughGateway(session, {
+      path: '/v1/drivers/DRV_1',
+      method: 'PATCH',
+      body: { employeeNo: 'EMP-1' },
+      submissionId: 'sub_AAAAAAAAAAAAAAAAAAAA',
+      schema,
+      mapping,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].method).toBe('PATCH');
+  });
+
   it('sends the same key on a retry, which is what makes a retry one record', async () => {
     // The double-submit case, at the level this module controls: the id comes
     // from the caller, so two attempts at one submission carry one key and the

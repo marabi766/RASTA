@@ -61,6 +61,7 @@
 | `fix/supply-chain-trust-policy` | `F:\Rasta-Parallel\supply-chain-trust-review` | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `fa14ef4` — D-008: بازبینی سه قاعدهٔ Supply-Chain کنارگذاشته‌شده؛ **`pnpm-lock.yaml`، `ci.yml` و `docs/23` را لمس می‌کند**                               |
 | `demo/investor-preview`         | `F:\Rasta-Parallel\investor-demo`             | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                              |
 | `design/claude-design`          | پوشهٔ موقت در `%TEMP%`                        | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                     |
+| `feat/web-drivers-surface`      | `F:\Rasta-Parallel\web-drivers-surface`       | —    | #76 | ۲ / ۰          | از `origin/main` @ `0b4a35a` — `EXP-002`: `/drivers` (فهرست، جزئیات، ثبت، ویرایش، تغییر وضعیت، تخصیص/پایان تخصیص)؛ PR باز، منتظر ادغام — طبق قاعدهٔ ۶، ادغام کار PM/کاربر است             |
 
 ## شاخه‌های بازنشسته
 
