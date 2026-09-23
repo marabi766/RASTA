@@ -49,16 +49,21 @@ const COMPLIANCE_BLOCKERS: Readonly<Record<string, string>> = {
   DECOMMISSIONED: 'از رده خارج شده',
 };
 
+/**
+ * `TIMELINE_CATEGORIES`, `services/asset-service/src/asset/dto.ts` — the nine
+ * sections `appendTimeline()` writes into, shared by the dossier's recent
+ * activity and the full `/assets/[id]/timeline` history.
+ */
 const TIMELINE_CATEGORIES: Readonly<Record<string, string>> = {
-  REGISTRATION: 'ثبت',
-  ASSIGNMENT: 'تخصیص',
+  LIFECYCLE: 'چرخهٔ عمر',
   USAGE: 'کارکرد',
   MAINTENANCE: 'نگهداری',
+  INSURANCE: 'بیمه',
+  INSPECTION: 'معاینهٔ فنی',
+  DOCUMENT: 'مدرک',
   COST: 'هزینه',
-  COMPLIANCE: 'انطباق',
-  LOCATION: 'مکان',
+  PROJECT: 'پروژه',
   TRANSFER: 'انتقال',
-  STATUS: 'وضعیت',
 };
 
 /** `docs/17-mvp-scope.md`: planned work versus a reported fault. */
@@ -177,5 +182,9 @@ export const driverStatusOptions = Object.entries(DRIVER_STATUSES).map(([value, 
 }));
 
 export const assignmentEndReasonOptions = Object.entries(ASSIGNMENT_END_REASONS).map(
+  ([value, label]) => ({ value, label }),
+);
+
+export const timelineCategoryOptions = Object.entries(TIMELINE_CATEGORIES).map(
   ([value, label]) => ({ value, label }),
 );

@@ -1,5 +1,6 @@
 import {
   Alert,
+  ButtonLink,
   EmptyState,
   ErrorState,
   Grid,
@@ -233,7 +234,15 @@ export function DossierScreen({ result, assetId }: DossierScreenProps) {
         </p>
       </Section>
 
-      <Section headingId="activity" title="رویدادهای اخیر">
+      <Section
+        headingId="activity"
+        title="رویدادهای اخیر"
+        actions={
+          <ButtonLink tone="secondary" href={`/assets/${encodeURIComponent(assetId)}/timeline`}>
+            مشاهدهٔ تاریخچهٔ کامل
+          </ButtonLink>
+        }
+      >
         {recentActivity.length === 0 ? (
           <EmptyState
             title="رویدادی ثبت نشده"
