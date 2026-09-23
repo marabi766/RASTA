@@ -886,6 +886,21 @@
           "kind": "DOCUMENT",
           "ref": "docs/16-ui-architecture.md#۱۶۶-نقشه-صفحات",
           "note": "Still unbuilt and not claimed: /organizations, /drivers, and the maintenance and asset write paths. EXP-002 is not finished by this change; what it adds is the foundation every later form inherits, proven by one screen."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/PLACEHOLDER",
+          "note": "/organizations — سازمان و اعضا: the organization's own profile (the three fields organization-service accepts), the member list, each member's roles, and revoking a membership. The role picker renders the caller's own grantable set, which identity-service computes from the configured ladder and now returns on GET /v1/users/me — so the form offers exactly what the service would accept rather than a hardcoded list that drifts when ROLE_GRANTS_BY_* changes. Hierarchy management is deliberately absent: docs/16 § 16.6 puts it on the admin console's own /organizations for UNION_ADMIN, and apps/admin does not exist yet."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/app/organizations",
+          "note": "45 tests on the screen and its three write paths: every gate refusal proves the service was not called, the role picker renders only grantable roles and preserves a held role the caller cannot grant instead of silently stripping it, an empty ladder is stated rather than shown as an empty form, and the ladder refusal from identity-service is rendered as its own outcome with a correlation id. Two jest-axe passes. 666 portal tests in total."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/server/gateway.spec.ts",
+          "note": "A defect the member work found in shared code: callGateway always parsed the body as JSON, so a 204 No Content — which POST /v1/memberships/:id/revoke answers — threw after the service had already done the work, reporting a successful revocation as a failure. Fixed and covered three ways."
         }
       ]
     },

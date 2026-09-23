@@ -5,6 +5,8 @@ import type { IdentityRepository } from './identity.repository';
 import type { KeycloakAdminClient } from '../keycloak/keycloak.client';
 import { IDENTITY_EVENTS } from './events';
 import { REFUSAL_SITES, refusalSiteOf } from '../security-events/refusal-sites';
+import { DEFAULT_ROLE_GRANT_POLICY, assertMayGrantRoles } from './role-grants';
+import type { PlatformRole } from './dto';
 
 /**
  * Identity service behaviour, with the repository and Keycloak stubbed.
@@ -402,5 +404,70 @@ describe('registration review', () => {
     expect((approved?.payload as { grantedRoles: string[] }).grantedRoles).toEqual([
       'FLEET_MANAGER',
     ]);
+  });
+});
+
+describe('getCurrentUser — the grantable-roles field', () => {
+  /**
+   * The field a client renders its role picker from (`docs/24` Q-60). It is
+   * not a permission check — every write is refused by the ladder whatever a
+   * client sends — so what these tests protect is *agreement*: the picker must
+   * offer exactly what the service would accept, or it misleads the person
+   * using it.
+   */
+  function withUser(roles: string[], membershipRoles = ['ORGANIZATION_ADMIN']) {
+    const h = harness();
+    h.repository.findUserWithMemberships.mockResolvedValue({
+      ...userRow(),
+      memberships: [membershipRow({ roles: membershipRoles })],
+    } as never);
+    return runWithContext(context({ roles }), () => h.service.getCurrentUser());
+  }
+
+  it('gives an organization administrator the five organization roles', async () => {
+    await expect(withUser(['ORGANIZATION_ADMIN'])).resolves.toMatchObject({
+      grantableRoles: [
+        'ORGANIZATION_ADMIN',
+        'FLEET_MANAGER',
+        'DRIVER',
+        'OPERATOR',
+        'PROCUREMENT_USER',
+      ],
+    });
+  });
+
+  it('gives a caller who may grant nothing an empty list, not every role', async () => {
+    const view = await withUser(['DRIVER'], ['DRIVER']);
+    expect(view.grantableRoles).toEqual([]);
+  });
+
+  it('never offers SYSTEM_ADMIN, not even to a SYSTEM_ADMIN', async () => {
+    const view = await withUser(['SYSTEM_ADMIN'], ['SYSTEM_ADMIN']);
+    expect(view.grantableRoles).not.toContain('SYSTEM_ADMIN');
+    expect(view.grantableRoles).toContain('UNION_ADMIN');
+  });
+
+  it('answers from the token, not the membership row, because enforcement does', async () => {
+    // A membership demoted after this token was minted still carries the old
+    // claims until it is refreshed. `assertMayGrantRoles` measures the token,
+    // so this must too — otherwise the picker offers what the write refuses.
+    const view = await withUser(['ORGANIZATION_ADMIN'], ['DRIVER']);
+
+    expect(view.effectiveRoles).toEqual(['DRIVER']);
+    expect(view.grantableRoles).toContain('FLEET_MANAGER');
+  });
+
+  it('agrees with the ladder the writes enforce', async () => {
+    // The point of the field, asserted directly: everything it offers is
+    // something `assertMayGrantRoles` accepts from the same caller.
+    const view = await withUser(['ORGANIZATION_ADMIN']);
+
+    for (const role of view.grantableRoles) {
+      expect(() =>
+        runWithContext(context({ roles: ['ORGANIZATION_ADMIN'] }), () =>
+          assertMayGrantRoles([role as PlatformRole], DEFAULT_ROLE_GRANT_POLICY),
+        ),
+      ).not.toThrow();
+    }
   });
 });

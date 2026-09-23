@@ -219,6 +219,21 @@ export interface CurrentUserView extends UserView {
   memberships: MembershipView[];
   /** Roles in the organization this request acts for. */
   effectiveRoles: string[];
+  /**
+   * The roles this caller may grant to somebody else, from the configured
+   * ladder (`role-grants.ts`, `docs/24` Q-60).
+   *
+   * Here so a client can render a role picker offering what the service would
+   * actually accept. It is **not** a permission check — the ladder is enforced
+   * on every write whatever a client sends, and `docs/16` § ۱۶٫۱۱ says hiding
+   * a control is not a security control. It exists because the ladder is
+   * deployment configuration: a client that hardcodes the list silently
+   * disagrees with the service the moment `ROLE_GRANTS_BY_*` changes, either
+   * offering a role that will be refused or hiding one that would have worked.
+   *
+   * Empty for a caller who may grant nothing, which is most of them.
+   */
+  grantableRoles: string[];
 }
 
 export interface RegistrationRequestView {

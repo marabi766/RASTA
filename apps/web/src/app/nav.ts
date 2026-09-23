@@ -17,4 +17,5 @@ export const PORTAL_NAV: readonly SidebarItem[] = [
   { href: '/drivers', label: 'راننده و تخصیص' },
   { href: '/usage', label: 'ثبت کارکرد' },
   { href: '/maintenance', label: 'نگهداری و تعمیرات' },
+  { href: '/organizations', label: 'سازمان و اعضا' },
 ];

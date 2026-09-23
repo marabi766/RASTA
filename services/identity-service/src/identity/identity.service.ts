@@ -10,6 +10,7 @@ import {
   assertMayGrantRoles,
   assertMayManageMembershipRoles,
   assertRolesMayBeRequested,
+  grantableRoles,
   type RoleGrantPolicy,
 } from './role-grants';
 import { IDENTITY_TOPIC } from '../config/env';
@@ -92,6 +93,13 @@ export class IdentityService {
       ...toUserView(user),
       memberships: user.memberships.map((m) => toMembershipView(m, nameById.get(m.organizationId))),
       effectiveRoles: active?.roles ?? [],
+      // Derived from `context.roles` — the verified token — and not from
+      // `effectiveRoles` above, because `assertMayGrantRoles` measures the
+      // token too. The two can disagree: a membership whose roles changed
+      // after this token was minted still carries the old claims until it is
+      // refreshed. Answering from the row would hand a client a picker the
+      // service then refuses, which is the drift this field exists to end.
+      grantableRoles: [...grantableRoles(context.roles, this.roleGrants)],
     };
   }
 
@@ -113,13 +121,23 @@ export class IdentityService {
 
   async listUsers(query: ListUsersQuery) {
     const result = await this.repository.listUsersInOrganization(query);
-    const rolesByUser = new Map(result.memberships.map((m) => [m.userId, m.roles]));
+    const membershipByUser = new Map(result.memberships.map((m) => [m.userId, m]));
 
     return {
-      items: result.users.map((user) => ({
-        ...toUserView(user),
-        roles: rolesByUser.get(user.id) ?? [],
-      })),
+      items: result.users.map((user) => {
+        const membership = membershipByUser.get(user.id);
+        return {
+          ...toUserView(user),
+          roles: membership?.roles ?? [],
+          // The membership this row *is* — the row is a membership in this
+          // organization, not a user in the abstract. Without it a client that
+          // lists members cannot then call `/v1/memberships/:id/roles` or
+          // `/revoke` on one, which is every member-management screen. It
+          // discloses nothing further: the list is already scoped to the
+          // caller's tenant, and the pagination cursor is a membership id.
+          membershipId: membership?.id ?? null,
+        };
+      }),
       nextCursor: result.nextCursor,
       hasMore: result.hasMore,
     };

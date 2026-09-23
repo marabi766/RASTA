@@ -147,3 +147,59 @@ describe('what goes on the wire', () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+describe('a success with no body', () => {
+  /**
+   * `POST /v1/memberships/:id/revoke` is `@HttpCode(204)`, and so is every
+   * other endpoint whose result is the absence of something. Parsing an empty
+   * body as JSON throws, and the throw would arrive *after* the service had
+   * already done the work — the write reported as failed, the person retrying
+   * something that already happened.
+   */
+  const noBody = (status: number, headers: Record<string, string> = {}) =>
+    (async () => new Response(null, { status, headers })) as unknown as typeof fetch;
+
+  it('reads a 204 as a success carrying nothing', async () => {
+    const response = await callGateway({
+      baseUrl: GATEWAY,
+      path: '/v1/memberships/MBR_1/revoke',
+      method: 'POST',
+      body: { reason: 'پایان همکاری' },
+      accessToken: 'token',
+      fetchImpl: noBody(204),
+    });
+
+    expect(response.data).toBeUndefined();
+    expect(response.correlationId).toEqual(expect.any(String));
+  });
+
+  it('reads an explicitly empty 200 the same way', async () => {
+    const response = await callGateway({
+      baseUrl: GATEWAY,
+      path: '/v1/memberships/MBR_1/revoke',
+      method: 'POST',
+      accessToken: 'token',
+      fetchImpl: noBody(200, { 'content-length': '0' }),
+    });
+
+    expect(response.data).toBeUndefined();
+  });
+
+  it('still parses a body when there is one', async () => {
+    const withBody = (async () =>
+      new Response(JSON.stringify({ id: 'MBR_1' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch;
+
+    const response = await callGateway<{ id: string }>({
+      baseUrl: GATEWAY,
+      path: '/v1/memberships/MBR_1/roles',
+      method: 'POST',
+      accessToken: 'token',
+      fetchImpl: withBody,
+    });
+
+    expect(response.data).toEqual({ id: 'MBR_1' });
+  });
+});

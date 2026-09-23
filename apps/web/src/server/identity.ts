@@ -37,6 +37,17 @@ const currentUserSchema = z.object({
   activeOrganizationId: z.string().nullable().default(null),
   memberships: z.array(membershipSchema).default([]),
   effectiveRoles: z.array(z.string()).default([]),
+  /**
+   * Which roles this person may grant, straight from the service's configured
+   * ladder (`docs/24` Q-60). The member-management form renders its options
+   * from this and from nothing else.
+   *
+   * `.default([])` rather than required: an older identity-service that does
+   * not send it leaves the picker empty, which offers nothing rather than
+   * guessing — and guessing is the whole failure mode this field exists to
+   * remove. The service refuses an ungrantable role regardless.
+   */
+  grantableRoles: z.array(z.string()).default([]),
 });
 
 export type CurrentUser = z.infer<typeof currentUserSchema>;
