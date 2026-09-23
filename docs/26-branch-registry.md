@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۰۱ (2026-09-23) · **`main` در آن لحظه:** `0b4a35a`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۰۱ (2026-09-23) · **`main` در آن لحظه:** `1a6ba45`
 
 ---
 
@@ -100,6 +100,7 @@
 | `fix/supply-chain-trust-policy`         | [#74](https://github.com/marabi766/RASTA/pull/74) | `9e0b769`   |
 | `feat/web-maintenance-surfaces`         | [#73](https://github.com/marabi766/RASTA/pull/73) | `239ae23`   |
 | `feat/web-write-path-and-usage`         | [#75](https://github.com/marabi766/RASTA/pull/75) | `0b4a35a`   |
+| `feat/web-drivers-surface`              | [#76](https://github.com/marabi766/RASTA/pull/76) | `1a6ba45`   |
 | `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 

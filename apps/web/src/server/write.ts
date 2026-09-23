@@ -82,6 +82,13 @@ export interface WriteCall<S extends z.ZodTypeAny, F extends string> {
   /** What the created resource must look like; everything else is dropped. */
   readonly schema: S;
   readonly mapping: FieldMapping<F>;
+  /**
+   * `POST` unless stated otherwise. An update is a `PATCH` and a status
+   * change is often a `POST` sub-resource, so this is a per-call choice
+   * rather than a fact about the module — `usage-records`, the first caller,
+   * never had to say it.
+   */
+  readonly method?: 'POST' | 'PATCH' | 'PUT';
   /** For tests. The real thing is the global `fetch`. */
   readonly fetchImpl?: typeof fetch;
 }
@@ -94,7 +101,7 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path: call.path,
-      method: 'POST',
+      method: call.method ?? 'POST',
       body: call.body,
       accessToken: session.accessToken,
       idempotencyKey: call.submissionId,
