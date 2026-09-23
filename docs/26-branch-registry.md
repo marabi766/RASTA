@@ -100,6 +100,7 @@
 | `feat/web-write-path-and-usage`         | [#75](https://github.com/marabi766/RASTA/pull/75) | `0b4a35a`   |
 | `feat/web-drivers-surface`              | [#76](https://github.com/marabi766/RASTA/pull/76) | `1a6ba45`   |
 | `fix/identity-role-grant-ladder`        | [#77](https://github.com/marabi766/RASTA/pull/77) | `9347b80`   |
+| `feat/ci-portal-e2e-live-stack`         | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
 | `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
