@@ -136,6 +136,18 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     );
   }
 
+  // `204 No Content` is a success with nothing to parse, and the platform
+  // answers it wherever the result is the absence of something —
+  // `POST /v1/memberships/:id/revoke` is `@HttpCode(204)`. Calling `.json()`
+  // on an empty body throws `Unexpected end of JSON input`, which would
+  // surface as a failed write *after* the service had already succeeded: the
+  // membership revoked, the page saying it was not, and a person retrying a
+  // thing that already happened. The caller's schema then parses `undefined`,
+  // which is what actually came back.
+  if (response.status === 204 || response.headers.get('content-length') === '0') {
+    return { data: undefined as T, correlationId };
+  }
+
   return { data: (await response.json()) as T, correlationId };
 }
 
