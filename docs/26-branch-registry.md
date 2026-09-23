@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۳۱ (2026-09-22) · **`main` در آن لحظه:** `239ae23`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۰۱ (2026-09-23) · **`main` در آن لحظه:** `1a6ba45`
 
 ---
 
@@ -55,11 +55,12 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                            | Worktree                                     | نشست               | PR  | ahead / behind | وضعیت                                                                                                                        |
-| ------------------------------- | -------------------------------------------- | ------------------ | --- | -------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `feat/ci-portal-e2e-live-stack` | `F:\Rasta-Parallel\ci-portal-e2e-live-stack` | Codex (زیر نظر PM) | —   | ۱ / ۰          | زیرساخت CI برای اثبات یک ثبت واقعی از راه Gateway در Job مرورگر — Session زنده، Keycloak، identity و fleet؛ آمادهٔ Push و PR |
-| `demo/investor-preview`         | `F:\Rasta-Parallel\investor-demo`            | —                  | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                 |
-| `design/claude-design`          | پوشهٔ موقت در `%TEMP%`                       | —                  | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                        |
+| شاخه                             | Worktree                                      | نشست               | PR  | ahead / behind | وضعیت                                                                                                                              |
+| -------------------------------- | --------------------------------------------- | ------------------ | --- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `feat/ci-portal-e2e-live-stack`  | `F:\Rasta-Parallel\ci-portal-e2e-live-stack`  | Codex (زیر نظر PM) | —   | ۱ / ۰          | زیرساخت CI برای اثبات یک ثبت واقعی از راه Gateway در Job مرورگر — Session زنده، Keycloak، identity و fleet؛ آمادهٔ Push و PR       |
+| `feat/web-organizations-surface` | `F:\Rasta-Parallel\web-organizations-surface` | Opus               | —   | ۰ / ۰          | از `origin/main` @ `9347b80` — `/organizations` (سازمان و اعضا)، از سر گرفته شد پس از ادغام PR #77؛ نام Worktree از کار قبلی مانده |
+| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`             | —                  | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                       |
+| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                        | —                  | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                              |
 
 ## شاخه‌های بازنشسته
 
@@ -97,10 +98,11 @@
 | `fix/document-service-allow-asset-read` | [#72](https://github.com/marabi766/RASTA/pull/72) | `3f68d76`   |
 | `fix/supply-chain-trust-policy`         | [#74](https://github.com/marabi766/RASTA/pull/74) | `9e0b769`   |
 | `feat/web-maintenance-surfaces`         | [#73](https://github.com/marabi766/RASTA/pull/73) | `239ae23`   |
-| `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
-| `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 | `feat/web-write-path-and-usage`         | [#75](https://github.com/marabi766/RASTA/pull/75) | `0b4a35a`   |
 | `feat/web-drivers-surface`              | [#76](https://github.com/marabi766/RASTA/pull/76) | `1a6ba45`   |
+| `fix/identity-role-grant-ladder`        | [#77](https://github.com/marabi766/RASTA/pull/77) | `9347b80`   |
+| `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
+| `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
 > است و می‌ماند. هیچ Worktreeای `main` را checkout نکرده، پس `git fetch` آن ref
@@ -178,7 +180,8 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 | Q-57        | `feat/audit-service-aud-004-contract` | روی `main`                                                                             |
 | Q-58        | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                   |
 | Q-59        | `feat/asset-insurance-claim-api`      | روی `main` (`fa14ef4`) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه           |
-| Q-60+       | آزاد                                  | —                                                                                      |
+| Q-60        | `fix/identity-role-grant-ladder`      | **رزرو شد** (2026-09-23) — مرجع اعطای نقش: چه نقشی، چه نقش‌هایی را می‌تواند بدهد       |
+| Q-61+       | آزاد                                  | —                                                                                      |
 
 > **چرا Q-44 قابل جابه‌جایی نیست:** یک ADR ادغام‌شده آن را به‌عنوان مرجع
 > پذیرش نقل کرده. نقل‌قول را نمی‌شود ویرایش کرد بی‌آنکه سند دروغ شود. هر
