@@ -274,7 +274,6 @@ describe('the members list', () => {
         query={{}}
         grantableRoles={ORG_ADMIN_GRANTS}
         csrfToken={CSRF}
-        submissionId={SUBMISSION}
       />,
     );
 
@@ -289,7 +288,6 @@ describe('the members list', () => {
         query={{}}
         grantableRoles={ORG_ADMIN_GRANTS}
         csrfToken={CSRF}
-        submissionId={SUBMISSION}
       />,
     );
 
@@ -305,7 +303,6 @@ describe('the members list', () => {
         query={{}}
         grantableRoles={ORG_ADMIN_GRANTS}
         csrfToken={CSRF}
-        submissionId={SUBMISSION}
       />,
     );
     expect(screen.getByText('هنوز عضوی ثبت نشده است')).toBeInTheDocument();
@@ -316,7 +313,6 @@ describe('the members list', () => {
         query={{ q: 'کسی' }}
         grantableRoles={ORG_ADMIN_GRANTS}
         csrfToken={CSRF}
-        submissionId={SUBMISSION}
       />,
     );
     expect(screen.getByText('عضوی با این جست‌وجو پیدا نشد')).toBeInTheDocument();
@@ -329,7 +325,6 @@ describe('the members list', () => {
         query={{}}
         grantableRoles={[]}
         csrfToken={CSRF}
-        submissionId={SUBMISSION}
       />,
     );
 
@@ -343,7 +338,6 @@ describe('the members list', () => {
         query={{}}
         grantableRoles={[]}
         csrfToken={CSRF}
-        submissionId={SUBMISSION}
       />,
     );
 
@@ -359,7 +353,6 @@ describe('accessibility', () => {
         query={{}}
         grantableRoles={ORG_ADMIN_GRANTS}
         csrfToken={CSRF}
-        submissionId={SUBMISSION}
       />,
     );
 

@@ -10,6 +10,10 @@ import {
 import { AGGREGATION_WINDOW_SECONDS } from '../security-events/refusal-aggregation';
 import { roleSchema, type PlatformRole } from '../identity/dto';
 import { DEFAULT_GRANTS, UNGRANTABLE_ROLES, type RoleGrantPolicy } from '../identity/role-grants';
+import {
+  DEFAULT_PROVISIONING_SCOPE_POLICY,
+  type ProvisioningScopePolicy,
+} from '../identity/provisioning-scope';
 
 /**
  * A comma-separated role list from the environment.
@@ -25,7 +29,10 @@ import { DEFAULT_GRANTS, UNGRANTABLE_ROLES, type RoleGrantPolicy } from '../iden
  * the value outright is what stops an operator believing they configured
  * something they did not get.
  */
-function roleListEnv(fallback: readonly PlatformRole[]) {
+function roleListEnv(
+  fallback: readonly PlatformRole[],
+  options: { allowUngrantable?: boolean } = {},
+) {
   return z
     .string()
     .default(fallback.join(','))
@@ -42,7 +49,7 @@ function roleListEnv(fallback: readonly PlatformRole[]) {
           ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Unknown role: ${entry}` });
           return z.NEVER;
         }
-        if (UNGRANTABLE_ROLES.includes(parsed.data)) {
+        if (!options.allowUngrantable && UNGRANTABLE_ROLES.includes(parsed.data)) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             message: `${entry} cannot be granted through this API and must not be configured as grantable`,
@@ -151,6 +158,25 @@ export const identityEnvSchema = baseEnvSchema
     ROLE_GRANTS_BY_SYSTEM_ADMIN: roleListEnv(DEFAULT_GRANTS.SYSTEM_ADMIN),
     ROLE_GRANTS_BY_UNION_ADMIN: roleListEnv(DEFAULT_GRANTS.UNION_ADMIN),
     ROLE_GRANTS_BY_ORGANIZATION_ADMIN: roleListEnv(DEFAULT_GRANTS.ORGANIZATION_ADMIN),
+
+    /**
+     * Which roles may provision a user into an organization other than the one
+     * they are acting for (`identity/provisioning-scope.ts`, `docs/24` Q-61).
+     *
+     * Everyone else must name their own active organization. `docs/09` scopes
+     * `ORGANIZATION_ADMIN` to its own organization, so its absence here is the
+     * table read plainly; `UNION_ADMIN`'s absence is the narrow reading of a
+     * question the product document does not answer, and widening it is one
+     * environment value rather than a release.
+     *
+     * Unlike the grant ladder, `SYSTEM_ADMIN` is permitted here — it is the
+     * platform-operator role, and it is the one role nobody can be granted
+     * through this API at all.
+     */
+    USER_PROVISIONING_CROSS_ORG_ROLES: roleListEnv(
+      DEFAULT_PROVISIONING_SCOPE_POLICY.crossOrgRoles as readonly PlatformRole[],
+      { allowUngrantable: true },
+    ),
   });
 
 export type IdentityEnv = z.infer<typeof identityEnvSchema>;
@@ -183,6 +209,11 @@ export function roleGrantPolicy(env: IdentityEnv): RoleGrantPolicy {
     byUnionAdmin: env.ROLE_GRANTS_BY_UNION_ADMIN,
     byOrganizationAdmin: env.ROLE_GRANTS_BY_ORGANIZATION_ADMIN,
   };
+}
+
+/** Which roles may provision across organizations, as the service holds it. */
+export function provisioningScopePolicy(env: IdentityEnv): ProvisioningScopePolicy {
+  return { crossOrgRoles: env.USER_PROVISIONING_CROSS_ORG_ROLES };
 }
 
 export const SERVICE_NAME = 'identity-service';
