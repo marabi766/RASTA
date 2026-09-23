@@ -219,9 +219,62 @@ jobs:
   web-browser:
     name: Portal in a browser
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    needs: quality
     permissions:
       contents: read
+
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: rasta
+          POSTGRES_PASSWORD: rasta_ci_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rasta"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      kafka:
+        image: apache/kafka:3.9.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: '1'
+          KAFKA_PROCESS_ROLES: 'controller,broker'
+          KAFKA_CONTROLLER_QUORUM_VOTERS: '1@localhost:9093'
+          KAFKA_LISTENERS: 'PLAINTEXT://:9092,CONTROLLER://:9093'
+          KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://localhost:9092'
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT'
+          KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+          KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+          CLUSTER_ID: 'rasta-e2e-cluster-000001'
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 20
+          --health-start-period 40s
+
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -234,22 +287,201 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
+      - name: Generate run secrets
+        # Job-local and masked. In particular, WEB_SESSION_SECRET is never a
+        # repository fixture: the browser receives only the cookie it seals.
+        run: |
+          set -euo pipefail
+          keycloak_password="$(openssl rand -hex 24)"
+          internal_secret="$(openssl rand -hex 32)"
+          web_session_secret="$(openssl rand -hex 32)"
+          echo "::add-mask::${keycloak_password}"
+          echo "::add-mask::${internal_secret}"
+          echo "::add-mask::${web_session_secret}"
+          echo "KEYCLOAK_ADMIN_PASSWORD=${keycloak_password}" >> "$GITHUB_ENV"
+          echo "INTERNAL_TOKEN_SECRET=${internal_secret}" >> "$GITHUB_ENV"
+          echo "WEB_SESSION_SECRET=${web_session_secret}" >> "$GITHUB_ENV"
+
+      - name: Start Keycloak with the platform realm
+        # Service containers start before checkout, so the checked-in realm
+        # import is mounted by an ordinary container after checkout instead.
+        run: |
+          set -euo pipefail
+          docker run -d --name rasta-web-e2e-keycloak \
+            -p 8080:8080 \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+            -e KC_BOOTSTRAP_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD}" \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_HOSTNAME_STRICT=false \
+            -v "$PWD/infrastructure/docker/keycloak:/opt/keycloak/data/import:ro" \
+            quay.io/keycloak/keycloak:26.0 \
+            start-dev --import-realm
+
       - run: pnpm install --frozen-lockfile
 
-      - name: Build the portal
-        # `...` so the workspace packages it imports are built first. Without
-        # it the type checker inside `next build` cannot find
-        # `@rasta/contracts`, whose declarations are a build output — which is
-        # invisible locally, where they are already on disk.
-        run: pnpm exec turbo run build --filter=@rasta/web...
+      - name: Provision databases, roles and extensions
+        env:
+          PGPASSWORD: rasta_ci_password
+          POSTGRES_SERVICE_PASSWORD: rasta_ci_service_password
+        run: |
+          export PGHOST=localhost PGPORT=5432 POSTGRES_USER=rasta
+          bash infrastructure/docker/postgres/00-init-databases.sh
+
+      - name: Create Kafka topics for the live path
+        # Fleet consumes the three reference streams and publishes its own
+        # outbox stream. Identity also owns its domain and audit-trail streams.
+        # Auto-creation stays off, as it is in every deployed environment.
+        run: |
+          set -euo pipefail
+          for topic in \
+            rasta.fleet.v1 rasta.fleet.v1.retry rasta.fleet.v1.dlq \
+            rasta.asset.v1 rasta.asset.v1.retry rasta.asset.v1.dlq \
+            rasta.insurance.v1 rasta.maintenance.v1 \
+            rasta.identity.v1 rasta.identity.v1.retry rasta.identity.v1.dlq \
+            rasta.audit.trail.v1; do
+            docker run --rm --network host apache/kafka:3.9.0 \
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+              --create --if-not-exists --partitions 3 --replication-factor 1 \
+              --topic "$topic"
+          done
+
+      - run: pnpm run db:generate
+
+      - name: Apply live-path migrations
+        run: |
+          pnpm --filter @rasta/identity-service run db:migrate
+          pnpm --filter @rasta/fleet-service run db:migrate
+        env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
+
+      - name: Seed the live user, asset reference and assignment
+        # operator.one is the same platform user in identity, Keycloak and
+        # fleet, and holds AST-SEED-0001 through ASG-SEED-0001.
+        run: |
+          pnpm --filter @rasta/identity-service run db:seed
+          pnpm --filter @rasta/fleet-service run db:seed
+        env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
+
+      - name: Build portal and live-path services
+        # Build the exact deployable artifacts this job starts, plus their
+        # workspace dependencies. Services run from dist, never watch mode.
+        run: >-
+          pnpm exec turbo run build
+          --filter=@rasta/web...
+          --filter=@rasta/api-gateway...
+          --filter=@rasta/identity-service...
+          --filter=@rasta/fleet-service...
+
+      - name: Wait for Keycloak to import the realm
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl -sfo /dev/null \
+              "http://localhost:8080/realms/rasta/.well-known/openid-configuration"; then
+              echo "Keycloak realm ready after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 5
+          done
+          docker logs rasta-web-e2e-keycloak
+          exit 1
+
+      - name: Start identity, fleet and api-gateway
+        env:
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          REDIS_URL: redis://localhost:6379
+          OIDC_ISSUER_URL: http://localhost:8080/realms/rasta
+          OIDC_JWKS_URI: http://localhost:8080/realms/rasta/protocol/openid-connect/certs
+          OIDC_AUDIENCE: rasta-api
+          KEYCLOAK_URL: http://localhost:8080
+          KEYCLOAK_REALM: rasta
+          KEYCLOAK_BACKEND_CLIENT_ID: rasta-backend
+          KEYCLOAK_BACKEND_CLIENT_SECRET: backend_dev_secret_change_me
+          AUDIT_SERVICE_URL: http://localhost:3115
+          IDENTITY_SERVICE_URL: http://localhost:3101
+          ORGANIZATION_SERVICE_URL: http://localhost:3102
+          ASSET_SERVICE_URL: http://localhost:3103
+          FLEET_SERVICE_URL: http://localhost:3104
+          MAINTENANCE_SERVICE_URL: http://localhost:3105
+          MARKETPLACE_SERVICE_URL: http://localhost:3106
+          PROCUREMENT_SERVICE_URL: http://localhost:3107
+          SUPPLIER_SERVICE_URL: http://localhost:3108
+          INVENTORY_SERVICE_URL: http://localhost:3109
+          CONSTRUCTION_SERVICE_URL: http://localhost:3110
+          CONTRACT_SERVICE_URL: http://localhost:3111
+          ECONOMIC_SERVICE_URL: http://localhost:3112
+          NOTIFICATION_SERVICE_URL: http://localhost:3113
+          DOCUMENT_SERVICE_URL: http://localhost:3114
+          ANALYTICS_SERVICE_URL: http://localhost:3116
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/rasta-web-e2e-logs
+
+          ( cd services/identity-service && \
+            PORT=3101 SERVICE_NAME=identity-service \
+            DATABASE_URL=postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/identity.log 2>&1 & )
+
+          ( cd services/fleet-service && \
+            PORT=3104 SERVICE_NAME=fleet-service \
+            DATABASE_URL=postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/fleet.log 2>&1 & )
+
+          ( cd services/api-gateway && \
+            PORT=3000 SERVICE_NAME=api-gateway \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/gateway.log 2>&1 & )
+
+          for attempt in $(seq 1 60); do
+            identity="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3101/health/ready || true)"
+            fleet="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3104/health/ready || true)"
+            gateway="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3000/v1/usage-records || true)"
+            if [ "$identity" = "200" ] && [ "$fleet" = "200" ] && [ "$gateway" = "401" ]; then
+              echo "portal live stack ready after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 3
+          done
+
+          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, gateway=${gateway})"
+          cat /tmp/rasta-web-e2e-logs/identity.log
+          cat /tmp/rasta-web-e2e-logs/fleet.log
+          cat /tmp/rasta-web-e2e-logs/gateway.log
+          exit 1
 
       # Chromium only. A second engine doubles the job for a page whose
-      # behaviour is server-rendered HTML and one link.
+      # critical behavior is server-rendered HTML and a native form post.
       - name: Install the browser
         run: pnpm --filter @rasta/web exec playwright install --with-deps chromium
 
       - name: Run the browser suite
         run: pnpm --filter @rasta/web exec playwright test
+        env:
+          WEB_LIVE_STACK_E2E: 'true'
+          WEB_E2E_FLEET_URL: http://localhost:3104
+          API_GATEWAY_URL: http://localhost:3000
+          OIDC_ISSUER_URL: http://localhost:8080/realms/rasta
+          OIDC_CLIENT_ID: rasta-web
+          WEB_PUBLIC_ORIGIN: http://localhost:3200
+          WEB_COOKIE_SECURE: 'false'
+
+      - name: Live-stack logs
+        if: failure()
+        run: |
+          echo '--- identity-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/identity.log || true
+          echo '--- fleet-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/fleet.log || true
+          echo '--- api-gateway ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/gateway.log || true
+          echo '--- keycloak ---'
+          docker logs --tail 200 rasta-web-e2e-keycloak || true
 
       - name: Playwright report
         if: failure()

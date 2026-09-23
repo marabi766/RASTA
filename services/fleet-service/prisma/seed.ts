@@ -96,7 +96,7 @@ const DRIVERS = [
     // The seeded operator.one, who holds OPERATOR and DRIVER. This link is
     // what makes the object-level authorization path demonstrable: signed in
     // as this user, only their own record and assignment are visible.
-    userId: 'USR-SEED-OPERATOR-ONE',
+    userId: 'USR-SEED-OPERATOR',
     employeeNo: 'OP-104',
     licenceClass: 'پایه یکم',
     licenceValidTo: new Date(now + 400 * day),
