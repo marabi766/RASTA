@@ -7,6 +7,7 @@ import {
   assertBuyer,
   assertDisputeResolver,
   assertOrderVisible,
+  viewerParties,
   assertSupplier,
 } from '../access/access';
 import { ENV } from '../tokens';
@@ -20,6 +21,7 @@ import {
 } from '../observability/metrics';
 import { OrderRepository, type LockedOrderRow } from './order.repository';
 import { assertTransition } from './state-machine';
+import { availableOrderActions } from './order-actions';
 import { priceOrder, type PriceableOffer } from './pricing';
 import type {
   CancelOrderDto,
@@ -920,6 +922,13 @@ type OrderRow = {
     currency: string;
     offerVersion: number;
   }[];
+  /**
+   * Present only on the read paths, which select it. A command's own return
+   * does not, and `undefined` there is read as "not known to exist" — the
+   * conservative direction, since the alternative is offering a second review
+   * the unique constraint would refuse.
+   */
+  review?: { id: string } | null;
 };
 
 export function toView(row: OrderRow): OrderView {
@@ -955,5 +964,15 @@ export function toView(row: OrderRow): OrderView {
     failureReason: row.failureReason,
     createdAt: row.createdAt.toISOString(),
     placedBy: row.placedBy,
+    // Computed per caller, from the request context — so the same order
+    // answers differently to its buyer, its supplier and an operator, which
+    // is the whole point. Not a permission check: every command re-checks its
+    // own transition and its own `assert*` when it runs.
+    availableActions: [
+      ...availableOrderActions(
+        { status: row.status, hasReview: row.review != null },
+        viewerParties(row),
+      ),
+    ],
   };
 }
