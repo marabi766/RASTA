@@ -55,13 +55,11 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                            | Worktree                                      | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                                     |
-| ------------------------------- | --------------------------------------------- | ---- | --- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `feat/web-write-path-and-usage` | `F:\Rasta-Parallel\web-write-path`            | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `3f68d76` — زیرساخت نوشتن پورتال (CSRF، Idempotency، نگاشت خطای اعتبارسنجی) و صفحهٔ `/usage`؛ **`nav.ts`، `PROJECT_MEMORY.md` و این فایل را لمس می‌کند** |
-| `fix/supply-chain-trust-policy` | `F:\Rasta-Parallel\supply-chain-trust-review` | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `fa14ef4` — D-008: بازبینی سه قاعدهٔ Supply-Chain کنارگذاشته‌شده؛ **`pnpm-lock.yaml`، `ci.yml` و `docs/23` را لمس می‌کند**                               |
-| `demo/investor-preview`         | `F:\Rasta-Parallel\investor-demo`             | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                              |
-| `design/claude-design`          | پوشهٔ موقت در `%TEMP%`                        | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                     |
-| `feat/web-drivers-surface`      | `F:\Rasta-Parallel\web-drivers-surface`       | —    | #76 | ۲ / ۰          | از `origin/main` @ `0b4a35a` — `EXP-002`: `/drivers` (فهرست، جزئیات، ثبت، ویرایش، تغییر وضعیت، تخصیص/پایان تخصیص)؛ PR باز، منتظر ادغام — طبق قاعدهٔ ۶، ادغام کار PM/کاربر است             |
+| شاخه                            | Worktree                                     | نشست               | PR  | ahead / behind | وضعیت                                                                                                                        |
+| ------------------------------- | -------------------------------------------- | ------------------ | --- | -------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `feat/ci-portal-e2e-live-stack` | `F:\Rasta-Parallel\ci-portal-e2e-live-stack` | Codex (زیر نظر PM) | —   | ۱ / ۰          | زیرساخت CI برای اثبات یک ثبت واقعی از راه Gateway در Job مرورگر — Session زنده، Keycloak، identity و fleet؛ آمادهٔ Push و PR |
+| `demo/investor-preview`         | `F:\Rasta-Parallel\investor-demo`            | —                  | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                 |
+| `design/claude-design`          | پوشهٔ موقت در `%TEMP%`                       | —                  | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                        |
 
 ## شاخه‌های بازنشسته
 
@@ -101,6 +99,8 @@
 | `feat/web-maintenance-surfaces`         | [#73](https://github.com/marabi766/RASTA/pull/73) | `239ae23`   |
 | `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
+| `feat/web-write-path-and-usage`         | [#75](https://github.com/marabi766/RASTA/pull/75) | `0b4a35a`   |
+| `feat/web-drivers-surface`              | [#76](https://github.com/marabi766/RASTA/pull/76) | `1a6ba45`   |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
 > است و می‌ماند. هیچ Worktreeای `main` را checkout نکرده، پس `git fetch` آن ref
