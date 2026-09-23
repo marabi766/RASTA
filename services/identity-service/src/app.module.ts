@@ -43,7 +43,8 @@ import { AuditCorrectionController } from './audit-correction/audit-correction.c
 import { AuditCorrectionService } from './audit-correction/audit-correction.service';
 import { AuditCorrectionCommandRepository } from './audit-correction/audit-correction.repository';
 import { AuditLookupClient } from './audit-correction/audit-lookup.client';
-import { loadIdentityEnv, SERVICE_NAME, type IdentityEnv } from './config/env';
+import { ROLE_GRANT_POLICY } from './identity/role-grants';
+import { loadIdentityEnv, roleGrantPolicy, SERVICE_NAME, type IdentityEnv } from './config/env';
 import { SecurityEventOutboxStore } from './security-events/security-event-outbox.store';
 import { RefusalAuditRecorder } from './security-events/refusal-audit.recorder';
 import { RefusalAuditExceptionFilter } from './security-events/refusal-audit.filter';
@@ -126,6 +127,12 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
           brokers: env.KAFKA_BROKERS.split(',').map((b) => b.trim()),
           clientId: env.KAFKA_CLIENT_ID,
         }),
+    },
+
+    {
+      provide: ROLE_GRANT_POLICY,
+      inject: [ENV],
+      useFactory: (env: IdentityEnv) => roleGrantPolicy(env),
     },
 
     PrismaOutboxStore,

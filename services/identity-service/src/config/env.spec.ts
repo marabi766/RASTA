@@ -1,5 +1,5 @@
 import { EnvValidationError } from '@rasta/config';
-import { loadIdentityEnv } from './env';
+import { loadIdentityEnv, roleGrantPolicy } from './env';
 
 /**
  * `KEYCLOAK_SYNC_ENABLED` — whether account provisioning reaches the identity
@@ -123,5 +123,64 @@ describe('audit correction lookup configuration (AUD-003 correction)', () => {
     expect(loadIdentityEnv(BASE).AUDIT_REQUEST_TIMEOUT_MS).toBe(3000);
     expect(() => loadIdentityEnv({ ...BASE, AUDIT_REQUEST_TIMEOUT_MS: '0' })).toThrow();
     expect(() => loadIdentityEnv({ ...BASE, AUDIT_REQUEST_TIMEOUT_MS: '60000' })).toThrow();
+  });
+});
+
+describe('the role-grant ladder (docs/24 Q-60)', () => {
+  it('defaults to the narrow reading of the docs/09 scope column', () => {
+    const env = loadIdentityEnv(BASE);
+    expect(env.ROLE_GRANTS_BY_ORGANIZATION_ADMIN).toEqual([
+      'ORGANIZATION_ADMIN',
+      'FLEET_MANAGER',
+      'DRIVER',
+      'OPERATOR',
+      'PROCUREMENT_USER',
+    ]);
+    expect(env.ROLE_GRANTS_BY_UNION_ADMIN).toContain('UNION_ADMIN');
+    expect(env.ROLE_GRANTS_BY_SYSTEM_ADMIN).not.toContain('SYSTEM_ADMIN');
+  });
+
+  it('assembles the three lists into the policy the service holds', () => {
+    const policy = roleGrantPolicy(loadIdentityEnv(BASE));
+    expect(policy.byOrganizationAdmin).toContain('FLEET_MANAGER');
+    expect(policy.byUnionAdmin).toContain('ORGANIZATION_ADMIN');
+  });
+
+  it('reads a narrowed list', () => {
+    const env = loadIdentityEnv({
+      ...BASE,
+      ROLE_GRANTS_BY_ORGANIZATION_ADMIN: 'DRIVER, OPERATOR',
+    });
+    expect(env.ROLE_GRANTS_BY_ORGANIZATION_ADMIN).toEqual(['DRIVER', 'OPERATOR']);
+  });
+
+  it('accepts an empty list as "grants nothing", which is a real answer', () => {
+    const env = loadIdentityEnv({ ...BASE, ROLE_GRANTS_BY_ORGANIZATION_ADMIN: '' });
+    expect(env.ROLE_GRANTS_BY_ORGANIZATION_ADMIN).toEqual([]);
+  });
+
+  it('drops a repeated entry rather than counting it twice', () => {
+    const env = loadIdentityEnv({
+      ...BASE,
+      ROLE_GRANTS_BY_ORGANIZATION_ADMIN: 'DRIVER,DRIVER,OPERATOR',
+    });
+    expect(env.ROLE_GRANTS_BY_ORGANIZATION_ADMIN).toEqual(['DRIVER', 'OPERATOR']);
+  });
+
+  it('fails the deployment on a misspelled role rather than silently granting nothing', () => {
+    expect(() =>
+      loadIdentityEnv({ ...BASE, ROLE_GRANTS_BY_ORGANIZATION_ADMIN: 'FLEET_MANGER' }),
+    ).toThrow(EnvValidationError);
+  });
+
+  it.each([
+    'ROLE_GRANTS_BY_SYSTEM_ADMIN',
+    'ROLE_GRANTS_BY_UNION_ADMIN',
+    'ROLE_GRANTS_BY_ORGANIZATION_ADMIN',
+  ])('refuses SYSTEM_ADMIN configured as grantable in %s', (key) => {
+    // The service would refuse it anyway — `grantableRoles` intersects it out.
+    // Refusing the value as well is what stops an operator believing they
+    // configured something they did not get.
+    expect(() => loadIdentityEnv({ ...BASE, [key]: 'SYSTEM_ADMIN' })).toThrow(EnvValidationError);
   });
 });

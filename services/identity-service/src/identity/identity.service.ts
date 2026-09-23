@@ -1,9 +1,17 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
 import { IdentityRepository, isUniqueViolation } from './identity.repository';
 import { IDENTITY_EVENTS, validateIdentityPayload } from './events';
+import {
+  DEFAULT_ROLE_GRANT_POLICY,
+  ROLE_GRANT_POLICY,
+  assertMayGrantRoles,
+  assertMayManageMembershipRoles,
+  assertRolesMayBeRequested,
+  type RoleGrantPolicy,
+} from './role-grants';
 import { IDENTITY_TOPIC } from '../config/env';
 import { KeycloakAdminClient } from '../keycloak/keycloak.client';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -18,6 +26,7 @@ import type {
   RegistrationRequestView,
   RejectRegistrationDto,
   RevokeMembershipDto,
+  PlatformRole,
   SubmitRegistrationDto,
   SwitchOrganizationDto,
   UpdateMembershipRolesDto,
@@ -40,6 +49,14 @@ export class IdentityService {
   constructor(
     private readonly repository: IdentityRepository,
     private readonly keycloak: KeycloakAdminClient,
+    /**
+     * Which roles the caller may hand out. Injected rather than imported so a
+     * deployment answers Q-60 with an environment value; the default is the
+     * narrow reading of `docs/09`'s scope column, so a construction that
+     * forgets it fails closed rather than open.
+     */
+    @Inject(ROLE_GRANT_POLICY)
+    private readonly roleGrants: RoleGrantPolicy = DEFAULT_ROLE_GRANT_POLICY,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -117,6 +134,10 @@ export class IdentityService {
    * self-service path is {@link submitRegistration}.
    */
   async createUser(dto: CreateUserDto): Promise<UserView> {
+    // Before the lookup, so a caller who may not grant the role learns nothing
+    // about whether the username they picked is taken.
+    assertMayGrantRoles(dto.roles, this.roleGrants);
+
     const existing = await this.repository.findUserByUsernameOrEmail(dto.username, dto.email);
     if (existing) {
       // Deliberately does not say *which* field collided. Telling an
@@ -248,6 +269,8 @@ export class IdentityService {
   // -------------------------------------------------------------------------
 
   async addMembership(userId: string, dto: CreateMembershipDto): Promise<MembershipView> {
+    assertMayGrantRoles(dto.roles, this.roleGrants);
+
     const user = await this.repository.findUserById(userId);
     if (!user) throw RastaError.notFound('User', userId);
 
@@ -293,8 +316,19 @@ export class IdentityService {
     membershipId: string,
     dto: UpdateMembershipRolesDto,
   ): Promise<MembershipView> {
+    // The escalation this method carried: `dto.roles` went straight onto the
+    // row, so an `ORGANIZATION_ADMIN` could name `SYSTEM_ADMIN` here — on
+    // their own membership, which is in their own tenant — and hold the
+    // platform. Checked before the lookup: a role the caller cannot grant is
+    // refused whether or not the membership they aimed at exists.
+    assertMayGrantRoles(dto.roles, this.roleGrants);
+
     const membership = await this.repository.findMembershipById(membershipId);
     if (!membership) throw RastaError.notFound('Membership', membershipId);
+
+    // And the other direction: the row may already hold a role above the
+    // caller's ladder, which they may not quietly replace with a lesser one.
+    assertMayManageMembershipRoles(membership.roles, this.roleGrants);
 
     const previousRoles = membership.roles;
     const actor = getContext().userId ?? 'SYSTEM';
@@ -352,6 +386,11 @@ export class IdentityService {
   async revokeMembership(membershipId: string, dto: RevokeMembershipDto): Promise<void> {
     const membership = await this.repository.findMembershipById(membershipId);
     if (!membership) throw RastaError.notFound('Membership', membershipId);
+
+    // Revoking is the other way to take a role off somebody, so it answers to
+    // the same rule as replacing one: you may administer a membership whose
+    // roles you could have granted, and no other.
+    assertMayManageMembershipRoles(membership.roles, this.roleGrants);
 
     const actor = getContext().userId ?? 'SYSTEM';
 
@@ -434,6 +473,12 @@ export class IdentityService {
    * requires operator review before activation, so nothing here grants access.
    */
   async submitRegistration(dto: SubmitRegistrationDto): Promise<{ registrationId: string }> {
+    // This endpoint is unauthenticated, so there is no ladder to measure the
+    // request against — but a role nobody can ever grant is one nobody can
+    // usefully ask for, and storing it would put attacker-chosen bait in front
+    // of a reviewer. The grant itself is still checked at approval.
+    assertRolesMayBeRequested(dto.requestedRoles);
+
     const existing = await this.repository.findUserByUsernameOrEmail(dto.username, dto.email);
     if (existing) throw RastaError.alreadyExists('User');
 
@@ -509,6 +554,13 @@ export class IdentityService {
     }
 
     const grantedRoles = dto.roles ?? request.requestedRoles;
+
+    // Checked on `grantedRoles`, which is the set actually granted — so the
+    // check covers the reviewer's own narrower choice *and* the default, where
+    // the roles came from the anonymous applicant. Without it, "approve" grants
+    // whatever a stranger typed into a public endpoint.
+    assertMayGrantRoles(grantedRoles as readonly PlatformRole[], this.roleGrants);
+
     const reviewer = getContext().userId ?? 'SYSTEM';
     const membershipId = `${ID_PREFIXES.membership}_${ulid()}`;
 

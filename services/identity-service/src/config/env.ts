@@ -8,6 +8,53 @@ import {
   loadEnv,
 } from '@rasta/config';
 import { AGGREGATION_WINDOW_SECONDS } from '../security-events/refusal-aggregation';
+import { roleSchema, type PlatformRole } from '../identity/dto';
+import { DEFAULT_GRANTS, UNGRANTABLE_ROLES, type RoleGrantPolicy } from '../identity/role-grants';
+
+/**
+ * A comma-separated role list from the environment.
+ *
+ * Every entry is validated against `PLATFORM_ROLES` at startup, so a typo —
+ * `FLEET_MANGER` — fails the deployment rather than silently narrowing
+ * somebody's authority to nothing at the first request that needed it. An
+ * empty value is legitimate and means *this role grants nothing*; that is a
+ * deliberate choice a deployment may make, so it is not confused with unset.
+ *
+ * `UNGRANTABLE_ROLES` is refused here as well as intersected away in
+ * `grantableRoles`. The intersection is what makes the system safe; refusing
+ * the value outright is what stops an operator believing they configured
+ * something they did not get.
+ */
+function roleListEnv(fallback: readonly PlatformRole[]) {
+  return z
+    .string()
+    .default(fallback.join(','))
+    .transform((value, ctx): readonly PlatformRole[] => {
+      const entries = value
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+
+      const roles: PlatformRole[] = [];
+      for (const entry of entries) {
+        const parsed = roleSchema.safeParse(entry);
+        if (!parsed.success) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Unknown role: ${entry}` });
+          return z.NEVER;
+        }
+        if (UNGRANTABLE_ROLES.includes(parsed.data)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `${entry} cannot be granted through this API and must not be configured as grantable`,
+          });
+          return z.NEVER;
+        }
+        if (!roles.includes(parsed.data)) roles.push(parsed.data);
+      }
+
+      return roles;
+    });
+}
 
 /**
  * identity-service configuration.
@@ -86,6 +133,24 @@ export const identityEnvSchema = baseEnvSchema
      * audit-service turns into a bounded `504`, never a hung command.
      */
     AUDIT_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+
+    /**
+     * The grant ladder — which roles each acting role may hand out
+     * (`identity/role-grants.ts`, `docs/24` Q-60).
+     *
+     * Configuration rather than constants because CLAUDE.md § 9 puts approval
+     * authorities in configuration: the product document does not say whether
+     * an administrator may promote a peer to their own role, or who hands out
+     * the supplier-organization roles, and a deployment that learns the answer
+     * should not need a release to apply it. The defaults follow the scope
+     * column of `docs/09` § RBAC and are the narrow reading of it.
+     *
+     * Widening one of these widens real authority. `SYSTEM_ADMIN` is refused
+     * in all three whatever is written here.
+     */
+    ROLE_GRANTS_BY_SYSTEM_ADMIN: roleListEnv(DEFAULT_GRANTS.SYSTEM_ADMIN),
+    ROLE_GRANTS_BY_UNION_ADMIN: roleListEnv(DEFAULT_GRANTS.UNION_ADMIN),
+    ROLE_GRANTS_BY_ORGANIZATION_ADMIN: roleListEnv(DEFAULT_GRANTS.ORGANIZATION_ADMIN),
   });
 
 export type IdentityEnv = z.infer<typeof identityEnvSchema>;
@@ -109,6 +174,15 @@ export function corsOrigins(env: IdentityEnv): string[] {
   return env.CORS_ORIGINS.split(',')
     .map((origin) => origin.trim())
     .filter((origin) => origin.length > 0);
+}
+
+/** The grant ladder as the service holds it, assembled from the three lists. */
+export function roleGrantPolicy(env: IdentityEnv): RoleGrantPolicy {
+  return {
+    bySystemAdmin: env.ROLE_GRANTS_BY_SYSTEM_ADMIN,
+    byUnionAdmin: env.ROLE_GRANTS_BY_UNION_ADMIN,
+    byOrganizationAdmin: env.ROLE_GRANTS_BY_ORGANIZATION_ADMIN,
+  };
 }
 
 export const SERVICE_NAME = 'identity-service';

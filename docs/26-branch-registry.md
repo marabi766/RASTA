@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۶/۳۱ (2026-09-22) · **`main` در آن لحظه:** `239ae23`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۰۱ (2026-09-23) · **`main` در آن لحظه:** `1a6ba45`
 
 ---
 
@@ -55,13 +55,13 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                            | Worktree                                      | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                                     |
-| ------------------------------- | --------------------------------------------- | ---- | --- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `feat/web-write-path-and-usage` | `F:\Rasta-Parallel\web-write-path`            | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `3f68d76` — زیرساخت نوشتن پورتال (CSRF، Idempotency، نگاشت خطای اعتبارسنجی) و صفحهٔ `/usage`؛ **`nav.ts`، `PROJECT_MEMORY.md` و این فایل را لمس می‌کند** |
-| `fix/supply-chain-trust-policy` | `F:\Rasta-Parallel\supply-chain-trust-review` | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `fa14ef4` — D-008: بازبینی سه قاعدهٔ Supply-Chain کنارگذاشته‌شده؛ **`pnpm-lock.yaml`، `ci.yml` و `docs/23` را لمس می‌کند**                               |
-| `demo/investor-preview`         | `F:\Rasta-Parallel\investor-demo`             | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                              |
-| `design/claude-design`          | پوشهٔ موقت در `%TEMP%`                        | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                     |
-| `feat/web-drivers-surface`      | `F:\Rasta-Parallel\web-drivers-surface`       | —    | #76 | ۲ / ۰          | از `origin/main` @ `0b4a35a` — `EXP-002`: `/drivers` (فهرست، جزئیات، ثبت، ویرایش، تغییر وضعیت، تخصیص/پایان تخصیص)؛ PR باز، منتظر ادغام — طبق قاعدهٔ ۶، ادغام کار PM/کاربر است             |
+| شاخه                             | Worktree                                      | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                                                                                                              |
+| -------------------------------- | --------------------------------------------- | ---- | --- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `fix/identity-role-grant-ladder` | `F:\Rasta-Parallel\web-organizations-surface` | Opus | #77 | ۳ / ۰          | تازه ساخته شد از `origin/main` @ `0b4a35a` — **رفع ارتقای سطح دسترسی در `identity-service`**؛ `Q-60` را می‌برد. نام پوشهٔ Worktree از کار قبلی مانده (`/organizations` موقتاً متوقف شد تا این رفع برسد)؛ برای پرهیز از نصب دوبارهٔ وابستگی‌ها همان پوشه استفاده شد |
+| `feat/web-write-path-and-usage`  | `F:\Rasta-Parallel\web-write-path`            | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `3f68d76` — زیرساخت نوشتن پورتال (CSRF، Idempotency، نگاشت خطای اعتبارسنجی) و صفحهٔ `/usage`؛ **`nav.ts`، `PROJECT_MEMORY.md` و این فایل را لمس می‌کند**                                                                          |
+| `fix/supply-chain-trust-policy`  | `F:\Rasta-Parallel\supply-chain-trust-review` | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `fa14ef4` — D-008: بازبینی سه قاعدهٔ Supply-Chain کنارگذاشته‌شده؛ **`pnpm-lock.yaml`، `ci.yml` و `docs/23` را لمس می‌کند**                                                                                                        |
+| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`             | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                                                                                                       |
+| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                        | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                                                                                              |
 
 ## شاخه‌های بازنشسته
 
@@ -99,6 +99,8 @@
 | `fix/document-service-allow-asset-read` | [#72](https://github.com/marabi766/RASTA/pull/72) | `3f68d76`   |
 | `fix/supply-chain-trust-policy`         | [#74](https://github.com/marabi766/RASTA/pull/74) | `9e0b769`   |
 | `feat/web-maintenance-surfaces`         | [#73](https://github.com/marabi766/RASTA/pull/73) | `239ae23`   |
+| `feat/web-write-path-and-usage`         | [#75](https://github.com/marabi766/RASTA/pull/75) | `0b4a35a`   |
+| `feat/web-drivers-surface`              | [#76](https://github.com/marabi766/RASTA/pull/76) | `1a6ba45`   |
 | `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 
@@ -178,7 +180,8 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 | Q-57        | `feat/audit-service-aud-004-contract` | روی `main`                                                                             |
 | Q-58        | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                   |
 | Q-59        | `feat/asset-insurance-claim-api`      | روی `main` (`fa14ef4`) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه           |
-| Q-60+       | آزاد                                  | —                                                                                      |
+| Q-60        | `fix/identity-role-grant-ladder`      | **رزرو شد** (2026-09-23) — مرجع اعطای نقش: چه نقشی، چه نقش‌هایی را می‌تواند بدهد       |
+| Q-61+       | آزاد                                  | —                                                                                      |
 
 > **چرا Q-44 قابل جابه‌جایی نیست:** یک ADR ادغام‌شده آن را به‌عنوان مرجع
 > پذیرش نقل کرده. نقل‌قول را نمی‌شود ویرایش کرد بی‌آنکه سند دروغ شود. هر
