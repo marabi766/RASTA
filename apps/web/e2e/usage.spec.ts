@@ -99,9 +99,7 @@ test.describe('a usage write through the live stack', () => {
     const usageForm = page.locator('form').filter({
       has: page.getByRole('button', { name: 'ثبت کارکرد' }),
     });
-    const submissionId = await usageForm
-      .locator(`input[name="${SUBMISSION_FIELD}"]`)
-      .inputValue();
+    const submissionId = await usageForm.locator(`input[name="${SUBMISSION_FIELD}"]`).inputValue();
 
     // Two simultaneous native-form payloads from one render exercise the
     // service's unique clientReference race. The ordinary click immediately

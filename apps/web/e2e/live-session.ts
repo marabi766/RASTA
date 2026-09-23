@@ -66,10 +66,7 @@ function requiredEnv(name: string): string {
 
 /** Reads the throwaway fixture password from its one source of truth. */
 function operatorPassword(): string {
-  const realmPath = resolve(
-    __dirname,
-    '../../../infrastructure/docker/keycloak/rasta-realm.json',
-  );
+  const realmPath = resolve(__dirname, '../../../infrastructure/docker/keycloak/rasta-realm.json');
   const realm = JSON.parse(readFileSync(realmPath, 'utf8')) as RealmExport;
   const credential = realm.users
     ?.find((user) => user.username === OPERATOR_USERNAME)
