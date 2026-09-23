@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۰۱ (2026-09-23) · **`main` در آن لحظه:** `9347b80`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۰۱ (2026-09-23) · **`main` در آن لحظه:** `0ac1a61`
 
 ---
 
@@ -55,11 +55,11 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                             | Worktree                                      | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                                                                                                                                    |
-| -------------------------------- | --------------------------------------------- | ---- | --- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `feat/web-organizations-surface` | `F:\Rasta-Parallel\web-organizations-surface` | Opus | #79 | ۲ / ۰          | تازه ساخته شد از `origin/main` @ `9347b80` — `EXP-002`: `/organizations` (پروفایل سازمان و مدیریت اعضا)؛ **یک فیلد به `GET /v1/users/me` در `identity-service` می‌افزاید** (نقش‌های قابل اعطای خود فرد، از `role-grants.ts`)؛ **`nav.ts`، `PROJECT_MEMORY.md` و این فایل را لمس می‌کند** |
-| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`             | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                                                                                                                             |
-| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                        | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                                                                                                                    |
+| شاخه                      | Worktree                                      | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                                                                                                                                                            |
+| ------------------------- | --------------------------------------------- | ---- | --- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `feat/web-orders-surface` | `F:\Rasta-Parallel\web-organizations-surface` | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `0ac1a61` — `/orders` و `/orders/[id]` (چرخهٔ عمر سفارش و Stepper). **پوشهٔ Worktree از کار قبلی مانده و دوباره استفاده شد** — `pnpm install` دیگری در جریان بود (نشست Sonnet) و Lockfile تغییر نکرده بود؛ **`marketplace-service` را هم لمس می‌کند** (فیلد `availableActions`) |
+| `demo/investor-preview`   | `F:\Rasta-Parallel\investor-demo`             | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                                                                                                                                                     |
+| `design/claude-design`    | پوشهٔ موقت در `%TEMP%`                        | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                                                                                                                                            |
 
 ## شاخه‌های بازنشسته
 
@@ -100,6 +100,8 @@
 | `feat/web-write-path-and-usage`         | [#75](https://github.com/marabi766/RASTA/pull/75) | `0b4a35a`   |
 | `feat/web-drivers-surface`              | [#76](https://github.com/marabi766/RASTA/pull/76) | `1a6ba45`   |
 | `fix/identity-role-grant-ladder`        | [#77](https://github.com/marabi766/RASTA/pull/77) | `9347b80`   |
+| `feat/web-organizations-surface`        | [#79](https://github.com/marabi766/RASTA/pull/79) | `0ac1a61`   |
+| `feat/ci-portal-e2e-live-stack`         | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
 | `feat/ci-portal-e2e-live-stack`         | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
 | `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
