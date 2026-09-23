@@ -55,13 +55,12 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                             | Worktree                                      | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                                                                                                              |
-| -------------------------------- | --------------------------------------------- | ---- | --- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `fix/identity-role-grant-ladder` | `F:\Rasta-Parallel\web-organizations-surface` | Opus | #77 | ۳ / ۰          | تازه ساخته شد از `origin/main` @ `0b4a35a` — **رفع ارتقای سطح دسترسی در `identity-service`**؛ `Q-60` را می‌برد. نام پوشهٔ Worktree از کار قبلی مانده (`/organizations` موقتاً متوقف شد تا این رفع برسد)؛ برای پرهیز از نصب دوبارهٔ وابستگی‌ها همان پوشه استفاده شد |
-| `feat/web-write-path-and-usage`  | `F:\Rasta-Parallel\web-write-path`            | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `3f68d76` — زیرساخت نوشتن پورتال (CSRF، Idempotency، نگاشت خطای اعتبارسنجی) و صفحهٔ `/usage`؛ **`nav.ts`، `PROJECT_MEMORY.md` و این فایل را لمس می‌کند**                                                                          |
-| `fix/supply-chain-trust-policy`  | `F:\Rasta-Parallel\supply-chain-trust-review` | Opus | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `fa14ef4` — D-008: بازبینی سه قاعدهٔ Supply-Chain کنارگذاشته‌شده؛ **`pnpm-lock.yaml`، `ci.yml` و `docs/23` را لمس می‌کند**                                                                                                        |
-| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`             | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                                                                                                       |
-| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                        | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                                                                                              |
+| شاخه                             | Worktree                                      | نشست               | PR  | ahead / behind | وضعیت                                                                                                                              |
+| -------------------------------- | --------------------------------------------- | ------------------ | --- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `feat/ci-portal-e2e-live-stack`  | `F:\Rasta-Parallel\ci-portal-e2e-live-stack`  | Codex (زیر نظر PM) | —   | ۱ / ۰          | زیرساخت CI برای اثبات یک ثبت واقعی از راه Gateway در Job مرورگر — Session زنده، Keycloak، identity و fleet؛ آمادهٔ Push و PR       |
+| `feat/web-organizations-surface` | `F:\Rasta-Parallel\web-organizations-surface` | Opus               | —   | ۰ / ۰          | از `origin/main` @ `9347b80` — `/organizations` (سازمان و اعضا)، از سر گرفته شد پس از ادغام PR #77؛ نام Worktree از کار قبلی مانده |
+| `demo/investor-preview`          | `F:\Rasta-Parallel\investor-demo`             | —                  | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                       |
+| `design/claude-design`           | پوشهٔ موقت در `%TEMP%`                        | —                  | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                              |
 
 ## شاخه‌های بازنشسته
 
@@ -101,6 +100,7 @@
 | `feat/web-maintenance-surfaces`         | [#73](https://github.com/marabi766/RASTA/pull/73) | `239ae23`   |
 | `feat/web-write-path-and-usage`         | [#75](https://github.com/marabi766/RASTA/pull/75) | `0b4a35a`   |
 | `feat/web-drivers-surface`              | [#76](https://github.com/marabi766/RASTA/pull/76) | `1a6ba45`   |
+| `fix/identity-role-grant-ladder`        | [#77](https://github.com/marabi766/RASTA/pull/77) | `9347b80`   |
 | `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
 

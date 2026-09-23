@@ -348,6 +348,26 @@
       }
     },
     {
+      "username": "operator.one",
+      "email": "operator.one@rasta.local",
+      "firstName": "اپراتور",
+      "lastName": "یکم",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "RastaDev!2026",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["OPERATOR", "DRIVER"],
+      "attributes": {
+        "active_organization_id": ["ORG-DEH-0001"],
+        "rasta_user_id": ["USR-SEED-OPERATOR"]
+      }
+    },
+    {
       "username": "service-account-rasta-backend",
       "enabled": true,
       "serviceAccountClientId": "rasta-backend",
