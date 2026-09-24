@@ -921,7 +921,7 @@
       "evidence": [
         {
           "kind": "PR",
-          "ref": "https://github.com/marabi766/RASTA/pull/PLACEHOLDER",
+          "ref": "https://github.com/marabi766/RASTA/pull/83",
           "note": "/orders and /orders/[id]: the order list (one tab per side, since an organization is a buyer in one order and a seller in the next) and the order detail with a stepper and the commands this viewer may issue. The commands come from OrderView.availableActions, computed per caller by marketplace-service from the transition table, each command's own from-narrowing and access.ts — never derived in the portal, because the table alone would offer the buyer 'confirm receipt' on a disputed order."
         },
         {
