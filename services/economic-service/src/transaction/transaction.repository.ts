@@ -47,6 +47,36 @@ export class TransactionRepository {
   }
 
   /**
+   * Records an obligation for a source fact, unless this payer already has one.
+   *
+   * `ON CONFLICT DO NOTHING` against `ux_transaction_source_fact`, never
+   * create-and-catch: this runs inside the caller's interactive transaction,
+   * and a unique violation there aborts the whole transaction (25P02), so the
+   * read that should recover the winner's row would itself be refused — the
+   * trap `LedgerRepository.ensureAccount` documents. Under READ COMMITTED the
+   * losing insert waits for the winner to commit and then does nothing, so a
+   * read afterwards finds the winner's row.
+   *
+   * Returns whether this call wrote the row. Legs are written only by the
+   * winner, so a lost race leaves no orphaned legs behind.
+   */
+  createForSource(
+    tx: ExtendedPrismaClient,
+    data: Prisma.TransactionCreateManyInput,
+    legs: Prisma.TransactionLegCreateManyInput[],
+  ): Promise<boolean> {
+    return runUnscoped(
+      'a transaction records a payer and a payee that belong to two organizations',
+      async () => {
+        const { count } = await tx.transaction.createMany({ data: [data], skipDuplicates: true });
+        if (count === 0) return false;
+        if (legs.length > 0) await tx.transactionLeg.createMany({ data: legs });
+        return true;
+      },
+    );
+  }
+
+  /**
    * Loads a transaction and locks its row.
    *
    * Every state change goes through here. The lock is what makes the status
@@ -141,11 +171,22 @@ export class TransactionRepository {
     });
   }
 
-  /** An obligation already recorded for this source fact — the consumer's
-   *  idempotency check, complementing `processed_event`. */
-  findBySource(tx: ExtendedPrismaClient, sourceType: string, sourceReference: string) {
+  /**
+   * The obligation this payer already has for this source fact, if any.
+   *
+   * Scoped to the payer, like `ux_transaction_source_fact`: a platform-wide
+   * lookup would let one tenant's row — written through the HTTP API with a
+   * source reference of its own choosing — stand in for another tenant's
+   * real approval, which would then never be recorded.
+   */
+  findBySource(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    sourceType: string,
+    sourceReference: string,
+  ) {
     return runUnscoped('an inbound event names its own organization, not the reader', () =>
-      tx.transaction.findFirst({ where: { sourceType, sourceReference } }),
+      tx.transaction.findFirst({ where: { organizationId, sourceType, sourceReference } }),
     );
   }
 

@@ -223,7 +223,9 @@ describe('financial consistency (real database)', () => {
       const wallet = await walletOf(org.c);
       expect((await readBalances(prisma, wallet.id)).available).toBe(0n);
 
-      await asActor({ organizationId: org.c }, () =>
+      // Returned by the payee (org.b): the payer may not refund its own escrow
+      // (docs/24 Q-62). The ledger lands on the payer's books either way.
+      await asActor({ organizationId: org.b }, () =>
         wiring.transactions.refund(transaction.id, 'order cancelled by the buyer'),
       );
 

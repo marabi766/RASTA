@@ -374,12 +374,15 @@ describe('ledger and governance API', () => {
       true,
     );
 
+    // A term is fixed once the rule exists (a new term is a new rule); what a
+    // PATCH may change is the window, the status and the label.
     const updated = await request(http)
       .patch(`/v1/rewards/rules/${created.body.id}`)
       .set('authorization', asSystem())
-      .send({ points: 20 })
+      .send({ label: 'بازبینی‌شده' })
       .expect(200);
-    expect(updated.body.points).toBe(20);
+    expect(updated.body.label).toBe('بازبینی‌شده');
+    expect(updated.body.points).toBe(created.body.points);
   });
 
   it('refuses a cashback rule while the regulatory review is outstanding', async () => {

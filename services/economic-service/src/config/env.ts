@@ -72,6 +72,18 @@ export const economicEnvSchema = baseEnvSchema
      */
     ECONOMIC_REWARD_CASHBACK_ENABLED: booleanEnv(false),
 
+    /**
+     * Whether the payee's financial administrator may return escrowed funds
+     * to the payer (docs/24 Q-62).
+     *
+     * On by default: returning money one is owed harms nobody but the one who
+     * returns it, which is the interim decision recorded in Q-62. Turned off,
+     * a refund needs platform scope or the order saga. The payer is never
+     * allowed either way, and a disputed transaction always needs platform
+     * scope — those are controls (docs/10 § 10.5), not settings.
+     */
+    ECONOMIC_REFUND_BY_PAYEE_ENABLED: booleanEnv(true),
+
     /** How long a stored idempotency key is honoured (docs/06 § 6.8). */
     ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
 
