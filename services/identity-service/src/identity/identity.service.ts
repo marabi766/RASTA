@@ -24,6 +24,7 @@ import {
   DEFAULT_PROVISIONING_SCOPE_POLICY,
   PROVISIONING_SCOPE_POLICY,
   assertMayProvisionInto,
+  isWithinProvisioningScope,
   type ProvisioningScopePolicy,
 } from './provisioning-scope';
 import { IDENTITY_TOPIC, SERVICE_NAME } from '../config/env';
@@ -615,7 +616,24 @@ export class IdentityService {
         }),
     );
 
-    if (!request) throw RastaError.notFound('RegistrationRequest', registrationId);
+    // A registration outside the caller's provisioning scope must look
+    // exactly like one that does not exist. Checking status or emitting a
+    // scope-specific refusal before this would let the id alone tell a
+    // reviewer things they have no authority over: missing (404) versus
+    // exists-but-decided (409) versus exists-and-pending (the old 403 from
+    // `assertMayProvisionInto`) is enough for a `UNION_ADMIN` of org A to
+    // learn the state of org B's registrations without ever touching them.
+    // The organization itself came from the applicant, on a `@Public`
+    // endpoint, so this is also what stops a reviewer from filing their own
+    // registration naming any organization and approving it — the same gap
+    // `assertMayProvisionInto` closes on the two direct provisioning paths.
+    if (
+      !request ||
+      !isWithinProvisioningScope(request.requestedOrganizationId, this.provisioningScope)
+    ) {
+      throw RastaError.notFound('RegistrationRequest', registrationId);
+    }
+
     if (request.status !== 'PENDING') {
       throw RastaError.invalidStateTransition(
         'RegistrationRequest',
@@ -624,12 +642,6 @@ export class IdentityService {
         'Only a pending registration can be approved',
       );
     }
-
-    // The organization came from the applicant, on a `@Public` endpoint.
-    // Without this, a reviewer could file their own registration naming any
-    // organization and approve it, walking around the check on the two direct
-    // provisioning paths.
-    assertMayProvisionInto(request.requestedOrganizationId, this.provisioningScope);
 
     const grantedRoles = dto.roles ?? request.requestedRoles;
 
@@ -757,7 +769,18 @@ export class IdentityService {
         }),
     );
 
-    if (!request) throw RastaError.notFound('RegistrationRequest', registrationId);
+    // Same oracle as `approveRegistration`, and here the unchecked path was
+    // worse: this function had no scope check at all, before or after the
+    // status check — any `UNION_ADMIN` on the platform could reject a
+    // PENDING registration destined for an organization they have no
+    // authority over, not merely learn that it existed.
+    if (
+      !request ||
+      !isWithinProvisioningScope(request.requestedOrganizationId, this.provisioningScope)
+    ) {
+      throw RastaError.notFound('RegistrationRequest', registrationId);
+    }
+
     if (request.status !== 'PENDING') {
       throw RastaError.invalidStateTransition('RegistrationRequest', request.status, 'REJECTED');
     }
