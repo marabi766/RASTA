@@ -145,7 +145,7 @@ describe('the published OpenAPI contract (real application)', () => {
 
   it('publishes the list parameters as the schema validates them', () => {
     const list = (
-      document.paths?.['/v1/notifications'] as {
+      document.paths?.['/v1/notifications'] as unknown as {
         get: {
           parameters: { name: string; required?: boolean; schema: Record<string, unknown> }[];
         };

@@ -22,7 +22,7 @@ function fakeFetch(respond: (url: URL, call: number) => Response | Promise<Respo
   calls: Captured[];
 } {
   const calls: Captured[] = [];
-  const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const impl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = input instanceof URL ? input : new URL(String(input));
     calls.push({ url, headers: { ...(init?.headers as Record<string, string>) } });
     return respond(url, calls.length);
@@ -265,7 +265,7 @@ describe('IdentityHttpRecipientAdapter', () => {
     const slow = new IdentityHttpRecipientAdapter(
       { baseUrl: 'http://identity.test', timeoutMs: 20 },
       tokens,
-      ((_input: RequestInfo | URL, init?: RequestInit) =>
+      ((_input: Parameters<typeof fetch>[0], init?: RequestInit) =>
         new Promise<Response>((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () => {
             const error = new Error('aborted');

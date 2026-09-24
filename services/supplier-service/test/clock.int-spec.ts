@@ -155,9 +155,9 @@ describe('D-5 — the database is the only clock a persisted fact uses', () => {
       //   PostgresError 23514 — new row for relation "qualification" violates
       //   check constraint "ck_qualification_decided_after_submitted"
       await asOperator(() =>
-        qualifications.decide(supplier.id, submitted.id, 'APPROVED', {
+        qualifications.approve(supplier.id, submitted.id, {
           note: 'approved under a trailing application clock',
-        } as never),
+        }),
       );
     });
 
@@ -240,9 +240,9 @@ describe('D-5 — the database is the only clock a persisted fact uses', () => {
     );
 
     await asOperator(() =>
-      qualifications.decide(supplier.id, submitted.id, 'REJECTED', {
+      qualifications.reject(supplier.id, submitted.id, {
         reason: 'not this time',
-      } as never),
+      }),
     );
 
     const row = await runUnscoped('reading back the decided row', () =>

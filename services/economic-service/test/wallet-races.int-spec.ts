@@ -94,6 +94,7 @@ describe('wallet races and refusals (real database)', () => {
           requestId: `itest-${fresh}`,
           organizationId: fresh,
           roles: ['SERVICE'],
+          organizationIds: [],
           authType: 'SERVICE',
           callerService: 'marketplace-service',
           startedAt: Date.now(),

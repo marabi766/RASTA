@@ -566,7 +566,7 @@ describe('the document API (real application, real database, real object storage
   // =========================================================================
 
   describe('what the boundary refuses', () => {
-    const post = (body: unknown) =>
+    const post = (body: object) =>
       http(mvp)
         .post('/v1/documents/upload-url')
         .set('authorization', `Bearer ${orgAdmin(org)}`)

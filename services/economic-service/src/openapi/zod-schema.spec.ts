@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import { toJsonSchema, type JsonSchema } from './zod-schema';
 import { listTransactionsQuerySchema } from '../transaction/dto';
 import { listSettlementsQuerySchema } from '../settlement/dto';
 
@@ -18,6 +18,11 @@ import { listSettlementsQuerySchema } from '../settlement/dto';
  * truncates a rial figure past `Number.MAX_SAFE_INTEGER` inside its own JSON
  * parser, where no validation of ours can ever see it.
  */
+/** An object schema's `properties`, which `JsonSchema` itself leaves as `unknown`. */
+function propertiesOf(schema: z.ZodTypeAny): Record<string, JsonSchema> {
+  return toJsonSchema(schema).properties as Record<string, JsonSchema>;
+}
+
 describe('toJsonSchema', () => {
   it('publishes a strict object with its required fields', () => {
     const schema = z
@@ -56,7 +61,7 @@ describe('toJsonSchema', () => {
       link: z.string().url(),
     });
 
-    const properties = toJsonSchema(schema).properties!;
+    const properties = propertiesOf(schema);
     // The source's own flags, so the published pattern is what runs rather
     // than a re-spelling of it.
     expect(properties.amountMinor).toEqual({ type: 'string', pattern: '^\\d{1,30}$' });
@@ -71,7 +76,7 @@ describe('toJsonSchema', () => {
     // plain type. Inventing a bound here would put a limit in the contract
     // that the service does not actually enforce, which is worse than none.
     const schema = z.object({ note: z.string(), count: z.number() });
-    const properties = toJsonSchema(schema).properties!;
+    const properties = propertiesOf(schema);
 
     expect(properties.note).toEqual({ type: 'string' });
     expect(properties.count).toEqual({ type: 'number' });
@@ -82,7 +87,7 @@ describe('toJsonSchema', () => {
     // a document that says `number` invites a client to send 2.5 (ADR-022).
     const schema = z.object({ rateBasisPoints: z.number().int().min(0).max(10_000) });
 
-    expect(toJsonSchema(schema).properties!.rateBasisPoints).toEqual({
+    expect(propertiesOf(schema).rateBasisPoints).toEqual({
       type: 'integer',
       minimum: 0,
       maximum: 10_000,
@@ -98,7 +103,7 @@ describe('toJsonSchema', () => {
       metadata: z.record(z.string()),
     });
 
-    const properties = toJsonSchema(schema).properties!;
+    const properties = propertiesOf(schema);
     expect(properties.flag).toEqual({ type: 'boolean' });
     expect(properties.status).toEqual({ type: 'string', enum: ['ACTIVE', 'INACTIVE'] });
     expect(properties.kind).toEqual({ const: 'SETTLEMENT' });
@@ -116,7 +121,7 @@ describe('toJsonSchema', () => {
       withDefault: z.string().default('IRR'),
     });
 
-    const properties = toJsonSchema(schema).properties!;
+    const properties = propertiesOf(schema);
     expect(properties.maybe).toEqual({ type: 'string' });
     expect(properties.nullable).toEqual({ type: 'string', nullable: true });
     expect(properties.withDefault).toEqual({ type: 'string', default: 'IRR' });

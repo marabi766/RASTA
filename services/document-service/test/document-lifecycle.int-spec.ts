@@ -603,9 +603,9 @@ describe('document lifecycle (real database and object storage)', () => {
       const { document } = await uploadDocument();
       expect(document.scanState).toBe('PENDING');
 
-      const error = await asOrgA(() => wiring.documents.createDownloadUrl(document.id)).catch(
-        (caught: unknown) => caught as { code?: string; internalContext?: { reason?: string } },
-      );
+      const error = (await asOrgA(() => wiring.documents.createDownloadUrl(document.id)).catch(
+        (caught: unknown) => caught,
+      )) as { code?: string; internalContext?: { reason?: string } };
 
       expect(error.code).toBe('BUSINESS_RULE_VIOLATION');
       // The reason reaches the log, never the response body.
@@ -632,9 +632,9 @@ describe('document lifecycle (real database and object storage)', () => {
         }),
       );
 
-      const error = await asOrgA(() => wiring.documents.createDownloadUrl(document.id)).catch(
-        (caught: unknown) => caught as { internalContext?: { reason?: string } },
-      );
+      const error = (await asOrgA(() => wiring.documents.createDownloadUrl(document.id)).catch(
+        (caught: unknown) => caught,
+      )) as { internalContext?: { reason?: string } };
 
       expect(error.internalContext?.reason).toBe('NOT_SCANNED');
     });

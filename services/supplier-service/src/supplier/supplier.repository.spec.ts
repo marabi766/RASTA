@@ -137,6 +137,7 @@ function asPlatformOperator<T>(fn: () => T): T {
     {
       requestId: 'req-1',
       correlationId: 'corr-1',
+      organizationIds: [],
       authType: 'USER',
       userId: 'USR_PLATFORM',
       roles: ['SYSTEM_ADMIN'],
@@ -200,6 +201,7 @@ describe('opening a suspension episode', () => {
     organizationId: SUPPLIER_ORG,
     reason: 'Repeated failure to deliver against accepted orders',
     suspendedBy: 'USR_OPERATOR',
+    suspendedAt: new Date(),
     suspendedCorrelationId: 'corr-1',
   } as const;
 
@@ -273,6 +275,7 @@ describe('the writes a supplier makes about itself', () => {
         displayName: 'A workshop',
         registeredBy: 'USR_OWNER',
         registeredCorrelationId: 'corr-1',
+        registeredAt: new Date(),
         capabilities: [{ id: 'SCP_1', capability: 'WORKSHOP_SERVICE' }],
       }),
     );
@@ -295,6 +298,7 @@ describe('the writes a supplier makes about itself', () => {
           displayName: 'A workshop',
           registeredBy: 'USR_OPERATOR',
           registeredCorrelationId: 'corr-1',
+          registeredAt: new Date(),
           capabilities: [],
         }),
       ),

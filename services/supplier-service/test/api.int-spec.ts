@@ -113,7 +113,7 @@ describe('supplier HTTP API', () => {
   // -------------------------------------------------------------------------
 
   describe('every route is closed by default', () => {
-    const routes: [string, string][] = [
+    const routes: ['get' | 'post', string][] = [
       ['post', '/v1/suppliers'],
       ['get', '/v1/suppliers'],
       ['get', '/v1/suppliers/qualified?capability=WORKSHOP_SERVICE'],
@@ -129,10 +129,8 @@ describe('supplier HTTP API', () => {
     it('answers 401 without a token on all ten endpoints', async () => {
       expect(routes).toHaveLength(10);
       for (const [method, path] of routes) {
-        const response = await (http() as never as Record<string, (p: string) => never>)[method](
-          path,
-        );
-        expect({ path, status: (response as { status: number }).status }).toEqual({
+        const response = await http()[method](path);
+        expect({ path, status: response.status }).toEqual({
           path,
           status: 401,
         });
@@ -149,10 +147,8 @@ describe('supplier HTTP API', () => {
       // service call at all — it is a malformed user token, and answered 401.
       const token = await internalToken('marketplace-service');
       for (const [method, path] of routes) {
-        const response = await (http() as never as Record<string, (p: string) => never>)
-          [method](path)
-          .set('x-internal-token', token);
-        expect({ path, status: (response as { status: number }).status }).toEqual({
+        const response = await http()[method](path).set('x-internal-token', token);
+        expect({ path, status: response.status }).toEqual({
           path,
           status: 403,
         });

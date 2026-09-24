@@ -9,8 +9,8 @@
     "clean": "rimraf dist .turbo",
     "dev": "prisma generate && node --import @swc-node/register/esm-register --watch --env-file=../../.env src/main.ts",
     "start": "node --env-file=../../.env dist/main.js",
-    "lint": "eslint src",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src test prisma/seed.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "jest --selectProjects unit",
     "test:unit": "jest --selectProjects unit --passWithNoTests",
     "test:integration": "jest --selectProjects integration --runInBand",
@@ -38,6 +38,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@nestjs/testing": "^11.2.3",
     "@rasta/testing": "workspace:*",
     "@swc-node/register": "^1.10.9",
     "@swc/core": "^1.10.7",

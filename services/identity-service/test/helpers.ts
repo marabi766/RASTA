@@ -159,6 +159,7 @@ export function asActor<T>(options: ActorOptions, fn: () => Promise<T>): Promise
     organizationId: options.organizationId,
     userId: options.userId ?? 'USR-ITEST',
     roles: options.roles ?? ['PLATFORM_OPERATOR'],
+    organizationIds: [],
     authType: options.authType ?? 'USER',
     startedAt: Date.now(),
   };

@@ -22,6 +22,7 @@ function context(overrides: Partial<RequestContext> = {}): RequestContext {
     organizationId: 'ORG-DEH-0001',
     userId: 'USR-SEED-DEHYARI-ADMIN',
     roles: ['ORGANIZATION_ADMIN'],
+    organizationIds: [],
     authType: 'USER',
     startedAt: 0,
     ...overrides,

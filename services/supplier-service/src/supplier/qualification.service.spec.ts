@@ -283,6 +283,7 @@ describe('approving', () => {
         {
           requestId: 'req-1',
           correlationId: 'corr-1',
+          organizationIds: [],
           authType: 'USER',
           roles: ['UNION_ADMIN'],
           organizationId: OTHER_ORG,

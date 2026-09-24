@@ -280,7 +280,9 @@ describe('reward lifecycle', () => {
         payload: {},
       }),
     );
-    expect(first.some((outcome) => outcome.levelChangedTo === 'نقره‌ای')).toBe(true);
+    expect(
+      first.some((outcome) => outcome.kind === 'GRANTED' && outcome.levelChangedTo === 'نقره‌ای'),
+    ).toBe(true);
 
     const second = await asAdmin(() =>
       wiring.rewards.grantFor({
@@ -294,7 +296,9 @@ describe('reward lifecycle', () => {
     );
     // A level that has not moved is not news, and notification-service would
     // otherwise turn every single reward into a message.
-    expect(second.every((outcome) => outcome.levelChangedTo === null)).toBe(true);
+    expect(
+      second.every((outcome) => outcome.kind === 'GRANTED' && outcome.levelChangedTo === null),
+    ).toBe(true);
 
     // ADR-036: a reward lifecycle is not a transaction lifecycle, so these
     // events keep their own aggregate keys rather than being handed a
