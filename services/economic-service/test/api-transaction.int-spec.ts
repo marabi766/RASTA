@@ -365,7 +365,11 @@ describe('transaction and settlement API', () => {
     expect(resolved.body.status).toBe('PENDING_SETTLEMENT');
   });
 
-  it('refunds a held transaction to the payer', async () => {
+  it('refunds a held transaction to the payer, at the payee’s request', async () => {
+    // The payer may not refund its own escrow (docs/24 Q-62) — that would let
+    // it confirm or dispute and then take the money back. The payee returning
+    // what it is owed is the voluntary return the interim policy allows; the
+    // full actor × state matrix is `refund-authority.int-spec.ts`.
     const wallet = await request(http).get('/v1/wallets/me').set('authorization', asPayer());
     const before = BigInt(wallet.body.availableBalanceMinor);
 
@@ -376,7 +380,7 @@ describe('transaction and settlement API', () => {
 
     const refunded = await request(http)
       .post(`/v1/transactions/${created.body.id}/refund`)
-      .set('authorization', asPayer())
+      .set('authorization', asPayee())
       .set('idempotency-key', id('api-txn-refund'))
       .send({ reason: 'the order was cancelled before dispatch' })
       .expect(200);

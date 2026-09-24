@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
@@ -7,10 +7,11 @@ import { WalletService } from '../wallet/wallet.service';
 import { WalletRepository } from '../wallet/wallet.repository';
 import { TransactionRepository, type TransactionFilter } from './transaction.repository';
 import { nextStatus } from './state-machine';
-import { assertTransactionVisible, canCommitOrganization } from '../access/access';
+import { assertMayRefund, assertTransactionVisible, canCommitOrganization } from '../access/access';
 import { parseMinor } from '../shared/money';
 import { financialTransactionDuration, transactionsCreatedTotal } from '../observability/metrics';
-import { SERVICE_NAME } from '../config/env';
+import { SERVICE_NAME, type EconomicEnv } from '../config/env';
+import { ENV } from '../tokens';
 import type { Prisma, TransactionType } from '../generated/prisma';
 import type { CreateTransactionDto, DisputeTransactionDto, ResolveDisputeDto } from './dto';
 
@@ -34,6 +35,7 @@ export class TransactionService {
     private readonly repository: TransactionRepository,
     private readonly wallets: WalletService,
     private readonly walletRepository: WalletRepository,
+    @Inject(ENV) private readonly env: EconomicEnv,
   ) {}
 
   // ==========================================================================
@@ -311,6 +313,11 @@ export class TransactionService {
    * Posts the refund journal and returns the escrowed funds, then moves the
    * transaction to `REFUNDED` — all in one transaction, so a refund that fails
    * halfway leaves the money exactly where it was.
+   *
+   * Who may ask is {@link assertMayRefund}: never the payer, and for a
+   * disputed transaction only a platform decision or the order saga (docs/24
+   * Q-62). Checked under the row lock, against the status the state machine is
+   * about to read, so the two cannot disagree.
    */
   async refund(transactionId: string, reason: string): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
@@ -323,7 +330,7 @@ export class TransactionService {
       await this.prisma.transaction(async (tx) => {
         const transaction = await this.repository.lockForUpdate(tx, transactionId);
         if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-        assertTransactionVisible(transaction);
+        assertMayRefund(transaction, { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED });
 
         const target = nextStatus(transactionId, transaction.status, 'REFUND');
 

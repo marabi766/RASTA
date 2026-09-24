@@ -235,7 +235,12 @@ export class TransactionController {
     description:
       'The cancellation branch of the hold cycle (docs/10 § 10.5). Posts a refund journal ' +
       'rather than reversing the hold: the hold really happened and was then cancelled, and an ' +
-      'auditor needs to be able to tell those apart. Requires an `Idempotency-Key`.',
+      'auditor needs to be able to tell those apart. Requires an `Idempotency-Key`. ' +
+      'Never available to the payer, from any state (403): a payer that could refund its own ' +
+      'escrow could step around the dispute resolution. Available to platform scope, to ' +
+      'marketplace-service as its order saga, and to the payee’s financial administrator — ' +
+      'except while DISPUTED, which needs platform scope (docs/24 Q-62). A caller that is ' +
+      'not a party gets 404.',
   })
   async refund(
     @Param('id') id: string,
