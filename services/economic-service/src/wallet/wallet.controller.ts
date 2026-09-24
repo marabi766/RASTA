@@ -3,7 +3,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AllowService, RastaError, Roles, zodPipe } from '@rasta/nest-common';
 import { WalletService } from './wallet.service';
 import { PaymentService } from '../payment/payment.service';
-import { IdempotencyStore } from '../shared/idempotency';
+import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { assertNotAuditor, assertWalletVisible } from '../access/access';
 import { toHoldView, toWalletView, type HoldRow, type WalletRow } from '../shared/views';
 import {
@@ -136,27 +136,33 @@ export class WalletController {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
 
-    return this.idempotency.run('POST /v1/wallets/:id/top-up', key, body, 201, async () => {
-      const result = await this.payments.topUp(id, { ...body, idempotencyKey: key });
-      return {
-        paymentIntentId: result.paymentIntentId,
-        transactionId: result.transactionId,
-        journalId: result.journalId,
-        status: result.status,
-        amountMinor: result.amountMinor.toString(),
-        currency: result.currency,
-        provider: result.provider,
-        simulated: result.simulated,
-        ...(result.failureReason ? { failureReason: result.failureReason } : {}),
-        balances: result.balances
-          ? {
-              ledgerBalanceMinor: result.balances.ledgerBalanceMinor.toString(),
-              pendingBalanceMinor: result.balances.pendingBalanceMinor.toString(),
-              availableBalanceMinor: result.balances.availableBalanceMinor.toString(),
-            }
-          : null,
-      };
-    });
+    return this.idempotency.run(
+      'POST /v1/wallets/:id/top-up',
+      key,
+      targeted(id, body),
+      201,
+      async () => {
+        const result = await this.payments.topUp(id, { ...body, idempotencyKey: key });
+        return {
+          paymentIntentId: result.paymentIntentId,
+          transactionId: result.transactionId,
+          journalId: result.journalId,
+          status: result.status,
+          amountMinor: result.amountMinor.toString(),
+          currency: result.currency,
+          provider: result.provider,
+          simulated: result.simulated,
+          ...(result.failureReason ? { failureReason: result.failureReason } : {}),
+          balances: result.balances
+            ? {
+                ledgerBalanceMinor: result.balances.ledgerBalanceMinor.toString(),
+                pendingBalanceMinor: result.balances.pendingBalanceMinor.toString(),
+                availableBalanceMinor: result.balances.availableBalanceMinor.toString(),
+              }
+            : null,
+        };
+      },
+    );
   }
 }
 

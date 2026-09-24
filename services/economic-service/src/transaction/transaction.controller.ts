@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@n
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AllowService, Roles, zodPipe } from '@rasta/nest-common';
 import { TransactionService } from './transaction.service';
-import { IdempotencyStore } from '../shared/idempotency';
+import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
 import {
@@ -162,7 +162,7 @@ export class TransactionController {
     return this.idempotency.run(
       'POST /v1/transactions/:id/authorise-settlement',
       key,
-      { id },
+      targeted(id),
       200,
       async () =>
         toTransactionDetailView((await this.transactions.authoriseSettlement(id)) as never),
@@ -188,8 +188,12 @@ export class TransactionController {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
 
-    return this.idempotency.run('POST /v1/transactions/:id/dispute', key, dto, 200, async () =>
-      toTransactionDetailView((await this.transactions.dispute(id, dto)) as never),
+    return this.idempotency.run(
+      'POST /v1/transactions/:id/dispute',
+      key,
+      targeted(id, dto),
+      200,
+      async () => toTransactionDetailView((await this.transactions.dispute(id, dto)) as never),
     );
   }
 
@@ -219,7 +223,7 @@ export class TransactionController {
     return this.idempotency.run(
       'POST /v1/transactions/:id/resolve-dispute',
       key,
-      dto,
+      targeted(id, dto),
       200,
       async () =>
         toTransactionDetailView((await this.transactions.resolveDispute(id, dto)) as never),
@@ -250,10 +254,16 @@ export class TransactionController {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
 
-    return this.idempotency.run(`POST /v1/transactions/:id/refund`, key, dto, 200, async () => {
-      const result = await this.transactions.refund(id, dto.reason);
-      return toTransactionDetailView(result as never);
-    });
+    return this.idempotency.run(
+      'POST /v1/transactions/:id/refund',
+      key,
+      targeted(id, dto),
+      200,
+      async () => {
+        const result = await this.transactions.refund(id, dto.reason);
+        return toTransactionDetailView(result as never);
+      },
+    );
   }
 
   @Post(':id/cancel')
@@ -274,8 +284,13 @@ export class TransactionController {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
 
-    return this.idempotency.run('POST /v1/transactions/:id/cancel', key, dto, 200, async () =>
-      toTransactionDetailView((await this.transactions.cancel(id, dto.reason)) as never),
+    return this.idempotency.run(
+      'POST /v1/transactions/:id/cancel',
+      key,
+      targeted(id, dto),
+      200,
+      async () =>
+        toTransactionDetailView((await this.transactions.cancel(id, dto.reason)) as never),
     );
   }
 }
