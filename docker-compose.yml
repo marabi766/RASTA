@@ -153,10 +153,21 @@ services:
       start_period: 60s
 
   # ------------------------------------------------------------ object storage
+  #
+  # Chainguard's signed builds, pinned by index digest — the same digests CI
+  # pins (.github/workflows/ci.yml, MINIO_IMAGE / MC_IMAGE). MinIO's own
+  # images stopped being publicly pullable on 2026-09-24: quay.io answers 401
+  # and Docker Hub's minio/minio is gone.
+  #
+  # The server image has no shell and no `mc`, so it carries no healthcheck;
+  # minio-init waits with `mc ready` instead. It runs as root here, as the
+  # previous official image did, so an existing `minio-data` volume stays
+  # readable — the Chainguard default is uid 65532.
   minio:
     <<: *restart
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1
     container_name: rasta-minio
+    user: '0:0'
     command: ['server', '/data', '--console-address', ':9001']
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY:-rasta_minio_admin}
@@ -166,25 +177,22 @@ services:
       - '9001:9001'
     volumes:
       - minio-data:/data
-    healthcheck:
-      test: ['CMD', 'mc', 'ready', 'local']
-      interval: 10s
-      timeout: 5s
-      retries: 12
 
   minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+    # The `-dev` variant, for the shell this multi-step init needs.
+    image: cgr.dev/chainguard/minio-client@sha256:614e083a12c6dc779f13f97e01b13afda4021a8ce3f4021a2fcf23ec86f46837
     container_name: rasta-minio-init
     depends_on:
       minio:
-        condition: service_healthy
+        condition: service_started
     entrypoint:
       - /bin/sh
       - -c
       - |
-        mc alias set rasta http://minio:9000 "${S3_ACCESS_KEY:-rasta_minio_admin}" "${S3_SECRET_KEY:-rasta_minio_dev_password}"
-        mc mb --ignore-existing "rasta/${S3_BUCKET_DOCUMENTS:-rasta-documents}"
-        mc anonymous set none "rasta/${S3_BUCKET_DOCUMENTS:-rasta-documents}"
+        mc -C /tmp/.mc alias set rasta http://minio:9000 "${S3_ACCESS_KEY:-rasta_minio_admin}" "${S3_SECRET_KEY:-rasta_minio_dev_password}"
+        until mc -C /tmp/.mc ready rasta; do sleep 2; done
+        mc -C /tmp/.mc mb --ignore-existing "rasta/${S3_BUCKET_DOCUMENTS:-rasta-documents}"
+        mc -C /tmp/.mc anonymous set none "rasta/${S3_BUCKET_DOCUMENTS:-rasta-documents}"
         echo 'MinIO buckets ready'
     restart: 'no'
 
