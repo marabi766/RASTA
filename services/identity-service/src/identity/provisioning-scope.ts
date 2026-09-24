@@ -125,6 +125,12 @@ export function isWithinProvisioningScope(
 ): boolean {
   const context = getContext();
 
+  // Fails closed rather than silently agreeing with a non-user caller.
+  // Unreachable today — every route that reaches this is `@Roles`-guarded
+  // with no `@AllowService` — but a helper this security-sensitive should
+  // not depend on staying unreachable to stay correct.
+  if (context.authType !== 'USER') return false;
+
   if (policy.crossOrgRoles.some((role) => context.roles.includes(role))) return true;
 
   // Their *active* organization — the one this request acts for — not the set
