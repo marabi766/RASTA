@@ -1,5 +1,5 @@
 import { EnvValidationError } from '@rasta/config';
-import { loadIdentityEnv, roleGrantPolicy } from './env';
+import { loadIdentityEnv, provisioningScopePolicy, roleGrantPolicy } from './env';
 
 /**
  * `KEYCLOAK_SYNC_ENABLED` — whether account provisioning reaches the identity
@@ -182,5 +182,43 @@ describe('the role-grant ladder (docs/24 Q-60)', () => {
     // Refusing the value as well is what stops an operator believing they
     // configured something they did not get.
     expect(() => loadIdentityEnv({ ...BASE, [key]: 'SYSTEM_ADMIN' })).toThrow(EnvValidationError);
+  });
+});
+
+describe('cross-organization provisioning (docs/24 Q-61)', () => {
+  it('defaults to the platform operator alone', () => {
+    expect(loadIdentityEnv(BASE).USER_PROVISIONING_CROSS_ORG_ROLES).toEqual(['SYSTEM_ADMIN']);
+  });
+
+  it('assembles the policy the service holds', () => {
+    expect(provisioningScopePolicy(loadIdentityEnv(BASE)).crossOrgRoles).toEqual(['SYSTEM_ADMIN']);
+  });
+
+  it('permits SYSTEM_ADMIN here, unlike the grant ladder', () => {
+    // The ladder refuses it because nobody may be *granted* it. This variable
+    // asks a different question — whose organization may you act in — and the
+    // platform operator is exactly who may act in anyone's.
+    expect(() =>
+      loadIdentityEnv({ ...BASE, USER_PROVISIONING_CROSS_ORG_ROLES: 'SYSTEM_ADMIN' }),
+    ).not.toThrow();
+  });
+
+  it('widens to UNION_ADMIN when a deployment answers Q-61 that way', () => {
+    const env = loadIdentityEnv({
+      ...BASE,
+      USER_PROVISIONING_CROSS_ORG_ROLES: 'SYSTEM_ADMIN,UNION_ADMIN',
+    });
+    expect(env.USER_PROVISIONING_CROSS_ORG_ROLES).toEqual(['SYSTEM_ADMIN', 'UNION_ADMIN']);
+  });
+
+  it('accepts an empty list — nobody provisions outside their own organization', () => {
+    const env = loadIdentityEnv({ ...BASE, USER_PROVISIONING_CROSS_ORG_ROLES: '' });
+    expect(env.USER_PROVISIONING_CROSS_ORG_ROLES).toEqual([]);
+  });
+
+  it('fails the deployment on a misspelled role', () => {
+    expect(() =>
+      loadIdentityEnv({ ...BASE, USER_PROVISIONING_CROSS_ORG_ROLES: 'UNIONADMIN' }),
+    ).toThrow(EnvValidationError);
   });
 });

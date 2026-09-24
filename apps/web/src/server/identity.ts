@@ -23,7 +23,18 @@ import type { WebSession } from './session';
 
 const membershipSchema = z.object({
   organizationId: z.string(),
-  organizationName: z.string().optional(),
+  /**
+   * `null` on the wire, not absent: `MembershipView.organizationName` is
+   * `string | null`, and `toMembershipView` sends `?? null` whenever the
+   * organization's name has not replicated into identity yet.
+   *
+   * `.optional()` accepts `undefined` and rejects `null`, so a legitimate,
+   * documented response failed the schema and the whole call came back
+   * `MALFORMED` — the dashboard and `/organizations` both blank for a reason
+   * neither could explain. `.nullable()` is the contract; `.optional()` is
+   * kept beside it because a future trimmed response may omit the key.
+   */
+  organizationName: z.string().nullable().optional(),
   roles: z.array(z.string()).default([]),
   status: z.string(),
 });

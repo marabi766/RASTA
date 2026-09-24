@@ -1,6 +1,7 @@
 import { ButtonLink, EmptyState, ErrorState, Identifier, NoAccessState, Section } from '@/ui';
 import { membershipStatusLabel, roleLabel } from '@/lib/organization-fields';
 import { memberName, type MemberListQuery, type MemberPage } from '@/server/members';
+import { newSubmissionId } from '@/server/submission';
 import type { ReadResult } from '@/server/assets';
 
 import { MemberRolesForm } from './MemberRolesForm';
@@ -23,22 +24,6 @@ export interface MembersScreenProps {
   readonly query: MemberListQuery;
   readonly grantableRoles: readonly string[];
   readonly csrfToken: string;
-  /**
-   * One id minted per render, shared by every row's forms.
-   *
-   * What it actually does here is the portal-side gate: a post carrying an id
-   * this server did not mint is refused before anything is called. It is
-   * **not** double-submit protection on these two endpoints. identity-service
-   * reads `Idempotency-Key` on `audit-corrections` and nowhere else, so
-   * `/memberships/:id/roles` and `/revoke` ignore it.
-   *
-   * That is tolerable, and differs per endpoint. Replacing roles is naturally
-   * idempotent: it writes the whole set, and a repeat computes an empty
-   * added/removed pair, so it emits no second event. Revoking is not — a
-   * repeat re-stamps the row and enqueues a second `MEMBERSHIP_REVOKED`.
-   * Closing that belongs in identity-service, not in a form.
-   */
-  readonly submissionId: string;
 }
 
 function hrefWith(query: MemberListQuery, changes: Partial<MemberListQuery>): string {
@@ -81,13 +66,17 @@ function Search({ query }: { query: MemberListQuery }) {
   );
 }
 
-export function MembersScreen({
-  result,
-  query,
-  grantableRoles,
-  csrfToken,
-  submissionId,
-}: MembersScreenProps) {
+/**
+ * One submission id per form, minted here.
+ *
+ * `submission.ts` says "one id per form, minted when the form is rendered".
+ * This screen renders two per member plus one profile form beside it, so a
+ * single id handed to all of them breaks that contract — and the reason it
+ * looked harmless was a property of a *different* service's uniqueness key
+ * (`(organizationId, endpoint, key)`), which is not a thing this file should
+ * depend on staying true. A server component may mint them, so it does.
+ */
+export function MembersScreen({ result, query, grantableRoles, csrfToken }: MembersScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="فهرست اعضای این سازمان در اختیار شما نیست." />;
   }
@@ -156,13 +145,13 @@ export function MembersScreen({
                       currentRoles={member.roles}
                       grantableRoles={grantableRoles}
                       csrfToken={csrfToken}
-                      submissionId={submissionId}
+                      submissionId={newSubmissionId()}
                     />
                     <RevokeMembershipForm
                       membershipId={member.membershipId}
                       memberName={memberName(member)}
                       csrfToken={csrfToken}
-                      submissionId={submissionId}
+                      submissionId={newSubmissionId()}
                     />
                   </div>
                 )}

@@ -30,6 +30,7 @@ import { IdentityRepository } from './identity.repository';
 import { KeycloakAdminClient } from '../keycloak/keycloak.client';
 import { TEST_ORG_A } from '@rasta/testing';
 import { DEFAULT_ROLE_GRANT_POLICY, ROLE_GRANT_POLICY } from './role-grants';
+import { DEFAULT_PROVISIONING_SCOPE_POLICY, PROVISIONING_SCOPE_POLICY } from './provisioning-scope';
 
 /**
  * The privilege escalation, performed.
@@ -66,6 +67,12 @@ const ISSUER = 'rasta-internal';
 /** A real seed-format id: the DTOs validate it, so a placeholder would be
  *  refused as malformed before any authorization decision was reached. */
 const ORG_A = TEST_ORG_A;
+
+/** An organization the caller has no authority over. */
+const ORG_B = 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YB';
+
+/** What the unscoped lookups should pretend to find, per test. */
+const lookups = { user: true as boolean, membership: false as boolean };
 
 const ADMIN_USER = 'USR_admin';
 /** The attacker's own membership — their organization, their row. */
@@ -195,7 +202,7 @@ function registrationRow(status: string) {
   return {
     id: REGISTRATION,
     userId: TARGET_USER,
-    requestedOrganizationId: ORG_A,
+    requestedOrganizationId: registrationOrganizationId,
     requestedRoles: requestedRoles.slice(),
     justification: null,
     status,
@@ -214,6 +221,8 @@ function registrationRow(status: string) {
 
 /** What the pending registration asked for — set per test. */
 let requestedRoles: string[] = ['FLEET_MANAGER'];
+/** Which organization it asked to join — the applicant chooses this. */
+let registrationOrganizationId: string = ORG_A;
 
 const repository = {
   client: {
@@ -225,10 +234,10 @@ const repository = {
   },
   transaction: async (fn: (t: unknown) => Promise<unknown>) => fn(tx),
   enqueueEvent: async () => 'evt-1',
-  findUserById: async () => userRow(),
+  findUserById: async () => (lookups.user ? userRow() : null),
   findUserByUsernameOrEmail: async () => null,
   findUserWithMemberships: async () => null,
-  findMembership: async () => null,
+  findMembership: async () => (lookups.membership ? membershipRow('MBR_x', ['DRIVER']) : null),
   findMembershipById: async (id: string) => membershipRow(id, memberships.get(id) ?? ['DRIVER']),
   listMembershipsForUser: async () => [],
   findOrganizationRefs: async () => [],
@@ -240,8 +249,14 @@ const repository = {
   }),
 } as unknown as IdentityRepository;
 
+/** Accounts Keycloak was asked to create. A refusal must leave this empty. */
+const keycloakCreates: unknown[] = [];
+
 const keycloak = {
-  createUser: async () => 'kc-new',
+  createUser: async (input: unknown) => {
+    keycloakCreates.push(input);
+    return 'kc-new';
+  },
   syncMemberships: async () => undefined,
   setActiveOrganization: async () => undefined,
   assignRealmRoles: async () => undefined,
@@ -256,6 +271,7 @@ const keycloak = {
     // The shipped default, not a test-only ladder: these tests assert what a
     // deployment that configures nothing actually does.
     { provide: ROLE_GRANT_POLICY, useValue: DEFAULT_ROLE_GRANT_POLICY },
+    { provide: PROVISIONING_SCOPE_POLICY, useValue: DEFAULT_PROVISIONING_SCOPE_POLICY },
     IdentityService,
     { provide: InternalTokenService, useValue: internalTokens },
     {
@@ -305,6 +321,10 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
     memberships.set(OWN_MEMBERSHIP, ['ORGANIZATION_ADMIN']);
     memberships.set(OPERATOR_MEMBERSHIP, ['SYSTEM_ADMIN']);
     requestedRoles = ['FLEET_MANAGER'];
+    registrationOrganizationId = ORG_A;
+    keycloakCreates.length = 0;
+    lookups.user = true;
+    lookups.membership = false;
   });
 
   const server = () => app.getHttpServer();
@@ -589,7 +609,167 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
   });
 
   // -------------------------------------------------------------------------
+  // The other axis: whose organization (docs/24 Q-61)
+  // -------------------------------------------------------------------------
+
+  describe('provisioning into an organization the caller has no authority over', () => {
+    it('refuses an ORGANIZATION_ADMIN creating a user in another organization', async () => {
+      // The attack: every role in this body is one the ladder permits. What is
+      // not permitted is the organization, and before this nothing looked.
+      const response = await request(server())
+        .post('/v1/users')
+        .set('authorization', orgAdmin())
+        .send({ ...newUser(['FLEET_MANAGER']), organizationId: ORG_B });
+
+      expect(response.status).toBe(403);
+      expect(response.body.code).toBe('TENANT_MISMATCH');
+      expect(writes).toHaveLength(0);
+      // The one that would have been hardest to undo: a real, enabled account
+      // in another organization's realm, created before any row is written.
+      expect(keycloakCreates).toHaveLength(0);
+    });
+
+    it('refuses an ORGANIZATION_ADMIN adding a membership in another organization', async () => {
+      const response = await request(server())
+        .post(`/v1/users/${TARGET_USER}/memberships`)
+        .set('authorization', orgAdmin())
+        .send({ organizationId: ORG_B, roles: ['DRIVER'] });
+
+      expect(response.status).toBe(403);
+      expect(response.body.code).toBe('TENANT_MISMATCH');
+      expect(writes).toHaveLength(0);
+    });
+
+    it('refuses a UNION_ADMIN too, by default (Q-61 temporary decision)', async () => {
+      // Narrow until the product says otherwise: `docs/09` calls UNION_ADMIN
+      // platform-scoped, which is not the same claim as "may provision into
+      // any organization on the platform". One environment value widens it.
+      const response = await request(server())
+        .post('/v1/users')
+        .set('authorization', unionAdmin())
+        .send({ ...newUser(['FLEET_MANAGER']), organizationId: ORG_B });
+
+      expect(response.status).toBe(403);
+      expect(writes).toHaveLength(0);
+    });
+
+    it('lets a SYSTEM_ADMIN provision across organizations', async () => {
+      const response = await request(server())
+        .post('/v1/users')
+        .set('authorization', systemAdmin())
+        .send({ ...newUser(['FLEET_MANAGER']), organizationId: ORG_B });
+
+      expect(response.status).toBe(201);
+      expect(keycloakCreates).toHaveLength(1);
+    });
+
+    it('closes the registration-approval way around it', async () => {
+      // `submitRegistration` is `@Public`, so the organization on a pending
+      // request is attacker-chosen. Checking only the two direct paths would
+      // have left this one open: file a request naming any organization, then
+      // approve your own filing.
+      registrationOrganizationId = ORG_B;
+
+      const response = await request(server())
+        .post(`/v1/registration-requests/${REGISTRATION}/approve`)
+        .set('authorization', unionAdmin())
+        .send({ roles: ['FLEET_MANAGER'] });
+
+      expect(response.status).toBe(403);
+      expect(writes).toHaveLength(0);
+      expect(keycloakCreates).toHaveLength(0);
+    });
+  });
+
+  describe('the cross-tenant membership oracle', () => {
+    /**
+     * `addMembership` answered three ways for an organization the caller has
+     * no business naming — 404 for no such user, 409 for one already a member,
+     * 201 otherwise — which told an outsider whether any given person belonged
+     * to any given organization. And the 201 was not a read: it *granted* the
+     * membership it was probing for.
+     *
+     * Checking the tenant before either lookup collapses all three into one
+     * answer.
+     */
+    const probe = () =>
+      request(server())
+        .post(`/v1/users/${TARGET_USER}/memberships`)
+        .set('authorization', orgAdmin())
+        .send({ organizationId: ORG_B, roles: ['DRIVER'] });
+
+    it('answers identically whether or not the user exists', async () => {
+      lookups.user = true;
+      const found = await probe();
+      lookups.user = false;
+      const missing = await probe();
+
+      expect(found.status).toBe(missing.status);
+      expect(found.body.code).toBe(missing.body.code);
+      expect(found.status).toBe(403);
+    });
+
+    it('answers identically whether or not the membership already exists', async () => {
+      lookups.membership = false;
+      const absent = await probe();
+      lookups.membership = true;
+      const present = await probe();
+
+      expect(absent.status).toBe(present.status);
+      expect(absent.body.code).toBe(present.body.code);
+    });
+
+    it('never grants the membership it was probing for', async () => {
+      lookups.user = true;
+      lookups.membership = false;
+      await probe();
+      expect(writes).toHaveLength(0);
+    });
+
+    it('names no organization in the body it returns', async () => {
+      // The refusal must not become the oracle it was written to close.
+      const response = await probe();
+      const body = JSON.stringify(response.body);
+      expect(body).not.toContain(ORG_B);
+      expect(body).not.toContain(ORG_A);
+    });
+  });
+
+  describe('what must still work in the caller own organization', () => {
+    it('lets an ORGANIZATION_ADMIN create a user in their own organization', async () => {
+      const response = await request(server())
+        .post('/v1/users')
+        .set('authorization', orgAdmin())
+        .send(newUser(['FLEET_MANAGER']));
+
+      expect(response.status).toBe(201);
+      expect(keycloakCreates).toHaveLength(1);
+    });
+
+    it('lets an ORGANIZATION_ADMIN add a membership in their own organization', async () => {
+      const response = await request(server())
+        .post(`/v1/users/${TARGET_USER}/memberships`)
+        .set('authorization', orgAdmin())
+        .send({ organizationId: ORG_A, roles: ['OPERATOR'] });
+
+      expect(response.status).toBe(201);
+    });
+
+    it('lets a UNION_ADMIN approve a registration for their own organization', async () => {
+      registrationOrganizationId = ORG_A;
+
+      const response = await request(server())
+        .post(`/v1/registration-requests/${REGISTRATION}/approve`)
+        .set('authorization', unionAdmin())
+        .send({ roles: ['FLEET_MANAGER'] });
+
+      expect(response.status).toBe(200);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // What the refusal says
+
   // -------------------------------------------------------------------------
 
   it('never names the refused roles in the response body (S-09)', async () => {

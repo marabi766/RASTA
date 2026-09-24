@@ -44,7 +44,14 @@ import { AuditCorrectionService } from './audit-correction/audit-correction.serv
 import { AuditCorrectionCommandRepository } from './audit-correction/audit-correction.repository';
 import { AuditLookupClient } from './audit-correction/audit-lookup.client';
 import { ROLE_GRANT_POLICY } from './identity/role-grants';
-import { loadIdentityEnv, roleGrantPolicy, SERVICE_NAME, type IdentityEnv } from './config/env';
+import { PROVISIONING_SCOPE_POLICY } from './identity/provisioning-scope';
+import {
+  loadIdentityEnv,
+  provisioningScopePolicy,
+  roleGrantPolicy,
+  SERVICE_NAME,
+  type IdentityEnv,
+} from './config/env';
 import { SecurityEventOutboxStore } from './security-events/security-event-outbox.store';
 import { RefusalAuditRecorder } from './security-events/refusal-audit.recorder';
 import { RefusalAuditExceptionFilter } from './security-events/refusal-audit.filter';
@@ -133,6 +140,12 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
       provide: ROLE_GRANT_POLICY,
       inject: [ENV],
       useFactory: (env: IdentityEnv) => roleGrantPolicy(env),
+    },
+
+    {
+      provide: PROVISIONING_SCOPE_POLICY,
+      inject: [ENV],
+      useFactory: (env: IdentityEnv) => provisioningScopePolicy(env),
     },
 
     PrismaOutboxStore,

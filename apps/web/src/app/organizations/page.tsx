@@ -141,7 +141,6 @@ export default async function OrganizationsPage({
   // read failed, which renders a picker that offers nothing rather than one
   // that guesses — the form says so in words.
   const grantableRoles = currentUser.kind === 'USER' ? currentUser.user.grantableRoles : [];
-  const submissionId = newSubmissionId();
 
   return (
     <AppShell
@@ -174,7 +173,7 @@ export default async function OrganizationsPage({
           <OrganizationProfile
             result={organization}
             csrfToken={session.csrfToken}
-            submissionId={submissionId}
+            submissionId={newSubmissionId()}
           />
         </Section>
       )}
@@ -185,7 +184,6 @@ export default async function OrganizationsPage({
           query={query}
           grantableRoles={grantableRoles}
           csrfToken={session.csrfToken}
-          submissionId={submissionId}
         />
       </div>
     </AppShell>
