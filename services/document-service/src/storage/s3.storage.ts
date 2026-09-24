@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadBucketCommand,
@@ -9,7 +10,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Transform, pipeline, type Readable } from 'node:stream';
-import type { ObjectMetadata, ObjectStorage } from './storage.port';
+import { ObjectChangedError, type ObjectMetadata, type ObjectStorage } from './storage.port';
 
 export interface S3StorageOptions {
   endpoint: string;
@@ -58,31 +59,59 @@ export class S3ObjectStorage implements ObjectStorage {
   async createUploadUrl(input: {
     objectKey: string;
     contentType: string;
+    contentLength: number;
     expiresInSeconds: number;
   }): Promise<string> {
     const command = new PutObjectCommand({
       Bucket: this.options.bucket,
       Key: input.objectKey,
       ContentType: input.contentType,
+      ContentLength: input.contentLength,
     });
 
-    // `signableHeaders` is what makes the content type binding, and it is not
-    // optional decoration. Setting `ContentType` on the command alone signs
-    // nothing: the presigner puts only `host` in `X-Amz-SignedHeaders`, so the
-    // URL accepted an upload declaring any type at all. That was the behaviour
-    // here until a test PUT a `text/html` header to a URL signed for
-    // `application/pdf` and storage answered 200 — while the comment above it
-    // claimed the opposite.
+    // `signableHeaders` is what makes the content type and size binding, and
+    // it is not optional decoration. Setting `ContentType`/`ContentLength` on
+    // the command alone signs nothing: the presigner puts only `host` in
+    // `X-Amz-SignedHeaders` otherwise, so the URL accepted an upload declaring
+    // any type — and any size — at all. That was the behaviour here until a
+    // test PUT a `text/html` header to a URL signed for `application/pdf` and
+    // storage answered 200, while the comment above it claimed the opposite.
     //
-    // With the header signed, a mismatch fails the signature check at storage.
-    // It is still not a substitute for inspecting the bytes afterwards — a
-    // client can send a matching header and different content, which is why
-    // `finalize` reads the magic number — but it does stop one URL from being
-    // reused to store something else entirely.
+    // With both headers signed, a mismatch fails the signature check at
+    // storage. Content type is still not a substitute for inspecting the
+    // bytes afterwards — a client can send a matching header and different
+    // content, which is why `finalize` reads the magic number — but between
+    // them the two stop one URL from being reused to store something else
+    // entirely, of a different type or a different size than it was issued
+    // for.
     return getSignedUrl(this.client, command, {
       expiresIn: input.expiresInSeconds,
-      signableHeaders: new Set(['content-type']),
+      signableHeaders: new Set(['content-type', 'content-length']),
     });
+  }
+
+  async copyToSealedKey(input: {
+    sourceKey: string;
+    destinationKey: string;
+    ifMatchETag: string;
+  }): Promise<void> {
+    try {
+      await this.client.send(
+        new CopyObjectCommand({
+          Bucket: this.options.bucket,
+          Key: input.destinationKey,
+          CopySource: `${this.options.bucket}/${encodeURIComponent(input.sourceKey)}`,
+          // Refuses the copy outright if the source's current ETag is not
+          // this one — the precondition that makes the seal provably of the
+          // bytes `finalize` just read back, not of whatever is at
+          // `sourceKey` by the time this command reaches storage.
+          CopySourceIfMatch: input.ifMatchETag,
+        }),
+      );
+    } catch (error) {
+      if (isPreconditionFailed(error)) throw new ObjectChangedError();
+      throw error;
+    }
   }
 
   async createDownloadUrl(input: {
@@ -231,6 +260,14 @@ function isNotFound(error: unknown): boolean {
   const candidate = error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } };
   if (candidate.name === 'NotFound' || candidate.name === 'NoSuchKey') return true;
   return candidate.$metadata?.httpStatusCode === 404;
+}
+
+/** A failed `x-amz-copy-source-if-match` precondition, from S3 or MinIO. */
+function isPreconditionFailed(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const candidate = error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } };
+  if (candidate.name === 'PreconditionFailed') return true;
+  return candidate.$metadata?.httpStatusCode === 412;
 }
 
 /**
