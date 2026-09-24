@@ -1,5 +1,6 @@
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import {
+  assertMayRefund,
   assertNotAuditor,
   assertPlatformScope,
   assertTransactionVisible,
@@ -36,11 +37,14 @@ function asUser(roles: string[], organizationId = 'ORG-A', userId = 'USR-1'): Re
   };
 }
 
-function asService(callerService = 'marketplace-service'): RequestContext {
+function asService(
+  callerService = 'marketplace-service',
+  organizationId = 'ORG-A',
+): RequestContext {
   return {
     correlationId: 'corr-1',
     requestId: 'req-1',
-    organizationId: 'ORG-A',
+    organizationId,
     roles: ['SYSTEM'],
     organizationIds: [],
     authType: 'SERVICE',
@@ -306,6 +310,88 @@ describe('assertWalletVisible', () => {
     // Ownership does not help: the constraint is on the role, not on the row.
     const wallet = { id: 'WLT_1', organizationId: 'ORG-A' };
     expect(() => run(asUser(['AUDITOR'], 'ORG-A'), () => assertWalletVisible(wallet))).toThrow(
+      expect.objectContaining({ code: 'FORBIDDEN' }),
+    );
+  });
+});
+
+describe('assertMayRefund (docs/24 Q-62)', () => {
+  // ORG-A pays, ORG-B is paid, ORG-C is a stranger to the transaction.
+  const REFUNDABLE = ['HELD', 'PENDING_SETTLEMENT', 'DISPUTED'] as const;
+  const txn = (status: string) => ({
+    id: 'TXN_1',
+    organizationId: 'ORG-A',
+    counterpartyOrganizationId: 'ORG-B',
+    status,
+  });
+  const allowed = { payeeMayRefund: true };
+  const refund = (context: RequestContext, status: string, policy = allowed) =>
+    run(context, () => assertMayRefund(txn(status), policy));
+
+  describe.each(REFUNDABLE)('from %s', (status) => {
+    it('refuses the payer’s own administrator', () => {
+      expect(() => refund(asUser(['ORGANIZATION_ADMIN'], 'ORG-A'), status)).toThrow(
+        expect.objectContaining({ code: 'FORBIDDEN' }),
+      );
+    });
+
+    it('refuses the payer even with platform roles', () => {
+      // A platform administrator acting as the payer is still the payer: the
+      // conflict of interest is the same one the rule exists to close.
+      expect(() => refund(asUser(['SYSTEM_ADMIN'], 'ORG-A'), status)).toThrow(
+        expect.objectContaining({ code: 'FORBIDDEN' }),
+      );
+    });
+
+    it('permits platform scope acting for any other organization', () => {
+      expect(() => refund(asUser(['UNION_ADMIN'], 'ORG-PLATFORM'), status)).not.toThrow();
+    });
+
+    it('permits the order saga, whose token names the payer', () => {
+      expect(() => refund(asService('marketplace-service', 'ORG-A'), status)).not.toThrow();
+    });
+
+    it('hides the transaction from a service token for a non-party — 404', () => {
+      expect(() => refund(asService('marketplace-service', 'ORG-C'), status)).toThrow(
+        expect.objectContaining({ code: 'NOT_FOUND' }),
+      );
+    });
+
+    it('hides the transaction from a stranger administrator — 404, never 403', () => {
+      expect(() => refund(asUser(['ORGANIZATION_ADMIN'], 'ORG-C'), status)).toThrow(
+        expect.objectContaining({ code: 'NOT_FOUND' }),
+      );
+    });
+
+    it('refuses a payee member without a financial role', () => {
+      expect(() => refund(asUser(['OPERATOR'], 'ORG-B'), status)).toThrow(
+        expect.objectContaining({ code: 'FORBIDDEN' }),
+      );
+    });
+
+    it('refuses the oversight role even as the payee', () => {
+      expect(() => refund(asUser(['AUDITOR', 'ORGANIZATION_ADMIN'], 'ORG-B'), status)).toThrow(
+        expect.objectContaining({ code: 'FORBIDDEN' }),
+      );
+    });
+  });
+
+  describe.each(['HELD', 'PENDING_SETTLEMENT'] as const)('from %s', (status) => {
+    it('permits the payee’s administrator — a voluntary return', () => {
+      expect(() => refund(asUser(['ORGANIZATION_ADMIN'], 'ORG-B'), status)).not.toThrow();
+    });
+
+    it('refuses the payee’s administrator when configuration turns it off', () => {
+      expect(() =>
+        refund(asUser(['ORGANIZATION_ADMIN'], 'ORG-B'), status, { payeeMayRefund: false }),
+      ).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }));
+    });
+  });
+
+  it('refuses the payee’s administrator once the transaction is disputed', () => {
+    // Only a platform decision on the dispute, or the saga mirroring one, may
+    // return disputed funds — never either party alone (docs/10 § 10.5).
+    expect(() => refund(asUser(['ORGANIZATION_ADMIN'], 'ORG-B'), 'DISPUTED')).toThrow(
       expect.objectContaining({ code: 'FORBIDDEN' }),
     );
   });

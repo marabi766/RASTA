@@ -512,6 +512,10 @@ export const EXPECTED = {
     tables: ['wallet', 'ledger_account', 'journal', 'ledger_entry', 'transaction', 'settlement'],
     triggers: ['trg_ledger_entry_immutable', 'trg_journal_immutable', 'trg_journal_balanced'],
     constraints: ['ck_wallet_balances'],
+    // One obligation per business fact per payer. A down script that dropped
+    // it without the forward migration restoring it would bring back the
+    // double-settlement race it closes, silently.
+    indexes: ['ux_transaction_source_fact'],
   },
   /**
    * The constraints listed are the ones carrying a financial invariant, not a
