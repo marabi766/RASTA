@@ -99,7 +99,7 @@ describe('starting a saga', () => {
     await new OrderSagaClient(env()).start('ORD_7');
 
     expect(temporal.start).toHaveBeenCalledTimes(1);
-    const [workflowName, options] = temporal.start.mock.calls[0] as [
+    const [workflowName, options] = temporal.start.mock.calls[0] as unknown as [
       string,
       { workflowId: string; taskQueue: string; args: [Record<string, number | string>] },
     ];
@@ -120,7 +120,7 @@ describe('starting a saga', () => {
       }),
     ).start('ORD_8');
 
-    const [, options] = temporal.start.mock.calls[0] as [
+    const [, options] = temporal.start.mock.calls[0] as unknown as [
       string,
       { args: [Record<string, unknown>] },
     ];
