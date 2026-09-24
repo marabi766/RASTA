@@ -13,6 +13,12 @@ import {
   grantableRoles,
   type RoleGrantPolicy,
 } from './role-grants';
+import {
+  DEFAULT_PROVISIONING_SCOPE_POLICY,
+  PROVISIONING_SCOPE_POLICY,
+  assertMayProvisionInto,
+  type ProvisioningScopePolicy,
+} from './provisioning-scope';
 import { IDENTITY_TOPIC } from '../config/env';
 import { KeycloakAdminClient } from '../keycloak/keycloak.client';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -58,6 +64,13 @@ export class IdentityService {
      */
     @Inject(ROLE_GRANT_POLICY)
     private readonly roleGrants: RoleGrantPolicy = DEFAULT_ROLE_GRANT_POLICY,
+    /**
+     * Which organization this caller may provision into (`docs/24` Q-61).
+     * Injected for the same reason the ladder is, and defaulted to the narrow
+     * reading so a construction that forgets it fails closed.
+     */
+    @Inject(PROVISIONING_SCOPE_POLICY)
+    private readonly provisioningScope: ProvisioningScopePolicy = DEFAULT_PROVISIONING_SCOPE_POLICY,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -152,8 +165,10 @@ export class IdentityService {
    * self-service path is {@link submitRegistration}.
    */
   async createUser(dto: CreateUserDto): Promise<UserView> {
-    // Before the lookup, so a caller who may not grant the role learns nothing
-    // about whether the username they picked is taken.
+    // Both before the lookup, so a caller who may not do this learns nothing
+    // about whether the username they picked is taken — and, for the tenant
+    // check, nothing about the organization they named either.
+    assertMayProvisionInto(dto.organizationId, this.provisioningScope);
     assertMayGrantRoles(dto.roles, this.roleGrants);
 
     const existing = await this.repository.findUserByUsernameOrEmail(dto.username, dto.email);
@@ -287,6 +302,12 @@ export class IdentityService {
   // -------------------------------------------------------------------------
 
   async addMembership(userId: string, dto: CreateMembershipDto): Promise<MembershipView> {
+    // First, and before either lookup. `findUserById` and `findMembership` are
+    // both deliberately unscoped, so without this the three outcomes below —
+    // 404, 409, 201 — told a caller whether any given user belonged to any
+    // given organization, and the 201 granted the membership it was probing
+    // for.
+    assertMayProvisionInto(dto.organizationId, this.provisioningScope);
     assertMayGrantRoles(dto.roles, this.roleGrants);
 
     const user = await this.repository.findUserById(userId);
@@ -570,6 +591,12 @@ export class IdentityService {
         'Only a pending registration can be approved',
       );
     }
+
+    // The organization came from the applicant, on a `@Public` endpoint.
+    // Without this, a reviewer could file their own registration naming any
+    // organization and approve it, walking around the check on the two direct
+    // provisioning paths.
+    assertMayProvisionInto(request.requestedOrganizationId, this.provisioningScope);
 
     const grantedRoles = dto.roles ?? request.requestedRoles;
 

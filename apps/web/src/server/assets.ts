@@ -197,3 +197,38 @@ export function fetchDossier(
   // an id containing a slash would otherwise address a different endpoint.
   return read(session, `/v1/assets/${encodeURIComponent(assetId)}/dossier`, dossierSchema);
 }
+
+const timelinePageSchema = z.object({
+  items: z.array(timelineEntrySchema),
+  nextCursor: z.string().nullable().default(null),
+  hasMore: z.boolean().default(false),
+});
+
+export type AssetTimelinePage = z.infer<typeof timelinePageSchema>;
+
+export interface AssetTimelineQuery {
+  readonly category?: string;
+  readonly cursor?: string;
+}
+
+/** How many rows one page shows. The service caps it far higher; this is a screen. */
+export const ASSET_TIMELINE_PER_PAGE = 20;
+
+export function fetchAssetTimeline(
+  session: WebSession,
+  assetId: string,
+  query: AssetTimelineQuery = {},
+): Promise<ReadResult<AssetTimelinePage>> {
+  const params = new URLSearchParams({ limit: String(ASSET_TIMELINE_PER_PAGE) });
+  // Only what the caller actually set — `category` is a strict enum on
+  // asset-service's side, and an empty value would be refused rather than
+  // read as "no filter".
+  if (query.category) params.set('category', query.category);
+  if (query.cursor) params.set('cursor', query.cursor);
+
+  return read(
+    session,
+    `/v1/assets/${encodeURIComponent(assetId)}/timeline?${params.toString()}`,
+    timelinePageSchema,
+  );
+}

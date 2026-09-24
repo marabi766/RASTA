@@ -113,3 +113,45 @@ describe('small presentation decisions', () => {
     ).toBeUndefined();
   });
 });
+
+describe('the membership organization name', () => {
+  /**
+   * `MembershipView.organizationName` is `string | null` on the service, and
+   * `toMembershipView` sends `?? null` whenever the organization's name has
+   * not replicated into identity yet. `.optional()` accepts `undefined` and
+   * rejects `null`, so this legitimate, documented response came back
+   * `MALFORMED` — the dashboard and `/organizations` both blank, with nothing
+   * on screen able to explain why.
+   */
+  const answering = (membership: Record<string, unknown>) =>
+    (async () =>
+      new Response(JSON.stringify({ ...IDENTITY_ANSWER, memberships: [membership] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch;
+
+  const base = { organizationId: 'ORG_1', roles: ['FLEET_MANAGER'], status: 'ACTIVE' };
+
+  it('accepts an explicit null, which is what the service sends', async () => {
+    await withFetch(answering({ ...base, organizationName: null }), async () => {
+      const result = await fetchCurrentUser(SESSION);
+      expect(result.kind).toBe('USER');
+    });
+  });
+
+  it('keeps the name when there is one', async () => {
+    await withFetch(answering({ ...base, organizationName: 'دهیاری نمونه' }), async () => {
+      const result = await fetchCurrentUser(SESSION);
+      expect(result.kind === 'USER' && result.user.memberships[0]?.organizationName).toBe(
+        'دهیاری نمونه',
+      );
+    });
+  });
+
+  it('accepts the key being absent as well', async () => {
+    await withFetch(answering(base), async () => {
+      const result = await fetchCurrentUser(SESSION);
+      expect(result.kind).toBe('USER');
+    });
+  });
+});
