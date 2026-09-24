@@ -13,8 +13,8 @@
 | Horizon | Earned SP | Committed SP | Remaining SP | Progress | Accepted units | Active units | Features | Stories |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | MVP | 217 | 555 | 338 | 39.1% | 21 | 40 | 36 | 5 |
-| Post-MVP only | 0 | 215 | 215 | 0% | 0 | 11 | 11 | 0 |
-| Full product | 217 | 770 | 553 | 28.2% | 21 | 51 | 47 | 5 |
+| Post-MVP only | 0 | 223 | 223 | 0% | 0 | 12 | 12 | 0 |
+| Full product | 217 | 778 | 561 | 27.9% | 21 | 52 | 48 | 5 |
 
 ## Progress by epic
 
@@ -31,14 +31,14 @@
 | EP-ENGAGEMENT | Participation, reward and ranking | POST_MVP | 0 | 34 | 0% | 2 | 0 |
 | EP-REVERSE | Reverse logistics | POST_MVP | 0 | 21 | 0% | 1 | 0 |
 | EP-IOT | IoT and telematics | POST_MVP | 0 | 42 | 0% | 2 | 0 |
-| EP-EXPANSION | National-scale product expansion | POST_MVP | 0 | 76 | 0% | 4 | 0 |
+| EP-EXPANSION | National-scale product expansion | POST_MVP | 0 | 84 | 0% | 5 | 0 |
 
 ## Delivery-unit state
 
 | Status | Delivery units | Story Points |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 15 | 270 |
+| READY | 16 | 278 |
 | IN_PROGRESS | 3 | 55 |
 | BLOCKED | 3 | 47 |
 | ACCEPTED | 21 | 217 |
@@ -51,7 +51,7 @@ A delivery unit is a User Story under a decomposed Feature, or the Feature itsel
 | Status | Features | Baseline SP |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 15 | 270 |
+| READY | 16 | 278 |
 | IN_PROGRESS | 3 | 55 |
 | BLOCKED | 3 | 47 |
 | ACCEPTED | 17 | 217 |

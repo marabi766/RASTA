@@ -1207,6 +1207,22 @@
       "dependencies": ["RUN-004"],
       "sourceRefs": ["docs/adr/ADR-044-target-service-topology.md"],
       "evidence": []
+    },
+    {
+      "id": "EXT-005",
+      "epicId": "EP-EXPANSION",
+      "title": "Gateway revocation list for demoted and revoked memberships",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 8,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "A ROLE_REVOKED or MEMBERSHIP_REVOKED event causes the gateway to refuse the affected (user, organization) pair within Kafka lag, until every access token minted before the change has expired",
+        "identity-service does not become a synchronous dependency of any request, and the gateway fails closed on a pair it cannot evaluate"
+      ],
+      "dependencies": ["CORE-003"],
+      "sourceRefs": ["docs/adr/ADR-060-tenant-bound-roles.md", "docs/23-risks-and-tradeoffs.md"],
+      "evidence": []
     }
   ],
   "stories": [
@@ -1811,6 +1827,14 @@
       "recordedBy": "Claude Opus 5",
       "approvalRef": "Product owner standing authority for quality and security decisions, Claude Code session 2026-09-21",
       "recordIds": ["EXP-002"]
+    },
+    {
+      "date": "2026-09-24",
+      "type": "SCOPE_ADDED",
+      "reason": "ADR-060 binds roles to the organization and carries them in the access token, so a demotion or revocation takes effect within 905 seconds (the realm's 900-second access-token lifetime plus 5 seconds of clock tolerance). That window was accepted for MVP and recorded as T-06 in docs/23. EXT-005 is the follow-up that closes it for the dangerous direction: a gateway revocation list fed by the events identity-service already publishes. Filed under EP-EXPANSION because the window was accepted for MVP, so the fix is post-MVP, and the backlog has no post-MVP hardening epic; EP-EXPANSION's 'before national scale' is the nearest honest home. Whether a dedicated hardening epic is wanted is a backlog-structure decision left to the project manager.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Project manager decision on ADR-060, 2026-09-24 (PR #84)",
+      "recordIds": ["EXT-005"]
     }
   ]
 }
