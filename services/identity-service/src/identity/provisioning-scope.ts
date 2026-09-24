@@ -103,16 +103,39 @@ export function assertMayProvisionInto(
     throw RastaError.forbidden('Only a signed-in user may provision an account');
   }
 
-  if (policy.crossOrgRoles.some((role) => context.roles.includes(role))) return;
-
-  // Their *active* organization — the one this request acts for — not the set
-  // they belong to. A caller who belongs to several chooses which one they are
-  // acting as with `X-Organization-Id`, and that choice is what every other
-  // tenant decision in the platform is measured against.
-  if (context.organizationId === organizationId) return;
+  if (isWithinProvisioningScope(organizationId, policy)) return;
 
   throw RastaError.tenantMismatch(
     organizationId,
     context.organizationId ? [context.organizationId] : [],
   );
+}
+
+/**
+ * The non-throwing half of {@link assertMayProvisionInto}'s scope check.
+ *
+ * Exists for callers that must not turn "out of scope" into a distinct,
+ * probeable signal — `approveRegistration` folds this into the same `404`
+ * used for a registration that does not exist at all, rather than a `403`
+ * that would still tell an outsider the id belongs to somebody.
+ */
+export function isWithinProvisioningScope(
+  organizationId: string,
+  policy: ProvisioningScopePolicy,
+): boolean {
+  const context = getContext();
+
+  // Fails closed rather than silently agreeing with a non-user caller.
+  // Unreachable today — every route that reaches this is `@Roles`-guarded
+  // with no `@AllowService` — but a helper this security-sensitive should
+  // not depend on staying unreachable to stay correct.
+  if (context.authType !== 'USER') return false;
+
+  if (policy.crossOrgRoles.some((role) => context.roles.includes(role))) return true;
+
+  // Their *active* organization — the one this request acts for — not the set
+  // they belong to. A caller who belongs to several chooses which one they are
+  // acting as with `X-Organization-Id`, and that choice is what every other
+  // tenant decision in the platform is measured against.
+  return context.organizationId === organizationId;
 }
