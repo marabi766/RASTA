@@ -265,7 +265,7 @@ async function main(): Promise<void> {
         id,
         organizationId: policy.organizationId,
         key: policy.key,
-        value: policy.value as object,
+        value: policy.value,
         inheritable: true,
         description: policy.description,
         createdBy: 'SEED',
@@ -277,7 +277,7 @@ async function main(): Promise<void> {
       // being idempotent.
       update: {
         organizationId: policy.organizationId,
-        value: policy.value as object,
+        value: policy.value,
         description: policy.description,
         updatedBy: 'SEED',
       },
