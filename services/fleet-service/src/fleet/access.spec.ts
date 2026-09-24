@@ -18,6 +18,7 @@ function context(overrides: Partial<RequestContext>): RequestContext {
     correlationId: 'corr-1',
     requestId: 'req-1',
     roles: [],
+    organizationIds: [],
     authType: 'USER',
     startedAt: Date.now(),
     ...overrides,

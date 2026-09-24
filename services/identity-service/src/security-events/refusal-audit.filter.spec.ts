@@ -37,8 +37,13 @@ function silentLogger() {
   return { warn: jest.fn(), error: jest.fn(), debug: jest.fn(), info: jest.fn() };
 }
 
-function fakeResponse() {
-  const response = {
+interface FakeResponse {
+  status: jest.Mock<FakeResponse, [number]>;
+  json: jest.Mock<undefined, [unknown]>;
+}
+
+function fakeResponse(): FakeResponse {
+  const response: FakeResponse = {
     status: jest.fn((_code: number) => response),
     json: jest.fn((_body: unknown) => undefined),
   };
@@ -227,7 +232,7 @@ describe('RefusalAuditExceptionFilter', () => {
     const exception = markGuardRefusal(
       RastaError.tenantMismatch('ORG_HEADER_SENTINEL', ['ORG_A']),
       'AUTH_TENANT_MISMATCH',
-      { userId: 'USR_A', organizationId: 'ORG_A', roles: ['FLEET_MANAGER'] },
+      { actorType: 'USER', userId: 'USR_A', organizationId: 'ORG_A', roles: ['FLEET_MANAGER'] },
     );
     const expected = platformResponse(RastaError.tenantMismatch('ORG_HEADER_SENTINEL', ['ORG_A']));
 

@@ -55,57 +55,58 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                                     | Worktree                                                                     | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                                                                                                           |
-| ---------------------------------------- | ---------------------------------------------------------------------------- | ---- | --- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `demo/investor-preview`                  | `F:\Rasta-Parallel\investor-demo`                                            | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                                                                                                    |
-| `design/claude-design`                   | پوشهٔ موقت در `%TEMP%`                                                       | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                                                                                           |
-| `fix/identity-cross-tenant-provisioning` | `F:\Rasta-Parallel\web-organizations-surface` (بازاستفاده از Worktree پیشین) | Opus | #81 | ۱ / ۳          | P0 امنیتی — `identity-service` مرز سازمانی را در ایجاد کاربر/عضویت بررسی نمی‌کرد؛ یافتهٔ Audit Codex                                                                                                                                                            |
-| `feat/web-wallet-marketplace-surfaces`   | `F:\Rasta-Parallel\web-wallet-marketplace`                                   | —    | —   | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `62186cf` — `EXP-003`: `/wallet`، `/marketplace`، `/marketplace/[productId]` (بخش فقط‌خواندنی این Epic؛ `docs/16 § ۱۶٫۶`)؛ **`services/identity-service/**` و `apps/web/src/app/orders/**` را لمس نمی‌کند — قلمرو موازی Opus** |
+| شاخه                                   | Worktree                                   | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                                                                                                   |
+| -------------------------------------- | ------------------------------------------ | ---- | --- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `demo/investor-preview`                | `F:\Rasta-Parallel\investor-demo`          | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                                                                                            |
+| `design/claude-design`                 | پوشهٔ موقت در `%TEMP%`                     | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                                                                                   |
+| `feat/web-wallet-marketplace-surfaces` | `F:\Rasta-Parallel\web-wallet-marketplace` | —    | —   | ۰ / ۰          | از `origin/main` @ `62186cf`، هم‌گام‌شده با `d7500be` — `EXP-003`: `/wallet`، `/marketplace`، `/marketplace/[productId]` (بخش فقط‌خواندنی این Epic؛ `docs/16 § ۱۶٫۶`)؛ **`services/identity-service/**` و `apps/web/src/app/orders/**` را لمس نمی‌کند** |
 
 ## شاخه‌های بازنشسته
 
 این‌ها `ahead=0` هستند، یعنی محتوایشان کاملاً روی `main` است و می‌توان حذفشان
 کرد. تا وقتی حذف نشده‌اند در این جدول می‌مانند تا کسی دوباره رویشان کار نکند.
 
-| شاخه                                    | PR                                                | ادغام شد در |
-| --------------------------------------- | ------------------------------------------------- | ----------- |
-| `feat/audit-service-aud-004-contract`   | [#44](https://github.com/marabi766/RASTA/pull/44) | `9fa75cc`   |
-| `docs/inventory-logistics-adr`          | [#45](https://github.com/marabi766/RASTA/pull/45) | `f2eb8fa`   |
-| `feat/notification-service`             | [#46](https://github.com/marabi766/RASTA/pull/46) | `cc89660`   |
-| `feat/notification-read-api`            | [#47](https://github.com/marabi766/RASTA/pull/47) | `7389ffd`   |
-| `feat/supplier-performance-phase2`      | [#48](https://github.com/marabi766/RASTA/pull/48) | `f7252d3`   |
-| `docs/branch-registry`                  | [#49](https://github.com/marabi766/RASTA/pull/49) | `76feb8e`   |
-| `fix/notification-dedupe-window-race`   | [#50](https://github.com/marabi766/RASTA/pull/50) | `78ac7b0`   |
-| `docs/project-memory-2026-09-18`        | [#51](https://github.com/marabi766/RASTA/pull/51) | `a84269a`   |
-| `docs/ci-serialization-and-backlog`     | [#52](https://github.com/marabi766/RASTA/pull/52) | `76a1bf7`   |
-| `docs/audit-immutable-archive`          | [#53](https://github.com/marabi766/RASTA/pull/53) | `eea7d61`   |
-| `feat/web-foundation`                   | [#54](https://github.com/marabi766/RASTA/pull/54) | `8c04477`   |
-| `feat/web-design-tokens`                | [#55](https://github.com/marabi766/RASTA/pull/55) | `4b15725`   |
-| `feat/web-component-library`            | [#56](https://github.com/marabi766/RASTA/pull/56) | `e7b0372`   |
-| `feat/maintenance-schedule-audit-event` | [#57](https://github.com/marabi766/RASTA/pull/57) | `18946a2`   |
-| `feat/notification-outbox-audit`        | [#58](https://github.com/marabi766/RASTA/pull/58) | `419afde`   |
-| `docs/state-2026-09-19`                 | [#59](https://github.com/marabi766/RASTA/pull/59) | `8a80ce5`   |
-| `feat/notification-preferences`         | [#60](https://github.com/marabi766/RASTA/pull/60) | `e6d509e`   |
-| `docs/state-2026-09-20`                 | [#61](https://github.com/marabi766/RASTA/pull/61) | `37c48c2`   |
-| `chore/test-task-unit-only`             | [#62](https://github.com/marabi766/RASTA/pull/62) | `f7755e0`   |
-| `feat/notification-mail-channel`        | [#63](https://github.com/marabi766/RASTA/pull/63) | `bcd3cd5`   |
-| `feat/notification-email-delivery`      | [#65](https://github.com/marabi766/RASTA/pull/65) | `db39f30`   |
-| `feat/web-session-and-shell`            | [#66](https://github.com/marabi766/RASTA/pull/66) | `3cf79aa`   |
-| `docs/frontend-gate-and-web-state`      | [#64](https://github.com/marabi766/RASTA/pull/64) | `df54a43`   |
-| `feat/web-asset-surfaces`               | [#67](https://github.com/marabi766/RASTA/pull/67) | `6ea1260`   |
-| `chore/api-gateway-dockerfile`          | [#70](https://github.com/marabi766/RASTA/pull/70) | `c4de97b`   |
-| `feat/asset-insurance-claim-api`        | [#71](https://github.com/marabi766/RASTA/pull/71) | `fa14ef4`   |
-| `fix/document-service-allow-asset-read` | [#72](https://github.com/marabi766/RASTA/pull/72) | `3f68d76`   |
-| `fix/supply-chain-trust-policy`         | [#74](https://github.com/marabi766/RASTA/pull/74) | `9e0b769`   |
-| `feat/web-maintenance-surfaces`         | [#73](https://github.com/marabi766/RASTA/pull/73) | `239ae23`   |
-| `feat/web-write-path-and-usage`         | [#75](https://github.com/marabi766/RASTA/pull/75) | `0b4a35a`   |
-| `feat/web-drivers-surface`              | [#76](https://github.com/marabi766/RASTA/pull/76) | `1a6ba45`   |
-| `fix/identity-role-grant-ladder`        | [#77](https://github.com/marabi766/RASTA/pull/77) | `9347b80`   |
-| `feat/ci-portal-e2e-live-stack`         | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
-| `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
-| `feat/web-organizations-surface`        | [#79](https://github.com/marabi766/RASTA/pull/79) | `0ac1a61`   |
-| `feat/web-asset-timeline`               | [#80](https://github.com/marabi766/RASTA/pull/80) | `62186cf`   |
-| `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
+| شاخه                                     | PR                                                | ادغام شد در |
+| ---------------------------------------- | ------------------------------------------------- | ----------- |
+| `feat/audit-service-aud-004-contract`    | [#44](https://github.com/marabi766/RASTA/pull/44) | `9fa75cc`   |
+| `docs/inventory-logistics-adr`           | [#45](https://github.com/marabi766/RASTA/pull/45) | `f2eb8fa`   |
+| `feat/notification-service`              | [#46](https://github.com/marabi766/RASTA/pull/46) | `cc89660`   |
+| `feat/notification-read-api`             | [#47](https://github.com/marabi766/RASTA/pull/47) | `7389ffd`   |
+| `feat/supplier-performance-phase2`       | [#48](https://github.com/marabi766/RASTA/pull/48) | `f7252d3`   |
+| `docs/branch-registry`                   | [#49](https://github.com/marabi766/RASTA/pull/49) | `76feb8e`   |
+| `fix/notification-dedupe-window-race`    | [#50](https://github.com/marabi766/RASTA/pull/50) | `78ac7b0`   |
+| `docs/project-memory-2026-09-18`         | [#51](https://github.com/marabi766/RASTA/pull/51) | `a84269a`   |
+| `docs/ci-serialization-and-backlog`      | [#52](https://github.com/marabi766/RASTA/pull/52) | `76a1bf7`   |
+| `docs/audit-immutable-archive`           | [#53](https://github.com/marabi766/RASTA/pull/53) | `eea7d61`   |
+| `feat/web-foundation`                    | [#54](https://github.com/marabi766/RASTA/pull/54) | `8c04477`   |
+| `feat/web-design-tokens`                 | [#55](https://github.com/marabi766/RASTA/pull/55) | `4b15725`   |
+| `feat/web-component-library`             | [#56](https://github.com/marabi766/RASTA/pull/56) | `e7b0372`   |
+| `feat/maintenance-schedule-audit-event`  | [#57](https://github.com/marabi766/RASTA/pull/57) | `18946a2`   |
+| `feat/notification-outbox-audit`         | [#58](https://github.com/marabi766/RASTA/pull/58) | `419afde`   |
+| `docs/state-2026-09-19`                  | [#59](https://github.com/marabi766/RASTA/pull/59) | `8a80ce5`   |
+| `feat/notification-preferences`          | [#60](https://github.com/marabi766/RASTA/pull/60) | `e6d509e`   |
+| `docs/state-2026-09-20`                  | [#61](https://github.com/marabi766/RASTA/pull/61) | `37c48c2`   |
+| `chore/test-task-unit-only`              | [#62](https://github.com/marabi766/RASTA/pull/62) | `f7755e0`   |
+| `feat/notification-mail-channel`         | [#63](https://github.com/marabi766/RASTA/pull/63) | `bcd3cd5`   |
+| `feat/notification-email-delivery`       | [#65](https://github.com/marabi766/RASTA/pull/65) | `db39f30`   |
+| `feat/web-session-and-shell`             | [#66](https://github.com/marabi766/RASTA/pull/66) | `3cf79aa`   |
+| `docs/frontend-gate-and-web-state`       | [#64](https://github.com/marabi766/RASTA/pull/64) | `df54a43`   |
+| `feat/web-asset-surfaces`                | [#67](https://github.com/marabi766/RASTA/pull/67) | `6ea1260`   |
+| `chore/api-gateway-dockerfile`           | [#70](https://github.com/marabi766/RASTA/pull/70) | `c4de97b`   |
+| `feat/asset-insurance-claim-api`         | [#71](https://github.com/marabi766/RASTA/pull/71) | `fa14ef4`   |
+| `fix/document-service-allow-asset-read`  | [#72](https://github.com/marabi766/RASTA/pull/72) | `3f68d76`   |
+| `fix/supply-chain-trust-policy`          | [#74](https://github.com/marabi766/RASTA/pull/74) | `9e0b769`   |
+| `feat/web-maintenance-surfaces`          | [#73](https://github.com/marabi766/RASTA/pull/73) | `239ae23`   |
+| `feat/web-write-path-and-usage`          | [#75](https://github.com/marabi766/RASTA/pull/75) | `0b4a35a`   |
+| `feat/web-drivers-surface`               | [#76](https://github.com/marabi766/RASTA/pull/76) | `1a6ba45`   |
+| `fix/identity-role-grant-ladder`         | [#77](https://github.com/marabi766/RASTA/pull/77) | `9347b80`   |
+| `feat/ci-portal-e2e-live-stack`          | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
+| `claude/quirky-curie-15d850`             | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
+| `feat/web-organizations-surface`         | [#79](https://github.com/marabi766/RASTA/pull/79) | `0ac1a61`   |
+| `feat/web-asset-timeline`                | [#80](https://github.com/marabi766/RASTA/pull/80) | `62186cf`   |
+| `fix/identity-cross-tenant-provisioning` | [#81](https://github.com/marabi766/RASTA/pull/81) | `cfdb7b0`   |
+| `claude/upbeat-tesla-cenkph`             | [#82](https://github.com/marabi766/RASTA/pull/82) | `d7500be`   |
+| `fix/minio-quay-registry`                | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
 > است و می‌ماند. هیچ Worktreeای `main` را checkout نکرده، پس `git fetch` آن ref

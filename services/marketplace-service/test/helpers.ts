@@ -164,6 +164,7 @@ export function asActor<T>(options: ActorOptions, fn: () => Promise<T>): Promise
     organizationId: options.organizationId,
     authType: options.authType ?? 'USER',
     roles: options.roles ?? ['ORGANIZATION_ADMIN'],
+    organizationIds: [],
     startedAt: Date.now(),
     ...(options.userId ? { userId: options.userId } : { userId: 'USR-ITEST' }),
     ...(options.callerService ? { callerService: options.callerService } : {}),

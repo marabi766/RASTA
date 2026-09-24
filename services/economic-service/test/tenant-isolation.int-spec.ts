@@ -299,6 +299,7 @@ describe('tenant isolation (real database)', () => {
         organizationId: org.a,
         userId: 'USR-ITEST',
         roles: ['ORGANIZATION_ADMIN'],
+        organizationIds: [],
         authType: 'USER',
         startedAt: Date.now(),
       };
@@ -350,6 +351,7 @@ describe('tenant isolation (real database)', () => {
             organizationId: org.a,
             userId: 'USR-AUDITOR',
             roles: ['AUDITOR'],
+            organizationIds: [],
             authType: 'USER',
             startedAt: Date.now(),
           },

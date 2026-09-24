@@ -228,7 +228,7 @@ describe('createSecurityEventRelay', () => {
     expect(sent.map((r) => r.id)).toEqual([good.id]);
     expect(store.markPublished).toHaveBeenCalledWith([good.id], 'tok-3');
     expect(store.markFailed).toHaveBeenCalledTimes(1);
-    const [failedId, , lastError] = store.markFailed.mock.calls[0] as unknown as [
+    const [failedId, , lastError] = jest.mocked(store.markFailed).mock.calls[0] as unknown as [
       string,
       string,
       string,

@@ -41,7 +41,13 @@ describe('fleet stream sequencing', () => {
 
     await asActor({ organizationId: org.a }, async () => {
       await prisma.client.driver.create({
-        data: { id: driverId, userId, createdBy: 'B3TEST', updatedBy: 'B3TEST' },
+        data: {
+          organizationId: org.a,
+          id: driverId,
+          userId,
+          createdBy: 'B3TEST',
+          updatedBy: 'B3TEST',
+        },
       });
       await prisma.client.assetRef.create({
         data: {

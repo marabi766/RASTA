@@ -146,9 +146,9 @@ describe('operability', () => {
     );
 
     const parameter = (path: string, name: string) =>
-      ((document.paths?.[path]?.get?.parameters ?? []) as Record<string, unknown>[]).find(
-        (candidate) => candidate.name === name,
-      );
+      (
+        (document.paths?.[path]?.get?.parameters ?? []) as unknown as Record<string, unknown>[]
+      ).find((candidate) => candidate.name === name);
 
     for (const [path, name] of [
       ['/v1/transactions', 'includeIncoming'],

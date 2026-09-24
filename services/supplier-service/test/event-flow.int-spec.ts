@@ -1,5 +1,6 @@
 import { Kafka, type Consumer } from 'kafkajs';
-import { OutboxRelay, runUnscoped, type EventEnvelope } from '@rasta/nest-common';
+import type { EventEnvelope } from '@rasta/contracts';
+import { OutboxRelay, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
@@ -168,9 +169,9 @@ describeWithKafka('supplier event flow over Kafka', () => {
     );
     await asOperator(
       () =>
-        wiring.qualifications.decide(supplier.id, approved.id, 'APPROVED', {
+        wiring.qualifications.approve(supplier.id, approved.id, {
           note: 'checked',
-        } as never),
+        }),
       platformOrg,
     );
 
@@ -183,9 +184,9 @@ describeWithKafka('supplier event flow over Kafka', () => {
     );
     await asOperator(
       () =>
-        wiring.qualifications.decide(supplier.id, rejected.id, 'REJECTED', {
+        wiring.qualifications.reject(supplier.id, rejected.id, {
           reason: 'no evidence of supply capacity',
-        } as never),
+        }),
       platformOrg,
     );
 
@@ -282,7 +283,7 @@ describeWithKafka('supplier event flow over Kafka', () => {
     const claimOrg = newOrganizationId();
     organizations.push(claimOrg);
 
-    const supplier = await asSupplier(claimOrg, () =>
+    await asSupplier(claimOrg, () =>
       wiring.suppliers.register({
         displayName: 'کارگاه انحصار',
         capabilities: ['CONTRACTING'],

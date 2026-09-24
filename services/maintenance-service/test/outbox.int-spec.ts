@@ -84,6 +84,7 @@ describe('transactional outbox', () => {
       organizationId: org.a,
       userId: 'USR-ITEST-ADMIN',
       roles: ['FLEET_MANAGER'],
+      organizationIds: [],
       authType: 'USER',
       startedAt: Date.now(),
     };
@@ -167,6 +168,7 @@ describe('transactional outbox', () => {
         quantity: '2',
         unit: 'عدد',
         unitCostMinor: '250000',
+        source: 'WORKSHOP_SUPPLIED',
       }),
     );
     await asActor({ organizationId: org.a }, () =>

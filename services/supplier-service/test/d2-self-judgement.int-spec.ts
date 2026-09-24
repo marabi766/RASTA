@@ -221,7 +221,7 @@ describe('D-2 — self-judgement cannot be reached by selecting another tenant',
   // -------------------------------------------------------------------------
 
   it('still lets an unconflicted operator decide', async () => {
-    const { supplierId, qualificationId, supplierOrg } = await registerAndSubmit();
+    const { supplierId, qualificationId } = await registerAndSubmit();
 
     await request(api.app.getHttpServer())
       .post(`/v1/suppliers/${supplierId}/qualifications/${qualificationId}/approve`)
@@ -234,7 +234,7 @@ describe('D-2 — self-judgement cannot be reached by selecting another tenant',
   });
 
   it('still lets a SYSTEM_ADMIN with no active tenant decide', async () => {
-    const { supplierId, qualificationId, supplierOrg } = await registerAndSubmit();
+    const { supplierId, qualificationId } = await registerAndSubmit();
 
     // The justified platform case: no active organization, no memberships.
     // Belonging to nothing is not suspicious — belonging to the supplier is.
@@ -266,7 +266,7 @@ describe('D-2 — self-judgement cannot be reached by selecting another tenant',
     // The pre-existing tenant guard, pinned here so the D-2 change cannot be
     // read as having replaced it. Selecting an organization you are not a
     // member of is still a TENANT_MISMATCH, before any supplier rule runs.
-    const { supplierId, qualificationId, supplierOrg } = await registerAndSubmit();
+    const { supplierId, qualificationId } = await registerAndSubmit();
 
     const response = await request(api.app.getHttpServer())
       .post(`/v1/suppliers/${supplierId}/qualifications/${qualificationId}/approve`)

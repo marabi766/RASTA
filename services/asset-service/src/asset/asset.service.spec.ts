@@ -31,6 +31,7 @@ function context(overrides: Partial<RequestContext> = {}): RequestContext {
     organizationId: DEH1,
     userId: 'USR-SEED-DEHYARI-ADMIN',
     roles: ['FLEET_MANAGER'],
+    organizationIds: [],
     authType: 'USER',
     startedAt: 0,
     ...overrides,
@@ -275,7 +276,11 @@ describe('AssetService', () => {
     it('refuses a transition a user does not own', async () => {
       const h = harness();
       await expect(
-        run(() => h.service.changeStatus(ASSET_ID, { status: 'ASSIGNED', reason: 'دستی' })),
+        run(() =>
+          // @ts-expect-error — ChangeStatusDto's schema already excludes ASSIGNED; this
+          // proves the service refuses it too if a caller bypasses the DTO.
+          h.service.changeStatus(ASSET_ID, { status: 'ASSIGNED', reason: 'دستی' }),
+        ),
       ).rejects.toThrow(/not done directly/);
     });
 

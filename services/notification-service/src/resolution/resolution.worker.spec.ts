@@ -126,7 +126,7 @@ function fakeRepository(claimed: NotificationIntent[]): FakeRepository {
 
 function port(
   handler: (query: RecipientQuery) => Promise<{
-    recipients: { userId: string; role: string; email?: string | null }[];
+    recipients: { userId: string; role: string; email: string | null }[];
     truncated: boolean;
   }>,
 ): RecipientPort & { queries: RecipientQuery[] } {

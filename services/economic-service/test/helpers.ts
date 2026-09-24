@@ -235,6 +235,7 @@ export function asActor<T>(options: ActorOptions, fn: () => Promise<T>): Promise
     organizationId: options.organizationId,
     userId: options.userId ?? `${ITEST_ACTOR}-${ulid().slice(-8)}`,
     roles: options.roles ?? ['ORGANIZATION_ADMIN'],
+    organizationIds: [],
     authType: options.authType ?? 'USER',
     startedAt: Date.now(),
   };

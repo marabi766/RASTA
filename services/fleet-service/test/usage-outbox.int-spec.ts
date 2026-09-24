@@ -32,7 +32,13 @@ describe('usage recording', () => {
 
     await asActor({ organizationId: org.a }, async () => {
       await prisma.client.driver.create({
-        data: { id: driverId, userId, createdBy: 'ITEST', updatedBy: 'ITEST' },
+        data: {
+          organizationId: org.a,
+          id: driverId,
+          userId,
+          createdBy: 'ITEST',
+          updatedBy: 'ITEST',
+        },
       });
       await prisma.client.assetRef.create({
         data: {
@@ -203,6 +209,7 @@ describe('usage recording', () => {
         await expect(
           prisma.client.usageRecord.create({
             data: {
+              organizationId: org.a,
               id: id('USG'),
               assetId,
               periodStart: new Date('2026-08-27T06:00:00Z'),
@@ -221,6 +228,7 @@ describe('usage recording', () => {
         await expect(
           prisma.client.usageRecord.create({
             data: {
+              organizationId: org.a,
               id: id('USG'),
               assetId,
               periodStart: new Date('2026-08-27T06:00:00Z'),
@@ -238,6 +246,7 @@ describe('usage recording', () => {
         await expect(
           prisma.client.usageRecord.create({
             data: {
+              organizationId: org.a,
               id: id('USG'),
               assetId,
               periodStart: new Date('2026-08-27T14:00:00Z'),

@@ -330,8 +330,10 @@ describe('security_event_outbox (real PostgreSQL)', () => {
   });
 
   describe('a failed capture returns the identical 403 TENANT_MISMATCH', () => {
+    const CAPTURE_TIMEOUT_MS = 200;
+
     it('when the insert is cancelled by its statement timeout behind a lock', async () => {
-      const bounded = await startIdentityApi({ captureTimeoutMs: 200 });
+      const bounded = await startIdentityApi({ captureTimeoutMs: CAPTURE_TIMEOUT_MS });
       const locker = newPrisma();
       await locker.onModuleInit();
 
@@ -356,6 +358,15 @@ describe('security_event_outbox (real PostgreSQL)', () => {
             const started = Date.now();
             locked = await switchOrganization(bounded, lockedCaller, requested, { correlationId });
             elapsedMs = Date.now() - started;
+            // The response is bounded by the recorder's deadline, not by the
+            // insert: the capture can reach PostgreSQL after it (a pooled
+            // connection still being opened on a loaded runner). Releasing the
+            // lock the moment the response lands lets such a late insert run
+            // unobstructed and commit — the case this test is not about. Held
+            // for five statement timeouts, a late insert still waits here and
+            // is cancelled by its own statement_timeout, which is what the
+            // assertions below prove.
+            await sleep(CAPTURE_TIMEOUT_MS * 5);
           },
           { maxWait: 10_000, timeout: 30_000 },
         );

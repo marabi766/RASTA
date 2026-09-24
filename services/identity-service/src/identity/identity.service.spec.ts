@@ -23,6 +23,7 @@ function context(overrides: Partial<RequestContext> = {}): RequestContext {
     organizationId: TEST_ORG_A,
     userId: TEST_USER_A,
     roles: ['ORGANIZATION_ADMIN'],
+    organizationIds: [],
     authType: 'USER',
     startedAt: 0,
     ...overrides,

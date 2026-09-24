@@ -1,5 +1,6 @@
 import { Kafka, type Consumer, type Producer } from 'kafkajs';
-import { OutboxRelay, type EventEnvelope } from '@rasta/nest-common';
+import type { EventEnvelope } from '@rasta/contracts';
+import { OutboxRelay } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
