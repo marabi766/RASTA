@@ -494,6 +494,15 @@ export class OrderService {
   /** The buyer cancels. Compensation is the saga's job, not this method's. */
   async cancel(orderId: string, dto: CancelOrderDto): Promise<OrderView> {
     return this.transition(orderId, 'CANCELLING', {
+      // Narrower than the transition table, for the same reason
+      // `confirmReceipt` is. `ORDER_TRANSITIONS` has `DISPUTED → CANCELLING`
+      // because a platform operator's `ResolveDispute(REFUND)` travels it
+      // (ADR-038). Without this list the buyer's own `CancelOrder` travelled
+      // it too: the party who raised the dispute could end it by cancelling,
+      // the saga would refund the escrow, and a supplier who had delivered
+      // would go unpaid. Leaving a dispute is the operator's decision, whichever
+      // exit it takes.
+      from: ['PENDING', 'FUNDS_HELD', 'CONFIRMED', 'AWAITING_RECEIPT_CONFIRMATION'],
       authorise: (order) => assertBuyer(order, 'cancel this order'),
       apply: async (tx, order) => {
         await tx.order.update({

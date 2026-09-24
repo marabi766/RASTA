@@ -16,15 +16,16 @@ import { canTransition } from './state-machine';
  * wrong answer:
  *
  *  1. `ORDER_TRANSITIONS` — which status changes are legal at all;
- *  2. the per-command narrowing in `OrderService` — `confirmReceipt` passes
- *     `from: ['AWAITING_RECEIPT_CONFIRMATION']` and `resolveDispute` passes
- *     `from: ['DISPUTED']`, both narrower than the table;
+ *  2. the per-command narrowing in `OrderService` — `confirmReceipt`,
+ *     `cancel` and `resolveDispute` each pass a `from` narrower than the
+ *     table;
  *  3. `access.ts` — which of the two organizations, plus the platform, may
  *     issue each command, decided against the record.
  *
- * The trap is (2). `ORDER_TRANSITIONS` contains `DISPUTED → RECEIPT_CONFIRMED`
- * so that a platform operator resolving a dispute can put the order back on
- * the settlement path. A client reading only the table would conclude the
+ * The trap is (2), and it has two doors. `ORDER_TRANSITIONS` gives `DISPUTED`
+ * two exits — `RECEIPT_CONFIRMED` and `CANCELLING` — so that a platform
+ * operator resolving a dispute can send the order either way. Both are the
+ * operator's alone (ADR-038). A client reading only the table would conclude the
  * **buyer** may confirm receipt while the order is disputed, and would draw
  * that button — inviting somebody to end a dispute by clicking past it, on
  * the one screen where a mistake costs the most. `confirmReceipt` refuses it,
@@ -100,8 +101,19 @@ const COMMANDS: Readonly<Record<OrderAction, CommandRule>> = {
   /** `OrderService.resolveDispute` — `from: ['DISPUTED']`, platform only. */
   RESOLVE_DISPUTE: { party: 'platform', to: null, only: ['DISPUTED'] },
 
-  /** `OrderService.cancel` — the buyer withdraws; the saga compensates. */
-  CANCEL: { party: 'buyer', to: 'CANCELLING' },
+  /**
+   * `OrderService.cancel` — `from: ['PENDING', 'FUNDS_HELD', 'CONFIRMED',
+   * 'AWAITING_RECEIPT_CONFIRMATION']`.
+   *
+   * The second narrowing of the same kind: the table also permits
+   * `DISPUTED → CANCELLING`, for the operator's `ResolveDispute(REFUND)`.
+   * Without `only`, the buyer would be offered a way out of their own dispute.
+   */
+  CANCEL: {
+    party: 'buyer',
+    to: 'CANCELLING',
+    only: ['PENDING', 'FUNDS_HELD', 'CONFIRMED', 'AWAITING_RECEIPT_CONFIRMATION'],
+  },
 
   /**
    * `OrderService.submitReview` — only a `COMPLETED` order, and `Review.orderId`

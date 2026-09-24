@@ -167,14 +167,19 @@ describe('available actions, along a real order lifecycle', () => {
     }).expect(200);
     expect(disputed.body.status).toBe('DISPUTED');
 
-    // The transition table does contain DISPUTED → RECEIPT_CONFIRMED — for the
-    // operator. The buyer must not be offered it.
-    expect(disputed.body.availableActions).toEqual(['CANCEL']);
-    expect(disputed.body.availableActions).not.toContain('CONFIRM_RECEIPT');
+    // The transition table gives DISPUTED two exits — RECEIPT_CONFIRMED and
+    // CANCELLING — both for the operator. The buyer is offered neither.
+    expect(disputed.body.availableActions).toEqual([]);
 
-    // And the service agrees: a buyer who presses it anyway is refused. This
-    // is what makes withholding it the truth rather than a UI choice.
+    // And the service agrees on both doors: a buyer who presses either anyway
+    // is refused, and the order does not move. This is what makes withholding
+    // them the truth rather than a UI choice.
     await post(id, 'confirm-receipt', asBuyer()).expect(422);
+    await post(id, 'cancel', asBuyer(), { reason: 'راهی برای خروج از اختلاف' }).expect(422);
+    const stillDisputed = await request(http)
+      .get(`/v1/orders/${id}`)
+      .set('authorization', asBuyer());
+    expect(stillDisputed.body.status).toBe('DISPUTED');
 
     // Only an operator may end a dispute, and only an operator is offered it.
     expect(await actionsFor(id, asOperator())).toEqual(['RESOLVE_DISPUTE']);
@@ -192,7 +197,7 @@ describe('available actions, along a real order lifecycle', () => {
     expect(await actionsFor(id, asBuyer())).toEqual(['RAISE_DISPUTE']);
   });
 
-  it('leaves DISPUTED → RECEIPT_CONFIRMED to the operator alone', async () => {
+  it('leaves both exits from DISPUTED to the operator alone', async () => {
     // The edge exists in the transition table for `resolveDispute`. Neither
     // party may walk it — not the buyer by confirming receipt, and not either
     // of them by resolving the dispute themselves.
@@ -211,10 +216,14 @@ describe('available actions, along a real order lifecycle', () => {
     };
 
     await post(id, 'confirm-receipt', asBuyer()).expect(422);
+    // The second exit: a buyer's cancel on a disputed order would refund the
+    // escrow and leave a supplier who delivered unpaid (ADR-038 gives
+    // DISPUTED → CANCELLING to `ResolveDispute(REFUND)` alone).
+    await post(id, 'cancel', asBuyer(), { reason: 'خروج از اختلاف با لغو' }).expect(422);
     await post(id, 'disputes/resolve', asBuyer(), resolution).expect(403);
     await post(id, 'disputes/resolve', asSupplier(), resolution).expect(403);
 
-    // Still disputed: none of the three attempts moved it.
+    // Still disputed: none of the four attempts moved it.
     const still = await request(http).get(`/v1/orders/${id}`).set('authorization', asBuyer());
     expect(still.body.status).toBe('DISPUTED');
     expect(still.body.receiptConfirmedAt).toBeNull();

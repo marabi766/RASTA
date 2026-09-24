@@ -121,10 +121,14 @@ describe('the screen renders what the service sent, and derives nothing', () => 
     // A client reading the transition table alone would conclude the buyer
     // may confirm receipt from DISPUTED. The service says otherwise, and the
     // screen follows the service.
-    renderDetail({ ...ORDER, status: 'DISPUTED', availableActions: ['CANCEL'] });
+    // Neither exit from a dispute is the buyer's — not confirming receipt,
+    // not cancelling (ADR-038) — so the service sends nothing, and the screen
+    // draws nothing.
+    renderDetail({ ...ORDER, status: 'DISPUTED', availableActions: [] });
 
-    expect(formsOffered()).toEqual(['command-CANCEL']);
+    expect(formsOffered()).toEqual([]);
     expect(screen.queryByText('تأیید دریافت', { selector: 'h3' })).toBeNull();
+    expect(screen.queryByText('لغو سفارش', { selector: 'h3' })).toBeNull();
   });
 
   it('offers nothing on an order whose status would seem to invite action', () => {

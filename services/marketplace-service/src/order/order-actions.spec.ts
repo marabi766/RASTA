@@ -107,8 +107,10 @@ describe('the buyer', () => {
     ['AWAITING_RECEIPT_CONFIRMATION', ['CONFIRM_RECEIPT', 'RAISE_DISPUTE', 'CANCEL']],
     ['RECEIPT_CONFIRMED', ['RAISE_DISPUTE']],
     ['SETTLING', []],
-    // The case this module exists for — see the header.
-    ['DISPUTED', ['CANCEL']],
+    // The case this module exists for — see the header. A dispute has two
+    // exits and both belong to the operator: the buyer who raised it may not
+    // leave it by confirming receipt, nor by cancelling (ADR-038).
+    ['DISPUTED', []],
     ['CANCELLING', []],
     ['COMPLETED', ['REVIEW']],
     ['CANCELLED', []],
@@ -137,6 +139,14 @@ describe('the buyer', () => {
 
   it('may not resolve the dispute it raised', () => {
     expect(actionsFor(AS_BUYER, 'DISPUTED')).not.toContain('RESOLVE_DISPUTE');
+  });
+
+  it('is never offered cancellation on a disputed order — the second door', () => {
+    // `ORDER_TRANSITIONS` has DISPUTED → CANCELLING for the operator's
+    // `ResolveDispute(REFUND)`. A buyer's cancel on that edge would refund
+    // the escrow and leave a supplier who delivered unpaid.
+    expect(ORDER_TRANSITIONS.DISPUTED).toContain('CANCELLING');
+    expect(actionsFor(AS_BUYER, 'DISPUTED')).not.toContain('CANCEL');
   });
 
   it('is offered a review once and not twice', () => {
@@ -168,7 +178,11 @@ describe('a platform operator who is also the buyer', () => {
   const both = context({ roles: ['UNION_ADMIN', 'PROCUREMENT_USER'] });
 
   it('gets both sets, because the two are independent', () => {
-    expect(actionsFor(both, 'DISPUTED')).toEqual(['RESOLVE_DISPUTE', 'CANCEL']);
+    // At FUNDS_HELD the buyer's set and the operator's are both visible.
+    expect(actionsFor(both, 'FUNDS_HELD')).toEqual(['RAISE_DISPUTE', 'CANCEL']);
+    // At DISPUTED only the operator's: holding both roles is not a way for
+    // the buyer's side to leave its own dispute.
+    expect(actionsFor(both, 'DISPUTED')).toEqual(['RESOLVE_DISPUTE']);
   });
 
   it('may still confirm receipt, as the buyer', () => {
