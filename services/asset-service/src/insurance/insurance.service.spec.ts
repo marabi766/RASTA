@@ -25,6 +25,7 @@ function context(overrides: Partial<RequestContext> = {}): RequestContext {
     organizationId: DEH1,
     userId: 'USR-SEED-DEHYARI-ADMIN',
     roles: ['FLEET_MANAGER'],
+    organizationIds: [],
     authType: 'USER',
     startedAt: 0,
     ...overrides,

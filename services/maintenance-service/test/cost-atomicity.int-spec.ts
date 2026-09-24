@@ -108,6 +108,7 @@ describe('cost atomicity', () => {
           quantity: '1',
           unit: 'عدد',
           unitCostMinor: '100000',
+          source: 'WORKSHOP_SUPPLIED',
         }),
       ),
     );
@@ -148,6 +149,7 @@ describe('cost atomicity', () => {
         quantity: '2',
         unit: 'عدد',
         unitCostMinor: '250000',
+        source: 'WORKSHOP_SUPPLIED',
       }),
     );
     const labour = await asActor({ organizationId: org.a }, () =>

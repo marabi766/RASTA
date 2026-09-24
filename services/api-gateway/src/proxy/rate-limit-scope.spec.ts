@@ -32,6 +32,7 @@ const context: RequestContext = {
   organizationId: 'ORG-RL',
   userId: 'USR-RL',
   roles: ['ORGANIZATION_ADMIN'],
+  organizationIds: [],
   authType: 'USER',
   startedAt: 0,
 };

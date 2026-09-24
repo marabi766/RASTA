@@ -49,7 +49,13 @@ describe('assignment exclusivity', () => {
     await asActor({ organizationId: org.a }, async () => {
       for (const driverId of [driverOne, driverTwo]) {
         await prisma.client.driver.create({
-          data: { id: driverId, userId: `USR-${driverId}`, createdBy: 'ITEST', updatedBy: 'ITEST' },
+          data: {
+            organizationId: org.a,
+            id: driverId,
+            userId: `USR-${driverId}`,
+            createdBy: 'ITEST',
+            updatedBy: 'ITEST',
+          },
         });
       }
       // The replica rows the assignment path checks before writing.
@@ -93,6 +99,7 @@ describe('assignment exclusivity', () => {
       await asActor({ organizationId: org.a }, async () => {
         await prisma.client.assignment.create({
           data: {
+            organizationId: org.a,
             id: id('ASG'),
             driverId: driverOne,
             assetId: assetOne,
@@ -104,6 +111,7 @@ describe('assignment exclusivity', () => {
         try {
           await prisma.client.assignment.create({
             data: {
+              organizationId: org.a,
               id: id('ASG'),
               driverId: driverOne,
               assetId: assetTwo,
@@ -132,6 +140,7 @@ describe('assignment exclusivity', () => {
         const first = id('ASG');
         await prisma.client.assignment.create({
           data: {
+            organizationId: org.a,
             id: first,
             driverId: driverOne,
             assetId: assetOne,
@@ -151,6 +160,7 @@ describe('assignment exclusivity', () => {
         await expect(
           prisma.client.assignment.create({
             data: {
+              organizationId: org.a,
               id: id('ASG'),
               driverId: driverOne,
               assetId: assetTwo,
@@ -168,6 +178,7 @@ describe('assignment exclusivity', () => {
       await asActor({ organizationId: org.a }, async () => {
         await prisma.client.assignment.create({
           data: {
+            organizationId: org.a,
             id: id('ASG'),
             driverId: driverOne,
             assetId: assetOne,
@@ -179,6 +190,7 @@ describe('assignment exclusivity', () => {
         try {
           await prisma.client.assignment.create({
             data: {
+              organizationId: org.a,
               id: id('ASG'),
               driverId: driverTwo,
               assetId: assetOne,
@@ -265,6 +277,7 @@ describe('assignment exclusivity', () => {
       await asActor({ organizationId: org.a }, () =>
         prisma.client.assignment.create({
           data: {
+            organizationId: org.a,
             id: assignmentId,
             driverId: driverOne,
             assetId: assetOne,
@@ -299,6 +312,7 @@ describe('assignment exclusivity', () => {
         const assignmentId = id('ASG');
         await prisma.client.assignment.create({
           data: {
+            organizationId: org.a,
             id: assignmentId,
             driverId: driverOne,
             assetId: assetOne,

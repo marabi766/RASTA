@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import request from 'supertest';
 import { ulid } from 'ulid';
 import { cleanup, newOrganizationId, newUserId } from './helpers';
@@ -510,10 +512,10 @@ describe('notification read API (real application)', () => {
     // The gateway's route table is configuration in another service; asserted
     // here by reading it as text, because importing it would cross a service
     // boundary (AGENTS.md A-02). `api-gateway`'s own spec asserts the same row.
-    const routes = require('node:fs').readFileSync(
-      require('node:path').join(__dirname, '..', '..', 'api-gateway', 'src', 'config', 'routes.ts'),
+    const routes = readFileSync(
+      join(__dirname, '..', '..', 'api-gateway', 'src', 'config', 'routes.ts'),
       'utf8',
-    ) as string;
+    );
     expect(routes).toMatch(/\{ prefix: 'notifications', service: 'notification' \}/);
   });
 });

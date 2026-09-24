@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import type { EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -191,11 +193,6 @@ describe('audit_event is append-only (real PostgreSQL)', () => {
 
     it('never issues a delete or update against audit_event in the service source', () => {
       // Guards against a future method that does not name itself honestly.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { readFileSync, readdirSync, statSync } =
-        require('node:fs') as typeof import('node:fs');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { join } = require('node:path') as typeof import('node:path');
 
       const offenders: string[] = [];
       const walk = (dir: string): void => {

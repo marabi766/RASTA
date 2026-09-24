@@ -132,7 +132,7 @@ describeWithKafka('domain projector over Kafka', () => {
     fatal: () => undefined,
     trace: () => undefined,
     child: () => silentLogger,
-  } as unknown as Parameters<typeof DomainProjectorConsumer.prototype.constructor>[2];
+  } as unknown as ConstructorParameters<typeof DomainProjectorConsumer>[2];
 
   function envelope(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
     return {
@@ -522,7 +522,7 @@ describeWithKafka('audit-trail consumer over Kafka', () => {
     fatal: () => undefined,
     trace: () => undefined,
     child: () => silentLogger,
-  } as unknown as Parameters<typeof AuditTrailConsumer.prototype.constructor>[2];
+  } as unknown as ConstructorParameters<typeof AuditTrailConsumer>[2];
 
   interface TrailMessageOptions {
     tenant?: string;

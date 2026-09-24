@@ -143,6 +143,7 @@ describe('registering', () => {
         {
           requestId: 'req-1',
           correlationId: 'corr-1',
+          organizationIds: [],
           authType: 'USER',
           roles: ['SUPPLIER'],
           organizationId: SUPPLIER_ORG,

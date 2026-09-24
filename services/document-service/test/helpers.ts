@@ -133,10 +133,10 @@ export function wire(
  */
 function silentLogger() {
   if (process.env.VERBOSE_TEST_LOGS) {
-    // eslint-disable-next-line no-console
     const emit =
       (level: string) =>
       (...args: unknown[]) =>
+        // eslint-disable-next-line no-console -- opt-in diagnostic output, VERBOSE_TEST_LOGS only
         console.log(level, ...args);
     return {
       debug: emit('debug'),
@@ -253,6 +253,7 @@ export function asActor<T>(options: ActorOptions, fn: () => Promise<T>): Promise
     organizationId: options.organizationId,
     userId: options.userId ?? `USR-ITEST-${ulid().slice(-8)}`,
     roles: options.roles ?? ['ORGANIZATION_ADMIN'],
+    organizationIds: [],
     authType: options.authType ?? 'USER',
     startedAt: Date.now(),
     ...(options.callerService ? { callerService: options.callerService } : {}),

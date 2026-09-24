@@ -40,6 +40,7 @@ describe('a system actor', () => {
       requestId: `system-itest-${ulid()}`,
       organizationId,
       roles: ['SERVICE'],
+      organizationIds: [],
       authType: 'SERVICE',
       callerService: 'marketplace-service',
       startedAt: Date.now(),

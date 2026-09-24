@@ -51,7 +51,7 @@ describe('the served OpenAPI document', () => {
     expect(operation).toBeDefined();
 
     parameters = Object.fromEntries(
-      ((operation?.parameters ?? []) as Record<string, unknown>[]).map((parameter) => [
+      ((operation?.parameters ?? []) as unknown as Record<string, unknown>[]).map((parameter) => [
         parameter.name as string,
         parameter,
       ]),

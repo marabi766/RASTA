@@ -228,6 +228,7 @@ describe('supplier stream sequencing', () => {
             eventName: 'SUPPLIER_REGISTERED',
             aggregateId: supplier.id,
             organizationId: org,
+            occurredAt: new Date(),
             payload: {
               supplierId: supplier.id,
               organizationId: org,
