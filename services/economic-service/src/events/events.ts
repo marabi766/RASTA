@@ -42,6 +42,8 @@ export const ECONOMIC_EVENTS = {
   REWARD_LEVEL_CHANGED: 'REWARD_LEVEL_CHANGED',
   SETTLEMENT_COMPLETED: 'SETTLEMENT_COMPLETED',
   JOURNAL_POSTED: 'JOURNAL_POSTED',
+  COMMISSION_RULE_CHANGED: 'COMMISSION_RULE_CHANGED',
+  REWARD_RULE_CHANGED: 'REWARD_RULE_CHANGED',
 } as const;
 
 export type EconomicEventName = (typeof ECONOMIC_EVENTS)[keyof typeof ECONOMIC_EVENTS];
@@ -293,6 +295,84 @@ export const journalPostedPayload = z.object({
     .min(2),
 });
 
+// ---------------------------------------------------------------------------
+// Governance configuration
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether a change record is internally consistent: a rule that was just
+ * created had nothing before it, and a rule that was updated did.
+ */
+const changeIsCoherent = (change: { change: 'CREATED' | 'UPDATED'; before: unknown }) =>
+  (change.change === 'CREATED') === (change.before === null);
+
+const CHANGE_KINDS = ['CREATED', 'UPDATED'] as const;
+
+/** A commission rule's terms at one moment — the thing an auditor compares. */
+const commissionRuleTerms = z.object({
+  organizationId: z.string().nullable(),
+  transactionType: z.string(),
+  rateBasisPoints: z.number().int().min(0).max(10_000),
+  minAmountMinor: amountMinor.nullable(),
+  maxAmountMinor: amountMinor.nullable(),
+  validFrom: z.string(),
+  validTo: z.string().nullable(),
+  status: z.string(),
+  label: z.string().nullable(),
+});
+
+/**
+ * A commission rule was created or changed, by whom, and from what to what.
+ *
+ * docs/10 § 10.7 and ADR-023 require every rate change to be recorded with
+ * who applied the steering group's decision. `updatedBy` on the row says who
+ * touched it last and nothing about what it was before; this event is the
+ * record, and audit-service keeps it (the economic topic is projected into
+ * the audit trail as a whole).
+ *
+ * The rate itself never appears as a change: once a rule exists its rate is
+ * fixed, and a new rate is a new rule. So an `UPDATED` record shows a rule
+ * closed, deactivated or relabelled — never repriced.
+ */
+export const commissionRuleChangedPayload = z
+  .object({
+    ruleId: z.string(),
+    change: z.enum(CHANGE_KINDS),
+    changedBy: z.string(),
+    changedAt: z.string(),
+    before: commissionRuleTerms.nullable(),
+    after: commissionRuleTerms,
+  })
+  .refine(changeIsCoherent, 'before is null exactly when the rule was created');
+
+/** A reward rule's terms at one moment. */
+const rewardRuleTerms = z.object({
+  organizationId: z.string().nullable(),
+  triggerEvent: z.string(),
+  rewardType: z.string(),
+  condition: z.record(z.string(), z.unknown()).nullable(),
+  points: z.number().int().positive(),
+  creditPerPointMinor: amountMinor.nullable(),
+  periodCap: z.number().int().positive().nullable(),
+  periodType: z.string().nullable(),
+  validFrom: z.string(),
+  validTo: z.string().nullable(),
+  status: z.string(),
+  label: z.string().nullable(),
+});
+
+/** The reward counterpart of `COMMISSION_RULE_CHANGED`, for the same reason. */
+export const rewardRuleChangedPayload = z
+  .object({
+    ruleId: z.string(),
+    change: z.enum(CHANGE_KINDS),
+    changedBy: z.string(),
+    changedAt: z.string(),
+    before: rewardRuleTerms.nullable(),
+    after: rewardRuleTerms,
+  })
+  .refine(changeIsCoherent, 'before is null exactly when the rule was created');
+
 export const ECONOMIC_EVENT_SCHEMAS = {
   [ECONOMIC_EVENTS.WALLET_OPENED]: walletOpenedPayload,
   [ECONOMIC_EVENTS.FUNDS_HELD]: fundsHeldPayload,
@@ -305,6 +385,8 @@ export const ECONOMIC_EVENT_SCHEMAS = {
   [ECONOMIC_EVENTS.REWARD_LEVEL_CHANGED]: rewardLevelChangedPayload,
   [ECONOMIC_EVENTS.SETTLEMENT_COMPLETED]: settlementCompletedPayload,
   [ECONOMIC_EVENTS.JOURNAL_POSTED]: journalPostedPayload,
+  [ECONOMIC_EVENTS.COMMISSION_RULE_CHANGED]: commissionRuleChangedPayload,
+  [ECONOMIC_EVENTS.REWARD_RULE_CHANGED]: rewardRuleChangedPayload,
 } as const satisfies Record<EconomicEventName, z.ZodTypeAny>;
 
 /**

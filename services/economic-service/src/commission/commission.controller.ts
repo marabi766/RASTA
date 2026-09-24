@@ -102,11 +102,16 @@ export class CommissionController {
   @Patch('rules/:id')
   @Roles('SYSTEM_ADMIN')
   @ApiOperation({
-    summary: 'Amend a rule',
+    summary: 'Close, deactivate or relabel a rule',
     description:
       'Close a rule with `validTo` rather than deleting it: a commission already charged ' +
       'references the rule that produced it, and deleting it would make a historical charge ' +
-      'unexplainable.',
+      'unexplainable. **The rate cannot be changed** — sending `rateBasisPoints` is a 400: a ' +
+      'rule is selected by when a transaction occurred and priced when it settles, so an ' +
+      'edited rate re-priced unsettled work. A new rate is a new rule: close this one and ' +
+      'create the next from the same instant. `validTo` only moves forward: a close in the ' +
+      'past, or re-dating a rule that has ended, is a 422. Every change publishes ' +
+      '`COMMISSION_RULE_CHANGED` with the actor and the terms before and after.',
   })
   async updateRule(
     @Param('id') id: string,

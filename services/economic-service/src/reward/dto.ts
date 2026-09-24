@@ -91,12 +91,16 @@ export const createRewardRuleSchema = z
 
 export type CreateRewardRuleDto = z.infer<typeof createRewardRuleSchema>;
 
+/**
+ * What may change on an existing reward rule: its end, its status, its label.
+ *
+ * Not `points`, `creditPerPointMinor` or `periodCap` — the terms a grant is
+ * computed from. Edited in place they reached back to occurrences not yet
+ * granted. A new term is a new rule; `.strict()` answers any attempt to send
+ * one here with a 400 rather than ignoring it.
+ */
 export const updateRewardRuleSchema = z
   .object({
-    points: z.number().int().positive().max(1_000_000).optional(),
-    /** Null clears it, returning the rule to points-only. */
-    creditPerPointMinor: amountMinorSchema.nullable().optional(),
-    periodCap: z.number().int().positive().max(10_000_000).nullable().optional(),
     status: z.enum(RULE_STATUSES).optional(),
     validTo: z.string().datetime().nullable().optional(),
     label: z.string().trim().max(200).optional(),

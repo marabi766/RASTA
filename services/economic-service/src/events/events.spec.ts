@@ -19,10 +19,11 @@ import { CONSUMED_EVENTS, DEFERRED_CONSUMPTION, maintenanceApprovedSchema } from
 const EVENT_NAMES = Object.values(ECONOMIC_EVENTS) as EconomicEventName[];
 
 describe('the catalogue', () => {
-  it('publishes exactly the eleven events docs/07 § 7.5 lists', () => {
+  it('publishes exactly the thirteen events docs/07 § 7.5 lists', () => {
     expect(EVENT_NAMES.sort()).toEqual(
       [
         'COMMISSION_APPLIED',
+        'COMMISSION_RULE_CHANGED',
         'FUNDS_HELD',
         'FUNDS_RELEASED',
         'JOURNAL_POSTED',
@@ -31,6 +32,7 @@ describe('the catalogue', () => {
         'PAYMENT_FAILED',
         'REWARD_GRANTED',
         'REWARD_LEVEL_CHANGED',
+        'REWARD_RULE_CHANGED',
         'SETTLEMENT_COMPLETED',
         'WALLET_OPENED',
       ].sort(),
@@ -392,6 +394,57 @@ describe('consumed events', () => {
         approvedAt: '2026-08-29T10:00:00.000Z',
         totalCostMinor: 11_850_000,
         currency: 'IRR',
+      }),
+    ).toThrow();
+  });
+});
+
+describe('a rule change record', () => {
+  const terms = {
+    organizationId: null,
+    transactionType: 'LOGISTICS',
+    rateBasisPoints: 100,
+    minAmountMinor: null,
+    maxAmountMinor: null,
+    validFrom: '2026-09-24T00:00:00.000Z',
+    validTo: null,
+    status: 'ACTIVE',
+    label: null,
+  };
+  const record = (change: 'CREATED' | 'UPDATED', before: typeof terms | null) => ({
+    ruleId: 'CMR_1',
+    change,
+    changedBy: 'USR-1',
+    changedAt: '2026-09-24T00:00:00.000Z',
+    before,
+    after: terms,
+  });
+
+  it('has nothing before a creation and something before an update', () => {
+    expect(() =>
+      validateEconomicPayload('COMMISSION_RULE_CHANGED', record('CREATED', null)),
+    ).not.toThrow();
+    expect(() =>
+      validateEconomicPayload('COMMISSION_RULE_CHANGED', record('UPDATED', terms)),
+    ).not.toThrow();
+  });
+
+  it('refuses a record that contradicts itself', () => {
+    // A creation that claims a prior state, or an update that has none, is a
+    // record an auditor could not trust either way.
+    expect(() =>
+      validateEconomicPayload('COMMISSION_RULE_CHANGED', record('CREATED', terms)),
+    ).toThrow();
+    expect(() =>
+      validateEconomicPayload('COMMISSION_RULE_CHANGED', record('UPDATED', null)),
+    ).toThrow();
+  });
+
+  it('carries the rate as integer basis points, never a decimal', () => {
+    expect(() =>
+      validateEconomicPayload('COMMISSION_RULE_CHANGED', {
+        ...record('CREATED', null),
+        after: { ...terms, rateBasisPoints: 2.5 },
       }),
     ).toThrow();
   });

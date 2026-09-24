@@ -171,22 +171,23 @@ describe('economic edge cases', () => {
       expect(BigInt(settled.body.commissionAmountMinor)).toBe(5_000n);
     });
 
-    it('is closed with a date, reopened by clearing it, and never deleted', async () => {
+    it('is closed from now on, never repriced, and never deleted', async () => {
       const created = await request(http)
         .post('/v1/commissions/rules')
         .set('authorization', asSystem())
         .send({ organizationId: org, transactionType: 'LOGISTICS', rateBasisPoints: 100 })
         .expect(201);
+      const inAnHour = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
       const closed = await request(http)
         .patch(`/v1/commissions/rules/${created.body.id}`)
         .set('authorization', asSystem())
-        .send({ validTo: new Date().toISOString() })
+        .send({ validTo: inAnHour })
         .expect(200);
-      expect(closed.body.validTo).not.toBeNull();
+      expect(closed.body.validTo).toBe(inAnHour);
 
-      // Nulling it reopens an indefinite rule — a commission already charged
-      // references this row, so it must never be removed.
+      // Still in force, so it may be made indefinite again — a commission
+      // already charged references this row, so it is never removed.
       const reopened = await request(http)
         .patch(`/v1/commissions/rules/${created.body.id}`)
         .set('authorization', asSystem())
@@ -194,14 +195,53 @@ describe('economic edge cases', () => {
         .expect(200);
       expect(reopened.body.validTo).toBeNull();
 
+      // A close in the past would drop the rule for work it already covered.
+      const backdated = await request(http)
+        .patch(`/v1/commissions/rules/${created.body.id}`)
+        .set('authorization', asSystem())
+        .send({ validTo: new Date(Date.now() - 60 * 60 * 1000).toISOString() })
+        .expect(422);
+      expect(backdated.body.code).toBe('BUSINESS_RULE_VIOLATION');
+
+      // The rate is fixed once the rule exists: a new rate is a new rule.
       const repriced = await request(http)
         .patch(`/v1/commissions/rules/${created.body.id}`)
         .set('authorization', asSystem())
-        .send({ rateBasisPoints: 175, status: 'INACTIVE', label: 'بازبینی‌شده' })
+        .send({ rateBasisPoints: 175 })
+        .expect(400);
+      expect(repriced.body.code).toBe('VALIDATION_FAILED');
+
+      const relabelled = await request(http)
+        .patch(`/v1/commissions/rules/${created.body.id}`)
+        .set('authorization', asSystem())
+        .send({ status: 'INACTIVE', label: 'بازبینی‌شده' })
         .expect(200);
-      expect(repriced.body.rateBasisPoints).toBe(175);
-      expect(repriced.body.status).toBe('INACTIVE');
-      expect(repriced.body.label).toBe('بازبینی‌شده');
+      expect(relabelled.body.rateBasisPoints).toBe(100);
+      expect(relabelled.body.status).toBe('INACTIVE');
+      expect(relabelled.body.label).toBe('بازبینی‌شده');
+    });
+
+    it('refuses to move or reopen a rule that has already ended', async () => {
+      const ended = await request(http)
+        .post('/v1/commissions/rules')
+        .set('authorization', asSystem())
+        .send({
+          organizationId: org,
+          transactionType: 'LOGISTICS',
+          rateBasisPoints: 90,
+          validFrom: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+          validTo: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        })
+        .expect(201);
+
+      // Reopening it would pull occurrences decided under another rule back
+      // under this one.
+      const reopened = await request(http)
+        .patch(`/v1/commissions/rules/${ended.body.id}`)
+        .set('authorization', asSystem())
+        .send({ validTo: null })
+        .expect(422);
+      expect(reopened.body.code).toBe('BUSINESS_RULE_VIOLATION');
     });
 
     it('answers 404 for a rule that does not exist', async () => {
@@ -297,39 +337,32 @@ describe('economic edge cases', () => {
       expect(created.body.periodCap).toBe(500);
     });
 
-    it('is repriced, capped, closed and reopened one field at a time', async () => {
+    it('keeps its terms, and is closed, relabelled and reopened one field at a time', async () => {
       const ruleId = await createRule();
 
-      const points = await request(http)
-        .patch(`/v1/rewards/rules/${ruleId}`)
-        .set('authorization', asSystem())
-        .send({ points: 20 })
-        .expect(200);
-      expect(points.body.points).toBe(20);
-
-      // Clearing the conversion rate returns the rule to points-only, which is
-      // the honest state while docs/24 Q-09 is unanswered.
-      const demonetised = await request(http)
-        .patch(`/v1/rewards/rules/${ruleId}`)
-        .set('authorization', asSystem())
-        .send({ creditPerPointMinor: null })
-        .expect(200);
-      expect(demonetised.body.creditPerPointMinor).toBeNull();
-
-      const remonetised = await request(http)
-        .patch(`/v1/rewards/rules/${ruleId}`)
-        .set('authorization', asSystem())
-        .send({ creditPerPointMinor: '2000', periodCap: 100, label: 'بازبینی‌شده' })
-        .expect(200);
-      expect(remonetised.body.creditPerPointMinor).toBe('2000');
-      expect(remonetised.body.periodCap).toBe(100);
+      // The terms a grant is computed from are fixed once the rule exists:
+      // edited, they reached back to occurrences not yet granted. A new term is
+      // a new rule — which is also how docs/24 Q-09 is answered.
+      for (const terms of [{ points: 20 }, { creditPerPointMinor: '2000' }, { periodCap: 100 }]) {
+        const refused = await request(http)
+          .patch(`/v1/rewards/rules/${ruleId}`)
+          .set('authorization', asSystem())
+          .send(terms)
+          .expect(400);
+        expect(refused.body.code).toBe('VALIDATION_FAILED');
+      }
 
       const closed = await request(http)
         .patch(`/v1/rewards/rules/${ruleId}`)
         .set('authorization', asSystem())
-        .send({ validTo: new Date().toISOString(), status: 'INACTIVE' })
+        .send({
+          validTo: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          status: 'INACTIVE',
+          label: 'بازبینی‌شده',
+        })
         .expect(200);
       expect(closed.body.status).toBe('INACTIVE');
+      expect(closed.body.label).toBe('بازبینی‌شده');
 
       const reopened = await request(http)
         .patch(`/v1/rewards/rules/${ruleId}`)
@@ -337,13 +370,20 @@ describe('economic edge cases', () => {
         .send({ validTo: null })
         .expect(200);
       expect(reopened.body.validTo).toBeNull();
+
+      const backdated = await request(http)
+        .patch(`/v1/rewards/rules/${ruleId}`)
+        .set('authorization', asSystem())
+        .send({ validTo: new Date(Date.now() - 60 * 60 * 1000).toISOString() })
+        .expect(422);
+      expect(backdated.body.code).toBe('BUSINESS_RULE_VIOLATION');
     });
 
     it('answers 404 for a rule that does not exist, and lists all triggers', async () => {
       await request(http)
         .patch('/v1/rewards/rules/RWR_0000000000000000000000000')
         .set('authorization', asSystem())
-        .send({ points: 1 })
+        .send({ status: 'INACTIVE' })
         .expect(404);
 
       const all = await request(http)

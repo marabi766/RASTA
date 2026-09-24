@@ -104,10 +104,14 @@ export class RewardController {
   @Patch('rules/:id')
   @Roles('SYSTEM_ADMIN')
   @ApiOperation({
-    summary: 'Amend a reward rule',
+    summary: 'Close, deactivate or relabel a reward rule',
     description:
-      'Setting `creditPerPointMinor` is how docs/24 Q-09 is answered when it is answered — a ' +
-      'single update, with no code change and no deployment.',
+      '`points`, `creditPerPointMinor` and `periodCap` cannot be changed — sending one is a ' +
+      '400, because a grant reads them when its event is processed and an edit reached back ' +
+      'to occurrences not yet granted. docs/24 Q-09 is answered by closing the points-only ' +
+      'rule and creating one with `creditPerPointMinor` from the same instant — still no code ' +
+      'change and no deployment. `validTo` only moves forward. Every change publishes ' +
+      '`REWARD_RULE_CHANGED` with the actor and the terms before and after.',
   })
   async updateRule(
     @Param('id') id: string,
