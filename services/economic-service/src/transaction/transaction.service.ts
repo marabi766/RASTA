@@ -9,6 +9,7 @@ import { TransactionRepository, type TransactionFilter } from './transaction.rep
 import { nextStatus } from './state-machine';
 import { assertMayRefund, assertTransactionVisible, canCommitOrganization } from '../access/access';
 import { parseMinor } from '../shared/money';
+import { isUniqueViolation } from '../ledger/ledger.repository';
 import { financialTransactionDuration, transactionsCreatedTotal } from '../observability/metrics';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { ENV } from '../tokens';
@@ -142,9 +143,41 @@ export class TransactionService {
       });
 
       return this.get(created);
+    } catch (error) {
+      throw await this.duplicateSourceOr(error, organizationId, dto);
     } finally {
       stop();
     }
+  }
+
+  /**
+   * A second obligation for a source fact this payer already recorded is a
+   * 409, not a 500.
+   *
+   * Different idempotency keys are different requests, so the idempotency
+   * store cannot catch this; `ux_transaction_source_fact` does. Confirmed by
+   * reading the row back rather than by parsing the driver's constraint name,
+   * so another unique violation is never mislabelled as this one. Nothing is
+   * said about the existing row beyond that it exists — the caller is its
+   * payer and can list it by `sourceReference`.
+   */
+  private async duplicateSourceOr(
+    error: unknown,
+    organizationId: string,
+    dto: CreateTransactionDto,
+  ): Promise<unknown> {
+    if (!isUniqueViolation(error) || !dto.sourceType || !dto.sourceReference) return error;
+    const existing = await this.repository.findBySource(
+      this.prisma.client,
+      organizationId,
+      dto.sourceType,
+      dto.sourceReference,
+    );
+    if (!existing) return error;
+    return new RastaError(
+      'CONFLICT',
+      'An obligation for this source is already recorded for this organization',
+    );
   }
 
   /**
@@ -156,10 +189,12 @@ export class TransactionService {
    * wallet is empty would lose a person's approval rather than protect
    * anything.
    *
-   * Idempotent on `(sourceType, sourceReference)` in addition to
-   * `processed_event`, because a producer that re-emits the same approval
+   * Idempotent on `(organizationId, sourceType, sourceReference)` in addition
+   * to `processed_event`, because a producer that re-emits the same approval
    * under a new event id would otherwise create a second obligation for one
-   * repair.
+   * repair. The read below is only the fast path: two such events processed
+   * concurrently both miss it, and it is `ux_transaction_source_fact` that
+   * decides — the loser writes nothing and returns the winner's row.
    */
   async recordAuthorisedObligation(
     tx: ExtendedPrismaClient,
@@ -177,6 +212,7 @@ export class TransactionService {
   ): Promise<{ id: string; created: boolean }> {
     const existing = await this.repository.findBySource(
       tx,
+      input.organizationId,
       input.sourceType,
       input.sourceReference,
     );
@@ -184,7 +220,7 @@ export class TransactionService {
 
     const id = `${ID_PREFIXES.transaction}_${ulid()}`;
 
-    await this.repository.create(
+    const written = await this.repository.createForSource(
       tx,
       {
         id,
@@ -212,6 +248,19 @@ export class TransactionService {
         input.currency,
       ),
     );
+
+    if (!written) {
+      const winner = await this.repository.findBySource(
+        tx,
+        input.organizationId,
+        input.sourceType,
+        input.sourceReference,
+      );
+      if (!winner) {
+        throw RastaError.internal('An obligation for this source fact conflicted and vanished');
+      }
+      return { id: winner.id, created: false };
+    }
 
     transactionsCreatedTotal.inc({
       service: SERVICE_NAME,
