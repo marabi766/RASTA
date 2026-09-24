@@ -31,8 +31,25 @@ export class IdentityRepository {
     return this.prisma.client;
   }
 
-  transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
-    return this.prisma.transaction(fn);
+  transaction<T>(
+    fn: (tx: ExtendedPrismaClient) => Promise<T>,
+    options?: { maxWait?: number; timeout?: number },
+  ): Promise<T> {
+    return this.prisma.transaction(fn, options);
+  }
+
+  /**
+   * Serialises every Keycloak projection of one user, inside the caller's
+   * transaction (ADR-060 § 5).
+   *
+   * A transaction-scoped advisory lock keyed on the user id, held until the
+   * projection's transaction ends. Taken *before* the projection reads the
+   * user's rows, so whichever projection writes last also read last — under
+   * READ COMMITTED it sees every change committed before it took the lock.
+   * The key is a bound parameter hashed by PostgreSQL; nothing is interpolated.
+   */
+  async lockUserProjection(tx: ExtendedPrismaClient, userId: string): Promise<void> {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`keycloak-projection:${userId}`}, 0))`;
   }
 
   /**
@@ -197,9 +214,46 @@ export class IdentityRepository {
     );
   }
 
-  async listMembershipsForUser(userId: string) {
-    return runUnscoped('a user must be able to see every organization they belong to', () =>
+  /**
+   * Memberships whose `validUntil` has passed and that the expiry sweep has
+   * not yet acted on (ADR-060 § 5), oldest lapse first. Platform-wide: a
+   * membership expires whichever tenant it belongs to.
+   */
+  async findLapsedMemberships(now: Date, take: number) {
+    return runUnscoped('the membership expiry sweep covers every organization', () =>
       this.client.membership.findMany({
+        where: { deletedAt: null, lapseHandledAt: null, validUntil: { lte: now } },
+        orderBy: [{ validUntil: 'asc' }, { id: 'asc' }],
+        take,
+      }),
+    );
+  }
+
+  /**
+   * One page of users that have a Keycloak account, by id — the backfill and
+   * reconcile sweep (ADR-060 § 5). Platform-wide by nature: projection is not
+   * something a tenant does.
+   */
+  async listUserIdsWithAccount(after: string | null, take: number): Promise<string[]> {
+    const rows = await runUnscoped('the Keycloak projection sweep covers every account', () =>
+      this.client.user.findMany({
+        where: {
+          deletedAt: null,
+          keycloakId: { not: null },
+          ...(after ? { id: { gt: after } } : {}),
+        },
+        orderBy: { id: 'asc' },
+        take,
+        select: { id: true },
+      }),
+    );
+    return rows.map((row) => row.id);
+  }
+
+  async listMembershipsForUser(userId: string, tx?: ExtendedPrismaClient) {
+    const db = tx ?? this.client;
+    return runUnscoped('a user must be able to see every organization they belong to', () =>
+      db.membership.findMany({
         where: { userId, deletedAt: null, status: { not: 'REVOKED' } },
         orderBy: { createdAt: 'asc' },
       }),

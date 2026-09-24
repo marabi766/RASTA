@@ -28,6 +28,7 @@ import {
 import { IdentityService } from './identity.service';
 import { IdentityRepository } from './identity.repository';
 import { KeycloakAdminClient } from '../keycloak/keycloak.client';
+import { KeycloakProjector } from '../keycloak/keycloak.projector';
 import { TEST_ORG_A } from '@rasta/testing';
 import { DEFAULT_ROLE_GRANT_POLICY, ROLE_GRANT_POLICY } from './role-grants';
 import { DEFAULT_PROVISIONING_SCOPE_POLICY, PROVISIONING_SCOPE_POLICY } from './provisioning-scope';
@@ -155,6 +156,8 @@ const tx = {
     },
   },
   membership: {
+    // Where a revoke looks for the user's next organization (ADR-060 § 5).
+    findFirst: async () => null,
     create: async (args: { data: { roles: string[] } }) => {
       writes.push({ model: 'membership', roles: args.data.roles });
       return membershipRow('MBR_new', args.data.roles);
@@ -261,8 +264,10 @@ const keycloak = {
     keycloakCreates.push(input);
     return 'kc-new';
   },
-  syncMemberships: async () => undefined,
-  setActiveOrganization: async () => undefined,
+  // Projection is not what this suite is about; with sync off the projector
+  // returns before touching anything (`identity.service.spec.ts` covers it).
+  enabled: false,
+  replacePlatformAttributes: async () => undefined,
   assignRealmRoles: async () => undefined,
   isHealthy: async () => true,
 } as unknown as KeycloakAdminClient;
@@ -272,6 +277,7 @@ const keycloak = {
   providers: [
     { provide: IdentityRepository, useValue: repository },
     { provide: KeycloakAdminClient, useValue: keycloak },
+    KeycloakProjector,
     // The shipped default, not a test-only ladder: these tests assert what a
     // deployment that configures nothing actually does.
     { provide: ROLE_GRANT_POLICY, useValue: DEFAULT_ROLE_GRANT_POLICY },

@@ -18,7 +18,7 @@ import {
   type AuthGuardOptions,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
-import { toLogContext } from '@rasta/nest-common';
+import { EventConsumer, toLogContext } from '@rasta/nest-common';
 import {
   outboxAckFencedTotal,
   outboxClaimAttemptsTotal,
@@ -31,8 +31,11 @@ import { PrismaService } from './prisma/prisma.service';
 import { PrismaOutboxStore } from './outbox/outbox.store';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { KeycloakAdminClient } from './keycloak/keycloak.client';
+import { KeycloakProjector } from './keycloak/keycloak.projector';
+import { KeycloakProjectionConsumer } from './keycloak/keycloak-projection.consumer';
 import { IdentityRepository } from './identity/identity.repository';
 import { IdentityService } from './identity/identity.service';
+import { MembershipExpiryScanner } from './identity/membership-expiry.scanner';
 import {
   MembershipController,
   RegistrationController,
@@ -46,6 +49,7 @@ import { AuditLookupClient } from './audit-correction/audit-lookup.client';
 import { ROLE_GRANT_POLICY } from './identity/role-grants';
 import { PROVISIONING_SCOPE_POLICY } from './identity/provisioning-scope';
 import {
+  IDENTITY_TOPIC,
   loadIdentityEnv,
   provisioningScopePolicy,
   roleGrantPolicy,
@@ -150,7 +154,55 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
 
     PrismaOutboxStore,
     IdentityRepository,
+    KeycloakProjector,
     IdentityService,
+    {
+      provide: MembershipExpiryScanner,
+      inject: [ENV, IdentityRepository, IdentityService],
+      useFactory: (env: IdentityEnv, repository: IdentityRepository, identity: IdentityService) =>
+        new MembershipExpiryScanner(repository, identity, {
+          enabled: env.MEMBERSHIP_EXPIRY_SCAN_ENABLED,
+          intervalSeconds: env.MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS,
+          batchSize: env.MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE,
+        }),
+    },
+
+    // The durable half of the Keycloak projection (ADR-060 § 5): re-projects
+    // the user each membership or role event names, from this service's own
+    // topic. Off with Keycloak sync, which is also what keeps test and offline
+    // boots from reaching for a broker they do not have.
+    {
+      provide: KeycloakProjectionConsumer,
+      inject: [ENV, LOGGER, KeycloakProjector],
+      useFactory: (env: IdentityEnv, logger: Logger, projector: KeycloakProjector) =>
+        new KeycloakProjectionConsumer(
+          env.KEYCLOAK_SYNC_ENABLED
+            ? (handler) =>
+                new EventConsumer(
+                  {
+                    brokers: env.KAFKA_BROKERS.split(',').map((b) => b.trim()),
+                    clientId: `${env.KAFKA_CLIENT_ID}-keycloak-projection`,
+                    // Its own group: the outbox relay publishes this topic, and
+                    // any other reader of it must not share partitions with
+                    // this one (docs/07 § 7.10).
+                    groupId: 'identity-service.keycloak-projection',
+                    topics: [IDENTITY_TOPIC],
+                    deadLetterTopic: `${IDENTITY_TOPIC}.dlq`,
+                    // Not from the beginning: history is what the backfill
+                    // command is for. This path only has to follow changes.
+                    fromBeginning: false,
+                  },
+                  handler,
+                  {
+                    log: (m) => logger.info(m),
+                    warn: (m) => logger.warn(m),
+                    error: (m, trace) => logger.error({ err: trace }, m),
+                  },
+                )
+            : null,
+          projector,
+        ),
+    },
 
     // ------------------------------------------------------------------------
     // Audit correction command (ADR-053 § 7, AUD-003 correction). Writes only to this
