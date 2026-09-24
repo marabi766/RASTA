@@ -38,6 +38,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@nestjs/testing": "^11.2.3",
     "@rasta/testing": "workspace:*",
     "@swc-node/register": "^1.10.9",
     "@swc/core": "^1.10.7",
