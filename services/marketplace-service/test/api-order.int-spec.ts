@@ -429,6 +429,11 @@ describe('order API', () => {
     });
 
     it('reports 404 to a third organization attempting a supplier command', async () => {
+      // The name always said 404; the assertion said 403, because commands
+      // skipped the visibility check `get()` makes and went straight to
+      // `assertSupplier`. A 403 here confirms the order exists to somebody
+      // who is not a party to it — the leak the controller's 404 rule exists
+      // to prevent. Commands now check visibility first.
       const offerId = await publishOffer();
       const order = await placeOrder(offerId);
 
@@ -437,7 +442,7 @@ describe('order API', () => {
         .set('authorization', `Bearer ${supplier(strangerOrg)}`)
         .set('idempotency-key', apiKey('api-stranger-confirm'))
         .send({})
-        .expect(403);
+        .expect(404);
     });
 
     it('refuses a tracking reference longer than the schema allows with 400', async () => {

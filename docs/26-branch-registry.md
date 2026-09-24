@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۰۱ (2026-09-23) · **`main` در آن لحظه:** `9347b80`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۰۲ (2026-09-24) · **`main` در آن لحظه:** `d7500be`
 
 ---
 
@@ -55,11 +55,13 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                                   | Worktree                                   | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                   |
-| -------------------------------------- | ------------------------------------------ | ---- | --- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `demo/investor-preview`                | `F:\Rasta-Parallel\investor-demo`          | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                            |
-| `design/claude-design`                 | پوشهٔ موقت در `%TEMP%`                     | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                   |
-| `feat/web-wallet-marketplace-surfaces` | `F:\Rasta-Parallel\web-wallet-marketplace` | —    | #85 | ۴ / ۰          | `EXP-003`: `/wallet`، `/marketplace`، `/marketplace/[productId]` (بخش فقط‌خواندنی این Epic)؛ PR باز، منتظر ادغام — طبق قاعدهٔ ۶، ادغام کار PM/کاربر است |
+| شاخه                      | Worktree                                      | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                                                                                                                                                            |
+| ------------------------- | --------------------------------------------- | ---- | --- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `feat/web-orders-surface` | `F:\Rasta-Parallel\web-organizations-surface` | Opus | #83 | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `0ac1a61` — `/orders` و `/orders/[id]` (چرخهٔ عمر سفارش و Stepper). **پوشهٔ Worktree از کار قبلی مانده و دوباره استفاده شد** — `pnpm install` دیگری در جریان بود (نشست Sonnet) و Lockfile تغییر نکرده بود؛ **`marketplace-service` را هم لمس می‌کند** (فیلد `availableActions`) |
+| `fix/ci-minio-chainguard` | `F:\Rasta-Parallel\ci-minio-chainguard`       | PM   | #88 | ۱ / ۰          | MinIO از `quay.io` دیگر بی‌احراز قابل دریافت نیست (۴۰۱) و `minio/minio` از Docker Hub حذف شده است. در نتیجه Jobهای یکپارچه و E2E همهٔ شاخه‌ها و `main` پیش از اجرای تست شکست می‌خورند. تصویرها به نسخه‌های امضاشدهٔ Chainguard با Digest ثابت منتقل شدند.                                                        |
+| `demo/investor-preview`   | `F:\Rasta-Parallel\investor-demo`             | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                                                                                                                                                     |
+| `design/claude-design`    | پوشهٔ موقت در `%TEMP%`                        | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                                                                                                                                            |
+| `feat/web-wallet-marketplace-surfaces` | `F:\Rasta-Parallel\web-wallet-marketplace`    | —    | #85 | ۴ / ۰          | `EXP-003`: `/wallet`، `/marketplace`، `/marketplace/[productId]` (بخش فقط‌خواندنی این Epic)؛ همگام با `origin/main` پس از #83 و #88. PR باز، منتظر ادغام — طبق قاعدهٔ ۶، ادغام کار PM/کاربر است |
 
 ## شاخه‌های بازنشسته
 
@@ -100,12 +102,13 @@
 | `feat/web-write-path-and-usage`          | [#75](https://github.com/marabi766/RASTA/pull/75) | `0b4a35a`   |
 | `feat/web-drivers-surface`               | [#76](https://github.com/marabi766/RASTA/pull/76) | `1a6ba45`   |
 | `fix/identity-role-grant-ladder`         | [#77](https://github.com/marabi766/RASTA/pull/77) | `9347b80`   |
-| `feat/ci-portal-e2e-live-stack`          | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
-| `claude/quirky-curie-15d850`             | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `feat/web-organizations-surface`         | [#79](https://github.com/marabi766/RASTA/pull/79) | `0ac1a61`   |
+| `feat/ci-portal-e2e-live-stack`          | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
 | `feat/web-asset-timeline`                | [#80](https://github.com/marabi766/RASTA/pull/80) | `62186cf`   |
 | `fix/identity-cross-tenant-provisioning` | [#81](https://github.com/marabi766/RASTA/pull/81) | `cfdb7b0`   |
 | `claude/upbeat-tesla-cenkph`             | [#82](https://github.com/marabi766/RASTA/pull/82) | `d7500be`   |
+| `feat/ci-portal-e2e-live-stack`          | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
+| `claude/quirky-curie-15d850`             | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`                | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
@@ -176,16 +179,17 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 
 ### پرسش‌های باز `Q-NN`
 
-| شماره       | مالک                                  | وضعیت                                                                                               |
-| ----------- | ------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Q-44        | تصمیم محصول MVP                       | **بسته** روی `main` و تثبیت‌شده با نقل‌قول کلمه‌به‌کلمه در `ADR-056 § ۲` — تغییرناپذیر              |
-| Q-45 … Q-55 | `feat/audit-service-aud-004-contract` | روی `main`                                                                                          |
-| Q-56        | `feat/supplier-performance-phase2`    | روی `main` (`f7252d3`)                                                                              |
-| Q-57        | `feat/audit-service-aud-004-contract` | روی `main`                                                                                          |
-| Q-58        | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                                |
-| Q-59        | `feat/asset-insurance-claim-api`      | روی `main` (`fa14ef4`) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه                        |
-| Q-60        | `fix/identity-role-grant-ladder`      | روی `main` (`9347b80`) — مرجع اعطای نقش: چه نقشی چه نقش‌هایی را می‌دهد، و چه عضویتی را اداره می‌کند |
-| Q-61+       | آزاد                                  | —                                                                                                   |
+| شماره       | مالک                                     | وضعیت                                                                                                                         |
+| ----------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Q-44        | تصمیم محصول MVP                          | **بسته** روی `main` و تثبیت‌شده با نقل‌قول کلمه‌به‌کلمه در `ADR-056 § ۲` — تغییرناپذیر                                        |
+| Q-45 … Q-55 | `feat/audit-service-aud-004-contract`    | روی `main`                                                                                                                    |
+| Q-56        | `feat/supplier-performance-phase2`       | روی `main` (`f7252d3`)                                                                                                        |
+| Q-57        | `feat/audit-service-aud-004-contract`    | روی `main`                                                                                                                    |
+| Q-58        | `docs/audit-immutable-archive`           | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                                                          |
+| Q-59        | `feat/asset-insurance-claim-api`         | روی `main` (`fa14ef4`) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه                                                  |
+| Q-60        | `fix/identity-role-grant-ladder`         | روی `main` (`9347b80`) — مرجع اعطای نقش: چه نقشی چه نقش‌هایی را می‌دهد، و چه عضویتی را اداره می‌کند                           |
+| Q-61        | `fix/identity-cross-tenant-provisioning` | روی `main` (`cfdb7b0`) — مرجع ساخت حساب در سازمانی جز سازمان خود. **پس از استفاده ثبت شد** — #81 بدون رزرو پیشین آن را برداشت |
+| Q-62+       | آزاد                                     | —                                                                                                                             |
 
 > **چرا Q-44 قابل جابه‌جایی نیست:** یک ADR ادغام‌شده آن را به‌عنوان مرجع
 > پذیرش نقل کرده. نقل‌قول را نمی‌شود ویرایش کرد بی‌آنکه سند دروغ شود. هر
