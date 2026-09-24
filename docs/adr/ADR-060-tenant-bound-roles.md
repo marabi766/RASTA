@@ -149,6 +149,9 @@ Keycloak زنده لازم است.**
   نیازمند بازنگری این تصمیم نیست، روی آن سوار می‌شوند.
 - اگر نوشتن Projector شکست بخورد، کران ۹۰۵ ثانیه از **لحظهٔ تلاش موفق بعدی** شمرده می‌شود؛ مسیر Outbox آن را محدود
   می‌کند و Reconcile گزارشش می‌کند.
+- **انقضای عضویت** (`validUntil`) رویدادی ندارد که Projector را براند؛ `MembershipExpiryScanner` هر
+  `MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS` (پیش‌فرض ۶۰) آن را می‌یابد. پس کران برای انقضا **Interval + ۹۰۵ ثانیه** است
+  (پیش‌فرض ۹۶۵)؛ خود `identity-service` از همان لحظهٔ `validUntil` عضویت را رد می‌کند (`docs/runbooks/keycloak-projection.md`).
 - **برای MVP پذیرفته شد** (مدیر پروژه، 2026-09-24) و در `docs/23` به‌عنوان **T-06** ثبت شد. فهرست ابطال در Gateway
   (بدیل «ث») کار بعدی ثبت‌شده است: `planning/backlog.json` **EXT-005**. کوتاه‌کردن عمر Access Token به ۳۰۰ ثانیه تصمیم
   جدا و بعدی است و **این ADR آن را تغییر نمی‌دهد**.

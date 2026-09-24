@@ -198,6 +198,21 @@ export class IdentityRepository {
   }
 
   /**
+   * Memberships whose `validUntil` has passed and that the expiry sweep has
+   * not yet acted on (ADR-060 § 5), oldest lapse first. Platform-wide: a
+   * membership expires whichever tenant it belongs to.
+   */
+  async findLapsedMemberships(now: Date, take: number) {
+    return runUnscoped('the membership expiry sweep covers every organization', () =>
+      this.client.membership.findMany({
+        where: { deletedAt: null, lapseHandledAt: null, validUntil: { lte: now } },
+        orderBy: [{ validUntil: 'asc' }, { id: 'asc' }],
+        take,
+      }),
+    );
+  }
+
+  /**
    * One page of users that have a Keycloak account, by id — the backfill and
    * reconcile sweep (ADR-060 § 5). Platform-wide by nature: projection is not
    * something a tenant does.

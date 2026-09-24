@@ -1,3 +1,5 @@
+import { isMembershipLive, type MembershipWindow } from '../identity/membership-window';
+
 /**
  * The Keycloak user attributes this service owns, and how they are derived
  * (ADR-060 § 5).
@@ -39,11 +41,9 @@ export interface ProjectableUser {
   activeOrganizationId: string | null;
 }
 
-export interface ProjectableMembership {
+export interface ProjectableMembership extends MembershipWindow {
   organizationId: string;
   roles: readonly string[];
-  status: string;
-  validUntil: Date | null;
 }
 
 /** One `organization_roles` value. Neither an organization id nor a role name contains `:`. */
@@ -54,9 +54,10 @@ export function organizationRole(organizationId: string, role: string): string {
 /**
  * The attributes a user should carry, derived from their rows alone.
  *
- * A membership counts only while it is `ACTIVE` and not past its
- * `validUntil`: an expired membership grants nothing in the database's own
- * terms, so it must not grant anything in the token either. An active
+ * A membership counts only while it is live (`membership-window.ts`):
+ * `ACTIVE`, and `now` inside `[validFrom, validUntil)`. An expired membership
+ * grants nothing in the database's own terms, so it must not grant anything in
+ * the token either. An active
  * organization the user no longer belongs to is dropped rather than kept —
  * the guard would otherwise be handed an organization with no roles in it.
  *
@@ -68,11 +69,7 @@ export function platformAttributesFor(
   memberships: readonly ProjectableMembership[],
   now: Date,
 ): PlatformAttributes {
-  const live = memberships.filter(
-    (membership) =>
-      membership.status === 'ACTIVE' &&
-      (membership.validUntil === null || membership.validUntil > now),
-  );
+  const live = memberships.filter((membership) => isMembershipLive(membership, now));
 
   const organizationIds = [...new Set(live.map((membership) => membership.organizationId))].sort();
   const organizationRoles = [

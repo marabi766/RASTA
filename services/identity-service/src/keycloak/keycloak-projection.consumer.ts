@@ -26,6 +26,7 @@ export const REPROJECTED_EVENTS = [
   IDENTITY_EVENTS.ROLE_ASSIGNED,
   IDENTITY_EVENTS.ROLE_REVOKED,
   IDENTITY_EVENTS.MEMBERSHIP_REVOKED,
+  IDENTITY_EVENTS.MEMBERSHIP_EXPIRED,
 ] as readonly string[];
 
 /** Every one of the events above names the user it changed. */

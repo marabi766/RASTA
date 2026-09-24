@@ -16,7 +16,8 @@ describe('platformAttributesFor', () => {
     organizationId,
     roles,
     status: 'ACTIVE',
-    validUntil: null,
+    validFrom: new Date('2026-01-01T00:00:00.000Z'),
+    validUntil: null as Date | null,
     ...extra,
   });
 
@@ -49,7 +50,7 @@ describe('platformAttributesFor', () => {
     expect(attributes.organization_roles).toContain('ORG-B:DRIVER');
   });
 
-  it('counts a membership only while it is active and unexpired', () => {
+  it('counts a membership only while it is active and inside its validity window', () => {
     const attributes = platformAttributesFor(
       { id: 'USR_1', activeOrganizationId: null },
       [
@@ -59,6 +60,9 @@ describe('platformAttributesFor', () => {
         membership('ORG-FUTURE-END', ['DRIVER'], {
           validUntil: new Date('2026-12-01T00:00:00.000Z'),
         }),
+        // The end is exclusive: at exactly validUntil the membership is over.
+        membership('ORG-ENDS-NOW', ['DRIVER'], { validUntil: now }),
+        membership('ORG-NOT-YET', ['DRIVER'], { validFrom: new Date('2026-09-24T12:00:01.000Z') }),
       ],
       now,
     );

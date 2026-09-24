@@ -35,6 +35,7 @@ import { KeycloakProjector } from './keycloak/keycloak.projector';
 import { KeycloakProjectionConsumer } from './keycloak/keycloak-projection.consumer';
 import { IdentityRepository } from './identity/identity.repository';
 import { IdentityService } from './identity/identity.service';
+import { MembershipExpiryScanner } from './identity/membership-expiry.scanner';
 import {
   MembershipController,
   RegistrationController,
@@ -155,6 +156,16 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
     IdentityRepository,
     KeycloakProjector,
     IdentityService,
+    {
+      provide: MembershipExpiryScanner,
+      inject: [ENV, IdentityRepository, IdentityService],
+      useFactory: (env: IdentityEnv, repository: IdentityRepository, identity: IdentityService) =>
+        new MembershipExpiryScanner(repository, identity, {
+          enabled: env.MEMBERSHIP_EXPIRY_SCAN_ENABLED,
+          intervalSeconds: env.MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS,
+          batchSize: env.MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE,
+        }),
+    },
 
     // The durable half of the Keycloak projection (ADR-060 § 5): re-projects
     // the user each membership or role event names, from this service's own

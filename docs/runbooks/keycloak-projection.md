@@ -17,13 +17,36 @@
 | صفت Keycloak             | Claim توکن  | منبع                                            |
 | ------------------------ | ----------- | ----------------------------------------------- |
 | `rasta_user_id`          | `rasta_uid` | `user.id`                                       |
-| `organization_ids`       | `org_ids`   | عضویت‌های `ACTIVE` و منقضی‌نشده                 |
+| `organization_ids`       | `org_ids`   | عضویت‌های زنده: `ACTIVE` و درون بازهٔ اعتبار    |
 | `organization_roles`     | `org_roles` | `ORG_ID:ROLE` برای هر نقش هر عضویت بالا         |
 | `active_organization_id` | `org_id`    | `user.activeOrganizationId` اگر هنوز عضویت باشد |
+
+«زنده» یعنی `status = ACTIVE` و `validFrom ≤ اکنون < validUntil` (`membership-window.ts`)؛ همین تعریف، تغییر سازمان فعال
+را هم مجاز یا رد می‌کند.
 
 دو مسیر می‌نویسند: درخواست، بلافاصله پس از Commit هر تغییر عضویت (`trigger="request"`)؛ و مصرف‌کنندهٔ رویدادهای
 `USER_ACTIVATED`، `MEMBERSHIP_*` و `ROLE_*` از `rasta.identity.v1` (`trigger="event"`). هر دو یک چیز می‌نویسند، پس تکرار
 بی‌خطر است.
+
+### انقضای عضویت
+
+وقتی `validUntil` می‌گذرد، هیچ درخواستی نمی‌آید. پس `MembershipExpiryScanner` هر
+`MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS` (پیش‌فرض ۶۰) عضویت‌های گذشته از `validUntil` را که هنوز
+`lapse_handled_at` ندارند برمی‌دارد، و برای هرکدام در یک تراکنش: آن را Claim می‌کند، سازمان فعال کاربر را اگر همان بود به
+قدیمی‌ترین عضویت زندهٔ دیگر منتقل (یا خالی) می‌کند، و `MEMBERSHIP_EXPIRED` منتشر می‌کند؛ سپس کاربر را Project می‌کند.
+Claim با `WHERE lapse_handled_at IS NULL` است، پس اجرا روی چند Replica یک بار عمل می‌کند و Replicaی که هنگام انقضا
+خاموش بوده، در اولین گذرش آن را می‌یابد. عضویت Revoke نمی‌شود.
+
+**کران تأخیر:**
+
+| از `validUntil` تا …                           | حداکثر                                                     |
+| ---------------------------------------------- | ---------------------------------------------------------- |
+| رد شدن تغییر سازمان فعال در `identity-service` | **صفر** — از ساعت خوانده می‌شود                            |
+| حذف از صفات Keycloak                           | یک Interval اسکن (۶۰ ثانیه) + نوشتن Projector              |
+| آخرین توکنی که هنوز آن سازمان را نام می‌برد    | **Interval + ۹۰۵ ثانیه** (ADR-060 § ۷) — پیش‌فرض ۹۶۵ ثانیه |
+
+`MEMBERSHIP_EXPIRY_SCAN_ENABLED=false` دسترسی را باز نمی‌کند، ولی عضویت منقضی تا Project بعدیِ کاربر در توکن می‌ماند؛
+`keycloak:reconcile` آن را واگرا گزارش می‌کند.
 
 ## اثر
 

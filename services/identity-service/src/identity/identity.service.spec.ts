@@ -75,7 +75,12 @@ function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harn
 
   const tx = {
     user: { create: jest.fn(), update: jest.fn() },
-    membership: { create: jest.fn(), update: jest.fn(), findFirst: jest.fn(async () => null) },
+    membership: {
+      create: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(async () => ({ count: 1 })),
+      findFirst: jest.fn(async () => null),
+    },
     registrationRequest: { create: jest.fn(), update: jest.fn() },
   };
 
@@ -681,5 +686,161 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
         h.service.switchActiveOrganization({ organizationId: TEST_ORG_B }),
       ),
     ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('membership validity window (ADR-060 § 5)', () => {
+  // A controlled clock: every decision below reads `new Date()`, and the point
+  // of these tests is which side of validUntil it is on.
+  const VALID_UNTIL = new Date('2026-10-01T00:00:00.000Z');
+  const before = new Date(VALID_UNTIL.getTime() - 1000);
+  const after = new Date(VALID_UNTIL.getTime() + 1000);
+
+  const put = (h: Harness) => h.keycloak.replacePlatformAttributes as unknown as jest.Mock;
+  const tx = (h: Harness) =>
+    h.repository.client as unknown as {
+      user: { update: jest.Mock };
+      membership: { updateMany: jest.Mock; findFirst: jest.Mock };
+    };
+
+  const inB = membershipRow({ id: 'MBR_B', organizationId: TEST_ORG_B, validUntil: VALID_UNTIL });
+  const inA = membershipRow({ id: 'MBR_A', organizationId: TEST_ORG_A });
+
+  function windowHarness() {
+    const h = harness();
+    h.repository.findMembership.mockResolvedValue(inB as never);
+    h.repository.listMembershipsForUser.mockResolvedValue([inA, inB] as never);
+    h.repository.findUserById.mockResolvedValue(
+      userRow({ activeOrganizationId: TEST_ORG_B }) as never,
+    );
+    tx(h).user.update.mockResolvedValue(userRow({ activeOrganizationId: TEST_ORG_B }));
+    return h;
+  }
+
+  function at<T>(now: Date, fn: () => Promise<T>): Promise<T> {
+    jest.setSystemTime(now);
+    return fn();
+  }
+
+  beforeEach(() => jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }));
+  afterEach(() => jest.useRealTimers());
+
+  it('before validUntil: the switch succeeds and org_ids carries the organization', async () => {
+    const h = windowHarness();
+
+    await at(before, () =>
+      runWithContext(context(), () =>
+        h.service.switchActiveOrganization({ organizationId: TEST_ORG_B }),
+      ),
+    );
+
+    expect(put(h)).toHaveBeenCalledWith('kc-1', {
+      rasta_user_id: [TEST_USER_A],
+      organization_ids: [TEST_ORG_A, TEST_ORG_B].sort(),
+      organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`, `${TEST_ORG_B}:FLEET_MANAGER`].sort(),
+      active_organization_id: [TEST_ORG_B],
+    });
+  });
+
+  it.each([
+    ['at validUntil (the end is exclusive)', VALID_UNTIL],
+    ['after validUntil', after],
+  ])('%s: the switch is refused, audited, and changes nothing', async (_label, now) => {
+    const h = windowHarness();
+
+    const refusal = await at(now, () =>
+      runWithContext(context(), () =>
+        h.service.switchActiveOrganization({ organizationId: TEST_ORG_B }),
+      ).then(
+        () => undefined,
+        (error: unknown) => error,
+      ),
+    );
+
+    expect(refusal).toMatchObject({ status: 403, code: 'TENANT_MISMATCH' });
+    expect(refusalSiteOf(refusal)).toBe(REFUSAL_SITES.SWITCH_ACTIVE_ORGANIZATION);
+    expect(tx(h).user.update).not.toHaveBeenCalled();
+    expect(put(h)).not.toHaveBeenCalled();
+  });
+
+  it('refuses a membership whose validFrom has not arrived', async () => {
+    const h = windowHarness();
+    h.repository.findMembership.mockResolvedValue(
+      membershipRow({ organizationId: TEST_ORG_B, validFrom: after }) as never,
+    );
+
+    await expect(
+      at(before, () =>
+        runWithContext(context(), () =>
+          h.service.switchActiveOrganization({ organizationId: TEST_ORG_B }),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
+  });
+
+  describe('expireLapsedMembership', () => {
+    it('after validUntil: moves the active organization, records the expiry, and drops it from the token', async () => {
+      const h = windowHarness();
+      // The remaining live membership the active organization moves to.
+      tx(h).membership.findFirst.mockResolvedValue(inA);
+      // What the projector reads once the lapse has committed.
+      h.repository.findUserById
+        .mockResolvedValueOnce(userRow({ activeOrganizationId: TEST_ORG_B }) as never)
+        .mockResolvedValue(userRow({ activeOrganizationId: TEST_ORG_A }) as never);
+
+      const acted = await at(after, () => h.service.expireLapsedMembership(inB, after));
+
+      expect(acted).toBe(true);
+      // Claimed with the guard, so a second replica cannot act on it too.
+      expect(tx(h).membership.updateMany).toHaveBeenCalledWith({
+        where: { id: 'MBR_B', lapseHandledAt: null, deletedAt: null },
+        data: { lapseHandledAt: after },
+      });
+      expect(tx(h).user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ activeOrganizationId: TEST_ORG_A, updatedBy: 'SYSTEM' }),
+        }),
+      );
+      expect(h.enqueued).toEqual([
+        {
+          eventName: 'MEMBERSHIP_EXPIRED',
+          payload: {
+            membershipId: 'MBR_B',
+            userId: TEST_USER_A,
+            organizationId: TEST_ORG_B,
+            validUntil: VALID_UNTIL.toISOString(),
+          },
+        },
+      ]);
+      expect(put(h)).toHaveBeenCalledWith('kc-1', {
+        rasta_user_id: [TEST_USER_A],
+        organization_ids: [TEST_ORG_A],
+        organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`],
+        active_organization_id: [TEST_ORG_A],
+      });
+    });
+
+    it('does nothing when another replica claimed the lapse first', async () => {
+      const h = windowHarness();
+      tx(h).membership.updateMany.mockResolvedValue({ count: 0 });
+
+      const acted = await at(after, () => h.service.expireLapsedMembership(inB, after));
+
+      expect(acted).toBe(false);
+      expect(h.enqueued).toEqual([]);
+      expect(tx(h).user.update).not.toHaveBeenCalled();
+      expect(put(h)).not.toHaveBeenCalled();
+    });
+
+    it('does nothing before validUntil', async () => {
+      const h = windowHarness();
+
+      const acted = await at(before, () => h.service.expireLapsedMembership(inB, before));
+
+      expect(acted).toBe(false);
+      expect(h.repository.transaction).not.toHaveBeenCalled();
+    });
   });
 });
