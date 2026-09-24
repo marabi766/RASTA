@@ -7,6 +7,7 @@ import { LedgerService } from '../ledger/ledger.service';
 import { computeCommission, type CommissionDecision, type CommissionRuleView } from './rule-engine';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor, parseMinor } from '../shared/money';
+import { nextValidTo } from '../shared/rule-validity';
 import { commissionApplicationsTotal } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
 import type { Prisma, TransactionType } from '../generated/prisma';
@@ -208,34 +209,92 @@ export class CommissionService {
       throw RastaError.businessRule('validTo must be after validFrom');
     }
 
-    return runUnscoped(
-      'a commission rule may be platform-wide, which no tenant scope can express',
-      () => this.prisma.client.commissionRule.create({ data }),
-    );
+    return this.prisma.transaction(async (tx) => {
+      const created = await runUnscoped(
+        'a commission rule may be platform-wide, which no tenant scope can express',
+        () => tx.commissionRule.create({ data }),
+      );
+      await this.recordRuleChange(tx, { rule: created, before: null, actor });
+      return created;
+    });
   }
 
+  /**
+   * Closes, deactivates or relabels a rule — and nothing else.
+   *
+   * **The rate is not editable.** The rule engine selects a rule by when the
+   * transaction occurred but reads its rate when the transaction settles, so
+   * a rate edited in place re-priced every unsettled transaction that had
+   * occurred under the old one. A new rate is a new rule: close this one with
+   * `validTo`, create the next with `validFrom` at the same instant (docs/10 §
+   * 10.7). `updateCommissionRuleSchema` refuses the field outright, and the
+   * window may only move forward ({@link nextValidTo}).
+   *
+   * Under the row lock, so the `before` in the change record is the state this
+   * change was actually applied to.
+   */
   async updateRule(id: string, dto: UpdateCommissionRuleDto) {
     const actor = getContext().userId ?? SERVICE_NAME;
 
-    const existing = await runUnscoped('commission rules may be platform-wide', () =>
-      this.prisma.client.commissionRule.findUnique({ where: { id } }),
-    );
-    if (!existing) throw RastaError.notFound('CommissionRule', id);
+    return this.prisma.transaction(async (tx) => {
+      const locked = await runUnscoped(
+        'commission rules may be platform-wide',
+        () =>
+          tx.$queryRaw<
+            { id: string }[]
+          >`SELECT id FROM commission_rule WHERE id = ${id} FOR UPDATE`,
+      );
+      if (locked.length === 0) throw RastaError.notFound('CommissionRule', id);
 
-    return runUnscoped('commission rules may be platform-wide', () =>
-      this.prisma.client.commissionRule.update({
-        where: { id },
-        data: {
-          ...(dto.rateBasisPoints !== undefined ? { rateBasisPoints: dto.rateBasisPoints } : {}),
-          ...(dto.status !== undefined ? { status: dto.status } : {}),
-          ...(dto.validTo !== undefined
-            ? { validTo: dto.validTo ? new Date(dto.validTo) : null }
-            : {}),
-          ...(dto.label !== undefined ? { label: dto.label } : {}),
-          updatedBy: actor,
-        },
-      }),
-    );
+      const existing = await runUnscoped('commission rules may be platform-wide', () =>
+        tx.commissionRule.findUniqueOrThrow({ where: { id } }),
+      );
+
+      const updated = await runUnscoped('commission rules may be platform-wide', () =>
+        tx.commissionRule.update({
+          where: { id },
+          data: {
+            ...(dto.status !== undefined ? { status: dto.status } : {}),
+            ...(dto.validTo !== undefined
+              ? { validTo: nextValidTo(existing, dto.validTo, new Date()) }
+              : {}),
+            ...(dto.label !== undefined ? { label: dto.label } : {}),
+            updatedBy: actor,
+          },
+        }),
+      );
+
+      await this.recordRuleChange(tx, { rule: updated, before: existing, actor });
+      return updated;
+    });
+  }
+
+  /**
+   * The audit record of a rule change: who, when, and the terms before and
+   * after (`COMMISSION_RULE_CHANGED`).
+   *
+   * In the same transaction as the change, so a rule never changes without its
+   * record and a record never describes a change that rolled back. The envelope
+   * tenant is the rule's own organization, or — for a platform-wide rule, which
+   * has none — the organization the administrator acted from.
+   */
+  private async recordRuleChange(
+    tx: ExtendedPrismaClient,
+    input: { rule: CommissionRuleRow; before: CommissionRuleRow | null; actor: string },
+  ): Promise<void> {
+    await this.ledger.enqueue(tx, {
+      eventName: ECONOMIC_EVENTS.COMMISSION_RULE_CHANGED,
+      aggregateId: input.rule.id,
+      organizationId: input.rule.organizationId ?? getOrganizationId(),
+      payload: {
+        ruleId: input.rule.id,
+        change: input.before ? 'UPDATED' : 'CREATED',
+        changedBy: input.actor,
+        changedAt: input.rule.updatedAt.toISOString(),
+        before: input.before ? commissionRuleTerms(input.before) : null,
+        after: commissionRuleTerms(input.rule),
+      },
+    });
   }
 
   /**
@@ -278,4 +337,21 @@ export class CommissionService {
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
   }
+}
+
+type CommissionRuleRow = Prisma.CommissionRuleGetPayload<Record<string, never>>;
+
+/** A rule's terms as the change record carries them: money as strings, times as ISO. */
+function commissionRuleTerms(rule: CommissionRuleRow) {
+  return {
+    organizationId: rule.organizationId,
+    transactionType: rule.transactionType,
+    rateBasisPoints: rule.rateBasisPoints,
+    minAmountMinor: rule.minAmountMinor === null ? null : formatMinor(rule.minAmountMinor),
+    maxAmountMinor: rule.maxAmountMinor === null ? null : formatMinor(rule.maxAmountMinor),
+    validFrom: rule.validFrom.toISOString(),
+    validTo: rule.validTo ? rule.validTo.toISOString() : null,
+    status: rule.status,
+    label: rule.label,
+  };
 }

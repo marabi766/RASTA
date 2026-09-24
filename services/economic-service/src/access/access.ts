@@ -174,6 +174,83 @@ export function assertTransactionVisible(transaction: {
 }
 
 /**
+ * The facts a refund decision reads off a transaction.
+ *
+ * `status` is part of it because the answer depends on it: a disputed
+ * transaction is a platform decision in a way a held one is not.
+ */
+export interface RefundableTransaction {
+  id: string;
+  organizationId: string;
+  counterpartyOrganizationId: string | null;
+  status: string;
+}
+
+export interface RefundPolicy {
+  /**
+   * Whether the payee's financial administrator may return escrowed funds.
+   *
+   * The one part of this rule that is a product choice rather than a control
+   * (docs/24 Q-62), so it comes from configuration:
+   * `ECONOMIC_REFUND_BY_PAYEE_ENABLED`.
+   */
+  payeeMayRefund: boolean;
+}
+
+/**
+ * Refuses a refund the caller has no authority to make (docs/24 Q-62).
+ *
+ * A refund returns escrow to the **payer**, so the payer is the one party
+ * whose say-so cannot be enough: a payer that could refund its own escrow
+ * could confirm receipt, or open a dispute, and then take the money back —
+ * stepping around `resolve-dispute`, which is a platform decision, and leaving
+ * the payee unpaid (docs/10 § 10.5). The interim rule:
+ *
+ * | caller                                         | may refund                  |
+ * | ---------------------------------------------- | --------------------------- |
+ * | not a party, no platform scope                 | 404 (never learns it exists) |
+ * | the payer, in any role, from any state         | never — 403                  |
+ * | platform scope (not acting as the payer)       | from any refundable state    |
+ * | a service `@AllowService` admits on the route  | as the party its token names |
+ * | the payee's financial administrator            | yes, unless `DISPUTED`       |
+ *
+ * **The service row is the order saga.** marketplace-service's token is signed
+ * for the *buyer* — the payer — and its refund is the compensation for an order
+ * cancelled before settlement, an authority its own saga has already checked
+ * (docs/08 § 8.4). It is still held to the tenant check above it: a token for
+ * an organization that is not a party gets the same 404 as anyone (ADR-035).
+ *
+ * The state machine still decides whether a refund is possible at all; this
+ * only decides who may ask.
+ */
+export function assertMayRefund(transaction: RefundableTransaction, policy: RefundPolicy): void {
+  // First, so that a non-party learns nothing — not even that it would have
+  // been refused for a different reason.
+  assertTransactionVisible(transaction);
+
+  const context = getContext();
+  if (context.authType === 'SERVICE') return;
+
+  if (getOrganizationId() === transaction.organizationId) {
+    throw RastaError.forbidden('The payer cannot refund its own transaction');
+  }
+
+  if (hasPlatformScope()) return;
+
+  if (transaction.status === 'DISPUTED') {
+    throw RastaError.forbidden(
+      'A disputed transaction is refunded only by a platform decision on the dispute',
+    );
+  }
+
+  const isPayee = getOrganizationId() === transaction.counterpartyOrganizationId;
+  const isAdmin = FINANCIAL_ADMIN_ROLES.some((role) => context.roles.includes(role));
+  if (isPayee && isAdmin && policy.payeeMayRefund) return;
+
+  throw RastaError.forbidden('You do not have permission to refund this transaction');
+}
+
+/**
  * Refuses a wallet that is not the caller's own.
  *
  * There is no "read another organization's wallet" path for a tenant, not even

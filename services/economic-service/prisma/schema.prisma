@@ -465,6 +465,10 @@ model Transaction {
   @@unique([organizationId, idempotencyKey])
   /// "What have I not settled yet" and "this order's transaction".
   @@index([organizationId, status, occurredAt(sort: Desc)])
+  /// Also UNIQUE where both source columns are set — `ux_transaction_source_fact`,
+  /// a partial index Prisma cannot express, written in migration
+  /// `20260924120000_transaction_source_fact_unique`. One obligation per
+  /// business fact per payer: two approvals of one repair cannot both settle.
   @@index([organizationId, sourceType, sourceReference])
   @@index([counterpartyOrganizationId, status])
   @@map("transaction")

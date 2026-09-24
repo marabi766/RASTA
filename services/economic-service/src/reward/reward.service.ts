@@ -16,6 +16,7 @@ import {
 } from './rule-engine';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor, parseMinor } from '../shared/money';
+import { nextValidTo } from '../shared/rule-validity';
 import { rewardsGrantedTotal, rewardsSkippedTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
@@ -422,42 +423,84 @@ export class RewardService {
       updatedBy: actor,
     };
 
-    return runUnscoped(
-      'a reward rule may be platform-wide, which no tenant scope can express',
-      () => this.prisma.client.rewardRule.create({ data }),
-    );
+    return this.prisma.transaction(async (tx) => {
+      const created = await runUnscoped(
+        'a reward rule may be platform-wide, which no tenant scope can express',
+        () => tx.rewardRule.create({ data }),
+      );
+      await this.recordRuleChange(tx, { rule: created, before: null, actor });
+      return created;
+    });
   }
 
+  /**
+   * Closes, deactivates or relabels a reward rule — and nothing else.
+   *
+   * `points`, `creditPerPointMinor` and `periodCap` are the rule's terms and
+   * are fixed once it exists: a grant reads them when the triggering event is
+   * processed, so an edit reached back to occurrences that had not been
+   * granted yet. A new term is a new rule — close this one and create the
+   * next from the same instant — which is also how docs/24 Q-09 is answered
+   * when it is (ADR-033 § 3, as amended). The window only moves forward
+   * ({@link nextValidTo}).
+   */
   async updateRule(id: string, dto: UpdateRewardRuleDto) {
     const actor = getContext().userId ?? SERVICE_NAME;
 
-    const existing = await runUnscoped('reward rules may be platform-wide', () =>
-      this.prisma.client.rewardRule.findUnique({ where: { id } }),
-    );
-    if (!existing) throw RastaError.notFound('RewardRule', id);
+    return this.prisma.transaction(async (tx) => {
+      const locked = await runUnscoped(
+        'reward rules may be platform-wide',
+        () =>
+          tx.$queryRaw<{ id: string }[]>`SELECT id FROM reward_rule WHERE id = ${id} FOR UPDATE`,
+      );
+      if (locked.length === 0) throw RastaError.notFound('RewardRule', id);
 
-    return runUnscoped('reward rules may be platform-wide', () =>
-      this.prisma.client.rewardRule.update({
-        where: { id },
-        data: {
-          ...(dto.points !== undefined ? { points: dto.points } : {}),
-          ...(dto.creditPerPointMinor !== undefined
-            ? {
-                creditPerPointMinor: dto.creditPerPointMinor
-                  ? parseMinor(dto.creditPerPointMinor, 'creditPerPointMinor')
-                  : null,
-              }
-            : {}),
-          ...(dto.periodCap !== undefined ? { periodCap: dto.periodCap } : {}),
-          ...(dto.status !== undefined ? { status: dto.status } : {}),
-          ...(dto.validTo !== undefined
-            ? { validTo: dto.validTo ? new Date(dto.validTo) : null }
-            : {}),
-          ...(dto.label !== undefined ? { label: dto.label } : {}),
-          updatedBy: actor,
-        },
-      }),
-    );
+      const existing = await runUnscoped('reward rules may be platform-wide', () =>
+        tx.rewardRule.findUniqueOrThrow({ where: { id } }),
+      );
+
+      const updated = await runUnscoped('reward rules may be platform-wide', () =>
+        tx.rewardRule.update({
+          where: { id },
+          data: {
+            ...(dto.status !== undefined ? { status: dto.status } : {}),
+            ...(dto.validTo !== undefined
+              ? { validTo: nextValidTo(existing, dto.validTo, new Date()) }
+              : {}),
+            ...(dto.label !== undefined ? { label: dto.label } : {}),
+            updatedBy: actor,
+          },
+        }),
+      );
+
+      await this.recordRuleChange(tx, { rule: updated, before: existing, actor });
+      return updated;
+    });
+  }
+
+  /**
+   * The audit record of a reward rule change (`REWARD_RULE_CHANGED`), in the
+   * same transaction as the change. The envelope tenant is the rule's own
+   * organization, or the one the administrator acted from for a platform-wide
+   * rule.
+   */
+  private async recordRuleChange(
+    tx: ExtendedPrismaClient,
+    input: { rule: RewardRuleRow; before: RewardRuleRow | null; actor: string },
+  ): Promise<void> {
+    await this.ledger.enqueue(tx, {
+      eventName: ECONOMIC_EVENTS.REWARD_RULE_CHANGED,
+      aggregateId: input.rule.id,
+      organizationId: input.rule.organizationId ?? getOrganizationId(),
+      payload: {
+        ruleId: input.rule.id,
+        change: input.before ? 'UPDATED' : 'CREATED',
+        changedBy: input.actor,
+        changedAt: input.rule.updatedAt.toISOString(),
+        before: input.before ? rewardRuleTerms(input.before) : null,
+        after: rewardRuleTerms(input.rule),
+      },
+    });
   }
 
   listRules(triggerEvent?: string) {
@@ -520,3 +563,24 @@ export type GrantOutcome =
       levelChangedTo: string | null;
     }
   | { kind: 'SKIPPED'; reason: string; ruleId: string };
+
+type RewardRuleRow = Prisma.RewardRuleGetPayload<Record<string, never>>;
+
+/** A reward rule's terms as the change record carries them. */
+function rewardRuleTerms(rule: RewardRuleRow) {
+  return {
+    organizationId: rule.organizationId,
+    triggerEvent: rule.triggerEvent,
+    rewardType: rule.rewardType,
+    condition: (rule.condition ?? null) as Record<string, unknown> | null,
+    points: rule.points,
+    creditPerPointMinor:
+      rule.creditPerPointMinor === null ? null : formatMinor(rule.creditPerPointMinor),
+    periodCap: rule.periodCap,
+    periodType: rule.periodType,
+    validFrom: rule.validFrom.toISOString(),
+    validTo: rule.validTo ? rule.validTo.toISOString() : null,
+    status: rule.status,
+    label: rule.label,
+  };
+}

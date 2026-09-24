@@ -49,16 +49,26 @@ export const createCommissionRuleSchema = z
 
 export type CreateCommissionRuleDto = z.infer<typeof createCommissionRuleSchema>;
 
+/**
+ * What may change on an existing rule: its end, its status, its label.
+ *
+ * **Not the rate**, and not the floor or ceiling. The rule engine selects a
+ * rule by when a transaction occurred and reads its terms when it settles, so
+ * an edited rate re-priced unsettled work retroactively. A new rate is a new
+ * rule — close this one, create the next — and `.strict()` answers any attempt
+ * to send `rateBasisPoints` here with a 400 rather than ignoring it.
+ */
 export const updateCommissionRuleSchema = z
   .object({
-    rateBasisPoints: z.number().int().min(0).max(10_000).optional(),
     status: z.enum(RULE_STATUSES).optional(),
     /**
      * Closing a rule is `validTo`, never a delete.
      *
      * A commission already charged references the rule that produced it, and
      * deleting it would make a historical charge unexplainable (docs/10 §
-     * 10.7). Nulling it reopens an indefinite rule.
+     * 10.7). Only forward: a close in the past, or moving the end of a rule
+     * that has already ended, is refused (`nextValidTo`). Nulling it makes a
+     * rule that is still in force indefinite again.
      */
     validTo: z.string().datetime().nullable().optional(),
     label: z.string().trim().max(200).optional(),
