@@ -97,6 +97,7 @@ function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harn
     findMembership: jest.fn(),
     findMembershipById: jest.fn(),
     listMembershipsForUser: jest.fn(async () => []),
+    lockUserProjection: jest.fn(async () => undefined),
     findOrganizationRefs: jest.fn(async () => []),
     listUsersInOrganization: jest.fn(),
     ...overrides,
@@ -608,8 +609,14 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
           data: expect.objectContaining({ activeOrganizationId: TEST_ORG_B }),
         }),
       );
-      // In the revoke's own transaction, so the two never disagree.
-      expect(h.repository.transaction).toHaveBeenCalledTimes(1);
+      // In the revoke's own transaction, so the two never disagree: the first
+      // transaction is the revoke, and the move lands before the projection's
+      // own transaction takes its lock.
+      expect(h.repository.transaction).toHaveBeenCalledTimes(2);
+      const lock = h.repository.lockUserProjection as unknown as jest.Mock;
+      expect(tx(h).user.update.mock.invocationCallOrder[0]).toBeLessThan(
+        lock.mock.invocationCallOrder[0]!,
+      );
     });
 
     it('clears it when no membership remains', async () => {

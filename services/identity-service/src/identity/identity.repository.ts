@@ -31,8 +31,25 @@ export class IdentityRepository {
     return this.prisma.client;
   }
 
-  transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
-    return this.prisma.transaction(fn);
+  transaction<T>(
+    fn: (tx: ExtendedPrismaClient) => Promise<T>,
+    options?: { maxWait?: number; timeout?: number },
+  ): Promise<T> {
+    return this.prisma.transaction(fn, options);
+  }
+
+  /**
+   * Serialises every Keycloak projection of one user, inside the caller's
+   * transaction (ADR-060 § 5).
+   *
+   * A transaction-scoped advisory lock keyed on the user id, held until the
+   * projection's transaction ends. Taken *before* the projection reads the
+   * user's rows, so whichever projection writes last also read last — under
+   * READ COMMITTED it sees every change committed before it took the lock.
+   * The key is a bound parameter hashed by PostgreSQL; nothing is interpolated.
+   */
+  async lockUserProjection(tx: ExtendedPrismaClient, userId: string): Promise<void> {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`keycloak-projection:${userId}`}, 0))`;
   }
 
   /**
@@ -233,9 +250,10 @@ export class IdentityRepository {
     return rows.map((row) => row.id);
   }
 
-  async listMembershipsForUser(userId: string) {
+  async listMembershipsForUser(userId: string, tx?: ExtendedPrismaClient) {
+    const db = tx ?? this.client;
     return runUnscoped('a user must be able to see every organization they belong to', () =>
-      this.client.membership.findMany({
+      db.membership.findMany({
         where: { userId, deletedAt: null, status: { not: 'REVOKED' } },
         orderBy: { createdAt: 'asc' },
       }),

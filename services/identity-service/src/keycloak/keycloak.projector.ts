@@ -14,6 +14,9 @@ import {
   type KeycloakProjectionTrigger,
 } from '../observability/keycloak-projection.metrics';
 
+/** Above the Keycloak client's worst case: three calls, each bounded at 10 s. */
+const PROJECTION_TRANSACTION_TIMEOUT_MS = 35_000;
+
 export interface ReconcileFinding {
   userId: string;
   divergent: PlatformAttributeName[];
@@ -36,7 +39,10 @@ export interface ReconcileFinding {
  * already committed, so it must not fail the request. The durable path is the
  * identity outbox: the same change enqueued `MEMBERSHIP_*` or `ROLE_*` in its
  * transaction, and `KeycloakProjectionConsumer` projects the user again when
- * it arrives. Whichever lands last wins, and both write the same thing.
+ * it arrives. Projections of one user are serialised by a per-user database
+ * lock taken before the rows are read (see {@link write}), so whichever lands
+ * last also read last: Keycloak never ends on an older snapshot than the one
+ * before it.
  */
 @Injectable()
 export class KeycloakProjector {
@@ -106,14 +112,42 @@ export class KeycloakProjector {
     return { userId, divergent: divergentAttributes(actual, expected.attributes) };
   }
 
+  /**
+   * Read the rows and write Keycloak **under one per-user lock**.
+   *
+   * Without it, two projections of one user — the request path and an event,
+   * or two events on different partitions — could interleave as read(old),
+   * read(new), write(new), write(old), leaving Keycloak on the older snapshot
+   * with no event left to correct it. Holding the lock from before the read
+   * until after the write makes every write carry a snapshot at least as new
+   * as the one before it, and the last write — which starts after the last
+   * change committed — carries the newest. The lock is a database lock held by
+   * this transaction, so it serialises across replicas and dies with the
+   * connection.
+   *
+   * The transaction outlives the Keycloak calls (three at most — token, GET,
+   * PUT — each bounded at 10 s by the client), so its timeout is set above
+   * that. A projection that cannot get the lock in time fails and is retried
+   * by its event, as any other failed projection is.
+   */
   private async write(userId: string): Promise<KeycloakProjectionOutcome> {
     if (!this.keycloak.enabled) return KEYCLOAK_PROJECTION_OUTCOMES.DISABLED;
-    const expected = await this.expectedAttributes(userId);
-    if (!expected) return KEYCLOAK_PROJECTION_OUTCOMES.NO_USER;
-    // A registration not yet approved has no account: nothing to project into.
-    if (!expected.keycloakId) return KEYCLOAK_PROJECTION_OUTCOMES.NO_ACCOUNT;
-    await this.keycloak.replacePlatformAttributes(expected.keycloakId, expected.attributes);
-    return KEYCLOAK_PROJECTION_OUTCOMES.PROJECTED;
+    return this.repository.transaction(
+      async (tx) => {
+        await this.repository.lockUserProjection(tx, userId);
+        const user = await this.repository.findUserById(userId, tx);
+        if (!user) return KEYCLOAK_PROJECTION_OUTCOMES.NO_USER;
+        // A registration not yet approved has no account: nothing to project into.
+        if (!user.keycloakId) return KEYCLOAK_PROJECTION_OUTCOMES.NO_ACCOUNT;
+        const memberships = await this.repository.listMembershipsForUser(userId, tx);
+        await this.keycloak.replacePlatformAttributes(
+          user.keycloakId,
+          platformAttributesFor(user, memberships, new Date()),
+        );
+        return KEYCLOAK_PROJECTION_OUTCOMES.PROJECTED;
+      },
+      { maxWait: 10_000, timeout: PROJECTION_TRANSACTION_TIMEOUT_MS },
+    );
   }
 }
 
