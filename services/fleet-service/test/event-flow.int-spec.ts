@@ -1,5 +1,6 @@
 import { Kafka, type Consumer } from 'kafkajs';
-import { OutboxRelay, type EventEnvelope } from '@rasta/nest-common';
+import type { EventEnvelope } from '@rasta/contracts';
+import { OutboxRelay } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
@@ -109,7 +110,13 @@ describeWithKafka('fleet event flow over Kafka', () => {
 
     await asActor({ organizationId: org.a }, async () => {
       await prisma.client.driver.create({
-        data: { id: driverId, userId: `USR-${driverId}`, createdBy: 'ITEST', updatedBy: 'ITEST' },
+        data: {
+          organizationId: org.a,
+          id: driverId,
+          userId: `USR-${driverId}`,
+          createdBy: 'ITEST',
+          updatedBy: 'ITEST',
+        },
       });
       await prisma.client.assetRef.create({
         data: {
@@ -300,7 +307,7 @@ describeWithKafka('fleet event flow over Kafka', () => {
       const eventId = id('EVT');
       const freshAsset = id('AST');
 
-      const event: EventEnvelope = {
+      const event: EventEnvelope<Record<string, unknown>> = {
         eventId,
         eventName: 'ASSET_STATUS_CHANGED',
         eventVersion: 1,
