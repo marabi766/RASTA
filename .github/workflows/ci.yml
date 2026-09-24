@@ -18,6 +18,12 @@ env:
   # refuses to run when the two disagree, which is how every run before
   # 2026-08-27 died before `pnpm install` ever started (D-005).
   PNPM_VERSION: '11.22.0'
+  # Object storage for document-service. Chainguard's signed builds, pinned by
+  # multi-arch index digest: MinIO's own images stopped being publicly
+  # pullable on 2026-09-24 (quay.io answers 401; Docker Hub's minio/minio is
+  # gone). docker-compose.yml pins the same digests.
+  MINIO_IMAGE: 'cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1'
+  MC_IMAGE: 'cgr.dev/chainguard/minio-client@sha256:b8b144ab34694ecea25aa352c4be9de4c26ee2a02701521dce02ee5593c57338'
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -683,9 +689,17 @@ jobs:
         # inspection on bytes read back from storage, an attachment
         # disposition set at the storage boundary — and none of that exists in
         # a mock. A suite that stubbed S3 would prove the mock.
+        #
+        # The Chainguard images (env above) run as uid 65532 with no shell,
+        # hence the tmpfs for /data, `mc -C` for a writable config dir, and
+        # MC_HOST_<alias> instead of `mc alias set` inside `sh -c`.
         run: |
           set -euo pipefail
-          docker run -d --name rasta-ci-minio --network host             -e MINIO_ROOT_USER=rasta_minio_admin             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password             quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data --address ':9000'
+          docker run -d --name rasta-ci-minio --network host \
+            --tmpfs /data:uid=65532,gid=65532 \
+            -e MINIO_ROOT_USER=rasta_minio_admin \
+            -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
+            "$MINIO_IMAGE" server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
@@ -699,11 +713,13 @@ jobs:
           # Private bucket, explicitly. ADR-014 requires it: every read goes
           # through a signed URL, and an anonymous policy here would make the
           # download tests pass for the wrong reason.
-          docker run --rm --network host --entrypoint sh             quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z -c "
-              mc alias set rasta http://localhost:9000 rasta_minio_admin rasta_minio_ci_password
-              mc mb --ignore-existing rasta/rasta-documents
-              mc anonymous set none rasta/rasta-documents
-            "
+          mc() {
+            docker run --rm --network host \
+              -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
+              "$MC_IMAGE" -C /tmp/.mc "$@"
+          }
+          mc mb --ignore-existing rasta/rasta-documents
+          mc anonymous set none rasta/rasta-documents
 
       - name: Start ClamAV on a Unix socket
         # The production transport, proven here rather than only described.
@@ -1406,7 +1422,12 @@ jobs:
         # which is the step the whole ADR exists to make observable.
         run: |
           set -euo pipefail
-          docker run -d --name rasta-e2e-minio --network host             -e MINIO_ROOT_USER=rasta_minio_admin             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password             quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data --address ':9000'
+          # Same images and uid-65532 adjustments as the integration job.
+          docker run -d --name rasta-e2e-minio --network host \
+            --tmpfs /data:uid=65532,gid=65532 \
+            -e MINIO_ROOT_USER=rasta_minio_admin \
+            -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
+            "$MINIO_IMAGE" server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then break; fi
@@ -1414,11 +1435,13 @@ jobs:
           done
           curl -fsS http://localhost:9000/minio/health/live >/dev/null
 
-          docker run --rm --network host --entrypoint sh             quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z -c "
-              mc alias set rasta http://localhost:9000 rasta_minio_admin rasta_minio_ci_password
-              mc mb --ignore-existing rasta/rasta-documents
-              mc anonymous set none rasta/rasta-documents
-            "
+          mc() {
+            docker run --rm --network host \
+              -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
+              "$MC_IMAGE" -C /tmp/.mc "$@"
+          }
+          mc mb --ignore-existing rasta/rasta-documents
+          mc anonymous set none rasta/rasta-documents
 
       - name: Start ClamAV on a Unix socket
         # The document scenario ends with a downloadable file, and only a

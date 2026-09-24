@@ -185,4 +185,22 @@ export interface OrderView {
   failureReason: string | null;
   createdAt: string;
   placedBy: string;
+  /**
+   * The commands **this caller** may issue on this order right now
+   * (`order-actions.ts`).
+   *
+   * Per caller, not per order: the same record answers differently to its
+   * buyer, its supplier and a platform operator, which is what lets a client
+   * draw a stepper showing what this person may do next rather than every
+   * transition that exists.
+   *
+   * It is not a permission check and must not be treated as one — every
+   * command re-checks its own transition and its own party rule when it runs.
+   * It exists because the real precondition of each command is spread across
+   * the transition table, the per-command narrowing and `access.ts`, so a
+   * client deriving it would get it wrong: reading the table alone concludes a
+   * buyer may confirm receipt on a **disputed** order, which `confirmReceipt`
+   * refuses.
+   */
+  availableActions: string[];
 }

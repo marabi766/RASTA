@@ -7,6 +7,7 @@ import {
   assertBuyer,
   assertDisputeResolver,
   assertOrderVisible,
+  viewerParties,
   assertSupplier,
 } from '../access/access';
 import { ENV } from '../tokens';
@@ -20,6 +21,7 @@ import {
 } from '../observability/metrics';
 import { OrderRepository, type LockedOrderRow } from './order.repository';
 import { assertTransition } from './state-machine';
+import { availableOrderActions } from './order-actions';
 import { priceOrder, type PriceableOffer } from './pricing';
 import type {
   CancelOrderDto,
@@ -492,6 +494,15 @@ export class OrderService {
   /** The buyer cancels. Compensation is the saga's job, not this method's. */
   async cancel(orderId: string, dto: CancelOrderDto): Promise<OrderView> {
     return this.transition(orderId, 'CANCELLING', {
+      // Narrower than the transition table, for the same reason
+      // `confirmReceipt` is. `ORDER_TRANSITIONS` has `DISPUTED → CANCELLING`
+      // because a platform operator's `ResolveDispute(REFUND)` travels it
+      // (ADR-038). Without this list the buyer's own `CancelOrder` travelled
+      // it too: the party who raised the dispute could end it by cancelling,
+      // the saga would refund the escrow, and a supplier who had delivered
+      // would go unpaid. Leaving a dispute is the operator's decision, whichever
+      // exit it takes.
+      from: ['PENDING', 'FUNDS_HELD', 'CONFIRMED', 'AWAITING_RECEIPT_CONFIRMATION'],
       authorise: (order) => assertBuyer(order, 'cancel this order'),
       apply: async (tx, order) => {
         await tx.order.update({
@@ -520,6 +531,8 @@ export class OrderService {
 
     return this.prisma.transaction(async (tx) => {
       const order = await this.repository.lockOrder(tx, orderId);
+      // As in `transition()`: a stranger learns nothing, a party learns why.
+      assertOrderVisible(order);
       assertBuyer(order, 'review this order');
 
       if (order.status !== 'COMPLETED') {
@@ -806,6 +819,16 @@ export class OrderService {
     const view = await this.prisma.transaction(async (tx) => {
       const order = await this.repository.lockOrder(tx, orderId);
 
+      // Visibility before the party check, as `get()` does. `lockOrder` is
+      // unscoped — the supplier must be able to reach the buyer's row — so
+      // without this an organization that is neither party reached
+      // `assertSupplier`/`assertBuyer` and was refused with **403**: an answer
+      // that confirms the order exists, and whose message ("only the supplying
+      // organization may…") says it has one. The controller promises 404 to a
+      // stranger for exactly that reason. Either real party still passes here
+      // and gets the 403 below when they try the other side's command — they
+      // can already see the order, so 404 would be a lie to them.
+      assertOrderVisible(order);
       handlers.authorise(order);
 
       if (handlers.from && !handlers.from.includes(order.status)) {
@@ -883,7 +906,10 @@ export class OrderService {
 
   private async load(tx: ExtendedPrismaClient, orderId: string): Promise<OrderView> {
     const row = await runUnscoped('reading back the order just written in this transaction', () =>
-      tx.order.findUnique({ where: { id: orderId }, include: { lines: true } }),
+      tx.order.findUnique({
+        where: { id: orderId },
+        include: { lines: true, review: { select: { id: true } } },
+      }),
     );
     if (!row) throw RastaError.notFound('Order', orderId);
     return toView(row);
@@ -920,6 +946,17 @@ type OrderRow = {
     currency: string;
     offerVersion: number;
   }[];
+  /**
+   * Whether this order has been reviewed — `Review.orderId` is unique, so at
+   * most one. Selected by **every** path that builds a view (both reads and
+   * `load`, the read-back after a command), because `availableActions` offers
+   * `REVIEW` only when it is absent: a path that forgot to select it would
+   * read `undefined` as "no review" and offer a second one the unique
+   * constraint then refuses. **Required** in this type for exactly that
+   * reason: a query that forgets the include no longer typechecks, instead of
+   * quietly offering a second review.
+   */
+  review: { id: string } | null;
 };
 
 export function toView(row: OrderRow): OrderView {
@@ -955,5 +992,15 @@ export function toView(row: OrderRow): OrderView {
     failureReason: row.failureReason,
     createdAt: row.createdAt.toISOString(),
     placedBy: row.placedBy,
+    // Computed per caller, from the request context — so the same order
+    // answers differently to its buyer, its supplier and an operator, which
+    // is the whole point. Not a permission check: every command re-checks its
+    // own transition and its own `assert*` when it runs.
+    availableActions: [
+      ...availableOrderActions(
+        { status: row.status, hasReview: row.review != null },
+        viewerParties(row),
+      ),
+    ],
   };
 }
