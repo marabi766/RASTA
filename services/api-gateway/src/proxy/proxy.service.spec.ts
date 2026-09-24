@@ -51,6 +51,7 @@ async function forwardAndCaptureHeaders(context: {
         correlationId: 'COR_1',
         requestId: 'REQ_1',
         startedAt: Date.now(),
+        organizationIds: [],
         ...context,
       },
       () =>
@@ -142,6 +143,7 @@ async function forwardAndCaptureBody(
         roles: ['ORGANIZATION_ADMIN'],
         authType: 'USER',
         userId: 'USR_1',
+        organizationIds: [],
       },
       () =>
         proxy().forward({
@@ -150,7 +152,7 @@ async function forwardAndCaptureBody(
           path: '/v1/users/USR_1',
           query: '',
           headers: { authorization: 'Bearer caller-token' },
-          ...(body !== undefined ? { body } : {}),
+          body,
         }),
     );
   } finally {
