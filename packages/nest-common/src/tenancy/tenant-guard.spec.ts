@@ -17,6 +17,7 @@ function contextFor(organizationId?: string): RequestContext {
     requestId: '01JBQ8Z4K7M2N5P8R1T3V6X9Y3',
     organizationId,
     roles: ['FLEET_MANAGER'],
+    organizationIds: [],
     authType: 'USER',
     startedAt: 0,
   };

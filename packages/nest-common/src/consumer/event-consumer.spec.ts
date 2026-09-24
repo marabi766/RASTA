@@ -37,7 +37,6 @@ describe('EventConsumer delivery metadata', () => {
     log: () => undefined,
     warn: () => undefined,
     error: () => undefined,
-    debug: () => undefined,
   };
 
   const options: EventConsumerOptions = {

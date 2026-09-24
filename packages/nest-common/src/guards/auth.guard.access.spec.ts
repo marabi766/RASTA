@@ -100,6 +100,7 @@ async function activate(
       correlationId: 'COR_1',
       requestId: 'REQ_1',
       roles: [],
+      organizationIds: [],
       authType: 'ANONYMOUS',
       startedAt: Date.now(),
     },
