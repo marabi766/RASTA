@@ -10,7 +10,7 @@
     "dev": "node --import @swc-node/register/esm-register --watch --env-file=../../.env src/main.ts",
     "start": "node --env-file=../../.env dist/main.js",
     "lint": "eslint src",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "jest --selectProjects unit --passWithNoTests",
     "test:unit": "jest --selectProjects unit --passWithNoTests",
     "test:integration": "jest --selectProjects integration --passWithNoTests --runInBand"
