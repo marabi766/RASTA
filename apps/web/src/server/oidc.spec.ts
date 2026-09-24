@@ -181,6 +181,24 @@ describe('refreshing', () => {
 describe('verifying the id token', () => {
   const nonce = randomBytes(8).toString('hex');
 
+  it('refuses a token with no expiry, which would otherwise verify forever', async () => {
+    // jose checks `exp` only when it is present. Keycloak always sets it, so
+    // a token without one did not come from the realm.
+    const token = await new SignJWT({ sub: 'USR_1', nonce })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuer(ISSUER)
+      .setAudience(CLIENT)
+      .sign(KEY);
+
+    await expect(
+      verifyIdToken(
+        token,
+        { issuer: ISSUER, clientId: CLIENT, jwksUri: endpoints.jwks, nonce },
+        KEY,
+      ),
+    ).rejects.toMatchObject({ reason: 'ID_TOKEN_REJECTED' });
+  });
+
   it('accepts a token for this client, this realm and this attempt', async () => {
     const token = await idToken({ sub: 'USR_1', nonce, preferred_username: 'dehyar' });
     await expect(
