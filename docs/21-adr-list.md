@@ -71,6 +71,7 @@
 | [057](adr/ADR-057-audit-external-anchoring-and-immutable-archive.md)  | لنگرگذاری خارجی و بایگانی تغییرناپذیر Audit      | **Proposed** | KMS/HSM، WORM، مقاومت مستقل در برابر دست‌کاری                |
 | [058](adr/ADR-058-web-portal-placement-and-design-system-boundary.md) | جای پورتال وب و مرز Design System                | **Accepted** | `apps/web` روی `main`؛ مرز استخراج به `packages/ui`          |
 | [059](adr/ADR-059-web-session-and-token-custody.md)                   | نگهداشت توکن در پورتال — نشست سمت سرور           | **Accepted** | توکن هرگز در مرورگر نیست؛ انحراف ثبت‌شده از `docs/16 § ۱۶٫۱` |
+| [060](adr/ADR-060-tenant-bound-roles.md)                              | نقش به سازمان گره می‌خورد، نه به کاربر           | Proposed     | بستن نقش‌های سراسری Realm؛ Q-62                              |
 
 ---
 
