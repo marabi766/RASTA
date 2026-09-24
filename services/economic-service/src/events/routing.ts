@@ -43,6 +43,8 @@ export const AGGREGATE_OF = {
   REWARD_LEVEL_CHANGED: 'RewardBalance',
   SETTLEMENT_COMPLETED: 'Settlement',
   JOURNAL_POSTED: 'Journal',
+  COMMISSION_RULE_CHANGED: 'CommissionRule',
+  REWARD_RULE_CHANGED: 'RewardRule',
 } as const satisfies Record<EconomicEventName, string>;
 
 /**
@@ -60,6 +62,7 @@ export const PARTITION_SCOPES = {
   PAYMENT_INTENT: 'PAYMENT_INTENT',
   REWARD: 'REWARD',
   REWARD_SUBJECT: 'REWARD_SUBJECT',
+  RULE: 'RULE',
 } as const;
 
 export type PartitionScope = (typeof PARTITION_SCOPES)[keyof typeof PARTITION_SCOPES];
@@ -135,6 +138,14 @@ export const PARTITION_KEY_POLICY: { [N in EconomicEventName]: PartitionRule<N> 
     scope: 'REWARD_SUBJECT',
     key: `${payload.organizationId}:${payload.userId}`,
   }),
+
+  /**
+   * A rule's history is one ordered stream: its creation, then each close,
+   * deactivation or relabel in the order it was made. Keyed by the rule, so an
+   * auditor replaying it never sees a rule closed before it existed.
+   */
+  COMMISSION_RULE_CHANGED: (payload) => ({ scope: 'RULE', key: payload.ruleId }),
+  REWARD_RULE_CHANGED: (payload) => ({ scope: 'RULE', key: payload.ruleId }),
 };
 
 /**
