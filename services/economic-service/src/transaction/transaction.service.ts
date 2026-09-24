@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
-import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
+import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { WalletRepository } from '../wallet/wallet.repository';
@@ -339,13 +339,24 @@ export class TransactionService {
 
         const hold = await this.walletRepository.findActiveHold(tx, wallet.id, transactionId);
         if (hold) {
-          await this.wallets.refundHold(tx, {
-            wallet: locked,
-            holdId: hold.id,
-            transactionId,
-            note: reason,
-            resolvedBy: actor,
-          });
+          // The refund journal is the payer's — it moves the payer's escrow back
+          // into the payer's wallet — but the caller may be another party: the
+          // payee, a platform administrator or the order saga. The journal
+          // header is tenant-scoped (`LedgerRepository.createJournal`), so
+          // without this crossing any refund not asked for by the payer itself
+          // was refused as an implicit cross-tenant write and surfaced as a 500.
+          // The authority to make it was decided above, under the row lock.
+          await runUnscoped(
+            'a refund posts the payer journal on the authority of another party to the transaction',
+            () =>
+              this.wallets.refundHold(tx, {
+                wallet: locked,
+                holdId: hold.id,
+                transactionId,
+                note: reason,
+                resolvedBy: actor,
+              }),
+          );
         }
 
         const moved = await this.repository.transition(

@@ -1,6 +1,6 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
-import { admin, apiTenant, auditor, startApi, type ApiHarness } from './api-helpers';
+import { admin, apiTenant, auditor, platformAdmin, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id } from './helpers';
 
 /**
@@ -379,6 +379,30 @@ describe('transaction and settlement API', () => {
       .set('authorization', asPayer())
       .set('idempotency-key', id('api-txn-refund'))
       .send({ reason: 'the order was cancelled before dispatch' })
+      .expect(200);
+    expect(refunded.body.status).toBe('REFUNDED');
+
+    const after = await request(http).get('/v1/wallets/me').set('authorization', asPayer());
+    expect(BigInt(after.body.availableBalanceMinor)).toBe(before);
+  });
+
+  it('refunds for a platform administrator acting from another organization', async () => {
+    // Regression: the refund journal is the payer's, and its header is
+    // tenant-scoped. Asked for by anyone but the payer, the write was refused
+    // as an implicit cross-tenant insert and the caller got a 500 — so the
+    // platform's documented ability to unstick a transaction never worked.
+    const wallet = await request(http).get('/v1/wallets/me').set('authorization', asPayer());
+    const before = BigInt(wallet.body.availableBalanceMinor);
+
+    const created = await createTransaction({ grossAmountMinor: '3500', holdFunds: true }).expect(
+      201,
+    );
+
+    const refunded = await request(http)
+      .post(`/v1/transactions/${created.body.id}/refund`)
+      .set('authorization', `Bearer ${platformAdmin()}`)
+      .set('idempotency-key', id('api-txn-platform-refund'))
+      .send({ reason: 'returned by a platform operator' })
       .expect(200);
     expect(refunded.body.status).toBe('REFUNDED');
 
