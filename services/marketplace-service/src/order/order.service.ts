@@ -522,6 +522,8 @@ export class OrderService {
 
     return this.prisma.transaction(async (tx) => {
       const order = await this.repository.lockOrder(tx, orderId);
+      // As in `transition()`: a stranger learns nothing, a party learns why.
+      assertOrderVisible(order);
       assertBuyer(order, 'review this order');
 
       if (order.status !== 'COMPLETED') {
@@ -808,6 +810,16 @@ export class OrderService {
     const view = await this.prisma.transaction(async (tx) => {
       const order = await this.repository.lockOrder(tx, orderId);
 
+      // Visibility before the party check, as `get()` does. `lockOrder` is
+      // unscoped — the supplier must be able to reach the buyer's row — so
+      // without this an organization that is neither party reached
+      // `assertSupplier`/`assertBuyer` and was refused with **403**: an answer
+      // that confirms the order exists, and whose message ("only the supplying
+      // organization may…") says it has one. The controller promises 404 to a
+      // stranger for exactly that reason. Either real party still passes here
+      // and gets the 403 below when they try the other side's command — they
+      // can already see the order, so 404 would be a lie to them.
+      assertOrderVisible(order);
       handlers.authorise(order);
 
       if (handlers.from && !handlers.from.includes(order.status)) {
@@ -885,7 +897,10 @@ export class OrderService {
 
   private async load(tx: ExtendedPrismaClient, orderId: string): Promise<OrderView> {
     const row = await runUnscoped('reading back the order just written in this transaction', () =>
-      tx.order.findUnique({ where: { id: orderId }, include: { lines: true } }),
+      tx.order.findUnique({
+        where: { id: orderId },
+        include: { lines: true, review: { select: { id: true } } },
+      }),
     );
     if (!row) throw RastaError.notFound('Order', orderId);
     return toView(row);
@@ -923,12 +938,16 @@ type OrderRow = {
     offerVersion: number;
   }[];
   /**
-   * Present only on the read paths, which select it. A command's own return
-   * does not, and `undefined` there is read as "not known to exist" — the
-   * conservative direction, since the alternative is offering a second review
-   * the unique constraint would refuse.
+   * Whether this order has been reviewed — `Review.orderId` is unique, so at
+   * most one. Selected by **every** path that builds a view (both reads and
+   * `load`, the read-back after a command), because `availableActions` offers
+   * `REVIEW` only when it is absent: a path that forgot to select it would
+   * read `undefined` as "no review" and offer a second one the unique
+   * constraint then refuses. **Required** in this type for exactly that
+   * reason: a query that forgets the include no longer typechecks, instead of
+   * quietly offering a second review.
    */
-  review?: { id: string } | null;
+  review: { id: string } | null;
 };
 
 export function toView(row: OrderRow): OrderView {
