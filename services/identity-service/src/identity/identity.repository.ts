@@ -197,6 +197,27 @@ export class IdentityRepository {
     );
   }
 
+  /**
+   * One page of users that have a Keycloak account, by id — the backfill and
+   * reconcile sweep (ADR-060 § 5). Platform-wide by nature: projection is not
+   * something a tenant does.
+   */
+  async listUserIdsWithAccount(after: string | null, take: number): Promise<string[]> {
+    const rows = await runUnscoped('the Keycloak projection sweep covers every account', () =>
+      this.client.user.findMany({
+        where: {
+          deletedAt: null,
+          keycloakId: { not: null },
+          ...(after ? { id: { gt: after } } : {}),
+        },
+        orderBy: { id: 'asc' },
+        take,
+        select: { id: true },
+      }),
+    );
+    return rows.map((row) => row.id);
+  }
+
   async listMembershipsForUser(userId: string) {
     return runUnscoped('a user must be able to see every organization they belong to', () =>
       this.client.membership.findMany({
