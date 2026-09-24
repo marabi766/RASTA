@@ -31,6 +31,7 @@ import { PrismaService } from './prisma/prisma.service';
 import { PrismaOutboxStore } from './outbox/outbox.store';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { KeycloakAdminClient } from './keycloak/keycloak.client';
+import { KeycloakProjector } from './keycloak/keycloak.projector';
 import { IdentityRepository } from './identity/identity.repository';
 import { IdentityService } from './identity/identity.service';
 import {
@@ -150,6 +151,7 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
 
     PrismaOutboxStore,
     IdentityRepository,
+    KeycloakProjector,
     IdentityService,
 
     // ------------------------------------------------------------------------
