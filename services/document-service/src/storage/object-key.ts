@@ -31,6 +31,32 @@ export function buildObjectKey(organizationId: string, documentClass: DocumentCl
 }
 
 /**
+ * The prefix a sealed object lives under.
+ *
+ * Distinct from {@link KEY_ROOT} in the one way that matters: no upload
+ * credential this service issues is ever signed for a key under this prefix
+ * — `createUploadUrl` is called in exactly one place (`requestUploadUrl`),
+ * always with a key from {@link buildObjectKey}. A signed PUT URL authorizes
+ * writes to the one key it was signed for, so a key nothing was ever signed
+ * for cannot be overwritten by any credential a client can hold, however
+ * long that credential's TTL runs.
+ */
+export const KEY_ROOT_SEALED = 'documents-sealed';
+
+/**
+ * A fresh, unguessable key for the bytes `finalize` just inspected.
+ *
+ * Called once per document, after the uploaded object has been read back and
+ * validated — never before, and never reused. The document row's `objectKey`
+ * becomes this key, not the one the upload credential could write to, which
+ * is what makes the served bytes and the scanned bytes provably the same
+ * object rather than merely the same object *key*.
+ */
+export function buildSealedObjectKey(organizationId: string, documentClass: DocumentClass): string {
+  return `${KEY_ROOT_SEALED}/${organizationId}/${documentClass}/${ulid()}`;
+}
+
+/**
  * Whether a key was issued for this organization.
  *
  * Compared against the whole segment rather than with `startsWith`, so
