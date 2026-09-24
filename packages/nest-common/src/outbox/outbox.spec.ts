@@ -18,6 +18,7 @@ const context: RequestContext = {
   organizationId: ORG_A,
   userId: 'USR_1',
   roles: ['PROCUREMENT_USER'],
+  organizationIds: [],
   authType: 'USER',
   startedAt: 0,
 };

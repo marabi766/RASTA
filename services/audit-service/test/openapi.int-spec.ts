@@ -81,7 +81,7 @@ describe('the published OpenAPI contract (real application)', () => {
   const operation = (path: string): Record<string, unknown> =>
     // JUSTIFIED-ANY is unnecessary here: the document type is structurally
     // `Record<string, PathItemObject>` and the `get` member is what is read.
-    (document.paths?.[path] as { get: Record<string, unknown> }).get;
+    (document.paths?.[path] as unknown as { get: Record<string, unknown> }).get;
 
   const parameters = (path: string): { name: string; in: string; required?: boolean }[] =>
     (operation(path).parameters ?? []) as { name: string; in: string; required?: boolean }[];

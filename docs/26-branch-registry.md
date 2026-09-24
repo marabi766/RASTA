@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۰۲ (2026-09-24) · **`main` در آن لحظه:** `cfdb7b0`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۰۲ (2026-09-24) · **`main` در آن لحظه:** `d7500be`
 
 ---
 
@@ -104,6 +104,7 @@
 | `feat/ci-portal-e2e-live-stack`          | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
 | `feat/web-asset-timeline`                | [#80](https://github.com/marabi766/RASTA/pull/80) | `62186cf`   |
 | `fix/identity-cross-tenant-provisioning` | [#81](https://github.com/marabi766/RASTA/pull/81) | `cfdb7b0`   |
+| `claude/upbeat-tesla-cenkph`             | [#82](https://github.com/marabi766/RASTA/pull/82) | `d7500be`   |
 | `feat/ci-portal-e2e-live-stack`          | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
 | `claude/quirky-curie-15d850`             | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
 | `fix/minio-quay-registry`                | —                                                 | پیش‌تر      |

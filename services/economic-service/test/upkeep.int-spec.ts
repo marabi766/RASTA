@@ -27,6 +27,7 @@ describe('upkeep', () => {
       organizationId: org.a,
       userId: 'USR-ITEST-UPKEEP',
       roles: ['ORGANIZATION_ADMIN'],
+      organizationIds: [],
       authType: 'USER',
       startedAt: Date.now(),
     };

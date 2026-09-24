@@ -9,7 +9,6 @@ import {
   cleanup,
   fundWallet,
   newPrisma,
-  silentLogger,
   tenants,
   testEnv,
   wire,

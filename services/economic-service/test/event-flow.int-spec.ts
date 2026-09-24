@@ -14,7 +14,6 @@ import {
   fundWallet,
   newPrisma,
   readBalances,
-  silentLogger,
   tenants,
   waitFor,
   wire,

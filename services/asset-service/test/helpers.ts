@@ -68,6 +68,7 @@ export function asActor<T>(options: ActorOptions, fn: () => Promise<T>): Promise
     organizationId: options.organizationId,
     userId: options.userId ?? `USR-ITEST-${ulid().slice(-8)}`,
     roles: options.roles ?? ['FLEET_MANAGER'],
+    organizationIds: [],
     authType: 'USER',
     startedAt: Date.now(),
   };

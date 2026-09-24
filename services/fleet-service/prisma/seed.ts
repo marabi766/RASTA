@@ -1,5 +1,5 @@
 /* eslint-disable no-console */
-import { PrismaClient } from '../src/generated/prisma';
+import { PrismaClient, type AssignmentEndReason } from '../src/generated/prisma';
 
 /**
  * Demo seed for fleet-service.
@@ -135,7 +135,7 @@ const ASSIGNMENTS = [
     startedAt: new Date(now - 2 * day),
     endedAt: null as Date | null,
     purpose: 'تسطیح معابر روستا',
-    endReason: null as string | null,
+    endReason: null as AssignmentEndReason | null,
   },
   {
     // Closed. Proves the exclusivity index is partial: the same driver could
@@ -147,7 +147,7 @@ const ASSIGNMENTS = [
     startedAt: new Date(now - 12 * day),
     endedAt: new Date(now - 9 * day),
     purpose: 'بارگیری مصالح',
-    endReason: 'COMPLETED' as string | null,
+    endReason: 'COMPLETED' as AssignmentEndReason | null,
   },
   {
     id: 'ASG-SEED-0003',
@@ -157,7 +157,7 @@ const ASSIGNMENTS = [
     startedAt: new Date(now - 1 * day),
     endedAt: null as Date | null,
     purpose: 'گودبرداری',
-    endReason: null as string | null,
+    endReason: null as AssignmentEndReason | null,
   },
 ];
 

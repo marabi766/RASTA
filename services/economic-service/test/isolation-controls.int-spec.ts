@@ -467,7 +467,7 @@ describe('the economic suite mutates only what it owns', () => {
       { label: 'null', ids: [null] },
     ];
 
-    for (const { label, ids } of cases) {
+    for (const { ids } of cases) {
       await expect(
         // JUSTIFIED-ANY: the point of the check is what happens when a caller
         // supplies something the signature already forbids, which is exactly

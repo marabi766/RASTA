@@ -40,6 +40,7 @@ describe('tenant isolation', () => {
       await asActor({ organizationId }, async () => {
         await prisma.client.driver.create({
           data: {
+            organizationId,
             id: driverId,
             userId: `USR-${driverId}`,
             createdBy: 'ITEST',
@@ -48,6 +49,7 @@ describe('tenant isolation', () => {
         });
         await prisma.client.assignment.create({
           data: {
+            organizationId,
             id: assignmentId,
             driverId,
             assetId,
@@ -57,6 +59,7 @@ describe('tenant isolation', () => {
         });
         await prisma.client.usageRecord.create({
           data: {
+            organizationId,
             id: usageId,
             assetId,
             driverId,

@@ -12,7 +12,7 @@
     "build": "tsc -p tsconfig.json",
     "clean": "rimraf dist .turbo",
     "lint": "eslint src",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "jest --passWithNoTests",
     "test:unit": "jest --passWithNoTests"
   },

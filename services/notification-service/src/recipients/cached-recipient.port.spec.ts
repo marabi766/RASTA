@@ -13,7 +13,7 @@ function counting(fail = false): RecipientPort & { calls: RecipientQuery[] } {
       calls.push(query);
       if (fail) throw new RecipientResolutionError('UNREACHABLE', 'down');
       return {
-        recipients: [{ userId: `USR_${calls.length}`, role: query.roles[0]! }],
+        recipients: [{ userId: `USR_${calls.length}`, role: query.roles[0]!, email: null }],
         truncated: false,
       };
     },
