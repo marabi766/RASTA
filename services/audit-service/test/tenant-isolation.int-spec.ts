@@ -524,7 +524,7 @@ describe('audit tenant isolation (real PostgreSQL)', () => {
     const seen: string[] = [];
     let cursor: string | null = null;
     for (let page = 0; page < 20; page += 1) {
-      const response = await request(server)
+      const response: request.Response = await request(server)
         .get('/v1/audit-events')
         .query({ ...window, limit: 1, organizationId: UNION_A, ...(cursor ? { cursor } : {}) })
         .set('Authorization', `Bearer ${unionAdmin(UNION_A)}`);
