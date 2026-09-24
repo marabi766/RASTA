@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RastaError, Roles, zodPipe } from '@rasta/nest-common';
-import { IdempotencyStore } from '../shared/idempotency';
+import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { OrderSagaClient } from '../temporal/saga.client';
 import { OrderService } from './order.service';
 import {
@@ -131,12 +131,10 @@ export class OrderController {
     description: 'The supplier accepts. Only the supplying organization may.',
   })
   async confirm(@Param('id') id: string, @Headers('idempotency-key') idempotencyKey?: string) {
-    const key = requireIdempotencyKey(idempotencyKey);
-    const order = await this.idempotency.run('POST /v1/orders/:id/confirm', key, { id }, 200, () =>
-      this.orders.confirm(id),
-    );
-    await this.saga.signal(id, 'orderConfirmed');
-    return order;
+    return this.command('POST /v1/orders/:id/confirm', id, idempotencyKey, undefined, {
+      work: () => this.orders.confirm(id),
+      signal: ['orderConfirmed'],
+    });
   }
 
   @Post(':id/fulfill')
@@ -153,12 +151,10 @@ export class OrderController {
     @Body(zodPipe(fulfillOrderSchema)) dto: FulfillOrderDto,
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const key = requireIdempotencyKey(idempotencyKey);
-    const order = await this.idempotency.run('POST /v1/orders/:id/fulfill', key, dto, 200, () =>
-      this.orders.fulfill(id, dto),
-    );
-    await this.saga.signal(id, 'orderFulfilled');
-    return order;
+    return this.command('POST /v1/orders/:id/fulfill', id, idempotencyKey, dto, {
+      work: () => this.orders.fulfill(id, dto),
+      signal: ['orderFulfilled'],
+    });
   }
 
   @Post(':id/confirm-receipt')
@@ -176,16 +172,10 @@ export class OrderController {
     @Body(zodPipe(confirmReceiptSchema)) dto: ConfirmReceiptDto,
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const key = requireIdempotencyKey(idempotencyKey);
-    const order = await this.idempotency.run(
-      'POST /v1/orders/:id/confirm-receipt',
-      key,
-      dto,
-      200,
-      () => this.orders.confirmReceipt(id, dto),
-    );
-    await this.saga.signal(id, 'receiptConfirmed');
-    return order;
+    return this.command('POST /v1/orders/:id/confirm-receipt', id, idempotencyKey, dto, {
+      work: () => this.orders.confirmReceipt(id, dto),
+      signal: ['receiptConfirmed'],
+    });
   }
 
   @Post(':id/disputes')
@@ -202,12 +192,10 @@ export class OrderController {
     @Body(zodPipe(raiseDisputeSchema)) dto: RaiseDisputeDto,
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const key = requireIdempotencyKey(idempotencyKey);
-    const order = await this.idempotency.run('POST /v1/orders/:id/disputes', key, dto, 200, () =>
-      this.orders.raiseDispute(id, dto),
-    );
-    await this.saga.signal(id, 'orderDisputed', dto.reason);
-    return order;
+    return this.command('POST /v1/orders/:id/disputes', id, idempotencyKey, dto, {
+      work: () => this.orders.raiseDispute(id, dto),
+      signal: ['orderDisputed', dto.reason],
+    });
   }
 
   @Post(':id/disputes/resolve')
@@ -224,16 +212,10 @@ export class OrderController {
     @Body(zodPipe(resolveDisputeSchema)) dto: ResolveDisputeDto,
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const key = requireIdempotencyKey(idempotencyKey);
-    const order = await this.idempotency.run(
-      'POST /v1/orders/:id/disputes/resolve',
-      key,
-      dto,
-      200,
-      () => this.orders.resolveDispute(id, dto),
-    );
-    await this.saga.signal(id, 'disputeResolved', dto.outcome);
-    return order;
+    return this.command('POST /v1/orders/:id/disputes/resolve', id, idempotencyKey, dto, {
+      work: () => this.orders.resolveDispute(id, dto),
+      signal: ['disputeResolved', dto.outcome],
+    });
   }
 
   @Post(':id/cancel')
@@ -250,12 +232,10 @@ export class OrderController {
     @Body(zodPipe(cancelOrderSchema)) dto: CancelOrderDto,
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const key = requireIdempotencyKey(idempotencyKey);
-    const order = await this.idempotency.run('POST /v1/orders/:id/cancel', key, dto, 200, () =>
-      this.orders.cancel(id, dto),
-    );
-    await this.saga.signal(id, 'orderCancelled', dto.reason);
-    return order;
+    return this.command('POST /v1/orders/:id/cancel', id, idempotencyKey, dto, {
+      work: () => this.orders.cancel(id, dto),
+      signal: ['orderCancelled', dto.reason],
+    });
   }
 
   @Post(':id/reviews')
@@ -273,9 +253,55 @@ export class OrderController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     const key = requireIdempotencyKey(idempotencyKey);
-    return this.idempotency.run('POST /v1/orders/:id/reviews', key, dto, 201, () =>
+    return this.idempotency.run('POST /v1/orders/:id/reviews', key, targeted(id, dto), 201, () =>
       this.orders.submitReview(id, dto),
     );
+  }
+
+  /**
+   * One command on one existing order: run it at most once, then tell the saga.
+   *
+   * Written once so that the two properties below cannot be forgotten by the
+   * next route. Both exist because of one defect: the key was stored under the
+   * route template and hashed over the body alone, and the saga was signalled
+   * unconditionally for the URL's id. A buyer who confirmed receipt on its own
+   * order X with key K could send the same K and body to
+   * `/orders/Y/confirm-receipt`, get X's stored response — so no party check
+   * and no transition check ever ran against Y — and still deliver
+   * `receiptConfirmed` to Y's saga, any tenant's. With `cancel` the saga's
+   * compensation then refunded Y's money while Y's order row never moved.
+   *
+   * **The order id is part of the request identity** ({@link targeted}). Key K
+   * reused on another order is the documented `409 IDEMPOTENCY_KEY_REUSED`,
+   * not a replay.
+   *
+   * **The saga is signalled only when the command ran in this request.** A
+   * replay ran nothing, so it has nothing to tell the saga: the original
+   * request already signalled, and signalling again would hand the workflow a
+   * command no check approved — a replayed dispute, arriving after the dispute
+   * was resolved, would halt a settlement the operator had released. A signal
+   * lost in the original request is the workflow's to recover, by re-reading
+   * the order on its timer (ADR-039), not a client retry's. The workflow does
+   * not do that re-read yet; it is tracked with the saga's other failure
+   * windows.
+   */
+  private async command<T>(
+    endpoint: string,
+    id: string,
+    idempotencyKey: string | undefined,
+    body: unknown,
+    step: { work: () => Promise<T>; signal: [name: string, ...args: unknown[]] },
+  ): Promise<T> {
+    const key = requireIdempotencyKey(idempotencyKey);
+    const { result, executed } = await this.idempotency.execute(
+      endpoint,
+      key,
+      targeted(id, body),
+      200,
+      step.work,
+    );
+    if (executed) await this.saga.signal(id, ...step.signal);
+    return result;
   }
 }
 
