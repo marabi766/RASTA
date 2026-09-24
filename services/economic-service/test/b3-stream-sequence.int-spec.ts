@@ -1,4 +1,4 @@
-import { asActor, cleanup, fundWallet, newPrisma, tenants, wire } from './helpers';
+import { cleanup, fundWallet, newPrisma, tenants, wire } from './helpers';
 import type { Wiring } from './helpers';
 import { runUnscoped } from '@rasta/nest-common';
 import type { PrismaService } from '../src/prisma/prisma.service';

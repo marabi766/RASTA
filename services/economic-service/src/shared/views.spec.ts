@@ -42,7 +42,11 @@ describe('toRewardBalanceView', () => {
   it('sends the lifetime credit as a string in minor units', () => {
     // A rial figure past Number.MAX_SAFE_INTEGER is truncated by the client's
     // own JSON parser, where no validation of ours can see it (ADR-022).
-    const view = toRewardBalanceView({ ...base, lifetimeCreditMinor: 9_007_199_254_740_993n });
+    const view = toRewardBalanceView({
+      ...base,
+      level: null,
+      lifetimeCreditMinor: 9_007_199_254_740_993n,
+    });
 
     expect(view.lifetimeCreditMinor).toBe('9007199254740993');
     expect(typeof view.lifetimeCreditMinor).toBe('string');

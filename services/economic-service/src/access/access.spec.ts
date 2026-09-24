@@ -30,6 +30,7 @@ function asUser(roles: string[], organizationId = 'ORG-A', userId = 'USR-1'): Re
     organizationId,
     userId,
     roles,
+    organizationIds: [],
     authType: 'USER',
     startedAt: Date.now(),
   };
@@ -41,6 +42,7 @@ function asService(callerService = 'marketplace-service'): RequestContext {
     requestId: 'req-1',
     organizationId: 'ORG-A',
     roles: ['SYSTEM'],
+    organizationIds: [],
     authType: 'SERVICE',
     callerService,
     startedAt: Date.now(),
@@ -182,6 +184,7 @@ describe('canCommitOrganization', () => {
       correlationId: 'corr-1',
       requestId: 'req-1',
       roles: ['SERVICE'],
+      organizationIds: [],
       authType: 'SERVICE',
       callerService: 'marketplace-service',
       startedAt: Date.now(),
@@ -200,6 +203,7 @@ describe('canCommitOrganization', () => {
       correlationId: 'corr-1',
       requestId: 'req-1',
       roles: ['ORGANIZATION_ADMIN'],
+      organizationIds: [],
       authType: 'USER',
       startedAt: Date.now(),
     };
