@@ -89,6 +89,18 @@ export const STATUS_TONES: Readonly<Record<string, StatusTone>> = {
 
   IN_MAINTENANCE: 'info',
   EVALUATION: 'info',
+  // Orders (EXP-002, `/orders`). The two that ask somebody to act are
+  // warnings: a delivered order waits on the buyer, and a disputed one has
+  // stopped settlement until an operator decides. The in-flight steps are
+  // informational; PENDING is neutral until funds are actually held.
+  AWAITING_RECEIPT_CONFIRMATION: 'warning',
+  DISPUTED: 'warning',
+  CANCELLING: 'warning',
+  FUNDS_HELD: 'info',
+  CONFIRMED: 'info',
+  RECEIPT_CONFIRMED: 'info',
+  SETTLING: 'info',
+  PENDING: 'neutral',
 };
 
 /** Default Persian wording. Presentation only; `label` overrides it. */
