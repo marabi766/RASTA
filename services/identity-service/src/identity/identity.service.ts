@@ -59,6 +59,13 @@ import type {
  * what makes it impossible for the platform to believe a role was granted
  * while no consumer was ever told (ADR-021).
  */
+/**
+ * Who may edit another person's profile. `SYSTEM_ADMIN` is listed for
+ * clarity; `RolesGuard` already treats it as satisfying any role check, but
+ * this check is made in the service, not by the guard.
+ */
+const PROFILE_ADMIN_ROLES: readonly string[] = ['ORGANIZATION_ADMIN', 'SYSTEM_ADMIN'];
+
 @Injectable()
 export class IdentityService {
   private readonly logger = new Logger(IdentityService.name);
@@ -133,7 +140,15 @@ export class IdentityService {
     // in the requesting organization. Checking the membership rather than the
     // user is what keeps this from leaking across tenants.
     const context = getContext();
-    if (context.organizationId && id !== context.userId) {
+    if (id !== context.userId) {
+      // Fails closed. This used to run only `if (context.organizationId)`, so a
+      // token that resolved no organization skipped the check entirely and
+      // `findUserById` — which is unscoped — answered for anybody on the
+      // platform. That state is reachable: the guard falls back to the IdP
+      // subject for an account with no platform claims (ADR-060 § Context).
+      // With no organization there is nothing a non-self read can be scoped
+      // to, so the answer is the one a user in another tenant gets.
+      if (!context.organizationId) throw RastaError.notFound('User', id);
       const membership = await this.repository.findMembership(id, context.organizationId);
       if (!membership) throw RastaError.notFound('User', id);
     }
@@ -282,6 +297,23 @@ export class IdentityService {
     const isSelf = id === context.userId;
 
     if (!isSelf) {
+      // Editing somebody else's profile is administering that person, which
+      // `docs/09` gives to `ORGANIZATION_ADMIN` ("مدیریت کاربران سازمان").
+      // Before this, the route had no `@Roles` and the service checked only
+      // that the target was in the caller's organization — so any member, an
+      // `OPERATOR`, could rename a colleague or change their phone number.
+      //
+      // Checked before the lookup, so a caller without the role learns
+      // nothing about whether the id they tried is a member.
+      //
+      // Imprecise until ADR-060's guard ships: roles are still realm-global,
+      // so an `ORGANIZATION_ADMIN` of one organization passes this check while
+      // acting for another in which they are only a member. The membership
+      // check below still confines them to users of the organization they act
+      // for; ADR-060 makes the role itself mean "in this organization".
+      if (!context.roles.some((role) => PROFILE_ADMIN_ROLES.includes(role))) {
+        throw RastaError.insufficientRole(PROFILE_ADMIN_ROLES, context.roles);
+      }
       const membership = await this.repository.findMembership(id, context.organizationId ?? '');
       if (!membership) throw RastaError.notFound('User', id);
     }

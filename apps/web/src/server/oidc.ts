@@ -246,6 +246,10 @@ export async function verifyIdToken(
   const options = {
     issuer: expectations.issuer.replace(/\/+$/, ''),
     audience: expectations.clientId,
+    // jose checks `exp` only when it is present; an id token without one
+    // would verify forever. Keycloak always sets it, so this refuses only a
+    // token that did not come from the realm.
+    requiredClaims: ['exp'],
   };
   try {
     // Branching rather than passing the union: `jwtVerify` is overloaded on
@@ -257,7 +261,10 @@ export async function verifyIdToken(
         : await jwtVerify(idToken, keys, options);
     claims = verified.payload;
   } catch {
-    throw new OidcError('ID_TOKEN_REJECTED', 'signature, issuer or audience did not verify');
+    throw new OidcError(
+      'ID_TOKEN_REJECTED',
+      'signature, issuer, audience or expiry did not verify',
+    );
   }
 
   const parsed = idTokenClaimsSchema.safeParse(claims);
