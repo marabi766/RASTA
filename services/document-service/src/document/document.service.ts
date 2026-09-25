@@ -1,12 +1,17 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { DOCUMENT_EVENTS } from '../events/events';
 import { ENV, OBJECT_STORAGE } from '../tokens';
 import { SERVICE_NAME, type DocumentEnv } from '../config/env';
-import type { ObjectStorage } from '../storage/storage.port';
-import { buildObjectKey, isWellFormedKey, keyBelongsTo } from '../storage/object-key';
+import { ObjectChangedError, type ObjectStorage } from '../storage/storage.port';
+import {
+  buildObjectKey,
+  buildSealedObjectKey,
+  isWellFormedKey,
+  keyBelongsTo,
+} from '../storage/object-key';
 import { MAGIC_PREFIX_BYTES, declarationMatches, detectMime } from '../content/magic-number';
 import {
   assertDeclarationAllowed,
@@ -61,6 +66,8 @@ import { canDownload, type DownloadDecision } from './download-policy';
  */
 @Injectable()
 export class DocumentService {
+  private readonly logger = new Logger(DocumentService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly repository: DocumentRepository,
@@ -123,6 +130,10 @@ export class DocumentService {
       this.storage.createUploadUrl({
         objectKey,
         contentType: intent.declaredContentType,
+        // Bound into the signature, the same way the content type is: an
+        // upload that sends a different number of bytes than this fails at
+        // storage rather than being accepted and caught later at finalize.
+        contentLength: intent.declaredSizeBytes,
         // The URL is shorter-lived than the intent: a client that uploaded at
         // the last second can still finalize, but the credential itself is
         // gone.
@@ -203,6 +214,15 @@ export class DocumentService {
       });
     }
 
+    if (!metadata.etag) {
+      // Every object a normal PUT produces carries one; without it there is
+      // nothing to pin the seal to, and sealing without that guarantee is
+      // exactly the gap this method exists to close.
+      throw RastaError.businessRule('The uploaded object carries no verifiable checksum', {
+        uploadIntentId: intent.id,
+      });
+    }
+
     const prefix = await this.timeStorage('readPrefix', () =>
       this.storage.readPrefix(intent.objectKey, MAGIC_PREFIX_BYTES),
     );
@@ -236,6 +256,40 @@ export class DocumentService {
       this.env.DOCUMENT_MAX_BYTES,
     );
 
+    // Seals the just-inspected bytes into a key the upload URL was never
+    // signed for, before anything is registered, scanned or ever served.
+    //
+    // Without this, `intent.objectKey` is still live for as long as
+    // `DOCUMENT_SIGNED_URL_TTL_SECONDS` runs — up to an hour — and that
+    // credential does not expire early just because finalize already ran.
+    // Everything downstream of this point (the scan worker, `createDownloadUrl`)
+    // reads the sealed key exclusively, so a later PUT to the original key
+    // lands on an object nothing ever reads again.
+    //
+    // `CopySourceIfMatch` is what makes this more than a relocation: the copy
+    // is refused if the source no longer matches the ETag `head()` just
+    // returned, so a write landing between that read and this copy is caught
+    // here rather than silently becoming what gets sealed. Combined, the two
+    // close both ends of the window — before the seal and after it.
+    const sealedKey = buildSealedObjectKey(organizationId, intent.documentClass as DocumentClass);
+    try {
+      await this.timeStorage('copyToSealedKey', () =>
+        this.storage.copyToSealedKey({
+          sourceKey: intent.objectKey,
+          destinationKey: sealedKey,
+          ifMatchETag: metadata.etag as string,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof ObjectChangedError) {
+        throw RastaError.businessRule(
+          'The uploaded object changed after it was inspected; upload again',
+          { uploadIntentId: intent.id },
+        );
+      }
+      throw error;
+    }
+
     // Scanning does **not** happen here (ADR-014 step 4, ADR-049).
     //
     // It used to, and that was only tolerable while the scanner did nothing.
@@ -255,7 +309,11 @@ export class DocumentService {
       const document = await this.repository.createDocument(tx, {
         id: documentId,
         organizationId,
-        objectKey: intent.objectKey,
+        // The sealed key, never `intent.objectKey` — that key's upload URL
+        // may still be a live credential for another
+        // `DOCUMENT_SIGNED_URL_TTL_SECONDS`, and this row is what the scan
+        // worker and every future download read from.
+        objectKey: sealedKey,
         documentClass: intent.documentClass,
         contentType: detected,
         sizeBytes: metadata.sizeBytes,
@@ -300,6 +358,21 @@ export class DocumentService {
 
       return document;
     });
+
+    // After the transaction commits, never before — the row already names
+    // the sealed key, so a failure here leaves an orphaned raw object rather
+    // than a document that exists and cannot be sealed. The raw key still
+    // being overwritable past this point is no longer a problem: nothing
+    // reads it again, the same reasoning `remove()` applies to the object it
+    // deletes.
+    await this.timeStorage('remove', () => this.storage.remove(intent.objectKey)).catch(
+      (error: unknown) => {
+        this.logger.warn(
+          { documentId, err: error },
+          'Could not remove the raw upload object after sealing; it is orphaned, not readable',
+        );
+      },
+    );
 
     documentsFinalizedTotal.inc({
       service: SERVICE_NAME,
