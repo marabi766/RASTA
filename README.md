@@ -184,7 +184,7 @@ cp .env.example .env
 pnpm infra:up
 pnpm db:generate
 pnpm db:migrate
-pnpm db:seed
+RASTA_ALLOW_DEMO_SEED=true pnpm db:seed   # development/test only — see .env.example
 pnpm dev
 ```
 

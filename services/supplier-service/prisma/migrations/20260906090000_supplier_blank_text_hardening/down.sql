@@ -50,3 +50,9 @@ ALTER TABLE "suspension" ADD CONSTRAINT "ck_suspension_text_not_blank"
     AND ("reinstated_by" IS NULL OR length(btrim("reinstated_by")) > 0)
     AND ("reinstatement_note" IS NULL OR length(btrim("reinstatement_note")) > 0)
   );
+
+-- The ledger row, which this script was missing: without it a rollback of this
+-- migration alone could never be rolled forward, and after a whole-chain
+-- rollback `prisma migrate deploy` re-applied only the initial migration and
+-- silently left the weaker predicates in place.
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20260906090000_supplier_blank_text_hardening';
