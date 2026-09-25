@@ -120,6 +120,28 @@ export class UsageService {
 
     try {
       const created = await this.repository.transaction(async (tx) => {
+        // Locked before the overlap check, not after: without the lock, two
+        // concurrent submissions for the same machine can both read "no
+        // overlap" before either has inserted, and both succeed (L3-05).
+        await this.repository.lockAssetRef(tx, dto.assetId);
+
+        const overlapping = await this.repository.findOverlappingUsage(
+          tx,
+          dto.assetId,
+          periodStart,
+          periodEnd,
+        );
+        if (overlapping) {
+          throw RastaError.businessRule(
+            'This usage period overlaps an existing record for the same machine.',
+            {
+              rule: 'USAGE_PERIOD_OVERLAP',
+              assetId: dto.assetId,
+              conflictingRecordId: overlapping.id,
+            },
+          );
+        }
+
         const record = await tx.usageRecord.create({
           data: {
             id,

@@ -238,6 +238,34 @@ export class FleetRepository {
     );
   }
 
+  /**
+   * Any existing record for this asset whose period overlaps the given one.
+   *
+   * The standard interval-overlap test: two periods overlap exactly when each
+   * starts before the other ends. Scoped by asset only, not by driver — two
+   * different drivers cannot both have been operating the same machine at
+   * once either, and the audit's own reproduction uses two different
+   * `clientReference`s on the same asset.
+   *
+   * Must be called after {@link lockAssetRefForUsage} in the same
+   * transaction, or two concurrent calls can both see no overlap and both
+   * insert.
+   */
+  async findOverlappingUsage(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    periodStart: Date,
+    periodEnd: Date,
+  ) {
+    return tx.usageRecord.findFirst({
+      where: {
+        assetId,
+        periodStart: { lt: periodEnd },
+        periodEnd: { gt: periodStart },
+      },
+    });
+  }
+
   async listUsage(query: ListUsageQuery) {
     const constraints: object[] = [];
     if (query.cursor) constraints.push({ id: { lt: query.cursor } });
