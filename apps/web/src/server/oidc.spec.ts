@@ -178,6 +178,87 @@ describe('refreshing', () => {
   });
 });
 
+describe('the token endpoint’s deadline', () => {
+  /**
+   * What `fetch` does when its `signal` fires: it rejects with an
+   * `AbortError`. A stand-in that merely never resolved would pass or fail
+   * for the wrong reason.
+   */
+  const silent = {
+    impl: ((_url: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () =>
+          reject(new DOMException('The operation was aborted.', 'AbortError')),
+        );
+      })) as unknown as typeof fetch,
+  };
+
+  it('gives up on a code exchange that never answers, and fails the login', async () => {
+    const started = Date.now();
+    await expect(
+      exchangeCode(
+        {
+          endpoints,
+          clientId: CLIENT,
+          redirectUri: 'http://x/cb',
+          code: 'the-code',
+          verifier: 'the-verifier',
+          timeoutMs: 20,
+        },
+        silent.impl,
+      ),
+    ).rejects.toMatchObject({ reason: 'TOKEN_REQUEST_FAILED' });
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('gives up on a refresh that never answers, and does not return tokens', async () => {
+    const refreshing = refreshTokens(
+      { endpoints, clientId: CLIENT, refreshToken: 'the-refresh-token', timeoutMs: 20 },
+      silent.impl,
+    );
+    await expect(refreshing).rejects.toBeInstanceOf(OidcError);
+    await expect(refreshing).rejects.toMatchObject({ reason: 'TOKEN_REQUEST_FAILED' });
+    // Neither the grant nor the token rides along in the error.
+    await expect(refreshing).rejects.not.toThrow(/the-refresh-token/);
+  });
+
+  it('cuts off a provider that sends headers and then stalls the body', async () => {
+    const impl = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener('abort', () =>
+            controller.error(new DOMException('The operation was aborted.', 'AbortError')),
+          );
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as typeof fetch;
+
+    await expect(
+      refreshTokens({ endpoints, clientId: CLIENT, refreshToken: 'r', timeoutMs: 20 }, impl),
+    ).rejects.toMatchObject({ reason: 'TOKEN_REQUEST_FAILED' });
+  });
+
+  it('always sends a deadline, even when the caller names none', async () => {
+    const { impl } = fakeFetch({
+      access_token: 'a',
+      refresh_token: 'r',
+      id_token: 'i',
+      expires_in: 300,
+      token_type: 'Bearer',
+    });
+    const seen: (AbortSignal | null | undefined)[] = [];
+    const spy = ((url: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(init?.signal);
+      return impl(url, init);
+    }) as typeof fetch;
+
+    await refreshTokens({ endpoints, clientId: CLIENT, refreshToken: 'r' }, spy);
+    expect(seen[0]).toBeInstanceOf(AbortSignal);
+    expect(seen[0]!.aborted).toBe(false);
+  });
+});
+
 describe('verifying the id token', () => {
   const nonce = randomBytes(8).toString('hex');
 

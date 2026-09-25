@@ -108,11 +108,34 @@ export class OidcError extends Error {
   }
 }
 
+/**
+ * How long this portal waits on the token endpoint before giving up.
+ *
+ * Named for the same reason as `GATEWAY_TIMEOUT_MS` in `gateway.ts`: without
+ * it, a provider that accepts the connection and never answers holds the
+ * login callback — or, on a refresh, the request of a person who was simply
+ * navigating — for as long as the runtime's own socket timeout. Shorter than
+ * the gateway's: a token grant is one small form post that Keycloak answers
+ * from memory, and a person is watching a blank page while it runs.
+ *
+ * Expiry fails closed. It lands in the same `catch` as a refused connection,
+ * so a login that ran out of time is a failed login, and a refresh that ran
+ * out of time is a session that has to sign in again — never a session
+ * carried on with tokens nobody confirmed.
+ */
+const TOKEN_ENDPOINT_TIMEOUT_MS = 10_000;
+
 async function postForm(
   endpoint: string,
   body: Record<string, string>,
   fetchImpl: typeof fetch,
+  timeoutMs: number = TOKEN_ENDPOINT_TIMEOUT_MS,
 ): Promise<TokenResponse> {
+  // One deadline for the whole exchange, body included: the signal stays
+  // attached to the response, so a provider that sends headers and then
+  // stalls mid-body is cut off by the same timer.
+  const signal = AbortSignal.timeout(timeoutMs);
+
   let response: Response;
   try {
     response = await fetchImpl(endpoint, {
@@ -120,11 +143,17 @@ async function postForm(
       headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
       body: new URLSearchParams(body).toString(),
       cache: 'no-store',
+      signal,
     });
   } catch {
     // The error object is not forwarded: it can carry the request body, and
     // the request body is a refresh token or an authorization code.
-    throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider did not answer');
+    throw new OidcError(
+      'TOKEN_REQUEST_FAILED',
+      signal.aborted
+        ? `the identity provider did not answer within ${timeoutMs} ms`
+        : 'the identity provider did not answer',
+    );
   }
 
   if (!response.ok) {
@@ -140,6 +169,14 @@ async function postForm(
   try {
     payload = await response.json();
   } catch {
+    // A body cut off by the deadline is a provider that stopped answering,
+    // not one that answered with something other than JSON.
+    if (signal.aborted) {
+      throw new OidcError(
+        'TOKEN_REQUEST_FAILED',
+        `the identity provider did not finish answering within ${timeoutMs} ms`,
+      );
+    }
     throw new OidcError('MALFORMED_RESPONSE', 'the token response was not JSON');
   }
 
@@ -159,6 +196,8 @@ export interface ExchangeRequest {
   readonly redirectUri: string;
   readonly code: string;
   readonly verifier: string;
+  /** Overrides {@link TOKEN_ENDPOINT_TIMEOUT_MS}. Exists for tests. */
+  readonly timeoutMs?: number;
 }
 
 export function exchangeCode(
@@ -175,11 +214,18 @@ export function exchangeCode(
       code_verifier: request.verifier,
     },
     fetchImpl,
+    request.timeoutMs,
   );
 }
 
 export function refreshTokens(
-  request: { endpoints: OidcEndpoints; clientId: string; refreshToken: string },
+  request: {
+    endpoints: OidcEndpoints;
+    clientId: string;
+    refreshToken: string;
+    /** Overrides {@link TOKEN_ENDPOINT_TIMEOUT_MS}. Exists for tests. */
+    timeoutMs?: number;
+  },
   fetchImpl: typeof fetch = fetch,
 ): Promise<TokenResponse> {
   return postForm(
@@ -190,6 +236,7 @@ export function refreshTokens(
       refresh_token: request.refreshToken,
     },
     fetchImpl,
+    request.timeoutMs,
   );
 }
 
