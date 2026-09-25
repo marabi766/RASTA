@@ -1,5 +1,11 @@
 import { Inject, Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
-import { Client, Connection, WorkflowNotFoundError } from '@temporalio/client';
+import {
+  Client,
+  Connection,
+  WorkflowExecutionAlreadyStartedError,
+  WorkflowIdReusePolicy,
+  WorkflowNotFoundError,
+} from '@temporalio/client';
 import { ENV } from '../tokens';
 import type { MarketplaceEnv } from '../config/env';
 
@@ -23,6 +29,15 @@ import type { MarketplaceEnv } from '../config/env';
  * Temporal refuses to start a second workflow with an id that is already
  * running. That makes "one saga per order" structural rather than a rule the
  * code has to keep — even if two requests race to start one.
+ *
+ * "Already running" was not enough on its own. `POST /orders` calls
+ * {@link start} on every request, replays included, so that a retry can start
+ * a saga whose first start failed. A replay arriving after the first saga had
+ * **closed** therefore started a second saga for the same order. The start
+ * now uses `REJECT_DUPLICATE`, so an id that has ever been used is refused
+ * for as long as the namespace keeps its history. That is longer than a key
+ * can be replayed. The saga also decides from the order row, not from its
+ * own memory, so even a duplicate run would find the order finished and stop.
  */
 @Injectable()
 export class OrderSagaClient implements OnModuleDestroy {
@@ -76,16 +91,24 @@ export class OrderSagaClient implements OnModuleDestroy {
       await client.workflow.start('orderSaga', {
         taskQueue: this.env.MARKETPLACE_TEMPORAL_TASK_QUEUE,
         workflowId: OrderSagaClient.workflowIdFor(orderId),
+        workflowIdReusePolicy: WorkflowIdReusePolicy.REJECT_DUPLICATE,
         args: [
           {
             orderId,
             fulfillmentWindowDays: this.env.MARKETPLACE_FULFILLMENT_WINDOW_DAYS,
             receiptWindowDays: this.env.MARKETPLACE_RECEIPT_WINDOW_DAYS,
             reminderIntervalDays: this.env.MARKETPLACE_REMINDER_INTERVAL_DAYS,
+            recheckIntervalHours: this.env.MARKETPLACE_SAGA_RECHECK_HOURS,
           },
         ],
       });
     } catch (error) {
+      if (error instanceof WorkflowExecutionAlreadyStartedError) {
+        // A replayed placement: this order's saga is running or has already
+        // run. That is the one outcome here that is not a problem.
+        this.logger.debug({ orderId }, 'The order saga was already started');
+        return;
+      }
       this.logger.error({ orderId, err: error }, 'Could not start the order saga');
     }
   }
