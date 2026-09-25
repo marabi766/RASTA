@@ -62,7 +62,7 @@
 | `docs/close-q64-policy-setter`      | `F:\Rasta-Parallel\docs-close-q64` | PM     | —    | ۱ / ۰          | بستن Q-64 با تصمیم مالک پروژه (رفتار موجود: `SYSTEM_ADMIN` و `UNION_ADMIN`) و هم‌سو کردن ردیف `/config/approval-policies` در `docs/16`                                                                           |
 | `demo/investor-preview`             | `F:\Rasta-Parallel\investor-demo`  | —      | —    | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                                                     |
 | `design/claude-design`              | پوشهٔ موقت در `%TEMP%`             | —      | —    | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                                            |
-| `fix/web-hardening`                 | `F:\Rasta-Parallel\web-hardening`  | Sonnet | —    | ۱ / ۰          | سخت‌سازی `apps/web` طبق `F:\Rasta-audit\L5-web.md` (L5-01, 03–08؛ L5-02 و L5-09 خارج از دامنه) — پیاده‌سازی و تست کامل، در انتظار باز شدن PR                                                                    |
+| `fix/web-hardening`                 | `F:\Rasta-Parallel\web-hardening`  | Sonnet | [#106](https://github.com/marabi766/RASTA/pull/106) | ۱ / ۰          | سخت‌سازی `apps/web` طبق `F:\Rasta-audit\L5-web.md` (L5-01, 03–08؛ L5-02 و L5-09 خارج از دامنه) — پیاده‌سازی، تست و مرج کامل؛ منتظر بازبینی                                                                    |
 
 ## شاخه‌های بازنشسته
 
