@@ -5,6 +5,7 @@ import { AssetRepository, isUniqueViolation } from '../asset/asset.repository';
 import { AssetService } from '../asset/asset.service';
 import { INSURANCE_EVENTS, validateInsurancePayload } from '../asset/events';
 import { INSURANCE_TOPIC } from '../config/env';
+import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import type {
   CreateInspectionDto,
   CreatePolicyDto,
@@ -75,6 +76,8 @@ export class InsuranceService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const created = await this.repository.transaction(async (tx) => {
+      await this.lockOwned(tx, assetId, asset.organizationId);
+
       let row;
       try {
         row = await tx.insurancePolicy.create({
@@ -161,6 +164,8 @@ export class InsuranceService {
     const validTo = new Date(dto.validTo);
 
     const created = await this.repository.transaction(async (tx) => {
+      await this.lockOwned(tx, assetId, asset.organizationId);
+
       const row = await tx.technicalInspection.create({
         data: {
           id: inspectionId,
@@ -341,6 +346,23 @@ export class InsuranceService {
   }
 
   // =========================================================================
+
+  /**
+   * Locks the asset before a policy or inspection is filed under its owner.
+   *
+   * Refuses when the asset is no longer that organization's. A transfer that
+   * committed after the caller's read would otherwise leave the new record
+   * with the previous owner (audit L3-08). The transfer's compare-and-set
+   * takes the same row, so the two are ordered.
+   */
+  private async lockOwned(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    organizationId: string,
+  ): Promise<void> {
+    const locked = await this.repository.lockAsset(tx, assetId, organizationId, 'SHARE');
+    if (!locked) throw RastaError.notFound('Asset', assetId);
+  }
 
   private async assertAssetExists(assetId: string) {
     const asset = await this.repository.findById(assetId);

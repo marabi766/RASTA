@@ -71,6 +71,7 @@ function harness(overrides: Record<string, unknown> = {}): Harness {
     findPoliciesExpiringWithin: jest.fn(async () => []),
     findInspectionsExpiringWithin: jest.fn(async () => []),
     claimLapsedPolicies: jest.fn(async () => []),
+    lockAsset: jest.fn(async () => ({ status: 'ACTIVE' })),
     ...overrides,
   } as unknown as AssetRepository;
 
@@ -140,6 +141,24 @@ describe('InsuranceService', () => {
     it('raises 404 for an asset the caller cannot see', async () => {
       const h = harness({ findById: jest.fn(async () => null) });
       await expect(run(() => h.service.recordPolicy(ASSET_ID, POLICY))).rejects.toThrow(RastaError);
+    });
+  });
+
+  describe('a transfer racing a new policy or inspection (audit L3-08)', () => {
+    it('refuses a policy for an asset that changed owner after the read', async () => {
+      const h = harness({ lockAsset: jest.fn(async () => null) });
+      await expect(run(() => h.service.recordPolicy(ASSET_ID, POLICY))).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
+      expect(h.enqueued).toHaveLength(0);
+    });
+
+    it('refuses an inspection for an asset that changed owner after the read', async () => {
+      const h = harness({ lockAsset: jest.fn(async () => null) });
+      await expect(
+        run(() => h.service.recordInspection(ASSET_ID, INSPECTION)),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      expect(h.enqueued).toHaveLength(0);
     });
   });
 
