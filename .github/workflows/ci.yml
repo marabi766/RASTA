@@ -86,6 +86,14 @@ jobs:
           pnpm run test:compose-ports
           pnpm run check:compose-ports
 
+      - name: Role passwords are distinct and checked before any role changes
+        # L7-33: the bootstrap and `pnpm db:rotate-role-passwords` refuse two
+        # roles (or a role and the superuser) with one password, and the old
+        # shared variable, before the first psql call; `pnpm infra:up` warns and
+        # refuses the same on the host. Runs both bash scripts against a stub
+        # psql that records every call.
+        run: pnpm run test:infra-preflight
+
       - name: Image scope rule
         # The rule that decides which images a pull request builds and scans
         # (L7-35). A wrong rule would quietly skip a changed image.

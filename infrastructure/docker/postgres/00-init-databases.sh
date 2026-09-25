@@ -10,46 +10,19 @@
 set -euo pipefail
 
 # -----------------------------------------------------------------------------
-# One password per role (L7-33).
-#
-# A single shared password made the per-service roles, and the audit migrator
-# separation below, a formality: anyone holding one service's connection string
-# held every service's, and the append-only audit store's owner too. Each role
-# now reads its own variable, POSTGRES_PASSWORD_<ROLE> (for example
-# POSTGRES_PASSWORD_IDENTITY, POSTGRES_PASSWORD_AUDIT_MIGRATOR), with a distinct
-# development default, rasta_<role>_dev_password. Real environments set every
-# variable; the defaults exist so a laptop and CI need no configuration.
-#
-# The old shared variable is refused rather than ignored: a stale .env that
-# still sets it would otherwise create roles whose passwords silently differ
-# from the connection strings beside it.
+# One password per role (L7-33): resolved and checked — syntax, the retired
+# shared variable, and no two roles (or a role and the superuser) sharing one —
+# before the first statement below runs. See lib/role-passwords.bash.
 # -----------------------------------------------------------------------------
-if [[ -n "${POSTGRES_SERVICE_PASSWORD:-}" ]]; then
-  echo "POSTGRES_SERVICE_PASSWORD is no longer read: each role has its own" >&2
-  echo "POSTGRES_PASSWORD_<ROLE> (see .env.example). Remove it and set those." >&2
-  exit 1
-fi
-
-# The password for one role, from POSTGRES_PASSWORD_<ROLE> or its dev default.
-# Restricted to URL-safe characters: it is interpolated into SQL here and into
-# DATABASE_URL_* connection strings everywhere else, unescaped in both.
-role_password() {
-  local role="$1"
-  local var="POSTGRES_PASSWORD_$(echo "${role#rasta_}" | tr '[:lower:]' '[:upper:]')"
-  local value="${!var:-${role}_dev_password}"
-  if [[ ! "$value" =~ ^[A-Za-z0-9_.~-]{16,}$ ]]; then
-    echo "${var}: at least 16 characters from [A-Za-z0-9_.~-] (it is used unescaped in URLs)" >&2
-    exit 1
-  fi
-  printf '%s' "$value"
-}
+# shellcheck source=lib/role-passwords.bash
+source "$(dirname "${BASH_SOURCE[0]}")/lib/role-passwords.bash"
+resolve_role_passwords || exit 1
 
 # Creates the role if it is missing and (re)sets its password either way, so a
 # bootstrap re-run on an existing cluster converges on the configured values.
 ensure_role() {
   local role="$1"
-  local password
-  password="$(role_password "$role")"
+  local password="${ROLE_PASSWORDS[$role]}"
   psql_exec postgres "DO \$\$ BEGIN
       IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${role}') THEN
         CREATE ROLE ${role} LOGIN CREATEDB;
@@ -58,24 +31,7 @@ ensure_role() {
   psql_exec postgres "ALTER ROLE ${role} WITH LOGIN PASSWORD '${password}'"
 }
 
-SERVICES=(
-  identity
-  organization
-  asset
-  fleet
-  maintenance
-  marketplace
-  procurement
-  supplier
-  inventory
-  construction
-  contract
-  economic
-  notification
-  document
-  audit
-  analytics
-)
+SERVICES=("${RASTA_SERVICES[@]}")
 
 # Infrastructure databases that are not owned by a Rasta service.
 INFRA_DATABASES=(keycloak temporal temporal_visibility)
