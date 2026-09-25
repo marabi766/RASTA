@@ -359,7 +359,10 @@ async function main(): Promise<void> {
 
   console.warn('Identity seed complete.');
   console.warn('');
-  console.warn('  Demo accounts (password RastaDev!2026, set in the Keycloak realm):');
+  // Usernames only. The shared demo password lives in the Keycloak realm
+  // fixture and nowhere else; printing it put it in every terminal and CI log
+  // that ever ran a seed.
+  console.warn('  Demo accounts (password: see infrastructure/docker/keycloak/rasta-realm.json):');
   for (const user of USERS.slice(0, 4)) {
     console.warn(`    ${user.username.padEnd(18)} ${user.roles.join(', ')}`);
   }
