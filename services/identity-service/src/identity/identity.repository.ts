@@ -53,6 +53,25 @@ export class IdentityRepository {
   }
 
   /**
+   * Locks one user row for the rest of the caller's transaction and returns
+   * its active organization.
+   *
+   * Used by the organization switch, so the `previousOrganizationId` its audit
+   * event records is the value this transaction replaced — not one a
+   * concurrent switch overwrote between the read and the write. `null` when
+   * no such user exists.
+   */
+  async lockUserActiveOrganization(
+    tx: ExtendedPrismaClient,
+    userId: string,
+  ): Promise<{ activeOrganizationId: string | null } | null> {
+    const rows = await tx.$queryRaw<Array<{ active_organization_id: string | null }>>`
+      SELECT active_organization_id FROM "user" WHERE id = ${userId} FOR UPDATE`;
+    const row = rows[0];
+    return row ? { activeOrganizationId: row.active_organization_id } : null;
+  }
+
+  /**
    * Writes an event to the outbox.
    *
    * Takes the transaction client explicitly rather than reaching for the

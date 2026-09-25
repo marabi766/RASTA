@@ -551,16 +551,45 @@ export class IdentityService {
       );
     }
 
-    const user = await runUnscoped('a user may switch between organizations they belong to', () =>
-      this.repository.client.user.update({
-        where: { id: context.userId },
-        data: { activeOrganizationId: dto.organizationId, updatedBy: context.userId },
-      }),
-    );
+    const userId = context.userId;
+    const user = await this.repository.transaction(async (tx) => {
+      const current = await this.repository.lockUserActiveOrganization(tx, userId);
+      if (!current) throw RastaError.notFound('User', userId);
+
+      const updated = await runUnscoped(
+        'a user may switch between organizations they belong to',
+        () =>
+          tx.user.update({
+            where: { id: userId },
+            data: { activeOrganizationId: dto.organizationId, updatedBy: userId },
+          }),
+      );
+
+      // The audit record of the switch, in the same transaction as the write
+      // (AGENTS.md S-06, A-08). Re-selecting the organization already active
+      // changed nothing, so it records nothing.
+      if (current.activeOrganizationId !== dto.organizationId) {
+        await this.repository.enqueueEvent(tx, {
+          aggregateType: 'User',
+          aggregateId: userId,
+          eventName: IDENTITY_EVENTS.ACTIVE_ORGANIZATION_SWITCHED,
+          topic: IDENTITY_TOPIC,
+          organizationId: dto.organizationId,
+          payload: validateIdentityPayload(IDENTITY_EVENTS.ACTIVE_ORGANIZATION_SWITCHED, {
+            userId,
+            previousOrganizationId: current.activeOrganizationId,
+            organizationId: dto.organizationId,
+          }),
+        });
+      }
+
+      return updated;
+    });
 
     // Not after-commit best effort: the caller asked for this switch and waits
-    // on its answer, and — unlike a membership change — it enqueues no event
-    // a retry could come from. A failed write is reported, as it always was.
+    // on its answer. The event above is an audit record, not a retry trigger —
+    // the Keycloak re-projection consumer does not act on it
+    // (`REPROJECTED_EVENTS`) — so a failed write is reported, as it always was.
     await this.projector.project(user.id, 'request');
 
     return toUserView(user);
