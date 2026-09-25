@@ -119,6 +119,10 @@ function tokenWithoutOrganization(name: string, roles: string[]): string {
     rastaUserId: `USR_${name}`,
     organizationIds: [],
     roles,
+    // No organization, so no organization-bound role either (ADR-060). The
+    // guard then drops every realm role but SYSTEM_ADMIN, which is exactly the
+    // caller these cases describe.
+    organizationRoles: [],
     expiresAt: Date.now() + 60_000,
   });
   return `Bearer ${token}`;
