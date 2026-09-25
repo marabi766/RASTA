@@ -1,7 +1,7 @@
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { ApplicationFailure } from '@temporalio/activity';
-import type { WorkflowHandle } from '@temporalio/client';
+import { WorkflowFailedError, type WorkflowHandle } from '@temporalio/client';
 import { orderSaga, type OrderSagaInput, type SagaStatus } from './workflows';
 import type { OrderActivities, SagaOrderView } from './activities';
 
@@ -42,6 +42,15 @@ const INPUT: OrderSagaInput = {
 type Status = SagaOrderView['status'];
 
 const TRANSACTION = 'TXN_1';
+
+/**
+ * For a test that sleeps through simulated days to watch a window or a
+ * dispute: a recheck interval longer than the sleep, so the only timers that
+ * fire are the ones the test is about. At the default 24 hours, every
+ * simulated day also ran a re-read activity, and a sleep of weeks became
+ * dozens of round trips on a slow CI runner — enough to hit jest's timeout.
+ */
+const NO_RECHECK = { recheckIntervalHours: 24 * 365 };
 
 class FakeOrder {
   status: Status = 'PENDING';
@@ -194,6 +203,37 @@ class Party {
 }
 
 /** Polls, in real time, until the saga has moved the order where a test needs it. */
+/**
+ * How long one drive, or one wait for a result, may take before the test gives
+ * up — well inside jest's 120 s, so that a stuck saga is terminated and its
+ * worker shut down by `run()` itself. When jest's own timeout fired first, the
+ * worker was still running: the next test failed with "Cannot close
+ * connection while Workers hold a reference", and every test after it too.
+ */
+const STEP_DEADLINE_MS = 45_000;
+
+/** `promise`, or a rejection naming `what` once `ms` have passed. */
+async function within<T>(ms: number, promise: Promise<T>, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out after ${ms} ms waiting for ${what}`)), ms);
+  });
+  try {
+    return await Promise.race([promise, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** `until`, for a condition only a query can answer. */
+async function eventually(predicate: () => Promise<boolean>, what: string): Promise<void> {
+  for (let i = 0; i < 400; i += 1) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for ${what}`);
+}
+
 async function until(predicate: () => boolean, what: string): Promise<void> {
   for (let i = 0; i < 400; i += 1) {
     if (predicate()) return;
@@ -227,7 +267,7 @@ describe('the order saga', () => {
       handle: WorkflowHandle;
       held: () => Promise<void>;
     }) => Promise<void>,
-    options: { keepRunning?: boolean } = {},
+    options: { keepRunning?: boolean; input?: Partial<OrderSagaInput> } = {},
   ): Promise<string | undefined> {
     // A queue per test. A workflow a test terminates can leave activity tasks
     // behind, and on a shared queue the next test's worker inherited them.
@@ -243,20 +283,34 @@ describe('the order saga', () => {
       const handle = await env.client.workflow.start(orderSaga, {
         taskQueue,
         workflowId: `test-${INPUT.orderId}-${Math.trunc(performance.now() * 1000)}`,
-        args: [INPUT],
+        args: [{ ...INPUT, ...options.input }],
       });
 
-      await drive({
-        party: new Party(order, handle),
-        handle,
-        held: () => until(() => order.status !== 'PENDING', 'the hold to be recorded'),
-      });
-
-      if (options.keepRunning) {
-        await handle.terminate('test finished');
-        return undefined;
+      let finished = false;
+      try {
+        await within(
+          STEP_DEADLINE_MS,
+          drive({
+            party: new Party(order, handle),
+            handle,
+            held: () => until(() => order.status !== 'PENDING', 'the hold to be recorded'),
+          }),
+          'the test to drive the saga',
+        );
+        if (options.keepRunning) return undefined;
+        const result = await within(STEP_DEADLINE_MS, handle.result(), 'the saga to finish');
+        finished = true;
+        return result;
+      } catch (error) {
+        // A saga that ended by failing is finished too; terminating it would
+        // only replace its own error with "already completed".
+        if (error instanceof WorkflowFailedError) finished = true;
+        throw error;
+      } finally {
+        // Whatever happened above, the saga is stopped before the worker is,
+        // so `runUntil` returns and the next test starts from nothing.
+        if (!finished) await handle.terminate('test finished').catch(() => undefined);
       }
-      return handle.result();
     });
   }
 
@@ -305,7 +359,7 @@ describe('the order saga', () => {
         const status = await handle.query<SagaStatus, []>('status');
         expect(status.remindersRecorded).toBeGreaterThan(0);
       },
-      { keepRunning: true },
+      { keepRunning: true, input: NO_RECHECK },
     );
 
     expect(calls).toContain('recordReminder');
@@ -335,7 +389,7 @@ describe('the order saga', () => {
         const status = await handle.query<SagaStatus, []>('status');
         expect(status.phase).toBe('AWAITING_RECEIPT_CONFIRMATION');
       },
-      { keepRunning: true },
+      { keepRunning: true, input: NO_RECHECK },
     );
 
     expect(calls).not.toContain('settle');
@@ -363,17 +417,22 @@ describe('the order saga', () => {
     const order = new FakeOrder();
     const { calls, activities } = recordingActivities(order);
 
-    const result = await run(order, activities, async ({ party, held }) => {
-      await held();
-      await party.confirm();
-      await party.fulfil();
-      await party.dispute('the delivered goods do not match the offer');
-      await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
-      // Nothing else happens until an operator decides.
-      await env.sleep('30 days');
-      expect(calls).not.toContain('settle');
-      await party.resolve('SETTLE', 'the supplier evidenced correct delivery');
-    });
+    const result = await run(
+      order,
+      activities,
+      async ({ party, held }) => {
+        await held();
+        await party.confirm();
+        await party.fulfil();
+        await party.dispute('the delivered goods do not match the offer');
+        await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
+        // Nothing else happens until an operator decides.
+        await env.sleep('30 days');
+        expect(calls).not.toContain('settle');
+        await party.resolve('SETTLE', 'the supplier evidenced correct delivery');
+      },
+      { input: NO_RECHECK },
+    );
 
     expect(result).toBe('COMPLETED');
     // economic-service is told before anything waits, so a direct settlement
@@ -574,10 +633,16 @@ describe('the order saga', () => {
         await party.confirm();
         await party.fulfil();
         await party.confirmReceipt();
+        // No simulated time is needed. The defect acted before the dispute
+        // was mirrored — markSettling refused, then markSettlementFailed
+        // walked the order out of DISPUTED — so once disputeObligation has
+        // run, whatever the saga was going to do about the refusal it has
+        // done. Waiting days on top of that only exercised the test server.
         await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
-        await env.sleep('10 days');
-        const status = await handle.query<SagaStatus, []>('status');
-        expect(status.phase).toBe('DISPUTED');
+        await eventually(
+          async () => (await handle.query<SagaStatus, []>('status')).phase === 'DISPUTED',
+          'the saga to wait on the dispute',
+        );
       },
       { keepRunning: true },
     );
@@ -631,14 +696,35 @@ describe('the order saga', () => {
       // Temporal was unreachable after each commit, so no signal arrived.
       // Waiting only on signals, the saga would have waited for ever.
       const order = new FakeOrder();
-      const { effects, activities } = recordingActivities(order);
+      const { calls, effects, activities } = recordingActivities(order);
 
-      const result = await run(order, activities, async ({ party, held }) => {
-        await held();
-        party.silently((o) => o.confirm());
-        party.silently((o) => o.fulfil());
-        party.silently((o) => o.confirmReceipt());
-      });
+      const result = await run(
+        order,
+        activities,
+        async ({ party, handle, held }) => {
+          await held();
+          // Waiting, so the commands below land after the read that followed
+          // the hold and can only be seen by a re-read.
+          await eventually(
+            async () =>
+              (await handle.query<SagaStatus, []>('status')).phase === 'AWAITING_CONFIRMATION',
+            'the saga to wait for the supplier',
+          );
+          party.silently((o) => o.confirm());
+          party.silently((o) => o.fulfil());
+          party.silently((o) => o.confirmReceipt());
+
+          // No time skipping. With a one-second recheck the test server's
+          // clock simply runs, and the saga's own timer wakes it — the only
+          // thing that could, since no signal was sent. Skipping simulated
+          // time here stalled on a loaded CI runner: an explicit sleep can
+          // wait on the server's skip, which is not this test's subject.
+          await until(() => calls.includes('markCompleted'), 'the saga to settle on its re-read');
+        },
+        // One second. The workflow takes any positive number; only the env
+        // schema insists on whole hours, and this is not configuration.
+        { input: { recheckIntervalHours: 1 / 3600 } },
+      );
 
       expect(result).toBe('COMPLETED');
       expect(effects()).toEqual([
@@ -656,19 +742,47 @@ describe('the order saga', () => {
       // delivered exactly this — must not start settlement, and a stray
       // `orderCancelled` must not refund anything.
       const order = new FakeOrder();
-      const { calls, activities } = recordingActivities(order);
+      let readsDone = 0;
+      const { calls, activities } = recordingActivities(order, {
+        // Counted on completion, not on call: what matters is that the saga
+        // has the fresh read in hand, and a query sent after this is answered
+        // only once the workflow has processed it.
+        readOrder: async () => {
+          calls.push('readOrder');
+          const view = order.view();
+          readsDone += 1;
+          return view;
+        },
+      });
 
       await run(
         order,
         activities,
         async ({ handle, held }) => {
           await held();
+          await eventually(
+            async () =>
+              (await handle.query<SagaStatus, []>('status')).phase === 'AWAITING_CONFIRMATION',
+            'the saga to wait for the supplier',
+          );
+          const readsBefore = readsDone;
+
           await handle.signal('receiptConfirmed');
           await handle.signal('orderCancelled', 'not what the buyer said');
           await handle.signal('disputeResolved', 'REFUND');
-          await env.sleep('2 days');
-          const status = await handle.query<SagaStatus, []>('status');
-          expect(status.phase).toBe('AWAITING_CONFIRMATION');
+
+          // The signals woke the saga and it read the order again — that read
+          // is the whole of what a signal may cause. No simulated time: the
+          // question is what the saga did on waking, not what it did later.
+          await until(
+            () => readsDone > readsBefore,
+            'the saga to re-read the order after the signals',
+          );
+          await eventually(
+            async () =>
+              (await handle.query<SagaStatus, []>('status')).phase === 'AWAITING_CONFIRMATION',
+            'the saga to go back to waiting',
+          );
         },
         { keepRunning: true },
       );
