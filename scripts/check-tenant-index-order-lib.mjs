@@ -58,31 +58,38 @@ const PARENT_LOAD =
   'parent-child path: Prisma loads the relation by the parent id with no organization ' +
   'predicate, and the ON DELETE RESTRICT check probes it the same way';
 
+/**
+ * Why a per-parent unique must not gain a leading organization_id: the child
+ * table references its parent by id alone, so nothing in the database makes a
+ * child's organization_id equal its parent's. Keyed on (organization_id,
+ * parent_id, …), two rows for one parent that disagree on organization_id
+ * would both be accepted, and the invariant would stop holding.
+ */
+const perParentUnique = (fk) =>
+  `leading with organization_id would weaken it: the foreign key is on ${fk} alone, so two rows ` +
+  `for one parent with different organization_id would both be accepted`;
+
 /** `service` → index or constraint name → why it does not lead with organization_id. */
 export const EXEMPTIONS = {
   supplier: {
-    ux_supplier_capability: `one row per (supplier, capability) — an invariant of one supplier; ${PARENT_LOAD}`,
-    ux_qualification_open:
-      'at most one open submission per (supplier, capability) — an invariant of one supplier',
-    ux_qualification_approved:
-      'at most one approval per (supplier, capability) — an invariant of one supplier',
+    ux_supplier_capability: `one row per (supplier, capability) — an invariant of one supplier; ${perParentUnique('supplier_id')}; ${PARENT_LOAD}`,
+    ux_qualification_open: `at most one open submission per (supplier, capability) — an invariant of one supplier; ${perParentUnique('supplier_id')}`,
+    ux_qualification_approved: `at most one approval per (supplier, capability) — an invariant of one supplier; ${perParentUnique('supplier_id')}`,
     ix_qualification_supplier_state: PARENT_LOAD,
     ix_qualification_review_queue:
       'the platform review queue (SupplierRepository.listForReview) is cross-tenant under runUnscoped',
-    ux_qualification_evidence_document: `one row per (qualification, document) — an invariant of one qualification; ${PARENT_LOAD}`,
+    ux_qualification_evidence_document: `one row per (qualification, document) — an invariant of one qualification; ${perParentUnique('qualification_id')}; ${PARENT_LOAD}`,
     ix_suspension_supplier: `${PARENT_LOAD}; also the open-episode lookup, which names the supplier`,
   },
   notification: {
-    ux_resolution_intent_user:
-      'one resolution per (intent, user) — an invariant of one intent; the mail worker joins on it across tenants',
-    ux_delivery_intent_user_channel:
-      'one delivery per (intent, user, channel) — an invariant of one intent',
+    ux_resolution_intent_user: `one resolution per (intent, user) — an invariant of one intent; the mail worker joins on it across tenants; ${perParentUnique('intent_id')}`,
+    ux_delivery_intent_user_channel: `one delivery per (intent, user, channel) — an invariant of one intent; ${perParentUnique('intent_id')}`,
     ix_delivery_channel_status_next: 'the delivery workers claim due rows for every tenant at once',
     ix_delivery_sendable: 'the mail worker claims sendable rows for every tenant at once',
-    ux_attempt_delivery_no: 'one row per (delivery, attempt number) — an invariant of one delivery',
+    ux_attempt_delivery_no: `one row per (delivery, attempt number) — an invariant of one delivery; ${perParentUnique('delivery_id')}`,
   },
   document: {
-    uq_grant_document_subject: 'one grant per (document, subject) — an invariant of one document',
+    uq_grant_document_subject: `one grant per (document, subject) — an invariant of one document; ${perParentUnique('document_id')}`,
     ix_document_scan_queue: 'the scan worker claims queued documents for every tenant at once',
   },
   audit: {
