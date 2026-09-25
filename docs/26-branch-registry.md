@@ -60,6 +60,7 @@
 | `fix/ci-temporal-test-server-cache` | `F:Rasta-Parallelqueue-sim`       | PM   | #100 | ۱ / ۰          | Cacheِ سرور آزمون Temporal در CI (حدود ۳۰۰ مگابایت) و بودجهٔ زمانی ۳۰۰ ثانیه برای Hook راه‌اندازی آن؛ دانلودِ هر بار، کل آزمون‌های Saga را روی شبکهٔ کند قرمز می‌کرد |
 | `demo/investor-preview`             | `F:\Rasta-Parallel\investor-demo` | —    | —    | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                         |
 | `design/claude-design`              | پوشهٔ موقت در `%TEMP%`            | —    | —    | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                |
+| `fix/web-hardening`                 | `F:\Rasta-Parallel\web-hardening` | Sonnet | —  | ۱ / ۰          | تازه ساخته شد از `origin/main` @ `b89e192`؛ سخت‌سازی `apps/web` طبق `F:\Rasta-audit\L5-web.md` (L5-01, 03–08)                                                       |
 
 ## شاخه‌های بازنشسته
 
