@@ -76,6 +76,19 @@ export const marketplaceEnvSchema = baseEnvSchema
     /** How often a reminder is recorded once a window has elapsed. */
     MARKETPLACE_REMINDER_INTERVAL_DAYS: z.coerce.number().int().min(1).max(90).default(3),
 
+    /**
+     * Hours between the saga's own re-reads of a waiting order (ADR-039 § 3).
+     *
+     * A command commits before its signal is sent, and a signal can be lost:
+     * Temporal unreachable, or a process gone between the commit and the send.
+     * The saga does not depend on the signal. It re-reads the order at least
+     * this often, so a lost signal delays the order by at most this long.
+     * Shorter is quicker to recover and makes a longer workflow history. An
+     * order can wait indefinitely for its buyer (ADR-043), and one re-read a
+     * day keeps a year-long wait to a few hundred history events.
+     */
+    MARKETPLACE_SAGA_RECHECK_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+
     /** Retention for stored `Idempotency-Key` responses (docs/06 § 6.8). */
     MARKETPLACE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
   });

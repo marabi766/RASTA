@@ -1,4 +1,4 @@
-import { WorkflowNotFoundError } from '@temporalio/client';
+import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { OrderSagaClient } from './saga.client';
 import type { MarketplaceEnv } from '../config/env';
 
@@ -45,6 +45,7 @@ function env(overrides: Partial<MarketplaceEnv> = {}): MarketplaceEnv {
     MARKETPLACE_FULFILLMENT_WINDOW_DAYS: 7,
     MARKETPLACE_RECEIPT_WINDOW_DAYS: 3,
     MARKETPLACE_REMINDER_INTERVAL_DAYS: 2,
+    MARKETPLACE_SAGA_RECHECK_HOURS: 24,
     ...overrides,
     // JUSTIFIED-ANY: only the Temporal-related settings are read by this class,
     // and building the whole environment here would couple a test about
@@ -117,6 +118,7 @@ describe('starting a saga', () => {
         MARKETPLACE_FULFILLMENT_WINDOW_DAYS: 14,
         MARKETPLACE_RECEIPT_WINDOW_DAYS: 5,
         MARKETPLACE_REMINDER_INTERVAL_DAYS: 4,
+        MARKETPLACE_SAGA_RECHECK_HOURS: 6,
       }),
     ).start('ORD_8');
 
@@ -129,7 +131,31 @@ describe('starting a saga', () => {
       fulfillmentWindowDays: 14,
       receiptWindowDays: 5,
       reminderIntervalDays: 4,
+      recheckIntervalHours: 6,
     });
+  });
+
+  it('never reuses an order id, so a replayed placement cannot start a second saga', async () => {
+    // A replay of `POST /orders` calls start() again. While the first saga
+    // runs Temporal refuses by id; after it closes only this policy does.
+    const temporal = stubTemporal();
+    await new OrderSagaClient(env()).start('ORD_11');
+
+    const [, options] = temporal.start.mock.calls[0] as unknown as [
+      string,
+      { workflowIdReusePolicy?: string },
+    ];
+    expect(options.workflowIdReusePolicy).toBe('REJECT_DUPLICATE');
+  });
+
+  it('treats an already-started saga as the expected outcome of a replay', async () => {
+    stubTemporal({
+      start: () =>
+        Promise.reject(
+          new WorkflowExecutionAlreadyStartedError('already started', 'order-ORD_12', 'orderSaga'),
+        ),
+    });
+    await expect(new OrderSagaClient(env()).start('ORD_12')).resolves.toBeUndefined();
   });
 
   it('swallows a failure, because the order already exists', async () => {
