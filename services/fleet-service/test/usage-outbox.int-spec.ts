@@ -57,14 +57,23 @@ describe('usage recording', () => {
     await prisma.onModuleDestroy();
   });
 
-  const reading = (overrides: Record<string, unknown> = {}) => ({
-    assetId,
-    periodStart: '2026-08-27T06:00:00.000Z',
-    periodEnd: '2026-08-27T14:00:00.000Z',
-    hours: '7.50',
-    source: 'MANUAL' as const,
-    ...overrides,
-  });
+  // A fresh, non-overlapping 8-hour window per call, one calendar day apart —
+  // so tests that do not care about the exact period (most of them: they
+  // exercise dedup, the outbox, correlation propagation) do not collide with
+  // each other under the L3-05 overlap check merely for sharing one asset.
+  let readingDayOffset = 0;
+  const reading = (overrides: Record<string, unknown> = {}) => {
+    const base = Date.UTC(2026, 7, 1, 6, 0, 0) + readingDayOffset * 24 * 60 * 60 * 1000;
+    readingDayOffset += 1;
+    return {
+      assetId,
+      periodStart: new Date(base).toISOString(),
+      periodEnd: new Date(base + 8 * 60 * 60 * 1000).toISOString(),
+      hours: '7.50',
+      source: 'MANUAL' as const,
+      ...overrides,
+    };
+  };
 
   describe('the state change and the event commit together', () => {
     it('writes the record and its outbox row in one transaction', async () => {
@@ -257,6 +266,273 @@ describe('usage recording', () => {
           }),
         ).rejects.toThrow(/ck_usage_period/);
       });
+    });
+  });
+
+  describe('overlap policy (L3-05)', () => {
+    // Before this, only `periodEnd > periodStart` was checked on each record
+    // in isolation — nothing compared a new period against a machine's
+    // existing ones. Two records with different `clientReference`s could
+    // cover the same hour twice, and maintenance-service accumulates every
+    // USAGE_RECORDED into its meter, so an accepted overlap double-counted
+    // real hours and could bring a usage-based schedule due early.
+    it('refuses a period that overlaps an existing record for the same machine', async () => {
+      await asActor({ organizationId: org.a }, async () => {
+        await service.record(
+          reading({
+            periodStart: '2026-08-28T08:00:00.000Z',
+            periodEnd: '2026-08-28T10:00:00.000Z',
+            hours: '2',
+            clientReference: `ovl-a-${id('R')}`,
+          }),
+        );
+
+        await expect(
+          service.record(
+            reading({
+              periodStart: '2026-08-28T09:00:00.000Z',
+              periodEnd: '2026-08-28T11:00:00.000Z',
+              hours: '2',
+              clientReference: `ovl-b-${id('R')}`,
+            }),
+          ),
+        ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+
+        // Only the accepted record's hours count — the refused overlap must
+        // not have been written at all.
+        const stored = await prisma.client.usageRecord.findMany({
+          where: { assetId, clientReference: { startsWith: 'ovl-' } },
+        });
+        expect(stored).toHaveLength(1);
+      });
+    });
+
+    it('accepts two periods that merely touch at the boundary', async () => {
+      // 10:00 is the end of one reading and the start of the next — real
+      // back-to-back shifts, not an overlap. The strict `<`/`>` comparison
+      // must not refuse this.
+      await asActor({ organizationId: org.a }, async () => {
+        const first = await service.record(
+          reading({
+            periodStart: '2026-08-29T08:00:00.000Z',
+            periodEnd: '2026-08-29T10:00:00.000Z',
+            hours: '2',
+            clientReference: `adj-a-${id('R')}`,
+          }),
+        );
+        const second = await service.record(
+          reading({
+            periodStart: '2026-08-29T10:00:00.000Z',
+            periodEnd: '2026-08-29T12:00:00.000Z',
+            hours: '2',
+            clientReference: `adj-b-${id('R')}`,
+          }),
+        );
+
+        expect(first.id).not.toBe(second.id);
+      });
+    });
+
+    it("names the conflicting record only when it is the caller's own", async () => {
+      await asActor({ organizationId: org.a }, async () => {
+        const first = await service.record(
+          reading({
+            periodStart: '2026-08-27T08:00:00.000Z',
+            periodEnd: '2026-08-27T10:00:00.000Z',
+            hours: '2',
+            clientReference: `own-a-${id('R')}`,
+          }),
+        );
+        await expect(
+          service.record(
+            reading({
+              periodStart: '2026-08-27T09:00:00.000Z',
+              periodEnd: '2026-08-27T11:00:00.000Z',
+              hours: '2',
+              clientReference: `own-b-${id('R')}`,
+            }),
+          ),
+        ).rejects.toMatchObject({
+          internalContext: expect.objectContaining({ conflictingRecordId: first.id }),
+        });
+      });
+    });
+
+    it("refuses an overlap with the previous owner's record, without naming it (review #5)", async () => {
+      // A machine transferred from A to B keeps A's history in A. B's
+      // overlapping period is still refused: maintenance-service adds every
+      // accepted period to one meter per asset, whoever owns it, so accepting
+      // it would count the same hour twice. The refusal does not name A's
+      // record, which B has no right to see.
+      const movedAsset = id('AST');
+      const historic = id('USG');
+      await asActor({ organizationId: org.b }, () =>
+        prisma.client.assetRef.create({
+          data: {
+            id: movedAsset,
+            organizationId: org.b,
+            status: 'ACTIVE',
+            syncedAt: new Date(),
+            sourceEvent: 'ITEST',
+          },
+        }),
+      );
+      await asActor({ organizationId: org.a }, () =>
+        prisma.client.usageRecord.create({
+          data: {
+            organizationId: org.a,
+            id: historic,
+            assetId: movedAsset,
+            periodStart: new Date('2026-08-20T08:00:00.000Z'),
+            periodEnd: new Date('2026-08-20T10:00:00.000Z'),
+            hours: '2',
+            recordedBy: 'ITEST',
+          },
+        }),
+      );
+
+      const refusal = await asActor({ organizationId: org.b }, () =>
+        service.record(
+          reading({
+            assetId: movedAsset,
+            periodStart: '2026-08-20T09:00:00.000Z',
+            periodEnd: '2026-08-20T11:00:00.000Z',
+            hours: '2',
+            clientReference: `ovl-t-${id('R')}`,
+          }),
+        ),
+      ).then(
+        () => null,
+        (error: { code?: string; internalContext?: Record<string, unknown> }) => error,
+      );
+      expect(refusal).toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+      expect(JSON.stringify(refusal)).not.toContain(historic);
+
+      // A period after A's record is fine.
+      await expect(
+        asActor({ organizationId: org.b }, () =>
+          service.record(
+            reading({
+              assetId: movedAsset,
+              periodStart: '2026-08-20T10:00:00.000Z',
+              periodEnd: '2026-08-20T12:00:00.000Z',
+              hours: '2',
+              clientReference: `ovl-u-${id('R')}`,
+            }),
+          ),
+        ),
+      ).resolves.toMatchObject({ assetId: movedAsset });
+
+      // And tenant A cannot record against a machine that is now B's at all.
+      await expect(
+        asActor({ organizationId: org.a }, () =>
+          service.record(reading({ assetId: movedAsset, clientReference: `ovl-x-${id('R')}` })),
+        ),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    });
+
+    it('refuses usage when the machine is transferred between the ownership check and the lock (review #4)', async () => {
+      const racedAsset = id('AST');
+      await asActor({ organizationId: org.a }, () =>
+        prisma.client.assetRef.create({
+          data: {
+            id: racedAsset,
+            organizationId: org.a,
+            status: 'ACTIVE',
+            syncedAt: new Date(),
+            sourceEvent: 'ITEST',
+          },
+        }),
+      );
+
+      // Hold the asset's lock; A's submission passes its ownership check and
+      // queues behind it; the transfer to B commits; then A goes on.
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+      const transfer = prisma.client.$transaction(
+        async (tx) => {
+          await repository.lockAssetRef(tx as never, racedAsset);
+          locked();
+          await released;
+          await tx.$executeRawUnsafe(
+            `UPDATE asset_ref SET organization_id = $2 WHERE id = $1`,
+            racedAsset,
+            org.b,
+          );
+        },
+        { timeout: 30_000 },
+      );
+      await isLocked;
+
+      const attempt = asActor({ organizationId: org.a }, () =>
+        service.record(reading({ assetId: racedAsset, clientReference: `race-t-${id('R')}` })),
+      );
+      for (let tries = 0; tries < 400; tries++) {
+        const rows = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+           WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+        );
+        if (rows[0]!.n >= 1) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      release();
+      await transfer;
+
+      await expect(attempt).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      const written = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM usage_record WHERE asset_id = $1`,
+        racedAsset,
+      );
+      expect(written[0]!.n).toBe(0);
+    });
+
+    it('refuses one side of two overlapping submissions arriving at the same moment', async () => {
+      // The race the audit reproduced: two concurrent inserts, neither having
+      // committed while the other checks, both passing a check-then-write
+      // done without a lock. The asset-row lock taken before the overlap
+      // check is what makes the second submission actually see the first.
+      const concurrentAsset = id('AST');
+      await asActor({ organizationId: org.a }, () =>
+        prisma.client.assetRef.create({
+          data: {
+            id: concurrentAsset,
+            organizationId: org.a,
+            status: 'ACTIVE',
+            syncedAt: new Date(),
+            sourceEvent: 'ITEST',
+          },
+        }),
+      );
+
+      const results = await asActor({ organizationId: org.a }, () =>
+        Promise.allSettled([
+          service.record(
+            reading({
+              assetId: concurrentAsset,
+              periodStart: '2026-08-30T08:00:00.000Z',
+              periodEnd: '2026-08-30T10:00:00.000Z',
+              hours: '2',
+              clientReference: `race-a-${id('R')}`,
+            }),
+          ),
+          service.record(
+            reading({
+              assetId: concurrentAsset,
+              periodStart: '2026-08-30T09:00:00.000Z',
+              periodEnd: '2026-08-30T11:00:00.000Z',
+              hours: '2',
+              clientReference: `race-b-${id('R')}`,
+            }),
+          ),
+        ]),
+      );
+
+      const fulfilled = results.filter((r) => r.status === 'fulfilled');
+      const rejected = results.filter((r) => r.status === 'rejected');
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
     });
   });
 

@@ -202,6 +202,7 @@ describe('InsuranceService', () => {
             id: 'INS_2',
             assetId: ASSET_ID,
             organizationId: DEH1,
+            coverage: 'THIRD_PARTY',
             validTo: new Date(Date.now() - day),
           },
         ]),
@@ -210,7 +211,10 @@ describe('InsuranceService', () => {
       const result = await h.service.runExpirySweep();
 
       expect(result.expired).toBe(1);
-      expect(h.enqueued.map((e) => e.eventName)).toContain(INSURANCE_EVENTS.INSURANCE_EXPIRED);
+      const expired = h.enqueued.find((e) => e.eventName === INSURANCE_EVENTS.INSURANCE_EXPIRED);
+      // fleet-service ends its dispatch block per coverage (L3-02), so the
+      // lapse must say which cover ran out.
+      expect(expired?.payload).toMatchObject({ policyId: 'INS_2', coverage: 'THIRD_PARTY' });
     });
 
     it('warns about expiring inspections as well as policies', async () => {

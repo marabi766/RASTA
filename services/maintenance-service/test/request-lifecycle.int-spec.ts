@@ -363,4 +363,124 @@ describe('maintenance request lifecycle', () => {
       expect(request.status).toBe('OPEN');
     });
   });
+
+  describe('REPAIR_CANCELLED event (L3-11)', () => {
+    // Before this, `cancel()` wrote `cancelledBy`/`cancellationReason` on the
+    // row and published nothing — audit-service, whose only input is events,
+    // never learned a referral had been withdrawn.
+    it('writes the outbox row in the same transaction as the cancellation', async () => {
+      const assetId = await machine();
+      const request = await asActor({ organizationId: org.a }, () =>
+        requests.create({ assetId, type: 'PREVENTIVE', title: 'سرویس' }),
+      );
+      const order = await asActor({ organizationId: org.a }, () =>
+        repairOrders.assign(request.id, { workshopOrganizationId: workshop }),
+      );
+
+      await asActor({ organizationId: org.a }, () =>
+        repairOrders.cancel(order.id, { reason: 'تعمیرگاه ظرفیت نداشت' }),
+      );
+
+      const outbox = await prisma.client.outboxMessage.findMany({
+        where: { organizationId: org.a, aggregateId: order.id, eventName: 'REPAIR_CANCELLED' },
+      });
+      expect(outbox).toHaveLength(1);
+      expect(outbox[0]!.partitionKey).toBe(assetId);
+
+      const envelope = outbox[0]!.payload as {
+        payload: { requestId: string; workshopOrganizationId: string; previousStatus: string };
+      };
+      expect(envelope.payload.requestId).toBe(request.id);
+      expect(envelope.payload.workshopOrganizationId).toBe(workshop);
+      expect(envelope.payload.previousStatus).toBe('OPEN');
+    });
+
+    it('records who cancelled, and rolls the cancellation back if its event cannot be written', async () => {
+      const assetId = await machine();
+      const request = await asActor({ organizationId: org.a }, () =>
+        requests.create({ assetId, type: 'PREVENTIVE', title: 'سرویس' }),
+      );
+      const order = await asActor({ organizationId: org.a }, () =>
+        repairOrders.assign(request.id, { workshopOrganizationId: workshop }),
+      );
+
+      // The outbox write fails: the cancellation must not survive without it.
+      const spy = jest
+        .spyOn(repository, 'enqueueEvent')
+        .mockRejectedValueOnce(new Error('outbox unavailable'));
+      await expect(
+        asActor({ organizationId: org.a }, () =>
+          repairOrders.cancel(order.id, { reason: 'تعمیرگاه ظرفیت نداشت' }),
+        ),
+      ).rejects.toThrow('outbox unavailable');
+      spy.mockRestore();
+      const untouched = await asActor({ organizationId: org.a }, () =>
+        prisma.client.repairOrder.findFirstOrThrow({ where: { id: order.id } }),
+      );
+      expect(untouched.status).toBe('OPEN');
+
+      await asActor({ organizationId: org.a, userId: 'USR-ITEST-CANCELLER' }, () =>
+        repairOrders.cancel(order.id, { reason: 'تعمیرگاه ظرفیت نداشت' }),
+      );
+      const outbox = await prisma.client.outboxMessage.findFirstOrThrow({
+        where: { organizationId: org.a, aggregateId: order.id, eventName: 'REPAIR_CANCELLED' },
+      });
+      const envelope = outbox.payload as { actor?: { id: string }; occurredAt: string };
+      expect(envelope.actor?.id).toBe('USR-ITEST-CANCELLER');
+      expect(Date.parse(envelope.occurredAt)).not.toBeNaN();
+    });
+
+    it("cannot cancel another tenant's repair order, and publishes nothing for it", async () => {
+      const assetId = await machine();
+      const request = await asActor({ organizationId: org.a }, () =>
+        requests.create({ assetId, type: 'PREVENTIVE', title: 'سرویس' }),
+      );
+      const order = await asActor({ organizationId: org.a }, () =>
+        repairOrders.assign(request.id, { workshopOrganizationId: workshop }),
+      );
+
+      await expect(
+        asActor({ organizationId: org.b }, () =>
+          repairOrders.cancel(order.id, { reason: 'تلاش از سازمان دیگر' }),
+        ),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+      const outbox = await prisma.client.outboxMessage.findMany({
+        where: { aggregateId: order.id, eventName: 'REPAIR_CANCELLED' },
+      });
+      expect(outbox).toHaveLength(0);
+      const row = await asActor({ organizationId: org.a }, () =>
+        prisma.client.repairOrder.findFirstOrThrow({ where: { id: order.id } }),
+      );
+      expect(row.status).toBe('OPEN');
+    });
+
+    it('publishes nothing when the cancellation itself is refused', async () => {
+      // A repair order already completed cannot be cancelled — and the
+      // refusal must not have written a stray event for a change that never
+      // happened.
+      const assetId = await machine();
+      const request = await asActor({ organizationId: org.a }, () =>
+        requests.create({ assetId, type: 'PREVENTIVE', title: 'سرویس' }),
+      );
+      const order = await asActor({ organizationId: org.a }, () =>
+        repairOrders.assign(request.id, { workshopOrganizationId: workshop }),
+      );
+      await asActor({ organizationId: org.a }, () => repairOrders.start(order.id, {}));
+      await asActor({ organizationId: org.a }, () =>
+        repairOrders.complete(order.id, { workPerformed: 'انجام شد' }),
+      );
+
+      await expect(
+        asActor({ organizationId: org.a }, () =>
+          repairOrders.cancel(order.id, { reason: 'تلاش دیرهنگام' }),
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
+
+      const outbox = await prisma.client.outboxMessage.findMany({
+        where: { organizationId: org.a, aggregateId: order.id, eventName: 'REPAIR_CANCELLED' },
+      });
+      expect(outbox).toHaveLength(0);
+    });
+  });
 });
