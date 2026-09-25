@@ -8,7 +8,7 @@ import {
   Section,
 } from '@/ui';
 import { productKindLabel } from '@/lib/labels';
-import { formatMoney } from '@/lib/format';
+import { formatMoney, toPersianDigits } from '@/lib/format';
 import type { OffersPage, Product, ReadResult } from '@/server/marketplace';
 
 /**
@@ -102,9 +102,15 @@ function OfferRows({ offers }: { offers: OffersPage }) {
               <Identifier>{offer.supplierOrganizationId}</Identifier>
             </td>
             <td className="p-3">{formatMoney(offer.unitPriceMinor)}</td>
-            <td className="p-3 text-content-muted">{offer.availableQuantity}</td>
-            <td className="p-3 text-content-muted">{offer.minimumQuantity}</td>
-            <td className="p-3 text-content-muted">{offer.leadTimeDays} روز</td>
+            <td className="p-3 text-content-muted">
+              {toPersianDigits(String(offer.availableQuantity))}
+            </td>
+            <td className="p-3 text-content-muted">
+              {toPersianDigits(String(offer.minimumQuantity))}
+            </td>
+            <td className="p-3 text-content-muted">
+              {toPersianDigits(String(offer.leadTimeDays))} روز
+            </td>
             <td className="p-3 text-content-muted">
               {offer.supplierQualification === 'UNAVAILABLE'
                 ? 'هنوز فعال نیست'

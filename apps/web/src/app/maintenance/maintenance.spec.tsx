@@ -186,6 +186,16 @@ describe('the maintenance request detail', () => {
     expect(getByText('تأیید شد، هزینه مطابق برآورد بود')).toBeInTheDocument();
   });
 
+  it('writes the downtime in Persian digits (L5-09)', () => {
+    const returned: MaintenanceRequestDetail = {
+      ...DETAIL,
+      returnedToServiceAt: '2026-02-01T10:30:00.000Z',
+      downtimeMinutes: 150,
+    };
+    const { getByText } = render(<RequestDetailScreen result={ok(returned)} requestId="MREQ_1" />);
+    expect(getByText('۱۵۰ دقیقه')).toBeInTheDocument();
+  });
+
   it('shows no severity as "preventive work" rather than a blank', () => {
     const preventive: MaintenanceRequestDetail = {
       ...DETAIL,

@@ -14,9 +14,10 @@ import {
   assetStatusLabel,
   assetTypeLabel,
   blockerLabel,
+  inspectionResultLabel,
   timelineCategoryLabel,
 } from '@/lib/labels';
-import { formatJalaliDateLong, formatMoney } from '@/lib/format';
+import { formatJalaliDateLong, formatMoney, toPersianDigits } from '@/lib/format';
 import type { AssetDossier, ReadResult } from '@/server/assets';
 
 /**
@@ -87,7 +88,10 @@ function Compliance({ dossier }: { dossier: AssetDossier }) {
           <dd className="text-content">
             {compliance.latestInspection ? (
               <>
-                <StatusBadge status={compliance.latestInspection.result} />
+                <StatusBadge
+                  status={compliance.latestInspection.result}
+                  label={inspectionResultLabel(compliance.latestInspection.result)}
+                />
                 <span className="block text-sm text-content-muted">
                   اعتبار تا {formatJalaliDateLong(compliance.latestInspection.validTo)} —{' '}
                   {expiryWording(compliance.latestInspection.daysUntilExpiry)}
@@ -108,12 +112,13 @@ function Compliance({ dossier }: { dossier: AssetDossier }) {
  *
  * asset-service sends a negative number once the date has passed, precisely so
  * a client can say the second thing. Rendering the raw number would leave a
- * person to work out what a negative expiry means.
+ * person to work out what a negative expiry means. The count is written in
+ * Persian digits here, at render, and nowhere earlier (docs/16 § 16.3).
  */
 function expiryWording(days: number): string {
-  if (days > 0) return `${days} روز مانده`;
+  if (days > 0) return `${toPersianDigits(String(days))} روز مانده`;
   if (days === 0) return 'امروز منقضی می‌شود';
-  return `${Math.abs(days)} روز از انقضا گذشته`;
+  return `${toPersianDigits(String(Math.abs(days)))} روز از انقضا گذشته`;
 }
 
 export function DossierScreen({ result, assetId }: DossierScreenProps) {
@@ -206,7 +211,11 @@ export function DossierScreen({ result, assetId }: DossierScreenProps) {
             </div>
             <div className="flex flex-col gap-1">
               <dt className="text-sm text-content-subtle">سال ساخت</dt>
-              <dd className="text-content">{asset.manufactureYear ?? 'ثبت نشده'}</dd>
+              <dd className="text-content">
+                {asset.manufactureYear !== null
+                  ? toPersianDigits(String(asset.manufactureYear))
+                  : 'ثبت نشده'}
+              </dd>
             </div>
             <div className="flex flex-col gap-1">
               <dt className="text-sm text-content-subtle">آغاز بهره‌برداری</dt>
@@ -236,7 +245,7 @@ export function DossierScreen({ result, assetId }: DossierScreenProps) {
           </div>
         </Grid>
         <p className="mt-4 text-sm text-content-muted">
-          بر پایهٔ {costs.entryCount} رویداد ثبت‌شده روی این دارایی.
+          بر پایهٔ {toPersianDigits(String(costs.entryCount))} رویداد ثبت‌شده روی این دارایی.
         </p>
       </Section>
 

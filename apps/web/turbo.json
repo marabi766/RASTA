@@ -1,0 +1,24 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    // `src/lib/labels.contract.spec.ts` reads these two asset-service files as
+    // text to pin the portal's asset vocabulary to the service's (L5-02). They
+    // live outside this package, so without naming them here a change to the
+    // service would replay a cached green for the one test meant to catch it.
+    "test": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/services/asset-service/src/asset/dto.ts",
+        "$TURBO_ROOT$/services/asset-service/src/asset/asset.service.ts"
+      ]
+    },
+    "test:unit": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/services/asset-service/src/asset/dto.ts",
+        "$TURBO_ROOT$/services/asset-service/src/asset/asset.service.ts"
+      ]
+    }
+  }
+}

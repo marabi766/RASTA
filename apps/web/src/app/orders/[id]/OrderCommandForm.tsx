@@ -4,6 +4,7 @@ import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { toPersianDigits } from '@/lib/format';
 import {
   COMMAND_CONSEQUENCES,
   COMMAND_FIELD,
@@ -152,7 +153,7 @@ function CommandFields({
       return (
         <Field
           label="دلیل اختلاف"
-          hint={`دست‌کم ${LIMITS.disputeReason.min} نویسه؛ کسی که رسیدگی می‌کند باید بداند موضوع چیست`}
+          hint={`دست‌کم ${toPersianDigits(String(LIMITS.disputeReason.min))} نویسه؛ کسی که رسیدگی می‌کند باید بداند موضوع چیست`}
           error={errors.reason}
           required
         >

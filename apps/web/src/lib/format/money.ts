@@ -160,7 +160,7 @@ export function parseMoneyInput(input: string, currency: CurrencyFormat = IRR): 
       input,
       currency.fractionDigits === 0
         ? `${currency.label} جزء اعشاری ندارد`
-        : `حداکثر ${currency.fractionDigits} رقم اعشار پذیرفته می‌شود`,
+        : `حداکثر ${toPersianDigits(String(currency.fractionDigits))} رقم اعشار پذیرفته می‌شود`,
     );
   }
 

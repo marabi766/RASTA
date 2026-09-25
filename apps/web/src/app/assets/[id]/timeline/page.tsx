@@ -3,6 +3,7 @@ import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchAssetTimeline, type AssetTimelineQuery } from '@/server/assets';
 import { PORTAL_NAV } from '@/app/nav';
+import { TIMELINE_CATEGORIES, oneOf } from '@/lib/asset-fields';
 import { TimelineScreen } from './TimelineScreen';
 
 /**
@@ -40,7 +41,8 @@ export default async function AssetTimelinePage({
 
   const search = await searchParams;
   const query: AssetTimelineQuery = {
-    category: one(search.category),
+    // A strict enum on asset-service's side; see `/assets/page.tsx`.
+    category: oneOf(TIMELINE_CATEGORIES, one(search.category)),
     cursor: one(search.cursor),
   };
 

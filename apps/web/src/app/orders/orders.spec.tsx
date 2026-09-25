@@ -4,7 +4,7 @@ import { axe } from 'jest-axe';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import type { Order, OrderPage, ReadResult } from '@/server/orders';
 
-import { OrdersScreen } from './OrdersScreen';
+import { OrdersScreen, formatOrderAmount } from './OrdersScreen';
 import { OrderDetailScreen } from './[id]/OrderDetailScreen';
 import type { OrderCommandFormState } from './[id]/form-state';
 
@@ -178,6 +178,15 @@ describe('the command forms', () => {
     const reason = screen.getByLabelText(/دلیل اختلاف/);
     expect(reason).toHaveAttribute('minLength', '10');
     expect(reason).toHaveAttribute('maxLength', '1000');
+  });
+
+  it('states the minimum in its hint in Persian digits, the attribute staying Latin (L5-09)', () => {
+    renderDetail({ ...ORDER, availableActions: ['RAISE_DISPUTE'] });
+    expect(screen.getByText(/دست‌کم ۱۰ نویسه/)).toBeInTheDocument();
+  });
+
+  it('writes an amount in a currency it cannot format in Persian digits, with its code', () => {
+    expect(formatOrderAmount('1250', 'USD')).toBe('۱۲۵۰ USD');
   });
 
   it('pre-selects no responsibility when resolving a dispute (ADR-052 rule 14)', () => {

@@ -18,7 +18,7 @@ const ASSET = {
   id: 'AST_1',
   assetTag: '۱۲ ب ۳۴۵',
   name: 'لودر کوماتسو',
-  type: 'HEAVY_MACHINERY',
+  type: 'LOADER',
   status: 'ACTIVE',
   manufacturer: 'کوماتسو',
   model: 'WA320',
@@ -43,10 +43,10 @@ describe('the machinery list', () => {
     // filter above it offers every label as an option too.
     const { getByRole } = render(<AssetsScreen result={page()} query={{}} />);
     const row = getByRole('row', { name: /لودر کوماتسو/ });
-    expect(row).toHaveTextContent('ماشین‌آلات سنگین');
+    expect(row).toHaveTextContent('لودر');
     expect(row).toHaveTextContent('فعال');
     // And the option that carries that label still carries the Latin value.
-    expect(getByRole('option', { name: 'ماشین‌آلات سنگین' })).toHaveValue('HEAVY_MACHINERY');
+    expect(getByRole('option', { name: 'لودر' })).toHaveValue('LOADER');
   });
 
   it('shows an unknown status as it arrived, rather than hiding it', () => {
@@ -122,7 +122,13 @@ const DOSSIER: AssetDossier = {
   organizationName: 'دهیاری نمونه',
   compliance: {
     operable: false,
-    blockers: ['INSURANCE_EXPIRED', 'INSPECTION_EXPIRED'],
+    // The sentences asset-service's `complianceBlockers()` actually sends —
+    // not codes, which it has never sent (L5-02).
+    blockers: [
+      'Asset status is OUT_OF_SERVICE',
+      'No insurance policy is currently in force',
+      'The technical inspection certificate has expired',
+    ],
     activeInsurance: null,
     latestInspection: {
       certificateNo: 'C-1',
@@ -159,13 +165,48 @@ describe('the electronic dossier', () => {
     // the first would send an operator back a second time.
     const { getByText } = render(<DossierScreen result={ok()} assetId="AST_1" />);
     expect(getByText('قابل اعزام نیست')).toBeInTheDocument();
-    expect(getByText('بیمه‌نامه منقضی شده')).toBeInTheDocument();
-    expect(getByText('معاینهٔ فنی منقضی شده')).toBeInTheDocument();
+    expect(getByText('وضعیت دارایی «خارج از سرویس» است')).toBeInTheDocument();
+    expect(getByText('بیمه‌نامهٔ معتبری ندارد')).toBeInTheDocument();
+    expect(getByText('گواهی معاینهٔ فنی منقضی شده')).toBeInTheDocument();
   });
 
   it('says an expiry has passed rather than showing a negative number', () => {
     const { getByText } = render(<DossierScreen result={ok()} assetId="AST_1" />);
-    expect(getByText(/۳۰ روز از انقضا گذشته|30 روز از انقضا گذشته/)).toBeInTheDocument();
+    expect(getByText(/۳۰ روز از انقضا گذشته/)).toBeInTheDocument();
+  });
+
+  it('counts days left in Persian digits too', () => {
+    const soon: AssetDossier = {
+      ...DOSSIER,
+      compliance: {
+        ...DOSSIER.compliance,
+        latestInspection: { ...DOSSIER.compliance.latestInspection!, daysUntilExpiry: 12 },
+      },
+    };
+    const { getByText } = render(<DossierScreen result={ok(soon)} assetId="AST_1" />);
+    expect(getByText(/۱۲ روز مانده/)).toBeInTheDocument();
+  });
+
+  it('renders the domain’s numbers in Persian digits, and only at render (L5-09)', () => {
+    // docs/16 § 16.3: the data stays Latin — the fixture above holds 2018 and
+    // 7 — and the conversion happens here, in the page, and nowhere earlier.
+    const { container, getByText } = render(<DossierScreen result={ok()} assetId="AST_1" />);
+    expect(getByText('۲۰۱۸')).toBeInTheDocument();
+    expect(getByText(/بر پایهٔ ۷ رویداد/)).toBeInTheDocument();
+    // No Latin digit anywhere a person reads except inside an identifier the
+    // service issued (the model code "WA320", the system id) — those are data.
+    const prose = [...container.querySelectorAll('dd, p, li, span')]
+      .filter((el) => !el.closest('bdi'))
+      .map((el) => el.childNodes)
+      .flatMap((nodes) => [...nodes])
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .map((node) => node.textContent ?? '');
+    expect(prose.join(' ')).not.toMatch(/[0-9]/);
+  });
+
+  it('labels the latest inspection’s result in Persian', () => {
+    const { getByText } = render(<DossierScreen result={ok()} assetId="AST_1" />);
+    expect(getByText('قبول')).toBeInTheDocument();
   });
 
   it('says plainly when nothing is blocking', () => {

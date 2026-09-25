@@ -125,6 +125,14 @@ describe('parsing a submission', () => {
     });
   });
 
+  it('names the digit limit in Persian digits (L5-09)', () => {
+    const parsed = parseUsageForm(values({ hours: '123456789' }), SUBMISSION);
+    expect(parsed).toMatchObject({
+      ok: false,
+      fieldErrors: { hours: 'حداکثر ۸ رقم پیش از اعشار مجاز است' },
+    });
+  });
+
   it('refuses a quantity with too many decimals, in Persian', () => {
     const parsed = parseUsageForm(values({ hours: '8.555' }), SUBMISSION);
     expect(parsed).toMatchObject({
