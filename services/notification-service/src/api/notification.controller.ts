@@ -1,6 +1,6 @@
 import { Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
-import { zodPipe } from '@rasta/nest-common';
+import { AuditorSelfService, zodPipe } from '@rasta/nest-common';
 import { NotificationApiService } from './notification.service';
 import {
   listNotificationsQuerySchema,
@@ -47,6 +47,7 @@ import type {
  * a view serialises (AGENTS.md A-10). Every handler is one line.
  */
 @ApiTags('notifications')
+@AuditorSelfService('every handler here reads or changes only the caller’s own notifications')
 @Controller({ path: 'notifications', version: '1' })
 export class NotificationController {
   constructor(private readonly notifications: NotificationApiService) {}

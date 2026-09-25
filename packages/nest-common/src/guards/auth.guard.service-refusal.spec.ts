@@ -71,6 +71,7 @@ const userClaims: UserClaims = {
   organizationId: ORG_SIGNED,
   organizationIds: [ORG_SIGNED],
   roles: ['FLEET_MANAGER'],
+  organizationRoles: [`${ORG_SIGNED}:FLEET_MANAGER`],
   username: 'fleet.manager',
   expiresAt: Date.now() + 60_000,
 };

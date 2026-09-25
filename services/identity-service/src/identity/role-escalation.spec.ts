@@ -93,6 +93,9 @@ function userToken(name: string, roles: string[]): string {
     organizationId: ORG_A,
     organizationIds: [ORG_A],
     roles,
+    // As the realm issues it (ADR-060): the role in the organization it was
+    // granted in. SYSTEM_ADMIN is also a realm role, and stays global.
+    organizationRoles: roles.map((role) => `${ORG_A}:${role}`),
     expiresAt: Date.now() + 60_000,
   });
   return token;
@@ -268,7 +271,6 @@ const keycloak = {
   // returns before touching anything (`identity.service.spec.ts` covers it).
   enabled: false,
   replacePlatformAttributes: async () => undefined,
-  assignRealmRoles: async () => undefined,
   isHealthy: async () => true,
 } as unknown as KeycloakAdminClient;
 

@@ -67,6 +67,7 @@ interface Claims {
   organizationId?: string;
   organizationIds: string[];
   roles: string[];
+  organizationRoles: string[];
   username?: string;
   expiresAt: number;
 }
@@ -77,6 +78,11 @@ const claimsFor = (overrides: Partial<Claims> = {}): Claims => ({
   organizationId: ORG_ACTIVE,
   organizationIds: [ORG_ACTIVE, ORG_SECOND],
   roles: ['FLEET_MANAGER', 'ORGANIZATION_ADMIN'],
+  organizationRoles: [
+    `${ORG_ACTIVE}:FLEET_MANAGER`,
+    `${ORG_ACTIVE}:ORGANIZATION_ADMIN`,
+    `${ORG_SECOND}:DRIVER`,
+  ],
   username: 'dehyari.admin',
   expiresAt: Date.now() + 60_000,
   ...overrides,

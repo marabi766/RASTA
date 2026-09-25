@@ -28,7 +28,16 @@ export interface UserClaims {
   rastaUserId?: string;
   organizationId?: string;
   organizationIds: string[];
+  /**
+   * The token's realm roles, as issued. **Not** the caller's authority: only
+   * the global ones survive the guard (ADR-060 § 4). Read `AuthState.roles`.
+   */
   roles: string[];
+  /**
+   * The `org_roles` claim: one `ORG_ID:ROLE` value per role held in each
+   * membership, unparsed. The guard parses it strictly (`parseOrganizationRoles`).
+   */
+  organizationRoles: string[];
   username?: string;
   email?: string;
   expiresAt: number;
@@ -114,6 +123,7 @@ export class TokenVerifier {
       organizationId: readString(payload, 'org_id'),
       organizationIds: readStringArray(payload, 'org_ids'),
       roles: readRealmRoles(payload),
+      organizationRoles: readStringArray(payload, 'org_roles'),
       username: readString(payload, 'preferred_username'),
       email: readString(payload, 'email'),
       expiresAt: (payload.exp ?? 0) * 1000,
