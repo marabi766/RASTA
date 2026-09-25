@@ -77,6 +77,17 @@ jobs:
           pnpm run test:local-postgres-config
           pnpm run check:local-postgres-config
 
+      - name: Development Keycloak realm gate
+        # L1-05: rasta-realm.json seeds a SYSTEM_ADMIN with a committed password
+        # and enables the password grant. Its `enabled` is a placeholder only
+        # infrastructure/docker/keycloak/dev-realm-gate.sh resolves, and only
+        # for start-dev with RASTA_KEYCLOAK_DEV_REALM=allow. Static: fails if
+        # the placeholder, the gate's checks, or any launcher's use of it is
+        # edited away. The checker's own tests run the gate script under bash.
+        run: |
+          pnpm run test:keycloak-dev-realm
+          pnpm run check:keycloak-dev-realm
+
       - name: Test phase contract
         # identity-service's aggregation stress spec (two 500-write proofs on
         # one hot row) must run exactly once, alone, after every other
@@ -330,9 +341,11 @@ jobs:
             -e KC_BOOTSTRAP_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD}" \
             -e KC_HEALTH_ENABLED=true \
             -e KC_HOSTNAME_STRICT=false \
+            -e RASTA_KEYCLOAK_DEV_REALM=allow \
             -v "$PWD/infrastructure/docker/keycloak:/opt/keycloak/data/import:ro" \
+            --entrypoint /bin/bash \
             quay.io/keycloak/keycloak:26.0 \
-            start-dev --import-realm
+            /opt/keycloak/data/import/dev-realm-gate.sh start-dev --import-realm
 
       - run: pnpm install --frozen-lockfile
 
@@ -1330,9 +1343,11 @@ jobs:
             -e KC_BOOTSTRAP_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD}" \
             -e KC_HEALTH_ENABLED=true \
             -e KC_HOSTNAME_STRICT=false \
+            -e RASTA_KEYCLOAK_DEV_REALM=allow \
             -v "$PWD/infrastructure/docker/keycloak:/opt/keycloak/data/import:ro" \
+            --entrypoint /bin/bash \
             quay.io/keycloak/keycloak:26.0 \
-            start-dev --import-realm
+            /opt/keycloak/data/import/dev-realm-gate.sh start-dev --import-realm
 
       - run: pnpm install --frozen-lockfile
 
