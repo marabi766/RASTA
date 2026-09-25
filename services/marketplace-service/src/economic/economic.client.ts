@@ -70,6 +70,9 @@ export interface SettlementView {
   settledAt: string;
 }
 
+/** The economic transaction type an order's obligation is recorded as. */
+const OBLIGATION_TYPE = 'MARKETPLACE_ORDER';
+
 /** Keys derived from identity, so a retry is a replay rather than a new act. */
 export const idempotencyKeyFor = {
   hold: (orderId: string) => `order:${orderId}:hold`,
@@ -116,7 +119,7 @@ export class EconomicClient {
       idempotencyKey: idempotencyKeyFor.hold(input.orderId),
       correlationId: input.correlationId,
       body: {
-        transactionType: 'MARKETPLACE_ORDER',
+        transactionType: OBLIGATION_TYPE,
         counterpartyOrganizationId: input.supplierOrganizationId,
         grossAmountMinor: input.totalAmountMinor.toString(),
         currency: input.currency,
@@ -125,6 +128,40 @@ export class EconomicClient {
         holdFunds: true,
       },
     });
+  }
+
+  /**
+   * The obligation recorded for this order, if there is one.
+   *
+   * The saga's answer to "did the hold happen?" when `createObligation` ended
+   * without a definite reply. A timeout, an exhausted retry or a lost response
+   * says nothing about whether economic-service committed the hold, and
+   * treating any of them as "nothing moved" failed the order while the
+   * buyer's money stayed held. economic-service keeps at most one obligation
+   * per payer and source fact (`ux_transaction_source_fact`), so this read is
+   * a complete answer, not a best guess.
+   */
+  async findObligation(input: {
+    orderId: string;
+    buyerOrganizationId: string;
+    correlationId: string;
+  }): Promise<TransactionView | null> {
+    const query = new URLSearchParams({
+      sourceReference: input.orderId,
+      transactionType: OBLIGATION_TYPE,
+    });
+    const page = await this.call<{ items: TransactionView[] }>('findObligation', {
+      method: 'GET',
+      path: `/v1/transactions?${query.toString()}`,
+      organizationId: input.buyerOrganizationId,
+      correlationId: input.correlationId,
+    });
+    return (
+      page.items.find(
+        (item) =>
+          item.sourceReference === input.orderId && item.transactionType === OBLIGATION_TYPE,
+      ) ?? null
+    );
   }
 
   /** Marks the obligation ready to settle. Only reachable after receipt. */

@@ -7,6 +7,7 @@ import {
 } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import type { OrderService } from '../order/order.service';
+import type { OrderStatus } from '../generated/prisma';
 import type { EconomicClient } from '../economic/economic.client';
 import { SERVICE_NAME } from '../config/env';
 import { settlementsExhaustedTotal } from '../observability/metrics';
@@ -45,6 +46,9 @@ export interface HeldResult {
   transactionId: string;
 }
 
+/** What `readOrder` returns: the fields the saga's decisions depend on. */
+export type SagaOrderView = Awaited<ReturnType<OrderService['sagaView']>>;
+
 export interface SettledResult {
   settlementId: string;
   commissionAmountMinor: string;
@@ -57,18 +61,27 @@ export function createActivities(deps: ActivityDependencies) {
    *
    * The organization is read from the order rather than passed in, so a
    * workflow cannot name a tenant of its own choosing.
+   *
+   * A platform error leaves here classified (`asTemporalFailure`), whichever
+   * step raised it. The workflow retries its reads and local writes until
+   * they answer, so a state-machine refusal that arrived unclassified would be
+   * retried forever instead of stopping the saga.
    */
   async function asSystemFor<T>(
     orderId: string,
     fn: (order: Awaited<ReturnType<OrderService['describe']>>) => Promise<T>,
   ): Promise<T> {
-    // Read once without a tenant, purely to learn which tenant to adopt. The
-    // describe() call is scoped by the repository's own written reason.
-    const bootstrap = systemContext(undefined, ulid());
-    const order = await runWithContext(bootstrap, () => deps.orders.describe(orderId));
+    try {
+      // Read once without a tenant, purely to learn which tenant to adopt. The
+      // describe() call is scoped by the repository's own written reason.
+      const bootstrap = systemContext(undefined, ulid());
+      const order = await runWithContext(bootstrap, () => deps.orders.describe(orderId));
 
-    const context = systemContext(order.buyerOrganizationId, order.correlationId);
-    return runWithContext(context, () => fn(order));
+      const context = systemContext(order.buyerOrganizationId, order.correlationId);
+      return await runWithContext(context, () => fn(order));
+    } catch (error) {
+      throw asTemporalFailure(error);
+    }
   }
 
   return {
@@ -97,12 +110,39 @@ export function createActivities(deps: ActivityDependencies) {
       });
     },
 
-    async markFundsHeld(orderId: string, transactionId: string): Promise<void> {
-      await asSystemFor(orderId, () => deps.orders.markFundsHeld(orderId, transactionId));
+    /**
+     * Whether economic-service holds an obligation for this order.
+     *
+     * Asked whenever `createObligation` ends without a definite answer,
+     * because only a refusal proves nothing moved (see
+     * `EconomicClient.findObligation`).
+     */
+    async findObligation(orderId: string): Promise<HeldResult | null> {
+      return asSystemFor(orderId, async (order) => {
+        try {
+          const found = await deps.economic.findObligation({
+            orderId: order.id,
+            buyerOrganizationId: order.buyerOrganizationId,
+            correlationId: order.correlationId,
+          });
+          return found ? { transactionId: found.id } : null;
+        } catch (error) {
+          throw asTemporalFailure(error);
+        }
+      });
     },
 
-    async markFailed(orderId: string, reason: string): Promise<void> {
-      await asSystemFor(orderId, () => deps.orders.markFailed(orderId, reason));
+    /** The order as the database has it now. What the saga decides on (ADR-039). */
+    async readOrder(orderId: string): Promise<SagaOrderView> {
+      return asSystemFor(orderId, () => deps.orders.sagaView(orderId));
+    },
+
+    async markFundsHeld(orderId: string, transactionId: string): Promise<OrderStatus> {
+      return asSystemFor(orderId, () => deps.orders.markFundsHeld(orderId, transactionId));
+    },
+
+    async markFailed(orderId: string, reason: string): Promise<OrderStatus> {
+      return asSystemFor(orderId, () => deps.orders.markFailed(orderId, reason));
     },
 
     async authoriseSettlement(orderId: string, transactionId: string): Promise<void> {
@@ -120,8 +160,8 @@ export function createActivities(deps: ActivityDependencies) {
       });
     },
 
-    async markSettling(orderId: string): Promise<void> {
-      await asSystemFor(orderId, () => deps.orders.markSettling(orderId));
+    async markSettling(orderId: string): Promise<OrderStatus> {
+      return asSystemFor(orderId, () => deps.orders.markSettling(orderId));
     },
 
     async settle(orderId: string, transactionId: string): Promise<SettledResult> {
@@ -144,13 +184,13 @@ export function createActivities(deps: ActivityDependencies) {
       });
     },
 
-    async markSettlementFailed(orderId: string): Promise<void> {
+    async markSettlementFailed(orderId: string): Promise<OrderStatus> {
       settlementsExhaustedTotal.inc({ service: SERVICE_NAME }, 0);
-      await asSystemFor(orderId, () => deps.orders.markSettlementFailed(orderId));
+      return asSystemFor(orderId, () => deps.orders.markSettlementFailed(orderId));
     },
 
-    async markCompleted(orderId: string, settlement: SettledResult): Promise<void> {
-      await asSystemFor(orderId, () => deps.orders.markCompleted(orderId, settlement));
+    async markCompleted(orderId: string, settlement: SettledResult): Promise<OrderStatus> {
+      return asSystemFor(orderId, () => deps.orders.markCompleted(orderId, settlement));
     },
 
     /**
@@ -222,8 +262,8 @@ export function createActivities(deps: ActivityDependencies) {
       });
     },
 
-    async markCancelled(orderId: string, reason: string): Promise<void> {
-      await asSystemFor(orderId, () => deps.orders.markCancelled(orderId, reason));
+    async markCancelled(orderId: string, reason: string): Promise<OrderStatus> {
+      return asSystemFor(orderId, () => deps.orders.markCancelled(orderId, reason));
     },
 
     /**
