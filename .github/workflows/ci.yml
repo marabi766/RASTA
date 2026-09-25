@@ -99,6 +99,16 @@ jobs:
           pnpm run test:dockerfile-pins
           pnpm run check:dockerfile-pins
 
+      - name: Tenant-leading composite indexes
+        # L7-44 / ADR-011: every composite index on a tenant table in
+        # supplier, notification, document and audit leads with
+        # organization_id, or is exempted by name with its reason. Replays the
+        # migrations, so partial indexes that exist only in SQL are judged too.
+        # Static; the checker's tests run first.
+        run: |
+          pnpm run test:tenant-index-order
+          pnpm run check:tenant-index-order
+
       - name: Test phase contract
         # identity-service's aggregation stress spec (two 500-write proofs on
         # one hot row) must run exactly once, alone, after every other

@@ -54,7 +54,7 @@ export class PreferencesRepository {
   async quietHours(actor: NotificationActor): Promise<QuietHoursRow | null> {
     const row = await this.prisma.client.notificationQuietHours.findUnique({
       where: {
-        userId_organizationId: { userId: actor.userId, organizationId: actor.organizationId },
+        organizationId_userId: { organizationId: actor.organizationId, userId: actor.userId },
       },
       select: { startMinute: true, endMinute: true, timezone: true },
     });
@@ -72,7 +72,7 @@ export class PreferencesRepository {
 
     await this.prisma.client.notificationQuietHours.upsert({
       where: {
-        userId_organizationId: { userId: actor.userId, organizationId: actor.organizationId },
+        organizationId_userId: { organizationId: actor.organizationId, userId: actor.userId },
       },
       create: {
         userId: actor.userId,
