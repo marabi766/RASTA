@@ -91,6 +91,14 @@ jobs:
         # (L7-35). A wrong rule would quietly skip a changed image.
         run: pnpm run test:container-scope
 
+      - name: Base images pinned by digest
+        # L7-45: every service Dockerfile builds on one digest-pinned base and
+        # runs no bare `apk upgrade`, so a rebuild of a commit is the same
+        # image. Update procedure: docs/runbooks/base-image-update.md.
+        run: |
+          pnpm run test:dockerfile-pins
+          pnpm run check:dockerfile-pins
+
       - name: Test phase contract
         # identity-service's aggregation stress spec (two 500-write proofs on
         # one hot row) must run exactly once, alone, after every other
