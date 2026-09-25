@@ -182,6 +182,8 @@ function harness(
     findById: jest.fn(async () =>
       options.asset === undefined ? { id: ASSET_ID, organizationId: DEH1 } : options.asset,
     ),
+    latestTransferAt: jest.fn(async () => null),
+    lockAsset: jest.fn(async () => ({ status: 'ACTIVE' })),
   } as unknown as AssetRepository;
 
   const assets = {

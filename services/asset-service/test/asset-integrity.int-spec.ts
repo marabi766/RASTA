@@ -497,7 +497,10 @@ describe('asset integrity', () => {
         asActor(manager(org.b), () => assets.activate(assetId, {})),
       ).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
-        details: expect.anything(),
+        internalContext: expect.objectContaining({
+          rule: 'INCOMPLETE_DOSSIER',
+          missing: ['an insurance policy currently in force'],
+        }),
       });
       const dossier = await asActor(manager(org.b), () => assets.dossier(assetId));
       expect(dossier.compliance.activeInsurance).toBeNull();

@@ -237,8 +237,11 @@ export class AssetService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const created = await this.repository.transaction(async (tx) => {
-      const asset = await tx.asset
-        .create({
+      // The lookups above are for a readable refusal. Under a concurrent
+      // create, both requests pass them, and the unique indexes decide.
+      let asset;
+      try {
+        asset = await tx.asset.create({
           data: {
             id,
             organizationId,
@@ -257,10 +260,10 @@ export class AssetService {
             createdBy: actor,
             updatedBy: actor,
           },
-        })
-        // The lookups above are for a readable refusal. Under a concurrent
-        // create, both requests pass them, and the unique indexes decide.
-        .catch(rethrowUniqueAsAlreadyExists);
+        });
+      } catch (error) {
+        rethrowUniqueAsAlreadyExists(error);
+      }
 
       if (dto.location) {
         await this.insertLocation(tx, id, organizationId, {
@@ -327,25 +330,26 @@ export class AssetService {
     const updated = await this.repository.transaction(async (tx) => {
       // Guarded on the row, not only on the read above: a decommission that
       // commits in between must not be followed by an edit (audit L3-07).
-      const { count } = await tx.asset
-        .updateMany({
+      let count: number;
+      try {
+        ({ count } = await tx.asset.updateMany({
           where: { id, deletedAt: null, status: { not: 'DECOMMISSIONED' } },
           data: {
             ...(dto.name !== undefined ? { name: dto.name } : {}),
             ...(dto.assetTag !== undefined ? { assetTag: dto.assetTag } : {}),
             ...(dto.manufacturer !== undefined ? { manufacturer: dto.manufacturer } : {}),
             ...(dto.model !== undefined ? { model: dto.model } : {}),
-            ...(dto.manufactureYear !== undefined
-              ? { manufactureYear: dto.manufactureYear }
-              : {}),
+            ...(dto.manufactureYear !== undefined ? { manufactureYear: dto.manufactureYear } : {}),
             ...(dto.specifications !== undefined
               ? { specifications: dto.specifications as object }
               : {}),
             updatedBy: actor,
             version: { increment: 1 },
           },
-        })
-        .catch(rethrowUniqueAsAlreadyExists);
+        }));
+      } catch (error) {
+        rethrowUniqueAsAlreadyExists(error);
+      }
       if (count === 0) throw RastaError.optimisticLockFailed('Asset', id);
 
       const row = await this.reread(tx, id);
@@ -904,13 +908,7 @@ export class AssetService {
     data: Record<string, unknown>,
     where: { organizationId?: string } = {},
   ) {
-    const changed = await this.repository.compareAndSetStatus(
-      tx,
-      id,
-      expectedStatus,
-      data,
-      where,
-    );
+    const changed = await this.repository.compareAndSetStatus(tx, id, expectedStatus, data, where);
     if (changed === 0) throw RastaError.optimisticLockFailed('Asset', id);
     return this.reread(tx, id);
   }

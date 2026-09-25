@@ -170,6 +170,16 @@ function harness(overrides: Partial<Record<string, unknown>> = {}): Harness {
     ...overrides,
   } as unknown as jest.Mocked<AssetRepository>;
 
+  // The re-read after a compare-and-set sees the write, as it would in the
+  // database: the row the lookup returns, with the last update applied.
+  const lookup = repository.findById;
+  repository.findById = jest.fn(async (...args: Parameters<AssetRepository['findById']>) => {
+    const row = await lookup(...args);
+    return row && args[1] !== undefined && updates.length > 0
+      ? { ...row, ...(updates.at(-1) as object) }
+      : row;
+  }) as never;
+
   return {
     service: new AssetService(repository),
     repository,
@@ -372,7 +382,7 @@ describe('AssetService', () => {
       );
     });
 
-    it.each([
+    it.each<[string, (h: Harness) => Promise<unknown>]>([
       [
         'a user status change',
         (h: Harness) => h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'x' }),
@@ -396,9 +406,9 @@ describe('AssetService', () => {
       const h = harness();
       h.tx.asset.updateMany.mockResolvedValueOnce({ count: 0 });
 
-      await expect(run(() => h.service.update(ASSET_ID, { name: 'نام تازه' }))).rejects.toMatchObject(
-        { code: 'OPTIMISTIC_LOCK_FAILED' },
-      );
+      await expect(
+        run(() => h.service.update(ASSET_ID, { name: 'نام تازه' })),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
       expect(h.tx.asset.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({ id: ASSET_ID, status: { not: 'DECOMMISSIONED' } }),
@@ -409,11 +419,13 @@ describe('AssetService', () => {
     it('turns a unique-index violation from a concurrent create into ALREADY_EXISTS', async () => {
       // Both requests pass the tag pre-check; the partial unique index decides.
       const h = harness();
-      h.tx.asset.create.mockRejectedValueOnce(Object.assign(new Error('unique'), { code: 'P2002' }));
-
-      await expect(run(() => h.service.create({ ...CREATE, assetTag: 'T-1' }))).rejects.toMatchObject(
-        { code: 'ALREADY_EXISTS' },
+      h.tx.asset.create.mockRejectedValueOnce(
+        Object.assign(new Error('unique'), { code: 'P2002' }),
       );
+
+      await expect(
+        run(() => h.service.create({ ...CREATE, assetTag: 'T-1' })),
+      ).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
     });
   });
 
@@ -512,15 +524,17 @@ describe('AssetService', () => {
       // scoped — so the caller has provably got it — and only then is scoping
       // lifted for the write.
       const h = harness();
-      let scopedAtLookup = true;
+      const scoped: boolean[] = [];
       (h.repository.findById as jest.Mock).mockImplementation(async () => {
-        scopedAtLookup = !isUnscoped();
+        scoped.push(!isUnscoped());
         return assetRow();
       });
 
       await run(() => h.service.transfer(ASSET_ID, dto));
 
-      expect(scopedAtLookup).toBe(true);
+      // The first lookup, the one that proves ownership, is scoped. The re-read
+      // after the write runs inside the declared crossing, by design.
+      expect(scoped[0]).toBe(true);
     });
 
     it('refuses a transfer to an organization that does not exist', async () => {
