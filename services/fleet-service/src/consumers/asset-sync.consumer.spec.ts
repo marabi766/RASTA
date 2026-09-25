@@ -339,36 +339,26 @@ describe('AssetSyncConsumer', () => {
       expect(recorded.events).toHaveLength(0);
     });
 
-    it("clears the previous owner's insurance state in the same write", async () => {
-      // docs/24 Q-66: a previous owner's policy does not follow the machine,
-      // so neither its lapses nor its cover may decide the new owner's case.
+    it('leaves the insurance state with the machine', async () => {
+      // docs/24 Q-66, the project owner's decision (2026-09-25): the policy
+      // follows the vehicle. Its cover and its lapses stay on the row.
       const { consumer, recorded } = buildConsumer({
         existing: {
           id: 'AST-SEED-0001',
           organizationId: 'ORG-DEH-0001',
           insuranceLapsedCoverages: ['THIRD_PARTY'],
-          insuranceLapsedAt: new Date('2026-08-01T00:00:00.000Z'),
-          insuranceCover: {
-            COMPREHENSIVE: [
-              {
-                policyId: 'INS-A',
-                validFrom: '2026-01-01T00:00:00Z',
-                validTo: '2027-01-01T00:00:00Z',
-              },
-            ],
-          },
+          insuranceCover: {},
         },
       });
 
       await consumer.handle(transfer());
 
       expect(recorded.upserts).toHaveLength(1);
-      expect(recorded.upserts[0]).toMatchObject({
-        organizationId: 'ORG-DEH-0002',
-        insuranceLapsedCoverages: [],
-        insuranceLapsedAt: null,
-        insuranceCover: {},
-      });
+      const patch = recorded.upserts[0]!;
+      expect(patch.organizationId).toBe('ORG-DEH-0002');
+      expect(patch).not.toHaveProperty('insuranceLapsedCoverages');
+      expect(patch).not.toHaveProperty('insuranceLapsedAt');
+      expect(patch).not.toHaveProperty('insuranceCover');
     });
 
     it.each(['ASSET_STATUS_CHANGED', 'ASSET_DECOMMISSIONED', 'INSPECTION_FAILED'])(
@@ -720,79 +710,54 @@ describe('AssetSyncConsumer', () => {
     });
   });
 
-  describe("a previous owner's insurance events (docs/24 Q-66)", () => {
-    // Insurance and asset events travel on different topics, so the previous
-    // owner's policy event can be consumed after the transfer. The replica now
-    // names the new owner; the event names the old one.
+  describe("the previous owner's insurance events after a transfer (docs/24 Q-66)", () => {
+    // The policy follows the vehicle (project owner's decision, 2026-09-25).
+    // Insurance and asset events travel on different topics, so the inherited
+    // policy's event can be consumed after the transfer, under the previous
+    // owner's tenant. It applies to the machine, which now has a new owner.
     const afterTransfer = { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0002' };
+    const fromPreviousOwner = (eventName: string, fields: Record<string, unknown>) =>
+      envelope({
+        eventName,
+        tenantId: 'ORG-DEH-0001',
+        payload: { assetId: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001', ...fields },
+      });
 
-    it.each([
-      [
-        'INSURANCE_EXPIRED',
-        { coverage: 'THIRD_PARTY', policyId: 'INS-A', validTo: '2026-08-01T00:00:00.000Z' },
-      ],
-      [
-        'INSURANCE_RECORDED',
-        {
-          coverage: 'THIRD_PARTY',
-          policyId: 'INS-A',
-          validFrom: '2026-01-01T00:00:00.000Z',
-          validTo: '2027-01-01T00:00:00.000Z',
-        },
-      ],
-    ])('marks %s handled and applies nothing', async (eventName, fields) => {
+    it('records the inherited policy lapsing, under the new owner', async () => {
       const { consumer, recorded } = buildConsumer({ existing: afterTransfer });
 
-      const outcome = await consumer.handle(
-        envelope({
-          eventName,
-          tenantId: 'ORG-DEH-0001',
-          payload: { assetId: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001', ...fields },
-        }),
-      );
-
-      expect(outcome).toBe('SKIPPED');
-      expect(recorded.upserts).toHaveLength(0);
-      // Marked, so a redelivery is not judged again against a later owner.
-      expect(recorded.processed).toEqual(['01JBQ8Z4K7M2N5P8R1T3V6X9Y2']);
-    });
-
-    it("still applies the current owner's insurance event", async () => {
-      const { consumer, recorded } = buildConsumer({ existing: afterTransfer });
-
-      await consumer.handle(
-        envelope({
-          eventName: 'INSURANCE_EXPIRED',
-          tenantId: 'ORG-DEH-0002',
-          payload: {
-            assetId: 'AST-SEED-0001',
-            organizationId: 'ORG-DEH-0002',
-            coverage: 'THIRD_PARTY',
-          },
-        }),
-      );
+      await consumer.handle(fromPreviousOwner('INSURANCE_EXPIRED', { coverage: 'THIRD_PARTY' }));
 
       expect(recorded.upserts[0]).toMatchObject({
+        // The row stays with the owner it has now, never moved back.
         organizationId: 'ORG-DEH-0002',
         insuranceLapsedCoverages: ['THIRD_PARTY'],
       });
     });
 
-    it('still applies a failed inspection, which is a fact about the machine', async () => {
+    it('records the inherited policy, under the new owner', async () => {
       const { consumer, recorded } = buildConsumer({ existing: afterTransfer });
 
       await consumer.handle(
-        envelope({
-          eventName: 'INSPECTION_FAILED',
-          tenantId: 'ORG-DEH-0001',
-          payload: { assetId: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+        fromPreviousOwner('INSURANCE_RECORDED', {
+          coverage: 'THIRD_PARTY',
+          policyId: 'INS-A',
+          validFrom: '2026-01-01T00:00:00.000Z',
+          validTo: '2999-01-01T00:00:00.000Z',
         }),
       );
 
       expect(recorded.upserts[0]).toMatchObject({
-        // Filed under the owner it has now, never moved back.
         organizationId: 'ORG-DEH-0002',
-        inspectionBlockedReason: expect.any(String),
+        insuranceCover: {
+          THIRD_PARTY: [
+            {
+              policyId: 'INS-A',
+              validFrom: '2026-01-01T00:00:00.000Z',
+              validTo: '2999-01-01T00:00:00.000Z',
+            },
+          ],
+        },
       });
     });
   });

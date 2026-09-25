@@ -8,7 +8,6 @@ import {
 } from '@rasta/nest-common';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
 import { FleetRepository } from '../fleet/fleet.repository';
-import { previousOwnerEventsIgnoredTotal } from '../observability/metrics';
 import {
   INSPECTION_BLOCK_REASON,
   UNKNOWN_COVERAGE,
@@ -73,17 +72,6 @@ interface Projection {
     now: Date,
     occurredAt: Date,
   ) => AssetRefPatch;
-  /**
-   * The fact belongs to the organization that recorded it, not to the
-   * machine. An insurance policy is the owner's contract: a previous owner's
-   * policy neither answers nor causes the new owner's lapse (docs/24 Q-66).
-   * An owner-bound event whose organization is not the replica's current
-   * owner is marked handled and not applied.
-   *
-   * Inspection and repair are facts about the machine itself and stay
-   * unbound: a failed inspection blocks it whoever owns it now.
-   */
-  ownerBound?: true;
 }
 
 /** The fields of the current row a projection may build on. */
@@ -143,13 +131,10 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
       // Its new owner must re-commission it, exactly as asset-service records.
       // Any assignment still open on it is ended by the handler, below.
       status: 'REGISTERED',
-      // The previous owner's insurance does not follow the machine (docs/24
-      // Q-66): its lapses must not block the new owner, and its policies must
-      // not answer the new owner's lapses. Delayed events of the previous
-      // owner are refused by `ownerBound`; this clears what already arrived.
-      insuranceLapsedCoverages: [],
-      insuranceLapsedAt: null,
-      insuranceCover: {},
+      // The insurance state is deliberately left as it is. The policy follows
+      // the vehicle: the previous owner's policy counts for the new owner
+      // until its own validTo, lapses included (docs/24 Q-66, project owner's
+      // decision 2026-09-25).
     }),
   },
   [CONSUMED_EVENTS.ASSET_DECOMMISSIONED]: {
@@ -180,7 +165,6 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
     },
   },
   [CONSUMED_EVENTS.INSURANCE_EXPIRED]: {
-    ownerBound: true,
     // Recorded as a lapse of the policy's coverage, never as "insured: no".
     // Whether it actually blocks is decided at dispatch time against the
     // recorded windows (dispatch-blocks.ts): a renewal recorded *before* this
@@ -196,7 +180,6 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
     },
   },
   [CONSUMED_EVENTS.INSURANCE_RECORDED]: {
-    ownerBound: true,
     // The only event that ends an insurance lapse, and only for its own
     // coverage and only while the policy is in force. The payload carries the
     // policy's `validFrom`/`validTo` (asset-service `insuranceRecordedPayload`),
@@ -372,25 +355,10 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       await this.repository.lockAssetRef(tx, assetId);
       const current = await this.repository.findAssetRef(assetId, tx);
 
-      // A previous owner's insurance event, consumed after the transfer — the
-      // topics carry no order between them. Read under the lock, so a transfer
-      // committing at the same moment is either fully seen or not at all. The
-      // marker stays: a redelivery would be refused for the same reason.
-      if (
-        projection.ownerBound &&
-        current &&
-        organizationId &&
-        organizationId !== current.organizationId
-      ) {
-        this.logger.warn(
-          `${envelope.eventName} ${envelope.eventId} for ${assetId} comes from an organization ` +
-            'that no longer owns it; not applied (docs/24 Q-66)',
-        );
-        previousOwnerEventsIgnoredTotal.inc({ service: SERVICE_NAME, event: envelope.eventName });
-        skipped = true;
-        return;
-      }
-
+      // An insurance event from the previous owner's tenant, consumed after the
+      // transfer, is applied to the row as it now stands, under its current
+      // owner: the policy is the vehicle's, not the organization's (docs/24
+      // Q-66). The tenant below comes from the row, never from such an event.
       const patch = projection.patch(payload, current, now, occurredAt);
 
       // Narrowed rather than asserted: the guard above already established

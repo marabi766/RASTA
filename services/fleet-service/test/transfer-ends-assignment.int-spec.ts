@@ -224,27 +224,37 @@ describe('a transfer ends the assignments still open on the machine', () => {
     });
   });
 
-  describe("a previous owner's delayed insurance events (docs/24 Q-66)", () => {
-    // Insurance and asset events travel on different topics. Here the
-    // transfer is consumed first and A's insurance events after it.
+  describe("the previous owner's delayed insurance events (docs/24 Q-66)", () => {
+    // The policy follows the vehicle (project owner's decision, 2026-09-25):
+    // after the transfer, the inherited policy's events decide the new
+    // owner's dispatch exactly as they decided the old owner's. Insurance and
+    // asset events travel on different topics; here the transfer is consumed
+    // first and the old owner's insurance events after it.
     const insurance = (eventName: string, assetId: string, owner: string, fields: object) =>
       event(eventName, owner, { assetId, organizationId: owner, ...fields });
     const year = 365 * 86_400_000;
 
-    it("neither blocks the new owner with A's lapse nor answers B's lapse with A's policy", async () => {
+    it("blocks and then clears the new owner's dispatch", async () => {
       const assetId = await machine(org.a);
-      // A lapse already applied under A is cleared by the transfer itself.
+      await consumer.handle(transfer(assetId));
+      await consumer.handle(event('ASSET_ACTIVATED', org.b, { assetId }));
+      const driverB = await driver(org.b);
+
+      // The inherited policy lapses: the new owner cannot dispatch.
       await consumer.handle(
         insurance('INSURANCE_EXPIRED', assetId, org.a, { coverage: 'THIRD_PARTY' }),
       );
-      await consumer.handle(transfer(assetId));
-      await consumer.handle(event('ASSET_ACTIVATED', org.b, { assetId }));
+      expect(await repository.findAssetRef(assetId)).toMatchObject({
+        organizationId: org.b,
+        insuranceLapsedCoverages: ['THIRD_PARTY'],
+      });
+      await expect(assign(org.b, assetId, driverB)).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        message: expect.stringContaining('withdrawn from dispatch'),
+      });
 
-      // A's late events: a lapse that would block B, and a policy that would
-      // answer B's own lapse.
-      await consumer.handle(
-        insurance('INSURANCE_EXPIRED', assetId, org.a, { coverage: 'COMPREHENSIVE' }),
-      );
+      // Its renewal, recorded by the previous owner before the transfer and
+      // consumed after it, answers the lapse for the new owner.
       await consumer.handle(
         insurance('INSURANCE_RECORDED', assetId, org.a, {
           policyId: id('INS'),
@@ -253,27 +263,22 @@ describe('a transfer ends the assignments still open on the machine', () => {
           validTo: new Date(Date.now() + year).toISOString(),
         }),
       );
-
-      const row = await repository.findAssetRef(assetId);
-      expect(row).toMatchObject({
+      await expect(assign(org.b, assetId, driverB)).resolves.toMatchObject({
+        assetId,
         organizationId: org.b,
-        insuranceLapsedCoverages: [],
-        insuranceLapsedAt: null,
-        insuranceCover: {},
       });
-      const driverB = await driver(org.b);
-      const held = await assign(org.b, assetId, driverB);
-      await asActor({ organizationId: org.b }, () =>
-        assignments.end(held.id, { reason: 'COMPLETED' }),
-      );
+    });
 
-      // B's own lapse blocks B; A's policy, not applied, does not answer it.
+    it('keeps a lapse recorded before the transfer', async () => {
+      const assetId = await machine(org.a);
       await consumer.handle(
-        insurance('INSURANCE_EXPIRED', assetId, org.b, { coverage: 'THIRD_PARTY' }),
+        insurance('INSURANCE_EXPIRED', assetId, org.a, { coverage: 'THIRD_PARTY' }),
       );
-      await expect(assign(org.b, assetId, driverB)).rejects.toMatchObject({
+      await consumer.handle(transfer(assetId));
+      await consumer.handle(event('ASSET_ACTIVATED', org.b, { assetId }));
+
+      await expect(assign(org.b, assetId, await driver(org.b))).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
-        message: expect.stringContaining('withdrawn from dispatch'),
       });
     });
   });
