@@ -71,16 +71,21 @@
 
 ## Identity — `rasta.identity.v1`
 
-| رویداد               | Aggregate | مصرف‌کنندگان                                   | Payload کلیدی                            |
-| -------------------- | --------- | ---------------------------------------------- | ---------------------------------------- |
-| `USER_REGISTERED`    | User      | notification · audit · analytics               | `userId`, `email`, `requestedRole`       |
-| `USER_ACTIVATED`     | User      | notification · **economic (باز کردن کیف پول)** | `userId`, `organizationId`               |
-| `USER_DEACTIVATED`   | User      | همه (ابطال Session)                            | `userId`, `reason`                       |
-| `MEMBERSHIP_CREATED` | User      | audit · analytics                              | `userId`, `organizationId`, `roles[]`    |
-| `MEMBERSHIP_REVOKED` | User      | audit · gateway (ابطال Cache)                  | `userId`, `organizationId`               |
-| `MEMBERSHIP_EXPIRED` | User      | audit · identity (Projection به Keycloak)      | `userId`, `organizationId`, `validUntil` |
-| `ROLE_ASSIGNED`      | User      | audit · **gateway (ابطال Cache مجوز)**         | `userId`, `organizationId`, `role`       |
-| `ROLE_REVOKED`       | User      | audit · gateway                                | `userId`, `organizationId`, `role`       |
+| رویداد                         | Aggregate | مصرف‌کنندگان                                   | Payload کلیدی                                        |
+| ------------------------------ | --------- | ---------------------------------------------- | ---------------------------------------------------- |
+| `USER_REGISTERED`              | User      | notification · audit · analytics               | `userId`, `email`, `requestedRole`                   |
+| `USER_ACTIVATED`               | User      | notification · **economic (باز کردن کیف پول)** | `userId`, `organizationId`                           |
+| `USER_DEACTIVATED`             | User      | همه (ابطال Session)                            | `userId`, `reason`                                   |
+| `MEMBERSHIP_CREATED`           | User      | audit · analytics                              | `userId`, `organizationId`, `roles[]`                |
+| `MEMBERSHIP_REVOKED`           | User      | audit · gateway (ابطال Cache)                  | `userId`, `organizationId`                           |
+| `MEMBERSHIP_EXPIRED`           | User      | audit · identity (Projection به Keycloak)      | `userId`, `organizationId`, `validUntil`             |
+| `ROLE_ASSIGNED`                | User      | audit · **gateway (ابطال Cache مجوز)**         | `userId`, `organizationId`, `role`                   |
+| `ROLE_REVOKED`                 | User      | audit · gateway                                | `userId`, `organizationId`, `role`                   |
+| `ACTIVE_ORGANIZATION_SWITCHED` | User      | **audit**                                      | `userId`, `previousOrganizationId`, `organizationId` |
+
+`ACTIVE_ORGANIZATION_SWITCHED` (L7-14، 2026-09-25) رکورد حسابرسیِ تغییر سازمان فعال است: در همان تراکنشی نوشته می‌شود که
+`user.active_organization_id` را جابه‌جا می‌کند، زیر مستأجرِ سازمان مقصد ثبت می‌شود و فقط وقتی مقدار واقعاً عوض شده باشد.
+Projection به Keycloak روی آن عمل نمی‌کند — تغییر سازمان هم‌زمان Project می‌شود و خطای خودش را گزارش می‌دهد.
 
 ## Organization — `rasta.organization.v1`
 
@@ -386,13 +391,14 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 
 ## Supplier — `rasta.supplier.v1`
 
-| رویداد                      | مصرف‌کنندگان                                                      | Payload کلیدی                                    |
-| --------------------------- | ----------------------------------------------------------------- | ------------------------------------------------ |
-| `SUPPLIER_REGISTERED`       | analytics · audit                                                 | `supplierId`, `organizationId`, `capabilities[]` |
-| `SUPPLIER_QUALIFIED`        | marketplace · procurement · construction                          | `supplierId`, `qualifiedFor[]`                   |
-| `SUPPLIER_REJECTED`         | notification                                                      | `supplierId`, `reason`                           |
-| `SUPPLIER_SUSPENDED`        | **marketplace (پنهان‌سازی پیشنهاد)** · procurement · construction | `supplierId`, `reason`, `until`                  |
-| `PERFORMANCE_SCORE_UPDATED` | **marketplace (رتبه‌بندی)** · search                              | `supplierId`, `score`, `breakdown`               |
+| رویداد                      | مصرف‌کنندگان                                                      | Payload کلیدی                                          |
+| --------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------ |
+| `SUPPLIER_REGISTERED`       | analytics · audit                                                 | `supplierId`, `organizationId`, `capabilities[]`       |
+| `SUPPLIER_QUALIFIED`        | marketplace · procurement · construction                          | `supplierId`, `qualifiedFor[]`                         |
+| `SUPPLIER_REJECTED`         | notification                                                      | `supplierId`, `reason`                                 |
+| `SUPPLIER_SUSPENDED`        | **marketplace (پنهان‌سازی پیشنهاد)** · procurement · construction | `supplierId`, `reason`, `until`                        |
+| `SUPPLIER_REINSTATED`       | **audit** · مصرف‌کنندگانِ `SUPPLIER_SUSPENDED`                    | `supplierId`, `suspensionId`, `reason`, `reinstatedBy` |
+| `PERFORMANCE_SCORE_UPDATED` | **marketplace (رتبه‌بندی)** · search                              | `supplierId`, `score`, `breakdown`                     |
 
 ## Inventory — `rasta.inventory.v1`
 
@@ -513,14 +519,15 @@ Schema رسمی در `services/economic-service/src/events/events.ts` و اعت�
 
 ## Document — `rasta.document.v1`
 
-| رویداد              | مصرف‌کنندگان                      | Payload کلیدی                                                               |
-| ------------------- | --------------------------------- | --------------------------------------------------------------------------- |
-| `DOCUMENT_UPLOADED` | مالک منبع · audit                 | `documentId`, `documentClass`, `contentType`, `scanState` (همیشه `PENDING`) |
-| `DOCUMENT_SCANNED`  | مالک منبع · audit                 | `documentId`, `scanState`, `engine`, `signatureVersion`, `failureReason`    |
-| `DOCUMENT_DELETED`  | audit                             | `documentId`, `reason`                                                      |
-| `VIRUS_DETECTED`    | **notification (بحرانی)** · audit | `documentId`, `engine`, `signature`                                         |
+| رویداد                 | مصرف‌کنندگان                      | Payload کلیدی                                                                                             |
+| ---------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `DOCUMENT_UPLOADED`    | مالک منبع · audit                 | `documentId`, `documentClass`, `contentType`, `scanState` (همیشه `PENDING`)                               |
+| `DOCUMENT_SCANNED`     | مالک منبع · audit                 | `documentId`, `scanState`, `engine`, `signatureVersion`, `failureReason`                                  |
+| `DOCUMENT_DELETED`     | audit                             | `documentId`, `reason`                                                                                    |
+| `VIRUS_DETECTED`       | **notification (بحرانی)** · audit | `documentId`, `engine`, `signature`                                                                       |
+| `UPLOAD_INTENT_ISSUED` | **audit**                         | `uploadIntentId`, `documentClass`, `declaredContentType`, `declaredSizeBytes`, `requestedBy`, `expiresAt` |
 
-**همه با `documentId` کلید می‌خورند**، پس تاریخچهٔ یک سند روی **یک** Partition می‌نشیند
+**هر رویدادِ دربارهٔ یک سند با `documentId` کلید می‌خورد**، پس تاریخچهٔ یک سند روی **یک** Partition می‌نشیند
 — شرط لازمِ مرتب‌ماندن، و امروز نه شرط کافی‌اش (¹ بالا، D-027).
 این از ADR-049 به بعد باربر است: اسکن ناهمزمان شد، پس `DOCUMENT_UPLOADED` همیشه
 `PENDING` حمل می‌کند و نتیجه بعداً به‌عنوان `DOCUMENT_SCANNED` می‌رسد — دنباله‌ای که فقط
@@ -535,6 +542,10 @@ Schema رسمی در `services/economic-service/src/events/events.ts` و اعت�
 آن: اولی تغییر وضعیتی است که هر مصرف‌کنندهٔ علاقه‌مند می‌خواند و دومی یافته‌ای امنیتی است
 که notification-service بحرانی می‌داندش. تنها از موتوری که واقعاً محتوا را بازرسی کرده
 منتشر می‌شود — یافتهٔ ساختگی بدتر از سکوت است، چون کسی رویش عمل می‌کند.
+
+**`UPLOAD_INTENT_ISSUED` (L7-14، 2026-09-25) استثناست:** هنوز سندی وجود ندارد، پس با `uploadIntentId` خودش کلید می‌خورد
+(Aggregate: `UploadIntent`). رکورد حسابرسیِ اجازهٔ بارگذاری است، در همان تراکنشِ ردیف Intent و پیش از امضای URL؛ آنچه
+مشتری **اعلام** کرده را حمل می‌کند — نه کلید شیء، نه URL، نه نام فایل.
 
 **هیچ‌کدام کلید شیء، Bucket، Endpoint یا URL امضاشده حمل نمی‌کنند.** رویداد هفت روز در
 Log ای می‌ماند که هر سرویسی می‌خواندش. تست `events.spec.ts` این را روی **همهٔ** Schema ها
@@ -571,6 +582,19 @@ Log ای می‌ماند که هر سرویسی می‌خواندش. تست `eve
 - **کنشی که چیزی را عوض نکرده، چیزی منتشر نمی‌کند.** خواندنِ دوبارهٔ یک اعلانِ خوانده‌شده رویداد نمی‌دهد. به‌روزرسانی شرطی
   همان چیزی است که این Endpoint ها را Idempotent می‌کند، و شمارندهٔ سطرهای تغییرکرده تنها پاسخ صادقانه به «آیا چیزی عوض
   شد» است.
+
+### تنظیمات شخص — L7-14 (2026-09-25)
+
+تغییر ترجیح‌ها و بازهٔ سکوت هم تغییر وضعیت‌اند و همان ارزش شاهدی را دارند: «ایمیل این قاعده را پیش از یادآوری خاموش کرده
+بود» واقعیتی است که اختلاف بر سر «آیا به او گفته شد» رویش می‌چرخد.
+
+| رویداد                              | Aggregate               | مصرف‌کنندگان | Payload                                                                     |
+| ----------------------------------- | ----------------------- | ------------ | --------------------------------------------------------------------------- |
+| `NOTIFICATION_PREFERENCES_REPLACED` | NotificationPreferences | **audit**    | `preferences[]` (کل مجموعهٔ جدید), `organizationId`, `userId`, `occurredAt` |
+| `NOTIFICATION_QUIET_HOURS_CHANGED`  | NotificationQuietHours  | **audit**    | `quietHours` (یا `null`), `organizationId`, `userId`, `occurredAt`          |
+
+هر دو در همان تراکنشِ نوشتن، با کلید `userId`، و **فقط وقتی وضعیت ذخیره‌شده واقعاً عوض شده باشد** — همان قاعدهٔ
+`NOTIFICATION_ALL_READ`. هیچ نشانی و هیچ محتوایی حمل نمی‌شود؛ فقط تنظیمات.
 
 ### آنچه `notification-service` مصرف می‌کند — NTF-001 (2026-09-17)
 
