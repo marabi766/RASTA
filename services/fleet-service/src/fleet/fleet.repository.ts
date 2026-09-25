@@ -204,6 +204,56 @@ export class FleetRepository {
     return active;
   }
 
+  /**
+   * Ends every active assignment on a machine that has left its organization.
+   * Used by the asset-sync consumer on `ASSET_TRANSFERRED`.
+   *
+   * Unscoped, keyed by asset. The consumer's context carries the transfer
+   * event's tenant, not necessarily the organization that holds the
+   * assignment, and the whole point is that no assignment survives the
+   * transfer, whoever holds it. Each ended row keeps its own
+   * `organizationId`; the caller publishes the release under that tenant.
+   *
+   * An assignment is ended at `at`, or at its own start if it began later.
+   * That happens when it started in the window before asset-service saw the
+   * transfer, and an end before the start is not a period.
+   *
+   * Guarded on `ended_at IS NULL` like {@link AssignmentService.end}: a row
+   * that a person ended in the meantime is left alone and is not returned, so
+   * its release is not published twice. Must be called after
+   * {@link lockAssetRef} in the same transaction, which keeps a new
+   * assignment from being created between this and the replica update.
+   */
+  async endActiveAssignmentsForAsset(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    at: Date,
+    endedBy: string,
+    reason: 'ASSET_UNAVAILABLE',
+    notes: string,
+  ) {
+    return runUnscoped(
+      "a transferred machine leaves its owner's dispatch; its active assignments end whoever holds them",
+      async () => {
+        const active = await tx.assignment.findMany({
+          where: { assetId, endedAt: null },
+          orderBy: { id: 'asc' },
+        });
+
+        const ended: ((typeof active)[number] & { endedAt: Date })[] = [];
+        for (const assignment of active) {
+          const endedAt = assignment.startedAt > at ? assignment.startedAt : at;
+          const result = await tx.assignment.updateMany({
+            where: { id: assignment.id, endedAt: null },
+            data: { endedAt, endedBy, endReason: reason, endNotes: notes },
+          });
+          if (result.count === 1) ended.push({ ...assignment, endedAt });
+        }
+        return ended;
+      },
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Usage
   // -------------------------------------------------------------------------

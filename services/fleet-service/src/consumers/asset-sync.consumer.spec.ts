@@ -1,4 +1,5 @@
 import type { EventEnvelope } from '@rasta/contracts';
+import { tryGetContext, type OutboxMessageInput } from '@rasta/nest-common';
 import { AssetSyncConsumer, CONSUMER_NAME } from './asset-sync.consumer';
 import type { FleetRepository } from '../fleet/fleet.repository';
 
@@ -12,15 +13,41 @@ import type { FleetRepository } from '../fleet/fleet.repository';
 interface Recorded {
   upserts: Record<string, unknown>[];
   processed: string[];
+  /** Every outbox row, with the actor and tenant of the context it was built in. */
+  events: (OutboxMessageInput & { callerService?: string; contextTenant?: string })[];
+}
+
+/** An assignment still open on the machine, as the repository hands it back once ended. */
+interface OpenAssignment {
+  id: string;
+  organizationId: string;
+  driverId: string;
+  startedAt: Date;
 }
 
 function buildConsumer(options: {
   existing?: Record<string, unknown> | null;
   alreadyProcessed?: boolean;
+  open?: OpenAssignment[];
 }) {
-  const recorded: Recorded = { upserts: [], processed: [] };
+  const recorded: Recorded = { upserts: [], processed: [], events: [] };
 
   const repository = {
+    endActiveAssignmentsForAsset: jest.fn(async (_tx: unknown, _assetId: string, at: Date) =>
+      (options.open ?? []).map((row) => ({
+        ...row,
+        endedAt: row.startedAt > at ? row.startedAt : at,
+      })),
+    ),
+    enqueueEvent: jest.fn(async (_tx: unknown, input: OutboxMessageInput) => {
+      const context = tryGetContext();
+      recorded.events.push({
+        ...input,
+        callerService: context?.callerService,
+        contextTenant: context?.organizationId,
+      });
+      return 'OUTBOX-1';
+    }),
     findAssetRef: jest.fn(async () => options.existing ?? null),
     lockAssetRef: jest.fn(async () => undefined),
     transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn({})),
@@ -170,6 +197,191 @@ describe('AssetSyncConsumer', () => {
       expect(patch).not.toHaveProperty('name');
       expect(patch).not.toHaveProperty('status');
     });
+  });
+
+  describe('a transfer ends the assignments still open on the machine', () => {
+    // asset-service refuses to transfer an ASSIGNED machine, but it learns of
+    // an assignment only when it consumes ASSET_ASSIGNED. One made here in
+    // that window used to survive the transfer, with the old owner's driver
+    // in charge of the new owner's machine.
+    const transfer = (overrides: Partial<EventEnvelope> = {}) =>
+      envelope({
+        eventId: 'EVT-TRANSFER-1',
+        eventName: 'ASSET_TRANSFERRED',
+        correlationId: 'corr-transfer',
+        payload: {
+          assetId: 'AST-SEED-0001',
+          fromOrganizationId: 'ORG-DEH-0001',
+          toOrganizationId: 'ORG-DEH-0002',
+          reason: 'واگذاری',
+        },
+        ...overrides,
+      });
+
+    const open: OpenAssignment = {
+      id: 'ASG-1',
+      organizationId: 'ORG-DEH-0001',
+      driverId: 'DRV-1',
+      startedAt: new Date('2026-08-27T08:00:00.000Z'),
+    };
+
+    it('ends it as the system, with a reason, and publishes the release under the old owner', async () => {
+      const { consumer, repository, recorded } = buildConsumer({
+        existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+        open: [open],
+      });
+
+      await consumer.handle(transfer());
+
+      expect(repository.endActiveAssignmentsForAsset).toHaveBeenCalledWith(
+        expect.anything(),
+        'AST-SEED-0001',
+        new Date('2026-08-27T10:00:00.000Z'),
+        'SYSTEM',
+        'ASSET_UNAVAILABLE',
+        expect.stringContaining('منتقل شد'),
+      );
+      expect(recorded.events).toHaveLength(1);
+      expect(recorded.events[0]).toMatchObject({
+        eventName: 'ASSIGNMENT_ENDED',
+        aggregateType: 'Assignment',
+        aggregateId: 'ASG-1',
+        // The tenant that held the assignment. The new owner must not be
+        // told which driver another organization had on the machine.
+        organizationId: 'ORG-DEH-0001',
+        contextTenant: 'ORG-DEH-0001',
+        // Fleet ended it, because of the transfer — not asset-service, whose
+        // name the consumer's own context carries.
+        callerService: 'fleet-service',
+        causationId: 'EVT-TRANSFER-1',
+        payload: {
+          assignmentId: 'ASG-1',
+          assetId: 'AST-SEED-0001',
+          driverId: 'DRV-1',
+          organizationId: 'ORG-DEH-0001',
+          startedAt: '2026-08-27T08:00:00.000Z',
+          endedAt: '2026-08-27T10:00:00.000Z',
+          reason: 'ASSET_UNAVAILABLE',
+        },
+      });
+    });
+
+    it('updates the replica before it ends anything, in the one transaction', async () => {
+      // The replica names the new owner by the time the assignment is ended,
+      // so an assignment attempt waiting on the asset's lock is refused.
+      const { consumer, repository } = buildConsumer({
+        existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+        open: [open],
+      });
+
+      await consumer.handle(transfer());
+
+      const lock = (repository.lockAssetRef as jest.Mock).mock.invocationCallOrder[0]!;
+      const upsert = (repository.upsertAssetRef as jest.Mock).mock.invocationCallOrder[0]!;
+      const end = (repository.endActiveAssignmentsForAsset as jest.Mock).mock
+        .invocationCallOrder[0]!;
+      expect(lock).toBeLessThan(upsert);
+      expect(upsert).toBeLessThan(end);
+      expect(repository.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('never dates the end after now, however far ahead the producer clock runs', async () => {
+      const { consumer, repository } = buildConsumer({
+        existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+        open: [open],
+      });
+      const before = Date.now();
+
+      await consumer.handle(transfer({ occurredAt: '2999-01-01T00:00:00.000Z' }));
+
+      const at = (repository.endActiveAssignmentsForAsset as jest.Mock).mock.calls[0]![2] as Date;
+      expect(at.getTime()).toBeGreaterThanOrEqual(before);
+      expect(at.getTime()).toBeLessThanOrEqual(Date.now());
+    });
+
+    it('ends one that started after the transfer at its own start, never before it', async () => {
+      // Started in the window before the transfer reached this service.
+      const late = { ...open, startedAt: new Date('2026-08-27T10:00:05.000Z') };
+      const { consumer, recorded } = buildConsumer({
+        existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+        open: [late],
+      });
+
+      await consumer.handle(transfer());
+
+      expect(recorded.events[0]!.payload).toMatchObject({
+        startedAt: '2026-08-27T10:00:05.000Z',
+        endedAt: '2026-08-27T10:00:05.000Z',
+      });
+    });
+
+    it('publishes nothing when no assignment was open', async () => {
+      const { consumer, recorded } = buildConsumer({
+        existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+      });
+
+      await consumer.handle(transfer());
+
+      expect(recorded.upserts).toHaveLength(1);
+      expect(recorded.events).toHaveLength(0);
+    });
+
+    it('ends nothing again on a redelivery', async () => {
+      const { consumer, repository, recorded } = buildConsumer({
+        existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0002' },
+        alreadyProcessed: true,
+        open: [open],
+      });
+
+      await consumer.handle(transfer());
+
+      expect(repository.endActiveAssignmentsForAsset).not.toHaveBeenCalled();
+      expect(recorded.events).toHaveLength(0);
+    });
+
+    it('leaves the insurance state with the machine', async () => {
+      // docs/24 Q-66, the project owner's decision (2026-09-25): the policy
+      // follows the vehicle. Its cover and its lapses stay on the row.
+      const { consumer, recorded } = buildConsumer({
+        existing: {
+          id: 'AST-SEED-0001',
+          organizationId: 'ORG-DEH-0001',
+          insuranceLapsedCoverages: ['THIRD_PARTY'],
+          insuranceCover: {},
+        },
+      });
+
+      await consumer.handle(transfer());
+
+      expect(recorded.upserts).toHaveLength(1);
+      const patch = recorded.upserts[0]!;
+      expect(patch.organizationId).toBe('ORG-DEH-0002');
+      expect(patch).not.toHaveProperty('insuranceLapsedCoverages');
+      expect(patch).not.toHaveProperty('insuranceLapsedAt');
+      expect(patch).not.toHaveProperty('insuranceCover');
+    });
+
+    it.each(['ASSET_STATUS_CHANGED', 'ASSET_DECOMMISSIONED', 'INSPECTION_FAILED'])(
+      'leaves assignments alone on %s',
+      async (eventName) => {
+        // Only a transfer takes the machine out of the organization. The
+        // others refuse *new* assignments, as before; this change does not
+        // widen what they do to a running one.
+        const { consumer, repository } = buildConsumer({
+          existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+          open: [open],
+        });
+
+        await consumer.handle(
+          envelope({
+            eventName,
+            payload: { assetId: 'AST-SEED-0001', newStatus: 'OUT_OF_SERVICE' },
+          }),
+        );
+
+        expect(repository.endActiveAssignmentsForAsset).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('safety withdrawals', () => {
@@ -495,6 +707,58 @@ describe('AssetSyncConsumer', () => {
       );
 
       expect(recorded.upserts[0]!.inMaintenance).toBe(true);
+    });
+  });
+
+  describe("the previous owner's insurance events after a transfer (docs/24 Q-66)", () => {
+    // The policy follows the vehicle (project owner's decision, 2026-09-25).
+    // Insurance and asset events travel on different topics, so the inherited
+    // policy's event can be consumed after the transfer, under the previous
+    // owner's tenant. It applies to the machine, which now has a new owner.
+    const afterTransfer = { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0002' };
+    const fromPreviousOwner = (eventName: string, fields: Record<string, unknown>) =>
+      envelope({
+        eventName,
+        tenantId: 'ORG-DEH-0001',
+        payload: { assetId: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001', ...fields },
+      });
+
+    it('records the inherited policy lapsing, under the new owner', async () => {
+      const { consumer, recorded } = buildConsumer({ existing: afterTransfer });
+
+      await consumer.handle(fromPreviousOwner('INSURANCE_EXPIRED', { coverage: 'THIRD_PARTY' }));
+
+      expect(recorded.upserts[0]).toMatchObject({
+        // The row stays with the owner it has now, never moved back.
+        organizationId: 'ORG-DEH-0002',
+        insuranceLapsedCoverages: ['THIRD_PARTY'],
+      });
+    });
+
+    it('records the inherited policy, under the new owner', async () => {
+      const { consumer, recorded } = buildConsumer({ existing: afterTransfer });
+
+      await consumer.handle(
+        fromPreviousOwner('INSURANCE_RECORDED', {
+          coverage: 'THIRD_PARTY',
+          policyId: 'INS-A',
+          validFrom: '2026-01-01T00:00:00.000Z',
+          validTo: '2999-01-01T00:00:00.000Z',
+        }),
+      );
+
+      expect(recorded.upserts[0]).toMatchObject({
+        organizationId: 'ORG-DEH-0002',
+        insuranceCover: {
+          THIRD_PARTY: [
+            {
+              policyId: 'INS-A',
+              validFrom: '2026-01-01T00:00:00.000Z',
+              validTo: '2999-01-01T00:00:00.000Z',
+            },
+          ],
+        },
+      });
     });
   });
 
