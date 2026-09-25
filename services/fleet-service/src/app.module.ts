@@ -32,6 +32,7 @@ import {
 import { PrismaService } from './prisma/prisma.service';
 import { PrismaOutboxStore } from './outbox/outbox.store';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
+import { DISPATCH_POLICY, type DispatchPolicy } from './fleet/dispatch-blocks';
 import { FleetRepository } from './fleet/fleet.repository';
 import { DriverService } from './fleet/driver.service';
 import { AssignmentService } from './fleet/assignment.service';
@@ -102,6 +103,14 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
           brokers: brokersOf(env),
           clientId: env.KAFKA_CLIENT_ID,
         }),
+    },
+
+    {
+      provide: DISPATCH_POLICY,
+      inject: [ENV],
+      useFactory: (env: FleetEnv): DispatchPolicy => ({
+        blockingCoverages: env.FLEET_DISPATCH_BLOCKING_COVERAGES,
+      }),
     },
 
     PrismaOutboxStore,

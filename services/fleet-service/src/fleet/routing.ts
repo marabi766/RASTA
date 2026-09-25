@@ -26,6 +26,7 @@ export type FleetPayload<N extends FleetEventName> = z.infer<(typeof FLEET_EVENT
 export const AGGREGATE_OF = {
   DRIVER_REGISTERED: 'Driver',
   DRIVER_STATUS_CHANGED: 'Driver',
+  DRIVER_UPDATED: 'Driver',
   ASSET_ASSIGNED: 'Assignment',
   ASSIGNMENT_ENDED: 'Assignment',
   USAGE_RECORDED: 'UsageRecord',
@@ -82,6 +83,7 @@ export const PARTITION_KEY_POLICY: { [N in FleetEventName]: PartitionRule<N> } =
   // ---- Driver-scoped: one partition per driver ----------------------------
   DRIVER_REGISTERED: (payload) => ({ scope: 'DRIVER', key: payload.driverId }),
   DRIVER_STATUS_CHANGED: (payload) => ({ scope: 'DRIVER', key: payload.driverId }),
+  DRIVER_UPDATED: (payload) => ({ scope: 'DRIVER', key: payload.driverId }),
 };
 
 /**
