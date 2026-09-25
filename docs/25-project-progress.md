@@ -12,9 +12,9 @@
 
 | Horizon | Earned SP | Committed SP | Remaining SP | Progress | Accepted units | Active units | Features | Stories |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| MVP | 217 | 555 | 338 | 39.1% | 21 | 40 | 36 | 5 |
-| Post-MVP only | 0 | 215 | 215 | 0% | 0 | 11 | 11 | 0 |
-| Full product | 217 | 770 | 553 | 28.2% | 21 | 51 | 47 | 5 |
+| MVP | 217 | 563 | 346 | 38.5% | 21 | 41 | 37 | 5 |
+| Post-MVP only | 0 | 223 | 223 | 0% | 0 | 12 | 12 | 0 |
+| Full product | 217 | 786 | 569 | 27.6% | 21 | 53 | 49 | 5 |
 
 ## Progress by epic
 
@@ -26,19 +26,19 @@
 | EP-COMMERCE | Economic, marketplace and supply chain | MVP | 71 | 181 | 39.2% | 12 | 5 |
 | EP-CONSTRUCTION | Construction and contracts | MVP | 0 | 63 | 0% | 3 | 0 |
 | EP-EXPERIENCE | Web, mobile and user experience | MVP | 13 | 89 | 14.6% | 5 | 0 |
-| EP-OPERABILITY | Operability, hardening and pilot | MVP | 0 | 89 | 0% | 5 | 0 |
+| EP-OPERABILITY | Operability, hardening and pilot | MVP | 0 | 97 | 0% | 6 | 0 |
 | EP-INSURANCE | Commercial insurance | POST_MVP | 0 | 42 | 0% | 2 | 0 |
 | EP-ENGAGEMENT | Participation, reward and ranking | POST_MVP | 0 | 34 | 0% | 2 | 0 |
 | EP-REVERSE | Reverse logistics | POST_MVP | 0 | 21 | 0% | 1 | 0 |
 | EP-IOT | IoT and telematics | POST_MVP | 0 | 42 | 0% | 2 | 0 |
-| EP-EXPANSION | National-scale product expansion | POST_MVP | 0 | 76 | 0% | 4 | 0 |
+| EP-EXPANSION | National-scale product expansion | POST_MVP | 0 | 84 | 0% | 5 | 0 |
 
 ## Delivery-unit state
 
 | Status | Delivery units | Story Points |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 14 | 249 |
+| READY | 16 | 265 |
 | IN_PROGRESS | 4 | 76 |
 | BLOCKED | 3 | 47 |
 | ACCEPTED | 21 | 217 |
@@ -51,7 +51,7 @@ A delivery unit is a User Story under a decomposed Feature, or the Feature itsel
 | Status | Features | Baseline SP |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 14 | 249 |
+| READY | 16 | 265 |
 | IN_PROGRESS | 4 | 76 |
 | BLOCKED | 3 | 47 |
 | ACCEPTED | 17 | 217 |

@@ -28,6 +28,7 @@ import {
 import { IdentityService } from './identity.service';
 import { IdentityRepository } from './identity.repository';
 import { KeycloakAdminClient } from '../keycloak/keycloak.client';
+import { KeycloakProjector } from '../keycloak/keycloak.projector';
 import { TEST_ORG_A } from '@rasta/testing';
 import { DEFAULT_ROLE_GRANT_POLICY, ROLE_GRANT_POLICY } from './role-grants';
 import { DEFAULT_PROVISIONING_SCOPE_POLICY, PROVISIONING_SCOPE_POLICY } from './provisioning-scope';
@@ -92,6 +93,9 @@ function userToken(name: string, roles: string[]): string {
     organizationId: ORG_A,
     organizationIds: [ORG_A],
     roles,
+    // As the realm issues it (ADR-060): the role in the organization it was
+    // granted in. SYSTEM_ADMIN is also a realm role, and stays global.
+    organizationRoles: roles.map((role) => `${ORG_A}:${role}`),
     expiresAt: Date.now() + 60_000,
   });
   return token;
@@ -101,6 +105,28 @@ function userToken(name: string, roles: string[]): string {
 const orgAdmin = () => `Bearer ${userToken('admin', ['ORGANIZATION_ADMIN'])}`;
 const unionAdmin = () => `Bearer ${userToken('union', ['UNION_ADMIN'])}`;
 const systemAdmin = () => `Bearer ${userToken('system', ['SYSTEM_ADMIN'])}`;
+const operator = () => `Bearer ${userToken('operator', ['OPERATOR'])}`;
+
+/**
+ * A verified token that resolves **no** organization — no `org_id`, no
+ * `org_ids`. Reachable in practice: the guard falls back to the IdP subject
+ * for an account carrying none of the platform's claims (ADR-060 § Context).
+ */
+function tokenWithoutOrganization(name: string, roles: string[]): string {
+  const token = `user-noorg-${name}-${roles.join('.')}`;
+  userTokens.set(token, {
+    sub: `kc-${name}`,
+    rastaUserId: `USR_${name}`,
+    organizationIds: [],
+    roles,
+    // No organization, so no organization-bound role either (ADR-060). The
+    // guard then drops every realm role but SYSTEM_ADMIN, which is exactly the
+    // caller these cases describe.
+    organizationRoles: [],
+    expiresAt: Date.now() + 60_000,
+  });
+  return `Bearer ${token}`;
+}
 
 const tokenVerifier = {
   verifyUserToken: async (token: string) => {
@@ -155,6 +181,8 @@ const tx = {
     },
   },
   membership: {
+    // Where a revoke looks for the user's next organization (ADR-060 § 5).
+    findFirst: async () => null,
     create: async (args: { data: { roles: string[] } }) => {
       writes.push({ model: 'membership', roles: args.data.roles });
       return membershipRow('MBR_new', args.data.roles);
@@ -261,9 +289,10 @@ const keycloak = {
     keycloakCreates.push(input);
     return 'kc-new';
   },
-  syncMemberships: async () => undefined,
-  setActiveOrganization: async () => undefined,
-  assignRealmRoles: async () => undefined,
+  // Projection is not what this suite is about; with sync off the projector
+  // returns before touching anything (`identity.service.spec.ts` covers it).
+  enabled: false,
+  replacePlatformAttributes: async () => undefined,
   isHealthy: async () => true,
 } as unknown as KeycloakAdminClient;
 
@@ -272,6 +301,7 @@ const keycloak = {
   providers: [
     { provide: IdentityRepository, useValue: repository },
     { provide: KeycloakAdminClient, useValue: keycloak },
+    KeycloakProjector,
     // The shipped default, not a test-only ladder: these tests assert what a
     // deployment that configures nothing actually does.
     { provide: ROLE_GRANT_POLICY, useValue: DEFAULT_ROLE_GRANT_POLICY },
@@ -919,6 +949,123 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
         .set('authorization', unionAdmin())
         .send({ roles: ['FLEET_MANAGER'] });
 
+      expect(response.status).toBe(200);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Reading and editing a profile (ADR-060 findings 2 and 3)
+  // -------------------------------------------------------------------------
+
+  describe('reading another person with no organization to scope the read', () => {
+    it('refuses a non-self read when the token resolves no organization', async () => {
+      // `getUser` used to run its membership check only when an organization
+      // was present, so this reached `findUserById` — unscoped — and answered
+      // for anybody on the platform.
+      lookups.user = true;
+      const response = await request(server())
+        .get(`/v1/users/${TARGET_USER}`)
+        .set('authorization', tokenWithoutOrganization('drifter', ['DRIVER']));
+
+      expect(response.status).toBe(404);
+      // Nothing of the profile — the error echoes the path the caller sent,
+      // which is their own input, but not the record behind it.
+      expect(JSON.stringify(response.body)).not.toContain('colleague@rasta.local');
+      expect(JSON.stringify(response.body)).not.toContain('همکار');
+    });
+
+    it('answers it the same whether or not the user exists', async () => {
+      lookups.user = true;
+      const real = await request(server())
+        .get(`/v1/users/${TARGET_USER}`)
+        .set('authorization', tokenWithoutOrganization('drifter', ['DRIVER']));
+      lookups.user = false;
+      const missing = await request(server())
+        .get('/v1/users/USR_nobody')
+        .set('authorization', tokenWithoutOrganization('drifter', ['DRIVER']));
+
+      expect(real.status).toBe(missing.status);
+      expect(real.body.code).toBe(missing.body.code);
+    });
+
+    it('still lets that caller read their own record', async () => {
+      const response = await request(server())
+        .get('/v1/users/USR_drifter')
+        .set('authorization', tokenWithoutOrganization('drifter', ['DRIVER']));
+      expect(response.status).toBe(200);
+    });
+
+    it('reads a member of the organization the caller acts for', async () => {
+      lookups.membership = true;
+      const response = await request(server())
+        .get(`/v1/users/${TARGET_USER}`)
+        .set('authorization', operator());
+      expect(response.status).toBe(200);
+    });
+  });
+
+  describe('editing somebody else’s profile', () => {
+    const edit = { firstName: 'نام‌تازه' };
+
+    it('refuses an OPERATOR editing a colleague, and writes nothing', async () => {
+      // Before: no `@Roles` on the route, and the service checked only that the
+      // target shared the caller's organization.
+      lookups.membership = true;
+      const response = await request(server())
+        .patch(`/v1/users/${TARGET_USER}`)
+        .set('authorization', operator())
+        .send(edit);
+
+      expect(response.status).toBe(403);
+      expect(response.body.code).toBe('INSUFFICIENT_ROLE');
+      expect(writes).toHaveLength(0);
+    });
+
+    it('refuses before looking the target up, so it cannot probe membership', async () => {
+      lookups.membership = false;
+      const nonMember = await request(server())
+        .patch(`/v1/users/${TARGET_USER}`)
+        .set('authorization', operator())
+        .send(edit);
+      lookups.membership = true;
+      const member = await request(server())
+        .patch(`/v1/users/${TARGET_USER}`)
+        .set('authorization', operator())
+        .send(edit);
+
+      expect(nonMember.status).toBe(member.status);
+    });
+
+    it('lets an ORGANIZATION_ADMIN edit a member of their organization', async () => {
+      lookups.membership = true;
+      const response = await request(server())
+        .patch(`/v1/users/${TARGET_USER}`)
+        .set('authorization', orgAdmin())
+        .send(edit);
+
+      expect(response.status).toBe(200);
+      expect(writes.some((w) => w.model === 'user')).toBe(true);
+    });
+
+    it('confines an ORGANIZATION_ADMIN to their own organization’s people', async () => {
+      // The tenant half, unchanged and still load-bearing: under today's
+      // realm-global roles the role check alone cannot tell which
+      // organization the admin rights belong to (ADR-060).
+      lookups.membership = false;
+      const response = await request(server())
+        .patch(`/v1/users/${TARGET_USER}`)
+        .set('authorization', orgAdmin())
+        .send(edit);
+
+      expect(response.status).toBe(404);
+      expect(writes).toHaveLength(0);
+    });
+
+    it('still lets anybody edit their own profile', async () => {
+      const response = await request(server())
+        .patch('/v1/users/USR_operator')
+        .set('authorization', operator())
+        .send(edit);
       expect(response.status).toBe(200);
     });
   });

@@ -95,7 +95,8 @@ describe('order saga activities (real database)', () => {
       cancel: method('cancel', undefined),
       dispute: method('dispute', undefined),
       resolveDispute: method('resolveDispute', undefined),
-      // JUSTIFIED-ANY: only the seven methods the activities call are needed,
+      findObligation: method('findObligation', null),
+      // JUSTIFIED-ANY: only the eight methods the activities call are needed,
       // and naming the class would drag its HTTP internals into a suite about
       // the activities. The client's own behaviour has its own spec.
     } as any as EconomicClient;
@@ -158,8 +159,10 @@ describe('order saga activities (real database)', () => {
 
     it('reports an order that does not exist rather than acting for no tenant', async () => {
       const { economic } = stubEconomic();
-      await expect(activitiesWith(economic).createObligation('ORD_NOT_REAL')).rejects.toThrow(
-        RastaError,
+      // Classified, like every platform error an activity raises, so the
+      // workflow stops on it instead of retrying a lookup that cannot succeed.
+      await expect(activitiesWith(economic).createObligation('ORD_NOT_REAL')).rejects.toMatchObject(
+        { type: 'NOT_FOUND', nonRetryable: true },
       );
     });
   });
@@ -392,12 +395,26 @@ describe('order saga activities (real database)', () => {
         () => wiring.orders.raiseDispute(orderId, { reason: 'the part does not fit' }),
       );
 
-      await acts.disputeObligation(orderId, held.transactionId, 'the part does not fit');
-      await acts.resolveObligationDispute(orderId, held.transactionId, 'RELEASE_TO_SUPPLIER');
+      const { dispute } = await acts.readOrder(orderId);
+      await acts.disputeObligation(
+        orderId,
+        held.transactionId,
+        dispute!.id,
+        'the part does not fit',
+      );
+      await acts.resolveObligationDispute(
+        orderId,
+        held.transactionId,
+        dispute!.id,
+        'RELEASE_TO_SUPPLIER',
+      );
 
       expect(calls.map((c) => c.method)).toEqual(['createObligation', 'dispute', 'resolveDispute']);
       expect(calls[1].input.reason).toBe('the part does not fit');
       expect(calls[2].input.resolution).toBe('RELEASE_TO_SUPPLIER');
+      // Keyed by the dispute, so a second dispute on this order is its own call.
+      expect(calls[1].input.disputeId).toBe(dispute!.id);
+      expect(calls[2].input.disputeId).toBe(dispute!.id);
     });
 
     it('records a settlement that will not complete, without moving money', async () => {
@@ -455,6 +472,156 @@ describe('order saga activities (real database)', () => {
       );
       expect(row.status).toBe('FUNDS_HELD');
       expect(calls.map((c) => c.method)).toEqual(['createObligation']);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The saga acts on what it last read, and a party can commit in between.
+  // Each case below is one of those interleavings, reproduced against the
+  // real state machine and the real row lock.
+  // -------------------------------------------------------------------------
+
+  describe('when a party commits between the saga reading and acting', () => {
+    const asBuyer = <T>(fn: () => Promise<T>) =>
+      asActor(
+        { organizationId: org.buyer, roles: ['PROCUREMENT_USER'], userId: 'USR-ACT-BUYER' },
+        fn,
+      );
+    const asSupplier = <T>(fn: () => Promise<T>) =>
+      asActor({ organizationId: org.supplier, roles: ['SUPPLIER'], userId: 'USR-ACT-SUP' }, fn);
+
+    async function statusOf(orderId: string): Promise<string> {
+      const row = await runUnscoped('the suite reads the order it drove', () =>
+        prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
+      );
+      return row.status;
+    }
+
+    /** An order whose buyer has confirmed receipt: the saga's settlement entry. */
+    async function receiptConfirmed(acts: OrderActivities): Promise<string> {
+      const { orderId } = await placeOrder();
+      const held = await acts.createObligation(orderId);
+      await acts.markFundsHeld(orderId, held.transactionId);
+      await asSupplier(async () => {
+        await wiring.orders.confirm(orderId);
+        await wiring.orders.fulfill(orderId, {});
+      });
+      await asBuyer(() => wiring.orders.confirmReceipt(orderId, {}));
+      return orderId;
+    }
+
+    it('records a hold placed while the buyer cancelled, and reports CANCELLING', async () => {
+      // Finding 1: the hold committed in economic-service, the buyer's cancel
+      // committed here, and markFundsHeld found CANCELLING. It used to refuse,
+      // the saga took its "nothing moved" branch, and markFailed refused too:
+      // the order stuck in CANCELLING with the money held.
+      const { orderId } = await placeOrder();
+      const { economic } = stubEconomic();
+      const acts = activitiesWith(economic);
+
+      const held = await acts.createObligation(orderId);
+      await asBuyer(() => wiring.orders.cancel(orderId, { reason: 'no longer needed' }));
+
+      await expect(acts.markFundsHeld(orderId, held.transactionId)).resolves.toBe('CANCELLING');
+
+      const row = await runUnscoped('the suite reads the order the hold landed on', () =>
+        prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
+      );
+      expect(row.status).toBe('CANCELLING');
+      // Recorded, so the refund can name exactly what to release.
+      expect(row.economicTransactionId).toBe(held.transactionId);
+    });
+
+    it('does not fail an order the buyer cancelled, when the hold was refused', async () => {
+      const { orderId } = await placeOrder();
+      const acts = activitiesWith(stubEconomic().economic);
+
+      await asBuyer(() => wiring.orders.cancel(orderId, { reason: 'no longer needed' }));
+
+      await expect(acts.markFailed(orderId, 'INSUFFICIENT_BALANCE')).resolves.toBe('CANCELLING');
+      expect(await statusOf(orderId)).toBe('CANCELLING');
+
+      // And it closes as a cancellation, with nothing to refund.
+      await expect(acts.markCancelled(orderId, 'no longer needed')).resolves.toBe('CANCELLED');
+    });
+
+    it('yields to a dispute that committed before settlement began', async () => {
+      // Finding 2, first half: the saga read RECEIPT_CONFIRMED, the buyer
+      // disputed, and then the saga tried to begin settlement.
+      const acts = activitiesWith(stubEconomic().economic);
+      const orderId = await receiptConfirmed(acts);
+
+      await asBuyer(() =>
+        wiring.orders.raiseDispute(orderId, { reason: 'the delivered part is the wrong size' }),
+      );
+
+      await expect(acts.markSettling(orderId)).resolves.toBe('DISPUTED');
+      expect(await statusOf(orderId)).toBe('DISPUTED');
+    });
+
+    it('never moves a disputed order back to RECEIPT_CONFIRMED as a failed settlement', async () => {
+      // Finding 2, second half: the edge the saga borrowed. DISPUTED to
+      // RECEIPT_CONFIRMED is in the table for an operator's resolution. The
+      // saga's "settlement attempt failed" step may only leave SETTLING.
+      const acts = activitiesWith(stubEconomic().economic);
+      const orderId = await receiptConfirmed(acts);
+      await asBuyer(() =>
+        wiring.orders.raiseDispute(orderId, { reason: 'the delivered part is the wrong size' }),
+      );
+
+      await expect(acts.markSettlementFailed(orderId)).rejects.toMatchObject({
+        type: 'BUSINESS_RULE_VIOLATION',
+        nonRetryable: true,
+      });
+      expect(await statusOf(orderId)).toBe('DISPUTED');
+    });
+
+    it('completes only an order that is settling', async () => {
+      const acts = activitiesWith(stubEconomic().economic);
+      const orderId = await receiptConfirmed(acts);
+
+      await expect(
+        acts.markCompleted(orderId, {
+          settlementId: `STL_${ulid()}`,
+          commissionAmountMinor: '0',
+          netAmountMinor: '500000',
+        }),
+      ).rejects.toMatchObject({ type: 'BUSINESS_RULE_VIOLATION' });
+      expect(await statusOf(orderId)).toBe('RECEIPT_CONFIRMED');
+    });
+
+    it('reads the order, its cancellation and its dispute from the database', async () => {
+      // Layer (c): every decision and every reason the saga passes on comes
+      // from here, never from a signal's arguments.
+      const acts = activitiesWith(stubEconomic().economic);
+      const orderId = await receiptConfirmed(acts);
+      await asBuyer(() =>
+        wiring.orders.raiseDispute(orderId, { reason: 'the delivered part is the wrong size' }),
+      );
+
+      const view = await acts.readOrder(orderId);
+
+      expect(view.status).toBe('DISPUTED');
+      expect(view.economicTransactionId).toMatch(/^TXN_/);
+      expect(view.dispute).toEqual({
+        id: expect.any(String),
+        reason: 'the delivered part is the wrong size',
+        resolution: null,
+      });
+    });
+
+    it('asks economic-service for the order obligation as the buyer', async () => {
+      const { orderId } = await placeOrder();
+      const { calls, economic } = stubEconomic({
+        findObligation: async () => ({ id: 'TXN_FOUND' }),
+      });
+
+      await expect(activitiesWith(economic).findObligation(orderId)).resolves.toEqual({
+        transactionId: 'TXN_FOUND',
+      });
+      expect(calls[0].method).toBe('findObligation');
+      expect(calls[0].input.orderId).toBe(orderId);
+      expect(calls[0].contextOrganizationId).toBe(org.buyer);
     });
   });
 });

@@ -6,6 +6,7 @@ export const REQUIRED_ROLES_KEY = 'rasta:requiredRoles';
 export const ALLOW_SERVICE_KEY = 'rasta:allowService';
 export const IDEMPOTENT_KEY = 'rasta:idempotent';
 export const SKIP_TENANT_SCOPE_KEY = 'rasta:skipTenantScope';
+export const AUDITOR_SELF_SERVICE_KEY = 'rasta:auditorSelfService';
 
 /**
  * Marks an endpoint as reachable without authentication.
@@ -31,6 +32,20 @@ export const Roles = (...roles: string[]) => SetMetadata(REQUIRED_ROLES_KEY, rol
  * Permits an authenticated *service* (not a user) to call this endpoint.
  * Used for internal endpoints under `/internal/v1`.
  */
+/**
+ * Admits the oversight role to a handler that is about the caller themself.
+ *
+ * `AUDITOR` is refused on every handler that does not name it (ADR-060,
+ * `RolesGuard`). A handler that does not concern any organization's data —
+ * reading one's own profile, switching one's active organization — would be
+ * refused too, and an auditor could not use the portal at all. This opens
+ * exactly such a handler, with a written reason, and nothing else. It is not
+ * a way to give an auditor anybody else's data: use `@Roles('AUDITOR', …)`
+ * for that, where the grant is visible as a grant.
+ */
+export const AuditorSelfService = (reason: string) =>
+  SetMetadata(AUDITOR_SELF_SERVICE_KEY, { allowed: true, reason });
+
 export const AllowService = (...services: string[]) => SetMetadata(ALLOW_SERVICE_KEY, services);
 
 /**

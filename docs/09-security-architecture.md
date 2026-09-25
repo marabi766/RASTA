@@ -157,7 +157,7 @@ Gateway پاسخ `403` می‌داد (D-007). حالا Claim `purpose` آن دو
 | نقش                  | محدوده       | مجوزهای کلیدی                                                      |
 | -------------------- | ------------ | ------------------------------------------------------------------ |
 | `SYSTEM_ADMIN`       | Platform     | همه (شامل پیکربندی سیستم)                                          |
-| `UNION_ADMIN`        | Platform     | عملیات پلتفرم، Marketplace، موتور اقتصادی                          |
+| `UNION_ADMIN`        | Platform ¹   | عملیات پلتفرم، Marketplace، موتور اقتصادی                          |
 | `ORGANIZATION_ADMIN` | Organization | همه در سازمان خود؛ مدیریت کاربران سازمان                           |
 | `FLEET_MANAGER`      | Organization | `asset:*` · `fleet:*` · `maintenance:*`                            |
 | `OPERATOR`           | Organization | `usage:create` · `maintenance:create` — **فقط دارایی تخصیص‌یافته** |
@@ -167,6 +167,8 @@ Gateway پاسخ `403` می‌داد (D-007). حالا Claim `purpose` آن دو
 | `WORKSHOP`           | Supplier Org | `repair-order:*` — **فقط ارجاع‌شده به خود**                        |
 | `CONTRACTOR`         | Supplier Org | `tender:read` · `bid:create` · `statement:create`                  |
 | `AUDITOR`            | Province     | **فقط `analytics:read` تجمیعی** — بدون داده سطح ردیف               |
+
+¹ **معنای «Platform» برای `UNION_ADMIN` (`ADR-060`، `docs/24` Q-63، 2026-09-24).** مدیر اتحادیه اختیارات پلتفرمی را **هنگام عمل به‌عنوان سازمان اتحادیهٔ خودش** اعمال می‌کند — مثلاً رسیدگی به اختلاف هر سفارش، که از همان‌جا می‌بیند. این نقش **هرگز به سازمان دیگری حمل نمی‌شود**: اگر با `X-Organization-Id` برای سازمانی عمل کند که در آن مثلاً `DRIVER` است، آن‌جا `DRIVER` است. تنها نقشی که در همهٔ سازمان‌ها معتبر است `SYSTEM_ADMIN` است. **گارد `ADR-060` (PR B) این معنا را اجرا می‌کند:** نقش‌های هر درخواست از `org_roles` سازمانِ حل‌شده می‌آیند و از نقش‌های Realm فقط `SYSTEM_ADMIN` پذیرفته می‌شود.
 
 **CONSTRAINT (از سند محصول).** نقش `AUDITOR` (استانداری) دسترسی «تجمیعی و بدون دسترسی به
 جزئیات تراکنش‌های فردی» دارد. این در کد یعنی: `AUDITOR` هیچ مجوزی روی `economic-service`،

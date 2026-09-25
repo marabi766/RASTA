@@ -28,7 +28,16 @@ export interface UserClaims {
   rastaUserId?: string;
   organizationId?: string;
   organizationIds: string[];
+  /**
+   * The token's realm roles, as issued. **Not** the caller's authority: only
+   * the global ones survive the guard (ADR-060 § 4). Read `AuthState.roles`.
+   */
   roles: string[];
+  /**
+   * The `org_roles` claim: one `ORG_ID:ROLE` value per role held in each
+   * membership, unparsed. The guard parses it strictly (`parseOrganizationRoles`).
+   */
+  organizationRoles: string[];
   username?: string;
   email?: string;
   expiresAt: number;
@@ -98,6 +107,9 @@ export class TokenVerifier {
         audience: this.options.audience,
         algorithms: ['RS256'],
         clockTolerance: this.options.clockToleranceSeconds ?? 5,
+        // jose checks `exp` only when it is present. Without this a token that
+        // simply omits it never expires — and a stolen one is valid forever.
+        requiredClaims: ['exp'],
       });
       payload = result.payload;
     } catch (error) {
@@ -114,9 +126,10 @@ export class TokenVerifier {
       organizationId: readString(payload, 'org_id'),
       organizationIds: readStringArray(payload, 'org_ids'),
       roles: readRealmRoles(payload),
+      organizationRoles: readStringArray(payload, 'org_roles'),
       username: readString(payload, 'preferred_username'),
       email: readString(payload, 'email'),
-      expiresAt: (payload.exp ?? 0) * 1000,
+      expiresAt: expiryMillis(payload),
     };
   }
 }
@@ -183,6 +196,9 @@ export class InternalTokenService {
         audience: expectedTarget,
         algorithms: ['HS256'],
         clockTolerance: 5,
+        // As for user tokens: `issue` always sets one, so this refuses only a
+        // token that did not come from `issue`.
+        requiredClaims: ['exp'],
       });
 
       if (!payload.sub) {
@@ -202,12 +218,28 @@ export class InternalTokenService {
         // component exposed to outside traffic — choose a tenant for a call it
         // is only forwarding (ADR-035).
         ...(purpose === 'SERVICE' ? { organizationId: readString(payload, 'org_id') } : {}),
-        expiresAt: (payload.exp ?? 0) * 1000,
+        expiresAt: expiryMillis(payload),
       };
     } catch (error) {
       throw mapJoseError(error);
     }
   }
+}
+
+/**
+ * The token's expiry in epoch milliseconds.
+ *
+ * `requiredClaims: ['exp']` means jose has already refused a token without
+ * one; this refuses again rather than defaulting. The line it replaces,
+ * `(payload.exp ?? 0) * 1000`, turned a missing expiry into the epoch without
+ * saying so — a value that reads as "long expired" to one caller and as "no
+ * expiry recorded" to another.
+ */
+function expiryMillis(payload: JWTPayload): number {
+  if (typeof payload.exp !== 'number') {
+    throw new RastaError('TOKEN_INVALID', 'Token has no expiry');
+  }
+  return payload.exp * 1000;
 }
 
 function mapJoseError(error: unknown): RastaError {

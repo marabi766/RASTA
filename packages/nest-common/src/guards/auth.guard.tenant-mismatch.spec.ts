@@ -79,6 +79,7 @@ const memberOfA = (overrides: Partial<UserClaims> = {}): UserClaims => ({
   organizationId: ORG_A,
   organizationIds: [ORG_A, ORG_B],
   roles: ['FLEET_MANAGER', 'ORGANIZATION_ADMIN'],
+  organizationRoles: [`${ORG_A}:FLEET_MANAGER`, `${ORG_A}:ORGANIZATION_ADMIN`, `${ORG_B}:DRIVER`],
   username: 'dehyari.admin',
   expiresAt: Date.now() + 60_000,
   ...overrides,
@@ -187,7 +188,7 @@ describe('AuthGuard — observing its own user-token tenant refusal', () => {
       // observer needs by identity; the attribution itself carries none of it.
       expect(refusal.error.internalContext).toEqual({
         requested: ORG_FOREIGN,
-        allowed: [ORG_A, ORG_A, ORG_B],
+        allowed: [ORG_A, ORG_B],
       });
     });
   });

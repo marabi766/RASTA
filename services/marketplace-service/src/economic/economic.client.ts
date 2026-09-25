@@ -70,6 +70,9 @@ export interface SettlementView {
   settledAt: string;
 }
 
+/** The economic transaction type an order's obligation is recorded as. */
+const OBLIGATION_TYPE = 'MARKETPLACE_ORDER';
+
 /** Keys derived from identity, so a retry is a replay rather than a new act. */
 export const idempotencyKeyFor = {
   hold: (orderId: string) => `order:${orderId}:hold`,
@@ -77,8 +80,16 @@ export const idempotencyKeyFor = {
   settle: (orderId: string) => `order:${orderId}:settle`,
   refund: (orderId: string) => `order:${orderId}:refund`,
   cancel: (orderId: string) => `order:${orderId}:cancel`,
-  dispute: (orderId: string) => `order:${orderId}:dispute`,
-  resolveDispute: (orderId: string) => `order:${orderId}:resolve-dispute`,
+  /**
+   * Per **dispute**, not per order. An order can be disputed, settled back by
+   * an operator, and disputed again (RECEIPT_CONFIRMED -> DISPUTED is legal).
+   * With one key per order the second dispute replayed the first one's stored
+   * response: economic-service never moved the transaction to DISPUTED, and
+   * its own "a disputed transaction never settles" guard was never engaged.
+   */
+  dispute: (orderId: string, disputeId: string) => `order:${orderId}:dispute:${disputeId}`,
+  resolveDispute: (orderId: string, disputeId: string) =>
+    `order:${orderId}:resolve-dispute:${disputeId}`,
 } as const;
 
 @Injectable()
@@ -116,7 +127,7 @@ export class EconomicClient {
       idempotencyKey: idempotencyKeyFor.hold(input.orderId),
       correlationId: input.correlationId,
       body: {
-        transactionType: 'MARKETPLACE_ORDER',
+        transactionType: OBLIGATION_TYPE,
         counterpartyOrganizationId: input.supplierOrganizationId,
         grossAmountMinor: input.totalAmountMinor.toString(),
         currency: input.currency,
@@ -125,6 +136,40 @@ export class EconomicClient {
         holdFunds: true,
       },
     });
+  }
+
+  /**
+   * The obligation recorded for this order, if there is one.
+   *
+   * The saga's answer to "did the hold happen?" when `createObligation` ended
+   * without a definite reply. A timeout, an exhausted retry or a lost response
+   * says nothing about whether economic-service committed the hold, and
+   * treating any of them as "nothing moved" failed the order while the
+   * buyer's money stayed held. economic-service keeps at most one obligation
+   * per payer and source fact (`ux_transaction_source_fact`), so this read is
+   * a complete answer, not a best guess.
+   */
+  async findObligation(input: {
+    orderId: string;
+    buyerOrganizationId: string;
+    correlationId: string;
+  }): Promise<TransactionView | null> {
+    const query = new URLSearchParams({
+      sourceReference: input.orderId,
+      transactionType: OBLIGATION_TYPE,
+    });
+    const page = await this.call<{ items: TransactionView[] }>('findObligation', {
+      method: 'GET',
+      path: `/v1/transactions?${query.toString()}`,
+      organizationId: input.buyerOrganizationId,
+      correlationId: input.correlationId,
+    });
+    return (
+      page.items.find(
+        (item) =>
+          item.sourceReference === input.orderId && item.transactionType === OBLIGATION_TYPE,
+      ) ?? null
+    );
   }
 
   /** Marks the obligation ready to settle. Only reachable after receipt. */
@@ -205,6 +250,8 @@ export class EconomicClient {
    */
   async dispute(input: {
     orderId: string;
+    /** The dispute being mirrored. Part of the idempotency key. */
+    disputeId: string;
     transactionId: string;
     buyerOrganizationId: string;
     reason: string;
@@ -214,7 +261,7 @@ export class EconomicClient {
       method: 'POST',
       path: `/v1/transactions/${input.transactionId}/dispute`,
       organizationId: input.buyerOrganizationId,
-      idempotencyKey: idempotencyKeyFor.dispute(input.orderId),
+      idempotencyKey: idempotencyKeyFor.dispute(input.orderId, input.disputeId),
       correlationId: input.correlationId,
       body: { reason: input.reason },
     });
@@ -230,6 +277,8 @@ export class EconomicClient {
    */
   async resolveDispute(input: {
     orderId: string;
+    /** The dispute being resolved. Part of the idempotency key. */
+    disputeId: string;
     transactionId: string;
     buyerOrganizationId: string;
     resolution: string;
@@ -239,7 +288,7 @@ export class EconomicClient {
       method: 'POST',
       path: `/v1/transactions/${input.transactionId}/resolve-dispute`,
       organizationId: input.buyerOrganizationId,
-      idempotencyKey: idempotencyKeyFor.resolveDispute(input.orderId),
+      idempotencyKey: idempotencyKeyFor.resolveDispute(input.orderId, input.disputeId),
       correlationId: input.correlationId,
       body: { resolution: input.resolution },
     });

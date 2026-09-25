@@ -18,12 +18,12 @@ test('the repository baseline is valid and preserves the approved horizons', () 
   // or estimate change may move them. The earned figures move whenever an item
   // is accepted, so they are updated in the same commit as the acceptance —
   // that coupling is the point: a status change nobody meant to make fails here.
-  assert.equal(progress.mvp.committed, 555);
+  assert.equal(progress.mvp.committed, 563);
   assert.equal(progress.mvp.earned, 217);
-  assert.equal(progress.mvp.percent, 39.1);
-  assert.equal(progress.fullProduct.committed, 770);
+  assert.equal(progress.mvp.percent, 38.5);
+  assert.equal(progress.fullProduct.committed, 786);
   assert.equal(progress.fullProduct.earned, 217);
-  assert.equal(progress.fullProduct.percent, 28.2);
+  assert.equal(progress.fullProduct.percent, 27.6);
 });
 
 test('decomposed features contribute child stories exactly once', () => {
@@ -35,7 +35,7 @@ test('decomposed features contribute child stories exactly once', () => {
     documentFeature.points,
   );
   assert.equal(progress.fullProduct.units, baseline.items.length - 1 + baseline.stories.length);
-  assert.equal(progress.fullProduct.committed, 770);
+  assert.equal(progress.fullProduct.committed, 786);
 });
 
 test('an accepted story earns its own points before feature-level acceptance', () => {
@@ -66,7 +66,7 @@ test('an accepted story earns its own points before feature-level acceptance', (
   // contributes none of its own on top of them.
   assert.equal(after.mvp.earned - before.mvp.earned, story.points);
   assert.equal(after.mvp.committed, before.mvp.committed);
-  assert.equal(after.mvp.committed, 555);
+  assert.equal(after.mvp.committed, 563);
 });
 
 test('accepted feature or story work without evidence cannot earn points', () => {

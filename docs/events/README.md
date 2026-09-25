@@ -71,15 +71,16 @@
 
 ## Identity — `rasta.identity.v1`
 
-| رویداد               | Aggregate | مصرف‌کنندگان                                   | Payload کلیدی                         |
-| -------------------- | --------- | ---------------------------------------------- | ------------------------------------- |
-| `USER_REGISTERED`    | User      | notification · audit · analytics               | `userId`, `email`, `requestedRole`    |
-| `USER_ACTIVATED`     | User      | notification · **economic (باز کردن کیف پول)** | `userId`, `organizationId`            |
-| `USER_DEACTIVATED`   | User      | همه (ابطال Session)                            | `userId`, `reason`                    |
-| `MEMBERSHIP_CREATED` | User      | audit · analytics                              | `userId`, `organizationId`, `roles[]` |
-| `MEMBERSHIP_REVOKED` | User      | audit · gateway (ابطال Cache)                  | `userId`, `organizationId`            |
-| `ROLE_ASSIGNED`      | User      | audit · **gateway (ابطال Cache مجوز)**         | `userId`, `organizationId`, `role`    |
-| `ROLE_REVOKED`       | User      | audit · gateway                                | `userId`, `organizationId`, `role`    |
+| رویداد               | Aggregate | مصرف‌کنندگان                                   | Payload کلیدی                            |
+| -------------------- | --------- | ---------------------------------------------- | ---------------------------------------- |
+| `USER_REGISTERED`    | User      | notification · audit · analytics               | `userId`, `email`, `requestedRole`       |
+| `USER_ACTIVATED`     | User      | notification · **economic (باز کردن کیف پول)** | `userId`, `organizationId`               |
+| `USER_DEACTIVATED`   | User      | همه (ابطال Session)                            | `userId`, `reason`                       |
+| `MEMBERSHIP_CREATED` | User      | audit · analytics                              | `userId`, `organizationId`, `roles[]`    |
+| `MEMBERSHIP_REVOKED` | User      | audit · gateway (ابطال Cache)                  | `userId`, `organizationId`               |
+| `MEMBERSHIP_EXPIRED` | User      | audit · identity (Projection به Keycloak)      | `userId`, `organizationId`, `validUntil` |
+| `ROLE_ASSIGNED`      | User      | audit · **gateway (ابطال Cache مجوز)**         | `userId`, `organizationId`, `role`       |
+| `ROLE_REVOKED`       | User      | audit · gateway                                | `userId`, `organizationId`, `role`       |
 
 ## Organization — `rasta.organization.v1`
 

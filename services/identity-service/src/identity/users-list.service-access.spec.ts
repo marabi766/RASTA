@@ -81,6 +81,8 @@ function userToken(name: string, roles: string[], organizationId = ORG_A): strin
     organizationId,
     organizationIds: [organizationId],
     roles,
+    // The role in the organization it was granted in (ADR-060).
+    organizationRoles: roles.map((role) => `${organizationId}:${role}`),
     expiresAt: Date.now() + 60_000,
   });
   return token;

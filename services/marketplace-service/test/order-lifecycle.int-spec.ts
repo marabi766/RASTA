@@ -229,9 +229,10 @@ describe('order lifecycle (real database)', () => {
       }),
     );
 
-    await expect(asSaga(() => wiring.orders.markSettling(order.id))).rejects.toThrow(
-      expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }),
-    );
+    // The saga's step yields to the dispute: it moves nothing and reports what
+    // it found, so the saga waits on the dispute instead of counting a failed
+    // settlement attempt — which is what used to erase it.
+    await expect(asSaga(() => wiring.orders.markSettling(order.id))).resolves.toBe('DISPUTED');
 
     const disputed = await asBuyer(() => wiring.orders.get(order.id));
     expect(disputed.status).toBe('DISPUTED');

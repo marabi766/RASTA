@@ -49,7 +49,12 @@ describe('object storage, against a real bucket', () => {
   };
 
   async function put(objectKey: string, bytes: Buffer, contentType = 'application/pdf') {
-    const url = await storage.createUploadUrl({ objectKey, contentType, expiresInSeconds: 300 });
+    const url = await storage.createUploadUrl({
+      objectKey,
+      contentType,
+      contentLength: bytes.length,
+      expiresInSeconds: 300,
+    });
     expect(await putToSignedUrl(url, bytes, contentType)).toBe(200);
   }
 
@@ -115,11 +120,35 @@ describe('object storage, against a real bucket', () => {
       const url = await storage.createUploadUrl({
         objectKey,
         contentType: 'application/pdf',
+        contentLength: FIXTURES.pdf().length,
         expiresInSeconds: 300,
       });
 
       const wrongType = await putToSignedUrl(url, FIXTURES.pdf(), 'text/html');
       expect(wrongType).toBeGreaterThanOrEqual(400);
+    });
+
+    it('signs an upload URL to one size, so a body of a different length is refused', async () => {
+      // The presigned URL binds `Content-Length`; an HTTP client sets that
+      // header from the body it actually sends and cannot be told to lie
+      // about it, so a mismatched body fails the signature check before a
+      // byte is stored.
+      const objectKey = key();
+      const declared = FIXTURES.pdf();
+      const url = await storage.createUploadUrl({
+        objectKey,
+        contentType: 'application/pdf',
+        contentLength: declared.length,
+        expiresInSeconds: 300,
+      });
+
+      const actuallyBigger = Buffer.concat([declared, Buffer.from('extra trailing bytes')]);
+      const status = await putToSignedUrl(url, actuallyBigger, 'application/pdf');
+      expect(status).toBeGreaterThanOrEqual(400);
+
+      // And nothing was stored under a mismatched size — the refusal is at
+      // storage, before an object exists to clean up.
+      expect(await storage.head(objectKey)).toBeNull();
     });
 
     it('serves a download as an attachment with the type it was given', async () => {
@@ -165,11 +194,68 @@ describe('object storage, against a real bucket', () => {
       const url = await storage.createUploadUrl({
         objectKey: key(),
         contentType: 'application/pdf',
+        contentLength: FIXTURES.pdf().length,
         expiresInSeconds: 300,
       });
 
       expect(url).not.toContain(env.S3_SECRET_KEY);
       expect(url).toContain('X-Amz-Signature');
+    });
+  });
+
+  describe('sealing a copy', () => {
+    /** A sealed key shaped exactly like the ones finalize mints. */
+    const sealedKey = () => {
+      const value = `documents-sealed/ORG-STORETEST/CONTRACT/${ulid()}`;
+      written.push(value);
+      return value;
+    };
+
+    it('copies the bytes when the source still matches the pinned ETag', async () => {
+      const source = key();
+      const bytes = FIXTURES.pdf();
+      await put(source, bytes);
+      const metadata = await storage.head(source);
+
+      const destination = sealedKey();
+      await storage.copyToSealedKey({
+        sourceKey: source,
+        destinationKey: destination,
+        ifMatchETag: metadata?.etag as string,
+      });
+
+      const copied = await getFromSignedUrl(
+        await storage.createDownloadUrl({
+          objectKey: destination,
+          expiresInSeconds: 300,
+          downloadFilename: 'sealed.pdf',
+          contentType: 'application/pdf',
+        }),
+      );
+      expect(Buffer.compare(copied.body, bytes)).toBe(0);
+    });
+
+    it('refuses the copy when the source no longer matches the pinned ETag', async () => {
+      // The precondition that closes the race between reading an object back
+      // and sealing it: if something overwrote the source in between, the
+      // ETag this call pins to is already stale, and the copy must not
+      // proceed as if it were not.
+      const source = key();
+      await put(source, FIXTURES.pdf());
+      const staleMetadata = await storage.head(source);
+
+      // Overwrites the source with different bytes, simulating a write that
+      // landed after the caller observed `staleMetadata` but before it asked
+      // for the copy.
+      await put(source, FIXTURES.png(), 'application/pdf');
+
+      await expect(
+        storage.copyToSealedKey({
+          sourceKey: source,
+          destinationKey: sealedKey(),
+          ifMatchETag: staleMetadata?.etag as string,
+        }),
+      ).rejects.toThrow();
     });
   });
 

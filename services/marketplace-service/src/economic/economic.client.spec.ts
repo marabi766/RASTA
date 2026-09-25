@@ -69,10 +69,21 @@ describe('idempotency keys are derived from the order, never from a clock', () =
       idempotencyKeyFor.settle('ORD_1'),
       idempotencyKeyFor.refund('ORD_1'),
       idempotencyKeyFor.cancel('ORD_1'),
-      idempotencyKeyFor.dispute('ORD_1'),
-      idempotencyKeyFor.resolveDispute('ORD_1'),
+      idempotencyKeyFor.dispute('ORD_1', 'DSP_1'),
+      idempotencyKeyFor.resolveDispute('ORD_1', 'DSP_1'),
     ];
     expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('gives a second dispute on the same order its own key', () => {
+    // One key per order made the second dispute a replay of the first: its
+    // stored response came back and economic-service never saw a dispute.
+    expect(idempotencyKeyFor.dispute('ORD_1', 'DSP_2')).not.toBe(
+      idempotencyKeyFor.dispute('ORD_1', 'DSP_1'),
+    );
+    expect(idempotencyKeyFor.resolveDispute('ORD_1', 'DSP_2')).not.toBe(
+      idempotencyKeyFor.resolveDispute('ORD_1', 'DSP_1'),
+    );
   });
 
   it('gives two orders different keys for the same operation', () => {
@@ -258,6 +269,7 @@ describe('each command reaches the endpoint it names', () => {
 
     await client[method]!({
       orderId: 'ORD_1',
+      disputeId: 'DSP_1',
       transactionId: 'TXN_1',
       buyerOrganizationId: 'ORG-BUYER',
       reason: 'a reason long enough to pass',

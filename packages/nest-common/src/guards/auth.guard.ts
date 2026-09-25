@@ -10,6 +10,11 @@ import {
 } from '../auth/token-verifier';
 import { IS_PUBLIC_KEY, ALLOW_SERVICE_KEY } from '../decorators';
 import { upgradeContext, type RequestContext } from '../context/request-context';
+import {
+  parseOrganizationRoles,
+  rolesForRequest,
+  type ParsedOrganizationRoles,
+} from '../auth/tenant-roles';
 
 export const AUTH_OPTIONS = Symbol('RASTA_AUTH_OPTIONS');
 
@@ -50,6 +55,24 @@ export interface AuthGuardOptions {
    * the caller. Not the token, the allowlist or any header.
    */
   onServiceAuthorizationRefusal?: (refusal: ServiceAuthorizationRefusal) => void;
+  /**
+   * Told when a verified user token's `org_roles` claim carried values the
+   * guard refused as malformed (ADR-060 § 3). The request itself proceeds on
+   * the well-formed values.
+   *
+   * The same promises as the other two seams: optional, observation only,
+   * called synchronously at most once per request, and anything it throws or
+   * rejects with is swallowed. It is where a service counts them.
+   */
+  onMalformedOrganizationRoles?: (malformed: MalformedOrganizationRoles) => void;
+}
+
+/** What `AuthGuardOptions.onMalformedOrganizationRoles` is given. */
+export interface MalformedOrganizationRoles {
+  /** The verified caller. */
+  readonly userId: string;
+  /** How many `org_roles` values were dropped. Never the values themselves. */
+  readonly dropped: number;
 }
 
 /**
@@ -69,7 +92,10 @@ export interface UserTenantMismatch {
   readonly userId: string;
   /** The verified token's active organization — never the rejected header. */
   readonly activeOrganizationId: string | undefined;
-  /** The verified token's roles. */
+  /**
+   * The roles the caller holds in its **active** organization — what a request
+   * without the refused header would have carried. Never the raw realm roles.
+   */
   readonly roles: readonly string[];
 }
 
@@ -112,6 +138,14 @@ export interface ServiceAuthorizationRefusal {
  *
  * In both cases a header that does not agree is refused, never resolved. This
  * is the exact point at which a mistake becomes a tenant escape.
+ *
+ * ## A user's roles belong to the organization they were granted in (ADR-060)
+ *
+ * A user token's roles are not the realm roles it carries. They are the roles
+ * its `org_roles` claim grants in the organization this request resolved to,
+ * plus the one global role, `SYSTEM_ADMIN`. An admin of A who is a driver in
+ * B is a driver when acting for B. Before this, the flat realm list travelled
+ * with the caller into every organization it could name.
  */
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -164,34 +198,37 @@ export class AuthGuard implements CanActivate {
     // account provisioned outside the platform usable rather than broken.
     const userId = claims.rastaUserId ?? claims.sub;
 
+    const organizationRoles = parseOrganizationRoles(claims.organizationRoles);
+    if (organizationRoles.dropped > 0 && this.options.onMalformedOrganizationRoles) {
+      notifyObserver(this.options.onMalformedOrganizationRoles, {
+        userId,
+        dropped: organizationRoles.dropped,
+      });
+    }
+
+    const organizationIds = memberships(claims.organizationIds);
     const requested = headerValue(request, 'x-organization-id');
     let organizationId: string | undefined;
     try {
-      organizationId = resolveOrganization(
-        requested,
-        claims.organizationId,
-        claims.organizationIds,
-      );
+      organizationId = resolveOrganization(requested, claims.organizationId, organizationIds);
+      assertHoldsRoles(organizationId, organizationRoles, organizationIds);
     } catch (error) {
       // The refusal is already decided. All this does is say who it was
       // decided against, before the throw discards that knowledge.
-      this.reportTenantMismatch(error, userId, claims);
+      this.reportTenantMismatch(error, userId, claims, organizationRoles);
       throw error;
     }
-
-    const organizationIds = mergeMemberships(
-      organizationId,
-      claims.organizationId,
-      claims.organizationIds,
-    );
 
     const state: AuthState = {
       authType: 'USER',
       userId,
       subject: claims.sub,
       organizationId,
+      // The token's memberships and nothing else. The active organization is
+      // no longer merged in: an active organization outside them is refused
+      // above, so merging it could only ever re-admit one (ADR-060 § 4).
       organizationIds,
-      roles: claims.roles,
+      roles: rolesForRequest(organizationId, organizationRoles, claims.roles),
       username: claims.username,
     };
 
@@ -217,7 +254,12 @@ export class AuthGuard implements CanActivate {
    * `SERVICE_TENANT_CONTEXT_INVALID`, a `FORBIDDEN`, a bad token and an
    * anonymous request are all decided elsewhere and are not this refusal.
    */
-  private reportTenantMismatch(error: unknown, userId: string, claims: UserClaims): void {
+  private reportTenantMismatch(
+    error: unknown,
+    userId: string,
+    claims: UserClaims,
+    organizationRoles: ParsedOrganizationRoles,
+  ): void {
     const observe = this.options.onUserTenantMismatch;
     if (observe === undefined) return;
     if (!(error instanceof RastaError) || error.code !== ERROR_CODES.TENANT_MISMATCH) return;
@@ -226,7 +268,7 @@ export class AuthGuard implements CanActivate {
       error,
       userId,
       activeOrganizationId: claims.organizationId,
-      roles: Object.freeze([...claims.roles]),
+      roles: Object.freeze(rolesForRequest(claims.organizationId, organizationRoles, claims.roles)),
     });
   }
 
@@ -353,53 +395,53 @@ function notifyObserver<T extends object>(observe: (value: T) => void, value: T)
 /**
  * Decides which organization this request acts for.
  *
- * Rules, in order:
- *  1. No requested org → use the token's active organization.
- *  2. Requested org is in the token's memberships → use it.
- *  3. Otherwise → TENANT_MISMATCH. Never fall back to the active org, because
- *     silently ignoring the header would let a caller believe they were acting
- *     for organization B while the server acted for A.
+ * The header if there is one, else the token's active organization — and
+ * either way **it must be one of the token's memberships**, or the request is
+ * `TENANT_MISMATCH`. There used to be two shortcuts that skipped that check:
+ * no header meant "the active organization, unchecked", and a header equal to
+ * the active organization was accepted without looking at the memberships.
+ * An active organization whose membership had been revoked therefore kept
+ * working for as long as the token did (ADR-060, finding 4).
+ *
+ * A header that names another organization is never answered by falling back
+ * to the active one: silently ignoring it would let a caller believe they
+ * were acting for B while the server acted for A.
  */
 export function resolveOrganization(
   requested: string | undefined,
   active: string | undefined,
   memberships: readonly string[],
 ): string | undefined {
-  if (!requested) return active;
-  if (requested === active) return requested;
-  if (memberships.includes(requested)) return requested;
+  const target = requested || active;
+  if (!target) return undefined;
+  if (memberships.includes(target)) return target;
 
-  throw RastaError.tenantMismatch(requested, active ? [active, ...memberships] : memberships);
+  throw RastaError.tenantMismatch(target, [...memberships]);
 }
 
 /**
- * Every organization a verified token asserts membership of (D-2).
+ * A membership that grants no role grants nothing (ADR-060 § 4, rule 2).
  *
- * The union of three things the guard already knows: the tenant resolved for
- * this request, the token's active organization, and its membership claim. All
- * three are token-derived — the resolved tenant is only ever a value
- * `resolveOrganization` accepted *from* the claims — so nothing a caller
- * asserts unilaterally can enter this set.
- *
- * Deduplicated, and blank entries dropped: a conflict-of-interest check must
- * not depend on how the identity provider happened to order or pad the claim.
- *
- * Exported so the union is testable on its own. It is the whole substance of
- * the D-2 fix, and it would otherwise only be reachable through a booted
- * application.
+ * Refused as `TENANT_MISMATCH`, not admitted with an empty role list: every
+ * handler would then have to get "no roles" right on its own, and one that
+ * checks only the tenant would let the caller through.
  */
-export function mergeMemberships(
-  resolved: string | undefined,
-  active: string | undefined,
-  claimed: readonly string[] | undefined,
-): string[] {
-  return [
-    ...new Set(
-      [resolved, active, ...(claimed ?? [])].filter(
-        (id): id is string => typeof id === 'string' && id.trim().length > 0,
-      ),
-    ),
-  ];
+function assertHoldsRoles(
+  organizationId: string | undefined,
+  organizationRoles: ParsedOrganizationRoles,
+  organizationIds: readonly string[],
+): void {
+  if (organizationId === undefined) return;
+  if (organizationRoles.byOrganization.has(organizationId)) return;
+  throw RastaError.tenantMismatch(
+    organizationId,
+    organizationIds.filter((id) => organizationRoles.byOrganization.has(id)),
+  );
+}
+
+/** The token's memberships, deduplicated, with blank entries dropped. */
+function memberships(claimed: readonly string[]): string[] {
+  return [...new Set(claimed.filter((id) => id.trim().length > 0))];
 }
 
 export interface AuthState {
