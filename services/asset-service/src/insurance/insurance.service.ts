@@ -24,6 +24,13 @@ import type {
  * The seam for later extraction is kept clean — its own module, its own topic,
  * no joins into asset tables beyond ownership lookups.
  */
+/**
+ * Lapsed policies expired per transaction by the sweep. Large enough that a
+ * normal day's lapses take one batch, small enough that a backlog after an
+ * outage does not hold thousands of row locks in one transaction.
+ */
+const EXPIRY_BATCH_SIZE = 200;
+
 @Injectable()
 export class InsuranceService {
   private readonly logger = new Logger(InsuranceService.name);
@@ -240,16 +247,20 @@ export class InsuranceService {
    * dedupe: a repeat carries the same aggregate and event name, and consumers
    * are idempotent. The alternative — tracking "already warned" state — buys
    * little and adds a column that can drift.
+   *
+   * Expiry is different, because it changes state. Each batch of lapsed
+   * policies is marked EXPIRED and announced in the same transaction (audit
+   * L3-04), so a policy is never expired without its INSURANCE_EXPIRED event,
+   * and an event is never sent for a policy whose expiry rolled back.
    */
   async runExpirySweep(): Promise<{ warned: number; expired: number }> {
-    const [expiringPolicies, expiringInspections, lapsed] = await Promise.all([
+    const [expiringPolicies, expiringInspections] = await Promise.all([
       runUnscoped('scheduled platform-wide expiry sweep', () =>
         this.repository.findPoliciesExpiringWithin(this.expiryWarningDays),
       ),
       runUnscoped('scheduled platform-wide expiry sweep', () =>
         this.repository.findInspectionsExpiringWithin(this.expiryWarningDays),
       ),
-      this.repository.expireLapsedPolicies(),
     ]);
 
     let warned = 0;
@@ -291,30 +302,42 @@ export class InsuranceService {
         });
         warned += 1;
       }
-
-      for (const policy of lapsed) {
-        await this.repository.enqueueEvent(tx, {
-          aggregateType: 'InsurancePolicy',
-          aggregateId: policy.id,
-          eventName: INSURANCE_EVENTS.INSURANCE_EXPIRED,
-          topic: INSURANCE_TOPIC,
-          organizationId: policy.organizationId,
-          payload: validateInsurancePayload(INSURANCE_EVENTS.INSURANCE_EXPIRED, {
-            assetId: policy.assetId,
-            organizationId: policy.organizationId,
-            policyId: policy.id,
-            coverage: policy.coverage,
-            validTo: policy.validTo.toISOString(),
-          }),
-        });
-      }
     });
 
-    if (warned > 0 || lapsed.length > 0) {
-      this.logger.log(`Expiry sweep: ${warned} warnings, ${lapsed.length} policies expired`);
+    // Batches, each its own transaction, so a large backlog does not become
+    // one long transaction holding every lapsed row. A batch shorter than the
+    // limit means nothing is left.
+    let expired = 0;
+    for (;;) {
+      const batch = await this.repository.transaction(async (tx) => {
+        const lapsed = await this.repository.claimLapsedPolicies(tx, EXPIRY_BATCH_SIZE);
+        for (const policy of lapsed) {
+          await this.repository.enqueueEvent(tx, {
+            aggregateType: 'InsurancePolicy',
+            aggregateId: policy.id,
+            eventName: INSURANCE_EVENTS.INSURANCE_EXPIRED,
+            topic: INSURANCE_TOPIC,
+            organizationId: policy.organizationId,
+            payload: validateInsurancePayload(INSURANCE_EVENTS.INSURANCE_EXPIRED, {
+              assetId: policy.assetId,
+              organizationId: policy.organizationId,
+              policyId: policy.id,
+              coverage: policy.coverage,
+              validTo: policy.validTo.toISOString(),
+            }),
+          });
+        }
+        return lapsed.length;
+      });
+      expired += batch;
+      if (batch < EXPIRY_BATCH_SIZE) break;
     }
 
-    return { warned, expired: lapsed.length };
+    if (warned > 0 || expired > 0) {
+      this.logger.log(`Expiry sweep: ${warned} warnings, ${expired} policies expired`);
+    }
+
+    return { warned, expired };
   }
 
   // =========================================================================

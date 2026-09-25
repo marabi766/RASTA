@@ -215,32 +215,54 @@ export class AssetRepository {
   }
 
   /**
-   * Marks lapsed policies EXPIRED and returns them.
+   * Marks up to `limit` lapsed policies EXPIRED and returns them, in `tx`.
    *
-   * Runs unscoped because it is a platform-wide sweep with no request context —
-   * there is no single tenant it belongs to.
+   * One statement, so the status change and the caller's INSURANCE_EXPIRED
+   * outbox rows commit together (audit L3-04). Before, the rows were flipped
+   * and committed on their own, and the events were written later in a second
+   * transaction: a crash in between left policies EXPIRED that no consumer
+   * ever heard about, and fleet kept dispatching the uninsured machine.
+   *
+   * `FOR UPDATE SKIP LOCKED` lets two sweep replicas share the work. Each
+   * claims different rows, and neither emits an event for a policy the other
+   * expired. Raw SQL for the `RETURNING` and the skip-locked subselect, which
+   * Prisma cannot express; it is outside the tenant extension, which this
+   * platform-wide sweep would lift anyway.
    */
-  async expireLapsedPolicies(): Promise<
+  async claimLapsedPolicies(
+    tx: ExtendedPrismaClient,
+    limit: number,
+    now: Date = new Date(),
+  ): Promise<
     { id: string; assetId: string; organizationId: string; coverage: string; validTo: Date }[]
   > {
-    return runUnscoped(
-      'scheduled platform-wide sweep; runs outside any request context',
-      async () => {
-        const lapsed = await this.client.insurancePolicy.findMany({
-          where: { status: 'ACTIVE', validTo: { lt: new Date() }, deletedAt: null },
-          select: { id: true, assetId: true, organizationId: true, coverage: true, validTo: true },
-        });
-
-        if (lapsed.length > 0) {
-          await this.client.insurancePolicy.updateMany({
-            where: { id: { in: lapsed.map((p) => p.id) } },
-            data: { status: 'EXPIRED' },
-          });
-        }
-
-        return lapsed;
-      },
-    );
+    const rows = await tx.$queryRaw<
+      {
+        id: string;
+        asset_id: string;
+        organization_id: string;
+        coverage: string;
+        valid_to: Date;
+      }[]
+    >`
+      UPDATE insurance_policy
+         SET status = 'EXPIRED', updated_at = ${now}
+       WHERE id IN (
+         SELECT id FROM insurance_policy
+          WHERE status = 'ACTIVE' AND valid_to < ${now} AND deleted_at IS NULL
+          ORDER BY valid_to, id
+          LIMIT ${limit}
+          FOR UPDATE SKIP LOCKED
+       )
+      RETURNING id, asset_id, organization_id, coverage::text AS coverage, valid_to
+    `;
+    return rows.map((row) => ({
+      id: row.id,
+      assetId: row.asset_id,
+      organizationId: row.organization_id,
+      coverage: row.coverage,
+      validTo: row.valid_to,
+    }));
   }
 
   // -------------------------------------------------------------------------

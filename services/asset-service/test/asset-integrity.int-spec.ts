@@ -604,6 +604,82 @@ describe('asset integrity', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // L3-04 — the expiry sweep and its outbox
+  // ---------------------------------------------------------------------------
+
+  describe('the insurance expiry sweep (audit L3-04)', () => {
+    /** A policy of this suite's organization whose term ended yesterday. */
+    async function lapsedPolicy(): Promise<string> {
+      const assetId = await machine(org.a);
+      const policy = await asActor(manager(org.a), () =>
+        insurance.recordPolicy(assetId, {
+          policyNumber: `POL-${ulid().slice(-8)}`,
+          insurerName: 'بیمه نمونه',
+          coverage: 'COMPREHENSIVE',
+          validFrom: new Date(Date.now() - 400 * day).toISOString(),
+          validTo: new Date(Date.now() + day).toISOString(),
+        }),
+      );
+      // recordPolicy refuses a policy that has already lapsed, so the term is
+      // moved into the past afterwards.
+      await prisma.client.$executeRawUnsafe(
+        `UPDATE insurance_policy SET valid_to = now() - interval '1 day' WHERE id = $1`,
+        policy.id,
+      );
+      return policy.id;
+    }
+
+    const policyStatus = async (policyId: string) =>
+      (
+        await prisma.client.$queryRawUnsafe<{ status: string }[]>(
+          `SELECT status::text AS status FROM insurance_policy WHERE id = $1`,
+          policyId,
+        )
+      )[0]!.status;
+
+    const expiredEvents = async (policyId: string) =>
+      (await outboxFor(policyId)).filter((e) => e.eventName === INSURANCE_EVENTS.INSURANCE_EXPIRED);
+
+    it('rolls the expiry back with its event, so the next sweep still announces it', async () => {
+      const policyId = await lapsedPolicy();
+
+      // The outbox write fails after the rows were claimed. Before the fix,
+      // the EXPIRED status had already committed on its own at this point.
+      const spy = jest
+        .spyOn(repository, 'enqueueEvent')
+        .mockRejectedValueOnce(new Error('simulated crash while writing the outbox'));
+      await expect(insurance.runExpirySweep()).rejects.toThrow(/simulated crash/);
+      spy.mockRestore();
+
+      expect(await policyStatus(policyId)).toBe('ACTIVE');
+      expect(await expiredEvents(policyId)).toHaveLength(0);
+
+      await insurance.runExpirySweep();
+
+      expect(await policyStatus(policyId)).toBe('EXPIRED');
+      const events = await expiredEvents(policyId);
+      expect(events).toHaveLength(1);
+      // #103's contract: fleet resolves lapses per coverage.
+      // The outbox row holds the whole envelope; the event's own fields are
+      // under its `payload`.
+      expect(events[0]!.payload).toMatchObject({
+        payload: { policyId, coverage: 'COMPREHENSIVE' },
+      });
+    });
+
+    it('announces each lapse once when two sweeps run at the same time', async () => {
+      const policyIds = [await lapsedPolicy(), await lapsedPolicy()];
+
+      await Promise.all([insurance.runExpirySweep(), insurance.runExpirySweep()]);
+
+      for (const policyId of policyIds) {
+        expect(await policyStatus(policyId)).toBe('EXPIRED');
+        expect(await expiredEvents(policyId)).toHaveLength(1);
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Tenant isolation of every changed write path
   // ---------------------------------------------------------------------------
 

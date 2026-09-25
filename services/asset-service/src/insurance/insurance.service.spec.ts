@@ -70,7 +70,7 @@ function harness(overrides: Record<string, unknown> = {}): Harness {
     findById: jest.fn(async () => ({ id: ASSET_ID, organizationId: DEH1 })),
     findPoliciesExpiringWithin: jest.fn(async () => []),
     findInspectionsExpiringWithin: jest.fn(async () => []),
-    expireLapsedPolicies: jest.fn(async () => []),
+    claimLapsedPolicies: jest.fn(async () => []),
     ...overrides,
   } as unknown as AssetRepository;
 
@@ -195,17 +195,17 @@ describe('InsuranceService', () => {
       expect(warning?.payload.daysRemaining).toBe(20);
     });
 
+    const lapsedPolicy = (id: string) => ({
+      id,
+      assetId: ASSET_ID,
+      organizationId: DEH1,
+      coverage: 'THIRD_PARTY',
+      validTo: new Date(Date.now() - day),
+    });
+
     it('marks lapsed policies expired and announces it', async () => {
       const h = harness({
-        expireLapsedPolicies: jest.fn(async () => [
-          {
-            id: 'INS_2',
-            assetId: ASSET_ID,
-            organizationId: DEH1,
-            coverage: 'THIRD_PARTY',
-            validTo: new Date(Date.now() - day),
-          },
-        ]),
+        claimLapsedPolicies: jest.fn(async () => [lapsedPolicy('INS_2')]),
       });
 
       const result = await h.service.runExpirySweep();
@@ -215,6 +215,45 @@ describe('InsuranceService', () => {
       // fleet-service ends its dispatch block per coverage (L3-02), so the
       // lapse must say which cover ran out.
       expect(expired?.payload).toMatchObject({ policyId: 'INS_2', coverage: 'THIRD_PARTY' });
+    });
+
+    it('expires and announces in the same transaction (audit L3-04)', async () => {
+      // Before, the status change committed on its own and the events were
+      // written later; a crash between the two lost the INSURANCE_EXPIRED.
+      const claim = jest.fn(async () => [lapsedPolicy('INS_3')]);
+      const h = harness({ claimLapsedPolicies: claim });
+      const txs: unknown[] = [];
+      const enqueueTxs: unknown[] = [];
+      Object.assign(h.service['repository'] as object, {
+        transaction: jest.fn(async (fn: (t: unknown) => Promise<unknown>) => {
+          const tx = { id: txs.length + 1 };
+          txs.push(tx);
+          return fn(tx);
+        }),
+        enqueueEvent: jest.fn(async (tx: unknown) => {
+          enqueueTxs.push(tx);
+          return 'EVT_1';
+        }),
+      });
+
+      await h.service.runExpirySweep();
+
+      const claimTx = (claim.mock.calls[0] as unknown[])[0];
+      expect(enqueueTxs).toEqual([claimTx]);
+    });
+
+    it('works through a backlog in batches until one comes back short', async () => {
+      const full = Array.from({ length: 200 }, (_, i) => lapsedPolicy(`INS_F${i}`));
+      const claim = jest
+        .fn()
+        .mockResolvedValueOnce(full)
+        .mockResolvedValueOnce([lapsedPolicy('INS_LAST')]);
+      const h = harness({ claimLapsedPolicies: claim });
+
+      const result = await h.service.runExpirySweep();
+
+      expect(claim).toHaveBeenCalledTimes(2);
+      expect(result.expired).toBe(201);
     });
 
     it('warns about expiring inspections as well as policies', async () => {
