@@ -3,6 +3,7 @@ import { allocateStreamSeqSql, buildOutboxRow, type OutboxMessageInput } from '@
 import { resolvePartitionKey } from './routing';
 import type { OrganizationEventName } from './events';
 import { PrismaService, type PrismaTransactionClient } from '../prisma/prisma.service';
+import { Prisma } from '../generated/prisma';
 import { SERVICE_NAME } from '../config/env';
 import type { ListOrganizationsQuery, NearbyQuery } from './dto';
 
@@ -33,6 +34,26 @@ export class OrganizationRepository {
 
   transaction<T>(fn: (tx: PrismaTransactionClient) => Promise<T>): Promise<T> {
     return this.prisma.transaction(fn);
+  }
+
+  /**
+   * Runs a read in one REPEATABLE READ snapshot.
+   *
+   * A read that checks visibility in one statement and reads in another sees
+   * two different trees if a move commits in between: the caller was allowed
+   * X under A, and then read X — its parent, its inherited governance values —
+   * under B. Inside one snapshot every statement sees the tree as of the first
+   * one, so the check and the data describe the same instant. Read-only, and
+   * it takes no lock: a concurrent move is neither blocked nor seen.
+   */
+  readSnapshot<T>(fn: (db: PrismaTransactionClient) => Promise<T>): Promise<T> {
+    return this.prisma.client.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+        return fn(tx);
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    );
   }
 
   async enqueueEvent(tx: PrismaTransactionClient, input: OutboxMessageInput): Promise<string> {
@@ -85,16 +106,16 @@ export class OrganizationRepository {
     return this.client.organization.findFirst({ where: { id, deletedAt: null } });
   }
 
-  async findDetailById(id: string) {
+  async findDetailById(id: string, db: PrismaTransactionClient = this.client) {
     const [organization, childCount] = await Promise.all([
-      this.client.organization.findFirst({
+      db.organization.findFirst({
         where: { id, deletedAt: null },
         include: {
           locations: { orderBy: { createdAt: 'asc' } },
           contacts: { orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }] },
         },
       }),
-      this.client.organization.count({ where: { parentId: id, deletedAt: null } }),
+      db.organization.count({ where: { parentId: id, deletedAt: null } }),
     ]);
 
     if (!organization) return null;
@@ -105,39 +126,38 @@ export class OrganizationRepository {
     return this.client.organization.findFirst({ where: { externalCode, deletedAt: null } });
   }
 
-  async list(query: ListOrganizationsQuery, allowedRootPath: string | null) {
-    // The cursor and the subtree restriction both constrain `id`. They are
-    // combined under AND rather than merged into one object, because two `id`
-    // keys in a single `where` would silently drop the cursor and break
-    // pagination in a way no test on page one would catch.
-    const idConstraints: object[] = [];
-    if (query.cursor) idConstraints.push({ id: { gt: query.cursor } });
-    if (allowedRootPath) {
-      // Restricted here rather than filtered afterwards, so a page contains
-      // `limit` rows the caller may actually see.
-      idConstraints.push({ id: { in: await this.idsUnderPath(allowedRootPath) } });
-    }
-
-    const rows = await this.client.organization.findMany({
-      where: {
-        deletedAt: null,
-        ...(query.type ? { type: query.type } : {}),
-        ...(query.status ? { status: query.status } : {}),
-        ...(query.parentId ? { parentId: query.parentId } : {}),
-        ...(query.q
-          ? {
-              OR: [
-                { name: { contains: query.q, mode: 'insensitive' as const } },
-                { shortName: { contains: query.q, mode: 'insensitive' as const } },
-                { externalCode: { contains: query.q, mode: 'insensitive' as const } },
-              ],
-            }
-          : {}),
-        ...(idConstraints.length > 0 ? { AND: idConstraints } : {}),
-      },
-      orderBy: { id: 'asc' },
-      take: query.limit + 1,
-    });
+  /**
+   * One page of organizations, restricted to `viewerOrganizationId`'s subtree
+   * (null only for a platform operator).
+   *
+   * One statement, so one snapshot: the subtree is resolved from the viewer's
+   * path in the same query that returns the page. Computing the permitted ids
+   * first and filtering by them second returned an organization that moved
+   * out of the subtree in between, and paid for every id in the subtree on
+   * every page. The restriction sits before `LIMIT`, so a page holds `limit`
+   * rows the caller may see rather than fewer after a filter.
+   *
+   * `q` matches as a plain case-insensitive substring (`strpos` over
+   * `lower`), so `%` and `_` in the search text are literal characters.
+   */
+  async list(query: ListOrganizationsQuery, viewerOrganizationId: string | null) {
+    const q = query.q ? query.q.toLowerCase() : null;
+    const rows = await this.client.$queryRaw<OrganizationRow[]>`
+      SELECT o.* FROM organization o
+      WHERE o.deleted_at IS NULL
+        AND (${viewerOrganizationId}::text IS NULL
+             OR o.path <@ (SELECT v.path FROM organization v WHERE v.id = ${viewerOrganizationId}))
+        AND (${query.type ?? null}::text IS NULL OR o.type::text = ${query.type ?? null}::text)
+        AND (${query.status ?? null}::text IS NULL OR o.status::text = ${query.status ?? null}::text)
+        AND (${query.parentId ?? null}::text IS NULL OR o.parent_id = ${query.parentId ?? null}::text)
+        AND (${q}::text IS NULL
+             OR strpos(lower(o.name), ${q}::text) > 0
+             OR strpos(lower(coalesce(o.short_name, '')), ${q}::text) > 0
+             OR strpos(lower(coalesce(o.external_code, '')), ${q}::text) > 0)
+        AND (${query.cursor ?? null}::text IS NULL OR o.id > ${query.cursor ?? null}::text)
+      ORDER BY o.id
+      LIMIT ${query.limit + 1}
+    `;
 
     const items = rows.slice(0, query.limit);
     return {
@@ -147,18 +167,9 @@ export class OrganizationRepository {
     };
   }
 
-  /** Identifiers in the subtree rooted at `path`, inclusive. */
-  async idsUnderPath(path: string): Promise<string[]> {
-    const rows = await this.client.$queryRaw<{ id: string }[]>`
-      SELECT id FROM organization
-      WHERE deleted_at IS NULL AND path <@ ${path}::ltree
-    `;
-    return rows.map((row) => row.id);
-  }
-
   /** Direct children only. */
-  async findChildren(id: string) {
-    return this.client.organization.findMany({
+  async findChildren(id: string, db: PrismaTransactionClient = this.client) {
+    return db.organization.findMany({
       where: { parentId: id, deletedAt: null },
       orderBy: { name: 'asc' },
     });
@@ -169,28 +180,40 @@ export class OrganizationRepository {
    *
    * `@>` reads as "is an ancestor of", so this is a single index scan rather
    * than a loop that walks parentId upwards one query at a time.
+   *
+   * `viewerOrganizationId` cuts the chain at the top of the viewer's visible
+   * subtree: an ancestor above it is outside what the viewer may read, and is
+   * left out rather than returned as a breadcrumb (Q-67). Null — the whole
+   * chain — is for a platform operator and for internal reads such as policy
+   * inheritance, which need every ancestor.
    */
-  async findAncestors(id: string) {
-    return this.client.$queryRaw<OrganizationRow[]>`
+  async findAncestors(
+    id: string,
+    viewerOrganizationId: string | null = null,
+    db: PrismaTransactionClient = this.client,
+  ) {
+    return db.$queryRaw<OrganizationRow[]>`
       SELECT o.* FROM organization o
       WHERE o.deleted_at IS NULL
         AND o.path @> (SELECT path FROM organization WHERE id = ${id})
         AND o.id <> ${id}
+        AND (${viewerOrganizationId}::text IS NULL
+             OR o.path <@ (SELECT v.path FROM organization v WHERE v.id = ${viewerOrganizationId}))
       ORDER BY nlevel(o.path)
     `;
   }
 
   /** Whole subtree, inclusive of the root. */
-  async findSubtree(id: string, maxDepth?: number) {
+  async findSubtree(id: string, maxDepth?: number, db: PrismaTransactionClient = this.client) {
     if (maxDepth === undefined) {
-      return this.client.$queryRaw<OrganizationRow[]>`
+      return db.$queryRaw<OrganizationRow[]>`
         SELECT o.* FROM organization o
         WHERE o.deleted_at IS NULL
           AND o.path <@ (SELECT path FROM organization WHERE id = ${id})
         ORDER BY o.path
       `;
     }
-    return this.client.$queryRaw<OrganizationRow[]>`
+    return db.$queryRaw<OrganizationRow[]>`
       SELECT o.* FROM organization o
       WHERE o.deleted_at IS NULL
         AND o.path <@ (SELECT path FROM organization WHERE id = ${id})
@@ -200,8 +223,12 @@ export class OrganizationRepository {
   }
 
   /** True when `ancestorId` is at or above `descendantId`. */
-  async isAncestorOf(ancestorId: string, descendantId: string): Promise<boolean> {
-    const rows = await this.client.$queryRaw<{ ok: boolean }[]>`
+  async isAncestorOf(
+    ancestorId: string,
+    descendantId: string,
+    tx?: PrismaTransactionClient,
+  ): Promise<boolean> {
+    const rows = await (tx ?? this.client).$queryRaw<{ ok: boolean }[]>`
       SELECT EXISTS (
         SELECT 1 FROM organization a, organization d
         WHERE a.id = ${ancestorId} AND d.id = ${descendantId} AND d.path <@ a.path
@@ -289,6 +316,37 @@ export class OrganizationRepository {
    */
   async lockHierarchy(tx: PrismaTransactionClient): Promise<void> {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(${HIERARCHY_LOCK_KEY}::bigint)`;
+  }
+
+  /**
+   * Serialises writes to one governance key of one organization.
+   *
+   * Replacing a policy reads the key's timeline, closes what is in force and
+   * inserts the new value. Two replacements interleaving that read would each
+   * close only what they saw and leave two open-ended values.
+   * Transaction-scoped, and keyed on the pair, so unrelated keys
+   * never wait on each other; a hash collision only makes two keys queue.
+   * The two-argument form lives in a different lock space from
+   * `HIERARCHY_LOCK_KEY`'s single-bigint form, so the two never collide.
+   */
+  async lockPolicyKey(tx: PrismaTransactionClient, organizationId: string, key: string) {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${`policy:${organizationId}`}), hashtext(${key}))
+    `;
+  }
+
+  /**
+   * Serialises primary-contact changes for one (organization, kind).
+   *
+   * Adding a primary contact demotes the incumbent. Two concurrent adds each
+   * saw no incumbent but the other's row, and both committed as primary.
+   * `ux_contact_primary_per_kind` refuses that outright; this lock makes the
+   * second add wait and demote the first instead of failing.
+   */
+  async lockContactKind(tx: PrismaTransactionClient, organizationId: string, kind: string) {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${`contact:${organizationId}`}), hashtext(${kind}))
+    `;
   }
 
   /**
@@ -431,8 +489,9 @@ export class OrganizationRepository {
 
   async readLocationPoints(
     organizationId: string,
+    db: PrismaTransactionClient = this.client,
   ): Promise<Map<string, { latitude: number; longitude: number }>> {
-    const rows = await this.client.$queryRaw<
+    const rows = await db.$queryRaw<
       { id: string; latitude: number | null; longitude: number | null }[]
     >`
       SELECT id,
@@ -454,13 +513,14 @@ export class OrganizationRepository {
   /**
    * Organizations within `radiusMeters`, nearest first.
    *
-   * `allowedRootPath` is the caller's visible subtree, exactly as `list`
-   * takes it: null means "the whole tree" and is only ever passed for a
-   * platform operator. The restriction sits in the query, before `LIMIT`, so a
-   * page holds `limit` rows the caller may see rather than fewer after a
-   * filter.
+   * `viewerOrganizationId` is the root of the caller's visible subtree,
+   * exactly as `list` takes it: null means "the whole tree" and is only ever
+   * passed for a platform operator. Its path is resolved inside this
+   * statement, so the restriction and the rows come from one snapshot. The
+   * restriction sits before `LIMIT`, so a page holds `limit` rows the caller
+   * may see rather than fewer after a filter.
    */
-  async findNearby(query: NearbyQuery, allowedRootPath: string | null) {
+  async findNearby(query: NearbyQuery, viewerOrganizationId: string | null) {
     return this.client.$queryRaw<NearbyRow[]>`
       SELECT o.id, o.name, o.type, o.status,
              ST_Distance(
@@ -471,7 +531,8 @@ export class OrganizationRepository {
       JOIN organization o ON o.id = l.organization_id
       WHERE o.deleted_at IS NULL
         AND l.point IS NOT NULL
-        AND (${allowedRootPath}::ltree IS NULL OR o.path <@ ${allowedRootPath}::ltree)
+        AND (${viewerOrganizationId}::text IS NULL
+             OR o.path <@ (SELECT v.path FROM organization v WHERE v.id = ${viewerOrganizationId}))
         -- Parenthesised deliberately: AND x OR y binds as (AND x) OR y, which
         -- would return every organization in the country and quietly ignore
         -- the radius entirely.

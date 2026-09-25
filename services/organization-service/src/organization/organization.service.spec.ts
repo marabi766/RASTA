@@ -119,7 +119,12 @@ function harness(
       updateMany: jest.fn(),
       findFirstOrThrow: jest.fn(),
     },
-    organizationPolicy: { create: jest.fn(), updateMany: jest.fn() },
+    organizationPolicy: {
+      create: jest.fn(),
+      updateMany: jest.fn(),
+      findMany: jest.fn(async () => []),
+      findFirst: jest.fn(async () => null),
+    },
     organizationLocation: { create: jest.fn() },
     organizationContact: {
       create: jest.fn(),
@@ -131,6 +136,7 @@ function harness(
   const repository = {
     client: tx,
     transaction: jest.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx)),
+    readSnapshot: jest.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx)),
     enqueueEvent: jest.fn(async (_tx: unknown, input: { eventName: string; payload: unknown }) => {
       enqueued.push({ eventName: input.eventName, payload: input.payload });
       return 'evt-1';
@@ -150,10 +156,11 @@ function harness(
     rewriteSubtreePath: jest.fn(async () => 3),
     readLocationPoints: jest.fn(async () => new Map()),
     list: jest.fn(async () => ({ items: [], nextCursor: null, hasMore: false })),
-    idsUnderPath: jest.fn(async () => []),
     findNearby: jest.fn(async () => []),
     setLocationPoint: jest.fn(),
     lockHierarchy: jest.fn(async () => undefined),
+    lockPolicyKey: jest.fn(async () => undefined),
+    lockContactKind: jest.fn(async () => undefined),
     lockAncestorChain: jest.fn(async (_tx: unknown, id: string, o: { includeSelf: boolean }) =>
       chainOf(id, {}, o.includeSelf),
     ),
@@ -254,9 +261,9 @@ describe('subtree visibility', () => {
       h.service.list({ limit: 25, cursor: undefined } as never),
     );
 
-    // A non-operator must always be passed a root path to restrict against;
-    // null here would mean "show everything".
-    expect(h.repository.list).toHaveBeenCalledWith(expect.anything(), toLabel(DEH1));
+    // A non-operator must always be passed a root to restrict against; null
+    // here would mean "show everything".
+    expect(h.repository.list).toHaveBeenCalledWith(expect.anything(), DEH1);
   });
 
   it('does not restrict a list for a platform operator', async () => {
@@ -395,8 +402,12 @@ describe('governance policy', () => {
     const h = harness();
     h.repository.findById.mockResolvedValue(orgRow(PROVINCE, { depth: 0 }) as never);
     const client = h.repository.client as unknown as {
-      organizationPolicy: { create: jest.Mock; updateMany: jest.Mock };
+      organizationPolicy: { create: jest.Mock; updateMany: jest.Mock; findMany: jest.Mock };
     };
+    // The value in force: began at the epoch, open-ended.
+    client.organizationPolicy.findMany.mockResolvedValue([
+      { id: 'POL_0', effectiveFrom: new Date(0), effectiveTo: null },
+    ]);
     client.organizationPolicy.create.mockResolvedValue({
       id: 'POL_1',
       key: 'approval.project.required',
@@ -417,7 +428,10 @@ describe('governance policy', () => {
     );
 
     expect(client.organizationPolicy.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ effectiveTo: null }) }),
+      expect.objectContaining({
+        where: { id: { in: ['POL_0'] } },
+        data: expect.objectContaining({ effectiveTo: expect.any(Date) }),
+      }),
     );
     expect(h.enqueued.map((e) => e.eventName)).toContain(
       ORGANIZATION_EVENTS.ORGANIZATION_POLICY_CHANGED,
@@ -604,7 +618,7 @@ describe('nearby visibility', () => {
     await runWithContext(context({ organizationId: COUNTY }), () => h.service.nearby(query));
 
     // Null here would mean "the whole country", which is exactly the leak.
-    expect(h.repository.findNearby).toHaveBeenCalledWith(query, toLabel(COUNTY));
+    expect(h.repository.findNearby).toHaveBeenCalledWith(query, COUNTY);
   });
 
   it('does not restrict a platform operator', async () => {
@@ -1023,5 +1037,348 @@ describe('toLabel', () => {
 
   it('leaves an already-legal identifier untouched', () => {
     expect(toLabel('ORG_01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toBe('ORG_01JBQ8Z4K7M2N5P8R1T3V6X9Y2');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Post-merge review of #101: authorization, locks and timelines inside the
+// transaction
+// ---------------------------------------------------------------------------
+
+describe('reactivation reads the tree under the hierarchy lock', () => {
+  it('takes the hierarchy lock before it reads the ancestor chain', async () => {
+    // A move of this organization that has written but not committed holds
+    // the hierarchy lock. Reading the chain first share-locked the *old*
+    // ancestors, and the move then committed it beneath a suspended parent.
+    const h = harness();
+    h.repository.findById.mockResolvedValue(orgRow(DEH1, { status: 'SUSPENDED' }) as never);
+    h.tx.organization.findFirstOrThrow.mockResolvedValue(orgRow(DEH1));
+
+    await runWithContext(unionContext(), () =>
+      h.service.changeStatus(DEH1, { status: 'ACTIVE', reason: 'cleared' }),
+    );
+
+    const lockOrder = h.repository.lockHierarchy.mock.invocationCallOrder[0] ?? Infinity;
+    const chainOrder = h.repository.lockAncestorChain.mock.invocationCallOrder[0] ?? -Infinity;
+    const casOrder = h.repository.compareAndSetStatus.mock.invocationCallOrder[0] ?? -Infinity;
+    expect(lockOrder).toBeLessThan(chainOrder);
+    expect(chainOrder).toBeLessThan(casOrder);
+  });
+
+  it('a suspension takes no hierarchy lock — it reads no ancestors', async () => {
+    const h = harness();
+    h.repository.findById.mockResolvedValue(orgRow(DEH1) as never);
+    h.tx.organization.findFirstOrThrow.mockResolvedValue(orgRow(DEH1, { status: 'SUSPENDED' }));
+
+    await runWithContext(unionContext(), () =>
+      h.service.changeStatus(DEH1, { status: 'SUSPENDED', reason: 'x' }),
+    );
+
+    expect(h.repository.lockHierarchy).not.toHaveBeenCalled();
+  });
+});
+
+describe('writes are authorized inside the transaction, after the hierarchy lock', () => {
+  /**
+   * The tree as the pre-transaction check saw it: DEH1 beneath COUNTY. Inside
+   * the transaction, after the lock, a move has committed and DEH1 is no
+   * longer beneath COUNTY.
+   */
+  const movedAwayAfterFirstCheck = (h: Harness) => {
+    let calls = 0;
+    h.repository.isAncestorOf.mockImplementation(async () => ++calls === 1);
+  };
+
+  it('create: refuses when the locked chain no longer contains the caller', async () => {
+    const h = harness();
+    // The early check passes (DEH1 is beneath COUNTY), but the chain read under
+    // the lock shows DEH1 moved beneath the union's other branch.
+    h.repository.lockAncestorChain.mockResolvedValue([
+      { id: PROVINCE, status: 'ACTIVE', depth: 0, path: toLabel(PROVINCE) },
+      { id: 'ORG-UNION-YAZD', status: 'ACTIVE', depth: 1, path: 'x' },
+      { id: DEH1, status: 'ACTIVE', depth: 2, path: 'y' },
+    ]);
+
+    const error = await runWithContext(context({ organizationId: COUNTY }), () =>
+      h.service
+        .create({ name: 'n', type: 'DEHYARI', metadata: {}, parentId: DEH1 } as never)
+        .catch((e: unknown) => e),
+    );
+
+    expect((error as RastaError).code).toBe('NOT_FOUND');
+    expect(h.tx.organization.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'update',
+      (h: Harness) => h.service.update(DEH1, { name: 'renamed' } as never),
+      (h: Harness) => h.tx.organization.update,
+    ],
+    [
+      'setPolicy',
+      (h: Harness) =>
+        h.service.setPolicy(DEH1, {
+          key: 'approval.project.required',
+          value: true,
+          inheritable: true,
+          description: 'd',
+        } as never),
+      (h: Harness) => h.tx.organizationPolicy.create,
+    ],
+    [
+      'addLocation',
+      (h: Harness) => h.service.addLocation(DEH1, { kind: 'PRIMARY' } as never),
+      (h: Harness) =>
+        (h.tx as unknown as { organizationLocation: { create: jest.Mock } }).organizationLocation
+          .create,
+    ],
+    [
+      'addContact',
+      (h: Harness) =>
+        h.service.addContact(DEH1, {
+          kind: 'FINANCIAL',
+          displayName: 'd',
+          phone: '09120000000',
+          isPrimary: true,
+        } as never),
+      (h: Harness) => h.tx.organizationContact.create,
+    ],
+  ])(
+    '%s: refuses when a move committed between the early check and the lock',
+    async (_, act, write) => {
+      const h = harness({}, { policySetterRoles: ['ORGANIZATION_ADMIN'] });
+      h.repository.findById.mockResolvedValue(orgRow(DEH1) as never);
+      movedAwayAfterFirstCheck(h);
+
+      const error = await runWithContext(context({ organizationId: COUNTY }), () =>
+        act(h).catch((e: unknown) => e),
+      );
+
+      expect((error as RastaError).code).toBe('NOT_FOUND');
+      expect(write(h)).not.toHaveBeenCalled();
+      // The second, authoritative check ran inside the transaction, after the lock.
+      const lockOrder = h.repository.lockHierarchy.mock.invocationCallOrder[0] ?? Infinity;
+      const checkOrder = h.repository.isAncestorOf.mock.invocationCallOrder[1] ?? -Infinity;
+      expect(lockOrder).toBeLessThan(checkOrder);
+      expect(h.repository.isAncestorOf.mock.calls[1]?.[2]).toBe(h.tx);
+    },
+  );
+
+  it('a platform operator takes no hierarchy lock for an ordinary write', async () => {
+    const h = harness();
+    h.repository.findById.mockResolvedValue(orgRow(DEH1) as never);
+    h.tx.organization.update.mockResolvedValue(orgRow(DEH1));
+
+    await runWithContext(unionContext(), () => h.service.update(DEH1, { name: 'n' } as never));
+
+    expect(h.repository.lockHierarchy).not.toHaveBeenCalled();
+  });
+});
+
+describe('ancestors stop at the caller visible root', () => {
+  it('passes the caller organization for a non-operator', async () => {
+    const h = harness();
+    await runWithContext(context({ organizationId: COUNTY }), () => h.service.ancestors(DEH1));
+    expect(h.repository.findAncestors).toHaveBeenCalledWith(DEH1, COUNTY, h.tx);
+  });
+
+  it('passes null — the whole chain — for a platform operator', async () => {
+    const h = harness();
+    await runWithContext(unionContext(), () => h.service.ancestors(DEH1));
+    expect(h.repository.findAncestors).toHaveBeenCalledWith(DEH1, null, h.tx);
+  });
+});
+
+describe('policy timeline', () => {
+  const setImmediate = (h: Harness) =>
+    runWithContext(unionContext(), () =>
+      h.service.setPolicy(PROVINCE, {
+        key: 'approval.project.required',
+        value: true,
+        inheritable: true,
+        description: 'd',
+      } as never),
+    );
+
+  it('serialises on (organization, key) before reading the timeline', async () => {
+    const h = harness();
+    h.repository.findById.mockResolvedValue(orgRow(PROVINCE) as never);
+    h.tx.organizationPolicy.create.mockResolvedValue({
+      id: 'POL_1',
+      key: 'k',
+      value: true,
+      inheritable: true,
+      description: 'd',
+      effectiveFrom: new Date(),
+      effectiveTo: null,
+    });
+
+    await setImmediate(h);
+
+    expect(h.repository.lockPolicyKey).toHaveBeenCalledWith(
+      h.tx,
+      PROVINCE,
+      'approval.project.required',
+    );
+    expect(h.repository.lockPolicyKey.mock.invocationCallOrder[0]).toBeLessThan(
+      h.tx.organizationPolicy.findMany.mock.invocationCallOrder[0] ?? -Infinity,
+    );
+  });
+
+  it('refuses to close a value that has not taken effect yet, and writes nothing', async () => {
+    // Closing a value scheduled for next month at "now" ended it before it
+    // began — effective_to < effective_from — and left two values in force.
+    const h = harness();
+    h.repository.findById.mockResolvedValue(orgRow(PROVINCE) as never);
+    const scheduledFrom = new Date(Date.now() + 30 * 86_400_000);
+    h.tx.organizationPolicy.findMany.mockResolvedValue([
+      { id: 'POL_NOW', effectiveFrom: new Date(0), effectiveTo: scheduledFrom },
+      { id: 'POL_NEXT', effectiveFrom: scheduledFrom, effectiveTo: null },
+    ]);
+
+    const error = await setImmediate(h).catch((e: unknown) => e);
+
+    expect((error as RastaError).internalContext).toMatchObject({
+      rule: 'POLICY_SCHEDULE_CONFLICT',
+      scheduledPolicyId: 'POL_NEXT',
+    });
+    expect(h.tx.organizationPolicy.updateMany).not.toHaveBeenCalled();
+    expect(h.tx.organizationPolicy.create).not.toHaveBeenCalled();
+  });
+
+  it('a database constraint violation becomes a retryable conflict, not a 500', async () => {
+    const h = harness();
+    h.repository.findById.mockResolvedValue(orgRow(PROVINCE) as never);
+    h.tx.organizationPolicy.create.mockRejectedValue(
+      new Error('conflicting key value violates exclusion constraint "ex_policy_no_overlap"'),
+    );
+
+    const error = await setImmediate(h).catch((e: unknown) => e);
+
+    expect((error as RastaError).code).toBe('OPTIMISTIC_LOCK_FAILED');
+    expect((error as RastaError).status).toBe(409);
+  });
+});
+
+describe('primary contact', () => {
+  const add = (h: Harness, isPrimary: boolean) =>
+    runWithContext(context(), () =>
+      h.service.addContact(DEH1, {
+        kind: 'FINANCIAL',
+        displayName: 'd',
+        phone: '09120000000',
+        isPrimary,
+      } as never),
+    );
+
+  it('locks (organization, kind) before it reads the incumbent', async () => {
+    const h = harness();
+    h.repository.findById.mockResolvedValue(orgRow(DEH1) as never);
+    h.tx.organizationContact.create.mockResolvedValue({ id: 'CNT_1' });
+
+    await add(h, true);
+
+    expect(h.repository.lockContactKind).toHaveBeenCalledWith(h.tx, DEH1, 'FINANCIAL');
+    expect(h.repository.lockContactKind.mock.invocationCallOrder[0]).toBeLessThan(
+      h.tx.organizationContact.findMany.mock.invocationCallOrder[0] ?? -Infinity,
+    );
+  });
+
+  it('a non-primary contact takes no lock', async () => {
+    const h = harness();
+    h.repository.findById.mockResolvedValue(orgRow(DEH1) as never);
+    h.tx.organizationContact.create.mockResolvedValue({ id: 'CNT_1' });
+
+    await add(h, false);
+
+    expect(h.repository.lockContactKind).not.toHaveBeenCalled();
+  });
+
+  it('the partial unique index firing becomes a retryable conflict', async () => {
+    const h = harness();
+    h.repository.findById.mockResolvedValue(orgRow(DEH1) as never);
+    h.tx.organizationContact.create.mockRejectedValue(
+      Object.assign(new Error('Unique constraint failed'), {
+        code: 'P2002',
+        meta: { target: 'ux_contact_primary_per_kind' },
+      }),
+    );
+
+    const error = await add(h, true).catch((e: unknown) => e);
+
+    expect((error as RastaError).code).toBe('OPTIMISTIC_LOCK_FAILED');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1 on #111
+// ---------------------------------------------------------------------------
+
+describe('reads check visibility and read data in one snapshot', () => {
+  it.each([
+    ['get', (h: Harness) => h.service.get(DEH1)],
+    ['children', (h: Harness) => h.service.children(DEH1)],
+    ['ancestors', (h: Harness) => h.service.ancestors(DEH1)],
+    ['subtree', (h: Harness) => h.service.subtree(DEH1)],
+    ['effectivePolicies', (h: Harness) => h.service.effectivePolicies(DEH1)],
+  ])('%s: the visibility check runs inside the snapshot, on its client', async (_, read) => {
+    const h = harness();
+    h.repository.findDetailById.mockResolvedValue({
+      ...orgRow(DEH1),
+      locations: [],
+      contacts: [],
+      childCount: 0,
+    } as never);
+
+    await runWithContext(context({ organizationId: COUNTY }), () => read(h));
+
+    expect(h.repository.readSnapshot).toHaveBeenCalledTimes(1);
+    expect(h.repository.isAncestorOf).toHaveBeenCalledWith(COUNTY, DEH1, h.tx);
+  });
+});
+
+describe('effectivePolicies evaluates one instant', () => {
+  it('uses the same timestamp for both ends of the period test', async () => {
+    const h = harness();
+    await runWithContext(unionContext(), () => h.service.effectivePolicies(DEH1));
+
+    const where = h.tx.organizationPolicy.findMany.mock.calls[0]?.[0]?.where as {
+      effectiveFrom: { lte: Date };
+      OR: [unknown, { effectiveTo: { gt: Date } }];
+    };
+    expect(where.effectiveFrom.lte).toBe(where.OR[1].effectiveTo.gt);
+  });
+});
+
+describe('a dated policy that expires while waiting for its locks', () => {
+  it('is refused after the lock, and nothing is written', async () => {
+    const h = harness();
+    h.repository.findById.mockResolvedValue(orgRow(PROVINCE) as never);
+    // Valid when the request arrived; expired by the time the per-key lock
+    // was granted.
+    const effectiveTo = new Date(Date.now() + 40);
+    h.repository.lockPolicyKey.mockImplementation(
+      () => new Promise((resolve) => setTimeout(resolve, 120)),
+    );
+
+    const error = await runWithContext(unionContext(), () =>
+      h.service
+        .setPolicy(PROVINCE, {
+          key: 'approval.project.required',
+          value: true,
+          inheritable: true,
+          description: 'd',
+          effectiveFrom: new Date(Date.now() - 60_000).toISOString(),
+          effectiveTo: effectiveTo.toISOString(),
+        } as never)
+        .catch((e: unknown) => e),
+    );
+
+    expect((error as RastaError).internalContext).toMatchObject({
+      rule: 'POLICY_ALREADY_EXPIRED',
+    });
+    expect(h.tx.organizationPolicy.updateMany).not.toHaveBeenCalled();
+    expect(h.tx.organizationPolicy.create).not.toHaveBeenCalled();
   });
 });

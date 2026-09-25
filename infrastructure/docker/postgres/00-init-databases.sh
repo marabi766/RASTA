@@ -121,14 +121,14 @@ echo "    - schema audit (owner rasta_audit_migrator, rasta_audit has USAGE only
 # extensions and `migrate deploy` uses no shadow database at all.
 # -----------------------------------------------------------------------------
 echo "==> Installing extensions into template1"
-for ext in postgis ltree pg_trgm pgcrypto; do
+for ext in postgis ltree pg_trgm pgcrypto btree_gist; do
   psql_exec template1 "CREATE EXTENSION IF NOT EXISTS ${ext}"
   echo "    - ${ext}"
 done
 
 echo "==> Ensuring extensions in already-created service databases"
 for svc in "${SERVICES[@]}"; do
-  for ext in postgis ltree pg_trgm pgcrypto; do
+  for ext in postgis ltree pg_trgm pgcrypto btree_gist; do
     psql_exec "rasta_${svc}" "CREATE EXTENSION IF NOT EXISTS ${ext}"
   done
 done

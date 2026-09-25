@@ -184,6 +184,10 @@ model OrganizationPolicy {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
+  // SQL-only, in 20260925150000_policy_timeline_and_primary_contact (Prisma
+  // cannot declare either): `ck_policy_effective_range` (effective_to after
+  // effective_from) and `ex_policy_no_overlap` (no two values of one key in
+  // force at the same instant; GiST over tsrange, needs btree_gist).
   @@unique([organizationId, key, effectiveFrom])
   @@index([organizationId, key])
   @@index([key])
@@ -210,6 +214,9 @@ model OrganizationContact {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
+  // SQL-only, in 20260925150000_policy_timeline_and_primary_contact (Prisma
+  // cannot declare a partial index): `ux_contact_primary_per_kind`, at most
+  // one primary contact per (organization, kind).
   @@index([organizationId])
   @@map("organization_contact")
 }
