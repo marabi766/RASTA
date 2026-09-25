@@ -138,8 +138,12 @@ services:
     <<: *restart
     image: quay.io/keycloak/keycloak:26.0
     container_name: rasta-keycloak
-    command: ['start-dev', '--import-realm']
+    # The development realm is loaded only through its gate (L1-05): Keycloak's
+    # development mode plus an explicit opt-in. See dev-realm-gate.sh.
+    entrypoint: ['/bin/bash']
+    command: ['/opt/keycloak/data/import/dev-realm-gate.sh', 'start-dev', '--import-realm']
     environment:
+      RASTA_KEYCLOAK_DEV_REALM: allow
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin_dev_password}
       KC_DB: postgres
