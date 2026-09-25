@@ -1,0 +1,214 @@
+/**
+ * @jest-environment node
+ */
+import { OidcError, type TokenResponse } from './oidc';
+import { forgetSharedRefreshes, renewSession, type RenewalDependencies } from './session-refresh';
+import { openSession, seal, sealSession, type WebSession } from './session';
+
+/**
+ * Keeping a session alive, and ending it on time (ADR-059 § 4).
+ *
+ * The two findings these tests hold shut: a refresh whose rotated token was
+ * never written back, which signed a reader out every access-token lifetime
+ * against a realm that refuses reuse; and a configured session lifetime that
+ * nothing on the server enforced.
+ */
+
+const SECRET = 'a-secret-that-is-long-enough-to-be-a-key';
+const MAX_AGE = 12 * 60 * 60;
+const T0 = 1_900_000_000; // seconds
+const at = (seconds: number) => seconds * 1000;
+
+const ENV: RenewalDependencies['env'] = {
+  OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
+  OIDC_CLIENT_ID: 'rasta-web',
+  WEB_SESSION_SECRET: SECRET,
+  WEB_SESSION_MAX_AGE_SECONDS: MAX_AGE,
+};
+
+function session(overrides: Partial<WebSession> = {}): WebSession {
+  return {
+    subject: 'USR_01J8',
+    username: 'dehyar',
+    organizationId: 'ORG_01J8',
+    accessToken: 'access-0',
+    accessTokenExpiresAt: T0 + 900,
+    refreshToken: 'refresh-0',
+    csrfToken: 'csrf-token-value',
+    issuedAt: T0,
+    ...overrides,
+  };
+}
+
+const sealed = (overrides: Partial<WebSession> = {}) => sealSession(session(overrides), SECRET);
+
+/**
+ * A token endpoint that behaves like the realm: every refresh token works
+ * once (`revokeRefreshToken: true`, `refreshTokenMaxReuse: 0`), and a spent
+ * one is refused.
+ */
+function rotatingProvider() {
+  const spent = new Set<string>();
+  let issued = 0;
+  const calls: string[] = [];
+  const refresh = async (refreshToken: string): Promise<TokenResponse> => {
+    calls.push(refreshToken);
+    if (spent.has(refreshToken)) {
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider answered 400');
+    }
+    spent.add(refreshToken);
+    issued += 1;
+    return {
+      access_token: `access-${issued}`,
+      refresh_token: `refresh-${issued}`,
+      id_token: `id-${issued}`,
+      expires_in: 900,
+      token_type: 'Bearer',
+    };
+  };
+  return { refresh, calls };
+}
+
+beforeEach(() => forgetSharedRefreshes());
+
+describe('a session that needs nothing', () => {
+  it('leaves a request with no cookie alone', async () => {
+    expect(await renewSession(undefined, { env: ENV })).toEqual({ kind: 'NONE' });
+  });
+
+  it('leaves a fresh access token alone, and does not call the provider', async () => {
+    const { refresh, calls } = rotatingProvider();
+    expect(await renewSession(sealed(), { env: ENV, refresh, now: at(T0 + 60) })).toEqual({
+      kind: 'VALID',
+    });
+    expect(calls).toEqual([]);
+  });
+});
+
+describe('refreshing', () => {
+  it('rotates the tokens and keeps everything else, the start of the session included', async () => {
+    const { refresh, calls } = rotatingProvider();
+    const now = at(T0 + 880); // inside the skew before the 900 s expiry
+    const renewal = await renewSession(sealed(), { env: ENV, refresh, now });
+
+    expect(calls).toEqual(['refresh-0']);
+    expect(renewal.kind).toBe('RENEWED');
+    if (renewal.kind !== 'RENEWED') return;
+
+    const opened = openSession(renewal.sealed, SECRET)!;
+    expect(opened).toMatchObject({
+      accessToken: 'access-1',
+      refreshToken: 'refresh-1',
+      accessTokenExpiresAt: T0 + 880 + 900,
+      csrfToken: 'csrf-token-value',
+      subject: 'USR_01J8',
+      issuedAt: T0,
+    });
+    // The cookie lives exactly as long as the session has left.
+    expect(renewal.maxAgeSeconds).toBe(MAX_AGE - 880);
+  });
+
+  it('keeps a reader signed in across many access-token lifetimes against a realm that refuses reuse', async () => {
+    // The regression: each "navigation" presents whatever cookie the last
+    // one left behind. When the rotated token was not written back, the
+    // second refresh presented a spent token and the session ended.
+    const { refresh } = rotatingProvider();
+    let cookie = sealed();
+    for (let minute = 1; minute <= 8 * 60; minute += 5) {
+      const renewal = await renewSession(cookie, { env: ENV, refresh, now: at(T0 + minute * 60) });
+      expect(renewal.kind).not.toBe('ENDED');
+      if (renewal.kind === 'RENEWED') cookie = renewal.sealed;
+    }
+    expect(openSession(cookie, SECRET)!.refreshToken).not.toBe('refresh-0');
+  });
+
+  it('shares one refresh among requests that present the same token at once', async () => {
+    // A navigation and its prefetches arrive together with the same cookie.
+    // Two refreshes of one token would spend it twice, and the second would
+    // end a good session.
+    const { refresh, calls } = rotatingProvider();
+    const cookie = sealed();
+    const now = at(T0 + 880);
+    const [first, second] = await Promise.all([
+      renewSession(cookie, { env: ENV, refresh, now }),
+      renewSession(cookie, { env: ENV, refresh, now }),
+    ]);
+
+    expect(calls).toEqual(['refresh-0']);
+    expect(first.kind).toBe('RENEWED');
+    expect(second.kind).toBe('RENEWED');
+    if (first.kind === 'RENEWED' && second.kind === 'RENEWED') {
+      expect(openSession(second.sealed, SECRET)!.refreshToken).toBe(
+        openSession(first.sealed, SECRET)!.refreshToken,
+      );
+    }
+  });
+
+  it('ends the session when the provider refuses or does not answer', async () => {
+    const refresh = async (): Promise<TokenResponse> => {
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider did not answer');
+    };
+    expect(await renewSession(sealed(), { env: ENV, refresh, now: at(T0 + 880) })).toEqual({
+      kind: 'ENDED',
+    });
+  });
+
+  it('lets a failure that is not the provider’s propagate, rather than hiding a bug', async () => {
+    const refresh = async (): Promise<TokenResponse> => {
+      throw new TypeError('a bug');
+    };
+    await expect(renewSession(sealed(), { env: ENV, refresh, now: at(T0 + 880) })).rejects.toThrow(
+      'a bug',
+    );
+  });
+});
+
+describe('the absolute lifetime, enforced on the server', () => {
+  it('ends a session past WEB_SESSION_MAX_AGE_SECONDS, even with a working refresh token', async () => {
+    const { refresh, calls } = rotatingProvider();
+    const renewal = await renewSession(sealed(), {
+      env: ENV,
+      refresh,
+      now: at(T0 + MAX_AGE),
+    });
+    expect(renewal).toEqual({ kind: 'ENDED' });
+    // Not even asked: a session past its lifetime does not get new tokens.
+    expect(calls).toEqual([]);
+  });
+
+  it('ends one past its lifetime even while its access token is still fresh', async () => {
+    const cookie = sealed({ accessTokenExpiresAt: T0 + MAX_AGE + 900 });
+    expect(await renewSession(cookie, { env: ENV, now: at(T0 + MAX_AGE + 1) })).toEqual({
+      kind: 'ENDED',
+    });
+  });
+
+  it('is not extended by refreshing', async () => {
+    const { refresh } = rotatingProvider();
+    let cookie = sealed();
+    let minute = 0;
+    let renewal: Awaited<ReturnType<typeof renewSession>> = { kind: 'VALID' };
+    while (renewal.kind !== 'ENDED') {
+      minute += 14;
+      renewal = await renewSession(cookie, { env: ENV, refresh, now: at(T0 + minute * 60) });
+      if (renewal.kind === 'RENEWED') cookie = renewal.sealed;
+    }
+    // Ends at the ceiling, measured from the login, however often it refreshed.
+    expect(minute * 60).toBeGreaterThanOrEqual(MAX_AGE);
+    expect(minute * 60).toBeLessThan(MAX_AGE + 14 * 60);
+  });
+
+  it('ends a cookie sealed before sessions carried their start', async () => {
+    // Sealed with the generic `seal`, which does not validate, exactly as an
+    // older build of this portal would have written it.
+    const withoutStart: Partial<WebSession> = session();
+    delete withoutStart.issuedAt;
+    expect(await renewSession(seal(withoutStart, SECRET), { env: ENV, now: at(T0) })).toEqual({
+      kind: 'ENDED',
+    });
+  });
+
+  it('ends a cookie that does not open', async () => {
+    expect(await renewSession('not-a-sealed-value', { env: ENV })).toEqual({ kind: 'ENDED' });
+  });
+});

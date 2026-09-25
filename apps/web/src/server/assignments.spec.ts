@@ -27,6 +27,7 @@ const SESSION: WebSession = {
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
+  issuedAt: 1_900_000_000,
 };
 
 const ENV = {

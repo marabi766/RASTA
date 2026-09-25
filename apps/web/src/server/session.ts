@@ -48,6 +48,17 @@ export const sessionSchema = z.object({
   refreshToken: z.string().min(1),
   /** Paired with a form field on every state-changing handler (ADR-059 § 5). */
   csrfToken: z.string().min(1),
+  /**
+   * Seconds since the epoch at which the login completed. Set once, by the
+   * callback, and carried unchanged through every refresh: it is what the
+   * absolute lifetime below is measured from, and a refresh that moved it
+   * would turn a ceiling into a session that never ends while it is used.
+   *
+   * Required, so a cookie sealed before this field existed fails to open and
+   * the person signs in once more — the one-time cost of a lifetime that is
+   * actually enforced.
+   */
+  issuedAt: z.number().int().positive(),
 });
 
 export type WebSession = z.infer<typeof sessionSchema>;
@@ -69,6 +80,25 @@ export function sessionCookieOptions(options: { secure: boolean; maxAgeSeconds: 
     path: '/',
     maxAge: options.maxAgeSeconds,
   };
+}
+
+/**
+ * Seconds this session has left before `WEB_SESSION_MAX_AGE_SECONDS` ends it;
+ * zero or less once it has.
+ *
+ * Enforced here, on the server, against the sealed `issuedAt`. The cookie's
+ * own `Max-Age` is an instruction to the browser, and a copied cookie obeys
+ * nobody: before this check a sealed session opened for as long as its
+ * refresh token kept working, whatever the configured ceiling said. Every
+ * read of the session goes through this (`current-session.ts`,
+ * `session-refresh.ts`).
+ */
+export function sessionSecondsLeft(
+  session: WebSession,
+  maxAgeSeconds: number,
+  now: number = Date.now(),
+): number {
+  return session.issuedAt + maxAgeSeconds - Math.floor(now / 1000);
 }
 
 /**

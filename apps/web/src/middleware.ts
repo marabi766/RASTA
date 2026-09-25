@@ -1,4 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import { webServerEnv } from '@/server/env';
+import { renewSession, type SessionRenewal } from '@/server/session-refresh';
+import { SESSION_COOKIE, sessionCookieOptions } from '@/server/session';
 
 /**
  * Security headers on every response (docs/09 § 302-306, docs/16 § 356-368).
@@ -22,7 +25,9 @@ import { NextResponse, type NextRequest } from 'next/server';
  * otherwise send a header instructing every browser to refuse it plain HTTP
  * for the next two years.
  */
-export function middleware(request: NextRequest): NextResponse {
+export async function middleware(request: NextRequest): Promise<NextResponse> {
+  const renewal = await renewSessionCookie(request);
+
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
   const isDev = process.env.NODE_ENV === 'development';
   const secureDeployment = process.env.WEB_COOKIE_SECURE !== 'false';
@@ -49,6 +54,7 @@ export function middleware(request: NextRequest): NextResponse {
   requestHeaders.set('Content-Security-Policy', csp);
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
+  applyRenewal(response, renewal);
   response.headers.set('Content-Security-Policy', csp);
   response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   response.headers.set('X-Content-Type-Options', 'nosniff');
@@ -62,7 +68,43 @@ export function middleware(request: NextRequest): NextResponse {
   return response;
 }
 
+/**
+ * Refreshes the session's tokens before the route runs (`session-refresh.ts`
+ * explains why here and nowhere else).
+ *
+ * The request's own cookie is rewritten too, not only the response's: the
+ * render that follows reads the cookie *it* was sent, and must see the
+ * rotated session in this same request rather than the spent one.
+ *
+ * The environment is read only when there is a cookie to act on, so a
+ * signed-out request — the login page itself — never depends on it.
+ */
+async function renewSessionCookie(request: NextRequest): Promise<SessionRenewal> {
+  const sealed = request.cookies.get(SESSION_COOKIE)?.value;
+  if (!sealed) return { kind: 'NONE' };
+
+  const renewal = await renewSession(sealed, { env: webServerEnv() });
+  if (renewal.kind === 'RENEWED') request.cookies.set(SESSION_COOKIE, renewal.sealed);
+  if (renewal.kind === 'ENDED') request.cookies.delete(SESSION_COOKIE);
+  return renewal;
+}
+
+function applyRenewal(response: NextResponse, renewal: SessionRenewal): void {
+  if (renewal.kind === 'RENEWED') {
+    const env = webServerEnv();
+    response.cookies.set(
+      SESSION_COOKIE,
+      renewal.sealed,
+      sessionCookieOptions({ secure: env.WEB_COOKIE_SECURE, maxAgeSeconds: renewal.maxAgeSeconds }),
+    );
+  }
+  if (renewal.kind === 'ENDED') response.cookies.delete(SESSION_COOKIE);
+}
+
 export const config = {
+  // Node rather than the edge runtime: the session is sealed with
+  // `node:crypto`'s AES-GCM (`session.ts`), and the refresh has to open it.
+  runtime: 'nodejs',
   matcher: [
     // Every route except Next's own fingerprinted static assets and the
     // favicon — files this portal ships itself, where a response header
