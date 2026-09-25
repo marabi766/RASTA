@@ -481,28 +481,57 @@ export class RepairOrderService {
 
     const actor = getContext().userId ?? 'SYSTEM';
     const cancelledAt = new Date();
+    const previousStatus = order.status;
 
-    const updated = await this.repository.client.repairOrder.updateMany({
-      where: { id, status: { in: ['OPEN', 'IN_PROGRESS'] } },
-      data: {
-        status: 'CANCELLED',
-        cancelledAt,
-        cancelledBy: actor,
-        cancellationReason: dto.reason,
-      },
+    const updated = await this.repository.transaction(async (tx) => {
+      // Guarded on the exact status read above, not on "either cancellable
+      // state": the event records `previousStatus`, and a concurrent start
+      // between the read and this write would otherwise publish a status the
+      // order no longer had.
+      const result = await tx.repairOrder.updateMany({
+        where: { id, status: previousStatus },
+        data: {
+          status: 'CANCELLED',
+          cancelledAt,
+          cancelledBy: actor,
+          cancellationReason: dto.reason,
+        },
+      });
+
+      if (result.count === 0) {
+        throw RastaError.invalidStateTransition(
+          'RepairOrder',
+          order.status,
+          'CANCELLED',
+          'This repair order was changed by another request',
+        );
+      }
+
+      // Before this there was no event at all (L3-11): the row changed and
+      // audit-service, whose only input is events, never learned a referral
+      // had been withdrawn (AGENTS.md S-06).
+      await this.repository.enqueueEvent(tx, {
+        aggregateType: 'RepairOrder',
+        aggregateId: id,
+        eventName: MAINTENANCE_EVENTS.REPAIR_CANCELLED,
+        topic: MAINTENANCE_TOPIC,
+        organizationId: order.organizationId,
+        payload: validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_CANCELLED, {
+          repairOrderId: id,
+          requestId: order.maintenanceRequestId,
+          assetId: order.assetId,
+          organizationId: order.organizationId,
+          workshopOrganizationId: order.workshopOrganizationId,
+          cancelledAt: cancelledAt.toISOString(),
+          reason: dto.reason,
+          previousStatus,
+        }),
+      });
+
+      return tx.repairOrder.findFirstOrThrow({ where: { id } });
     });
 
-    if (updated.count === 0) {
-      throw RastaError.invalidStateTransition(
-        'RepairOrder',
-        order.status,
-        'CANCELLED',
-        'This repair order was completed or cancelled by another request',
-      );
-    }
-
-    const row = await this.repository.findRepairOrderById(id);
-    return toRepairOrderView(row as RepairOrderRow);
+    return toRepairOrderView(updated as RepairOrderRow);
   }
 
   // =========================================================================

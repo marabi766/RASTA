@@ -111,19 +111,33 @@
 
 ## Insurance — `rasta.insurance.v1`
 
-| رویداد                | مصرف‌کنندگان                        | Payload کلیدی                                                |
-| --------------------- | ----------------------------------- | ------------------------------------------------------------ |
-| `INSURANCE_RECORDED`  | notification · analytics            | `assetId`, `policyId`, `insurerName`, `validFrom`, `validTo` |
-| `INSURANCE_EXPIRING`  | **notification** · analytics        | `assetId`, `policyId`, `insurerName`, `daysRemaining`        |
-| `INSURANCE_EXPIRED`   | fleet · notification · analytics    | `assetId`, `policyId`, `validTo`                             |
-| `INSPECTION_RECORDED` | analytics                           | `assetId`, `inspectionId`, `certificateNo`, `result`         |
-| `INSPECTION_EXPIRING` | notification                        | `assetId`, `inspectionId`, `daysRemaining`                   |
-| `INSPECTION_FAILED`   | **fleet** · maintenance · analytics | `assetId`, `inspectionId`, `notes`                           |
+| رویداد                | مصرف‌کنندگان                         | Payload کلیدی                                                            |
+| --------------------- | ------------------------------------ | ------------------------------------------------------------------------ |
+| `INSURANCE_RECORDED`  | **fleet** · notification · analytics | `assetId`, `policyId`, `insurerName`, `coverage`, `validFrom`, `validTo` |
+| `INSURANCE_EXPIRING`  | **notification** · analytics         | `assetId`, `policyId`, `insurerName`, `daysRemaining`                    |
+| `INSURANCE_EXPIRED`   | fleet · notification · analytics     | `assetId`, `policyId`, `coverage`, `validTo`                             |
+| `INSPECTION_RECORDED` | analytics                            | `assetId`, `inspectionId`, `certificateNo`, `result`                     |
+| `INSPECTION_EXPIRING` | notification                         | `assetId`, `inspectionId`, `daysRemaining`                               |
+| `INSPECTION_FAILED`   | **fleet** · maintenance · analytics  | `assetId`, `inspectionId`, `notes`                                       |
 
 `INSPECTION_FAILED` رویدادی ایمنی است، نه اداری: `fleet` باید بلافاصله دستگاه را از
 فهرست قابل اعزام بردارد، و نباید مجبور باشد برای فهمیدن این موضوع فیلد `result` یک
 رویداد عمومی «ثبت شد» را بازرسی کند. `daysRemaining` در رویدادهای انقضا حمل می‌شود تا
 `notification` بتواند بدون محاسبه دوباره تاریخ، یادآور ۳۰ روزه را از ۳ روزه تشخیص دهد.
+
+**`fleet` اکنون `INSURANCE_RECORDED` را هم مصرف می‌کند (L3-02).** ممنوعیت اعزام
+Causeهای مستقل دارد و هیچ‌کدام دیگری را پاک یا بازنویسی نمی‌کند. `INSPECTION_FAILED`
+Cause معاینه را می‌گذارد و فقط `MAINTENANCE_COMPLETED` آن را برمی‌دارد. بیمه به‌ازای
+هر **نوع پوشش** (`coverage`) جدا نگه داشته می‌شود: `INSURANCE_EXPIRED` پوششِ منقضی را
+به مجموعهٔ Lapseها می‌افزاید، و فقط بیمه‌نامه‌ای از **همان پوشش** که `validFrom` تا
+`validTo`‌اش اکنون را در بر بگیرد آن را پاسخ می‌دهد. این پاسخ هنگام اعزام حساب می‌شود،
+نه ذخیره: تمدیدی که پیش از انقضای بیمه‌نامهٔ قبلی ثبت شده (ترتیب عادی) Lapse بعدی را
+از پیش پاسخ داده، و تمدیدی که هفتهٔ بعد شروع می‌شود از هفتهٔ بعد حساب می‌شود.
+`coverage` در `INSURANCE_EXPIRED` از همین تغییر افزوده شد؛ Lapseی که آن را ندارد
+(تولیدکنندهٔ قدیمی‌تر) `UNKNOWN` ثبت می‌شود و هر بیمه‌نامهٔ معتبری پاسخش می‌دهد. اینکه
+کدام پوشش‌ها اصلاً باید مانع اعزام باشند پرسش باز `docs/24` **Q-65** است؛ تا پاسخ،
+هر Lapse مانع است، مثل پیش از این تغییر. کد مانع در پاسخ دسترس‌پذیری همان
+`DISPATCH_BLOCKED` می‌ماند (قرارداد `ADR-026`)، با یک ورودی به‌ازای هر Cause.
 
 ## Fleet — `rasta.fleet.v1`
 
@@ -134,17 +148,29 @@
 | ----------------------- | ------------------ | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `DRIVER_REGISTERED`     | Driver             | audit · analytics                                                   | `driverId`, `organizationId`, `userId`, `status`                                                                                                               |
 | `DRIVER_STATUS_CHANGED` | Driver             | audit · analytics                                                   | `driverId`, `organizationId`, `userId`, `previousStatus`, `newStatus`, `reason`                                                                                |
+| `DRIVER_UPDATED`        | Driver             | **audit** · analytics                                               | `driverId`, `organizationId`, `changedFields`                                                                                                                  |
 | `ASSET_ASSIGNED`        | Assignment         | **asset (پرونده + وضعیت `ASSIGNED`)** · analytics                   | `assignmentId`, `assetId`, `driverId`, `organizationId`, `startedAt`, `purpose`                                                                                |
 | `ASSIGNMENT_ENDED`      | Assignment         | **asset (پرونده + بازگشت به `ACTIVE`)** · analytics                 | `assignmentId`, **`assetId`**, `driverId`, `organizationId`, `startedAt`, `endedAt`, `reason`                                                                  |
 | `USAGE_RECORDED`        | UsageRecord        | **maintenance (محرک سرویس)** · asset · economic (پاداش) · analytics | `usageRecordId`, `assetId`, `organizationId`, `driverId`, `assignmentId`, `periodStart`, `periodEnd`, `hours`, `kilometres`, `hourMeter`, `odometer`, `source` |
 | `AVAILABILITY_CHANGED`  | AvailabilityWindow | construction · analytics                                            | `assetId`, `organizationId`, `available`, `reason`, `from`, `to`                                                                                               |
 
-**کلید پارتیشن هر شش رویداد `assetId` است، نه `aggregateId`.** استثنای آگاهانه‌ای بر
-قاعده § «کلید پارتیشن». هر مصرف‌کننده درباره **یک دستگاه** استدلال می‌کند — پرونده
-الکترونیکی، برنامه سرویس کارکردمحور — و ترتیب فقط درون یک پارتیشن تضمین می‌شود. اگر
-`ASSET_ASSIGNED` و `ASSIGNMENT_ENDED` یک دستگاه روی دو پارتیشن می‌نشستند، دستگاه
-آزادشده می‌توانست برای همیشه در `ASSIGNED` گیر کند. (`DRIVER_*` هم به همین شکل کلید
-ندارند و روی `aggregateId` می‌مانند، چون هیچ ترتیبی میان راننده و دستگاه لازم نیست.)
+**کلید پارتیشن چهار رویداد asset-scoped (`ASSET_ASSIGNED`، `ASSIGNMENT_ENDED`،
+`USAGE_RECORDED`، `AVAILABILITY_CHANGED`) `assetId` است، نه `aggregateId`.**
+استثنای آگاهانه‌ای بر قاعده § «کلید پارتیشن». هر مصرف‌کننده درباره **یک دستگاه**
+استدلال می‌کند — پرونده الکترونیکی، برنامه سرویس کارکردمحور — و ترتیب فقط درون یک
+پارتیشن تضمین می‌شود. اگر `ASSET_ASSIGNED` و `ASSIGNMENT_ENDED` یک دستگاه روی دو
+پارتیشن می‌نشستند، دستگاه آزادشده می‌توانست برای همیشه در `ASSIGNED` گیر کند.
+سه رویداد `DRIVER_*` کلید جدا ندارند و روی `aggregateId` (یعنی `driverId`) می‌مانند،
+چون هیچ ترتیبی میان راننده و دستگاه لازم نیست.
+
+**`DRIVER_UPDATED` دومین افزودهٔ آگاهانه به کاتالوگ است، کنار
+`DRIVER_STATUS_CHANGED` (L3-11).** پیش از این، ویرایش پروندهٔ راننده — شماره
+گواهینامه، کلاس، شماره پرسنلی — هیچ رویدادی تولید نمی‌کرد؛ فقط ردیف را با
+`updatedBy` تازه می‌نوشت. `audit-service` تنها ورودی‌اش رویداد است، پس این
+تغییرها از دید آن نامرئی بودند (`AGENTS.md` S-06). `changedFields` فقط نام
+فیلدهای تغییرکرده را حمل می‌کند، نه مقدارشان — شماره گواهینامه دقیقاً همان دادهٔ
+شخصی است که یادداشت بالای این فایل از قرار گرفتنش روی یک Topic ماندگار برحذر
+می‌دارد.
 
 **`ASSIGNMENT_ENDED` حتماً `assetId` دارد.** ستون «Payload کلیدی» نسخه پیشین این سند
 فقط `assignmentId` و `endedAt` را فهرست کرده بود. پیروی تحت‌اللفظی از آن، رویدادی
@@ -186,10 +212,11 @@ Consumer Group: `fleet-service.asset-sync`. Topicها: `rasta.asset.v1` ·
 | `ASSET_ACTIVATED` / `ASSET_STATUS_CHANGED` | asset         | وضعیت Replica                                             |
 | `ASSET_TRANSFERRED`                        | asset         | دستگاه به سازمان جدید منتقل می‌شود؛ وضعیت به `REGISTERED` |
 | `ASSET_DECOMMISSIONED`                     | asset         | وضعیت `DECOMMISSIONED` — دیگر قابل تخصیص نیست             |
-| **`INSPECTION_FAILED`**                    | asset         | **مسدودسازی فوری اعزام** — رویداد ایمنی                   |
-| **`INSURANCE_EXPIRED`**                    | asset         | **مسدودسازی فوری اعزام**                                  |
+| **`INSPECTION_FAILED`**                    | asset         | **مسدودسازی اعزام، Cause معاینه**                         |
+| **`INSURANCE_EXPIRED`**                    | asset         | **مسدودسازی اعزام، Cause بیمه**                           |
+| **`INSURANCE_RECORDED`**                   | asset         | **پاسخ Lapse همان پوشش** — فقط در بازهٔ اعتبار (L3-02)    |
 | `MAINTENANCE_STARTED`                      | maintenance\* | `inMaintenance = true`                                    |
-| `MAINTENANCE_COMPLETED`                    | maintenance\* | `inMaintenance = false` + رفع مسدودی اعزام                |
+| `MAINTENANCE_COMPLETED`                    | maintenance\* | `inMaintenance = false` + رفع مسدودی Cause معاینه (فقط)   |
 
 \* تولیدکننده هنوز ساخته نشده؛ اشتراک از امروز برقرار است تا راه‌اندازی
 `maintenance-service` یک استقرار باشد، نه تغییر کد.
@@ -198,7 +225,8 @@ Consumer Group: `fleet-service.asset-sync`. Topicها: `rasta.asset.v1` ·
 
 > **پیاده‌شده و LIVE VERIFIED (2026-08-28).** `maintenance-service` نُه رویداد
 > نخست زیر را تولید می‌کند؛ دهمی، `MAINTENANCE_SCHEDULE_CHANGED`، در 2026-09-19
-> برای بستن `D-011` افزوده شد.
+> برای بستن `D-011` افزوده شد؛ یازدهمی، `REPAIR_CANCELLED`، در 2026-09-25
+> برای بستن `L3-11` افزوده شد.
 > جدول این بخش پیش از ساخت سرویس نوشته شده بود و اینجا با
 > کد Sync شده — سه تفاوت که پیروی تحت‌اللفظی از نسخه پیشین، مصرف‌کننده‌ها را
 > بی‌صدا می‌شکست، در پی جدول توضیح داده شده است.
@@ -214,6 +242,7 @@ Consumer Group: `fleet-service.asset-sync`. Topicها: `rasta.asset.v1` ·
 | `MAINTENANCE_COMPLETED`        | MaintenanceRequest  | **asset** · **fleet** · economic · analytics | `requestId`, `assetId`, `organizationId`, `type`, `scheduleId`, `completedAt`, `downtimeMinutes`, **`totalCostMinor`**, `currency`                  |
 | `MAINTENANCE_APPROVED`         | MaintenanceRequest  | **economic (مجوز تسویه)** · analytics        | `requestId`, `assetId`, `organizationId`, `approvedBy`, `approvedAt`, `workshopOrganizationId`, **`totalCostMinor`**, `currency`, `costBreakdown[]` |
 | `MAINTENANCE_CANCELLED`        | MaintenanceRequest  | asset · notification · audit · analytics     | `requestId`, `assetId`, `organizationId`, `cancelledAt`, `reason`, `previousStatus`                                                                 |
+| `REPAIR_CANCELLED`             | RepairOrder         | **audit** · supplier · analytics             | `repairOrderId`, `requestId`, `assetId`, `organizationId`, `workshopOrganizationId`, `cancelledAt`, `reason`, `previousStatus`                      |
 | `MAINTENANCE_SCHEDULE_CHANGED` | MaintenanceSchedule | **audit** · analytics                        | `scheduleId`, `assetId`, `organizationId`, `change`, `status`, `previousStatus`, `reason`, `changedFields[]`, `changedAt`, `changedBy`              |
 
 **`MAINTENANCE_SCHEDULE_CHANGED` رویداد دهم است و برای بستن `D-011` اضافه شد.**
@@ -230,7 +259,14 @@ Consumer Group: `fleet-service.asset-sync`. Topicها: `rasta.asset.v1` ·
 گذار وضعیت اما کامل می‌آید (`previousStatus` و `status` و `reason`)، چون پرسشی
 که یک حسابرس واقعاً می‌پرسد همین است: چه کسی این را خاموش کرد و چرا.
 
-**کلید پارتیشن هر ده رویداد `assetId` است، نه `aggregateId`** — همان استثنای
+**`REPAIR_CANCELLED` رویداد یازدهم است.** از `MAINTENANCE_CANCELLED` مجزاست:
+لغو یک RepairOrder یعنی withdrawal یک ارجاع به یک کارگاه، نه رهاشدن کل درخواست
+— درخواست باقی می‌ماند تا به کارگاه دیگری ارجاع شود. پیش از این، `cancel()`
+فقط ردیف را می‌نوشت (`cancelledBy`، `cancellationReason`) و هیچ رویدادی
+منتشر نمی‌شد؛ `audit-service` هرگز نمی‌فهمید ارجاعی پس گرفته شده (`AGENTS.md`
+S-06).
+
+**کلید پارتیشن هر یازده رویداد `assetId` است، نه `aggregateId`** — همان استثنای
 آگاهانه‌ای که `rasta.fleet.v1` دارد. هر مصرف‌کننده درباره **یک دستگاه** استدلال
 می‌کند، و ترتیب فقط درون یک پارتیشن تضمین می‌شود. اگر `MAINTENANCE_STARTED` و
 `MAINTENANCE_COMPLETED` یک دستگاه روی دو پارتیشن می‌نشستند، دستگاه تعمیرشده

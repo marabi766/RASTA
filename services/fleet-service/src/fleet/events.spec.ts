@@ -18,6 +18,7 @@ describe('fleet event contracts', () => {
       'AVAILABILITY_CHANGED',
       'DRIVER_REGISTERED',
       'DRIVER_STATUS_CHANGED',
+      'DRIVER_UPDATED',
       'USAGE_RECORDED',
     ]);
   });
@@ -129,6 +130,23 @@ describe('fleet event contracts', () => {
       expect(keys).toEqual(['driverId', 'organizationId', 'userId', 'status']);
       expect(keys).not.toContain('licenceNumber');
       expect(keys).not.toContain('employeeNo');
+    });
+
+    it('DRIVER_UPDATED carries only field names, never the new values (L3-11)', () => {
+      const shape = (
+        FLEET_EVENT_SCHEMAS.DRIVER_UPDATED as unknown as { shape: Record<string, unknown> }
+      ).shape;
+      const keys = Object.keys(shape);
+      expect(keys).toEqual(['driverId', 'organizationId', 'changedFields']);
+      expect(keys).not.toContain('licenceNumber');
+
+      expect(() =>
+        validateFleetPayload(FLEET_EVENTS.DRIVER_UPDATED, {
+          driverId: 'DRV_01JBQ8Z4K7M2N5P8R1T3V6X9Y2',
+          organizationId: 'ORG-DEH-0001',
+          changedFields: ['licenceNumber'],
+        }),
+      ).not.toThrow();
     });
   });
 
