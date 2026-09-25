@@ -65,6 +65,30 @@ export function loginAttemptCookieOptions(secure: boolean) {
 }
 
 /**
+ * Reads the sealed login-attempt cookie's value out of a raw `Cookie` header,
+ * or `null` if there is none.
+ *
+ * Percent-decoding it can throw — `%` alone, or an incomplete escape — and a
+ * cookie this callback did not itself write is exactly the kind of input
+ * somebody else controls. A throw here must fail closed like any other
+ * malformed input (`AGENTS.md` S-05) rather than surface as a framework
+ * error page in the middle of `/auth/callback`'s own refusal handling.
+ */
+export function readSealedLoginAttempt(cookieHeader: string | null): string | null {
+  const raw = cookieHeader
+    ?.split(';')
+    .map((entry) => entry.trim())
+    .find((entry) => entry.startsWith(`${LOGIN_ATTEMPT_COOKIE}=`))
+    ?.slice(LOGIN_ATTEMPT_COOKIE.length + 1);
+  if (!raw) return null;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Narrows a caller-supplied destination to a safe in-app path.
  *
  * Anything that is not a single-slash-rooted path becomes `/`. That rules out

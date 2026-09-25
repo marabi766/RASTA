@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { readSession } from '@/server/current-session';
+import { safeReturnTo } from '@/server/login-attempt';
 import { LoginScreen } from './LoginScreen';
 
 /**
@@ -21,6 +22,15 @@ export default async function LoginPage({
   // dashboard is less confusing than showing a way in they have already used.
   if (await readSession()) redirect('/');
 
-  const raw = (await searchParams).error;
-  return <LoginScreen reason={typeof raw === 'string' ? raw : undefined} />;
+  const params = await searchParams;
+  const reason = params.error;
+  // Narrowed here, the one place this value is read from the query string —
+  // `LoginScreen` gets an already-safe path and stays a plain function of it
+  // (`safeReturnTo` is the same check `/auth/login` and the attempt cookie
+  // apply again on their own turn, so a caller-supplied absolute URL never
+  // reaches a link, cookie or redirect unexamined).
+  const returnTo = safeReturnTo(params.returnTo);
+  return (
+    <LoginScreen reason={typeof reason === 'string' ? reason : undefined} returnTo={returnTo} />
+  );
 }

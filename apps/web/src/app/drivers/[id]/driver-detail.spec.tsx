@@ -36,7 +36,11 @@ const SUBMISSION_IDS = {
   end: 'sub_DDDDDDDDDDDDDDDDDDDD',
 };
 
-function render_(result: ReadResult<DriverDetail>, assignments: ReadResult<AssignmentPage>) {
+function render_(
+  result: ReadResult<DriverDetail>,
+  assignments: ReadResult<AssignmentPage>,
+  canManageDrivers = true,
+) {
   return render(
     <DriverDetailScreen
       result={result}
@@ -44,6 +48,7 @@ function render_(result: ReadResult<DriverDetail>, assignments: ReadResult<Assig
       driverId="DRV_1"
       csrfToken="csrf-token-for-this-session"
       submissionIds={SUBMISSION_IDS}
+      canManageDrivers={canManageDrivers}
     />,
   );
 }
@@ -53,11 +58,26 @@ const NO_ASSIGNMENTS: ReadResult<AssignmentPage> = {
   data: { items: [], nextCursor: null, hasMore: false },
 };
 
+describe('pre-filling the edit form’s licence expiry (L5-01)', () => {
+  it('shows the Tehran calendar day the value was saved on, not the UTC one', () => {
+    // `2026-12-31T20:30:00.000Z` is Tehran midnight on 1 January — exactly
+    // what saving `2027-01-01` from the edit form itself produces. A
+    // `.slice(0, 10)` bug would pre-fill the date input with `2026-12-31`.
+    const { container } = render_(
+      { kind: 'OK', data: { ...DRIVER, licenceValidTo: '2026-12-31T20:30:00.000Z' } },
+      NO_ASSIGNMENTS,
+    );
+    expect(container.querySelector('[name="licenceValidTo"]')).toHaveValue('2027-01-01');
+  });
+});
+
 describe('the driver record', () => {
   it('shows the identity and status of a found driver', () => {
     const { getByText } = render_({ kind: 'OK', data: DRIVER }, NO_ASSIGNMENTS);
     expect(getByText('فعال')).toBeInTheDocument();
-    expect(getByText('گواهینامه LIC-1')).toBeInTheDocument();
+    // The licence number is isolated in its own <bdi> (L5-06), so it is a
+    // separate text node from the label around it.
+    expect(getByText((_, node) => node?.textContent === 'گواهینامه LIC-1')).toBeInTheDocument();
   });
 
   it('renders a refusal as a refusal', () => {
@@ -154,6 +174,51 @@ describe('the assignment read failing independently of the driver read', () => {
     );
     expect(getByText('فعال')).toBeInTheDocument();
     expect(getByText(/COR_7/)).toBeInTheDocument();
+  });
+});
+
+describe('which forms a role without write access sees (L5-05)', () => {
+  it('shows the record and history but none of the write forms', () => {
+    const { queryByRole, getByText } = render_({ kind: 'OK', data: DRIVER }, NO_ASSIGNMENTS, false);
+    // The record itself, and the status, are still a read.
+    expect(getByText('فعال')).toBeInTheDocument();
+    // Neither section's heading is rendered at all — this is not a disabled
+    // button, the form does not exist on the page.
+    expect(queryByRole('button', { name: 'ذخیرهٔ تغییرات' })).toBeNull();
+    expect(queryByRole('button', { name: /تغییر وضعیت/ })).toBeNull();
+    expect(queryByRole('button', { name: 'تخصیص به این ماشین' })).toBeNull();
+  });
+
+  it('shows the active assignment as information, without offering to end it', () => {
+    const active: ReadResult<AssignmentPage> = {
+      kind: 'OK',
+      data: {
+        items: [
+          {
+            id: 'ASG_1',
+            driverId: 'DRV_1',
+            assetId: 'AST_1',
+            active: true,
+            startedAt: '2026-09-01T00:00:00.000Z',
+            endedAt: null,
+            purpose: null,
+            endReason: null,
+            endNotes: null,
+          },
+        ],
+        nextCursor: null,
+        hasMore: false,
+      },
+    };
+    const { getByText, queryByRole } = render_({ kind: 'OK', data: DRIVER }, active, false);
+    expect(getByText(/هم‌اکنون به/)).toBeInTheDocument();
+    expect(queryByRole('button', { name: 'پایان تخصیص' })).toBeNull();
+  });
+
+  it('still renders every write form for a role that may manage drivers', () => {
+    const { getByRole } = render_({ kind: 'OK', data: DRIVER }, NO_ASSIGNMENTS, true);
+    expect(getByRole('button', { name: 'ذخیرهٔ تغییرات' })).toBeInTheDocument();
+    expect(getByRole('button', { name: 'تخصیص به این ماشین' })).toBeInTheDocument();
   });
 });
 

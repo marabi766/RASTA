@@ -1,7 +1,8 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, PageHeader, Section, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
-import { fetchDrivers, type DriverListQuery } from '@/server/drivers';
+import { canManageDrivers, fetchDrivers, type DriverListQuery } from '@/server/drivers';
+import { fetchCurrentUser } from '@/server/identity';
 import { newSubmissionId } from '@/server/submission';
 import { PORTAL_NAV } from '@/app/nav';
 import { DriversScreen } from './DriversScreen';
@@ -15,10 +16,13 @@ import { NewDriverForm } from './NewDriverForm';
  * map, and a route the document does not name is a promise the product does
  * not keep (`nav.ts`).
  *
- * **No role check here**, for the same reason `/usage` has none: hiding a
- * control is not a security control (`docs/16 § ۱۶٫۱۱`). fleet-service
- * decides who may register a driver; a refusal from it is rendered as an
- * outcome, not guarded against a second time here.
+ * The registration form is a Route Guard as UX, not as security (`docs/16 §
+ * ۱۶٫۱۱`, which asks for both in the same breath: hide the control for
+ * somebody who cannot use it, and never let that hiding stand in for the
+ * server's own check). fleet-service still decides, independently, who may
+ * register a driver — a role that lost write access between this render and
+ * the submit still gets refused there, not waved through because the form
+ * was visible a moment ago.
  */
 export const dynamic = 'force-dynamic';
 
@@ -43,7 +47,14 @@ export default async function DriversPage({
     cursor: one(params.cursor),
   };
 
-  const result = await fetchDrivers(session, query);
+  const [result, currentUser] = await Promise.all([
+    fetchDrivers(session, query),
+    fetchCurrentUser(session),
+  ]);
+
+  // A failed identity read shows no registration form rather than one that
+  // might not work — the same fail-closed default `canManageDrivers` documents.
+  const manage = currentUser.kind === 'USER' && canManageDrivers(currentUser.user.effectiveRoles);
 
   return (
     <AppShell
@@ -64,9 +75,11 @@ export default async function DriversPage({
         description="رانندگان این سازمان، شمارهٔ گواهینامه و اعتبار آن، و ثبت راننده تازه."
       />
 
-      <Section headingId="new-driver" title="ثبت راننده" className="mt-4">
-        <NewDriverForm csrfToken={session.csrfToken} submissionId={newSubmissionId()} />
-      </Section>
+      {manage ? (
+        <Section headingId="new-driver" title="ثبت راننده" className="mt-4">
+          <NewDriverForm csrfToken={session.csrfToken} submissionId={newSubmissionId()} />
+        </Section>
+      ) : null}
 
       <div className="mt-4 flex flex-col gap-4">
         <DriversScreen result={result} query={query} />

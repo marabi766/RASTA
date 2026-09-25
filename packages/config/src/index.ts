@@ -21,3 +21,11 @@ export {
 } from './env';
 
 export type { NodeEnv, LogLevel, BaseEnv, EnvIssue } from './env';
+
+export {
+  DEMO_SEED_ENVIRONMENTS,
+  DEMO_SEED_OPT_IN,
+  DemoSeedRefusedError,
+  assertDemoSeedAllowed,
+  demoSeedRefusals,
+} from './seed-guard';

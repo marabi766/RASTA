@@ -389,9 +389,14 @@ jobs:
         # operator.one is the same platform user in identity, Keycloak and
         # fleet, and holds AST-SEED-0001 through ASG-SEED-0001.
         run: |
-          pnpm --filter @rasta/identity-service run db:seed
-          pnpm --filter @rasta/fleet-service run db:seed
+          # Through turbo, not `pnpm --filter … run db:seed`: the seed imports
+          # @rasta/config, which is not built yet at this point in the job, and
+          # turbo's db:seed builds it first (dependsOn ^build, db:generate).
+          pnpm exec turbo run db:seed --filter=@rasta/identity-service --filter=@rasta/fleet-service
         env:
+          # Demo seeds refuse to run without both (packages/config seed-guard).
+          NODE_ENV: test
+          RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
 
@@ -1157,26 +1162,27 @@ jobs:
         # own job because this is where a migrated database already exists.
         run: pnpm run test:migration
         env:
-          # All nine, not only the six the whole-chain checks cover. ADR-050
-          # adds its claim columns to every service-owned database, and
-          # `verify-outbox-claim-migration.mjs --in-place` reverses that one
-          # migration on each of them — so a missing url here is a database
-          # whose rollback is never exercised, which is the failure this step
-          # exists to prevent.
+          # Every service with migrations is now covered by the whole-chain
+          # check. The five whose initial migration once had no down.sql
+          # (identity, organization, asset, fleet, maintenance) were beyond it
+          # until the platform-safety pass; each is now verified up → down → up
+          # like the rest, and `scripts/verify-migration-reversible-lib.test.mjs`
+          # fails if a service with migrations is missing from this chain.
           #
-          # supplier is the exception that proves it: it folds ADR-050 and B1
-          # into its initial migration, so the by-name verifier cannot reach it
-          # and `verify-migration-reversible.mjs supplier` covers it instead —
-          # which is why that command is now in `test:migration` rather than
-          # only being available to run by hand.
+          # The whole-chain check proves each down.sql an *exact* inverse: after
+          # every down script the schema must match, object for object, the
+          # state recorded just before that migration (built by applying each
+          # migration.sql in turn), and the ledger must no longer list it. The
+          # one documented allowance is marketplace's NOT VALID rollback.
           #
-          # identity is the mirror of that exception: its *initial* migration
-          # has no down.sql, so the whole-chain verifier cannot reach any of
-          # its migrations, and each one it owns needs a verifier addressed to
-          # it by name. Two are registered — `security_event_outbox` (AUD-004
-          # C1/C2) and `audit_correction_command` (AUD-003's correction half).
-          # A third identity migration would need a third entry; nothing here
-          # discovers it.
+          # organization and asset run in a throwaway database cloned from
+          # template1 rather than a schema, because their migrations use ltree
+          # and geography unqualified; the service roles hold CREATEDB for this.
+          #
+          # The by-name verifiers still run: ADR-050's claim migration on every
+          # service database (`--in-place`), and identity's security-event and
+          # audit-correction tables, which check behaviour the catalogue
+          # comparison does not (constraints refusing rows, triggers firing).
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
@@ -1189,6 +1195,22 @@ jobs:
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+
+      - name: Demo seeds refuse outside development and test
+        # Every service's prisma/seed.ts upserts fixed ids with demo values; run
+        # with production credentials it would overwrite real tenants. Each seed
+        # must refuse NODE_ENV=production (even with the opt-in) and a missing
+        # RASTA_ALLOW_DEMO_SEED, exit non-zero, and leave a checksum of every row
+        # of its database unchanged. No seed is allowed to write here.
+        run: pnpm run test:seed-guard:db
+        env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
 
       - name: Outbox stream-sequence protocol (ADR-051 B3)
         # The producer-side allocation protocol: strictly increasing sequences
@@ -1393,8 +1415,13 @@ jobs:
         # Keycloak realm import above already carries the matching
         # `rasta_user_id` attributes; this is the other half of the same seed
         # (`services/identity-service/prisma/seed.ts`).
-        run: pnpm --filter @rasta/identity-service run db:seed
+        # Through turbo so @rasta/config is built before the seed imports it;
+        # this step runs before the job's own build (see turbo.json db:seed).
+        run: pnpm exec turbo run db:seed --filter=@rasta/identity-service
         env:
+          # Demo seeds refuse to run without both (packages/config seed-guard).
+          NODE_ENV: test
+          RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
 
       - name: Build

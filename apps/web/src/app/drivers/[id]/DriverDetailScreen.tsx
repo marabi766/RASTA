@@ -10,6 +10,7 @@ import {
 } from '@/ui';
 import { assignmentEndReasonLabel, driverStatusLabel } from '@/lib/labels';
 import { formatJalaliDateLong } from '@/lib/format';
+import { localDateFromIso } from '@/server/drivers';
 import type { AssignmentPage, DriverDetail, ReadResult } from '@/server/drivers';
 
 import { AssignDriverForm } from './AssignDriverForm';
@@ -51,6 +52,14 @@ export interface DriverDetailScreenProps {
     readonly assign: string;
     readonly end: string;
   };
+  /**
+   * Whether fleet-service would accept a write from this caller — a Route
+   * Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): the service applies its
+   * own role check again on every write regardless of this flag. A `DRIVER`
+   * or `OPERATOR` reading their own record sees no form for an action they
+   * cannot take, rather than one that answers `403`.
+   */
+  readonly canManageDrivers: boolean;
 }
 
 function AssignmentHistory({ page }: { page: AssignmentPage }) {
@@ -90,6 +99,7 @@ export function DriverDetailScreen({
   driverId,
   csrfToken,
   submissionIds,
+  canManageDrivers,
 }: DriverDetailScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return (
@@ -142,8 +152,16 @@ export function DriverDetailScreen({
   return (
     <>
       <PageHeader
-        title={driver.employeeNo ?? driver.userId}
-        description={`گواهینامه ${driver.licenceNumber ?? 'ثبت نشده'}`}
+        title={<Identifier>{driver.employeeNo ?? driver.userId}</Identifier>}
+        description={
+          driver.licenceNumber ? (
+            <>
+              گواهینامه <Identifier>{driver.licenceNumber}</Identifier>
+            </>
+          ) : (
+            'گواهینامه ثبت نشده'
+          )
+        }
       />
 
       <Section headingId="identity" title="شناسنامه">
@@ -172,7 +190,9 @@ export function DriverDetailScreen({
           <dl className="flex flex-col gap-4">
             <div className="flex flex-col gap-1">
               <dt className="text-sm text-content-subtle">پایهٔ گواهینامه</dt>
-              <dd className="text-content">{driver.licenceClass ?? 'ثبت نشده'}</dd>
+              <dd className="text-content">
+                {driver.licenceClass ? <Identifier>{driver.licenceClass}</Identifier> : 'ثبت نشده'}
+              </dd>
             </div>
             <div className="flex flex-col gap-1">
               <dt className="text-sm text-content-subtle">اعتبار گواهینامه</dt>
@@ -186,29 +206,33 @@ export function DriverDetailScreen({
         {driver.notes ? <p className="mt-4 text-sm text-content-muted">{driver.notes}</p> : null}
       </Section>
 
-      <Section headingId="edit" title="ویرایش اطلاعات">
-        <UpdateDriverForm
-          driverId={driverId}
-          csrfToken={csrfToken}
-          submissionId={submissionIds.update}
-          initialValues={{
-            employeeNo: driver.employeeNo ?? '',
-            licenceNumber: driver.licenceNumber ?? '',
-            licenceClass: driver.licenceClass ?? '',
-            licenceValidTo: driver.licenceValidTo ? driver.licenceValidTo.slice(0, 10) : '',
-            notes: driver.notes ?? '',
-          }}
-        />
-      </Section>
+      {canManageDrivers ? (
+        <Section headingId="edit" title="ویرایش اطلاعات">
+          <UpdateDriverForm
+            driverId={driverId}
+            csrfToken={csrfToken}
+            submissionId={submissionIds.update}
+            initialValues={{
+              employeeNo: driver.employeeNo ?? '',
+              licenceNumber: driver.licenceNumber ?? '',
+              licenceClass: driver.licenceClass ?? '',
+              licenceValidTo: driver.licenceValidTo ? localDateFromIso(driver.licenceValidTo) : '',
+              notes: driver.notes ?? '',
+            }}
+          />
+        </Section>
+      ) : null}
 
-      <Section headingId="status" title="تغییر وضعیت">
-        <ChangeStatusForm
-          driverId={driverId}
-          currentStatus={driver.status}
-          csrfToken={csrfToken}
-          submissionId={submissionIds.status}
-        />
-      </Section>
+      {canManageDrivers ? (
+        <Section headingId="status" title="تغییر وضعیت">
+          <ChangeStatusForm
+            driverId={driverId}
+            currentStatus={driver.status}
+            csrfToken={csrfToken}
+            submissionId={submissionIds.status}
+          />
+        </Section>
+      ) : null}
 
       <Section headingId="assignment" title="تخصیص">
         {assignments.kind === 'FORBIDDEN' ? <NoAccessState /> : null}
@@ -237,20 +261,22 @@ export function DriverDetailScreen({
                   {active.purpose ? ` · ${active.purpose}` : ''}
                 </p>
               </div>
-              <EndAssignmentForm
-                driverId={driverId}
-                assignmentId={active.id}
-                csrfToken={csrfToken}
-                submissionId={submissionIds.end}
-              />
+              {canManageDrivers ? (
+                <EndAssignmentForm
+                  driverId={driverId}
+                  assignmentId={active.id}
+                  csrfToken={csrfToken}
+                  submissionId={submissionIds.end}
+                />
+              ) : null}
             </div>
-          ) : (
+          ) : canManageDrivers ? (
             <AssignDriverForm
               driverId={driverId}
               csrfToken={csrfToken}
               submissionId={submissionIds.assign}
             />
-          )
+          ) : null
         ) : null}
       </Section>
 
