@@ -80,8 +80,16 @@ export class OrganizationService {
     return PLATFORM_ROLES.some((role) => roles.includes(role));
   }
 
-  /** Root of the caller's visible subtree, or null when they see everything. */
-  private async visibleRootPath(): Promise<string | null> {
+  /**
+   * Root of the caller's visible subtree, as an organization id, or null when
+   * they see everything.
+   *
+   * An id, not a path: the queries that take it resolve its path themselves,
+   * in the same statement that returns rows, so the restriction and the rows
+   * come from one snapshot. A path read here first would be stale by the time
+   * a query used it if the caller's own organization moved in between.
+   */
+  private async visibleRoot(): Promise<string | null> {
     if (this.isPlatformOperator()) return null;
 
     const { organizationId } = getContext();
@@ -100,7 +108,7 @@ export class OrganizationService {
       );
       throw RastaError.forbidden('Your organization context is not recognised');
     }
-    return path;
+    return organizationId;
   }
 
   private async assertCanRead(id: string): Promise<void> {
@@ -132,6 +140,32 @@ export class OrganizationService {
     }
   }
 
+  /**
+   * The authoritative write check, made inside the write's transaction.
+   *
+   * `assertCanWrite` runs before the transaction, against the tree as it was
+   * at that moment. A move committed in between — the only operation that
+   * changes who is above whom — could carry the target into another tenant's
+   * subtree, and the write would land there. Here the hierarchy lock is taken
+   * first: no move can start until this transaction commits, and the check
+   * reads the tree as left by any move that committed before it. The early
+   * `assertCanWrite` stays as a cheap refusal; this is the one that holds.
+   *
+   * A platform operator's access does not depend on the tree, so it takes no
+   * lock.
+   */
+  private async assertCanWriteLocked(tx: PrismaTransactionClient, id: string): Promise<void> {
+    if (this.isPlatformOperator()) return;
+
+    const { organizationId } = getContext();
+    await this.repository.lockHierarchy(tx);
+    if (organizationId === id) return;
+
+    if (!organizationId || !(await this.repository.isAncestorOf(organizationId, id, tx))) {
+      throw RastaError.notFound('Organization', id);
+    }
+  }
+
   // =========================================================================
   // Reads
   // =========================================================================
@@ -156,11 +190,11 @@ export class OrganizationService {
   }
 
   async list(query: ListOrganizationsQuery) {
-    const allowedRootPath = await this.visibleRootPath();
-    const result = await this.repository.list(query, allowedRootPath);
+    const viewer = await this.visibleRoot();
+    const result = await this.repository.list(query, viewer);
 
     return {
-      items: result.items.map((organization) => toView(organization, null)),
+      items: result.items.map(rawRowToView),
       nextCursor: result.nextCursor,
       hasMore: result.hasMore,
     };
@@ -172,9 +206,21 @@ export class OrganizationService {
     return rows.map((row) => toView(row, null));
   }
 
+  /**
+   * Ancestors of `id`, root first — but never above the caller's own
+   * organization.
+   *
+   * Visibility flows downward: a caller sees their organization and what is
+   * beneath it. Returning every ancestor up to the root, with metadata, showed
+   * a dehyari the full records of the county and union above it. Whether a
+   * breadcrumb needs those names is a product question (Q-67); until it is
+   * answered the chain stops at the top of the caller's subtree. A platform
+   * operator sees the whole chain.
+   */
   async ancestors(id: string): Promise<OrganizationView[]> {
     await this.assertCanRead(id);
-    const rows = await this.repository.findAncestors(id);
+    const viewer = await this.visibleRoot();
+    const rows = await this.repository.findAncestors(id, viewer);
     return rows.map(rawRowToView);
   }
 
@@ -190,8 +236,8 @@ export class OrganizationService {
    * reveal a sibling that `GET /:id` would answer 404 for.
    */
   async nearby(query: NearbyQuery) {
-    const allowedRootPath = await this.visibleRootPath();
-    const rows = await this.repository.findNearby(query, allowedRootPath);
+    const viewer = await this.visibleRoot();
+    const rows = await this.repository.findNearby(query, viewer);
     return rows.map((row) => ({
       id: row.id,
       name: row.name,
@@ -239,6 +285,17 @@ export class OrganizationService {
         const parent = chain.at(-1);
         if (!parent || parent.id !== dto.parentId) {
           throw RastaError.notFound('Organization', dto.parentId);
+        }
+
+        // The authoritative write check, against the chain read under the
+        // hierarchy lock: the parent must still be at or beneath the caller's
+        // organization. The check before the transaction saw the tree before
+        // any move that committed since.
+        if (!this.isPlatformOperator()) {
+          const { organizationId } = getContext();
+          if (!chain.some((row) => row.id === organizationId)) {
+            throw RastaError.notFound('Organization', dto.parentId);
+          }
         }
 
         this.assertWithinDepth(parent.depth + 1, { parentDepth: parent.depth });
@@ -307,6 +364,8 @@ export class OrganizationService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
+      await this.assertCanWriteLocked(tx, id);
+
       const row = await tx.organization.update({
         where: { id },
         data: {
@@ -481,6 +540,15 @@ export class OrganizationService {
         // that ancestor's cascade for this one branch. The ancestors are
         // share-locked, so a suspension racing this request either commits
         // first (and is seen here) or waits and then cascades over this row.
+        //
+        // Which rows are the ancestors is itself a read of the tree, so the
+        // hierarchy lock comes first — the same order create and move take:
+        // hierarchy, then ancestor chain, then the target. Without it, a move
+        // of this organization that had written but not committed left this
+        // request share-locking the *old* chain; the move then committed it
+        // beneath a suspended parent, and the compare-and-set below, which
+        // waited on the moved row, woke and set it ACTIVE there.
+        await this.repository.lockHierarchy(tx);
         const ancestors = await this.repository.lockAncestorChain(tx, id, { includeSelf: false });
         assertNoBlockingAncestor(ancestors, 'reactivate an organization');
       }
@@ -601,63 +669,128 @@ export class OrganizationService {
     const policyId = `POL_${ulid()}`;
     const actor = getContext().userId ?? 'SYSTEM';
     const now = new Date();
-    const effectiveFrom = dto.effectiveFrom ? new Date(dto.effectiveFrom) : now;
+    const requestedFrom = dto.effectiveFrom ? new Date(dto.effectiveFrom) : null;
     const effectiveTo = dto.effectiveTo ? new Date(dto.effectiveTo) : null;
 
     // A replacement closes the value in force. One that has already expired
     // would close it and put nothing in its place — the key would silently
     // fall back to an ancestor's value, or to none. The DTO can only compare
     // the two dates it was given; "already" needs the clock, so it is here.
-    if (effectiveTo && (effectiveTo <= now || effectiveTo <= effectiveFrom)) {
+    if (effectiveTo && (effectiveTo <= now || effectiveTo <= (requestedFrom ?? now))) {
       throw RastaError.businessRule('A policy cannot end before it takes effect or in the past', {
         rule: 'POLICY_ALREADY_EXPIRED',
-        effectiveFrom: effectiveFrom.toISOString(),
+        effectiveFrom: (requestedFrom ?? now).toISOString(),
         effectiveTo: effectiveTo.toISOString(),
       });
     }
 
-    const created = await this.repository.transaction(async (tx) => {
-      // Close the current value rather than overwriting it. A governance
-      // decision taken last year must remain reconstructible.
-      await tx.organizationPolicy.updateMany({
-        where: { organizationId: id, key: dto.key, effectiveTo: null },
-        data: { effectiveTo: effectiveFrom, updatedBy: actor },
-      });
+    const created = await this.repository
+      .transaction(async (tx) => {
+        await this.assertCanWriteLocked(tx, id);
 
-      const row = await tx.organizationPolicy.create({
-        data: {
-          id: policyId,
+        // One writer per (organization, key): the timeline below is read, then
+        // closed, then extended, and two replacements interleaving that read
+        // each closed only what they saw — leaving two open-ended values.
+        await this.repository.lockPolicyKey(tx, id, dto.key);
+
+        // "Now" for an immediate value is read after the lock, not before it: a
+        // writer that queued behind another would otherwise start before the
+        // value it is replacing and be refused as a scheduling conflict. And a
+        // value set within the same millisecond as the one in force (the
+        // column holds milliseconds) starts one millisecond after it, so the
+        // two periods stay ordered and non-empty.
+        const effectiveFrom =
+          requestedFrom ?? (await this.immediateStart(tx, id, dto.key, new Date()));
+        if (effectiveTo && effectiveTo <= effectiveFrom) {
+          throw RastaError.businessRule(
+            'A policy cannot end before it takes effect or in the past',
+            {
+              rule: 'POLICY_ALREADY_EXPIRED',
+              effectiveFrom: effectiveFrom.toISOString(),
+              effectiveTo: effectiveTo.toISOString(),
+            },
+          );
+        }
+
+        // Every value of this key whose period meets the new one's
+        // [effectiveFrom, effectiveTo), read under that lock.
+        const overlapping = await tx.organizationPolicy.findMany({
+          where: {
+            organizationId: id,
+            key: dto.key,
+            OR: [{ effectiveTo: null }, { effectiveTo: { gt: effectiveFrom } }],
+            ...(effectiveTo ? { effectiveFrom: { lt: effectiveTo } } : {}),
+          },
+          orderBy: { effectiveFrom: 'asc' },
+        });
+
+        // A value that starts at or after the new one has not taken effect yet
+        // (or takes effect with it). Closing it at `effectiveFrom` would end it
+        // before it began — effective_to < effective_from — and the timeline
+        // would hold two values for the same instant. What the operator means
+        // by replacing a scheduled value is not something this service decides,
+        // so it refuses; a value that ends when the scheduled one begins is
+        // still accepted.
+        const scheduled = overlapping.find((row) => row.effectiveFrom >= effectiveFrom);
+        if (scheduled) {
+          throw RastaError.businessRule(
+            'Another value for this key is scheduled to take effect within the new period',
+            {
+              rule: 'POLICY_SCHEDULE_CONFLICT',
+              scheduledPolicyId: scheduled.id,
+              scheduledFrom: scheduled.effectiveFrom.toISOString(),
+              scheduledTo: scheduled.effectiveTo?.toISOString() ?? null,
+              effectiveFrom: effectiveFrom.toISOString(),
+              effectiveTo: effectiveTo?.toISOString() ?? null,
+            },
+          );
+        }
+
+        // What remains began before the new value and is in force when it
+        // starts. Close it there rather than overwriting it: a governance
+        // decision taken last year must remain reconstructible.
+        if (overlapping.length > 0) {
+          await tx.organizationPolicy.updateMany({
+            where: { id: { in: overlapping.map((row) => row.id) } },
+            data: { effectiveTo: effectiveFrom, updatedBy: actor },
+          });
+        }
+
+        const row = await tx.organizationPolicy.create({
+          data: {
+            id: policyId,
+            organizationId: id,
+            key: dto.key,
+            value: dto.value as object,
+            inheritable: dto.inheritable,
+            description: dto.description,
+            effectiveFrom,
+            effectiveTo,
+            createdBy: actor,
+            updatedBy: actor,
+          },
+        });
+
+        await this.repository.enqueueEvent(tx, {
+          aggregateType: 'OrganizationPolicy',
+          aggregateId: policyId,
+          eventName: ORGANIZATION_EVENTS.ORGANIZATION_POLICY_CHANGED,
+          topic: ORGANIZATION_TOPIC,
           organizationId: id,
-          key: dto.key,
-          value: dto.value as object,
-          inheritable: dto.inheritable,
-          description: dto.description,
-          effectiveFrom,
-          effectiveTo,
-          createdBy: actor,
-          updatedBy: actor,
-        },
-      });
+          payload: validateOrganizationPayload(ORGANIZATION_EVENTS.ORGANIZATION_POLICY_CHANGED, {
+            organizationId: id,
+            key: dto.key,
+            value: dto.value,
+            inheritable: dto.inheritable,
+            effectiveFrom: effectiveFrom.toISOString(),
+            effectiveTo: dto.effectiveTo ?? null,
+            changedBy: actor,
+          }),
+        });
 
-      await this.repository.enqueueEvent(tx, {
-        aggregateType: 'OrganizationPolicy',
-        aggregateId: policyId,
-        eventName: ORGANIZATION_EVENTS.ORGANIZATION_POLICY_CHANGED,
-        topic: ORGANIZATION_TOPIC,
-        organizationId: id,
-        payload: validateOrganizationPayload(ORGANIZATION_EVENTS.ORGANIZATION_POLICY_CHANGED, {
-          organizationId: id,
-          key: dto.key,
-          value: dto.value,
-          inheritable: dto.inheritable,
-          effectiveFrom: effectiveFrom.toISOString(),
-          effectiveTo: dto.effectiveTo ?? null,
-          changedBy: actor,
-        }),
-      });
-
-      return row;
-    });
+        return row;
+      })
+      .catch(rethrowConstraintViolation('OrganizationPolicy', id));
 
     return {
       id: created.id,
@@ -671,6 +804,27 @@ export class OrganizationService {
     };
   }
 
+  /**
+   * Start of an immediate replacement: `now`, or one millisecond after the
+   * latest value that has already started if that is later. Only values that
+   * have started count — one scheduled for the future is not moved past, it is
+   * refused by the caller as a conflict.
+   */
+  private async immediateStart(
+    tx: PrismaTransactionClient,
+    organizationId: string,
+    key: string,
+    now: Date,
+  ): Promise<Date> {
+    const latest = await tx.organizationPolicy.findFirst({
+      where: { organizationId, key, effectiveFrom: { lte: now } },
+      orderBy: { effectiveFrom: 'desc' },
+      select: { effectiveFrom: true },
+    });
+    if (!latest || latest.effectiveFrom < now) return now;
+    return new Date(latest.effectiveFrom.getTime() + 1);
+  }
+
   // =========================================================================
   // Locations and contacts
   // =========================================================================
@@ -682,6 +836,7 @@ export class OrganizationService {
     if (!organization) throw RastaError.notFound('Organization', id);
 
     const locationId = await this.repository.transaction(async (tx) => {
+      await this.assertCanWriteLocked(tx, id);
       const newId = await this.insertLocation(tx, id, dto);
 
       await this.repository.enqueueEvent(tx, {
@@ -717,60 +872,68 @@ export class OrganizationService {
 
     const contactId = `CNT_${ulid()}`;
 
-    const row = await this.repository.transaction(async (tx) => {
-      let demotedContactIds: string[] = [];
-      if (dto.isPrimary) {
-        // Exactly one primary per kind, enforced by demoting the incumbent.
-        // The incumbents are named so the demotion is part of the record, not
-        // a side effect nobody can see afterwards.
-        const incumbents = await tx.organizationContact.findMany({
-          where: { organizationId: id, kind: dto.kind, isPrimary: true },
-          select: { id: true },
-        });
-        demotedContactIds = incumbents.map((contact) => contact.id);
-        if (demotedContactIds.length > 0) {
-          await tx.organizationContact.updateMany({
-            where: { id: { in: demotedContactIds } },
-            data: { isPrimary: false },
+    const row = await this.repository
+      .transaction(async (tx) => {
+        await this.assertCanWriteLocked(tx, id);
+
+        let demotedContactIds: string[] = [];
+        if (dto.isPrimary) {
+          // Exactly one primary per kind, enforced by demoting the incumbent.
+          // The incumbents are named so the demotion is part of the record, not
+          // a side effect nobody can see afterwards. The lock makes a concurrent
+          // add of the same kind wait, so it reads — and demotes — this one's
+          // row instead of missing it; `ux_contact_primary_per_kind` is the
+          // backstop if anything writes around this path.
+          await this.repository.lockContactKind(tx, id, dto.kind);
+          const incumbents = await tx.organizationContact.findMany({
+            where: { organizationId: id, kind: dto.kind, isPrimary: true },
+            select: { id: true },
           });
+          demotedContactIds = incumbents.map((contact) => contact.id);
+          if (demotedContactIds.length > 0) {
+            await tx.organizationContact.updateMany({
+              where: { id: { in: demotedContactIds } },
+              data: { isPrimary: false },
+            });
+          }
         }
-      }
 
-      const contact = await tx.organizationContact.create({
-        data: {
-          id: contactId,
+        const contact = await tx.organizationContact.create({
+          data: {
+            id: contactId,
+            organizationId: id,
+            kind: dto.kind,
+            displayName: dto.displayName,
+            phone: dto.phone ?? null,
+            email: dto.email ?? null,
+            isPrimary: dto.isPrimary,
+          },
+        });
+
+        // Every state change leaves an audit record (AGENTS.md S-06), and
+        // audit-service records every event on this topic. The payload names
+        // the change, not the phone number or email (see the event schema).
+        await this.repository.enqueueEvent(tx, {
+          aggregateType: 'Organization',
+          aggregateId: id,
+          eventName: ORGANIZATION_EVENTS.ORGANIZATION_CONTACT_CHANGED,
+          topic: ORGANIZATION_TOPIC,
           organizationId: id,
-          kind: dto.kind,
-          displayName: dto.displayName,
-          phone: dto.phone ?? null,
-          email: dto.email ?? null,
-          isPrimary: dto.isPrimary,
-        },
-      });
+          payload: validateOrganizationPayload(ORGANIZATION_EVENTS.ORGANIZATION_CONTACT_CHANGED, {
+            organizationId: id,
+            contactId,
+            change: 'ADDED',
+            kind: dto.kind,
+            isPrimary: dto.isPrimary,
+            hasPhone: dto.phone !== undefined,
+            hasEmail: dto.email !== undefined,
+            demotedContactIds,
+          }),
+        });
 
-      // Every state change leaves an audit record (AGENTS.md S-06), and
-      // audit-service records every event on this topic. The payload names
-      // the change, not the phone number or email (see the event schema).
-      await this.repository.enqueueEvent(tx, {
-        aggregateType: 'Organization',
-        aggregateId: id,
-        eventName: ORGANIZATION_EVENTS.ORGANIZATION_CONTACT_CHANGED,
-        topic: ORGANIZATION_TOPIC,
-        organizationId: id,
-        payload: validateOrganizationPayload(ORGANIZATION_EVENTS.ORGANIZATION_CONTACT_CHANGED, {
-          organizationId: id,
-          contactId,
-          change: 'ADDED',
-          kind: dto.kind,
-          isPrimary: dto.isPrimary,
-          hasPhone: dto.phone !== undefined,
-          hasEmail: dto.email !== undefined,
-          demotedContactIds,
-        }),
-      });
-
-      return contact;
-    });
+        return contact;
+      })
+      .catch(rethrowConstraintViolation('OrganizationContact', id));
 
     return toContactView(row);
   }
@@ -821,6 +984,30 @@ export class OrganizationService {
 
     return locationId;
   }
+}
+
+/**
+ * Constraints that back a serialised write path in this service. Each can only
+ * fire if something wrote around that path — a concurrent writer the lock did
+ * not cover, or a manual change — so the caller gets a retryable conflict
+ * rather than a 500.
+ */
+const SERIALISED_CONSTRAINTS = [
+  'ex_policy_no_overlap',
+  'ck_policy_effective_range',
+  'ux_contact_primary_per_kind',
+] as const;
+
+function rethrowConstraintViolation(aggregate: string, id: string) {
+  return (error: unknown): never => {
+    const message = (error as { message?: unknown } | null)?.message;
+    const target = (error as { meta?: { target?: unknown } } | null)?.meta?.target;
+    const text = `${typeof message === 'string' ? message : ''} ${String(target ?? '')}`;
+    if (SERIALISED_CONSTRAINTS.some((name) => text.includes(name))) {
+      throw RastaError.optimisticLockFailed(aggregate, id);
+    }
+    throw error;
+  };
 }
 
 /**

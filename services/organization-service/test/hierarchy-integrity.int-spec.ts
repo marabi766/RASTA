@@ -646,4 +646,405 @@ describe('organization hierarchy integrity', () => {
       expect(effective.find((policy) => policy.key === key)?.value).toBe(1);
     });
   });
+
+  // =========================================================================
+  // Post-merge review of #101
+  // =========================================================================
+
+  /**
+   * Inside `tx`: exactly what `move` writes — the hierarchy lock, the rewritten
+   * subtree paths and the new parent — without committing. Lets a test hold a
+   * move open at the point where the races below happened.
+   */
+  /**
+   * Runs `during` while `holder` is still open, then always releases it. A
+   * failed expectation inside would otherwise leave the holder's locks in place
+   * and every later test queued behind them.
+   */
+  const whileHeld = async (
+    holder: { release: () => void; done: Promise<unknown> },
+    during: () => Promise<unknown>,
+  ) => {
+    try {
+      await during();
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+  };
+
+  const writeMove = async (
+    tx: Parameters<Parameters<PrismaService['transaction']>[0]>[0],
+    id: string,
+    newParentId: string,
+  ) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${HIERARCHY_LOCK_KEY}::bigint)`;
+    const oldPath = await repository.getPath(id, tx);
+    const parentPath = await repository.getPath(newParentId, tx);
+    if (!oldPath || !parentPath) throw new Error('test tree is missing a path');
+    await repository.rewriteSubtreePath(tx, oldPath, `${parentPath}.${toLabel(id)}`);
+    await tx.organization.update({ where: { id }, data: { parentId: newParentId } });
+  };
+
+  describe('reactivation cannot race a move beneath a suspended parent', () => {
+    it('waits for the uncommitted move, then reads the new ancestors and refuses', async () => {
+      const service = serviceWith();
+      const activeParent = await create(service);
+      const stoppedParent = await create(service);
+      const child = await create(service, activeParent.id);
+      await operator(() => service.changeStatus(child.id, { status: 'SUSPENDED', reason: 'own' }));
+      await operator(() =>
+        service.changeStatus(stoppedParent.id, { status: 'SUSPENDED', reason: 'stopped' }),
+      );
+
+      // A suspended organization may move beneath a suspended one; the move
+      // has written and not yet committed.
+      const move = await holdTransaction((tx) => writeMove(tx, child.id, stoppedParent.id));
+
+      const reactivating = track(
+        operator(() => service.changeStatus(child.id, { status: 'ACTIVE', reason: 'cleared' })),
+      );
+      await whileHeld(move, async () => {
+        await pause(500);
+        expect(reactivating.state.settled).toBe(false);
+      });
+
+      // Before the fix the reactivation had share-locked the old, ACTIVE chain,
+      // and its compare-and-set woke after the move and set the child ACTIVE
+      // beneath the suspended parent.
+      const error = await errorOf(reactivating.promise);
+      expect(error.internalContext).toMatchObject({
+        rule: 'ANCESTOR_NOT_ACTIVE',
+        ancestorId: stoppedParent.id,
+      });
+      expect((await row(child.id)).status).toBe('SUSPENDED');
+      expect((await row(child.id)).parentId).toBe(stoppedParent.id);
+    });
+  });
+
+  describe('a write is authorized against the tree after any in-flight move', () => {
+    let service: OrganizationService;
+    let tenantA: OrganizationView;
+    let tenantB: OrganizationView;
+
+    beforeEach(async () => {
+      service = new OrganizationService(repository, {
+        maxDepth: 8,
+        policySetterRoles: ['SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN'],
+      });
+      const root = await create(service);
+      tenantA = await create(service, root.id);
+      tenantB = await create(service, root.id);
+    });
+
+    it('create: the parent moves to another tenant while the create waits — nothing lands there', async () => {
+      const parent = await create(service, tenantA.id);
+      const move = await holdTransaction((tx) => writeMove(tx, parent.id, tenantB.id));
+
+      const creating = track(
+        adminOf(tenantA.id, () =>
+          service.create({ name: 'جا مانده', type: 'DEHYARI', metadata: {}, parentId: parent.id }),
+        ),
+      );
+      await whileHeld(move, async () => {
+        await pause(500);
+        expect(creating.state.settled).toBe(false);
+      });
+
+      const error = await errorOf(creating.promise);
+      expect(error.code).toBe('NOT_FOUND');
+      expect(await prisma.client.organization.count({ where: { parentId: parent.id } })).toBe(0);
+    });
+
+    it('setPolicy: a non-operator setter waits for the move, then is refused', async () => {
+      const target = await create(service, tenantA.id);
+      const key = `sample.itest_${ulid().toLowerCase()}`;
+      const move = await holdTransaction((tx) => writeMove(tx, target.id, tenantB.id));
+
+      const setting = track(
+        adminOf(tenantA.id, () =>
+          service.setPolicy(target.id, { key, value: 1, inheritable: true, description: 'd' }),
+        ),
+      );
+      await whileHeld(move, async () => {
+        await pause(500);
+        expect(setting.state.settled).toBe(false);
+      });
+
+      expect((await errorOf(setting.promise)).code).toBe('NOT_FOUND');
+      expect(
+        await prisma.client.organizationPolicy.count({ where: { organizationId: target.id } }),
+      ).toBe(0);
+    });
+
+    it('update: same', async () => {
+      const target = await create(service, tenantA.id);
+      const move = await holdTransaction((tx) => writeMove(tx, target.id, tenantB.id));
+
+      const updating = track(adminOf(tenantA.id, () => service.update(target.id, { name: 'x' })));
+      await whileHeld(move, async () => {
+        await pause(500);
+        expect(updating.state.settled).toBe(false);
+      });
+
+      expect((await errorOf(updating.promise)).code).toBe('NOT_FOUND');
+      expect((await row(target.id)).name).toBe(target.name);
+    });
+
+    it('a write inside the caller subtree still succeeds after waiting', async () => {
+      const target = await create(service, tenantA.id);
+      const elsewhere = await create(service, tenantB.id);
+      const unrelated = await create(service);
+      // A move of something else holds the lock; the write waits, then proceeds.
+      const move = await holdTransaction((tx) => writeMove(tx, elsewhere.id, unrelated.id));
+
+      const updating = track(adminOf(tenantA.id, () => service.update(target.id, { name: 'ok' })));
+      await whileHeld(move, () => pause(300));
+
+      expect((await updating.promise).name).toBe('ok');
+    });
+  });
+
+  describe('list: visibility, filters and paging in one statement', () => {
+    let service: OrganizationService;
+    let root: OrganizationView;
+    let tenantA: OrganizationView;
+    let tenantB: OrganizationView;
+    const children: OrganizationView[] = [];
+    const tag = `LIST${ulid().slice(-6)}`;
+
+    beforeAll(async () => {
+      service = serviceWith();
+      root = await create(service);
+      tenantA = await create(service, root.id);
+      tenantB = await create(service, root.id);
+      for (const name of [`${tag} الف`, `${tag} ب`, `${tag} 100%`, `${tag} ج`]) {
+        children.push(
+          await operator(() =>
+            service.create({ name, type: 'DEHYARI', metadata: {}, parentId: tenantA.id }),
+          ),
+        );
+      }
+      await operator(() =>
+        service.create({
+          name: `${tag} other`,
+          type: 'DEHYARI',
+          metadata: {},
+          parentId: tenantB.id,
+        }),
+      );
+    });
+
+    const listAs = (who: string | null, query: Record<string, unknown>) =>
+      (who ? (fn: () => Promise<unknown>) => adminOf(who, fn) : operator)(() =>
+        service.list({ limit: 50, ...query } as never),
+      ) as Promise<{ items: OrganizationView[]; nextCursor: string | null; hasMore: boolean }>;
+
+    it('a tenant sees its own subtree and none of the other tenant', async () => {
+      const { items } = await listAs(tenantA.id, { q: tag });
+      expect(new Set(items.map((item) => item.id))).toEqual(new Set(children.map((c) => c.id)));
+    });
+
+    it('a platform operator sees both tenants', async () => {
+      const { items } = await listAs(null, { q: tag });
+      expect(items).toHaveLength(5);
+    });
+
+    it('q matches case-insensitively, and % is a literal character', async () => {
+      expect((await listAs(tenantA.id, { q: tag.toLowerCase() })).items).toHaveLength(4);
+      const percent = await listAs(tenantA.id, { q: '100%' });
+      expect(percent.items.map((item) => item.name)).toEqual([`${tag} 100%`]);
+    });
+
+    it('parentId and status filter; the row maps to the public view', async () => {
+      const { items } = await listAs(null, { parentId: tenantB.id, status: 'ACTIVE' });
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ parentId: tenantB.id, status: 'ACTIVE', type: 'DEHYARI' });
+      expect(typeof items[0]?.createdAt).toBe('string');
+    });
+
+    it('pages by cursor with the limit applied after the visibility filter', async () => {
+      const first = await listAs(tenantA.id, { q: tag, limit: 3 });
+      expect(first.items).toHaveLength(3);
+      expect(first.hasMore).toBe(true);
+      const second = await listAs(tenantA.id, { q: tag, limit: 3, cursor: first.nextCursor });
+      expect(second.items).toHaveLength(1);
+      expect(second.hasMore).toBe(false);
+      const all = [...first.items, ...second.items].map((item) => item.id);
+      expect(new Set(all)).toEqual(new Set(children.map((c) => c.id)));
+    });
+  });
+
+  describe('ancestors stop at the caller visible root', () => {
+    it('a tenant sees the chain from itself down, never the root above it', async () => {
+      const service = serviceWith();
+      const root = await create(service);
+      const tenant = await create(service, root.id);
+      const child = await create(service, tenant.id);
+      const grandchild = await create(service, child.id);
+
+      const asTenant = await adminOf(tenant.id, () => service.ancestors(grandchild.id));
+      expect(asTenant.map((item) => item.id)).toEqual([tenant.id, child.id]);
+
+      expect(await adminOf(tenant.id, () => service.ancestors(tenant.id))).toEqual([]);
+
+      const asOperator = await operator(() => service.ancestors(grandchild.id));
+      expect(asOperator.map((item) => item.id)).toEqual([root.id, tenant.id, child.id]);
+    });
+  });
+
+  describe('policy timeline: one value per instant', () => {
+    const periods = async (organizationId: string, key: string) =>
+      prisma.client.organizationPolicy.findMany({
+        where: { organizationId, key },
+        orderBy: { effectiveFrom: 'asc' },
+      });
+
+    it('concurrent immediate replacements leave exactly one open-ended value', async () => {
+      const service = serviceWith();
+      const organization = await create(service);
+      const key = `sample.itest_${ulid().toLowerCase()}`;
+
+      const outcomes = await Promise.allSettled(
+        [1, 2, 3, 4, 5].map((value) =>
+          operator(() =>
+            service.setPolicy(organization.id, { key, value, inheritable: true, description: 'r' }),
+          ),
+        ),
+      );
+
+      // Every writer succeeds: each waits for the one before it and replaces
+      // its value. Without the per-key lock, writers collided on the database
+      // constraint and failed; before the constraint, they all "succeeded" and
+      // left several open-ended values.
+      expect(outcomes.map((outcome) => outcome.status)).toEqual(Array(5).fill('fulfilled'));
+      const rows = await periods(organization.id, key);
+      expect(rows).toHaveLength(5);
+      expect(rows.filter((r) => r.effectiveTo === null)).toHaveLength(1);
+      for (const r of rows) {
+        if (r.effectiveTo)
+          expect(r.effectiveTo.getTime()).toBeGreaterThan(r.effectiveFrom.getTime());
+      }
+      // Consecutive periods meet without overlapping.
+      for (let i = 1; i < rows.length; i += 1) {
+        expect(rows[i - 1]?.effectiveTo?.getTime()).toBeLessThanOrEqual(
+          rows[i]?.effectiveFrom.getTime() ?? 0,
+        );
+      }
+    });
+
+    it('an immediate replacement of a scheduled value is refused; one that ends before it is accepted', async () => {
+      const service = serviceWith();
+      const organization = await create(service);
+      const key = `sample.itest_${ulid().toLowerCase()}`;
+      const scheduledFrom = new Date(Date.now() + 7 * 86_400_000);
+      const set = (value: number, extra: Record<string, string> = {}) =>
+        operator(() =>
+          service.setPolicy(organization.id, {
+            key,
+            value,
+            inheritable: true,
+            description: 'd',
+            ...extra,
+          }),
+        );
+
+      await set(1);
+      await set(2, { effectiveFrom: scheduledFrom.toISOString() });
+
+      const error = await errorOf(set(3));
+      expect(error.internalContext).toMatchObject({ rule: 'POLICY_SCHEDULE_CONFLICT' });
+
+      await set(4, { effectiveTo: scheduledFrom.toISOString() });
+
+      const rows = await periods(organization.id, key);
+      expect(rows.map((r) => r.value)).toEqual([1, 4, 2]);
+      expect(rows[1]?.effectiveTo?.getTime()).toBe(scheduledFrom.getTime());
+      expect(rows[2]?.effectiveFrom.getTime()).toBe(scheduledFrom.getTime());
+      expect(rows[2]?.effectiveTo).toBeNull();
+      const effective = await operator(() => service.effectivePolicies(organization.id));
+      expect(effective.find((policy) => policy.key === key)?.value).toBe(4);
+    });
+
+    it('the database refuses an overlapping or inverted period written around the service', async () => {
+      const service = serviceWith();
+      const organization = await create(service);
+      const key = `sample.itest_${ulid().toLowerCase()}`;
+      await operator(() =>
+        service.setPolicy(organization.id, { key, value: 1, inheritable: true, description: 'd' }),
+      );
+      const insert = (from: Date, to: Date | null) =>
+        prisma.client.organizationPolicy.create({
+          data: {
+            id: `POL_${ulid()}`,
+            organizationId: organization.id,
+            key,
+            value: 9,
+            effectiveFrom: from,
+            effectiveTo: to,
+            createdBy: 'itest',
+            updatedBy: 'itest',
+          },
+        });
+
+      await expect(insert(new Date(Date.now() + 60_000), null)).rejects.toThrow(
+        /ex_policy_no_overlap/,
+      );
+      await expect(insert(new Date(2001, 1, 2), new Date(2001, 1, 1))).rejects.toThrow(
+        /ck_policy_effective_range/,
+      );
+    });
+  });
+
+  describe('one primary contact per kind', () => {
+    it('concurrent primary adds leave exactly one primary, and each demotes the one before', async () => {
+      const service = serviceWith();
+      const organization = await create(service);
+
+      const outcomes = await Promise.allSettled(
+        [1, 2, 3, 4, 5].map((n) =>
+          adminOf(organization.id, () =>
+            service.addContact(organization.id, {
+              kind: 'EMERGENCY',
+              displayName: `contact ${n}`,
+              phone: `0912000000${n}`,
+              isPrimary: true,
+            }),
+          ),
+        ),
+      );
+
+      expect(outcomes.every((outcome) => outcome.status === 'fulfilled')).toBe(true);
+      const primaries = await prisma.client.organizationContact.count({
+        where: { organizationId: organization.id, kind: 'EMERGENCY', isPrimary: true },
+      });
+      expect(primaries).toBe(1);
+    });
+
+    it('the database refuses a second primary written around the service', async () => {
+      const service = serviceWith();
+      const organization = await create(service);
+      await adminOf(organization.id, () =>
+        service.addContact(organization.id, {
+          kind: 'TECHNICAL',
+          displayName: 'first',
+          phone: '09120000001',
+          isPrimary: true,
+        }),
+      );
+
+      await expect(
+        prisma.client.organizationContact.create({
+          data: {
+            id: `CNT_${ulid()}`,
+            organizationId: organization.id,
+            kind: 'TECHNICAL',
+            displayName: 'second',
+            phone: '09120000002',
+            isPrimary: true,
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+    });
+  });
 });
