@@ -25,7 +25,24 @@ services:
       POSTGRES_USER: ${POSTGRES_SUPERUSER:-rasta}
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-rasta_dev_password}
       POSTGRES_DB: postgres
-      POSTGRES_SERVICE_PASSWORD: ${POSTGRES_SERVICE_PASSWORD:-rasta_service_dev_password}
+      # One password per role (L7-33); the init script reads these.
+      POSTGRES_PASSWORD_IDENTITY: ${POSTGRES_PASSWORD_IDENTITY:-rasta_identity_dev_password}
+      POSTGRES_PASSWORD_ORGANIZATION: ${POSTGRES_PASSWORD_ORGANIZATION:-rasta_organization_dev_password}
+      POSTGRES_PASSWORD_ASSET: ${POSTGRES_PASSWORD_ASSET:-rasta_asset_dev_password}
+      POSTGRES_PASSWORD_FLEET: ${POSTGRES_PASSWORD_FLEET:-rasta_fleet_dev_password}
+      POSTGRES_PASSWORD_MAINTENANCE: ${POSTGRES_PASSWORD_MAINTENANCE:-rasta_maintenance_dev_password}
+      POSTGRES_PASSWORD_MARKETPLACE: ${POSTGRES_PASSWORD_MARKETPLACE:-rasta_marketplace_dev_password}
+      POSTGRES_PASSWORD_PROCUREMENT: ${POSTGRES_PASSWORD_PROCUREMENT:-rasta_procurement_dev_password}
+      POSTGRES_PASSWORD_SUPPLIER: ${POSTGRES_PASSWORD_SUPPLIER:-rasta_supplier_dev_password}
+      POSTGRES_PASSWORD_INVENTORY: ${POSTGRES_PASSWORD_INVENTORY:-rasta_inventory_dev_password}
+      POSTGRES_PASSWORD_CONSTRUCTION: ${POSTGRES_PASSWORD_CONSTRUCTION:-rasta_construction_dev_password}
+      POSTGRES_PASSWORD_CONTRACT: ${POSTGRES_PASSWORD_CONTRACT:-rasta_contract_dev_password}
+      POSTGRES_PASSWORD_ECONOMIC: ${POSTGRES_PASSWORD_ECONOMIC:-rasta_economic_dev_password}
+      POSTGRES_PASSWORD_NOTIFICATION: ${POSTGRES_PASSWORD_NOTIFICATION:-rasta_notification_dev_password}
+      POSTGRES_PASSWORD_DOCUMENT: ${POSTGRES_PASSWORD_DOCUMENT:-rasta_document_dev_password}
+      POSTGRES_PASSWORD_AUDIT: ${POSTGRES_PASSWORD_AUDIT:-rasta_audit_dev_password}
+      POSTGRES_PASSWORD_ANALYTICS: ${POSTGRES_PASSWORD_ANALYTICS:-rasta_analytics_dev_password}
+      POSTGRES_PASSWORD_AUDIT_MIGRATOR: ${POSTGRES_PASSWORD_AUDIT_MIGRATOR:-rasta_audit_migrator_dev_password}
       LANG: C.UTF-8
     ports:
       - '${POSTGRES_PORT:-5432}:5432'
