@@ -179,3 +179,50 @@ export function assertDisputeResolver(): void {
     throw RastaError.forbidden('Only a platform operator may resolve a dispute');
   }
 }
+
+/**
+ * Which of the three roles this caller plays on this order, without throwing.
+ *
+ * The `assert*` functions above decide one question each and raise on a no.
+ * A client rendering an order needs the whole answer at once — "what may I do
+ * here" — and a refusal is not an answer it can draw a screen from.
+ *
+ * Deliberately built from the **same** predicates rather than beside them, so
+ * there is no second definition of who a buyer is. If `assertBuyer` gains a
+ * condition and this does not, the two disagree, and the shape of that
+ * disagreement is a client offering a command the service then refuses.
+ *
+ * All three are independent, not exclusive:
+ *
+ *  - a platform operator acting for the buying organization is **both**
+ *    `buyer` and `platform`, and may confirm receipt *and* resolve a dispute;
+ *  - an `AUDITOR` is none of them, because the oversight role has no access to
+ *    an individual order at all.
+ */
+export interface OrderViewerParties {
+  readonly buyer: boolean;
+  readonly supplier: boolean;
+  readonly platform: boolean;
+}
+
+export function viewerParties(order: OrderParties): OrderViewerParties {
+  const context = getContext();
+  if (context.roles.includes('AUDITOR')) {
+    return { buyer: false, supplier: false, platform: false };
+  }
+
+  // A service caller acts for no organization and gets no party here. It is
+  // the same rule `hasPlatformScope` applies for the same ADR-035 reason: a
+  // machine must not inherit a human's side of a two-party order.
+  if (context.authType === 'SERVICE') {
+    return { buyer: false, supplier: false, platform: false };
+  }
+
+  const caller = context.organizationId;
+
+  return {
+    buyer: hasAnyRole(BUYER_ROLES) && caller === order.organizationId,
+    supplier: hasAnyRole(SUPPLIER_ROLES) && caller === order.supplierOrganizationId,
+    platform: hasPlatformScope(),
+  };
+}

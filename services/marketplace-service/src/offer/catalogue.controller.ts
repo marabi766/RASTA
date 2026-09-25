@@ -49,6 +49,17 @@ export class ProductController {
     return this.catalogue.searchProducts(query);
   }
 
+  @Get(':id')
+  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN', 'PROCUREMENT_USER', 'SUPPLIER')
+  @ApiOperation({
+    summary: 'One product from the catalogue',
+    description:
+      'Visible regardless of which organization catalogued it — the same open read as search.',
+  })
+  async get(@Param('id') id: string) {
+    return this.catalogue.getProduct(id);
+  }
+
   @Get(':id/offers')
   @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN', 'PROCUREMENT_USER', 'SUPPLIER')
   @ApiOperation({

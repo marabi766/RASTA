@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۰۱ (2026-09-23) · **`main` در آن لحظه:** `d7500be`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۰۲ (2026-09-24) · **`main` در آن لحظه:** `d7500be`
 
 ---
 
@@ -55,57 +55,64 @@
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                                       | Worktree                                      | نشست | PR  | ahead / behind | وضعیت                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ------------------------------------------ | --------------------------------------------- | ---- | --- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `feat/web-organizations-surface`           | `F:\Rasta-Parallel\web-organizations-surface` | Opus | #79 | ۲ / ۰          | تازه ساخته شد از `origin/main` @ `9347b80` — `EXP-002`: `/organizations` (پروفایل سازمان و مدیریت اعضا)؛ **یک فیلد به `GET /v1/users/me` در `identity-service` می‌افزاید** (نقش‌های قابل اعطای خود فرد، از `role-grants.ts`)؛ **`nav.ts`، `PROJECT_MEMORY.md` و این فایل را لمس می‌کند**                                                                                                                                  |
-| `fix/identity-getuser-fail-closed-and-exp` | `F:\Rasta-Parallel\web-organizations-surface` | Opus | #87 | ۱ / ۰          | از `origin/main` @ `d7500be` — سه یافتهٔ مستقل از طرح ADR-060: `getUser` با شکست بسته، `PATCH` غیرخود فقط با `ORGANIZATION_ADMIN`، `exp` الزامی؛ **`packages/nest-common` و `apps/web/src/server/oidc.ts` را لمس می‌کند**                                                                                                                                                                                                 |
-| `demo/investor-preview`                    | `F:\Rasta-Parallel\investor-demo`             | —    | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                                                                                                                                                                                                                                                              |
-| `design/claude-design`                     | پوشهٔ موقت در `%TEMP%`                        | —    | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                                                                                                                                                                                                                                                     |
-| `feat/web-asset-timeline`                  | `F:\Rasta-Parallel\web-asset-timeline`        | —    | #80 | ۱ / ۰          | از `origin/main` @ `0ac1a61` — `EXP-002`: `/assets/[id]/timeline` (تاریخچهٔ دارایی، فقط‌خواندنی؛ `docs/16 § ۱۶٫۶`)؛ آخرین صفحهٔ P0 نقشهٔ صفحات؛ PR باز، منتظر ادغام — طبق قاعدهٔ ۶، ادغام کار PM/کاربر است                                                                                                                                                                                                                |
-| `claude/upbeat-tesla-cenkph`               | نشست ابری Claude Code                         | Opus | —   | —              | از `origin/main` @ `cfdb7b0` — کار PM «`chore/gates-service-tests`» (PR ۱ از ۳ گسترش دروازه‌های ایستا): `tsconfig.test.json` در هر سرویس و بسته تا `src/**/*.spec.ts`، `test/**/*.ts` و `prisma/seed.ts` هم Type-Check شوند؛ دامنهٔ Lint سرویس‌ها به `test` و `prisma/seed.ts` گسترش می‌یابد؛ **`package.json` همهٔ سرویس‌ها/بسته‌ها و `pnpm-lock.yaml` را لمس می‌کند**. نام شاخه را محیط نشست تعیین کرده، نه قرارداد § ۶ |
+| شاخه                                        | Worktree                                                  | نشست   | PR  | ahead / behind | وضعیت                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------- | --------------------------------------------------------- | ------ | --- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fix/ci-minio-chainguard`                   | `F:\Rasta-Parallel\ci-minio-chainguard`                   | PM     | #88 | ۱ / ۰          | MinIO از `quay.io` دیگر بی‌احراز قابل دریافت نیست (۴۰۱) و `minio/minio` از Docker Hub حذف شده است. در نتیجه Jobهای یکپارچه و E2E همهٔ شاخه‌ها و `main` پیش از اجرای تست شکست می‌خورند. تصویرها به نسخه‌های امضاشدهٔ Chainguard با Digest ثابت منتقل شدند.                                                                                                                                                                                                                                                                             |
+| `feat/web-orders-surface`                   | `F:\Rasta-Parallel\web-organizations-surface`             | Opus   | #83 | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `0ac1a61` — `/orders` و `/orders/[id]` (چرخهٔ عمر سفارش و Stepper). **پوشهٔ Worktree از کار قبلی مانده و دوباره استفاده شد** — `pnpm install` دیگری در جریان بود (نشست Sonnet) و Lockfile تغییر نکرده بود؛ **`marketplace-service` را هم لمس می‌کند** (فیلد `availableActions`)                                                                                                                                                                                                                      |
+| `feat/web-organizations-surface`            | `F:\Rasta-Parallel\web-organizations-surface`             | Opus   | #79 | ۲ / ۰          | تازه ساخته شد از `origin/main` @ `9347b80` — `EXP-002`: `/organizations` (پروفایل سازمان و مدیریت اعضا)؛ **یک فیلد به `GET /v1/users/me` در `identity-service` می‌افزاید** (نقش‌های قابل اعطای خود فرد، از `role-grants.ts`)؛ **`nav.ts`، `PROJECT_MEMORY.md` و این فایل را لمس می‌کند**                                                                                                                                                                                                                                              |
+| `demo/investor-preview`                     | `F:\Rasta-Parallel\investor-demo`                         | —      | —   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `design/claude-design`                      | پوشهٔ موقت در `%TEMP%`                                    | —      | —   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `feat/web-asset-timeline`                   | `F:\Rasta-Parallel\web-asset-timeline`                    | —      | #80 | ۱ / ۰          | از `origin/main` @ `0ac1a61` — `EXP-002`: `/assets/[id]/timeline` (تاریخچهٔ دارایی، فقط‌خواندنی؛ `docs/16 § ۱۶٫۶`)؛ آخرین صفحهٔ P0 نقشهٔ صفحات؛ PR باز، منتظر ادغام — طبق قاعدهٔ ۶، ادغام کار PM/کاربر است                                                                                                                                                                                                                                                                                                                            |
+| `claude/upbeat-tesla-cenkph`                | نشست ابری Claude Code                                     | Opus   | —   | —              | PR #82 ادغام شد (`d7500be`)؛ شاخه از `origin/main` @ `d7500be` از نو ساخته شد برای کار PM «`fix/economic-refund-authority-and-idempotency`»: مرجع Refund، شناسهٔ Idempotency با شناسهٔ هدف، یکتایی تعهد برای یک واقعیت کسب‌وکاری (Migration تازه در `economic-service`)، تغییرناپذیری نرخ کمیسیون و پاداش. **`docs/24-open-questions.md` (Q-62) و `PROJECT_MEMORY.md` را لمس می‌کند.** نام شاخه را محیط نشست تعیین کرده                                                                                                               |
+| `fix/identity-registration-approval-oracle` | `F:\Rasta-Parallel\identity-registration-approval-oracle` | Sonnet | #89 | ۰ / ۰          | دو نقص در `identity-service`: (۱) `approveRegistration` یک Oracle بود — جستجوی سراسری‌پلتفرم پیش از بررسی محدودهٔ Provisioning، پس یک `UNION_ADMIN` سازمان A می‌توانست با کد وضعیت (۴۰۴/۴۰۹/۴۰۳) بفهمد آیا شناسهٔ ثبت‌نامی در سازمان B وجود دارد و در چه وضعیتی است. (۲) `rejectRegistration` اصلاً بررسی محدوده نداشت — همان `UNION_ADMIN` می‌توانست ثبت‌نام هر سازمانی را واقعاً رد کند، نه فقط کاوش کند. هر دو با یک کمکی مشترک (`isWithinProvisioningScope`) رفع شدند. PR باز، منتظر ادغام — طبق قاعدهٔ ۶، ادغام کار PM/کاربر است |
 
 ## شاخه‌های بازنشسته
 
 این‌ها `ahead=0` هستند، یعنی محتوایشان کاملاً روی `main` است و می‌توان حذفشان
 کرد. تا وقتی حذف نشده‌اند در این جدول می‌مانند تا کسی دوباره رویشان کار نکند.
 
-| شاخه                                    | PR                                                | ادغام شد در |
-| --------------------------------------- | ------------------------------------------------- | ----------- |
-| `feat/audit-service-aud-004-contract`   | [#44](https://github.com/marabi766/RASTA/pull/44) | `9fa75cc`   |
-| `docs/inventory-logistics-adr`          | [#45](https://github.com/marabi766/RASTA/pull/45) | `f2eb8fa`   |
-| `feat/notification-service`             | [#46](https://github.com/marabi766/RASTA/pull/46) | `cc89660`   |
-| `feat/notification-read-api`            | [#47](https://github.com/marabi766/RASTA/pull/47) | `7389ffd`   |
-| `feat/supplier-performance-phase2`      | [#48](https://github.com/marabi766/RASTA/pull/48) | `f7252d3`   |
-| `docs/branch-registry`                  | [#49](https://github.com/marabi766/RASTA/pull/49) | `76feb8e`   |
-| `fix/notification-dedupe-window-race`   | [#50](https://github.com/marabi766/RASTA/pull/50) | `78ac7b0`   |
-| `docs/project-memory-2026-09-18`        | [#51](https://github.com/marabi766/RASTA/pull/51) | `a84269a`   |
-| `docs/ci-serialization-and-backlog`     | [#52](https://github.com/marabi766/RASTA/pull/52) | `76a1bf7`   |
-| `docs/audit-immutable-archive`          | [#53](https://github.com/marabi766/RASTA/pull/53) | `eea7d61`   |
-| `feat/web-foundation`                   | [#54](https://github.com/marabi766/RASTA/pull/54) | `8c04477`   |
-| `feat/web-design-tokens`                | [#55](https://github.com/marabi766/RASTA/pull/55) | `4b15725`   |
-| `feat/web-component-library`            | [#56](https://github.com/marabi766/RASTA/pull/56) | `e7b0372`   |
-| `feat/maintenance-schedule-audit-event` | [#57](https://github.com/marabi766/RASTA/pull/57) | `18946a2`   |
-| `feat/notification-outbox-audit`        | [#58](https://github.com/marabi766/RASTA/pull/58) | `419afde`   |
-| `docs/state-2026-09-19`                 | [#59](https://github.com/marabi766/RASTA/pull/59) | `8a80ce5`   |
-| `feat/notification-preferences`         | [#60](https://github.com/marabi766/RASTA/pull/60) | `e6d509e`   |
-| `docs/state-2026-09-20`                 | [#61](https://github.com/marabi766/RASTA/pull/61) | `37c48c2`   |
-| `chore/test-task-unit-only`             | [#62](https://github.com/marabi766/RASTA/pull/62) | `f7755e0`   |
-| `feat/notification-mail-channel`        | [#63](https://github.com/marabi766/RASTA/pull/63) | `bcd3cd5`   |
-| `feat/notification-email-delivery`      | [#65](https://github.com/marabi766/RASTA/pull/65) | `db39f30`   |
-| `feat/web-session-and-shell`            | [#66](https://github.com/marabi766/RASTA/pull/66) | `3cf79aa`   |
-| `docs/frontend-gate-and-web-state`      | [#64](https://github.com/marabi766/RASTA/pull/64) | `df54a43`   |
-| `feat/web-asset-surfaces`               | [#67](https://github.com/marabi766/RASTA/pull/67) | `6ea1260`   |
-| `chore/api-gateway-dockerfile`          | [#70](https://github.com/marabi766/RASTA/pull/70) | `c4de97b`   |
-| `feat/asset-insurance-claim-api`        | [#71](https://github.com/marabi766/RASTA/pull/71) | `fa14ef4`   |
-| `fix/document-service-allow-asset-read` | [#72](https://github.com/marabi766/RASTA/pull/72) | `3f68d76`   |
-| `fix/supply-chain-trust-policy`         | [#74](https://github.com/marabi766/RASTA/pull/74) | `9e0b769`   |
-| `feat/web-maintenance-surfaces`         | [#73](https://github.com/marabi766/RASTA/pull/73) | `239ae23`   |
-| `feat/web-write-path-and-usage`         | [#75](https://github.com/marabi766/RASTA/pull/75) | `0b4a35a`   |
-| `feat/web-drivers-surface`              | [#76](https://github.com/marabi766/RASTA/pull/76) | `1a6ba45`   |
-| `fix/identity-role-grant-ladder`        | [#77](https://github.com/marabi766/RASTA/pull/77) | `9347b80`   |
-| `feat/ci-portal-e2e-live-stack`         | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
-| `claude/quirky-curie-15d850`            | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
-| `fix/minio-quay-registry`               | —                                                 | پیش‌تر      |
+| شاخه                                     | PR                                                | ادغام شد در |
+| ---------------------------------------- | ------------------------------------------------- | ----------- |
+| `feat/audit-service-aud-004-contract`    | [#44](https://github.com/marabi766/RASTA/pull/44) | `9fa75cc`   |
+| `docs/inventory-logistics-adr`           | [#45](https://github.com/marabi766/RASTA/pull/45) | `f2eb8fa`   |
+| `feat/notification-service`              | [#46](https://github.com/marabi766/RASTA/pull/46) | `cc89660`   |
+| `feat/notification-read-api`             | [#47](https://github.com/marabi766/RASTA/pull/47) | `7389ffd`   |
+| `feat/supplier-performance-phase2`       | [#48](https://github.com/marabi766/RASTA/pull/48) | `f7252d3`   |
+| `docs/branch-registry`                   | [#49](https://github.com/marabi766/RASTA/pull/49) | `76feb8e`   |
+| `fix/notification-dedupe-window-race`    | [#50](https://github.com/marabi766/RASTA/pull/50) | `78ac7b0`   |
+| `docs/project-memory-2026-09-18`         | [#51](https://github.com/marabi766/RASTA/pull/51) | `a84269a`   |
+| `docs/ci-serialization-and-backlog`      | [#52](https://github.com/marabi766/RASTA/pull/52) | `76a1bf7`   |
+| `docs/audit-immutable-archive`           | [#53](https://github.com/marabi766/RASTA/pull/53) | `eea7d61`   |
+| `feat/web-foundation`                    | [#54](https://github.com/marabi766/RASTA/pull/54) | `8c04477`   |
+| `feat/web-design-tokens`                 | [#55](https://github.com/marabi766/RASTA/pull/55) | `4b15725`   |
+| `feat/web-component-library`             | [#56](https://github.com/marabi766/RASTA/pull/56) | `e7b0372`   |
+| `feat/maintenance-schedule-audit-event`  | [#57](https://github.com/marabi766/RASTA/pull/57) | `18946a2`   |
+| `feat/notification-outbox-audit`         | [#58](https://github.com/marabi766/RASTA/pull/58) | `419afde`   |
+| `docs/state-2026-09-19`                  | [#59](https://github.com/marabi766/RASTA/pull/59) | `8a80ce5`   |
+| `feat/notification-preferences`          | [#60](https://github.com/marabi766/RASTA/pull/60) | `e6d509e`   |
+| `docs/state-2026-09-20`                  | [#61](https://github.com/marabi766/RASTA/pull/61) | `37c48c2`   |
+| `chore/test-task-unit-only`              | [#62](https://github.com/marabi766/RASTA/pull/62) | `f7755e0`   |
+| `feat/notification-mail-channel`         | [#63](https://github.com/marabi766/RASTA/pull/63) | `bcd3cd5`   |
+| `feat/notification-email-delivery`       | [#65](https://github.com/marabi766/RASTA/pull/65) | `db39f30`   |
+| `feat/web-session-and-shell`             | [#66](https://github.com/marabi766/RASTA/pull/66) | `3cf79aa`   |
+| `docs/frontend-gate-and-web-state`       | [#64](https://github.com/marabi766/RASTA/pull/64) | `df54a43`   |
+| `feat/web-asset-surfaces`                | [#67](https://github.com/marabi766/RASTA/pull/67) | `6ea1260`   |
+| `chore/api-gateway-dockerfile`           | [#70](https://github.com/marabi766/RASTA/pull/70) | `c4de97b`   |
+| `feat/asset-insurance-claim-api`         | [#71](https://github.com/marabi766/RASTA/pull/71) | `fa14ef4`   |
+| `fix/document-service-allow-asset-read`  | [#72](https://github.com/marabi766/RASTA/pull/72) | `3f68d76`   |
+| `fix/supply-chain-trust-policy`          | [#74](https://github.com/marabi766/RASTA/pull/74) | `9e0b769`   |
+| `feat/web-maintenance-surfaces`          | [#73](https://github.com/marabi766/RASTA/pull/73) | `239ae23`   |
+| `feat/web-write-path-and-usage`          | [#75](https://github.com/marabi766/RASTA/pull/75) | `0b4a35a`   |
+| `feat/web-drivers-surface`               | [#76](https://github.com/marabi766/RASTA/pull/76) | `1a6ba45`   |
+| `fix/identity-role-grant-ladder`         | [#77](https://github.com/marabi766/RASTA/pull/77) | `9347b80`   |
+| `feat/web-organizations-surface`         | [#79](https://github.com/marabi766/RASTA/pull/79) | `0ac1a61`   |
+| `feat/ci-portal-e2e-live-stack`          | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
+| `feat/web-asset-timeline`                | [#80](https://github.com/marabi766/RASTA/pull/80) | `62186cf`   |
+| `fix/identity-cross-tenant-provisioning` | [#81](https://github.com/marabi766/RASTA/pull/81) | `cfdb7b0`   |
+| `claude/upbeat-tesla-cenkph`             | [#82](https://github.com/marabi766/RASTA/pull/82) | `d7500be`   |
+| `feat/ci-portal-e2e-live-stack`          | [#78](https://github.com/marabi766/RASTA/pull/78) | `39ac75c`   |
+| `claude/quirky-curie-15d850`             | [#69](https://github.com/marabi766/RASTA/pull/69) | `7488e73`   |
+| `fix/minio-quay-registry`                | —                                                 | پیش‌تر      |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
 > است و می‌ماند. هیچ Worktreeای `main` را checkout نکرده، پس `git fetch` آن ref
@@ -175,16 +182,18 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 
 ### پرسش‌های باز `Q-NN`
 
-| شماره       | مالک                                  | وضعیت                                                                                               |
-| ----------- | ------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Q-44        | تصمیم محصول MVP                       | **بسته** روی `main` و تثبیت‌شده با نقل‌قول کلمه‌به‌کلمه در `ADR-056 § ۲` — تغییرناپذیر              |
-| Q-45 … Q-55 | `feat/audit-service-aud-004-contract` | روی `main`                                                                                          |
-| Q-56        | `feat/supplier-performance-phase2`    | روی `main` (`f7252d3`)                                                                              |
-| Q-57        | `feat/audit-service-aud-004-contract` | روی `main`                                                                                          |
-| Q-58        | `docs/audit-immutable-archive`        | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                                |
-| Q-59        | `feat/asset-insurance-claim-api`      | روی `main` (`fa14ef4`) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه                        |
-| Q-60        | `fix/identity-role-grant-ladder`      | روی `main` (`9347b80`) — مرجع اعطای نقش: چه نقشی چه نقش‌هایی را می‌دهد، و چه عضویتی را اداره می‌کند |
-| Q-61+       | آزاد                                  | —                                                                                                   |
+| شماره       | مالک                                     | وضعیت                                                                                                                         |
+| ----------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Q-44        | تصمیم محصول MVP                          | **بسته** روی `main` و تثبیت‌شده با نقل‌قول کلمه‌به‌کلمه در `ADR-056 § ۲` — تغییرناپذیر                                        |
+| Q-45 … Q-55 | `feat/audit-service-aud-004-contract`    | روی `main`                                                                                                                    |
+| Q-56        | `feat/supplier-performance-phase2`       | روی `main` (`f7252d3`)                                                                                                        |
+| Q-57        | `feat/audit-service-aud-004-contract`    | روی `main`                                                                                                                    |
+| Q-58        | `docs/audit-immutable-archive`           | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                                                          |
+| Q-59        | `feat/asset-insurance-claim-api`         | روی `main` (`fa14ef4`) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه                                                  |
+| Q-60        | `fix/identity-role-grant-ladder`         | روی `main` (`9347b80`) — مرجع اعطای نقش: چه نقشی چه نقش‌هایی را می‌دهد، و چه عضویتی را اداره می‌کند                           |
+| Q-61        | `fix/identity-cross-tenant-provisioning` | روی `main` (`cfdb7b0`) — مرجع ساخت حساب در سازمانی جز سازمان خود. **پس از استفاده ثبت شد** — #81 بدون رزرو پیشین آن را برداشت |
+| Q-62        | `claude/upbeat-tesla-cenkph`             | رزرو — مرجع استرداد (Refund) تراکنش: چه کسی، از کدام وضعیت؛ سیاست موقت `fix/economic-refund-authority-and-idempotency`        |
+| Q-63+       | آزاد                                     | —                                                                                                                             |
 
 > **چرا Q-44 قابل جابه‌جایی نیست:** یک ADR ادغام‌شده آن را به‌عنوان مرجع
 > پذیرش نقل کرده. نقل‌قول را نمی‌شود ویرایش کرد بی‌آنکه سند دروغ شود. هر

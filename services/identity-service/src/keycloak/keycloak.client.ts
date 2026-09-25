@@ -1,19 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { RastaError } from '@rasta/nest-common';
+import {
+  PLATFORM_ATTRIBUTE_NAMES,
+  readPlatformAttributes,
+  type PlatformAttributes,
+} from './platform-attributes';
 
 /**
  * Thin client over the Keycloak Admin API.
  *
  * The boundary this maintains (ADR-008): Keycloak owns authentication —
  * passwords, sessions, MFA, token issuance. This service owns membership. The
- * only reason to call Keycloak at all is to keep two attributes in sync so
- * they land in the token:
+ * reason to call Keycloak at all is to project membership into the four user
+ * attributes that become token claims (`platform-attributes.ts`, ADR-060 § 5).
  *
- *   active_organization_id -> the `org_id` claim
- *   organization_ids       -> the `org_ids` claim
- *
- * Those claims are what the gateway checks `X-Organization-Id` against, so a
- * failure to sync means a user cannot act for an organization they belong to.
+ * Those claims are what every service authorizes against, so a projection
+ * that did not land means a token that says something the database does not.
  */
 
 export interface CreateKeycloakUserInput {
@@ -21,8 +23,16 @@ export interface CreateKeycloakUserInput {
   email: string;
   firstName: string;
   lastName: string;
-  organizationId: string;
+  /** The whole platform attribute set, from the first write (ADR-060 § 5). */
+  attributes: PlatformAttributes;
   roles: string[];
+}
+
+/** What the admin API returns for a user — only the fields this client reads. */
+interface KeycloakUserRepresentation {
+  id: string;
+  attributes?: Record<string, string[]>;
+  [field: string]: unknown;
 }
 
 export interface KeycloakClientOptions {
@@ -124,10 +134,9 @@ export class KeycloakAdminClient {
         enabled: true,
         emailVerified: false,
         requiredActions: ['UPDATE_PASSWORD'],
-        attributes: {
-          active_organization_id: [input.organizationId],
-          organization_ids: [input.organizationId],
-        },
+        // All four, including `rasta_user_id` — which was never written before,
+        // so every API-provisioned token fell back to `sub` for the user id.
+        attributes: input.attributes,
       }),
     });
 
@@ -182,42 +191,62 @@ export class KeycloakAdminClient {
     }
   }
 
-  /** Mirrors the membership set into the attribute that becomes `org_ids`. */
-  async syncMemberships(
-    keycloakId: string | null,
-    userId: string,
-    organizationIds: readonly string[],
+  /**
+   * Replaces the platform attributes of one user — all four, in one write.
+   *
+   * Read-modify-write of the whole representation, never a partial body: the
+   * admin `PUT` treats what it is sent as the complete user, so a body carrying
+   * only `attributes` erased the other platform attributes *and* the user's
+   * email and names (verified on Keycloak 26.0). Attributes this service does
+   * not own are carried over untouched.
+   *
+   * Throws when the write does not land. Whether that is fatal is the
+   * caller's decision (`KeycloakProjector`), not this client's.
+   */
+  async replacePlatformAttributes(
+    keycloakId: string,
+    attributes: PlatformAttributes,
   ): Promise<void> {
-    if (!this.options.enabled || !keycloakId) return;
+    if (!this.options.enabled) return;
+
+    const current = await this.getUser(keycloakId, 'replacePlatformAttributes');
+    const others = Object.fromEntries(
+      Object.entries(current.attributes ?? {}).filter(
+        ([name]) => !(PLATFORM_ATTRIBUTE_NAMES as readonly string[]).includes(name),
+      ),
+    );
 
     const response = await this.admin(`/users/${keycloakId}`, {
       method: 'PUT',
-      body: JSON.stringify({ attributes: { organization_ids: [...organizationIds] } }),
+      body: JSON.stringify({ ...current, attributes: { ...others, ...attributes } }),
     });
 
     if (!response.ok) {
-      // Deliberately not fatal. The membership is already committed; failing
-      // here would roll back a valid change because a downstream sync blipped.
-      // Surfaced loudly because the user cannot act for the new organization
-      // until their next token refresh picks the attribute up.
-      this.logger.error(
-        `Failed to sync memberships for user ${userId} (status ${response.status}). ` +
-          'Their token will not carry the new organization until this is retried.',
-      );
+      throw RastaError.upstreamUnavailable('keycloak', {
+        status: response.status,
+        operation: 'replacePlatformAttributes',
+      });
     }
   }
 
-  async setActiveOrganization(keycloakId: string | null, organizationId: string): Promise<void> {
-    if (!this.options.enabled || !keycloakId) return;
+  /** The platform attributes Keycloak currently holds for one user, for reconcile. */
+  async getPlatformAttributes(keycloakId: string): Promise<PlatformAttributes> {
+    const current = await this.getUser(keycloakId, 'getPlatformAttributes');
+    return readPlatformAttributes(current.attributes);
+  }
 
-    const response = await this.admin(`/users/${keycloakId}`, {
-      method: 'PUT',
-      body: JSON.stringify({ attributes: { active_organization_id: [organizationId] } }),
-    });
-
-    if (!response.ok) {
-      throw RastaError.upstreamUnavailable('keycloak', { operation: 'setActiveOrganization' });
+  private async getUser(
+    keycloakId: string,
+    operation: string,
+  ): Promise<KeycloakUserRepresentation> {
+    const response = await this.admin(`/users/${keycloakId}`);
+    if (response.status === 404) {
+      throw RastaError.notFound('KeycloakUser', keycloakId);
     }
+    if (!response.ok) {
+      throw RastaError.upstreamUnavailable('keycloak', { status: response.status, operation });
+    }
+    return (await response.json()) as KeycloakUserRepresentation;
   }
 
   async setEnabled(keycloakId: string | null, enabled: boolean): Promise<void> {

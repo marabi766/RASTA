@@ -911,14 +911,30 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 21,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Wallet, order, dispute and settlement states match implemented backend contracts",
         "No UI claims real banking, automatic confirmation or unimplemented supplier capabilities"
       ],
       "dependencies": ["EXP-001", "COM-001", "COM-002"],
       "sourceRefs": ["docs/16-ui-architecture.md#۱۶۶-نقشه-صفحات"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/83",
+          "note": "/orders and /orders/[id]: the order list (one tab per side, since an organization is a buyer in one order and a seller in the next) and the order detail with a stepper and the commands this viewer may issue. The commands come from OrderView.availableActions, computed per caller by marketplace-service from the transition table, each command's own from-narrowing and access.ts — never derived in the portal, because the table alone would offer the buyer 'confirm receipt' on a disputed order."
+        },
+        {
+          "kind": "TEST",
+          "ref": "services/marketplace-service/test/api-available-actions.int-spec.ts",
+          "note": "Against a real database: at each step of confirm → fulfil → confirm receipt the advertised commands are the ones that then succeed; mid-dispute confirm receipt is withheld and refused (422); only an operator may leave DISPUTED; and a non-party gets 404 — never 403 — on a read and on every command."
+        },
+        {
+          "kind": "TEST",
+          "ref": "apps/web/src/app/orders",
+          "note": "The same order rendered for its buyer and its supplier offers different commands, driven only by availableActions; each form mints its own submission id (a real idempotency key on orders); the money-releasing command requires an acknowledgement checked on the server, not only by the checkbox. Three jest-axe passes."
+        }
+      ]
     },
     {
       "id": "EXP-004",
@@ -1206,6 +1222,22 @@
       ],
       "dependencies": ["RUN-004"],
       "sourceRefs": ["docs/adr/ADR-044-target-service-topology.md"],
+      "evidence": []
+    },
+    {
+      "id": "EXT-005",
+      "epicId": "EP-EXPANSION",
+      "title": "Gateway revocation list for demoted and revoked memberships",
+      "scope": "POST_MVP",
+      "priority": "P3",
+      "points": 8,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "A ROLE_REVOKED or MEMBERSHIP_REVOKED event causes the gateway to refuse the affected (user, organization) pair within Kafka lag, until every access token minted before the change has expired",
+        "identity-service does not become a synchronous dependency of any request, and the gateway fails closed on a pair it cannot evaluate"
+      ],
+      "dependencies": ["CORE-003"],
+      "sourceRefs": ["docs/adr/ADR-060-tenant-bound-roles.md", "docs/23-risks-and-tradeoffs.md"],
       "evidence": []
     }
   ],
@@ -1811,6 +1843,14 @@
       "recordedBy": "Claude Opus 5",
       "approvalRef": "Product owner standing authority for quality and security decisions, Claude Code session 2026-09-21",
       "recordIds": ["EXP-002"]
+    },
+    {
+      "date": "2026-09-24",
+      "type": "SCOPE_ADDED",
+      "reason": "ADR-060 binds roles to the organization and carries them in the access token, so a demotion or revocation takes effect within 905 seconds (the realm's 900-second access-token lifetime plus 5 seconds of clock tolerance). That window was accepted for MVP and recorded as T-06 in docs/23. EXT-005 is the follow-up that closes it for the dangerous direction: a gateway revocation list fed by the events identity-service already publishes. Filed under EP-EXPANSION because the window was accepted for MVP, so the fix is post-MVP, and the backlog has no post-MVP hardening epic; EP-EXPANSION's 'before national scale' is the nearest honest home. Whether a dedicated hardening epic is wanted is a backlog-structure decision left to the project manager.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Project manager decision on ADR-060, 2026-09-24 (PR #84)",
+      "recordIds": ["EXT-005"]
     }
   ]
 }

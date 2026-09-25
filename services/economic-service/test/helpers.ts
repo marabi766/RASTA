@@ -153,6 +153,7 @@ export function wire(prisma: PrismaService): Wiring {
     transactionRepository,
     wallets,
     walletRepository,
+    env,
   );
   const commissions = new CommissionService(prisma, ledger);
   const rewards = new RewardService(prisma, ledger, wallets, env);

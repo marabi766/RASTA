@@ -449,4 +449,89 @@ describe('catalogue API', () => {
       expect(response.body.items).toEqual([]);
     });
   });
+
+  describe('GET /v1/products/:id', () => {
+    it('reads one product, across organizations, the same open read as search', async () => {
+      const product = await createProduct(supplierOrg, { name: 'شیر فشارشکن' });
+
+      const response = await request(http)
+        .get(`/v1/products/${product.body.id}`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .expect(200);
+
+      expect(response.body.id).toBe(product.body.id);
+      expect(response.body.name).toBe('شیر فشارشکن');
+    });
+
+    it('answers even for a product with no published offer', async () => {
+      // A compare page reached from an older link should still say what the
+      // product is, even if nobody is currently offering it — unlike search,
+      // which only ever returns what is for sale right now.
+      const product = await createProduct(supplierOrg, { name: 'بدون عرضهٔ فعال' });
+
+      await request(http)
+        .get(`/v1/products/${product.body.id}`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .expect(200);
+    });
+
+    it('reports 404 for a product that does not exist', async () => {
+      await request(http)
+        .get('/v1/products/PRD_does_not_exist')
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .expect(404);
+    });
+
+    it('reports 404 for a product that has been archived, matching createOffer’s own precedent', async () => {
+      // ARCHIVED is not "no current offer" — it is the catalogue's own
+      // removal state, and `createOffer` already answers 404 for it. A
+      // second endpoint disagreeing would let a caller tell "gone" from
+      // "never existed" by comparing the two.
+      const product = await createProduct(supplierOrg, { name: 'محصول بایگانی‌شده' });
+      await runUnscoped('the suite archives the product it created', () =>
+        harness.prisma.client.$executeRawUnsafe(
+          `UPDATE product SET status='ARCHIVED' WHERE id=$1`,
+          product.body.id,
+        ),
+      );
+
+      await request(http)
+        .get(`/v1/products/${product.body.id}`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .expect(404);
+    });
+
+    it('crosses organizations the same narrow way search does — catalogue columns only, never an order', async () => {
+      // ADR-042 § 3: the open read is scoped to what `toProductView` actually
+      // whitelists. It does not carry `organizationId` — this asserts the
+      // shape, not merely that the request succeeded.
+      const product = await createProduct(supplierOrg);
+
+      const response = await request(http)
+        .get(`/v1/products/${product.body.id}`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .expect(200);
+
+      expect(response.body).not.toHaveProperty('organizationId');
+      // No `offers` key at all here — `getProduct` calls `toProductView`
+      // without a second argument, unlike search. A buyer comparing offers
+      // uses `GET /v1/products/:id/offers`, which is where that list lives.
+      expect(Object.keys(response.body).sort()).toEqual(
+        ['category', 'description', 'id', 'kind', 'name', 'sku', 'status', 'unit'].sort(),
+      );
+    });
+
+    it('refuses the oversight role with 403', async () => {
+      const product = await createProduct();
+      await request(http)
+        .get(`/v1/products/${product.body.id}`)
+        .set('authorization', `Bearer ${auditor(buyerOrg)}`)
+        .expect(403);
+    });
+
+    it('refuses an unauthenticated request with 401', async () => {
+      const product = await createProduct();
+      await request(http).get(`/v1/products/${product.body.id}`).expect(401);
+    });
+  });
 });

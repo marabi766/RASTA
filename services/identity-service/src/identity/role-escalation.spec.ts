@@ -28,6 +28,7 @@ import {
 import { IdentityService } from './identity.service';
 import { IdentityRepository } from './identity.repository';
 import { KeycloakAdminClient } from '../keycloak/keycloak.client';
+import { KeycloakProjector } from '../keycloak/keycloak.projector';
 import { TEST_ORG_A } from '@rasta/testing';
 import { DEFAULT_ROLE_GRANT_POLICY, ROLE_GRANT_POLICY } from './role-grants';
 import { DEFAULT_PROVISIONING_SCOPE_POLICY, PROVISIONING_SCOPE_POLICY } from './provisioning-scope';
@@ -173,6 +174,8 @@ const tx = {
     },
   },
   membership: {
+    // Where a revoke looks for the user's next organization (ADR-060 § 5).
+    findFirst: async () => null,
     create: async (args: { data: { roles: string[] } }) => {
       writes.push({ model: 'membership', roles: args.data.roles });
       return membershipRow('MBR_new', args.data.roles);
@@ -241,13 +244,17 @@ function registrationRow(status: string) {
 let requestedRoles: string[] = ['FLEET_MANAGER'];
 /** Which organization it asked to join — the applicant chooses this. */
 let registrationOrganizationId: string = ORG_A;
+/** The registration's status — set per test. */
+let registrationStatus: string = 'PENDING';
+/** Whether `REGISTRATION` exists at all — `false` simulates an unknown id. */
+let registrationExists = true;
 
 const repository = {
   client: {
     ...tx,
     registrationRequest: {
       ...tx.registrationRequest,
-      findFirst: async () => registrationRow('PENDING'),
+      findFirst: async () => (registrationExists ? registrationRow(registrationStatus) : null),
     },
   },
   transaction: async (fn: (t: unknown) => Promise<unknown>) => fn(tx),
@@ -275,8 +282,10 @@ const keycloak = {
     keycloakCreates.push(input);
     return 'kc-new';
   },
-  syncMemberships: async () => undefined,
-  setActiveOrganization: async () => undefined,
+  // Projection is not what this suite is about; with sync off the projector
+  // returns before touching anything (`identity.service.spec.ts` covers it).
+  enabled: false,
+  replacePlatformAttributes: async () => undefined,
   assignRealmRoles: async () => undefined,
   isHealthy: async () => true,
 } as unknown as KeycloakAdminClient;
@@ -286,6 +295,7 @@ const keycloak = {
   providers: [
     { provide: IdentityRepository, useValue: repository },
     { provide: KeycloakAdminClient, useValue: keycloak },
+    KeycloakProjector,
     // The shipped default, not a test-only ladder: these tests assert what a
     // deployment that configures nothing actually does.
     { provide: ROLE_GRANT_POLICY, useValue: DEFAULT_ROLE_GRANT_POLICY },
@@ -340,6 +350,8 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
     memberships.set(OPERATOR_MEMBERSHIP, ['SYSTEM_ADMIN']);
     requestedRoles = ['FLEET_MANAGER'];
     registrationOrganizationId = ORG_A;
+    registrationStatus = 'PENDING';
+    registrationExists = true;
     keycloakCreates.length = 0;
     lookups.user = true;
     lookups.membership = false;
@@ -686,6 +698,10 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
       // request is attacker-chosen. Checking only the two direct paths would
       // have left this one open: file a request naming any organization, then
       // approve your own filing.
+      //
+      // `404`, not `403`/`TENANT_MISMATCH`: see "the registration-approval
+      // oracle" below for why a scope refusal here must look like a missing
+      // registration rather than a distinct refusal.
       registrationOrganizationId = ORG_B;
 
       const response = await request(server())
@@ -693,9 +709,25 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
         .set('authorization', unionAdmin())
         .send({ roles: ['FLEET_MANAGER'] });
 
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(404);
       expect(writes).toHaveLength(0);
       expect(keycloakCreates).toHaveLength(0);
+    });
+
+    it('closes the registration-rejection way around it — unchecked before this fix, at any status', async () => {
+      // Unlike approve, reject had no scope check anywhere, at any point in
+      // the function: a UNION_ADMIN of ORG_A did not just learn that ORG_B's
+      // registration existed, they could actually reject it — a real
+      // cross-tenant mutation, not an oracle.
+      registrationOrganizationId = ORG_B;
+
+      const response = await request(server())
+        .post(`/v1/registration-requests/${REGISTRATION}/reject`)
+        .set('authorization', unionAdmin())
+        .send({ reason: 'not eligible for this organization' });
+
+      expect(response.status).toBe(404);
+      expect(writes).toHaveLength(0);
     });
   });
 
@@ -750,6 +782,136 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
       const body = JSON.stringify(response.body);
       expect(body).not.toContain(ORG_B);
       expect(body).not.toContain(ORG_A);
+    });
+  });
+
+  describe('the registration-approval oracle', () => {
+    /**
+     * `approveRegistration` looked the registration up platform-wide, then
+     * answered `404` if it did not exist, `409` if it existed but was no
+     * longer pending, and only *then* checked whether the reviewer had any
+     * authority over the organization it named. A `UNION_ADMIN` of `ORG_A`
+     * could therefore learn, about any registration id, whether it existed
+     * in some other organization and what state it was in — three distinct
+     * answers, none of them anything the reviewer is allowed to see.
+     *
+     * Folding the scope check into the same `404` used for a genuinely
+     * missing id, checked before status is ever read, collapses all three
+     * into one answer.
+     */
+    const probe = () =>
+      request(server())
+        .post(`/v1/registration-requests/${REGISTRATION}/approve`)
+        .set('authorization', unionAdmin())
+        .send({});
+
+    it('answers identically for a pending registration in another organization and a missing one', async () => {
+      registrationOrganizationId = ORG_B;
+      registrationStatus = 'PENDING';
+
+      registrationExists = true;
+      const existsElsewhere = await probe();
+      registrationExists = false;
+      const missing = await probe();
+
+      expect(existsElsewhere.status).toBe(missing.status);
+      expect(existsElsewhere.body.code).toBe(missing.body.code);
+      expect(existsElsewhere.status).toBe(404);
+    });
+
+    it('answers identically for an already-decided registration in another organization and a missing one', async () => {
+      registrationOrganizationId = ORG_B;
+      registrationStatus = 'APPROVED';
+
+      registrationExists = true;
+      const existsElsewhere = await probe();
+      registrationExists = false;
+      const missing = await probe();
+
+      expect(existsElsewhere.status).toBe(missing.status);
+      expect(existsElsewhere.body.code).toBe(missing.body.code);
+      expect(existsElsewhere.status).toBe(404);
+    });
+
+    it('never calls Keycloak or writes anything for a registration outside the caller scope', async () => {
+      registrationOrganizationId = ORG_B;
+      await probe();
+      expect(keycloakCreates).toHaveLength(0);
+      expect(writes).toHaveLength(0);
+    });
+
+    it('still tells a reviewer a pending registration in their own organization apart from a decided one', async () => {
+      // The fix must not blur the two cases the endpoint has always had to
+      // distinguish *within* the caller's own scope.
+      registrationOrganizationId = ORG_A;
+      registrationStatus = 'APPROVED';
+
+      const response = await probe();
+
+      expect(response.status).toBe(409);
+    });
+
+    it('does not widen what a platform-scope reviewer may already do (Q-61)', async () => {
+      // SYSTEM_ADMIN is in `crossOrgRoles`, so it was always in scope for
+      // every organization. The fix must leave that reach exactly as it was.
+      registrationOrganizationId = ORG_B;
+      registrationStatus = 'PENDING';
+
+      const response = await request(server())
+        .post(`/v1/registration-requests/${REGISTRATION}/approve`)
+        .set('authorization', systemAdmin())
+        .send({ roles: ['FLEET_MANAGER'] });
+
+      expect(response.status).toBe(200);
+      expect(keycloakCreates).toHaveLength(1);
+    });
+  });
+
+  describe('the registration-rejection oracle and bypass', () => {
+    /**
+     * `rejectRegistration` had no provisioning-scope check at all — not even
+     * the "checked too late" shape `approveRegistration` had. Any
+     * `UNION_ADMIN` on the platform could reject a PENDING registration
+     * destined for any organization: a real mutation of another tenant's
+     * data, not merely an oracle about it.
+     */
+    const probe = () =>
+      request(server())
+        .post(`/v1/registration-requests/${REGISTRATION}/reject`)
+        .set('authorization', unionAdmin())
+        .send({ reason: 'not eligible for this organization' });
+
+    it('answers identically for a pending registration in another organization and a missing one', async () => {
+      registrationOrganizationId = ORG_B;
+      registrationStatus = 'PENDING';
+
+      registrationExists = true;
+      const existsElsewhere = await probe();
+      registrationExists = false;
+      const missing = await probe();
+
+      expect(existsElsewhere.status).toBe(missing.status);
+      expect(existsElsewhere.body.code).toBe(missing.body.code);
+      expect(existsElsewhere.status).toBe(404);
+    });
+
+    it('leaves the registration PENDING — no write for a caller outside its scope', async () => {
+      registrationOrganizationId = ORG_B;
+      registrationStatus = 'PENDING';
+
+      await probe();
+
+      expect(writes).toHaveLength(0);
+    });
+
+    it('still lets a reviewer reject a pending registration in their own organization', async () => {
+      registrationOrganizationId = ORG_A;
+      registrationStatus = 'PENDING';
+
+      const response = await probe();
+
+      expect(response.status).toBe(200);
+      expect(writes.some((w) => w.model === 'registrationRequest')).toBe(true);
     });
   });
 

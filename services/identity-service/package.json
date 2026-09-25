@@ -19,6 +19,8 @@
     "db:migrate": "node --env-file-if-exists=../../.env ../../scripts/prisma.mjs migrate deploy",
     "db:migrate:dev": "node --env-file-if-exists=../../.env ../../scripts/prisma.mjs migrate dev",
     "db:seed": "node --import @swc-node/register/esm-register --env-file-if-exists=../../.env prisma/seed.ts",
+    "keycloak:reconcile": "node -r @swc-node/register --env-file-if-exists=../../.env src/keycloak/projection.cli.ts reconcile",
+    "keycloak:backfill": "node -r @swc-node/register --env-file-if-exists=../../.env src/keycloak/projection.cli.ts backfill",
     "openapi:generate": "tsx src/openapi.ts"
   },
   "prisma": {

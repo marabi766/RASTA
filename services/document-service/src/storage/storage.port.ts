@@ -1,6 +1,23 @@
 import type { Readable } from 'node:stream';
 
 /**
+ * Raised by {@link ObjectStorage.copyToSealedKey} when the source object no
+ * longer matches the ETag the caller pinned the copy to.
+ *
+ * A storage-port-level type rather than a leaked AWS SDK error, so the
+ * domain can catch exactly this without knowing whether the underlying
+ * client happens to call it `PreconditionFailed` or something else.
+ */
+export class ObjectChangedError extends Error {
+  constructor() {
+    // No object key in the message — ADR-014 keeps it inside this service,
+    // and an uncaught throw can still reach a log line.
+    super('The source object changed since it was last inspected');
+    this.name = 'ObjectChangedError';
+  }
+}
+
+/**
  * The object-storage boundary (ADR-014).
  *
  * An interface rather than a class so that "swapping MinIO for managed S3 is a
@@ -33,15 +50,44 @@ export interface ObjectStorage {
   /**
    * A short-lived URL the client may PUT one object to.
    *
-   * The content type is bound into the signature: a client that asks for
-   * permission to upload a PDF cannot use the same URL to upload something
-   * else, because the signature covers the header.
+   * The content type **and the declared size** are bound into the signature:
+   * a client that asks for permission to upload a 2 MB PDF cannot use the
+   * same URL to upload something else, or something a different size,
+   * because the signature covers both headers. An HTTP client sets
+   * `Content-Length` from the body it actually sends and cannot be told to
+   * lie about it, so a body that does not match the declared size fails the
+   * signature check at storage before a byte is accepted — the same
+   * enforcement `content-type` already gets, extended to size.
    */
   createUploadUrl(input: {
     objectKey: string;
     contentType: string;
+    contentLength: number;
     expiresInSeconds: number;
   }): Promise<string>;
+
+  /**
+   * Server-side copy into an object nothing but this method can create.
+   *
+   * The one step that closes the overwrite window: `finalize` calls this
+   * once, immediately after reading the object back and validating it,
+   * copying the just-inspected bytes into a key under
+   * {@link KEY_ROOT_SEALED} that no upload credential was ever signed for.
+   * From that instant the document row names the sealed key, never the one
+   * the client's upload URL could still write to.
+   *
+   * `ifMatchETag` is not optional hardening — it is what makes the copy
+   * provably of the bytes just inspected rather than of whatever happens to
+   * be at `sourceKey` when the copy runs. Storage refuses the copy outright
+   * if the source has changed since that ETag was read, which is what closes
+   * the second race: an overwrite landing between the read-back and the
+   * seal, not only one landing after it.
+   */
+  copyToSealedKey(input: {
+    sourceKey: string;
+    destinationKey: string;
+    ifMatchETag: string;
+  }): Promise<void>;
 
   /** A short-lived URL for reading one object, as an attachment. */
   createDownloadUrl(input: {

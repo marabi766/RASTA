@@ -1,4 +1,4 @@
-import { hashRequestBody } from './idempotency';
+import { hashRequestBody, targeted } from './idempotency';
 
 /**
  * Request-body canonicalisation for idempotent writes (docs/06 § 6.8).
@@ -67,5 +67,28 @@ describe('hashRequestBody', () => {
 
   it('produces a hex digest of the expected length', () => {
     expect(hashRequestBody({ a: 1 })).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe('targeted — the request identity of a route that acts on one resource', () => {
+  const reason = { reason: 'the order was cancelled before dispatch' };
+
+  it('tells two resources apart even when the body is identical', () => {
+    // The defect: hashing only the DTO made key K + this body on TXN_B look like
+    // a retry of TXN_A, so TXN_B got TXN_A's stored response and was never touched.
+    expect(hashRequestBody(targeted('TXN_A', reason))).not.toBe(
+      hashRequestBody(targeted('TXN_B', reason)),
+    );
+  });
+
+  it('is still a retry for the same resource and the same body', () => {
+    expect(hashRequestBody(targeted('TXN_A', reason))).toBe(
+      hashRequestBody(targeted('TXN_A', { ...reason })),
+    );
+  });
+
+  it('with no body, hashes exactly what authorise-settlement always stored', () => {
+    // So keys that route recorded before this change still match after it.
+    expect(hashRequestBody(targeted('TXN_A'))).toBe(hashRequestBody({ id: 'TXN_A' }));
   });
 });

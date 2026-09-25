@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@n
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { PaymentService } from './payment.service';
-import { IdempotencyStore } from '../shared/idempotency';
+import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
 import { toPaymentIntentView, type PaymentIntentRow } from '../shared/views';
@@ -79,22 +79,28 @@ export class PaymentController {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
 
-    return this.idempotency.run(`POST /v1/payment-intents/:id/refund`, key, dto, 200, async () => {
-      const result = await this.payments.refund(id, dto.reason);
-      return {
-        paymentIntentId: result.paymentIntentId,
-        reversalJournalId: result.reversalJournalId,
-        amountMinor: result.amountMinor.toString(),
-        currency: result.currency,
-        provider: result.provider,
-        simulated: result.simulated,
-        refundedAt: result.refundedAt.toISOString(),
-        balances: {
-          ledgerBalanceMinor: result.balances.ledgerBalanceMinor.toString(),
-          pendingBalanceMinor: result.balances.pendingBalanceMinor.toString(),
-          availableBalanceMinor: result.balances.availableBalanceMinor.toString(),
-        },
-      };
-    });
+    return this.idempotency.run(
+      'POST /v1/payment-intents/:id/refund',
+      key,
+      targeted(id, dto),
+      200,
+      async () => {
+        const result = await this.payments.refund(id, dto.reason);
+        return {
+          paymentIntentId: result.paymentIntentId,
+          reversalJournalId: result.reversalJournalId,
+          amountMinor: result.amountMinor.toString(),
+          currency: result.currency,
+          provider: result.provider,
+          simulated: result.simulated,
+          refundedAt: result.refundedAt.toISOString(),
+          balances: {
+            ledgerBalanceMinor: result.balances.ledgerBalanceMinor.toString(),
+            pendingBalanceMinor: result.balances.pendingBalanceMinor.toString(),
+            availableBalanceMinor: result.balances.availableBalanceMinor.toString(),
+          },
+        };
+      },
+    );
   }
 }

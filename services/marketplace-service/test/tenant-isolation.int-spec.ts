@@ -253,9 +253,13 @@ describe('tenant isolation (real database)', () => {
       // check and from nothing else.
       const order = await anOrder();
 
+      // NOT_FOUND, not FORBIDDEN: a machine acting for another tenant is a
+      // non-party like any other, and gets the same answer a stranger does —
+      // one that does not confirm the order exists. The ADR-035 lesson still
+      // holds: exempt from the role check, from nothing else, and refused.
       await expect(
         asSaga(() => wiring.orders.confirmReceipt(order.id, {}), org.other),
-      ).rejects.toThrow(expect.objectContaining({ code: 'FORBIDDEN' }));
+      ).rejects.toThrow(expect.objectContaining({ code: 'NOT_FOUND' }));
     });
   });
 });

@@ -100,7 +100,7 @@ export class OrderRepository {
     return runUnscoped('an order names two organizations and the seller is one of them', () =>
       this.prisma.client.order.findUnique({
         where: { id: orderId },
-        include: { lines: true },
+        include: { lines: true, review: { select: { id: true } } },
       }),
     );
   }
@@ -194,7 +194,7 @@ export class OrderRepository {
       () =>
         this.prisma.client.order.findMany({
           where,
-          include: { lines: true },
+          include: { lines: true, review: { select: { id: true } } },
           orderBy: { id: 'desc' },
           take: query.limit,
         }),

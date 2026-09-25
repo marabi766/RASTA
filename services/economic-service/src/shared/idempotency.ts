@@ -212,6 +212,24 @@ export class IdempotencyStore {
 }
 
 /**
+ * The request identity of a route that acts on one resource.
+ *
+ * The endpoint a key is stored under is the route **template** —
+ * `POST /v1/transactions/:id/refund` — so that the replay metric's label set
+ * stays bounded. That leaves the target id to the body hash, and a route that
+ * hashed only its DTO made two different resources the same request: key K
+ * with the same reason, reused on a second transaction, replayed the first
+ * transaction's response and never touched the second. Folding the id in
+ * turns that into the documented `409 IDEMPOTENCY_KEY_REUSED` (docs/06 § 6.8).
+ *
+ * With no body it is `{ id }` exactly, which is what `authorise-settlement`
+ * already hashed — so its stored keys still match after this change.
+ */
+export function targeted(id: string, body?: unknown): { id: string; body?: unknown } {
+  return body === undefined ? { id } : { id, body };
+}
+
+/**
  * Canonical hash of a request body.
  *
  * Keys are sorted recursively so that `{a:1,b:2}` and `{b:2,a:1}` — the same

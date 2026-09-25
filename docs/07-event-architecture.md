@@ -426,19 +426,27 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 
 ### Economic
 
-| رویداد                 | Producer | مصرف‌کنندگان اصلی                                   |
-| ---------------------- | -------- | --------------------------------------------------- |
-| `WALLET_OPENED`        | economic | notification                                        |
-| `FUNDS_HELD`           | economic | marketplace (پیشبرد Saga) · analytics               |
-| `FUNDS_RELEASED`       | economic | marketplace · analytics                             |
-| `PAYMENT_AUTHORIZED`   | economic | marketplace · contract                              |
-| `PAYMENT_COMPLETED`    | economic | marketplace · maintenance · contract · notification |
-| `PAYMENT_FAILED`       | economic | marketplace (جبران) · notification                  |
-| `COMMISSION_APPLIED`   | economic | analytics (**درآمد پلتفرم**) · audit                |
-| `REWARD_GRANTED`       | economic | notification · analytics                            |
-| `REWARD_LEVEL_CHANGED` | economic | notification                                        |
-| `SETTLEMENT_COMPLETED` | economic | marketplace · supplier · notification               |
-| `JOURNAL_POSTED`       | economic | audit · analytics                                   |
+| رویداد                    | Producer | مصرف‌کنندگان اصلی                                   |
+| ------------------------- | -------- | --------------------------------------------------- |
+| `WALLET_OPENED`           | economic | notification                                        |
+| `FUNDS_HELD`              | economic | marketplace (پیشبرد Saga) · analytics               |
+| `FUNDS_RELEASED`          | economic | marketplace · analytics                             |
+| `PAYMENT_AUTHORIZED`      | economic | marketplace · contract                              |
+| `PAYMENT_COMPLETED`       | economic | marketplace · maintenance · contract · notification |
+| `PAYMENT_FAILED`          | economic | marketplace (جبران) · notification                  |
+| `COMMISSION_APPLIED`      | economic | analytics (**درآمد پلتفرم**) · audit                |
+| `REWARD_GRANTED`          | economic | notification · analytics                            |
+| `REWARD_LEVEL_CHANGED`    | economic | notification                                        |
+| `SETTLEMENT_COMPLETED`    | economic | marketplace · supplier · notification               |
+| `JOURNAL_POSTED`          | economic | audit · analytics                                   |
+| `COMMISSION_RULE_CHANGED` | economic | audit                                               |
+| `REWARD_RULE_CHANGED`     | economic | audit                                               |
+
+> **افزوده (2026-09-24).** دو رویداد آخر، رکورد Audit تغییر پیکربندی حکمرانی‌اند:
+> چه کسی، کِی، و شرایط قاعده پیش و پس از تغییر. نرخ یک قاعدهٔ موجود دیگر تغییر
+> نمی‌کند — نرخ تازه یعنی قاعدهٔ تازه (`docs/10` § ۱۰٫۷) — پس رکورد `UPDATED` فقط
+> بستن، غیرفعال‌کردن یا برچسب را نشان می‌دهد. پیاده‌سازی و تست در همان تاریخ؛
+> زنده‌بودنِ آن روی Broker با اجرای CI سنجیده می‌شود، نه با این سند.
 
 > **وضعیت (2026-08-29).** `economic` تولیدکننده واقعی است: هر یازده رویداد بالا
 > پیاده، تست قرارداد شده و روی `rasta.economic.v1` زنده مشاهده شده‌اند. مصرف

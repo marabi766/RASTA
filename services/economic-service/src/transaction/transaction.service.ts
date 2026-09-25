@@ -1,16 +1,18 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
-import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
+import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { WalletRepository } from '../wallet/wallet.repository';
 import { TransactionRepository, type TransactionFilter } from './transaction.repository';
 import { nextStatus } from './state-machine';
-import { assertTransactionVisible, canCommitOrganization } from '../access/access';
+import { assertMayRefund, assertTransactionVisible, canCommitOrganization } from '../access/access';
 import { parseMinor } from '../shared/money';
+import { isUniqueViolation } from '../ledger/ledger.repository';
 import { financialTransactionDuration, transactionsCreatedTotal } from '../observability/metrics';
-import { SERVICE_NAME } from '../config/env';
+import { SERVICE_NAME, type EconomicEnv } from '../config/env';
+import { ENV } from '../tokens';
 import type { Prisma, TransactionType } from '../generated/prisma';
 import type { CreateTransactionDto, DisputeTransactionDto, ResolveDisputeDto } from './dto';
 
@@ -34,6 +36,7 @@ export class TransactionService {
     private readonly repository: TransactionRepository,
     private readonly wallets: WalletService,
     private readonly walletRepository: WalletRepository,
+    @Inject(ENV) private readonly env: EconomicEnv,
   ) {}
 
   // ==========================================================================
@@ -140,9 +143,41 @@ export class TransactionService {
       });
 
       return this.get(created);
+    } catch (error) {
+      throw await this.duplicateSourceOr(error, organizationId, dto);
     } finally {
       stop();
     }
+  }
+
+  /**
+   * A second obligation for a source fact this payer already recorded is a
+   * 409, not a 500.
+   *
+   * Different idempotency keys are different requests, so the idempotency
+   * store cannot catch this; `ux_transaction_source_fact` does. Confirmed by
+   * reading the row back rather than by parsing the driver's constraint name,
+   * so another unique violation is never mislabelled as this one. Nothing is
+   * said about the existing row beyond that it exists — the caller is its
+   * payer and can list it by `sourceReference`.
+   */
+  private async duplicateSourceOr(
+    error: unknown,
+    organizationId: string,
+    dto: CreateTransactionDto,
+  ): Promise<unknown> {
+    if (!isUniqueViolation(error) || !dto.sourceType || !dto.sourceReference) return error;
+    const existing = await this.repository.findBySource(
+      this.prisma.client,
+      organizationId,
+      dto.sourceType,
+      dto.sourceReference,
+    );
+    if (!existing) return error;
+    return new RastaError(
+      'CONFLICT',
+      'An obligation for this source is already recorded for this organization',
+    );
   }
 
   /**
@@ -154,10 +189,12 @@ export class TransactionService {
    * wallet is empty would lose a person's approval rather than protect
    * anything.
    *
-   * Idempotent on `(sourceType, sourceReference)` in addition to
-   * `processed_event`, because a producer that re-emits the same approval
+   * Idempotent on `(organizationId, sourceType, sourceReference)` in addition
+   * to `processed_event`, because a producer that re-emits the same approval
    * under a new event id would otherwise create a second obligation for one
-   * repair.
+   * repair. The read below is only the fast path: two such events processed
+   * concurrently both miss it, and it is `ux_transaction_source_fact` that
+   * decides — the loser writes nothing and returns the winner's row.
    */
   async recordAuthorisedObligation(
     tx: ExtendedPrismaClient,
@@ -175,6 +212,7 @@ export class TransactionService {
   ): Promise<{ id: string; created: boolean }> {
     const existing = await this.repository.findBySource(
       tx,
+      input.organizationId,
       input.sourceType,
       input.sourceReference,
     );
@@ -182,7 +220,7 @@ export class TransactionService {
 
     const id = `${ID_PREFIXES.transaction}_${ulid()}`;
 
-    await this.repository.create(
+    const written = await this.repository.createForSource(
       tx,
       {
         id,
@@ -210,6 +248,19 @@ export class TransactionService {
         input.currency,
       ),
     );
+
+    if (!written) {
+      const winner = await this.repository.findBySource(
+        tx,
+        input.organizationId,
+        input.sourceType,
+        input.sourceReference,
+      );
+      if (!winner) {
+        throw RastaError.internal('An obligation for this source fact conflicted and vanished');
+      }
+      return { id: winner.id, created: false };
+    }
 
     transactionsCreatedTotal.inc({
       service: SERVICE_NAME,
@@ -311,6 +362,11 @@ export class TransactionService {
    * Posts the refund journal and returns the escrowed funds, then moves the
    * transaction to `REFUNDED` — all in one transaction, so a refund that fails
    * halfway leaves the money exactly where it was.
+   *
+   * Who may ask is {@link assertMayRefund}: never the payer, and for a
+   * disputed transaction only a platform decision or the order saga (docs/24
+   * Q-62). Checked under the row lock, against the status the state machine is
+   * about to read, so the two cannot disagree.
    */
   async refund(transactionId: string, reason: string): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
@@ -323,7 +379,7 @@ export class TransactionService {
       await this.prisma.transaction(async (tx) => {
         const transaction = await this.repository.lockForUpdate(tx, transactionId);
         if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-        assertTransactionVisible(transaction);
+        assertMayRefund(transaction, { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED });
 
         const target = nextStatus(transactionId, transaction.status, 'REFUND');
 
@@ -339,13 +395,24 @@ export class TransactionService {
 
         const hold = await this.walletRepository.findActiveHold(tx, wallet.id, transactionId);
         if (hold) {
-          await this.wallets.refundHold(tx, {
-            wallet: locked,
-            holdId: hold.id,
-            transactionId,
-            note: reason,
-            resolvedBy: actor,
-          });
+          // The refund journal is the payer's — it moves the payer's escrow back
+          // into the payer's wallet — but the caller may be another party: the
+          // payee, a platform administrator or the order saga. The journal
+          // header is tenant-scoped (`LedgerRepository.createJournal`), so
+          // without this crossing any refund not asked for by the payer itself
+          // was refused as an implicit cross-tenant write and surfaced as a 500.
+          // The authority to make it was decided above, under the row lock.
+          await runUnscoped(
+            'a refund posts the payer journal on the authority of another party to the transaction',
+            () =>
+              this.wallets.refundHold(tx, {
+                wallet: locked,
+                holdId: hold.id,
+                transactionId,
+                note: reason,
+                resolvedBy: actor,
+              }),
+          );
         }
 
         const moved = await this.repository.transition(

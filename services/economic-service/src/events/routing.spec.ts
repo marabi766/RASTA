@@ -155,6 +155,45 @@ const PAYLOADS = {
       },
     ],
   },
+  COMMISSION_RULE_CHANGED: {
+    ruleId: 'CMR_1',
+    change: 'CREATED' as const,
+    changedBy: 'USR-1',
+    changedAt: '2026-08-29T00:00:00.000Z',
+    before: null,
+    after: {
+      organizationId: null,
+      transactionType: 'MARKETPLACE_ORDER',
+      rateBasisPoints: 250,
+      minAmountMinor: null,
+      maxAmountMinor: null,
+      validFrom: '2026-08-29T00:00:00.000Z',
+      validTo: null,
+      status: 'ACTIVE',
+      label: null,
+    },
+  },
+  REWARD_RULE_CHANGED: {
+    ruleId: 'RWR_1',
+    change: 'CREATED' as const,
+    changedBy: 'USR-1',
+    changedAt: '2026-08-29T00:00:00.000Z',
+    before: null,
+    after: {
+      organizationId: ORG,
+      triggerEvent: 'MAINTENANCE_COMPLETED',
+      rewardType: 'POINTS',
+      condition: null,
+      points: 10,
+      creditPerPointMinor: null,
+      periodCap: null,
+      periodType: null,
+      validFrom: '2026-08-29T00:00:00.000Z',
+      validTo: null,
+      status: 'ACTIVE',
+      label: null,
+    },
+  },
 } satisfies { [N in EconomicEventName]: Parameters<(typeof PARTITION_KEY_POLICY)[N]>[0] };
 
 /** The specification, one row per published event. */
@@ -170,6 +209,8 @@ const EXPECTED: { [N in EconomicEventName]: { scope: PartitionScope; key: string
   REWARD_LEVEL_CHANGED: { scope: 'REWARD_SUBJECT', key: `${ORG}:USR-1` },
   SETTLEMENT_COMPLETED: { scope: 'TRANSACTION', key: TXN },
   JOURNAL_POSTED: { scope: 'TRANSACTION', key: TXN },
+  COMMISSION_RULE_CHANGED: { scope: 'RULE', key: 'CMR_1' },
+  REWARD_RULE_CHANGED: { scope: 'RULE', key: 'RWR_1' },
 };
 
 const NAMES = Object.values(ECONOMIC_EVENTS);
@@ -184,13 +225,13 @@ describe('every published economic event has a partition decision', () => {
     expect(resolve(name)).toEqual(EXPECTED[name]);
   });
 
-  it('covers exactly the eleven events the catalogue publishes', () => {
+  it('covers exactly the thirteen events the catalogue publishes', () => {
     // Guards the table above against drift in both directions: an event added
     // to the catalogue without a row here, and a row left behind for an event
     // that no longer exists.
     expect(Object.keys(EXPECTED).sort()).toEqual([...NAMES].sort());
     expect(Object.keys(PARTITION_KEY_POLICY).sort()).toEqual([...NAMES].sort());
-    expect(NAMES).toHaveLength(11);
+    expect(NAMES).toHaveLength(13);
   });
 });
 
@@ -323,6 +364,8 @@ describe('aggregate identity is untouched by this change', () => {
       REWARD_LEVEL_CHANGED: 'RewardBalance',
       SETTLEMENT_COMPLETED: 'Settlement',
       JOURNAL_POSTED: 'Journal',
+      COMMISSION_RULE_CHANGED: 'CommissionRule',
+      REWARD_RULE_CHANGED: 'RewardRule',
     });
   });
 
