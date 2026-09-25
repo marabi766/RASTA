@@ -38,7 +38,10 @@ export function middleware(request: NextRequest): NextResponse {
     `base-uri 'self'`,
     `form-action 'self'`,
     `frame-ancestors 'none'`,
-    `upgrade-insecure-requests`,
+    // Only where TLS is terminated in front of the portal, like HSTS below.
+    // On a plain-HTTP deployment it rewrites the portal's own same-origin
+    // fetches and redirects to https://, which nothing answers.
+    ...(secureDeployment ? [`upgrade-insecure-requests`] : []),
   ].join('; ');
 
   const requestHeaders = new Headers(request.headers);

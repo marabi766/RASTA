@@ -85,6 +85,13 @@ describe('the other headers', () => {
     expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
   });
 
+  it('upgrades insecure requests only for a deployment that terminates TLS', () => {
+    const csp = (value: string) =>
+      run({ WEB_COOKIE_SECURE: value }).headers.get('Content-Security-Policy') ?? '';
+    expect(csp('false')).not.toContain('upgrade-insecure-requests');
+    expect(csp('true')).toContain('upgrade-insecure-requests');
+  });
+
   it('sends HSTS only for a deployment that terminates TLS', () => {
     expect(run({ WEB_COOKIE_SECURE: 'false' }).headers.get('Strict-Transport-Security')).toBeNull();
     expect(run({ WEB_COOKIE_SECURE: 'true' }).headers.get('Strict-Transport-Security')).toContain(
