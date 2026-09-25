@@ -85,7 +85,10 @@ export const LOGGER = Symbol('ORGANIZATION_LOGGER');
       provide: OrganizationService,
       inject: [OrganizationRepository, ENV],
       useFactory: (repository: OrganizationRepository, env: OrganizationEnv) =>
-        new OrganizationService(repository, env.MAX_HIERARCHY_DEPTH),
+        new OrganizationService(repository, {
+          maxDepth: env.MAX_HIERARCHY_DEPTH,
+          policySetterRoles: env.GOVERNANCE_POLICY_SETTER_ROLES,
+        }),
     },
 
     {
