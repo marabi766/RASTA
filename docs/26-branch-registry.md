@@ -60,7 +60,7 @@
 | `fix/ci-temporal-test-server-cache`          | `F:Rasta-Parallelqueue-sim`       | PM    | #100 | ۱ / ۰          | Cacheِ سرور آزمون Temporal در CI (حدود ۳۰۰ مگابایت) و بودجهٔ زمانی ۳۰۰ ثانیه برای Hook راه‌اندازی آن؛ دانلودِ هر بار، کل آزمون‌های Saga را روی شبکهٔ کند قرمز می‌کرد                                 |
 | `demo/investor-preview`                      | `F:\Rasta-Parallel\investor-demo` | —     | —    | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                                         |
 | `design/claude-design`                       | پوشهٔ موقت در `%TEMP%`            | —     | —    | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                                |
-| `claude/adoring-cerf-nhq97e-platform-safety` | نشست ابری (Cloud)                 | Cloud | —    | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `b89e192` — ایمنی پلتفرم (Lane 6): گارد Seed در برابر Production، `down.sql` شش Migration بی‌بازگشت و اثبات وارون دقیق در Verifier، توقف چاپ رمزهای نمایشی identity |
+| `claude/adoring-cerf-nhq97e-platform-safety` | نشست ابری (Cloud)                 | Cloud | #105 | ۷ / ۰          | تازه ساخته شد از `origin/main` @ `b89e192` — ایمنی پلتفرم (Lane 6): گارد Seed در برابر Production، `down.sql` شش Migration بی‌بازگشت و اثبات وارون دقیق در Verifier، توقف چاپ رمزهای نمایشی identity |
 
 ## شاخه‌های بازنشسته
 
