@@ -2,11 +2,13 @@
  * @jest-environment node
  */
 import {
+  canManageDrivers,
   changeStatusFormValues,
   createDriverFormValues,
   CREATE_DRIVER_FIELD_MAPPING,
   fetchDriver,
   fetchDrivers,
+  localDateFromIso,
   parseChangeStatusForm,
   parseCreateDriverForm,
   parseUpdateDriverForm,
@@ -23,6 +25,14 @@ import type { WebSession } from './session';
  * and `usage.spec.ts` for the write parsing — this module designs nothing
  * new, so its tests do not either.
  */
+
+/**
+ * U+202E RIGHT-TO-LEFT OVERRIDE, built from its code point rather than
+ * written as a literal — the character is invisible, so a literal in source
+ * would be exactly the kind of thing no diff or reviewer could see (same
+ * reasoning as `format/codepoints.ts`).
+ */
+const RLO = String.fromCodePoint(0x202e);
 
 const SESSION: WebSession = {
   subject: 'USR_1',
@@ -83,6 +93,35 @@ const DRIVER = {
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
 };
+
+describe('reading a stored licence expiry back onto the edit form (L5-01)', () => {
+  it('round-trips through Tehran midnight without moving the date back a day', () => {
+    // The exact instant `localDateToIso` produces for `2027-01-01` in Tehran.
+    // `.slice(0, 10)` on this string reads `2026-12-31` — the UTC calendar
+    // day — which is the bug this function exists to not have.
+    expect(localDateFromIso('2026-12-31T20:30:00.000Z')).toBe('2027-01-01');
+  });
+
+  it('agrees with a plain UTC slice whenever the instant is already Tehran midnight', () => {
+    expect(localDateFromIso('2027-01-01T00:00:00.000Z')).toBe('2027-01-01');
+  });
+});
+
+describe('who may manage drivers', () => {
+  it('grants it to the roles fleet-service actually accepts on a write', () => {
+    expect(canManageDrivers(['ORGANIZATION_ADMIN'])).toBe(true);
+    expect(canManageDrivers(['FLEET_MANAGER'])).toBe(true);
+    expect(canManageDrivers(['UNION_ADMIN'])).toBe(true);
+    // One qualifying role among several is enough.
+    expect(canManageDrivers(['DRIVER', 'FLEET_MANAGER'])).toBe(true);
+  });
+
+  it('refuses a driver or operator, who may only read', () => {
+    expect(canManageDrivers(['DRIVER'])).toBe(false);
+    expect(canManageDrivers(['OPERATOR'])).toBe(false);
+    expect(canManageDrivers([])).toBe(false);
+  });
+});
 
 describe('the list', () => {
   it('asks the gateway, with only the filters the caller set', async () => {
@@ -225,6 +264,18 @@ describe('registering a driver', () => {
   it('translates the duplicate-registration sentence fleet-service actually emits', () => {
     expect(CREATE_DRIVER_FIELD_MAPPING.messages?.['Driver already exists']).toBeDefined();
   });
+
+  it('refuses a bidi control character hidden in an identifier field (L5-06)', () => {
+    // RIGHT-TO-LEFT OVERRIDE, planted in the middle of an otherwise ordinary
+    // employee number — fleet-service accepts it unchanged, and it can make
+    // the value render as a different identifier than the one typed.
+    const employeeNo = parseCreateDriverForm(values({ employeeNo: `EMP-${RLO}102` }));
+    expect(employeeNo.ok).toBe(false);
+    const licenceNumber = parseCreateDriverForm(values({ licenceNumber: `LIC-${RLO}102` }));
+    expect(licenceNumber.ok).toBe(false);
+    const licenceClass = parseCreateDriverForm(values({ licenceClass: `B${RLO}` }));
+    expect(licenceClass.ok).toBe(false);
+  });
 });
 
 describe('editing a driver', () => {
@@ -285,6 +336,14 @@ describe('editing a driver', () => {
         'A deactivated driver is a historical record and cannot be edited'
       ],
     ).toBeDefined();
+  });
+
+  it('refuses a bidi control character hidden in an identifier field (L5-06)', () => {
+    const parsed = parseUpdateDriverForm({
+      ...EMPTY_UPDATE_DRIVER_FORM,
+      employeeNo: `EMP-${RLO}102`,
+    });
+    expect(parsed.ok).toBe(false);
   });
 });
 

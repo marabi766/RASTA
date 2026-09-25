@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
+import { assertDemoSeedAllowed } from '@rasta/config';
 
 /**
  * Demo seed for maintenance-service.
@@ -285,6 +286,10 @@ const DIRECT_COST = {
 };
 
 async function main(): Promise<void> {
+  // Before anything touches the database: this seed overwrites fixed ids with
+  // demo values, so it runs only in an explicit development or test run.
+  assertDemoSeedAllowed('maintenance-service');
+
   console.warn('Seeding maintenance-service…');
 
   for (const asset of ASSET_REFS) {

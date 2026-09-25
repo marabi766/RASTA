@@ -115,16 +115,30 @@ function DriverRows({ page, query }: { page: DriverPage; query: DriverListQuery 
               <td className="p-3">
                 <a
                   href={`/drivers/${encodeURIComponent(driver.id)}`}
+                  // `<Identifier>` isolates the run for bidi (L5-06), but its
+                  // custom-component children are invisible to the linter's
+                  // static accessible-name check — `aria-label` states the
+                  // same text explicitly, which is also what a screen reader
+                  // should say regardless of the bdi isolation underneath.
+                  aria-label={driver.employeeNo ?? driver.userId}
                   className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
                 >
-                  {driver.employeeNo ?? <Identifier>{driver.userId}</Identifier>}
+                  <Identifier>{driver.employeeNo ?? driver.userId}</Identifier>
                 </a>
               </td>
               <td className="p-3 text-content-muted">
                 {driver.licenceNumber ? (
                   <>
                     <Identifier>{driver.licenceNumber}</Identifier>
-                    {driver.licenceClass ? ` (${driver.licenceClass})` : ''}
+                    {driver.licenceClass ? (
+                      <>
+                        {' ('}
+                        <Identifier>{driver.licenceClass}</Identifier>
+                        {')'}
+                      </>
+                    ) : (
+                      ''
+                    )}
                   </>
                 ) : (
                   '—'

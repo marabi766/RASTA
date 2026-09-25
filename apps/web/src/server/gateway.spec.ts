@@ -148,6 +148,51 @@ describe('what goes on the wire', () => {
   });
 });
 
+describe('a transport failure never escapes as a bare throw', () => {
+  it('turns a rejected fetch into a safe UNAVAILABLE outcome', async () => {
+    const impl = (async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+
+    await expect(
+      callGateway({ baseUrl: GATEWAY, path: '/v1/users/me', accessToken: 't', fetchImpl: impl }),
+    ).rejects.toMatchObject({ status: 503 });
+  });
+
+  it('gives up on a call that never answers, rather than hanging on it forever', async () => {
+    // A stand-in for what `fetch` actually does when its `signal` fires: it
+    // rejects with an `AbortError`, it does not simply never resolve.
+    const impl = ((_url: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () =>
+          reject(new DOMException('The operation was aborted.', 'AbortError')),
+        );
+      })) as unknown as typeof fetch;
+
+    await expect(
+      callGateway({
+        baseUrl: GATEWAY,
+        path: '/v1/users/me',
+        accessToken: 't',
+        fetchImpl: impl,
+        timeoutMs: 20,
+      }),
+    ).rejects.toMatchObject({ status: 503 });
+  });
+
+  it('treats a malformed body on a 2xx as an outage rather than an unhandled rejection', async () => {
+    const impl = (async () =>
+      new Response('not json', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch;
+
+    await expect(
+      callGateway({ baseUrl: GATEWAY, path: '/v1/users/me', accessToken: 't', fetchImpl: impl }),
+    ).rejects.toMatchObject({ status: 502 });
+  });
+});
+
 describe('a success with no body', () => {
   /**
    * `POST /v1/memberships/:id/revoke` is `@HttpCode(204)`, and so is every

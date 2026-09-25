@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
+import { assertDemoSeedAllowed } from '@rasta/config';
 
 /**
  * Demo seed for marketplace-service.
@@ -496,6 +497,10 @@ export function assertDatasetIsConsistent(): void {
 }
 
 async function main(): Promise<void> {
+  // Before anything touches the database: this seed overwrites fixed ids with
+  // demo values, so it runs only in an explicit development or test run.
+  assertDemoSeedAllowed('marketplace-service');
+
   assertDatasetIsConsistent();
 
   const url = resolveDatabaseUrl();

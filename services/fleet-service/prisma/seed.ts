@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient, type AssignmentEndReason } from '../src/generated/prisma';
+import { assertDemoSeedAllowed } from '@rasta/config';
 
 /**
  * Demo seed for fleet-service.
@@ -232,6 +233,10 @@ function usageRecords() {
 }
 
 async function main(): Promise<void> {
+  // Before anything touches the database: this seed overwrites fixed ids with
+  // demo values, so it runs only in an explicit development or test run.
+  assertDemoSeedAllowed('fleet-service');
+
   console.warn('Seeding fleet-service…');
 
   for (const ref of ASSET_REFS) {

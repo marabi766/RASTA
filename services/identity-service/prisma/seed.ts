@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
+import { assertDemoSeedAllowed } from '@rasta/config';
 
 /**
  * Demo seed for identity-service.
@@ -266,6 +267,10 @@ const ORGANIZATION_REFS = [
 ];
 
 async function main(): Promise<void> {
+  // Before anything touches the database: this seed overwrites fixed ids with
+  // demo values, so it runs only in an explicit development or test run.
+  assertDemoSeedAllowed('identity-service');
+
   console.warn('Seeding identity-service…');
 
   for (const role of ROLES) {
@@ -354,7 +359,10 @@ async function main(): Promise<void> {
 
   console.warn('Identity seed complete.');
   console.warn('');
-  console.warn('  Demo accounts (password RastaDev!2026, set in the Keycloak realm):');
+  // Usernames only. The shared demo password lives in the Keycloak realm
+  // fixture and nowhere else; printing it put it in every terminal and CI log
+  // that ever ran a seed.
+  console.warn('  Demo accounts (password: see infrastructure/docker/keycloak/rasta-realm.json):');
   for (const user of USERS.slice(0, 4)) {
     console.warn(`    ${user.username.padEnd(18)} ${user.roles.join(', ')}`);
   }

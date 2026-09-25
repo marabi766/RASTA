@@ -1,7 +1,8 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
-import { fetchDriver, fetchDriverAssignments } from '@/server/drivers';
+import { canManageDrivers, fetchDriver, fetchDriverAssignments } from '@/server/drivers';
+import { fetchCurrentUser } from '@/server/identity';
 import { newSubmissionId } from '@/server/submission';
 import { PORTAL_NAV } from '@/app/nav';
 import { DriverDetailScreen } from './DriverDetailScreen';
@@ -28,10 +29,15 @@ export default async function DriverDetailPage({ params }: { params: Promise<{ i
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/drivers/${id}`)}`);
 
-  const [result, assignments] = await Promise.all([
+  const [result, assignments, currentUser] = await Promise.all([
     fetchDriver(session, id),
     fetchDriverAssignments(session, id),
+    fetchCurrentUser(session),
   ]);
+
+  // A failed identity read shows no write form rather than one that might
+  // not work — the same fail-closed default `canManageDrivers` documents.
+  const manage = currentUser.kind === 'USER' && canManageDrivers(currentUser.user.effectiveRoles);
 
   return (
     <AppShell
@@ -52,6 +58,7 @@ export default async function DriverDetailPage({ params }: { params: Promise<{ i
         assignments={assignments}
         driverId={id}
         csrfToken={session.csrfToken}
+        canManageDrivers={manage}
         submissionIds={{
           update: newSubmissionId(),
           status: newSubmissionId(),
