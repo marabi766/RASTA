@@ -29,6 +29,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { applyTrustProxy } from './http/trust-proxy';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -37,6 +38,10 @@ async function bootstrap(): Promise<void> {
     logger: env.NODE_ENV === 'development' ? ['log', 'warn', 'error'] : ['warn', 'error'],
     bufferLogs: true,
   });
+
+  // Before any middleware reads `req.ip`: the request-context middleware
+  // records it for audit, and anonymous rate limits key on it (L1-03).
+  applyTrustProxy(app, env.GATEWAY_TRUSTED_PROXIES);
 
   app.use(
     helmet({
