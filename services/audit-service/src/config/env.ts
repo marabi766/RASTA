@@ -173,14 +173,27 @@ export type AuditEnv = z.infer<typeof auditEnvSchema>;
  * file describes the whole platform, while a container sets `PORT` alone.
  */
 export function loadAuditEnv(source: NodeJS.ProcessEnv = process.env): AuditEnv {
+  // Only DATABASE_URL_AUDIT. The generic DATABASE_URL is what migration
+  // tooling sets (`scripts/prisma.mjs` points it at the migrator for `migrate
+  // deploy`), so an environment shared between a migrate job and the service
+  // could hand the runtime the owner's connection through it. It is ignored
+  // here, and its presence alone is not accepted as configuration.
+  if (!source.DATABASE_URL_AUDIT) {
+    throw new Error(
+      'audit-service reads its database url from DATABASE_URL_AUDIT only, and it is not set. ' +
+        'DATABASE_URL is deliberately ignored: migration tooling sets it, and it may name the ' +
+        'migrator role, which owns schema audit (ADR-053 § 6).',
+    );
+  }
   return loadEnv(auditEnvSchema, {
     ...source,
     SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
     PORT: source.PORT ?? source.PORT_AUDIT ?? DEFAULT_PORT,
-    // Never DATABASE_URL_AUDIT_MIGRATOR. That connection owns the schema and
-    // may drop it; this process must only ever hold the role that can insert
-    // and select. Falling back to it would quietly undo the whole split.
-    DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_AUDIT,
+    // Never DATABASE_URL_AUDIT_MIGRATOR, and never the generic DATABASE_URL.
+    // The migrator owns the schema and may drop it; this process must only
+    // ever hold the role that can insert and select. `AppModule` also checks
+    // the connected role at startup (PrismaService.assertRuntimeRole).
+    DATABASE_URL: source.DATABASE_URL_AUDIT,
     KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
     KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? DOMAIN_PROJECTOR_CONSUMER,
     CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',

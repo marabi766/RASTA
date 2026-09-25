@@ -13,7 +13,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 export const RUN_TAG = ulid().slice(-10);
 
 export function runtimeUrl(): string {
-  const url = process.env.DATABASE_URL ?? process.env.DATABASE_URL_AUDIT;
+  const url = process.env.DATABASE_URL_AUDIT ?? process.env.DATABASE_URL;
   if (!url) {
     throw new Error(
       'DATABASE_URL_AUDIT is not set. These tests run against a real PostgreSQL; ' +

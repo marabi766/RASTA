@@ -9,26 +9,29 @@
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
-SERVICE_PASSWORD="${POSTGRES_SERVICE_PASSWORD:-rasta_service_dev_password}"
+# -----------------------------------------------------------------------------
+# One password per role (L7-33): resolved and checked — syntax, the retired
+# shared variable, and no two roles (or a role and the superuser) sharing one —
+# before the first statement below runs. See lib/role-passwords.bash.
+# -----------------------------------------------------------------------------
+# shellcheck source=lib/role-passwords.bash
+source "$(dirname "${BASH_SOURCE[0]}")/lib/role-passwords.bash"
+resolve_role_passwords || exit 1
 
-SERVICES=(
-  identity
-  organization
-  asset
-  fleet
-  maintenance
-  marketplace
-  procurement
-  supplier
-  inventory
-  construction
-  contract
-  economic
-  notification
-  document
-  audit
-  analytics
-)
+# Creates the role if it is missing and (re)sets its password either way, so a
+# bootstrap re-run on an existing cluster converges on the configured values.
+ensure_role() {
+  local role="$1"
+  local password="${ROLE_PASSWORDS[$role]}"
+  psql_exec postgres "DO \$\$ BEGIN
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${role}') THEN
+        CREATE ROLE ${role} LOGIN CREATEDB;
+      END IF;
+    END \$\$;"
+  psql_exec postgres "ALTER ROLE ${role} WITH LOGIN PASSWORD '${password}'"
+}
+
+SERVICES=("${RASTA_SERVICES[@]}")
 
 # Infrastructure databases that are not owned by a Rasta service.
 INFRA_DATABASES=(keycloak temporal temporal_visibility)
@@ -46,11 +49,7 @@ for svc in "${SERVICES[@]}"; do
   # provisions a temporary shadow database to diff against. Production applies
   # migrations with `prisma migrate deploy`, which needs no shadow database and
   # therefore no such privilege — and never runs this script.
-  psql_exec postgres "DO \$\$ BEGIN
-      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${role}') THEN
-        CREATE ROLE ${role} LOGIN CREATEDB PASSWORD '${SERVICE_PASSWORD}';
-      END IF;
-    END \$\$;"
+  ensure_role "${role}"
 
   if ! psql -tAc "SELECT 1 FROM pg_database WHERE datname='${db}'" --username "$POSTGRES_USER" postgres | grep -q 1; then
     psql_exec postgres "CREATE DATABASE ${db} OWNER ${role} ENCODING 'UTF8'"
@@ -92,11 +91,7 @@ echo "==> Creating the audit migrator role and its owned schema"
 # CREATEDB for the same local-development reason the service roles have it:
 # `prisma migrate dev` provisions a shadow database. `migrate deploy`, which is
 # what production runs, needs neither.
-psql_exec postgres "DO \$\$ BEGIN
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rasta_audit_migrator') THEN
-      CREATE ROLE rasta_audit_migrator LOGIN CREATEDB PASSWORD '${SERVICE_PASSWORD}';
-    END IF;
-  END \$\$;"
+ensure_role rasta_audit_migrator
 
 psql_exec postgres "GRANT CONNECT ON DATABASE rasta_audit TO rasta_audit_migrator"
 

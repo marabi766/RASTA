@@ -56,11 +56,12 @@ docker compose --profile all up -d            # همه
 
 ## ۱۲٫۳ Docker
 
-هر سرویس یک `Dockerfile` چندمرحله‌ای دارد:
+هر سرویس یک `Dockerfile` چندمرحله‌ای دارد: (طرح کلی؛ فایل واقعی هر سرویس مرجع است). تصویر پایه با **Digest** Pin است و همهٔ سرویس‌ها یک Digest
+دارند؛ روند به‌روزرسانی در [`runbooks/base-image-update.md`](runbooks/base-image-update.md).
 
 ```dockerfile
 # ---- deps: فقط وابستگی‌ها، برای Cache بهتر لایه ----
-FROM node:22-alpine AS deps
+FROM node:22-alpine@sha256:<digest> AS deps   # Digest، نه برچسب متحرک (L7-45)
 RUN corepack enable
 WORKDIR /app
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
@@ -74,7 +75,7 @@ COPY . .
 RUN pnpm --filter @rasta/<name>... build
 
 # ---- runtime: کوچک، بدون ریشه ----
-FROM node:22-alpine AS runtime
+FROM node:22-alpine@sha256:<digest> AS runtime   # همان Digest؛ بی apk upgrade
 RUN addgroup -S rasta && adduser -S rasta -G rasta
 WORKDIR /app
 COPY --from=build --chown=rasta:rasta /app/services/<name>/dist ./dist
