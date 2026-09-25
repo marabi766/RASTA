@@ -397,6 +397,33 @@ describe('L1-06: a non-platform 5xx body is replaced, never reflected', () => {
     }
   });
 
+  it('counts a malformed 5xx toward the circuit breaker exactly once', async () => {
+    // Recorded with every other >= 500 before the body is read; the malformed
+    // branch must neither skip that nor add a second failure for one response.
+    upstream.respond = (res) => {
+      res.writeHead(502, { 'content-type': 'text/html' });
+      res.end('<html>bad gateway</html>');
+    };
+    const proxy = proxyTo(upstream);
+    const forward = () =>
+      runWithContext(userContext, () =>
+        proxy.forward({
+          service: 'identity',
+          method: 'GET',
+          path: '/v1/users/me',
+          query: '',
+          headers: {},
+          body: undefined,
+        }),
+      );
+
+    await expect(forward()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+    expect(proxy.circuitStates().identity).toEqual({ failures: 1, open: false });
+
+    await expect(forward()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+    expect(proxy.circuitStates().identity).toEqual({ failures: 2, open: false });
+  });
+
   it('passes a platform error envelope through unchanged', async () => {
     const envelope = {
       code: 'INTERNAL_ERROR',

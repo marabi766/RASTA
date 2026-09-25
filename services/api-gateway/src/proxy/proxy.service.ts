@@ -156,6 +156,10 @@ export class ProxyService {
       };
     } catch (error) {
       if (error instanceof UpstreamMalformedError) {
+        // Not recorded again: every upstream status >= 500 already counted
+        // toward the circuit above, before the body was read. A second
+        // recordFailure() here would count one bad response twice and open
+        // the breaker at half the configured threshold.
         throw RastaError.upstreamUnavailable(request.service, {
           upstreamStatus: error.upstreamStatus,
           reason: 'malformed-error-body',
