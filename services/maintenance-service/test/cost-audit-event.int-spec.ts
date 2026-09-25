@@ -141,7 +141,7 @@ describe('cost-line audit events (L7-14)', () => {
       const spy = jest
         .spyOn(repository, 'enqueueEvent')
         .mockRejectedValueOnce(new Error('outbox unavailable'));
-      const write = () => {
+      const write = (): Promise<unknown> => {
         switch (method) {
           case 'recordPart':
             return repairOrders.recordPart(orderId, {

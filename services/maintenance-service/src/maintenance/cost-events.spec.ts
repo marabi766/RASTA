@@ -176,16 +176,19 @@ describe('cost-line events (L7-14)', () => {
   });
 
   it('publishes nothing when the write is refused before the transaction', async () => {
+    // A completed repair order no longer accepts cost.
+    ORDER.status = 'COMPLETED';
     await expect(
       asManager(() =>
         service.recordCost(ORDER.id, {
           category: 'SERVICE',
           amountMinor: '1',
-          currency: 'USD',
-          description: 'ارز دیگر',
+          currency: 'IRR',
+          description: 'پس از تکمیل',
         }),
       ),
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+    ORDER.status = 'IN_PROGRESS';
     expect(enqueued).toHaveLength(0);
   });
 });
