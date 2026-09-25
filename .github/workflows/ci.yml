@@ -131,8 +131,19 @@ jobs:
       - name: Type check
         run: pnpm run typecheck
 
+      - name: Cache the Temporal time-skipping test server
+        # marketplace-service's saga specs run on it, and it is a ~300 MB
+        # download. Fetched on every run it made the specs' setup hook exceed
+        # its timeout whenever the network was slow (2026-09-25).
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/temporal-test-server
+          key: temporal-test-server-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
       - name: Unit tests
         run: pnpm run test:unit
+        env:
+          TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
 
       - name: Build
         run: pnpm run build
