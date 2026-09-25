@@ -395,12 +395,26 @@ describe('order saga activities (real database)', () => {
         () => wiring.orders.raiseDispute(orderId, { reason: 'the part does not fit' }),
       );
 
-      await acts.disputeObligation(orderId, held.transactionId, 'the part does not fit');
-      await acts.resolveObligationDispute(orderId, held.transactionId, 'RELEASE_TO_SUPPLIER');
+      const { dispute } = await acts.readOrder(orderId);
+      await acts.disputeObligation(
+        orderId,
+        held.transactionId,
+        dispute!.id,
+        'the part does not fit',
+      );
+      await acts.resolveObligationDispute(
+        orderId,
+        held.transactionId,
+        dispute!.id,
+        'RELEASE_TO_SUPPLIER',
+      );
 
       expect(calls.map((c) => c.method)).toEqual(['createObligation', 'dispute', 'resolveDispute']);
       expect(calls[1].input.reason).toBe('the part does not fit');
       expect(calls[2].input.resolution).toBe('RELEASE_TO_SUPPLIER');
+      // Keyed by the dispute, so a second dispute on this order is its own call.
+      expect(calls[1].input.disputeId).toBe(dispute!.id);
+      expect(calls[2].input.disputeId).toBe(dispute!.id);
     });
 
     it('records a settlement that will not complete, without moving money', async () => {
@@ -590,6 +604,7 @@ describe('order saga activities (real database)', () => {
       expect(view.status).toBe('DISPUTED');
       expect(view.economicTransactionId).toMatch(/^TXN_/);
       expect(view.dispute).toEqual({
+        id: expect.any(String),
         reason: 'the delivered part is the wrong size',
         resolution: null,
       });

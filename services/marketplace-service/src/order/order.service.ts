@@ -845,7 +845,7 @@ export class OrderService {
     economicTransactionId: string | null;
     cancellationReason: string | null;
     /** The most recent dispute's reason and, once decided, its resolution. */
-    dispute: { reason: string; resolution: string | null } | null;
+    dispute: { id: string; reason: string; resolution: string | null } | null;
   }> {
     const row = await this.repository.findForParty(orderId);
     if (!row) throw RastaError.notFound('Order', orderId);
@@ -854,7 +854,7 @@ export class OrderService {
       this.prisma.client.orderDispute.findFirst({
         where: { orderId: row.id },
         orderBy: { raisedAt: 'desc' },
-        select: { reason: true, resolution: true },
+        select: { id: true, reason: true, resolution: true },
       }),
     );
 

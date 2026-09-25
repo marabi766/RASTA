@@ -225,11 +225,17 @@ export function createActivities(deps: ActivityDependencies) {
      * DISPUTED there, and economic-service refuses to settle it independently
      * of anything this service does.
      */
-    async disputeObligation(orderId: string, transactionId: string, reason: string): Promise<void> {
+    async disputeObligation(
+      orderId: string,
+      transactionId: string,
+      disputeId: string,
+      reason: string,
+    ): Promise<void> {
       await asSystemFor(orderId, async (order) => {
         try {
           await deps.economic.dispute({
             orderId: order.id,
+            disputeId,
             transactionId,
             buyerOrganizationId: order.buyerOrganizationId,
             reason,
@@ -245,12 +251,14 @@ export function createActivities(deps: ActivityDependencies) {
     async resolveObligationDispute(
       orderId: string,
       transactionId: string,
+      disputeId: string,
       resolution: string,
     ): Promise<void> {
       await asSystemFor(orderId, async (order) => {
         try {
           await deps.economic.resolveDispute({
             orderId: order.id,
+            disputeId,
             transactionId,
             buyerOrganizationId: order.buyerOrganizationId,
             resolution,
