@@ -91,7 +91,20 @@ export interface GatewayCall {
    */
   readonly idempotencyKey?: string;
   readonly fetchImpl?: typeof fetch;
+  /** Overrides {@link GATEWAY_TIMEOUT_MS}. Exists for tests. */
+  readonly timeoutMs?: number;
 }
+
+/**
+ * How long this portal waits on the gateway before giving up.
+ *
+ * Named rather than left to whatever the hosting runtime happens to enforce
+ * (`docs/16 § ۱۶٫۱۱`): an upstream that accepts the connection and then never
+ * answers would otherwise hold the request — and a server-render along with
+ * it — for as long as the platform's own socket timeout, which is a much
+ * longer and much less predictable number than this one.
+ */
+const GATEWAY_TIMEOUT_MS = 15_000;
 
 export interface GatewayResponse<T> {
   readonly data: T;
@@ -110,18 +123,30 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
   const correlationId = call.correlationId ?? randomUUID();
   const fetchImpl = call.fetchImpl ?? fetch;
 
-  const response = await fetchImpl(url, {
-    method: call.method ?? 'GET',
-    headers: {
-      accept: 'application/json',
-      authorization: `Bearer ${call.accessToken}`,
-      'x-correlation-id': correlationId,
-      ...(call.body === undefined ? {} : { 'content-type': 'application/json' }),
-      ...(call.idempotencyKey === undefined ? {} : { 'idempotency-key': call.idempotencyKey }),
-    },
-    body: call.body === undefined ? undefined : JSON.stringify(call.body),
-    cache: 'no-store',
-  });
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: call.method ?? 'GET',
+      headers: {
+        accept: 'application/json',
+        authorization: `Bearer ${call.accessToken}`,
+        'x-correlation-id': correlationId,
+        ...(call.body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...(call.idempotencyKey === undefined ? {} : { 'idempotency-key': call.idempotencyKey }),
+      },
+      body: call.body === undefined ? undefined : JSON.stringify(call.body),
+      cache: 'no-store',
+      signal: AbortSignal.timeout(call.timeoutMs ?? GATEWAY_TIMEOUT_MS),
+    });
+  } catch {
+    // A refused connection, a DNS failure, a reset, or this function's own
+    // timeout above all reject `fetch` rather than answering it, and none of
+    // them carries a platform status. Every read and write module already
+    // maps `GatewayRequestError` to a safe `UNAVAILABLE` outcome; wrapping a
+    // transport failure as one here — rather than in each of those modules —
+    // is what makes that mapping actually total (`docs/16 § ۱۶٫۱۱`).
+    throw new GatewayRequestError(503, correlationId, null);
+  }
 
   if (!response.ok) {
     // The status, the correlation id, and — for a 4xx that explains itself —
@@ -148,7 +173,13 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     return { data: undefined as T, correlationId };
   }
 
-  return { data: (await response.json()) as T, correlationId };
+  try {
+    return { data: (await response.json()) as T, correlationId };
+  } catch {
+    // A 2xx whose body does not parse is the gateway's contract broken, not
+    // something a screen mid-form can be asked to make sense of.
+    throw new GatewayRequestError(502, correlationId, null);
+  }
 }
 
 async function readProblem(response: Response): Promise<GatewayProblem | null> {

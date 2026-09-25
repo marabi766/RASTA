@@ -1,6 +1,11 @@
 import { NextResponse } from 'next/server';
 import { webServerEnv } from '@/server/env';
-import { LOGIN_ATTEMPT_COOKIE, openLoginAttempt, safeReturnTo } from '@/server/login-attempt';
+import {
+  LOGIN_ATTEMPT_COOKIE,
+  openLoginAttempt,
+  readSealedLoginAttempt,
+  safeReturnTo,
+} from '@/server/login-attempt';
 import { endpointsFor, exchangeCode, OidcError, verifyIdToken } from '@/server/oidc';
 import { SESSION_COOKIE, newCsrfToken, sealSession, sessionCookieOptions } from '@/server/session';
 
@@ -42,15 +47,10 @@ export async function GET(request: Request): Promise<NextResponse> {
   const providerError = url.searchParams.get('error');
   if (providerError) return refuse(origin, 'provider_refused');
 
-  const sealed = request.headers
-    .get('cookie')
-    ?.split(';')
-    .map((entry) => entry.trim())
-    .find((entry) => entry.startsWith(`${LOGIN_ATTEMPT_COOKIE}=`))
-    ?.slice(LOGIN_ATTEMPT_COOKIE.length + 1);
+  const sealed = readSealedLoginAttempt(request.headers.get('cookie'));
   if (!sealed) return refuse(origin, 'no_attempt');
 
-  const attempt = openLoginAttempt(decodeURIComponent(sealed), env.WEB_SESSION_SECRET);
+  const attempt = openLoginAttempt(sealed, env.WEB_SESSION_SECRET);
   if (!attempt) return refuse(origin, 'no_attempt');
 
   const state = url.searchParams.get('state');

@@ -5,6 +5,7 @@ import {
   LOGIN_ATTEMPT_COOKIE,
   loginAttemptCookieOptions,
   openLoginAttempt,
+  readSealedLoginAttempt,
   safeReturnTo,
   sealLoginAttempt,
 } from './login-attempt';
@@ -43,6 +44,27 @@ describe('the attempt cookie', () => {
   it('does not leave the verifier readable', () => {
     const sealed = sealLoginAttempt(attempt, SECRET);
     expect(Buffer.from(sealed, 'base64url').toString('utf8')).not.toContain('verifier-value');
+  });
+});
+
+describe('reading the attempt cookie out of a raw Cookie header (L5-08)', () => {
+  it('finds the cookie among others and decodes it', () => {
+    const sealed = sealLoginAttempt(attempt, SECRET);
+    const header = `other=1; ${LOGIN_ATTEMPT_COOKIE}=${encodeURIComponent(sealed)}; more=2`;
+    expect(readSealedLoginAttempt(header)).toBe(sealed);
+  });
+
+  it('returns null rather than throwing on a malformed percent-escape', () => {
+    // A lone `%` makes `decodeURIComponent` throw `URIError`. A callback
+    // request carrying this cookie must fail closed — the same `no_attempt`
+    // refusal an absent cookie gets — not surface as a framework error.
+    expect(readSealedLoginAttempt(`${LOGIN_ATTEMPT_COOKIE}=%`)).toBeNull();
+    expect(readSealedLoginAttempt(`${LOGIN_ATTEMPT_COOKIE}=%ZZ`)).toBeNull();
+  });
+
+  it('returns null when there is no cookie header, or no matching cookie in it', () => {
+    expect(readSealedLoginAttempt(null)).toBeNull();
+    expect(readSealedLoginAttempt('other=1')).toBeNull();
   });
 });
 
