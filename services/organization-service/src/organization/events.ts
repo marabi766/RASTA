@@ -16,6 +16,7 @@ export const ORGANIZATION_EVENTS = {
   ORGANIZATION_STATUS_CHANGED: 'ORGANIZATION_STATUS_CHANGED',
   ORGANIZATION_POLICY_CHANGED: 'ORGANIZATION_POLICY_CHANGED',
   ORGANIZATION_LOCATION_CHANGED: 'ORGANIZATION_LOCATION_CHANGED',
+  ORGANIZATION_CONTACT_CHANGED: 'ORGANIZATION_CONTACT_CHANGED',
 } as const;
 
 export type OrganizationEventName = (typeof ORGANIZATION_EVENTS)[keyof typeof ORGANIZATION_EVENTS];
@@ -91,6 +92,28 @@ export const organizationLocationChangedPayload = z.object({
   hasCoordinate: z.boolean(),
 });
 
+/**
+ * A contact was added, and possibly displaced the previous primary of its kind.
+ *
+ * Exists so the change has an audit record (AGENTS.md S-06): audit-service
+ * records every event on this topic. It carries **no phone number, email or
+ * display name** — who may be reached at an organization is personal data,
+ * and the audit record needs only which contact changed, how, and who did it
+ * (the actor travels on the envelope). A reader who needs the value asks this
+ * service, which applies its own visibility rules.
+ */
+export const organizationContactChangedPayload = z.object({
+  organizationId: z.string(),
+  contactId: z.string(),
+  change: z.enum(['ADDED']),
+  kind: z.string(),
+  isPrimary: z.boolean(),
+  hasPhone: z.boolean(),
+  hasEmail: z.boolean(),
+  /** Contacts of the same kind that lost their primary flag in this change. */
+  demotedContactIds: z.array(z.string()),
+});
+
 export const ORGANIZATION_EVENT_SCHEMAS = {
   [ORGANIZATION_EVENTS.ORGANIZATION_CREATED]: organizationCreatedPayload,
   [ORGANIZATION_EVENTS.ORGANIZATION_UPDATED]: organizationUpdatedPayload,
@@ -98,6 +121,7 @@ export const ORGANIZATION_EVENT_SCHEMAS = {
   [ORGANIZATION_EVENTS.ORGANIZATION_STATUS_CHANGED]: organizationStatusChangedPayload,
   [ORGANIZATION_EVENTS.ORGANIZATION_POLICY_CHANGED]: organizationPolicyChangedPayload,
   [ORGANIZATION_EVENTS.ORGANIZATION_LOCATION_CHANGED]: organizationLocationChangedPayload,
+  [ORGANIZATION_EVENTS.ORGANIZATION_CONTACT_CHANGED]: organizationContactChangedPayload,
 } as const satisfies Record<OrganizationEventName, z.ZodTypeAny>;
 
 /**
