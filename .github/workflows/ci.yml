@@ -77,6 +77,15 @@ jobs:
           pnpm run test:local-postgres-config
           pnpm run check:local-postgres-config
 
+      - name: Compose ports bound to loopback
+        # L7-38: the dev stack runs Postgres, Redis, Kafka, MinIO and the rest
+        # with development credentials or none. Every published port must bind
+        # ${COMPOSE_BIND_ADDRESS:-127.0.0.1} (or 127.0.0.1), never 0.0.0.0.
+        # Static; the checker's tests run first.
+        run: |
+          pnpm run test:compose-ports
+          pnpm run check:compose-ports
+
       - name: Test phase contract
         # identity-service's aggregation stress spec (two 500-write proofs on
         # one hot row) must run exactly once, alone, after every other

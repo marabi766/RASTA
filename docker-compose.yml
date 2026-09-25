@@ -45,7 +45,7 @@ services:
       POSTGRES_PASSWORD_AUDIT_MIGRATOR: ${POSTGRES_PASSWORD_AUDIT_MIGRATOR:-rasta_audit_migrator_dev_password}
       LANG: C.UTF-8
     ports:
-      - '${POSTGRES_PORT:-5432}:5432'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./infrastructure/docker/postgres:/docker-entrypoint-initdb.d:ro
@@ -63,7 +63,7 @@ services:
     container_name: rasta-redis
     command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
     ports:
-      - '6379:6379'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:6379:6379'
     volumes:
       - redis-data:/data
     healthcheck:
@@ -107,7 +107,7 @@ services:
       KAFKA_LOG_RETENTION_HOURS: '168'
       CLUSTER_ID: 'rasta-local-cluster-000001'
     ports:
-      - '${KAFKA_HOST_PORT:-9092}:9092'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:${KAFKA_HOST_PORT:-9092}:9092'
     # Deliberately no named volume. The container runs as uid 1000, and a named
     # volume mounts root-owned, so the broker cannot write its log dir. Local
     # Kafka data is disposable anyway — kafka-init recreates every topic on each
@@ -151,8 +151,8 @@ services:
       KC_HEALTH_ENABLED: 'true'
       KC_METRICS_ENABLED: 'true'
     ports:
-      - '8080:8080'
-      - '9003:9000'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:8080:8080'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:9003:9000'
     volumes:
       - ./infrastructure/docker/keycloak:/opt/keycloak/data/import:ro
     depends_on:
@@ -190,8 +190,8 @@ services:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY:-rasta_minio_admin}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-rasta_minio_dev_password}
     ports:
-      - '9000:9000'
-      - '9001:9001'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:9000:9000'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:9001:9001'
     volumes:
       - minio-data:/data
 
@@ -338,7 +338,7 @@ services:
       # loopback healthcheck can never succeed even though the server is fine.
       BIND_ON_IP: '0.0.0.0'
     ports:
-      - '7233:7233'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:7233:7233'
     depends_on:
       postgres:
         condition: service_healthy
@@ -357,7 +357,7 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_CORS_ORIGINS: http://localhost:3200
     ports:
-      - '8088:8080'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:8088:8080'
     depends_on:
       - temporal
     profiles: ['tools', 'all']
@@ -381,7 +381,7 @@ services:
         soft: 65536
         hard: 65536
     ports:
-      - '9200:9200'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:9200:9200'
     volumes:
       - opensearch-data:/usr/share/opensearch/data
     profiles: ['search', 'all']
@@ -395,9 +395,9 @@ services:
     volumes:
       - ./infrastructure/docker/otel/config.yaml:/etc/otel/config.yaml:ro
     ports:
-      - '4317:4317'
-      - '4318:4318'
-      - '8889:8889'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:4317:4317'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:4318:4318'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:8889:8889'
     profiles: ['observability', 'all']
 
   prometheus:
@@ -412,7 +412,7 @@ services:
       - ./infrastructure/docker/prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
     ports:
-      - '9090:9090'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:9090:9090'
     profiles: ['observability', 'all']
 
   # Broker-side Kafka metrics for the local Prometheus: consumer-group offsets
@@ -457,7 +457,7 @@ services:
       - ./infrastructure/docker/grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - '3001:3000'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:3001:3000'
     depends_on:
       - prometheus
     profiles: ['observability', 'all']
@@ -472,7 +472,7 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9094
       DYNAMIC_CONFIG_ENABLED: 'true'
     ports:
-      - '8081:8080'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:8081:8080'
     depends_on:
       kafka:
         condition: service_healthy
@@ -483,8 +483,8 @@ services:
     image: axllent/mailpit:v1.22
     container_name: rasta-mailpit
     ports:
-      - '1025:1025'
-      - '8025:8025'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:1025:1025'
+      - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:8025:8025'
     profiles: ['tools', 'all']
 
 volumes:
