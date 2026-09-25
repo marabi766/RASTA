@@ -2,6 +2,14 @@ import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@ne
 import type { EventEnvelope } from '@rasta/contracts';
 import type { EventConsumer, EventHandler } from '@rasta/nest-common';
 import { FleetRepository } from '../fleet/fleet.repository';
+import {
+  INSPECTION_BLOCK_REASON,
+  UNKNOWN_COVERAGE,
+  parseCover,
+  unresolvedLapses,
+  withRecordedPolicy,
+  type InsuranceCover,
+} from '../fleet/dispatch-blocks';
 import { CONSUMED_EVENTS, assetSourceSchema, type ConsumedEventName } from '../fleet/events';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 
@@ -29,8 +37,31 @@ import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 
 /** What each consumed event does to the local picture. */
 interface Projection {
-  /** Applied on top of the existing replica row. */
-  patch: (payload: Record<string, unknown>) => AssetRefPatch;
+  /**
+   * Applied on top of the existing replica row. `current` is that row as read
+   * under a row lock inside the handler's transaction, so a projection that
+   * adds to a field (a lapse to the set, a window to the map) cannot lose a
+   * concurrent addition; `null` on the first sighting of a machine.
+   *
+   * `now` is when fleet handles the event, `occurredAt` when the producer says
+   * it happened. Anything that decides which of two events is newer uses
+   * `occurredAt`: events from different topics arrive in no guaranteed order.
+   */
+  patch: (
+    payload: Record<string, unknown>,
+    current: CurrentAssetRef | null,
+    now: Date,
+    occurredAt: Date,
+  ) => AssetRefPatch;
+}
+
+/** The fields of the current row a projection may build on. */
+interface CurrentAssetRef {
+  inspectionBlockedAt: Date | null;
+  inspectionResolvedAt: Date | null;
+  insuranceLapsedCoverages: string[];
+  insuranceLapsedAt: Date | null;
+  insuranceCover: unknown;
 }
 
 interface AssetRefPatch {
@@ -40,8 +71,12 @@ interface AssetRefPatch {
   assetTag?: string | null;
   status?: string;
   inMaintenance?: boolean;
-  dispatchBlockedReason?: string | null;
-  dispatchBlockedAt?: Date | null;
+  inspectionBlockedReason?: string | null;
+  inspectionBlockedAt?: Date | null;
+  inspectionResolvedAt?: Date | null;
+  insuranceLapsedCoverages?: string[];
+  insuranceLapsedAt?: Date | null;
+  insuranceCover?: InsuranceCover;
 }
 
 const PROJECTIONS: Record<ConsumedEventName, Projection> = {
@@ -83,17 +118,75 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
   },
 
   // ---- asset-service: safety ----------------------------------------------
+  //
+  // Independent causes in independent fields (L3-02). Folding them into one
+  // `dispatchBlockedReason` meant whichever event resolved *one* of them
+  // silently cleared the other too — a completed repair has nothing to say
+  // about a lapsed insurance policy, but it used to clear that block anyway —
+  // and a later block overwrote the reason of an earlier one. Each projection
+  // below reads the current row and adds to it; none replaces another cause.
   [CONSUMED_EVENTS.INSPECTION_FAILED]: {
-    patch: () => ({
-      dispatchBlockedReason: 'The most recent technical inspection failed',
-      dispatchBlockedAt: new Date(),
-    }),
+    patch: (_payload, current, _now, occurredAt) => {
+      // A repair completed after this failure has already answered it. That
+      // happens when the completion is consumed first: the topics are
+      // separate and carry no order between them.
+      const resolvedAt = current?.inspectionResolvedAt;
+      if (resolvedAt && occurredAt < resolvedAt) return {};
+      // Dated by the most recent failure, when the producer says it happened,
+      // so only a repair completed after that failure clears the block.
+      return {
+        inspectionBlockedReason: INSPECTION_BLOCK_REASON,
+        inspectionBlockedAt: later(current?.inspectionBlockedAt, occurredAt),
+      };
+    },
   },
   [CONSUMED_EVENTS.INSURANCE_EXPIRED]: {
-    patch: () => ({
-      dispatchBlockedReason: 'The insurance policy has expired',
-      dispatchBlockedAt: new Date(),
-    }),
+    // Recorded as a lapse of the policy's coverage, never as "insured: no".
+    // Whether it actually blocks is decided at dispatch time against the
+    // recorded windows (dispatch-blocks.ts): a renewal recorded *before* this
+    // lapse — the normal order — already answers it.
+    patch: (payload, current, now) => {
+      const lapsed = current?.insuranceLapsedCoverages ?? [];
+      const coverage = str(payload.coverage) ?? UNKNOWN_COVERAGE;
+      if (lapsed.includes(coverage)) return {};
+      return {
+        insuranceLapsedCoverages: [...lapsed, coverage],
+        insuranceLapsedAt: current?.insuranceLapsedAt ?? now,
+      };
+    },
+  },
+  [CONSUMED_EVENTS.INSURANCE_RECORDED]: {
+    // The only event that ends an insurance lapse, and only for its own
+    // coverage and only while the policy is in force. The payload carries the
+    // policy's `validFrom`/`validTo` (asset-service `insuranceRecordedPayload`),
+    // so the window is stored rather than assumed: a renewal that starts next
+    // week answers the lapse from next week, not from now.
+    patch: (payload, current, now) => {
+      const coverage = str(payload.coverage);
+      const policyId = str(payload.policyId);
+      const validFrom = str(payload.validFrom);
+      const validTo = str(payload.validTo);
+      // A policy without its dates cannot answer anything; it is recorded as
+      // seen and changes nothing, rather than guessing a validity.
+      if (!coverage || !policyId || !validFrom || !validTo) return {};
+
+      const cover = withRecordedPolicy(
+        parseCover(current?.insuranceCover),
+        coverage,
+        { policyId, validFrom, validTo },
+        now,
+      );
+      // Resolved lapses are dropped from the set so it does not grow for
+      // ever; one this policy does not yet answer stays and is re-checked at
+      // dispatch time. `UNKNOWN` follows the same rule as the read side.
+      const lapsed = current?.insuranceLapsedCoverages ?? [];
+      const stillLapsed = unresolvedLapses(lapsed, cover, now);
+      return {
+        insuranceCover: cover,
+        insuranceLapsedCoverages: stillLapsed,
+        insuranceLapsedAt: stillLapsed.length > 0 ? (current?.insuranceLapsedAt ?? null) : null,
+      };
+    },
   },
 
   // ---- maintenance-service ------------------------------------------------
@@ -104,15 +197,23 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
     patch: () => ({ inMaintenance: true }),
   },
   [CONSUMED_EVENTS.MAINTENANCE_COMPLETED]: {
-    patch: () => ({
-      inMaintenance: false,
-      // A completed repair clears the safety block: the machine has been
-      // through a workshop, which is the event that resolves a failed
-      // inspection. If it has not, the next inspection will say so and block
-      // it again.
-      dispatchBlockedReason: null,
-      dispatchBlockedAt: null,
-    }),
+    patch: (_payload, current, _now, occurredAt) => {
+      // A completed repair resolves a failed *inspection* — the machine has
+      // been through a workshop, which is the event the inspection block
+      // exists to gate (docs/24 Q-65). It says nothing about insurance: that
+      // block survives this event and ends only with INSURANCE_RECORDED.
+      //
+      // Only a failure older than the repair is resolved. A completion that
+      // arrives after a newer failure, because the topics are consumed in no
+      // guaranteed order, leaves that failure in force.
+      const blockedAt = current?.inspectionBlockedAt;
+      const resolves = !blockedAt || occurredAt > blockedAt;
+      return {
+        inMaintenance: false,
+        inspectionResolvedAt: later(current?.inspectionResolvedAt, occurredAt),
+        ...(resolves ? { inspectionBlockedReason: null, inspectionBlockedAt: null } : {}),
+      };
+    },
   },
 };
 
@@ -200,12 +301,13 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       return 'SKIPPED';
     }
 
-    const patch = projection.patch(payload);
-    // Narrowed rather than asserted: the guard above already established that
-    // one of these is present, and spelling it out here keeps that true if the
-    // guard is ever edited.
-    const tenant = patch.organizationId ?? existing?.organizationId ?? organizationId;
-    if (!tenant) return 'SKIPPED';
+    const now = new Date();
+    // The producer's clock, for ordering. An unreadable timestamp falls back to
+    // now, which dates the event as late as possible: a failure then blocks,
+    // and a repair clears only failures that are genuinely older.
+    const stated = new Date(envelope.occurredAt);
+    const occurredAt = Number.isNaN(stated.getTime()) ? now : stated;
+    let skipped = false;
 
     await this.repository.transaction(async (tx: ExtendedPrismaClient) => {
       // The idempotency marker and the effect commit together, so a crash
@@ -214,6 +316,22 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       const fresh = await this.repository.markEventProcessed(tx, envelope.eventId, CONSUMER_NAME);
       if (!fresh) {
         this.logger.debug(`${envelope.eventName} ${envelope.eventId} already applied`);
+        return;
+      }
+
+      // Locked and re-read inside the transaction: the safety projections add
+      // to what the row already holds, and two events for one machine handled
+      // at once must not each build on a copy that lacks the other's change.
+      await this.repository.lockAssetRef(tx, assetId);
+      const current = await this.repository.findAssetRef(assetId, tx);
+      const patch = projection.patch(payload, current, now, occurredAt);
+
+      // Narrowed rather than asserted: the guard above already established
+      // that one of these is present, and spelling it out here keeps that true
+      // if the guard is ever edited.
+      const tenant = patch.organizationId ?? current?.organizationId ?? organizationId;
+      if (!tenant) {
+        skipped = true;
         return;
       }
 
@@ -231,7 +349,14 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         sourceEvent: envelope.eventName,
       });
     });
+
+    return skipped ? 'SKIPPED' : undefined;
   }
+}
+
+/** The later of two instants, either of which may be missing. */
+function later(a: Date | null | undefined, b: Date): Date {
+  return a && a > b ? a : b;
 }
 
 /** Reads a string field, tolerating the absence the loose schema allows. */

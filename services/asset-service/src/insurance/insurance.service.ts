@@ -303,6 +303,7 @@ export class InsuranceService {
             assetId: policy.assetId,
             organizationId: policy.organizationId,
             policyId: policy.id,
+            coverage: policy.coverage,
             validTo: policy.validTo.toISOString(),
           }),
         });

@@ -9,6 +9,7 @@ import { resolvePartitionKey } from './routing';
 import type { FleetEventName } from './events';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
+import type { InsuranceCover } from './dispatch-blocks';
 import type {
   AvailabilityQuery,
   ListAssignmentsQuery,
@@ -215,6 +216,76 @@ export class FleetRepository {
     return this.client.usageRecord.findFirst({ where: { clientReference } });
   }
 
+  /**
+   * Serialises every writer for one asset until the transaction ends. Three
+   * callers: usage submission, so two concurrent submissions for the same
+   * machine cannot both pass the overlap check before either has inserted
+   * (L3-05); assignment, so a dispatch block that commits a moment earlier is
+   * seen before the insert; and the asset-sync consumer, so two safety events
+   * for one machine cannot each build on a copy of the row that lacks the
+   * other's change (L3-02).
+   *
+   * A transaction-scoped advisory lock keyed by the asset id, not only a row
+   * lock. `FOR UPDATE` on a row that does not exist yet locks nothing, so two
+   * events that are the first sighting of a machine would both read "no row"
+   * and the second upsert would overwrite the first. The advisory lock exists
+   * whether or not the row does. The row lock is still taken, so a writer
+   * that locks only the row is ordered too.
+   *
+   * Raw SQL because Prisma has no expression for either lock. Unscoped
+   * because the replica is platform-wide, not tenant data. Callers that act
+   * for a tenant re-read the row after this and check its organization.
+   */
+  async lockAssetRef(tx: ExtendedPrismaClient, assetId: string): Promise<void> {
+    await runUnscoped(
+      'serializes concurrent writers for one asset; the replica row is the only per-asset row this service owns',
+      async () => {
+        // `SELECT 1 FROM`, because Prisma cannot read back the `void` the
+        // function returns.
+        await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`asset_ref:${assetId}`}, 0))`;
+        await tx.$queryRaw`SELECT id FROM asset_ref WHERE id = ${assetId} FOR UPDATE`;
+      },
+    );
+  }
+
+  /**
+   * Any existing record for this asset whose period overlaps the given one.
+   *
+   * The standard interval-overlap test: two periods overlap exactly when each
+   * starts before the other ends. Scoped by asset only, not by driver — two
+   * different drivers cannot both have been operating the same machine at
+   * once either, and the audit's own reproduction uses two different
+   * `clientReference`s on the same asset.
+   *
+   * Not by tenant either. A machine transferred mid-shift has records under
+   * two organizations, and maintenance-service adds every accepted period to
+   * one meter per asset, so an overlap across the transfer would count the
+   * same hour twice. Unscoped for that reason; the caller must not show a
+   * conflicting record that belongs to another organization.
+   *
+   * Must be called after {@link lockAssetRef} in the same transaction, or two
+   * concurrent calls can both see no overlap and both insert.
+   */
+  async findOverlappingUsage(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    periodStart: Date,
+    periodEnd: Date,
+  ) {
+    return runUnscoped(
+      'usage periods of one machine must not overlap across owners; the maintenance meter is per asset',
+      () =>
+        tx.usageRecord.findFirst({
+          where: {
+            assetId,
+            periodStart: { lt: periodEnd },
+            periodEnd: { gt: periodStart },
+          },
+          select: { id: true, organizationId: true },
+        }),
+    );
+  }
+
   async listUsage(query: ListUsageQuery) {
     const constraints: object[] = [];
     if (query.cursor) constraints.push({ id: { lt: query.cursor } });
@@ -372,8 +443,12 @@ export class FleetRepository {
       assetTag?: string | null;
       status?: string;
       inMaintenance?: boolean;
-      dispatchBlockedReason?: string | null;
-      dispatchBlockedAt?: Date | null;
+      inspectionBlockedReason?: string | null;
+      inspectionBlockedAt?: Date | null;
+      inspectionResolvedAt?: Date | null;
+      insuranceLapsedCoverages?: string[];
+      insuranceLapsedAt?: Date | null;
+      insuranceCover?: InsuranceCover;
       sourceEvent: string;
     },
   ) {
