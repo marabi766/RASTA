@@ -114,6 +114,13 @@ describe('economic consumers', () => {
     };
   }
 
+  const processedBy = (consumerName: string, eventId: string) =>
+    runUnscoped('the suite reads the processed-event ledger', () =>
+      prisma.client.processedEvent.findUnique({
+        where: { eventId_consumerName: { eventId, consumerName } },
+      }),
+    );
+
   const findBySource = (requestId: string) =>
     runUnscoped('the consumer suite reads across tenants to verify what was written', () =>
       prisma.client.transaction.findFirst({
@@ -159,20 +166,26 @@ describe('economic consumers', () => {
 
   it('skips an approval with no workshop — there is nobody to pay', async () => {
     const payload = approval({ workshopOrganizationId: null });
+    sources.approved(payload);
+    const event = envelope(CONSUMED_EVENTS.MAINTENANCE_APPROVED, payload);
 
-    await expect(
-      settlementAuthority.handle(envelope(CONSUMED_EVENTS.MAINTENANCE_APPROVED, payload)),
-    ).resolves.toBe('SKIPPED');
+    await expect(settlementAuthority.handle(event)).resolves.toBe('SKIPPED');
 
     // Skipped rather than dead-lettered: an in-house repair with no external
     // workshop is a valid thing for maintenance-service to publish, and a
     // dead-letter would make an ordinary event look like a defect and need a
-    // human to clear it.
+    // human to clear it. Decided after the owner confirmed it (PR #110 review
+    // #2), and marked processed so a redelivery does not ask again.
     expect(await findBySource(payload.requestId)).toBeNull();
+    expect(sources.calls.at(-1)).toMatchObject({ id: payload.requestId });
+    expect(
+      await processedBy(SettlementAuthorityConsumer.CONSUMER_NAME, event.eventId),
+    ).not.toBeNull();
   });
 
   it('skips an approval that cost nothing', async () => {
     const payload = approval({ totalCostMinor: '0' });
+    sources.approved(payload);
 
     await expect(
       settlementAuthority.handle(envelope(CONSUMED_EVENTS.MAINTENANCE_APPROVED, payload)),
@@ -182,6 +195,7 @@ describe('economic consumers', () => {
 
   it('skips an in-house repair, where payer and payee are one organization', async () => {
     const payload = approval({ workshopOrganizationId: org.a });
+    sources.approved(payload);
 
     await expect(
       settlementAuthority.handle(envelope(CONSUMED_EVENTS.MAINTENANCE_APPROVED, payload)),
@@ -239,13 +253,6 @@ describe('economic consumers', () => {
   // -------------------------------------------------------------------------
   // Settlement authority: the owner confirms, or nothing is recorded (ADR-061 § 4)
   // -------------------------------------------------------------------------
-
-  const processedBy = (consumerName: string, eventId: string) =>
-    runUnscoped('the suite reads the processed-event ledger', () =>
-      prisma.client.processedEvent.findUnique({
-        where: { eventId_consumerName: { eventId, consumerName } },
-      }),
-    );
 
   /** Handles the event and expects the owner's refusal, dead-lettered at once. */
   async function expectRefused(
@@ -350,6 +357,59 @@ describe('economic consumers', () => {
     sources.unavailable = false;
     await expect(settlementAuthority.handle(event)).resolves.toBeUndefined();
     expect(await findBySource(payload.requestId)).not.toBeNull();
+  });
+
+  // PR #110 review #2: a skip is decided from the owner's record, after it
+  // confirmed the approval, never from what the event claims.
+  it.each<[string, Record<string, unknown>, string]>([
+    ['claims no workshop', { workshopOrganizationId: null }, 'workshop_mismatch'],
+    ['claims it cost nothing', { totalCostMinor: '0' }, 'amount_mismatch'],
+    ["claims the payer's own workshop", { workshopOrganizationId: 'SELF' }, 'workshop_mismatch'],
+  ])(
+    'dead-letters an approval that %s when the owner recorded a real payable',
+    async (_case, claimed, mismatch) => {
+      const real = approval();
+      sources.approved(real);
+      const claim = {
+        ...real,
+        ...claimed,
+        ...(claimed.workshopOrganizationId === 'SELF' ? { workshopOrganizationId: org.a } : {}),
+      };
+      const event = envelope(CONSUMED_EVENTS.MAINTENANCE_APPROVED, claim);
+
+      // Before, each of these returned SKIPPED unasked and the real
+      // obligation to org B was silently never recorded.
+      await expectRefused(settlementAuthority, event, mismatch);
+      expect(sources.calls.at(-1)).toMatchObject({ id: real.requestId });
+      expect(await findBySource(real.requestId)).toBeNull();
+      expect(
+        await processedBy(SettlementAuthorityConsumer.CONSUMER_NAME, event.eventId),
+      ).toBeNull();
+
+      // The honest event still records it.
+      await expect(
+        settlementAuthority.handle(envelope(CONSUMED_EVENTS.MAINTENANCE_APPROVED, real)),
+      ).resolves.toBeUndefined();
+      expect((await findBySource(real.requestId))?.counterpartyOrganizationId).toBe(org.b);
+    },
+  );
+
+  // PR #110 review #3: the envelope's tenant is the payload's, or nothing is asked.
+  it("refuses an approval whose envelope is another tenant's, before asking anyone", async () => {
+    // A real approval in org C, published under an envelope for org A.
+    const payload = approval({ organizationId: org.c });
+    sources.approved(payload);
+    const event = envelope(CONSUMED_EVENTS.MAINTENANCE_APPROVED, payload, { tenantId: org.a });
+
+    await expectRefused(settlementAuthority, event, 'tenant_mismatch');
+    expect(sources.calls.some((call) => call.id === payload.requestId)).toBe(false);
+    expect(await findBySource(payload.requestId)).toBeNull();
+
+    // And one with no tenant at all.
+    const untenanted = envelope(CONSUMED_EVENTS.MAINTENANCE_APPROVED, approval(), {
+      tenantId: undefined,
+    });
+    await expectRefused(settlementAuthority, untenanted, 'tenant_mismatch');
   });
 
   // -------------------------------------------------------------------------
@@ -574,5 +634,115 @@ describe('economic consumers', () => {
     expect(rewards).toHaveLength(1);
     expect(rewards[0]!.points).toBe(3);
     expect(rewards[0]!.userId).toBe('USR-MAINT');
+  });
+
+  // PR #110 review #3, the reward side.
+  it("refuses a reward trigger whose envelope is another tenant's, before asking anyone", async () => {
+    const payload = usage({ organizationId: org.c });
+    sources.recorded(payload, { recordedBy: 'USR-REWARD-SUBJECT' });
+    const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, {
+      ...userActor(),
+      tenantId: org.a,
+    });
+
+    await expectRefused(rewardTrigger, event, 'tenant_mismatch');
+    expect(sources.calls.some((call) => call.id === payload.usageRecordId)).toBe(false);
+    const rewards = await runUnscoped('the suite counts grants across tenants', () =>
+      prisma.client.reward.count({ where: { sourceReference: payload.usageRecordId } }),
+    );
+    expect(rewards).toBe(0);
+  });
+
+  // PR #110 review #1: one evaluation per source fact, whatever event id.
+  it('grants nothing to a fact re-emitted under a new event id after a backdated rule', async () => {
+    // Org B, which has no rule yet.
+    const inB = () => usage({ organizationId: org.b });
+    const fact = inB();
+    sources.recorded(fact, { recordedBy: 'USR-REWARD-B' });
+
+    // Consumed while nothing could pay: nobody is asked, but the fact is
+    // recorded as evaluated.
+    await expect(
+      rewardTrigger.handle(envelope(CONSUMED_EVENTS.USAGE_RECORDED, fact, userActor())),
+    ).resolves.toBeUndefined();
+
+    // A rule activated later, valid from a day before the fact.
+    const ruleFor = (points: number) =>
+      asActor({ organizationId: org.b, roles: ['SYSTEM_ADMIN'] }, () =>
+        wiring.rewards.createRule({
+          organizationId: org.b,
+          triggerEvent: 'USAGE_RECORDED',
+          rewardType: 'POINTS',
+          points,
+          status: 'ACTIVE',
+          validFrom: new Date(Date.now() - 86_400_000).toISOString(),
+          // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any),
+      );
+    await ruleFor(4);
+
+    // The same fact under a new event id: passes processed_event and the
+    // owner would confirm it, but it has been evaluated already.
+    const replay = envelope(CONSUMED_EVENTS.USAGE_RECORDED, fact, userActor());
+    await expect(rewardTrigger.handle(replay)).resolves.toBe('SKIPPED');
+    expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, replay.eventId)).not.toBeNull();
+
+    const countFor = (sourceReference: string) =>
+      runUnscoped('the suite counts grants across tenants', () =>
+        prisma.client.reward.count({ where: { sourceReference } }),
+      );
+    expect(await countFor(fact.usageRecordId)).toBe(0);
+
+    // A new fact is paid by that rule once; a second rule activated after
+    // does not pay it again when it is re-emitted.
+    const later = inB();
+    sources.recorded(later, { recordedBy: 'USR-REWARD-B' });
+    await rewardTrigger.handle(envelope(CONSUMED_EVENTS.USAGE_RECORDED, later, userActor()));
+    expect(await countFor(later.usageRecordId)).toBe(1);
+
+    await ruleFor(9);
+    await expect(
+      rewardTrigger.handle(envelope(CONSUMED_EVENTS.USAGE_RECORDED, later, userActor())),
+    ).resolves.toBe('SKIPPED');
+    expect(await countFor(later.usageRecordId)).toBe(1);
+  });
+
+  it('lets the event that claimed a fact finish it after a crash, and no other', async () => {
+    // The claim committed, then the process died before processed_event did.
+    // The same event, redelivered, still holds the claim and completes.
+    const payload = usage();
+    sources.recorded(payload, { recordedBy: 'USR-CRASH' });
+    const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
+
+    const spy = jest
+      .spyOn(wiring.rewards, 'grantFor')
+      .mockRejectedValueOnce(new Error('process died between the claim and the grant'));
+    await rewardTrigger.handle(event);
+    spy.mockRestore();
+    // The grant failure is tolerated and the event marked processed; remove
+    // that marker to stand for the crash that never wrote it.
+    await runUnscoped('the suite simulates a crash before processed_event committed', () =>
+      prisma.client.processedEvent.delete({
+        where: {
+          eventId_consumerName: {
+            eventId: event.eventId,
+            consumerName: RewardTriggerConsumer.CONSUMER_NAME,
+          },
+        },
+      }),
+    );
+
+    await expect(rewardTrigger.handle(event)).resolves.toBeUndefined();
+    const rewards = await runUnscoped('the suite counts grants across tenants', () =>
+      prisma.client.reward.findMany({ where: { sourceReference: payload.usageRecordId } }),
+    );
+    expect(rewards.length).toBeGreaterThan(0);
+    expect(rewards.every((reward) => reward.userId === 'USR-CRASH')).toBe(true);
+
+    // Any other event id for the same fact is refused.
+    await expect(
+      rewardTrigger.handle(envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor())),
+    ).resolves.toBe('SKIPPED');
   });
 });

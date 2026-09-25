@@ -105,10 +105,45 @@ describe('SourceFactsClient', () => {
     expect(claims.organizationId).toBe('ORG-A');
   });
 
-  it('answers "no such record" for a 404, which the consumer turns into a refusal', async () => {
-    const { facts } = client(() => json({ code: 'NOT_FOUND' }, 404));
-    await expect(facts.maintenanceRequest('ORG-A', 'MNT_1')).resolves.toBeNull();
+  it('answers "no such record" only for the owner’s own NOT_FOUND about that record', async () => {
+    // What the global exception filter renders for RastaError.notFound().
+    const notFound = (message: string) =>
+      json({ code: 'NOT_FOUND', message, correlationId: 'c', timestamp: 't' }, 404);
+
+    const requests = client(() => notFound('MaintenanceRequest not found'));
+    await expect(requests.facts.maintenanceRequest('ORG-A', 'MNT_1')).resolves.toBeNull();
+    const usage = client(() => notFound('UsageRecord not found'));
+    await expect(usage.facts.usageRecord('ORG-A', 'USG_1')).resolves.toBeNull();
   });
+
+  it.each<[string, () => Response]>([
+    // A rolling deploy, an old version without the route, a wrong base path:
+    // Nest renders these with the same code but its own message.
+    [
+      'a route that does not exist',
+      () =>
+        json(
+          { code: 'NOT_FOUND', message: 'Cannot GET /v1/internal/maintenance-requests/MNT_1' },
+          404,
+        ),
+    ],
+    ['a proxy page', () => new Response('<html>404</html>', { status: 404 })],
+    ['an empty 404', () => new Response(null, { status: 404 })],
+    [
+      'a NOT_FOUND about another kind of record',
+      () => json({ code: 'NOT_FOUND', message: 'Asset not found' }, 404),
+    ],
+  ])(
+    'does not take %s as proof of absence: retried as UPSTREAM_UNAVAILABLE',
+    async (_case, respond) => {
+      // PR #110 review #4: "no such record" dead-letters the event at once, so
+      // only the owner's own answer about the record may say it.
+      const { facts } = client(respond);
+      await expect(facts.maintenanceRequest('ORG-A', 'MNT_1')).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+    },
+  );
 
   it.each<[string, () => Response | Promise<Response>]>([
     ['a 403 from a misconfigured allowlist', () => json({ code: 'FORBIDDEN' }, 403)],
@@ -152,7 +187,7 @@ describe('SourceFactsClient', () => {
 
   it('escapes the identifier, so an event cannot steer the request to another path', async () => {
     const { calls, facts } = client(() => json({ code: 'NOT_FOUND' }, 404));
-    await facts.maintenanceRequest('ORG-A', '../../v1/wallets');
+    await facts.maintenanceRequest('ORG-A', '../../v1/wallets').catch(() => undefined);
     expect(calls[0]!.url).toBe(
       'http://maintenance.internal:3105/v1/internal/maintenance-requests/..%2F..%2Fv1%2Fwallets',
     );

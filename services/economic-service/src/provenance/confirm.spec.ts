@@ -1,7 +1,9 @@
 import {
   confirmApproval,
   confirmCompletion,
+  confirmTenant,
   confirmUsage,
+  noObligationReason,
   rewardSubject,
   type ApprovalClaim,
 } from './confirm';
@@ -38,6 +40,46 @@ describe('confirming an event against its owner', () => {
     currency: 'IRR',
     workshopOrganizationId: 'ORG-WORKSHOP',
   };
+
+  describe("the envelope's tenant (ADR-061 § 5)", () => {
+    it('is confirmed only when it is the organization the payload names', () => {
+      expect(confirmTenant('ORG-A', 'ORG-A')).toEqual({ confirmed: true });
+      // Envelope for A, payload naming a fact in B: refused before any token
+      // is minted for B (PR #110 review #3).
+      expect(confirmTenant('ORG-A', 'ORG-B')).toEqual({
+        confirmed: false,
+        mismatch: 'tenant_mismatch',
+      });
+      // No tenant is not a pass.
+      expect(confirmTenant(undefined, 'ORG-A')).toMatchObject({ mismatch: 'tenant_mismatch' });
+      expect(confirmTenant('', 'ORG-A')).toMatchObject({ mismatch: 'tenant_mismatch' });
+    });
+  });
+
+  describe('whether a confirmed approval creates an obligation', () => {
+    // Read from the owner's record, never the event's (PR #110 review #2).
+    it('does for a positive amount owed to another organization', () => {
+      expect(noObligationReason(approved)).toBeNull();
+    });
+
+    it('does not when the owner recorded no workshop, no cost, or the payer’s own workshop', () => {
+      expect(noObligationReason({ ...approved, workshopOrganizationId: null })).toBe('no_workshop');
+      expect(noObligationReason({ ...approved, totalCostMinor: '0' })).toBe('no_cost');
+      expect(noObligationReason({ ...approved, workshopOrganizationId: 'ORG-A' })).toBe('in_house');
+    });
+
+    it('is not decided by an event that claims no workshop for an approval that has one', () => {
+      // The event's claim meets the owner's record in confirmApproval first,
+      // and a disagreement there is a refusal, not a skip.
+      expect(confirmApproval({ ...claim, workshopOrganizationId: null }, approved)).toEqual({
+        confirmed: false,
+        mismatch: 'workshop_mismatch',
+      });
+      expect(confirmApproval({ ...claim, totalCostMinor: '0' }, approved)).toMatchObject({
+        mismatch: 'amount_mismatch',
+      });
+    });
+  });
 
   describe('an approval', () => {
     it('is confirmed only when the owner says exactly what the event says', () => {

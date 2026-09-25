@@ -32,7 +32,11 @@ import { SERVICE_NAME } from '../config/env';
  * ## Three answers, and only three
  *
  * - the fact, parsed against the declared shape;
- * - `null`: the owner answered `404`, meaning no such record in that organization;
+ * - `null`: the owner answered `404` **with the platform error body naming the
+ *   resource it was asked for** (`{ code: 'NOT_FOUND', message: 'UsageRecord not
+ *   found' }`), meaning no such record in that organization. Any other `404` (a
+ *   route missing during a rolling deploy, a wrong base path, a proxy) proves
+ *   nothing about the record and is treated as unavailable (PR #110 review #4);
  * - a thrown `UPSTREAM_UNAVAILABLE` or `UPSTREAM_TIMEOUT` for everything else:
  *   transport errors, timeouts, a `403` from a misconfigured allowlist, a `5xx`,
  *   a body that does not parse. The consumer retries those and never acts on
@@ -131,6 +135,7 @@ export class SourceFactsClient implements SourceFacts {
       MAINTENANCE_SERVICE,
       this.options.maintenanceBaseUrl,
       `/v1/internal/maintenance-requests/${encodeURIComponent(id)}`,
+      'MaintenanceRequest',
       organizationId,
       id,
       maintenanceRequestFactSchema,
@@ -142,6 +147,7 @@ export class SourceFactsClient implements SourceFacts {
       FLEET_SERVICE,
       this.options.fleetBaseUrl,
       `/v1/internal/usage-records/${encodeURIComponent(id)}`,
+      'UsageRecord',
       organizationId,
       id,
       usageRecordFactSchema,
@@ -152,6 +158,7 @@ export class SourceFactsClient implements SourceFacts {
     service: string,
     baseUrl: string,
     path: string,
+    resourceType: string,
     organizationId: string,
     id: string,
     schema: z.ZodType<T>,
@@ -194,7 +201,18 @@ export class SourceFactsClient implements SourceFacts {
         throw failed();
       }
 
-      if (response.status === 404) return null;
+      if (response.status === 404) {
+        // Absence only when the owner's own handler said so, about this kind
+        // of record. Unavailable otherwise: retried, never taken as "no".
+        let body: unknown;
+        try {
+          body = await response.json();
+        } catch {
+          throw failed();
+        }
+        if (isRecordNotFound(body, resourceType)) return null;
+        throw RastaError.upstreamUnavailable(service);
+      }
       if (response.status !== 200) throw RastaError.upstreamUnavailable(service);
 
       let body: unknown;
@@ -216,4 +234,18 @@ export class SourceFactsClient implements SourceFacts {
       clearTimeout(timer);
     }
   }
+}
+
+/**
+ * The platform's error body for a record the owner looked for and did not
+ * find: `RastaError.notFound(resourceType, id)` rendered by the global
+ * exception filter. A route-level 404 goes through the same filter with the
+ * same code, but its message is Nest's `Cannot GET …`, so the message is what
+ * tells the two apart.
+ */
+const notFoundBodySchema = z.object({ code: z.literal('NOT_FOUND'), message: z.string() });
+
+export function isRecordNotFound(body: unknown, resourceType: string): boolean {
+  const parsed = notFoundBodySchema.safeParse(body);
+  return parsed.success && parsed.data.message === `${resourceType} not found`;
 }

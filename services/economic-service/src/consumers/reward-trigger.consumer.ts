@@ -19,8 +19,10 @@ import { rewardsSkippedTotal, sourceVerificationsTotal } from '../observability/
 import { SERVICE_NAME } from '../config/env';
 import {
   confirmCompletion,
+  confirmTenant,
   confirmUsage,
   rewardSubject,
+  type Mismatch,
   type Verdict,
 } from '../provenance/confirm';
 import type { SourceFacts } from '../provenance/source-facts.client';
@@ -79,12 +81,15 @@ import type { SourceFacts } from '../provenance/source-facts.client';
  * no round trip. A forged organization gains nothing from this: with no rule,
  * nothing is granted; with one, the owner is asked and refutes it.
  *
- * ## Idempotency, twice over
+ * ## Idempotency, three times over
  *
- * `processed_event` handles a replayed envelope. Separately, `(rule_id,
- * source_reference)` is unique on `reward`, so the same usage record cannot
- * earn twice even under a new event id. That is an anti-fraud control as much
- * as an idempotency one (docs/10 § 10.9).
+ * `processed_event` handles a replayed envelope. `(rule_id, source_reference)`
+ * is unique on `reward`, so one rule cannot pay the same usage record twice.
+ * And `reward_source_evaluation` records that a fact has been evaluated at
+ * all, paid or not, so the same fact re-emitted under a new event id is never
+ * evaluated again, even after a rule that did not exist the first time is
+ * activated with a `validFrom` over it (PR #110 review #1). Those are
+ * anti-fraud controls as much as idempotency ones (docs/10 § 10.9).
  *
  * ## A grant that fails does not stall the partition
  *
@@ -121,6 +126,12 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
     const claim = this.extract(envelope);
     if (!claim) return 'SKIPPED';
 
+    // Before the rule lookup, the owner and any token: the envelope's tenant
+    // and the payload's organization are one, or the event is refused
+    // (ADR-061 § 5). Every context below is that one tenant.
+    const tenancy = confirmTenant(envelope.tenantId, claim.organizationId);
+    if (!tenancy.confirmed) this.refuse(envelope.eventName, claim, tenancy.mismatch);
+
     const context = createSystemContext({
       correlationId: envelope.correlationId,
       organizationId: claim.organizationId,
@@ -145,14 +156,37 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
         return 'SKIPPED';
       }
 
+      // One evaluation per fact, whatever event id carries it (PR #110 review
+      // #1). Checked here only to spare the owner a round trip; the claim
+      // below is what decides.
+      const prior = await this.evaluationOf(envelope.eventName, claim);
+      if (prior && prior.eventId !== envelope.eventId) {
+        return this.alreadyEvaluated(envelope, claim);
+      }
+
       if (!(await this.rewards.hasActiveRules(claim.organizationId, envelope.eventName))) {
         rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_rule' });
-        await this.markProcessed(envelope.eventId);
+        // Recorded even though nothing could pay. A rule activated later, even
+        // one backdated over this fact, must not pay it when the same fact is
+        // re-emitted under a new event id: that is a retroactive grant, and
+        // one belongs to a separately authorised backfill, not to a replay.
+        await this.prisma.transaction(async (tx) => {
+          await this.recordEvaluation(tx, envelope, claim, 'NO_RULE');
+          await this.markProcessed(envelope.eventId, tx);
+        });
         return undefined;
       }
 
       // Throws on an owner that cannot be asked: retried, never granted.
       const fact = await this.confirmedFact(envelope.eventName, claim);
+
+      // Claimed only once the owner has confirmed the fact, so an event the
+      // owner refutes claims nothing. Two events for one fact racing here are
+      // decided by the primary key: exactly one of them evaluates it.
+      const evaluation = fact.subject ? 'EVALUATED' : 'NO_SUBJECT';
+      if (!(await this.claimEvaluation(envelope, claim, evaluation))) {
+        return this.alreadyEvaluated(envelope, claim);
+      }
 
       if (!fact.subject) {
         rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_actor' });
@@ -259,23 +293,107 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
 
   /** Counts the verdict, dead-letters a refusal, and returns the confirmed fact. */
   private judge<T>(eventName: string, claim: Claim, fact: T | null, verdict: Verdict): T {
-    const outcome = verdict.confirmed ? 'confirmed' : verdict.mismatch;
-    sourceVerificationsTotal.inc({ service: SERVICE_NAME, consumer: 'reward_trigger', outcome });
     if (!verdict.confirmed || fact === null) {
-      throw new UnprocessableEventError(
-        DLQ_REASONS.SOURCE_UNCONFIRMED,
-        `The owner does not confirm ${eventName} for ${claim.sourceReference}: ${outcome}`,
-      );
+      this.refuse(eventName, claim, verdict.confirmed ? 'not_found' : verdict.mismatch);
     }
+    sourceVerificationsTotal.inc({
+      service: SERVICE_NAME,
+      consumer: 'reward_trigger',
+      outcome: 'confirmed',
+    });
     return fact;
   }
 
-  private async markProcessed(eventId: string): Promise<void> {
+  /** Counts the refusal and dead-letters the event as `SOURCE_UNCONFIRMED`. */
+  private refuse(eventName: string, claim: Claim, mismatch: Mismatch): never {
+    sourceVerificationsTotal.inc({
+      service: SERVICE_NAME,
+      consumer: 'reward_trigger',
+      outcome: mismatch,
+    });
+    throw new UnprocessableEventError(
+      DLQ_REASONS.SOURCE_UNCONFIRMED,
+      `The owner does not confirm ${eventName} for ${claim.sourceReference}: ${mismatch}`,
+    );
+  }
+
+  private async markProcessed(
+    eventId: string,
+    client: Pick<PrismaService['client'], 'processedEvent'> = this.prisma.client,
+  ): Promise<void> {
     await runUnscoped('the processed-event ledger is platform plumbing with no tenant column', () =>
-      this.prisma.client.processedEvent.create({
+      client.processedEvent.create({
         data: { eventId, consumerName: RewardTriggerConsumer.CONSUMER_NAME },
       }),
     );
+  }
+
+  // --------------------------------------------------------------------------
+  // One evaluation per source fact (PR #110 review #1)
+  //
+  // `processed_event` stops the same envelope twice, and `(rule_id,
+  // source_reference)` stops one rule paying one fact twice. Neither stopped a
+  // fact that was consumed while no rule could pay, or before a second rule
+  // existed, from being re-emitted under a new event id after a rule was
+  // activated with a `validFrom` over the fact: it would then pay. The
+  // evaluation row records the first event that decided the fact, whether or
+  // not anything was paid. Only that event, redelivered, may decide it again,
+  // which is what a crash between the claim and the grants needs; the grants
+  // themselves stay idempotent per rule.
+  // --------------------------------------------------------------------------
+
+  private evaluationOf(triggerEvent: string, claim: Claim) {
+    return this.prisma.client.rewardSourceEvaluation.findUnique({
+      where: {
+        organizationId_triggerEvent_sourceReference: {
+          organizationId: claim.organizationId,
+          triggerEvent,
+          sourceReference: claim.sourceReference,
+        },
+      },
+    });
+  }
+
+  /** Inserts the row unless one exists; `ON CONFLICT DO NOTHING`, so a transaction survives. */
+  private async recordEvaluation(
+    client: Pick<PrismaService['client'], 'rewardSourceEvaluation'>,
+    envelope: EventEnvelope,
+    claim: Claim,
+    outcome: EvaluationOutcome,
+  ): Promise<void> {
+    await client.rewardSourceEvaluation.createMany({
+      data: [
+        {
+          organizationId: claim.organizationId,
+          triggerEvent: envelope.eventName,
+          sourceReference: claim.sourceReference,
+          eventId: envelope.eventId,
+          outcome,
+        },
+      ],
+      skipDuplicates: true,
+    });
+  }
+
+  /** True when this event holds the fact's evaluation, now or from before a crash. */
+  private async claimEvaluation(
+    envelope: EventEnvelope,
+    claim: Claim,
+    outcome: EvaluationOutcome,
+  ): Promise<boolean> {
+    await this.recordEvaluation(this.prisma.client, envelope, claim, outcome);
+    const holder = await this.evaluationOf(envelope.eventName, claim);
+    return holder?.eventId === envelope.eventId;
+  }
+
+  private async alreadyEvaluated(envelope: EventEnvelope, claim: Claim): Promise<'SKIPPED'> {
+    rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'already_evaluated' });
+    this.logger.warn(
+      `${envelope.eventName} ${envelope.eventId} names ${claim.sourceReference}, which another ` +
+        'event already evaluated; nothing granted',
+    );
+    await this.markProcessed(envelope.eventId);
+    return 'SKIPPED';
   }
 
   /**
@@ -311,6 +429,9 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
     }
   }
 }
+
+/** What the first evaluation of a fact found; kept for the audit trail. */
+type EvaluationOutcome = 'NO_RULE' | 'NO_SUBJECT' | 'EVALUATED';
 
 interface Claim {
   organizationId: string;

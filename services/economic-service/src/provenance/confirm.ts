@@ -21,6 +21,7 @@ import type { MaintenanceRequestFact, UsageRecordFact } from './source-facts.cli
  */
 
 export type Mismatch =
+  | 'tenant_mismatch'
   | 'not_found'
   | 'organization_mismatch'
   | 'asset_mismatch'
@@ -34,6 +35,45 @@ export type Verdict = { confirmed: true } | { confirmed: false; mismatch: Mismat
 
 const CONFIRMED: Verdict = { confirmed: true };
 const refuted = (mismatch: Mismatch): Verdict => ({ confirmed: false, mismatch });
+
+/**
+ * The envelope's tenant and the payload's organization must be one and the
+ * same, before anything else is asked (ADR-061 § 5).
+ *
+ * Both are the publisher's claim. An envelope for A whose payload names a
+ * fact in B would otherwise be handled as B's: a B token minted, B's record
+ * read, and an obligation or reward created outside the tenant the event was
+ * published for. A missing tenant is a mismatch too, never a pass.
+ */
+export function confirmTenant(
+  envelopeTenantId: string | undefined,
+  claimedOrganizationId: string,
+): Verdict {
+  if (!envelopeTenantId || envelopeTenantId !== claimedOrganizationId) {
+    return refuted('tenant_mismatch');
+  }
+  return CONFIRMED;
+}
+
+/** Why a confirmed approval creates no obligation, or `null` when it does. */
+export type NoObligation = 'no_workshop' | 'no_cost' | 'in_house';
+
+/**
+ * Decided from the owner's record, never from the event (PR #110 review #2).
+ *
+ * The event's `workshopOrganizationId`, amount and payer are only claims. A
+ * publisher defect, or a forgery, that claimed "no workshop" or "zero" would
+ * otherwise have suppressed a real payable obligation before the owner was
+ * even asked. `confirmApproval` has already proved the claim equal to the
+ * fact by the time this runs, so the two agree; reading the fact is what
+ * makes that true by construction.
+ */
+export function noObligationReason(fact: MaintenanceRequestFact): NoObligation | null {
+  if (!fact.workshopOrganizationId) return 'no_workshop';
+  if (BigInt(fact.totalCostMinor) <= 0n) return 'no_cost';
+  if (fact.workshopOrganizationId === fact.organizationId) return 'in_house';
+  return null;
+}
 
 /** The approval as `MAINTENANCE_APPROVED` states it. */
 export interface ApprovalClaim {
