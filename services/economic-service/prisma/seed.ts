@@ -40,7 +40,23 @@ import { assertDemoSeedAllowed } from '@rasta/config';
  * mistaken for an approved one.
  */
 
-const prisma = new PrismaClient();
+/**
+ * The same resolution every other seed uses. A bare `new PrismaClient()` read
+ * only `DATABASE_URL`, which the repo-root .env does not set, so `pnpm db:seed`
+ * failed here while the six other seeds ran.
+ */
+function resolveDatabaseUrl(): string {
+  const url = process.env.DATABASE_URL ?? process.env.DATABASE_URL_ECONOMIC;
+  if (!url) {
+    throw new Error(
+      'Set DATABASE_URL or DATABASE_URL_ECONOMIC. ' +
+        'Run via `pnpm db:seed`, which loads the repo-root .env.',
+    );
+  }
+  return url;
+}
+
+const prisma = new PrismaClient({ datasources: { db: { url: resolveDatabaseUrl() } } });
 
 const PLATFORM_ORGANIZATION_ID = process.env.ECONOMIC_PLATFORM_ORGANIZATION_ID ?? 'ORG-PLATFORM';
 const SEED_SAMPLE_RULES = process.env.ECONOMIC_SEED_SAMPLE_RULES === 'true';
