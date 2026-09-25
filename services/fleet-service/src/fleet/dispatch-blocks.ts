@@ -12,7 +12,7 @@
  *   renewal of one says nothing about another. `INSURANCE_EXPIRED` adds the
  *   lapsed coverage to a set; only an `INSURANCE_RECORDED` policy of the same
  *   coverage, valid now, resolves it. Which coverages ought to gate dispatch
- *   at all is a business rule nobody has stated — docs/24 **Q-64**; until it
+ *   at all is a business rule nobody has stated — docs/24 **Q-65**; until it
  *   is answered every lapse blocks, exactly as before this change.
  *
  * The insurance answer is worked out when it is asked, not stored, because
@@ -25,7 +25,7 @@
  * next week, rather than from the moment it was typed in.
  */
 
-/** A lapse whose coverage the event did not say — only from producers that predate Q-64. */
+/** A lapse whose coverage the event did not say — only from producers that predate Q-65. */
 export const UNKNOWN_COVERAGE = 'UNKNOWN';
 
 /** One recorded policy's validity, as `INSURANCE_RECORDED` carried it. */
@@ -93,7 +93,7 @@ export function isInForce(window: CoverWindow | undefined, now: Date): boolean {
  * `UNKNOWN` is answered by a policy of any coverage in force: it only exists
  * for lapses recorded before the producer said which coverage lapsed, and a
  * rule that nothing could ever satisfy would strand those machines with no
- * way back short of editing the database (Q-64 records the trade-off).
+ * way back short of editing the database (Q-65 records the trade-off).
  */
 export function unresolvedLapses(
   lapsed: readonly string[],

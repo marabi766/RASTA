@@ -13,7 +13,7 @@
 -- Backfill is exact, not a guess: the consumer only ever wrote two literal
 -- reason strings. An existing insurance block did not record which coverage
 -- lapsed, so it becomes `UNKNOWN`, which any policy in force resolves — the
--- same answer the old single field gave, and no worse (docs/24 Q-64). No
+-- same answer the old single field gave, and no worse (docs/24 Q-65). No
 -- recorded policy windows exist yet (fleet never consumed INSURANCE_RECORDED
 -- before this change), so `insurance_cover` starts empty for every row.
 SET LOCAL lock_timeout = '3s';
