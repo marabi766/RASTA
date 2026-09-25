@@ -117,16 +117,11 @@ export class SuspensionService {
   /**
    * Reinstates a supplier.
    *
-   * Publishes **nothing**, and that is a gap rather than a design: the platform
-   * catalogue (`docs/events/README.md` § Supplier) names no `SUPPLIER_REINSTATED`
-   * and this phase's event set is the four the catalogue does name. A consumer
-   * that hid a supplier's offers on `SUPPLIER_SUSPENDED` therefore has no event
-   * telling it to stop and must re-read this service.
-   *
-   * Recorded as a known issue and an Integration Handoff item rather than closed
-   * by inventing an event this service has no mandate to add — the same
-   * discipline ADR-041 applied when it refused to answer `false` for a check
-   * nobody had made.
+   * The status flip, the stamped episode and `SUPPLIER_REINSTATED` share one
+   * transaction (A-08), exactly as `suspend` does. Until the global audit's
+   * L7-14 it published nothing, so audit-service held every suspension and
+   * never its end (AGENTS.md S-06); the event also tells a consumer that hid
+   * the supplier's offers on `SUPPLIER_SUSPENDED` to stop.
    *
    * The episode is stamped, never deleted: a reinstatement that removed the row
    * would erase the record of who suspended the supplier and why.
@@ -143,21 +138,39 @@ export class SuspensionService {
 
     await this.prisma.transaction(async (tx) => {
       // D-5: `reinstated_at >= suspended_at` is a CHECK, and both sides must
-      // come from the clock that evaluates it.
+      // come from the clock that evaluates it — and the event states the same
+      // instant the episode records.
+      const reinstatedAt = await transactionNow(tx);
       const result = await this.repository.closeSuspension(tx, {
         supplierId,
         reinstatedBy: actor,
-        reinstatedAt: await transactionNow(tx),
+        reinstatedAt,
         reinstatedCorrelationId: context.correlationId,
         reinstatementNote: dto.reason,
       });
 
-      if (result.changed === 0) {
+      if (result.changed === 0 || !result.suspensionId) {
+        // Thrown inside the transaction so nothing — status or event — commits.
         throw RastaError.businessRule(
           `Supplier ${supplierId} was reinstated by somebody else first`,
           { supplierId },
         );
       }
+
+      await this.events.enqueue(tx, {
+        eventName: 'SUPPLIER_REINSTATED',
+        aggregateId: result.suspensionId,
+        organizationId: supplier.organizationId,
+        payload: {
+          supplierId,
+          organizationId: supplier.organizationId,
+          suspensionId: result.suspensionId,
+          reason: dto.reason,
+          reinstatedBy: actor,
+          reinstatedAt: reinstatedAt.toISOString(),
+        },
+        occurredAt: reinstatedAt,
+      });
     });
 
     suspensionTransitionsTotal.inc({ service: SERVICE_NAME, transition: 'REINSTATED' });

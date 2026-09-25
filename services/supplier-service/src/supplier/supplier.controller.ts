@@ -239,10 +239,8 @@ export class SupplierController {
     description:
       'Closes the open suspension episode by stamping it with the lifting operator and ' +
       'reason; the episode is never deleted, so who suspended the supplier and why stays ' +
-      'answerable. Publishes no event: the platform catalogue names no SUPPLIER_REINSTATED, ' +
-      'so a consumer that hid this supplier on SUPPLIER_SUSPENDED must re-read this service ' +
-      'rather than wait for one. That gap is recorded rather than closed by inventing an ' +
-      'event this service has no mandate to add.',
+      'answerable. Publishes SUPPLIER_REINSTATED for the closed episode, in the same ' +
+      'transaction, so a consumer that hid this supplier on SUPPLIER_SUSPENDED learns to stop.',
   })
   async reinstate(
     @Param('id') id: string,

@@ -223,10 +223,13 @@ describe('supplier lifecycle', () => {
     // Always null: a suspension runs until an explicit reinstatement.
     expect((events[2].payload as { payload: { until: unknown } }).payload.until).toBeNull();
 
-    const reinstated = await asOperator(() =>
-      w.suspensions.reinstate(supplier.id, {
-        reason: 'The two orders were delivered late, not never',
-      }),
+    const operatorOrg = newOrganizationId();
+    const reinstated = await asOperator(
+      () =>
+        w.suspensions.reinstate(supplier.id, {
+          reason: 'The two orders were delivered late, not never',
+        }),
+      operatorOrg,
     );
 
     expect(reinstated.status).toBe('ACTIVE');
@@ -237,11 +240,76 @@ describe('supplier lifecycle', () => {
     expect(reinstated.suspensions[0].open).toBe(false);
     expect(reinstated.suspensions[0].reinstatedBy).toBeTruthy();
 
-    // The reinstatement gap: no SUPPLIER_REINSTATED exists in the platform
-    // catalogue, so nothing new is published. A consumer that hid this
-    // supplier must re-read the service. Asserted so the gap is visible in the
-    // suite rather than only in a comment.
-    expect(await outboxFor(w.prisma, org)).toHaveLength(3);
+    // L7-14: the reinstatement is audited, in the same transaction, for the
+    // episode the suspension opened, under the supplier's tenant — not the
+    // operator's — with the operator as actor.
+    const after = await outboxFor(w.prisma, org);
+    expect(after.map((row) => row.eventName)).toEqual([
+      'SUPPLIER_REGISTERED',
+      'SUPPLIER_QUALIFIED',
+      'SUPPLIER_SUSPENDED',
+      'SUPPLIER_REINSTATED',
+    ]);
+    const suspendedEnvelope = after[2].payload as { payload: { suspensionId: string } };
+    const envelope = after[3].payload as {
+      tenantId?: string;
+      actor?: { type: string; id: string };
+      aggregateType: string;
+      aggregateId: string;
+      payload: Record<string, unknown>;
+    };
+    expect(after[3].organizationId).toBe(org);
+    expect(envelope.tenantId).toBe(org);
+    expect(envelope.actor).toEqual({ type: 'USER', id: reinstated.suspensions[0].reinstatedBy });
+    expect(envelope.aggregateType).toBe('Suspension');
+    expect(envelope.aggregateId).toBe(suspendedEnvelope.payload.suspensionId);
+    expect(after[3].partitionKey).toBe(supplier.id);
+    expect(envelope.payload).toEqual({
+      supplierId: supplier.id,
+      organizationId: org,
+      suspensionId: suspendedEnvelope.payload.suspensionId,
+      reason: 'The two orders were delivered late, not never',
+      reinstatedBy: reinstated.suspensions[0].reinstatedBy,
+      reinstatedAt: reinstated.suspensions[0].reinstatedAt,
+    });
+    // Tenant isolation: nothing about this supplier is filed under the
+    // operator's own organization.
+    expect(await outboxFor(w.prisma, operatorOrg)).toEqual([]);
+  });
+
+  it('rolls the reinstatement and its event back together', async () => {
+    const org = organization();
+    const supplier = await asSupplier(org, () =>
+      w.suppliers.register({ displayName: 'A workshop', capabilities: ['WORKSHOP_SERVICE'] }),
+    );
+    await asOperator(() =>
+      w.suspensions.suspend(supplier.id, { reason: 'A stated reason for the record' }),
+    );
+    const before = await outboxFor(w.prisma, org);
+
+    const original = w.events.enqueue.bind(w.events);
+    // Fails *after* the outbox insert, inside the same transaction: if the
+    // status flip, the stamped episode and the event were not atomic, one of
+    // them would survive.
+    const spy = jest.spyOn(w.events, 'enqueue').mockImplementationOnce(async (tx, input) => {
+      await original(tx, input);
+      throw new Error('failure after the outbox insert');
+    });
+
+    try {
+      await expect(
+        asOperator(() =>
+          w.suspensions.reinstate(supplier.id, { reason: 'The orders were delivered late' }),
+        ),
+      ).rejects.toThrow('failure after the outbox insert');
+    } finally {
+      spy.mockRestore();
+    }
+
+    const still = await asSupplier(org, () => w.suppliers.get(supplier.id));
+    expect(still.status).toBe('SUSPENDED');
+    expect(still.suspensions[0].open).toBe(true);
+    expect(await outboxFor(w.prisma, org)).toHaveLength(before.length);
   });
 
   it('refuses suspending twice and reinstating what is not suspended', async () => {
