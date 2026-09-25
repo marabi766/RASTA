@@ -256,7 +256,7 @@ ErrorState   — پیام قابل فهم + دکمه تلاش دوباره + cor
 | `/config/reward-rules`      | **قواعد پاداش**                   | SYSTEM_ADMIN | P1  |
 | `/config/commission-lines`  | **خطوط کسب‌وکار کارمزد**          | SYSTEM_ADMIN | P1  |
 | `/config/reward-benefits`   | **مزایا، گروه همتا و قواعد رتبه** | SYSTEM_ADMIN | P2  |
-| `/config/approval-policies` | **سیاست‌های موافقت**              | SYSTEM_ADMIN | P1  |
+| `/config/approval-policies` | **سیاست‌های موافقت** (Q-64)       | UNION_ADMIN  | P1  |
 | `/audit`                    | سوابق حسابرسی                     | UNION_ADMIN  | P0  |
 | `/governance`               | **داشبورد تجمیعی استانداری**      | AUDITOR      | P1  |
 
