@@ -929,7 +929,7 @@ test('the CLI exit status separates a dry run, a bounded slice and a converged a
     // Redaction holds on both of the writing runs.
     assert.doesNotMatch(
       `${bounded.stdout}${resumed.stdout}`,
-      /postgresql:|rasta_service_dev_password|@localhost/,
+      /postgresql:|_dev_password|@localhost/,
     );
   });
 });
@@ -1014,9 +1014,9 @@ test('a service whose connection cannot be resolved does not skip the services a
     // Redaction: the variable is named, its value never is — and no stack
     // frame, payload or credential rides along on the event or on stdout.
     assert.equal(refusal.stack, undefined);
-    assert.doesNotMatch(refusal.reason, /postgresql:|@localhost|rasta_service_dev_password/);
+    assert.doesNotMatch(refusal.reason, /postgresql:|@localhost|_dev_password/);
     assert.doesNotMatch(refusal.reason, /\n\s+at /);
-    assert.doesNotMatch(run.stdout, /postgresql:|@localhost|rasta_service_dev_password/);
+    assert.doesNotMatch(run.stdout, /postgresql:|@localhost|_dev_password/);
     assert.doesNotMatch(run.stdout, /"stack"/);
 
     // The aggregate summary is still emitted, and it is still the last line.
@@ -1131,7 +1131,7 @@ test('a backfill of one service database cannot reach another', async () => {
       );
 
       // Redaction: nothing on stdout carries a credential or a URL.
-      assert.doesNotMatch(result.stdout, /postgresql:|rasta_service_dev_password|@localhost/);
+      assert.doesNotMatch(result.stdout, /postgresql:|_dev_password|@localhost/);
 
       assert.equal(
         await scalar(
@@ -1230,7 +1230,7 @@ test('a global preflight refusal emits one unscoped refused, no summary and no s
       // never a URL, a credential, a payload or a stack frame.
       assert.equal(event.stack, undefined, `${where} the event carried a stack`);
       assert.doesNotMatch(event.reason, /\n\s+at /);
-      assert.doesNotMatch(run.stdout, /postgresql:|@localhost|rasta_service_dev_password/);
+      assert.doesNotMatch(run.stdout, /postgresql:|@localhost|_dev_password/);
       assert.doesNotMatch(run.stdout, /"stack"|"payload"/);
 
       // The database it could have reached did not move.

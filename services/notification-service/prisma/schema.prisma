@@ -557,8 +557,11 @@ model NotificationPreference {
   /// One row per person, per tenant, per scope, per channel. The resolver reads
   /// at most one row per layer, so a duplicate would make the winning layer
   /// depend on row order.
-  @@unique([userId, organizationId, scope, scopeKey, channel], map: "ux_preference_owner_scope_channel")
-  @@index([organizationId, userId], map: "ix_preference_owner")
+  ///
+  /// Tenant first (ADR-011), so this key also serves every read of the table:
+  /// the guard scopes by tenant and each read names the user. That is why there
+  /// is no separate `(organizationId, userId)` index.
+  @@unique([organizationId, userId, scope, scopeKey, channel], map: "ux_preference_owner_scope_channel")
   @@map("notification_preference")
 }
 
@@ -647,7 +650,7 @@ model NotificationQuietHours {
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   updatedBy String   @map("updated_by") @db.VarChar(128)
 
-  @@id([userId, organizationId])
-  @@index([organizationId], map: "ix_quiet_hours_org")
+  /// Tenant first (ADR-011): the key serves the per-tenant reads by itself.
+  @@id([organizationId, userId])
   @@map("notification_quiet_hours")
 }

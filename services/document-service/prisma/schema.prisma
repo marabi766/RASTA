@@ -229,7 +229,7 @@ model Document {
 
   @@index([organizationId, status], map: "ix_document_org_status")
   @@index([organizationId, documentClass], map: "ix_document_org_class")
-  @@index([ownerResourceType, ownerResourceId], map: "ix_document_owner_resource")
+  @@index([organizationId, ownerResourceType, ownerResourceId], map: "ix_document_org_owner_resource")
   /// The scan worker's claim query, which runs on every poll of every replica.
   /// Without it that is a sequential scan of the whole document table several
   /// times a second, growing with the platform rather than with the backlog.

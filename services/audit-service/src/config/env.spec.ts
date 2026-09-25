@@ -78,6 +78,20 @@ describe('audit-service configuration', () => {
       expect(env.DATABASE_URL).not.toContain('rasta_audit_migrator');
     });
 
+    it('ignores the generic DATABASE_URL, even when it names another role', () => {
+      // Migration tooling sets DATABASE_URL, and for audit it names the
+      // migrator. An environment shared with a migrate job must not hand the
+      // runtime that connection.
+      const env = loadAuditEnv(base({ DATABASE_URL: MIGRATOR_URL }));
+      expect(env.DATABASE_URL).toBe(RUNTIME_URL);
+    });
+
+    it('refuses DATABASE_URL alone, naming the variable it needs', () => {
+      expect(() =>
+        loadAuditEnv({ KAFKA_BROKERS: 'localhost:9092', ...AUTH, DATABASE_URL: RUNTIME_URL }),
+      ).toThrow(/DATABASE_URL_AUDIT only/);
+    });
+
     it('refuses to start with no database url at all', () => {
       // AUD-001 opens a client and writes on every message. Starting without a
       // database would mean answering health checks while recording nothing.

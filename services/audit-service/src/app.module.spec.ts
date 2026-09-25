@@ -131,6 +131,11 @@ const idleRepository = {
   partitionRowCounts: async () => [{ partition: 'audit_event_default', rows: 0 }],
 } as unknown as AuditRepository;
 
+/** The runtime-role check, passing: the connection is the runtime role. */
+const runtimeRole = {
+  assertRuntimeRole: async () => undefined,
+} as unknown as PrismaService;
+
 describe('audit-service composition root', () => {
   const originalEnv = process.env;
 
@@ -392,6 +397,25 @@ describe('audit-service composition root', () => {
     expect(typeof AuditTrailConsumer.prototype.onModuleDestroy).toBe('function');
   });
 
+  it('refuses to start either consumer when connected as a role that owns the audit schema', async () => {
+    const order: string[] = [];
+    const asMigrator = {
+      assertRuntimeRole: async () => {
+        throw new Error('audit-service refuses to start: it is connected as rasta_audit_migrator');
+      },
+    } as unknown as PrismaService;
+    const module = new AppModule(
+      startable('projector', order) as unknown as DomainProjectorConsumer,
+      startable('trail', order) as unknown as AuditTrailConsumer,
+      idleRepository,
+      providerFor(ENV).useFactory?.() as AuditEnv,
+      asMigrator,
+    );
+
+    await expect(module.onModuleInit()).rejects.toThrow(/refuses to start/);
+    expect(order).toEqual([]);
+  });
+
   it('starts both consumers on init, the projector first', async () => {
     const order: string[] = [];
     const module = new AppModule(
@@ -399,6 +423,7 @@ describe('audit-service composition root', () => {
       startable('trail', order) as unknown as AuditTrailConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
+      runtimeRole,
     );
 
     await module.onModuleInit();
@@ -417,6 +442,7 @@ describe('audit-service composition root', () => {
       startable('trail', order, true) as unknown as AuditTrailConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
+      runtimeRole,
     );
 
     await expect(module.onModuleInit()).rejects.toThrow(/does not host this topic-partition/);
@@ -436,6 +462,7 @@ describe('audit-service composition root', () => {
       startable('trail', order) as unknown as AuditTrailConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
+      runtimeRole,
     );
     await module.onModuleInit();
     await module.onApplicationShutdown();
@@ -460,6 +487,7 @@ describe('audit-service composition root', () => {
       startable('trail', order) as unknown as AuditTrailConsumer,
       repository,
       providerFor(ENV).useFactory?.() as AuditEnv,
+      runtimeRole,
     );
     await expect(module.onModuleInit()).resolves.toBeUndefined();
     await module.onApplicationShutdown();
@@ -493,6 +521,7 @@ describe('audit-service composition root', () => {
         startable('trail', order) as unknown as AuditTrailConsumer,
         idleRepository,
         providerFor(ENV).useFactory?.() as AuditEnv,
+        runtimeRole,
       );
 
       await module.onModuleInit();
@@ -520,6 +549,7 @@ describe('audit-service composition root', () => {
         recording('trail') as unknown as AuditTrailConsumer,
         idleRepository,
         providerFor(ENV).useFactory?.() as AuditEnv,
+        runtimeRole,
       );
 
       await module.onModuleInit();

@@ -826,7 +826,7 @@ export class NotificationRepository {
     userId: string,
   ): Promise<{ startMinute: number; endMinute: number; timezone: string } | null> {
     const row = await this.prisma.client.notificationQuietHours.findUnique({
-      where: { userId_organizationId: { userId, organizationId } },
+      where: { organizationId_userId: { organizationId, userId } },
       select: { startMinute: true, endMinute: true, timezone: true },
     });
     return row ?? null;

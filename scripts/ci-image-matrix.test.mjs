@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import {
   CONTAINERS_JOB,
   compareCoverage,
@@ -10,12 +11,40 @@ import {
   extractMatrixServices,
   formatFindings,
   hasFindings,
+  matrixIsDerived,
+  resolveMatrixServices,
 } from './ci-image-matrix-lib.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const workflow = await readFile(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
+const realWorkflow = await readFile(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
 
 const dockerfileServices = discoverDockerfileServices(root);
+
+/** `container-scope.mjs --all`, run for real, as the container-scope job runs it on main. */
+const deriveAll = () =>
+  JSON.parse(
+    execFileSync(process.execPath, [path.join(root, 'scripts', 'container-scope.mjs'), '--all'], {
+      encoding: 'utf8',
+    }),
+  );
+
+/**
+ * A written matrix in the shape the workflow used before it was derived. The
+ * list parser still guards any workflow that goes back to one, so the negative
+ * controls below keep exercising it against the real service set.
+ */
+const workflow = [
+  'jobs:',
+  '  containers:',
+  '    strategy:',
+  '      matrix:',
+  '        service:',
+  '          [',
+  ...dockerfileServices.map((service) => `            ${service},`),
+  '          ]',
+  '    steps:',
+  '      - run: echo ${{ matrix.service }}',
+].join('\n');
 const matrixServices = extractMatrixServices(workflow, CONTAINERS_JOB);
 
 /**
@@ -36,8 +65,11 @@ function withExtraMatrixEntry(yaml, service, after) {
   return yaml.replace(line, `$1$2\n$1${service},`);
 }
 
-test('every tracked Dockerfile is built and scanned by the containers matrix', () => {
-  const findings = compareCoverage(dockerfileServices, matrixServices);
+test('every tracked Dockerfile is built and scanned by the real workflow on main', () => {
+  const findings = compareCoverage(
+    dockerfileServices,
+    resolveMatrixServices(realWorkflow, deriveAll),
+  );
   assert.deepEqual(
     findings,
     { missingFromMatrix: [], staleInMatrix: [], duplicateMatrixEntries: [] },
@@ -139,4 +171,30 @@ test('the parser survives a block-sequence reformat of the same list', () => {
     '      - run: echo ${{ matrix.service }}',
   ].join('\n');
   assert.deepEqual(extractMatrixServices(block), ['identity-service', 'document-service']);
+});
+
+test('the real workflow derives its matrix from the container-scope job', () => {
+  assert.ok(matrixIsDerived(realWorkflow), 'containers matrix is no longer the scope output');
+});
+
+test('a derived matrix whose push path forgets --all fails the guard', () => {
+  const broken = realWorkflow.replace(
+    'node scripts/container-scope.mjs --all',
+    'node scripts/container-scope.mjs',
+  );
+  assert.notEqual(broken, realWorkflow);
+  assert.throws(() => resolveMatrixServices(broken, deriveAll), /never runs/);
+});
+
+test('a derived matrix that resolves to nothing fails the guard', () => {
+  assert.throws(() => resolveMatrixServices(realWorkflow, () => []), /returned no services/);
+});
+
+test('a scope script that dropped a service is caught by the coverage comparison', () => {
+  const dropped = dockerfileServices[0];
+  const findings = compareCoverage(
+    dockerfileServices,
+    resolveMatrixServices(realWorkflow, () => deriveAll().filter((s) => s !== dropped)),
+  );
+  assert.deepEqual(findings.missingFromMatrix, [dropped]);
 });
