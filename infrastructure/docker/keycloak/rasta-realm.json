@@ -2,7 +2,7 @@
   "realm": "rasta",
   "displayName": "Rasta Platform",
   "displayNameHtml": "<b>رستا</b> — Rasta Platform",
-  "enabled": true,
+  "enabled": "${RASTA_DEV_REALM_GATE}",
   "sslRequired": "external",
   "registrationAllowed": false,
   "registrationEmailAsUsername": false,

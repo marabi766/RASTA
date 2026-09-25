@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { RastaError, getContext, type InternalTokenService } from '@rasta/nest-common';
+import { apiErrorSchema, type ApiError } from '@rasta/contracts';
 import { serviceUrl, type ServiceName, type ServiceUrls } from '../config/routes';
 
 /**
@@ -119,6 +120,10 @@ export class ProxyService {
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    // Each upstream response counts toward the circuit exactly once, whichever
+    // way it fails afterwards: a 5xx is counted when its status arrives, and a
+    // body that then fails to read (truncated, reset) must not count it again.
+    let failureRecorded = false;
 
     try {
       const response = await fetch(target, {
@@ -130,10 +135,39 @@ export class ProxyService {
 
       // 5xx counts toward the circuit; 4xx does not. A client sending bad
       // requests is not evidence that the downstream is unhealthy.
-      if (response.status >= 500) this.recordFailure(request.service);
-      else this.recordSuccess(request.service);
+      if (response.status >= 500) {
+        this.recordFailure(request.service);
+        failureRecorded = true;
+      } else {
+        this.recordSuccess(request.service);
+      }
 
       const text = await response.text();
+
+      if (response.status >= 500) {
+        // Parsed once, and only the parsed, allow-listed fields travel. The
+        // schema accepting a body says nothing about what else the body held:
+        // a `stack` or an internal field beside a valid envelope would reach
+        // the caller if the original object were forwarded.
+        const envelope = platformErrorEnvelope(text);
+        if (envelope) {
+          return {
+            status: response.status,
+            headers: this.responseHeaders(response),
+            body: envelope,
+          };
+        }
+        // L1-06. A 5xx that is not the platform's own error envelope is a
+        // crash page, a proxy's HTML or a stack trace — reflecting it hands
+        // internals to the caller. The shape, status and content type are
+        // logged; the body never is (S-09), because it is exactly the part
+        // that may hold what must not leak.
+        this.logger.error(
+          `${request.service} answered ${response.status} without a platform error body ` +
+            `(content-type ${response.headers.get('content-type') ?? 'none'}, ${text.length} chars)`,
+        );
+        throw new UpstreamMalformedError(request.service, response.status);
+      }
 
       return {
         status: response.status,
@@ -141,7 +175,17 @@ export class ProxyService {
         body: text.length > 0 ? this.parseJson(text) : undefined,
       };
     } catch (error) {
-      this.recordFailure(request.service);
+      // Not recorded twice: a 5xx already counted when its status arrived. A
+      // second recordFailure() for the same response — a malformed body, or
+      // one whose read failed — would open the breaker at half its threshold.
+      if (!failureRecorded) this.recordFailure(request.service);
+
+      if (error instanceof UpstreamMalformedError) {
+        throw RastaError.upstreamUnavailable(request.service, {
+          upstreamStatus: error.upstreamStatus,
+          reason: 'malformed-error-body',
+        });
+      }
 
       if ((error as Error).name === 'AbortError') {
         throw new RastaError('UPSTREAM_TIMEOUT', 'The upstream service did not respond in time', {
@@ -242,6 +286,10 @@ export class ProxyService {
       const lower = name.toLowerCase();
       if (HOP_BY_HOP.has(lower)) return;
       if (lower === 'content-encoding') return; // fetch already decoded it
+      // The gateway always answers with its own JSON serialisation, so the
+      // upstream's type must not travel with it: a `text/html` label on a
+      // reflected body is how a JSON response gets rendered as a page.
+      if (lower === 'content-type') return;
       result[lower] = value;
     });
     return result;
@@ -288,4 +336,52 @@ export class ProxyService {
       return { raw: text };
     }
   }
+}
+
+/** Raised inside `forward` so the catch block can tell it from a network fault. */
+class UpstreamMalformedError extends Error {
+  constructor(
+    readonly service: ServiceName,
+    readonly upstreamStatus: number,
+  ) {
+    super(`${service} returned a malformed ${upstreamStatus}`);
+  }
+}
+
+/**
+ * The platform error envelope (`@rasta/contracts`) in a body, rebuilt from its
+ * named fields only; null when the body is not one.
+ *
+ * Rebuilt field by field rather than trusting the schema's output: which keys
+ * reach a caller is a security property, so it is written down here, not
+ * inherited from however the schema happens to treat unknown keys.
+ */
+function platformErrorEnvelope(text: string): ApiError | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const result = apiErrorSchema.safeParse(parsed);
+  if (!result.success) return null;
+
+  const { code, message, details, correlationId, traceId, timestamp, path } = result.data;
+  return {
+    code,
+    message,
+    ...(details
+      ? {
+          details: details.map((detail) => ({
+            path: detail.path,
+            message: detail.message,
+            ...(detail.code !== undefined ? { code: detail.code } : {}),
+          })),
+        }
+      : {}),
+    correlationId,
+    ...(traceId !== undefined ? { traceId } : {}),
+    timestamp,
+    ...(path !== undefined ? { path } : {}),
+  };
 }
