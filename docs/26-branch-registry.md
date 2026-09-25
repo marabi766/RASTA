@@ -60,7 +60,7 @@
 | `fix/ci-temporal-test-server-cache`  | `F:Rasta-Parallelqueue-sim`       | PM    | #100 | ۱ / ۰          | Cacheِ سرور آزمون Temporal در CI (حدود ۳۰۰ مگابایت) و بودجهٔ زمانی ۳۰۰ ثانیه برای Hook راه‌اندازی آن؛ دانلودِ هر بار، کل آزمون‌های Saga را روی شبکهٔ کند قرمز می‌کرد                                                     |
 | `demo/investor-preview`              | `F:\Rasta-Parallel\investor-demo` | —     | —    | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                                                                                                                                             |
 | `design/claude-design`               | پوشهٔ موقت در `%TEMP%`            | —     | —    | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                                                                                                                                    |
-| `claude/adoring-cerf-nhq97e-gateway` | نشست ابری (Cloud)                 | Cloud | —    | ۰ / ۰          | تازه ساخته شد از `origin/main` @ `b89e192` — سخت‌سازی `api-gateway`: کلید حد ناشناس پشت Proxy (L1-03)، رد مسیر نقطه‌ای پیش از انتخاب Route (L1-04)، Gate Realm توسعهٔ Keycloak (L1-05)، عدم بازتاب بدنهٔ خام ۵xx (L1-06) |
+| `claude/adoring-cerf-nhq97e-gateway` | نشست ابری (Cloud)                 | Cloud | #102 | ۳ / ۰          | تازه ساخته شد از `origin/main` @ `b89e192` — سخت‌سازی `api-gateway`: کلید حد ناشناس پشت Proxy (L1-03)، رد مسیر نقطه‌ای پیش از انتخاب Route (L1-04)، Gate Realm توسعهٔ Keycloak (L1-05)، عدم بازتاب بدنهٔ خام ۵xx (L1-06) |
 
 ## شاخه‌های بازنشسته
 
