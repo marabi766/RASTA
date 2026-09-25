@@ -111,6 +111,31 @@ export class CatalogueService {
     return { items: rows.map((row) => toProductView(row, row.offers)) };
   }
 
+  /**
+   * One product, by id — regardless of which organization catalogued it.
+   *
+   * The same open read as `searchProducts`: a marketplace where a buyer
+   * cannot see a listing's own name and category, only search results that
+   * happened to contain it, is not a marketplace. Unlike search this does not
+   * require a published offer — a compare page reached from an older link
+   * should still say what the product is, even if nobody is currently
+   * offering it. It does still require `ACTIVE`, the same rule `createOffer`
+   * applies to the same column: an archived product is gone from the
+   * catalogue, and this endpoint answers exactly as it would for an id that
+   * never existed, matching that precedent rather than adding a second one.
+   */
+  async getProduct(productId: string): Promise<ProductView> {
+    assertNotAuditor();
+
+    const row = await runUnscoped(
+      'a compare page needs the product it names, regardless of which organization catalogued it',
+      () => this.prisma.client.product.findUnique({ where: { id: productId } }),
+    );
+    if (!row || row.status !== 'ACTIVE') throw RastaError.notFound('Product', productId);
+
+    return toProductView(row);
+  }
+
   /** Offers for one product, cheapest first unless asked otherwise. */
   async offersFor(productId: string, sort: SearchProductsQuery['sort']): Promise<OfferView[]> {
     assertNotAuditor();
