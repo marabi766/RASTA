@@ -147,29 +147,50 @@ export class DriverService {
     }
 
     const actor = getContext().userId ?? 'SYSTEM';
+    // Field names only, never their values — a licence number does not
+    // belong on a topic every service reads and retains (docs/07 § 7.3).
+    const changedFields = Object.keys(dto);
 
-    // Guarded on `version`, so two concurrent edits cannot silently interleave
-    // and leave the row holding a mix of both. The loser is told to reload
-    // rather than having its write vanish.
-    const result = await this.repository.client.driver.updateMany({
-      where: { id, version: driver.version },
-      data: {
-        ...(dto.employeeNo !== undefined ? { employeeNo: dto.employeeNo } : {}),
-        ...(dto.licenceNumber !== undefined ? { licenceNumber: dto.licenceNumber } : {}),
-        ...(dto.licenceClass !== undefined ? { licenceClass: dto.licenceClass } : {}),
-        ...(dto.licenceValidTo !== undefined
-          ? { licenceValidTo: dto.licenceValidTo ? new Date(dto.licenceValidTo) : null }
-          : {}),
-        ...(dto.notes !== undefined ? { notes: dto.notes } : {}),
-        updatedBy: actor,
-        version: { increment: 1 },
-      },
+    const updated = await this.repository.transaction(async (tx) => {
+      // Guarded on `version`, so two concurrent edits cannot silently
+      // interleave and leave the row holding a mix of both. The loser is
+      // told to reload rather than having its write vanish.
+      const result = await tx.driver.updateMany({
+        where: { id, version: driver.version },
+        data: {
+          ...(dto.employeeNo !== undefined ? { employeeNo: dto.employeeNo } : {}),
+          ...(dto.licenceNumber !== undefined ? { licenceNumber: dto.licenceNumber } : {}),
+          ...(dto.licenceClass !== undefined ? { licenceClass: dto.licenceClass } : {}),
+          ...(dto.licenceValidTo !== undefined
+            ? { licenceValidTo: dto.licenceValidTo ? new Date(dto.licenceValidTo) : null }
+            : {}),
+          ...(dto.notes !== undefined ? { notes: dto.notes } : {}),
+          updatedBy: actor,
+          version: { increment: 1 },
+        },
+      });
+
+      if (result.count === 0) throw RastaError.optimisticLockFailed('Driver', id);
+
+      // Before this there was no event at all for a profile edit (L3-11):
+      // the row changed and nothing told audit-service it had (AGENTS.md
+      // S-06), and nothing on the bus let another consumer react to it.
+      await this.repository.enqueueEvent(tx, {
+        aggregateType: 'Driver',
+        aggregateId: id,
+        eventName: FLEET_EVENTS.DRIVER_UPDATED,
+        topic: FLEET_TOPIC,
+        organizationId: driver.organizationId,
+        payload: validateFleetPayload(FLEET_EVENTS.DRIVER_UPDATED, {
+          driverId: id,
+          organizationId: driver.organizationId,
+          changedFields,
+        }),
+      });
+
+      return tx.driver.findFirstOrThrow({ where: { id } });
     });
 
-    if (result.count === 0) throw RastaError.optimisticLockFailed('Driver', id);
-
-    const updated = await this.repository.findDriverById(id);
-    if (!updated) throw RastaError.notFound('Driver', id);
     return toDriverView(updated);
   }
 

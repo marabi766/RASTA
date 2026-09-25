@@ -21,6 +21,10 @@ import { z } from 'zod';
 export const FLEET_EVENTS = {
   DRIVER_REGISTERED: 'DRIVER_REGISTERED',
   DRIVER_STATUS_CHANGED: 'DRIVER_STATUS_CHANGED',
+  // A second deliberate addition, alongside DRIVER_STATUS_CHANGED (L3-11):
+  // editing a driver's profile is a state change with no event at all before
+  // this, not merely one whose payload was too thin.
+  DRIVER_UPDATED: 'DRIVER_UPDATED',
   ASSET_ASSIGNED: 'ASSET_ASSIGNED',
   ASSIGNMENT_ENDED: 'ASSIGNMENT_ENDED',
   USAGE_RECORDED: 'USAGE_RECORDED',
@@ -52,6 +56,24 @@ export const driverStatusChangedPayload = z.object({
   previousStatus: z.string(),
   newStatus: z.string(),
   reason: z.string(),
+});
+
+/**
+ * A driver's profile fields changed — licence number, licence class, employee
+ * number, or notes.
+ *
+ * Field names only, never their values (the same rule `ASSET_UPDATED` in
+ * asset-service follows): a licence number is exactly the kind of durable,
+ * personally identifying fact this module's own header warns against putting
+ * on a topic every service reads and retains (docs/07 § 7.3). Before this
+ * event existed, `DriverService.update` wrote the row and nothing else —
+ * audit-service, whose only input is events, never learned a licence number
+ * had changed (AGENTS.md S-06).
+ */
+export const driverUpdatedPayload = z.object({
+  driverId: z.string(),
+  organizationId: z.string(),
+  changedFields: z.array(z.string()),
 });
 
 /**
@@ -136,6 +158,7 @@ export const availabilityChangedPayload = z.object({
 export const FLEET_EVENT_SCHEMAS = {
   [FLEET_EVENTS.DRIVER_REGISTERED]: driverRegisteredPayload,
   [FLEET_EVENTS.DRIVER_STATUS_CHANGED]: driverStatusChangedPayload,
+  [FLEET_EVENTS.DRIVER_UPDATED]: driverUpdatedPayload,
   [FLEET_EVENTS.ASSET_ASSIGNED]: assetAssignedPayload,
   [FLEET_EVENTS.ASSIGNMENT_ENDED]: assignmentEndedPayload,
   [FLEET_EVENTS.USAGE_RECORDED]: usageRecordedPayload,

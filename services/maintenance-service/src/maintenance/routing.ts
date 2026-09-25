@@ -29,6 +29,7 @@ export const AGGREGATE_OF = {
   MAINTENANCE_COMPLETED: 'MaintenanceRequest',
   MAINTENANCE_APPROVED: 'MaintenanceRequest',
   MAINTENANCE_CANCELLED: 'MaintenanceRequest',
+  REPAIR_CANCELLED: 'RepairOrder',
   MAINTENANCE_SCHEDULE_CHANGED: 'MaintenanceSchedule',
 } as const satisfies Record<MaintenanceEventName, string>;
 
@@ -76,6 +77,7 @@ export const PARTITION_KEY_POLICY: { [N in MaintenanceEventName]: PartitionRule<
   MAINTENANCE_COMPLETED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
   MAINTENANCE_APPROVED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
   MAINTENANCE_CANCELLED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
+  REPAIR_CANCELLED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
   MAINTENANCE_SCHEDULE_CHANGED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
 };
 

@@ -24,11 +24,13 @@ import { z } from 'zod';
  * producer defect and move on. fleet-service learned this the hard way with
  * `ASSIGNMENT_ENDED`, and the contract test in `events.spec.ts` locks it here.
  *
- * One deliberate addition to the catalogue: `MAINTENANCE_CANCELLED`. An
- * abandoned request whose creation was already announced leaves every consumer
- * believing the work is still outstanding, and audit-service — whose only
- * input is events — would never learn it was dropped (AGENTS.md S-06). The
- * same reasoning fleet-service used for `DRIVER_STATUS_CHANGED`.
+ * Two deliberate additions to the catalogue, for the same reason (L3-11):
+ * `MAINTENANCE_CANCELLED` (an abandoned request whose creation was already
+ * announced leaves every consumer believing the work is still outstanding)
+ * and `REPAIR_CANCELLED` (a withdrawn referral used to update the row and
+ * produce nothing). Either way, audit-service — whose only input is events —
+ * would never learn what happened (AGENTS.md S-06). The same reasoning
+ * fleet-service used for `DRIVER_STATUS_CHANGED` and `DRIVER_UPDATED`.
  *
  * ## Money on these events
  *
@@ -52,6 +54,7 @@ export const MAINTENANCE_EVENTS = {
   MAINTENANCE_COMPLETED: 'MAINTENANCE_COMPLETED',
   MAINTENANCE_APPROVED: 'MAINTENANCE_APPROVED',
   MAINTENANCE_CANCELLED: 'MAINTENANCE_CANCELLED',
+  REPAIR_CANCELLED: 'REPAIR_CANCELLED',
   MAINTENANCE_SCHEDULE_CHANGED: 'MAINTENANCE_SCHEDULE_CHANGED',
 } as const;
 
@@ -228,6 +231,26 @@ export const maintenanceCancelledPayload = z.object({
 });
 
 /**
+ * A workshop's referral was withdrawn — distinct from `MAINTENANCE_CANCELLED`
+ * above, which abandons the *request*. The request survives a
+ * `RepairOrder.cancel()`: it can be referred to another workshop, so nothing
+ * about the job itself went away. A third addition to the catalogue, for the
+ * same reason as the other two (L3-11): before this, cancelling a referral
+ * updated the row and produced no event at all.
+ */
+export const repairCancelledPayload = z.object({
+  repairOrderId: z.string(),
+  requestId: z.string(),
+  assetId: z.string(),
+  organizationId: z.string(),
+  workshopOrganizationId: z.string(),
+  cancelledAt: z.string(),
+  reason: z.string(),
+  /** OPEN or IN_PROGRESS — the two states a referral can be withdrawn from. */
+  previousStatus: z.string(),
+});
+
+/**
  * A service rule was created, edited, paused, resumed or archived.
  *
  * This event exists to close `D-011`, and the gap it closes is worth stating
@@ -287,6 +310,7 @@ export const MAINTENANCE_EVENT_SCHEMAS = {
   [MAINTENANCE_EVENTS.MAINTENANCE_COMPLETED]: maintenanceCompletedPayload,
   [MAINTENANCE_EVENTS.MAINTENANCE_APPROVED]: maintenanceApprovedPayload,
   [MAINTENANCE_EVENTS.MAINTENANCE_CANCELLED]: maintenanceCancelledPayload,
+  [MAINTENANCE_EVENTS.REPAIR_CANCELLED]: repairCancelledPayload,
   [MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED]: maintenanceScheduleChangedPayload,
 } as const satisfies Record<MaintenanceEventName, z.ZodTypeAny>;
 
