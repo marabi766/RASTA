@@ -497,9 +497,16 @@ describe('asset integrity', () => {
         expect({ table, n: left[0]!.n }).toEqual({ table, n: 0 });
       }
 
-      // The previous owner's policy is history, not the new owner's cover.
+      // docs/24 Q-66, the project owner's decision (2026-09-25): the insurance
+      // follows the vehicle. First a deployment that narrowed the rule to no
+      // coverage at all: the inherited policy is history there.
+      const narrowAssets = new AssetService(repository, { coveragesFollowingVehicle: [] });
+      const narrowClaims = new ClaimService(repository, narrowAssets, {
+        decisionRoles: ['ORGANIZATION_ADMIN'],
+        approvalCeilingMinor: null,
+      });
       await expect(
-        asActor(manager(org.b), () => assets.activate(assetId, {})),
+        asActor(manager(org.b), () => narrowAssets.activate(assetId, {})),
       ).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
         internalContext: expect.objectContaining({
@@ -507,21 +514,46 @@ describe('asset integrity', () => {
           missing: ['an insurance policy currently in force'],
         }),
       });
-      const dossier = await asActor(manager(org.b), () => assets.dossier(assetId));
-      expect(dossier.compliance.activeInsurance).toBeNull();
-      expect(dossier.transferCount).toBe(1);
+      expect(
+        (await asActor(manager(org.b), () => narrowAssets.dossier(assetId))).compliance
+          .activeInsurance,
+      ).toBeNull();
       await expect(
         asActor(manager(org.b), () =>
-          claims.submitClaim(assetId, {
+          narrowClaims.submitClaim(assetId, {
             policyId: policy.id,
             description: 'خسارت پس از انتقال مالکیت',
             incidentAt: new Date(Date.now() - day).toISOString(),
           }),
         ),
-      ).rejects.toThrow(/previous owner/);
+      ).rejects.toMatchObject({
+        internalContext: expect.objectContaining({ rule: 'POLICY_FROM_PREVIOUS_OWNER' }),
+      });
 
-      // With a policy of their own, the new owner commissions the asset.
-      await asActor(manager(org.b), () =>
+      // Under the default, every coverage follows: the inherited policy is
+      // the new owner's active insurance, and takes the new owner's claim.
+      const dossier = await asActor(manager(org.b), () => assets.dossier(assetId));
+      expect(dossier.compliance.activeInsurance).toMatchObject({ id: policy.id });
+      expect(dossier.transferCount).toBe(1);
+      const inherited = await asActor(manager(org.b), () =>
+        claims.submitClaim(assetId, {
+          policyId: policy.id,
+          description: 'خسارت پس از انتقال مالکیت',
+          incidentAt: new Date(Date.now() - day).toISOString(),
+        }),
+      );
+      // Filed under the new owner: it is their claim.
+      const filed = await prisma.client.$queryRawUnsafe<{ organization_id: string }[]>(
+        `SELECT organization_id FROM insurance_claim WHERE id = $1`,
+        inherited.id,
+      );
+      expect(filed[0]!.organization_id).toBe(org.b);
+
+      // Narrowed again: a policy the new owner records after the transfer
+      // counts. Its created_at and the transfer's instant are both
+      // PostgreSQL's clock, so no skew between hosts can misfile it (PR #108
+      // review #6).
+      const own = await asActor(manager(org.b), () =>
         insurance.recordPolicy(assetId, {
           policyNumber: `POL-${ulid().slice(-8)}`,
           insurerName: 'بیمه نمونه',
@@ -530,6 +562,11 @@ describe('asset integrity', () => {
           validTo: new Date(Date.now() + 300 * day).toISOString(),
         }),
       );
+      expect(
+        (await asActor(manager(org.b), () => narrowAssets.dossier(assetId))).compliance
+          .activeInsurance,
+      ).toMatchObject({ id: own.id });
+
       const activated = await asActor(manager(org.b), () => assets.activate(assetId, {}));
       expect(activated.status).toBe('ACTIVE');
     });

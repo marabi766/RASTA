@@ -108,13 +108,14 @@ export class ClaimService {
       });
     }
 
-    // A transfer brings the previous owner's policies into view as history
-    // (audit L3-08). They are not the new owner's cover, so they take no new
-    // claims. Before the dossier moved, the new owner could not see them at all.
-    const ownedSince = await this.repository.latestTransferAt(assetId);
-    if (ownedSince && policy.createdAt < ownedSince) {
+    // The insurance follows the vehicle (docs/24 Q-66, project owner's
+    // decision 2026-09-25): the new owner may claim on a policy the previous
+    // owner recorded, and the claim is theirs, filed under their organization
+    // below. Only a coverage configured as *not* following the vehicle is
+    // refused, and by default every coverage follows.
+    if (!(await this.assets.policyCountsForCurrentOwner(assetId, policy))) {
       throw RastaError.businessRule(
-        "This policy was recorded under the asset's previous owner and takes no new claims",
+        "This policy was recorded under the asset's previous owner, and its coverage does not follow the vehicle",
         { rule: 'POLICY_FROM_PREVIOUS_OWNER', policyId: policy.id },
       );
     }

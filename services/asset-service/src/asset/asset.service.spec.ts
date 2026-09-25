@@ -149,6 +149,7 @@ function harness(overrides: Partial<Record<string, unknown>> = {}): Harness {
       },
     ),
     latestTransferAt: jest.fn(async () => null),
+    databaseClock: jest.fn(async () => new Date('2026-09-25T12:00:00.000Z')),
     lockAsset: jest.fn(async () => ({ status: 'ACTIVE' })),
     hasOpenClaims: jest.fn(async () => false),
     findBySerialNumber: jest.fn(async () => null),
@@ -294,20 +295,19 @@ describe('AssetService', () => {
       expect(h.enqueued.map((e) => e.eventName)).toContain(ASSET_EVENTS.ASSET_ACTIVATED);
     });
 
-    it("does not count the previous owner's policy after a transfer", async () => {
-      // The dossier moves with the asset (audit L3-08), so the old policy is in
-      // view. Only a policy recorded since the transfer is the new owner's cover.
-      const transferredAt = new Date('2026-09-01T00:00:00.000Z');
+    it("counts the previous owner's policy after a transfer, as the project owner decided", async () => {
+      // docs/24 Q-66: the insurance follows the vehicle. Under the default,
+      // every coverage follows, so the lookup carries no ownership clause.
       const h = harness({
         findById: jest.fn(async () => assetRow({ status: 'REGISTERED' })),
-        latestTransferAt: jest.fn(async () => transferredAt),
+        latestTransferAt: jest.fn(async () => new Date('2026-09-01T00:00:00.000Z')),
       });
 
       await expect(run(() => h.service.activate(ASSET_ID, {}))).rejects.toThrow(/insurance/);
       expect(h.repository.findActivePolicy).toHaveBeenCalledWith(
         ASSET_ID,
         expect.any(Date),
-        transferredAt,
+        undefined,
       );
     });
 
@@ -450,7 +450,6 @@ describe('AssetService', () => {
       const h = harness();
       await run(() => h.service.transfer(ASSET_ID, dto));
 
-      // The previous owner's insurance does not cover the new owner.
       expect(h.updates.at(-1)?.status).toBe('REGISTERED');
     });
 

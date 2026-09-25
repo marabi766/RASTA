@@ -2,6 +2,7 @@ import type { EventEnvelope } from '@rasta/contracts';
 import { TimelineConsumer } from './timeline.consumer';
 import type { AssetRepository } from '../asset/asset.repository';
 import type { AssetService } from '../asset/asset.service';
+import { timelineEventsSkippedTotal } from '../observability/metrics';
 
 /**
  * The dossier projector.
@@ -49,6 +50,8 @@ function harness(
     assetExists?: boolean;
     /** The asset changed owner between the read and the lock. */
     lockFails?: boolean;
+    /** The asset exists, but under another organization than the event's. */
+    elsewhere?: boolean;
     statusChangeError?: Error;
   } = {},
 ): Harness {
@@ -74,6 +77,7 @@ function harness(
     transaction,
     markEventProcessed: markProcessed,
     lockAsset,
+    assetExistsInAnyTenant: jest.fn(async () => options.elsewhere ?? options.lockFails ?? false),
   } as unknown as AssetRepository;
 
   const assets = {
@@ -281,6 +285,42 @@ describe('TimelineConsumer', () => {
       expect(h.markProcessed).not.toHaveBeenCalled();
       expect(h.appended).toHaveLength(0);
       expect(h.statusChanges).toHaveLength(0);
+    });
+
+    // PR #108 review #1: an event that lost a race with a transfer is not
+    // applied, and that is no longer silent.
+    const skippedCount = async (reason: string) =>
+      (await timelineEventsSkippedTotal.get()).values.find(
+        (value) => value.labels.reason === reason && value.labels.event === 'ASSET_ASSIGNED',
+      )?.value ?? 0;
+
+    it('counts and warns about an event from an organization that no longer owns the asset', async () => {
+      const before = await skippedCount('owner_changed');
+      const h = harness({ assetExists: false, elsewhere: true });
+
+      const result = await h.consumer.handle(envelope({ eventName: 'ASSET_ASSIGNED' }));
+
+      expect(result).toBe('SKIPPED');
+      expect(h.appended).toHaveLength(0);
+      expect(await skippedCount('owner_changed')).toBe(before + 1);
+    });
+
+    it('counts the lock-time race as an ownership change too', async () => {
+      const before = await skippedCount('owner_changed');
+      const h = harness({ lockFails: true });
+
+      await h.consumer.handle(envelope({ eventName: 'ASSET_ASSIGNED' }));
+
+      expect(await skippedCount('owner_changed')).toBe(before + 1);
+    });
+
+    it('counts an event about an asset that exists nowhere as unknown', async () => {
+      const before = await skippedCount('asset_unknown');
+      const h = harness({ assetExists: false });
+
+      await h.consumer.handle(envelope({ eventName: 'ASSET_ASSIGNED' }));
+
+      expect(await skippedCount('asset_unknown')).toBe(before + 1);
     });
   });
 

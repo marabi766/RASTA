@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
@@ -14,6 +14,13 @@ import {
   type TransitionActor,
 } from './lifecycle';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+import {
+  DEFAULT_TRANSFER_INSURANCE_POLICY,
+  TRANSFER_INSURANCE_POLICY,
+  countsForCurrentOwner,
+  currentOwnerPolicyFilter,
+  type TransferInsurancePolicy,
+} from '../insurance/ownership';
 import type {
   ActivateAssetDto,
   AssetDossierView,
@@ -37,7 +44,14 @@ import type {
 export class AssetService {
   private readonly logger = new Logger(AssetService.name);
 
-  constructor(private readonly repository: AssetRepository) {}
+  constructor(
+    private readonly repository: AssetRepository,
+    // Optional so a test can build the service with the repository alone; the
+    // application provides it from configuration (docs/24 Q-66).
+    @Optional()
+    @Inject(TRANSFER_INSURANCE_POLICY)
+    private readonly transferInsurance: TransferInsurancePolicy = DEFAULT_TRANSFER_INSURANCE_POLICY,
+  ) {}
 
   // =========================================================================
   // Reads
@@ -99,9 +113,8 @@ export class AssetService {
     const asset = await this.repository.findById(id);
     if (!asset) throw RastaError.notFound('Asset', id);
 
-    const ownedSince = await this.repository.latestTransferAt(id);
     const [policy, inspection, costRows, transferCount, recent, organization] = await Promise.all([
-      this.repository.findActivePolicy(id, new Date(), ownedSince),
+      this.findCountingPolicy(id),
       this.repository.findLatestInspection(id),
       this.repository.costSummary(id),
       this.repository.countTransfers(id),
@@ -388,11 +401,11 @@ export class AssetService {
 
     this.assertTransition(asset.status as AssetStatus, 'ACTIVE', 'USER');
 
-    // The new owner re-commissions with their own insurance. A policy recorded
-    // before the latest transfer is the previous owner's history.
-    const ownedSince = await this.repository.latestTransferAt(id);
+    // Any in-force policy that counts for the current owner: under the project
+    // owner's decision the previous owner's policy follows the vehicle
+    // (docs/24 Q-66).
     const [policy, ownershipDoc] = await Promise.all([
-      this.repository.findActivePolicy(id, new Date(), ownedSince),
+      this.findCountingPolicy(id),
       this.repository.client.assetDocumentRef.findFirst({
         where: {
           assetId: id,
@@ -565,7 +578,6 @@ export class AssetService {
     const transferId = `TRF_${ulid()}`;
     const actor = getContext().userId ?? 'SYSTEM';
     const from = asset.organizationId;
-    const transferredAt = new Date();
 
     // A transfer is the one operation that legitimately writes rows belonging
     // to another tenant — the transfer record, the asset and its whole history
@@ -591,13 +603,20 @@ export class AssetService {
             asset.status,
             {
               organizationId: dto.toOrganizationId,
-              // Ownership changed, so the new owner must re-commission it: their
-              // insurance and their paperwork, not the previous owner's.
+              // Ownership changed, so the new owner must re-commission it with
+              // their own paperwork. The insurance may be the one that came with
+              // the vehicle (docs/24 Q-66).
               status: 'REGISTERED',
               updatedBy: actor,
             },
             { organizationId: from },
           );
+
+          // Dated by the database, under the row lock just taken, so the
+          // transfer and every policy's created_at share one clock (PR #108
+          // review #6). A policy write takes the same lock, so it lands
+          // before this instant under the old owner, or is refused.
+          const transferredAt = await this.repository.databaseClock(tx);
 
           // An open claim is being decided under the current owner's authority.
           // Moving it would hand that decision to the new owner. Checked under
@@ -891,6 +910,28 @@ export class AssetService {
     });
 
     return row;
+  }
+
+  /**
+   * Whether a policy counts for the asset's current owner (docs/24 Q-66). One
+   * rule for activation, the dossier and claims (src/insurance/ownership.ts).
+   */
+  async policyCountsForCurrentOwner(
+    assetId: string,
+    policy: { coverage: string; createdAt: Date },
+  ): Promise<boolean> {
+    const ownedSince = await this.repository.latestTransferAt(assetId);
+    return countsForCurrentOwner(policy, ownedSince, this.transferInsurance);
+  }
+
+  /** The in-force policy that counts for the current owner, if any. */
+  private async findCountingPolicy(assetId: string) {
+    const ownedSince = await this.repository.latestTransferAt(assetId);
+    return this.repository.findActivePolicy(
+      assetId,
+      new Date(),
+      currentOwnerPolicyFilter(ownedSince, this.transferInsurance),
+    );
   }
 
   /**

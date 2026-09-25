@@ -6,6 +6,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
+import { INSURANCE_COVERAGES } from '../insurance/ownership';
 
 /**
  * asset-service configuration.
@@ -55,6 +56,27 @@ export const assetEnvSchema = baseEnvSchema
       .regex(/^\d{0,30}$/, 'Must be a non-negative integer in minor units, or empty')
       .default('')
       .transform((raw) => (raw === '' ? null : BigInt(raw))),
+
+    /**
+     * Which coverages follow the vehicle when it changes owner.
+     *
+     * The project owner decided docs/24 Q-66 on 2026-09-25: after a transfer,
+     * the previous owner's in-force policy counts for the new owner, for every
+     * coverage, until its own validTo — for activation, the dossier and claims.
+     * So the default is all four. A later legal change can narrow the list
+     * without a code change (AGENTS.md § 9): a coverage left out counts only
+     * when the current owner recorded it. Empty means none follows.
+     */
+    INSURANCE_COVERAGES_FOLLOWING_VEHICLE: z
+      .string()
+      .default(INSURANCE_COVERAGES.join(','))
+      .transform((raw) =>
+        raw
+          .split(',')
+          .map((coverage) => coverage.trim())
+          .filter((coverage) => coverage.length > 0),
+      )
+      .pipe(z.array(z.enum(INSURANCE_COVERAGES))),
   });
 
 export type AssetEnv = z.infer<typeof assetEnvSchema>;

@@ -5,6 +5,7 @@ import {
   runUnscoped,
   type OutboxMessageInput,
 } from '@rasta/nest-common';
+import { canonicalIdentifier } from './identifier';
 import { resolvePartitionKey } from './routing';
 import type { AssetEventName, InsuranceEventName } from './events';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -100,6 +101,21 @@ export class AssetRepository {
     );
   }
 
+  /**
+   * Whether an asset with this id exists in any organization.
+   *
+   * Unscoped, and answers only yes or no: the timeline consumer uses it to
+   * tell an event that lost a race with a transfer from one about an unknown
+   * asset, and never learns, logs or returns the other owner.
+   */
+  async assetExistsInAnyTenant(id: string): Promise<boolean> {
+    const row = await runUnscoped(
+      'classifies a skipped event: does the asset exist under another owner; the owner is not read',
+      () => this.client.asset.findFirst({ where: { id, deletedAt: null }, select: { id: true } }),
+    );
+    return row !== null;
+  }
+
   async findByAssetTag(organizationId: string, assetTag: string) {
     return this.client.asset.findFirst({
       where: { organizationId, assetTag, deletedAt: null },
@@ -132,8 +148,22 @@ export class AssetRepository {
           ? {
               OR: [
                 { name: { contains: query.q, mode: 'insensitive' as const } },
-                { assetTag: { contains: query.q, mode: 'insensitive' as const } },
-                { serialNumber: { contains: query.q, mode: 'insensitive' as const } },
+                // Identifiers are stored canonical (src/asset/identifier.ts,
+                // and migration 20260925110000 for older rows), so they are
+                // searched canonical: `ماشين-۱۲` finds `ماشین-12` (PR #108
+                // review #5). Free text is searched as typed.
+                {
+                  assetTag: {
+                    contains: canonicalIdentifier(query.q),
+                    mode: 'insensitive' as const,
+                  },
+                },
+                {
+                  serialNumber: {
+                    contains: canonicalIdentifier(query.q),
+                    mode: 'insensitive' as const,
+                  },
+                },
                 { manufacturer: { contains: query.q, mode: 'insensitive' as const } },
                 { model: { contains: query.q, mode: 'insensitive' as const } },
               ],
@@ -165,18 +195,15 @@ export class AssetRepository {
    * in the row and already lapsed in reality. Compliance must not depend on a
    * background job having run recently.
    *
-   * `recordedSince` limits the answer to policies recorded under the current
-   * ownership. Since a transfer moves the whole dossier to the new owner
-   * (audit L3-08), the previous owner's policies are now in view. They stay
-   * history, and do not count as the new owner's cover. Before that fix they
-   * were invisible to the new owner, so this keeps the rule that already
-   * held. Whether a policy should follow the vehicle to its new owner is a
-   * product question, not a code decision.
+   * `ownerFilter` is which of the asset's policies count for its current
+   * owner (src/insurance/ownership.ts, docs/24 Q-66). Under the project
+   * owner's decision every coverage follows the vehicle, so it is normally
+   * absent and the previous owner's in-force policy counts.
    */
   async findActivePolicy(
     assetId: string,
     at: Date = new Date(),
-    recordedSince: Date | null = null,
+    ownerFilter: { OR: object[] } | undefined = undefined,
   ) {
     return this.client.insurancePolicy.findFirst({
       where: {
@@ -185,7 +212,7 @@ export class AssetRepository {
         status: { not: 'CANCELLED' },
         validFrom: { lte: at },
         validTo: { gt: at },
-        ...(recordedSince ? { createdAt: { gte: recordedSince } } : {}),
+        ...(ownerFilter ?? {}),
       },
       orderBy: { validTo: 'desc' },
     });
@@ -400,6 +427,20 @@ export class AssetRepository {
 
   async countTransfers(assetId: string): Promise<number> {
     return this.client.assetTransfer.count({ where: { assetId } });
+  }
+
+  /**
+   * The database's own clock, now, inside `tx`.
+   *
+   * A transfer is dated with this, under the asset's row lock, so that it and
+   * every policy's `created_at` (the database's `now()`) are read from one
+   * clock. Comparing an application timestamp with a database one let a skew
+   * between the two hosts misfile a policy (PR #108 review #6).
+   */
+  async databaseClock(tx: ExtendedPrismaClient): Promise<Date> {
+    const [row] = await tx.$queryRaw<{ now: Date }[]>`SELECT clock_timestamp() AS now`;
+    if (!row) throw new Error('clock_timestamp() returned no row');
+    return row.now;
   }
 
   /** When the asset last changed hands, or null if it never has. */

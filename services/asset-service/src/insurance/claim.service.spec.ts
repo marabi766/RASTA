@@ -106,6 +106,8 @@ function harness(
     authority?: ClaimAuthority;
     /** Simulates a concurrent request that moved the claim first. */
     loseRace?: boolean;
+    /** Whether the policy counts for the asset's current owner (docs/24 Q-66). */
+    policyCounts?: boolean;
   } = {},
 ): Harness {
   const enqueued: Harness['enqueued'] = [];
@@ -190,6 +192,7 @@ function harness(
     appendTimeline: jest.fn(async (_tx: unknown, entry: Record<string, unknown>) => {
       appended.push(entry);
     }),
+    policyCountsForCurrentOwner: jest.fn(async () => options.policyCounts ?? true),
   } as unknown as AssetService;
 
   return {
@@ -213,6 +216,22 @@ const SUBMISSION: SubmitClaimDto = {
 
 describe('ClaimService', () => {
   describe('filing a claim', () => {
+    it("takes a claim on the previous owner's policy, which follows the vehicle", async () => {
+      // docs/24 Q-66, the project owner's decision: the new owner may claim on
+      // an inherited policy, and the claim is filed under the new owner.
+      const h = harness({ policyCounts: true });
+      const claim = await run(() => h.service.submitClaim(ASSET_ID, SUBMISSION));
+      expect(claim.id).toBeDefined();
+      expect(h.row()).toMatchObject({ organizationId: DEH1 });
+    });
+
+    it('refuses it only where a narrowed configuration says the coverage stays behind', async () => {
+      const h = harness({ policyCounts: false });
+      await expect(run(() => h.service.submitClaim(ASSET_ID, SUBMISSION))).rejects.toMatchObject({
+        internalContext: expect.objectContaining({ rule: 'POLICY_FROM_PREVIOUS_OWNER' }),
+      });
+    });
+
     it('opens the claim, publishes INSURANCE_CLAIM_OPENED and writes a dossier line', async () => {
       const h = harness({ claim: null });
       const claim = await run(() => h.service.submitClaim(ASSET_ID, SUBMISSION));
