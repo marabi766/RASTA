@@ -4,7 +4,14 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { EXPECTED, assertionScript } from './verify-migration-reversible-lib.mjs';
+import {
+  EXPECTED,
+  assertionScript,
+  assertSnapshotScript,
+  ledgerAssertionScript,
+  recordSnapshotScript,
+  snapshotQuery,
+} from './verify-migration-reversible-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -437,4 +444,127 @@ test('every audit migration reverses its own ledger row, and only its own', () =
       `${name}/down.sql must delete exactly its own _prisma_migrations row`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// Platform-wide: every migration is reversible, and every service is verified
+// ---------------------------------------------------------------------------
+
+/** Every service directory that ships Prisma migrations. */
+function servicesWithMigrations() {
+  return readdirSync(join(ROOT, 'services'), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((dir) => {
+      try {
+        return readdirSync(join(ROOT, 'services', dir, 'prisma', 'migrations')).length > 0;
+      } catch {
+        return false;
+      }
+    })
+    .map((dir) => dir.replace(/-service$/, ''))
+    .sort();
+}
+
+function migrationNames(service) {
+  const dir = join(ROOT, 'services', `${service}-service`, 'prisma', 'migrations');
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+}
+
+test('every migration of every service has a down.sql', () => {
+  // The six initial migrations that had none put five whole services beyond
+  // the reversibility gate; this keeps a seventh from joining them silently.
+  const missing = servicesWithMigrations().flatMap((service) =>
+    migrationNames(service)
+      .filter((name) => {
+        try {
+          readFileSync(
+            join(ROOT, 'services', `${service}-service`, 'prisma', 'migrations', name, 'down.sql'),
+          );
+          return false;
+        } catch {
+          return true;
+        }
+      })
+      .map((name) => `${service}/${name}`),
+  );
+  assert.deepEqual(missing, []);
+});
+
+test('every down.sql of every service deletes exactly its own ledger row', () => {
+  // supplier's blank-text hardening was the one that did not: after a
+  // whole-chain rollback its row survived, `migrate deploy` skipped it, and
+  // the weaker predicates came back under the same names.
+  for (const service of servicesWithMigrations()) {
+    for (const name of migrationNames(service)) {
+      const down = readFileSync(
+        join(ROOT, 'services', `${service}-service`, 'prisma', 'migrations', name, 'down.sql'),
+        'utf8',
+      );
+      const deleted = [...down.matchAll(/"migration_name"\s*=\s*'([^']+)'/g)].map((m) => m[1]);
+      assert.deepEqual(deleted, [name], `${service}/${name}/down.sql`);
+    }
+  }
+});
+
+test('every service with migrations is in EXPECTED and in test:migration', () => {
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  const verified = [
+    ...pkg.scripts['test:migration'].matchAll(/verify-migration-reversible\.mjs (\S+)/g),
+  ].map((m) => m[1]);
+
+  for (const service of servicesWithMigrations()) {
+    assert.ok(EXPECTED[service], `${service} has no EXPECTED entry`);
+    assert.ok(verified.includes(service), `${service} is not in the root test:migration chain`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The exact-inverse builders (behaviour is proven against PostgreSQL by the
+// CLI; these pin the parts that are pure)
+// ---------------------------------------------------------------------------
+
+test('snapshotQuery reads only the named schema and strips its name', () => {
+  const sql = snapshotQuery('migration_check');
+  assert.match(sql, /nspname = 'migration_check'/);
+  assert.match(sql, /'"migration_check"\.', ''/);
+  assert.match(sql, /'migration_check\.', ''/);
+  // Extension members and the ledger are excluded, not compared.
+  assert.match(sql, /deptype = 'e'/);
+  assert.match(sql, /relname = '_prisma_migrations'/);
+});
+
+test('the builders refuse identifiers that would have to be quoted into SQL', () => {
+  assert.throws(() => snapshotQuery('bad"schema'));
+  assert.throws(() => recordSnapshotScript('meta', "x'; DROP TABLE t; --", 'ref'));
+  assert.throws(() => assertSnapshotScript('meta', 'a b', 'ref', 'ctx'));
+  assert.throws(() => ledgerAssertionScript(["m'1"], 'ctx'));
+});
+
+test('an allowance is escaped, and required to match rather than merely tolerated', () => {
+  const script = assertSnapshotScript('meta', 'after:m1', 'target', "down: it's", {
+    missing: [`constraint t.c CHECK ((s = 'A'::"E"))`],
+    unexpected: [],
+  });
+  assert.match(script, /'constraint t\.c CHECK \(\(s = ''A''::"E"\)\)'/);
+  assert.match(script, /<@ missing/);
+  assert.match(script, /no longer matches/);
+  assert.match(script, /down: it''s/);
+});
+
+test('the ledger assertion compares the full set, finished and not rolled back', () => {
+  const script = ledgerAssertionScript(['20260101000000_a', '20260102000000_b'], 'after up');
+  assert.match(script, /finished_at IS NOT NULL AND rolled_back_at IS NULL/);
+  assert.match(script, /ARRAY\['20260101000000_a', '20260102000000_b'\]/);
+  assert.match(ledgerAssertionScript([], 'after the last down'), /ARRAY\[\]::text\[\]/);
+});
+
+test('the only inexact-inverse allowance is marketplace cancel_before_hold', () => {
+  const allowances = Object.entries(EXPECTED).flatMap(([service, entry]) =>
+    Object.keys(entry.inexactInverse ?? {}).map((name) => `${service}/${name}`),
+  );
+  assert.deepEqual(allowances, ['marketplace/20260830103500_cancel_before_hold']);
 });

@@ -1147,26 +1147,27 @@ jobs:
         # own job because this is where a migrated database already exists.
         run: pnpm run test:migration
         env:
-          # All nine, not only the six the whole-chain checks cover. ADR-050
-          # adds its claim columns to every service-owned database, and
-          # `verify-outbox-claim-migration.mjs --in-place` reverses that one
-          # migration on each of them — so a missing url here is a database
-          # whose rollback is never exercised, which is the failure this step
-          # exists to prevent.
+          # Every service with migrations is now covered by the whole-chain
+          # check. The five whose initial migration once had no down.sql
+          # (identity, organization, asset, fleet, maintenance) were beyond it
+          # until the platform-safety pass; each is now verified up → down → up
+          # like the rest, and `scripts/verify-migration-reversible-lib.test.mjs`
+          # fails if a service with migrations is missing from this chain.
           #
-          # supplier is the exception that proves it: it folds ADR-050 and B1
-          # into its initial migration, so the by-name verifier cannot reach it
-          # and `verify-migration-reversible.mjs supplier` covers it instead —
-          # which is why that command is now in `test:migration` rather than
-          # only being available to run by hand.
+          # The whole-chain check proves each down.sql an *exact* inverse: after
+          # every down script the schema must match, object for object, the
+          # state recorded just before that migration (built by applying each
+          # migration.sql in turn), and the ledger must no longer list it. The
+          # one documented allowance is marketplace's NOT VALID rollback.
           #
-          # identity is the mirror of that exception: its *initial* migration
-          # has no down.sql, so the whole-chain verifier cannot reach any of
-          # its migrations, and each one it owns needs a verifier addressed to
-          # it by name. Two are registered — `security_event_outbox` (AUD-004
-          # C1/C2) and `audit_correction_command` (AUD-003's correction half).
-          # A third identity migration would need a third entry; nothing here
-          # discovers it.
+          # organization and asset run in a throwaway database cloned from
+          # template1 rather than a schema, because their migrations use ltree
+          # and geography unqualified; the service roles hold CREATEDB for this.
+          #
+          # The by-name verifiers still run: ADR-050's claim migration on every
+          # service database (`--in-place`), and identity's security-event and
+          # audit-correction tables, which check behaviour the catalogue
+          # comparison does not (constraints refusing rows, triggers firing).
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
