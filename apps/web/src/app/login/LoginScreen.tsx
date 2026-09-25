@@ -31,11 +31,22 @@ export const LOGIN_REASONS: Record<string, string> = {
   login_failed: 'ورود کامل نشد. دوباره تلاش کنید.',
 };
 
-export function LoginScreen({ reason }: { reason?: string }) {
+export function LoginScreen({ reason, returnTo }: { reason?: string; returnTo?: string }) {
   // An unknown code renders nothing rather than being echoed back. Whatever
   // arrives in a query string is somebody else's text until this map has
   // agreed to it.
   const message = reason ? LOGIN_REASONS[reason] : undefined;
+
+  // `returnTo` is already `safeReturnTo`'d by the route before it reaches
+  // this component (this stays a plain function of its props, per the note
+  // above). `/auth/login` re-validates it again on its own turn regardless —
+  // this is only which link a signed-out visitor sees, never the check.
+  // The default destination needs no query string at all, so a bare visit to
+  // `/login` keeps linking straight to `/auth/login`.
+  const loginHref =
+    returnTo && returnTo !== '/'
+      ? `/auth/login?returnTo=${encodeURIComponent(returnTo)}`
+      : '/auth/login';
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-6 p-6">
@@ -47,7 +58,7 @@ export function LoginScreen({ reason }: { reason?: string }) {
         </Alert>
       ) : null}
 
-      <ButtonLink href="/auth/login" className="py-3 text-base">
+      <ButtonLink href={loginHref} className="py-3 text-base">
         ورود با حساب سازمانی
       </ButtonLink>
 
