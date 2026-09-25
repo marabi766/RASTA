@@ -80,8 +80,16 @@ export const idempotencyKeyFor = {
   settle: (orderId: string) => `order:${orderId}:settle`,
   refund: (orderId: string) => `order:${orderId}:refund`,
   cancel: (orderId: string) => `order:${orderId}:cancel`,
-  dispute: (orderId: string) => `order:${orderId}:dispute`,
-  resolveDispute: (orderId: string) => `order:${orderId}:resolve-dispute`,
+  /**
+   * Per **dispute**, not per order. An order can be disputed, settled back by
+   * an operator, and disputed again (RECEIPT_CONFIRMED -> DISPUTED is legal).
+   * With one key per order the second dispute replayed the first one's stored
+   * response: economic-service never moved the transaction to DISPUTED, and
+   * its own "a disputed transaction never settles" guard was never engaged.
+   */
+  dispute: (orderId: string, disputeId: string) => `order:${orderId}:dispute:${disputeId}`,
+  resolveDispute: (orderId: string, disputeId: string) =>
+    `order:${orderId}:resolve-dispute:${disputeId}`,
 } as const;
 
 @Injectable()
@@ -242,6 +250,8 @@ export class EconomicClient {
    */
   async dispute(input: {
     orderId: string;
+    /** The dispute being mirrored. Part of the idempotency key. */
+    disputeId: string;
     transactionId: string;
     buyerOrganizationId: string;
     reason: string;
@@ -251,7 +261,7 @@ export class EconomicClient {
       method: 'POST',
       path: `/v1/transactions/${input.transactionId}/dispute`,
       organizationId: input.buyerOrganizationId,
-      idempotencyKey: idempotencyKeyFor.dispute(input.orderId),
+      idempotencyKey: idempotencyKeyFor.dispute(input.orderId, input.disputeId),
       correlationId: input.correlationId,
       body: { reason: input.reason },
     });
@@ -267,6 +277,8 @@ export class EconomicClient {
    */
   async resolveDispute(input: {
     orderId: string;
+    /** The dispute being resolved. Part of the idempotency key. */
+    disputeId: string;
     transactionId: string;
     buyerOrganizationId: string;
     resolution: string;
@@ -276,7 +288,7 @@ export class EconomicClient {
       method: 'POST',
       path: `/v1/transactions/${input.transactionId}/resolve-dispute`,
       organizationId: input.buyerOrganizationId,
-      idempotencyKey: idempotencyKeyFor.resolveDispute(input.orderId),
+      idempotencyKey: idempotencyKeyFor.resolveDispute(input.orderId, input.disputeId),
       correlationId: input.correlationId,
       body: { resolution: input.resolution },
     });

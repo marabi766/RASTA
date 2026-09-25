@@ -47,7 +47,8 @@ class FakeOrder {
   status: Status = 'PENDING';
   economicTransactionId: string | null = null;
   cancellationReason: string | null = null;
-  dispute: { reason: string; resolution: string | null } | null = null;
+  dispute: { id: string; reason: string; resolution: string | null } | null = null;
+  private disputes = 0;
   /** Every status the order passed through, for asserting on history. */
   readonly history: Status[] = ['PENDING'];
 
@@ -93,7 +94,8 @@ class FakeOrder {
       ['FUNDS_HELD', 'CONFIRMED', 'AWAITING_RECEIPT_CONFIRMATION', 'RECEIPT_CONFIRMED'],
       'DISPUTED',
     );
-    this.dispute = { reason, resolution: null };
+    this.disputes += 1;
+    this.dispute = { id: `DSP_${this.disputes}`, reason, resolution: null };
   }
   resolveDispute(outcome: 'SETTLE' | 'REFUND', resolution: string): void {
     this.move(['DISPUTED'], outcome === 'SETTLE' ? 'RECEIPT_CONFIRMED' : 'CANCELLING');
@@ -587,6 +589,49 @@ describe('the order saga', () => {
     expect(calls).not.toContain('settle');
     // The only exit from DISPUTED is an operator's, and none was taken.
     expect(order.history.slice(order.history.indexOf('DISPUTED'))).toEqual(['DISPUTED']);
+  });
+
+  it('mirrors a second dispute on the same order under its own key', async () => {
+    // RECEIPT_CONFIRMED -> DISPUTED is legal after an operator settles the
+    // first dispute back. The second must reach economic-service as a dispute,
+    // not replay the first one's stored response.
+    const order = new FakeOrder();
+    const mirrored: string[] = [];
+    const resolved: string[] = [];
+    let raisedSecond = false;
+    const { calls, activities } = recordingActivities(order, {
+      disputeObligation: async (_o: string, _t: string, disputeId: string) => {
+        calls.push('disputeObligation');
+        mirrored.push(disputeId);
+      },
+      resolveObligationDispute: async (_o: string, _t: string, disputeId: string) => {
+        calls.push('resolveObligationDispute');
+        resolved.push(disputeId);
+      },
+      markSettling: async () => {
+        calls.push('markSettling');
+        if (mirrored.length === 1 && !raisedSecond) {
+          raisedSecond = true;
+          order.raiseDispute('the replacement parts are damaged too');
+        }
+        return order.step('SETTLING', ['RECEIPT_CONFIRMED'], ['DISPUTED']);
+      },
+    });
+
+    const result = await run(order, activities, async ({ party, held }) => {
+      await held();
+      await party.confirm();
+      await party.fulfil();
+      await party.dispute('the parts arrived damaged');
+      await until(() => mirrored.length === 1, 'the first dispute to be mirrored');
+      await party.resolve('SETTLE', 'the supplier replaced the damaged parts');
+      await until(() => mirrored.length === 2, 'the second dispute to be mirrored');
+      await party.resolve('SETTLE', 'the supplier evidenced undamaged delivery');
+    });
+
+    expect(result).toBe('COMPLETED');
+    expect(mirrored).toEqual(['DSP_1', 'DSP_2']);
+    expect(resolved).toEqual(['DSP_1', 'DSP_2']);
   });
 
   // -------------------------------------------------------------------------

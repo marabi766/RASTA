@@ -360,7 +360,10 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   }
 
   // ---- 2. Follow the order until it ends ----------------------------------
-  let disputeMirrored = false;
+  // The dispute economic-service has been told about and not yet told is
+  // resolved. An id, not a flag: a second dispute on the same order is a
+  // different dispute, and is mirrored under its own key.
+  let mirroredDispute: string | undefined;
 
   for (;;) {
     switch (order.status) {
@@ -392,15 +395,23 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       // A dispute stops everything until somebody decides.
       case 'DISPUTED':
         status.phase = 'DISPUTED';
-        if (!disputeMirrored) {
+        if (!order.dispute) {
+          // raiseDispute writes the row in the same transaction as the status.
+          throw ApplicationFailure.nonRetryable(
+            `Order ${orderId} is DISPUTED with no dispute recorded`,
+            'SAGA_INCONSISTENT',
+          );
+        }
+        if (mirroredDispute !== order.dispute.id) {
           // economic-service is told too, so a direct settlement command there
           // is refused independently of anything this service does (ADR-040 § 5).
           await disputeObligation(
             orderId,
             heldTransaction(order),
-            order.dispute?.reason ?? 'A dispute was raised on this order',
+            order.dispute.id,
+            order.dispute.reason,
           );
-          disputeMirrored = true;
+          mirroredDispute = order.dispute.id;
         }
         // No window. A dispute that expired into anything would be worse than
         // one that waits: money would move because nobody looked.
@@ -409,15 +420,16 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
 
       case 'RECEIPT_CONFIRMED':
       case 'SETTLING':
-        if (disputeMirrored) {
+        if (mirroredDispute) {
           // The resolution is mirrored back, or economic-service would still
           // refuse to settle a transaction it believes is disputed.
           await resolveObligationDispute(
             orderId,
             heldTransaction(order),
+            mirroredDispute,
             order.dispute?.resolution ?? 'Dispute resolved: SETTLE',
           );
-          disputeMirrored = false;
+          mirroredDispute = undefined;
         }
         if (await settleOrder(heldTransaction(order))) return 'COMPLETED';
         order = await readOrder(orderId);
@@ -425,13 +437,14 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
 
       // ---- Compensation ---------------------------------------------------
       case 'CANCELLING': {
-        if (disputeMirrored) {
+        if (mirroredDispute) {
           await resolveObligationDispute(
             orderId,
             heldTransaction(order),
+            mirroredDispute,
             order.dispute?.resolution ?? 'Dispute resolved: REFUND',
           );
-          disputeMirrored = false;
+          mirroredDispute = undefined;
         }
         status.phase = 'COMPENSATING';
         const reason = order.cancellationReason ?? 'Cancelled';
