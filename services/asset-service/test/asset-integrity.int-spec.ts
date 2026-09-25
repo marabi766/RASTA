@@ -111,7 +111,10 @@ describe('asset integrity', () => {
 
   const outboxFor = (aggregateId: string) =>
     runUnscoped('the outbox audit reads platform plumbing', () =>
-      prisma.client.outboxMessage.findMany({ where: { aggregateId }, orderBy: { createdAt: 'asc' } }),
+      prisma.client.outboxMessage.findMany({
+        where: { aggregateId },
+        orderBy: { createdAt: 'asc' },
+      }),
     );
 
   function envelope(eventName: string, assetId: string, tenantId: string): EventEnvelope {
@@ -241,7 +244,9 @@ describe('asset integrity', () => {
 
       expect((await statusOf(assetId)).status).toBe('DECOMMISSIONED');
       // The history is still recorded, only the status change is refused.
-      const entries = await asActor(manager(org.a), () => assets.timeline(assetId, { limit: 50 } as never));
+      const entries = await asActor(manager(org.a), () =>
+        assets.timeline(assetId, { limit: 50 } as never),
+      );
       expect(entries.items.map((e) => e.eventName)).toContain('MAINTENANCE_STARTED');
     });
 
@@ -660,9 +665,7 @@ describe('asset integrity', () => {
           (error: { code?: string }) => error.code,
         );
       }
-      expect(outcomes).toEqual(
-        Object.fromEntries(attempts.map(([name]) => [name, 'NOT_FOUND'])),
-      );
+      expect(outcomes).toEqual(Object.fromEntries(attempts.map(([name]) => [name, 'NOT_FOUND'])));
       expect(await statusOf(assetId)).toEqual({ status: 'ACTIVE', organizationId: org.a });
       const leaked = (await outboxFor(assetId)).filter((e) =>
         [INSURANCE_EVENTS.INSURANCE_CLAIM_OPENED, ASSET_EVENTS.ASSET_TRANSFERRED].includes(

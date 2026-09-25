@@ -477,7 +477,7 @@ model AssetTimelineEntry {
   organizationId String @map("organization_id")
 
   /// The event that produced this line, e.g. `MAINTENANCE_COMPLETED`.
-  eventName   String @map("event_name")
+  eventName     String @map("event_name")
   /// Which service reported it.
   sourceService String @map("source_service")
   /// The originating event's id, so a rebuild is idempotent.
@@ -591,8 +591,8 @@ model OutboxMessage {
   ///
   /// Nothing sets either field in B1: no allocation, no head maintenance, no
   /// ordering guarantee. D-027 stays open until B2–B6 ship and are accepted.
-  streamSeq      BigInt?   @map("stream_seq")
-  isStreamHead   Boolean   @default(false) @map("is_stream_head")
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
 
   @@index([createdAt], map: "idx_outbox_pending")
   @@map("outbox_message")
@@ -640,8 +640,8 @@ model IdempotencyKey {
 
   requestHash String @map("request_hash")
 
-  responseStatus Int?  @map("response_status")
-  responseBody   Json? @map("response_body")
+  responseStatus Int?   @map("response_status")
+  responseBody   Json?  @map("response_body")
   state          String
 
   createdAt DateTime @default(now()) @map("created_at")
