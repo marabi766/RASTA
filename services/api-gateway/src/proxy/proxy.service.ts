@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { RastaError, getContext, type InternalTokenService } from '@rasta/nest-common';
+import { apiErrorSchema } from '@rasta/contracts';
 import { serviceUrl, type ServiceName, type ServiceUrls } from '../config/routes';
 
 /**
@@ -135,12 +136,32 @@ export class ProxyService {
 
       const text = await response.text();
 
+      if (response.status >= 500 && !isPlatformError(text)) {
+        // L1-06. A 5xx that is not the platform's own error envelope is a
+        // crash page, a proxy's HTML or a stack trace — reflecting it hands
+        // internals to the caller. The shape, status and content type are
+        // logged; the body never is (S-09), because it is exactly the part
+        // that may hold what must not leak.
+        this.logger.error(
+          `${request.service} answered ${response.status} without a platform error body ` +
+            `(content-type ${response.headers.get('content-type') ?? 'none'}, ${text.length} chars)`,
+        );
+        throw new UpstreamMalformedError(request.service, response.status);
+      }
+
       return {
         status: response.status,
         headers: this.responseHeaders(response),
         body: text.length > 0 ? this.parseJson(text) : undefined,
       };
     } catch (error) {
+      if (error instanceof UpstreamMalformedError) {
+        throw RastaError.upstreamUnavailable(request.service, {
+          upstreamStatus: error.upstreamStatus,
+          reason: 'malformed-error-body',
+        });
+      }
+
       this.recordFailure(request.service);
 
       if ((error as Error).name === 'AbortError') {
@@ -242,6 +263,10 @@ export class ProxyService {
       const lower = name.toLowerCase();
       if (HOP_BY_HOP.has(lower)) return;
       if (lower === 'content-encoding') return; // fetch already decoded it
+      // The gateway always answers with its own JSON serialisation, so the
+      // upstream's type must not travel with it: a `text/html` label on a
+      // reflected body is how a JSON response gets rendered as a page.
+      if (lower === 'content-type') return;
       result[lower] = value;
     });
     return result;
@@ -287,5 +312,24 @@ export class ProxyService {
       // gateway must not turn it into a 500 and hide the real response.
       return { raw: text };
     }
+  }
+}
+
+/** Raised inside `forward` so the catch block can tell it from a network fault. */
+class UpstreamMalformedError extends Error {
+  constructor(
+    readonly service: ServiceName,
+    readonly upstreamStatus: number,
+  ) {
+    super(`${service} returned a malformed ${upstreamStatus}`);
+  }
+}
+
+/** Whether a body is the platform's error envelope (`@rasta/contracts`). */
+function isPlatformError(text: string): boolean {
+  try {
+    return apiErrorSchema.safeParse(JSON.parse(text)).success;
+  } catch {
+    return false;
   }
 }

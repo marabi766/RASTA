@@ -6,6 +6,7 @@ import type { Request, Response } from 'express';
 import { ProxyService } from './proxy.service';
 import { RateLimiter } from './rate-limiter';
 import { resolveRoute, type RouteRule } from '../config/routes';
+import { assertCanonicalPath } from '../http/canonical-path';
 import { SERVICE_NAME, type GatewayEnv } from '../config/env';
 import { GATEWAY_ENV } from '../tokens';
 
@@ -15,7 +16,7 @@ import { GATEWAY_ENV } from '../tokens';
  * Order matters and is not arbitrary — each step is cheap-to-expensive, and
  * each rejects before the next one costs anything:
  *
- *   1. route lookup      unknown path never reaches a service
+ *   1. route lookup      unknown or non-canonical path never reaches a service
  *   2. authentication    handled by the global AuthGuard before this runs
  *   3. rate limit        before doing real work, so a flood is cheap to refuse
  *   4. idempotency key   before forwarding, so a missing key never charges
@@ -38,6 +39,10 @@ export class GatewayController {
   @All('v1/*path')
   @Public('Authentication is decided per route from the routing table, not per controller')
   async handle(@Req() request: Request, @Res() response: Response): Promise<void> {
+    // Before the route is chosen: a path the upstream would resolve to a
+    // different route must never be checked against this one (L1-04).
+    assertCanonicalPath(request.path);
+
     const path = request.path.replace(/^\/v1/, '');
     const route = resolveRoute(path);
 

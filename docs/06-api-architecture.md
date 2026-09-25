@@ -234,6 +234,20 @@ Idempotency-Key: 01JBQ8Z4K7M2N5P8R1T3V6X9Y2
 
 الگوریتم: **Sliding Window** روی Redis. همه حدود **پیکربندی‌پذیر**اند.
 
+**کلید حد ناشناس (L1-03).** حد «به‌ازای IP» روی نشانی واقعی کاربر می‌نشیند، نه نشانی Ingress. Gateway
+`X-Forwarded-For` را فقط از Hopهایی می‌پذیرد که در `GATEWAY_TRUSTED_PROXIES` نام برده شده‌اند (نشانی، بازهٔ CIDR یا
+`loopback`/`linklocal`/`uniquelocal`)؛ «اعتماد به همه» و شمارش Hop پذیرفته نمی‌شوند، چون هر دو سرآیندی را باور می‌کنند که
+خودِ Client نوشته. پیش‌فرض خالی است — هیچ Hopی مورد اعتماد نیست.
+
+**مسیر متعارف (L1-04).** مسیری که Segment نقطه‌ای (`.`، `..` یا شکل کدشدهٔ آن‌ها مثل `%2e%2e`) یا Backslash دارد، **پیش از
+انتخاب Route** با `400 VALIDATION_FAILED` رد می‌شود. دلیل: Gateway حد نرخ، فیلتر نقش و الزام `Idempotency-Key` را از Route
+مسیر خام انتخاب می‌کند، ولی `fetch` هنگام ارسال Segmentهای نقطه‌ای را حذف می‌کند؛ بدون این بررسی
+`/v1/users/../audit-corrections` با قواعد `users` سنجیده و به `audit-corrections` تحویل داده می‌شد.
+
+**خطای ۵xx بالادست (L1-06).** پاسخ ۵xx‌ای که Envelope خطای پلتفرم نیست (صفحهٔ HTML، Stack Trace، JSON دلخواه یا بدنهٔ خالی)
+به Client بازتابانده نمی‌شود؛ Gateway به‌جایش `503 UPSTREAM_UNAVAILABLE` می‌دهد و فقط وضعیت، نوع محتوا و طول بدنه را Log
+می‌کند، نه خودِ بدنه را (S-09). Gateway همیشه با سریال‌سازی JSON خودش پاسخ می‌دهد، پس `Content-Type` بالادست منتقل نمی‌شود.
+
 ---
 
 ## ۶٫۱۰ الگوهای Endpoint

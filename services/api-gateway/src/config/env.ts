@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { authEnvSchema, baseEnvSchema, booleanEnv, redisEnvSchema, loadEnv } from '@rasta/config';
 import { serviceUrlEnvSchema } from './routes';
+import { trustedProxiesSchema } from '../http/trust-proxy';
 
 /**
  * api-gateway configuration.
@@ -39,6 +40,14 @@ export const gatewayEnvSchema = baseEnvSchema
      * through and alert. Set false where abuse risk outweighs availability.
      */
     GATEWAY_RATE_LIMIT_FAIL_OPEN: booleanEnv(true),
+
+    /**
+     * Hops allowed to state the client address in `X-Forwarded-For` — the
+     * ingress in front of the gateway (L1-03). Addresses, CIDR ranges or
+     * `loopback`/`linklocal`/`uniquelocal`; never "all" or a hop count. Empty
+     * trusts nobody. See `../http/trust-proxy.ts`.
+     */
+    GATEWAY_TRUSTED_PROXIES: trustedProxiesSchema,
   });
 
 export type GatewayEnv = z.infer<typeof gatewayEnvSchema>;
