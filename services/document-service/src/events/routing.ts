@@ -25,6 +25,13 @@ import type { DocumentEventName } from './events';
  * Keying by organization instead would be the tempting alternative and is
  * wrong: it would order every document in a tenant against every other,
  * which buys nothing and makes one busy tenant a single partition's problem.
+ *
+ * ## The one event that is not about a document
+ *
+ * `UPLOAD_INTENT_ISSUED` (L7-14) is published before any document exists, so
+ * there is no `documentId` to key it by. It is keyed by its own intent: the
+ * intent is its aggregate, and nothing else is published about that intent
+ * that it would have to stay in order with.
  */
 
 export const AGGREGATE_OF = {
@@ -32,6 +39,16 @@ export const AGGREGATE_OF = {
   DOCUMENT_SCANNED: 'Document',
   DOCUMENT_DELETED: 'Document',
   VIRUS_DETECTED: 'Document',
+  UPLOAD_INTENT_ISSUED: 'UploadIntent',
+} as const satisfies Record<DocumentEventName, string>;
+
+/** The payload field each event is ordered by. */
+const PARTITION_FIELD_OF = {
+  DOCUMENT_UPLOADED: 'documentId',
+  DOCUMENT_SCANNED: 'documentId',
+  DOCUMENT_DELETED: 'documentId',
+  VIRUS_DETECTED: 'documentId',
+  UPLOAD_INTENT_ISSUED: 'uploadIntentId',
 } as const satisfies Record<DocumentEventName, string>;
 
 export interface PartitionDecision {
@@ -48,10 +65,21 @@ export interface PartitionDecision {
  */
 export function resolvePartitionKey(
   eventName: DocumentEventName,
-  payload: { documentId: string },
+  payload: Readonly<Record<string, unknown>>,
 ): PartitionDecision {
+  const field = PARTITION_FIELD_OF[eventName];
+  const key = payload[field];
+  if (typeof key !== 'string' || key.length === 0) {
+    throw new Error(
+      `Document routing: ${eventName} resolved to an empty partition key (${field}). ` +
+        'An event without a stream cannot be ordered or sequenced.',
+    );
+  }
   return {
-    key: payload.documentId,
-    reason: `${eventName} is ordered by the document it concerns`,
+    key,
+    reason:
+      field === 'documentId'
+        ? `${eventName} is ordered by the document it concerns`
+        : `${eventName} is ordered by the upload intent it concerns`,
   };
 }

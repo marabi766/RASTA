@@ -33,7 +33,7 @@ import { z } from 'zod';
  *
  * ## Version
  *
- * `eventVersion` is 1 for all four. `DOCUMENT_SCANNED` is new rather than a
+ * `eventVersion` is 1 for all of them. `DOCUMENT_SCANNED` is new rather than a
  * second version of `DOCUMENT_UPLOADED`: registration and verdict are separate
  * facts that now happen at separate times, and folding them together would
  * mean a consumer could not tell which one it was holding.
@@ -44,6 +44,7 @@ export const DOCUMENT_EVENTS = {
   DOCUMENT_SCANNED: 'DOCUMENT_SCANNED',
   DOCUMENT_DELETED: 'DOCUMENT_DELETED',
   VIRUS_DETECTED: 'VIRUS_DETECTED',
+  UPLOAD_INTENT_ISSUED: 'UPLOAD_INTENT_ISSUED',
 } as const;
 
 export type DocumentEventName = (typeof DOCUMENT_EVENTS)[keyof typeof DOCUMENT_EVENTS];
@@ -172,11 +173,39 @@ export const virusDetectedPayload = z
   })
   .strict();
 
+/**
+ * Permission to upload one object was issued (global audit L7-14).
+ *
+ * The audit record of the intent row `requestUploadUrl` writes: who asked to
+ * upload what, into which tenant, and until when the permission stands
+ * (AGENTS.md S-06). It is not a document yet — nothing has been uploaded, and
+ * `DOCUMENT_UPLOADED` is still the fact that one exists.
+ *
+ * What the client *declared*, and only that. **No object key and no URL** —
+ * the reasons at the top of this file apply with more force here, because the
+ * upload URL is a live write credential for the key — and no filename: an
+ * intent that is never finalized names no document, so there is nothing for a
+ * consumer to display.
+ */
+export const uploadIntentIssuedPayload = z
+  .object({
+    uploadIntentId: identifier,
+    organizationId: identifier,
+    documentClass: z.string().min(1).max(64),
+    declaredContentType: z.string().min(1).max(255),
+    declaredSizeBytes: z.number().int().positive(),
+    requestedBy: z.string().min(1).max(64),
+    issuedAt: isoTimestamp,
+    expiresAt: isoTimestamp,
+  })
+  .strict();
+
 export const DOCUMENT_EVENT_SCHEMAS = {
   DOCUMENT_UPLOADED: documentUploadedPayload,
   DOCUMENT_SCANNED: documentScannedPayload,
   DOCUMENT_DELETED: documentDeletedPayload,
   VIRUS_DETECTED: virusDetectedPayload,
+  UPLOAD_INTENT_ISSUED: uploadIntentIssuedPayload,
 } as const satisfies Record<DocumentEventName, z.ZodTypeAny>;
 
 /**

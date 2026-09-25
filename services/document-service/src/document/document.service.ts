@@ -114,16 +114,41 @@ export class DocumentService {
     const objectKey = buildObjectKey(organizationId, documentClass);
     const expiresAt = new Date(Date.now() + this.env.DOCUMENT_UPLOAD_INTENT_TTL_SECONDS * 1000);
 
-    const intent = await this.repository.createIntent({
-      id: newId(ID_PREFIX.uploadIntent),
-      organizationId,
-      objectKey,
-      documentClass,
-      declaredContentType: dto.contentType.trim().toLowerCase(),
-      declaredSizeBytes: dto.sizeBytes,
-      declaredFilename: sanitizeFilename(dto.filename),
-      expiresAt,
-      createdBy: actor,
+    const intentId = newId(ID_PREFIX.uploadIntent);
+
+    // The intent row and its audit record commit together (AGENTS.md S-06,
+    // A-08). The URL is signed only after that commit, so no credential is
+    // ever handed out for an intent the log does not know about.
+    const intent = await this.prisma.transaction(async (tx) => {
+      const created = await this.repository.createIntent(tx, {
+        id: intentId,
+        organizationId,
+        objectKey,
+        documentClass,
+        declaredContentType: dto.contentType.trim().toLowerCase(),
+        declaredSizeBytes: dto.sizeBytes,
+        declaredFilename: sanitizeFilename(dto.filename),
+        expiresAt,
+        createdBy: actor,
+      });
+
+      await this.events.enqueue(tx, {
+        eventName: DOCUMENT_EVENTS.UPLOAD_INTENT_ISSUED,
+        aggregateId: intentId,
+        organizationId,
+        payload: {
+          uploadIntentId: intentId,
+          organizationId,
+          documentClass,
+          declaredContentType: created.declaredContentType,
+          declaredSizeBytes: created.declaredSizeBytes,
+          requestedBy: actor,
+          issuedAt: created.createdAt.toISOString(),
+          expiresAt: expiresAt.toISOString(),
+        },
+      });
+
+      return created;
     });
 
     const uploadUrl = await this.timeStorage('createUploadUrl', () =>
