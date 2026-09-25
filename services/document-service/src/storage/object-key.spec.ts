@@ -1,4 +1,11 @@
-import { buildObjectKey, isWellFormedKey, keyBelongsTo, KEY_ROOT } from './object-key';
+import {
+  buildObjectKey,
+  buildSealedObjectKey,
+  isWellFormedKey,
+  keyBelongsTo,
+  KEY_ROOT,
+  KEY_ROOT_SEALED,
+} from './object-key';
 
 /**
  * Object keys, which are the path-traversal defence ADR-014 specifies.
@@ -50,6 +57,27 @@ describe('generating a key', () => {
     );
     expect(new Set(suffixes).size).toBe(50);
     for (const suffix of suffixes) expect(suffix).toHaveLength(26);
+  });
+});
+
+describe('generating a sealed key', () => {
+  it('lives under a different root than an upload key ever does', () => {
+    // The property the whole fix rests on: `createUploadUrl` is called with
+    // exactly one shape of key, `buildObjectKey`'s, and no code path ever
+    // signs an upload URL for anything under `KEY_ROOT_SEALED`. A sealed key
+    // being outside `KEY_ROOT` is what makes that true by construction rather
+    // than by review.
+    const key = buildSealedObjectKey('ORG-A', 'CONTRACT');
+    expect(KEY_ROOT_SEALED).not.toBe(KEY_ROOT);
+    expect(key.startsWith(`${KEY_ROOT_SEALED}/ORG-A/CONTRACT/`)).toBe(true);
+    expect(key.startsWith(`${KEY_ROOT}/`)).toBe(false);
+  });
+
+  it('is unique per call, the same as an upload key', () => {
+    const keys = new Set(
+      Array.from({ length: 200 }, () => buildSealedObjectKey('ORG-A', 'DAMAGE_PHOTO')),
+    );
+    expect(keys.size).toBe(200);
   });
 });
 

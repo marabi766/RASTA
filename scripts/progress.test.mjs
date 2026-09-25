@@ -21,9 +21,9 @@ test('the repository baseline is valid and preserves the approved horizons', () 
   assert.equal(progress.mvp.committed, 555);
   assert.equal(progress.mvp.earned, 217);
   assert.equal(progress.mvp.percent, 39.1);
-  assert.equal(progress.fullProduct.committed, 770);
+  assert.equal(progress.fullProduct.committed, 778);
   assert.equal(progress.fullProduct.earned, 217);
-  assert.equal(progress.fullProduct.percent, 28.2);
+  assert.equal(progress.fullProduct.percent, 27.9);
 });
 
 test('decomposed features contribute child stories exactly once', () => {
@@ -35,7 +35,7 @@ test('decomposed features contribute child stories exactly once', () => {
     documentFeature.points,
   );
   assert.equal(progress.fullProduct.units, baseline.items.length - 1 + baseline.stories.length);
-  assert.equal(progress.fullProduct.committed, 770);
+  assert.equal(progress.fullProduct.committed, 778);
 });
 
 test('an accepted story earns its own points before feature-level acceptance', () => {

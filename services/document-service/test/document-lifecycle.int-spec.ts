@@ -194,6 +194,120 @@ describe('document lifecycle (real database and object storage)', () => {
   });
 
   // =========================================================================
+  // Upload immutability — the object a client can still write to must never
+  // be the one that gets scanned or served.
+  // =========================================================================
+
+  describe('after finalize seals the object', () => {
+    /** The raw key `requestUploadUrl` issued — the client's own upload URL still writes here. */
+    const rawKeyOf = (uploadIntentId: string) =>
+      runUnscoped('the suite reads the intent’s raw upload key', async () => {
+        const row = await prisma.client.uploadIntent.findUniqueOrThrow({
+          where: { id: uploadIntentId },
+        });
+        return row.objectKey;
+      });
+
+    /**
+     * Different bytes, identical length and still a real PDF.
+     *
+     * The overwrite has to pass the *content-length and content-type*
+     * binding the same upload URL now enforces, or the test would be
+     * proving that binding stops the attack rather than proving sealing
+     * does. Same length, same magic bytes, one flipped byte well inside the
+     * body — a forgery an attacker holding the same URL could equally send.
+     */
+    function forged(original: Buffer): Buffer {
+      const copy = Buffer.from(original);
+      const middle = Math.floor(copy.length / 2);
+      copy[middle] = (copy[middle]! + 1) % 256;
+      return copy;
+    }
+
+    it('does not serve an overwrite made after the document went CLEAN', async () => {
+      // The exploit this suite exists to close: `createUploadUrl`'s TTL runs
+      // up to an hour, and finalize completing — even a scan clearing the
+      // document — does not revoke that credential early. Before this fix,
+      // a PUT to the same URL after CLEAN silently replaced what
+      // `createDownloadUrl` served, with the row still saying CLEAN.
+      const original = FIXTURES.pdf();
+      const { intent, document } = await uploadDocument({ bytes: original, via: scanned });
+      await settle(scanned, document.id);
+      expect((await asOrgA(() => scanned.documents.get(document.id))).scanState).toBe('CLEAN');
+
+      const rawKey = await rawKeyOf(intent.uploadIntentId);
+      const overwrite = forged(original);
+      const overwriteStatus = await putToSignedUrl(intent.uploadUrl, overwrite, 'application/pdf');
+      // Same type, same length as what the URL was signed for — this PUT is
+      // expected to succeed at storage. What must not happen is the
+      // overwritten bytes reaching a download.
+      expect(overwriteStatus).toBe(200);
+
+      const link = await asOrgA(() => scanned.documents.createDownloadUrl(document.id));
+      const served = await getFromSignedUrl(link.downloadUrl);
+
+      expect(Buffer.compare(served.body, original)).toBe(0);
+      expect(Buffer.compare(served.body, overwrite)).not.toBe(0);
+      // And the overwrite really did land at the raw key — proving the
+      // assertion above holds because sealing reads elsewhere, not because
+      // the PUT silently failed.
+      const rawObject = await getFromSignedUrl(
+        await scanned.storage.createDownloadUrl({
+          objectKey: rawKey,
+          expiresInSeconds: 60,
+          downloadFilename: 'raw.pdf',
+          contentType: 'application/pdf',
+        }),
+      );
+      expect(Buffer.compare(rawObject.body, overwrite)).toBe(0);
+    });
+
+    it('does not scan an overwrite made while the document is still PENDING', async () => {
+      // The narrower race: an overwrite landing after finalize but before
+      // the worker's tick. If scanning read the raw key, this is the window
+      // an attacker would use to get unscanned bytes past a scanner that
+      // inspected something else entirely.
+      const original = FIXTURES.pdf();
+      const { intent, document } = await uploadDocument({ bytes: original, via: scanned });
+      expect(document.scanState).toBe('PENDING');
+
+      const overwriteStatus = await putToSignedUrl(
+        intent.uploadUrl,
+        forged(original),
+        'application/pdf',
+      );
+      expect(overwriteStatus).toBe(200);
+
+      await settle(scanned, document.id);
+
+      expect((await asOrgA(() => scanned.documents.get(document.id))).scanState).toBe('CLEAN');
+      const link = await asOrgA(() => scanned.documents.createDownloadUrl(document.id));
+      const served = await getFromSignedUrl(link.downloadUrl);
+      expect(Buffer.compare(served.body, original)).toBe(0);
+    });
+
+    it('removes the raw upload object once it has been sealed', async () => {
+      const { intent, document } = await uploadDocument();
+      expect(document.status).toBe('REGISTERED');
+
+      const rawKey = await rawKeyOf(intent.uploadIntentId);
+      expect(await wiring.storage.head(rawKey)).toBeNull();
+    });
+
+    it('registers the document under a key an upload URL was never signed for', async () => {
+      const { intent, document } = await uploadDocument();
+      const rawKey = await rawKeyOf(intent.uploadIntentId);
+
+      const row = await runUnscoped('the suite reads the sealed key the document names', () =>
+        prisma.client.document.findUniqueOrThrow({ where: { id: document.id } }),
+      );
+
+      expect(row.objectKey).not.toBe(rawKey);
+      expect(row.objectKey).toMatch(/^documents-sealed\//);
+    });
+  });
+
+  // =========================================================================
   // Content validation against reality
   // =========================================================================
 

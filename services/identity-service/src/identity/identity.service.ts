@@ -1,9 +1,16 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
-import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
+import {
+  RastaError,
+  createSystemContext,
+  getContext,
+  runUnscoped,
+  runWithContext,
+} from '@rasta/nest-common';
 import { IdentityRepository, isUniqueViolation } from './identity.repository';
 import { IDENTITY_EVENTS, validateIdentityPayload } from './events';
+import { isMembershipLive, liveMembershipWhere } from './membership-window';
 import {
   DEFAULT_ROLE_GRANT_POLICY,
   ROLE_GRANT_POLICY,
@@ -17,10 +24,13 @@ import {
   DEFAULT_PROVISIONING_SCOPE_POLICY,
   PROVISIONING_SCOPE_POLICY,
   assertMayProvisionInto,
+  isWithinProvisioningScope,
   type ProvisioningScopePolicy,
 } from './provisioning-scope';
-import { IDENTITY_TOPIC } from '../config/env';
+import { IDENTITY_TOPIC, SERVICE_NAME } from '../config/env';
 import { KeycloakAdminClient } from '../keycloak/keycloak.client';
+import { KeycloakProjector } from '../keycloak/keycloak.projector';
+import { platformAttributesFor } from '../keycloak/platform-attributes';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { markRefusal } from '../security-events/refusal-sites';
 import type {
@@ -56,6 +66,8 @@ export class IdentityService {
   constructor(
     private readonly repository: IdentityRepository,
     private readonly keycloak: KeycloakAdminClient,
+    /** The one writer of the Keycloak attributes tokens are built from (ADR-060 § 5). */
+    private readonly projector: KeycloakProjector,
     /**
      * Which roles the caller may hand out. Injected rather than imported so a
      * deployment answers Q-60 with an environment value; the default is the
@@ -182,13 +194,28 @@ export class IdentityService {
     const userId = `${ID_PREFIXES.user}_${ulid()}`;
     const membershipId = `${ID_PREFIXES.membership}_${ulid()}`;
     const actor = getContext().userId ?? 'SYSTEM';
+    const grantedAt = new Date();
 
     const keycloakId = await this.keycloak.createUser({
       username: dto.username,
       email: dto.email,
       firstName: dto.firstName,
       lastName: dto.lastName,
-      organizationId: dto.organizationId,
+      // Exactly what the projector would write for the rows committed below,
+      // so the account's very first token is already right.
+      attributes: platformAttributesFor(
+        { id: userId, activeOrganizationId: dto.organizationId },
+        [
+          {
+            organizationId: dto.organizationId,
+            roles: dto.roles,
+            status: 'ACTIVE',
+            validFrom: grantedAt,
+            validUntil: null,
+          },
+        ],
+        grantedAt,
+      ),
       roles: dto.roles,
     });
 
@@ -346,7 +373,7 @@ export class IdentityService {
       return created;
     });
 
-    await this.keycloak.syncMemberships(user.keycloakId, userId, await this.orgIdsFor(userId));
+    await this.projector.projectAfterCommit(userId);
 
     return toMembershipView(membership);
   }
@@ -419,6 +446,11 @@ export class IdentityService {
       return result;
     });
 
+    // Promotion and demotion alike: before ADR-060 neither ever reached the
+    // token, because roles were written to Keycloak only when the account was
+    // created. A demoted administrator kept administering.
+    await this.projector.projectAfterCommit(membership.userId);
+
     return toMembershipView(updated);
   }
 
@@ -444,6 +476,8 @@ export class IdentityService {
         },
       });
 
+      await this.moveActiveOrganizationOff(tx, membership.userId, membership.organizationId, actor);
+
       await this.repository.enqueueEvent(tx, {
         aggregateType: 'Membership',
         aggregateId: membershipId,
@@ -459,12 +493,7 @@ export class IdentityService {
       });
     });
 
-    const user = await this.repository.findUserById(membership.userId);
-    await this.keycloak.syncMemberships(
-      user?.keycloakId ?? null,
-      membership.userId,
-      await this.orgIdsFor(membership.userId),
-    );
+    await this.projector.projectAfterCommit(membership.userId);
   }
 
   /**
@@ -478,7 +507,9 @@ export class IdentityService {
     if (!context.userId) throw RastaError.unauthenticated('This endpoint requires a user token');
 
     const membership = await this.repository.findMembership(context.userId, dto.organizationId);
-    if (!membership || membership.status !== 'ACTIVE') {
+    // Live, not merely ACTIVE: a membership past its validUntil is not one the
+    // caller may act for, and this is where acting for it would begin.
+    if (!membership || !isMembershipLive(membership, new Date())) {
       // Marked as the one refusal this service records as audit evidence
       // (ADR-053 § 4). The mark changes nothing about the error or its `403`;
       // it only tells the exception filter that *this* decision is the one the
@@ -496,7 +527,10 @@ export class IdentityService {
       }),
     );
 
-    await this.keycloak.setActiveOrganization(user.keycloakId, dto.organizationId);
+    // Not after-commit best effort: the caller asked for this switch and waits
+    // on its answer, and — unlike a membership change — it enqueues no event
+    // a retry could come from. A failed write is reported, as it always was.
+    await this.projector.project(user.id, 'request');
 
     return toUserView(user);
   }
@@ -582,7 +616,24 @@ export class IdentityService {
         }),
     );
 
-    if (!request) throw RastaError.notFound('RegistrationRequest', registrationId);
+    // A registration outside the caller's provisioning scope must look
+    // exactly like one that does not exist. Checking status or emitting a
+    // scope-specific refusal before this would let the id alone tell a
+    // reviewer things they have no authority over: missing (404) versus
+    // exists-but-decided (409) versus exists-and-pending (the old 403 from
+    // `assertMayProvisionInto`) is enough for a `UNION_ADMIN` of org A to
+    // learn the state of org B's registrations without ever touching them.
+    // The organization itself came from the applicant, on a `@Public`
+    // endpoint, so this is also what stops a reviewer from filing their own
+    // registration naming any organization and approving it — the same gap
+    // `assertMayProvisionInto` closes on the two direct provisioning paths.
+    if (
+      !request ||
+      !isWithinProvisioningScope(request.requestedOrganizationId, this.provisioningScope)
+    ) {
+      throw RastaError.notFound('RegistrationRequest', registrationId);
+    }
+
     if (request.status !== 'PENDING') {
       throw RastaError.invalidStateTransition(
         'RegistrationRequest',
@@ -591,12 +642,6 @@ export class IdentityService {
         'Only a pending registration can be approved',
       );
     }
-
-    // The organization came from the applicant, on a `@Public` endpoint.
-    // Without this, a reviewer could file their own registration naming any
-    // organization and approve it, walking around the check on the two direct
-    // provisioning paths.
-    assertMayProvisionInto(request.requestedOrganizationId, this.provisioningScope);
 
     const grantedRoles = dto.roles ?? request.requestedRoles;
 
@@ -608,13 +653,26 @@ export class IdentityService {
 
     const reviewer = getContext().userId ?? 'SYSTEM';
     const membershipId = `${ID_PREFIXES.membership}_${ulid()}`;
+    const grantedAt = new Date();
 
     const keycloakId = await this.keycloak.createUser({
       username: request.user.username,
       email: request.user.email,
       firstName: request.user.firstName,
       lastName: request.user.lastName,
-      organizationId: request.requestedOrganizationId,
+      attributes: platformAttributesFor(
+        { id: request.userId, activeOrganizationId: request.requestedOrganizationId },
+        [
+          {
+            organizationId: request.requestedOrganizationId,
+            roles: grantedRoles,
+            status: 'ACTIVE',
+            validFrom: grantedAt,
+            validUntil: null,
+          },
+        ],
+        grantedAt,
+      ),
       roles: grantedRoles,
     });
 
@@ -711,7 +769,18 @@ export class IdentityService {
         }),
     );
 
-    if (!request) throw RastaError.notFound('RegistrationRequest', registrationId);
+    // Same oracle as `approveRegistration`, and here the unchecked path was
+    // worse: this function had no scope check at all, before or after the
+    // status check — any `UNION_ADMIN` on the platform could reject a
+    // PENDING registration destined for an organization they have no
+    // authority over, not merely learn that it existed.
+    if (
+      !request ||
+      !isWithinProvisioningScope(request.requestedOrganizationId, this.provisioningScope)
+    ) {
+      throw RastaError.notFound('RegistrationRequest', registrationId);
+    }
+
     if (request.status !== 'PENDING') {
       throw RastaError.invalidStateTransition('RegistrationRequest', request.status, 'REJECTED');
     }
@@ -790,9 +859,120 @@ export class IdentityService {
     }
   }
 
-  private async orgIdsFor(userId: string): Promise<string[]> {
-    const memberships = await this.repository.listMembershipsForUser(userId);
-    return memberships.filter((m) => m.status === 'ACTIVE').map((m) => m.organizationId);
+  // -------------------------------------------------------------------------
+  // Membership expiry (ADR-060 § 5)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Acts on one membership whose `validUntil` has passed.
+   *
+   * The membership stopped granting anything at `validUntil` on its own — every
+   * decision reads the validity window against the clock. What does not happen
+   * on its own is everything *outside* this database that still believes in
+   * it: the user's Keycloak attributes, and so their next token; the active
+   * organization they land in; the audit trail. This is that step:
+   *
+   * 1. claim the lapse (`lapse_handled_at IS NULL`), so every replica may
+   *    sweep and exactly one acts;
+   * 2. move the user's active organization off it, if it was the active one;
+   * 3. publish `MEMBERSHIP_EXPIRED` — audit evidence, and the durable trigger
+   *    for re-projection should step 4 fail;
+   * 4. re-project the user after commit.
+   *
+   * 1–3 commit together. Runs inside the membership's own organization, like a
+   * request would: a background job is not trusted more than a person is.
+   *
+   * Returns whether this call acted, which is `false` when another replica
+   * claimed the lapse first.
+   */
+  async expireLapsedMembership(
+    membership: { id: string; userId: string; organizationId: string; validUntil: Date | null },
+    now: Date,
+  ): Promise<boolean> {
+    if (!membership.validUntil || membership.validUntil > now) return false;
+    const validUntil = membership.validUntil;
+
+    const acted = await runWithContext(
+      createSystemContext({
+        correlationId: `membership-expiry-${membership.id}`,
+        organizationId: membership.organizationId,
+        callerService: SERVICE_NAME,
+      }),
+      () =>
+        this.repository.transaction(async (tx) => {
+          const claim = await tx.membership.updateMany({
+            where: { id: membership.id, lapseHandledAt: null, deletedAt: null },
+            data: { lapseHandledAt: now },
+          });
+          if (claim.count === 0) return false;
+
+          await this.moveActiveOrganizationOff(
+            tx,
+            membership.userId,
+            membership.organizationId,
+            'SYSTEM',
+            now,
+          );
+
+          await this.repository.enqueueEvent(tx, {
+            aggregateType: 'Membership',
+            aggregateId: membership.id,
+            eventName: IDENTITY_EVENTS.MEMBERSHIP_EXPIRED,
+            topic: IDENTITY_TOPIC,
+            organizationId: membership.organizationId,
+            payload: validateIdentityPayload(IDENTITY_EVENTS.MEMBERSHIP_EXPIRED, {
+              membershipId: membership.id,
+              userId: membership.userId,
+              organizationId: membership.organizationId,
+              validUntil: validUntil.toISOString(),
+            }),
+          });
+          return true;
+        }),
+    );
+
+    if (acted) await this.projector.projectAfterCommit(membership.userId);
+    return acted;
+  }
+
+  /**
+   * A revoked or lapsed membership cannot stay the organization the user acts for.
+   *
+   * Left in place, the token's `org_id` would name an organization that is no
+   * longer in `org_ids` — the case ADR-060 § 4 refuses outright — and the
+   * database would disagree with itself about where this user works. It moves
+   * to the user's earliest remaining live membership, or is cleared when
+   * there is none. Earliest rather than any: the same rows must always give the
+   * same answer. In the revoking (or lapsing) transaction, so the two never
+   * disagree.
+   */
+  private async moveActiveOrganizationOff(
+    tx: ExtendedPrismaClient,
+    userId: string,
+    leftOrganizationId: string,
+    actor: string,
+    now: Date = new Date(),
+  ): Promise<void> {
+    const user = await this.repository.findUserById(userId, tx);
+    if (!user || user.activeOrganizationId !== leftOrganizationId) return;
+
+    const next = await runUnscoped('a user may belong to several organizations', () =>
+      tx.membership.findFirst({
+        where: {
+          userId,
+          organizationId: { not: leftOrganizationId },
+          ...liveMembershipWhere(now),
+        },
+        orderBy: { createdAt: 'asc' },
+      }),
+    );
+
+    await runUnscoped('the active organization is a property of the user, not of a tenant', () =>
+      tx.user.update({
+        where: { id: userId },
+        data: { activeOrganizationId: next?.organizationId ?? null, updatedBy: actor },
+      }),
+    );
   }
 }
 

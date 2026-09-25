@@ -20,6 +20,7 @@ export const IDENTITY_EVENTS = {
   USER_DEACTIVATED: 'USER_DEACTIVATED',
   MEMBERSHIP_CREATED: 'MEMBERSHIP_CREATED',
   MEMBERSHIP_REVOKED: 'MEMBERSHIP_REVOKED',
+  MEMBERSHIP_EXPIRED: 'MEMBERSHIP_EXPIRED',
   ROLE_ASSIGNED: 'ROLE_ASSIGNED',
   ROLE_REVOKED: 'ROLE_REVOKED',
   REGISTRATION_SUBMITTED: 'REGISTRATION_SUBMITTED',
@@ -70,6 +71,22 @@ export const membershipRevokedPayload = z.object({
 });
 
 /**
+ * A membership's `validUntil` passed (ADR-060 § 5).
+ *
+ * Nobody acted, so there is no actor and no reason: the grantor chose the end
+ * when they granted it. The membership row is unchanged apart from the sweep's
+ * bookkeeping — it simply stopped granting anything at `validUntil`, and this
+ * is the record that it did. Published by the expiry sweep, at most once per
+ * membership, after `validUntil`; how long after is the sweep interval.
+ */
+export const membershipExpiredPayload = z.object({
+  membershipId: z.string(),
+  userId: z.string(),
+  organizationId: z.string(),
+  validUntil: z.string().datetime(),
+});
+
+/**
  * Role changes.
  *
  * The gateway consumes these to invalidate its cached permissions. Without
@@ -111,6 +128,7 @@ export const IDENTITY_EVENT_SCHEMAS = {
   [IDENTITY_EVENTS.USER_DEACTIVATED]: userStatusChangedPayload,
   [IDENTITY_EVENTS.MEMBERSHIP_CREATED]: membershipCreatedPayload,
   [IDENTITY_EVENTS.MEMBERSHIP_REVOKED]: membershipRevokedPayload,
+  [IDENTITY_EVENTS.MEMBERSHIP_EXPIRED]: membershipExpiredPayload,
   [IDENTITY_EVENTS.ROLE_ASSIGNED]: roleChangedPayload,
   [IDENTITY_EVENTS.ROLE_REVOKED]: roleChangedPayload,
   [IDENTITY_EVENTS.REGISTRATION_SUBMITTED]: registrationSubmittedPayload,

@@ -95,6 +95,12 @@ model Membership {
   validFrom  DateTime  @default(now()) @map("valid_from")
   validUntil DateTime? @map("valid_until")
 
+  /// When the expiry sweep acted on this membership's `validUntil` passing
+  /// (ADR-060 § 5): active organization moved off it, MEMBERSHIP_EXPIRED
+  /// published, user re-projected. Bookkeeping only — access is decided from
+  /// status and the validity window against the clock, never from this.
+  lapseHandledAt DateTime? @map("lapse_handled_at")
+
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   createdBy String    @map("created_by")

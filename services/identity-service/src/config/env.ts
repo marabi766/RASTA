@@ -160,6 +160,18 @@ export const identityEnvSchema = baseEnvSchema
     ROLE_GRANTS_BY_ORGANIZATION_ADMIN: roleListEnv(DEFAULT_GRANTS.ORGANIZATION_ADMIN),
 
     /**
+     * ADR-060 § 5 — the membership expiry sweep (`membership-expiry.scanner.ts`).
+     *
+     * On by default: switching it off does not let an expired membership grant
+     * anything, but its organization stays in the user's token until something
+     * else re-projects them. The interval is the latency bound on top of
+     * ADR-060 § 7's 905 s, so its ceiling is kept at an hour.
+     */
+    MEMBERSHIP_EXPIRY_SCAN_ENABLED: booleanEnv(true),
+    MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS: z.coerce.number().int().min(5).max(3600).default(60),
+    MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(200),
+
+    /**
      * Which roles may provision a user into an organization other than the one
      * they are acting for (`identity/provisioning-scope.ts`, `docs/24` Q-61).
      *
