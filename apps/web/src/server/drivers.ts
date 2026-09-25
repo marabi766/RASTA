@@ -39,6 +39,31 @@ export type { ReadResult };
  */
 
 // ---------------------------------------------------------------------------
+// Who may write a driver or an assignment
+// ---------------------------------------------------------------------------
+
+/**
+ * The roles fleet-service's own `@Roles` guard lets write a driver or an
+ * assignment (`driver.controller.ts`, `assignment.controller.ts`). `DRIVER`
+ * and `OPERATOR` may read but never write, including their own record.
+ *
+ * The screen reads this to decide which forms to render — a Route Guard as
+ * UX, explicitly not as security (`docs/16 § ۱۶٫۱۱`): fleet-service applies
+ * its own guard again on every write regardless of what this function said,
+ * and a caller whose identity read failed sees no write form rather than one
+ * that might work.
+ */
+const DRIVER_MANAGEMENT_ROLES: readonly string[] = [
+  'ORGANIZATION_ADMIN',
+  'FLEET_MANAGER',
+  'UNION_ADMIN',
+];
+
+export function canManageDrivers(effectiveRoles: readonly string[]): boolean {
+  return effectiveRoles.some((role) => DRIVER_MANAGEMENT_ROLES.includes(role));
+}
+
+// ---------------------------------------------------------------------------
 // Reading
 // ---------------------------------------------------------------------------
 
@@ -151,6 +176,27 @@ function localDateToIso(raw: string, timeZone = DISPLAY_TIME_ZONE): string | nul
   return new Date(instant.getTime()).toISOString();
 }
 
+/**
+ * The inverse of {@link localDateToIso}: the calendar day an instant falls on
+ * in `timeZone`, as `YYYY-MM-DD` — what `type="date"` expects as a starting
+ * value.
+ *
+ * Slicing the ISO string's first ten characters instead would read the *UTC*
+ * calendar day, which for a Tehran evening instant is the day before the one
+ * `localDateToIso` was given. A licence expiry saved as `2027-01-01` round
+ * trips through the edit form as `2026-12-31T20:30:00.000Z` on the wire, and
+ * a naive slice would then pre-fill the form with `2026-12-31` — one day
+ * earlier than what was actually stored, moving the date back again on the
+ * next save that touches any other field (docs/16 § 16.3).
+ */
+export function localDateFromIso(iso: string, timeZone = DISPLAY_TIME_ZONE): string {
+  const local = new TZDate(new Date(iso), timeZone);
+  const year = String(local.getFullYear()).padStart(4, '0');
+  const month = String(local.getMonth() + 1).padStart(2, '0');
+  const day = String(local.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 const optionalLocalDate = z
   .string()
   .transform((raw, ctx) => {
@@ -181,10 +227,47 @@ const nullableLocalDate = z.string().transform((raw, ctx) => {
   return iso;
 });
 
+/**
+ * Bidi control characters — LRM/RLM, the embeddings and overrides, the
+ * isolates — refused in short free-text identifiers.
+ *
+ * Built from code points rather than written as literals, the same reason
+ * `format/codepoints.ts` gives for doing the same with ZWNJ and the rest:
+ * every one of these is invisible, so a literal in source is a character no
+ * diff and no reviewer can see — which would be a strange way to write the
+ * check for exactly that failure mode.
+ *
+ * fleet-service accepts these unchanged today — it checks only length and
+ * trim (`dto.ts`) — and a value carrying one can be rendered to look like a
+ * different identifier than what was actually typed: exactly the deception a
+ * fleet manager comparing an employee number or a licence class against a
+ * paper record must not be exposed to. The portal is one of several clients
+ * that can write these fields, so refusing here narrows the surface rather
+ * than closing it — the service-side check is a separate fix.
+ */
+const BIDI_CONTROL_CODEPOINTS = [
+  0x200e, // LEFT-TO-RIGHT MARK
+  0x200f, // RIGHT-TO-LEFT MARK
+  0x202a, // LEFT-TO-RIGHT EMBEDDING
+  0x202b, // RIGHT-TO-LEFT EMBEDDING
+  0x202c, // POP DIRECTIONAL FORMATTING
+  0x202d, // LEFT-TO-RIGHT OVERRIDE
+  0x202e, // RIGHT-TO-LEFT OVERRIDE
+  0x2066, // LEFT-TO-RIGHT ISOLATE
+  0x2067, // RIGHT-TO-LEFT ISOLATE
+  0x2068, // FIRST STRONG ISOLATE
+  0x2069, // POP DIRECTIONAL ISOLATE
+];
+const BIDI_CONTROL = new RegExp(
+  `[${BIDI_CONTROL_CODEPOINTS.map((codePoint) => String.fromCodePoint(codePoint)).join('')}]`,
+);
+const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
+
 const nullableShortText = (max: number, message: string) =>
   z
     .string()
     .trim()
+    .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE)
     .transform((value) => (value === '' ? null : value))
     .pipe(z.string().max(max, message).nullable());
 
@@ -225,16 +308,19 @@ export const createDriverFormSchema = z
     employeeNo: z
       .string()
       .trim()
+      .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE)
       .pipe(z.string().max(64, 'شمارهٔ پرسنلی حداکثر ۶۴ نویسه است'))
       .transform((value) => (value === '' ? undefined : value)),
     licenceNumber: z
       .string()
       .trim()
+      .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE)
       .pipe(z.string().max(64, 'شمارهٔ گواهینامه حداکثر ۶۴ نویسه است'))
       .transform((value) => (value === '' ? undefined : value)),
     licenceClass: z
       .string()
       .trim()
+      .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE)
       .pipe(z.string().max(32, 'پایهٔ گواهینامه حداکثر ۳۲ نویسه است'))
       .transform((value) => (value === '' ? undefined : value)),
     licenceValidTo: optionalLocalDate,
