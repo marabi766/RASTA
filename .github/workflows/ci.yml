@@ -86,6 +86,11 @@ jobs:
           pnpm run test:compose-ports
           pnpm run check:compose-ports
 
+      - name: Image scope rule
+        # The rule that decides which images a pull request builds and scans
+        # (L7-35). A wrong rule would quietly skip a changed image.
+        run: pnpm run test:container-scope
+
       - name: Test phase contract
         # identity-service's aggregation stress spec (two 500-write proofs on
         # one hot row) must run exactly once, alone, after every other
@@ -1798,39 +1803,55 @@ jobs:
   # Container build and image scan. Only on main, because it is the slowest
   # stage and a PR has already been gated by everything above.
   # ---------------------------------------------------------------------------
+  container-scope:
+    name: Images to build and scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      services: ${{ steps.scope.outputs.services }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The pull request's base must be present to diff against.
+          fetch-depth: 0
+
+      - name: Decide which images this change affects
+        id: scope
+        # L7-35: images were built and scanned only after merge, so a broken
+        # or vulnerable image was found on main. A pull request now builds the
+        # images it can affect (scripts/container-scope-lib.mjs explains the
+        # rule); a push to main still builds all of them.
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            services="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" \
+              | node scripts/container-scope.mjs)"
+          else
+            services="$(node scripts/container-scope.mjs --all)"
+          fi
+          echo "Images to build: ${services}"
+          echo "services=${services}" >> "$GITHUB_OUTPUT"
+
   containers:
     name: Build and scan images
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # E2E joins the list: main must stay deployable, and an image built from a
     # commit whose critical financial path was never exercised is not something
-    # to publish (AGENTS.md § 6, § 7).
-    needs: [quality, security, integration, e2e]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # to publish (AGENTS.md § 6, § 7). The same gates hold on a pull request,
+    # which now builds and scans the images it touches before merge (L7-35).
+    needs: [container-scope, quality, security, integration, e2e]
+    if: needs.container-scope.outputs.services != '[]'
 
     strategy:
       fail-fast: false
       matrix:
-        # asset-service, fleet-service and document-service were each absent
-        # from this list for one or more releases after they landed, so their
-        # images went unbuilt and unscanned by CI (PROJECT_MEMORY § 22).
-        # Every service with a Dockerfile belongs here — that is what makes
-        # the scan gate cover what we actually deploy.
-        service:
-          [
-            api-gateway,
-            identity-service,
-            organization-service,
-            asset-service,
-            fleet-service,
-            maintenance-service,
-            economic-service,
-            marketplace-service,
-            document-service,
-            supplier-service,
-            notification-service,
-            audit-service,
-          ]
+        # Every service with a Dockerfile on a push to main; on a pull request,
+        # the ones the change can affect. Derived from the repository rather
+        # than listed here: asset-service, fleet-service and document-service
+        # were each absent from a hand-kept list for one or more releases, so
+        # their images went unbuilt and unscanned (PROJECT_MEMORY § 22).
+        service: ${{ fromJSON(needs.container-scope.outputs.services) }}
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
