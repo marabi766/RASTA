@@ -28,7 +28,7 @@ import { z } from 'zod';
  *
  * ## Version
  *
- * `eventVersion` is **1** for all ten. Nine are new contracts, not changes to
+ * `eventVersion` is **1** for all of them. Nine are new contracts, not changes to
  * an existing one, so there is nothing to be compatible with yet — and
  * starting anywhere but 1 would imply a v0 that consumers might look for.
  * `ORDER_DISPUTE_RESOLVED` is the tenth, added later for ADR-052 § 1-b, and
@@ -48,6 +48,14 @@ export const MARKETPLACE_EVENTS = {
   ORDER_DISPUTED: 'ORDER_DISPUTED',
   ORDER_DISPUTE_RESOLVED: 'ORDER_DISPUTE_RESOLVED',
   REVIEW_SUBMITTED: 'REVIEW_SUBMITTED',
+  // Global audit L7-14: state changes that published nothing.
+  PRODUCT_CREATED: 'PRODUCT_CREATED',
+  OFFER_DRAFTED: 'OFFER_DRAFTED',
+  OFFER_UPDATED: 'OFFER_UPDATED',
+  ORDER_FUNDS_HELD: 'ORDER_FUNDS_HELD',
+  ORDER_FAILED: 'ORDER_FAILED',
+  ORDER_SETTLEMENT_STARTED: 'ORDER_SETTLEMENT_STARTED',
+  ORDER_SETTLEMENT_FAILED: 'ORDER_SETTLEMENT_FAILED',
 } as const;
 
 export type MarketplaceEventName = (typeof MARKETPLACE_EVENTS)[keyof typeof MARKETPLACE_EVENTS];
@@ -293,6 +301,134 @@ export const reviewSubmittedPayload = z.object({
   submittedAt: isoTimestamp,
 });
 
+// ---------------------------------------------------------------------------
+// Audit records for changes that used to publish nothing (global audit L7-14)
+// ---------------------------------------------------------------------------
+//
+// AGENTS.md S-06: every state change produces an audit record, and
+// audit-service reads only the event log. Each of these was a committed
+// change with no event. They are written in the same transaction as the
+// change and, like the rest of this file, carry only columns the aggregate
+// has — no free text from another service, no wallet or account identifier.
+
+/**
+ * A product was added to the catalogue.
+ *
+ * Catalogue metadata only: the SKU, category, kind and unit. The name and
+ * description are display text a consumer reads back through the API.
+ */
+export const productCreatedPayload = z.object({
+  productId: z.string(),
+  organizationId: z.string(),
+  sku: z.string(),
+  category: z.string(),
+  kind: z.string(),
+  unit: z.string(),
+  createdBy: z.string(),
+  createdAt: isoTimestamp,
+});
+
+/** The terms an offer carries, as stored. Shared by the two offer records. */
+const offerTerms = {
+  offerId: z.string(),
+  productId: z.string(),
+  supplierOrganizationId: z.string(),
+  unitPriceMinor: amountMinor,
+  currency,
+  availableQuantity: z.number().int().nonnegative(),
+  leadTimeDays: z.number().int().nonnegative(),
+  minimumQuantity: z.number().int().positive(),
+  version: z.number().int().positive(),
+};
+
+/**
+ * An offer was created without being published.
+ *
+ * A published one is announced by `OFFER_PUBLISHED`, as before; this is the
+ * draft that previously left no trace until — and unless — it was published.
+ */
+export const offerDraftedPayload = z.object({
+  ...offerTerms,
+  createdBy: z.string(),
+  createdAt: isoTimestamp,
+});
+
+/**
+ * An offer changed and is not published afterwards.
+ *
+ * The other half of `updateOffer`: a change that leaves the offer
+ * `PUBLISHED` is announced by `OFFER_PUBLISHED`, as before. This covers an
+ * edit to a draft and every move *out of* `PUBLISHED` — the one a search
+ * index most needs, and the one that was silent. `previousStatus` and
+ * `status` say which it was; `changedFields` names what actually changed on
+ * the row (field names, not values — the values are the terms above). An
+ * update that changed nothing records nothing.
+ */
+export const offerUpdatedPayload = z.object({
+  ...offerTerms,
+  previousStatus: z.enum(['DRAFT', 'PUBLISHED', 'SUSPENDED', 'WITHDRAWN']),
+  status: z.enum(['DRAFT', 'SUSPENDED', 'WITHDRAWN']),
+  changedFields: z
+    .array(z.enum(['unitPriceMinor', 'availableQuantity', 'leadTimeDays', 'status']))
+    .min(1),
+  updatedBy: z.string(),
+  updatedAt: isoTimestamp,
+});
+
+/** The order's parties and amount — what every saga record below names. */
+const orderParties = {
+  orderId: z.string(),
+  buyerOrganizationId: z.string(),
+  supplierOrganizationId: z.string(),
+  totalAmountMinor: amountMinor,
+  currency,
+};
+
+/**
+ * economic-service holds the buyer's funds for this order (ADR-040).
+ *
+ * `transactionId` is economic-service's obligation, the same reference the
+ * order row records; `status` is the order's status afterwards — `FUNDS_HELD`,
+ * or `CANCELLING` when the buyer cancelled while the hold was being placed
+ * and the saga will compensate. The money is held either way, which is the
+ * fact recorded.
+ */
+export const orderFundsHeldPayload = z.object({
+  ...orderParties,
+  transactionId: z.string(),
+  status: z.enum(['FUNDS_HELD', 'CANCELLING']),
+  heldAt: isoTimestamp,
+});
+
+/**
+ * The order could not be funded and is `FAILED`; nothing was held.
+ *
+ * No reason on the wire: the saga's reason is economic-service's refusal
+ * text, which this service does not control. It is kept on the order row
+ * (`failure_reason`) behind the API's authorization.
+ */
+export const orderFailedPayload = z.object({
+  ...orderParties,
+  failedAt: isoTimestamp,
+});
+
+/** A settlement attempt began: `RECEIPT_CONFIRMED → SETTLING`. */
+export const orderSettlementStartedPayload = z.object({
+  ...orderParties,
+  startedAt: isoTimestamp,
+});
+
+/**
+ * A settlement attempt failed and the order is back at `RECEIPT_CONFIRMED`.
+ *
+ * The funds are still held. Whether the saga tries again or stops for a
+ * human is the saga's decision (`docs/08` § 8.4), not this record's.
+ */
+export const orderSettlementFailedPayload = z.object({
+  ...orderParties,
+  failedAt: isoTimestamp,
+});
+
 export const MARKETPLACE_EVENT_SCHEMAS = {
   [MARKETPLACE_EVENTS.OFFER_PUBLISHED]: offerPublishedPayload,
   [MARKETPLACE_EVENTS.ORDER_CREATED]: orderCreatedPayload,
@@ -304,6 +440,13 @@ export const MARKETPLACE_EVENT_SCHEMAS = {
   [MARKETPLACE_EVENTS.ORDER_DISPUTED]: orderDisputedPayload,
   [MARKETPLACE_EVENTS.ORDER_DISPUTE_RESOLVED]: orderDisputeResolvedPayload,
   [MARKETPLACE_EVENTS.REVIEW_SUBMITTED]: reviewSubmittedPayload,
+  [MARKETPLACE_EVENTS.PRODUCT_CREATED]: productCreatedPayload,
+  [MARKETPLACE_EVENTS.OFFER_DRAFTED]: offerDraftedPayload,
+  [MARKETPLACE_EVENTS.OFFER_UPDATED]: offerUpdatedPayload,
+  [MARKETPLACE_EVENTS.ORDER_FUNDS_HELD]: orderFundsHeldPayload,
+  [MARKETPLACE_EVENTS.ORDER_FAILED]: orderFailedPayload,
+  [MARKETPLACE_EVENTS.ORDER_SETTLEMENT_STARTED]: orderSettlementStartedPayload,
+  [MARKETPLACE_EVENTS.ORDER_SETTLEMENT_FAILED]: orderSettlementFailedPayload,
 } as const satisfies Record<MarketplaceEventName, z.ZodTypeAny>;
 
 /**

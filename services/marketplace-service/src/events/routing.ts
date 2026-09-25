@@ -32,11 +32,19 @@ export const AGGREGATE_OF = {
   ORDER_DISPUTED: 'Order',
   ORDER_DISPUTE_RESOLVED: 'Order',
   REVIEW_SUBMITTED: 'Review',
+  PRODUCT_CREATED: 'Product',
+  OFFER_DRAFTED: 'Offer',
+  OFFER_UPDATED: 'Offer',
+  ORDER_FUNDS_HELD: 'Order',
+  ORDER_FAILED: 'Order',
+  ORDER_SETTLEMENT_STARTED: 'Order',
+  ORDER_SETTLEMENT_FAILED: 'Order',
 } as const satisfies Record<MarketplaceEventName, string>;
 
 export const PARTITION_SCOPES = {
   ORDER: 'ORDER',
   OFFER: 'OFFER',
+  PRODUCT: 'PRODUCT',
 } as const;
 
 export type PartitionScope = (typeof PARTITION_SCOPES)[keyof typeof PARTITION_SCOPES];
@@ -72,6 +80,13 @@ export const PARTITION_KEY_POLICY: { [N in MarketplaceEventName]: PartitionRule<
   ORDER_CANCELLED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
   ORDER_DISPUTED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
   ORDER_DISPUTE_RESOLVED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
+  // The saga's own steps (L7-14) sit in the same stream as the rest of the
+  // order: a hold, a settlement attempt and the completion that follows it
+  // are one story.
+  ORDER_FUNDS_HELD: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
+  ORDER_FAILED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
+  ORDER_SETTLEMENT_STARTED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
+  ORDER_SETTLEMENT_FAILED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
 
   /**
    * Ordered by the order, not by the review.
@@ -91,6 +106,13 @@ export const PARTITION_KEY_POLICY: { [N in MarketplaceEventName]: PartitionRule<
    * order; it has no relationship to any particular order.
    */
   OFFER_PUBLISHED: (payload) => ({ scope: 'OFFER', key: payload.offerId }),
+  // A draft and a change that leaves an offer unpublished belong to the same
+  // offer's stream as its publications (L7-14).
+  OFFER_DRAFTED: (payload) => ({ scope: 'OFFER', key: payload.offerId }),
+  OFFER_UPDATED: (payload) => ({ scope: 'OFFER', key: payload.offerId }),
+
+  /** A product is its own lifecycle; nothing else is ordered against it (L7-14). */
+  PRODUCT_CREATED: (payload) => ({ scope: 'PRODUCT', key: payload.productId }),
 };
 
 /**

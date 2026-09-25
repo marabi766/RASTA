@@ -125,6 +125,79 @@ const PAYLOADS = {
     rating: 5,
     submittedAt: '2026-08-29T00:00:08.000Z',
   },
+  PRODUCT_CREATED: {
+    productId: 'PRD_1',
+    organizationId: SUPPLIER,
+    sku: 'SKU-1',
+    category: 'PARTS',
+    kind: 'GOODS',
+    unit: 'EA',
+    createdBy: 'USR-2',
+    createdAt: '2026-08-28T00:00:00.000Z',
+  },
+  OFFER_DRAFTED: {
+    offerId: 'OFR_2',
+    productId: 'PRD_1',
+    supplierOrganizationId: SUPPLIER,
+    unitPriceMinor: '250000',
+    currency: 'IRR',
+    availableQuantity: 10,
+    leadTimeDays: 3,
+    minimumQuantity: 1,
+    version: 1,
+    createdBy: 'USR-2',
+    createdAt: '2026-08-28T00:00:01.000Z',
+  },
+  OFFER_UPDATED: {
+    offerId: 'OFR_2',
+    productId: 'PRD_1',
+    supplierOrganizationId: SUPPLIER,
+    unitPriceMinor: '250000',
+    currency: 'IRR',
+    availableQuantity: 10,
+    leadTimeDays: 3,
+    minimumQuantity: 1,
+    version: 1,
+    previousStatus: 'PUBLISHED',
+    status: 'WITHDRAWN',
+    changedFields: ['status'],
+    updatedBy: 'USR-2',
+    updatedAt: '2026-08-28T00:00:02.000Z',
+  },
+  ORDER_FUNDS_HELD: {
+    orderId: ORDER,
+    buyerOrganizationId: BUYER,
+    supplierOrganizationId: SUPPLIER,
+    totalAmountMinor: '500000',
+    currency: 'IRR',
+    transactionId: 'TXN_1',
+    status: 'FUNDS_HELD',
+    heldAt: '2026-08-29T00:00:01.500Z',
+  },
+  ORDER_FAILED: {
+    orderId: ORDER,
+    buyerOrganizationId: BUYER,
+    supplierOrganizationId: SUPPLIER,
+    totalAmountMinor: '500000',
+    currency: 'IRR',
+    failedAt: '2026-08-29T00:00:01.500Z',
+  },
+  ORDER_SETTLEMENT_STARTED: {
+    orderId: ORDER,
+    buyerOrganizationId: BUYER,
+    supplierOrganizationId: SUPPLIER,
+    totalAmountMinor: '500000',
+    currency: 'IRR',
+    startedAt: '2026-08-29T00:00:04.500Z',
+  },
+  ORDER_SETTLEMENT_FAILED: {
+    orderId: ORDER,
+    buyerOrganizationId: BUYER,
+    supplierOrganizationId: SUPPLIER,
+    totalAmountMinor: '500000',
+    currency: 'IRR',
+    failedAt: '2026-08-29T00:00:04.700Z',
+  },
 } satisfies { [N in MarketplaceEventName]: Parameters<(typeof PARTITION_KEY_POLICY)[N]>[0] };
 
 const EXPECTED: { [N in MarketplaceEventName]: { scope: PartitionScope; key: string } } = {
@@ -138,6 +211,13 @@ const EXPECTED: { [N in MarketplaceEventName]: { scope: PartitionScope; key: str
   ORDER_DISPUTED: { scope: 'ORDER', key: ORDER },
   ORDER_DISPUTE_RESOLVED: { scope: 'ORDER', key: ORDER },
   REVIEW_SUBMITTED: { scope: 'ORDER', key: ORDER },
+  PRODUCT_CREATED: { scope: 'PRODUCT', key: 'PRD_1' },
+  OFFER_DRAFTED: { scope: 'OFFER', key: 'OFR_2' },
+  OFFER_UPDATED: { scope: 'OFFER', key: 'OFR_2' },
+  ORDER_FUNDS_HELD: { scope: 'ORDER', key: ORDER },
+  ORDER_FAILED: { scope: 'ORDER', key: ORDER },
+  ORDER_SETTLEMENT_STARTED: { scope: 'ORDER', key: ORDER },
+  ORDER_SETTLEMENT_FAILED: { scope: 'ORDER', key: ORDER },
 };
 
 const NAMES = Object.values(MARKETPLACE_EVENTS);
@@ -151,10 +231,10 @@ describe('every published marketplace event has a partition decision', () => {
     expect(resolve(name)).toEqual(EXPECTED[name]);
   });
 
-  it('covers exactly the ten events this service publishes', () => {
+  it('covers exactly the seventeen events this service publishes', () => {
     expect(Object.keys(EXPECTED).sort()).toEqual([...NAMES].sort());
     expect(Object.keys(PARTITION_KEY_POLICY).sort()).toEqual([...NAMES].sort());
-    expect(NAMES).toHaveLength(10);
+    expect(NAMES).toHaveLength(17);
   });
 });
 
@@ -169,6 +249,11 @@ describe('an order is one ordered stream', () => {
       'ORDER_CANCELLED',
       'ORDER_DISPUTED',
       'ORDER_DISPUTE_RESOLVED',
+      // The saga's own steps (L7-14) are part of the same story.
+      'ORDER_FUNDS_HELD',
+      'ORDER_FAILED',
+      'ORDER_SETTLEMENT_STARTED',
+      'ORDER_SETTLEMENT_FAILED',
     ] as const;
 
     expect(new Set(lifecycle.map((name) => resolve(name).key))).toEqual(new Set([ORDER]));
@@ -202,6 +287,13 @@ describe('the catalogue is its own stream', () => {
   it('does not put an offer on any order’s partition', () => {
     expect(resolve('OFFER_PUBLISHED').scope).not.toBe('ORDER');
   });
+
+  it('keeps a draft and an unpublishing change on the offer’s own stream', () => {
+    // A search index must see an offer withdrawn after — never before — the
+    // publication it withdraws.
+    expect(resolve('OFFER_DRAFTED')).toEqual({ scope: 'OFFER', key: 'OFR_2' });
+    expect(resolve('OFFER_UPDATED')).toEqual({ scope: 'OFFER', key: 'OFR_2' });
+  });
 });
 
 describe('the policy refuses to publish an unkeyed message', () => {
@@ -231,6 +323,13 @@ describe('aggregate identity is separate from partition ordering', () => {
       ORDER_DISPUTED: 'Order',
       ORDER_DISPUTE_RESOLVED: 'Order',
       REVIEW_SUBMITTED: 'Review',
+      PRODUCT_CREATED: 'Product',
+      OFFER_DRAFTED: 'Offer',
+      OFFER_UPDATED: 'Offer',
+      ORDER_FUNDS_HELD: 'Order',
+      ORDER_FAILED: 'Order',
+      ORDER_SETTLEMENT_STARTED: 'Order',
+      ORDER_SETTLEMENT_FAILED: 'Order',
     });
   });
 
