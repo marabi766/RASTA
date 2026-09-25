@@ -1824,7 +1824,8 @@ jobs:
         # The same severity and the same `exit-code: 1` as every Rasta image
         # below — the threshold is not relaxed because the image is somebody
         # else's. When it fires, the fix is to bump the pinned digest, which is
-        # a reviewable edit rather than a silent drift.
+        # a reviewable edit rather than a silent drift. Like that gate, it
+        # rejects fixable HIGH/CRITICAL only (`ignore-unfixed`).
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: rasta/clamav-pinned:ci
@@ -1945,6 +1946,15 @@ jobs:
         # running a single step (D-005). Moved to the current release rather
         # than back-pinning: a vulnerability scanner two years behind is a
         # gate in name only.
+        #
+        # What this gate claims, exactly: it rejects **fixable** HIGH and
+        # CRITICAL findings. `ignore-unfixed: true` passes a HIGH/CRITICAL that
+        # has no fixed version anywhere yet — deliberately, since failing on it
+        # would turn every PR red over a CVE nobody can act on. Such findings
+        # are not tracked by this job; an expiring, reviewed allowlist (a
+        # .trivyignore entry per CVE with an owner and an expiry date, and the
+        # gate run without ignore-unfixed) is the recorded follow-up (L7-35
+        # review).
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: rasta/${{ matrix.service }}:${{ github.sha }}
