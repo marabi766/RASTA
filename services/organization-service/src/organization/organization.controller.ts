@@ -121,8 +121,15 @@ export class OrganizationController {
     return this.organizations.changeStatus(id, dto);
   }
 
+  /**
+   * No `@Roles` here on purpose. Which roles may set governance policy is
+   * configuration (`GOVERNANCE_POLICY_SETTER_ROLES`, `docs/24` Q-64), and a
+   * decorator is fixed at compile time: a static list would either override
+   * the configuration or silently disagree with it. The route is still closed
+   * — authentication is required, `AUDITOR` is refused by the global guard,
+   * and `OrganizationService.setPolicy` refuses every role not configured.
+   */
   @Post(':id/policies')
-  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN')
   @ApiOperation({ summary: 'Set a governance policy value' })
   setPolicy(@Param('id') id: string, @Body(zodPipe(setPolicySchema)) dto: SetPolicyDto) {
     return this.organizations.setPolicy(id, dto);

@@ -1,8 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
-import { RastaError, getContext } from '@rasta/nest-common';
-import { OrganizationRepository, toLabel, type OrganizationRow } from './organization.repository';
+import { RastaError, RolesGuard, getContext } from '@rasta/nest-common';
+import {
+  OrganizationRepository,
+  toLabel,
+  type ChainRow,
+  type OrganizationRow,
+} from './organization.repository';
 import { ORGANIZATION_EVENTS, validateOrganizationPayload } from './events';
 import { ORGANIZATION_TOPIC } from '../config/env';
 import type { PrismaTransactionClient } from '../prisma/prisma.service';
@@ -26,14 +31,33 @@ import type {
 /** Roles that may act across the whole organization tree. */
 const PLATFORM_ROLES = ['SYSTEM_ADMIN', 'UNION_ADMIN'] as const;
 
+/**
+ * Statuses under which nothing beneath may be ACTIVE. Suspension and
+ * deactivation cascade downward; these are the checks that stop a create, a
+ * reactivation or a move from putting an ACTIVE organization back underneath.
+ */
+const BLOCKING_ANCESTOR_STATUSES: readonly string[] = ['SUSPENDED', 'DEACTIVATED'];
+
+export interface OrganizationServiceOptions {
+  /** Deepest `depth` any organization may have (`MAX_HIERARCHY_DEPTH`). */
+  readonly maxDepth: number;
+  /** Roles that may set governance policy (`GOVERNANCE_POLICY_SETTER_ROLES`, Q-64). */
+  readonly policySetterRoles: readonly string[];
+}
+
 @Injectable()
 export class OrganizationService {
   private readonly logger = new Logger(OrganizationService.name);
+  private readonly maxDepth: number;
+  private readonly policySetterRoles: readonly string[];
 
   constructor(
     private readonly repository: OrganizationRepository,
-    private readonly maxDepth: number,
-  ) {}
+    options: OrganizationServiceOptions,
+  ) {
+    this.maxDepth = options.maxDepth;
+    this.policySetterRoles = options.policySetterRoles;
+  }
 
   // =========================================================================
   // Authorization — the whole tenant boundary for this service
@@ -160,8 +184,14 @@ export class OrganizationService {
     return rows.map(rawRowToView);
   }
 
+  /**
+   * Same visibility as `list`: a non-operator sees only their own subtree.
+   * Coordinates are not a way around the tree — a radius search must not
+   * reveal a sibling that `GET /:id` would answer 404 for.
+   */
   async nearby(query: NearbyQuery) {
-    const rows = await this.repository.findNearby(query);
+    const allowedRootPath = await this.visibleRootPath();
+    const rows = await this.repository.findNearby(query, allowedRootPath);
     return rows.map((row) => ({
       id: row.id,
       name: row.name,
@@ -183,22 +213,7 @@ export class OrganizationService {
       throw RastaError.forbidden('Only a platform operator may create a root organization');
     }
 
-    let parentPath: string | null = null;
-    if (dto.parentId) {
-      await this.assertCanWrite(dto.parentId);
-
-      const parent = await this.repository.findById(dto.parentId);
-      if (!parent) throw RastaError.notFound('Organization', dto.parentId);
-
-      parentPath = await this.repository.getPath(dto.parentId);
-      if (parent.depth + 1 > this.maxDepth) {
-        throw RastaError.businessRule(`Hierarchy may not exceed ${this.maxDepth} levels`, {
-          rule: 'HIERARCHY_TOO_DEEP',
-          maxDepth: this.maxDepth,
-          parentDepth: parent.depth,
-        });
-      }
-    }
+    if (dto.parentId) await this.assertCanWrite(dto.parentId);
 
     if (dto.externalCode) {
       const existing = await this.repository.findByExternalCode(dto.externalCode);
@@ -209,6 +224,28 @@ export class OrganizationService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const created = await this.repository.transaction(async (tx) => {
+      // Everything the new row depends on is read here, under locks, rather
+      // than before the transaction: the parent's path (a concurrent move
+      // would otherwise leave the child on a path that no longer exists), its
+      // depth, and the status of every ancestor (a concurrent suspension
+      // would otherwise miss a child created ACTIVE a moment later).
+      await this.repository.lockHierarchy(tx);
+
+      let parentPath: string | null = null;
+      if (dto.parentId) {
+        const chain = await this.repository.lockAncestorChain(tx, dto.parentId, {
+          includeSelf: true,
+        });
+        const parent = chain.at(-1);
+        if (!parent || parent.id !== dto.parentId) {
+          throw RastaError.notFound('Organization', dto.parentId);
+        }
+
+        this.assertWithinDepth(parent.depth + 1, { parentDepth: parent.depth });
+        assertNoBlockingAncestor(chain, 'create an organization');
+        parentPath = parent.path;
+      }
+
       const row = await tx.organization.create({
         data: {
           id,
@@ -318,39 +355,66 @@ export class OrganizationService {
       throw RastaError.forbidden('Only a platform operator may restructure the hierarchy');
     }
 
-    const organization = await this.repository.findById(id);
-    if (!organization) throw RastaError.notFound('Organization', id);
-
-    const oldPath = await this.repository.getPath(id);
-    if (!oldPath) throw RastaError.businessRule('Organization has no hierarchy path');
-
-    let newParentPath: string | null = null;
-    if (dto.parentId) {
-      if (dto.parentId === id) {
-        throw RastaError.businessRule('An organization cannot be its own parent', {
-          rule: 'CYCLE_DETECTED',
-        });
-      }
-
-      const parent = await this.repository.findById(dto.parentId);
-      if (!parent) throw RastaError.notFound('Organization', dto.parentId);
-
-      // The check that matters: the proposed parent must not sit inside the
-      // subtree being moved.
-      if (await this.repository.isAncestorOf(id, dto.parentId)) {
-        throw RastaError.businessRule(
-          'Cannot move an organization beneath one of its own descendants',
-          { rule: 'CYCLE_DETECTED', organizationId: id, proposedParentId: dto.parentId },
-        );
-      }
-
-      newParentPath = await this.repository.getPath(dto.parentId);
+    if (dto.parentId === id) {
+      throw RastaError.businessRule('An organization cannot be its own parent', {
+        rule: 'CYCLE_DETECTED',
+      });
     }
 
-    const newPath = newParentPath ? `${newParentPath}.${toLabel(id)}` : toLabel(id);
     const actor = getContext().userId ?? 'SYSTEM';
 
     const result = await this.repository.transaction(async (tx) => {
+      // Every check below runs on paths read under the hierarchy lock. Checked
+      // outside it, two opposite moves (A beneath a descendant of B, B beneath
+      // a descendant of A) each pass against the tree as it was and together
+      // leave a ring no subtree query reaches.
+      await this.repository.lockHierarchy(tx);
+
+      // Parent chain first, then the moved row: the order a concurrent
+      // cascade locks rows in, so the two wait rather than deadlock.
+      let chain: ChainRow[] = [];
+      if (dto.parentId) {
+        chain = await this.repository.lockAncestorChain(tx, dto.parentId, { includeSelf: true });
+        const parent = chain.at(-1);
+        if (!parent || parent.id !== dto.parentId) {
+          throw RastaError.notFound('Organization', dto.parentId);
+        }
+
+        // The check that matters: the proposed parent must not sit inside the
+        // subtree being moved, i.e. the moved organization must not be on the
+        // proposed parent's own ancestor chain.
+        if (chain.some((row) => row.id === id)) {
+          throw RastaError.businessRule(
+            'Cannot move an organization beneath one of its own descendants',
+            { rule: 'CYCLE_DETECTED', organizationId: id, proposedParentId: dto.parentId },
+          );
+        }
+      }
+
+      const organization = await this.repository.lockForUpdate(tx, id);
+      if (!organization) throw RastaError.notFound('Organization', id);
+      const oldPath = organization.path;
+      if (!oldPath) throw RastaError.businessRule('Organization has no hierarchy path');
+
+      const parent = chain.at(-1);
+      const newRootDepth = parent ? parent.depth + 1 : 0;
+      const newPath = parent ? `${parent.path}.${toLabel(id)}` : toLabel(id);
+
+      // Depth is a property of the deepest descendant, not of the moved root:
+      // a three-level subtree moved to one level above the limit puts its
+      // leaves two levels past it.
+      const deepest = await this.repository.deepestDepthUnder(tx, oldPath);
+      this.assertWithinDepth(newRootDepth + (deepest - organization.depth), {
+        movedSubtreeLevels: deepest - organization.depth + 1,
+        newParentDepth: parent?.depth ?? null,
+      });
+
+      // Moving a subtree that has an ACTIVE member beneath a suspended or
+      // deactivated organization would undo that organization's cascade.
+      if (parent && (await this.repository.statusesUnder(tx, oldPath)).includes('ACTIVE')) {
+        assertNoBlockingAncestor(chain, 'move an active organization');
+      }
+
       const affectedCount = await this.repository.rewriteSubtreePath(tx, oldPath, newPath);
 
       const row = await tx.organization.update({
@@ -366,7 +430,7 @@ export class OrganizationService {
         organizationId: id,
         payload: validateOrganizationPayload(ORGANIZATION_EVENTS.ORGANIZATION_MOVED, {
           organizationId: id,
-          previousParentId: organization.parentId,
+          previousParentId: organization.parent_id,
           newParentId: dto.parentId,
           previousPath: oldPath,
           newPath,
@@ -375,10 +439,10 @@ export class OrganizationService {
         }),
       });
 
-      return row;
+      return { row, newPath };
     });
 
-    return toView(result, newPath);
+    return toView(result.row, result.newPath);
   }
 
   /**
@@ -409,17 +473,41 @@ export class OrganizationService {
     }
 
     const cascade = dto.status === 'SUSPENDED' || dto.status === 'DEACTIVATED';
-    const subtreeIds = cascade
-      ? (await this.repository.findSubtree(id)).map((row) => row.id)
-      : [id];
-
     const actor = getContext().userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
-      await tx.organization.updateMany({
-        where: { id: { in: subtreeIds }, deletedAt: null },
-        data: { status: dto.status, updatedBy: actor },
-      });
+      if (dto.status === 'ACTIVE') {
+        // Reactivating beneath a suspended or deactivated ancestor would undo
+        // that ancestor's cascade for this one branch. The ancestors are
+        // share-locked, so a suspension racing this request either commits
+        // first (and is seen here) or waits and then cascades over this row.
+        const ancestors = await this.repository.lockAncestorChain(tx, id, { includeSelf: false });
+        assertNoBlockingAncestor(ancestors, 'reactivate an organization');
+      }
+
+      // Compare-and-set on the status the checks above were made against. A
+      // concurrent change — including a deactivation — makes this match zero
+      // rows, and the request fails instead of writing over it.
+      const changed = await this.repository.compareAndSetStatus(
+        tx,
+        id,
+        organization.status,
+        dto.status,
+        actor,
+      );
+      if (changed === 0) throw RastaError.optimisticLockFailed('Organization', id);
+
+      // The subtree is read inside the transaction, after the row lock the
+      // compare-and-set took, so a child created a moment ago is included.
+      const subtreeIds = [id];
+      if (cascade) {
+        const path = await this.repository.getPath(id, tx);
+        if (path) {
+          subtreeIds.push(
+            ...(await this.repository.cascadeStatus(tx, id, path, dto.status, actor)),
+          );
+        }
+      }
 
       await this.repository.enqueueEvent(tx, {
         aggregateType: 'Organization',
@@ -493,18 +581,40 @@ export class OrganizationService {
   }
 
   async setPolicy(id: string, dto: SetPolicyDto): Promise<PolicyView> {
-    // Policies decide who may approve what, so setting one is a platform
-    // operator action even within your own subtree.
-    if (!this.isPlatformOperator()) {
-      throw RastaError.forbidden('Only a platform operator may set governance policy');
-    }
+    // Policies decide who may approve what, so who may set one is itself an
+    // authority question. It comes from configuration (Q-64), never from a
+    // role list written here.
+    // SYSTEM_ADMIN is honoured regardless, as everywhere else on the platform
+    // (`RolesGuard.SUPER_ROLE`); the configured list decides everyone else.
+    const { roles } = getContext();
+    const permitted =
+      roles.includes(RolesGuard.SUPER_ROLE) ||
+      this.policySetterRoles.some((role) => roles.includes(role));
+    if (!permitted) throw RastaError.insufficientRole(this.policySetterRoles, roles);
+    // A configured role that is not a platform operator acts only within its
+    // own subtree, like every other write in this service.
+    if (!this.isPlatformOperator()) await this.assertCanWrite(id);
 
     const organization = await this.repository.findById(id);
     if (!organization) throw RastaError.notFound('Organization', id);
 
     const policyId = `POL_${ulid()}`;
     const actor = getContext().userId ?? 'SYSTEM';
-    const effectiveFrom = dto.effectiveFrom ? new Date(dto.effectiveFrom) : new Date();
+    const now = new Date();
+    const effectiveFrom = dto.effectiveFrom ? new Date(dto.effectiveFrom) : now;
+    const effectiveTo = dto.effectiveTo ? new Date(dto.effectiveTo) : null;
+
+    // A replacement closes the value in force. One that has already expired
+    // would close it and put nothing in its place — the key would silently
+    // fall back to an ancestor's value, or to none. The DTO can only compare
+    // the two dates it was given; "already" needs the clock, so it is here.
+    if (effectiveTo && (effectiveTo <= now || effectiveTo <= effectiveFrom)) {
+      throw RastaError.businessRule('A policy cannot end before it takes effect or in the past', {
+        rule: 'POLICY_ALREADY_EXPIRED',
+        effectiveFrom: effectiveFrom.toISOString(),
+        effectiveTo: effectiveTo.toISOString(),
+      });
+    }
 
     const created = await this.repository.transaction(async (tx) => {
       // Close the current value rather than overwriting it. A governance
@@ -523,7 +633,7 @@ export class OrganizationService {
           inheritable: dto.inheritable,
           description: dto.description,
           effectiveFrom,
-          effectiveTo: dto.effectiveTo ? new Date(dto.effectiveTo) : null,
+          effectiveTo,
           createdBy: actor,
           updatedBy: actor,
         },
@@ -608,15 +718,25 @@ export class OrganizationService {
     const contactId = `CNT_${ulid()}`;
 
     const row = await this.repository.transaction(async (tx) => {
+      let demotedContactIds: string[] = [];
       if (dto.isPrimary) {
         // Exactly one primary per kind, enforced by demoting the incumbent.
-        await tx.organizationContact.updateMany({
+        // The incumbents are named so the demotion is part of the record, not
+        // a side effect nobody can see afterwards.
+        const incumbents = await tx.organizationContact.findMany({
           where: { organizationId: id, kind: dto.kind, isPrimary: true },
-          data: { isPrimary: false },
+          select: { id: true },
         });
+        demotedContactIds = incumbents.map((contact) => contact.id);
+        if (demotedContactIds.length > 0) {
+          await tx.organizationContact.updateMany({
+            where: { id: { in: demotedContactIds } },
+            data: { isPrimary: false },
+          });
+        }
       }
 
-      return tx.organizationContact.create({
+      const contact = await tx.organizationContact.create({
         data: {
           id: contactId,
           organizationId: id,
@@ -627,6 +747,29 @@ export class OrganizationService {
           isPrimary: dto.isPrimary,
         },
       });
+
+      // Every state change leaves an audit record (AGENTS.md S-06), and
+      // audit-service records every event on this topic. The payload names
+      // the change, not the phone number or email (see the event schema).
+      await this.repository.enqueueEvent(tx, {
+        aggregateType: 'Organization',
+        aggregateId: id,
+        eventName: ORGANIZATION_EVENTS.ORGANIZATION_CONTACT_CHANGED,
+        topic: ORGANIZATION_TOPIC,
+        organizationId: id,
+        payload: validateOrganizationPayload(ORGANIZATION_EVENTS.ORGANIZATION_CONTACT_CHANGED, {
+          organizationId: id,
+          contactId,
+          change: 'ADDED',
+          kind: dto.kind,
+          isPrimary: dto.isPrimary,
+          hasPhone: dto.phone !== undefined,
+          hasEmail: dto.email !== undefined,
+          demotedContactIds,
+        }),
+      });
+
+      return contact;
     });
 
     return toContactView(row);
@@ -635,6 +778,17 @@ export class OrganizationService {
   // =========================================================================
   // Internals
   // =========================================================================
+
+  private assertWithinDepth(resultingDepth: number, context: Record<string, unknown>): void {
+    if (resultingDepth > this.maxDepth) {
+      throw RastaError.businessRule(`Hierarchy may not exceed ${this.maxDepth} levels`, {
+        rule: 'HIERARCHY_TOO_DEEP',
+        maxDepth: this.maxDepth,
+        resultingDepth,
+        ...context,
+      });
+    }
+  }
 
   private async insertLocation(
     tx: PrismaTransactionClient,
@@ -667,6 +821,22 @@ export class OrganizationService {
 
     return locationId;
   }
+}
+
+/**
+ * Refuses an operation that would leave an ACTIVE organization beneath a
+ * SUSPENDED or DEACTIVATED one. `chain` is ancestors root-first, already
+ * locked by the caller; the nearest blocking one is reported.
+ */
+function assertNoBlockingAncestor(chain: readonly ChainRow[], action: string): void {
+  const blocking = [...chain]
+    .reverse()
+    .find((row) => BLOCKING_ANCESTOR_STATUSES.includes(row.status));
+  if (!blocking) return;
+  throw RastaError.businessRule(
+    `Cannot ${action} beneath a ${blocking.status.toLowerCase()} organization`,
+    { rule: 'ANCESTOR_NOT_ACTIVE', ancestorId: blocking.id, ancestorStatus: blocking.status },
+  );
 }
 
 // ---------------------------------------------------------------------------
