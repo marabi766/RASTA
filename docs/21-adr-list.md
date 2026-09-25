@@ -72,7 +72,7 @@
 | [058](adr/ADR-058-web-portal-placement-and-design-system-boundary.md) | جای پورتال وب و مرز Design System                | **Accepted**                          | `apps/web` روی `main`؛ مرز استخراج به `packages/ui`          |
 | [059](adr/ADR-059-web-session-and-token-custody.md)                   | نگهداشت توکن در پورتال — نشست سمت سرور           | **Accepted**                          | توکن هرگز در مرورگر نیست؛ انحراف ثبت‌شده از `docs/16 § ۱۶٫۱` |
 | [060](adr/ADR-060-tenant-bound-roles.md)                              | نقش به سازمان گره می‌خورد، نه به کاربر           | **Accepted** — implementation pending | بستن نقش‌های سراسری Realm؛ Q-63                              |
-| [061](adr/ADR-061-event-provenance.md)                                | منشأ رویداد: ادعای ناشر، نه واقعیت               | **Proposed**                          | مالک Topic، SASL/ACL؛ L2-03، L3-01، L4-01                    |
+| [061](adr/ADR-061-event-provenance.md)                                | منشأ رویداد: ادعای ناشر، نه واقعیت               | **Accepted**                          | مالک Topic، SASL/ACL؛ L2-03، L3-01، L4-01                    |
 
 ---
 
