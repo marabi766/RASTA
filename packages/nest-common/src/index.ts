@@ -29,6 +29,7 @@ export {
   Public,
   Roles,
   AllowService,
+  AuditorSelfService,
   Idempotent,
   SkipTenantScope,
   Ctx,
@@ -39,6 +40,7 @@ export {
   ALLOW_SERVICE_KEY,
   IDEMPOTENT_KEY,
   SKIP_TENANT_SCOPE_KEY,
+  AUDITOR_SELF_SERVICE_KEY,
 } from './decorators';
 
 // Authentication -------------------------------------------------------------
@@ -51,10 +53,18 @@ export type {
 } from './auth/token-verifier';
 
 export { AuthGuard, AUTH_OPTIONS, resolveOrganization } from './guards/auth.guard';
+export {
+  PLATFORM_ROLES,
+  GLOBAL_ROLES,
+  parseOrganizationRoles,
+  rolesForRequest,
+} from './auth/tenant-roles';
+export type { PlatformRole, ParsedOrganizationRoles } from './auth/tenant-roles';
 export type {
   AuthGuardOptions,
   AuthState,
   AuthenticatedRequest,
+  MalformedOrganizationRoles,
   ServiceAuthorizationRefusal,
   UserTenantMismatch,
 } from './guards/auth.guard';

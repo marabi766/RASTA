@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { AllowService, Public, Roles, zodPipe } from '@rasta/nest-common';
+import { AllowService, AuditorSelfService, Public, Roles, zodPipe } from '@rasta/nest-common';
 import { IdentityService } from './identity.service';
 import {
   approveRegistrationSchema,
@@ -39,12 +39,14 @@ export class UserController {
   constructor(private readonly identity: IdentityService) {}
 
   @Get('me')
+  @AuditorSelfService('the caller reads their own profile and memberships')
   @ApiOperation({ summary: 'The authenticated user, their memberships and effective roles' })
   getCurrentUser() {
     return this.identity.getCurrentUser();
   }
 
   @Post('me/active-organization')
+  @AuditorSelfService('the caller chooses which of their own memberships to act as')
   @HttpCode(200)
   @ApiOperation({ summary: 'Switch which organization subsequent requests act for' })
   switchOrganization(@Body(zodPipe(switchOrganizationSchema)) dto: SwitchOrganizationDto) {

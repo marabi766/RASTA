@@ -313,7 +313,7 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["UNION_ADMIN"],
+      "realmRoles": [],
       "attributes": {
         "active_organization_id": ["ORG-UNION-YAZD"],
         "rasta_user_id": ["USR-SEED-UNION-ADMIN"],
@@ -335,7 +335,7 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["ORGANIZATION_ADMIN", "FLEET_MANAGER", "PROCUREMENT_USER"],
+      "realmRoles": [],
       "attributes": {
         "active_organization_id": ["ORG-DEH-0001"],
         "rasta_user_id": ["USR-SEED-DEHYARI-ADMIN"],
@@ -361,7 +361,7 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["ORGANIZATION_ADMIN"],
+      "realmRoles": [],
       "attributes": {
         "active_organization_id": ["ORG-DEH-0002"],
         "rasta_user_id": ["USR-SEED-DEHYARI-ADMIN-B"],
@@ -383,7 +383,7 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["AUDITOR"],
+      "realmRoles": [],
       "attributes": {
         "active_organization_id": ["ORG-PROVINCE-YAZD"],
         "rasta_user_id": ["USR-SEED-AUDITOR"],
@@ -405,7 +405,7 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["OPERATOR", "DRIVER"],
+      "realmRoles": [],
       "attributes": {
         "active_organization_id": ["ORG-DEH-0001"],
         "rasta_user_id": ["USR-SEED-OPERATOR"],

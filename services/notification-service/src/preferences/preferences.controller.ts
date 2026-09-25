@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Put, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { zodPipe } from '@rasta/nest-common';
+import { AuditorSelfService, zodPipe } from '@rasta/nest-common';
 import {
   PreferencesService,
   type EffectivePreferenceView,
@@ -36,6 +36,9 @@ import {
  * actor and decides, and each handler is one line (AGENTS.md A-10).
  */
 @ApiTags('notification-preferences')
+@AuditorSelfService(
+  'every handler here reads or changes only the caller’s own notification preferences',
+)
 @Controller({ path: 'preferences', version: '1' })
 export class PreferencesController {
   constructor(private readonly preferences: PreferencesService) {}

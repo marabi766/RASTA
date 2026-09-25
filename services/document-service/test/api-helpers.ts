@@ -268,7 +268,7 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
               sub: claims.sub,
               rastaUserId: claims.rastaUserId,
               organizationId: claims.organizationId,
-              organizationIds: claims.organizationIds ?? [],
+              ...projectedClaims(claims),
               roles: claims.roles,
               username: claims.username,
               expiresAt: Date.now() + 60_000,
@@ -313,4 +313,29 @@ export function scannerOf(harness: ApiHarness): MalwareScanner {
 /** A tenant identifier that cannot collide with another run's. */
 export function apiTenant(label: string): string {
   return `ORG-APITEST-${label}-${ulid().slice(-10)}`;
+}
+
+/**
+ * What the realm issues for a test actor since ADR-060: the active
+ * organization among the memberships (the projector never writes one outside
+ * them), and every role the actor holds, in each membership, as
+ * `organization_roles` — the claim the guard reads roles from. As for the
+ * seeded `system.admin`, `SYSTEM_ADMIN` is both a pair and a realm role.
+ */
+function projectedClaims(claims: {
+  organizationId?: string;
+  organizationIds?: string[];
+  roles: string[];
+}): { organizationIds: string[]; organizationRoles: string[] } {
+  const organizationIds = [
+    ...new Set(
+      [claims.organizationId, ...(claims.organizationIds ?? [])].filter(
+        (id): id is string => typeof id === 'string' && id.length > 0,
+      ),
+    ),
+  ];
+  const organizationRoles = organizationIds.flatMap((organizationId) =>
+    claims.roles.map((role) => `${organizationId}:${role}`),
+  );
+  return { organizationIds, organizationRoles };
 }

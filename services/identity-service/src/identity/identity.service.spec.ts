@@ -108,7 +108,6 @@ function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harn
     createUser: jest.fn(async () => 'kc-new'),
     replacePlatformAttributes: jest.fn(async () => undefined),
     getPlatformAttributes: jest.fn(),
-    assignRealmRoles: jest.fn(async () => undefined),
     isHealthy: jest.fn(async () => true),
   } as unknown as jest.Mocked<KeycloakAdminClient>;
 

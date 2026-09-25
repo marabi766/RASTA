@@ -67,6 +67,7 @@ function verifierAccepting(token: string): TokenVerifier {
         organizationId: 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YA',
         organizationIds: ['ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YA'],
         roles: ['ORGANIZATION_ADMIN'],
+        organizationRoles: ['ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YA:ORGANIZATION_ADMIN'],
         username: 'dehyari.admin',
         expiresAt: Date.now() + 60_000,
       };

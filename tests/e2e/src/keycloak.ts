@@ -136,9 +136,15 @@ function tenantBRepresentation() {
     enabled: true,
     emailVerified: true,
     requiredActions: [],
+    // All four platform attributes, as the realm declares them. The role is
+    // `organization_roles`, not a realm role: the guard reads a user's roles
+    // from the organization they act for and ignores every realm role but
+    // SYSTEM_ADMIN (ADR-060 § 4).
     attributes: {
       active_organization_id: [ORG.b],
       rasta_user_id: ['USR-SEED-DEHYARI-ADMIN-B'],
+      organization_ids: [ORG.b],
+      organization_roles: [`${ORG.b}:ORGANIZATION_ADMIN`],
     },
   };
 }
@@ -161,12 +167,10 @@ interface KeycloakUser {
  * identity provider" is not an acceptable prerequisite for a test suite.
  *
  * Narrow, and confined to one user in a development realm: it creates the
- * account if it is absent, and otherwise repairs only the two things that make
- * an account unusable — a missing profile field and a missing role mapping.
- * Both are the residue of a run that failed between the create call and the
- * role-mapping call, and leaving them means every later run fails with a
- * message that blames authentication. In CI the realm import has already
- * created the user correctly and this is a pair of GETs that find it.
+ * account if it is absent, and otherwise repairs only what makes an account
+ * unusable — a missing profile field, or a token without the organization and
+ * its role. In CI the realm import has already created the user correctly and
+ * this is a GET and a token request that find it.
  */
 export async function ensureTenantBUser(
   config: E2eConfig = e2eConfig(),
@@ -181,9 +185,10 @@ export async function ensureTenantBUser(
     userId = existing.id;
     const incomplete =
       !existing.firstName || !existing.lastName || (existing.requiredActions?.length ?? 0) > 0;
-    if (incomplete) await writeRepresentation(config, userId);
-    const mapped = await grantOrganizationAdmin(config, userId);
-    if (incomplete || mapped) outcome = 'repaired';
+    if (incomplete) {
+      await writeRepresentation(config, userId);
+      outcome = 'repaired';
+    }
   } else {
     await allowAdminEditedAttributes(config);
     const created = await adminRequest(config, '/users', {
@@ -197,8 +202,6 @@ export async function ensureTenantBUser(
     const location = created.headers.get('location')?.split('/').pop();
     if (!location) throw new Error('Keycloak created a user but returned no Location header');
     userId = location;
-
-    await grantOrganizationAdmin(config, userId);
     outcome = 'created';
   }
 
@@ -216,7 +219,7 @@ export async function ensureTenantBUser(
 
     if (!(await tokenCarriesOrganization(config))) {
       throw new Error(
-        `${E2E_USERS.tenantB} authenticates but its token carries no org_id claim. ` +
+        `${E2E_USERS.tenantB} authenticates but its token lacks the org_id or org_roles claim. ` +
           'Recreate the realm from infrastructure/docker/keycloak/rasta-realm.json ' +
           '(`docker compose down keycloak && pnpm infra:up`).',
       );
@@ -234,15 +237,17 @@ async function writeRepresentation(config: E2eConfig, userId: string): Promise<v
   });
 }
 
-/** Whether this user's access token actually carries the organization claim. */
+/** Whether this user's token carries the organization and its admin role in it. */
 async function tokenCarriesOrganization(config: E2eConfig): Promise<boolean> {
   const token = await accessToken(E2E_USERS.tenantB, config);
   const segment = token.split('.')[1];
   if (!segment) return false;
   const claims = JSON.parse(Buffer.from(segment, 'base64url').toString('utf8')) as {
     org_id?: string;
+    org_roles?: string[] | string;
   };
-  return claims.org_id === ORG.b;
+  const roles = Array.isArray(claims.org_roles) ? claims.org_roles : [claims.org_roles];
+  return claims.org_id === ORG.b && roles.includes(`${ORG.b}:ORGANIZATION_ADMIN`);
 }
 
 /**
@@ -265,28 +270,6 @@ async function allowAdminEditedAttributes(config: E2eConfig): Promise<void> {
     method: 'PUT',
     body: JSON.stringify({ ...profile, unmanagedAttributePolicy: 'ADMIN_EDIT' }),
   });
-}
-
-/**
- * Adds the realm role if it is not already there. Returns whether it had to.
- *
- * Keycloak's create-user endpoint ignores `realmRoles`; the mapping is a
- * separate call, and its absence is what produces a user that authenticates
- * and then fails every authorization check — which would make the
- * cross-tenant assertions pass for entirely the wrong reason.
- */
-async function grantOrganizationAdmin(config: E2eConfig, userId: string): Promise<boolean> {
-  const current = await adminRequest(config, `/users/${userId}/role-mappings/realm`);
-  const assigned = (await current.json()) as { name: string }[];
-  if (assigned.some((role) => role.name === 'ORGANIZATION_ADMIN')) return false;
-
-  const roles = await adminRequest(config, '/roles/ORGANIZATION_ADMIN');
-  const role = (await roles.json()) as { id: string; name: string };
-  await adminRequest(config, `/users/${userId}/role-mappings/realm`, {
-    method: 'POST',
-    body: JSON.stringify([{ id: role.id, name: role.name }]),
-  });
-  return true;
 }
 
 let adminToken: string | undefined;
