@@ -123,6 +123,20 @@ Realm واحد `rasta` با:
 
 پیکربندی: [`infrastructure/docker/keycloak/rasta-realm.json`](../infrastructure/docker/keycloak/rasta-realm.json)
 
+**این Realm فقط برای توسعه و CI است (L1-05).** Grant رمز عبور را روی `rasta-web` و `rasta-backend` روشن می‌کند و کاربرانی —
+از جمله یک `SYSTEM_ADMIN` — با رمز دائمیِ Commitشده در همین مخزن می‌سازد. دو دروازه آن را محصور نگه می‌دارند:
+
+1. `"enabled"` این Realm Placeholder ‏`${RASTA_DEV_REALM_GATE}` است. Keycloak با Placeholder بولیِ حل‌نشده **بالا نمی‌آید**
+   ("only true or false recognized")، پس Mount کردن مستقیم فایل در پوشهٔ Import — در حالت Dev یا Production — Import نمی‌کند.
+2. تنها چیزی که آن را `true` می‌کند [`dev-realm-gate.sh`](../infrastructure/docker/keycloak/dev-realm-gate.sh) است، و فقط
+   وقتی فرمان `start-dev` (حالت توسعهٔ خودِ Keycloak) باشد **و** `RASTA_KEYCLOAK_DEV_REALM=allow` صریحاً تنظیم شده باشد؛ در
+   غیر این صورت با کد ۶۴ پیش از اجرای Keycloak خارج می‌شود.
+
+`docker-compose.yml` و هر دو Job مرورگری CI Keycloak را از راه همین Gate بالا می‌آورند، و
+`pnpm check:keycloak-dev-realm` (در `pnpm verify` و CI) هر Launcherی را که بی Gate Realm را Import کند، یا Placeholder و
+بررسی‌های Gate را حذف کند، رد می‌کند. Production هرگز این فایل را بار نمی‌کند؛ Realm Production جداگانه و بیرون از مخزن
+تعریف می‌شود.
+
 **مرز مسئولیت.** Keycloak مالک **احراز هویت** است. `identity-service` مالک **عضویت سازمانی
 و نقش‌های دامنه‌ای** است و صفات `active_organization_id` / `organization_ids` را از راه
 Admin API با Keycloak همگام می‌کند تا در توکن بنشینند.
