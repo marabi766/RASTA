@@ -35,30 +35,54 @@ function envelope(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
 interface Harness {
   consumer: TimelineConsumer;
   appended: Array<Record<string, unknown>>;
-  statusChanges: Array<{ assetId: string; status: string }>;
+  statusChanges: Array<{ assetId: string; status: string; tx: unknown }>;
   markProcessed: jest.Mock;
+  lockAsset: jest.Mock;
+  transaction: jest.Mock;
+  /** The transaction object the harness hands out, one per `transaction` call. */
+  txs: unknown[];
 }
 
-function harness(options: { alreadyProcessed?: boolean; assetExists?: boolean } = {}): Harness {
+function harness(
+  options: {
+    alreadyProcessed?: boolean;
+    assetExists?: boolean;
+    /** The asset changed owner between the read and the lock. */
+    lockFails?: boolean;
+    statusChangeError?: Error;
+  } = {},
+): Harness {
   const appended: Harness['appended'] = [];
   const statusChanges: Harness['statusChanges'] = [];
+  const txs: unknown[] = [];
 
-  const markProcessed = jest.fn(async () => !options.alreadyProcessed);
+  const markProcessed = jest.fn(async (tx: unknown) => {
+    expect(txs).toContain(tx);
+    return !options.alreadyProcessed;
+  });
+  const lockAsset = jest.fn(async () => (options.lockFails ? null : { status: 'ACTIVE' }));
+  const transaction = jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
+    const tx = { id: `TX_${txs.length + 1}` };
+    txs.push(tx);
+    return fn(tx);
+  });
 
   const repository = {
     findById: jest.fn(async () =>
       options.assetExists === false ? null : { id: ASSET_ID, organizationId: DEH1 },
     ),
-    transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn({})),
+    transaction,
     markEventProcessed: markProcessed,
+    lockAsset,
   } as unknown as AssetRepository;
 
   const assets = {
     appendTimeline: jest.fn(async (_tx: unknown, entry: Record<string, unknown>) => {
       appended.push(entry);
     }),
-    applyEventStatusChange: jest.fn(async (assetId: string, status: string) => {
-      statusChanges.push({ assetId, status });
+    applyEventStatusChange: jest.fn(async (tx: unknown, assetId: string, status: string) => {
+      if (options.statusChangeError) throw options.statusChangeError;
+      statusChanges.push({ assetId, status, tx });
     }),
   } as unknown as AssetService;
 
@@ -68,6 +92,9 @@ function harness(options: { alreadyProcessed?: boolean; assetExists?: boolean } 
     appended,
     statusChanges,
     markProcessed,
+    lockAsset,
+    transaction,
+    txs,
   };
 }
 
@@ -173,14 +200,14 @@ describe('TimelineConsumer', () => {
       const h = harness();
       await h.consumer.handle(envelope({ eventName: 'ASSET_ASSIGNED' }));
 
-      expect(h.statusChanges).toEqual([{ assetId: ASSET_ID, status: 'ASSIGNED' }]);
+      expect(h.statusChanges).toMatchObject([{ assetId: ASSET_ID, status: 'ASSIGNED' }]);
     });
 
     it('moves the asset into maintenance when a repair starts', async () => {
       const h = harness();
       await h.consumer.handle(envelope({ eventName: 'MAINTENANCE_STARTED' }));
 
-      expect(h.statusChanges).toEqual([{ assetId: ASSET_ID, status: 'IN_MAINTENANCE' }]);
+      expect(h.statusChanges).toMatchObject([{ assetId: ASSET_ID, status: 'IN_MAINTENANCE' }]);
     });
 
     it('leaves the status alone for events that only add history', async () => {
@@ -199,6 +226,61 @@ describe('TimelineConsumer', () => {
 
       expect(h.appended).toHaveLength(1);
       expect(h.statusChanges).toHaveLength(1);
+    });
+
+    it('applies the status change in the same transaction as the marker and the entry', async () => {
+      // Audit L4-03. With the status change in a second transaction, a crash
+      // after the first commit left the event marked handled and the status
+      // never applied: the redelivery found the marker and skipped.
+      const h = harness();
+      await h.consumer.handle(envelope({ eventName: 'MAINTENANCE_STARTED' }));
+
+      expect(h.transaction).toHaveBeenCalledTimes(1);
+      expect(h.markProcessed.mock.calls[0]?.[0]).toBe(h.txs[0]);
+      expect(h.statusChanges[0]?.tx).toBe(h.txs[0]);
+    });
+
+    it('fails the whole handling when the status change fails, so the event is redelivered', async () => {
+      // The error escapes the transaction, and that is what rolls the marker
+      // back with it. The integration test proves the rollback on PostgreSQL.
+      const h = harness({ statusChangeError: new Error('conflict') });
+
+      await expect(
+        h.consumer.handle(envelope({ eventName: 'MAINTENANCE_STARTED' })),
+      ).rejects.toThrow('conflict');
+      expect(h.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('locks the row exclusively when a status change follows, and shared otherwise', async () => {
+      const withStatus = harness();
+      await withStatus.consumer.handle(envelope({ eventName: 'ASSET_ASSIGNED' }));
+      expect(withStatus.lockAsset).toHaveBeenCalledWith(
+        withStatus.txs[0],
+        ASSET_ID,
+        DEH1,
+        'EXCLUSIVE',
+      );
+
+      const historyOnly = harness();
+      await historyOnly.consumer.handle(envelope({ eventName: 'USAGE_RECORDED' }));
+      expect(historyOnly.lockAsset).toHaveBeenCalledWith(
+        historyOnly.txs[0],
+        ASSET_ID,
+        DEH1,
+        'SHARE',
+      );
+    });
+
+    it('skips without a marker when the asset changed owner before the lock', async () => {
+      // A transfer that commits between the read and the lock would otherwise
+      // get this entry filed under the previous owner.
+      const h = harness({ lockFails: true });
+      const result = await h.consumer.handle(envelope({ eventName: 'ASSET_ASSIGNED' }));
+
+      expect(result).toBe('SKIPPED');
+      expect(h.markProcessed).not.toHaveBeenCalled();
+      expect(h.appended).toHaveLength(0);
+      expect(h.statusChanges).toHaveLength(0);
     });
   });
 

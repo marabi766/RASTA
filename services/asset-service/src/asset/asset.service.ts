@@ -9,6 +9,7 @@ import {
   canTransition,
   explainRefusal,
   DISPATCHABLE_STATUSES,
+  OPEN_ACTIVITY_STATUSES,
   type AssetStatus,
   type TransitionActor,
 } from './lifecycle';
@@ -98,8 +99,9 @@ export class AssetService {
     const asset = await this.repository.findById(id);
     if (!asset) throw RastaError.notFound('Asset', id);
 
+    const ownedSince = await this.repository.latestTransferAt(id);
     const [policy, inspection, costRows, transferCount, recent, organization] = await Promise.all([
-      this.repository.findActivePolicy(id),
+      this.repository.findActivePolicy(id, new Date(), ownedSince),
       this.repository.findLatestInspection(id),
       this.repository.costSummary(id),
       this.repository.countTransfers(id),
@@ -235,26 +237,30 @@ export class AssetService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const created = await this.repository.transaction(async (tx) => {
-      const asset = await tx.asset.create({
-        data: {
-          id,
-          organizationId,
-          name: dto.name,
-          type: dto.type,
-          assetTag: dto.assetTag ?? null,
-          manufacturer: dto.manufacturer ?? null,
-          model: dto.model ?? null,
-          serialNumber: dto.serialNumber ?? null,
-          manufactureYear: dto.manufactureYear ?? null,
-          specifications: dto.specifications as object,
-          // Registration alone does not make an asset usable. It becomes
-          // ACTIVE only once its dossier is complete, which is the check in
-          // `activate`.
-          status: 'REGISTERED',
-          createdBy: actor,
-          updatedBy: actor,
-        },
-      });
+      const asset = await tx.asset
+        .create({
+          data: {
+            id,
+            organizationId,
+            name: dto.name,
+            type: dto.type,
+            assetTag: dto.assetTag ?? null,
+            manufacturer: dto.manufacturer ?? null,
+            model: dto.model ?? null,
+            serialNumber: dto.serialNumber ?? null,
+            manufactureYear: dto.manufactureYear ?? null,
+            specifications: dto.specifications as object,
+            // Registration alone does not make an asset usable. It becomes
+            // ACTIVE only once its dossier is complete, which is the check in
+            // `activate`.
+            status: 'REGISTERED',
+            createdBy: actor,
+            updatedBy: actor,
+          },
+        })
+        // The lookups above are for a readable refusal. Under a concurrent
+        // create, both requests pass them, and the unique indexes decide.
+        .catch(rethrowUniqueAsAlreadyExists);
 
       if (dto.location) {
         await this.insertLocation(tx, id, organizationId, {
@@ -319,21 +325,30 @@ export class AssetService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
-      const row = await tx.asset.update({
-        where: { id },
-        data: {
-          ...(dto.name !== undefined ? { name: dto.name } : {}),
-          ...(dto.assetTag !== undefined ? { assetTag: dto.assetTag } : {}),
-          ...(dto.manufacturer !== undefined ? { manufacturer: dto.manufacturer } : {}),
-          ...(dto.model !== undefined ? { model: dto.model } : {}),
-          ...(dto.manufactureYear !== undefined ? { manufactureYear: dto.manufactureYear } : {}),
-          ...(dto.specifications !== undefined
-            ? { specifications: dto.specifications as object }
-            : {}),
-          updatedBy: actor,
-          version: { increment: 1 },
-        },
-      });
+      // Guarded on the row, not only on the read above: a decommission that
+      // commits in between must not be followed by an edit (audit L3-07).
+      const { count } = await tx.asset
+        .updateMany({
+          where: { id, deletedAt: null, status: { not: 'DECOMMISSIONED' } },
+          data: {
+            ...(dto.name !== undefined ? { name: dto.name } : {}),
+            ...(dto.assetTag !== undefined ? { assetTag: dto.assetTag } : {}),
+            ...(dto.manufacturer !== undefined ? { manufacturer: dto.manufacturer } : {}),
+            ...(dto.model !== undefined ? { model: dto.model } : {}),
+            ...(dto.manufactureYear !== undefined
+              ? { manufactureYear: dto.manufactureYear }
+              : {}),
+            ...(dto.specifications !== undefined
+              ? { specifications: dto.specifications as object }
+              : {}),
+            updatedBy: actor,
+            version: { increment: 1 },
+          },
+        })
+        .catch(rethrowUniqueAsAlreadyExists);
+      if (count === 0) throw RastaError.optimisticLockFailed('Asset', id);
+
+      const row = await this.reread(tx, id);
 
       await this.repository.enqueueEvent(tx, {
         aggregateType: 'Asset',
@@ -369,8 +384,11 @@ export class AssetService {
 
     this.assertTransition(asset.status as AssetStatus, 'ACTIVE', 'USER');
 
+    // The new owner re-commissions with their own insurance. A policy recorded
+    // before the latest transfer is the previous owner's history.
+    const ownedSince = await this.repository.latestTransferAt(id);
     const [policy, ownershipDoc] = await Promise.all([
-      this.repository.findActivePolicy(id),
+      this.repository.findActivePolicy(id, new Date(), ownedSince),
       this.repository.client.assetDocumentRef.findFirst({
         where: {
           assetId: id,
@@ -395,14 +413,10 @@ export class AssetService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
-      const row = await tx.asset.update({
-        where: { id },
-        data: {
-          status: 'ACTIVE',
-          commissionedAt,
-          updatedBy: actor,
-          version: { increment: 1 },
-        },
+      const row = await this.compareAndSet(tx, id, asset.status, {
+        status: 'ACTIVE',
+        commissionedAt,
+        updatedBy: actor,
       });
 
       await this.repository.enqueueEvent(tx, {
@@ -441,7 +455,10 @@ export class AssetService {
 
     this.assertTransition(asset.status as AssetStatus, dto.status as AssetStatus, 'USER');
 
-    return this.applyStatusChange(id, asset, dto.status, dto.reason);
+    const updated = await this.repository.transaction((tx) =>
+      this.writeStatusChange(tx, id, asset, dto.status, dto.reason),
+    );
+    return toView(updated);
   }
 
   async decommission(id: string, dto: DecommissionDto): Promise<AssetView> {
@@ -454,15 +471,11 @@ export class AssetService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
-      const row = await tx.asset.update({
-        where: { id },
-        data: {
-          status: 'DECOMMISSIONED',
-          decommissionedAt,
-          decommissionedReason: dto.reason,
-          updatedBy: actor,
-          version: { increment: 1 },
-        },
+      const row = await this.compareAndSet(tx, id, asset.status, {
+        status: 'DECOMMISSIONED',
+        decommissionedAt,
+        decommissionedReason: dto.reason,
+        updatedBy: actor,
       });
 
       await this.repository.enqueueEvent(tx, {
@@ -523,6 +536,17 @@ export class AssetService {
       );
     }
 
+    // An open assignment or repair belongs to the current owner and would stay
+    // behind with them (audit L3-03). Refused rather than closed from here:
+    // fleet-service and maintenance-service own that work, and this service
+    // has no business ending it on their behalf.
+    if (OPEN_ACTIVITY_STATUSES.includes(asset.status as AssetStatus)) {
+      throw RastaError.businessRule(
+        `The asset is ${asset.status}. End the assignment or repair before transferring it.`,
+        { rule: 'OPEN_OPERATIONAL_ACTIVITY', status: asset.status },
+      );
+    }
+
     const destination = await this.repository.findOrganizationRef(dto.toOrganizationId);
     if (!destination) {
       throw RastaError.notFound('Organization', dto.toOrganizationId);
@@ -553,6 +577,34 @@ export class AssetService {
       `ownership transfer of ${id} from ${from} to ${dto.toOrganizationId}`,
       () =>
         this.repository.transaction(async (tx) => {
+          // First, so the row lock is held for everything below. Matching on
+          // the organization as well as the status makes a concurrent transfer
+          // a conflict too: this runs unscoped, so nothing else would notice
+          // that the asset has already moved.
+          const row = await this.compareAndSet(
+            tx,
+            id,
+            asset.status,
+            {
+              organizationId: dto.toOrganizationId,
+              // Ownership changed, so the new owner must re-commission it: their
+              // insurance and their paperwork, not the previous owner's.
+              status: 'REGISTERED',
+              updatedBy: actor,
+            },
+            { organizationId: from },
+          );
+
+          // An open claim is being decided under the current owner's authority.
+          // Moving it would hand that decision to the new owner. Checked under
+          // the lock, together with the move.
+          if (await this.repository.hasOpenClaims(tx, id)) {
+            throw RastaError.businessRule(
+              'The asset has an insurance claim that is still open. Decide or settle it before transferring the asset.',
+              { rule: 'OPEN_INSURANCE_CLAIM' },
+            );
+          }
+
           await tx.assetTransfer.create({
             data: {
               id: transferId,
@@ -569,32 +621,19 @@ export class AssetService {
             },
           });
 
-          const row = await tx.asset.update({
-            where: { id },
-            data: {
-              organizationId: dto.toOrganizationId,
-              // Ownership changed, so the new owner must re-commission it: their
-              // insurance and their paperwork, not the previous owner's.
-              status: 'REGISTERED',
-              updatedBy: actor,
-              version: { increment: 1 },
-            },
-          });
-
           // The whole history moves with the asset, which is what keeps the
-          // dossier intact across a change of owner.
-          await tx.assetTimelineEntry.updateMany({
-            where: { assetId: id },
-            data: { organizationId: dto.toOrganizationId },
-          });
-          await tx.assetLocation.updateMany({
-            where: { assetId: id },
-            data: { organizationId: dto.toOrganizationId },
-          });
-          await tx.assetDocumentRef.updateMany({
-            where: { assetId: id },
-            data: { organizationId: dto.toOrganizationId },
-          });
+          // dossier intact across a change of owner (ADR-012). That means every
+          // asset-owned table, the insurance and inspection record included
+          // (audit L3-08), and the earlier transfer records too. A table left
+          // out here stays with the previous owner.
+          const moved = { where: { assetId: id }, data: { organizationId: dto.toOrganizationId } };
+          await tx.assetTimelineEntry.updateMany(moved);
+          await tx.assetLocation.updateMany(moved);
+          await tx.assetDocumentRef.updateMany(moved);
+          await tx.insurancePolicy.updateMany(moved);
+          await tx.insuranceClaim.updateMany(moved);
+          await tx.technicalInspection.updateMany(moved);
+          await tx.assetTransfer.updateMany(moved);
 
           await this.repository.enqueueEvent(tx, {
             aggregateType: 'Asset',
@@ -636,7 +675,11 @@ export class AssetService {
     if (!asset) throw RastaError.notFound('Asset', id);
 
     const locationId = await this.repository.transaction(async (tx) => {
-      // A unique index enforces one current location per asset, so the
+      // Exclusive, so two recordings on one asset run one after the other.
+      // Otherwise both demote the same incumbent and both insert a current row.
+      await this.lockOwned(tx, id, asset.organizationId, 'EXCLUSIVE');
+
+      // A partial unique index enforces one current location per asset, so the
       // incumbent has to be demoted before the new row lands.
       await tx.assetLocation.updateMany({
         where: { assetId: id, isCurrent: true },
@@ -685,6 +728,8 @@ export class AssetService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const created = await this.repository.transaction(async (tx) => {
+      await this.lockOwned(tx, id, asset.organizationId, 'SHARE');
+
       const row = await tx.assetDocumentRef.create({
         data: {
           id: refId,
@@ -750,13 +795,21 @@ export class AssetService {
    * This service records the consequence; it does not adjudicate it, which is
    * why the actor is `EVENT` and the transition table is stricter about what
    * a user may do directly.
+   *
+   * Runs inside the caller's transaction, the one that records the consumer's
+   * dedupe marker. The marker, the timeline entry and the status change then
+   * commit together or not at all (AGENTS.md A-09, audit L4-03). A conflict
+   * with a concurrent write throws, so the whole transaction rolls back, the
+   * marker included, and the redelivered event is judged again against the
+   * state that won.
    */
   async applyEventStatusChange(
+    tx: ExtendedPrismaClient,
     assetId: string,
     newStatus: AssetStatus,
     reason: string,
   ): Promise<void> {
-    const asset = await this.repository.findById(assetId);
+    const asset = await this.repository.findById(assetId, tx);
     if (!asset) {
       // The event names an asset this service has never seen. Logged rather
       // than thrown: failing here would push a perfectly valid event into a
@@ -772,7 +825,7 @@ export class AssetService {
       return;
     }
 
-    await this.applyStatusChange(assetId, asset, newStatus, reason);
+    await this.writeStatusChange(tx, assetId, asset, newStatus, reason);
   }
 
   // =========================================================================
@@ -785,52 +838,104 @@ export class AssetService {
     throw RastaError.invalidStateTransition('Asset', from, to, explainRefusal(from, to, actor));
   }
 
-  private async applyStatusChange(
+  /**
+   * Writes a status change with its outbox event and timeline entry, in `tx`.
+   *
+   * `asset.status` is the status the transition was judged against, and the
+   * update matches on it (audit L3-07).
+   */
+  private async writeStatusChange(
+    tx: ExtendedPrismaClient,
     id: string,
     asset: { organizationId: string; status: string },
     newStatus: AssetStatus,
     reason: string,
-  ): Promise<AssetView> {
+  ) {
     const actor = getContext().userId ?? 'SYSTEM';
     const previousStatus = asset.status;
 
-    const updated = await this.repository.transaction(async (tx) => {
-      const row = await tx.asset.update({
-        where: { id },
-        data: { status: newStatus, updatedBy: actor, version: { increment: 1 } },
-      });
-
-      await this.repository.enqueueEvent(tx, {
-        aggregateType: 'Asset',
-        aggregateId: id,
-        eventName: ASSET_EVENTS.ASSET_STATUS_CHANGED,
-        topic: ASSET_TOPIC,
-        organizationId: asset.organizationId,
-        payload: validateAssetPayload(ASSET_EVENTS.ASSET_STATUS_CHANGED, {
-          assetId: id,
-          organizationId: asset.organizationId,
-          previousStatus,
-          newStatus,
-          reason,
-        }),
-      });
-
-      await this.appendTimeline(tx, {
-        assetId: id,
-        organizationId: asset.organizationId,
-        eventName: ASSET_EVENTS.ASSET_STATUS_CHANGED,
-        sourceEventId: `local-${id}-status-${Date.now()}`,
-        category: 'LIFECYCLE',
-        title: `تغییر وضعیت به ${newStatus}`,
-        description: reason,
-        detail: { previousStatus, newStatus },
-        occurredAt: new Date(),
-      });
-
-      return row;
+    const row = await this.compareAndSet(tx, id, previousStatus, {
+      status: newStatus,
+      updatedBy: actor,
     });
 
-    return toView(updated);
+    await this.repository.enqueueEvent(tx, {
+      aggregateType: 'Asset',
+      aggregateId: id,
+      eventName: ASSET_EVENTS.ASSET_STATUS_CHANGED,
+      topic: ASSET_TOPIC,
+      organizationId: asset.organizationId,
+      payload: validateAssetPayload(ASSET_EVENTS.ASSET_STATUS_CHANGED, {
+        assetId: id,
+        organizationId: asset.organizationId,
+        previousStatus,
+        newStatus,
+        reason,
+      }),
+    });
+
+    await this.appendTimeline(tx, {
+      assetId: id,
+      organizationId: asset.organizationId,
+      eventName: ASSET_EVENTS.ASSET_STATUS_CHANGED,
+      sourceEventId: `local-${id}-status-${Date.now()}`,
+      category: 'LIFECYCLE',
+      title: `تغییر وضعیت به ${newStatus}`,
+      description: reason,
+      detail: { previousStatus, newStatus },
+      occurredAt: new Date(),
+    });
+
+    return row;
+  }
+
+  /**
+   * Compare-and-set on the status a decision was made from, then the fresh row.
+   *
+   * Zero rows means the asset changed since it was read, whether to another
+   * status, to another owner or out of existence. The request fails with a
+   * conflict instead of writing over that change. In particular, nothing
+   * overwrites a DECOMMISSIONED row (audit L3-07).
+   */
+  private async compareAndSet(
+    tx: ExtendedPrismaClient,
+    id: string,
+    expectedStatus: string,
+    data: Record<string, unknown>,
+    where: { organizationId?: string } = {},
+  ) {
+    const changed = await this.repository.compareAndSetStatus(
+      tx,
+      id,
+      expectedStatus,
+      data,
+      where,
+    );
+    if (changed === 0) throw RastaError.optimisticLockFailed('Asset', id);
+    return this.reread(tx, id);
+  }
+
+  private async reread(tx: ExtendedPrismaClient, id: string) {
+    const row = await this.repository.findById(id, tx);
+    if (!row) throw RastaError.optimisticLockFailed('Asset', id);
+    return row;
+  }
+
+  /**
+   * Locks the asset before a record is hung off it under `organizationId`.
+   *
+   * Refuses when the asset is no longer that organization's. A transfer that
+   * committed after the caller's read would otherwise leave the new record
+   * with the previous owner (audit L3-08).
+   */
+  private async lockOwned(
+    tx: ExtendedPrismaClient,
+    id: string,
+    organizationId: string,
+    mode: 'SHARE' | 'EXCLUSIVE',
+  ): Promise<void> {
+    const locked = await this.repository.lockAsset(tx, id, organizationId, mode);
+    if (!locked) throw RastaError.notFound('Asset', id);
   }
 
   private async insertLocation(
@@ -912,6 +1017,17 @@ export class AssetService {
       throw error;
     }
   }
+}
+
+/**
+ * Turns a unique-index violation into the same refusal the pre-checks give.
+ *
+ * The pre-checks give a readable error in the common case. Under a concurrent
+ * create or rename they both pass, and the index is what refuses.
+ */
+function rethrowUniqueAsAlreadyExists(error: unknown): never {
+  if (isUniqueViolation(error)) throw RastaError.alreadyExists('Asset');
+  throw error;
 }
 
 // ---------------------------------------------------------------------------

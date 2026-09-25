@@ -10,6 +10,7 @@ import type { AssetEventName, InsuranceEventName } from './events';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
 import type { ListAssetsQuery, NearbyQuery, TimelineQuery } from './dto';
+import { TERMINAL_CLAIM_STATUSES } from '../insurance/claim-lifecycle';
 
 /**
  * Data access for assets.
@@ -163,8 +164,20 @@ export class AssetRepository {
    * status: the expiry sweep runs periodically, so a policy can be `ACTIVE`
    * in the row and already lapsed in reality. Compliance must not depend on a
    * background job having run recently.
+   *
+   * `recordedSince` limits the answer to policies recorded under the current
+   * ownership. Since a transfer moves the whole dossier to the new owner
+   * (audit L3-08), the previous owner's policies are now in view. They stay
+   * history, and do not count as the new owner's cover. Before that fix they
+   * were invisible to the new owner, so this keeps the rule that already
+   * held. Whether a policy should follow the vehicle to its new owner is a
+   * product question, not a code decision.
    */
-  async findActivePolicy(assetId: string, at: Date = new Date()) {
+  async findActivePolicy(
+    assetId: string,
+    at: Date = new Date(),
+    recordedSince: Date | null = null,
+  ) {
     return this.client.insurancePolicy.findFirst({
       where: {
         assetId,
@@ -172,6 +185,7 @@ export class AssetRepository {
         status: { not: 'CANCELLED' },
         validFrom: { lte: at },
         validTo: { gt: at },
+        ...(recordedSince ? { createdAt: { gte: recordedSince } } : {}),
       },
       orderBy: { validTo: 'desc' },
     });
@@ -364,6 +378,91 @@ export class AssetRepository {
 
   async countTransfers(assetId: string): Promise<number> {
     return this.client.assetTransfer.count({ where: { assetId } });
+  }
+
+  /** When the asset last changed hands, or null if it never has. */
+  async latestTransferAt(assetId: string): Promise<Date | null> {
+    const latest = await this.client.assetTransfer.findFirst({
+      where: { assetId },
+      orderBy: { transferredAt: 'desc' },
+      select: { transferredAt: true },
+    });
+    return latest?.transferredAt ?? null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Concurrency — compare-and-set and row locks
+  // -------------------------------------------------------------------------
+
+  /**
+   * Compare-and-set on one asset's status.
+   *
+   * Matches on the status the caller decided from. A write computed from a
+   * stale read then updates nothing instead of overwriting a newer state, and
+   * in particular it can never turn a DECOMMISSIONED row back into anything
+   * else (audit L3-07). Returns the number of rows changed, 0 or 1.
+   *
+   * `where` narrows the match further. A transfer, which runs unscoped, passes
+   * the owning organization here so a concurrent transfer also counts as a
+   * conflict.
+   */
+  async compareAndSetStatus(
+    tx: ExtendedPrismaClient,
+    id: string,
+    expected: string,
+    data: Record<string, unknown>,
+    where: { organizationId?: string } = {},
+  ): Promise<number> {
+    const result = await tx.asset.updateMany({
+      where: { id, status: expected as never, deletedAt: null, ...where },
+      data: { ...data, version: { increment: 1 } },
+    });
+    return result.count;
+  }
+
+  /**
+   * Locks the asset row for a write that hangs a record off it.
+   *
+   * A location, document or claim is written under the asset's organization,
+   * read a moment earlier. A transfer that commits in between would leave the
+   * new record with the previous owner. The transfer's compare-and-set takes
+   * the row lock, so holding a lock here orders the two: either this write
+   * lands first and the transfer moves it, or the transfer lands first and
+   * this lookup finds no asset for the caller's organization.
+   *
+   * `SHARE` lets independent writes run side by side. `EXCLUSIVE` (`FOR NO KEY
+   * UPDATE`) serialises writers on the same asset, which the current-location
+   * swap needs: two concurrent swaps would both see the old row as current.
+   *
+   * Raw SQL, so outside the tenant extension. The organization is therefore
+   * part of the predicate.
+   */
+  async lockAsset(
+    tx: ExtendedPrismaClient,
+    id: string,
+    organizationId: string,
+    mode: 'SHARE' | 'EXCLUSIVE',
+  ): Promise<{ status: string } | null> {
+    const rows =
+      mode === 'SHARE'
+        ? await tx.$queryRaw<{ status: string }[]>`
+            SELECT status::text AS status FROM asset
+            WHERE id = ${id} AND organization_id = ${organizationId} AND deleted_at IS NULL
+            FOR SHARE`
+        : await tx.$queryRaw<{ status: string }[]>`
+            SELECT status::text AS status FROM asset
+            WHERE id = ${id} AND organization_id = ${organizationId} AND deleted_at IS NULL
+            FOR NO KEY UPDATE`;
+    return rows[0] ?? null;
+  }
+
+  /** Whether any claim on the asset is still open, meaning not REJECTED and not SETTLED. */
+  async hasOpenClaims(tx: ExtendedPrismaClient, assetId: string): Promise<boolean> {
+    const open = await tx.insuranceClaim.findFirst({
+      where: { assetId, status: { notIn: [...TERMINAL_CLAIM_STATUSES] } },
+      select: { id: true },
+    });
+    return open !== null;
   }
 
   async findOrganizationRef(id: string) {

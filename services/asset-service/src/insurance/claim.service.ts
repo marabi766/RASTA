@@ -108,6 +108,17 @@ export class ClaimService {
       });
     }
 
+    // A transfer brings the previous owner's policies into view as history
+    // (audit L3-08). They are not the new owner's cover, so they take no new
+    // claims. Before the dossier moved, the new owner could not see them at all.
+    const ownedSince = await this.repository.latestTransferAt(assetId);
+    if (ownedSince && policy.createdAt < ownedSince) {
+      throw RastaError.businessRule(
+        "This policy was recorded under the asset's previous owner and takes no new claims",
+        { rule: 'POLICY_FROM_PREVIOUS_OWNER', policyId: policy.id },
+      );
+    }
+
     // A policy covers incidents inside its term. Outside it, the claim is
     // either against the wrong policy or a data-entry error — and accepting it
     // would put an uncovered loss on the dossier as if it were covered.
@@ -126,6 +137,12 @@ export class ClaimService {
     const claimedAmountMinor = dto.claimedAmountMinor ? BigInt(dto.claimedAmountMinor) : null;
 
     const created = await this.repository.transaction(async (tx) => {
+      // Ordered against a concurrent transfer. The transfer refuses while a
+      // claim is open, and this lock makes sure it sees one filed a moment
+      // before (audit L3-03, L3-08).
+      const locked = await this.repository.lockAsset(tx, assetId, asset.organizationId, 'SHARE');
+      if (!locked) throw RastaError.notFound('Asset', assetId);
+
       const row = await tx.insuranceClaim.create({
         data: {
           id: claimId,

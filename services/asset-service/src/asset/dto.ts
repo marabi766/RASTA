@@ -6,6 +6,7 @@ import {
   ID_PREFIXES,
   amountMinorSchema,
 } from '@rasta/contracts';
+import { canonicalIdentifier } from './identifier';
 
 /**
  * Request and response shapes for assets.
@@ -70,6 +71,14 @@ const displayText = (min: number, max: number) =>
       'Contains unsupported characters',
     );
 
+/**
+ * A value that takes part in a uniqueness check: asset tag, serial number,
+ * policy number. Canonicalised before the length check and before storage, so
+ * lookups and the unique index see one spelling (audit L3-10).
+ */
+const identifierText = (min: number, max: number) =>
+  z.string().trim().transform(canonicalIdentifier).pipe(z.string().min(min).max(max));
+
 const coordinate = z
   .object({
     latitude: z.number().min(-90).max(90),
@@ -91,11 +100,11 @@ export const createAssetSchema = z
      * because a newly delivered machine may not have one yet, and registration
      * must not be blocked on paperwork the platform does not control.
      */
-    assetTag: z.string().trim().min(1).max(64).optional(),
+    assetTag: identifierText(1, 64).optional(),
 
     manufacturer: displayText(1, 120).optional(),
     model: z.string().trim().min(1).max(120).optional(),
-    serialNumber: z.string().trim().min(3).max(120).optional(),
+    serialNumber: identifierText(3, 120).optional(),
     manufactureYear: z.coerce.number().int().min(1300).max(2100).optional(),
 
     /** Type-specific attributes; free-form so a new type needs no migration. */
@@ -117,7 +126,7 @@ export type CreateAssetDto = z.infer<typeof createAssetSchema>;
 export const updateAssetSchema = z
   .object({
     name: displayText(2, 200).optional(),
-    assetTag: z.string().trim().min(1).max(64).nullable().optional(),
+    assetTag: identifierText(1, 64).nullable().optional(),
     manufacturer: displayText(1, 120).nullable().optional(),
     model: z.string().trim().min(1).max(120).nullable().optional(),
     manufactureYear: z.coerce.number().int().min(1300).max(2100).nullable().optional(),
@@ -380,8 +389,9 @@ export interface AssetDossierView {
 
 export const createPolicySchema = z
   .object({
-    policyNumber: z.string().trim().min(3).max(64),
-    insurerName: displayText(2, 200),
+    policyNumber: identifierText(3, 64),
+    // Part of the policy's unique key, so it is canonicalised too.
+    insurerName: displayText(2, 200).transform(canonicalIdentifier),
     coverage: z.enum(['THIRD_PARTY', 'COMPREHENSIVE', 'PASSENGER_ACCIDENT', 'LIABILITY']),
     premiumMinor: amountMinorSchema.optional(),
     insuredValueMinor: amountMinorSchema.optional(),

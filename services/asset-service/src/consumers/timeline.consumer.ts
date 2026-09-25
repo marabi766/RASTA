@@ -158,9 +158,23 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
     }
 
     const appended = await this.repository.transaction(async (tx) => {
-      // The idempotency ledger and the entry commit together, so a crash
-      // between them cannot leave the event marked handled with nothing to
-      // show for it.
+      // The asset row is locked first, and the lock also checks that the asset
+      // still belongs to the organization read above. A transfer committed in
+      // between would otherwise get an entry filed under the previous owner.
+      // The lock is exclusive when a status change follows, so the change does
+      // not have to upgrade a shared lock that another consumer also holds.
+      const locked = await this.repository.lockAsset(
+        tx,
+        assetId,
+        asset.organizationId,
+        projection.status ? 'EXCLUSIVE' : 'SHARE',
+      );
+      if (!locked) return false;
+
+      // The idempotency ledger, the entry and the status change commit
+      // together (AGENTS.md A-09). If the marker committed alone, a crash
+      // before the status change would lose it for good: the redelivery
+      // finds the marker and skips (audit L4-03).
       const fresh = await this.repository.markEventProcessed(tx, envelope.eventId, CONSUMER_NAME);
       if (!fresh) return false;
 
@@ -178,21 +192,24 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
         occurredAt: new Date(envelope.occurredAt),
       });
 
+      // The history is a record of what happened, and it survives a status
+      // change that is illegal from the asset's current state: that case is
+      // logged and ignored, not thrown. A conflict with a concurrent write
+      // does throw, so everything above rolls back and the redelivery is
+      // judged again.
+      if (projection.status) {
+        await this.assets.applyEventStatusChange(
+          tx,
+          assetId,
+          projection.status,
+          `${envelope.eventName} از ${envelope.producer}`,
+        );
+      }
+
       return true;
     });
 
     if (!appended) return 'SKIPPED';
-
-    // Applied after the entry is durable, and in its own transaction: the
-    // history is a record of what happened and must survive even if the status
-    // change turns out to be illegal from the asset's current state.
-    if (projection.status) {
-      await this.assets.applyEventStatusChange(
-        assetId,
-        projection.status,
-        `${envelope.eventName} از ${envelope.producer}`,
-      );
-    }
   }
 }
 
