@@ -724,6 +724,8 @@ export const EXPECTED = {
       'ck_outbox_attempts_nonneg',
       'ck_outbox_next_attempt_requires_failure',
       'ck_outbox_published_is_clean',
+      'ck_policy_effective_range',
+      'ex_policy_no_overlap',
     ],
   },
   asset: {
