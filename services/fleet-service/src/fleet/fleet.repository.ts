@@ -217,24 +217,34 @@ export class FleetRepository {
   }
 
   /**
-   * Takes a row lock on the asset's replica row. Two callers: usage
-   * submission, so two concurrent submissions for the same machine cannot
-   * both pass the overlap check before either has inserted (L3-05); and the
-   * asset-sync consumer, so two safety events for one machine cannot each
-   * build on a copy of the row that lacks the other's change (L3-02).
+   * Serialises every writer for one asset until the transaction ends. Three
+   * callers: usage submission, so two concurrent submissions for the same
+   * machine cannot both pass the overlap check before either has inserted
+   * (L3-05); assignment, so a dispatch block that commits a moment earlier is
+   * seen before the insert; and the asset-sync consumer, so two safety events
+   * for one machine cannot each build on a copy of the row that lacks the
+   * other's change (L3-02).
    *
-   * Raw SQL because Prisma has no expression for `FOR UPDATE` — the same
-   * reason `wallet.repository.ts` locks a wallet row before touching a
-   * balance. `asset_ref` is the only row this service owns per asset, so it
-   * is the lock target even though the row being written is `usage_record`.
+   * A transaction-scoped advisory lock keyed by the asset id, not only a row
+   * lock. `FOR UPDATE` on a row that does not exist yet locks nothing, so two
+   * events that are the first sighting of a machine would both read "no row"
+   * and the second upsert would overwrite the first. The advisory lock exists
+   * whether or not the row does. The row lock is still taken, so a writer
+   * that locks only the row is ordered too.
    *
-   * Unscoped because the replica is platform-wide, not tenant data; the
-   * caller already resolved the asset under a tenant check before this point.
+   * Raw SQL because Prisma has no expression for either lock. Unscoped
+   * because the replica is platform-wide, not tenant data. Callers that act
+   * for a tenant re-read the row after this and check its organization.
    */
   async lockAssetRef(tx: ExtendedPrismaClient, assetId: string): Promise<void> {
     await runUnscoped(
       'serializes concurrent writers for one asset; the replica row is the only per-asset row this service owns',
-      () => tx.$queryRaw`SELECT id FROM asset_ref WHERE id = ${assetId} FOR UPDATE`,
+      async () => {
+        // `SELECT 1 FROM`, because Prisma cannot read back the `void` the
+        // function returns.
+        await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`asset_ref:${assetId}`}, 0))`;
+        await tx.$queryRaw`SELECT id FROM asset_ref WHERE id = ${assetId} FOR UPDATE`;
+      },
     );
   }
 
@@ -247,9 +257,14 @@ export class FleetRepository {
    * once either, and the audit's own reproduction uses two different
    * `clientReference`s on the same asset.
    *
-   * Must be called after {@link lockAssetRefForUsage} in the same
-   * transaction, or two concurrent calls can both see no overlap and both
-   * insert.
+   * Not by tenant either. A machine transferred mid-shift has records under
+   * two organizations, and maintenance-service adds every accepted period to
+   * one meter per asset, so an overlap across the transfer would count the
+   * same hour twice. Unscoped for that reason; the caller must not show a
+   * conflicting record that belongs to another organization.
+   *
+   * Must be called after {@link lockAssetRef} in the same transaction, or two
+   * concurrent calls can both see no overlap and both insert.
    */
   async findOverlappingUsage(
     tx: ExtendedPrismaClient,
@@ -257,13 +272,18 @@ export class FleetRepository {
     periodStart: Date,
     periodEnd: Date,
   ) {
-    return tx.usageRecord.findFirst({
-      where: {
-        assetId,
-        periodStart: { lt: periodEnd },
-        periodEnd: { gt: periodStart },
-      },
-    });
+    return runUnscoped(
+      'usage periods of one machine must not overlap across owners; the maintenance meter is per asset',
+      () =>
+        tx.usageRecord.findFirst({
+          where: {
+            assetId,
+            periodStart: { lt: periodEnd },
+            periodEnd: { gt: periodStart },
+          },
+          select: { id: true, organizationId: true },
+        }),
+    );
   }
 
   async listUsage(query: ListUsageQuery) {
@@ -425,6 +445,7 @@ export class FleetRepository {
       inMaintenance?: boolean;
       inspectionBlockedReason?: string | null;
       inspectionBlockedAt?: Date | null;
+      inspectionResolvedAt?: Date | null;
       insuranceLapsedCoverages?: string[];
       insuranceLapsedAt?: Date | null;
       insuranceCover?: InsuranceCover;

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
@@ -8,7 +8,13 @@ import { FLEET_EVENTS, validateFleetPayload } from './events';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
 import { assertOwnDriverRecord, currentFleetScope } from './access';
 import { isAssignable } from './driver-lifecycle';
-import { activeDispatchBlocks } from './dispatch-blocks';
+import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+import {
+  DEFAULT_DISPATCH_POLICY,
+  DISPATCH_POLICY,
+  activeDispatchBlocks,
+  type DispatchPolicy,
+} from './dispatch-blocks';
 import { ACTIVE_ASSET_STATUSES, identifyExclusivityConstraint } from './constraints';
 import type {
   AssignmentView,
@@ -37,7 +43,14 @@ import type {
 export class AssignmentService {
   private readonly logger = new Logger(AssignmentService.name);
 
-  constructor(private readonly repository: FleetRepository) {}
+  constructor(
+    private readonly repository: FleetRepository,
+    // Optional so a test can build the service with the repository alone; the
+    // application always provides it from configuration (docs/24 Q-65).
+    @Optional()
+    @Inject(DISPATCH_POLICY)
+    private readonly dispatchPolicy: DispatchPolicy = DEFAULT_DISPATCH_POLICY,
+  ) {}
 
   // =========================================================================
   // Reads
@@ -125,6 +138,14 @@ export class AssignmentService {
 
     try {
       const created = await this.repository.transaction(async (tx) => {
+        // Every asset check again, under the asset's lock. The checks above
+        // were for a readable refusal; a dispatch block, a maintenance start
+        // or a transfer consumed since then would otherwise not stop this
+        // insert. The consumer takes the same lock, so whatever it commits
+        // first is seen here, and whatever comes after sees this assignment.
+        await this.repository.lockAssetRef(tx, dto.assetId);
+        await this.assertAssetAssignable(dto.assetId, tx);
+
         const assignment = await tx.assignment.create({
           data: {
             id,
@@ -262,8 +283,8 @@ export class AssignmentService {
    * never appears is a typo or another tenant's machine, and assigning a
    * driver to it would create an assignment nobody can ever see.
    */
-  private async assertAssetAssignable(assetId: string): Promise<void> {
-    const asset = await this.repository.findAssetRef(assetId);
+  private async assertAssetAssignable(assetId: string, tx?: ExtendedPrismaClient): Promise<void> {
+    const asset = await this.repository.findAssetRef(assetId, tx);
 
     if (!asset) {
       throw RastaError.notFound('Asset', assetId);
@@ -279,7 +300,7 @@ export class AssignmentService {
     // insurance, or both, and each ends independently. Insurance is decided
     // now, against the recorded policy windows, not read from a stored flag
     // (dispatch-blocks.ts). Joined here only for the refusal's detail text.
-    const blocks = activeDispatchBlocks(asset, new Date());
+    const blocks = activeDispatchBlocks(asset, new Date(), this.dispatchPolicy);
     if (blocks.length > 0) {
       throw RastaError.businessRule(
         'This machine has been withdrawn from dispatch and cannot be assigned.',

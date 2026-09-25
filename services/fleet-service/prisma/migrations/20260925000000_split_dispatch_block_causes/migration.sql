@@ -6,7 +6,9 @@
 -- lapsed policy — therefore also re-armed an asset whose insurance had
 -- expired, and a later block overwrote the reason of an earlier one.
 --
--- Inspection keeps a reason/at pair. Insurance becomes a set of lapsed
+-- Inspection keeps a reason/at pair, plus the instant of the latest completed
+-- repair, so a failure and a repair are ordered by when they happened rather
+-- than by when fleet consumed them. Insurance becomes a set of lapsed
 -- coverages plus the recorded policy windows per coverage, resolved at read
 -- time (src/fleet/dispatch-blocks.ts).
 --
@@ -20,6 +22,7 @@ SET LOCAL lock_timeout = '3s';
 
 ALTER TABLE "asset_ref" ADD COLUMN IF NOT EXISTS "inspection_blocked_reason" TEXT;
 ALTER TABLE "asset_ref" ADD COLUMN IF NOT EXISTS "inspection_blocked_at" TIMESTAMP(3);
+ALTER TABLE "asset_ref" ADD COLUMN IF NOT EXISTS "inspection_resolved_at" TIMESTAMP(3);
 ALTER TABLE "asset_ref" ADD COLUMN IF NOT EXISTS "insurance_lapsed_coverages" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
 ALTER TABLE "asset_ref" ADD COLUMN IF NOT EXISTS "insurance_lapsed_at" TIMESTAMP(3);
 ALTER TABLE "asset_ref" ADD COLUMN IF NOT EXISTS "insurance_cover" JSONB NOT NULL DEFAULT '{}';

@@ -176,4 +176,128 @@ describe('dispatch blocks (L3-02)', () => {
 
     await expect(assign(org.b, assetId, outsider)).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
+
+  // ---------------------------------------------------------------------------
+  // Review round 1 on #103. The races are made deterministic: a transaction
+  // holds the asset's lock while the contenders queue behind it, the test
+  // waits until PostgreSQL reports them blocked, and only then releases.
+  // ---------------------------------------------------------------------------
+
+  describe('ordering and races (PR #103 review round 1)', () => {
+    /** Holds the asset's lock, as every writer takes it, until released. */
+    async function holdAssetLock(assetId: string, whileHeld?: (tx: never) => Promise<void>) {
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+
+      const done = prisma.client.$transaction(
+        async (tx) => {
+          await repository.lockAssetRef(tx as never, assetId);
+          locked();
+          await released;
+          await whileHeld?.(tx as never);
+        },
+        { timeout: 30_000 },
+      );
+
+      await isLocked;
+      return async () => {
+        release();
+        await done;
+      };
+    }
+
+    async function waitForBlocked(n: number) {
+      for (let attempt = 0; attempt < 400; attempt++) {
+        const rows = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+           WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+        );
+        if (rows[0]!.n >= n) return;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error(`fewer than ${n} sessions ever blocked`);
+    }
+
+    it('keeps both lapses when two insurance events are the first sighting of a machine (#1)', async () => {
+      // `FOR UPDATE` on a row that does not exist locks nothing. The asset's
+      // advisory lock exists either way, so the second event builds on the
+      // first one's row instead of on "no row".
+      const assetId = id('AST');
+      const release = await holdAssetLock(assetId);
+      const both = Promise.all([lapse(assetId, 'THIRD_PARTY'), lapse(assetId, 'COMPREHENSIVE')]);
+      await waitForBlocked(2);
+      await release();
+      await both;
+
+      const row = await repository.findAssetRef(assetId);
+      expect([...row!.insuranceLapsedCoverages].sort()).toEqual(['COMPREHENSIVE', 'THIRD_PARTY']);
+    });
+
+    it('leaves a newer inspection failure in force when an older repair completion arrives late (#2)', async () => {
+      const { assetId, driverId } = await fleet();
+      const at = (iso: string, envelope: EventEnvelope): EventEnvelope => ({
+        ...envelope,
+        occurredAt: iso,
+      });
+
+      // Repair completed at 10:00, inspection failed at 11:00; the failure is
+      // consumed first.
+      await consumer.handle(
+        at(
+          '2026-09-01T11:00:00.000Z',
+          event('INSPECTION_FAILED', { assetId, inspectionId: id('INP') }),
+        ),
+      );
+      await consumer.handle(
+        at(
+          '2026-09-01T10:00:00.000Z',
+          event('MAINTENANCE_COMPLETED', { assetId, requestId: id('MNT') }),
+        ),
+      );
+
+      await expect(assign(org.a, assetId, driverId)).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        message: expect.stringContaining('withdrawn from dispatch'),
+      });
+
+      // A repair completed after the failure does clear it.
+      await consumer.handle(
+        at(
+          '2026-09-01T12:00:00.000Z',
+          event('MAINTENANCE_COMPLETED', { assetId, requestId: id('MNT') }),
+        ),
+      );
+      await expect(assign(org.a, assetId, driverId)).resolves.toMatchObject({ assetId });
+    });
+
+    it('refuses an assignment when a dispatch block commits between its check and its insert (#3)', async () => {
+      const { assetId, driverId } = await fleet();
+
+      // The assignment passes its early checks, then waits for the lock. The
+      // block lands while it waits.
+      const release = await holdAssetLock(assetId, async (tx) => {
+        await (tx as unknown as PrismaService['client']).$executeRawUnsafe(
+          `UPDATE asset_ref SET inspection_blocked_reason = 'The most recent technical inspection failed',
+                                inspection_blocked_at = now()
+           WHERE id = $1`,
+          assetId,
+        );
+      });
+      const attempt = assign(org.a, assetId, driverId);
+      await waitForBlocked(1);
+      await release();
+
+      await expect(attempt).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        message: expect.stringContaining('withdrawn from dispatch'),
+      });
+      const active = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM assignment WHERE asset_id = $1 AND ended_at IS NULL`,
+        assetId,
+      );
+      expect(active[0]!.n).toBe(0);
+    });
+  });
 });

@@ -333,11 +333,37 @@ describe('usage recording', () => {
       });
     });
 
-    it("never measures a period against another tenant's records, nor names them", async () => {
+    it("names the conflicting record only when it is the caller's own", async () => {
+      await asActor({ organizationId: org.a }, async () => {
+        const first = await service.record(
+          reading({
+            periodStart: '2026-08-27T08:00:00.000Z',
+            periodEnd: '2026-08-27T10:00:00.000Z',
+            hours: '2',
+            clientReference: `own-a-${id('R')}`,
+          }),
+        );
+        await expect(
+          service.record(
+            reading({
+              periodStart: '2026-08-27T09:00:00.000Z',
+              periodEnd: '2026-08-27T11:00:00.000Z',
+              hours: '2',
+              clientReference: `own-b-${id('R')}`,
+            }),
+          ),
+        ).rejects.toMatchObject({
+          internalContext: expect.objectContaining({ conflictingRecordId: first.id }),
+        });
+      });
+    });
+
+    it("refuses an overlap with the previous owner's record, without naming it (review #5)", async () => {
       // A machine transferred from A to B keeps A's history in A. B's
-      // submission is checked against B's records only: the overlap query
-      // runs under B's tenant scope, so A's record neither refuses it nor
-      // leaks its id into a refusal.
+      // overlapping period is still refused: maintenance-service adds every
+      // accepted period to one meter per asset, whoever owns it, so accepting
+      // it would count the same hour twice. The refusal does not name A's
+      // record, which B has no right to see.
       const movedAsset = id('AST');
       const historic = id('USG');
       await asActor({ organizationId: org.b }, () =>
@@ -365,7 +391,7 @@ describe('usage recording', () => {
         }),
       );
 
-      const accepted = await asActor({ organizationId: org.b }, () =>
+      const refusal = await asActor({ organizationId: org.b }, () =>
         service.record(
           reading({
             assetId: movedAsset,
@@ -375,8 +401,27 @@ describe('usage recording', () => {
             clientReference: `ovl-t-${id('R')}`,
           }),
         ),
+      ).then(
+        () => null,
+        (error: { code?: string; internalContext?: Record<string, unknown> }) => error,
       );
-      expect(accepted.assetId).toBe(movedAsset);
+      expect(refusal).toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+      expect(JSON.stringify(refusal)).not.toContain(historic);
+
+      // A period after A's record is fine.
+      await expect(
+        asActor({ organizationId: org.b }, () =>
+          service.record(
+            reading({
+              assetId: movedAsset,
+              periodStart: '2026-08-20T10:00:00.000Z',
+              periodEnd: '2026-08-20T12:00:00.000Z',
+              hours: '2',
+              clientReference: `ovl-u-${id('R')}`,
+            }),
+          ),
+        ),
+      ).resolves.toMatchObject({ assetId: movedAsset });
 
       // And tenant A cannot record against a machine that is now B's at all.
       await expect(
@@ -384,6 +429,63 @@ describe('usage recording', () => {
           service.record(reading({ assetId: movedAsset, clientReference: `ovl-x-${id('R')}` })),
         ),
       ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    });
+
+    it('refuses usage when the machine is transferred between the ownership check and the lock (review #4)', async () => {
+      const racedAsset = id('AST');
+      await asActor({ organizationId: org.a }, () =>
+        prisma.client.assetRef.create({
+          data: {
+            id: racedAsset,
+            organizationId: org.a,
+            status: 'ACTIVE',
+            syncedAt: new Date(),
+            sourceEvent: 'ITEST',
+          },
+        }),
+      );
+
+      // Hold the asset's lock; A's submission passes its ownership check and
+      // queues behind it; the transfer to B commits; then A goes on.
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+      const transfer = prisma.client.$transaction(
+        async (tx) => {
+          await repository.lockAssetRef(tx as never, racedAsset);
+          locked();
+          await released;
+          await tx.$executeRawUnsafe(
+            `UPDATE asset_ref SET organization_id = $2 WHERE id = $1`,
+            racedAsset,
+            org.b,
+          );
+        },
+        { timeout: 30_000 },
+      );
+      await isLocked;
+
+      const attempt = asActor({ organizationId: org.a }, () =>
+        service.record(reading({ assetId: racedAsset, clientReference: `race-t-${id('R')}` })),
+      );
+      for (let tries = 0; tries < 400; tries++) {
+        const rows = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+           WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+        );
+        if (rows[0]!.n >= 1) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      release();
+      await transfer;
+
+      await expect(attempt).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      const written = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM usage_record WHERE asset_id = $1`,
+        racedAsset,
+      );
+      expect(written[0]!.n).toBe(0);
     });
 
     it('refuses one side of two overlapping submissions arriving at the same moment', async () => {

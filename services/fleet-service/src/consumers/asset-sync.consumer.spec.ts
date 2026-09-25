@@ -197,7 +197,10 @@ describe('AssetSyncConsumer', () => {
       expect(recorded.upserts[0]!.inspectionBlockedReason).toBe(
         'The most recent technical inspection failed',
       );
-      expect(recorded.upserts[0]!.inspectionBlockedAt).toBeInstanceOf(Date);
+      // Dated by when the inspection failed, not by when fleet consumed it.
+      expect(recorded.upserts[0]!.inspectionBlockedAt).toEqual(
+        new Date('2026-08-27T10:00:00.000Z'),
+      );
     });
 
     const lapsedMachine = {
@@ -259,7 +262,7 @@ describe('AssetSyncConsumer', () => {
       expect(recorded.upserts[0]!.insuranceLapsedAt).toEqual(lapsedMachine.insuranceLapsedAt);
     });
 
-    it('keeps the date of the first inspection failure when a second one arrives', async () => {
+    it('keeps the date of the newer failure when an older one arrives late', async () => {
       const first = new Date('2026-09-01T00:00:00.000Z');
       const { consumer, recorded } = buildConsumer({
         existing: { ...lapsedMachine, inspectionBlockedAt: first },
@@ -311,6 +314,91 @@ describe('AssetSyncConsumer', () => {
       expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
     });
 
+    describe('inspection failure and repair, in either order (review #2)', () => {
+      const failure = (occurredAt: string) =>
+        envelope({
+          eventName: 'INSPECTION_FAILED',
+          occurredAt,
+          payload: { assetId: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+        });
+      const completion = (occurredAt: string) =>
+        envelope({
+          eventName: 'MAINTENANCE_COMPLETED',
+          producer: 'maintenance-service',
+          occurredAt,
+          payload: { assetId: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+        });
+      const machine = { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' };
+
+      it('moves the block to a newer failure', async () => {
+        const { consumer, recorded } = buildConsumer({
+          existing: { ...machine, inspectionBlockedAt: new Date('2026-09-01T10:00:00.000Z') },
+        });
+        await consumer.handle(failure('2026-09-05T10:00:00.000Z'));
+
+        expect(recorded.upserts[0]!.inspectionBlockedAt).toEqual(
+          new Date('2026-09-05T10:00:00.000Z'),
+        );
+      });
+
+      it('does not let a repair completed before a failure clear that failure', async () => {
+        // Repair at 10:00, inspection failed at 11:00, the failure consumed
+        // first. The late completion must leave the newer failure in force.
+        const { consumer, recorded } = buildConsumer({
+          existing: {
+            ...machine,
+            inMaintenance: true,
+            inspectionBlockedReason: 'The most recent technical inspection failed',
+            inspectionBlockedAt: new Date('2026-09-01T11:00:00.000Z'),
+          },
+        });
+        await consumer.handle(completion('2026-09-01T10:00:00.000Z'));
+
+        expect(recorded.upserts[0]).toMatchObject({
+          inMaintenance: false,
+          inspectionResolvedAt: new Date('2026-09-01T10:00:00.000Z'),
+        });
+        expect(recorded.upserts[0]).not.toHaveProperty('inspectionBlockedReason');
+        expect(recorded.upserts[0]).not.toHaveProperty('inspectionBlockedAt');
+      });
+
+      it('clears a failure older than the completed repair', async () => {
+        const { consumer, recorded } = buildConsumer({
+          existing: {
+            ...machine,
+            inspectionBlockedReason: 'The most recent technical inspection failed',
+            inspectionBlockedAt: new Date('2026-09-01T09:00:00.000Z'),
+          },
+        });
+        await consumer.handle(completion('2026-09-01T10:00:00.000Z'));
+
+        expect(recorded.upserts[0]).toMatchObject({
+          inspectionBlockedReason: null,
+          inspectionBlockedAt: null,
+        });
+      });
+
+      it('does not block on a failure a repair already answered, when the repair was consumed first', async () => {
+        const { consumer, recorded } = buildConsumer({
+          existing: { ...machine, inspectionResolvedAt: new Date('2026-09-01T10:00:00.000Z') },
+        });
+        await consumer.handle(failure('2026-09-01T09:00:00.000Z'));
+
+        expect(recorded.upserts[0]).not.toHaveProperty('inspectionBlockedReason');
+      });
+
+      it('blocks on a failure after the last repair', async () => {
+        const { consumer, recorded } = buildConsumer({
+          existing: { ...machine, inspectionResolvedAt: new Date('2026-09-01T10:00:00.000Z') },
+        });
+        await consumer.handle(failure('2026-09-01T11:00:00.000Z'));
+
+        expect(recorded.upserts[0]!.inspectionBlockedReason).toBe(
+          'The most recent technical inspection failed',
+        );
+      });
+    });
+
     it('ends the lapse when a policy of the same coverage in force is recorded (L3-02)', async () => {
       const { consumer, recorded } = buildConsumer({
         existing: {
@@ -325,11 +413,13 @@ describe('AssetSyncConsumer', () => {
         insuranceLapsedCoverages: [],
         insuranceLapsedAt: null,
         insuranceCover: {
-          THIRD_PARTY: {
-            policyId: 'INS-2',
-            validFrom: '2020-01-01T00:00:00.000Z',
-            validTo: '2099-01-01T00:00:00.000Z',
-          },
+          THIRD_PARTY: [
+            {
+              policyId: 'INS-2',
+              validFrom: '2020-01-01T00:00:00.000Z',
+              validTo: '2099-01-01T00:00:00.000Z',
+            },
+          ],
         },
       });
       // A renewed policy says nothing about whether the machine has since

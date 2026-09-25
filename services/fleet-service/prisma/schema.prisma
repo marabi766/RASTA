@@ -375,13 +375,19 @@ model AssetRef {
   /// Insurance is kept per coverage type and resolved at read time against
   /// the recorded policy windows — see `src/fleet/dispatch-blocks.ts` for why
   /// a stored flag cannot answer it.
+  ///
+  /// Both inspection instants are the producer's `occurredAt`, so the order of
+  /// a failure and a repair does not depend on the order they were consumed
+  /// in. `inspectionBlockedAt` is the most recent failure; `inspectionResolvedAt`
+  /// the most recent completed repair.
   inspectionBlockedReason  String?   @map("inspection_blocked_reason")
   inspectionBlockedAt      DateTime? @map("inspection_blocked_at")
+  inspectionResolvedAt     DateTime? @map("inspection_resolved_at")
   /// Coverages whose policy lapsed (`INSURANCE_EXPIRED`); `UNKNOWN` when the
   /// event did not say which.
   insuranceLapsedCoverages String[]  @default([]) @map("insurance_lapsed_coverages")
   insuranceLapsedAt        DateTime? @map("insurance_lapsed_at")
-  /// Latest-ending recorded policy window per coverage (`INSURANCE_RECORDED`).
+  /// Recorded policy windows per coverage, one per policy (`INSURANCE_RECORDED`).
   insuranceCover           Json      @default("{}") @map("insurance_cover")
 
   syncedAt    DateTime @map("synced_at")

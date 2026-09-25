@@ -42,17 +42,23 @@ interface Projection {
    * under a row lock inside the handler's transaction, so a projection that
    * adds to a field (a lapse to the set, a window to the map) cannot lose a
    * concurrent addition; `null` on the first sighting of a machine.
+   *
+   * `now` is when fleet handles the event, `occurredAt` when the producer says
+   * it happened. Anything that decides which of two events is newer uses
+   * `occurredAt`: events from different topics arrive in no guaranteed order.
    */
   patch: (
     payload: Record<string, unknown>,
     current: CurrentAssetRef | null,
     now: Date,
+    occurredAt: Date,
   ) => AssetRefPatch;
 }
 
 /** The fields of the current row a projection may build on. */
 interface CurrentAssetRef {
   inspectionBlockedAt: Date | null;
+  inspectionResolvedAt: Date | null;
   insuranceLapsedCoverages: string[];
   insuranceLapsedAt: Date | null;
   insuranceCover: unknown;
@@ -67,6 +73,7 @@ interface AssetRefPatch {
   inMaintenance?: boolean;
   inspectionBlockedReason?: string | null;
   inspectionBlockedAt?: Date | null;
+  inspectionResolvedAt?: Date | null;
   insuranceLapsedCoverages?: string[];
   insuranceLapsedAt?: Date | null;
   insuranceCover?: InsuranceCover;
@@ -119,11 +126,19 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
   // and a later block overwrote the reason of an earlier one. Each projection
   // below reads the current row and adds to it; none replaces another cause.
   [CONSUMED_EVENTS.INSPECTION_FAILED]: {
-    patch: (_payload, current, now) => ({
-      inspectionBlockedReason: INSPECTION_BLOCK_REASON,
-      // The first failure dates the block; a second one does not reset it.
-      inspectionBlockedAt: current?.inspectionBlockedAt ?? now,
-    }),
+    patch: (_payload, current, _now, occurredAt) => {
+      // A repair completed after this failure has already answered it. That
+      // happens when the completion is consumed first: the topics are
+      // separate and carry no order between them.
+      const resolvedAt = current?.inspectionResolvedAt;
+      if (resolvedAt && occurredAt < resolvedAt) return {};
+      // Dated by the most recent failure, when the producer says it happened,
+      // so only a repair completed after that failure clears the block.
+      return {
+        inspectionBlockedReason: INSPECTION_BLOCK_REASON,
+        inspectionBlockedAt: later(current?.inspectionBlockedAt, occurredAt),
+      };
+    },
   },
   [CONSUMED_EVENTS.INSURANCE_EXPIRED]: {
     // Recorded as a lapse of the policy's coverage, never as "insured: no".
@@ -155,11 +170,12 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
       // seen and changes nothing, rather than guessing a validity.
       if (!coverage || !policyId || !validFrom || !validTo) return {};
 
-      const cover = withRecordedPolicy(parseCover(current?.insuranceCover), coverage, {
-        policyId,
-        validFrom,
-        validTo,
-      });
+      const cover = withRecordedPolicy(
+        parseCover(current?.insuranceCover),
+        coverage,
+        { policyId, validFrom, validTo },
+        now,
+      );
       // Resolved lapses are dropped from the set so it does not grow for
       // ever; one this policy does not yet answer stays and is re-checked at
       // dispatch time. `UNKNOWN` follows the same rule as the read side.
@@ -181,15 +197,23 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
     patch: () => ({ inMaintenance: true }),
   },
   [CONSUMED_EVENTS.MAINTENANCE_COMPLETED]: {
-    patch: () => ({
-      inMaintenance: false,
+    patch: (_payload, current, _now, occurredAt) => {
       // A completed repair resolves a failed *inspection* — the machine has
       // been through a workshop, which is the event the inspection block
-      // exists to gate. It says nothing about insurance: that block survives
-      // this event and ends only with INSURANCE_RECORDED, above.
-      inspectionBlockedReason: null,
-      inspectionBlockedAt: null,
-    }),
+      // exists to gate (docs/24 Q-65). It says nothing about insurance: that
+      // block survives this event and ends only with INSURANCE_RECORDED.
+      //
+      // Only a failure older than the repair is resolved. A completion that
+      // arrives after a newer failure, because the topics are consumed in no
+      // guaranteed order, leaves that failure in force.
+      const blockedAt = current?.inspectionBlockedAt;
+      const resolves = !blockedAt || occurredAt > blockedAt;
+      return {
+        inMaintenance: false,
+        inspectionResolvedAt: later(current?.inspectionResolvedAt, occurredAt),
+        ...(resolves ? { inspectionBlockedReason: null, inspectionBlockedAt: null } : {}),
+      };
+    },
   },
 };
 
@@ -278,6 +302,11 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     }
 
     const now = new Date();
+    // The producer's clock, for ordering. An unreadable timestamp falls back to
+    // now, which dates the event as late as possible: a failure then blocks,
+    // and a repair clears only failures that are genuinely older.
+    const stated = new Date(envelope.occurredAt);
+    const occurredAt = Number.isNaN(stated.getTime()) ? now : stated;
     let skipped = false;
 
     await this.repository.transaction(async (tx: ExtendedPrismaClient) => {
@@ -295,7 +324,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       // at once must not each build on a copy that lacks the other's change.
       await this.repository.lockAssetRef(tx, assetId);
       const current = await this.repository.findAssetRef(assetId, tx);
-      const patch = projection.patch(payload, current, now);
+      const patch = projection.patch(payload, current, now, occurredAt);
 
       // Narrowed rather than asserted: the guard above already established
       // that one of these is present, and spelling it out here keeps that true
@@ -323,6 +352,11 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
 
     return skipped ? 'SKIPPED' : undefined;
   }
+}
+
+/** The later of two instants, either of which may be missing. */
+function later(a: Date | null | undefined, b: Date): Date {
+  return a && a > b ? a : b;
 }
 
 /** Reads a string field, tolerating the absence the loose schema allows. */

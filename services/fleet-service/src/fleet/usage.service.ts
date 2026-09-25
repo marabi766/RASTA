@@ -125,6 +125,14 @@ export class UsageService {
         // overlap" before either has inserted, and both succeed (L3-05).
         await this.repository.lockAssetRef(tx, dto.assetId);
 
+        // Ownership again, now under the lock. The check above ran before it,
+        // and a transfer consumed in between would otherwise let this
+        // organization record usage against a machine it no longer holds.
+        const locked = await this.repository.findAssetRef(dto.assetId, tx);
+        if (!locked || locked.organizationId !== organizationId) {
+          throw RastaError.notFound('Asset', dto.assetId);
+        }
+
         const overlapping = await this.repository.findOverlappingUsage(
           tx,
           dto.assetId,
@@ -137,7 +145,12 @@ export class UsageService {
             {
               rule: 'USAGE_PERIOD_OVERLAP',
               assetId: dto.assetId,
-              conflictingRecordId: overlapping.id,
+              // Named only when it is this organization's own record. The
+              // overlap check spans owners, but naming a previous owner's
+              // record would disclose it.
+              ...(overlapping.organizationId === organizationId
+                ? { conflictingRecordId: overlapping.id }
+                : {}),
             },
           );
         }
