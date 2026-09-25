@@ -29,7 +29,10 @@ describe('organization stream sequencing', () => {
     // full-suite run the first one was paying engine start-up inside that
     // budget — measuring cold start rather than anything about sequencing.
     await prisma.client.$queryRawUnsafe('SELECT 1');
-    organizations = new OrganizationService(new OrganizationRepository(prisma), 6);
+    organizations = new OrganizationService(new OrganizationRepository(prisma), {
+      maxDepth: 6,
+      policySetterRoles: ['SYSTEM_ADMIN', 'UNION_ADMIN'],
+    });
   });
 
   afterAll(async () => {
