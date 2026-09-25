@@ -84,13 +84,14 @@
 
 ## Organization — `rasta.organization.v1`
 
-| رویداد                        | مصرف‌کنندگان                                | Payload کلیدی                                  |
-| ----------------------------- | ------------------------------------------- | ---------------------------------------------- |
-| `ORGANIZATION_CREATED`        | **همه (Replica مرجع)** · economic (کیف پول) | `organizationId`, `name`, `type`, `parentId`   |
-| `ORGANIZATION_UPDATED`        | همه (Replica مرجع)                          | `organizationId`, `changes`                    |
-| `ORGANIZATION_MOVED`          | analytics · audit                           | `organizationId`, `fromParentId`, `toParentId` |
-| `ORGANIZATION_DEACTIVATED`    | identity (ابطال عضویت) · همه                | `organizationId`, `reason`                     |
-| `ORGANIZATION_POLICY_CHANGED` | audit                                       | `organizationId`, `policyKey`, `value`         |
+| رویداد                         | مصرف‌کنندگان                                | Payload کلیدی                                                                                                     |
+| ------------------------------ | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `ORGANIZATION_CREATED`         | **همه (Replica مرجع)** · economic (کیف پول) | `organizationId`, `name`, `type`, `parentId`                                                                      |
+| `ORGANIZATION_UPDATED`         | همه (Replica مرجع)                          | `organizationId`, `changes`                                                                                       |
+| `ORGANIZATION_MOVED`           | analytics · audit                           | `organizationId`, `fromParentId`, `toParentId`                                                                    |
+| `ORGANIZATION_DEACTIVATED`     | identity (ابطال عضویت) · همه                | `organizationId`, `reason`                                                                                        |
+| `ORGANIZATION_POLICY_CHANGED`  | audit                                       | `organizationId`, `policyKey`, `value`                                                                            |
+| `ORGANIZATION_CONTACT_CHANGED` | audit                                       | `organizationId`, `contactId`, `change`, `kind`, `isPrimary`, `demotedContactIds[]` — **بدون** تلفن، ایمیل یا نام |
 
 ## Asset — `rasta.asset.v1`
 
