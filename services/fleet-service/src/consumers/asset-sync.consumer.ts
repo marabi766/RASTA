@@ -1,7 +1,14 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
-import type { EventConsumer, EventHandler } from '@rasta/nest-common';
+import {
+  createSystemContext,
+  runWithContext,
+  type EventConsumer,
+  type EventHandler,
+} from '@rasta/nest-common';
+import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
 import { FleetRepository } from '../fleet/fleet.repository';
+import { previousOwnerEventsIgnoredTotal } from '../observability/metrics';
 import {
   INSPECTION_BLOCK_REASON,
   UNKNOWN_COVERAGE,
@@ -10,7 +17,13 @@ import {
   withRecordedPolicy,
   type InsuranceCover,
 } from '../fleet/dispatch-blocks';
-import { CONSUMED_EVENTS, assetSourceSchema, type ConsumedEventName } from '../fleet/events';
+import {
+  CONSUMED_EVENTS,
+  FLEET_EVENTS,
+  assetSourceSchema,
+  validateFleetPayload,
+  type ConsumedEventName,
+} from '../fleet/events';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 
 /**
@@ -28,6 +41,13 @@ import type { ExtendedPrismaClient } from '../prisma/prisma.service';
  *   immediately rather than inspecting some other event's `result` field
  *   (docs/events/README.md § Insurance). A missed one of these means a machine
  *   that should be off the road being handed to a driver.
+ *
+ * One event also acts on fleet's own rows: `ASSET_TRANSFERRED` ends every
+ * active assignment on the machine, in the same transaction as the replica
+ * update. asset-service refuses to transfer an `ASSIGNED` machine, but an
+ * assignment made here before asset-service consumed `ASSET_ASSIGNED` is not
+ * visible to that check, and would otherwise survive into the new owner's
+ * tenure with the old owner's driver still in charge.
  *
  * Everything here is idempotent by construction: the `processed_event` row and
  * the effect commit in the same transaction, so a redelivery — which the
@@ -53,6 +73,17 @@ interface Projection {
     now: Date,
     occurredAt: Date,
   ) => AssetRefPatch;
+  /**
+   * The fact belongs to the organization that recorded it, not to the
+   * machine. An insurance policy is the owner's contract: a previous owner's
+   * policy neither answers nor causes the new owner's lapse (docs/24 Q-66).
+   * An owner-bound event whose organization is not the replica's current
+   * owner is marked handled and not applied.
+   *
+   * Inspection and repair are facts about the machine itself and stay
+   * unbound: a failed inspection blocks it whoever owns it now.
+   */
+  ownerBound?: true;
 }
 
 /** The fields of the current row a projection may build on. */
@@ -110,7 +141,15 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
       // the wrong organization's availability listing.
       organizationId: str(payload.toOrganizationId),
       // Its new owner must re-commission it, exactly as asset-service records.
+      // Any assignment still open on it is ended by the handler, below.
       status: 'REGISTERED',
+      // The previous owner's insurance does not follow the machine (docs/24
+      // Q-66): its lapses must not block the new owner, and its policies must
+      // not answer the new owner's lapses. Delayed events of the previous
+      // owner are refused by `ownerBound`; this clears what already arrived.
+      insuranceLapsedCoverages: [],
+      insuranceLapsedAt: null,
+      insuranceCover: {},
     }),
   },
   [CONSUMED_EVENTS.ASSET_DECOMMISSIONED]: {
@@ -141,6 +180,7 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
     },
   },
   [CONSUMED_EVENTS.INSURANCE_EXPIRED]: {
+    ownerBound: true,
     // Recorded as a lapse of the policy's coverage, never as "insured: no".
     // Whether it actually blocks is decided at dispatch time against the
     // recorded windows (dispatch-blocks.ts): a renewal recorded *before* this
@@ -156,6 +196,7 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
     },
   },
   [CONSUMED_EVENTS.INSURANCE_RECORDED]: {
+    ownerBound: true,
     // The only event that ends an insurance lapse, and only for its own
     // coverage and only while the policy is in force. The payload carries the
     // policy's `validFrom`/`validTo` (asset-service `insuranceRecordedPayload`),
@@ -218,6 +259,12 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
 };
 
 const CONSUMER_NAME = 'fleet-service.asset-sync';
+
+/** Who ended an assignment nobody ended by hand; the same value as elsewhere. */
+const SYSTEM_ACTOR = 'SYSTEM';
+
+/** Stored as the assignment's end notes. Persian: it reaches the user unchanged. */
+const TRANSFER_END_NOTES = 'پایان خودکار: ماشین به سازمان دیگری منتقل شد.';
 
 /**
  * Builds the broker-facing half.
@@ -324,6 +371,26 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       // at once must not each build on a copy that lacks the other's change.
       await this.repository.lockAssetRef(tx, assetId);
       const current = await this.repository.findAssetRef(assetId, tx);
+
+      // A previous owner's insurance event, consumed after the transfer — the
+      // topics carry no order between them. Read under the lock, so a transfer
+      // committing at the same moment is either fully seen or not at all. The
+      // marker stays: a redelivery would be refused for the same reason.
+      if (
+        projection.ownerBound &&
+        current &&
+        organizationId &&
+        organizationId !== current.organizationId
+      ) {
+        this.logger.warn(
+          `${envelope.eventName} ${envelope.eventId} for ${assetId} comes from an organization ` +
+            'that no longer owns it; not applied (docs/24 Q-66)',
+        );
+        previousOwnerEventsIgnoredTotal.inc({ service: SERVICE_NAME, event: envelope.eventName });
+        skipped = true;
+        return;
+      }
+
       const patch = projection.patch(payload, current, now, occurredAt);
 
       // Narrowed rather than asserted: the guard above already established
@@ -348,9 +415,86 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         organizationId: tenant,
         sourceEvent: envelope.eventName,
       });
+
+      if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
+        await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
+      }
     });
 
     return skipped ? 'SKIPPED' : undefined;
+  }
+
+  /**
+   * Ends whatever assignment is still open on a machine that changed owner.
+   *
+   * Runs under the asset's lock, after the replica already names the new
+   * owner and `REGISTERED`: an assignment attempt queued behind the lock sees
+   * both and is refused, so nothing new can start between this and commit.
+   * A redelivery stops at the `processed_event` marker before reaching here;
+   * the guarded update in the repository covers a person ending the same
+   * assignment at the same moment.
+   *
+   * Each release is published like any other `ASSIGNMENT_ENDED`, under the
+   * tenant that held the assignment — never the new owner's, which must not
+   * learn another organization's driver — with fleet-service as the actor
+   * and the transfer event as its cause, so audit-service can tell it from a
+   * release someone asked for.
+   */
+  private async endAssignmentsOnTransfer(
+    tx: ExtendedPrismaClient,
+    envelope: EventEnvelope,
+    assetId: string,
+    now: Date,
+    occurredAt: Date,
+  ): Promise<void> {
+    // Dated when the transfer happened, but never later than now: a producer
+    // clock running ahead must not end an assignment in the future.
+    const at = occurredAt < now ? occurredAt : now;
+    const ended = await this.repository.endActiveAssignmentsForAsset(
+      tx,
+      assetId,
+      at,
+      SYSTEM_ACTOR,
+      'ASSET_UNAVAILABLE',
+      TRANSFER_END_NOTES,
+    );
+
+    for (const assignment of ended) {
+      // The consumer's own context names asset-service, the producer of the
+      // transfer, as the caller. The release is this service's act, so the
+      // envelope is built in a context that says so.
+      const context = createSystemContext({
+        correlationId: envelope.correlationId,
+        organizationId: assignment.organizationId,
+        callerService: SERVICE_NAME,
+      });
+      await runWithContext(context, () =>
+        this.repository.enqueueEvent(tx, {
+          aggregateType: 'Assignment',
+          aggregateId: assignment.id,
+          eventName: FLEET_EVENTS.ASSIGNMENT_ENDED,
+          topic: FLEET_TOPIC,
+          organizationId: assignment.organizationId,
+          causationId: envelope.eventId,
+          payload: validateFleetPayload(FLEET_EVENTS.ASSIGNMENT_ENDED, {
+            assignmentId: assignment.id,
+            assetId,
+            driverId: assignment.driverId,
+            organizationId: assignment.organizationId,
+            startedAt: assignment.startedAt.toISOString(),
+            endedAt: assignment.endedAt.toISOString(),
+            reason: 'ASSET_UNAVAILABLE',
+          }),
+        }),
+      );
+    }
+
+    if (ended.length > 0) {
+      this.logger.log(
+        `Ended ${ended.length} active assignment(s) on ${assetId} because it was transferred ` +
+          `(${envelope.eventId})`,
+      );
+    }
   }
 }
 

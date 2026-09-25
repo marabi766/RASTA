@@ -63,6 +63,22 @@ export const usageDuplicatesTotal = new Counter({
 });
 
 /**
+ * Owner-bound events not applied because they came from an organization that
+ * no longer owns the machine — a previous owner's insurance event consumed
+ * after the transfer (docs/24 Q-66). Labelled by event name, a closed set of
+ * two.
+ *
+ * Non-zero is expected around transfers. A steady rate without transfers
+ * means the replica's owner and the producer disagree, which is worth a look.
+ */
+export const previousOwnerEventsIgnoredTotal = new Counter({
+  name: 'rasta_fleet_previous_owner_events_ignored_total',
+  help: 'Insurance events not applied because their organization no longer owns the asset',
+  labelNames: ['service', 'event'] as const,
+  registers: [registry],
+});
+
+/**
  * Assets the fleet currently considers unavailable, by the reason.
  *
  * The label is the blocker code, which is a small closed set — `ASSET_STATUS`,
