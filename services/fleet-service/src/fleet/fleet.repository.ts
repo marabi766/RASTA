@@ -9,6 +9,7 @@ import { resolvePartitionKey } from './routing';
 import type { FleetEventName } from './events';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
+import type { InsuranceCover } from './dispatch-blocks';
 import type {
   AvailabilityQuery,
   ListAssignmentsQuery,
@@ -215,6 +216,28 @@ export class FleetRepository {
     return this.client.usageRecord.findFirst({ where: { clientReference } });
   }
 
+  /**
+   * Takes a row lock on the asset's replica row. Two callers: usage
+   * submission, so two concurrent submissions for the same machine cannot
+   * both pass the overlap check before either has inserted (L3-05); and the
+   * asset-sync consumer, so two safety events for one machine cannot each
+   * build on a copy of the row that lacks the other's change (L3-02).
+   *
+   * Raw SQL because Prisma has no expression for `FOR UPDATE` — the same
+   * reason `wallet.repository.ts` locks a wallet row before touching a
+   * balance. `asset_ref` is the only row this service owns per asset, so it
+   * is the lock target even though the row being written is `usage_record`.
+   *
+   * Unscoped because the replica is platform-wide, not tenant data; the
+   * caller already resolved the asset under a tenant check before this point.
+   */
+  async lockAssetRef(tx: ExtendedPrismaClient, assetId: string): Promise<void> {
+    await runUnscoped(
+      'serializes concurrent writers for one asset; the replica row is the only per-asset row this service owns',
+      () => tx.$queryRaw`SELECT id FROM asset_ref WHERE id = ${assetId} FOR UPDATE`,
+    );
+  }
+
   async listUsage(query: ListUsageQuery) {
     const constraints: object[] = [];
     if (query.cursor) constraints.push({ id: { lt: query.cursor } });
@@ -372,8 +395,11 @@ export class FleetRepository {
       assetTag?: string | null;
       status?: string;
       inMaintenance?: boolean;
-      dispatchBlockedReason?: string | null;
-      dispatchBlockedAt?: Date | null;
+      inspectionBlockedReason?: string | null;
+      inspectionBlockedAt?: Date | null;
+      insuranceLapsedCoverages?: string[];
+      insuranceLapsedAt?: Date | null;
+      insuranceCover?: InsuranceCover;
       sourceEvent: string;
     },
   ) {

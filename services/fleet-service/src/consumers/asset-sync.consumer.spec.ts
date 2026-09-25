@@ -22,6 +22,7 @@ function buildConsumer(options: {
 
   const repository = {
     findAssetRef: jest.fn(async () => options.existing ?? null),
+    lockAssetRef: jest.fn(async () => undefined),
     transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn({})),
     markEventProcessed: jest.fn(async (_tx: unknown, eventId: string) => {
       if (options.alreadyProcessed) return false;
@@ -193,13 +194,35 @@ describe('AssetSyncConsumer', () => {
         }),
       );
 
-      expect(recorded.upserts[0]!.dispatchBlockedReason).toBe(
+      expect(recorded.upserts[0]!.inspectionBlockedReason).toBe(
         'The most recent technical inspection failed',
       );
-      expect(recorded.upserts[0]!.dispatchBlockedAt).toBeInstanceOf(Date);
+      expect(recorded.upserts[0]!.inspectionBlockedAt).toBeInstanceOf(Date);
     });
 
-    it('blocks dispatch when insurance lapses', async () => {
+    const lapsedMachine = {
+      id: 'AST-SEED-0001',
+      organizationId: 'ORG-DEH-0001',
+      inspectionBlockedAt: null,
+      insuranceLapsedCoverages: ['THIRD_PARTY'],
+      insuranceLapsedAt: new Date('2026-09-01T00:00:00.000Z'),
+      insuranceCover: {},
+    };
+    const recordedPolicy = (validFrom: string, validTo: string, coverage = 'THIRD_PARTY') =>
+      envelope({
+        eventName: 'INSURANCE_RECORDED',
+        payload: {
+          assetId: 'AST-SEED-0001',
+          organizationId: 'ORG-DEH-0001',
+          policyId: 'INS-2',
+          insurerName: 'بیمه ایران',
+          coverage,
+          validFrom,
+          validTo,
+        },
+      });
+
+    it('records a lapse of the coverage when insurance expires', async () => {
       const { consumer, recorded } = buildConsumer({
         existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
       });
@@ -211,21 +234,62 @@ describe('AssetSyncConsumer', () => {
             assetId: 'AST-SEED-0001',
             organizationId: 'ORG-DEH-0001',
             policyId: 'INS-1',
+            coverage: 'THIRD_PARTY',
             validTo: '2026-08-01T00:00:00.000Z',
           },
         }),
       );
 
-      expect(recorded.upserts[0]!.dispatchBlockedReason).toBe('The insurance policy has expired');
+      expect(recorded.upserts[0]!.insuranceLapsedCoverages).toEqual(['THIRD_PARTY']);
+      expect(recorded.upserts[0]!.insuranceLapsedAt).toBeInstanceOf(Date);
     });
 
-    it('clears the block and the maintenance flag when a repair completes', async () => {
+    it('records UNKNOWN when the lapse names no coverage, adding to earlier lapses', async () => {
+      // A later block never overwrites an earlier one.
+      const { consumer, recorded } = buildConsumer({ existing: lapsedMachine });
+
+      await consumer.handle(
+        envelope({
+          eventName: 'INSURANCE_EXPIRED',
+          payload: { assetId: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001', policyId: 'INS-1' },
+        }),
+      );
+
+      expect(recorded.upserts[0]!.insuranceLapsedCoverages).toEqual(['THIRD_PARTY', 'UNKNOWN']);
+      expect(recorded.upserts[0]!.insuranceLapsedAt).toEqual(lapsedMachine.insuranceLapsedAt);
+    });
+
+    it('keeps the date of the first inspection failure when a second one arrives', async () => {
+      const first = new Date('2026-09-01T00:00:00.000Z');
+      const { consumer, recorded } = buildConsumer({
+        existing: { ...lapsedMachine, inspectionBlockedAt: first },
+      });
+
+      await consumer.handle(
+        envelope({
+          eventName: 'INSPECTION_FAILED',
+          payload: {
+            assetId: 'AST-SEED-0001',
+            organizationId: 'ORG-DEH-0001',
+            inspectionId: 'INP-2',
+          },
+        }),
+      );
+
+      expect(recorded.upserts[0]!.inspectionBlockedAt).toEqual(first);
+      expect(recorded.upserts[0]).not.toHaveProperty('insuranceLapsedCoverages');
+    });
+
+    it('clears only the inspection block and the maintenance flag when a repair completes (L3-02)', async () => {
+      // The bug: MAINTENANCE_COMPLETED used to clear a shared
+      // `dispatchBlockedReason` regardless of which cause set it, so a
+      // repair for an unrelated fault re-armed a machine whose insurance had
+      // lapsed. The causes must now end independently.
       const { consumer, recorded } = buildConsumer({
         existing: {
-          id: 'AST-SEED-0001',
-          organizationId: 'ORG-DEH-0001',
+          ...lapsedMachine,
           inMaintenance: true,
-          dispatchBlockedReason: 'The most recent technical inspection failed',
+          inspectionBlockedReason: 'The most recent technical inspection failed',
         },
       });
 
@@ -239,9 +303,92 @@ describe('AssetSyncConsumer', () => {
 
       expect(recorded.upserts[0]).toMatchObject({
         inMaintenance: false,
-        dispatchBlockedReason: null,
-        dispatchBlockedAt: null,
+        inspectionBlockedReason: null,
+        inspectionBlockedAt: null,
       });
+      // The insurance cause is untouched — not present in the patch at all.
+      expect(recorded.upserts[0]).not.toHaveProperty('insuranceLapsedCoverages');
+      expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+    });
+
+    it('ends the lapse when a policy of the same coverage in force is recorded (L3-02)', async () => {
+      const { consumer, recorded } = buildConsumer({
+        existing: {
+          ...lapsedMachine,
+          inspectionBlockedReason: 'The most recent technical inspection failed',
+        },
+      });
+
+      await consumer.handle(recordedPolicy('2020-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z'));
+
+      expect(recorded.upserts[0]).toMatchObject({
+        insuranceLapsedCoverages: [],
+        insuranceLapsedAt: null,
+        insuranceCover: {
+          THIRD_PARTY: {
+            policyId: 'INS-2',
+            validFrom: '2020-01-01T00:00:00.000Z',
+            validTo: '2099-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      // A renewed policy says nothing about whether the machine has since
+      // passed inspection.
+      expect(recorded.upserts[0]).not.toHaveProperty('inspectionBlockedReason');
+    });
+
+    it('stores a future-dated renewal but keeps the lapse until it starts', async () => {
+      const { consumer, recorded } = buildConsumer({ existing: lapsedMachine });
+
+      await consumer.handle(recordedPolicy('2099-01-01T00:00:00.000Z', '2100-01-01T00:00:00.000Z'));
+
+      expect(recorded.upserts[0]!.insuranceLapsedCoverages).toEqual(['THIRD_PARTY']);
+      expect(recorded.upserts[0]!.insuranceLapsedAt).toEqual(lapsedMachine.insuranceLapsedAt);
+      expect(recorded.upserts[0]!.insuranceCover).toHaveProperty('THIRD_PARTY');
+    });
+
+    it('does not end a lapse with a policy of another coverage', async () => {
+      const { consumer, recorded } = buildConsumer({ existing: lapsedMachine });
+
+      await consumer.handle(
+        recordedPolicy(
+          '2020-01-01T00:00:00.000Z',
+          '2099-01-01T00:00:00.000Z',
+          'PASSENGER_ACCIDENT',
+        ),
+      );
+
+      expect(recorded.upserts[0]!.insuranceLapsedCoverages).toEqual(['THIRD_PARTY']);
+    });
+
+    it('changes nothing when a recorded policy carries no validity dates', async () => {
+      const { consumer, recorded } = buildConsumer({ existing: lapsedMachine });
+
+      await consumer.handle(
+        envelope({
+          eventName: 'INSURANCE_RECORDED',
+          payload: {
+            assetId: 'AST-SEED-0001',
+            organizationId: 'ORG-DEH-0001',
+            policyId: 'INS-2',
+            coverage: 'THIRD_PARTY',
+          },
+        }),
+      );
+
+      expect(recorded.upserts[0]).not.toHaveProperty('insuranceLapsedCoverages');
+      expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+    });
+
+    it('locks the replica row before reading it for a projection', async () => {
+      const { consumer, repository } = buildConsumer({ existing: lapsedMachine });
+      await consumer.handle(recordedPolicy('2020-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z'));
+
+      const lockOrder = (repository.lockAssetRef as jest.Mock).mock.invocationCallOrder[0]!;
+      const reads = (repository.findAssetRef as jest.Mock).mock.invocationCallOrder;
+      expect(repository.lockAssetRef).toHaveBeenCalledWith(expect.anything(), 'AST-SEED-0001');
+      // The read the projection builds on comes after the lock.
+      expect(reads[reads.length - 1]!).toBeGreaterThan(lockOrder);
     });
 
     it('withdraws a machine while it is in the workshop', async () => {

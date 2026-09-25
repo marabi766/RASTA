@@ -67,10 +67,10 @@ model Driver {
   licenceClass   String?   @map("licence_class")
   licenceValidTo DateTime? @map("licence_valid_to")
 
-  status DriverStatus @default(ACTIVE)
+  status       DriverStatus @default(ACTIVE)
   /// Why the driver is not ACTIVE. Required by the service layer whenever the
   /// status leaves ACTIVE, so a suspension is never unexplained.
-  statusReason String? @map("status_reason")
+  statusReason String?      @map("status_reason")
 
   notes String?
 
@@ -365,12 +365,24 @@ model AssetRef {
   /// maintenance-service; fleet only mirrors it.
   inMaintenance Boolean @default(false) @map("in_maintenance")
 
-  /// A safety block reported by asset-service — a failed technical inspection
-  /// or a lapsed insurance policy. The event catalogue is explicit that a
-  /// failed inspection is a safety event and fleet must stop dispatching the
-  /// machine immediately (docs/events/README.md § Insurance).
-  dispatchBlockedReason String?   @map("dispatch_blocked_reason")
-  dispatchBlockedAt     DateTime? @map("dispatch_blocked_at")
+  /// Two independent safety blocks, not one. A completed repair resolves a
+  /// failed inspection; it says nothing about the insurance policy, which
+  /// only a renewal resolves (L3-02). Folding both into one field meant
+  /// MAINTENANCE_COMPLETED cleared whichever cause had actually blocked the
+  /// machine, insurance included, and let an uninsured machine back on the
+  /// road because an unrelated repair had finished.
+  ///
+  /// Insurance is kept per coverage type and resolved at read time against
+  /// the recorded policy windows — see `src/fleet/dispatch-blocks.ts` for why
+  /// a stored flag cannot answer it.
+  inspectionBlockedReason  String?   @map("inspection_blocked_reason")
+  inspectionBlockedAt      DateTime? @map("inspection_blocked_at")
+  /// Coverages whose policy lapsed (`INSURANCE_EXPIRED`); `UNKNOWN` when the
+  /// event did not say which.
+  insuranceLapsedCoverages String[]  @default([]) @map("insurance_lapsed_coverages")
+  insuranceLapsedAt        DateTime? @map("insurance_lapsed_at")
+  /// Latest-ending recorded policy window per coverage (`INSURANCE_RECORDED`).
+  insuranceCover           Json      @default("{}") @map("insurance_cover")
 
   syncedAt    DateTime @map("synced_at")
   sourceEvent String   @map("source_event")
@@ -429,8 +441,8 @@ model OutboxMessage {
   ///
   /// Nothing sets either field in B1: no allocation, no head maintenance, no
   /// ordering guarantee. D-027 stays open until B2–B6 ship and are accepted.
-  streamSeq      BigInt?   @map("stream_seq")
-  isStreamHead   Boolean   @default(false) @map("is_stream_head")
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
 
   @@index([createdAt], map: "idx_outbox_pending")
   @@map("outbox_message")

@@ -8,6 +8,7 @@ import { FLEET_EVENTS, validateFleetPayload } from './events';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
 import { assertOwnDriverRecord, currentFleetScope } from './access';
 import { isAssignable } from './driver-lifecycle';
+import { activeDispatchBlocks } from './dispatch-blocks';
 import { ACTIVE_ASSET_STATUSES, identifyExclusivityConstraint } from './constraints';
 import type {
   AssignmentView,
@@ -274,13 +275,18 @@ export class AssignmentService {
       throw RastaError.notFound('Asset', assetId);
     }
 
-    if (asset.dispatchBlockedReason) {
+    // Independent causes (L3-02): a machine can be blocked on inspection,
+    // insurance, or both, and each ends independently. Insurance is decided
+    // now, against the recorded policy windows, not read from a stored flag
+    // (dispatch-blocks.ts). Joined here only for the refusal's detail text.
+    const blocks = activeDispatchBlocks(asset, new Date());
+    if (blocks.length > 0) {
       throw RastaError.businessRule(
         'This machine has been withdrawn from dispatch and cannot be assigned.',
         {
           rule: 'ASSET_DISPATCH_BLOCKED',
           assetId,
-          detail: asset.dispatchBlockedReason,
+          detail: blocks.map((block) => block.detail).join('; '),
           owner: 'asset-service',
         },
       );

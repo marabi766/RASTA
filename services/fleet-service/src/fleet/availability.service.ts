@@ -7,6 +7,7 @@ import { FleetRepository } from './fleet.repository';
 import { FLEET_EVENTS, validateFleetPayload } from './events';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
 import { ACTIVE_ASSET_STATUSES } from './constraints';
+import { activeDispatchBlocks, type DispatchBlockFields } from './dispatch-blocks';
 import type {
   AvailabilityBlocker,
   AvailabilityQuery,
@@ -334,19 +335,18 @@ function describeBlockers(
   asset: {
     status: string;
     inMaintenance: boolean;
-    dispatchBlockedReason: string | null;
-  },
+  } & DispatchBlockFields,
   assignment: { id: string; driverId: string } | undefined,
   window: { available: boolean; reason: string } | undefined,
 ): AvailabilityBlocker[] {
   const blockers: AvailabilityBlocker[] = [];
 
-  if (asset.dispatchBlockedReason) {
-    blockers.push({
-      code: 'DISPATCH_BLOCKED',
-      owner: 'asset-service',
-      detail: asset.dispatchBlockedReason,
-    });
+  // One blocker per cause, never merged (L3-02): a fleet manager clearing
+  // the inspection must still be told the insurance has lapsed, and vice
+  // versa. The code stays `DISPATCH_BLOCKED` — the contract ADR-026 published
+  // — and each entry's detail names the cause.
+  for (const block of activeDispatchBlocks(asset, new Date())) {
+    blockers.push({ code: 'DISPATCH_BLOCKED', owner: 'asset-service', detail: block.detail });
   }
 
   if (asset.inMaintenance) {

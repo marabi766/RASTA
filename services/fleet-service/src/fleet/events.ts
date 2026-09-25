@@ -210,6 +210,10 @@ export const CONSUMED_EVENTS = {
   ASSET_DECOMMISSIONED: 'ASSET_DECOMMISSIONED',
   INSPECTION_FAILED: 'INSPECTION_FAILED',
   INSURANCE_EXPIRED: 'INSURANCE_EXPIRED',
+  // The only event that ends an insurance lapse (L3-02): its coverage and
+  // `validFrom`/`validTo` are stored, and a lapse of the same coverage is
+  // answered while that window is in force (dispatch-blocks.ts).
+  INSURANCE_RECORDED: 'INSURANCE_RECORDED',
   MAINTENANCE_STARTED: 'MAINTENANCE_STARTED',
   MAINTENANCE_COMPLETED: 'MAINTENANCE_COMPLETED',
 } as const;

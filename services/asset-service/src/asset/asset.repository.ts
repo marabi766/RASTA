@@ -207,14 +207,14 @@ export class AssetRepository {
    * there is no single tenant it belongs to.
    */
   async expireLapsedPolicies(): Promise<
-    { id: string; assetId: string; organizationId: string; validTo: Date }[]
+    { id: string; assetId: string; organizationId: string; coverage: string; validTo: Date }[]
   > {
     return runUnscoped(
       'scheduled platform-wide sweep; runs outside any request context',
       async () => {
         const lapsed = await this.client.insurancePolicy.findMany({
           where: { status: 'ACTIVE', validTo: { lt: new Date() }, deletedAt: null },
-          select: { id: true, assetId: true, organizationId: true, validTo: true },
+          select: { id: true, assetId: true, organizationId: true, coverage: true, validTo: true },
         });
 
         if (lapsed.length > 0) {

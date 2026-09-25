@@ -156,6 +156,12 @@ export const insuranceExpiredPayload = z.object({
   assetId: z.string(),
   organizationId: z.string(),
   policyId: z.string(),
+  /**
+   * Which cover lapsed. fleet-service keeps its dispatch block per coverage
+   * and ends it only with a recorded policy of the same coverage (L3-02);
+   * without this field every lapse reads as `UNKNOWN` there.
+   */
+  coverage: z.string(),
   validTo: z.string(),
 });
 
