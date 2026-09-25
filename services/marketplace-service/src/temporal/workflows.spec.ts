@@ -43,6 +43,15 @@ type Status = SagaOrderView['status'];
 
 const TRANSACTION = 'TXN_1';
 
+/**
+ * For a test that sleeps through simulated days to watch a window or a
+ * dispute: a recheck interval longer than the sleep, so the only timers that
+ * fire are the ones the test is about. At the default 24 hours, every
+ * simulated day also ran a re-read activity, and a sleep of weeks became
+ * dozens of round trips on a slow CI runner — enough to hit jest's timeout.
+ */
+const NO_RECHECK = { recheckIntervalHours: 24 * 365 };
+
 class FakeOrder {
   status: Status = 'PENDING';
   economicTransactionId: string | null = null;
@@ -258,7 +267,7 @@ describe('the order saga', () => {
       handle: WorkflowHandle;
       held: () => Promise<void>;
     }) => Promise<void>,
-    options: { keepRunning?: boolean } = {},
+    options: { keepRunning?: boolean; input?: Partial<OrderSagaInput> } = {},
   ): Promise<string | undefined> {
     // A queue per test. A workflow a test terminates can leave activity tasks
     // behind, and on a shared queue the next test's worker inherited them.
@@ -274,7 +283,7 @@ describe('the order saga', () => {
       const handle = await env.client.workflow.start(orderSaga, {
         taskQueue,
         workflowId: `test-${INPUT.orderId}-${Math.trunc(performance.now() * 1000)}`,
-        args: [INPUT],
+        args: [{ ...INPUT, ...options.input }],
       });
 
       let finished = false;
@@ -350,7 +359,7 @@ describe('the order saga', () => {
         const status = await handle.query<SagaStatus, []>('status');
         expect(status.remindersRecorded).toBeGreaterThan(0);
       },
-      { keepRunning: true },
+      { keepRunning: true, input: NO_RECHECK },
     );
 
     expect(calls).toContain('recordReminder');
@@ -380,7 +389,7 @@ describe('the order saga', () => {
         const status = await handle.query<SagaStatus, []>('status');
         expect(status.phase).toBe('AWAITING_RECEIPT_CONFIRMATION');
       },
-      { keepRunning: true },
+      { keepRunning: true, input: NO_RECHECK },
     );
 
     expect(calls).not.toContain('settle');
@@ -408,17 +417,22 @@ describe('the order saga', () => {
     const order = new FakeOrder();
     const { calls, activities } = recordingActivities(order);
 
-    const result = await run(order, activities, async ({ party, held }) => {
-      await held();
-      await party.confirm();
-      await party.fulfil();
-      await party.dispute('the delivered goods do not match the offer');
-      await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
-      // Nothing else happens until an operator decides.
-      await env.sleep('30 days');
-      expect(calls).not.toContain('settle');
-      await party.resolve('SETTLE', 'the supplier evidenced correct delivery');
-    });
+    const result = await run(
+      order,
+      activities,
+      async ({ party, held }) => {
+        await held();
+        await party.confirm();
+        await party.fulfil();
+        await party.dispute('the delivered goods do not match the offer');
+        await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
+        // Nothing else happens until an operator decides.
+        await env.sleep('30 days');
+        expect(calls).not.toContain('settle');
+        await party.resolve('SETTLE', 'the supplier evidenced correct delivery');
+      },
+      { input: NO_RECHECK },
+    );
 
     expect(result).toBe('COMPLETED');
     // economic-service is told before anything waits, so a direct settlement
@@ -682,14 +696,35 @@ describe('the order saga', () => {
       // Temporal was unreachable after each commit, so no signal arrived.
       // Waiting only on signals, the saga would have waited for ever.
       const order = new FakeOrder();
-      const { effects, activities } = recordingActivities(order);
+      const { calls, effects, activities } = recordingActivities(order);
 
-      const result = await run(order, activities, async ({ party, held }) => {
-        await held();
-        party.silently((o) => o.confirm());
-        party.silently((o) => o.fulfil());
-        party.silently((o) => o.confirmReceipt());
-      });
+      const result = await run(
+        order,
+        activities,
+        async ({ party, handle, held }) => {
+          await held();
+          // Waiting, so the commands below land after the read that followed
+          // the hold and can only be seen by a re-read.
+          await eventually(
+            async () =>
+              (await handle.query<SagaStatus, []>('status')).phase === 'AWAITING_CONFIRMATION',
+            'the saga to wait for the supplier',
+          );
+          party.silently((o) => o.confirm());
+          party.silently((o) => o.fulfil());
+          party.silently((o) => o.confirmReceipt());
+
+          // No time skipping. With a one-second recheck the test server's
+          // clock simply runs, and the saga's own timer wakes it — the only
+          // thing that could, since no signal was sent. Skipping simulated
+          // time here stalled on a loaded CI runner: an explicit sleep can
+          // wait on the server's skip, which is not this test's subject.
+          await until(() => calls.includes('markCompleted'), 'the saga to settle on its re-read');
+        },
+        // One second. The workflow takes any positive number; only the env
+        // schema insists on whole hours, and this is not configuration.
+        { input: { recheckIntervalHours: 1 / 3600 } },
+      );
 
       expect(result).toBe('COMPLETED');
       expect(effects()).toEqual([
