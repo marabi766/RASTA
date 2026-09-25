@@ -26,7 +26,13 @@
     // RASTA_ALLOW_DEMO_SEED is the seeds' explicit opt-in (packages/config
     // seed-guard). Undeclared, turbo would withhold it and every seed would
     // refuse even when the operator typed it.
+    //
+    // Every seed imports @rasta/config (the guard) and its own generated Prisma
+    // client, and neither exists in a fresh checkout until built. Without these
+    // dependencies a first `pnpm db:seed` failed with "Cannot find module
+    // '@rasta/config'", and CI did too wherever a seed ran before the build.
     "db:seed": {
+      "dependsOn": ["^build", "db:generate"],
       "cache": false,
       "persistent": false,
       "env": ["DATABASE_URL", "DATABASE_URL_*", "RASTA_ALLOW_DEMO_SEED"]

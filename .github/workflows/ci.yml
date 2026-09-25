@@ -376,8 +376,10 @@ jobs:
         # operator.one is the same platform user in identity, Keycloak and
         # fleet, and holds AST-SEED-0001 through ASG-SEED-0001.
         run: |
-          pnpm --filter @rasta/identity-service run db:seed
-          pnpm --filter @rasta/fleet-service run db:seed
+          # Through turbo, not `pnpm --filter … run db:seed`: the seed imports
+          # @rasta/config, which is not built yet at this point in the job, and
+          # turbo's db:seed builds it first (dependsOn ^build, db:generate).
+          pnpm exec turbo run db:seed --filter=@rasta/identity-service --filter=@rasta/fleet-service
         env:
           # Demo seeds refuse to run without both (packages/config seed-guard).
           NODE_ENV: test
@@ -1398,7 +1400,9 @@ jobs:
         # Keycloak realm import above already carries the matching
         # `rasta_user_id` attributes; this is the other half of the same seed
         # (`services/identity-service/prisma/seed.ts`).
-        run: pnpm --filter @rasta/identity-service run db:seed
+        # Through turbo so @rasta/config is built before the seed imports it;
+        # this step runs before the job's own build (see turbo.json db:seed).
+        run: pnpm exec turbo run db:seed --filter=@rasta/identity-service
         env:
           # Demo seeds refuse to run without both (packages/config seed-guard).
           NODE_ENV: test
