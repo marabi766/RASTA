@@ -68,6 +68,14 @@ deleted_at        TIMESTAMPTZ                 -- حذف نرم؛ NULL = فعال
 فرامستأجری است؛ Scope از راه `membership` می‌آید)، `role`، `permission`، `commission_rule`
 و `reward_rule` (سراسری، با امکان Override سازمانی)، `audit_event` (دارد اما فقط برای فیلتر).
 
+**اجرای قاعدهٔ Index مرکب (L7-44):** `pnpm check:tenant-index-order` زنجیرهٔ Migrationهای
+supplier، notification، document و audit را بازپخش می‌کند (Index جزئیِ فقط-SQL هم دیده می‌شود)
+و هر Index مرکبی را که روی جدول مستأجرمحور با `organization_id` شروع نشود رد می‌کند، مگر به نام
+و با دلیل در `scripts/check-tenant-index-order-lib.mjs` معاف شده باشد. معافیت فقط برای این دسته‌هاست:
+مسیر عمداً میان‌مستأجری (Worker یا `runUnscoped`)، مسیر والد-فرزند (بارگذاری Relation و بررسی
+کلید خارجی)، قید یکتایی درون یک ردیف والد، و جدول Partition‌شده. معافیتِ کهنه خودش خطاست.
+سرویس‌های دیگر با افزوده‌شدن به `SERVICES` در همان فایل وارد می‌شوند.
+
 ---
 
 ## ۵٫۳ الگوهای کلیدی Schema

@@ -186,7 +186,7 @@ describe('the schema says what this service does and does not do', () => {
     // deviation is recorded in the migration header and in the plan; this is
     // what makes it visible in the schema rather than only in prose.
     const quiet = models(SCHEMA).get('NotificationQuietHours') ?? '';
-    expect(quiet).toMatch(/@@id\(\[userId, organizationId\]\)/);
+    expect(quiet).toMatch(/@@id\(\[organizationId, userId\]\)/);
     expect(models(SCHEMA).get('NotificationPreference') ?? '').not.toMatch(/quietHours/);
   });
 
