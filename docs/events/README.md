@@ -226,7 +226,9 @@ Consumer Group: `fleet-service.asset-sync`. Topicها: `rasta.asset.v1` ·
 > **پیاده‌شده و LIVE VERIFIED (2026-08-28).** `maintenance-service` نُه رویداد
 > نخست زیر را تولید می‌کند؛ دهمی، `MAINTENANCE_SCHEDULE_CHANGED`، در 2026-09-19
 > برای بستن `D-011` افزوده شد؛ یازدهمی، `REPAIR_CANCELLED`، در 2026-09-25
-> برای بستن `L3-11` افزوده شد.
+> برای بستن `L3-11` افزوده شد؛ سه رویداد سطر هزینه (`REPAIR_PART_RECORDED`،
+> `REPAIR_LABOUR_RECORDED`، `REPAIR_COST_RECORDED`) در 2026-09-25 برای بستن
+> بخش maintenance از `L7-14` افزوده شدند.
 > جدول این بخش پیش از ساخت سرویس نوشته شده بود و اینجا با
 > کد Sync شده — سه تفاوت که پیروی تحت‌اللفظی از نسخه پیشین، مصرف‌کننده‌ها را
 > بی‌صدا می‌شکست، در پی جدول توضیح داده شده است.
@@ -244,6 +246,9 @@ Consumer Group: `fleet-service.asset-sync`. Topicها: `rasta.asset.v1` ·
 | `MAINTENANCE_CANCELLED`        | MaintenanceRequest  | asset · notification · audit · analytics     | `requestId`, `assetId`, `organizationId`, `cancelledAt`, `reason`, `previousStatus`                                                                 |
 | `REPAIR_CANCELLED`             | RepairOrder         | **audit** · supplier · analytics             | `repairOrderId`, `requestId`, `assetId`, `organizationId`, `workshopOrganizationId`, `cancelledAt`, `reason`, `previousStatus`                      |
 | `MAINTENANCE_SCHEDULE_CHANGED` | MaintenanceSchedule | **audit** · analytics                        | `scheduleId`, `assetId`, `organizationId`, `change`, `status`, `previousStatus`, `reason`, `changedFields[]`, `changedAt`, `changedBy`              |
+| `REPAIR_PART_RECORDED`         | RepairOrder         | **audit** · analytics                        | پایهٔ سطر هزینه + `partUsageId`, `source`, `quantity`, **`unitCostMinor`**, **`totalCostMinor`**                                                    |
+| `REPAIR_LABOUR_RECORDED`       | RepairOrder         | **audit** · analytics                        | پایهٔ سطر هزینه + `laborEntryId`, `hours`, **`hourlyRateMinor`**, **`totalCostMinor`**, `performedAt`                                               |
+| `REPAIR_COST_RECORDED`         | RepairOrder         | **audit** · analytics                        | پایهٔ سطر هزینه + `category`, **`amountMinor`**                                                                                                     |
 
 **`MAINTENANCE_SCHEDULE_CHANGED` رویداد دهم است و برای بستن `D-011` اضافه شد.**
 برنامهٔ سرویس تعیین می‌کند دستگاهی هر چند وقت سرویس می‌شود؛ تا پیش از این،
@@ -266,13 +271,24 @@ Consumer Group: `fleet-service.asset-sync`. Topicها: `rasta.asset.v1` ·
 منتشر نمی‌شد؛ `audit-service` هرگز نمی‌فهمید ارجاعی پس گرفته شده (`AGENTS.md`
 S-06).
 
-**کلید پارتیشن هر یازده رویداد `assetId` است، نه `aggregateId`** — همان استثنای
+**سه رویداد سطر هزینه (`L7-14`).** ثبت قطعه، دستمزد و هزینهٔ مستقیم هر کدام پول
+به صورتحسابی می‌افزایند که مالک بعداً تأیید می‌کند، و تا پیش از این هیچ‌کدام رویدادی
+تولید نمی‌کرد. هر سه دربارهٔ RepairOrder‌اند (سطر هزینه درون Aggregate آن است،
+docs/03 § 3.3) و «پایهٔ سطر هزینه» را مشترک دارند: `repairOrderId`، `requestId`،
+`assetId`، `organizationId`، `workshopOrganizationId`، `costId`، `currency`،
+`recordedAt`، `recordedBy`، **`orderTotalCostMinor`** و **`requestTotalCostMinor`**
+(جمع‌ها پس از همین سطر، بازمحاسبه‌شده از سطرها). مبالغ رشتهٔ واحد فرعی‌اند و
+مقدار/ساعت رشتهٔ اعشاری. متن آزاد — نام قطعه، شرح کار، شرح هزینه و به‌ویژه نام
+تکنسین — عمداً حمل نمی‌شود. لغو RepairOrder در پی لغو درخواست هم اکنون برای هر
+ارجاع زنده یک `REPAIR_CANCELLED` (با `causationId` درخواست) منتشر می‌کند.
+
+**کلید پارتیشن هر چهارده رویداد `assetId` است، نه `aggregateId`** — همان استثنای
 آگاهانه‌ای که `rasta.fleet.v1` دارد. هر مصرف‌کننده درباره **یک دستگاه** استدلال
 می‌کند، و ترتیب فقط درون یک پارتیشن تضمین می‌شود. اگر `MAINTENANCE_STARTED` و
 `MAINTENANCE_COMPLETED` یک دستگاه روی دو پارتیشن می‌نشستند، دستگاه تعمیرشده
 می‌توانست برای همیشه در `IN_MAINTENANCE` بماند.
 
-**هر ده رویداد `assetId` حمل می‌کنند — بدون استثنا.** ستون Payload نسخه پیشین
+**هر چهارده رویداد `assetId` حمل می‌کنند — بدون استثنا.** ستون Payload نسخه پیشین
 این سند برای `MAINTENANCE_DUE`، `WORKSHOP_ASSIGNED` و `MAINTENANCE_APPROVED`
 آن را نیاورده بود. پیروی تحت‌اللفظی از آن، رویدادی می‌ساخت که `TimelineConsumer`
 در `asset-service` نمی‌تواند به چیزی بچسباند (`timelineSourceSchema` بدون

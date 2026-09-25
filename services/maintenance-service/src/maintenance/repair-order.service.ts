@@ -553,6 +553,7 @@ export class RepairOrderService {
     const actor = getContext().userId ?? 'SYSTEM';
     const recordedAt = dto.recordedAt ? new Date(dto.recordedAt) : new Date();
     const partId = `${ID_PREFIXES.partUsage}_${ulid()}`;
+    const costId = `${ID_PREFIXES.maintenanceCost}_${ulid()}`;
 
     const part = await this.repository.transaction(async (tx) => {
       await this.lock(tx, order.id, order.organizationId);
@@ -580,7 +581,7 @@ export class RepairOrderService {
       // without the part it came from (ADR-028).
       await tx.maintenanceCost.create({
         data: {
-          id: `${ID_PREFIXES.maintenanceCost}_${ulid()}`,
+          id: costId,
           organizationId: order.organizationId,
           repairOrderId: order.id,
           maintenanceRequestId: order.maintenanceRequestId,
@@ -594,7 +595,30 @@ export class RepairOrderService {
         },
       });
 
-      await this.recomputeTotals(tx, order.organizationId, order.id, order.maintenanceRequestId);
+      const totals = await this.recomputeTotals(
+        tx,
+        order.organizationId,
+        order.id,
+        order.maintenanceRequestId,
+      );
+
+      // Money entered the bill: audit-service must see it, in the same commit
+      // as the line (L7-14, AGENTS.md S-06).
+      await this.repository.enqueueEvent(tx, {
+        aggregateType: 'RepairOrder',
+        aggregateId: order.id,
+        eventName: MAINTENANCE_EVENTS.REPAIR_PART_RECORDED,
+        topic: MAINTENANCE_TOPIC,
+        organizationId: order.organizationId,
+        payload: validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_PART_RECORDED, {
+          ...this.costLineFacts(order, costId, recordedAt, actor, totals),
+          partUsageId: partId,
+          source: dto.source,
+          quantity: String(created.quantity),
+          unitCostMinor: unitCostMinor.toString(),
+          totalCostMinor: totalCostMinor.toString(),
+        }),
+      });
 
       return created;
     });
@@ -619,6 +643,7 @@ export class RepairOrderService {
     const recordedAt = dto.recordedAt ? new Date(dto.recordedAt) : new Date();
     const performedAt = dto.performedAt ? new Date(dto.performedAt) : recordedAt;
     const labourId = `${ID_PREFIXES.laborEntry}_${ulid()}`;
+    const costId = `${ID_PREFIXES.maintenanceCost}_${ulid()}`;
 
     const entry = await this.repository.transaction(async (tx) => {
       await this.lock(tx, order.id, order.organizationId);
@@ -641,7 +666,7 @@ export class RepairOrderService {
 
       await tx.maintenanceCost.create({
         data: {
-          id: `${ID_PREFIXES.maintenanceCost}_${ulid()}`,
+          id: costId,
           organizationId: order.organizationId,
           repairOrderId: order.id,
           maintenanceRequestId: order.maintenanceRequestId,
@@ -655,7 +680,28 @@ export class RepairOrderService {
         },
       });
 
-      await this.recomputeTotals(tx, order.organizationId, order.id, order.maintenanceRequestId);
+      const totals = await this.recomputeTotals(
+        tx,
+        order.organizationId,
+        order.id,
+        order.maintenanceRequestId,
+      );
+
+      await this.repository.enqueueEvent(tx, {
+        aggregateType: 'RepairOrder',
+        aggregateId: order.id,
+        eventName: MAINTENANCE_EVENTS.REPAIR_LABOUR_RECORDED,
+        topic: MAINTENANCE_TOPIC,
+        organizationId: order.organizationId,
+        payload: validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_LABOUR_RECORDED, {
+          ...this.costLineFacts(order, costId, recordedAt, actor, totals),
+          laborEntryId: labourId,
+          hours: String(created.hours),
+          hourlyRateMinor: hourlyRateMinor.toString(),
+          totalCostMinor: totalCostMinor.toString(),
+          performedAt: performedAt.toISOString(),
+        }),
+      });
 
       return created;
     });
@@ -687,6 +733,8 @@ export class RepairOrderService {
     const recordedAt = dto.recordedAt ? new Date(dto.recordedAt) : new Date();
     const costId = `${ID_PREFIXES.maintenanceCost}_${ulid()}`;
 
+    const amount = BigInt(dto.amountMinor);
+
     const cost = await this.repository.transaction(async (tx) => {
       await this.lock(tx, order.id, order.organizationId);
 
@@ -697,7 +745,7 @@ export class RepairOrderService {
           repairOrderId: order.id,
           maintenanceRequestId: order.maintenanceRequestId,
           category: dto.category,
-          amountMinor: BigInt(dto.amountMinor),
+          amountMinor: amount,
           currency: dto.currency,
           description: dto.description,
           recordedAt,
@@ -705,7 +753,25 @@ export class RepairOrderService {
         },
       });
 
-      await this.recomputeTotals(tx, order.organizationId, order.id, order.maintenanceRequestId);
+      const totals = await this.recomputeTotals(
+        tx,
+        order.organizationId,
+        order.id,
+        order.maintenanceRequestId,
+      );
+
+      await this.repository.enqueueEvent(tx, {
+        aggregateType: 'RepairOrder',
+        aggregateId: order.id,
+        eventName: MAINTENANCE_EVENTS.REPAIR_COST_RECORDED,
+        topic: MAINTENANCE_TOPIC,
+        organizationId: order.organizationId,
+        payload: validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_COST_RECORDED, {
+          ...this.costLineFacts(order, costId, recordedAt, actor, totals),
+          category: dto.category,
+          amountMinor: amount.toString(),
+        }),
+      });
 
       return created;
     });
@@ -770,6 +836,29 @@ export class RepairOrderService {
     });
 
     return { orderTotal, requestTotal };
+  }
+
+  /** What every cost-line event says about where the line landed. */
+  private costLineFacts(
+    order: CostableOrder,
+    costId: string,
+    recordedAt: Date,
+    recordedBy: string,
+    totals: { orderTotal: bigint; requestTotal: bigint },
+  ) {
+    return {
+      repairOrderId: order.id,
+      requestId: order.maintenanceRequestId,
+      assetId: order.assetId,
+      organizationId: order.organizationId,
+      workshopOrganizationId: order.workshopOrganizationId,
+      costId,
+      currency: order.currency,
+      recordedAt: recordedAt.toISOString(),
+      recordedBy,
+      orderTotalCostMinor: totals.orderTotal.toString(),
+      requestTotalCostMinor: totals.requestTotal.toString(),
+    };
   }
 
   private async lock(
@@ -862,6 +951,16 @@ export class RepairOrderService {
       throw RastaError.notFound(resourceType, resourceId);
     }
   }
+}
+
+/** The repair-order fields a cost-line event is built from. */
+interface CostableOrder {
+  id: string;
+  maintenanceRequestId: string;
+  assetId: string;
+  organizationId: string;
+  workshopOrganizationId: string;
+  currency: string;
 }
 
 /** Part quantities carry three decimals; labour hours carry two. */

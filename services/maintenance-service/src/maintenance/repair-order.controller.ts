@@ -119,7 +119,8 @@ export class RepairOrderController {
       'part it came from. The repair order and request totals are recomputed from the lines in ' +
       'the same transaction, under a row lock, so two people entering parts at once cannot lose ' +
       'one of them. This records consumption, not stock: `sourceReference` points at the order ' +
-      'or stock movement in the service that owns it.',
+      'or stock movement in the service that owns it. Publishes REPAIR_PART_RECORDED in the same ' +
+      'transaction.',
   })
   recordPart(@Param('id') id: string, @Body(zodPipe(recordPartSchema)) dto: RecordPartDto) {
     return this.repairOrders.recordPart(id, dto);
@@ -131,7 +132,8 @@ export class RepairOrderController {
     summary: 'Record labour spent on the repair',
     description:
       'Hours times rate, rounded once. `technician` is free text — a village workshop mechanic ' +
-      'has no account on this platform, and requiring one would block the entry.',
+      'has no account on this platform, and requiring one would block the entry. It stays in ' +
+      'this service: REPAIR_LABOUR_RECORDED, published in the same transaction, does not carry it.',
   })
   recordLabour(@Param('id') id: string, @Body(zodPipe(recordLabourSchema)) dto: RecordLabourDto) {
     return this.repairOrders.recordLabour(id, dto);
@@ -144,7 +146,8 @@ export class RepairOrderController {
     description:
       'A call-out fee, a diagnostic charge, a third-party invoice. `PART` and `LABOUR` are not ' +
       'accepted here: those lines are written by recording the work itself, which is what keeps ' +
-      'the provenance on a cost line meaningful.',
+      'the provenance on a cost line meaningful. Publishes REPAIR_COST_RECORDED in the same ' +
+      'transaction.',
   })
   recordCost(@Param('id') id: string, @Body(zodPipe(recordCostSchema)) dto: RecordCostDto) {
     return this.repairOrders.recordCost(id, dto);

@@ -366,16 +366,50 @@ export class RequestService {
         );
       }
 
-      // A live referral cannot outlive the work it was for.
-      await tx.repairOrder.updateMany({
+      // A live referral cannot outlive the work it was for. Each one is
+      // cancelled on its own, guarded on the status just read, and announced
+      // as `REPAIR_CANCELLED` — before this the cascade changed the repair
+      // order silently, and its audit trail stopped at "started" (L7-14).
+      const liveOrders = await tx.repairOrder.findMany({
         where: { maintenanceRequestId: id, status: { in: ['OPEN', 'IN_PROGRESS'] } },
-        data: {
-          status: 'CANCELLED',
-          cancelledAt,
-          cancelledBy: actor,
-          cancellationReason: `Maintenance request cancelled: ${dto.reason}`,
-        },
+        select: { id: true, status: true, assetId: true, workshopOrganizationId: true },
       });
+
+      for (const order of liveOrders) {
+        const reason = `Maintenance request cancelled: ${dto.reason}`;
+        const cascaded = await tx.repairOrder.updateMany({
+          where: { id: order.id, status: order.status },
+          data: {
+            status: 'CANCELLED',
+            cancelledAt,
+            cancelledBy: actor,
+            cancellationReason: reason,
+          },
+        });
+
+        // Zero rows: the order moved on by its own path in the meantime, and
+        // that path published its own event. Nothing here happened to it.
+        if (cascaded.count === 0) continue;
+
+        await this.repository.enqueueEvent(tx, {
+          aggregateType: 'RepairOrder',
+          aggregateId: order.id,
+          eventName: MAINTENANCE_EVENTS.REPAIR_CANCELLED,
+          topic: MAINTENANCE_TOPIC,
+          organizationId: request.organizationId,
+          causationId: id,
+          payload: validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_CANCELLED, {
+            repairOrderId: order.id,
+            requestId: id,
+            assetId: order.assetId,
+            organizationId: request.organizationId,
+            workshopOrganizationId: order.workshopOrganizationId,
+            cancelledAt: cancelledAt.toISOString(),
+            reason,
+            previousStatus: order.status,
+          }),
+        });
+      }
 
       await this.repository.enqueueEvent(tx, {
         aggregateType: 'MaintenanceRequest',
