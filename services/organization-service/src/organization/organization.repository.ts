@@ -256,10 +256,16 @@ export class OrganizationRepository {
     oldPath: string,
     newPath: string,
   ): Promise<number> {
+    // The moved root is special-cased: `subpath(path, nlevel(path))` asks for
+    // an offset equal to the path's own length, which ltree rejects with
+    // "invalid positions" — so the one-expression form failed every move
+    // against a real database. CASE is evaluated lazily, so the root row
+    // never reaches `subpath`.
     const affected = await tx.$executeRaw`
       UPDATE organization
-      SET path  = ${newPath}::ltree || subpath(path, nlevel(${oldPath}::ltree)),
-          depth = nlevel(${newPath}::ltree || subpath(path, nlevel(${oldPath}::ltree))) - 1
+      SET path  = CASE WHEN path = ${oldPath}::ltree THEN ${newPath}::ltree
+                       ELSE ${newPath}::ltree || subpath(path, nlevel(${oldPath}::ltree)) END,
+          depth = nlevel(${newPath}::ltree) - 1 + (nlevel(path) - nlevel(${oldPath}::ltree))
       WHERE path <@ ${oldPath}::ltree
     `;
     return affected;
