@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { RastaError, getContext, type InternalTokenService } from '@rasta/nest-common';
-import { apiErrorSchema } from '@rasta/contracts';
+import { apiErrorSchema, type ApiError } from '@rasta/contracts';
 import { serviceUrl, type ServiceName, type ServiceUrls } from '../config/routes';
 
 /**
@@ -120,6 +120,10 @@ export class ProxyService {
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    // Each upstream response counts toward the circuit exactly once, whichever
+    // way it fails afterwards: a 5xx is counted when its status arrives, and a
+    // body that then fails to read (truncated, reset) must not count it again.
+    let failureRecorded = false;
 
     try {
       const response = await fetch(target, {
@@ -131,12 +135,28 @@ export class ProxyService {
 
       // 5xx counts toward the circuit; 4xx does not. A client sending bad
       // requests is not evidence that the downstream is unhealthy.
-      if (response.status >= 500) this.recordFailure(request.service);
-      else this.recordSuccess(request.service);
+      if (response.status >= 500) {
+        this.recordFailure(request.service);
+        failureRecorded = true;
+      } else {
+        this.recordSuccess(request.service);
+      }
 
       const text = await response.text();
 
-      if (response.status >= 500 && !isPlatformError(text)) {
+      if (response.status >= 500) {
+        // Parsed once, and only the parsed, allow-listed fields travel. The
+        // schema accepting a body says nothing about what else the body held:
+        // a `stack` or an internal field beside a valid envelope would reach
+        // the caller if the original object were forwarded.
+        const envelope = platformErrorEnvelope(text);
+        if (envelope) {
+          return {
+            status: response.status,
+            headers: this.responseHeaders(response),
+            body: envelope,
+          };
+        }
         // L1-06. A 5xx that is not the platform's own error envelope is a
         // crash page, a proxy's HTML or a stack trace — reflecting it hands
         // internals to the caller. The shape, status and content type are
@@ -155,18 +175,17 @@ export class ProxyService {
         body: text.length > 0 ? this.parseJson(text) : undefined,
       };
     } catch (error) {
+      // Not recorded twice: a 5xx already counted when its status arrived. A
+      // second recordFailure() for the same response — a malformed body, or
+      // one whose read failed — would open the breaker at half its threshold.
+      if (!failureRecorded) this.recordFailure(request.service);
+
       if (error instanceof UpstreamMalformedError) {
-        // Not recorded again: every upstream status >= 500 already counted
-        // toward the circuit above, before the body was read. A second
-        // recordFailure() here would count one bad response twice and open
-        // the breaker at half the configured threshold.
         throw RastaError.upstreamUnavailable(request.service, {
           upstreamStatus: error.upstreamStatus,
           reason: 'malformed-error-body',
         });
       }
-
-      this.recordFailure(request.service);
 
       if ((error as Error).name === 'AbortError') {
         throw new RastaError('UPSTREAM_TIMEOUT', 'The upstream service did not respond in time', {
@@ -329,11 +348,40 @@ class UpstreamMalformedError extends Error {
   }
 }
 
-/** Whether a body is the platform's error envelope (`@rasta/contracts`). */
-function isPlatformError(text: string): boolean {
+/**
+ * The platform error envelope (`@rasta/contracts`) in a body, rebuilt from its
+ * named fields only; null when the body is not one.
+ *
+ * Rebuilt field by field rather than trusting the schema's output: which keys
+ * reach a caller is a security property, so it is written down here, not
+ * inherited from however the schema happens to treat unknown keys.
+ */
+function platformErrorEnvelope(text: string): ApiError | null {
+  let parsed: unknown;
   try {
-    return apiErrorSchema.safeParse(JSON.parse(text)).success;
+    parsed = JSON.parse(text);
   } catch {
-    return false;
+    return null;
   }
+  const result = apiErrorSchema.safeParse(parsed);
+  if (!result.success) return null;
+
+  const { code, message, details, correlationId, traceId, timestamp, path } = result.data;
+  return {
+    code,
+    message,
+    ...(details
+      ? {
+          details: details.map((detail) => ({
+            path: detail.path,
+            message: detail.message,
+            ...(detail.code !== undefined ? { code: detail.code } : {}),
+          })),
+        }
+      : {}),
+    correlationId,
+    ...(traceId !== undefined ? { traceId } : {}),
+    timestamp,
+    ...(path !== undefined ? { path } : {}),
+  };
 }

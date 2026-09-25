@@ -6,7 +6,7 @@ import type { Request, Response } from 'express';
 import { ProxyService } from './proxy.service';
 import { RateLimiter } from './rate-limiter';
 import { resolveRoute, type RouteRule } from '../config/routes';
-import { assertCanonicalPath } from '../http/canonical-path';
+import { assertCanonicalPath, assertNoFragment } from '../http/canonical-path';
 import { SERVICE_NAME, type GatewayEnv } from '../config/env';
 import { GATEWAY_ENV } from '../tokens';
 
@@ -42,6 +42,7 @@ export class GatewayController {
     // Before the route is chosen: a path the upstream would resolve to a
     // different route must never be checked against this one (L1-04).
     assertCanonicalPath(request.path);
+    assertNoFragment(request.originalUrl);
 
     const path = request.path.replace(/^\/v1/, '');
     const route = resolveRoute(path);

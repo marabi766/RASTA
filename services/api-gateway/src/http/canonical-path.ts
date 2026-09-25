@@ -38,3 +38,26 @@ export function assertCanonicalPath(path: string): void {
     },
   ]);
 }
+
+/**
+ * Refuses a request target containing a literal `#`.
+ *
+ * A fragment is never sent by a conforming client, but a raw socket can put
+ * one in the request line, and the two sides read it differently: the route
+ * is chosen from Express's path — `/v1/assets/X#/status` routes as `assets` —
+ * while `fetch` treats `#` as the start of a fragment and forwards only
+ * `/v1/assets/X`. The check reads `originalUrl`, the target as received, so a
+ * `#` in the query is caught too. `%23` is an escaped character, not a
+ * fragment, and both sides agree on it.
+ */
+export function assertNoFragment(originalUrl: string): void {
+  if (!originalUrl.includes('#')) return;
+
+  throw RastaError.validation([
+    {
+      path: 'path',
+      message: 'The request target must not contain a fragment (#)',
+      code: 'fragment_in_target',
+    },
+  ]);
+}

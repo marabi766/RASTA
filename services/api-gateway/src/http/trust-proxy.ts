@@ -20,7 +20,14 @@ import { z } from 'zod';
  * Only explicit addresses and ranges are accepted. Express also takes `true`
  * (trust everyone) and a hop count; both believe a header the client controls
  * whenever the gateway is reached by any path other than the expected one,
- * so neither can be configured here.
+ * so neither can be configured here — and neither can `/0`, which is the same
+ * "trust everyone" written as a range.
+ *
+ * **The list must contain proxy peers only — never a range that also holds
+ * clients.** Every address inside it is allowed to name the client, so a
+ * client whose own address falls in a trusted range can write any
+ * X-Forwarded-For it likes and choose its own rate-limit bucket. Name the
+ * ingress's addresses or the narrow range they come from, nothing wider.
  */
 
 /** proxy-addr's named ranges: loopback, link-local and unique-local/private. */
@@ -38,7 +45,9 @@ function isAddressOrRange(entry: string): boolean {
 
   if (!/^\d{1,3}$/.test(prefix)) return false;
   const bits = Number(prefix);
-  return bits >= 0 && bits <= (family === 4 ? 32 : 128);
+  // /0 is every address of its family — "trust everyone" spelled as a range,
+  // which makes X-Forwarded-For client-controlled again. Refused like `true`.
+  return bits >= 1 && bits <= (family === 4 ? 32 : 128);
 }
 
 /**
@@ -62,8 +71,9 @@ export const trustedProxiesSchema = z
         context.addIssue({
           code: z.ZodIssueCode.custom,
           message:
-            `"${entry}" is not an IP address, a CIDR range or one of ${NAMED_RANGES.join(', ')}. ` +
-            'Trusting every hop or a hop count is refused: both believe a client-written header.',
+            `"${entry}" is not an IP address, a CIDR range of /1 or narrower, or one of ` +
+            `${NAMED_RANGES.join(', ')}. Trusting every hop, a hop count or a /0 range is ` +
+            'refused: each believes a client-written header. Name proxy peers only.',
         });
       }
     }

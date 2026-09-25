@@ -227,6 +227,27 @@ describe('L1-04: a dot-segment path is refused before the route is chosen', () =
     expect(upstream.received).toEqual(['/v1/audit-corrections']);
   });
 
+  it.each(['/v1/assets/AST-1#/status', '/v1/users/me?expand=roles#x'])(
+    'refuses %s: a literal # routes on one path and forwards another',
+    async (target) => {
+      const gateway = await startGateway({ upstream, context: userContext });
+      try {
+        const response = await gateway.send(target, {}, 'POST');
+
+        expect(response.status).toBe(400);
+        expect(JSON.parse(response.body)).toMatchObject({ code: 'VALIDATION_FAILED' });
+        expect(upstream.received).toEqual([]);
+        expect(gateway.keys).toEqual([]);
+      } finally {
+        await gateway.close();
+      }
+    },
+  );
+
+  it('the # premise: fetch drops what follows it', () => {
+    expect(new URL('http://up/v1/assets/AST-1#/status').pathname).toBe('/v1/assets/AST-1');
+  });
+
   it('a canonical path is forwarded unchanged and charged to its own route', async () => {
     const gateway = await startGateway({ upstream, context: userContext });
     try {
@@ -352,14 +373,23 @@ describe('GATEWAY_TRUSTED_PROXIES', () => {
     ]);
   });
 
-  it.each(['true', '*', '1', '2', '0.0.0.0/33', '10.0.0.0/8/1', 'ingress.local', 'fe80::/129'])(
-    'refuses %p at start-up',
-    (value) => {
-      // `true` and a hop count are Express-valid and exactly the spoofable
-      // settings; a hostname is not an address and would never match.
-      expect(() => load(value)).toThrow();
-    },
-  );
+  it.each([
+    'true',
+    '*',
+    '1',
+    '2',
+    '0.0.0.0/0',
+    '::/0',
+    '10.0.0.0/8, 0.0.0.0/0',
+    '0.0.0.0/33',
+    '10.0.0.0/8/1',
+    'ingress.local',
+    'fe80::/129',
+  ])('refuses %p at start-up', (value) => {
+    // `true` and a hop count are Express-valid and exactly the spoofable
+    // settings; a hostname is not an address and would never match.
+    expect(() => load(value)).toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -422,6 +452,64 @@ describe('L1-06: a non-platform 5xx body is replaced, never reflected', () => {
 
     await expect(forward()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
     expect(proxy.circuitStates().identity).toEqual({ failures: 2, open: false });
+  });
+
+  it('forwards only the allow-listed fields of a valid envelope', async () => {
+    // Review finding: the schema accepting the body was only a yes/no, and the
+    // original object — `stack` and all — was what went out.
+    const envelope = {
+      code: 'INTERNAL_ERROR',
+      message: 'An unexpected error occurred',
+      details: [{ path: 'x', message: 'y', code: 'z', internalNote: 'db-host-sample' }],
+      correlationId: 'req-sample-correlation',
+      traceId: 'trace-sample',
+      timestamp: new Date(0).toISOString(),
+      path: '/v1/users/me',
+    };
+    upstream.respond = (res) => {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ...envelope, stack: LEAK, internalHost: 'db-host-sample' }));
+    };
+    const gateway = await startGateway({ upstream, context: userContext });
+    try {
+      const response = await gateway.send('/v1/users/me');
+
+      expect(response.status).toBe(500);
+      expect(JSON.parse(response.body)).toEqual({
+        ...envelope,
+        details: [{ path: 'x', message: 'y', code: 'z' }],
+      });
+      expect(response.body).not.toContain('ECONNREFUSED');
+      expect(response.body).not.toContain('db-host-sample');
+      expect(response.body).not.toContain('stack');
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it('counts a 5xx whose body is cut off exactly once', async () => {
+    // Review finding: the status check counted it, then the failed body read
+    // landed in the generic catch and counted it again.
+    upstream.respond = (res) => {
+      res.writeHead(500, { 'content-type': 'application/json', 'content-length': '500' });
+      res.write('{"code":"INTERNAL_ERROR","mess');
+      setTimeout(() => res.socket?.destroy(), 20);
+    };
+    const proxy = proxyTo(upstream);
+    const forward = () =>
+      runWithContext(userContext, () =>
+        proxy.forward({
+          service: 'identity',
+          method: 'GET',
+          path: '/v1/users/me',
+          query: '',
+          headers: {},
+          body: undefined,
+        }),
+      );
+
+    await expect(forward()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+    expect(proxy.circuitStates().identity).toEqual({ failures: 1, open: false });
   });
 
   it('passes a platform error envelope through unchanged', async () => {
