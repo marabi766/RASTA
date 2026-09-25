@@ -216,7 +216,6 @@ export class IdentityService {
         ],
         grantedAt,
       ),
-      roles: dto.roles,
     });
 
     const user = await this.repository.transaction(async (tx) => {
@@ -673,7 +672,6 @@ export class IdentityService {
         ],
         grantedAt,
       ),
-      roles: grantedRoles,
     });
 
     const updated = await this.repository.transaction(async (tx) => {

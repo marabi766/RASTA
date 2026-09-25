@@ -25,7 +25,6 @@ export interface CreateKeycloakUserInput {
   lastName: string;
   /** The whole platform attribute set, from the first write (ADR-060 § 5). */
   attributes: PlatformAttributes;
-  roles: string[];
 }
 
 /** What the admin API returns for a user — only the fields this client reads. */
@@ -154,41 +153,11 @@ export class KeycloakAdminClient {
     const location = response.headers.get('location');
     const keycloakId = location?.split('/').pop() ?? null;
 
-    if (keycloakId) {
-      await this.assignRealmRoles(keycloakId, input.roles);
-    }
-
+    // No realm roles. A role is granted in one organization and travels in
+    // `organization_roles`; the guard ignores every realm role but
+    // SYSTEM_ADMIN, which the API cannot grant to anybody (ADR-060 § 2, #77).
+    // Mapping the realm role here only produced a misleading token claim.
     return keycloakId;
-  }
-
-  async assignRealmRoles(keycloakId: string, roles: readonly string[]): Promise<void> {
-    if (!this.options.enabled || roles.length === 0) return;
-
-    const available = await this.admin('/roles');
-    if (!available.ok) {
-      throw RastaError.upstreamUnavailable('keycloak', { operation: 'listRoles' });
-    }
-
-    const all = (await available.json()) as Array<{ id: string; name: string }>;
-    const wanted = all.filter((role) => roles.includes(role.name));
-
-    // A role present locally but absent in Keycloak means the realm and the
-    // platform have drifted. Log it rather than failing the whole operation:
-    // the membership is still valid, and the drift is an operations problem.
-    const missing = roles.filter((name) => !all.some((role) => role.name === name));
-    if (missing.length > 0) {
-      this.logger.warn(`Roles missing from Keycloak realm: ${missing.join(', ')}`);
-    }
-    if (wanted.length === 0) return;
-
-    const response = await this.admin(`/users/${keycloakId}/role-mappings/realm`, {
-      method: 'POST',
-      body: JSON.stringify(wanted),
-    });
-
-    if (!response.ok) {
-      throw RastaError.upstreamUnavailable('keycloak', { operation: 'assignRealmRoles' });
-    }
   }
 
   /**
