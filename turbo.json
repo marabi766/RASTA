@@ -23,10 +23,13 @@
       "persistent": false,
       "env": ["DATABASE_URL", "DATABASE_URL_*"]
     },
+    // RASTA_ALLOW_DEMO_SEED is the seeds' explicit opt-in (packages/config
+    // seed-guard). Undeclared, turbo would withhold it and every seed would
+    // refuse even when the operator typed it.
     "db:seed": {
       "cache": false,
       "persistent": false,
-      "env": ["DATABASE_URL", "DATABASE_URL_*"]
+      "env": ["DATABASE_URL", "DATABASE_URL_*", "RASTA_ALLOW_DEMO_SEED"]
     },
     "typecheck": { "dependsOn": ["^build", "db:generate"], "outputs": [] },
     "lint": { "dependsOn": ["^build"], "outputs": [] },

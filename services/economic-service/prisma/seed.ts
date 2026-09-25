@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
+import { assertDemoSeedAllowed } from '@rasta/config';
 
 /**
  * Seed data for economic-service.
@@ -150,6 +151,10 @@ async function seedSampleRules(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  // Before anything touches the database: this seed overwrites fixed ids with
+  // demo values, so it runs only in an explicit development or test run.
+  assertDemoSeedAllowed('economic-service');
+
   console.log('==> Seeding economic-service');
   console.log(`    platform organization: ${PLATFORM_ORGANIZATION_ID}`);
 

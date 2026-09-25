@@ -379,6 +379,9 @@ jobs:
           pnpm --filter @rasta/identity-service run db:seed
           pnpm --filter @rasta/fleet-service run db:seed
         env:
+          # Demo seeds refuse to run without both (packages/config seed-guard).
+          NODE_ENV: test
+          RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
 
@@ -1177,6 +1180,22 @@ jobs:
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
 
+      - name: Demo seeds refuse outside development and test
+        # Every service's prisma/seed.ts upserts fixed ids with demo values; run
+        # with production credentials it would overwrite real tenants. Each seed
+        # must refuse NODE_ENV=production (even with the opt-in) and a missing
+        # RASTA_ALLOW_DEMO_SEED, exit non-zero, and leave a checksum of every row
+        # of its database unchanged. No seed is allowed to write here.
+        run: pnpm run test:seed-guard:db
+        env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
+
       - name: Outbox stream-sequence protocol (ADR-051 B3)
         # The producer-side allocation protocol: strictly increasing sequences
         # on one stream, two transactions serializing on the counter row, a
@@ -1380,6 +1399,9 @@ jobs:
         # (`services/identity-service/prisma/seed.ts`).
         run: pnpm --filter @rasta/identity-service run db:seed
         env:
+          # Demo seeds refuse to run without both (packages/config seed-guard).
+          NODE_ENV: test
+          RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
 
       - name: Build

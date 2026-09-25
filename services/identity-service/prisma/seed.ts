@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
+import { assertDemoSeedAllowed } from '@rasta/config';
 
 /**
  * Demo seed for identity-service.
@@ -266,6 +267,10 @@ const ORGANIZATION_REFS = [
 ];
 
 async function main(): Promise<void> {
+  // Before anything touches the database: this seed overwrites fixed ids with
+  // demo values, so it runs only in an explicit development or test run.
+  assertDemoSeedAllowed('identity-service');
+
   console.warn('Seeding identity-service…');
 
   for (const role of ROLES) {

@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
+import { assertDemoSeedAllowed } from '@rasta/config';
 import { toLabel } from '../src/organization/organization.repository';
 
 /**
@@ -187,6 +188,10 @@ const CONTACTS = [
 ];
 
 async function main(): Promise<void> {
+  // Before anything touches the database: this seed overwrites fixed ids with
+  // demo values, so it runs only in an explicit development or test run.
+  assertDemoSeedAllowed('organization-service');
+
   console.warn('Seeding organization-service…');
 
   const pathById = new Map<string, string>();
