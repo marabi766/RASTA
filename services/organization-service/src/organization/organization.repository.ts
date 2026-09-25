@@ -210,8 +210,8 @@ export class OrganizationRepository {
     return rows[0]?.ok ?? false;
   }
 
-  async getPath(id: string): Promise<string | null> {
-    const rows = await this.client.$queryRaw<{ path: string | null }[]>`
+  async getPath(id: string, tx?: PrismaTransactionClient): Promise<string | null> {
+    const rows = await (tx ?? this.client).$queryRaw<{ path: string | null }[]>`
       SELECT path::text AS path FROM organization WHERE id = ${id}
     `;
     return rows[0]?.path ?? null;
@@ -272,6 +272,145 @@ export class OrganizationRepository {
   }
 
   // -------------------------------------------------------------------------
+  // Concurrency — locks taken inside the caller's transaction
+  // -------------------------------------------------------------------------
+
+  /**
+   * Serialises every write that changes the shape of the tree: create and move.
+   *
+   * A cycle is a property of two moves together, not of either one: moving A
+   * beneath a descendant of B while B moves beneath a descendant of A passes
+   * both checks and leaves a detached ring. Row locks would have to cover the
+   * whole ancestor chain of both new parents to prevent that, and a chain read
+   * before its lock can already be stale. Structural writes are rare and
+   * operator-driven, so one transaction-scoped advisory lock is the simpler
+   * guarantee: whoever holds it reads paths nobody else can be rewriting.
+   * Advisory locks are scoped to this service's own database.
+   */
+  async lockHierarchy(tx: PrismaTransactionClient): Promise<void> {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${HIERARCHY_LOCK_KEY}::bigint)`;
+  }
+
+  /**
+   * `id` and every ancestor, root first, share-locked until commit.
+   *
+   * A share lock blocks a concurrent status change on any of these rows (its
+   * compare-and-set is an UPDATE) but not another reader, so two creates under
+   * the same parent do not queue on each other. Rows are locked in root-first
+   * order, the same order a cascade takes them in, so the two cannot deadlock.
+   */
+  async lockAncestorChain(
+    tx: PrismaTransactionClient,
+    id: string,
+    options: { includeSelf: boolean },
+  ): Promise<ChainRow[]> {
+    // `includeSelf: false` exists for a caller that will UPDATE `id` next.
+    // Share-locking it first and upgrading later is how two concurrent
+    // requests on the same row deadlock: each holds a share the other's
+    // upgrade waits on.
+    return tx.$queryRaw<ChainRow[]>`
+      SELECT o.id, o.status::text AS status, o.depth, o.path::text AS path
+      FROM organization o
+      WHERE o.deleted_at IS NULL
+        AND o.path @> (SELECT path FROM organization WHERE id = ${id})
+        AND (${options.includeSelf} OR o.id <> ${id})
+      ORDER BY nlevel(o.path)
+      FOR SHARE OF o
+    `;
+  }
+
+  /** One row, exclusively locked, read after the lock is granted. */
+  async lockForUpdate(tx: PrismaTransactionClient, id: string): Promise<LockedRow | null> {
+    const rows = await tx.$queryRaw<LockedRow[]>`
+      SELECT id, status::text AS status, depth, parent_id, path::text AS path
+      FROM organization
+      WHERE id = ${id} AND deleted_at IS NULL
+      FOR UPDATE
+    `;
+    return rows[0] ?? null;
+  }
+
+  /** Depth of the deepest node in the subtree rooted at `path`, inclusive. */
+  async deepestDepthUnder(tx: PrismaTransactionClient, path: string): Promise<number> {
+    const rows = await tx.$queryRaw<{ deepest: number | null }[]>`
+      SELECT max(depth)::int AS deepest
+      FROM organization
+      WHERE deleted_at IS NULL AND path <@ ${path}::ltree
+    `;
+    return rows[0]?.deepest ?? 0;
+  }
+
+  /** Statuses present in the subtree rooted at `path`, inclusive. */
+  async statusesUnder(tx: PrismaTransactionClient, path: string): Promise<string[]> {
+    const rows = await tx.$queryRaw<{ status: string }[]>`
+      SELECT DISTINCT status::text AS status
+      FROM organization
+      WHERE deleted_at IS NULL AND path <@ ${path}::ltree
+    `;
+    return rows.map((row) => row.status);
+  }
+
+  /**
+   * Compare-and-set on one organization's status.
+   *
+   * Matches on the status the caller decided from, so a write computed from a
+   * stale read updates nothing instead of overwriting a newer state — in
+   * particular it can never turn a DEACTIVATED row back into anything else.
+   */
+  async compareAndSetStatus(
+    tx: PrismaTransactionClient,
+    id: string,
+    expected: string,
+    next: string,
+    actor: string,
+  ): Promise<number> {
+    const result = await tx.organization.updateMany({
+      where: { id, status: expected as never, deletedAt: null },
+      data: { status: next as never, updatedBy: actor, version: { increment: 1 } },
+    });
+    return result.count;
+  }
+
+  /**
+   * Cascades a status to every descendant of `rootPath` (the root excluded)
+   * and returns the identifiers actually changed.
+   *
+   * DEACTIVATED is terminal, so a later suspension of an ancestor must not
+   * rewrite it; rows already at the target status are left alone so the event
+   * lists only real changes. Rows are locked root-first before the update, the
+   * same order `lockAncestorChain` uses, so two overlapping cascades wait on
+   * each other rather than deadlock.
+   */
+  async cascadeStatus(
+    tx: PrismaTransactionClient,
+    rootId: string,
+    rootPath: string,
+    next: string,
+    actor: string,
+  ): Promise<string[]> {
+    const rows = await tx.$queryRaw<{ id: string }[]>`
+      WITH target AS (
+        SELECT id FROM organization
+        WHERE deleted_at IS NULL
+          AND path <@ ${rootPath}::ltree
+          AND id <> ${rootId}
+          AND status NOT IN ('DEACTIVATED', ${next}::"OrganizationStatus")
+        ORDER BY path
+        FOR UPDATE
+      )
+      UPDATE organization o
+      SET status = ${next}::"OrganizationStatus",
+          updated_by = ${actor},
+          updated_at = now(),
+          version = o.version + 1
+      FROM target
+      WHERE o.id = target.id
+      RETURNING o.id
+    `;
+    return rows.map((row) => row.id);
+  }
+
+  // -------------------------------------------------------------------------
   // Geospatial
   // -------------------------------------------------------------------------
 
@@ -312,8 +451,16 @@ export class OrganizationRepository {
     return result;
   }
 
-  /** Organizations within `radiusMeters`, nearest first. */
-  async findNearby(query: NearbyQuery) {
+  /**
+   * Organizations within `radiusMeters`, nearest first.
+   *
+   * `allowedRootPath` is the caller's visible subtree, exactly as `list`
+   * takes it: null means "the whole tree" and is only ever passed for a
+   * platform operator. The restriction sits in the query, before `LIMIT`, so a
+   * page holds `limit` rows the caller may see rather than fewer after a
+   * filter.
+   */
+  async findNearby(query: NearbyQuery, allowedRootPath: string | null) {
     return this.client.$queryRaw<NearbyRow[]>`
       SELECT o.id, o.name, o.type, o.status,
              ST_Distance(
@@ -324,6 +471,7 @@ export class OrganizationRepository {
       JOIN organization o ON o.id = l.organization_id
       WHERE o.deleted_at IS NULL
         AND l.point IS NOT NULL
+        AND (${allowedRootPath}::ltree IS NULL OR o.path <@ ${allowedRootPath}::ltree)
         -- Parenthesised deliberately: AND x OR y binds as (AND x) OR y, which
         -- would return every organization in the country and quietly ignore
         -- the radius entirely.
@@ -362,6 +510,27 @@ export interface OrganizationRow {
   metadata: Record<string, unknown>;
   created_at: Date;
   updated_at: Date;
+}
+
+/**
+ * Key of the advisory lock that serialises structural writes. An arbitrary
+ * constant; named so the one place that takes it is greppable.
+ */
+export const HIERARCHY_LOCK_KEY = 7_214_300_001n;
+
+export interface ChainRow {
+  id: string;
+  status: string;
+  depth: number;
+  path: string;
+}
+
+export interface LockedRow {
+  id: string;
+  status: string;
+  depth: number;
+  parent_id: string | null;
+  path: string | null;
 }
 
 export interface NearbyRow {
