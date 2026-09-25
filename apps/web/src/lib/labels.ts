@@ -132,6 +132,45 @@ const ASSIGNMENT_END_REASONS: Readonly<Record<string, string>> = {
   REASSIGNED: 'تخصیص مجدد',
 };
 
+/** `TRANSACTION_STATUSES`, `services/economic-service/src/transaction/dto.ts`. */
+const TRANSACTION_STATUSES: Readonly<Record<string, string>> = {
+  CREATED: 'ثبت‌شده',
+  HELD: 'در وثیقه',
+  PENDING_SETTLEMENT: 'در انتظار تسویه',
+  DISPUTED: 'معترض‌شده',
+  SETTLED: 'تسویه‌شده',
+  REFUNDED: 'بازگشت‌داده‌شده',
+  CANCELLED: 'لغوشده',
+  FAILED: 'ناموفق',
+};
+
+/**
+ * `TRANSACTION_TYPES` plus `WALLET_TOP_UP`, same file — the latter is a
+ * filter value only; no endpoint accepts it as a type to *create*
+ * (`createTransactionSchema` omits it on purpose).
+ */
+const TRANSACTION_TYPES: Readonly<Record<string, string>> = {
+  MARKETPLACE_ORDER: 'سفارش بازار',
+  MAINTENANCE_SERVICE: 'خدمت نگهداری',
+  LOGISTICS: 'حمل‌ونقل',
+  CONSTRUCTION_STATEMENT: 'صورت‌وضعیت عمرانی',
+  PROCUREMENT_ORDER: 'سفارش تدارکات',
+  WALLET_TOP_UP: 'افزایش موجودی',
+};
+
+/** `HoldStatus`, `services/economic-service/prisma/schema.prisma`. */
+const WALLET_HOLD_STATUSES: Readonly<Record<string, string>> = {
+  ACTIVE: 'در وثیقه',
+  RELEASED: 'آزادشده',
+  REFUNDED: 'بازگشت‌داده‌شده',
+};
+
+/** `kind`, `services/marketplace-service/src/offer/dto.ts`'s `createProductSchema`. */
+const PRODUCT_KINDS: Readonly<Record<string, string>> = {
+  GOOD: 'کالا',
+  SERVICE: 'خدمت',
+};
+
 function lookup(table: Readonly<Record<string, string>>, value: string): string {
   return table[value] ?? value;
 }
@@ -150,6 +189,11 @@ export const costCategoryLabel = (value: string): string => lookup(COST_CATEGORI
 export const driverStatusLabel = (value: string): string => lookup(DRIVER_STATUSES, value);
 export const assignmentEndReasonLabel = (value: string): string =>
   lookup(ASSIGNMENT_END_REASONS, value);
+export const transactionStatusLabel = (value: string): string =>
+  lookup(TRANSACTION_STATUSES, value);
+export const transactionTypeLabel = (value: string): string => lookup(TRANSACTION_TYPES, value);
+export const walletHoldStatusLabel = (value: string): string => lookup(WALLET_HOLD_STATUSES, value);
+export const productKindLabel = (value: string): string => lookup(PRODUCT_KINDS, value);
 
 /** The options a filter offers, in the order a person reads them. */
 export const assetTypeOptions = Object.entries(ASSET_TYPES).map(([value, label]) => ({
@@ -188,3 +232,12 @@ export const assignmentEndReasonOptions = Object.entries(ASSIGNMENT_END_REASONS)
 export const timelineCategoryOptions = Object.entries(TIMELINE_CATEGORIES).map(
   ([value, label]) => ({ value, label }),
 );
+
+export const transactionStatusOptions = Object.entries(TRANSACTION_STATUSES).map(
+  ([value, label]) => ({ value, label }),
+);
+
+export const transactionTypeOptions = Object.entries(TRANSACTION_TYPES).map(([value, label]) => ({
+  value,
+  label,
+}));
