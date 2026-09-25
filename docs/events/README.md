@@ -371,6 +371,25 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `ORDER_DISPUTE_RESOLVED`  | supplier (امتیاز)                                        | `orderId`, `disputeId`, `outcome`, `responsibility` (enum بسته، الزامی، ADR-052 § ۱-ب)                                          |
 | `REVIEW_SUBMITTED`        | supplier (امتیاز) · economic (پاداش)                     | `orderId`, `rating`, `criteria`                                                                                                 |
 
+### رکوردهای حسابرسی — L7-14 (2026-09-25)
+
+هفت تغییر وضعیت که هیچ رویدادی منتشر نمی‌کردند (`AGENTS.md` S-06). هر کدام در همان تراکنشِ تغییر نوشته می‌شود و فقط وقتی
+چیزی واقعاً عوض شده باشد.
+
+| رویداد                     | Aggregate / کلید    | مصرف‌کنندگان | Payload کلیدی                                                                                           |
+| -------------------------- | ------------------- | ------------ | ------------------------------------------------------------------------------------------------------- |
+| `PRODUCT_CREATED`          | Product / productId | **audit**    | `productId`, `sku`, `category`, `kind`, `unit`, `createdBy`                                             |
+| `OFFER_DRAFTED`            | Offer / offerId     | **audit**    | شرایط عرضه، `version`, `createdBy`                                                                      |
+| `OFFER_UPDATED`            | Offer / offerId     | **audit**    | شرایط عرضه، `previousStatus`, `status` (هرگز `PUBLISHED`), `changedFields[]`, `updatedBy`               |
+| `ORDER_FUNDS_HELD`         | Order / orderId     | **audit**    | طرفین و مبلغ، `transactionId`, `status` (`FUNDS_HELD` یا `CANCELLING`)                                  |
+| `ORDER_FAILED`             | Order / orderId     | **audit**    | طرفین و مبلغ، `failedAt` — **بدون دلیل**: متن ردِ economic-service است و روی ردیف سفارش پشت API می‌ماند |
+| `ORDER_SETTLEMENT_STARTED` | Order / orderId     | **audit**    | طرفین و مبلغ، `startedAt`                                                                               |
+| `ORDER_SETTLEMENT_FAILED`  | Order / orderId     | **audit**    | طرفین و مبلغ، `failedAt`                                                                                |
+
+تغییری که عرضه را `PUBLISHED` نگه دارد همچنان `OFFER_PUBLISHED` است؛ `OFFER_UPDATED` ویرایش پیش‌نویس و هر خروج از انتشار
+را پوشش می‌دهد — همان چیزی که Index جست‌وجو نباید از دست بدهد. رویدادهای Saga زیر مستأجر خریدار ثبت می‌شوند، مثل بقیهٔ
+رویدادهای سفارش، با Actor از نوع `SERVICE` (`marketplace-service`).
+
 ## Procurement — `rasta.procurement.v1`
 
 | رویداد                   | مصرف‌کنندگان                        | Payload کلیدی                                    |
