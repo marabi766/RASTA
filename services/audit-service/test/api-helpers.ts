@@ -155,7 +155,7 @@ const decodeClaims = (token: string): TestClaims => {
  * worth exercising rather than bypassing.
  */
 function applyEnvironment(maxQueryWindowDays?: number): void {
-  process.env.DATABASE_URL = runtimeUrl();
+  process.env.DATABASE_URL_AUDIT = runtimeUrl();
   process.env.SERVICE_NAME ??= SERVICE_NAME;
   process.env.PORT ??= '3115';
   process.env.KAFKA_BROKERS ??= 'localhost:9092';

@@ -1695,7 +1695,7 @@ jobs:
           # to alter or drop what it writes (ADR-053 § 6).
           ( cd services/audit-service && \
             PORT=3115 SERVICE_NAME=audit-service \
-            DATABASE_URL=postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit \
+            DATABASE_URL_AUDIT=postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit \
             node dist/main.js > /tmp/rasta-logs/audit.log 2>&1 & )
 
           ( cd services/api-gateway && \
