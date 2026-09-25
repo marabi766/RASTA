@@ -120,6 +120,41 @@ export class UsageService {
 
     try {
       const created = await this.repository.transaction(async (tx) => {
+        // Locked before the overlap check, not after: without the lock, two
+        // concurrent submissions for the same machine can both read "no
+        // overlap" before either has inserted, and both succeed (L3-05).
+        await this.repository.lockAssetRef(tx, dto.assetId);
+
+        // Ownership again, now under the lock. The check above ran before it,
+        // and a transfer consumed in between would otherwise let this
+        // organization record usage against a machine it no longer holds.
+        const locked = await this.repository.findAssetRef(dto.assetId, tx);
+        if (!locked || locked.organizationId !== organizationId) {
+          throw RastaError.notFound('Asset', dto.assetId);
+        }
+
+        const overlapping = await this.repository.findOverlappingUsage(
+          tx,
+          dto.assetId,
+          periodStart,
+          periodEnd,
+        );
+        if (overlapping) {
+          throw RastaError.businessRule(
+            'This usage period overlaps an existing record for the same machine.',
+            {
+              rule: 'USAGE_PERIOD_OVERLAP',
+              assetId: dto.assetId,
+              // Named only when it is this organization's own record. The
+              // overlap check spans owners, but naming a previous owner's
+              // record would disclose it.
+              ...(overlapping.organizationId === organizationId
+                ? { conflictingRecordId: overlapping.id }
+                : {}),
+            },
+          );
+        }
+
         const record = await tx.usageRecord.create({
           data: {
             id,

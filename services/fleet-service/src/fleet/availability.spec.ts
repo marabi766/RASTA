@@ -7,16 +7,24 @@ import { describeBlockers } from './availability.service';
  * service that can clear it (ADR-026).
  */
 describe('availability blockers', () => {
-  const free = { status: 'ACTIVE', inMaintenance: false, dispatchBlockedReason: null };
+  const free = {
+    status: 'ACTIVE',
+    inMaintenance: false,
+    inspectionBlockedReason: null,
+    insuranceLapsedCoverages: [] as string[],
+    insuranceCover: {},
+  };
+  const lapsedThirdParty = { insuranceLapsedCoverages: ['THIRD_PARTY'] };
+  const insuranceDetail = 'The insurance policy has expired (THIRD_PARTY)';
 
   it('reports a dispatchable machine with no blockers', () => {
     expect(describeBlockers(free, undefined, undefined)).toEqual([]);
   });
 
   describe('attribution', () => {
-    it('names asset-service for a safety withdrawal', () => {
+    it('names asset-service for a failed inspection', () => {
       const [blocker] = describeBlockers(
-        { ...free, dispatchBlockedReason: 'The most recent technical inspection failed' },
+        { ...free, inspectionBlockedReason: 'The most recent technical inspection failed' },
         undefined,
         undefined,
       );
@@ -25,6 +33,36 @@ describe('availability blockers', () => {
         owner: 'asset-service',
         detail: 'The most recent technical inspection failed',
       });
+    });
+
+    it('names asset-service for a lapsed insurance policy, independently of inspection', () => {
+      const [blocker] = describeBlockers({ ...free, ...lapsedThirdParty }, undefined, undefined);
+      expect(blocker).toEqual({
+        code: 'DISPATCH_BLOCKED',
+        owner: 'asset-service',
+        detail: insuranceDetail,
+      });
+    });
+
+    it('reports both blocks when a machine is withdrawn for both reasons', () => {
+      const blockers = describeBlockers(
+        {
+          ...free,
+          inspectionBlockedReason: 'The most recent technical inspection failed',
+          ...lapsedThirdParty,
+        },
+        undefined,
+        undefined,
+      );
+      // One entry per cause under the published code (ADR-026), never merged.
+      expect(blockers).toEqual([
+        {
+          code: 'DISPATCH_BLOCKED',
+          owner: 'asset-service',
+          detail: 'The most recent technical inspection failed',
+        },
+        { code: 'DISPATCH_BLOCKED', owner: 'asset-service', detail: insuranceDetail },
+      ]);
     });
 
     it('names maintenance-service for a workshop withdrawal', () => {
@@ -54,7 +92,9 @@ describe('availability blockers', () => {
         {
           status: 'OUT_OF_SERVICE',
           inMaintenance: true,
-          dispatchBlockedReason: 'The insurance policy has expired',
+          inspectionBlockedReason: null,
+          insuranceLapsedCoverages: ['THIRD_PARTY'],
+          insuranceCover: {},
         },
         { id: 'ASG_1', driverId: 'DRV_1' },
         { available: false, reason: 'رزرو' },
@@ -88,11 +128,10 @@ describe('availability blockers', () => {
     it('a window declaring availability does not clear other blockers', () => {
       // Declaring a machine free does not renew its insurance. The declaration
       // sits alongside the other blockers rather than overriding them.
-      const blockers = describeBlockers(
-        { ...free, dispatchBlockedReason: 'The insurance policy has expired' },
-        undefined,
-        { available: true, reason: 'مورد نیاز پروژه' },
-      );
+      const blockers = describeBlockers({ ...free, ...lapsedThirdParty }, undefined, {
+        available: true,
+        reason: 'مورد نیاز پروژه',
+      });
 
       expect(blockers.map((b) => b.code)).toEqual(['DISPATCH_BLOCKED']);
     });

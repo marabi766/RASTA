@@ -6,6 +6,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
+import { INSURANCE_COVERAGES } from '../fleet/dispatch-blocks';
 
 /**
  * fleet-service configuration.
@@ -36,6 +37,28 @@ export const fleetEnvSchema = baseEnvSchema
      * sets this to 16 without a code change.
      */
     UTILIZATION_AVAILABLE_HOURS_PER_DAY: z.coerce.number().min(1).max(24).default(8),
+
+    /**
+     * Insurance coverages whose lapse withdraws a machine from dispatch,
+     * comma-separated.
+     *
+     * Which coverages are legally required is a regulatory fact the product
+     * document does not state (docs/24 Q-65), so it is configuration, not code
+     * (AGENTS.md § 9). The default is all four coverages, the behaviour before
+     * Q-65. An unknown name stops the service at startup rather than silently
+     * blocking nothing. A lapse whose coverage is not known blocks whatever
+     * this says.
+     */
+    FLEET_DISPATCH_BLOCKING_COVERAGES: z
+      .string()
+      .default(INSURANCE_COVERAGES.join(','))
+      .transform((value) =>
+        value
+          .split(',')
+          .map((coverage) => coverage.trim())
+          .filter((coverage) => coverage.length > 0),
+      )
+      .pipe(z.array(z.enum(INSURANCE_COVERAGES)).min(1)),
   });
 
 export type FleetEnv = z.infer<typeof fleetEnvSchema>;
