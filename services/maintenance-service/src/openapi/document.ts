@@ -94,6 +94,8 @@ const ERRORS: Record<string, readonly number[]> = {
   'POST /v1/repair-orders/{id}/parts': WRITE,
   'POST /v1/repair-orders/{id}/labour': WRITE,
   'POST /v1/repair-orders/{id}/costs': WRITE,
+  // A tenant claim the token does not carry is a 403; a record outside it, 404.
+  'GET /v1/internal/maintenance-requests/{id}': READ_ONE,
 };
 
 const STATUS_TEXT: Record<number, string> = {

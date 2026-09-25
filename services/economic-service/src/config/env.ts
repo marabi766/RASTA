@@ -84,6 +84,19 @@ export const economicEnvSchema = baseEnvSchema
      */
     ECONOMIC_REFUND_BY_PAYEE_ENABLED: booleanEnv(true),
 
+    /**
+     * The services that own the facts this service makes money from (ADR-061 § 4).
+     *
+     * Required, with no default. Without them, the settlement consumer cannot
+     * confirm an approval, so it could never record an obligation. That is
+     * better found at boot than as a DLQ full of good events.
+     */
+    MAINTENANCE_SERVICE_URL: z.string().url(),
+    FLEET_SERVICE_URL: z.string().url(),
+
+    /** One source read, body included. A timeout is retried, never acted on. */
+    ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+
     /** How long a stored idempotency key is honoured (docs/06 § 6.8). */
     ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
 

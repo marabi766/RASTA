@@ -1,9 +1,10 @@
 import { Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
-import type { EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   createSystemContext,
   runWithContext,
   runUnscoped,
+  UnprocessableEventError,
   type EventConsumer,
   type HandlerOutcome,
 } from '@rasta/nest-common';
@@ -11,6 +12,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TransactionService } from '../transaction/transaction.service';
 import { CONSUMED_EVENTS, maintenanceApprovedSchema } from '../events/consumed';
 import { SERVICE_NAME } from '../config/env';
+import { sourceVerificationsTotal } from '../observability/metrics';
+import { confirmApproval } from '../provenance/confirm';
+import type { SourceFacts } from '../provenance/source-facts.client';
 
 /**
  * Consumes `MAINTENANCE_APPROVED` and records a settleable obligation
@@ -34,6 +38,27 @@ import { SERVICE_NAME } from '../config/env';
  *     balance. Recording the obligation and letting it wait is the honest
  *     outcome, and the queue is visible in
  *     `rasta_economic_transactions_pending_settlement`.
+ *
+ * ## The approval is read from maintenance-service, not from the event (ADR-061 § 4)
+ *
+ * The event is its publisher's claim, and the broker does not yet
+ * authenticate publishers. So before anything is recorded, the approval is
+ * read from maintenance-service over authenticated REST, with the event's
+ * organization signed into the token, and compared field by field: the
+ * organization, the asset, `APPROVED`, the amount, the currency, the workshop
+ * that gets paid, and who approved it and when.
+ *
+ *   - **The owner disagrees** (no such request in that organization, or any
+ *     field differs): dead-lettered at once as `SOURCE_UNCONFIRMED`, with the
+ *     field that differed. Nothing is recorded. A retry cannot change the
+ *     owner's answer.
+ *   - **The owner cannot be asked** (down, slow, misconfigured): the handler
+ *     throws, the consumer retries, and the event is dead-lettered as
+ *     `UPSTREAM_UNAVAILABLE` once the retries run out. Nothing is recorded. It
+ *     fails closed, and a DLQ replay recovers it once maintenance-service is back.
+ *
+ * The HTTP call happens outside the database transaction, so a slow owner
+ * never holds a connection or a lock.
  *
  * ## Idempotency, twice over
  *
@@ -60,6 +85,7 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
     build: (handler: (envelope: EventEnvelope) => Promise<HandlerOutcome>) => EventConsumer,
     private readonly prisma: PrismaService,
     private readonly transactions: TransactionService,
+    private readonly sources: SourceFacts,
   ) {
     this.consumer = build((envelope) => this.handle(envelope));
   }
@@ -115,28 +141,49 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
     });
 
     return runWithContext(context, async () => {
-      const alreadyProcessed = await this.prisma.transaction(async (tx) => {
-        const seen = await runUnscoped(
-          'the processed-event ledger is platform plumbing with no tenant column',
-          () =>
-            tx.processedEvent.findUnique({
-              where: {
-                eventId_consumerName: {
-                  eventId: envelope.eventId,
-                  consumerName: SettlementAuthorityConsumer.CONSUMER_NAME,
-                },
-              },
-            }),
-        );
-        if (seen) return true;
+      // Checked first so a replayed event costs no round trip to the owner.
+      // Checked again inside the transaction below, which is the check that
+      // counts.
+      if (await this.alreadyProcessed(this.prisma.client, envelope.eventId)) {
+        this.logger.debug(`Event ${envelope.eventId} already processed; no second effect`);
+        return 'SKIPPED';
+      }
 
+      // Throws on an owner that cannot be asked: retried, never acted on.
+      const fact = await this.sources.maintenanceRequest(payload.organizationId, payload.requestId);
+      const verdict = confirmApproval(payload, fact);
+      if (!verdict.confirmed || !fact) {
+        const mismatch = verdict.confirmed ? 'not_found' : verdict.mismatch;
+        sourceVerificationsTotal.inc({
+          service: SERVICE_NAME,
+          consumer: 'settlement_authority',
+          outcome: mismatch,
+        });
+        throw new UnprocessableEventError(
+          DLQ_REASONS.SOURCE_UNCONFIRMED,
+          `maintenance-service does not confirm MAINTENANCE_APPROVED for ${payload.requestId}: ${mismatch}`,
+        );
+      }
+      sourceVerificationsTotal.inc({
+        service: SERVICE_NAME,
+        consumer: 'settlement_authority',
+        outcome: 'confirmed',
+      });
+
+      const alreadyProcessed = await this.prisma.transaction(async (tx) => {
+        if (await this.alreadyProcessed(tx, envelope.eventId)) return true;
+
+        // Every figure from the owner's answer. `confirmApproval` has just
+        // proved it equal to the event's, so this changes no outcome. It
+        // does mean nothing recorded here was taken on the event's word.
         const result = await this.transactions.recordAuthorisedObligation(tx, {
-          organizationId: payload.organizationId,
+          organizationId: fact.organizationId,
           counterpartyOrganizationId: payeeOrganizationId,
           transactionType: 'MAINTENANCE_SERVICE',
-          grossAmountMinor: BigInt(payload.totalCostMinor),
-          currency: payload.currency,
-          occurredAt: new Date(payload.approvedAt),
+          grossAmountMinor: BigInt(fact.totalCostMinor),
+          currency: fact.currency,
+          // Equal to the event's instant; `confirmApproval` refuses a fact without one.
+          occurredAt: new Date(fact.approvedAt ?? payload.approvedAt),
           sourceType: 'MAINTENANCE_REQUEST',
           sourceReference: payload.requestId,
           causationId: envelope.eventId,
@@ -171,5 +218,24 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
 
       return undefined;
     });
+  }
+
+  private async alreadyProcessed(
+    client: Pick<PrismaService['client'], 'processedEvent'>,
+    eventId: string,
+  ): Promise<boolean> {
+    const seen = await runUnscoped(
+      'the processed-event ledger is platform plumbing with no tenant column',
+      () =>
+        client.processedEvent.findUnique({
+          where: {
+            eventId_consumerName: {
+              eventId,
+              consumerName: SettlementAuthorityConsumer.CONSUMER_NAME,
+            },
+          },
+        }),
+    );
+    return seen !== null;
   }
 }

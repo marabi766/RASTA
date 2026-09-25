@@ -206,6 +206,24 @@ export const rewardsSkippedTotal = new Counter({
 });
 
 /**
+ * Every question a money-making consumer put to a fact's owner (ADR-061 § 4).
+ *
+ * `consumer` is `settlement_authority` or `reward_trigger`. `outcome` is a
+ * closed set: `confirmed`; `not_found`, `organization_mismatch`,
+ * `status_mismatch`, `amount_mismatch`, `currency_mismatch`,
+ * `workshop_mismatch`, `approval_mismatch` and `asset_mismatch` (each one
+ * dead-lettered as `SOURCE_UNCONFIRMED`); and `unavailable`, which is retried.
+ * Any mismatch is worth an alert: either a producer has a defect or somebody
+ * is publishing events they do not own.
+ */
+export const sourceVerificationsTotal = new Counter({
+  name: 'rasta_economic_source_verifications_total',
+  help: 'Checks of an event against the owning service, by consumer and outcome',
+  labelNames: ['service', 'consumer', 'outcome'] as const,
+  registers: [registry],
+});
+
+/**
  * Idempotent replays served from the stored response.
  *
  * A healthy number here means clients are retrying and the platform is

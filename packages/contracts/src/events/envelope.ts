@@ -198,6 +198,14 @@ export const DLQ_REASONS = {
   BUSINESS_RULE_VIOLATION: 'BUSINESS_RULE_VIOLATION',
   UPSTREAM_UNAVAILABLE: 'UPSTREAM_UNAVAILABLE',
   MAX_RETRIES_EXCEEDED: 'MAX_RETRIES_EXCEEDED',
+  /**
+   * ADR-061 § 4. A consumer with a financial effect asked the fact's owning
+   * service, and the owner did not confirm what the event claims: no such
+   * record in that organization, another status, another amount. The owner
+   * refutes the event, so no retry changes the answer, and no money is made
+   * from it. The field that disagreed rides in `x-dlq-error`.
+   */
+  SOURCE_UNCONFIRMED: 'SOURCE_UNCONFIRMED',
 } as const;
 
 export type DlqReason = (typeof DLQ_REASONS)[keyof typeof DLQ_REASONS];

@@ -1,6 +1,6 @@
 # ADR-061: منشأ رویداد — پیام Kafka ادعای ناشرش است، نه واقعیت
 
-- **وضعیت:** **Accepted — implementation pending.** مدیر پروژه در 2026-09-25 همان‌طور که پیشنهاد شد پذیرفت (§ «تصمیم مدیر پروژه»).
+- **وضعیت:** **Accepted — implementation in progress.** مدیر پروژه در 2026-09-25 همان‌طور که پیشنهاد شد پذیرفت (§ «تصمیم مدیر پروژه»). بند ۴: شاخهٔ `fix/economic-source-verification` (§ «پیاده‌سازی»). بندهای ۱، ۲، ۵ تا ۷: هنوز نه.
 - **تاریخ:** 2026-09-25
 - **تصمیم‌گیرنده:** معماری پلتفرم، زیر اختیار صریح مدیر پروژه برای تصمیم‌های امنیت و کیفیت
 - **اهمیت:** **بحرانی.** هر Consumerی که از یک رویداد پول یا وضعیت می‌سازد
@@ -153,6 +153,14 @@ _ترتیب اجرا طبق تصمیم مدیر پروژه: ۳ ← ۱ ← ۲._
 2. **audit-service:** کلید `processed_event` با Topic، تشخیص و گزارش شکاف `streamSeq`، و جملهٔ کامل‌بودن در گزارش
    تأیید.
 3. **economic-service:** پرسیدن از منبع برای `settlement-authority` و `reward-trigger`، و بند تازه در `AGENTS.md`.
+
+**وضعیت PR بند ۴ (`fix/economic-source-verification`):** `settlement-authority` تأیید را از
+`GET /v1/internal/maintenance-requests/{id}` می‌خواند و `reward-trigger` کارکرد را از
+`GET /v1/internal/usage-records/{id}` در fleet-service (افزوده در همین PR؛ پیش از آن Endpointی نبود). بدیلِ
+«ثبت برای اعطای بعدی» که بند ۴ برای نبودِ Endpoint پیش‌بینی کرده بود، لازم نشد. `EventConsumer` خطای تازهٔ
+`UnprocessableEventError` را بی Retry به DLQ می‌فرستد، و `DLQ_REASONS` دلیل `SOURCE_UNCONFIRMED` را دارد. Retryِ
+تمام‌شده روی منبعِ در دسترس‌ناپذیر اکنون `UPSTREAM_UNAVAILABLE` است، نه `MAX_RETRIES_EXCEEDED`. قاعدهٔ A-13 در
+`AGENTS.md` ثبت شد.
 
 **جدا از این سه PR، تصمیم استقرار:** SASL/SCRAM و ACL برای هر محیط غیرتوسعه، و Broker با ACL در CI. مالکش باید
 مدیر پروژه تعیین کند؛ این ADR فقط شرط Gate بودنش را تثبیت می‌کند.

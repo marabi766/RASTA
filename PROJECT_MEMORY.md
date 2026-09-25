@@ -2373,6 +2373,16 @@ Commission یا Settlement — تا مصرف‌کننده‌ای که یک تر�
 **فعال:** `MAINTENANCE_APPROVED` (تعهد قابل تسویه، **بدون حرکت پول**) ·
 `USAGE_RECORDED` و `MAINTENANCE_COMPLETED` (محرک پاداش).
 
+**پرسیدن از منبع (ADR-061 § ۴، شاخهٔ `fix/economic-source-verification`، 2026-09-25):** هر دو Consumer پیش از اثر،
+رکورد را از سرویس مالک می‌خوانند، از راه `GET /v1/internal/maintenance-requests/{id}` در maintenance-service و
+`GET /v1/internal/usage-records/{id}` در fleet-service. هر دو فقط برای توکن سرویسِ `economic-service` باز است، با
+مستأجرِ امضاشده. تعهد فقط وقتی ثبت می‌شود که سازمان، دارایی، `APPROVED`، مبلغ، ارز، کارگاه و تأییدکننده/زمان
+تأیید با رویداد یکی باشد. سازمان و **موضوع** پاداش (`recordedBy` یا `completedBy`) و فیلدهایی که قاعده می‌خواند
+از منبع می‌آیند، نه از `envelope.actor`. ناهم‌خوانی ← DLQ `SOURCE_UNCONFIRMED`؛ منبعِ در دسترس‌ناپذیر ← Retry و
+سپس DLQ `UPSTREAM_UNAVAILABLE` (Fail-Closed). متریک: `rasta_economic_source_verifications_total`. پیامد زمان اجرا:
+economic-service بی maintenance-service تعهد تازه ثبت نمی‌کند، و `MAINTENANCE_SERVICE_URL` و `FLEET_SERVICE_URL`
+اکنون اجباری‌اند. **وضعیت:** Unit و Integration محلی؛ مسیر زنده میان سه سرویس هنوز Live-Verify نشده.
+
 **موکول و نام‌دار:** `ORDER_CREATED` · `ORDER_RECEIPT_CONFIRMED` ·
 `ORDER_CANCELLED` · `ORDER_DISPUTED` · `STATEMENT_APPROVED` ·
 `PURCHASE_ORDER_ISSUED` · `GOODS_RECEIVED`.

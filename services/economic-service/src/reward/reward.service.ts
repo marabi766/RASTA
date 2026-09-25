@@ -375,6 +375,19 @@ export class RewardService {
     return level.name;
   }
 
+  /**
+   * Whether any active rule could reward this trigger for this organization.
+   *
+   * Asked before the reward consumer checks the event with the fact's owner
+   * (ADR-061 § 4). With no rule configured, which is the MVP's real state,
+   * nothing can be granted, so there is nothing to confirm, and the busiest
+   * event on the platform costs no round trip. Validity windows are left to
+   * `grantFor`, which evaluates them against the source's own instant.
+   */
+  async hasActiveRules(organizationId: string, triggerEvent: string): Promise<boolean> {
+    return (await this.candidateRules(organizationId, triggerEvent)).length > 0;
+  }
+
   private candidateRules(organizationId: string, triggerEvent: string) {
     return runUnscoped(
       'reward rules are platform-wide or organization-specific; the OR below is the scope',
