@@ -11,7 +11,8 @@
  * `schema.prisma` declares: partial unique indexes (`WHERE state = 'OPEN'`)
  * cannot be written in Prisma and exist only in migration SQL. So the check
  * replays each service's `migration.sql` files in order — CREATE TABLE,
- * PRIMARY KEY and UNIQUE constraints, CREATE/DROP/ALTER INDEX — and judges the
+ * PRIMARY KEY and UNIQUE constraints (including ADD CONSTRAINT ... USING
+ * INDEX, which adopts a prebuilt index), CREATE/DROP/ALTER INDEX — and judges the
  * final state.
  *
  * Some composite indexes legitimately lead with something else, and each is
@@ -270,6 +271,16 @@ export function replayMigrations(sqlTexts) {
       ),
       'dropConstraint',
     );
+    // ADD CONSTRAINT ... PRIMARY KEY | UNIQUE USING INDEX: the constraint adopts
+    // a prebuilt index (renaming it to the constraint's name) instead of
+    // building one — how a key is swapped without a build under lock.
+    push(
+      new RegExp(
+        String.raw`ALTER\s+TABLE\s+(?:ONLY\s+)?(?:IF\s+EXISTS\s+)?${QUALIFIED}\s+ADD\s+CONSTRAINT\s+(${IDENT})\s+(PRIMARY\s+KEY|UNIQUE)\s+USING\s+INDEX\s+(${IDENT})`,
+        'gi',
+      ),
+      'adoptIndex',
+    );
     push(
       new RegExp(
         String.raw`CREATE\s+(UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(${IDENT})\s+ON\s+(?:ONLY\s+)?${QUALIFIED}\s*(?:USING\s+\w+\s*)?\(`,
@@ -361,6 +372,18 @@ export function replayMigrations(sqlTexts) {
           unique: true,
           kind: primary ? 'primary key' : 'unique',
         });
+      } else if (kind === 'adoptIndex') {
+        const name = unquote(match[2]);
+        const adopted = unquote(match[4]);
+        const index = indexes.get(adopted);
+        if (index) {
+          indexes.delete(adopted);
+          indexes.set(name, {
+            ...index,
+            unique: true,
+            kind: /^PRIMARY/i.test(match[3]) ? 'primary key' : 'unique',
+          });
+        }
       } else if (kind === 'dropConstraint') {
         indexes.delete(unquote(match[2]));
       } else if (kind === 'createIndex') {

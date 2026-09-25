@@ -91,6 +91,22 @@ test('the fixes keep what each key refuses, and drop only exact prefixes', () =>
   ]);
 });
 
+test('a key adopted with ADD CONSTRAINT ... USING INDEX takes the prebuilt index and its columns', () => {
+  const { indexes } = replayMigrations([
+    `CREATE TABLE "t" ("organization_id" TEXT, "user_id" TEXT, CONSTRAINT "t_pkey" PRIMARY KEY ("user_id", "organization_id"));
+     CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "t_pkey_next" ON "t" ("organization_id", "user_id");`,
+    `ALTER TABLE "t" DROP CONSTRAINT "t_pkey";
+     ALTER TABLE "t" ADD CONSTRAINT "t_pkey" PRIMARY KEY USING INDEX "t_pkey_next";`,
+  ]);
+  assert.equal(indexes.has('t_pkey_next'), false);
+  assert.deepEqual(indexes.get('t_pkey'), {
+    table: 't',
+    columns: ['organization_id', 'user_id'],
+    unique: true,
+    kind: 'primary key',
+  });
+});
+
 test('refuses a composite index, unique index, primary key and unique constraint that lead elsewhere', () => {
   const { errors, checked } = check(`${TENANT_TABLE}
     CREATE INDEX "ix_a" ON "t"("user_id", "organization_id");
