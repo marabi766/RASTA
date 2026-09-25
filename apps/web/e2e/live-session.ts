@@ -103,7 +103,8 @@ async function operatorTokens(): Promise<z.infer<typeof tokenResponseSchema>> {
 export async function installLiveSession(context: BrowserContext): Promise<LiveSession> {
   const tokens = await operatorTokens();
   const claims = tokenClaimsSchema.parse(decodeJwt(tokens.access_token));
-  const expiresAt = Math.floor(Date.now() / 1000) + tokens.expires_in;
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = now + tokens.expires_in;
 
   const sealed = sealSession(
     {
@@ -114,6 +115,7 @@ export async function installLiveSession(context: BrowserContext): Promise<LiveS
       accessTokenExpiresAt: expiresAt,
       refreshToken: tokens.refresh_token,
       csrfToken: newCsrfToken(),
+      issuedAt: now,
     },
     requiredEnv('WEB_SESSION_SECRET'),
   );
