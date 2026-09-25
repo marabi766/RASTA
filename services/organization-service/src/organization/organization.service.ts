@@ -89,7 +89,7 @@ export class OrganizationService {
    * come from one snapshot. A path read here first would be stale by the time
    * a query used it if the caller's own organization moved in between.
    */
-  private async visibleRoot(): Promise<string | null> {
+  private async visibleRoot(db?: PrismaTransactionClient): Promise<string | null> {
     if (this.isPlatformOperator()) return null;
 
     const { organizationId } = getContext();
@@ -97,7 +97,7 @@ export class OrganizationService {
       throw RastaError.forbidden('This endpoint requires an organization context');
     }
 
-    const path = await this.repository.getPath(organizationId);
+    const path = await this.repository.getPath(organizationId, db);
     if (!path) {
       // The token names an organization this service has never seen. That is
       // a provisioning fault, not a client error, so it is logged rather than
@@ -111,13 +111,18 @@ export class OrganizationService {
     return organizationId;
   }
 
-  private async assertCanRead(id: string): Promise<void> {
+  /**
+   * Read access. `db` is the snapshot the read itself runs in (see
+   * `OrganizationRepository.readSnapshot`), so the check and the data are
+   * answered from the same tree.
+   */
+  private async assertCanRead(id: string, db?: PrismaTransactionClient): Promise<void> {
     if (this.isPlatformOperator()) return;
 
     const { organizationId } = getContext();
     if (organizationId === id) return;
 
-    if (!organizationId || !(await this.repository.isAncestorOf(organizationId, id))) {
+    if (!organizationId || !(await this.repository.isAncestorOf(organizationId, id, db))) {
       throw RastaError.notFound('Organization', id);
     }
   }
@@ -171,13 +176,16 @@ export class OrganizationService {
   // =========================================================================
 
   async get(id: string): Promise<OrganizationDetailView> {
-    await this.assertCanRead(id);
-
-    const organization = await this.repository.findDetailById(id);
-    if (!organization) throw RastaError.notFound('Organization', id);
-
-    const points = await this.repository.readLocationPoints(id);
-    const path = await this.repository.getPath(id);
+    const { organization, points, path } = await this.repository.readSnapshot(async (db) => {
+      await this.assertCanRead(id, db);
+      const found = await this.repository.findDetailById(id, db);
+      if (!found) throw RastaError.notFound('Organization', id);
+      return {
+        organization: found,
+        points: await this.repository.readLocationPoints(id, db),
+        path: await this.repository.getPath(id, db),
+      };
+    });
 
     return {
       ...toView(organization, path),
@@ -201,8 +209,10 @@ export class OrganizationService {
   }
 
   async children(id: string): Promise<OrganizationView[]> {
-    await this.assertCanRead(id);
-    const rows = await this.repository.findChildren(id);
+    const rows = await this.repository.readSnapshot(async (db) => {
+      await this.assertCanRead(id, db);
+      return this.repository.findChildren(id, db);
+    });
     return rows.map((row) => toView(row, null));
   }
 
@@ -218,15 +228,19 @@ export class OrganizationService {
    * operator sees the whole chain.
    */
   async ancestors(id: string): Promise<OrganizationView[]> {
-    await this.assertCanRead(id);
-    const viewer = await this.visibleRoot();
-    const rows = await this.repository.findAncestors(id, viewer);
+    const rows = await this.repository.readSnapshot(async (db) => {
+      await this.assertCanRead(id, db);
+      const viewer = await this.visibleRoot(db);
+      return this.repository.findAncestors(id, viewer, db);
+    });
     return rows.map(rawRowToView);
   }
 
   async subtree(id: string, maxDepth?: number): Promise<OrganizationView[]> {
-    await this.assertCanRead(id);
-    const rows = await this.repository.findSubtree(id, maxDepth);
+    const rows = await this.repository.readSnapshot(async (db) => {
+      await this.assertCanRead(id, db);
+      return this.repository.findSubtree(id, maxDepth, db);
+    });
     return rows.map(rawRowToView);
   }
 
@@ -610,18 +624,28 @@ export class OrganizationService {
    * default which an individual dehyari can still override.
    */
   async effectivePolicies(id: string): Promise<PolicyView[]> {
-    await this.assertCanRead(id);
+    // One instant for both ends of the period test. Two clock reads let a
+    // value that ends at T and its successor that starts at T both miss: the
+    // first read said "not yet started", the second "already ended".
+    const effectiveAt = new Date();
 
-    const ancestors = await this.repository.findAncestors(id);
-    const chain = [...ancestors.map((row) => row.id), id];
-
-    const rows = await this.repository.client.organizationPolicy.findMany({
-      where: {
-        organizationId: { in: chain },
-        effectiveFrom: { lte: new Date() },
-        OR: [{ effectiveTo: null }, { effectiveTo: { gt: new Date() } }],
-      },
-      orderBy: { effectiveFrom: 'desc' },
+    // The check, the ancestor chain and the policies in one snapshot: read
+    // separately, a move committed in between returned the new parent's
+    // inherited governance values to a caller who was only allowed the old
+    // position.
+    const { chain, rows } = await this.repository.readSnapshot(async (db) => {
+      await this.assertCanRead(id, db);
+      const ancestors = await this.repository.findAncestors(id, null, db);
+      const ids = [...ancestors.map((row) => row.id), id];
+      const policies = await db.organizationPolicy.findMany({
+        where: {
+          organizationId: { in: ids },
+          effectiveFrom: { lte: effectiveAt },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: effectiveAt } }],
+        },
+        orderBy: { effectiveFrom: 'desc' },
+      });
+      return { chain: ids, rows: policies };
     });
 
     // Nearest wins: iterate root-first so a closer organization overwrites.
@@ -699,9 +723,14 @@ export class OrganizationService {
         // value set within the same millisecond as the one in force (the
         // column holds milliseconds) starts one millisecond after it, so the
         // two periods stay ordered and non-empty.
+        // The clock again, after the locks: a request that queued behind
+        // another writer can reach this point after its own end date. The
+        // check before the transaction said "not expired" about an earlier
+        // instant.
+        const lockedAt = new Date();
         const effectiveFrom =
-          requestedFrom ?? (await this.immediateStart(tx, id, dto.key, new Date()));
-        if (effectiveTo && effectiveTo <= effectiveFrom) {
+          requestedFrom ?? (await this.immediateStart(tx, id, dto.key, lockedAt));
+        if (effectiveTo && (effectiveTo <= lockedAt || effectiveTo <= effectiveFrom)) {
           throw RastaError.businessRule(
             'A policy cannot end before it takes effect or in the past',
             {

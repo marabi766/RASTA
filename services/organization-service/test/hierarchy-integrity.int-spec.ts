@@ -1047,4 +1047,169 @@ describe('organization hierarchy integrity', () => {
       ).rejects.toMatchObject({ code: 'P2002' });
     });
   });
+
+  // =========================================================================
+  // Review round 1 on #111: reads answer from one tree
+  // =========================================================================
+
+  describe('a read checks visibility and reads its data from the same tree', () => {
+    /**
+     * root ─ tenantA ─ x ─ y
+     *      └ b0 ─ tenantB          (tenantB one level deeper than tenantA)
+     *
+     * tenantB holds an inheritable policy tenantA does not. The repository
+     * below commits a real move of x beneath tenantB right after the visibility
+     * check for x has passed — before the read that follows it. Answered from
+     * one tree, the read is the one the caller was allowed: x under tenantA.
+     */
+    const build = async () => {
+      const service = serviceWith();
+      const root = await create(service);
+      const tenantA = await create(service, root.id);
+      const b0 = await create(service, root.id);
+      const tenantB = await create(service, b0.id);
+      const x = await create(service, tenantA.id);
+      const y = await create(service, x.id);
+      const key = `sample.itest_${ulid().toLowerCase()}`;
+      await operator(() =>
+        service.setPolicy(tenantA.id, {
+          key,
+          value: 'tenant A value',
+          inheritable: true,
+          description: 'A',
+        }),
+      );
+      await operator(() =>
+        service.setPolicy(tenantB.id, {
+          key,
+          value: 'tenant B value',
+          inheritable: true,
+          description: 'B governance, not for tenant A',
+        }),
+      );
+      return { service, tenantA, tenantB, x, y, key };
+    };
+
+    /** A service whose first visibility check is followed by a committed move. */
+    const racing = (move: () => Promise<unknown>) => {
+      const repo = new OrganizationRepository(prisma);
+      const check = repo.isAncestorOf.bind(repo);
+      let fired = false;
+      repo.isAncestorOf = async (...args: Parameters<typeof check>) => {
+        const allowed = await check(...args);
+        if (!fired) {
+          fired = true;
+          await move();
+        }
+        return allowed;
+      };
+      return serviceWith(8, repo);
+    };
+
+    it('effectivePolicies: never returns the new parent inherited governance', async () => {
+      const { service, tenantA, tenantB, x, key } = await build();
+      const reader = racing(() =>
+        operator(() => service.move(x.id, { parentId: tenantB.id, reason: 'race' })),
+      );
+
+      const policies = await adminOf(tenantA.id, () => reader.effectivePolicies(x.id));
+
+      const value = policies.find((policy) => policy.key === key);
+      expect(value).toMatchObject({ value: 'tenant A value', inheritedFrom: tenantA.id });
+      expect(JSON.stringify(policies)).not.toContain('B governance');
+      // The move did commit; the read simply answered from before it.
+      expect((await row(x.id)).parentId).toBe(tenantB.id);
+    });
+
+    it('get: returns x as it was when the caller was allowed to see it', async () => {
+      const { service, tenantA, tenantB, x } = await build();
+      const reader = racing(() =>
+        operator(() => service.move(x.id, { parentId: tenantB.id, reason: 'race' })),
+      );
+
+      const view = await adminOf(tenantA.id, () => reader.get(x.id));
+
+      expect(view.parentId).toBe(tenantA.id);
+      expect(view.depth).toBe(2);
+      expect(view.path).toBe(await pathOf(tenantA.id).then((p) => `${p}.${toLabel(x.id)}`));
+    });
+
+    it('children: the child is read at the depth it had under tenant A', async () => {
+      const { service, tenantA, tenantB, x, y } = await build();
+      const reader = racing(() =>
+        operator(() => service.move(x.id, { parentId: tenantB.id, reason: 'race' })),
+      );
+
+      const rows = await adminOf(tenantA.id, () => reader.children(x.id));
+
+      expect(rows.map((r) => [r.id, r.depth])).toEqual([[y.id, 3]]);
+    });
+
+    it('subtree: every row is read at its depth under tenant A', async () => {
+      const { service, tenantA, tenantB, x, y } = await build();
+      const reader = racing(() =>
+        operator(() => service.move(x.id, { parentId: tenantB.id, reason: 'race' })),
+      );
+
+      const rows = await adminOf(tenantA.id, () => reader.subtree(x.id));
+
+      expect(rows.map((r) => [r.id, r.depth])).toEqual([
+        [x.id, 2],
+        [y.id, 3],
+      ]);
+    });
+
+    it('ancestors: the chain is the one the check was made against', async () => {
+      const { service, tenantA, tenantB, x } = await build();
+      const reader = racing(() =>
+        operator(() => service.move(x.id, { parentId: tenantB.id, reason: 'race' })),
+      );
+
+      const chain = await adminOf(tenantA.id, () => reader.ancestors(x.id));
+
+      expect(chain.map((r) => r.id)).toEqual([tenantA.id]);
+    });
+  });
+
+  describe('a dated policy that expires while it waits for the per-key lock', () => {
+    it('is refused after the lock, and nothing is written', async () => {
+      const service = serviceWith();
+      const organization = await create(service);
+      const key = `sample.itest_${ulid().toLowerCase()}`;
+      const effectiveTo = new Date(Date.now() + 1_500);
+
+      // Another writer of the same key holds the lock past that end date.
+      const holder = await holdTransaction(async (tx) => {
+        await tx.$executeRaw`
+          SELECT pg_advisory_xact_lock(hashtext(${`policy:${organization.id}`}), hashtext(${key}))
+        `;
+      });
+      const setting = track(
+        operator(() =>
+          service.setPolicy(organization.id, {
+            key,
+            value: 1,
+            inheritable: true,
+            description: 'expires while queued',
+            // Explicitly dated: the start is given, so nothing re-reads the
+            // clock for it after the lock.
+            effectiveFrom: new Date(Date.now() - 60_000).toISOString(),
+            effectiveTo: effectiveTo.toISOString(),
+          }),
+        ),
+      );
+      await whileHeld(holder, async () => {
+        await pause(2_000);
+        expect(setting.state.settled).toBe(false);
+      });
+
+      const error = await errorOf(setting.promise);
+      expect(error.internalContext).toMatchObject({ rule: 'POLICY_ALREADY_EXPIRED' });
+      expect(
+        await prisma.client.organizationPolicy.count({
+          where: { organizationId: organization.id, key },
+        }),
+      ).toBe(0);
+    });
+  });
 });

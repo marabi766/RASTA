@@ -136,6 +136,7 @@ function harness(
   const repository = {
     client: tx,
     transaction: jest.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx)),
+    readSnapshot: jest.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx)),
     enqueueEvent: jest.fn(async (_tx: unknown, input: { eventName: string; payload: unknown }) => {
       enqueued.push({ eventName: input.eventName, payload: input.payload });
       return 'evt-1';
@@ -1179,13 +1180,13 @@ describe('ancestors stop at the caller visible root', () => {
   it('passes the caller organization for a non-operator', async () => {
     const h = harness();
     await runWithContext(context({ organizationId: COUNTY }), () => h.service.ancestors(DEH1));
-    expect(h.repository.findAncestors).toHaveBeenCalledWith(DEH1, COUNTY);
+    expect(h.repository.findAncestors).toHaveBeenCalledWith(DEH1, COUNTY, h.tx);
   });
 
   it('passes null — the whole chain — for a platform operator', async () => {
     const h = harness();
     await runWithContext(unionContext(), () => h.service.ancestors(DEH1));
-    expect(h.repository.findAncestors).toHaveBeenCalledWith(DEH1, null);
+    expect(h.repository.findAncestors).toHaveBeenCalledWith(DEH1, null, h.tx);
   });
 });
 
@@ -1307,5 +1308,77 @@ describe('primary contact', () => {
     const error = await add(h, true).catch((e: unknown) => e);
 
     expect((error as RastaError).code).toBe('OPTIMISTIC_LOCK_FAILED');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1 on #111
+// ---------------------------------------------------------------------------
+
+describe('reads check visibility and read data in one snapshot', () => {
+  it.each([
+    ['get', (h: Harness) => h.service.get(DEH1)],
+    ['children', (h: Harness) => h.service.children(DEH1)],
+    ['ancestors', (h: Harness) => h.service.ancestors(DEH1)],
+    ['subtree', (h: Harness) => h.service.subtree(DEH1)],
+    ['effectivePolicies', (h: Harness) => h.service.effectivePolicies(DEH1)],
+  ])('%s: the visibility check runs inside the snapshot, on its client', async (_, read) => {
+    const h = harness();
+    h.repository.findDetailById.mockResolvedValue({
+      ...orgRow(DEH1),
+      locations: [],
+      contacts: [],
+      childCount: 0,
+    } as never);
+
+    await runWithContext(context({ organizationId: COUNTY }), () => read(h));
+
+    expect(h.repository.readSnapshot).toHaveBeenCalledTimes(1);
+    expect(h.repository.isAncestorOf).toHaveBeenCalledWith(COUNTY, DEH1, h.tx);
+  });
+});
+
+describe('effectivePolicies evaluates one instant', () => {
+  it('uses the same timestamp for both ends of the period test', async () => {
+    const h = harness();
+    await runWithContext(unionContext(), () => h.service.effectivePolicies(DEH1));
+
+    const where = h.tx.organizationPolicy.findMany.mock.calls[0]?.[0]?.where as {
+      effectiveFrom: { lte: Date };
+      OR: [unknown, { effectiveTo: { gt: Date } }];
+    };
+    expect(where.effectiveFrom.lte).toBe(where.OR[1].effectiveTo.gt);
+  });
+});
+
+describe('a dated policy that expires while waiting for its locks', () => {
+  it('is refused after the lock, and nothing is written', async () => {
+    const h = harness();
+    h.repository.findById.mockResolvedValue(orgRow(PROVINCE) as never);
+    // Valid when the request arrived; expired by the time the per-key lock
+    // was granted.
+    const effectiveTo = new Date(Date.now() + 40);
+    h.repository.lockPolicyKey.mockImplementation(
+      () => new Promise((resolve) => setTimeout(resolve, 120)),
+    );
+
+    const error = await runWithContext(unionContext(), () =>
+      h.service
+        .setPolicy(PROVINCE, {
+          key: 'approval.project.required',
+          value: true,
+          inheritable: true,
+          description: 'd',
+          effectiveFrom: new Date(Date.now() - 60_000).toISOString(),
+          effectiveTo: effectiveTo.toISOString(),
+        } as never)
+        .catch((e: unknown) => e),
+    );
+
+    expect((error as RastaError).internalContext).toMatchObject({
+      rule: 'POLICY_ALREADY_EXPIRED',
+    });
+    expect(h.tx.organizationPolicy.updateMany).not.toHaveBeenCalled();
+    expect(h.tx.organizationPolicy.create).not.toHaveBeenCalled();
   });
 });

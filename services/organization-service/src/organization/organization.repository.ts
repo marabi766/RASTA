@@ -3,6 +3,7 @@ import { allocateStreamSeqSql, buildOutboxRow, type OutboxMessageInput } from '@
 import { resolvePartitionKey } from './routing';
 import type { OrganizationEventName } from './events';
 import { PrismaService, type PrismaTransactionClient } from '../prisma/prisma.service';
+import { Prisma } from '../generated/prisma';
 import { SERVICE_NAME } from '../config/env';
 import type { ListOrganizationsQuery, NearbyQuery } from './dto';
 
@@ -33,6 +34,26 @@ export class OrganizationRepository {
 
   transaction<T>(fn: (tx: PrismaTransactionClient) => Promise<T>): Promise<T> {
     return this.prisma.transaction(fn);
+  }
+
+  /**
+   * Runs a read in one REPEATABLE READ snapshot.
+   *
+   * A read that checks visibility in one statement and reads in another sees
+   * two different trees if a move commits in between: the caller was allowed
+   * X under A, and then read X — its parent, its inherited governance values —
+   * under B. Inside one snapshot every statement sees the tree as of the first
+   * one, so the check and the data describe the same instant. Read-only, and
+   * it takes no lock: a concurrent move is neither blocked nor seen.
+   */
+  readSnapshot<T>(fn: (db: PrismaTransactionClient) => Promise<T>): Promise<T> {
+    return this.prisma.client.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+        return fn(tx);
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    );
   }
 
   async enqueueEvent(tx: PrismaTransactionClient, input: OutboxMessageInput): Promise<string> {
@@ -85,16 +106,16 @@ export class OrganizationRepository {
     return this.client.organization.findFirst({ where: { id, deletedAt: null } });
   }
 
-  async findDetailById(id: string) {
+  async findDetailById(id: string, db: PrismaTransactionClient = this.client) {
     const [organization, childCount] = await Promise.all([
-      this.client.organization.findFirst({
+      db.organization.findFirst({
         where: { id, deletedAt: null },
         include: {
           locations: { orderBy: { createdAt: 'asc' } },
           contacts: { orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }] },
         },
       }),
-      this.client.organization.count({ where: { parentId: id, deletedAt: null } }),
+      db.organization.count({ where: { parentId: id, deletedAt: null } }),
     ]);
 
     if (!organization) return null;
@@ -147,8 +168,8 @@ export class OrganizationRepository {
   }
 
   /** Direct children only. */
-  async findChildren(id: string) {
-    return this.client.organization.findMany({
+  async findChildren(id: string, db: PrismaTransactionClient = this.client) {
+    return db.organization.findMany({
       where: { parentId: id, deletedAt: null },
       orderBy: { name: 'asc' },
     });
@@ -166,8 +187,12 @@ export class OrganizationRepository {
    * chain — is for a platform operator and for internal reads such as policy
    * inheritance, which need every ancestor.
    */
-  async findAncestors(id: string, viewerOrganizationId: string | null = null) {
-    return this.client.$queryRaw<OrganizationRow[]>`
+  async findAncestors(
+    id: string,
+    viewerOrganizationId: string | null = null,
+    db: PrismaTransactionClient = this.client,
+  ) {
+    return db.$queryRaw<OrganizationRow[]>`
       SELECT o.* FROM organization o
       WHERE o.deleted_at IS NULL
         AND o.path @> (SELECT path FROM organization WHERE id = ${id})
@@ -179,16 +204,16 @@ export class OrganizationRepository {
   }
 
   /** Whole subtree, inclusive of the root. */
-  async findSubtree(id: string, maxDepth?: number) {
+  async findSubtree(id: string, maxDepth?: number, db: PrismaTransactionClient = this.client) {
     if (maxDepth === undefined) {
-      return this.client.$queryRaw<OrganizationRow[]>`
+      return db.$queryRaw<OrganizationRow[]>`
         SELECT o.* FROM organization o
         WHERE o.deleted_at IS NULL
           AND o.path <@ (SELECT path FROM organization WHERE id = ${id})
         ORDER BY o.path
       `;
     }
-    return this.client.$queryRaw<OrganizationRow[]>`
+    return db.$queryRaw<OrganizationRow[]>`
       SELECT o.* FROM organization o
       WHERE o.deleted_at IS NULL
         AND o.path <@ (SELECT path FROM organization WHERE id = ${id})
@@ -464,8 +489,9 @@ export class OrganizationRepository {
 
   async readLocationPoints(
     organizationId: string,
+    db: PrismaTransactionClient = this.client,
   ): Promise<Map<string, { latitude: number; longitude: number }>> {
-    const rows = await this.client.$queryRaw<
+    const rows = await db.$queryRaw<
       { id: string; latitude: number | null; longitude: number | null }[]
     >`
       SELECT id,
