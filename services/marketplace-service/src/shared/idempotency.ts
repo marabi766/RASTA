@@ -171,13 +171,33 @@ export class IdempotencyStore {
     successStatus: number,
     work: () => Promise<T>,
   ): Promise<T> {
+    return (await this.execute(endpoint, key, body, successStatus, work)).result;
+  }
+
+  /**
+   * {@link run}, and whether `work` actually ran in this request.
+   *
+   * A caller with a side effect **outside** `work` — an order command that
+   * signals its saga after the commit — needs to know, because a replay runs
+   * nothing: no party check, no transition check, no write. Anything the
+   * caller does next on the strength of a replayed response is done without
+   * any of those checks having run, which is how a replay once delivered a
+   * saga signal to an order the caller had no right to touch.
+   */
+  async execute<T>(
+    endpoint: string,
+    key: string,
+    body: unknown,
+    successStatus: number,
+    work: () => Promise<T>,
+  ): Promise<{ result: T; executed: boolean }> {
     const claim = await this.claim(endpoint, key, body);
-    if (claim.kind === 'REPLAY') return claim.body as T;
+    if (claim.kind === 'REPLAY') return { result: claim.body as T, executed: false };
 
     try {
       const result = await work();
       await this.complete(endpoint, key, successStatus, result);
-      return result;
+      return { result, executed: true };
     } catch (error) {
       await this.release(endpoint, key);
       throw error;
@@ -209,6 +229,26 @@ export class IdempotencyStore {
     );
     return result.count;
   }
+}
+
+/**
+ * The request identity of a route that acts on one resource.
+ *
+ * The endpoint a key is stored under is the route **template** —
+ * `POST /v1/orders/:id/cancel` — so that the replay metric's label set stays
+ * bounded. That leaves the target id to the body hash, and a route that hashed
+ * only its DTO made two different orders the same request: key K with the same
+ * body, reused on a second order, replayed the first order's response without
+ * running any check against the second. Folding the id in turns that into the
+ * documented `409 IDEMPOTENCY_KEY_REUSED` (docs/06 § 6.8).
+ *
+ * With no body it is `{ id }` exactly, which is what `confirm` already hashed —
+ * so its stored keys still match after this change. The same shape as
+ * economic-service's helper of the same name; each service keeps its own copy
+ * because services share no source (A-02).
+ */
+export function targeted(id: string, body?: unknown): { id: string; body?: unknown } {
+  return body === undefined ? { id } : { id, body };
 }
 
 /**
