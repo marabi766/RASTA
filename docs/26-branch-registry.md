@@ -123,7 +123,7 @@
 | `docs/adr-061-event-provenance`             | [#96](https://github.com/marabi766/RASTA/pull/96)   | `3115f4d`   |
 | `fix/marketplace-workflow-spec-determinism` | [#97](https://github.com/marabi766/RASTA/pull/97)   | `68d121e`   |
 | `fix/identity-spec-no-org-claims`           | [#98](https://github.com/marabi766/RASTA/pull/98)   | `a673a57`   |
-| `claude/adoring-cerf-nhq97e`                | [#101](https://github.com/marabi766/RASTA/pull/101) | `3f3c78c`   |
+| `claude/adoring-cerf-nhq97e`                | [#101](https://github.com/marabi766/RASTA/pull/101) | `8b3136b`   |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
 > است و می‌ماند. هیچ Worktreeای `main` را checkout نکرده، پس `git fetch` آن ref
@@ -205,7 +205,7 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 | Q-61        | `fix/identity-cross-tenant-provisioning` | روی `main` (`cfdb7b0`) — مرجع ساخت حساب در سازمانی جز سازمان خود. **پس از استفاده ثبت شد** — #81 بدون رزرو پیشین آن را برداشت |
 | Q-62        | `claude/upbeat-tesla-cenkph`             | رزرو — مرجع استرداد (Refund) تراکنش: چه کسی، از کدام وضعیت؛ سیاست موقت `fix/economic-refund-authority-and-idempotency`        |
 | Q-63        | `fix/identity-tenant-bound-roles`        | روی `main` (`6b9b956`) — نقش‌های سراسری؛ همراه `ADR-060`                                                                      |
-| Q-64        | `claude/adoring-cerf-nhq97e`             | روی `main` (`3f3c78c`) — چه نقشی سیاست حکمرانی (`organization_policy`) را تنظیم می‌کند                                        |
+| Q-64        | `claude/adoring-cerf-nhq97e`             | روی `main` (`8b3136b`) — چه نقشی سیاست حکمرانی (`organization_policy`) را تنظیم می‌کند                                        |
 | Q-65+       | آزاد                                     | —                                                                                                                             |
 
 > **چرا Q-44 قابل جابه‌جایی نیست:** یک ADR ادغام‌شده آن را به‌عنوان مرجع
