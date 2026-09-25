@@ -207,3 +207,56 @@ export function formatFindings(findings) {
   }
   return lines.join('\n');
 }
+
+// -----------------------------------------------------------------------------
+// The derived matrix (L7-35)
+//
+// Since images are built on pull requests too, the `containers` matrix is no
+// longer a list in the workflow: it is the output of the `container-scope`
+// job, which runs `scripts/container-scope.mjs` — every services/*/Dockerfile
+// on a push to main, the affected ones on a pull request. The guard then has
+// two things to hold: that the matrix really is that output, and that the
+// push-to-main path really asks for all of them (`--all`). What `--all`
+// returns is compared with the git-tracked Dockerfiles exactly as a written
+// list used to be.
+// -----------------------------------------------------------------------------
+
+/** The job that decides which images to build. */
+export const SCOPE_JOB = 'container-scope';
+
+/** The matrix expression that hands the scope job's output to `containers`. */
+export const DERIVED_MATRIX = 'fromJSON(needs.container-scope.outputs.services)';
+
+/** Whether the `containers` matrix is the scope job's output rather than a list. */
+export function matrixIsDerived(workflowYaml, jobName = CONTAINERS_JOB) {
+  return jobBlock(workflowYaml, jobName).some((line) => {
+    const code = stripComment(line);
+    return /^\s*service:/.test(code) && code.replace(/\s+/g, '').includes(DERIVED_MATRIX);
+  });
+}
+
+/**
+ * The services the `containers` job builds on a push to main.
+ *
+ * A written list is parsed as before. A derived matrix is resolved with
+ * `deriveAll` — the real `container-scope.mjs --all` — after checking that the
+ * scope job's push path calls it with `--all`; without that, main could build
+ * only what the last commit touched and the guard would not know.
+ */
+export function resolveMatrixServices(workflowYaml, deriveAll, jobName = CONTAINERS_JOB) {
+  if (!matrixIsDerived(workflowYaml, jobName)) {
+    return extractMatrixServices(workflowYaml, jobName);
+  }
+  const scope = jobBlock(workflowYaml, SCOPE_JOB).map(stripComment).join('\n');
+  if (!/node scripts\/container-scope\.mjs --all/.test(scope)) {
+    throw new Error(
+      `the '${jobName}' matrix is derived, but the '${SCOPE_JOB}' job never runs ` +
+        '`node scripts/container-scope.mjs --all`, so a push to main would not build every image',
+    );
+  }
+  const services = deriveAll();
+  if (!Array.isArray(services) || services.length === 0) {
+    throw new Error(`'container-scope.mjs --all' returned no services`);
+  }
+  return services;
+}

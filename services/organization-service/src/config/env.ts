@@ -35,13 +35,12 @@ export const organizationEnvSchema = baseEnvSchema
      *
      * Configuration, not code: policy rows decide who approves what, so who
      * may write them is itself an authority question the platform must not
-     * settle on its own (AGENTS.md § 1.2, ADR-023). The product documents do
-     * not answer it — `docs/16` § 16.6 gives the approval-policy screen to
-     * SYSTEM_ADMIN, while this service and its seed have always also admitted
-     * UNION_ADMIN — so it is open as `docs/24` **Q-64**. The default keeps
-     * today's behaviour as the provisional decision. SYSTEM_ADMIN is honoured
-     * regardless, as everywhere else. A role that is not a platform operator
-     * is additionally confined to its own subtree.
+     * settle on its own (AGENTS.md § 1.2, ADR-023). The project owner has
+     * settled it: `docs/24` **Q-64** is closed (#104) with SYSTEM_ADMIN and
+     * UNION_ADMIN, the default below, as the final decision. It stays
+     * configuration so a later decision needs no code change. SYSTEM_ADMIN is
+     * honoured regardless, as everywhere else. A role that is not a platform
+     * operator is additionally confined to its own subtree.
      */
     GOVERNANCE_POLICY_SETTER_ROLES: z
       .string()

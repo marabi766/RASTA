@@ -300,6 +300,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly trail: AuditTrailConsumer,
     private readonly repository: AuditRepository,
     @Inject(ENV) private readonly env: AuditEnv,
+    private readonly prisma: PrismaService,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -307,6 +308,10 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onModuleInit(): Promise<void> {
+    // First of all: nothing is consumed or served as a role that could alter
+    // or drop what this service writes.
+    await this.prisma.assertRuntimeRole();
+
     // Before either consumer starts, so every zero-seeded producer series is
     // exported before a first row could be counted, and after the environment
     // was validated, because the expected set is configuration.

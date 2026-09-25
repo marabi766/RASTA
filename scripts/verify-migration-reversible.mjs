@@ -43,7 +43,14 @@ import { resolve, join } from 'node:path';
 // What each service's schema must contain, and the SQL that checks it. Kept in
 // a module of its own so `verify-migration-reversible-lib.test.mjs` can execute
 // the same expectations this CLI runs, rather than a copy of them.
-import { EXPECTED, assertionScript } from './verify-migration-reversible-lib.mjs';
+import {
+  EXPECTED,
+  assertionScript,
+  assertSnapshotScript,
+  ledgerAssertionScript,
+  recordSnapshotScript,
+  snapshotStoreScript,
+} from './verify-migration-reversible-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
@@ -82,12 +89,49 @@ if (!baseUrl) {
   process.exit(1);
 }
 
-/** The same database, a different schema. Nothing this script does can reach the real one. */
-function scratchUrl() {
+/**
+ * The reference schema, where each migration.sql is applied on its own so the
+ * state *before* every migration can be recorded, and the schema holding
+ * those records. Both are throwaway, like the scratch schema, and derived from
+ * its name so two verifications with different --schema values never share.
+ */
+const referenceSchema = `${scratchSchema}_ref`;
+const metaSchema = `${scratchSchema}_meta`;
+
+/**
+ * Where the migrations under test are applied.
+ *
+ * Normally a throwaway schema in the service's own database. Services marked
+ * `scratchDatabase` instead get a throwaway **database**, cloned from
+ * template1 — which is where the platform's bootstrap installs postgis, ltree
+ * and pg_trgm — and are applied to its `public` schema. Their migrations use
+ * extension types (`ltree`, `geography`) unqualified, and those resolve only
+ * with `public` on the search path, which Prisma sets to the one schema it
+ * deploys into. Rewriting migrations that production has already applied to
+ * qualify them would change their checksums; a scratch database leaves them as
+ * they are.
+ */
+const inDatabase = Boolean(EXPECTED[service].scratchDatabase);
+const targetSchema = inDatabase ? 'public' : scratchSchema;
+const scratchDatabase = inDatabase
+  ? `${new URL(baseUrl).pathname.slice(1)}_${scratchSchema}`
+  : null;
+
+/** A throwaway schema (or database). Nothing this script does can reach the real one. */
+function scratchUrl(schema = targetSchema) {
   const url = new URL(baseUrl);
-  url.searchParams.set('schema', scratchSchema);
+  if (scratchDatabase) url.pathname = `/${scratchDatabase}`;
+  url.searchParams.set('schema', schema);
   return url.toString();
 }
+
+/**
+ * Prepended to anything run in the reference schema, and to every snapshot:
+ * extension types then resolve, and every catalogue rendering is taken with
+ * the same search path, so a type reads `ltree` on both sides rather than
+ * `public.ltree` on one.
+ */
+const searchPath = (schema) => `SET search_path TO "${schema}", public;\n`;
 
 // ---------------------------------------------------------------------------
 // Migration under test
@@ -146,13 +190,13 @@ function prisma(argv, { stdin, env } = {}) {
 }
 
 /** Runs SQL and returns whether it succeeded. */
-function sql(script) {
-  return prisma(['db', 'execute', '--url', scratchUrl(), '--stdin'], { stdin: script });
+function sql(script, schema = targetSchema) {
+  return prisma(['db', 'execute', '--url', scratchUrl(schema), '--stdin'], { stdin: script });
 }
 
 /** Runs SQL that must succeed, and stops the whole verification if it does not. */
-function mustRun(label, script) {
-  const result = sql(script);
+function mustRun(label, script, schema = targetSchema) {
+  const result = sql(script, schema);
   if (!result.ok) {
     fail(`${label} failed:\n${result.output}`);
   }
@@ -185,8 +229,22 @@ function fail(message) {
   console.error(`\n✗ ${message}`);
   // Best effort: leave nothing behind even on failure. A scratch schema that
   // survives a failed run makes the next run fail for a different reason.
-  sql(`DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE;`);
+  dropScratch();
   process.exit(1);
+}
+
+/** Removes everything this run created. Best effort: also called on failure. */
+function dropScratch() {
+  if (scratchDatabase) {
+    return prisma(['db', 'execute', '--url', baseUrl, '--stdin'], {
+      stdin: `DROP DATABASE IF EXISTS "${scratchDatabase}" WITH (FORCE);`,
+    });
+  }
+  return sql(
+    `DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE; ` +
+      `DROP SCHEMA IF EXISTS "${referenceSchema}" CASCADE; ` +
+      `DROP SCHEMA IF EXISTS "${metaSchema}" CASCADE;`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -198,13 +256,30 @@ const startedAt = Date.now();
 
 console.log(`Verifying migration reversibility for ${service}-service`);
 console.log(`  migrations : ${migrations.join(', ')}`);
-console.log(`  schema     : ${scratchSchema} (throwaway)`);
+console.log(
+  scratchDatabase
+    ? `  database   : ${scratchDatabase} (throwaway, from template1)`
+    : `  schema     : ${scratchSchema} (throwaway)`,
+);
 console.log('');
 
-mustRun(
-  'clean scratch schema',
-  `DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE; CREATE SCHEMA "${scratchSchema}";`,
-);
+if (scratchDatabase) {
+  // Two calls: CREATE DATABASE refuses to run inside the implicit transaction
+  // a multi-statement script gets.
+  for (const statement of [
+    `DROP DATABASE IF EXISTS "${scratchDatabase}" WITH (FORCE);`,
+    `CREATE DATABASE "${scratchDatabase}" TEMPLATE template1;`,
+  ]) {
+    const result = prisma(['db', 'execute', '--url', baseUrl, '--stdin'], { stdin: statement });
+    if (!result.ok) fail(`scratch database: ${statement} failed:\n${result.output}`);
+  }
+  console.log('  ✓ clean scratch database');
+} else {
+  mustRun(
+    'clean scratch schema',
+    `DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE; CREATE SCHEMA "${scratchSchema}";`,
+  );
+}
 
 function deploy(label) {
   const result = prisma(['migrate', 'deploy'], { env: { DATABASE_URL: scratchUrl() } });
@@ -219,9 +294,53 @@ function deploy(label) {
   console.log(`  ✓ ${label}`);
 }
 
+// --- reference states --------------------------------------------------------
+//
+// Each migration.sql applied on its own, in order, into the reference schema,
+// with the catalogue recorded after each. `before:<name>` is the state a
+// migration's down.sql must restore exactly (see `snapshotQuery`).
+mustRun(
+  'reference: clean reference and snapshot schemas',
+  `DROP SCHEMA IF EXISTS "${referenceSchema}" CASCADE; CREATE SCHEMA "${referenceSchema}";\n` +
+    snapshotStoreScript(metaSchema),
+);
+const stateBefore = (index) => (index === 0 ? 'initial' : `after:${migrations[index - 1]}`);
+mustRun(
+  'reference: record the empty schema',
+  searchPath(referenceSchema) + recordSnapshotScript(metaSchema, 'initial', referenceSchema),
+  referenceSchema,
+);
+for (const name of migrations) {
+  const forward = readFileSync(join(migrationsDir, name, 'migration.sql'), 'utf8');
+  // In a scratch database, the path Prisma's deploy has there: the extensions'
+  // `public` alongside the schema itself.
+  const applied = sql(
+    (scratchDatabase ? searchPath(referenceSchema) : '') + forward,
+    referenceSchema,
+  );
+  if (!applied.ok) fail(`reference: ${name}/migration.sql failed on its own:\n${applied.output}`);
+  const recorded = sql(
+    searchPath(referenceSchema) +
+      recordSnapshotScript(metaSchema, `after:${name}`, referenceSchema),
+    referenceSchema,
+  );
+  if (!recorded.ok)
+    fail(`reference: recording the state after ${name} failed:\n${recorded.output}`);
+}
+console.log(
+  `  ✓ reference: ${migrations.length} migration(s) applied one by one, each state recorded`,
+);
+const finalState = `after:${migrations.at(-1)}`;
+
 // --- up ---------------------------------------------------------------------
 deploy('up: prisma migrate deploy');
-mustRun('up: every expected object exists', assertionScript(expected, true, scratchSchema));
+mustRun('up: every expected object exists', assertionScript(expected, true, targetSchema));
+mustRun(
+  'up: identical to the migrations applied one by one',
+  searchPath(targetSchema) +
+    assertSnapshotScript(metaSchema, finalState, targetSchema, 'after prisma migrate deploy'),
+);
+mustRun('up: every migration in the ledger', ledgerAssertionScript(migrations, 'after up'));
 
 // --- rollback against real data ---------------------------------------------
 //
@@ -256,21 +375,64 @@ if (expected.dataRollback) {
 }
 
 // --- down -------------------------------------------------------------------
-for (const name of [...migrations].reverse()) {
-  const file = join(migrationsDir, name, 'down.sql');
-  const script = readFileSync(file, 'utf8');
+//
+// Each down.sql is held to two things before the next one runs: the schema is
+// exactly the state before its migration, and the ledger no longer lists it —
+// so a partial rollback, or one a later deploy would silently skip, fails
+// here and names the migration.
+for (let index = migrations.length - 1; index >= 0; index -= 1) {
+  const name = migrations[index];
+  const script = readFileSync(join(migrationsDir, name, 'down.sql'), 'utf8');
   const result = sql(script);
   if (!result.ok) fail(`down: ${name}/down.sql failed:\n${result.output}`);
-  console.log(`  ✓ down: ${name}/down.sql`);
+
+  const exact = sql(
+    searchPath(targetSchema) +
+      assertSnapshotScript(
+        metaSchema,
+        stateBefore(index),
+        targetSchema,
+        `down: ${name}/down.sql`,
+        expected.inexactInverse?.[name],
+      ),
+  );
+  if (!exact.ok)
+    fail(`down: ${name}/down.sql is not the exact inverse of its migration:\n${exact.output}`);
+
+  const ledger = sql(ledgerAssertionScript(migrations.slice(0, index), `down: ${name}/down.sql`));
+  if (!ledger.ok) {
+    fail(
+      `down: ${name}/down.sql left the ledger wrong, so a re-deploy would skip it:\n${ledger.output}`,
+    );
+  }
+  const allowance = expected.inexactInverse?.[name]
+    ? 'exact inverse apart from its documented allowance'
+    : 'exact inverse';
+  console.log(`  ✓ down: ${name}/down.sql — ${allowance}, ledger row removed`);
 }
-mustRun('down: every expected object is gone', assertionScript(expected, false, scratchSchema));
+mustRun('down: every expected object is gone', assertionScript(expected, false, targetSchema));
 
 // --- up again ---------------------------------------------------------------
 deploy('up again: prisma migrate deploy');
-mustRun('up again: every expected object is back', assertionScript(expected, true, scratchSchema));
+mustRun('up again: every expected object is back', assertionScript(expected, true, targetSchema));
+mustRun(
+  'up again: identical to the first up',
+  searchPath(targetSchema) +
+    assertSnapshotScript(metaSchema, finalState, targetSchema, 'after up again'),
+);
+mustRun(
+  'up again: every migration in the ledger',
+  ledgerAssertionScript(migrations, 'after up again'),
+);
 
 // --- clean up ---------------------------------------------------------------
-mustRun('drop scratch schema', `DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE;`);
+{
+  const dropped = dropScratch();
+  if (!dropped.ok) fail(`clean up failed:\n${dropped.output}`);
+  console.log(
+    `  ✓ drop scratch ${scratchDatabase ? 'database' : 'reference and snapshot schemas'}`,
+  );
+}
 
 console.log(
   `\n✓ ${service}-service migration is reversible: up → down → up in ${Date.now() - startedAt}ms`,

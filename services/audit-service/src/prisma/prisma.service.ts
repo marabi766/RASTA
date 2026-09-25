@@ -50,6 +50,47 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     this.logger.log('Database connection established');
   }
 
+  /**
+   * Refuses to serve as a role that could undo the append-only design.
+   *
+   * The runtime role holds SELECT and INSERT and owns nothing in schema
+   * `audit`; that ownership split is the barrier ADR-053 § 6 relies on. A
+   * connection string naming the migrator — or any superuser — would pass
+   * every privilege check the readiness probe makes and silently hold the
+   * power to alter or drop the evidence. So startup asks the catalogue who it
+   * is connected as, and stops if that role is a superuser or can act as the
+   * owner of schema `audit` (directly or through membership).
+   *
+   * Called by `AppModule` before either consumer starts. Not in
+   * `onModuleInit`: tests open owner connections through this class on
+   * purpose, to undo a control and to clean up.
+   */
+  async assertRuntimeRole(): Promise<void> {
+    const rows = await this.client.$queryRaw<
+      { role: string; superuser: boolean; owner: boolean }[]
+    >`
+      SELECT current_user::text AS role,
+             r.rolsuper AS superuser,
+             EXISTS (
+               SELECT 1 FROM pg_namespace n
+               WHERE n.nspname = 'audit' AND pg_has_role(current_user, n.nspowner, 'USAGE')
+             ) AS owner
+      FROM pg_roles r
+      WHERE r.rolname = current_user
+    `;
+    const row = rows[0];
+    if (!row) throw new Error('audit-service could not read the role it is connected as');
+    if (row.superuser || row.owner) {
+      throw new Error(
+        `audit-service refuses to start: it is connected as ${row.role}, which ` +
+          `${row.superuser ? 'is a superuser' : 'can act as the owner of schema audit'}. ` +
+          'Only the runtime role (DATABASE_URL_AUDIT) may run the service; the migrator ' +
+          '(DATABASE_URL_AUDIT_MIGRATOR) is for migration tooling only (ADR-053 § 6).',
+      );
+    }
+    this.logger.log(`Connected as ${row.role}: not a superuser, owns nothing in schema audit`);
+  }
+
   async onModuleDestroy(): Promise<void> {
     await this.client.$disconnect();
   }

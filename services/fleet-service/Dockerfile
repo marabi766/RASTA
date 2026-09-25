@@ -12,7 +12,7 @@
 # =============================================================================
 
 # ---- deps -------------------------------------------------------------------
-FROM node:22-alpine AS deps
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS deps
 
 # pnpm is installed directly rather than through corepack. Corepack downloads
 # the tarball at build time and crashes intermittently doing so
@@ -65,15 +65,15 @@ RUN --mount=type=cache,id=prisma-engines,target=/root/.cache/prisma \
     CI=true pnpm --filter @rasta/fleet-service deploy --prod --legacy /deploy
 
 # ---- runtime ----------------------------------------------------------------
-FROM node:22-alpine AS runtime
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS runtime
 WORKDIR /app
 
-# Apply whatever OS patches Alpine has published since this base image was
-# cut. The base tag moves slower than the security feed, so a freshly built
-# image can already carry a fixed-upstream CVE. Deliberately unpinned:
-# reproducibility of the OS layer is worth less than shipping a patched one,
-# and the Trivy scan in CI still fails the build if anything fixed remains.
-RUN apk --no-cache upgrade
+# No `apk upgrade`: the OS layer is exactly the pinned base's (L7-45). A
+# rebuild of the same commit therefore produces the same image, and a security
+# fix arrives as a deliberate digest bump that the image scan (on every pull
+# request that touches this service, and on main) makes visible. The update
+# procedure, including the stop-gap when upstream has not rebuilt yet, is in
+# docs/runbooks/base-image-update.md.
 
 # Non-root, owning nothing it does not need to write.
 RUN addgroup -S rasta && adduser -S rasta -G rasta

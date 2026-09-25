@@ -525,6 +525,28 @@ export const EXPECTED = {
    * restoring it would leave an order table that enforces nothing.
    */
   marketplace: {
+    /**
+     * The one documented exception to "down.sql is the exact inverse".
+     *
+     * `20260830103500_cancel_before_hold/down.sql` restores the narrower
+     * `ck_order_held_has_transaction` as `NOT VALID`, on purpose: by the time
+     * anyone rolls it back the table may hold cancelled-before-hold orders only
+     * the widened rule allowed, and validating would abort the rollback or
+     * force someone to delete or falsify real orders (its header explains).
+     * Same predicate, enforced on every write; only the retroactive claim
+     * differs. Exactly this difference is allowed — nothing else, and if it
+     * ever stops occurring the allowance itself fails.
+     */
+    inexactInverse: {
+      '20260830103500_cancel_before_hold': {
+        missing: [
+          `constraint order.ck_order_held_has_transaction CHECK (((status = ANY (ARRAY['PENDING'::"OrderStatus", 'FAILED'::"OrderStatus"])) OR (economic_transaction_id IS NOT NULL))) deferrable=false/false valid=true`,
+        ],
+        unexpected: [
+          `constraint order.ck_order_held_has_transaction CHECK (((status = ANY (ARRAY['PENDING'::"OrderStatus", 'FAILED'::"OrderStatus"])) OR (economic_transaction_id IS NOT NULL))) NOT VALID deferrable=false/false valid=false`,
+        ],
+      },
+    },
     tables: ['product', 'offer', 'order', 'order_line', 'fulfillment', 'order_status_history'],
     triggers: [],
     constraints: [
@@ -644,6 +666,163 @@ export const EXPECTED = {
       'ck_outbox_published_is_clean',
     ],
   },
+  /*
+   * The five services whose initial migration had no down.sql until the
+   * platform-safety pass (lane 6), so the whole-chain check could not reach
+   * any of their migrations. The lists name the tables and the hand-written
+   * invariants; the exact-inverse snapshot (see `snapshotQuery`) covers every
+   * other object without having to be listed here.
+   */
+  identity: {
+    tables: [
+      'audit_correction_command',
+      'idempotency_key',
+      'membership',
+      'organization_ref',
+      'outbox_message',
+      'outbox_stream_sequence',
+      'permission',
+      'processed_event',
+      'registration_request',
+      'role',
+      'role_permission',
+      'security_event_outbox',
+      'user',
+    ],
+    triggers: ['tg_security_event_outbox_guard'],
+    functions: ['security_event_outbox_guard'],
+    constraints: [
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_next_attempt_requires_failure',
+      'ck_outbox_published_is_clean',
+      'ck_security_event_outbox_claim_triple',
+      'ck_security_event_outbox_published_was_claimed',
+      'ck_security_event_outbox_window_bounds',
+      'ck_security_event_outbox_occurrence_count_range',
+    ],
+  },
+  organization: {
+    // ltree / geography, unqualified in its migrations: see `scratchDatabase`
+    // in verify-migration-reversible.mjs.
+    scratchDatabase: true,
+    tables: [
+      'idempotency_key',
+      'organization',
+      'organization_contact',
+      'organization_location',
+      'organization_policy',
+      'outbox_message',
+      'outbox_stream_sequence',
+      'processed_event',
+    ],
+    triggers: [],
+    constraints: [
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_next_attempt_requires_failure',
+      'ck_outbox_published_is_clean',
+      'ck_policy_effective_range',
+      'ex_policy_no_overlap',
+    ],
+  },
+  asset: {
+    // ltree / geography, unqualified in its migrations: see `scratchDatabase`
+    // in verify-migration-reversible.mjs.
+    scratchDatabase: true,
+    tables: [
+      'asset',
+      'asset_document_ref',
+      'asset_location',
+      'asset_timeline_entry',
+      'asset_transfer',
+      'idempotency_key',
+      'insurance_claim',
+      'insurance_policy',
+      'organization_ref',
+      'outbox_message',
+      'outbox_stream_sequence',
+      'processed_event',
+      'technical_inspection',
+    ],
+    triggers: [],
+    constraints: [
+      'ck_claim_decided_iff_decision_recorded',
+      'ck_claim_rejected_has_no_approved_amount',
+      'ck_claim_settled_iff_settlement_recorded',
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_next_attempt_requires_failure',
+      'ck_outbox_published_is_clean',
+    ],
+  },
+  fleet: {
+    tables: [
+      'asset_ref',
+      'assignment',
+      'availability_window',
+      'driver',
+      'outbox_message',
+      'outbox_stream_sequence',
+      'processed_event',
+      'usage_record',
+    ],
+    triggers: [],
+    constraints: [
+      'ck_assignment_period',
+      'ck_availability_period',
+      'ck_driver_status_reason',
+      'ck_usage_has_measure',
+      'ck_usage_non_negative',
+      'ck_usage_period',
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_next_attempt_requires_failure',
+      'ck_outbox_published_is_clean',
+    ],
+  },
+  maintenance: {
+    tables: [
+      'asset_ref',
+      'asset_usage_meter',
+      'labor_entry',
+      'maintenance_cost',
+      'maintenance_request',
+      'maintenance_schedule',
+      'outbox_message',
+      'outbox_stream_sequence',
+      'part_usage',
+      'processed_event',
+      'repair_order',
+    ],
+    triggers: [],
+    constraints: [
+      'ck_cost_provenance',
+      'ck_labor_entry_amounts',
+      'ck_part_usage_amounts',
+      'ck_repair_order_cancellation',
+      'ck_repair_order_period',
+      'ck_repair_order_totals',
+      'ck_request_downtime',
+      'ck_request_period',
+      'ck_request_severity_matches_type',
+      'ck_request_terminal_attribution',
+      'ck_request_total_non_negative',
+      'ck_schedule_anchors_non_negative',
+      'ck_schedule_has_interval',
+      'ck_schedule_intervals_positive',
+      'ck_usage_meter_non_negative',
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_next_attempt_requires_failure',
+      'ck_outbox_published_is_clean',
+    ],
+  },
 };
 
 /**
@@ -749,4 +928,262 @@ export function assertionScript(expected, present, schema) {
   ].join('\n');
 
   return `DO $$\nBEGIN\n${checks}\nEND\n$$;`;
+}
+
+// -----------------------------------------------------------------------------
+// Exact inverse
+//
+// `assertionScript` checks that *named* objects exist or do not. That catches a
+// down script that forgot a table, but not one that restored an object with a
+// different definition, restored a weaker CHECK under the same name, or left
+// its `_prisma_migrations` row behind so a later `migrate deploy` silently
+// skipped it — which is exactly how supplier's blank-text hardening could
+// "pass" while its rollback was incomplete: after the whole-chain reversal,
+// its ledger row survived, the re-deploy applied only the initial migration,
+// and every constraint was back under its old name with the old predicate.
+//
+// So each migration's down.sql is also held to the state *before* that
+// migration, compared as a whole: a catalogue snapshot of the schema — every
+// relation, column, constraint, index, trigger, function, enum, domain,
+// sequence, view, policy, rule and comment, each rendered by PostgreSQL's own
+// `pg_get_*def` — taken from a reference schema built by applying each
+// migration.sql in turn.
+// -----------------------------------------------------------------------------
+
+/** A schema name safe to interpolate into SQL. */
+export function assertSchemaName(schema) {
+  if (!/^[a-z_][a-z0-9_]*$/.test(schema)) {
+    throw new Error(`Refusing schema name ${JSON.stringify(schema)}: lowercase identifiers only.`);
+  }
+  return schema;
+}
+
+/**
+ * One row per catalogue object in `schema`, each a single line of text with
+ * the schema's own name removed, so two schemas holding the same objects
+ * produce identical rows. Prisma's `_prisma_migrations` table is excluded: its
+ * rows are asserted separately, and its structure belongs to Prisma.
+ * Extension members are excluded too — they are the extension's, not a
+ * migration's.
+ */
+export function snapshotQuery(schema) {
+  assertSchemaName(schema);
+  const strip = (expression) =>
+    `replace(replace(${expression}, '"${schema}".', ''), '${schema}.', '')`;
+  return `
+    WITH ns AS (SELECT oid FROM pg_namespace WHERE nspname = '${schema}'),
+    ext AS (SELECT objid FROM pg_depend WHERE deptype = 'e'),
+    ledger AS (
+      SELECT c.oid FROM pg_class c
+      WHERE c.relnamespace = (SELECT oid FROM ns) AND c.relname = '_prisma_migrations'
+    ),
+    owned AS (
+      -- Relations a migration created: not the ledger, and not an extension's
+      -- (postgis puts spatial_ref_sys, geometry_columns and its composite
+      -- types into public). A composite type's membership is recorded on its
+      -- pg_type row, not on the relation.
+      SELECT c.* FROM pg_class c
+      WHERE c.relnamespace = (SELECT oid FROM ns)
+        AND c.relkind NOT IN ('i', 'I')
+        AND c.oid NOT IN (SELECT objid FROM ext)
+        AND c.reltype NOT IN (SELECT objid FROM ext)
+        AND c.oid NOT IN (SELECT oid FROM ledger)
+    ),
+    rel AS (
+      -- Plus the indexes on those relations — and only those, so an
+      -- extension's index or the ledger's primary key never appears.
+      SELECT * FROM owned
+      UNION ALL
+      SELECT c.* FROM pg_class c
+      JOIN pg_index i ON i.indexrelid = c.oid
+      WHERE i.indrelid IN (SELECT oid FROM owned)
+    ),
+    items AS (
+      SELECT 'relation ' || r.relname || ' kind=' || r.relkind::text
+             || ' persistence=' || r.relpersistence::text
+             || ' rls=' || r.relrowsecurity || '/' || r.relforcerowsecurity
+             || ' acl=' || coalesce(r.relacl::text, '-')
+             || ' partkey=' || coalesce(pg_get_partkeydef(r.oid), '-')
+             || ' bound=' || coalesce(pg_get_expr(r.relpartbound, r.oid), '-') AS item
+      FROM rel r WHERE r.relkind IN ('r', 'p', 'v', 'm', 'S', 'f', 'c')
+      UNION ALL
+      SELECT 'column ' || r.relname || '.' || a.attname
+             || ' ' || format_type(a.atttypid, a.atttypmod)
+             || ' notnull=' || a.attnotnull
+             || ' default=' || coalesce(pg_get_expr(d.adbin, d.adrelid), '-')
+             || ' identity=' || a.attidentity::text || ' generated=' || a.attgenerated::text
+             || ' collation=' || coalesce(co.collname, '-')
+      FROM rel r
+      JOIN pg_attribute a ON a.attrelid = r.oid AND a.attnum > 0 AND NOT a.attisdropped
+      LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+      LEFT JOIN pg_collation co ON co.oid = a.attcollation AND a.attcollation <> 0
+        AND co.collname <> 'default'
+      WHERE r.relkind IN ('r', 'p', 'v', 'm', 'f', 'c')
+      UNION ALL
+      SELECT 'constraint ' || coalesce(r.relname, t.typname) || '.' || con.conname
+             || ' ' || pg_get_constraintdef(con.oid)
+             || ' deferrable=' || con.condeferrable || '/' || con.condeferred
+             || ' valid=' || con.convalidated
+      FROM pg_constraint con
+      LEFT JOIN pg_class r ON r.oid = con.conrelid
+      LEFT JOIN pg_type t ON t.oid = con.contypid
+      WHERE con.connamespace = (SELECT oid FROM ns)
+        AND (con.conrelid = 0 OR con.conrelid IN (SELECT oid FROM rel))
+      UNION ALL
+      SELECT 'index ' || r.relname || ' ' || pg_get_indexdef(r.oid)
+      FROM rel r WHERE r.relkind IN ('i', 'I')
+      UNION ALL
+      SELECT 'trigger ' || r.relname || '.' || tg.tgname || ' ' || pg_get_triggerdef(tg.oid)
+             || ' enabled=' || tg.tgenabled::text
+      FROM pg_trigger tg JOIN rel r ON r.oid = tg.tgrelid
+      WHERE NOT tg.tgisinternal
+      UNION ALL
+      SELECT 'function ' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+             || ' kind=' || p.prokind::text
+             || ' ' || CASE WHEN p.prokind IN ('f', 'p') THEN pg_get_functiondef(p.oid) ELSE '' END
+      FROM pg_proc p
+      WHERE p.pronamespace = (SELECT oid FROM ns) AND p.oid NOT IN (SELECT objid FROM ext)
+      UNION ALL
+      SELECT 'enum ' || t.typname || ' '
+             || (SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
+                 FROM pg_enum e WHERE e.enumtypid = t.oid)
+      FROM pg_type t
+      WHERE t.typnamespace = (SELECT oid FROM ns) AND t.typtype = 'e'
+        AND t.oid NOT IN (SELECT objid FROM ext)
+      UNION ALL
+      SELECT 'domain ' || t.typname || ' ' || format_type(t.typbasetype, t.typtypmod)
+             || ' notnull=' || t.typnotnull || ' default=' || coalesce(t.typdefault, '-')
+      FROM pg_type t
+      WHERE t.typnamespace = (SELECT oid FROM ns) AND t.typtype = 'd'
+        AND t.oid NOT IN (SELECT objid FROM ext)
+      UNION ALL
+      SELECT 'sequence ' || r.relname || ' ' || format_type(s.seqtypid, NULL)
+             || ' start=' || s.seqstart || ' increment=' || s.seqincrement
+             || ' min=' || s.seqmin || ' max=' || s.seqmax
+             || ' cache=' || s.seqcache || ' cycle=' || s.seqcycle
+      FROM pg_sequence s JOIN rel r ON r.oid = s.seqrelid
+      UNION ALL
+      SELECT 'sequence-owner ' || s.relname || ' ' || t.relname || '.' || a.attname
+      FROM pg_depend dep
+      JOIN rel s ON s.oid = dep.objid AND s.relkind = 'S'
+      JOIN pg_class t ON t.oid = dep.refobjid
+      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = dep.refobjsubid
+      WHERE dep.classid = 'pg_class'::regclass AND dep.deptype IN ('a', 'i')
+      UNION ALL
+      SELECT 'view ' || r.relname || ' ' || pg_get_viewdef(r.oid)
+      FROM rel r WHERE r.relkind IN ('v', 'm')
+      UNION ALL
+      SELECT 'policy ' || pol.tablename || '.' || pol.policyname || ' ' || pol.permissive
+             || ' ' || pol.roles::text || ' ' || pol.cmd
+             || ' using=' || coalesce(pol.qual, '-') || ' check=' || coalesce(pol.with_check, '-')
+      FROM pg_policies pol
+      JOIN owned r ON r.relname = pol.tablename
+      WHERE pol.schemaname = '${schema}'
+      UNION ALL
+      SELECT 'rule ' || ru.tablename || '.' || ru.rulename || ' ' || ru.definition
+      FROM pg_rules ru
+      JOIN owned r ON r.relname = ru.tablename
+      WHERE ru.schemaname = '${schema}'
+      UNION ALL
+      SELECT 'comment ' || r.relname || coalesce('.' || a.attname, '') || ' ' || dsc.description
+      FROM pg_description dsc
+      JOIN rel r ON r.oid = dsc.objoid AND dsc.classoid = 'pg_class'::regclass
+      LEFT JOIN pg_attribute a ON a.attrelid = r.oid AND a.attnum = dsc.objsubid AND dsc.objsubid > 0
+    )
+    SELECT ${strip('item')} AS item FROM items`;
+}
+
+/** The table snapshots are recorded into, in a schema of the verifier's own. */
+export function snapshotStoreScript(metaSchema) {
+  assertSchemaName(metaSchema);
+  return `DROP SCHEMA IF EXISTS "${metaSchema}" CASCADE;
+CREATE SCHEMA "${metaSchema}";
+CREATE TABLE "${metaSchema}".snapshot (label text NOT NULL, item text NOT NULL);`;
+}
+
+/** Records `schema`'s current state under `label`. */
+export function recordSnapshotScript(metaSchema, label, schema) {
+  assertSchemaName(metaSchema);
+  if (!/^[A-Za-z0-9_:.-]+$/.test(label)) throw new Error(`Unsafe snapshot label ${label}`);
+  return `INSERT INTO "${metaSchema}".snapshot (label, item)
+SELECT '${label}', item FROM (${snapshotQuery(schema)}) s;`;
+}
+
+/**
+ * Raises unless `schema` is exactly the state recorded under `label`, listing
+ * what is missing and what is extra — as PostgreSQL renders each — so a
+ * failure says which object a down script got wrong, not just that one did.
+ */
+export function assertSnapshotScript(
+  metaSchema,
+  label,
+  schema,
+  context,
+  allowance = { missing: [], unexpected: [] },
+) {
+  assertSchemaName(metaSchema);
+  if (!/^[A-Za-z0-9_:.-]+$/.test(label)) throw new Error(`Unsafe snapshot label ${label}`);
+  const safeContext = context.replaceAll("'", "''");
+  const literalArray = (items) =>
+    items.length === 0
+      ? 'ARRAY[]::text[]'
+      : `ARRAY[${items.map((item) => `'${item.replaceAll("'", "''")}'`).join(', ')}]::text[]`;
+  const allowedMissing = literalArray(allowance.missing ?? []);
+  const allowedUnexpected = literalArray(allowance.unexpected ?? []);
+  const live = snapshotQuery(schema);
+  const recorded = `SELECT item FROM "${metaSchema}".snapshot WHERE label = '${label}'`;
+  return `DO $exact$
+DECLARE
+  missing text[];
+  unexpected text[];
+BEGIN
+  IF NOT EXISTS (${recorded}) AND EXISTS (${live}) THEN
+    RAISE EXCEPTION '${safeContext}: no reference snapshot "${label}", and the schema is not empty';
+  END IF;
+  missing := ARRAY(${recorded} EXCEPT ALL SELECT item FROM (${live}) l);
+  unexpected := ARRAY(SELECT item FROM (${live}) l EXCEPT ALL ${recorded});
+
+  -- A documented allowance must match exactly: its items must really be part
+  -- of the difference, or it has gone stale — which is itself a failure, so
+  -- the exception cannot outlive the reason for it.
+  IF NOT (${allowedMissing} <@ missing) OR NOT (${allowedUnexpected} <@ unexpected) THEN
+    RAISE EXCEPTION E'${safeContext}: a documented inexact-inverse allowance no longer matches\\n expected but missing:\\n  %\\n present but not expected:\\n  %',
+      array_to_string(missing, E'\\n  '), array_to_string(unexpected, E'\\n  ');
+  END IF;
+  missing := ARRAY(SELECT unnest(missing) EXCEPT ALL SELECT unnest(${allowedMissing}));
+  unexpected := ARRAY(SELECT unnest(unexpected) EXCEPT ALL SELECT unnest(${allowedUnexpected}));
+
+  IF cardinality(missing) > 0 OR cardinality(unexpected) > 0 THEN
+    RAISE EXCEPTION E'${safeContext}: not the exact expected schema\\n expected but missing:\\n  %\\n present but not expected:\\n  %',
+      coalesce(nullif(array_to_string(ARRAY(SELECT unnest(missing) ORDER BY 1), E'\\n  '), ''), '(none)'),
+      coalesce(nullif(array_to_string(ARRAY(SELECT unnest(unexpected) ORDER BY 1), E'\\n  '), ''), '(none)');
+  END IF;
+END
+$exact$;`;
+}
+
+/**
+ * Raises unless the ledger holds exactly `applied` — every one finished and
+ * none rolled back. After a down script, that is every earlier migration and
+ * not this one; after a re-deploy, all of them.
+ */
+export function ledgerAssertionScript(applied, context) {
+  const names = applied.map((name) => {
+    if (!/^[A-Za-z0-9_]+$/.test(name)) throw new Error(`Unsafe migration name ${name}`);
+    return `'${name}'`;
+  });
+  const expected = names.length > 0 ? `ARRAY[${names.join(', ')}]::text[]` : `ARRAY[]::text[]`;
+  const safeContext = context.replaceAll("'", "''");
+  return `DO $ledger$
+DECLARE
+  actual text[];
+BEGIN
+  SELECT coalesce(array_agg(migration_name ORDER BY migration_name), ARRAY[]::text[]) INTO actual
+  FROM "_prisma_migrations"
+  WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL;
+  IF actual IS DISTINCT FROM (SELECT coalesce(array_agg(x ORDER BY x), ARRAY[]::text[]) FROM unnest(${expected}) x) THEN
+    RAISE EXCEPTION E'${safeContext}: _prisma_migrations holds %, expected %', actual, ${expected};
+  END IF;
+END
+$ledger$;`;
 }

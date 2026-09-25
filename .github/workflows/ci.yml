@@ -77,6 +77,46 @@ jobs:
           pnpm run test:local-postgres-config
           pnpm run check:local-postgres-config
 
+      - name: Compose ports bound to loopback
+        # L7-38: the dev stack runs Postgres, Redis, Kafka, MinIO and the rest
+        # with development credentials or none. Every published port must bind
+        # ${COMPOSE_BIND_ADDRESS:-127.0.0.1} (or 127.0.0.1), never 0.0.0.0.
+        # Static; the checker's tests run first.
+        run: |
+          pnpm run test:compose-ports
+          pnpm run check:compose-ports
+
+      - name: Role passwords are distinct and checked before any role changes
+        # L7-33: the bootstrap and `pnpm db:rotate-role-passwords` refuse two
+        # roles (or a role and the superuser) with one password, and the old
+        # shared variable, before the first psql call; `pnpm infra:up` warns and
+        # refuses the same on the host. Runs both bash scripts against a stub
+        # psql that records every call.
+        run: pnpm run test:infra-preflight
+
+      - name: Image scope rule
+        # The rule that decides which images a pull request builds and scans
+        # (L7-35). A wrong rule would quietly skip a changed image.
+        run: pnpm run test:container-scope
+
+      - name: Base images pinned by digest
+        # L7-45: every service Dockerfile builds on one digest-pinned base and
+        # runs no bare `apk upgrade`, so a rebuild of a commit is the same
+        # image. Update procedure: docs/runbooks/base-image-update.md.
+        run: |
+          pnpm run test:dockerfile-pins
+          pnpm run check:dockerfile-pins
+
+      - name: Tenant-leading composite indexes
+        # L7-44 / ADR-011: every composite index on a tenant table in
+        # supplier, notification, document and audit leads with
+        # organization_id, or is exempted by name with its reason. Replays the
+        # migrations, so partial indexes that exist only in SQL are judged too.
+        # Static; the checker's tests run first.
+        run: |
+          pnpm run test:tenant-index-order
+          pnpm run check:tenant-index-order
+
       - name: Development Keycloak realm gate
         # L1-05: rasta-realm.json seeds a SYSTEM_ADMIN with a committed password
         # and enables the password grant. Its `enabled` is a placeholder only
@@ -352,7 +392,6 @@ jobs:
       - name: Provision databases, roles and extensions
         env:
           PGPASSWORD: rasta_ci_password
-          POSTGRES_SERVICE_PASSWORD: rasta_ci_service_password
         run: |
           export PGHOST=localhost PGPORT=5432 POSTGRES_USER=rasta
           bash infrastructure/docker/postgres/00-init-databases.sh
@@ -382,18 +421,23 @@ jobs:
           pnpm --filter @rasta/identity-service run db:migrate
           pnpm --filter @rasta/fleet-service run db:migrate
         env:
-          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
-          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
 
       - name: Seed the live user, asset reference and assignment
         # operator.one is the same platform user in identity, Keycloak and
         # fleet, and holds AST-SEED-0001 through ASG-SEED-0001.
         run: |
-          pnpm --filter @rasta/identity-service run db:seed
-          pnpm --filter @rasta/fleet-service run db:seed
+          # Through turbo, not `pnpm --filter … run db:seed`: the seed imports
+          # @rasta/config, which is not built yet at this point in the job, and
+          # turbo's db:seed builds it first (dependsOn ^build, db:generate).
+          pnpm exec turbo run db:seed --filter=@rasta/identity-service --filter=@rasta/fleet-service
         env:
-          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
-          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
+          # Demo seeds refuse to run without both (packages/config seed-guard).
+          NODE_ENV: test
+          RASTA_ALLOW_DEMO_SEED: 'true'
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
 
       - name: Build portal and live-path services
         # Build the exact deployable artifacts this job starts, plus their
@@ -453,12 +497,12 @@ jobs:
 
           ( cd services/identity-service && \
             PORT=3101 SERVICE_NAME=identity-service \
-            DATABASE_URL=postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public \
+            DATABASE_URL=postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public \
             node dist/main.js > /tmp/rasta-web-e2e-logs/identity.log 2>&1 & )
 
           ( cd services/fleet-service && \
             PORT=3104 SERVICE_NAME=fleet-service \
-            DATABASE_URL=postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public \
+            DATABASE_URL=postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public \
             node dist/main.js > /tmp/rasta-web-e2e-logs/fleet.log 2>&1 & )
 
           ( cd services/api-gateway && \
@@ -645,7 +689,6 @@ jobs:
         env:
           PGPASSWORD: rasta_ci_password
           POSTGRES_USER: rasta
-          POSTGRES_SERVICE_PASSWORD: rasta_ci_service_password
         run: |
           # The same script the local stack uses, so CI and a developer
           # laptop provision identically. Divergence here is how "works on my
@@ -875,18 +918,18 @@ jobs:
         # has happened. For `notification` in those two steps it has not.
         run: pnpm run db:migrate
         env:
-          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
-          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
-          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
-          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
-          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
-          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
-          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
-          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
-          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
-          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
-          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
-          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
       - name: Integration tests
         # Two phases (`scripts/run-test-phases.mjs`): every package's
@@ -900,18 +943,18 @@ jobs:
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
-          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
-          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
-          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
-          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
-          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
-          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
-          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
-          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
-          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
-          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
-          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
-          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
@@ -950,7 +993,7 @@ jobs:
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
-          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
 
       - name: Marketplace coverage gate
         # `docs/14` § 14.2 puts marketplace-service in the 75% band, and until
@@ -967,7 +1010,7 @@ jobs:
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
-          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
 
       - name: Document coverage gate
         # `docs/14` § 14.2 puts document-service in the 75% band. The number
@@ -983,7 +1026,7 @@ jobs:
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
-          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
@@ -1019,7 +1062,7 @@ jobs:
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
-          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
 
       - name: Audit coverage gate
         # `docs/14` § 14.2 puts audit-service in the 75% band, unchanged by
@@ -1032,11 +1075,11 @@ jobs:
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
-          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           # The append-only suites need the owner connection to disable one
           # control while testing the other, and to clean up rows the runtime
           # role genuinely cannot delete.
-          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
       - name: Notification coverage gate
         # `docs/14` § 14.2 puts notification-service in the 75% band, gated from
@@ -1049,7 +1092,7 @@ jobs:
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
-          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
 
       - name: Test independence (F-25)
         # Runs every test in maintenance's event-flow suite on its own and
@@ -1076,7 +1119,7 @@ jobs:
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
-          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
 
       - name: Tenant isolation and authorization tests
         # Called out separately from the rest of the suite so a failure names
@@ -1115,18 +1158,18 @@ jobs:
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
-          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
-          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
-          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
-          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
-          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
-          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
-          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
-          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
-          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
-          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
-          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
-          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
@@ -1157,38 +1200,55 @@ jobs:
         # own job because this is where a migrated database already exists.
         run: pnpm run test:migration
         env:
-          # All nine, not only the six the whole-chain checks cover. ADR-050
-          # adds its claim columns to every service-owned database, and
-          # `verify-outbox-claim-migration.mjs --in-place` reverses that one
-          # migration on each of them — so a missing url here is a database
-          # whose rollback is never exercised, which is the failure this step
-          # exists to prevent.
+          # Every service with migrations is now covered by the whole-chain
+          # check. The five whose initial migration once had no down.sql
+          # (identity, organization, asset, fleet, maintenance) were beyond it
+          # until the platform-safety pass; each is now verified up → down → up
+          # like the rest, and `scripts/verify-migration-reversible-lib.test.mjs`
+          # fails if a service with migrations is missing from this chain.
           #
-          # supplier is the exception that proves it: it folds ADR-050 and B1
-          # into its initial migration, so the by-name verifier cannot reach it
-          # and `verify-migration-reversible.mjs supplier` covers it instead —
-          # which is why that command is now in `test:migration` rather than
-          # only being available to run by hand.
+          # The whole-chain check proves each down.sql an *exact* inverse: after
+          # every down script the schema must match, object for object, the
+          # state recorded just before that migration (built by applying each
+          # migration.sql in turn), and the ledger must no longer list it. The
+          # one documented allowance is marketplace's NOT VALID rollback.
           #
-          # identity is the mirror of that exception: its *initial* migration
-          # has no down.sql, so the whole-chain verifier cannot reach any of
-          # its migrations, and each one it owns needs a verifier addressed to
-          # it by name. Two are registered — `security_event_outbox` (AUD-004
-          # C1/C2) and `audit_correction_command` (AUD-003's correction half).
-          # A third identity migration would need a third entry; nothing here
-          # discovers it.
-          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
-          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
-          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
-          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
-          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
-          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
-          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
-          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
-          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
-          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_ci_service_password@localhost:5432/rasta_notification?schema=public
-          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
-          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          # organization and asset run in a throwaway database cloned from
+          # template1 rather than a schema, because their migrations use ltree
+          # and geography unqualified; the service roles hold CREATEDB for this.
+          #
+          # The by-name verifiers still run: ADR-050's claim migration on every
+          # service database (`--in-place`), and identity's security-event and
+          # audit-correction tables, which check behaviour the catalogue
+          # comparison does not (constraints refusing rows, triggers firing).
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
+
+      - name: Demo seeds refuse outside development and test
+        # Every service's prisma/seed.ts upserts fixed ids with demo values; run
+        # with production credentials it would overwrite real tenants. Each seed
+        # must refuse NODE_ENV=production (even with the opt-in) and a missing
+        # RASTA_ALLOW_DEMO_SEED, exit non-zero, and leave a checksum of every row
+        # of its database unchanged. No seed is allowed to write here.
+        run: pnpm run test:seed-guard:db
+        env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
 
       - name: Outbox stream-sequence protocol (ADR-051 B3)
         # The producer-side allocation protocol: strictly increasing sequences
@@ -1203,15 +1263,15 @@ jobs:
         # green one, which is the failure `pnpm test:e2e` used to have.
         run: pnpm run test:outbox-b3
         env:
-          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
-          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_ci_service_password@localhost:5432/rasta_organization?schema=public
-          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_ci_service_password@localhost:5432/rasta_asset?schema=public
-          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_ci_service_password@localhost:5432/rasta_fleet?schema=public
-          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_ci_service_password@localhost:5432/rasta_maintenance?schema=public
-          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
-          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
-          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
-          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
 
   # ---------------------------------------------------------------------------
   # End-to-end. The economic critical path through the whole stack.
@@ -1332,7 +1392,6 @@ jobs:
       - name: Provision databases, roles and extensions
         env:
           PGPASSWORD: rasta_ci_password
-          POSTGRES_SERVICE_PASSWORD: rasta_ci_service_password
         run: |
           export PGHOST=localhost PGPORT=5432 POSTGRES_USER=rasta
           bash infrastructure/docker/postgres/00-init-databases.sh
@@ -1374,16 +1433,16 @@ jobs:
           pnpm --filter @rasta/document-service run db:migrate
           pnpm --filter @rasta/audit-service run db:migrate
         env:
-          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
-          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
-          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public
-          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public
-          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_ci_service_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
           # The audit migration runs as the schema owner, never as the runtime
           # role. ADR-053 § 6: a privilege the runtime role could hand back to
           # itself is not a barrier, so `rasta_audit` owns nothing it writes to.
-          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
-          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
       - name: Seed identity-service
         # AUD-004 Phase C1's refusal scenario needs `dehyari.admin` to have a
@@ -1393,9 +1452,14 @@ jobs:
         # Keycloak realm import above already carries the matching
         # `rasta_user_id` attributes; this is the other half of the same seed
         # (`services/identity-service/prisma/seed.ts`).
-        run: pnpm --filter @rasta/identity-service run db:seed
+        # Through turbo so @rasta/config is built before the seed imports it;
+        # this step runs before the job's own build (see turbo.json db:seed).
+        run: pnpm exec turbo run db:seed --filter=@rasta/identity-service
         env:
-          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public
+          # Demo seeds refuse to run without both (packages/config seed-guard).
+          NODE_ENV: test
+          RASTA_ALLOW_DEMO_SEED: 'true'
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
 
       - name: Build
         run: pnpm run build
@@ -1531,7 +1595,7 @@ jobs:
         # their logs must survive the job for a failure to be diagnosable.
         env:
           NODE_ENV: test
-          DATABASE_URL: postgresql://rasta_economic:rasta_ci_service_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
           KAFKA_BROKERS: localhost:9092
           REDIS_URL: redis://localhost:6379
           OIDC_ISSUER_URL: http://localhost:8080/realms/rasta
@@ -1610,7 +1674,7 @@ jobs:
 
           ( cd services/identity-service && \
             PORT=3101 SERVICE_NAME=identity-service \
-            DATABASE_URL=postgresql://rasta_identity:rasta_ci_service_password@localhost:5432/rasta_identity?schema=public \
+            DATABASE_URL=postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public \
             node dist/main.js > /tmp/rasta-logs/identity.log 2>&1 & )
 
           ( cd services/economic-service && \
@@ -1619,19 +1683,19 @@ jobs:
 
           ( cd services/marketplace-service && \
             PORT=3106 SERVICE_NAME=marketplace-service \
-            DATABASE_URL=postgresql://rasta_marketplace:rasta_ci_service_password@localhost:5432/rasta_marketplace?schema=public \
+            DATABASE_URL=postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public \
             node dist/main.js > /tmp/rasta-logs/marketplace.log 2>&1 & )
 
           ( cd services/document-service && \
             PORT=3114 SERVICE_NAME=document-service \
-            DATABASE_URL=postgresql://rasta_document:rasta_ci_service_password@localhost:5432/rasta_document?schema=public \
+            DATABASE_URL=postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public \
             node dist/main.js > /tmp/rasta-logs/document.log 2>&1 & )
 
           # The runtime role, never the migrator: audit-service must not be able
           # to alter or drop what it writes (ADR-053 § 6).
           ( cd services/audit-service && \
             PORT=3115 SERVICE_NAME=audit-service \
-            DATABASE_URL=postgresql://rasta_audit:rasta_ci_service_password@localhost:5432/rasta_audit?schema=audit \
+            DATABASE_URL_AUDIT=postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit \
             node dist/main.js > /tmp/rasta-logs/audit.log 2>&1 & )
 
           ( cd services/api-gateway && \
@@ -1760,7 +1824,8 @@ jobs:
         # The same severity and the same `exit-code: 1` as every Rasta image
         # below — the threshold is not relaxed because the image is somebody
         # else's. When it fires, the fix is to bump the pinned digest, which is
-        # a reviewable edit rather than a silent drift.
+        # a reviewable edit rather than a silent drift. Like that gate, it
+        # rejects fixable HIGH/CRITICAL only (`ignore-unfixed`).
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: rasta/clamav-pinned:ci
@@ -1807,39 +1872,55 @@ jobs:
   # Container build and image scan. Only on main, because it is the slowest
   # stage and a PR has already been gated by everything above.
   # ---------------------------------------------------------------------------
+  container-scope:
+    name: Images to build and scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      services: ${{ steps.scope.outputs.services }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The pull request's base must be present to diff against.
+          fetch-depth: 0
+
+      - name: Decide which images this change affects
+        id: scope
+        # L7-35: images were built and scanned only after merge, so a broken
+        # or vulnerable image was found on main. A pull request now builds the
+        # images it can affect (scripts/container-scope-lib.mjs explains the
+        # rule); a push to main still builds all of them.
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            services="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" \
+              | node scripts/container-scope.mjs)"
+          else
+            services="$(node scripts/container-scope.mjs --all)"
+          fi
+          echo "Images to build: ${services}"
+          echo "services=${services}" >> "$GITHUB_OUTPUT"
+
   containers:
     name: Build and scan images
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # E2E joins the list: main must stay deployable, and an image built from a
     # commit whose critical financial path was never exercised is not something
-    # to publish (AGENTS.md § 6, § 7).
-    needs: [quality, security, integration, e2e]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # to publish (AGENTS.md § 6, § 7). The same gates hold on a pull request,
+    # which now builds and scans the images it touches before merge (L7-35).
+    needs: [container-scope, quality, security, integration, e2e]
+    if: needs.container-scope.outputs.services != '[]'
 
     strategy:
       fail-fast: false
       matrix:
-        # asset-service, fleet-service and document-service were each absent
-        # from this list for one or more releases after they landed, so their
-        # images went unbuilt and unscanned by CI (PROJECT_MEMORY § 22).
-        # Every service with a Dockerfile belongs here — that is what makes
-        # the scan gate cover what we actually deploy.
-        service:
-          [
-            api-gateway,
-            identity-service,
-            organization-service,
-            asset-service,
-            fleet-service,
-            maintenance-service,
-            economic-service,
-            marketplace-service,
-            document-service,
-            supplier-service,
-            notification-service,
-            audit-service,
-          ]
+        # Every service with a Dockerfile on a push to main; on a pull request,
+        # the ones the change can affect. Derived from the repository rather
+        # than listed here: asset-service, fleet-service and document-service
+        # were each absent from a hand-kept list for one or more releases, so
+        # their images went unbuilt and unscanned (PROJECT_MEMORY § 22).
+        service: ${{ fromJSON(needs.container-scope.outputs.services) }}
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -1865,6 +1946,15 @@ jobs:
         # running a single step (D-005). Moved to the current release rather
         # than back-pinning: a vulnerability scanner two years behind is a
         # gate in name only.
+        #
+        # What this gate claims, exactly: it rejects **fixable** HIGH and
+        # CRITICAL findings. `ignore-unfixed: true` passes a HIGH/CRITICAL that
+        # has no fixed version anywhere yet — deliberately, since failing on it
+        # would turn every PR red over a CVE nobody can act on. Such findings
+        # are not tracked by this job; an expiring, reviewed allowlist (a
+        # .trivyignore entry per CVE with an owner and an expiry date, and the
+        # gate run without ignore-unfixed) is the recorded follow-up (L7-35
+        # review).
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: rasta/${{ matrix.service }}:${{ github.sha }}

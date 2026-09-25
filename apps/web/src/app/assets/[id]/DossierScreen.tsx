@@ -195,7 +195,13 @@ export function DossierScreen({ result, assetId }: DossierScreenProps) {
             <div className="flex flex-col gap-1">
               <dt className="text-sm text-content-subtle">سازنده و مدل</dt>
               <dd className="text-content">
-                {[asset.manufacturer, asset.model].filter(Boolean).join(' — ') || 'ثبت نشده'}
+                {asset.manufacturer || asset.model ? (
+                  <Identifier>
+                    {[asset.manufacturer, asset.model].filter(Boolean).join(' — ')}
+                  </Identifier>
+                ) : (
+                  'ثبت نشده'
+                )}
               </dd>
             </div>
             <div className="flex flex-col gap-1">

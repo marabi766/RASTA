@@ -46,7 +46,7 @@ function assertSafe(errors) {
   for (const error of errors) {
     assert.ok(!error.includes(SECRET), `message leaks a password: ${error}`);
     assert.ok(!error.includes('://'), `message contains a URL: ${error}`);
-    assert.ok(!error.includes('rasta_service_dev_password'), `message leaks a password: ${error}`);
+    assert.ok(!/_dev_password/.test(error), `message leaks a password: ${error}`);
   }
 }
 
@@ -271,7 +271,7 @@ test('the CLI passes on .env.example and fails a temporary copy without printing
       failed.stderr,
       /DATABASE_URL_IDENTITY \(line \d+\): host must be 127\.0\.0\.1 \(found localhost\)/,
     );
-    assert.ok(!failed.stderr.includes('rasta_service_dev_password'));
+    assert.ok(!/_dev_password/.test(failed.stderr + failed.stdout));
     assert.ok(!/postgres(?:ql)?:\/\//.test(failed.stderr + failed.stdout));
   } finally {
     rmSync(dir, { recursive: true, force: true });
