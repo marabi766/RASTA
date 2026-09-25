@@ -1873,7 +1873,10 @@
     {
       "date": "2026-09-25",
       "type": "SCOPE_ADDED",
-      "reason": "ADR-061 (accepted by the project manager, 2026-09-25) makes broker-level producer authentication a deployment gate: until SASL/SCRAM and per-topic ACLs exist, the application-layer producer check is consistency, not authentication. There is no production deployment yet, so the gate has no owner; RUN-006 records it under EP-OPERABILITY as P1, with the ACL broker in CI as part of it."
+      "reason": "ADR-061 (accepted by the project manager, 2026-09-25) makes broker-level producer authentication a deployment gate: until SASL/SCRAM and per-topic ACLs exist, the application-layer producer check is consistency, not authentication. There is no production deployment yet, so the gate has no owner; RUN-006 records it under EP-OPERABILITY as P1, with the ACL broker in CI as part of it.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Project manager acceptance of ADR-061, 2026-09-25 (PR #96)",
+      "recordIds": ["RUN-006"]
     }
   ]
 }
