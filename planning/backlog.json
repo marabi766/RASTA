@@ -1049,6 +1049,24 @@
       "evidence": []
     },
     {
+      "id": "RUN-006",
+      "epicId": "EP-OPERABILITY",
+      "title": "Kafka SASL/SCRAM and per-topic ACLs, gated before any real tenant data",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 8,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "Every service authenticates to Kafka with its own SASL/SCRAM-SHA-512 principal over TLS, and allow.everyone.if.no.acl.found is false",
+        "WRITE on each topic is granted only to the principals ADR-061's TOPIC_PRODUCERS names for it, and READ only to declared consumer groups",
+        "CI runs the integration suites against a broker with these ACLs, and a write to another service's topic with the wrong credentials is refused by the broker",
+        "No environment holding real tenant data is deployed without it; the development compose stays plaintext and is marked development-only"
+      ],
+      "dependencies": [],
+      "sourceRefs": ["docs/adr/ADR-061-event-provenance.md"],
+      "evidence": []
+    },
+    {
       "id": "INS-001",
       "epicId": "EP-INSURANCE",
       "title": "Commercial insurance quotation, comparison and issuance",
@@ -1851,6 +1869,14 @@
       "recordedBy": "Claude Opus 5.5",
       "approvalRef": "Project manager decision on ADR-060, 2026-09-24 (PR #84)",
       "recordIds": ["EXT-005"]
+    },
+    {
+      "date": "2026-09-25",
+      "type": "SCOPE_ADDED",
+      "reason": "ADR-061 (accepted by the project manager, 2026-09-25) makes broker-level producer authentication a deployment gate: until SASL/SCRAM and per-topic ACLs exist, the application-layer producer check is consistency, not authentication. There is no production deployment yet, so the gate has no owner; RUN-006 records it under EP-OPERABILITY as P1, with the ACL broker in CI as part of it.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Project manager acceptance of ADR-061, 2026-09-25 (PR #96)",
+      "recordIds": ["RUN-006"]
     }
   ]
 }
