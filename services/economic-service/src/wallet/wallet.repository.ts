@@ -75,10 +75,17 @@ export class WalletRepository {
    *
    * **Recomputed, never incremented** (ADR-034). `balance = balance + amount`
    * is a read-modify-write: two concurrent writers read the same value and one
-   * update is lost. The row lock above prevents that for callers that take it,
-   * but recomputation removes the failure mode instead of guarding it — the
-   * stored figure is a function of the ledger and nothing else, so it cannot
-   * drift from the ledger no matter how it was reached.
+   * update is lost. Recomputation makes the stored figure a function of the
+   * ledger and nothing else.
+   *
+   * **The caller must hold the wallet's row lock ({@link lock}) from before it
+   * posted.** Recomputation alone does not remove the race. Under READ
+   * COMMITTED the sum below is read from the statement's snapshot; a second
+   * writer that blocks on the first one's row lock re-checks only the `WHERE`
+   * when it wakes, not the sum, so it writes a total that lacks the first
+   * writer's entries. Locking before posting serialises the writers, and each
+   * one's statement then starts after the other committed (economic batch 2,
+   * item a).
    *
    * One statement rather than read-then-write, so there is no window between
    * the two, and it deliberately reads `ledger_entry` rather than trusting any
