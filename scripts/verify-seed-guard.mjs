@@ -10,7 +10,13 @@
  * operator would run — under the conditions that must be refused:
  *
  *   - NODE_ENV=production, even with RASTA_ALLOW_DEMO_SEED=true;
- *   - NODE_ENV=development without the opt-in.
+ *   - NODE_ENV=development without the opt-in;
+ *   - NODE_ENV=development with the opt-in, against a database that does not
+ *     carry the disposable marker (`rasta.disposable_database`, set only by
+ *     the development/CI bootstrap). Without a database that is the closed
+ *     port — a database that cannot be asked is refused too; with one, it is
+ *     the same server's `postgres` database, reached with the service's own
+ *     credentials.
  *
  * Each run must exit non-zero with the guard's refusal.
  *
@@ -21,12 +27,16 @@
  *
  * With `--with-database`, each seed gets its real `DATABASE_URL_<SERVICE>`,
  * and a checksum of every row in every table is taken before and after: it
- * must not move. `psql` must be on PATH. Nothing here runs a seed that is
- * allowed to write.
+ * must not move. It also proves the marker itself against PostgreSQL: the
+ * guard's probe answers true on the service's database and false on
+ * `postgres`, a client-side `-c rasta.disposable_database=true` does not fool
+ * it, and the service role cannot set the marker on its own database. `psql`
+ * must be on PATH. Nothing here runs a seed that is allowed to write.
  */
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVICES = [
@@ -50,7 +60,19 @@ const CASES = [
     label: 'NODE_ENV=development without the opt-in',
     env: { NODE_ENV: 'development', RASTA_ALLOW_DEMO_SEED: '' },
   },
+  {
+    label: 'NODE_ENV=development with the opt-in, database not marked disposable',
+    env: { NODE_ENV: 'development', RASTA_ALLOW_DEMO_SEED: 'true' },
+    unmarked: true,
+  },
 ];
+
+/** The same server and credentials, but the `postgres` database: never marked. */
+function unmarkedSibling(url) {
+  const parsed = new URL(url);
+  parsed.pathname = '/postgres';
+  return parsed.toString();
+}
 
 /**
  * One checksum per table in the connection's schema: row count and an md5 of
@@ -66,21 +88,76 @@ const SNAPSHOT_SQL = `
   WHERE t.table_schema = current_schema() AND t.table_type = 'BASE TABLE'
   ORDER BY t.table_name;`;
 
-function snapshot(url) {
+function psql(url, sql, extraOptions = '') {
   // psql does not understand Prisma's `?schema=` parameter; pass it as the
   // search_path instead, so current_schema() is the schema the seed writes.
   const parsed = new URL(url);
   const schema = parsed.searchParams.get('schema') ?? 'public';
   parsed.search = '';
-  const result = spawnSync(
-    'psql',
-    [parsed.toString(), '-X', '-v', 'ON_ERROR_STOP=1', '-tA', '-c', SNAPSHOT_SQL],
-    { encoding: 'utf8', env: { ...process.env, PGOPTIONS: `-c search_path=${schema}` } },
-  );
+  return spawnSync('psql', [parsed.toString(), '-X', '-v', 'ON_ERROR_STOP=1', '-tA', '-c', sql], {
+    encoding: 'utf8',
+    env: { ...process.env, PGOPTIONS: `-c search_path=${schema} ${extraOptions}`.trim() },
+  });
+}
+
+function snapshot(url) {
+  const result = psql(url, SNAPSHOT_SQL);
   if (result.status !== 0) {
     throw new Error(`snapshot failed: ${result.stderr.trim()}`);
   }
   return result.stdout.trim();
+}
+
+/**
+ * The guard's own probe and setting name, from the built @rasta/config — the
+ * code the seeds run — so this cannot drift from it. The seeds need the build
+ * as well (`@rasta/config` resolves to its dist).
+ */
+async function loadGuard() {
+  const dist = resolve(ROOT, 'packages/config/dist/seed-guard.js');
+  if (!existsSync(dist)) {
+    throw new Error('packages/config is not built: run `pnpm --filter @rasta/config build`');
+  }
+  const guard = await import(pathToFileURL(dist).href);
+  return {
+    probe: guard.DISPOSABLE_DATABASE_PROBE_SQL,
+    setting: guard.DISPOSABLE_DATABASE_SETTING,
+  };
+}
+
+/**
+ * The marker against a real server, with the service's credentials: marked
+ * here, not marked on `postgres`, not spoofable from the client, and not
+ * settable by the service role on its own database.
+ */
+function markerProblems(service, url, { probe, setting }) {
+  const problems = [];
+  const ask = (target, extraOptions) => {
+    const result = psql(target, probe, extraOptions);
+    return result.status === 0 ? result.stdout.trim() : `error: ${result.stderr.trim()}`;
+  };
+
+  const own = ask(url);
+  if (own !== 't') problems.push(`${service}: its database is not marked disposable (${own})`);
+
+  const other = ask(unmarkedSibling(url));
+  if (other !== 'f') problems.push(`${service}: the postgres database answered ${other}`);
+
+  const spoofed = ask(unmarkedSibling(url), `-c ${setting}=true`);
+  if (spoofed !== 'f') {
+    problems.push(`${service}: a session-level ${setting} fooled the probe (${spoofed})`);
+  }
+
+  const database = new URL(url).pathname.slice(1);
+  const self = psql(url, `ALTER DATABASE "${database}" SET ${setting} = 'true'`);
+  if (self.status === 0) {
+    problems.push(`${service}: the service role could set ${setting} on its own database`);
+  } else if (!/permission denied/i.test(self.stderr)) {
+    problems.push(
+      `${service}: setting the marker failed, but not as refused: ${self.stderr.trim()}`,
+    );
+  }
+  return problems;
 }
 
 function runSeed(service, env) {
@@ -93,6 +170,7 @@ function runSeed(service, env) {
 
 const failures = [];
 let checks = 0;
+const guard = withDatabase ? await loadGuard() : null;
 
 for (const service of SERVICES) {
   const urlKey = `DATABASE_URL_${service.toUpperCase()}`;
@@ -102,9 +180,19 @@ for (const service of SERVICES) {
     continue;
   }
 
-  for (const { label, env } of CASES) {
+  if (withDatabase) {
+    const problems = markerProblems(service, url, guard);
+    failures.push(...problems);
+    checks += 1;
+    if (problems.length === 0) {
+      console.log(`  ✓ ${service}: marker set, read from the catalog, not settable by the service`);
+    }
+  }
+
+  for (const { label, env, unmarked } of CASES) {
+    const target = unmarked && withDatabase ? unmarkedSibling(url) : url;
     const before = withDatabase ? snapshot(url) : null;
-    const result = runSeed(service, { ...env, [urlKey]: url, DATABASE_URL: url });
+    const result = runSeed(service, { ...env, [urlKey]: target, DATABASE_URL: target });
     const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
     checks += 1;
 
@@ -142,6 +230,8 @@ if (failures.length > 0) {
 }
 
 console.log(
-  `\n✓ seed guard: ${checks} refusal(s) across ${SERVICES.length} seeds` +
-    (withDatabase ? ', every database snapshot unchanged' : ', each before any connection'),
+  `\n✓ seed guard: ${checks} check(s) across ${SERVICES.length} seeds` +
+    (withDatabase
+      ? ', every marker proven, every database snapshot unchanged'
+      : ', the environment refusals before any connection'),
 );

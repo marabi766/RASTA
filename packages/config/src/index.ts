@@ -25,7 +25,11 @@ export type { NodeEnv, LogLevel, BaseEnv, EnvIssue } from './env';
 export {
   DEMO_SEED_ENVIRONMENTS,
   DEMO_SEED_OPT_IN,
+  DISPOSABLE_DATABASE_PROBE_SQL,
+  DISPOSABLE_DATABASE_SETTING,
   DemoSeedRefusedError,
   assertDemoSeedAllowed,
+  assertDemoSeedDatabase,
   demoSeedRefusals,
 } from './seed-guard';
+export type { DemoSeedDatabaseProbe } from './seed-guard';

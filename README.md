@@ -184,6 +184,7 @@ cp .env.example .env
 pnpm infra:up
 pnpm db:generate
 pnpm db:migrate
+pnpm db:mark-disposable                   # once, for a volume created before the seed marker
 RASTA_ALLOW_DEMO_SEED=true pnpm db:seed   # development/test only — see .env.example
 pnpm dev
 ```

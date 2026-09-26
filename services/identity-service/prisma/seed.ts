@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
-import { assertDemoSeedAllowed } from '@rasta/config';
+import { assertDemoSeedAllowed, assertDemoSeedDatabase } from '@rasta/config';
 
 /**
  * Demo seed for identity-service.
@@ -270,6 +270,9 @@ async function main(): Promise<void> {
   // Before anything touches the database: this seed overwrites fixed ids with
   // demo values, so it runs only in an explicit development or test run.
   assertDemoSeedAllowed('identity-service');
+  // …and only into a database the development bootstrap marked disposable:
+  // the shell's settings above cannot tell a production URL from a local one.
+  await assertDemoSeedDatabase('identity-service', prisma);
 
   console.warn('Seeding identity-service…');
 

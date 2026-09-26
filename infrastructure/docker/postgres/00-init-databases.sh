@@ -18,6 +18,11 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib/role-passwords.bash"
 resolve_role_passwords || exit 1
 
+# The demo seeds' marker (packages/config seed-guard): every database this
+# script creates is disposable by construction. See lib/disposable-marker.bash.
+# shellcheck source=lib/disposable-marker.bash
+source "$(dirname "${BASH_SOURCE[0]}")/lib/disposable-marker.bash"
+
 # Creates the role if it is missing and (re)sets its password either way, so a
 # bootstrap re-run on an existing cluster converges on the configured values.
 ensure_role() {
@@ -59,8 +64,9 @@ for svc in "${SERVICES[@]}"; do
   psql_exec postgres "REVOKE ALL ON DATABASE ${db} FROM PUBLIC"
   psql_exec postgres "GRANT ALL PRIVILEGES ON DATABASE ${db} TO ${role}"
   psql_exec "${db}" "GRANT ALL ON SCHEMA public TO ${role}"
+  mark_disposable_database "${db}"
 
-  echo "    - ${db} (owner ${role})"
+  echo "    - ${db} (owner ${role}, marked disposable)"
 done
 
 # -----------------------------------------------------------------------------
