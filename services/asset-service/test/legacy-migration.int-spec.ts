@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import * as path from 'node:path';
 import { ulid } from 'ulid';
 import { AssetRepository } from '../src/asset/asset.repository';
@@ -63,6 +63,68 @@ describe('legacy data migration (20260925110000)', () => {
 
   /** Runs the shipped migration file, as a deploy would. */
   const runMigration = (): void => runFile(migrationFile);
+
+  /**
+   * `runFile` without blocking the event loop, so a writer on another
+   * connection can act while the file runs. Resolves to the error output, or
+   * to '' when the file succeeded.
+   */
+  function runFileConcurrently(file: string): Promise<string> {
+    return new Promise((resolve) => {
+      execFile(
+        process.execPath,
+        [
+          require.resolve('prisma/build/index.js'),
+          'db',
+          'execute',
+          '--file',
+          file,
+          '--url',
+          databaseUrl(),
+        ],
+        (error, _stdout, stderr) => resolve(error ? String(stderr || error) : ''),
+      );
+    });
+  }
+
+  /**
+   * Until another session is waiting on a lock: the file just started, which
+   * is the only other client while this suite runs in band. `prisma db
+   * execute` sends the file statement by statement, so the waiting query's
+   * text is one statement, not the file.
+   */
+  async function fileWaitingOnLock(): Promise<void> {
+    for (let tries = 0; tries < 400; tries += 1) {
+      const rows = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()
+            AND datname = current_database()`,
+      );
+      if (rows[0]!.n > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error('the file never waited on a lock');
+  }
+
+  /**
+   * recordPolicy's lock order, split where it matters (PR #108 round 3 #1):
+   * `FOR SHARE` on the asset row (InsuranceService.lockOwned), then a write
+   * on insurance_policy. `between` runs after the first step; the second
+   * starts only when it resolves.
+   */
+  function recordPolicyShaped(assetId: string, between: () => Promise<void>): Promise<void> {
+    return prisma.client.$transaction(
+      async (tx) => {
+        await tx.$queryRawUnsafe(`SELECT id FROM asset WHERE id = $1 FOR SHARE`, assetId);
+        await between();
+        await tx.$executeRawUnsafe(
+          `UPDATE insurance_policy SET updated_at = updated_at WHERE asset_id = $1`,
+          assetId,
+        );
+      },
+      { timeout: 120_000 },
+    );
+  }
 
   beforeAll(async () => {
     prisma = newPrisma();
@@ -349,5 +411,90 @@ describe('legacy data migration (20260925110000)', () => {
       second.id,
     );
     runMigration();
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #108 round 3
+  // -------------------------------------------------------------------------
+
+  it('waits for a writer holding its asset FOR SHARE, and neither deadlocks (round 3 #1)', async () => {
+    const created = await asActor(manager(org.a), () =>
+      assets.create({ name: 'هم‌زمان', type: 'LOADER', specifications: {} } as never),
+    );
+    // A tag the migration rewrites, so it must write the row the writer holds.
+    await prisma.client.$executeRawUnsafe(
+      `UPDATE asset SET asset_tag = $2 WHERE id = $1`,
+      created.id,
+      'هم‌زمان-۴',
+    );
+
+    // The writer holds the asset row; the migration starts and must wait for
+    // it before locking anything else; the writer then writes
+    // insurance_policy and commits. Under SHARE ROW EXCLUSIVE the migration
+    // held insurance_policy by then, and this was a deadlock.
+    let migration!: Promise<string>;
+    const writer = recordPolicyShaped(created.id, async () => {
+      migration = runFileConcurrently(migrationFile);
+      await fileWaitingOnLock();
+    });
+
+    await expect(writer).resolves.toBeUndefined();
+    expect(await migration).toBe('');
+    const after = await prisma.client.$queryRawUnsafe<{ asset_tag: string }[]>(
+      `SELECT asset_tag FROM asset WHERE id = $1`,
+      created.id,
+    );
+    expect(after[0]!.asset_tag).toBe('هم‌زمان-4');
+  });
+
+  it('will not roll back a generation it cannot re-derive, and takes the asset first (round 3 #1, #2)', async () => {
+    const ownershipDown = path.resolve(
+      __dirname,
+      '../prisma/migrations/20260926000000_asset_ownership_generation/down.sql',
+    );
+    const created = await asActor(manager(org.a), () =>
+      assets.create({ name: 'هم‌لحظه', type: 'LOADER', specifications: {} } as never),
+    );
+    const policy = await asActor(manager(org.a), () =>
+      insurance.recordPolicy(created.id, {
+        policyNumber: `SAME-MS-${ulid().slice(-8)}`,
+        insurerName: 'بیمه آزمون',
+        coverage: 'THIRD_PARTY',
+        validFrom: new Date(Date.now() - day).toISOString(),
+        validTo: new Date(Date.now() + 300 * day).toISOString(),
+      }),
+    );
+    await asActor(admin(org.a), () =>
+      assets.transfer(created.id, { toOrganizationId: org.b, reason: 'هم‌لحظه' }),
+    );
+    // Recorded by A just before the transfer, in the same millisecond: stored
+    // as generation 0, which timestamps alone would read as generation 1.
+    await prisma.client.$executeRawUnsafe(
+      `UPDATE insurance_policy p SET created_at = t.transferred_at
+         FROM asset_transfer t WHERE t.asset_id = p.asset_id AND p.id = $1`,
+      policy.id,
+    );
+
+    // The rollback is started while a recordPolicy-shaped writer holds the
+    // asset row, and the writer then writes insurance_policy. Taking
+    // insurance_policy first (the round 2 order) deadlocked here.
+    let rollback!: Promise<string>;
+    const writer = recordPolicyShaped(created.id, async () => {
+      rollback = runFileConcurrently(ownershipDown);
+      await fileWaitingOnLock();
+    });
+    await expect(writer).resolves.toBeUndefined();
+
+    const refusal = await rollback;
+    expect(refusal).toMatch(/cannot be re-derived from timestamps/);
+    expect(refusal).toContain(`insurance_policy ${policy.id}: stored 0, derived 1`);
+    expect(refusal).not.toMatch(/deadlock/);
+
+    // Nothing was dropped: the stored generation is still there, and still 0.
+    const kept = await prisma.client.$queryRawUnsafe<{ ownership_generation: number }[]>(
+      `SELECT ownership_generation FROM insurance_policy WHERE id = $1`,
+      policy.id,
+    );
+    expect(kept[0]!.ownership_generation).toBe(0);
   });
 });

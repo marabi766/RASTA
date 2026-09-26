@@ -18,8 +18,10 @@
 -- logged rows that has been transferred since. In either case the rollback is
 -- refused before anything is changed, and the rows are listed.
 --
--- Locks the same tables in the same order as the migration, so nothing moves
--- between the check and the restore. Atomic, like the migration.
+-- Locks the same tables in the same order and mode as the migration (asset
+-- first, ACCESS EXCLUSIVE; PR #108 round 3 #1), so nothing moves between the
+-- check and the restore, and no writer holding an asset row can deadlock it.
+-- Atomic, like the migration.
 
 BEGIN;
 
@@ -35,7 +37,7 @@ LOCK TABLE
   "technical_inspection",
   "asset_transfer",
   "asset_legacy_migration_log"
-  IN SHARE ROW EXCLUSIVE MODE;
+  IN ACCESS EXCLUSIVE MODE;
 
 DO $preflight$
 DECLARE

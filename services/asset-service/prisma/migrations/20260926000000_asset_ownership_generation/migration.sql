@@ -21,14 +21,20 @@
 -- transfer to the millisecond keeps the reading it already had; every policy
 -- recorded from now on is exact.
 --
--- Locked like 20260925110000, so no transfer or policy lands between the two
--- backfills. Atomic because of the explicit BEGIN/COMMIT.
+-- Locked like 20260925110000: asset first, ACCESS EXCLUSIVE, before any read
+-- or ALTER (PR #108 round 3 #1). No transfer or policy lands between the two
+-- backfills, and no writer holding an asset row FOR SHARE can deadlock the
+-- ALTER. Atomic because of the explicit BEGIN/COMMIT.
+--
+-- Edited after 8ac4229 in round 3 (lock mode only). Never on main, and no
+-- persistent environment applied it; CI and development databases are
+-- disposable.
 
 BEGIN;
 
 SET LOCAL lock_timeout = '3s';
 
-LOCK TABLE "asset", "insurance_policy", "asset_transfer" IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE "asset", "insurance_policy", "asset_transfer" IN ACCESS EXCLUSIVE MODE;
 
 ALTER TABLE "asset" ADD COLUMN "ownership_generation" INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE "insurance_policy" ADD COLUMN "ownership_generation" INTEGER NOT NULL DEFAULT 0;

@@ -30,9 +30,23 @@
 -- not a stable view across eight tables: a transfer committing between two of
 -- the loops below would leave a dossier split. So the asset and its seven
 -- child tables are locked first, before any preflight, in one fixed order,
--- in SHARE ROW EXCLUSIVE mode: reads go on, every write waits for this commit,
--- and a write already in flight makes the migration fail on lock_timeout,
+-- asset first, in ACCESS EXCLUSIVE mode: every read and write waits for this
+-- commit, and one already in flight makes the migration fail on lock_timeout,
 -- having changed nothing, rather than run around it.
+--
+-- ACCESS EXCLUSIVE, not SHARE ROW EXCLUSIVE (PR #108 round 3 #1). The weaker
+-- mode admits the ROW SHARE that `SELECT ... FOR SHARE` takes: recordPolicy
+-- could lock its asset row after this migration locked the tables, wait on
+-- insurance_policy, and hold the asset row this migration then updates: a
+-- deadlock. The application locks the asset before any child, and so does
+-- this migration, so a writer is either finished before it or waits for it.
+--
+-- Edited after 8ac4229 (round 2 added asset_id and new_value to the log
+-- table; round 3 changed the lock mode). Neither version was ever on main and
+-- no persistent environment applied one; CI and development databases are
+-- disposable. A database that ran the 8ac4229 file must be reset (down.sql,
+-- then deploy), never re-run: CREATE TABLE IF NOT EXISTS would keep the old
+-- log table without those columns (PR #108 round 3 #3).
 --
 -- Re-runnable on a database that already has it (the legacy-state integration
 -- test does exactly that): CREATE ... IF NOT EXISTS / OR REPLACE, the log keeps
@@ -59,7 +73,7 @@ LOCK TABLE
   "insurance_claim",
   "technical_inspection",
   "asset_transfer"
-  IN SHARE ROW EXCLUSIVE MODE;
+  IN ACCESS EXCLUSIVE MODE;
 
 -- The canonical form, exactly as canonicalIdentifier() computes it: NFKC;
 -- Arabic yeh (ي ى) and kaf (ك) to Persian (ی ک); Persian and Arabic-Indic
