@@ -221,6 +221,39 @@ describe('ledger and governance API', () => {
       .expect(404);
   });
 
+  it('gives a platform administrator the same 404 for a foreign journal and a missing one', async () => {
+    // Codex round 1 on #123, F3: platform scope is checked before the lookup,
+    // and the lookup is tenant-scoped — so a platform caller acting for the
+    // payee cannot tell another organization's journal from one that never
+    // existed. Same status, same code, same body once the id is taken out.
+    const wallet = await request(http).get('/v1/wallets/me').set('authorization', asOrg());
+    const topUp = await request(http)
+      .post(`/v1/wallets/${wallet.body.id}/top-up`)
+      .set('authorization', asOrg())
+      .set('idempotency-key', id('api-foreign-journal'))
+      .send({ amountMinor: '7000' })
+      .expect(201);
+    const foreignId: string = topUp.body.journalId;
+    const missingId = id('JRN');
+    const asPayeePlatform = `Bearer ${admin(payee, ['UNION_ADMIN'])}`;
+
+    const refusal = async (journalId: string) => {
+      const response = await request(http)
+        .post(`/v1/ledger/journals/${journalId}/reverse`)
+        .set('authorization', asPayeePlatform)
+        .send({ reason: 'a platform administrator probes a journal id' })
+        .expect(404);
+      // The correlation id and timestamp differ per request by design; the rest
+      // must not.
+      const body = { ...response.body, correlationId: undefined, timestamp: undefined };
+      return JSON.parse(JSON.stringify(body).split(journalId).join('<id>')) as unknown;
+    };
+
+    const [foreign, missing] = [await refusal(foreignId), await refusal(missingId)];
+    expect(foreign).toMatchObject({ code: 'NOT_FOUND' });
+    expect(foreign).toEqual(missing);
+  });
+
   // -------------------------------------------------------------------------
   // Commission rules
   // -------------------------------------------------------------------------
