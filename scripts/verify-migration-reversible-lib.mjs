@@ -655,6 +655,10 @@ export const EXPECTED = {
       'performance_formula_weight',
       // ADR-052 step 3: the append-only performance-event store.
       'performance_event',
+      // ADR-052 step 4: the score snapshot and its provenance.
+      'performance_score_snapshot',
+      'performance_score_component',
+      'performance_score_source_event',
     ],
     // ADR-052 step 2. The freeze, the no-truncate pair, the deferred 100% sum
     // and the successor rule. A round trip that lost any one of them would
@@ -670,6 +674,18 @@ export const EXPECTED = {
       // ADR-052 step 3. Both, because the row trigger never sees a TRUNCATE.
       'trg_performance_event_append_only',
       'trg_performance_event_no_truncate',
+      // ADR-052 step 4. Insert-only on all three tables, the seal that keeps
+      // provenance from being added after the fact, and the commit-time check
+      // that the snapshot agrees with its formula version.
+      'trg_performance_score_snapshot_append_only',
+      'trg_performance_score_snapshot_no_truncate',
+      'trg_performance_score_component_append_only',
+      'trg_performance_score_component_no_truncate',
+      'trg_performance_score_source_event_append_only',
+      'trg_performance_score_source_event_no_truncate',
+      'trg_performance_score_component_sealed',
+      'trg_performance_score_source_event_sealed',
+      'trg_performance_score_snapshot_consistent',
     ],
     functions: [
       'performance_formula_version_guard',
@@ -677,6 +693,9 @@ export const EXPECTED = {
       'performance_formula_weight_sum_check',
       'performance_formula_successor_check',
       'performance_event_append_only',
+      'performance_score_append_only',
+      'performance_score_child_sealed',
+      'performance_score_snapshot_consistent',
     ],
     indexes: [
       'ux_performance_formula_version_number',
@@ -686,12 +705,18 @@ export const EXPECTED = {
       // counted twice and the score moves.
       'ux_performance_event_source',
       'ux_performance_event_compensation_target',
+      // ADR-052 step 4: the targets of the composite foreign keys that keep a
+      // snapshot's version number and cited events consistent and in-tenant.
+      'ux_performance_formula_version_identity',
+      'ux_performance_event_tenant_source',
+      'ux_performance_score_snapshot_tenant',
     ],
     types: [
       'PerformanceFormulaStatus',
       'PerformanceComponent',
       'ResponsibilityAttribution',
       'PerformanceOutcomeKind',
+      'PerformanceScoreStatus',
     ],
     constraints: [
       // Domain invariants.
@@ -735,6 +760,17 @@ export const EXPECTED = {
       'ck_performance_event_rating',
       'ck_performance_event_timeliness',
       'ck_performance_event_text_not_blank',
+      // ADR-052 step 4.
+      'performance_score_snapshot_version_fkey',
+      'performance_score_component_snapshot_fkey',
+      'performance_score_source_event_snapshot_fkey',
+      'performance_score_source_event_event_fkey',
+      'ck_score_snapshot_window',
+      'ck_score_snapshot_score_only_when_published',
+      'ck_score_snapshot_ranges',
+      'ck_score_snapshot_text_not_blank',
+      'ck_score_component_absent_is_null',
+      'ck_score_component_ranges',
     ],
   },
   /*

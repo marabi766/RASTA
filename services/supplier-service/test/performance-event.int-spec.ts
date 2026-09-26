@@ -138,7 +138,7 @@ describe('performance-event store (ADR-052 step 3)', () => {
     it('refuses TRUNCATE', async () => {
       await seeded();
 
-      await expect(exec('TRUNCATE "performance_event"')).rejects.toThrow(APPEND_ONLY);
+      await expect(exec('TRUNCATE "performance_event" CASCADE')).rejects.toThrow(APPEND_ONLY);
     });
   });
 

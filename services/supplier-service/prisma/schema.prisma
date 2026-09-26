@@ -417,8 +417,10 @@ model PerformanceFormulaVersion {
   retiredAt              DateTime? @map("retired_at")
   retiredCorrelationId   String?   @map("retired_correlation_id")
 
-  weights PerformanceFormulaWeight[]
+  weights   PerformanceFormulaWeight[]
+  snapshots PerformanceScoreSnapshot[]
 
+  @@unique([id, formulaVersion], map: "ux_performance_formula_version_identity")
   @@map("performance_formula_version")
 }
 
@@ -484,8 +486,86 @@ model PerformanceEvent {
   recordedAt    DateTime @default(now()) @map("recorded_at")
   correlationId String   @map("correlation_id")
 
+  citedBy PerformanceScoreSourceEvent[]
+
   @@unique([organizationId, component, sourceEventId], map: "ux_performance_event_compensation_target")
+  @@unique([organizationId, sourceEventId], map: "ux_performance_event_tenant_source")
   @@index([organizationId, occurredAt, sourceEventId], map: "ix_performance_event_window")
   @@index([organizationId, outcomeKind, outcomeKey], map: "ix_performance_event_outcome")
   @@map("performance_event")
+}
+
+enum PerformanceScoreStatus {
+  PUBLISHED
+  INSUFFICIENT_DATA
+  INSUFFICIENT_COVERAGE
+}
+
+/// One computation of one supplier's score (ADR-052 step 4, § 8).
+///
+/// **Insert-only**: a recomputation is a new row; the database refuses UPDATE,
+/// DELETE and TRUNCATE, refuses child rows added after the snapshot's own
+/// transaction, and checks at commit that the provenance matches the formula
+/// version. `scoreCentis` is NULL unless PUBLISHED — never 0 for "no score".
+///
+/// Tenant-scoped by the supplier's organization.
+model PerformanceScoreSnapshot {
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  formulaVersionId String                    @map("formula_version_id")
+  formulaVersion   Int                       @map("formula_version")
+  formula          PerformanceFormulaVersion @relation(fields: [formulaVersionId, formulaVersion], references: [id, formulaVersion], onDelete: Restrict, onUpdate: Restrict, map: "performance_score_snapshot_version_fkey")
+
+  windowStart  DateTime @map("window_start")
+  windowEnd    DateTime @map("window_end")
+  calculatedAt DateTime @default(now()) @map("calculated_at")
+
+  status              PerformanceScoreStatus
+  scoreCentis         Int?                   @map("score_centis")
+  eligibleSampleCount Int                    @map("eligible_sample_count")
+  coverageBp          Int                    @map("coverage_bp")
+
+  correlationId String @map("correlation_id")
+
+  components   PerformanceScoreComponent[]
+  sourceEvents PerformanceScoreSourceEvent[]
+
+  @@unique([organizationId, id], map: "ux_performance_score_snapshot_tenant")
+  @@index([organizationId, calculatedAt, id], map: "ix_performance_score_snapshot_latest")
+  @@index([formulaVersionId], map: "ix_performance_score_snapshot_version")
+  @@map("performance_score_snapshot")
+}
+
+/// One weighted component of a snapshot: its configured weight, and — when it
+/// had data — its effective weight and score. Absent is NULL, never 0.
+model PerformanceScoreComponent {
+  organizationId String                   @map("organization_id")
+  snapshotId     String                   @map("snapshot_id")
+  snapshot       PerformanceScoreSnapshot @relation(fields: [organizationId, snapshotId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict, map: "performance_score_component_snapshot_fkey")
+
+  component PerformanceComponent
+
+  configuredWeightBp   Int  @map("configured_weight_bp")
+  effectiveWeightBp    Int? @map("effective_weight_bp")
+  componentScoreCentis Int? @map("component_score_centis")
+  sampleCount          Int  @map("sample_count")
+
+  @@id([organizationId, snapshotId, component])
+  @@map("performance_score_component")
+}
+
+/// A performance event a snapshot counted (ADR-052 § 8 `sourceEventIds`).
+model PerformanceScoreSourceEvent {
+  organizationId String                   @map("organization_id")
+  snapshotId     String                   @map("snapshot_id")
+  snapshot       PerformanceScoreSnapshot @relation(fields: [organizationId, snapshotId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict, map: "performance_score_source_event_snapshot_fkey")
+
+  sourceEventId String           @map("source_event_id")
+  event         PerformanceEvent @relation(fields: [organizationId, sourceEventId], references: [organizationId, sourceEventId], onDelete: Restrict, onUpdate: Restrict, map: "performance_score_source_event_event_fkey")
+
+  @@id([organizationId, snapshotId, sourceEventId])
+  @@index([organizationId, sourceEventId], map: "ix_performance_score_source_event_event")
+  @@map("performance_score_source_event")
 }

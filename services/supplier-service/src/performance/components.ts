@@ -51,3 +51,7 @@ export type OutcomeKind = (typeof OUTCOME_KINDS)[number];
 
 /** The components whose facts carry a responsibility (rule 13). */
 export const ATTRIBUTED_COMPONENTS = ['DISPUTE_ABSENCE', 'CANCELLATION_ABSENCE'] as const;
+
+/** ADR-052 § 8 — the three outcomes of a computation. Only PUBLISHED has a score. */
+export const SCORE_STATUSES = ['PUBLISHED', 'INSUFFICIENT_DATA', 'INSUFFICIENT_COVERAGE'] as const;
+export type ScoreStatus = (typeof SCORE_STATUSES)[number];
