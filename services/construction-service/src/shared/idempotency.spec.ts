@@ -1,7 +1,7 @@
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { ConstructionEnv } from '../config/env';
-import { IdempotencyStore } from './idempotency';
+import { IdempotencyStore, keyDigest } from './idempotency';
 
 /**
  * The claim's race branches, which a real database hits only by timing: a
@@ -146,5 +146,32 @@ describe('IdempotencyStore.execute', () => {
       inTenant(() => store.execute(ENDPOINT, 'k', {}, 201, async () => 'forgot')),
     ).rejects.toThrow(/did not record its completion/);
     expect(delegate.deleteMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('no raw Idempotency-Key in an error (S-09)', () => {
+  const RAW = 'create-project-for-village-0042';
+
+  it.each([
+    ['reused with another body', row({ state: 'COMPLETED', responseBody: {} }), { a: 2 }],
+    ['still in flight', row({}), { a: 1 }],
+  ])('%s: the logged context carries a digest, never the key', async (_case, existing, body) => {
+    const { store, delegate } = fakeStore();
+    delegate.create.mockRejectedValue(UNIQUE);
+    delegate.findUnique.mockResolvedValue(existing);
+
+    const error = (await inTenant(() => store.claim(ENDPOINT, RAW, body)).catch(
+      (caught: unknown) => caught,
+    )) as { internalContext?: Record<string, unknown>; message: string };
+
+    expect(JSON.stringify(error.internalContext)).not.toContain(RAW);
+    expect(error.message).not.toContain(RAW);
+    expect(error.internalContext).toMatchObject({ endpoint: ENDPOINT, keyDigest: keyDigest(RAW) });
+  });
+
+  it('digests one-way and stably', () => {
+    expect(keyDigest(RAW)).toMatch(/^[0-9a-f]{16}$/);
+    expect(keyDigest(RAW)).toBe(keyDigest(RAW));
+    expect(keyDigest(RAW)).not.toBe(keyDigest(`${RAW}-other`));
   });
 });
