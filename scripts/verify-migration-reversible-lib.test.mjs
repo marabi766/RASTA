@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,6 +12,7 @@ import {
   ledgerAssertionScript,
   recordSnapshotScript,
   snapshotQuery,
+  snapshotStoreScript,
 } from './verify-migration-reversible-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -644,19 +646,33 @@ test('the snapshot lists every extension with its version and schema, unstripped
   assert.throws(() => snapshotQuery('migration_check', 'bad"home'));
 });
 
-test('a kept extension is excused by exact name only, and must be a plain identifier', () => {
-  const script = assertSnapshotScript('meta', 'after:m1', 'target', 'down: m1', undefined, [
-    'btree_gist',
-  ]);
+test('a kept extension is excused by exact name, and only as its exact post-deploy row', () => {
+  const script = assertSnapshotScript('meta', 'after:m1', 'target', 'down: m1', undefined, {
+    keptExtensions: ['btree_gist'],
+    keptFrom: 'post-up',
+  });
   assert.match(script, /split_part\(u, ' ', 1\) = 'extension'/);
   assert.match(script, /split_part\(u, ' ', 2\) = ANY \(ARRAY\['btree_gist'\]::text\[\]\)/);
+  // The whole row — name, version and schema — must be one recorded after deploy.
+  assert.match(script, /AND u IN \(SELECT item FROM "meta"\.snapshot WHERE label = 'post-up'\)/);
   assert.doesNotMatch(script, /LIKE/);
   // No allowance: an empty list, so every extension difference fails.
   assert.match(
     assertSnapshotScript('meta', 'after:m1', 'target', 'ctx'),
     /ANY \(ARRAY\[\]::text\[\]\)/,
   );
-  assert.throws(() => assertSnapshotScript('meta', 'l', 'target', 'ctx', undefined, ["x' OR 1=1"]));
+  assert.throws(() =>
+    assertSnapshotScript('meta', 'l', 'target', 'ctx', undefined, {
+      keptExtensions: ["x' OR 1=1"],
+      keptFrom: 'post-up',
+    }),
+  );
+  // An allowance without the state it must match is refused, not widened.
+  assert.throws(
+    () =>
+      assertSnapshotScript('meta', 'l', 'target', 'ctx', undefined, { keptExtensions: ['citext'] }),
+    /needs keptFrom/,
+  );
 });
 
 test('every service with migrations is in EXPECTED and in test:migration', () => {
@@ -731,3 +747,111 @@ test('the only inexact-inverse allowance is marketplace cancel_before_hold', () 
   );
   assert.deepEqual(allowances, ['marketplace/20260830103500_cancel_before_hold']);
 });
+
+// ---------------------------------------------------------------------------
+// Kept extensions against PostgreSQL (Codex review of #117, finding 4)
+//
+// With MIGRATION_LIB_TEST_DATABASE_URL (a role that may CREATE DATABASE, as
+// the development and CI service roles may), each case runs in a throwaway
+// database: record the state before, "deploy" citext at one version into the
+// schema under test, record that as post-up, apply the case's "down", and
+// assert. CI sets MIGRATION_LIB_TEST_DATABASE_REQUIRED=true, so there the cases
+// cannot be skipped by a missing URL.
+// ---------------------------------------------------------------------------
+
+const libDatabaseUrl = process.env.MIGRATION_LIB_TEST_DATABASE_URL;
+if (process.env.MIGRATION_LIB_TEST_DATABASE_REQUIRED === 'true' && !libDatabaseUrl) {
+  throw new Error(
+    'MIGRATION_LIB_TEST_DATABASE_REQUIRED is set but MIGRATION_LIB_TEST_DATABASE_URL is not',
+  );
+}
+
+function psqlAt(url, script, database) {
+  const target = new URL(url);
+  target.search = '';
+  if (database) target.pathname = `/${database}`;
+  return spawnSync('psql', [target.toString(), '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', script], {
+    encoding: 'utf8',
+  });
+}
+
+/** Runs `down` after a citext 1.5 "deploy", then the down-script assertion. */
+function keptExtensionCase(down, keptExtensions) {
+  const database = `mlt_kept_ext_${process.pid}_${Math.floor(Math.random() * 1e9)}`;
+  const must = (result, what) => {
+    if (result.status !== 0) throw new Error(`${what}: ${result.stderr}`);
+  };
+  must(psqlAt(libDatabaseUrl, `CREATE DATABASE "${database}" TEMPLATE template1;`), 'create');
+  try {
+    const run = (script) => psqlAt(libDatabaseUrl, script, database);
+    must(
+      run(
+        'CREATE SCHEMA target; CREATE SCHEMA elsewhere;' +
+          snapshotStoreScript('meta') +
+          recordSnapshotScript('meta', 'before', 'target'),
+      ),
+      'record before',
+    );
+    must(
+      run(
+        "CREATE EXTENSION citext VERSION '1.5' SCHEMA target;" +
+          recordSnapshotScript('meta', 'post-up', 'target'),
+      ),
+      'deploy',
+    );
+    if (down) must(run(down), 'down');
+    return run(
+      assertSnapshotScript('meta', 'before', 'target', 'down: m1', undefined, {
+        keptExtensions,
+        keptFrom: 'post-up',
+      }),
+    );
+  } finally {
+    psqlAt(libDatabaseUrl, `DROP DATABASE IF EXISTS "${database}" WITH (FORCE);`);
+  }
+}
+
+test(
+  'a kept extension left exactly as deployed passes',
+  { skip: !libDatabaseUrl && 'MIGRATION_LIB_TEST_DATABASE_URL is not set' },
+  () => {
+    const result = keptExtensionCase(null, ['citext']);
+    assert.equal(result.status, 0, result.stderr);
+  },
+);
+
+test(
+  'a kept extension left at another version fails',
+  { skip: !libDatabaseUrl && 'MIGRATION_LIB_TEST_DATABASE_URL is not set' },
+  () => {
+    const result = keptExtensionCase("ALTER EXTENSION citext UPDATE TO '1.6';", ['citext']);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /present but not expected:\s+extension citext version=1\.6/);
+  },
+);
+
+test(
+  'a kept extension moved to another schema fails',
+  { skip: !libDatabaseUrl && 'MIGRATION_LIB_TEST_DATABASE_URL is not set' },
+  () => {
+    // Left at the same version, in another schema. (Recreated rather than
+    // ALTER … SET SCHEMA, which a trusted extension's members refuse to a
+    // non-superuser.)
+    const result = keptExtensionCase(
+      "DROP EXTENSION citext; CREATE EXTENSION citext VERSION '1.5' SCHEMA elsewhere;",
+      ['citext'],
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /extension citext version=1\.5 schema=elsewhere/);
+  },
+);
+
+test(
+  'an extension left behind without an allowance fails',
+  { skip: !libDatabaseUrl && 'MIGRATION_LIB_TEST_DATABASE_URL is not set' },
+  () => {
+    const result = keptExtensionCase(null, []);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /extension citext version=1\.5 schema=\(target\)/);
+  },
+);

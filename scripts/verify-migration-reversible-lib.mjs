@@ -1152,12 +1152,18 @@ SELECT '${label}', item FROM (${snapshotQuery(schema, extensionHome)}) s;`;
  * failure says which object a down script got wrong, not just that one did.
  *
  * `keptExtensions` names extensions this down script may leave installed
- * (`EXPECTED[service].keptExtensions`): an `extension <name> …` row for one of
- * them is tolerated as extra, at any version. Nothing else is — not another
- * extension, and not a missing one. Unlike `allowance`, it cannot be required
- * to match: whether the migration's `CREATE EXTENSION IF NOT EXISTS` created
- * anything depends on the cluster (the bootstrap pre-installs it into
- * template1), so it is pinned statically instead — see the lib test.
+ * (`EXPECTED[service].keptExtensions`). Such an extension is tolerated as
+ * extra only as the **exact** row recorded under `keptFrom` — the target's own
+ * state right after `prisma migrate deploy` — name, version and schema alike
+ * (Codex review of #117, finding 4): a down script that leaves it at another
+ * version, or moves it to another schema, still fails. Nothing else is
+ * tolerated — not another extension, and not a missing one. Unlike
+ * `allowance`, it cannot be required to match: whether the migration's
+ * `CREATE EXTENSION IF NOT EXISTS` created anything depends on the cluster
+ * (the bootstrap pre-installs it into template1), so it is pinned statically
+ * instead — see the lib test.
+ *
+ * `extensionHome`: see `snapshotQuery`.
  */
 export function assertSnapshotScript(
   metaSchema,
@@ -1165,13 +1171,18 @@ export function assertSnapshotScript(
   schema,
   context,
   allowance = { missing: [], unexpected: [] },
-  keptExtensions = [],
-  extensionHome = schema,
+  { keptExtensions = [], keptFrom = null, extensionHome = schema } = {},
 ) {
   assertSchemaName(metaSchema);
   if (!/^[A-Za-z0-9_:.-]+$/.test(label)) throw new Error(`Unsafe snapshot label ${label}`);
   for (const name of keptExtensions) {
     if (!/^[a-z0-9_]+$/.test(name)) throw new Error(`Unsafe extension name ${name}`);
+  }
+  if (keptExtensions.length > 0 && keptFrom === null) {
+    throw new Error('keptExtensions needs keptFrom: the snapshot whose exact rows it may keep');
+  }
+  if (keptFrom !== null && !/^[A-Za-z0-9_:.-]+$/.test(keptFrom)) {
+    throw new Error(`Unsafe snapshot label ${keptFrom}`);
   }
   const safeContext = context.replaceAll("'", "''");
   const literalArray = (items) =>
@@ -1203,11 +1214,16 @@ BEGIN
   END IF;
   missing := ARRAY(SELECT unnest(missing) EXCEPT ALL SELECT unnest(${allowedMissing}));
   unexpected := ARRAY(SELECT unnest(unexpected) EXCEPT ALL SELECT unnest(${allowedUnexpected}));
-  -- An extension this down script is documented to leave installed. By exact
-  -- name, never a pattern: btree_gist must not also excuse btree_gin.
+  -- An extension this down script is documented to leave installed: by exact
+  -- name (btree_gist must not also excuse btree_gin), and only as the exact
+  -- row the target had right after its deploy — same version, same schema.
   unexpected := ARRAY(
     SELECT u FROM unnest(unexpected) u
-    WHERE NOT (split_part(u, ' ', 1) = 'extension' AND split_part(u, ' ', 2) = ANY (${kept}))
+    WHERE NOT (
+      split_part(u, ' ', 1) = 'extension'
+      AND split_part(u, ' ', 2) = ANY (${kept})
+      AND u IN (SELECT item FROM "${metaSchema}".snapshot WHERE label = ${keptFrom === null ? 'NULL' : `'${keptFrom}'`})
+    )
   );
 
   IF cardinality(missing) > 0 OR cardinality(unexpected) > 0 THEN

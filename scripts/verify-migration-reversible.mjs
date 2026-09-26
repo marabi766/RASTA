@@ -120,6 +120,9 @@ const targetSchema = inDatabase ? 'public' : scratchSchema;
  * describe, as `(target)` (see `snapshotQuery`).
  */
 const extensionHome = targetSchema;
+
+/** The label the target's own state is recorded under, right after its deploy. */
+const POST_UP = 'post-up';
 const scratchDatabase = inDatabase
   ? `${new URL(baseUrl).pathname.slice(1)}_${scratchSchema}`
   : null;
@@ -364,11 +367,16 @@ mustRun(
       targetSchema,
       'after prisma migrate deploy',
       undefined,
-      [],
-      extensionHome,
+      { extensionHome },
     ),
 );
 mustRun('up: every migration in the ledger', ledgerAssertionScript(migrations, 'after up'));
+// The target as deployed: the only form in which a down script may leave an
+// extension its migration created (EXPECTED.<service>.keptExtensions).
+mustRun(
+  'up: record the deployed state',
+  searchPath(targetSchema) + recordSnapshotScript(metaSchema, POST_UP, targetSchema, extensionHome),
+);
 
 // --- rollback against real data ---------------------------------------------
 //
@@ -422,8 +430,11 @@ for (let index = migrations.length - 1; index >= 0; index -= 1) {
         targetSchema,
         `down: ${name}/down.sql`,
         expected.inexactInverse?.[name],
-        expected.keptExtensions?.[name],
-        extensionHome,
+        {
+          keptExtensions: expected.keptExtensions?.[name] ?? [],
+          keptFrom: POST_UP,
+          extensionHome,
+        },
       ),
   );
   if (!exact.ok)
@@ -450,15 +461,9 @@ mustRun('up again: every expected object is back', assertionScript(expected, tru
 mustRun(
   'up again: identical to the first up',
   searchPath(targetSchema) +
-    assertSnapshotScript(
-      metaSchema,
-      finalState,
-      targetSchema,
-      'after up again',
-      undefined,
-      [],
+    assertSnapshotScript(metaSchema, finalState, targetSchema, 'after up again', undefined, {
       extensionHome,
-    ),
+    }),
 );
 mustRun(
   'up again: every migration in the ledger',

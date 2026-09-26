@@ -1234,6 +1234,17 @@ jobs:
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
+      - name: Migration verifier library, against PostgreSQL
+        # The verifier's builders and static checks, plus the cases that need
+        # a server: a kept extension passes only exactly as deployed — not at
+        # another version, not in another schema (scripts/
+        # verify-migration-reversible-lib.test.mjs). Each case runs in its own
+        # throwaway database; REQUIRED makes a missing URL an error, not a skip.
+        run: pnpm run test:migration-lib
+        env:
+          MIGRATION_LIB_TEST_DATABASE_URL: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity
+          MIGRATION_LIB_TEST_DATABASE_REQUIRED: 'true'
+
       - name: Demo seeds refuse outside development and test
         # Every service's prisma/seed.ts upserts fixed ids with demo values; run
         # with production credentials it would overwrite real tenants. Each seed
