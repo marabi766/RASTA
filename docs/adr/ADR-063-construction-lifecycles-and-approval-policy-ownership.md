@@ -51,6 +51,11 @@ version = $expected`، با `version = version + 1`. صفر ردیف یعنی «
   ممکن نیست.
 - هر گذار رویدادش را **در همان تراکنش** در Outbox می‌نویسد (A-08). گذاری که Commit نشود، رویدادی ندارد؛ رویدادی که
   نوشته نشود، گذار را برمی‌گرداند.
+- **چرخهٔ نیاز** (`need.state-machine.ts`، پاسخ موقت Q-68): `DRAFT → SUBMITTED`، `DRAFT → WITHDRAWN`،
+  `SUBMITTED → WITHDRAWN`؛ `WITHDRAWN` پایانی. فقط `DRAFT` ویرایش‌پذیر است؛ نیاز ثبت‌شده تغییرناپذیر است و اصلاحش
+  «انصراف (با دلیل الزامی) + افزودن تازه» است. حذف نیست. هر فرمان نیاز فقط وقتی پذیرفته می‌شود که پروژهٔ قفل‌شده در
+  `DRAFT` یا `CHANGES_REQUESTED` باشد، و `expectedVersion` نیاز را هم می‌سنجد. قیدهای `ck_need_submission_complete` و
+  `ck_need_withdrawal_complete` در پایگاه داده همین را اجبار می‌کنند.
 - **Temporal برای CON-002 می‌ماند**، همان‌طور که `docs/04` § ۴٫۱۲ می‌گوید: مهلت‌های مناقصه Timer ماندگارند. وقتی
   `TenderWorkflow` ساخته شود، گذارهای پروژه را با همین CAS از راه یک Activity انجام می‌دهد، نه با حالت موازی در
   Workflow.

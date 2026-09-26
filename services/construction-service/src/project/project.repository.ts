@@ -204,13 +204,20 @@ export class ProjectRepository {
 
   // -- project reads ----------------------------------------------------------
 
-  async findProject(projectId: string): Promise<Project | null> {
-    return this.prisma.client.project.findFirst({ where: { id: projectId } });
+  async findProject(
+    projectId: string,
+    client: ExtendedPrismaClient = this.prisma.client,
+  ): Promise<Project | null> {
+    return client.project.findFirst({ where: { id: projectId } });
   }
 
   /** The operating area as GeoJSON, or null. Raw, for the same reason as `setArea`. */
-  async readArea(organizationId: string, projectId: string): Promise<unknown> {
-    const rows = await this.prisma.client.$queryRaw<{ area: string | null }[]>`
+  async readArea(
+    organizationId: string,
+    projectId: string,
+    client: ExtendedPrismaClient = this.prisma.client,
+  ): Promise<unknown> {
+    const rows = await client.$queryRaw<{ area: string | null }[]>`
       SELECT ST_AsGeoJSON("area") AS "area"
         FROM "project"
        WHERE "organization_id" = ${organizationId} AND "id" = ${projectId}`;
@@ -246,8 +253,11 @@ export class ProjectRepository {
     });
   }
 
-  async needsSummary(projectId: string): Promise<NeedsSummary> {
-    const groups = await this.prisma.client.projectNeed.groupBy({
+  async needsSummary(
+    projectId: string,
+    client: ExtendedPrismaClient = this.prisma.client,
+  ): Promise<NeedsSummary> {
+    const groups = await client.projectNeed.groupBy({
       by: ['status'],
       where: { projectId },
       _count: { _all: true },

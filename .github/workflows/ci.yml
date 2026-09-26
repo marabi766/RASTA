@@ -1753,7 +1753,8 @@ jobs:
             DATABASE_URL_AUDIT=postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit \
             node dist/main.js > /tmp/rasta-logs/audit.log 2>&1 & )
 
-          # CON-001. The E2E owner organization writes its own approval
+          # CON-001: its project scenarios, and the audit record they produce.
+          # The E2E owner organization writes its own approval
           # policies, which the default setter roles (SYSTEM_ADMIN, UNION_ADMIN)
           # do not allow: no seeded organization holds both a project role and a
           # setter role. A deployment choice under Q-70 (7), made here and named

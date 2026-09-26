@@ -300,6 +300,11 @@ describe('approval policies and rounds', () => {
         status: 'CHANGES_REQUESTED',
         statusReason: 'The estimate is not itemised',
       });
+      // The reason and the step's own text are prose: in the database, never
+      // on the log.
+      const published = JSON.stringify((await outboxFor(w.prisma, a)).map((row) => row.payload));
+      expect(published).toContain('APPROVAL_REJECTED');
+      expect(published).not.toMatch(/The estimate is not itemised|approvalType|authorityLabel/);
     });
 
     it('opens a fresh round on resubmission, against the policy in force then', async () => {

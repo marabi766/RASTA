@@ -74,8 +74,6 @@ describe('project lifecycle', () => {
       expect(envelope.payload).toEqual({
         projectId: project.id,
         organizationId: a,
-        title: PROJECT.title,
-        operationType: PROJECT.operationType,
         estimatedCostMinor: '1500000000',
         hasArea: false,
         createdBy: project.createdBy,
@@ -245,11 +243,13 @@ describe('project lifecycle', () => {
         'PROJECT_STATUS_CHANGED',
       ]);
       expect(rows[1]!.streamSeq).toBe(2n);
-      expect(eventEnvelopeSchema.parse(rows[1]!.payload).payload).toMatchObject({
-        from: 'DRAFT',
-        to: 'CANCELLED',
-        reason: 'Funding was withdrawn',
-      });
+      const payload = eventEnvelopeSchema.parse(rows[1]!.payload).payload;
+      expect(payload).toMatchObject({ from: 'DRAFT', to: 'CANCELLED' });
+      // The reason is prose: kept in the database, never on the log.
+      expect(payload).not.toHaveProperty('reason');
+      expect(JSON.stringify(rows.map((row) => row.payload))).not.toMatch(
+        /Funding was withdrawn|Village road/,
+      );
     });
 
     it('is terminal: no edit and no second cancel', async () => {

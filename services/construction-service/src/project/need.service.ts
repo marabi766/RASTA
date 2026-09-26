@@ -6,7 +6,7 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { ProjectAccess, assertOwnProject } from '../access/access';
 import { transactionNow } from '../shared/clock';
-import { IdempotencyStore, targeted } from '../shared/idempotency';
+import { IdempotencyStore, targeted, type RecordCompletion } from '../shared/idempotency';
 import { SERVICE_NAME } from '../config/env';
 import { needTransitionsTotal, versionConflictsTotal } from '../observability/metrics';
 import { ProjectRepository } from './project.repository';
@@ -51,9 +51,9 @@ export class NeedService {
   async add(projectId: string, dto: CreateNeedDto, idempotencyKey?: string): Promise<NeedView> {
     const { organizationId, actor } = this.access.assertCanWrite();
 
-    const work = async (): Promise<NeedView> => {
+    const work = async (record: RecordCompletion<NeedView>): Promise<NeedView> => {
       const needId = newId(ID_PREFIX.need);
-      await this.prisma.transaction(async (tx) => {
+      const view = await this.prisma.transaction(async (tx) => {
         const at = await transactionNow(tx);
         await this.lockEditableProject(tx, organizationId, projectId);
 
@@ -79,12 +79,16 @@ export class NeedService {
           payload: { projectId, needId, organizationId, addedBy: actor, addedAt: at.toISOString() },
           occurredAt: at,
         });
+
+        // The need and its key's completion commit together.
+        const created = await this.view(projectId, needId, tx);
+        await record(tx, needId, created);
+        return created;
       });
       needTransitionsTotal.inc({ service: SERVICE_NAME, command: 'add' });
-      return this.view(projectId, needId);
+      return view;
     };
 
-    if (!idempotencyKey) return work();
     return this.idempotency.run(
       ADD_NEED_ENDPOINT,
       idempotencyKey,
@@ -272,7 +276,6 @@ export class NeedService {
           projectId,
           needId,
           organizationId,
-          reason: dto.reason,
           withdrawnBy: actor,
           withdrawnAt: at.toISOString(),
         },
@@ -316,8 +319,12 @@ export class NeedService {
     return RastaError.optimisticLockFailed('ProjectNeed', needId);
   }
 
-  private async view(projectId: string, needId: string): Promise<NeedView> {
-    const need = await this.repository.findNeed(this.prisma.client, projectId, needId);
+  private async view(
+    projectId: string,
+    needId: string,
+    client: ExtendedPrismaClient = this.prisma.client,
+  ): Promise<NeedView> {
+    const need = await this.repository.findNeed(client, projectId, needId);
     if (!need) throw RastaError.notFound('ProjectNeed', needId);
     return toNeedView(need);
   }
