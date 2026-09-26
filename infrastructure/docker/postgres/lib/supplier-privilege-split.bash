@@ -84,7 +84,48 @@ split_supplier_privileges() {
   _split_psql "${db}" "REVOKE ALL ON SCHEMA public FROM ${runtime}"
   _split_psql "${db}" "GRANT USAGE ON SCHEMA public TO ${runtime}"
 
-  echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB"
+  # Functions: no EXECUTE for PUBLIC (Codex review of #120, round 3).
+  #
+  # PostgreSQL grants EXECUTE on every new function to PUBLIC. A later
+  # migration that created a SECURITY DEFINER function as the migrator would
+  # hand the runtime role whatever that function does, with the migrator's
+  # rights. Two statements close it:
+  #
+  #   * the migrator's default privileges in this database stop granting
+  #     EXECUTE to PUBLIC on functions it creates from now on. This is the
+  #     *global* form, deliberately without `IN SCHEMA`: PostgreSQL documents
+  #     that a per-schema default can only add to the global defaults, never
+  #     revoke them, and PUBLIC's EXECUTE is a global default — the `IN SCHEMA
+  #     public` form was measured to leave a new function executable by the
+  #     runtime role (PostgreSQL 16);
+  #   * every function the migrator already owns here — the trigger functions
+  #     of an upgraded database — loses PUBLIC's and the runtime role's EXECUTE.
+  #     An extension's functions are left alone: they are the extension's, and
+  #     changing their ACL would diverge from what the extension installs.
+  #
+  # Triggers keep working: PostgreSQL checks EXECUTE on a trigger function when
+  # the trigger is created, not when it fires, so the runtime role's INSERTs and
+  # UPDATEs still run every guard (test/runtime-privileges.int-spec.ts proves
+  # both halves). Nothing needs EXECUTE granted back today; a function the
+  # service must call directly gets an explicit GRANT in its own migration.
+  _split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
+  _split_psql "${db}" "DO \$\$
+    DECLARE fn regprocedure;
+    BEGIN
+      FOR fn IN
+        SELECT p.oid::regprocedure
+          FROM pg_proc p
+         WHERE p.proowner = '${migrator}'::regrole
+           AND NOT EXISTS (
+             SELECT 1 FROM pg_depend d
+              WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
+           )
+      LOOP
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC, ${runtime}', fn);
+      END LOOP;
+    END \$\$;"
+
+  echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no EXECUTE"
 }
 
 # Run directly (not sourced): resolve passwords exactly as the bootstrap does,

@@ -228,6 +228,87 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
     expect(found?.status).toBe('DRAFT');
   });
 
+  describe('functions (Codex review of #120, round 3)', () => {
+    // PostgreSQL grants EXECUTE on a new function to PUBLIC. The split
+    // removes that default for the migrator — in its global form, because a
+    // per-schema default cannot revoke a global one — and strips EXECUTE
+    // from the functions it already owns.
+
+    const executable = async (signature: string): Promise<boolean> => {
+      const [row] = await raw(() =>
+        owner.client.$queryRawUnsafe<{ can: boolean }[]>(
+          `SELECT has_function_privilege('rasta_supplier', '${signature}', 'EXECUTE') AS "can"`,
+        ),
+      );
+      return row?.can ?? true;
+    };
+
+    it.each([
+      ['a plain function', ''],
+      ['a SECURITY DEFINER function', 'SECURITY DEFINER'],
+    ])(
+      'does not let the runtime role execute %s the migrator creates later',
+      async (_label, mode) => {
+        const name = `probe_${process.pid}_${mode ? 'definer' : 'plain'}_${Date.now()}`;
+        await raw(() =>
+          owner.client.$executeRawUnsafe(
+            `CREATE FUNCTION "${name}"() RETURNS int LANGUAGE sql ${mode} AS 'SELECT 1'`,
+          ),
+        );
+        try {
+          expect(await executable(`"${name}"()`)).toBe(false);
+          await expect(asRuntime(`SELECT "${name}"()`)).rejects.toThrow(DENIED);
+        } finally {
+          await raw(() => owner.client.$executeRawUnsafe(`DROP FUNCTION "${name}"()`));
+        }
+      },
+    );
+
+    it('lets the runtime role execute none of the functions the migrations created', async () => {
+      const rows = await raw(() =>
+        owner.client.$queryRawUnsafe<{ fn: string; can: boolean }[]>(
+          `SELECT p.oid::regprocedure::text AS "fn",
+                  has_function_privilege('rasta_supplier', p.oid, 'EXECUTE') AS "can"
+             FROM pg_proc p
+            WHERE p.pronamespace = current_schema()::regnamespace
+              AND NOT EXISTS (
+                SELECT 1 FROM pg_depend d
+                 WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
+              )`,
+        ),
+      );
+
+      // Not vacuous: the three performance migrations create eight functions.
+      expect(rows.length).toBeGreaterThanOrEqual(8);
+      expect(rows.filter((row) => row.can)).toEqual([]);
+    });
+
+    it('still runs every trigger for the runtime role — firing needs no EXECUTE', async () => {
+      // A version with no weights: the deferred 100% trigger must refuse it at
+      // commit, which it can only do if it runs.
+      await expect(
+        raw(() =>
+          runtime.client.$transaction(async (tx) => {
+            await tx.$executeRawUnsafe(
+              `INSERT INTO "performance_formula_version" ("id", "formula_version", "window_days",
+                 "min_sample_count", "min_coverage_bp", "rating_scale_min", "rating_scale_max",
+                 "rating_min_score_centis", "rating_max_score_centis", "created_by", "created_correlation_id")
+               VALUES ('PFV_TRIGGER_PROBE_${process.pid}', 2000000000 - ${process.pid}, 180, 5, 5000, 1, 5, 0, 10000, 'U', 'C')`,
+            );
+          }),
+        ),
+      ).rejects.toThrow(/exactly 10000 bp is required/);
+
+      // And the row-level guard on UPDATE, which the runtime role may issue.
+      const { id } = await seedDraft(runtime);
+      await expect(
+        asRuntime(
+          `UPDATE "performance_formula_version" SET "status" = 'RETIRED' WHERE "id" = '${id}'`,
+        ),
+      ).rejects.toThrow(/may go from DRAFT only to ACTIVE/);
+    });
+  });
+
   describe('the database itself (Codex review of #120, round 2 finding 2)', () => {
     /** The runtime role, connected to the maintenance database `postgres`. */
     let elsewhere: PrismaService;

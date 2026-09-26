@@ -250,6 +250,29 @@ for (const [label, sql, database] of [
   });
 }
 
+test('no function the migrator owns is executable by the runtime role, now or later', () => {
+  // Round 3: PUBLIC's default EXECUTE is revoked for the migrator's functions,
+  // existing (the trigger functions) and future (the global default privilege).
+  assert.equal(
+    ok(
+      `SELECT count(*) FROM pg_proc p
+        WHERE p.proowner = '${MIGRATOR}'::regrole
+          AND has_function_privilege('${RUNTIME}', p.oid, 'EXECUTE')`,
+    ),
+    '0',
+  );
+  const name = `probe_${process.pid}_later`;
+  ok(`CREATE FUNCTION ${name}() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'`, {
+    role: MIGRATOR,
+  });
+  try {
+    assert.equal(ok(`SELECT has_function_privilege('${RUNTIME}', '${name}()', 'EXECUTE')`), 'f');
+    denied(`SELECT ${name}()`, { role: RUNTIME });
+  } finally {
+    ok(`DROP FUNCTION ${name}()`, { role: MIGRATOR });
+  }
+});
+
 test('running the split again changes nothing', () => {
   split();
   assert.equal(
