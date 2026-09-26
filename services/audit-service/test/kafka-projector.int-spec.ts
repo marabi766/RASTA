@@ -7,7 +7,7 @@ import {
   AUDIT_TRAIL_TOPIC,
   DLQ_HEADERS,
   ERROR_CODES,
-  TOPIC_PRODUCERS,
+  producersOf,
   type EventEnvelope,
 } from '@rasta/contracts';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -165,7 +165,7 @@ describeWithKafka('domain projector over Kafka', () => {
    * a fixture meant to become a row has to name the topic's owner.
    */
   function ownerOf(topic: string): string {
-    const owner = TOPIC_PRODUCERS[topic]?.[0];
+    const owner = producersOf(topic)[0];
     if (!owner) throw new Error(`${topic} has no producer declared in TOPIC_PRODUCERS`);
     return owner;
   }

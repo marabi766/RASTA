@@ -21,6 +21,18 @@ export const eventActorSchema = z.object({
 });
 export type EventActor = z.infer<typeof eventActorSchema>;
 
+/**
+ * What a `producer` may look like: a service name, as every `SERVICE_NAME` on
+ * the platform is (`asset-service`, `api-gateway`).
+ *
+ * The field is the sender's claim and reaches logs, metrics and dead-letter
+ * headers of every consumer group on the topic (ADR-061 § 2). Bounded and
+ * printable by construction, so a padded or control-character claim is an
+ * invalid envelope — refused before anyone repeats it — rather than a string
+ * each consumer has to remember to sanitise.
+ */
+export const PRODUCER_NAME_PATTERN = /^[a-z][a-z0-9-]{1,62}$/;
+
 export const eventEnvelopeSchema = z.object({
   /** ULID. The consumer-side idempotency key. */
   eventId: z.string().min(1),
@@ -31,7 +43,10 @@ export const eventEnvelopeSchema = z.object({
   /** When it happened in the domain — not when it was published. */
   occurredAt: z.string().datetime(),
 
-  producer: z.string().min(1),
+  /** The publishing service's `SERVICE_NAME` — see `PRODUCER_NAME_PATTERN`. */
+  producer: z
+    .string()
+    .regex(PRODUCER_NAME_PATTERN, 'producer must be a service name (lower-case, digits, hyphens)'),
   producerVersion: z.string().default('0.0.0'),
 
   aggregateType: z.string().min(1),

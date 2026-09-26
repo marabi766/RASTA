@@ -57,6 +57,7 @@ export {
   actorTypeSchema,
   eventActorSchema,
   eventEnvelopeSchema,
+  PRODUCER_NAME_PATTERN,
   parseEnvelope,
   isEventName,
   topicFor,
@@ -81,7 +82,9 @@ export {
   ownerTopicOf,
   isDeclaredTopic,
   isAllowedProducer,
+  producersOf,
 } from './events/topic-producers';
+export type { DeclaredTopic, DeclaredProducer } from './events/topic-producers';
 
 export {
   AUDIT_EVENT_RECORDED,

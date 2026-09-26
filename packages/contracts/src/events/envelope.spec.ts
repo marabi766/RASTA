@@ -203,3 +203,54 @@ describe('EVENT_HEADERS', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// The producer claim (Codex review of #124, finding 1)
+// ---------------------------------------------------------------------------
+
+describe('producer is a bounded, printable service name', () => {
+  it.each([
+    'api-gateway',
+    'asset-service',
+    'audit-service',
+    'construction-service',
+    'document-service',
+    'economic-service',
+    'fleet-service',
+    'identity-service',
+    'maintenance-service',
+    'marketplace-service',
+    'notification-service',
+    'organization-service',
+    'supplier-service',
+  ])('accepts %s, a SERVICE_NAME on main', (producer) => {
+    expect(eventEnvelopeSchema.safeParse({ ...base, producer }).success).toBe(true);
+  });
+
+  it.each([
+    ['empty', ''],
+    ['one character', 'a'],
+    ['64 characters', `a${'b'.repeat(63)}`],
+    ['4 KiB of padding', `marketplace-service${'x'.repeat(4096)}`],
+    ['a newline that forges a log line', 'asset-service\nINFO forged entry'],
+    ['a carriage return', 'asset-service\r'],
+    ['an ANSI escape', 'asset-service\u001b[2J'],
+    ['a NUL', 'asset-service\u0000'],
+    ['a right-to-left override', 'asset-service‮'],
+    ['a look-alike letter', 'asset-servíce'],
+    ['upper case', 'Asset-Service'],
+    ['a space', 'asset service'],
+    ['a leading digit', '1asset-service'],
+    ['a leading hyphen', '-asset-service'],
+  ])('refuses %s', (_label, producer) => {
+    expect(eventEnvelopeSchema.safeParse({ ...base, producer }).success).toBe(false);
+  });
+
+  it('never repeats the refused value in its error', () => {
+    const producer = `asset-service\nSECRET-${'x'.repeat(200)}`;
+    const result = eventEnvelopeSchema.safeParse({ ...base, producer });
+
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.error?.issues)).not.toContain('SECRET');
+  });
+});

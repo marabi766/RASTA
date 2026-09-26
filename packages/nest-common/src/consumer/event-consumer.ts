@@ -309,13 +309,22 @@ export class EventConsumer {
     // — never a topic the envelope claims. A refusal is a verdict, not a
     // failure, so it is dead-lettered at once and the partition moves on.
     // Consistency, not authentication: see `TOPIC_PRODUCERS`.
+    //
+    // The claim itself is never repeated as free text (Codex review of #124,
+    // finding 1). The dead-letter header is fixed text naming only the topic
+    // this consumer subscribed to; the log line is fixed text plus bounded,
+    // escaped fields. The envelope schema already bounds `producer` to a
+    // service name, so the escaping is a second line, not the only one.
     if (!isAllowedProducer(topic, envelope.producer)) {
       const refusal = new UnprocessableEventError(
         DLQ_REASONS.PRODUCER_NOT_ALLOWED,
-        `${envelope.eventName} ${envelope.eventId} names producer ${envelope.producer}, ` +
-          `which is not allowed on ${topic}`,
+        `The envelope's producer is not declared for ${topic} (ADR-061 § 2)`,
       );
-      this.logger.error(`Refused before any handler (PRODUCER_NOT_ALLOWED): ${refusal.message}`);
+      this.logger.error(
+        `Refused before any handler (PRODUCER_NOT_ALLOWED) on ${topic}: ` +
+          `eventId=${logField(envelope.eventId)} eventName=${logField(envelope.eventName)} ` +
+          `producer=${logField(envelope.producer)}`,
+      );
       await this.deadLetter(topic, value, headers, refusal.reason, refusal, 0);
       return;
     }
@@ -449,6 +458,21 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+/**
+ * A sender-supplied value made safe to put in a log line: at most 64
+ * characters, in quotes, with everything outside printable ASCII escaped — so
+ * a newline, an ANSI sequence or a right-to-left override cannot forge or
+ * disguise output. Longer values say how long they were, not what followed.
+ */
+export function logField(value: string, max = 64): string {
+  const clipped = value.length > max ? value.slice(0, max) : value;
+  const escaped = clipped.replace(
+    /[^\x20-\x7e]|["\\]/g,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+  return value.length > max ? `"${escaped}"...(${value.length} chars)` : `"${escaped}"`;
 }
 
 function describe(error: unknown): string {

@@ -1,4 +1,4 @@
-import { AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
+import { AUDIT_TRAIL_TOPIC, TOPIC_PRODUCERS } from '@rasta/contracts';
 import {
   AUDIT_DOMAIN_TOPIC_OWNERS,
   AUDIT_SOURCE_SERVICE_LABELS,
@@ -44,6 +44,19 @@ describe('audit producer topology', () => {
     expect([...DOMAIN_TOPICS]).toEqual(AUDIT_DOMAIN_TOPIC_OWNERS.map((entry) => entry.topic));
     expect(new Set(DOMAIN_TOPICS).size).toBe(12);
     expect(DOMAIN_TOPICS).not.toContain(AUDIT_TRAIL_TOPIC);
+  });
+
+  it('is TOPIC_PRODUCERS exactly — one source of truth (ADR-061 § 1, Codex review of #124)', () => {
+    // The consumer's allow-list and this service's subscriptions and labels
+    // are one declaration. Derived, so this holds by construction; asserted,
+    // so a later edit that restates either side fails here.
+    const declared = Object.entries(TOPIC_PRODUCERS);
+
+    expect(AUDIT_DOMAIN_TOPIC_OWNERS.map(({ topic, owner }) => [topic, [owner]])).toEqual(
+      declared.filter(([topic]) => topic !== AUDIT_TRAIL_TOPIC),
+    );
+    expect(AUDIT_TRAIL_PRODUCERS).toBe(TOPIC_PRODUCERS[AUDIT_TRAIL_TOPIC]);
+    expect(new Set(AUDIT_SOURCE_SERVICES)).toEqual(new Set(declared.flatMap(([, p]) => p)));
   });
 
   it('names identity-service as the only known trail producer today', () => {

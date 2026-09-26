@@ -1,7 +1,8 @@
-import { DLQ_HEADERS, DLQ_REASONS, TOPIC_PRODUCERS } from '@rasta/contracts';
+import { DLQ_HEADERS, DLQ_REASONS, TOPIC_PRODUCERS, producersOf } from '@rasta/contracts';
 import { dlqMessagesTotal } from '@rasta/observability';
 import {
   EventConsumer,
+  logField,
   type ConsumerLogger,
   type EventConsumerOptions,
   type EventHandler,
@@ -73,6 +74,7 @@ function build(
   topics: string[],
   handler: EventHandler,
   overrides: Partial<EventConsumerOptions> = {},
+  logger: ConsumerLogger = silent,
 ): { handle: PrivateHandle; dlq: FakeDlqProducer } {
   const dlq = new FakeDlqProducer();
   const consumer = new EventConsumer(
@@ -87,7 +89,7 @@ function build(
       ...overrides,
     },
     handler,
-    silent,
+    logger,
   );
   const handle = consumer as unknown as PrivateHandle;
   handle.dlqProducer = dlq;
@@ -105,7 +107,7 @@ afterAll(() => {
 describe('a foreign producer on every declared topic', () => {
   // The whole matrix, not a sample: every topic, every other known producer.
   const cases = DECLARED_TOPICS.flatMap((topic) =>
-    EVERY_PRODUCER.filter((producer) => !TOPIC_PRODUCERS[topic]?.includes(producer)).map(
+    EVERY_PRODUCER.filter((producer) => !producersOf(topic).includes(producer)).map(
       (producer) => [topic, producer] as const,
     ),
   );
@@ -137,7 +139,7 @@ describe('a foreign producer on every declared topic', () => {
 
 describe('an allowed producer', () => {
   const cases = DECLARED_TOPICS.flatMap((topic) =>
-    (TOPIC_PRODUCERS[topic] ?? []).map((producer) => [topic, producer] as const),
+    producersOf(topic).map((producer) => [topic, producer] as const),
   );
 
   it.each(cases)(
@@ -261,5 +263,89 @@ describe('subscribing to an undeclared topic', () => {
     expect(() => build(['rasta.asset.v1', 'rasta.inventory.v1'], async () => undefined)).toThrow(
       /rasta\.inventory\.v1/,
     );
+  });
+});
+
+describe('the producer claim is never repeated as raw text (Codex review of #124, finding 1)', () => {
+  function recording(): { logger: ConsumerLogger; lines: string[] } {
+    const lines: string[] = [];
+    const push = (message: string): void => {
+      lines.push(message);
+    };
+    return { logger: { log: push, warn: push, error: push }, lines };
+  }
+
+  function headerText(dlq: FakeDlqProducer): string {
+    return JSON.stringify(dlq.sent.map((record) => record.messages.map((m) => m.headers)));
+  }
+
+  it('dead-letters a refusal with fixed text, never the claimed producer', async () => {
+    const { logger, lines } = recording();
+    const { handle, dlq } = build(['rasta.marketplace.v1'], async () => undefined, {}, logger);
+
+    await handle.handleMessage(
+      'rasta.marketplace.v1',
+      0,
+      envelopeBytes('economic-service'),
+      undefined,
+    );
+
+    const error = String(dlq.sent[0]?.messages[0]?.headers[DLQ_HEADERS.error]);
+    expect(error).toBe(
+      "UnprocessableEventError: The envelope's producer is not declared for rasta.marketplace.v1 (ADR-061 § 2)",
+    );
+    expect(error).not.toContain('economic-service');
+    // The log keeps the claim for the security review — quoted, as a field.
+    expect(lines).toEqual([
+      'Refused before any handler (PRODUCER_NOT_ALLOWED) on rasta.marketplace.v1: ' +
+        'eventId="01JALLOWLISTSPEC000000001" eventName="SOMETHING_HAPPENED" producer="economic-service"',
+    ]);
+  });
+
+  it.each([
+    ['4 KiB of padding', `marketplace-service${'P'.repeat(4096)}`],
+    ['a forged log line', 'marketplace-service\nINFO Refused nothing, all is well'],
+    ['an ANSI escape', 'marketplace-service\u001b[2Jcleared'],
+    ['a right-to-left override', 'marketplace-service\u202eecivres'],
+  ])(
+    'refuses a producer with %s as an invalid envelope, repeating none of it',
+    async (_label, producer) => {
+      const { logger, lines } = recording();
+      const handled: string[] = [];
+      const { handle, dlq } = build(
+        ['rasta.marketplace.v1'],
+        async (envelope) => {
+          handled.push(envelope.eventId);
+        },
+        {},
+        logger,
+      );
+
+      await handle.handleMessage('rasta.marketplace.v1', 0, envelopeBytes(producer), undefined);
+
+      expect(handled).toEqual([]);
+      expect(dlq.sent[0]?.messages[0]?.headers[DLQ_HEADERS.reason]).toBe(
+        DLQ_REASONS.VALIDATION_FAILED,
+      );
+      const suffix = producer.slice('marketplace-service'.length);
+      for (const text of [...lines, headerText(dlq)]) {
+        expect(text).not.toContain(suffix);
+        expect(text).not.toContain('marketplace-service');
+      }
+    },
+  );
+});
+
+describe('logField', () => {
+  it('quotes a plain value unchanged', () => {
+    expect(logField('asset-service')).toBe('"asset-service"');
+  });
+
+  it('escapes control characters, quotes, backslashes and non-ASCII', () => {
+    expect(logField('a\nb\u001b"c\\\u202e')).toBe('"a\\u000ab\\u001b\\u0022c\\u005c\\u202e"');
+  });
+
+  it('bounds a long value and says how long it was', () => {
+    expect(logField('x'.repeat(5000))).toBe(`"${'x'.repeat(64)}"...(5000 chars)`);
   });
 });

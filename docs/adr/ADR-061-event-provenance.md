@@ -1,6 +1,6 @@
 # ADR-061: منشأ رویداد — پیام Kafka ادعای ناشرش است، نه واقعیت
 
-- **وضعیت:** **Accepted — implementation in progress.** مدیر پروژه در 2026-09-25 همان‌طور که پیشنهاد شد پذیرفت (§ «تصمیم مدیر پروژه»). بند ۴: شاخهٔ `fix/economic-source-verification` (§ «پیاده‌سازی»). بندهای ۱ و ۲: `TOPIC_PRODUCERS` و بررسی ناشر در `EventConsumer` (§ «وضعیت PR بند ۱ و ۲»)؛ مشتق‌کردن ثابت‌های audit هنوز نه. بندهای ۵ تا ۷: هنوز نه.
+- **وضعیت:** **Accepted — implementation in progress.** مدیر پروژه در 2026-09-25 همان‌طور که پیشنهاد شد پذیرفت (§ «تصمیم مدیر پروژه»). بند ۴: شاخهٔ `fix/economic-source-verification` (§ «پیاده‌سازی»). بندهای ۱ و ۲: `TOPIC_PRODUCERS`، بررسی ناشر در `EventConsumer` و ثابت‌های audit مشتق از آن (§ «وضعیت PR بند ۱ و ۲»). بندهای ۵ تا ۷: هنوز نه.
 - **تاریخ:** 2026-09-25
 - **تصمیم‌گیرنده:** معماری پلتفرم، زیر اختیار صریح مدیر پروژه برای تصمیم‌های امنیت و کیفیت
 - **اهمیت:** **بحرانی.** هر Consumerی که از یک رویداد پول یا وضعیت می‌سازد
@@ -205,14 +205,23 @@ _ترتیب اجرا طبق تصمیم مدیر پروژه: ۳ ← ۱ ← ۲._
 تمام‌شده روی منبعِ در دسترس‌ناپذیر اکنون `UPSTREAM_UNAVAILABLE` است، نه `MAX_RETRIES_EXCEEDED`. قاعدهٔ A-13 در
 `AGENTS.md` ثبت شد.
 
-**وضعیت PR بند ۱ و ۲:** `TOPIC_PRODUCERS` در `packages/contracts/src/events/topic-producers.ts`، ثابت و Frozen؛
-هر Topicی که Consumerی روی `main` مشترکش است، با مالکش. `EventConsumer` پس از خواندن Envelope و پیش از هر Handler
-ناشر را با **Topic تحویل** می‌سنجد (Topic `.retry` با Topic اصلش) و ناهم‌خوانی را بی Retry با `PRODUCER_NOT_ALLOWED`
-(تلاش `0`) به DLQ می‌فرستد؛ اشتراک روی Topic اعلام‌نشده در سازندهٔ `EventConsumer` خطا می‌دهد. آزمون: همهٔ جفت‌های
-«Topic × ناشر بیگانه» و «Topic × ناشر مجاز» (`producer-allowlist.spec.ts`) و یک مورد روی Broker واقعی در
-`kafka-projector.int-spec.ts`. هیچ Consumerی پیکربندی تازه نخواست. **هنوز نه:** مشتق‌کردن
-`AUDIT_DOMAIN_TOPIC_OWNERS` و `AUDIT_TRAIL_PRODUCERS` از `TOPIC_PRODUCERS` (بند ۱) — تغییر در کد audit-service، منتظر
-تصمیم مدیر پروژه؛ تا آن زمان دو فهرست هم‌ارزند و هر دو در آزمون‌ها کامل نوشته شده‌اند.
+**وضعیت PR بند ۱ و ۲:** `TOPIC_PRODUCERS` در `packages/contracts/src/events/topic-producers.ts`، ثابت، Frozen و با
+نوع‌های Literal؛ هر Topicی که Consumerی روی `main` مشترکش است، با مالکش. `EventConsumer` پس از خواندن Envelope و پیش از
+هر Handler ناشر را با **Topic تحویل** می‌سنجد (Topic `.retry` با Topic اصلش) و ناهم‌خوانی را بی Retry با
+`PRODUCER_NOT_ALLOWED` (تلاش `0`) به DLQ می‌فرستد؛ اشتراک روی Topic اعلام‌نشده در سازندهٔ `EventConsumer` خطا می‌دهد.
+هیچ Consumerی پیکربندی تازه نخواست.
+
+- **ادعای ناشر هرگز خام تکرار نمی‌شود** (بازبینی Codex، یافتهٔ ۱). `producer` در `eventEnvelopeSchema` باید نام سرویس
+  باشد (`PRODUCER_NAME_PATTERN`، `^[a-z][a-z0-9-]{1,62}$` — همهٔ `SERVICE_NAME`های `main` در آن می‌گنجند)؛ مقدار
+  بلند یا دارای نویسهٔ کنترلی Envelope نامعتبر است و با `VALIDATION_FAILED` رد می‌شود، بی‌آنکه پیام خطا مقدار را تکرار
+  کند. `x-dlq-error` ردِ `PRODUCER_NOT_ALLOWED` متن ثابتی است که فقط Topic اشتراک را نام می‌برد؛ Log متن ثابت است به‌علاوهٔ
+  فیلدهای محدود (۶۴ نویسه) و Escape‌شده.
+- **ثابت‌های audit مشتق‌اند** (بازبینی Codex، یافتهٔ ۲). `AUDIT_DOMAIN_TOPIC_OWNERS` و `AUDIT_TRAIL_PRODUCERS` از
+  `TOPIC_PRODUCERS` ساخته می‌شوند، و به‌تبع آن‌ها اشتراک مسیر A، برچسب‌های متریک، سری‌های صفرشده و اعتبارسنجی
+  `AUDIT_EXPECTED_ACTIVE_PRODUCERS`. نوع‌های Literal audit از نوع `TOPIC_PRODUCERS` می‌آیند؛ Topic دامنه‌ای با بیش از یک
+  مالک بارگذاری را متوقف می‌کند. یک آزمون برابری میان دو قرارداد هم هست.
+- آزمون: همهٔ جفت‌های «Topic × ناشر بیگانه» و «Topic × ناشر مجاز» (`producer-allowlist.spec.ts`)، ادعای بلند و دارای
+  نویسهٔ کنترلی، و یک مورد روی Broker واقعی در `kafka-projector.int-spec.ts`.
 
 **جدا از این سه PR، تصمیم استقرار:** SASL/SCRAM و ACL برای هر محیط غیرتوسعه، و Broker با ACL در CI. مالکش باید
 مدیر پروژه تعیین کند؛ این ADR فقط شرط Gate بودنش را تثبیت می‌کند.
