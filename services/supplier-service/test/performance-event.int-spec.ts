@@ -186,6 +186,86 @@ describe('performance-event store (ADR-052 step 3)', () => {
       );
     });
 
+    describe('compares every fact field on redelivery (Codex review of #120, finding 4)', () => {
+      // One mutation per field. Each redelivery is otherwise valid, so the
+      // refusal can only be the comparison — and the stored fact is unchanged.
+      const at = (iso: string): Date => new Date(iso);
+
+      async function base(kind: 'dispute' | 'rating' | 'promise' | 'delivery') {
+        const organizationId = newOrganizationId();
+        const input =
+          kind === 'dispute'
+            ? dispute(organizationId)
+            : kind === 'rating'
+              ? rating(organizationId)
+              : rating(organizationId, {
+                  sourceEventName: kind === 'promise' ? 'ORDER_CREATED' : 'ORDER_FULFILLED',
+                  component: 'ON_TIME',
+                  rating: null,
+                  promisedAt: kind === 'promise' ? at('2026-10-01T00:00:00Z') : null,
+                  deliveredAt: kind === 'delivery' ? at('2026-10-02T00:00:00Z') : null,
+                });
+        await record(input);
+        return input;
+      }
+
+      it.each([
+        ['organizationId', 'dispute', () => ({ organizationId: newOrganizationId() })],
+        ['sourceEventName', 'dispute', () => ({ sourceEventName: 'ORDER_CANCELLED' })],
+        ['component', 'dispute', () => ({ component: 'CANCELLATION_ABSENCE' as const })],
+        ['outcomeKind', 'dispute', () => ({ outcomeKind: 'REPAIR_ORDER' as const })],
+        ['outcomeKey', 'dispute', () => ({ outcomeKey: `ORD_${ulid()}` })],
+        ['responsibility', 'dispute', () => ({ responsibility: 'UNDETERMINED' as const })],
+        ['occurredAt', 'dispute', () => ({ occurredAt: at('2026-09-20T10:00:00.001Z') })],
+        ['rating', 'rating', () => ({ rating: 1 })],
+        ['promisedAt', 'promise', () => ({ promisedAt: at('2026-10-05T00:00:00Z') })],
+        ['deliveredAt', 'delivery', () => ({ deliveredAt: at('2026-10-06T00:00:00Z') })],
+      ] as const)('refuses a redelivery differing only in %s', async (field, kind, mutate) => {
+        const original = await base(kind);
+        const before = await asSupplier(original.organizationId, () =>
+          events.findBySourceEventId(original.sourceEventId),
+        );
+
+        const attempt = record({ ...original, ...mutate() } as PerformanceEventInput);
+
+        await expect(attempt).rejects.toMatchObject({
+          code: 'BUSINESS_RULE_VIOLATION',
+          internalContext: { differingFields: [field] },
+        });
+        expect(
+          await asSupplier(original.organizationId, () =>
+            events.findBySourceEventId(original.sourceEventId),
+          ),
+        ).toEqual(before);
+      });
+
+      it('refuses a redelivery differing only in the fact it compensates', async () => {
+        const organizationId = newOrganizationId();
+        const target = dispute(organizationId);
+        const other = dispute(organizationId);
+        await record(target);
+        await record(other);
+        const correction = dispute(organizationId, {
+          responsibility: 'BUYER',
+          compensatesSourceEventId: target.sourceEventId,
+        });
+        await record(correction);
+
+        await expect(
+          record({ ...correction, compensatesSourceEventId: other.sourceEventId }),
+        ).rejects.toMatchObject({
+          code: 'BUSINESS_RULE_VIOLATION',
+          internalContext: { differingFields: ['compensatesSourceEventId'] },
+        });
+      });
+
+      it('accepts a redelivery that differs only in its trace id, as DUPLICATE', async () => {
+        const original = await base('rating');
+
+        expect(await record({ ...original, correlationId: ulid() })).toBe('DUPLICATE');
+      });
+    });
+
     it('is separate from processed_event — counting writes nothing there', async () => {
       const input = rating(newOrganizationId());
       await record(input);

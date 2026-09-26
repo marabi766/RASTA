@@ -28,6 +28,51 @@ import { assertValidPerformanceEvent, type PerformanceEventInput } from './perfo
 
 export type RecordOutcome = 'RECORDED' | 'DUPLICATE';
 
+/**
+ * Every field that states the fact, compared on redelivery (Codex review of
+ * #120, finding 4). A redelivery that differs in any of them is the same event
+ * id claiming a different fact — a different rating, attribution, time or
+ * correction target — and is refused, never reported as a harmless duplicate.
+ *
+ * Left out, deliberately, and only these:
+ *
+ *   id             this store's own key, minted per attempt;
+ *   recordedAt     when this store counted it — this database's clock;
+ *   correlationId  the delivery's trace id: a redelivery through a retry or a
+ *                  replay legitimately carries a new one.
+ */
+export const FACT_FIELDS = [
+  'organizationId',
+  'sourceEventName',
+  'component',
+  'outcomeKind',
+  'outcomeKey',
+  'responsibility',
+  'rating',
+  'promisedAt',
+  'deliveredAt',
+  'compensatesSourceEventId',
+  'occurredAt',
+] as const satisfies readonly (keyof PerformanceEventInput)[];
+
+type FactField = (typeof FACT_FIELDS)[number];
+type StoredFact = Pick<PerformanceEventInput, FactField>;
+
+const FACT_SELECT = Object.fromEntries(FACT_FIELDS.map((field) => [field, true])) as Record<
+  FactField,
+  true
+>;
+
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  return a === b;
+}
+
+/** The fact fields on which a redelivery disagrees with what is stored. */
+export function differingFactFields(stored: StoredFact, incoming: StoredFact): FactField[] {
+  return FACT_FIELDS.filter((field) => !sameValue(stored[field], incoming[field]));
+}
+
 export interface PerformanceEventRow extends PerformanceEventInput {
   id: string;
   recordedAt: Date;
@@ -77,20 +122,16 @@ export class PerformanceEventRepository {
       () =>
         tx.performanceEvent.findUnique({
           where: { sourceEventId: input.sourceEventId },
-          select: { organizationId: true, component: true, outcomeKind: true, outcomeKey: true },
+          select: FACT_SELECT,
         }),
     );
-    if (
-      !existing ||
-      existing.organizationId !== input.organizationId ||
-      existing.component !== input.component ||
-      existing.outcomeKind !== input.outcomeKind ||
-      existing.outcomeKey !== input.outcomeKey
-    ) {
-      // Deliberately says nothing about the stored row: it may be another
-      // tenant's (S-09).
+    const differing = existing ? differingFactFields(existing, input) : ['sourceEventId'];
+    if (differing.length > 0) {
+      // Names the fields, never their stored values: the stored row may be
+      // another tenant's (S-09).
       throw RastaError.businessRule(
         `Source event ${input.sourceEventId} was already counted as a different fact`,
+        { differingFields: differing },
       );
     }
     return 'DUPLICATE';
