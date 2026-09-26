@@ -1,4 +1,4 @@
-import type { EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   createSystemContext,
   RastaError,
@@ -8,7 +8,6 @@ import {
   type EventHandler,
   type HandlerOutcome,
 } from '@rasta/nest-common';
-import { DLQ_REASONS } from '@rasta/contracts';
 import type { Logger } from '@rasta/logging';
 import { SERVICE_NAME } from '../config/env';
 import { performanceFactsTotal } from '../observability/metrics';
