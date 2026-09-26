@@ -694,10 +694,14 @@ export const EXPECTED = {
   construction: {
     scratchDatabase: true,
     tables: [
+      'approval',
+      'approval_policy',
+      'approval_policy_step',
       'idempotency_key',
       'outbox_message',
       'outbox_stream_sequence',
       'processed_event',
+      'progress_report',
       'project',
       'project_need',
     ],
@@ -721,6 +725,26 @@ export const EXPECTED = {
       // The tenant-bound foreign key: a need can only reference a project of
       // its own organization.
       'project_need_organization_id_project_id_fkey',
+      // 20260926180000_approvals_and_progress (CON-001 PR 2): the authority is
+      // never the oversight role, a decision names who and when and never
+      // predates its request, a rejection says why, and every child is bound
+      // to its parent's tenant.
+      'ck_project_approval_round_nonneg',
+      'ck_policy_activation_complete',
+      'ck_policy_retirement_complete',
+      'ck_step_authority_not_oversight',
+      'ck_step_amount_range',
+      'ck_approval_decision_complete',
+      'ck_approval_rejection_has_reason',
+      'ck_approval_superseded_complete',
+      'ck_approval_authority_not_oversight',
+      'ck_progress_basis_points_range',
+      'ck_progress_submission_complete',
+      'ck_progress_discard_complete',
+      'approval_organization_id_project_id_fkey',
+      'approval_organization_id_policy_id_fkey',
+      'approval_policy_step_organization_id_policy_id_fkey',
+      'progress_report_organization_id_project_id_fkey',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',

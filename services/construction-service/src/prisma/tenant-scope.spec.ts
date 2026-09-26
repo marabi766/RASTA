@@ -98,15 +98,23 @@ describe('the schema keeps history from being erased', () => {
   });
 });
 
-describe('the schema models nothing CON-001 PR 1 has not decided', () => {
-  it('has no approval, policy, tender or progress model yet', () => {
-    // Approvals and progress are PR 2 (ADR-063, Q-70, Q-72); tenders CON-002.
+describe('the schema models nothing CON-001 has not decided', () => {
+  it('has no tender, bid or evaluation model', () => {
+    // Tenders are CON-002.
     const names = [...models(SCHEMA).keys()];
-    expect(names.filter((name) => /Approval|Policy|Tender|Bid|Progress/i.test(name))).toEqual([]);
+    expect(names.filter((name) => /Tender|Bid|Evaluation/i.test(name))).toEqual([]);
   });
 
   it('stores no document reference', () => {
     // Attachments are Q-72; no column claims a document before that is decided.
     expect(SCHEMA).not.toMatch(/^\s*documentId\s/m);
+  });
+
+  it('binds every approval, policy step and progress report to its parent and tenant', () => {
+    for (const parent of ['projectId', 'policyId']) {
+      expect(SCHEMA).toMatch(
+        new RegExp(`fields: \\[organizationId, ${parent}\\], references: \\[organizationId, id\\]`),
+      );
+    }
   });
 });

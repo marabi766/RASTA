@@ -16,8 +16,6 @@
 //
 // ## What this schema deliberately does not model yet
 //
-//   approval, approval_policy   PR 2 of CON-001 (ADR-063, Q-70).
-//   progress_report             PR 2 of CON-001 (Q-72).
 //   tender and everything below it   CON-002.
 //   attachments                 Q-72; a document reference is never stored
 //                               before somebody decides what it may point at.
@@ -90,10 +88,16 @@ model Project {
   updatedAt            DateTime @map("updated_at")
   updatedBy            String   @map("updated_by")
 
+  /// How many approval rounds the project has opened, across workflows.
+  /// Incremented by RequestApproval and by a completion that opens a round.
+  approvalRound Int @default(0) @map("approval_round")
+
   /// The compare-and-set token. Every change matches on it and increments it.
   version Int @default(1)
 
-  needs ProjectNeed[]
+  needs           ProjectNeed[]
+  approvals       Approval[]
+  progressReports ProgressReport[]
 
   /// The composite target of `project_need`'s tenant-bound foreign key, and
   /// the index every tenant-scoped id lookup and listing uses.
@@ -154,6 +158,201 @@ model ProjectNeed {
   @@index([organizationId, projectId, status], map: "ix_project_need_org_project_status")
   @@index([organizationId, projectId, id], map: "ix_project_need_org_project_id")
   @@map("project_need")
+}
+
+// ---------------------------------------------------------------------------
+// Approval policy — configuration as data (ADR-023, ADR-063, Q-70)
+// ---------------------------------------------------------------------------
+
+enum ApprovalPolicyStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+}
+
+/// Which approvals a lifecycle step needs, from whom, above which amount.
+///
+/// Rows written by the tenant's configured policy setters, never by code: the
+/// platform stores the authority it is told and creates none (ADR-023). A
+/// policy is immutable once written — a change is a new version, activated in
+/// place of the old one, so what an approval round snapshotted stays true.
+model ApprovalPolicy {
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  /// The lifecycle point this policy governs: `project.execution` (approval
+  /// to proceed) or `project.completion` (final technical approval, Q-71).
+  workflowKey   String @map("workflow_key")
+  /// 1, 2, 3 … per (organization, workflow key).
+  policyVersion Int    @map("policy_version")
+
+  status    ApprovalPolicyStatus @default(DRAFT)
+  label     String
+  /// Why this policy — a governance setting without a rationale is unauditable.
+  rationale String
+  /// Demo data labelled «نمونه — نیازمند تصویب» (ADR-023).
+  isSample  Boolean              @default(false) @map("is_sample")
+
+  createdAt            DateTime  @map("created_at")
+  createdBy            String    @map("created_by")
+  createdCorrelationId String    @map("created_correlation_id")
+  activatedAt          DateTime? @map("activated_at")
+  activatedBy          String?   @map("activated_by")
+  retiredAt            DateTime? @map("retired_at")
+  retiredBy            String?   @map("retired_by")
+
+  version Int @default(1)
+
+  steps     ApprovalPolicyStep[]
+  approvals Approval[]
+
+  // SQL-only: `ux_approval_policy_active` — at most one ACTIVE policy per
+  // (organization, workflow key).
+  @@unique([organizationId, id], map: "ux_approval_policy_org_id")
+  @@unique([organizationId, workflowKey, policyVersion], map: "ux_approval_policy_version")
+  @@index([organizationId, workflowKey, status], map: "ix_approval_policy_org_key_status")
+  @@map("approval_policy")
+}
+
+/// One required approval of a policy, in order.
+model ApprovalPolicyStep {
+  id String @id
+
+  organizationId String @map("organization_id")
+  policyId       String @map("policy_id")
+
+  policy ApprovalPolicy @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// 1, 2, 3 … Strictly sequential (Q-70).
+  stepOrder Int @map("step_order")
+
+  /// The kind of approval, in the tenant's own words.
+  approvalType            String @map("approval_type")
+  /// The authority: an organization and a role within it (Q-70). Opaque here:
+  /// the platform does not decide whether the organization exists or is
+  /// competent — the tenant who wrote the policy did.
+  authorityOrganizationId String @map("authority_organization_id")
+  authorityRole           String @map("authority_role")
+  authorityLabel          String @map("authority_label")
+
+  /// The step applies when the project estimate is ≥ min and < max (Q-70).
+  minAmountMinor BigInt? @map("min_amount_minor")
+  maxAmountMinor BigInt? @map("max_amount_minor")
+
+  @@unique([organizationId, policyId, stepOrder], map: "ux_approval_policy_step_order")
+  @@map("approval_policy_step")
+}
+
+// ---------------------------------------------------------------------------
+// Approval — a policy step snapshotted into one round of one project
+// ---------------------------------------------------------------------------
+
+enum ApprovalStatus {
+  QUEUED
+  PENDING
+  GRANTED
+  REJECTED
+  SUPERSEDED
+}
+
+/// One approval a project needs in one round (`docs/03`: authority, result,
+/// date, number and conditions). Everything about the step is copied from the
+/// policy when the round opens, so a later policy change never alters it.
+model Approval {
+  id String @id
+
+  /// The project's organization.
+  organizationId String @map("organization_id")
+  projectId      String @map("project_id")
+
+  project Project        @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  policy  ApprovalPolicy @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  workflowKey String @map("workflow_key")
+  round       Int
+  stepOrder   Int    @map("step_order")
+
+  policyId      String @map("policy_id")
+  policyVersion Int    @map("policy_version")
+
+  approvalType            String @map("approval_type")
+  authorityOrganizationId String @map("authority_organization_id")
+  authorityRole           String @map("authority_role")
+  authorityLabel          String @map("authority_label")
+
+  status ApprovalStatus
+
+  /// When the step became PENDING — the moment the authority was asked.
+  requestedAt    DateTime? @map("requested_at")
+  decidedAt      DateTime? @map("decided_at")
+  decidedBy      String?   @map("decided_by")
+  /// The authority's own reference number for the decision, if it has one.
+  decisionNumber String?   @map("decision_number")
+  /// Conditions attached to a grant.
+  conditions     String?
+  /// Why, for a rejection.
+  reason         String?
+  /// When the round ended before this step was decided.
+  supersededAt   DateTime? @map("superseded_at")
+
+  createdAt            DateTime @map("created_at")
+  createdCorrelationId String   @map("created_correlation_id")
+
+  version Int @default(1)
+
+  // SQL-only: `ux_approval_one_pending` — one PENDING step per (project, workflow).
+  @@unique([organizationId, projectId, workflowKey, round, stepOrder], map: "ux_approval_round_step")
+  @@index([organizationId, projectId, round], map: "ix_approval_org_project_round")
+  @@index([authorityOrganizationId, status, id], map: "ix_approval_authority_inbox")
+  @@map("approval")
+}
+
+// ---------------------------------------------------------------------------
+// Progress report (Q-72)
+// ---------------------------------------------------------------------------
+
+enum ProgressReportStatus {
+  DRAFT
+  SUBMITTED
+  DISCARDED
+}
+
+/// What an executing project reports (`docs/03`: percentage, materials,
+/// machinery, labour, obstacles). Immutable once submitted.
+model ProgressReport {
+  id String @id
+
+  organizationId String @map("organization_id")
+  projectId      String @map("project_id")
+
+  project Project @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// 0..10000 — a percentage in basis points, never a float (AGENTS.md § 3).
+  progressBasisPoints Int      @map("progress_basis_points")
+  materials           String?
+  machinery           String?
+  labor               String?
+  obstacles           String?
+  /// Asset identifiers as reported. Opaque here: not resolved against fleet.
+  assetsUsed          String[] @default([]) @map("assets_used")
+
+  status ProgressReportStatus @default(DRAFT)
+
+  createdAt            DateTime  @map("created_at")
+  createdBy            String    @map("created_by")
+  createdCorrelationId String    @map("created_correlation_id")
+  updatedAt            DateTime  @map("updated_at")
+  updatedBy            String    @map("updated_by")
+  submittedAt          DateTime? @map("submitted_at")
+  submittedBy          String?   @map("submitted_by")
+  discardedAt          DateTime? @map("discarded_at")
+  discardedBy          String?   @map("discarded_by")
+
+  version Int @default(1)
+
+  @@index([organizationId, projectId, status, id], map: "ix_progress_org_project_status")
+  @@map("progress_report")
 }
 
 // ---------------------------------------------------------------------------
