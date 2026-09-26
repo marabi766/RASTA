@@ -113,6 +113,13 @@ const metaSchema = `${scratchSchema}_meta`;
  */
 const inDatabase = Boolean(EXPECTED[service].scratchDatabase);
 const targetSchema = inDatabase ? 'public' : scratchSchema;
+/**
+ * Where the target's deploy puts an extension a migration creates: the first
+ * schema on its search path — `public` in a scratch database, the scratch
+ * schema otherwise. Snapshots read an extension there, or in the schema they
+ * describe, as `(target)` (see `snapshotQuery`).
+ */
+const extensionHome = targetSchema;
 const scratchDatabase = inDatabase
   ? `${new URL(baseUrl).pathname.slice(1)}_${scratchSchema}`
   : null;
@@ -307,7 +314,8 @@ mustRun(
 const stateBefore = (index) => (index === 0 ? 'initial' : `after:${migrations[index - 1]}`);
 mustRun(
   'reference: record the empty schema',
-  searchPath(referenceSchema) + recordSnapshotScript(metaSchema, 'initial', referenceSchema),
+  searchPath(referenceSchema) +
+    recordSnapshotScript(metaSchema, 'initial', referenceSchema, extensionHome),
   referenceSchema,
 );
 for (const name of migrations) {
@@ -321,7 +329,7 @@ for (const name of migrations) {
   if (!applied.ok) fail(`reference: ${name}/migration.sql failed on its own:\n${applied.output}`);
   const recorded = sql(
     searchPath(referenceSchema) +
-      recordSnapshotScript(metaSchema, `after:${name}`, referenceSchema),
+      recordSnapshotScript(metaSchema, `after:${name}`, referenceSchema, extensionHome),
     referenceSchema,
   );
   if (!recorded.ok)
@@ -329,6 +337,18 @@ for (const name of migrations) {
 }
 console.log(
   `  ✓ reference: ${migrations.length} migration(s) applied one by one, each state recorded`,
+);
+
+// The recorded states are all that is needed from here on. Dropping the
+// reference schema now keeps its objects from pinning what a down script does
+// to the database: an extension its migration created cannot be dropped while
+// the reference's indexes still use it, and a leftover one could not be told
+// from the reference's own. Extensions the reference run created stay
+// installed unless they lived in that schema, exactly as the target's
+// `CREATE EXTENSION IF NOT EXISTS` would then find them.
+mustRun(
+  'reference: drop the reference schema, keeping the recorded states',
+  `DROP SCHEMA IF EXISTS "${referenceSchema}" CASCADE;`,
 );
 const finalState = `after:${migrations.at(-1)}`;
 
@@ -338,7 +358,15 @@ mustRun('up: every expected object exists', assertionScript(expected, true, targ
 mustRun(
   'up: identical to the migrations applied one by one',
   searchPath(targetSchema) +
-    assertSnapshotScript(metaSchema, finalState, targetSchema, 'after prisma migrate deploy'),
+    assertSnapshotScript(
+      metaSchema,
+      finalState,
+      targetSchema,
+      'after prisma migrate deploy',
+      undefined,
+      [],
+      extensionHome,
+    ),
 );
 mustRun('up: every migration in the ledger', ledgerAssertionScript(migrations, 'after up'));
 
@@ -394,12 +422,16 @@ for (let index = migrations.length - 1; index >= 0; index -= 1) {
         targetSchema,
         `down: ${name}/down.sql`,
         expected.inexactInverse?.[name],
+        expected.keptExtensions?.[name],
+        extensionHome,
       ),
   );
   if (!exact.ok)
     fail(`down: ${name}/down.sql is not the exact inverse of its migration:\n${exact.output}`);
 
-  const ledger = sql(ledgerAssertionScript(migrations.slice(0, index), `down: ${name}/down.sql`));
+  const ledger = sql(
+    ledgerAssertionScript(migrations.slice(0, index), `down: ${name}/down.sql`, name),
+  );
   if (!ledger.ok) {
     fail(
       `down: ${name}/down.sql left the ledger wrong, so a re-deploy would skip it:\n${ledger.output}`,
@@ -418,7 +450,15 @@ mustRun('up again: every expected object is back', assertionScript(expected, tru
 mustRun(
   'up again: identical to the first up',
   searchPath(targetSchema) +
-    assertSnapshotScript(metaSchema, finalState, targetSchema, 'after up again'),
+    assertSnapshotScript(
+      metaSchema,
+      finalState,
+      targetSchema,
+      'after up again',
+      undefined,
+      [],
+      extensionHome,
+    ),
 );
 mustRun(
   'up again: every migration in the ledger',
