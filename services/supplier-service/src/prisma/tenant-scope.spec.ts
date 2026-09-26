@@ -133,19 +133,28 @@ describe('a model without a tenant column is a written decision', () => {
   });
 
   it('scopes the supplier-owned performance history by the supplier organization', () => {
-    // Events and snapshots are about one supplier and belong to its tenant;
-    // only the formula is platform-wide. Checked against the schema so a
-    // model added in a later step cannot quietly land on the wrong side.
-    const performanceModels = [...models(SCHEMA).keys()].filter((name) =>
-      /^Performance/.test(name),
-    );
-    const tenantOwned = performanceModels.filter(
-      (name) => !Object.keys(PLATFORM_SCOPED_MODELS).includes(name),
+    // Named, not derived (Codex review of #120, finding 1): a check that only
+    // iterates the Performance* models that happen to exist passes vacuously
+    // when a step's models are missing. Events and snapshots are about one
+    // supplier and belong to its tenant; only the formula is platform-wide.
+    const TENANT_OWNED_PERFORMANCE_MODELS = [
+      'PerformanceEvent',
+      'PerformanceScoreComponent',
+      'PerformanceScoreSnapshot',
+      'PerformanceScoreSourceEvent',
+    ];
+    const defined = [...models(SCHEMA).keys()];
+
+    expect(defined).toEqual(expect.arrayContaining(TENANT_OWNED_PERFORMANCE_MODELS));
+    expect(TENANT_SCOPED_MODELS).toEqual(expect.arrayContaining(TENANT_OWNED_PERFORMANCE_MODELS));
+    expect(modelsWithTenantColumn(SCHEMA)).toEqual(
+      expect.arrayContaining(TENANT_OWNED_PERFORMANCE_MODELS),
     );
 
-    for (const name of tenantOwned) {
-      expect(TENANT_SCOPED_MODELS).toContain(name);
-    }
+    // And nothing else named Performance* slips in on either side unnoticed.
+    expect(defined.filter((name) => /^Performance/.test(name)).sort()).toEqual(
+      [...TENANT_OWNED_PERFORMANCE_MODELS, ...Object.keys(PLATFORM_SCOPED_MODELS)].sort(),
+    );
   });
 });
 
