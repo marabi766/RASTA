@@ -288,9 +288,9 @@ describe('the catalogue is its own stream', () => {
     expect(resolve('OFFER_PUBLISHED').scope).not.toBe('ORDER');
   });
 
-  it('keeps a draft and an unpublishing change on the offer’s own stream', () => {
-    // A search index must see an offer withdrawn after — never before — the
-    // publication it withdraws.
+  it('keys a draft and an unpublishing change by the offer, like its publications', () => {
+    // Co-partitioning only: delivery order across relay retries is D-027
+    // (ADR-051 B4), not something this key promises.
     expect(resolve('OFFER_DRAFTED')).toEqual({ scope: 'OFFER', key: 'OFR_2' });
     expect(resolve('OFFER_UPDATED')).toEqual({ scope: 'OFFER', key: 'OFR_2' });
   });

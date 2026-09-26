@@ -80,9 +80,13 @@ export const PARTITION_KEY_POLICY: { [N in MarketplaceEventName]: PartitionRule<
   ORDER_CANCELLED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
   ORDER_DISPUTED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
   ORDER_DISPUTE_RESOLVED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
-  // The saga's own steps (L7-14) sit in the same stream as the rest of the
-  // order: a hold, a settlement attempt and the completion that follows it
-  // are one story.
+  // The saga's own steps (L7-14) are keyed by the order like the rest of it,
+  // so they land on the same partition. Co-partitioned, **not** delivered in
+  // order: the relay can still publish a later row of one key before an
+  // earlier one (backoff, a live lease, a DLQ replay). That is D-027, open;
+  // its fix is ADR-051 B4 and is not in this change. A consumer must not read
+  // arrival order as the order things happened in — `occurredAt` and the
+  // envelope's `streamSeq` are what say that.
   ORDER_FUNDS_HELD: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
   ORDER_FAILED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
   ORDER_SETTLEMENT_STARTED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
@@ -106,8 +110,9 @@ export const PARTITION_KEY_POLICY: { [N in MarketplaceEventName]: PartitionRule<
    * order; it has no relationship to any particular order.
    */
   OFFER_PUBLISHED: (payload) => ({ scope: 'OFFER', key: payload.offerId }),
-  // A draft and a change that leaves an offer unpublished belong to the same
-  // offer's stream as its publications (L7-14).
+  // A draft and a change that leaves an offer unpublished are keyed by the
+  // offer like its publications (L7-14): the same partition, with the same
+  // caveat as the saga steps above — co-partitioned, not ordered (D-027).
   OFFER_DRAFTED: (payload) => ({ scope: 'OFFER', key: payload.offerId }),
   OFFER_UPDATED: (payload) => ({ scope: 'OFFER', key: payload.offerId }),
 

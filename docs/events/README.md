@@ -388,7 +388,9 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 
 تغییری که عرضه را `PUBLISHED` نگه دارد همچنان `OFFER_PUBLISHED` است؛ `OFFER_UPDATED` ویرایش پیش‌نویس و هر خروج از انتشار
 را پوشش می‌دهد — همان چیزی که Index جست‌وجو نباید از دست بدهد. رویدادهای Saga زیر مستأجر خریدار ثبت می‌شوند، مثل بقیهٔ
-رویدادهای سفارش، با Actor از نوع `SERVICE` (`marketplace-service`).
+رویدادهای سفارش، با Actor از نوع `SERVICE` (`marketplace-service`). کلید مشترک (`orderId` / `offerId`) فقط **هم‌پارتیشنی**
+است، نه تحویل مرتب: Relay هنوز می‌تواند ردیف بعدیِ یک کلید را پیش از ردیف قبلی منتشر کند (D-027، باز؛ رفعش ADR-051 B4
+است و در این تغییر نیست). ترتیب واقعی را `occurredAt` و `streamSeq` می‌گویند، نه ترتیب رسیدن.
 
 ## Procurement — `rasta.procurement.v1`
 
