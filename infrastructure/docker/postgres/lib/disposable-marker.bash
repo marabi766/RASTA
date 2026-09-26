@@ -11,10 +11,20 @@
 # shell holding a production DATABASE_URL_* passes them. This marker describes
 # the database, and only this bootstrap sets it:
 #
-#   - 00-init-databases.sh sources this file and marks every service database
-#     it creates, in development (docker compose) and in CI;
-#   - run on its own, it marks the service databases of an existing volume,
-#     which the postgres image never re-initialises.
+#   - 00-init-databases.sh sources this file and marks each service database
+#     *that run creates*, in development (docker compose) and in CI. A
+#     database that already existed is never marked by the bootstrap: run
+#     against a cluster it did not create, it must not make that cluster's
+#     databases seedable;
+#   - run on its own — `pnpm db:mark-disposable`, which executes inside the
+#     compose `postgres` container and nowhere else — it marks the service
+#     databases of an existing development volume, which the postgres image
+#     never re-initialises. That is a deliberate act on a local volume.
+#
+# Residual: the marker is part of the database. A dump of a marked
+# development database restored into another cluster carries it, and seeds
+# would then accept that database. Restore a development dump only into a
+# disposable cluster (docs/deployment/README.md § Demo seeds).
 #
 # Production never runs either. And a service role cannot set the marker on
 # its own database: on PostgreSQL 15+, `ALTER DATABASE ... SET` of a custom

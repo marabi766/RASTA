@@ -56,17 +56,28 @@ for svc in "${SERVICES[@]}"; do
   # therefore no such privilege — and never runs this script.
   ensure_role "${role}"
 
+  created=false
   if ! psql -tAc "SELECT 1 FROM pg_database WHERE datname='${db}'" --username "$POSTGRES_USER" postgres | grep -q 1; then
     psql_exec postgres "CREATE DATABASE ${db} OWNER ${role} ENCODING 'UTF8'"
+    created=true
   fi
 
   # Deny cross-service access explicitly rather than relying on defaults.
   psql_exec postgres "REVOKE ALL ON DATABASE ${db} FROM PUBLIC"
   psql_exec postgres "GRANT ALL PRIVILEGES ON DATABASE ${db} TO ${role}"
   psql_exec "${db}" "GRANT ALL ON SCHEMA public TO ${role}"
-  mark_disposable_database "${db}"
 
-  echo "    - ${db} (owner ${role}, marked disposable)"
+  # Only a database this run created is disposable by construction. One that
+  # already existed may hold data somebody needs — this script run against a
+  # cluster it did not create must not make its databases seedable — so it is
+  # never marked here. An existing *development* volume is marked on purpose,
+  # by `pnpm db:mark-disposable` (lib/disposable-marker.bash).
+  if [[ "${created}" == true ]]; then
+    mark_disposable_database "${db}"
+    echo "    - ${db} (owner ${role}, created, marked disposable)"
+  else
+    echo "    - ${db} (owner ${role}, already existed, not marked)"
+  fi
 done
 
 # -----------------------------------------------------------------------------
