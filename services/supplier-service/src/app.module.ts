@@ -185,6 +185,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly relay: OutboxRelay,
     private readonly store: PrismaOutboxStore,
+    private readonly prisma: PrismaService,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -194,7 +195,11 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     consumer.apply(RequestContextMiddleware).forRoutes('*');
   }
 
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
+    // First of all: nothing is relayed or served as a role that could disable
+    // the triggers that make the performance tables append-only.
+    await this.prisma.assertRuntimeRole();
+
     this.relay.start();
 
     const sample = async () => {

@@ -14,6 +14,7 @@ import {
   weightsInsertSql,
   wireFormula,
   type FormulaWiring,
+  ownerPrisma,
 } from './performance-helpers';
 
 /**
@@ -31,19 +32,23 @@ const FROZEN = /is never edited|are frozen/;
 
 describe('performance formula storage (ADR-052 step 2)', () => {
   let prisma: PrismaService;
+  /** The schema owner — the trigger attacks run as it (see `ownerPrisma`). */
+  let owner: PrismaService;
   let formula: FormulaWiring;
 
   beforeAll(() => {
     prisma = newPrisma();
+    owner = ownerPrisma();
     formula = wireFormula(prisma);
   });
 
   afterAll(async () => {
     await prisma.onModuleDestroy();
+    await owner.onModuleDestroy();
   });
 
   function exec(sql: string): Promise<number> {
-    return raw(() => prisma.client.$executeRawUnsafe(sql));
+    return raw(() => owner.client.$executeRawUnsafe(sql));
   }
 
   async function statusOf(id: string): Promise<string | undefined> {
@@ -68,7 +73,7 @@ describe('performance formula storage (ADR-052 step 2)', () => {
       );
 
       await expect(
-        inOneTransaction(prisma, [
+        inOneTransaction(owner, [
           versionInsertSql(id, await nextFormulaNumber(prisma)),
           weightsInsertSql(id, weights),
         ]),
@@ -83,7 +88,7 @@ describe('performance formula storage (ADR-052 step 2)', () => {
       );
 
       await expect(
-        inOneTransaction(prisma, [
+        inOneTransaction(owner, [
           versionInsertSql(id, await nextFormulaNumber(prisma)),
           weightsInsertSql(id, weights),
         ]),
@@ -112,7 +117,7 @@ describe('performance formula storage (ADR-052 step 2)', () => {
     it('lets a DRAFT be re-weighted when the transaction ends at exactly 100%', async () => {
       const { id } = await seedDraft(prisma);
 
-      await inOneTransaction(prisma, [
+      await inOneTransaction(owner, [
         `UPDATE "performance_formula_weight" SET "weight_bp" = 2500 WHERE "formula_version_id" = '${id}' AND "component" = 'QUALITY'`,
         `UPDATE "performance_formula_weight" SET "weight_bp" = 3000 WHERE "formula_version_id" = '${id}' AND "component" = 'ON_TIME'`,
       ]);
@@ -122,7 +127,7 @@ describe('performance formula storage (ADR-052 step 2)', () => {
       const id = `PFV_${ulid()}`;
 
       await expect(
-        inOneTransaction(prisma, [
+        inOneTransaction(owner, [
           versionInsertSql(id, await nextFormulaNumber(prisma)),
           weightsInsertSql(id, [
             { component: 'QUALITY', weightBp },
@@ -136,7 +141,7 @@ describe('performance formula storage (ADR-052 step 2)', () => {
       const id = `PFV_${ulid()}`;
 
       await expect(
-        inOneTransaction(prisma, [
+        inOneTransaction(owner, [
           versionInsertSql(id, await nextFormulaNumber(prisma)),
           weightsInsertSql(id, [
             { component: 'QUALITY', weightBp: 5000 },
@@ -150,7 +155,7 @@ describe('performance formula storage (ADR-052 step 2)', () => {
       const id = `PFV_${ulid()}`;
 
       await expect(
-        inOneTransaction(prisma, [
+        inOneTransaction(owner, [
           versionInsertSql(id, await nextFormulaNumber(prisma)),
           weightsInsertSql(id, [{ component: 'PRICE', weightBp: 10_000 }]),
         ]),
@@ -164,7 +169,7 @@ describe('performance formula storage (ADR-052 step 2)', () => {
       const id = `PFV_${ulid()}`;
 
       await expect(
-        inOneTransaction(prisma, [
+        inOneTransaction(owner, [
           versionInsertSql(id, number),
           weightsInsertSql(id, ADR_052_V1.weights),
         ]),
@@ -196,7 +201,7 @@ describe('performance formula storage (ADR-052 step 2)', () => {
       const id = `PFV_${ulid()}`;
 
       await expect(
-        inOneTransaction(prisma, [
+        inOneTransaction(owner, [
           versionInsertSql(id, await nextFormulaNumber(prisma)).replace("'USR_TEST'", "E'\\t'"),
           weightsInsertSql(id, ADR_052_V1.weights),
         ]),

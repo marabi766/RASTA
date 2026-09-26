@@ -3,7 +3,7 @@ import type { PerformanceEventInput } from '../src/performance/performance-event
 import { PerformanceEventRepository } from '../src/performance/performance-event.repository';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { asSupplier, newOrganizationId, newPrisma } from './helpers';
-import { raw } from './performance-helpers';
+import { ownerPrisma, raw } from './performance-helpers';
 
 /**
  * ADR-052 step 3 — the append-only performance-event store, against a real
@@ -78,19 +78,23 @@ function insertSql(columns: Record<string, string>): string {
 
 describe('performance-event store (ADR-052 step 3)', () => {
   let prisma: PrismaService;
+  /** The schema owner — the trigger attacks run as it (see `ownerPrisma`). */
+  let owner: PrismaService;
   let events: PerformanceEventRepository;
 
   beforeAll(() => {
     prisma = newPrisma();
+    owner = ownerPrisma();
     events = new PerformanceEventRepository(prisma);
   });
 
   afterAll(async () => {
     await prisma.onModuleDestroy();
+    await owner.onModuleDestroy();
   });
 
   function exec(sql: string): Promise<number> {
-    return raw(() => prisma.client.$executeRawUnsafe(sql));
+    return raw(() => owner.client.$executeRawUnsafe(sql));
   }
 
   function record(input: PerformanceEventInput) {

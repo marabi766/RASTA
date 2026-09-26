@@ -108,6 +108,58 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     this.logger.log('Database connection established');
   }
 
+  /**
+   * Refuses to run as a role that could remove this service's own guarantees.
+   *
+   * The performance tables are append-only, frozen or insert-only by trigger,
+   * and a trigger binds only a role that cannot drop or disable it. The tables
+   * belong to `rasta_supplier_migrator` in schema `supplier`; this service must
+   * connect as `rasta_supplier`, which owns nothing there (migration
+   * `20260926130000_supplier_runtime_privileges`). So startup asks the
+   * catalogue who it is and stops if that role is a superuser, can act as the
+   * owner of the schema it is connected to, or owns any table in it — which
+   * also catches a stale `?schema=public` url, since the runtime role owns the
+   * database and with it `public`.
+   *
+   * Called by `AppModule` before the relay starts. Not in `onModuleInit`
+   * here: tests open owner connections through this class on purpose.
+   */
+  async assertRuntimeRole(): Promise<void> {
+    const rows = await this.base.$queryRaw<
+      { role: string; schema: string; superuser: boolean; owner: boolean }[]
+    >`
+      SELECT current_user::text AS role,
+             current_schema()::text AS schema,
+             r.rolsuper AS superuser,
+             (
+               EXISTS (
+                 SELECT 1 FROM pg_namespace n
+                  WHERE n.nspname = current_schema()
+                    AND pg_has_role(current_user, n.nspowner, 'USAGE')
+               )
+               OR EXISTS (
+                 SELECT 1 FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = current_schema()
+                    AND pg_has_role(current_user, c.relowner, 'USAGE')
+               )
+             ) AS owner
+        FROM pg_roles r
+       WHERE r.rolname = current_user
+    `;
+    const row = rows[0];
+    if (!row) throw new Error('supplier-service could not read the role it is connected as');
+    if (row.superuser || row.owner) {
+      throw new Error(
+        `supplier-service refuses to start: it is connected as ${row.role}, which ` +
+          `${row.superuser ? 'is a superuser' : `can act as an owner in schema ${row.schema}`}. ` +
+          'Only the runtime role (DATABASE_URL_SUPPLIER, schema supplier) may run the service; ' +
+          'the migrator (DATABASE_URL_SUPPLIER_MIGRATOR) is for migration tooling only.',
+      );
+    }
+    this.logger.log(`Connected as ${row.role}: not a superuser, owns nothing in ${row.schema}`);
+  }
+
   async onModuleDestroy(): Promise<void> {
     await this.base.$disconnect();
   }

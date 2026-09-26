@@ -4,7 +4,7 @@ import { EventPublisher } from '../src/events/publisher';
 import type { FormulaDraftInput } from '../src/performance/formula';
 import { PerformanceFormulaRepository } from '../src/performance/formula.repository';
 import { PerformanceFormulaService } from '../src/performance/formula.service';
-import type { PrismaService } from '../src/prisma/prisma.service';
+import { PrismaService } from '../src/prisma/prisma.service';
 import { context, newUserId, testEnv } from './helpers';
 
 /**
@@ -32,6 +32,26 @@ export const ADR_052_V1: FormulaDraftInput = {
     { component: 'CANCELLATION_ABSENCE', weightBp: 1000 },
   ],
 };
+
+/**
+ * A connection as `rasta_supplier_migrator`, the owner of schema `supplier`.
+ *
+ * The trigger-layer suites attack as the **owner** on purpose: a trigger that
+ * binds the owner binds everyone, so a refusal proved here is the trigger's
+ * and not a missing grant. That the runtime role cannot remove those
+ * triggers — or reach most of these statements at all — is proved separately,
+ * as `rasta_supplier`, in `runtime-privileges.int-spec.ts`.
+ */
+export function ownerPrisma(): PrismaService {
+  const url = process.env.DATABASE_URL_SUPPLIER_MIGRATOR;
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL_SUPPLIER_MIGRATOR is not set. The storage suites attack the triggers as ' +
+        'the schema owner, rasta_supplier_migrator; see .env.example.',
+    );
+  }
+  return new PrismaService(url);
+}
 
 export function raw<T>(fn: () => Promise<T>): Promise<T> {
   return runUnscoped('the storage suites write raw rows on purpose', fn);

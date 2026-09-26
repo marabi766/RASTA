@@ -13,6 +13,7 @@ import {
   raw,
   seedDraft,
   wireFormula,
+  ownerPrisma,
 } from './performance-helpers';
 
 /**
@@ -33,6 +34,8 @@ interface Version {
 
 describe('score snapshots (ADR-052 step 4)', () => {
   let prisma: PrismaService;
+  /** The schema owner — the trigger attacks run as it (see `ownerPrisma`). */
+  let owner: PrismaService;
   let snapshots: ScoreSnapshotRepository;
   let events: PerformanceEventRepository;
   /** ADR-052 § 1's weights; thresholds 5 samples, 5000 bp. Activated, then retired below. */
@@ -49,6 +52,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
 
   beforeAll(async () => {
     prisma = newPrisma();
+    owner = ownerPrisma();
     snapshots = new ScoreSnapshotRepository(prisma);
     events = new PerformanceEventRepository(prisma);
     adr = await createAndActivate(ADR_052_V1);
@@ -63,10 +67,11 @@ describe('score snapshots (ADR-052 step 4)', () => {
 
   afterAll(async () => {
     await prisma.onModuleDestroy();
+    await owner.onModuleDestroy();
   });
 
   function exec(sql: string): Promise<number> {
-    return raw(() => prisma.client.$executeRawUnsafe(sql));
+    return raw(() => owner.client.$executeRawUnsafe(sql));
   }
 
   /** Records a real performance fact for `organizationId`, for a snapshot to cite. */
@@ -297,7 +302,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
     it('refuses PUBLISHED without a score', async () => {
       const { statements } = snapshotSql(published(newOrganizationId()), { score_centis: 'NULL' });
 
-      await expect(inOneTransaction(prisma, statements)).rejects.toThrow(
+      await expect(inOneTransaction(owner, statements)).rejects.toThrow(
         /ck_score_snapshot_score_only_when_published/,
       );
     });
@@ -310,7 +315,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
           score_centis: '0',
         });
 
-        await expect(inOneTransaction(prisma, statements)).rejects.toThrow(
+        await expect(inOneTransaction(owner, statements)).rejects.toThrow(
           /ck_score_snapshot_score_only_when_published/,
         );
       },
@@ -323,9 +328,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
     ])('refuses %s', async (_label, overrides) => {
       const { statements } = snapshotSql(published(newOrganizationId()), overrides);
 
-      await expect(inOneTransaction(prisma, statements)).rejects.toThrow(
-        /ck_score_snapshot_ranges/,
-      );
+      await expect(inOneTransaction(owner, statements)).rejects.toThrow(/ck_score_snapshot_ranges/);
     });
 
     it('refuses an empty window', async () => {
@@ -334,9 +337,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
         window_end: lit(input.windowStart.toISOString()),
       });
 
-      await expect(inOneTransaction(prisma, statements)).rejects.toThrow(
-        /ck_score_snapshot_window/,
-      );
+      await expect(inOneTransaction(owner, statements)).rejects.toThrow(/ck_score_snapshot_window/);
     });
 
     it('refuses an absent component stored as zero', async () => {
@@ -346,7 +347,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
       );
       const { statements } = snapshotSql(input);
 
-      await expect(inOneTransaction(prisma, statements)).rejects.toThrow(
+      await expect(inOneTransaction(owner, statements)).rejects.toThrow(
         /ck_score_component_absent_is_null/,
       );
     });
@@ -358,7 +359,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
         eligible_sample_count: '4',
       });
 
-      await expect(inOneTransaction(prisma, statements)).rejects.toThrow(/PUBLISHED below/);
+      await expect(inOneTransaction(owner, statements)).rejects.toThrow(/PUBLISHED below/);
     });
 
     it('refuses PUBLISHED under 50% coverage', async () => {
@@ -373,7 +374,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
             : { ...row, effectiveWeightBp: null, componentScoreCentis: null },
       );
 
-      await expect(inOneTransaction(prisma, snapshotSql(input).statements)).rejects.toThrow(
+      await expect(inOneTransaction(owner, snapshotSql(input).statements)).rejects.toThrow(
         /PUBLISHED below/,
       );
     });
@@ -402,7 +403,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
         score_centis: 'NULL',
       });
 
-      await expect(inOneTransaction(prisma, statements)).rejects.toThrow(/meets the threshold/);
+      await expect(inOneTransaction(owner, statements)).rejects.toThrow(/meets the threshold/);
     });
 
     it('refuses INSUFFICIENT_DATA when the sample meets the minimum', async () => {
@@ -411,7 +412,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
         score_centis: 'NULL',
       });
 
-      await expect(inOneTransaction(prisma, statements)).rejects.toThrow(/meets the minimum/);
+      await expect(inOneTransaction(owner, statements)).rejects.toThrow(/meets the minimum/);
     });
 
     it('accepts INSUFFICIENT_DATA on four samples, carrying the count', async () => {
@@ -440,7 +441,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
         formulaVersion: draft.number,
       });
 
-      await expect(inOneTransaction(prisma, statements)).rejects.toThrow(/DRAFT formula version/);
+      await expect(inOneTransaction(owner, statements)).rejects.toThrow(/DRAFT formula version/);
     });
 
     it('refuses a formula number that is not its version’s', async () => {
@@ -448,7 +449,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
         formula_version: String(narrow.number),
       });
 
-      await expect(inOneTransaction(prisma, statements)).rejects.toThrow(
+      await expect(inOneTransaction(owner, statements)).rejects.toThrow(
         /performance_score_snapshot_version_fkey/,
       );
     });
@@ -457,7 +458,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
       const input = published(newOrganizationId());
       input.components = input.components.filter((row) => row.component !== 'QUALITY');
 
-      await expect(inOneTransaction(prisma, snapshotSql(input).statements)).rejects.toThrow(
+      await expect(inOneTransaction(owner, snapshotSql(input).statements)).rejects.toThrow(
         /missing 1/,
       );
     });
@@ -493,7 +494,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
         ],
       };
 
-      await expect(inOneTransaction(prisma, snapshotSql(input).statements)).rejects.toThrow(
+      await expect(inOneTransaction(owner, snapshotSql(input).statements)).rejects.toThrow(
         /extra 1/,
       );
     });
@@ -504,7 +505,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
         row.component === 'QUALITY' ? { ...row, configuredWeightBp: 2999 } : row,
       );
 
-      await expect(inOneTransaction(prisma, snapshotSql(input).statements)).rejects.toThrow(
+      await expect(inOneTransaction(owner, snapshotSql(input).statements)).rejects.toThrow(
         /wrong weight 1/,
       );
     });
@@ -512,7 +513,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
     it('refuses a coverage that is not the weight of the available components', async () => {
       const { statements } = snapshotSql(published(newOrganizationId()), { coverage_bp: '7500' });
 
-      await expect(inOneTransaction(prisma, statements)).rejects.toThrow(
+      await expect(inOneTransaction(owner, statements)).rejects.toThrow(
         /its available components weigh 7000 bp/,
       );
     });
@@ -523,7 +524,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
         row.component === 'ON_TIME' ? { ...row, effectiveWeightBp: 2500 } : row,
       );
 
-      await expect(inOneTransaction(prisma, snapshotSql(input).statements)).rejects.toThrow(
+      await expect(inOneTransaction(owner, snapshotSql(input).statements)).rejects.toThrow(
         /not the renormalised/,
       );
     });
@@ -535,7 +536,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
       const foreign = await fact(newOrganizationId());
 
       await expect(
-        inOneTransaction(prisma, snapshotSql(published(a, [foreign])).statements),
+        inOneTransaction(owner, snapshotSql(published(a, [foreign])).statements),
       ).rejects.toThrow(/performance_score_source_event_event_fkey/);
     });
 

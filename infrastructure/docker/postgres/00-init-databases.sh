@@ -129,6 +129,39 @@ psql_exec rasta_audit "GRANT USAGE ON SCHEMA audit TO rasta_audit"
 echo "    - schema audit (owner rasta_audit_migrator, rasta_audit has USAGE only)"
 
 # -----------------------------------------------------------------------------
+# supplier-service: the same split, for the same reason (ADR-052 step 2–4).
+#
+# The performance formula is frozen once active, performance events are
+# append-only and score snapshots are insert-only — each enforced by triggers.
+# A trigger is only a barrier against a role that cannot remove it: the table
+# owner can `ALTER TABLE ... DISABLE TRIGGER`, alter the table or drop it. So
+# the supplier tables live in schema `supplier`, owned by
+# `rasta_supplier_migrator`; `rasta_supplier` — the role the running service
+# connects as — gets USAGE on the schema and, from the migrations, only the
+# DML each table needs. Every one of those DDL paths is then refused with
+# SQLSTATE 42501 (test/runtime-privileges.int-spec.ts).
+#
+# Why a schema and not `public`: `rasta_supplier` owns the database, and so
+# owns `public` through `pg_database_owner` — it could drop another role's
+# objects there. It owns nothing in `supplier`.
+# -----------------------------------------------------------------------------
+echo "==> Creating the supplier migrator role and its owned schema"
+
+ensure_role rasta_supplier_migrator
+
+psql_exec postgres "GRANT CONNECT ON DATABASE rasta_supplier TO rasta_supplier_migrator"
+psql_exec rasta_supplier "CREATE SCHEMA IF NOT EXISTS supplier AUTHORIZATION rasta_supplier_migrator"
+psql_exec rasta_supplier "ALTER SCHEMA supplier OWNER TO rasta_supplier_migrator"
+
+# USAGE only — no CREATE, so the runtime role cannot add objects it would own.
+psql_exec rasta_supplier "REVOKE ALL ON SCHEMA supplier FROM rasta_supplier"
+psql_exec rasta_supplier "GRANT USAGE ON SCHEMA supplier TO rasta_supplier"
+
+# The supplier migrations use no extension, so nothing else is needed here.
+# Table grants come from the migrations, for the reason given for audit above.
+echo "    - schema supplier (owner rasta_supplier_migrator, rasta_supplier has USAGE only)"
+
+# -----------------------------------------------------------------------------
 # Extensions go into template1, so every database created afterwards inherits
 # them — including the throwaway shadow databases `prisma migrate dev` creates.
 #
