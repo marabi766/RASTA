@@ -676,6 +676,58 @@ export const EXPECTED = {
       'ck_outbox_published_is_clean',
     ],
   },
+  /**
+   * construction-service (CON-001, ADR-063). One initial migration that folds
+   * the domain schema and the outbox together, as supplier's does, so its
+   * outbox objects are verified here rather than by the by-name outbox
+   * verifiers (`verify-outbox-claim-migration.mjs` lists it as folded).
+   *
+   * A scratch database, because `project.area` is `geography` and the
+   * migration names it unqualified: it resolves only where PostGIS is on the
+   * search path, which a throwaway schema in the service database is not.
+   *
+   * The domain constraints listed are the ones carrying a claim a reader would
+   * otherwise take on trust: a cancellation always has a reason, a withdrawal
+   * names who, when and why, a submission names its actor, and an operating
+   * area is valid geometry.
+   */
+  construction: {
+    scratchDatabase: true,
+    tables: [
+      'idempotency_key',
+      'outbox_message',
+      'outbox_stream_sequence',
+      'processed_event',
+      'project',
+      'project_need',
+    ],
+    triggers: [],
+    constraints: [
+      'ck_project_text_not_blank',
+      'ck_project_actor_recorded',
+      'ck_project_estimate_nonneg',
+      'ck_project_cancellation_has_reason',
+      'ck_project_version_positive',
+      'ck_project_timestamps_ordered',
+      'ck_project_area_valid',
+      'ck_need_text_not_blank',
+      'ck_need_actor_recorded',
+      'ck_need_quantity_positive',
+      'ck_need_estimate_nonneg',
+      'ck_need_version_positive',
+      'ck_need_submission_complete',
+      'ck_need_withdrawal_complete',
+      'ck_need_timestamps_ordered',
+      // The tenant-bound foreign key: a need can only reference a project of
+      // its own organization.
+      'project_need_organization_id_project_id_fkey',
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_next_attempt_requires_failure',
+      'ck_outbox_published_is_clean',
+    ],
+  },
   /*
    * The five services whose initial migration had no down.sql until the
    * platform-safety pass (lane 6), so the whole-chain check could not reach

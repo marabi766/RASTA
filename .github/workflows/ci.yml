@@ -732,6 +732,7 @@ jobs:
             rasta.marketplace.v1 rasta.marketplace.v1.retry rasta.marketplace.v1.dlq \
             rasta.economic.v1 rasta.economic.v1.retry rasta.economic.v1.dlq \
             rasta.supplier.v1 rasta.supplier.v1.retry rasta.supplier.v1.dlq \
+            rasta.construction.v1 rasta.construction.v1.retry rasta.construction.v1.dlq \
             rasta.notification.v1 rasta.notification.v1.retry rasta.notification.v1.dlq \
             rasta.audit.v1 rasta.audit.v1.retry rasta.audit.v1.dlq \
             rasta.audit.trail.v1 \
@@ -938,6 +939,7 @@ jobs:
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -963,6 +965,7 @@ jobs:
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -1075,6 +1078,19 @@ jobs:
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
 
+      - name: Construction coverage gate
+        # `docs/14` § 14.2 puts construction-service in the 85% band, a
+        # critical domain (AGENTS.md § 7). Both projects, for the reason the
+        # supplier gate gives: the compare-and-set transitions, the row lock
+        # that serialises need and project commands, the tenant-bound foreign
+        # key, the PostGIS validity check, the outbox coupling and the HTTP
+        # surface exist only against a real database and broker.
+        run: pnpm --filter @rasta/construction-service run test:coverage
+        env:
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
+
       - name: Audit coverage gate
         # `docs/14` § 14.2 puts audit-service in the 75% band, unchanged by
         # AUD-001. Measured across both projects because the append-only
@@ -1178,6 +1194,7 @@ jobs:
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -1241,6 +1258,7 @@ jobs:
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -1422,7 +1440,8 @@ jobs:
         # Auto-creation is off by design (ADR-006). The economic topic and its
         # retry/dlq siblings must exist before the service connects, or the
         # outbox relay fails to publish and the correlation scenario times out
-        # blaming the wrong component.
+        # blaming the wrong component. `rasta.construction.v1` is here because
+        # audit-service subscribes to every topic in its producer topology.
         run: |
           set -euo pipefail
           for topic in \
@@ -1435,6 +1454,7 @@ jobs:
             rasta.audit.v1 rasta.audit.v1.retry rasta.audit.v1.dlq \
             rasta.audit.trail.v1 \
             rasta.identity.v1 rasta.organization.v1 rasta.supplier.v1 \
+            rasta.construction.v1 \
             rasta.document.v1; do
             docker run --rm --network host apache/kafka:3.9.0 \
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
