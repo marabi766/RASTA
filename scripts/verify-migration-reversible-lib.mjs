@@ -733,6 +733,9 @@ export const EXPECTED = {
       // predates its request, a rejection says why, and every child is bound
       // to its parent's tenant.
       'ck_project_approval_round_nonneg',
+      'ck_policy_author_role',
+      'ck_policy_submission_complete',
+      'ck_policy_rejection_complete',
       'ck_policy_activation_complete',
       'ck_policy_retirement_complete',
       'ck_step_authority_not_oversight',

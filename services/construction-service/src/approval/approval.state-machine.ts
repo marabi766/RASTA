@@ -3,15 +3,23 @@ import { RastaError } from '@rasta/nest-common';
 /**
  * Policy and approval lifecycles (AGENTS.md A-11, ADR-063, Q-70).
  *
- * ## Approval policy
+ * ## Approval policy (Q-70 (7), decided 2026-09-26)
  *
  * ```
- *   create             activate                      activate(next) | retire
- *   ─────► DRAFT ────────────────► ACTIVE ─────────────────────────────► RETIRED
+ *   create        submit                           approve (SYSTEM_ADMIN)
+ *   ────► DRAFT ─────────► PENDING_PLATFORM_APPROVAL ──────────────────► ACTIVE
+ *                                   │                                      │
+ *                                   └─reject(reason)─► REJECTED            │
+ *                                                            approve(next) | retire
+ *                                                                          ▼
+ *                                                                       RETIRED
  * ```
  *
+ * A union administrator (for its own organization or one beneath it) or the
+ * platform administrator writes a policy; only a platform administrator puts
+ * it in force. A DRAFT, PENDING or REJECTED policy never governs a project.
  * A policy is written once and never edited: a change is a new version,
- * activated in its place, which retires the old one in the same transaction.
+ * approved in its place, which retires the old one in the same transaction.
  * An open approval round keeps the steps it copied, so a later policy never
  * changes a round already running (`docs/08` § 8.9).
  *
@@ -32,14 +40,25 @@ import { RastaError } from '@rasta/nest-common';
 export const WORKFLOW_KEYS = ['project.execution', 'project.completion'] as const;
 export type WorkflowKey = (typeof WORKFLOW_KEYS)[number];
 
-export const POLICY_STATES = ['DRAFT', 'ACTIVE', 'RETIRED'] as const;
+export const POLICY_STATES = [
+  'DRAFT',
+  'PENDING_PLATFORM_APPROVAL',
+  'ACTIVE',
+  'REJECTED',
+  'RETIRED',
+] as const;
 export type PolicyStateName = (typeof POLICY_STATES)[number];
 
 export const POLICY_TRANSITIONS: Readonly<Record<PolicyStateName, readonly PolicyStateName[]>> = {
-  DRAFT: ['ACTIVE'],
+  DRAFT: ['PENDING_PLATFORM_APPROVAL'],
+  PENDING_PLATFORM_APPROVAL: ['ACTIVE', 'REJECTED'],
   ACTIVE: ['RETIRED'],
+  REJECTED: [],
   RETIRED: [],
 } as const;
+
+/** The only state in which a policy governs a project. */
+export const GOVERNING_POLICY_STATE: PolicyStateName = 'ACTIVE';
 
 export const APPROVAL_STATES = ['QUEUED', 'PENDING', 'GRANTED', 'REJECTED', 'SUPERSEDED'] as const;
 export type ApprovalStateName = (typeof APPROVAL_STATES)[number];

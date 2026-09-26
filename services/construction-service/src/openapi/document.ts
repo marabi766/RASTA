@@ -20,6 +20,7 @@ import {
   decisionSchema,
   inboxQuerySchema,
   listPoliciesQuerySchema,
+  policyRejectionSchema,
   policyTransitionSchema,
   policyViewSchema,
   projectApprovalsQuerySchema,
@@ -121,7 +122,13 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'POST /v1/approval-policies': { status: '201', schema: policyViewSchema },
   'GET /v1/approval-policies': { status: '200', schema: cursorPageOf(policyViewSchema) },
   'GET /v1/approval-policies/{id}': { status: '200', schema: policyViewSchema },
-  'POST /v1/approval-policies/{id}/activate': { status: '200', schema: policyViewSchema },
+  'GET /v1/approval-policies/pending-platform-approval': {
+    status: '200',
+    schema: cursorPageOf(policyViewSchema),
+  },
+  'POST /v1/approval-policies/{id}/submit': { status: '200', schema: policyViewSchema },
+  'POST /v1/approval-policies/{id}/approve': { status: '200', schema: policyViewSchema },
+  'POST /v1/approval-policies/{id}/reject': { status: '200', schema: policyViewSchema },
   'POST /v1/approval-policies/{id}/retire': { status: '200', schema: policyViewSchema },
   'GET /v1/approvals': { status: '200', schema: cursorPageOf(approvalViewSchema) },
   'GET /v1/approvals/{id}': { status: '200', schema: approvalViewSchema },
@@ -143,7 +150,9 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/projects/{id}/progress/{reportId}/submit': progressTransitionSchema,
   'POST /v1/projects/{id}/progress/{reportId}/discard': progressTransitionSchema,
   'POST /v1/approval-policies': createPolicySchema,
-  'POST /v1/approval-policies/{id}/activate': policyTransitionSchema,
+  'POST /v1/approval-policies/{id}/submit': policyTransitionSchema,
+  'POST /v1/approval-policies/{id}/approve': policyTransitionSchema,
+  'POST /v1/approval-policies/{id}/reject': policyRejectionSchema,
   'POST /v1/approval-policies/{id}/retire': policyTransitionSchema,
   'POST /v1/approvals/{id}/decision': decisionSchema,
 };
@@ -154,6 +163,7 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/projects/{id}/approvals': projectApprovalsQuerySchema,
   'GET /v1/projects/{id}/progress': listProgressQuerySchema,
   'GET /v1/approval-policies': listPoliciesQuerySchema,
+  'GET /v1/approval-policies/pending-platform-approval': listPoliciesQuerySchema,
   'GET /v1/approvals': inboxQuerySchema,
 };
 
@@ -172,7 +182,9 @@ const VERSIONED = new Set([
   'POST /v1/projects/{id}/complete',
   'POST /v1/projects/{id}/progress/{reportId}/submit',
   'POST /v1/projects/{id}/progress/{reportId}/discard',
-  'POST /v1/approval-policies/{id}/activate',
+  'POST /v1/approval-policies/{id}/submit',
+  'POST /v1/approval-policies/{id}/approve',
+  'POST /v1/approval-policies/{id}/reject',
   'POST /v1/approval-policies/{id}/retire',
   'POST /v1/approvals/{id}/decision',
 ]);
@@ -183,23 +195,36 @@ const LIFECYCLE_CREATES = new Set([
   'POST /v1/projects/{id}/progress',
 ]);
 
+/**
+ * Operations that ask organization-service whether the target organization is
+ * within the author's union (Q-70 (7)); an unconfirmable answer refuses them.
+ */
+const HIERARCHY_CHECKED = new Set([
+  'POST /v1/approval-policies',
+  'POST /v1/approval-policies/{id}/submit',
+  'POST /v1/approval-policies/{id}/approve',
+]);
+
 /** A create that can lose a race on a unique key (409 CONFLICT, retry). */
 const RACING_CREATES = new Set(['POST /v1/approval-policies']);
 
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
-  403: 'Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.',
+  403: 'Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).',
   404: 'Not found — also returned for a project, need, progress report, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed.',
   409: 'Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), or two policy versions created at once (CONFLICT — retry).',
   422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS.',
   500: 'Unexpected server error.',
+  503: 'organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write is refused, never assumed (Q-70 (7), fail closed).',
+  504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write is refused.',
 };
 
 const DESCRIPTION =
   'Civil-works projects (CON-001): drafting with needs, configurable approvals, execution, ' +
   'progress reports and completion. Approval authorities come from approval_policy rows the ' +
-  "tenant's policy setters write — an (organization, role) per step, in order, by estimate " +
+  'union writes and the platform administrator approves (Q-70 (7)) — an (organization, role) ' +
+  'per step, in order, by estimate ' +
   'range — never from code, and the platform never creates an authority or approves by ' +
   'default: no policy, no applicable step, silence or a timeout is a refusal, and only the ' +
   'authority a step names may decide it (ADR-023, ADR-063). Every change is a compare-and-set ' +
@@ -321,6 +346,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           continue;
         }
         if (status === '422' && !VERSIONED.has(key) && !LIFECYCLE_CREATES.has(key)) continue;
+        if ((status === '503' || status === '504') && !HIERARCHY_CHECKED.has(key)) continue;
         operation.responses[status] ??= {
           description,
           content: { 'application/json': { schema: { $ref: '#/components/schemas/ApiError' } } },

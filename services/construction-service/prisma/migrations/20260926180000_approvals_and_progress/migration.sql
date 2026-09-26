@@ -12,7 +12,7 @@
 -- =============================================================================
 
 -- CreateEnum
-CREATE TYPE "ApprovalPolicyStatus" AS ENUM ('DRAFT', 'ACTIVE', 'RETIRED');
+CREATE TYPE "ApprovalPolicyStatus" AS ENUM ('DRAFT', 'PENDING_PLATFORM_APPROVAL', 'ACTIVE', 'REJECTED', 'RETIRED');
 
 -- CreateEnum
 CREATE TYPE "ApprovalStatus" AS ENUM ('QUEUED', 'PENDING', 'GRANTED', 'REJECTED', 'SUPERSEDED');
@@ -27,6 +27,8 @@ ALTER TABLE "project" ADD COLUMN     "approval_round" INTEGER NOT NULL DEFAULT 0
 CREATE TABLE "approval_policy" (
     "id" TEXT NOT NULL,
     "organization_id" TEXT NOT NULL,
+    "author_organization_id" TEXT NOT NULL,
+    "author_role" TEXT NOT NULL,
     "workflow_key" TEXT NOT NULL,
     "policy_version" INTEGER NOT NULL,
     "status" "ApprovalPolicyStatus" NOT NULL DEFAULT 'DRAFT',
@@ -36,8 +38,13 @@ CREATE TABLE "approval_policy" (
     "created_at" TIMESTAMP(3) NOT NULL,
     "created_by" TEXT NOT NULL,
     "created_correlation_id" TEXT NOT NULL,
+    "submitted_at" TIMESTAMP(3),
+    "submitted_by" TEXT,
     "activated_at" TIMESTAMP(3),
     "activated_by" TEXT,
+    "rejected_at" TIMESTAMP(3),
+    "rejected_by" TEXT,
+    "rejection_reason" TEXT,
     "retired_at" TIMESTAMP(3),
     "retired_by" TEXT,
     "version" INTEGER NOT NULL DEFAULT 1,
@@ -163,16 +170,36 @@ ALTER TABLE "project" ADD CONSTRAINT "ck_project_approval_round_nonneg"
 
 ALTER TABLE "approval_policy" ADD CONSTRAINT "ck_policy_text_not_blank"
   CHECK (btrim("workflow_key") <> '' AND btrim("label") <> '' AND btrim("rationale") <> ''
-         AND btrim("created_by") <> '' AND btrim("created_correlation_id") <> '');
+         AND btrim("created_by") <> '' AND btrim("created_correlation_id") <> ''
+         AND btrim("author_organization_id") <> '');
+
+-- Q-70 (7), decided: a union administrator (for its own organization or one
+-- beneath it) or the platform administrator writes a policy; an organization
+-- administrator never writes its own.
+ALTER TABLE "approval_policy" ADD CONSTRAINT "ck_policy_author_role"
+  CHECK ("author_role" IN ('UNION_ADMIN', 'SYSTEM_ADMIN'));
 
 ALTER TABLE "approval_policy" ADD CONSTRAINT "ck_policy_versions_positive"
   CHECK ("policy_version" >= 1 AND "version" >= 1);
 
--- Activation names who and when, exactly when the policy has left DRAFT;
--- retirement names who and when, exactly when it is RETIRED.
+-- Q-70 (7), decided 2026-09-26: DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE (a
+-- SYSTEM_ADMIN approved it) or REJECTED (with a reason); ACTIVE → RETIRED. Each
+-- step names who and when, exactly when the policy has taken it, so a policy
+-- can never be ACTIVE without a recorded platform approval.
+ALTER TABLE "approval_policy" ADD CONSTRAINT "ck_policy_submission_complete"
+  CHECK (num_nonnulls("submitted_at", "submitted_by") IN (0, 2)
+         AND (("status" = 'DRAFT') = ("submitted_at" IS NULL)));
+
 ALTER TABLE "approval_policy" ADD CONSTRAINT "ck_policy_activation_complete"
   CHECK (num_nonnulls("activated_at", "activated_by") IN (0, 2)
-         AND (("status" = 'DRAFT') = ("activated_at" IS NULL)));
+         AND (("status" IN ('ACTIVE', 'RETIRED')) = ("activated_at" IS NOT NULL))
+         AND ("activated_at" IS NULL OR "activated_at" >= "submitted_at"));
+
+ALTER TABLE "approval_policy" ADD CONSTRAINT "ck_policy_rejection_complete"
+  CHECK (num_nonnulls("rejected_at", "rejected_by", "rejection_reason") IN (0, 3)
+         AND (("status" = 'REJECTED') = ("rejected_at" IS NOT NULL))
+         AND ("rejection_reason" IS NULL OR btrim("rejection_reason") <> '')
+         AND ("rejected_at" IS NULL OR "rejected_at" >= "submitted_at"));
 
 ALTER TABLE "approval_policy" ADD CONSTRAINT "ck_policy_retirement_complete"
   CHECK (num_nonnulls("retired_at", "retired_by") IN (0, 2)

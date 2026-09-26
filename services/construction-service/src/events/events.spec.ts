@@ -92,6 +92,8 @@ Object.assign(VALID, {
   PROJECT_COMPLETED: { ...BASE, completedBy: 'USR_1', completedAt: AT },
   APPROVAL_POLICY_CREATED: {
     ...POLICY,
+    authorOrganizationId: 'ORG_UNION',
+    authorRole: 'UNION_ADMIN',
     policyVersion: 1,
     stepCount: 2,
     isSample: true,
@@ -106,6 +108,8 @@ Object.assign(VALID, {
     activatedAt: AT,
   },
   APPROVAL_POLICY_RETIRED: { ...POLICY, policyVersion: 2, retiredBy: 'USR_1', retiredAt: AT },
+  APPROVAL_POLICY_SUBMITTED: { ...POLICY, policyVersion: 2, submittedBy: 'USR_1', submittedAt: AT },
+  APPROVAL_POLICY_REJECTED: { ...POLICY, policyVersion: 2, rejectedBy: 'USR_9', rejectedAt: AT },
   PROJECT_PROGRESS_REPORT_DRAFTED: {
     ...BASE,
     reportId: 'PRG_1',
@@ -125,16 +129,20 @@ const POLICY_EVENTS = [
   'APPROVAL_POLICY_CREATED',
   'APPROVAL_POLICY_ACTIVATED',
   'APPROVAL_POLICY_RETIRED',
+  'APPROVAL_POLICY_SUBMITTED',
+  'APPROVAL_POLICY_REJECTED',
 ];
 const PROJECT_EVENTS = NAMES.filter((name) => !POLICY_EVENTS.includes(name));
 
 describe('the construction event catalogue', () => {
-  it('publishes exactly the CON-001 events: seven of PR 1 and eleven of PR 2', () => {
+  it('publishes exactly the CON-001 events: seven of PR 1 and thirteen of PR 2', () => {
     expect([...NAMES].sort()).toEqual([
       'APPROVAL_GRANTED',
       'APPROVAL_POLICY_ACTIVATED',
       'APPROVAL_POLICY_CREATED',
+      'APPROVAL_POLICY_REJECTED',
       'APPROVAL_POLICY_RETIRED',
+      'APPROVAL_POLICY_SUBMITTED',
       'APPROVAL_REJECTED',
       'APPROVAL_REQUESTED',
       'PROJECT_COMPLETED',
@@ -327,6 +335,8 @@ describe('the PR 2 contracts', () => {
     ['APPROVAL_GRANTED', { conditions: 'Finish the drainage first' }],
     ['APPROVAL_GRANTED', { decisionNumber: '1405/12' }],
     ['APPROVAL_REJECTED', { reason: 'Estimate lacks detail' }],
+    ['APPROVAL_POLICY_REJECTED', { reason: 'Authorities unclear' }],
+    ['APPROVAL_POLICY_CREATED', { label: 'Council approvals' }],
   ])('refuses the prose of a decision on %s (%j)', (name, prose) => {
     expect(() => validateConstructionPayload(name, { ...VALID[name]!, ...prose })).toThrow();
   });

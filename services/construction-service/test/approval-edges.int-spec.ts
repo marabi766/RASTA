@@ -2,6 +2,7 @@ import {
   activePolicy,
   approvalsOf,
   asAdmin,
+  asPlatform,
   asSetter,
   cleanup,
   newOrganizationId,
@@ -119,6 +120,7 @@ describe('approvals, execution and progress — edges', () => {
       const a = org();
       const first = await asSetter(a, () =>
         w.policies.create({
+          organizationId: a,
           workflowKey: 'project.execution',
           label: 'Retired draft',
           rationale: 'Only here to be paged',
@@ -288,11 +290,12 @@ describe('approvals, execution and progress — edges', () => {
       expect(completion).toEqual([]);
     });
 
-    it('on policy activation and retirement', async () => {
+    it('on platform approval and retirement', async () => {
       const a = org();
       const current = await activePolicy(w, a, [{ authorityOrganizationId: a }]);
       const draft = await asSetter(a, () =>
         w.policies.create({
+          organizationId: a,
           workflowKey: 'project.execution',
           label: 'Successor',
           rationale: 'Replaces the current policy',
@@ -308,36 +311,53 @@ describe('approvals, execution and progress — edges', () => {
         }),
       );
 
+      // Submitting matches nothing.
+      jest.spyOn(w.approvalRepository, 'transitionPolicy').mockResolvedValueOnce(0);
+      await expect(
+        asSetter(a, () => w.policies.submit(draft.id, { expectedVersion: 1 })),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+      await asSetter(a, () => w.policies.submit(draft.id, { expectedVersion: 1 }));
+
       // Retiring the current policy matches nothing.
       jest.spyOn(w.approvalRepository, 'transitionPolicy').mockResolvedValueOnce(0);
       await expect(
-        asSetter(a, () => w.policies.activate(draft.id, { expectedVersion: 1 })),
+        asPlatform(() => w.policies.approve(draft.id, { expectedVersion: 2 })),
       ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
 
-      // Activating the draft itself matches nothing.
+      // Approving the pending policy itself matches nothing.
       const transitionPolicy = w.approvalRepository.transitionPolicy.bind(w.approvalRepository);
       jest
         .spyOn(w.approvalRepository, 'transitionPolicy')
         .mockImplementationOnce(transitionPolicy)
         .mockResolvedValueOnce(0);
       await expect(
-        asSetter(a, () => w.policies.activate(draft.id, { expectedVersion: 1 })),
+        asPlatform(() => w.policies.approve(draft.id, { expectedVersion: 2 })),
       ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
 
-      // A concurrent activation surfaces as the partial unique index.
+      // A concurrent approval surfaces as the partial unique index.
       jest.spyOn(w.approvalRepository, 'transitionPolicy').mockRejectedValueOnce(UNIQUE_VIOLATION);
       await expect(
-        asSetter(a, () => w.policies.activate(draft.id, { expectedVersion: 1 })),
+        asPlatform(() => w.policies.approve(draft.id, { expectedVersion: 2 })),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+      // Rejecting matches nothing.
+      jest.spyOn(w.approvalRepository, 'transitionPolicy').mockResolvedValueOnce(0);
+      await expect(
+        asPlatform(() =>
+          w.policies.reject(draft.id, { expectedVersion: 2, reason: 'Authorities unclear' }),
+        ),
       ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
 
       jest.restoreAllMocks();
       jest.spyOn(w.approvalRepository, 'transitionPolicy').mockResolvedValueOnce(0);
       await expect(
-        asSetter(a, () => w.policies.retire(current, { expectedVersion: 2 })),
+        asSetter(a, () => w.policies.retire(current, { expectedVersion: 3 })),
       ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
 
       expect((await asSetter(a, () => w.policies.get(current))).status).toBe('ACTIVE');
-      expect((await asSetter(a, () => w.policies.get(draft.id))).status).toBe('DRAFT');
+      expect((await asSetter(a, () => w.policies.get(draft.id))).status).toBe(
+        'PENDING_PLATFORM_APPROVAL',
+      );
     });
 
     it('on policy creation, when two versions of one workflow collide', async () => {
@@ -346,6 +366,7 @@ describe('approvals, execution and progress — edges', () => {
       await expect(
         asSetter(a, () =>
           w.policies.create({
+            organizationId: a,
             workflowKey: 'project.execution',
             label: 'Collides',
             rationale: 'Drew the same version as another',

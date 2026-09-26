@@ -58,6 +58,10 @@ export const CONSTRUCTION_EVENTS = {
   APPROVAL_POLICY_CREATED: 'APPROVAL_POLICY_CREATED',
   APPROVAL_POLICY_ACTIVATED: 'APPROVAL_POLICY_ACTIVATED',
   APPROVAL_POLICY_RETIRED: 'APPROVAL_POLICY_RETIRED',
+  // Q-70 (7), decided 2026-09-26: the platform approval step. Names proposed,
+  // awaiting the PM's approval.
+  APPROVAL_POLICY_SUBMITTED: 'APPROVAL_POLICY_SUBMITTED',
+  APPROVAL_POLICY_REJECTED: 'APPROVAL_POLICY_REJECTED',
   PROJECT_PROGRESS_REPORT_DRAFTED: 'PROJECT_PROGRESS_REPORT_DRAFTED',
   PROJECT_PROGRESS_REPORT_DISCARDED: 'PROJECT_PROGRESS_REPORT_DISCARDED',
 } as const;
@@ -259,7 +263,11 @@ export const projectCompletedPayload = z
 export const approvalPolicyCreatedPayload = z
   .object({
     policyId: identifier,
+    /** The organization the policy governs. */
     organizationId: identifier,
+    /** Who wrote it: the governed organization's union, or the platform. */
+    authorOrganizationId: identifier,
+    authorRole: z.enum(['UNION_ADMIN', 'SYSTEM_ADMIN']),
     workflowKey,
     policyVersion: positive,
     stepCount: positive,
@@ -269,6 +277,34 @@ export const approvalPolicyCreatedPayload = z
   })
   .strict();
 
+/** Sent for the platform administrator's approval (Q-70 (7)). */
+export const approvalPolicySubmittedPayload = z
+  .object({
+    policyId: identifier,
+    organizationId: identifier,
+    workflowKey,
+    policyVersion: positive,
+    submittedBy: identifier,
+    submittedAt: isoTimestamp,
+  })
+  .strict();
+
+/** Refused by the platform administrator. The reason stays with the policy. */
+export const approvalPolicyRejectedPayload = z
+  .object({
+    policyId: identifier,
+    organizationId: identifier,
+    workflowKey,
+    policyVersion: positive,
+    rejectedBy: identifier,
+    rejectedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * Put in force by the platform administrator's approval (Q-70 (7));
+ * `activatedBy` is that administrator.
+ */
 export const approvalPolicyActivatedPayload = z
   .object({
     policyId: identifier,
@@ -330,6 +366,8 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   APPROVAL_POLICY_CREATED: approvalPolicyCreatedPayload,
   APPROVAL_POLICY_ACTIVATED: approvalPolicyActivatedPayload,
   APPROVAL_POLICY_RETIRED: approvalPolicyRetiredPayload,
+  APPROVAL_POLICY_SUBMITTED: approvalPolicySubmittedPayload,
+  APPROVAL_POLICY_REJECTED: approvalPolicyRejectedPayload,
   PROJECT_PROGRESS_REPORT_DRAFTED: progressReportDraftedPayload,
   PROJECT_PROGRESS_REPORT_DISCARDED: progressReportDiscardedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;

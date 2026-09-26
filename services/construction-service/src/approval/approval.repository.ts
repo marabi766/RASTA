@@ -69,6 +69,10 @@ const STEPS_IN_ORDER = {
   steps: { orderBy: { stepOrder: 'asc' } },
 } satisfies Prisma.ApprovalPolicyInclude;
 
+const POLICY_REASON =
+  'an approval policy is written by a union for an organization beneath it and approved by the ' +
+  'platform (Q-70 (7)); the predicate names the organization explicitly';
+
 const AUTHORITY_REASON =
   'an approval is decided by its configured authority, which may be another organization; ' +
   'the predicate names the organization explicitly';
@@ -77,13 +81,25 @@ const AUTHORITY_REASON =
 export class ApprovalRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  // -- policies (the writer's own organization, under the guard) -------------
+  // -- policies ----------------------------------------------------------------
+  //
+  // A policy is written by a union for an organization beneath it, read by its
+  // author, by the governed organization and by the platform administrator,
+  // and approved by the platform (Q-70 (7), decided). None of those is "the
+  // caller's own organization", so these queries cross the tenant guard — and
+  // every one names the organization in its own predicate.
 
-  async nextPolicyVersion(tx: ExtendedPrismaClient, workflowKey: WorkflowKey): Promise<number> {
-    const latest = await tx.approvalPolicy.aggregate({
-      where: { workflowKey },
-      _max: { policyVersion: true },
-    });
+  async nextPolicyVersion(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    workflowKey: WorkflowKey,
+  ): Promise<number> {
+    const latest = await runUnscoped(POLICY_REASON, () =>
+      tx.approvalPolicy.aggregate({
+        where: { organizationId, workflowKey },
+        _max: { policyVersion: true },
+      }),
+    );
     return (latest._max.policyVersion ?? 0) + 1;
   }
 
@@ -92,6 +108,8 @@ export class ApprovalRepository {
     policy: {
       id: string;
       organizationId: string;
+      authorOrganizationId: string;
+      authorRole: string;
       workflowKey: WorkflowKey;
       policyVersion: number;
       label: string;
@@ -103,37 +121,49 @@ export class ApprovalRepository {
     },
     steps: StepInput[],
   ): Promise<void> {
-    await tx.approvalPolicy.create({
-      data: {
-        id: policy.id,
-        organizationId: policy.organizationId,
-        workflowKey: policy.workflowKey,
-        policyVersion: policy.policyVersion,
-        status: 'DRAFT',
-        label: policy.label,
-        rationale: policy.rationale,
-        isSample: policy.isSample,
-        createdAt: policy.at,
-        createdBy: policy.actor,
-        createdCorrelationId: policy.correlationId,
-      },
-    });
-    await tx.approvalPolicyStep.createMany({
-      data: steps.map((step) => ({
-        ...step,
-        organizationId: policy.organizationId,
-        policyId: policy.id,
-      })),
+    await runUnscoped(POLICY_REASON, async () => {
+      await tx.approvalPolicy.create({
+        data: {
+          id: policy.id,
+          organizationId: policy.organizationId,
+          authorOrganizationId: policy.authorOrganizationId,
+          authorRole: policy.authorRole,
+          workflowKey: policy.workflowKey,
+          policyVersion: policy.policyVersion,
+          status: 'DRAFT',
+          label: policy.label,
+          rationale: policy.rationale,
+          isSample: policy.isSample,
+          createdAt: policy.at,
+          createdBy: policy.actor,
+          createdCorrelationId: policy.correlationId,
+        },
+      });
+      await tx.approvalPolicyStep.createMany({
+        data: steps.map((step) => ({
+          ...step,
+          organizationId: policy.organizationId,
+          policyId: policy.id,
+        })),
+      });
     });
   }
 
+  /** One policy by id, whoever's it is; the caller checks who may see it. */
   async findPolicy(
     client: ExtendedPrismaClient,
     policyId: string,
   ): Promise<PolicyWithSteps | null> {
-    return client.approvalPolicy.findFirst({ where: { id: policyId }, include: STEPS_IN_ORDER });
+    return runUnscoped(POLICY_REASON, () =>
+      client.approvalPolicy.findFirst({ where: { id: policyId }, include: STEPS_IN_ORDER }),
+    );
   }
 
+  /**
+   * The policy in force for the tenant in context — the project's
+   * organization. Under the guard: only ACTIVE governs, never DRAFT, PENDING
+   * or REJECTED.
+   */
   async findActivePolicy(
     tx: ExtendedPrismaClient,
     workflowKey: WorkflowKey,
@@ -144,42 +174,75 @@ export class ApprovalRepository {
     });
   }
 
+  /** The policy in force for a named organization (the platform approval swap). */
+  async findActivePolicyOf(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    workflowKey: WorkflowKey,
+  ): Promise<PolicyWithSteps | null> {
+    return runUnscoped(POLICY_REASON, () =>
+      tx.approvalPolicy.findFirst({
+        where: { organizationId, workflowKey, status: 'ACTIVE' },
+        include: STEPS_IN_ORDER,
+      }),
+    );
+  }
+
+  /**
+   * Policies an organization governs by or wrote — or, with `organizationId`
+   * null, every organization's (the platform administrator's queue).
+   */
   async listPolicies(filter: {
+    organizationId: string | null;
     workflowKey?: WorkflowKey;
     status?: PolicyStateName;
     cursor?: string;
     limit: number;
   }): Promise<PolicyWithSteps[]> {
-    return this.prisma.client.approvalPolicy.findMany({
-      where: {
-        ...(filter.workflowKey ? { workflowKey: filter.workflowKey } : {}),
-        ...(filter.status ? { status: filter.status } : {}),
-        ...(filter.cursor ? { id: { lt: filter.cursor } } : {}),
-      },
-      include: STEPS_IN_ORDER,
-      orderBy: { id: 'desc' },
-      take: filter.limit + 1,
-    });
+    return runUnscoped(POLICY_REASON, () =>
+      this.prisma.client.approvalPolicy.findMany({
+        where: {
+          ...(filter.organizationId !== null
+            ? {
+                OR: [
+                  { organizationId: filter.organizationId },
+                  { authorOrganizationId: filter.organizationId },
+                ],
+              }
+            : {}),
+          ...(filter.workflowKey ? { workflowKey: filter.workflowKey } : {}),
+          ...(filter.status ? { status: filter.status } : {}),
+          ...(filter.cursor ? { id: { lt: filter.cursor } } : {}),
+        },
+        include: STEPS_IN_ORDER,
+        orderBy: { id: 'desc' },
+        take: filter.limit + 1,
+      }),
+    );
   }
 
   /** Compare-and-set on a policy's status. Returns the rows matched: 0 or 1. */
   async transitionPolicy(
     tx: ExtendedPrismaClient,
     input: {
+      organizationId: string;
       policyId: string;
       from: PolicyStateName;
       expectedVersion?: number;
       data: Prisma.ApprovalPolicyUpdateManyMutationInput;
     },
   ): Promise<number> {
-    const result = await tx.approvalPolicy.updateMany({
-      where: {
-        id: input.policyId,
-        status: input.from,
-        ...(input.expectedVersion !== undefined ? { version: input.expectedVersion } : {}),
-      },
-      data: { ...input.data, version: { increment: 1 } },
-    });
+    const result = await runUnscoped(POLICY_REASON, () =>
+      tx.approvalPolicy.updateMany({
+        where: {
+          organizationId: input.organizationId,
+          id: input.policyId,
+          status: input.from,
+          ...(input.expectedVersion !== undefined ? { version: input.expectedVersion } : {}),
+        },
+        data: { ...input.data, version: { increment: 1 } },
+      }),
+    );
     return result.count;
   }
 

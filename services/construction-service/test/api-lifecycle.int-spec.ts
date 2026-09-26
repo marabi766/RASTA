@@ -21,6 +21,7 @@ describe('construction HTTP API — approvals, execution and progress', () => {
   };
   const http = () => request(api.app.getHttpServer());
   const setter = (org: string) => actor(org, ['UNION_ADMIN']);
+  const platform = () => actor('ORG-APITEST-PLATFORM', ['SYSTEM_ADMIN']);
 
   beforeAll(async () => {
     api = await startApi();
@@ -31,15 +32,23 @@ describe('construction HTTP API — approvals, execution and progress', () => {
     await api.close();
   });
 
+  /**
+   * A policy for `org`, the decided way (Q-70 (7)): written and submitted by
+   * the administrator of the union `org` sits under, approved by a platform
+   * administrator.
+   */
   async function policyFor(
     org: string,
     authorityOrganizationId: string,
     workflowKey = 'project.execution',
   ) {
+    const union = tenant('UNION');
+    api.hierarchy.adopt(union, org);
     const created = await http()
       .post('/v1/approval-policies')
-      .set('authorization', `Bearer ${setter(org)}`)
+      .set('authorization', `Bearer ${setter(union)}`)
       .send({
+        organizationId: org,
         workflowKey,
         label: 'Council approval',
         rationale: 'Resolution recorded by the council',
@@ -54,10 +63,21 @@ describe('construction HTTP API — approvals, execution and progress', () => {
         ],
       })
       .expect(201);
+    expect(created.body).toMatchObject({
+      status: 'DRAFT',
+      organizationId: org,
+      authorOrganizationId: union,
+      authorRole: 'UNION_ADMIN',
+    });
     await http()
-      .post(`/v1/approval-policies/${created.body.id}/activate`)
-      .set('authorization', `Bearer ${setter(org)}`)
+      .post(`/v1/approval-policies/${created.body.id}/submit`)
+      .set('authorization', `Bearer ${setter(union)}`)
       .send({ expectedVersion: 1 })
+      .expect(200);
+    await http()
+      .post(`/v1/approval-policies/${created.body.id}/approve`)
+      .set('authorization', `Bearer ${platform()}`)
+      .send({ expectedVersion: 2 })
       .expect(200);
     return created.body.id as string;
   }
@@ -181,26 +201,130 @@ describe('construction HTTP API — approvals, execution and progress', () => {
     expect(response.body.message).toMatch(/never approves by default/);
   });
 
-  it('keeps policy writing to the configured setter roles, and reads to its organization', async () => {
+  it('writes, submits, approves and rejects policies as decided (Q-70 (7))', async () => {
     const org = tenant('POLICY');
-    await http()
+    const union = tenant('POLICY-UNION');
+    api.hierarchy.adopt(union, org);
+    const body = {
+      organizationId: org,
+      workflowKey: 'project.execution',
+      label: 'Council approval',
+      rationale: 'Resolution recorded by the council',
+      steps: [
+        {
+          approvalType: 'Council approval',
+          authorityOrganizationId: org,
+          authorityRole: 'ORGANIZATION_ADMIN',
+          authorityLabel: 'Council',
+        },
+      ],
+    };
+
+    // The organization's own administrator never writes its policy.
+    const own = await http()
       .post('/v1/approval-policies')
       .set('authorization', `Bearer ${orgAdmin(org)}`)
-      .send({ workflowKey: 'project.execution', label: 'x', rationale: 'y', steps: [] })
-      .expect(400);
+      .send(body)
+      .expect(403);
+    expect(own.body.code).toBe('INSUFFICIENT_ROLE');
+
+    // A union not above the organization is refused, without learning why.
+    const stranger = await http()
+      .post('/v1/approval-policies')
+      .set('authorization', `Bearer ${setter(tenant('OTHER-UNION'))}`)
+      .send(body)
+      .expect(403);
+    expect(stranger.body.code).toBe('FORBIDDEN');
+
+    // The union above it writes; the policy governs nothing until approved.
+    const created = await http()
+      .post('/v1/approval-policies')
+      .set('authorization', `Bearer ${setter(union)}`)
+      .send(body)
+      .expect(201);
+    await http()
+      .post(`/v1/approval-policies/${created.body.id}/submit`)
+      .set('authorization', `Bearer ${setter(union)}`)
+      .send({ expectedVersion: 1 })
+      .expect(200);
+
+    // Only a platform administrator decides; the union cannot approve its own.
+    await http()
+      .post(`/v1/approval-policies/${created.body.id}/approve`)
+      .set('authorization', `Bearer ${setter(union)}`)
+      .send({ expectedVersion: 2 })
+      .expect(403);
+    const queue = await http()
+      .get('/v1/approval-policies/pending-platform-approval')
+      .set('authorization', `Bearer ${platform()}`)
+      .expect(200);
+    expect(queue.body.items.map((item: { id: string }) => item.id)).toContain(created.body.id);
+    const rejected = await http()
+      .post(`/v1/approval-policies/${created.body.id}/reject`)
+      .set('authorization', `Bearer ${platform()}`)
+      .send({ expectedVersion: 2, reason: 'The authority is not named precisely' })
+      .expect(200);
+    expect(rejected.body).toMatchObject({
+      status: 'REJECTED',
+      rejectionReason: 'The authority is not named precisely',
+    });
+
+    // The governed organization reads it; an unrelated organization does not.
+    await http()
+      .get(`/v1/approval-policies/${created.body.id}`)
+      .set('authorization', `Bearer ${orgAdmin(org)}`)
+      .expect(200);
+    await http()
+      .get(`/v1/approval-policies/${created.body.id}`)
+      .set('authorization', `Bearer ${setter(tenant('POLICY-OTHER'))}`)
+      .expect(404);
+
     const policyId = await policyFor(org, org);
     const list = await http()
       .get('/v1/approval-policies')
-      .set('authorization', `Bearer ${setter(org)}`)
+      .set('authorization', `Bearer ${orgAdmin(org)}`)
       .expect(200);
-    expect(list.body.items.map((item: { id: string }) => item.id)).toEqual([policyId]);
+    expect(list.body.items.map((item: { id: string }) => item.id)).toEqual(
+      expect.arrayContaining([policyId, created.body.id]),
+    );
+  });
+
+  it('holds a platform administrator to four eyes on its own policy', async () => {
+    const org = tenant('FOUR-EYES');
+    const author = actor('ORG-APITEST-PLATFORM', ['SYSTEM_ADMIN']);
+    const created = await http()
+      .post('/v1/approval-policies')
+      .set('authorization', `Bearer ${author}`)
+      .send({
+        organizationId: org,
+        workflowKey: 'project.execution',
+        label: 'Platform-written policy',
+        rationale: 'Written directly by the platform administrator',
+        steps: [
+          {
+            approvalType: 'Council approval',
+            authorityOrganizationId: org,
+            authorityRole: 'ORGANIZATION_ADMIN',
+            authorityLabel: 'Council',
+          },
+        ],
+      })
+      .expect(201);
+    expect(created.body.authorRole).toBe('SYSTEM_ADMIN');
     await http()
-      .get(`/v1/approval-policies/${policyId}`)
-      .set('authorization', `Bearer ${setter(tenant('POLICY-OTHER'))}`)
-      .expect(404);
+      .post(`/v1/approval-policies/${created.body.id}/submit`)
+      .set('authorization', `Bearer ${author}`)
+      .send({ expectedVersion: 1 })
+      .expect(200);
+    const self = await http()
+      .post(`/v1/approval-policies/${created.body.id}/approve`)
+      .set('authorization', `Bearer ${author}`)
+      .send({ expectedVersion: 2 })
+      .expect(403);
+    expect(self.body.message).toMatch(/different platform administrator/);
     await http()
-      .post(`/v1/approval-policies/${policyId}/retire`)
-      .set('authorization', `Bearer ${setter(org)}`)
+      .post(`/v1/approval-policies/${created.body.id}/approve`)
+      .set('authorization', `Bearer ${platform()}`)
       .send({ expectedVersion: 2 })
       .expect(200);
   });

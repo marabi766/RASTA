@@ -42,6 +42,7 @@ import { ExecutionService } from './project/execution.service';
 import { ApprovalRepository } from './approval/approval.repository';
 import { ApprovalService } from './approval/approval.service';
 import { PolicyService } from './approval/policy.service';
+import { OrganizationDirectory } from './organization/organization-directory';
 import { PolicyController } from './approval/policy.controller';
 import { ApprovalController } from './approval/approval.controller';
 import { ProgressService } from './progress/progress.service';
@@ -120,6 +121,7 @@ import { brokersOf, loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } fr
     ApprovalRepository,
     ApprovalService,
     PolicyService,
+    OrganizationDirectory,
     ExecutionService,
     ProgressService,
 

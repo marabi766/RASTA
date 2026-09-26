@@ -9,6 +9,7 @@ const STEP = {
 };
 
 const POLICY = {
+  organizationId: 'ORG_DEH_1',
   workflowKey: 'project.execution',
   label: 'Execution approvals',
   rationale: 'As resolved by the council',
@@ -55,11 +56,13 @@ describe('createPolicy', () => {
     ).toBe(true);
   });
 
-  it('refuses a status or an organization in the body', () => {
+  it('refuses a status, an author, and a policy that names no governed organization', () => {
     expect(createPolicySchema.safeParse({ ...POLICY, status: 'ACTIVE' }).success).toBe(false);
-    expect(createPolicySchema.safeParse({ ...POLICY, organizationId: 'ORG_X' }).success).toBe(
+    expect(createPolicySchema.safeParse({ ...POLICY, authorOrganizationId: 'ORG_X' }).success).toBe(
       false,
     );
+    const { organizationId: _o, ...withoutTarget } = POLICY;
+    expect(createPolicySchema.safeParse(withoutTarget).success).toBe(false);
   });
 
   it('requires a rationale somebody can read later', () => {

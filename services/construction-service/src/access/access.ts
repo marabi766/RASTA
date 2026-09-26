@@ -48,6 +48,23 @@ import type { ConstructionEnv } from '../config/env';
 export const SUPER_ROLE = 'SYSTEM_ADMIN';
 const OVERSIGHT_ROLE = 'AUDITOR';
 
+/**
+ * Q-70 (7), decided 2026-09-26: the union administrator writes approval
+ * policies for the organizations under its union; the platform administrator
+ * may write one for any organization and is the only one who puts a policy in
+ * force. An organization administrator never writes its own (conflict of
+ * interest). Not configurable: the owner decided it.
+ */
+export const UNION_ROLE = 'UNION_ADMIN';
+export type PolicyAuthorRole = typeof UNION_ROLE | typeof SUPER_ROLE;
+
+/** What the policy checks need to know about a policy. */
+export interface PolicyOwnership {
+  readonly id: string;
+  readonly organizationId: string;
+  readonly authorOrganizationId: string;
+}
+
 /** The fields every object-level check needs. */
 export interface ProjectOwnership {
   readonly id: string;
@@ -66,28 +83,109 @@ export interface ApprovalAuthority {
 export class ProjectAccess {
   private readonly writers: readonly string[];
   private readonly readers: readonly string[];
-  private readonly policySetters: readonly string[];
   private readonly policyReaders: readonly string[];
 
   constructor(@Inject(ENV) env: ConstructionEnv) {
     this.writers = [SUPER_ROLE, ...env.CONSTRUCTION_PROJECT_ROLES];
     this.readers = [...this.writers, ...env.CONSTRUCTION_PROJECT_READER_ROLES];
-    this.policySetters = [SUPER_ROLE, ...env.CONSTRUCTION_POLICY_SETTER_ROLES];
-    this.policyReaders = [...new Set([...this.readers, ...this.policySetters])];
+    this.policyReaders = [...new Set([...this.readers, UNION_ROLE])];
+  }
+
+  // -- approval policies (Q-70 (7), decided) ---------------------------------
+
+  /**
+   * May the caller write an approval policy, and as whom? `SYSTEM_ADMIN` or
+   * `UNION_ADMIN` acting for an organization; anyone else — an organization
+   * administrator included — is refused. Whether the target organization is
+   * within the union is organization-service's answer, asked by the caller of
+   * this method.
+   */
+  assertPolicyAuthor(): { organizationId: string; actor: string; role: PolicyAuthorRole } {
+    const { organizationId, actor } = this.assert(
+      [SUPER_ROLE, UNION_ROLE],
+      'write approval policies',
+    );
+    const role: PolicyAuthorRole = getContext().roles.includes(SUPER_ROLE)
+      ? SUPER_ROLE
+      : UNION_ROLE;
+    return { organizationId, actor, role };
   }
 
   /**
-   * May the caller write approval policies for the organization they act for?
-   * (`CONSTRUCTION_POLICY_SETTER_ROLES`, Q-70 reusing Q-64.) A setter writes
-   * only its own organization's policies — `UNION_ADMIN` included (ADR-060).
+   * The platform approval: `SYSTEM_ADMIN` only, for any organization. It needs
+   * no selected organization — the policy names its own.
    */
-  assertCanWritePolicy(): { organizationId: string; actor: string } {
-    return this.assert(this.policySetters, 'change approval policies');
+  assertPlatformAdministrator(): { actor: string } {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    const context = getContext();
+    if (!context.roles.includes(SUPER_ROLE)) {
+      throw RastaError.insufficientRole([SUPER_ROLE], context.roles);
+    }
+    if (!context.userId) {
+      throw RastaError.forbidden('This operation records an actor and the request names none');
+    }
+    return { actor: context.userId };
   }
 
-  assertCanReadPolicy(): { organizationId: string } {
+  /** The organization whose policies (governed or authored) a listing shows. */
+  assertCanListPolicies(): { organizationId: string } {
     const { organizationId } = this.assert(this.policyReaders, 'read approval policies');
     return { organizationId };
+  }
+
+  /**
+   * Who may see a policy: the platform administrator; its author's
+   * organization (union or platform administrator acting for it); and the
+   * governed organization's project readers, who need to know who approves.
+   * Anyone else gets 404.
+   */
+  canSeePolicy(policy: PolicyOwnership): boolean {
+    const context = getContext();
+    if (context.authType === 'SERVICE' || context.roles.includes(OVERSIGHT_ROLE)) return false;
+    if (context.roles.includes(SUPER_ROLE)) return true;
+    if (
+      context.organizationId === policy.authorOrganizationId &&
+      context.roles.includes(UNION_ROLE)
+    ) {
+      return true;
+    }
+    return this.canReadProjectsOf(policy.organizationId);
+  }
+
+  assertCanSeePolicy(policy: PolicyOwnership): void {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    if (!this.canSeePolicy(policy)) throw RastaError.notFound('ApprovalPolicy', policy.id);
+  }
+
+  /**
+   * Submitting a policy for platform approval: its author's organization
+   * only, by a union or platform administrator acting for it. A caller who
+   * may see the policy is told why (403); anyone else learns nothing (404).
+   */
+  assertCanSubmitPolicy(policy: PolicyOwnership): { actor: string; role: PolicyAuthorRole } {
+    const author = this.refuseUnlessPolicyVisible(policy, () => this.assertPolicyAuthor());
+    if (author.organizationId !== policy.authorOrganizationId) {
+      throw RastaError.forbidden('Only the organization that wrote this policy may submit it');
+    }
+    return { actor: author.actor, role: author.role };
+  }
+
+  /** Retiring: the author's organization, or any platform administrator. */
+  assertCanRetirePolicy(policy: PolicyOwnership): { actor: string } {
+    const author = this.refuseUnlessPolicyVisible(policy, () => this.assertPolicyAuthor());
+    if (author.role !== SUPER_ROLE && author.organizationId !== policy.authorOrganizationId) {
+      throw RastaError.forbidden('Only the organization that wrote this policy may retire it');
+    }
+    return { actor: author.actor };
+  }
+
+  private refuseUnlessPolicyVisible<T>(policy: PolicyOwnership, check: () => T): T {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    if (!this.canSeePolicy(policy)) throw RastaError.notFound('ApprovalPolicy', policy.id);
+    return check();
   }
 
   /** Whether the caller reads projects of the organization they act for. */

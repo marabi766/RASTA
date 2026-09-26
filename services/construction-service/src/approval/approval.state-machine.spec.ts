@@ -20,7 +20,13 @@ function codeOf(fn: () => void): string {
 }
 
 describe('the policy lifecycle', () => {
-  const LEGAL = ['DRAFT→ACTIVE', 'ACTIVE→RETIRED'];
+  // Q-70 (7): nothing reaches ACTIVE except through the platform approval.
+  const LEGAL = [
+    'DRAFT→PENDING_PLATFORM_APPROVAL',
+    'PENDING_PLATFORM_APPROVAL→ACTIVE',
+    'PENDING_PLATFORM_APPROVAL→REJECTED',
+    'ACTIVE→RETIRED',
+  ];
 
   it.each(POLICY_STATES.flatMap((from) => POLICY_STATES.map((to) => [from, to] as const)))(
     '%s → %s',

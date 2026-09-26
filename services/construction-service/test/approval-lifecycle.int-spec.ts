@@ -4,6 +4,7 @@ import {
   activePolicy,
   approvalsOf,
   asAdmin,
+  asPlatform,
   asSetter,
   asUser,
   cleanup,
@@ -43,11 +44,12 @@ describe('approval policies and rounds', () => {
   });
 
   describe('policies are versioned data', () => {
-    it('creates a DRAFT version, activates it, and retires the previous version together', async () => {
+    it('creates a DRAFT version, and its platform approval retires the previous version together', async () => {
       const a = org();
       const first = await activePolicy(w, a, [{ authorityOrganizationId: a }]);
       const second = await asSetter(a, () =>
         w.policies.create({
+          organizationId: a,
           workflowKey: 'project.execution',
           label: 'Second version',
           rationale: 'A replacement written by the suite',
@@ -64,10 +66,11 @@ describe('approval policies and rounds', () => {
       );
       expect(second).toMatchObject({ status: 'DRAFT', policyVersion: 2, version: 1 });
 
-      const activated = await asSetter(a, () =>
-        w.policies.activate(second.id, { expectedVersion: 1 }),
+      await asSetter(a, () => w.policies.submit(second.id, { expectedVersion: 1 }));
+      const activated = await asPlatform(() =>
+        w.policies.approve(second.id, { expectedVersion: 2 }),
       );
-      expect(activated).toMatchObject({ status: 'ACTIVE', version: 2 });
+      expect(activated).toMatchObject({ status: 'ACTIVE', version: 3 });
       const retired = await asSetter(a, () => w.policies.get(first));
       expect(retired.status).toBe('RETIRED');
 
@@ -79,11 +82,12 @@ describe('approval policies and rounds', () => {
       expect(events.every((row) => row.partitionKey === `${a}/project.execution`)).toBe(true);
     });
 
-    it('lets only the configured setter roles write policies', async () => {
+    it('never lets an organization administrator write its own policy (Q-70 (7))', async () => {
       const a = org();
       await expect(
         asAdmin(a, () =>
           w.policies.create({
+            organizationId: a,
             workflowKey: 'project.execution',
             label: 'Not allowed',
             rationale: 'An administrator is not a setter',
@@ -104,7 +108,7 @@ describe('approval policies and rounds', () => {
     it('retires a policy with no replacement, after which requests are refused', async () => {
       const a = org();
       const policyId = await activePolicy(w, a, [{ authorityOrganizationId: a }]);
-      await asSetter(a, () => w.policies.retire(policyId, { expectedVersion: 2 }));
+      await asSetter(a, () => w.policies.retire(policyId, { expectedVersion: 3 }));
       const project = await readyProject(w, a);
 
       await expect(
@@ -116,7 +120,7 @@ describe('approval policies and rounds', () => {
       const a = org();
       const policyId = await activePolicy(w, a, [{ authorityOrganizationId: a }]);
       await expect(
-        asSetter(a, () => w.policies.activate(policyId, { expectedVersion: 2 })),
+        asPlatform(() => w.policies.approve(policyId, { expectedVersion: 3 })),
       ).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
       });

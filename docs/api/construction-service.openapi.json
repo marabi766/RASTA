@@ -175,7 +175,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -454,7 +454,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -654,7 +654,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -862,7 +862,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1169,7 +1169,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1395,7 +1395,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1671,7 +1671,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1850,7 +1850,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2098,7 +2098,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2316,7 +2316,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2570,7 +2570,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2831,7 +2831,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3041,7 +3041,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3290,7 +3290,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3495,7 +3495,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3764,7 +3764,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3938,7 +3938,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4150,7 +4150,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4230,7 +4230,7 @@
     },
     "/v1/approval-policies": {
       "post": {
-        "description": "Steps are asked strictly in order. A step applies when the project estimate is ≥ minAmountMinor and < maxAmountMinor; a step with neither bound always applies. The authority is an (organization, role) and never the oversight role. Written by the roles in CONSTRUCTION_POLICY_SETTER_ROLES (default SYSTEM_ADMIN, UNION_ADMIN — the Q-64 answer), for the organization the request acts for only. The platform stores the authority it is told and creates none (ADR-023); organization-service approval.* keys are not read (ADR-063).",
+        "description": "Steps are asked strictly in order. A step applies when the project estimate is ≥ minAmountMinor and < maxAmountMinor; a step with neither bound always applies. The authority is an (organization, role) and never the oversight role. A DRAFT governs nothing until a platform administrator approves it. Q-70 (7), decided 2026-09-26: a UNION_ADMIN writes for its own organization or one beneath it (confirmed with organization-service; an unconfirmable answer refuses, 503), a SYSTEM_ADMIN for any existing organization. An ORGANIZATION_ADMIN never writes its own policy (403). The platform stores the authority it is told and creates none (ADR-023); organization-service approval.* keys are not read (ADR-063).",
         "operationId": "PolicyController_create_v1",
         "parameters": [],
         "responses": {
@@ -4247,6 +4247,13 @@
                     "organizationId": {
                       "type": "string"
                     },
+                    "authorOrganizationId": {
+                      "type": "string"
+                    },
+                    "authorRole": {
+                      "type": "string",
+                      "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                    },
                     "workflowKey": {
                       "type": "string",
                       "enum": ["project.execution", "project.completion"]
@@ -4256,7 +4263,13 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["DRAFT", "ACTIVE", "RETIRED"]
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_PLATFORM_APPROVAL",
+                        "ACTIVE",
+                        "REJECTED",
+                        "RETIRED"
+                      ]
                     },
                     "label": {
                       "type": "string"
@@ -4314,11 +4327,31 @@
                     "createdBy": {
                       "type": "string"
                     },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
                     "activatedAt": {
                       "type": "string",
                       "nullable": true
                     },
                     "activatedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectionReason": {
                       "type": "string",
                       "nullable": true
                     },
@@ -4337,6 +4370,8 @@
                   "required": [
                     "id",
                     "organizationId",
+                    "authorOrganizationId",
+                    "authorRole",
                     "workflowKey",
                     "policyVersion",
                     "status",
@@ -4346,8 +4381,13 @@
                     "steps",
                     "createdAt",
                     "createdBy",
+                    "submittedAt",
+                    "submittedBy",
                     "activatedAt",
                     "activatedBy",
+                    "rejectedAt",
+                    "rejectedBy",
+                    "rejectionReason",
                     "retiredAt",
                     "retiredBy",
                     "version"
@@ -4378,7 +4418,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4406,9 +4446,29 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write is refused, never assumed (Q-70 (7), fail closed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write is refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         },
-        "summary": "Create an approval policy version (DRAFT)",
+        "summary": "Write an approval policy version (DRAFT) for an organization",
         "tags": ["approval-policies"],
         "security": [
           {
@@ -4422,6 +4482,11 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "organizationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
                   "workflowKey": {
                     "type": "string",
                     "enum": ["project.execution", "project.completion"]
@@ -4497,7 +4562,7 @@
                     "maxItems": 20
                   }
                 },
-                "required": ["workflowKey", "label", "rationale", "steps"],
+                "required": ["organizationId", "workflowKey", "label", "rationale", "steps"],
                 "additionalProperties": false
               }
             }
@@ -4542,7 +4607,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": ["DRAFT", "ACTIVE", "RETIRED"]
+              "enum": ["DRAFT", "PENDING_PLATFORM_APPROVAL", "ACTIVE", "REJECTED", "RETIRED"]
             }
           }
         ],
@@ -4565,6 +4630,13 @@
                           "organizationId": {
                             "type": "string"
                           },
+                          "authorOrganizationId": {
+                            "type": "string"
+                          },
+                          "authorRole": {
+                            "type": "string",
+                            "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                          },
                           "workflowKey": {
                             "type": "string",
                             "enum": ["project.execution", "project.completion"]
@@ -4574,7 +4646,13 @@
                           },
                           "status": {
                             "type": "string",
-                            "enum": ["DRAFT", "ACTIVE", "RETIRED"]
+                            "enum": [
+                              "DRAFT",
+                              "PENDING_PLATFORM_APPROVAL",
+                              "ACTIVE",
+                              "REJECTED",
+                              "RETIRED"
+                            ]
                           },
                           "label": {
                             "type": "string"
@@ -4632,11 +4710,31 @@
                           "createdBy": {
                             "type": "string"
                           },
+                          "submittedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "submittedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
                           "activatedAt": {
                             "type": "string",
                             "nullable": true
                           },
                           "activatedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "rejectedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "rejectedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "rejectionReason": {
                             "type": "string",
                             "nullable": true
                           },
@@ -4655,6 +4753,8 @@
                         "required": [
                           "id",
                           "organizationId",
+                          "authorOrganizationId",
+                          "authorRole",
                           "workflowKey",
                           "policyVersion",
                           "status",
@@ -4664,8 +4764,13 @@
                           "steps",
                           "createdAt",
                           "createdBy",
+                          "submittedAt",
+                          "submittedBy",
                           "activatedAt",
                           "activatedBy",
+                          "rejectedAt",
+                          "rejectedBy",
+                          "rejectionReason",
                           "retiredAt",
                           "retiredBy",
                           "version"
@@ -4708,7 +4813,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4728,7 +4833,282 @@
             }
           }
         },
-        "summary": "List the organization's approval policies, newest first",
+        "summary": "List the policies governing, or written by, the organization the request acts for",
+        "tags": ["approval-policies"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/approval-policies/pending-platform-approval": {
+      "get": {
+        "description": "SYSTEM_ADMIN only, for any organization.",
+        "operationId": "PolicyController_platformQueue_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "workflowKey",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["project.execution", "project.completion"]
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["DRAFT", "PENDING_PLATFORM_APPROVAL", "ACTIVE", "REJECTED", "RETIRED"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string"
+                          },
+                          "authorOrganizationId": {
+                            "type": "string"
+                          },
+                          "authorRole": {
+                            "type": "string",
+                            "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                          },
+                          "workflowKey": {
+                            "type": "string",
+                            "enum": ["project.execution", "project.completion"]
+                          },
+                          "policyVersion": {
+                            "type": "integer"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "DRAFT",
+                              "PENDING_PLATFORM_APPROVAL",
+                              "ACTIVE",
+                              "REJECTED",
+                              "RETIRED"
+                            ]
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "rationale": {
+                            "type": "string"
+                          },
+                          "isSample": {
+                            "type": "boolean"
+                          },
+                          "steps": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "stepOrder": {
+                                  "type": "integer"
+                                },
+                                "approvalType": {
+                                  "type": "string"
+                                },
+                                "authorityOrganizationId": {
+                                  "type": "string"
+                                },
+                                "authorityRole": {
+                                  "type": "string"
+                                },
+                                "authorityLabel": {
+                                  "type": "string"
+                                },
+                                "minAmountMinor": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
+                                "maxAmountMinor": {
+                                  "type": "string",
+                                  "nullable": true
+                                }
+                              },
+                              "required": [
+                                "stepOrder",
+                                "approvalType",
+                                "authorityOrganizationId",
+                                "authorityRole",
+                                "authorityLabel",
+                                "minAmountMinor",
+                                "maxAmountMinor"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "createdBy": {
+                            "type": "string"
+                          },
+                          "submittedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "submittedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "activatedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "activatedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "rejectedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "rejectedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "rejectionReason": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "retiredAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "retiredBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "version": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "organizationId",
+                          "authorOrganizationId",
+                          "authorRole",
+                          "workflowKey",
+                          "policyVersion",
+                          "status",
+                          "label",
+                          "rationale",
+                          "isSample",
+                          "steps",
+                          "createdAt",
+                          "createdBy",
+                          "submittedAt",
+                          "submittedBy",
+                          "activatedAt",
+                          "activatedBy",
+                          "rejectedAt",
+                          "rejectedBy",
+                          "rejectionReason",
+                          "retiredAt",
+                          "retiredBy",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The platform administrator's queue: every organization's policies awaiting approval",
         "tags": ["approval-policies"],
         "security": [
           {
@@ -4739,6 +5119,7 @@
     },
     "/v1/approval-policies/{id}": {
       "get": {
+        "description": "Visible to its author organization, to the governed organization's project readers and to a platform administrator; anyone else gets 404.",
         "operationId": "PolicyController_get_v1",
         "parameters": [
           {
@@ -4764,6 +5145,13 @@
                     "organizationId": {
                       "type": "string"
                     },
+                    "authorOrganizationId": {
+                      "type": "string"
+                    },
+                    "authorRole": {
+                      "type": "string",
+                      "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                    },
                     "workflowKey": {
                       "type": "string",
                       "enum": ["project.execution", "project.completion"]
@@ -4773,7 +5161,13 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["DRAFT", "ACTIVE", "RETIRED"]
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_PLATFORM_APPROVAL",
+                        "ACTIVE",
+                        "REJECTED",
+                        "RETIRED"
+                      ]
                     },
                     "label": {
                       "type": "string"
@@ -4831,11 +5225,31 @@
                     "createdBy": {
                       "type": "string"
                     },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
                     "activatedAt": {
                       "type": "string",
                       "nullable": true
                     },
                     "activatedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectionReason": {
                       "type": "string",
                       "nullable": true
                     },
@@ -4854,6 +5268,8 @@
                   "required": [
                     "id",
                     "organizationId",
+                    "authorOrganizationId",
+                    "authorRole",
                     "workflowKey",
                     "policyVersion",
                     "status",
@@ -4863,8 +5279,13 @@
                     "steps",
                     "createdAt",
                     "createdBy",
+                    "submittedAt",
+                    "submittedBy",
                     "activatedAt",
                     "activatedBy",
+                    "rejectedAt",
+                    "rejectedBy",
+                    "rejectionReason",
                     "retiredAt",
                     "retiredBy",
                     "version"
@@ -4895,7 +5316,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4934,10 +5355,10 @@
         ]
       }
     },
-    "/v1/approval-policies/{id}/activate": {
+    "/v1/approval-policies/{id}/submit": {
       "post": {
-        "description": "Retires the policy in force for the same workflow in the same transaction. Rounds already open keep the steps they copied. Written by the roles in CONSTRUCTION_POLICY_SETTER_ROLES (default SYSTEM_ADMIN, UNION_ADMIN — the Q-64 answer), for the organization the request acts for only. The platform stores the authority it is told and creates none (ADR-023); organization-service approval.* keys are not read (ADR-063).",
-        "operationId": "PolicyController_activate_v1",
+        "description": "By the organization that wrote it. The hierarchy is confirmed again with organization-service.",
+        "operationId": "PolicyController_submit_v1",
         "parameters": [
           {
             "name": "id",
@@ -4962,6 +5383,13 @@
                     "organizationId": {
                       "type": "string"
                     },
+                    "authorOrganizationId": {
+                      "type": "string"
+                    },
+                    "authorRole": {
+                      "type": "string",
+                      "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                    },
                     "workflowKey": {
                       "type": "string",
                       "enum": ["project.execution", "project.completion"]
@@ -4971,7 +5399,13 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["DRAFT", "ACTIVE", "RETIRED"]
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_PLATFORM_APPROVAL",
+                        "ACTIVE",
+                        "REJECTED",
+                        "RETIRED"
+                      ]
                     },
                     "label": {
                       "type": "string"
@@ -5029,11 +5463,31 @@
                     "createdBy": {
                       "type": "string"
                     },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
                     "activatedAt": {
                       "type": "string",
                       "nullable": true
                     },
                     "activatedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectionReason": {
                       "type": "string",
                       "nullable": true
                     },
@@ -5052,6 +5506,8 @@
                   "required": [
                     "id",
                     "organizationId",
+                    "authorOrganizationId",
+                    "authorRole",
                     "workflowKey",
                     "policyVersion",
                     "status",
@@ -5061,8 +5517,13 @@
                     "steps",
                     "createdAt",
                     "createdBy",
+                    "submittedAt",
+                    "submittedBy",
                     "activatedAt",
                     "activatedBy",
+                    "rejectedAt",
+                    "rejectedBy",
+                    "rejectionReason",
                     "retiredAt",
                     "retiredBy",
                     "version"
@@ -5093,7 +5554,601 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a project, need, progress report, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), or two policy versions created at once (CONFLICT — retry).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write is refused, never assumed (Q-70 (7), fail closed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write is refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Send a DRAFT policy for platform approval",
+        "tags": ["approval-policies"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  }
+                },
+                "required": ["expectedVersion"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/approval-policies/{id}/approve": {
+      "post": {
+        "description": "Retires the policy in force for the same organization and workflow in the same transaction. Rounds already open keep the steps they copied. SYSTEM_ADMIN only, for any organization. With CONSTRUCTION_POLICY_FOUR_EYES (default on) the approver must be neither the author nor the submitter (403).",
+        "operationId": "PolicyController_approve_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "authorOrganizationId": {
+                      "type": "string"
+                    },
+                    "authorRole": {
+                      "type": "string",
+                      "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                    },
+                    "workflowKey": {
+                      "type": "string",
+                      "enum": ["project.execution", "project.completion"]
+                    },
+                    "policyVersion": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_PLATFORM_APPROVAL",
+                        "ACTIVE",
+                        "REJECTED",
+                        "RETIRED"
+                      ]
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "rationale": {
+                      "type": "string"
+                    },
+                    "isSample": {
+                      "type": "boolean"
+                    },
+                    "steps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "stepOrder": {
+                            "type": "integer"
+                          },
+                          "approvalType": {
+                            "type": "string"
+                          },
+                          "authorityOrganizationId": {
+                            "type": "string"
+                          },
+                          "authorityRole": {
+                            "type": "string"
+                          },
+                          "authorityLabel": {
+                            "type": "string"
+                          },
+                          "minAmountMinor": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "maxAmountMinor": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "stepOrder",
+                          "approvalType",
+                          "authorityOrganizationId",
+                          "authorityRole",
+                          "authorityLabel",
+                          "minAmountMinor",
+                          "maxAmountMinor"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "authorOrganizationId",
+                    "authorRole",
+                    "workflowKey",
+                    "policyVersion",
+                    "status",
+                    "label",
+                    "rationale",
+                    "isSample",
+                    "steps",
+                    "createdAt",
+                    "createdBy",
+                    "submittedAt",
+                    "submittedBy",
+                    "activatedAt",
+                    "activatedBy",
+                    "rejectedAt",
+                    "rejectedBy",
+                    "rejectionReason",
+                    "retiredAt",
+                    "retiredBy",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a project, need, progress report, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), or two policy versions created at once (CONFLICT — retry).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write is refused, never assumed (Q-70 (7), fail closed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write is refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Approve a pending policy: it comes into force",
+        "tags": ["approval-policies"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  }
+                },
+                "required": ["expectedVersion"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/approval-policies/{id}/reject": {
+      "post": {
+        "description": "A rejected policy never governs a project. The reason stays with the policy and is not published on the event. SYSTEM_ADMIN only.",
+        "operationId": "PolicyController_reject_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "authorOrganizationId": {
+                      "type": "string"
+                    },
+                    "authorRole": {
+                      "type": "string",
+                      "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                    },
+                    "workflowKey": {
+                      "type": "string",
+                      "enum": ["project.execution", "project.completion"]
+                    },
+                    "policyVersion": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_PLATFORM_APPROVAL",
+                        "ACTIVE",
+                        "REJECTED",
+                        "RETIRED"
+                      ]
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "rationale": {
+                      "type": "string"
+                    },
+                    "isSample": {
+                      "type": "boolean"
+                    },
+                    "steps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "stepOrder": {
+                            "type": "integer"
+                          },
+                          "approvalType": {
+                            "type": "string"
+                          },
+                          "authorityOrganizationId": {
+                            "type": "string"
+                          },
+                          "authorityRole": {
+                            "type": "string"
+                          },
+                          "authorityLabel": {
+                            "type": "string"
+                          },
+                          "minAmountMinor": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "maxAmountMinor": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "stepOrder",
+                          "approvalType",
+                          "authorityOrganizationId",
+                          "authorityRole",
+                          "authorityLabel",
+                          "minAmountMinor",
+                          "maxAmountMinor"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "authorOrganizationId",
+                    "authorRole",
+                    "workflowKey",
+                    "policyVersion",
+                    "status",
+                    "label",
+                    "rationale",
+                    "isSample",
+                    "steps",
+                    "createdAt",
+                    "createdBy",
+                    "submittedAt",
+                    "submittedBy",
+                    "activatedAt",
+                    "activatedBy",
+                    "rejectedAt",
+                    "rejectedBy",
+                    "rejectionReason",
+                    "retiredAt",
+                    "retiredBy",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5143,7 +6198,7 @@
             }
           }
         },
-        "summary": "Put a DRAFT policy in force",
+        "summary": "Reject a pending policy, with a reason",
         "tags": ["approval-policies"],
         "security": [
           {
@@ -5161,9 +6216,14 @@
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 2147483647
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 500
                   }
                 },
-                "required": ["expectedVersion"],
+                "required": ["expectedVersion", "reason"],
                 "additionalProperties": false
               }
             }
@@ -5173,7 +6233,7 @@
     },
     "/v1/approval-policies/{id}/retire": {
       "post": {
-        "description": "From then on RequestApproval for that workflow is refused: no policy never means \"no approval needed\" for execution.",
+        "description": "By its author organization or a platform administrator. From then on RequestApproval for that workflow is refused: no policy never means \"no approval needed\" for execution.",
         "operationId": "PolicyController_retire_v1",
         "parameters": [
           {
@@ -5199,6 +6259,13 @@
                     "organizationId": {
                       "type": "string"
                     },
+                    "authorOrganizationId": {
+                      "type": "string"
+                    },
+                    "authorRole": {
+                      "type": "string",
+                      "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                    },
                     "workflowKey": {
                       "type": "string",
                       "enum": ["project.execution", "project.completion"]
@@ -5208,7 +6275,13 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["DRAFT", "ACTIVE", "RETIRED"]
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_PLATFORM_APPROVAL",
+                        "ACTIVE",
+                        "REJECTED",
+                        "RETIRED"
+                      ]
                     },
                     "label": {
                       "type": "string"
@@ -5266,11 +6339,31 @@
                     "createdBy": {
                       "type": "string"
                     },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
                     "activatedAt": {
                       "type": "string",
                       "nullable": true
                     },
                     "activatedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectionReason": {
                       "type": "string",
                       "nullable": true
                     },
@@ -5289,6 +6382,8 @@
                   "required": [
                     "id",
                     "organizationId",
+                    "authorOrganizationId",
+                    "authorRole",
                     "workflowKey",
                     "policyVersion",
                     "status",
@@ -5298,8 +6393,13 @@
                     "steps",
                     "createdAt",
                     "createdBy",
+                    "submittedAt",
+                    "submittedBy",
                     "activatedAt",
                     "activatedBy",
+                    "rejectedAt",
+                    "rejectedBy",
+                    "rejectionReason",
                     "retiredAt",
                     "retiredBy",
                     "version"
@@ -5330,7 +6430,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5612,7 +6712,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5806,7 +6906,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -6010,7 +7110,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, or — on a decision — a caller who can see the project but is not the authority the approval names.",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).",
             "content": {
               "application/json": {
                 "schema": {
@@ -6110,7 +7210,7 @@
   },
   "info": {
     "title": "Rasta — Construction Service",
-    "description": "Civil-works projects (CON-001): drafting with needs, configurable approvals, execution, progress reports and completion. Approval authorities come from approval_policy rows the tenant's policy setters write — an (organization, role) per step, in order, by estimate range — never from code, and the platform never creates an authority or approves by default: no policy, no applicable step, silence or a timeout is a refusal, and only the authority a step names may decide it (ADR-023, ADR-063). Every change is a compare-and-set on `version` and publishes its event on rasta.construction.v1 in the same transaction. Project fields, roles, preconditions, start and completion rules, and progress rules are provisional answers to docs/24 Q-68 to Q-73, each configurable. Every read and write is confined to the organization the request acts for, except that an authority of another organization sees and decides the steps addressed to it.",
+    "description": "Civil-works projects (CON-001): drafting with needs, configurable approvals, execution, progress reports and completion. Approval authorities come from approval_policy rows the union writes and the platform administrator approves (Q-70 (7)) — an (organization, role) per step, in order, by estimate range — never from code, and the platform never creates an authority or approves by default: no policy, no applicable step, silence or a timeout is a refusal, and only the authority a step names may decide it (ADR-023, ADR-063). Every change is a compare-and-set on `version` and publishes its event on rasta.construction.v1 in the same transaction. Project fields, roles, preconditions, start and completion rules, and progress rules are provisional answers to docs/24 Q-68 to Q-73, each configurable. Every read and write is confined to the organization the request acts for, except that an authority of another organization sees and decides the steps addressed to it.",
     "version": "0.1.0",
     "contact": {}
   },

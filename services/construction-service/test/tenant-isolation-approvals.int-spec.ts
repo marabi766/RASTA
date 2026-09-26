@@ -94,15 +94,6 @@ describe('tenant isolation — policies, approvals, execution and progress', () 
 
   describe.each(intruders)('%s', (_who, as, acceptable) => {
     it.each<[string, () => Promise<unknown>]>([
-      ['GET /v1/approval-policies/{id}', () => w.policies.get(policyId)],
-      [
-        'POST /v1/approval-policies/{id}/retire',
-        () => w.policies.retire(policyId, { expectedVersion: 2 }),
-      ],
-      [
-        'POST /v1/approval-policies/{id}/activate',
-        () => w.policies.activate(policyId, { expectedVersion: 2 }),
-      ],
       [
         'POST /v1/projects/{id}/approvals',
         () => w.approvals.request(pendingProjectId, { expectedVersion: 1 }),
@@ -140,6 +131,52 @@ describe('tenant isolation — policies, approvals, execution and progress', () 
     });
   });
 
+  /**
+   * Approval policies (Q-70 (7), decided). An administrator or a union of B —
+   * B is not above A — reaches nothing of A's policy. A SYSTEM_ADMIN is
+   * different on purpose: it is the platform approver for every organization,
+   * so it may read and retire any policy; that is asserted, not excluded.
+   */
+  describe.each<[string, <T>(fn: () => T) => T]>([
+    ['an administrator of B', (fn) => asAdmin(b, fn)],
+    ['a union administrator of B', (fn) => asSetter(b, fn)],
+  ])('%s and A’s approval policy', (_who, as) => {
+    it.each<[string, () => Promise<unknown>, string[]]>([
+      ['GET /v1/approval-policies/{id}', () => w.policies.get(policyId), ['NOT_FOUND']],
+      [
+        'POST /v1/approval-policies/{id}/submit',
+        () => w.policies.submit(policyId, { expectedVersion: 3 }),
+        ['NOT_FOUND'],
+      ],
+      [
+        'POST /v1/approval-policies/{id}/retire',
+        () => w.policies.retire(policyId, { expectedVersion: 3 }),
+        ['NOT_FOUND'],
+      ],
+      [
+        'POST /v1/approval-policies/{id}/approve',
+        () => w.policies.approve(policyId, { expectedVersion: 3 }),
+        ['INSUFFICIENT_ROLE'],
+      ],
+      [
+        'POST /v1/approval-policies/{id}/reject',
+        () => w.policies.reject(policyId, { expectedVersion: 3, reason: 'Not yours to judge' }),
+        ['INSUFFICIENT_ROLE'],
+      ],
+    ])('%s never reaches it', async (_route, call, acceptable) => {
+      const error = await as(call).then(
+        () => undefined,
+        (caught: unknown) => caught as { code?: string },
+      );
+      expect(acceptable).toContain(error?.code);
+    });
+  });
+
+  it('a SYSTEM_ADMIN acting for B may read A’s policy: it is the platform approver (Q-70 (7))', async () => {
+    const seen = await asUser(b, ['SYSTEM_ADMIN'], () => w.policies.get(policyId));
+    expect(seen).toMatchObject({ id: policyId, organizationId: a });
+  });
+
   describe('lists and inboxes return nothing of A', () => {
     it('GET /v1/approval-policies lists only B’s policies', async () => {
       const page = await asSetter(b, () => w.policies.list({ limit: 200 }));
@@ -163,9 +200,10 @@ describe('tenant isolation — policies, approvals, execution and progress', () 
 
   describe('repository reads are scoped', () => {
     it('policy reads under B’s context see nothing of A', async () => {
-      await expect(
-        asSetter(b, () => w.approvalRepository.findPolicy(w.prisma.client, policyId)),
-      ).resolves.toBeNull();
+      // `findPolicy` crosses the guard on purpose (a union reads the policies
+      // it wrote for organizations beneath it; the platform approves any), so
+      // the service decides visibility — proven by the 404s above. The policy
+      // that *governs* is still read under the guard:
       const bActive = await asSetter(b, () =>
         w.prisma.transaction((tx) =>
           w.approvalRepository.findActivePolicy(tx, 'project.execution'),

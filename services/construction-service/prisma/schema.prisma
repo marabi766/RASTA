@@ -166,7 +166,9 @@ model ProjectNeed {
 
 enum ApprovalPolicyStatus {
   DRAFT
+  PENDING_PLATFORM_APPROVAL
   ACTIVE
+  REJECTED
   RETIRED
 }
 
@@ -179,7 +181,13 @@ enum ApprovalPolicyStatus {
 model ApprovalPolicy {
   id String @id
 
-  organizationId String @map("organization_id")
+  /// The organization this policy governs (whose projects it applies to).
+  organizationId       String @map("organization_id")
+  /// The organization whose administrator wrote it: the governed organization's
+  /// union or an ancestor union, or the platform (Q-70 (7), decided).
+  authorOrganizationId String @map("author_organization_id")
+  /// `UNION_ADMIN` or `SYSTEM_ADMIN` (`ck_policy_author_role`).
+  authorRole           String @map("author_role")
 
   /// The lifecycle point this policy governs: `project.execution` (approval
   /// to proceed) or `project.completion` (final technical approval, Q-71).
@@ -197,8 +205,14 @@ model ApprovalPolicy {
   createdAt            DateTime  @map("created_at")
   createdBy            String    @map("created_by")
   createdCorrelationId String    @map("created_correlation_id")
+  submittedAt          DateTime? @map("submitted_at")
+  submittedBy          String?   @map("submitted_by")
+  /// The platform approval: the SYSTEM_ADMIN who approved it, and when.
   activatedAt          DateTime? @map("activated_at")
   activatedBy          String?   @map("activated_by")
+  rejectedAt           DateTime? @map("rejected_at")
+  rejectedBy           String?   @map("rejected_by")
+  rejectionReason      String?   @map("rejection_reason")
   retiredAt            DateTime? @map("retired_at")
   retiredBy            String?   @map("retired_by")
 

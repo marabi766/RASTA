@@ -48,6 +48,12 @@ export const policyStepInput = z
 
 export const createPolicySchema = z
   .object({
+    /**
+     * The organization this policy governs. A union administrator may name its
+     * own organization or one beneath it (confirmed with organization-service);
+     * a platform administrator may name any existing organization (Q-70 (7)).
+     */
+    organizationId: z.string().trim().min(1).max(64),
     workflowKey: z.enum(WORKFLOW_KEYS),
     label: z.string().trim().min(2).max(200),
     /** Why — a governance setting without a rationale is unauditable. */
@@ -63,6 +69,10 @@ export type CreatePolicyDto = z.infer<typeof createPolicySchema>;
 
 export const policyTransitionSchema = z.object({ expectedVersion }).strict();
 export type PolicyTransitionDto = z.infer<typeof policyTransitionSchema>;
+
+/** The platform administrator's refusal; the reason stays with the policy. */
+export const policyRejectionSchema = z.object({ expectedVersion, reason: statedReason }).strict();
+export type PolicyRejectionDto = z.infer<typeof policyRejectionSchema>;
 
 export const listPoliciesQuerySchema = cursorPaginationSchema
   .extend({
@@ -146,6 +156,8 @@ export const policyViewSchema = z
   .object({
     id: z.string(),
     organizationId: z.string(),
+    authorOrganizationId: z.string(),
+    authorRole: z.enum(['UNION_ADMIN', 'SYSTEM_ADMIN']),
     workflowKey: z.enum(WORKFLOW_KEYS),
     policyVersion: z.number().int(),
     status: z.enum(POLICY_STATES),
@@ -155,8 +167,14 @@ export const policyViewSchema = z
     steps: z.array(policyStepViewSchema),
     createdAt: z.string(),
     createdBy: z.string(),
+    submittedAt: z.string().nullable(),
+    submittedBy: z.string().nullable(),
+    /** The platform approval. */
     activatedAt: z.string().nullable(),
     activatedBy: z.string().nullable(),
+    rejectedAt: z.string().nullable(),
+    rejectedBy: z.string().nullable(),
+    rejectionReason: z.string().nullable(),
     retiredAt: z.string().nullable(),
     retiredBy: z.string().nullable(),
     version: z.number().int(),

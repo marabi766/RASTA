@@ -1,4 +1,4 @@
-import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
+import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
@@ -12,6 +12,7 @@ import { ApprovalService } from '../src/approval/approval.service';
 import { PolicyService } from '../src/approval/policy.service';
 import { ExecutionService } from '../src/project/execution.service';
 import { ProgressService } from '../src/progress/progress.service';
+import { OrganizationDirectory } from '../src/organization/organization-directory';
 import { loadConstructionEnv, type ConstructionEnv } from '../src/config/env';
 import type { CreateProjectDto } from '../src/project/dto';
 
@@ -67,6 +68,8 @@ export interface Wiring {
   approvalRepository: ApprovalRepository;
   approvals: ApprovalService;
   policies: PolicyService;
+  /** The organization hierarchy these suites see instead of organization-service. */
+  hierarchy: FakeHierarchy;
   execution: ExecutionService;
   progress: ProgressService;
   close(): Promise<void>;
@@ -78,6 +81,7 @@ export interface Wiring {
  */
 export function wire(env: ConstructionEnv = testEnv()): Wiring {
   const prisma = new PrismaService(databaseUrl());
+  const hierarchy = new FakeHierarchy();
   const events = new EventPublisher(env);
   const repository = new ProjectRepository(prisma);
   const access = new ProjectAccess(env);
@@ -109,7 +113,15 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     needs: new NeedService(prisma, repository, events, access, idempotency),
     approvalRepository,
     approvals,
-    policies: new PolicyService(prisma, approvalRepository, events, access),
+    policies: new PolicyService(
+      prisma,
+      approvalRepository,
+      events,
+      access,
+      hierarchy as unknown as OrganizationDirectory,
+      env,
+    ),
+    hierarchy,
     execution: new ExecutionService(
       prisma,
       repository,
@@ -262,9 +274,50 @@ export function asUser<T>(
   );
 }
 
-/** Runs `fn` as a policy setter of `organizationId` (UNION_ADMIN, the default setter role). */
+/** Runs `fn` as the union administrator of `organizationId` (a policy author, Q-70 (7)). */
 export function asSetter<T>(organizationId: string, fn: () => T): T {
   return asUser(organizationId, ['UNION_ADMIN'], fn);
+}
+
+/** The platform organization the suites' SYSTEM_ADMIN acts for. */
+export const PLATFORM_ORG = 'ORG-ITEST-PLATFORM';
+
+/** Runs `fn` as a platform administrator — a different person each call unless `userId` is given. */
+export function asPlatform<T>(fn: () => T, userId = newUserId()): T {
+  return asUser(PLATFORM_ORG, ['SYSTEM_ADMIN'], fn, userId);
+}
+
+/**
+ * organization-service's hierarchy, as these suites need it: an organization
+ * is within itself and within every ancestor registered with `adopt`. The
+ * contract this stands in for is proven twice over — against the real
+ * organization-service (`construction-hierarchy-contract.int-spec.ts` there)
+ * and, for the HTTP client, in `organization-directory.int-spec.ts` here.
+ * `unavailable` makes every answer fail as an unreachable service would.
+ */
+export class FakeHierarchy {
+  private readonly parents = new Map<string, string>();
+  unavailable = false;
+  timedOut = false;
+  readonly asked: [string, string][] = [];
+
+  adopt(parent: string, child: string): void {
+    this.parents.set(child, parent);
+  }
+
+  async isWithin(scope: string, organizationId: string): Promise<boolean> {
+    this.asked.push([scope, organizationId]);
+    if (this.unavailable) throw RastaError.upstreamUnavailable('organization-service');
+    if (this.timedOut) throw RastaError.upstreamTimeout('organization-service', 3000);
+    for (
+      let current: string | undefined = organizationId;
+      current;
+      current = this.parents.get(current)
+    ) {
+      if (current === scope) return true;
+    }
+    return false;
+  }
 }
 
 export interface StepSpec {
@@ -275,7 +328,11 @@ export interface StepSpec {
   approvalType?: string;
 }
 
-/** Creates and activates a policy for `organizationId`. Returns its id. */
+/**
+ * Puts a policy in force for `organizationId` the decided way (Q-70 (7)): its
+ * union administrator writes and submits it, a different platform
+ * administrator approves it. Returns its id.
+ */
 export async function activePolicy(
   w: Wiring,
   organizationId: string,
@@ -284,6 +341,7 @@ export async function activePolicy(
 ): Promise<string> {
   const policy = await asSetter(organizationId, () =>
     w.policies.create({
+      organizationId,
       workflowKey,
       label: `Policy for ${workflowKey}`,
       rationale: 'Written by the integration suite to exercise the round',
@@ -298,7 +356,8 @@ export async function activePolicy(
       })),
     }),
   );
-  await asSetter(organizationId, () => w.policies.activate(policy.id, { expectedVersion: 1 }));
+  await asSetter(organizationId, () => w.policies.submit(policy.id, { expectedVersion: 1 }));
+  await asPlatform(() => w.policies.approve(policy.id, { expectedVersion: 2 }));
   return policy.id;
 }
 

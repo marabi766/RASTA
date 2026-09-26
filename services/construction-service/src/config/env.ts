@@ -75,10 +75,14 @@ function roleList(name: string, options: { min: number }) {
  *                                       means only those values. The platform
  *                                       ships no list of its own.
  *
- *   CONSTRUCTION_POLICY_SETTER_ROLES    Q-70 (reusing the Q-64 answer). Who writes
- *                                       approval policies, for their own
- *                                       organization. Default
- *                                       `SYSTEM_ADMIN,UNION_ADMIN`.
+ *   CONSTRUCTION_POLICY_FOUR_EYES       Q-70 (7), decided. Whether the SYSTEM_ADMIN
+ *                                       who approves a policy must differ from
+ *                                       its author and submitter. Default
+ *                                       `true`. Who writes a policy is not
+ *                                       configurable: the owner decided it
+ *                                       (UNION_ADMIN for its union's
+ *                                       organizations, SYSTEM_ADMIN for any).
+ *   ORGANIZATION_SERVICE_URL            Where the union hierarchy is confirmed.
  *   CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS
  *                                       Q-68. Submitted needs a project must
  *                                       have before it may request approval.
@@ -152,10 +156,19 @@ export const constructionEnvSchema = baseEnvSchema
         ),
       ),
 
-    CONSTRUCTION_POLICY_SETTER_ROLES: z
-      .string()
-      .default('SYSTEM_ADMIN,UNION_ADMIN')
-      .pipe(roleList('CONSTRUCTION_POLICY_SETTER_ROLES', { min: 1 })),
+    /**
+     * Q-70 (7), decided 2026-09-26: a SYSTEM_ADMIN approving a policy must not
+     * be the one who wrote or submitted it. `false` only where the platform
+     * has a single administrator — a choice the owner records.
+     */
+    CONSTRUCTION_POLICY_FOUR_EYES: booleanEnv(true),
+
+    /**
+     * Where organization-service answers "is this organization within the
+     * union?" (Q-70 (7)). Anything but a 200 or a 404 refuses the policy write.
+     */
+    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
 
     CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).default(1),
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),

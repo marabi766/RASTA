@@ -175,7 +175,9 @@ describe('what is deliberately not configurable', () => {
 describe('PR 2 settings (Q-68, Q-70 to Q-72)', () => {
   it('defaults to the recorded provisional answers', () => {
     const env = load();
-    expect(env.CONSTRUCTION_POLICY_SETTER_ROLES).toEqual(['SYSTEM_ADMIN', 'UNION_ADMIN']);
+    expect(env.CONSTRUCTION_POLICY_FOUR_EYES).toBe(true);
+    expect(env.ORGANIZATION_SERVICE_URL).toBe('http://localhost:3102');
+    expect(env.ORGANIZATION_REQUEST_TIMEOUT_MS).toBe(3000);
     expect(env.CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS).toBe(1);
     expect(env.CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE).toBe(true);
     expect(env.CONSTRUCTION_START_REQUIRES_CONTRACT).toBe(false);
@@ -184,22 +186,22 @@ describe('PR 2 settings (Q-68, Q-70 to Q-72)', () => {
 
   it('accepts each as configuration', () => {
     const env = load({
-      CONSTRUCTION_POLICY_SETTER_ROLES: 'SYSTEM_ADMIN',
+      CONSTRUCTION_POLICY_FOUR_EYES: 'false',
       CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: '0',
       CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: 'false',
       CONSTRUCTION_START_REQUIRES_CONTRACT: 'true',
       CONSTRUCTION_PROGRESS_ALLOW_DECREASE: 'on',
     });
-    expect(env.CONSTRUCTION_POLICY_SETTER_ROLES).toEqual(['SYSTEM_ADMIN']);
+    expect(env.CONSTRUCTION_POLICY_FOUR_EYES).toBe(false);
     expect(env.CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS).toBe(0);
     expect(env.CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE).toBe(false);
     expect(env.CONSTRUCTION_START_REQUIRES_CONTRACT).toBe(true);
     expect(env.CONSTRUCTION_PROGRESS_ALLOW_DECREASE).toBe(true);
   });
 
-  it('refuses the oversight role as a policy setter, and an empty setter list', () => {
-    expect(() => load({ CONSTRUCTION_POLICY_SETTER_ROLES: 'AUDITOR' })).toThrow(/AUDITOR/);
-    expect(() => load({ CONSTRUCTION_POLICY_SETTER_ROLES: '' })).toThrow(/at least 1 role/);
+  it('refuses an organization-service address that is not a URL, and an absurd timeout', () => {
+    expect(() => load({ ORGANIZATION_SERVICE_URL: 'organization-service' })).toThrow();
+    expect(() => load({ ORGANIZATION_REQUEST_TIMEOUT_MS: '0' })).toThrow();
   });
 
   it('refuses a negative need minimum', () => {
