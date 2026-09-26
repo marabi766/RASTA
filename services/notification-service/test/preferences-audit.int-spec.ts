@@ -107,7 +107,7 @@ describe('preference changes are audited (L7-14)', () => {
     }
   });
 
-  it.each([
+  it.each<[string, () => Promise<unknown>]>([
     [
       'preferences',
       () => service.replaceOwn([{ scope: 'GLOBAL', channel: 'EMAIL', enabled: false }]),
