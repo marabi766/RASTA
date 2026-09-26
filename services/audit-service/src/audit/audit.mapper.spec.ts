@@ -31,7 +31,7 @@ function envelope(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
 const delivery = (topic = 'rasta.asset.v1', partition = 0): EventDelivery =>
   Object.freeze({ topic, partition });
 
-describe('the ten subscribed topics', () => {
+describe('the twelve subscribed topics', () => {
   it('is exactly the set ADR-053 path A names, and no more', () => {
     // Pinned deliberately. Adding `rasta.audit.trail.v1` here would have this
     // service auditing its own writes (that is AUD-004), and adding a topic
@@ -49,8 +49,9 @@ describe('the ten subscribed topics', () => {
       'rasta.document.v1',
       'rasta.supplier.v1',
       'rasta.notification.v1',
+      'rasta.construction.v1',
     ]);
-    expect(DOMAIN_TOPICS).toHaveLength(11);
+    expect(DOMAIN_TOPICS).toHaveLength(12);
   });
 
   it('subscribes to no topic this service itself produces', () => {

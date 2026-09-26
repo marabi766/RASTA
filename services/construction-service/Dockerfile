@@ -1,0 +1,108 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# construction-service
+#
+# Built from the repository root, because a pnpm workspace resolves through the
+# root lockfile and the linked @rasta/* packages. Building from the service
+# directory would produce an image that cannot see its own dependencies.
+#
+# The reasoning behind each stage is the same as supplier-service's image, which
+# this file copies; each comment below records a failure that actually happened
+# when the earlier images were first built — kept so this service does not
+# rediscover them.
+#
+# This file and the CI image matrix entry are one commit on purpose. A Dockerfile
+# without a matrix row is an image that is built by nobody and scanned by nobody,
+# which is how asset, fleet and document each went unscanned for a release
+# (PROJECT_MEMORY § 22). `pnpm run ci:image-matrix` fails the build if the two
+# ever drift apart again.
+# =============================================================================
+
+# ---- deps -------------------------------------------------------------------
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS deps
+
+# pnpm is installed directly rather than through corepack. Corepack downloads
+# the tarball at build time and crashes intermittently doing so
+# (`AssertionError: assert(!this.paused)`), which turns an image build into a
+# coin flip. A pinned npm install is deterministic and needs no TTY.
+RUN npm install -g pnpm@11.22.0
+
+WORKDIR /app
+
+ENV PNPM_HOME=/pnpm
+ENV PATH="$PNPM_HOME:$PATH"
+
+# The whole workspace is copied before installing, not just this service's
+# manifest. `--frozen-lockfile` validates the lockfile against every project
+# the workspace globs match, so a partial copy reads as a lockfile mismatch
+# and fails.
+#
+# The layer cache is therefore invalidated by any source change, so the pnpm
+# store is mounted as a BuildKit cache instead: the install stays fast because
+# packages are already in the store, even when the layer must re-run.
+COPY . .
+
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm config set store-dir /pnpm/store && \
+    pnpm install --frozen-lockfile
+
+# ---- build ------------------------------------------------------------------
+FROM deps AS build
+WORKDIR /app
+
+# Generates the Prisma client, then compiles this service and its dependencies
+# in dependency order.
+RUN pnpm --filter @rasta/construction-service... build
+
+# `pnpm deploy` rather than `prune`, and the difference matters.
+#
+# pnpm's isolated node_modules layout means a workspace package resolves its
+# peer dependencies through the *consumer*, not through its own directory. So
+# a naively copied packages/nest-common/dist cannot find @nestjs/common at
+# runtime: it is a peer, and the root node_modules holds only the root's own
+# tooling.
+#
+# `deploy` produces a self-contained directory with a complete, flattened
+# node_modules — workspace dependencies included — which is exactly what a
+# runtime image needs.
+# The Prisma engine cache is mounted here too: `deploy` re-runs postinstall
+# scripts, and re-downloading the engine binary makes the build depend on a
+# CDN staying up.
+RUN --mount=type=cache,id=prisma-engines,target=/root/.cache/prisma \
+    CI=true pnpm --filter @rasta/construction-service deploy --prod --legacy /deploy
+
+# ---- runtime ----------------------------------------------------------------
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS runtime
+WORKDIR /app
+
+# No `apk upgrade`: the OS layer is exactly the pinned base's (L7-45). A
+# rebuild of the same commit therefore produces the same image, and a security
+# fix arrives as a deliberate digest bump that the image scan (on every pull
+# request that touches this service, and on main) makes visible. The update
+# procedure, including the stop-gap when upstream has not rebuilt yet, is in
+# docs/runbooks/base-image-update.md.
+
+# Non-root, owning nothing it does not need to write.
+RUN addgroup -S rasta && adduser -S rasta -G rasta
+
+# The runtime runs exactly one command: `node dist/main.js`. It has no use for
+# a package manager, and shipping one costs twice — npm's own bundled
+# dependencies carry CVEs into an image that never calls them, and anything
+# that gains code execution finds a ready-made way to fetch more. Removed
+# rather than added to an ignore list.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
+
+ENV NODE_ENV=production
+
+COPY --from=build --chown=rasta:rasta /deploy ./
+
+USER rasta
+
+EXPOSE 3110
+
+# Probes readiness, not liveness: an unhealthy database should mark the
+# container unhealthy rather than leave it in rotation answering 500s.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3110)+'/health/ready',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+
+CMD ["node", "dist/main.js"]

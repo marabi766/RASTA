@@ -115,5 +115,12 @@ export default defineConfig({
       // `audit-api` is, and it shares no wallet, order or document with
       // anything else here (AUD-004 Phase C1).
     },
+    {
+      name: 'construction-api',
+      testDir: './specs/construction',
+      // No dependency on the others. construction-service moves no money and
+      // shares no row with them; its lifecycle is found by its own project id
+      // and correlation id (CON-001).
+    },
   ],
 });
