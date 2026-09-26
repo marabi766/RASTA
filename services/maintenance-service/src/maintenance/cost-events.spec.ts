@@ -62,7 +62,8 @@ describe('cost-line events (L7-14)', () => {
     const repository = {
       findRepairOrderById: jest.fn(async () => ORDER),
       transaction: jest.fn(async (fn: (client: unknown) => Promise<unknown>) => fn(tx)),
-      lockRepairOrder: jest.fn(async () => true),
+      lockRequest: jest.fn(async () => true),
+      lockRepairOrder: jest.fn(async () => ({ status: 'IN_PROGRESS' })),
       sumCostsByCategory: jest.fn(async () => sum()),
       enqueueEvent: jest.fn(async (_tx: unknown, input: OutboxMessageInput) => {
         enqueued.push(input);

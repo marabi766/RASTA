@@ -376,14 +376,14 @@ export class RequestService {
       });
 
       for (const order of liveOrders) {
-        const reason = `Maintenance request cancelled: ${dto.reason}`;
         const cascaded = await tx.repairOrder.updateMany({
           where: { id: order.id, status: order.status },
           data: {
             status: 'CANCELLED',
             cancelledAt,
             cancelledBy: actor,
-            cancellationReason: reason,
+            // The operator's words stay here, in the tenant's database.
+            cancellationReason: `Maintenance request cancelled: ${dto.reason}`,
           },
         });
 
@@ -405,7 +405,10 @@ export class RequestService {
             organizationId: request.organizationId,
             workshopOrganizationId: order.workshopOrganizationId,
             cancelledAt: cancelledAt.toISOString(),
-            reason,
+            // A fixed reason, never the caller's free text, which may name a
+            // person (PR #116 review #4). The request's own event says why;
+            // `causationId` links the two.
+            reason: CASCADE_CANCELLATION_REASON,
             previousStatus: order.status,
           }),
         });
@@ -565,3 +568,9 @@ function scheduleDueDate(schedule: ScheduleRow): Date | null {
   const time = assessment.triggers.find((trigger) => trigger.basis === 'TIME');
   return time?.dueAt ? new Date(time.dueAt) : null;
 }
+
+/**
+ * The reason a cascaded `REPAIR_CANCELLED` carries: fixed, so no caller's
+ * free text reaches the event log through it (PR #116 review #4).
+ */
+const CASCADE_CANCELLATION_REASON = 'MAINTENANCE_REQUEST_CANCELLED';

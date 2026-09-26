@@ -22,7 +22,7 @@ import type { ListRepairOrdersQuery, ListRequestsQuery, ListSchedulesQuery } fro
  * are exactly two kinds: the two reference replicas, which no authorization
  * decision consults, and the operational gauges, which no tenant ever sees.
  *
- * Raw SQL appears three times, each with `organization_id` filtered
+ * Raw SQL appears four times, each with `organization_id` filtered
  * explicitly. The Prisma extension cannot reach inside raw SQL, so a crossing
  * written that way would be invisible both to `grep -r runUnscoped` and to the
  * unscoped-query audit log — the finding fleet-service's release gate turned
@@ -295,6 +295,13 @@ export class MaintenanceRepository {
    * COMMITTED — the sum it then reads includes the row the first one
    * committed.
    *
+   * Returns the status as it is under the lock (PR #116 review #1). A
+   * decision read before the transaction is stale by the time the lock is
+   * granted: a completion that committed in between has made the order
+   * uncostable, and only the locked row says so.
+   *
+   * Take `lockRequest` first. See there for the order.
+   *
    * `organization_id` is in the predicate explicitly: the tenant extension
    * cannot rewrite raw SQL, so a lock taken without it would be a silent
    * cross-tenant reach even though it returns no data.
@@ -303,12 +310,41 @@ export class MaintenanceRepository {
     tx: ExtendedPrismaClient,
     id: string,
     organizationId: string,
-  ): Promise<boolean> {
-    const rows = await tx.$queryRaw<{ id: string }[]>`
-      SELECT id
+  ): Promise<{ status: string } | null> {
+    const rows = await tx.$queryRaw<{ status: string }[]>`
+      SELECT status::text AS status
       FROM repair_order
       WHERE id = ${id} AND organization_id = ${organizationId}
       FOR UPDATE
+    `;
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Locks a maintenance request's row: the first lock of every transaction
+   * that writes both a request and one of its repair orders (PR #116 review
+   * #3).
+   *
+   * One order for all of them — the request, then its repair orders. Request
+   * cancellation updates the request and then cascades to the orders; cost
+   * entry, starting and completing used to lock the order and then update the
+   * request. Two transactions taking the same two rows in opposite orders
+   * deadlock, and PostgreSQL aborts one of two valid operations.
+   *
+   * `FOR NO KEY UPDATE`, the lock an ordinary UPDATE takes anyway, so rows
+   * that merely reference the request (a new cost line, a new referral) are
+   * not held up by it. Raw SQL, hence the explicit organization.
+   */
+  async lockRequest(
+    tx: ExtendedPrismaClient,
+    id: string,
+    organizationId: string,
+  ): Promise<boolean> {
+    const rows = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id
+      FROM maintenance_request
+      WHERE id = ${id} AND organization_id = ${organizationId}
+      FOR NO KEY UPDATE
     `;
     return rows.length === 1;
   }

@@ -1,6 +1,8 @@
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
 import { RequestService } from '../src/maintenance/request.service';
 import { RepairOrderService } from '../src/maintenance/repair-order.service';
+import { ScheduleService } from '../src/maintenance/schedule.service';
+import type { MaintenanceEnv } from '../src/config/env';
 import { UnverifiedWorkshopDirectory } from '../src/maintenance/workshop.directory';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, cleanup, id, newPrisma, seedAsset, tenants } from './helpers';
@@ -22,6 +24,7 @@ describe('cost-line audit events (L7-14)', () => {
   let repository: MaintenanceRepository;
   let requests: RequestService;
   let repairOrders: RepairOrderService;
+  let schedules: ScheduleService;
 
   const org = tenants();
   const workshop = 'ORG-ITEST-WORKSHOP';
@@ -32,6 +35,9 @@ describe('cost-line audit events (L7-14)', () => {
     repository = new MaintenanceRepository(prisma);
     requests = new RequestService(repository);
     repairOrders = new RepairOrderService(repository, new UnverifiedWorkshopDirectory());
+    schedules = new ScheduleService(repository, {
+      MAINTENANCE_DEFAULT_LEAD_DAYS: 7,
+    } as MaintenanceEnv);
   });
 
   afterAll(async () => {
@@ -273,7 +279,11 @@ describe('cost-line audit events (L7-14)', () => {
         repairOrderId: orderId,
         requestId,
         previousStatus: 'IN_PROGRESS',
+        // A fixed reason: the caller's free text stays in the tenant database
+        // (PR #116 review #4).
+        reason: 'MAINTENANCE_REQUEST_CANCELLED',
       });
+      expect(JSON.stringify(rows[0]!.payload)).not.toContain('دستگاه فروخته شد');
 
       const order = await asActor({ organizationId: org.a }, () => repairOrders.get(orderId));
       expect(order.status).toBe('CANCELLED');
@@ -316,6 +326,241 @@ describe('cost-line audit events (L7-14)', () => {
       expect(
         rows.filter((row) => (row.payload as Envelope).payload.requestId === request.id),
       ).toEqual([]);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #116 review
+  // -------------------------------------------------------------------------
+
+  /** Until another session in this database is waiting on a lock. */
+  async function someoneWaitsOnALock(): Promise<void> {
+    for (let tries = 0; tries < 400; tries += 1) {
+      const rows = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()
+            AND datname = current_database()`,
+      );
+      if (rows[0]!.n > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error('no session ever waited on a lock');
+  }
+
+  const record = {
+    part: (orderId: string) =>
+      repairOrders.recordPart(orderId, {
+        partName: 'فیلتر',
+        quantity: '1',
+        unit: 'عدد',
+        unitCostMinor: '70000',
+        source: 'WORKSHOP_SUPPLIED',
+      }),
+    labour: (orderId: string) =>
+      repairOrders.recordLabour(orderId, {
+        description: 'تعویض',
+        hours: '1.00',
+        hourlyRateMinor: '50000',
+      }),
+    cost: (orderId: string) =>
+      repairOrders.recordCost(orderId, {
+        category: 'OTHER',
+        amountMinor: '30000',
+        currency: 'IRR',
+        description: 'حمل',
+      }),
+  } as const;
+
+  describe.each([
+    ['part', false],
+    ['labour', false],
+    ['cost', true],
+  ] as const)('a %s written after its order was checked (review #1)', (kind, approve) => {
+    it(`is refused once a completion${approve ? ' and an approval' : ''} committed in between`, async () => {
+      const { requestId, orderId } = await liveRepair();
+
+      // The writer reads the order (IN_PROGRESS, costable); before its
+      // transaction begins, the repair is completed (and approved).
+      const findOrder = repository.findRepairOrderById.bind(repository);
+      const spy = jest
+        .spyOn(repository, 'findRepairOrderById')
+        .mockImplementationOnce(async (...args) => {
+          const seen = await findOrder(...args);
+          await asActor({ organizationId: org.a, userId: 'USR-ITEST-WORKSHOP' }, () =>
+            repairOrders.complete(orderId, { workPerformed: 'انجام شد' }),
+          );
+          if (approve) {
+            await asActor({ organizationId: org.a, userId: 'USR-ITEST-OWNER' }, () =>
+              requests.approve(requestId, {}),
+            );
+          }
+          return seen;
+        });
+
+      await expect(
+        asActor({ organizationId: org.a }, (): Promise<unknown> => record[kind](orderId)),
+      ).rejects.toMatchObject({
+        internalContext: { rule: 'REPAIR_ORDER_NOT_COSTABLE', status: 'COMPLETED' },
+      });
+      spy.mockRestore();
+
+      // The bill the completion published is still the bill.
+      expect(await costEvents(orderId)).toHaveLength(0);
+      const request = await asActor({ organizationId: org.a }, () => requests.get(requestId));
+      expect(request.totalCostMinor).toBe('0');
+      expect(request.status).toBe(approve ? 'APPROVED' : 'COMPLETED');
+    });
+  });
+
+  it('lets a cost write and a request cancellation run together without a deadlock (review #3)', async () => {
+    const { requestId, orderId } = await liveRepair();
+
+    // The cost write holds its locks and is about to update the request; the
+    // cancellation starts then. Before the one lock order, the cost write
+    // held only the order and the cancellation took the request and then
+    // wanted the order: a deadlock, one of them a 500.
+    let cancelling!: Promise<unknown>;
+    const sum = repository.sumCostsByCategory.bind(repository);
+    const spy = jest
+      .spyOn(repository, 'sumCostsByCategory')
+      .mockImplementationOnce(async (...args) => {
+        cancelling = asActor({ organizationId: org.a, userId: 'USR-ITEST-OWNER' }, () =>
+          requests.cancel(requestId, { reason: 'منصرف شدیم' }),
+        );
+        await someoneWaitsOnALock();
+        return sum(...args);
+      });
+
+    const writing = asActor({ organizationId: org.a }, () => record.part(orderId));
+    const [written, cancelled] = await Promise.allSettled([
+      writing,
+      writing.then(() => cancelling),
+    ]);
+    spy.mockRestore();
+
+    expect(written.status).toBe('fulfilled');
+    expect(cancelled.status).toBe('fulfilled');
+    // The line landed first, then the cascade withdrew the order.
+    expect(await costEvents(orderId)).toHaveLength(1);
+    const order = await asActor({ organizationId: org.a }, () => repairOrders.get(orderId));
+    expect(order.status).toBe('CANCELLED');
+  });
+
+  it('lets a completion and a request cancellation race to a clear answer, not a deadlock (review #3)', async () => {
+    const { requestId, orderId } = await liveRepair();
+
+    let cancelling!: Promise<unknown>;
+    const sum = repository.sumCostsByCategory.bind(repository);
+    const spy = jest
+      .spyOn(repository, 'sumCostsByCategory')
+      .mockImplementationOnce(async (...args) => {
+        cancelling = asActor({ organizationId: org.a, userId: 'USR-ITEST-OWNER' }, () =>
+          requests.cancel(requestId, { reason: 'منصرف شدیم' }),
+        );
+        await someoneWaitsOnALock();
+        return sum(...args);
+      });
+
+    const completing = asActor({ organizationId: org.a }, () =>
+      repairOrders.complete(orderId, { workPerformed: 'انجام شد' }),
+    );
+    await expect(completing).resolves.toMatchObject({ status: 'COMPLETED' });
+    spy.mockRestore();
+
+    // The cancellation waited, then found the work finished: a refused
+    // transition, not a database error.
+    await expect(cancelling).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
+    const request = await asActor({ organizationId: org.a }, () => requests.get(requestId));
+    expect(request.status).toBe('COMPLETED');
+  });
+
+  describe('a schedule served by a completion (review #2)', () => {
+    async function scheduledRepair(recurrence: 'RECURRING' | 'ONE_TIME') {
+      const assetId = id('AST-ITEST');
+      await seedAsset(prisma, assetId, org.a);
+      const schedule = await asActor({ organizationId: org.a }, () =>
+        schedules.create({
+          assetId,
+          title: 'سرویس دوره‌ای',
+          maintenanceType: 'PREVENTIVE',
+          recurrence,
+          intervalDays: 90,
+        }),
+      );
+      const request = await asActor({ organizationId: org.a }, () =>
+        requests.create({ assetId, type: 'PREVENTIVE', title: 'سرویس', scheduleId: schedule.id }),
+      );
+      const order = await asActor({ organizationId: org.a }, () =>
+        repairOrders.assign(request.id, { workshopOrganizationId: workshop }),
+      );
+      await asActor({ organizationId: org.a }, () => repairOrders.start(order.id, {}));
+      return { scheduleId: schedule.id, orderId: order.id };
+    }
+
+    const scheduleEvents = (scheduleId: string) =>
+      asActor({ organizationId: org.a }, () =>
+        prisma.client.outboxMessage.findMany({
+          where: { aggregateId: scheduleId, eventName: 'MAINTENANCE_SCHEDULE_CHANGED' },
+          orderBy: { streamSeq: 'asc' },
+        }),
+      );
+
+    it.each([
+      ['RECURRING', 'UPDATED', 'ACTIVE', null],
+      ['ONE_TIME', 'STATUS_CHANGED', 'ARCHIVED', 'ACTIVE'],
+    ] as const)(
+      'announces a %s schedule moved on as %s, by the completer, caused by the repair',
+      async (recurrence, change, status, previousStatus) => {
+        const { scheduleId, orderId } = await scheduledRepair(recurrence);
+
+        await asActor({ organizationId: org.a, userId: 'USR-ITEST-WORKSHOP' }, () =>
+          repairOrders.complete(orderId, { workPerformed: 'سرویس انجام شد' }),
+        );
+
+        const rows = await scheduleEvents(scheduleId);
+        // CREATED by schedules.create, then the completion's.
+        expect(rows.map((row) => (row.payload as Envelope).payload.change)).toEqual([
+          'CREATED',
+          change,
+        ]);
+        const envelope = rows[1]!.payload as Envelope & { causationId?: string };
+        expect(envelope.causationId).toBe(orderId);
+        expect(envelope.actor?.id).toBe('USR-ITEST-WORKSHOP');
+        expect(envelope.payload).toMatchObject({
+          scheduleId,
+          status,
+          previousStatus,
+          changedBy: 'USR-ITEST-WORKSHOP',
+        });
+        expect(envelope.payload.changedFields).toContain('lastServicedAt');
+      },
+    );
+
+    it('rolls the completion back with the schedule event', async () => {
+      const { scheduleId, orderId } = await scheduledRepair('ONE_TIME');
+
+      const enqueue = repository.enqueueEvent.bind(repository);
+      const spy = jest.spyOn(repository, 'enqueueEvent').mockImplementation(async (tx, input) => {
+        if (input.eventName === 'MAINTENANCE_SCHEDULE_CHANGED') {
+          throw new Error('outbox unavailable');
+        }
+        return enqueue(tx, input);
+      });
+      await expect(
+        asActor({ organizationId: org.a }, () =>
+          repairOrders.complete(orderId, { workPerformed: 'سرویس انجام شد' }),
+        ),
+      ).rejects.toThrow('outbox unavailable');
+      spy.mockRestore();
+
+      const order = await asActor({ organizationId: org.a }, () => repairOrders.get(orderId));
+      expect(order.status).toBe('IN_PROGRESS');
+      const schedule = await asActor({ organizationId: org.a }, () =>
+        prisma.client.maintenanceSchedule.findFirstOrThrow({ where: { id: scheduleId } }),
+      );
+      expect(schedule.status).toBe('ACTIVE');
+      expect(schedule.lastServiceRequestId).toBeNull();
+      expect(await scheduleEvents(scheduleId)).toHaveLength(1);
     });
   });
 });
