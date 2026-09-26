@@ -1972,8 +1972,9 @@ services/
   maintenance-service/    IMPLEMENTED — کد، تست و تأیید زنده کامل
   economic-service/       IMPLEMENTED — کد، تست و تأیید زنده کامل
   marketplace/document/supplier/notification/audit-service  IMPLEMENTED
-  (۵ سرویس دیگر)          NOT_STARTED — procurement، inventory، construction،
-                          contract، analytics (بخش ۲۷)
+  construction-service/   IN REVIEW — CON-001 PR 1 (#119) و PR 2 روی شاخه؛ هنوز روی main نیست (§ ۷-ه)
+  (۴ سرویس دیگر)          NOT_STARTED — procurement، inventory، contract،
+                          analytics (بخش ۲۷)
 
 packages/
   contracts/    شیء‌های مشترک: ID، Money، Error، Event Envelope
@@ -2628,6 +2629,41 @@ Migration با `node scripts/verify-migration-reversible.mjs document` واقع�
 - **پاکسازی دوره‌ای اشیاء یتیم** — هزینه‌ای که خود ADR-014 نام می‌برد: آپلود و
   ثبت فراداده اتمیک نیستند.
 - **Versioning و Replication** — ADR-014 صریحاً در MVP خارج از Scope گذاشته.
+
+---
+
+## ۷-ه. construction-service — ورودی کامل حافظه
+
+> **وضعیت (2026-09-26):** IMPLEMENTED · TESTED (محلی) · **روی `main` نیست**. پورت **۳۱۱۰**، پایگاه داده
+> `rasta_construction`، Topic ‏`rasta.construction.v1`. دیگر `NOT_STARTED` نیست. تصمیم معماری:
+> [ADR-063](docs/adr/ADR-063-construction-lifecycles-and-approval-policy-ownership.md) (`Proposed`). پرسش‌های باز:
+> Q-68..Q-73 (`docs/24` § ۲۴٫۹-الف)، همه با پاسخ موقت پیکربندی‌پذیر و همه **باز**.
+
+**CON-001 PR 1 — #119** (شاخهٔ `claude/new-session-6ektto`): پروژه و نیاز پروژه؛ ماشین حالت صریح پایگاه داده
+(بی Temporal)، CAS روی `version`، قفل ردیف پروژه، Outbox تراکنشی، هفت رویداد (یکی از کاتالوگ، شش افزوده با تأیید
+مدیر پروژه)، ساخت Idempotent (تکمیل کلید در **همان** تراکنش دامنه، پس از بازبینی Codex)، Migration برگشت‌پذیر،
+ثبت در Audit Topology، و سناریوی E2E از راه Gateway (بسته بودن بی‌توکن، Idempotency، چرخهٔ پروژه و نیاز، ۴۰۹، ۴۰۴
+میان‌مستأجری، رکورد Audit). Payloadها هیچ متن آزادی حمل نمی‌کنند.
+
+**CON-001 PR 2** (شاخهٔ `claude/new-session-6ektto-pr2`، روی PR 1 بنا شده): `approval_policy` داده‌ای (مرجع =
+سازمان + نقش؛ پلتفرم هرگز پیش‌فرض موافقت نمی‌کند — نبود سیاست = ۴۲۲)، گام‌های ترتیبی، آغاز، گزارش پیشرفت (Basis
+Point، نزولی‌نشدنی مگر با پیکربندی)، پایان با تأیید فنی نهایی پیکربندی‌پذیر، بی هیچ Timer.
+
+**شواهد محلی (نه CI):** PR 1 — ۴۰۱ تست (واحد + یکپارچگی)، پوشش شاخه‌ای ≈ ۸۸٪ (دروازهٔ ۸۵٪)، Migration بالا → پایین →
+بالا سبز. PR 2 — ۵۹۳ تست پیش از ادغام اصلاحات PR 1. **E2E محلی اجرا نشد** (Docker/Keycloak در محیط نبود)؛ نخستین
+اجرای واقعی‌اش در CI است.
+
+**شکاف‌های باقی‌مانده (صادقانه):**
+
+- پیوست مدارک پروژه و تصویر پیشرفت (Q-72) — پیاده نشده.
+- مناقصه و پیشنهاد (CON-002) و قرارداد (CON-003) — شروع نشده؛ `PROJECT_STARTED.contractId` همیشه `null`.
+- هیچ قاعدهٔ تعارض منافع درخواست‌کننده/تصمیم‌گیرنده (سندی تعریفش نکرده).
+- شناسهٔ سازمان مرجع در سیاست با `organization-service` اعتبارسنجی نمی‌شود.
+- با نقش‌های پیش‌فرض و Realm نمونه، هیچ سازمانی هم نقش پروژه و هم نقش نویسندهٔ سیاست را ندارد؛ E2E ‏PR 2 برای همین
+  `CONSTRUCTION_POLICY_SETTER_ROLES` را گسترده می‌کند — پرسش Q-70 (۷) برای مالک.
+- ترتیب تحویل رویداد میان Replicaهای Relay تضمین نشده (D-027، ADR-051 B4) — مشترک با همهٔ سرویس‌ها.
+- همان الگوی Idempotency «تکمیل پس از Commit» در `marketplace-service` و `economic-service` هنوز هست (این PR فقط
+  construction را اصلاح کرد).
 
 ---
 
