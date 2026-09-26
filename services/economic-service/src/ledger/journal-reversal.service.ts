@@ -140,18 +140,21 @@ export class JournalReversalService {
    * so that is what the refusal says.
    *
    * Both reads stay inside the journal's organization: the journal was read
-   * tenant-scoped above, the hold is read the same way, and a transaction
-   * whose payer is not that organization is treated as not found.
+   * tenant-scoped above, and the hold and the transaction are read through
+   * the same tenant guard, so another organization's transaction is not
+   * found — it is never read.
    */
   private async holdCorrection(
     journal: { id: string; organizationId: string; transactionId: string | null },
     refund: string,
   ): Promise<string> {
     const hold = await this.wallets.findHoldPlacedBy(journal.id);
-    const found = journal.transactionId
-      ? await this.transactions.findByIdForParty(journal.transactionId)
+    // Tenant-guarded, not `findByIdForParty`: that one reads unscoped, and a
+    // check on the row afterwards does not undo the read (Codex round 2 on
+    // #123, F5; AGENTS.md A-04).
+    const transaction = journal.transactionId
+      ? await this.transactions.findById(journal.transactionId)
       : null;
-    const transaction = found?.organizationId === journal.organizationId ? found : null;
 
     if (hold?.status === 'ACTIVE' && transaction && canTransition(transaction.status, 'REFUND')) {
       return refund;

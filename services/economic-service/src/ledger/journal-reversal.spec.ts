@@ -45,10 +45,7 @@ describe('JournalReversalService FUNDS_HELD guidance', () => {
     startedAt: Date.now(),
   };
 
-  const serviceWith = (
-    transactionId: string | null,
-    transaction: { organizationId: string; status: string } | null,
-  ) =>
+  const serviceWith = (transactionId: string | null) =>
     new JournalReversalService(
       {} as PrismaService,
       {
@@ -60,19 +57,21 @@ describe('JournalReversalService FUNDS_HELD guidance', () => {
         }),
       } as unknown as LedgerService,
       { findHoldPlacedBy: async () => null } as unknown as WalletRepository,
-      { findByIdForParty: async () => transaction } as unknown as TransactionRepository,
+      {
+        // What the tenant guard answers for another organization's id.
+        findById: async () => null,
+        findByIdForParty: async () => {
+          throw new Error('the unscoped read must not be used here (Codex round 2, F5)');
+        },
+      } as unknown as TransactionRepository,
     );
 
   it.each([
-    ['no transaction on the journal', null, null],
-    [
-      'a transaction another organization pays',
-      'TXN_UNIT',
-      { organizationId: 'ORG-OTHER', status: 'HELD' },
-    ],
-  ])('names Q-76, not the refund, for %s and no hold', async (_case, transactionId, found) => {
+    ['no transaction on the journal', null],
+    ['a transaction the tenant guard does not find', 'TXN_UNIT'],
+  ])('names Q-76, not the refund, for %s and no hold', async (_case, transactionId) => {
     const failure = await runWithContext(platform, async () =>
-      serviceWith(transactionId, found).reverse('JRN_UNIT', 'a unit test asks'),
+      serviceWith(transactionId).reverse('JRN_UNIT', 'a unit test asks'),
     ).catch((error: unknown) => error);
 
     expect(failure).toMatchObject({ code: 'BUSINESS_RULE_VIOLATION', status: 422 });

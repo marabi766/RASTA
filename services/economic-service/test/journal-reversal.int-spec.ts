@@ -179,7 +179,19 @@ describe('journal reversal refusals (real database)', () => {
   it('refuses a hold, names the transaction refund, and leaves the hold ACTIVE', async () => {
     const held = await createHeld('100000');
     const journal = await journalOf(held.id, 'FUNDS_HELD');
+    // Codex round 2, F5: the guidance reads the transaction through the tenant
+    // guard, never the unscoped party read.
+    const unscoped = jest.spyOn(wiring.transactionRepository, 'findByIdForParty');
     await expectRefused(journal.id, payer, /FUNDS_HELD.*transactions\/\{id\}\/refund/);
+    expect(unscoped).not.toHaveBeenCalled();
+    unscoped.mockRestore();
+    // And that guarded read does not find this transaction from another
+    // organization, which is what makes a foreign one "not found".
+    expect(
+      await asActor({ organizationId: unownedOrg }, () =>
+        wiring.transactionRepository.findById(held.id),
+      ),
+    ).toBeNull();
 
     const holds = await runUnscoped('the suite reads the hold', () =>
       prisma.client.walletHold.findMany({ where: { reference: held.id } }),
