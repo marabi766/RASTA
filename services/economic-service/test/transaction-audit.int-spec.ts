@@ -59,7 +59,8 @@ describe('transaction lifecycle audit (real database)', () => {
         orderBy: { createdAt: 'asc' },
       }),
     );
-    return rows.map((row) => row.payload as Record<string, unknown>);
+    // The outbox row holds the whole envelope; the event's payload is inside.
+    return rows.map((row) => (row.payload as { payload: Record<string, unknown> }).payload);
   };
 
   const rowOf = (transactionId: string) =>
