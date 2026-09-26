@@ -32,3 +32,22 @@ export const WEIGHT_TOTAL_BP = 10_000;
 
 /** The top of the 0..100 scale, in hundredths (ADR-052 § 7, `scoreCentis`). */
 export const SCORE_CENTIS_MAX = 10_000;
+
+/**
+ * ADR-052 § 4, rule 13 — the closed set marketplace publishes on
+ * `ORDER_DISPUTE_RESOLVED.responsibility` and `ORDER_CANCELLED.cancellationCause`.
+ */
+export const RESPONSIBILITY_ATTRIBUTIONS = [
+  'SUPPLIER',
+  'BUYER',
+  'PLATFORM',
+  'UNDETERMINED',
+] as const;
+export type ResponsibilityAttribution = (typeof RESPONSIBILITY_ATTRIBUTIONS)[number];
+
+/** ADR-052 § 6 — marketplace samples by `orderId`, maintenance by `repairOrderId`. */
+export const OUTCOME_KINDS = ['ORDER', 'REPAIR_ORDER'] as const;
+export type OutcomeKind = (typeof OUTCOME_KINDS)[number];
+
+/** The components whose facts carry a responsibility (rule 13). */
+export const ATTRIBUTED_COMPONENTS = ['DISPUTE_ABSENCE', 'CANCELLATION_ABSENCE'] as const;

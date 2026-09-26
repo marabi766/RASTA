@@ -653,6 +653,8 @@ export const EXPECTED = {
       // ADR-052 step 2: the platform-wide performance formula.
       'performance_formula_version',
       'performance_formula_weight',
+      // ADR-052 step 3: the append-only performance-event store.
+      'performance_event',
     ],
     // ADR-052 step 2. The freeze, the no-truncate pair, the deferred 100% sum
     // and the successor rule. A round trip that lost any one of them would
@@ -665,19 +667,32 @@ export const EXPECTED = {
       'trg_performance_formula_weight_sum',
       'trg_performance_formula_version_sum',
       'trg_performance_formula_successor',
+      // ADR-052 step 3. Both, because the row trigger never sees a TRUNCATE.
+      'trg_performance_event_append_only',
+      'trg_performance_event_no_truncate',
     ],
     functions: [
       'performance_formula_version_guard',
       'performance_formula_weight_guard',
       'performance_formula_weight_sum_check',
       'performance_formula_successor_check',
+      'performance_event_append_only',
     ],
     indexes: [
       'ux_performance_formula_version_number',
       // "At most one ACTIVE" is this partial index and nothing else.
       'ux_performance_formula_single_active',
+      // ADR-052 rule 8: the idempotency key. Without it a redelivery is
+      // counted twice and the score moves.
+      'ux_performance_event_source',
+      'ux_performance_event_compensation_target',
     ],
-    types: ['PerformanceFormulaStatus', 'PerformanceComponent'],
+    types: [
+      'PerformanceFormulaStatus',
+      'PerformanceComponent',
+      'ResponsibilityAttribution',
+      'PerformanceOutcomeKind',
+    ],
     constraints: [
       // Domain invariants.
       'ck_supplier_display_name_not_blank',
@@ -712,6 +727,14 @@ export const EXPECTED = {
       'ck_formula_chronology',
       'ck_formula_text_not_blank',
       'ck_formula_weight_bp_range',
+      // ADR-052 step 3.
+      'performance_event_compensates_fkey',
+      'ck_performance_event_not_self_compensating',
+      'ck_performance_event_quality_unmeasured',
+      'ck_performance_event_responsibility',
+      'ck_performance_event_rating',
+      'ck_performance_event_timeliness',
+      'ck_performance_event_text_not_blank',
     ],
   },
   /*

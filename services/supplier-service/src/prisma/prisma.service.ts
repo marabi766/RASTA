@@ -12,7 +12,7 @@ import { PrismaClient } from '../generated/prisma';
  * `tenant-scope.spec.ts` compares this list against the schema so an omission
  * fails a test rather than passing review.
  *
- * All five domain models carry the column, including the two — `Qualification`
+ * Every domain model carries the column, including the two — `Qualification`
  * and `QualificationEvidence` — that could have reached it through a join to
  * `Supplier`. The column is denormalised precisely so the guard can see it: a
  * guard that has to join is a guard that does not run on a `findMany`.
@@ -23,6 +23,8 @@ export const TENANT_SCOPED_MODELS = [
   'Qualification',
   'QualificationEvidence',
   'Suspension',
+  // ADR-052 step 3 — scoped by the supplier organization the fact is about.
+  'PerformanceEvent',
 ] as const;
 
 /**

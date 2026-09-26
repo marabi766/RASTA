@@ -434,3 +434,58 @@ model PerformanceFormulaWeight {
   @@id([formulaVersionId, component])
   @@map("performance_formula_weight")
 }
+
+/// ADR-052 § 4, rule 13 — who a dispute outcome or a cancellation is
+/// attributed to. UNDETERMINED is a value, excluded from the denominator.
+enum ResponsibilityAttribution {
+  SUPPLIER
+  BUYER
+  PLATFORM
+  UNDETERMINED
+}
+
+/// ADR-052 § 6 — what a sample is keyed by.
+enum PerformanceOutcomeKind {
+  ORDER
+  REPAIR_ORDER
+}
+
+/// One source event counted toward a supplier's performance (ADR-052 step 3).
+///
+/// **Append-only**: the database refuses UPDATE, DELETE and TRUNCATE; a
+/// correction is a new row naming the one it corrects. `sourceEventId` is
+/// unique — the idempotency key — and this table is separate from
+/// `ProcessedEvent`: that one says "seen", this one says "counted".
+///
+/// Tenant-scoped by the supplier's organization.
+model PerformanceEvent {
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  sourceEventId   String @unique(map: "ux_performance_event_source") @map("source_event_id")
+  sourceEventName String @map("source_event_name")
+
+  component PerformanceComponent
+
+  outcomeKind PerformanceOutcomeKind @map("outcome_kind")
+  outcomeKey  String                 @map("outcome_key")
+
+  responsibility ResponsibilityAttribution?
+  rating         Int?                       @db.SmallInt
+  promisedAt     DateTime?                  @map("promised_at")
+  deliveredAt    DateTime?                  @map("delivered_at")
+
+  compensatesSourceEventId String?            @map("compensates_source_event_id")
+  compensates              PerformanceEvent?  @relation("PerformanceEventCompensation", fields: [organizationId, component, compensatesSourceEventId], references: [organizationId, component, sourceEventId], onDelete: Restrict, onUpdate: Restrict, map: "performance_event_compensates_fkey")
+  compensatedBy            PerformanceEvent[] @relation("PerformanceEventCompensation")
+
+  occurredAt    DateTime @map("occurred_at")
+  recordedAt    DateTime @default(now()) @map("recorded_at")
+  correlationId String   @map("correlation_id")
+
+  @@unique([organizationId, component, sourceEventId], map: "ux_performance_event_compensation_target")
+  @@index([organizationId, occurredAt, sourceEventId], map: "ix_performance_event_window")
+  @@index([organizationId, outcomeKind, outcomeKey], map: "ix_performance_event_outcome")
+  @@map("performance_event")
+}
