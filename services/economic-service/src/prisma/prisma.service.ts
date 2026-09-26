@@ -40,6 +40,7 @@ export const TENANT_SCOPED_MODELS = [
   'PaymentIntent',
   'Commission',
   'Reward',
+  'RewardSourceEvaluation',
   'RewardBalance',
   'Settlement',
   'IdempotencyKey',

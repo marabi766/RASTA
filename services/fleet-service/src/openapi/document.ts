@@ -79,6 +79,8 @@ const ERRORS: Record<string, readonly number[]> = {
   'DELETE /v1/assignments/{id}': WRITE,
   'GET /v1/usage-records': COMMON,
   'GET /v1/usage-records/{id}': READ_ONE,
+  // A tenant claim the token does not carry is a 403; a record outside it, 404.
+  'GET /v1/internal/usage-records/{id}': READ_ONE,
   'POST /v1/usage-records': WRITE,
   'GET /v1/fleet/availability': COMMON,
   'POST /v1/fleet/availability': WRITE,

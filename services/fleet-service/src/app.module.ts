@@ -41,6 +41,8 @@ import { AvailabilityService } from './fleet/availability.service';
 import { DriverController } from './fleet/driver.controller';
 import { AssignmentController } from './fleet/assignment.controller';
 import { FleetController, UsageController } from './fleet/fleet.controller';
+import { FleetInternalController } from './fleet/internal.controller';
+import { UsageFactService } from './fleet/source-fact';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
 import { assignmentsActiveTotal } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
@@ -66,6 +68,7 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
     AssignmentController,
     UsageController,
     FleetController,
+    FleetInternalController,
     HealthController,
     MetricsController,
   ],
@@ -118,6 +121,7 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
     DriverService,
     AssignmentService,
     UsageService,
+    UsageFactService,
     AvailabilityService,
 
     {

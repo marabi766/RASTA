@@ -102,6 +102,10 @@ export function testEnv(): EconomicEnv {
     OIDC_AUDIENCE: 'rasta-api',
     INTERNAL_TOKEN_SECRET: 'itest_internal_secret_at_least_32_characters',
     KAFKA_BROKERS: 'localhost:9092',
+    // Never dialled: the consumer suites stand in for both owners
+    // (`source-facts.fake.ts`). A closed port, so a slip fails fast.
+    MAINTENANCE_SERVICE_URL: 'http://127.0.0.1:9',
+    FLEET_SERVICE_URL: 'http://127.0.0.1:9',
     ...process.env,
     DATABASE_URL: databaseUrl(),
     ECONOMIC_PLATFORM_ORGANIZATION_ID: PLATFORM_ORGANIZATION_ID,

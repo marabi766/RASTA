@@ -9,6 +9,7 @@ import {
 } from '@rasta/contracts';
 import { dlqMessagesTotal } from '@rasta/observability';
 import { createSystemContext, runWithContext } from '../context/request-context';
+import { RastaError } from '../errors/rasta-error';
 
 /**
  * The consuming half of the outbox pattern (ADR-021).
@@ -29,6 +30,10 @@ import { createSystemContext, runWithContext } from '../context/request-context'
  *   - **A handler that failed** — a database blip, a downstream timeout.
  *     Retried in-process with backoff, and dead-lettered only once the
  *     attempts are exhausted.
+ *
+ * A handler can also reach the first verdict itself, after the envelope has
+ * parsed: it throws {@link UnprocessableEventError} and the message goes
+ * straight to the dead-letter topic under the reason it names.
  *
  * What it deliberately does not do is commit an offset it could not account
  * for. If even the dead-letter write fails, the error propagates, kafkajs
@@ -105,6 +110,49 @@ export type EventHandler = (
   envelope: EventEnvelope,
   delivery: EventDelivery,
 ) => Promise<HandlerOutcome>;
+
+/**
+ * Thrown by a handler for a message it has decided it can never process.
+ *
+ * The consumer dead-letters it **at once**, with this reason, and does not
+ * retry: the handler has already established that the answer will not change.
+ * ADR-061 § 4 is the case it exists for. The owning service said the fact the
+ * event claims is not so, and asking three more times would only delay the
+ * DLQ and hold the partition.
+ *
+ * Only for a verdict. A handler that merely *failed* (a timeout, a database
+ * blip) throws anything else and is retried as before.
+ *
+ * The message goes into `x-dlq-error`, so it must name what disagreed and
+ * never carry a secret, a token or a value that is not the platform's to copy.
+ */
+export class UnprocessableEventError extends Error {
+  constructor(
+    readonly reason: DlqReason,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'UnprocessableEventError';
+  }
+}
+
+/**
+ * The DLQ reason for a handler whose retries ran out.
+ *
+ * An owning service that was down the whole time is `UPSTREAM_UNAVAILABLE`,
+ * not a generic exhaustion. The event may be perfectly good, and whoever
+ * triages the DLQ should know to replay it once the upstream is back rather
+ * than look for a defect in it.
+ */
+function exhaustedReason(error: unknown): DlqReason {
+  if (
+    error instanceof RastaError &&
+    (error.code === 'UPSTREAM_UNAVAILABLE' || error.code === 'UPSTREAM_TIMEOUT')
+  ) {
+    return DLQ_REASONS.UPSTREAM_UNAVAILABLE;
+  }
+  return DLQ_REASONS.MAX_RETRIES_EXCEEDED;
+}
 
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_BACKOFF_MS = 500;
@@ -263,18 +311,19 @@ export class EventConsumer {
         );
         return;
       } catch (error) {
+        if (error instanceof UnprocessableEventError) {
+          this.logger.error(
+            `Handler refused ${envelope.eventName} ${envelope.eventId} (${error.reason}): ${error.message}`,
+          );
+          await this.deadLetter(topic, value, headers, error.reason, error, attempt);
+          return;
+        }
+
         if (attempt === maxRetries) {
           this.logger.error(
             `Handler failed ${maxRetries}x for ${envelope.eventName} ${envelope.eventId}: ${describe(error)}`,
           );
-          await this.deadLetter(
-            topic,
-            value,
-            headers,
-            DLQ_REASONS.MAX_RETRIES_EXCEEDED,
-            error,
-            attempt,
-          );
+          await this.deadLetter(topic, value, headers, exhaustedReason(error), error, attempt);
           return;
         }
 

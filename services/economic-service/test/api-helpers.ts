@@ -143,6 +143,9 @@ function applyEnvironment(): void {
   process.env.OIDC_AUDIENCE ??= 'rasta-api';
   process.env.INTERNAL_TOKEN_SECRET = INTERNAL_SECRET;
   process.env.KAFKA_BROKERS ??= 'localhost:9092';
+  // The consumers are replaced below, so nothing dials these (ADR-061 § 4).
+  process.env.MAINTENANCE_SERVICE_URL ??= 'http://127.0.0.1:9';
+  process.env.FLEET_SERVICE_URL ??= 'http://127.0.0.1:9';
   process.env.ECONOMIC_PLATFORM_ORGANIZATION_ID = PLATFORM_ORGANIZATION_ID;
   // The reconciliation is a timer that reports and never repairs; it has its
   // own suite and only adds noise here.

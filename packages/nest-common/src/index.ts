@@ -106,7 +106,7 @@ export {
 export type { TenantGuardOptions } from './tenancy/tenant-guard.extension';
 
 // Event consumption ----------------------------------------------------------
-export { EventConsumer } from './consumer/event-consumer';
+export { EventConsumer, UnprocessableEventError } from './consumer/event-consumer';
 export type {
   EventConsumerOptions,
   EventDelivery,

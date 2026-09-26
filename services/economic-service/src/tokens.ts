@@ -18,3 +18,9 @@ export const LOGGER = Symbol('ECONOMIC_LOGGER');
  * change to one `useClass` in `app.module.ts`.
  */
 export const PAYMENT_PROVIDER = Symbol('ECONOMIC_PAYMENT_PROVIDER');
+
+/**
+ * Where the consumers read the facts they make money from (ADR-061 § 4). A
+ * token so a test can stand in for maintenance-service and fleet-service.
+ */
+export const SOURCE_FACTS = Symbol('ECONOMIC_SOURCE_FACTS');

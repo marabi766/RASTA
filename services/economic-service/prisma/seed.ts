@@ -1,6 +1,7 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
 import { assertDemoSeedAllowed } from '@rasta/config';
+import { recordCutoverIfMissing } from '../src/reward/evaluation-cutover';
 
 /**
  * Seed data for economic-service.
@@ -176,6 +177,17 @@ async function main(): Promise<void> {
 
   console.log('==> Platform ledger accounts');
   await seedPlatformAccounts();
+
+  // A freshly migrated database has no reward history, so its cutover is now.
+  // Production never gets here (the guard above); its operator records the
+  // cutover after draining the old consumers (docs/runbooks/reward-evaluation-cutover.md).
+  console.log('==> Reward evaluation cutover');
+  const cutover = await recordCutoverIfMissing(prisma, new Date());
+  console.log(
+    cutover.recorded
+      ? `    recorded ${cutover.cutoverAt.toISOString()}`
+      : `    already recorded (${cutover.cutoverAt.toISOString()}); left as it is`,
+  );
 
   if (SEED_SAMPLE_RULES) {
     console.log('==> Sample governance rules (ECONOMIC_SEED_SAMPLE_RULES=true)');

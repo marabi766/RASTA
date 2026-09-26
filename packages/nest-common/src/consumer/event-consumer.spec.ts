@@ -1,4 +1,5 @@
-import { EventConsumer } from './event-consumer';
+import { EventConsumer, UnprocessableEventError } from './event-consumer';
+import { RastaError } from '../errors/rasta-error';
 import type {
   ConsumerLogger,
   EventConsumerOptions,
@@ -575,6 +576,70 @@ describe('EventConsumer dead-letter metric', () => {
     expect(samples.reduce((total, sample) => total + sample.value, 0)).toBe(2);
   });
 
+  it('dead-letters a refusal at once, under the reason the handler names', async () => {
+    // ADR-061 § 4: the fact's owner said no. Asking again cannot change that,
+    // so there is no retry, even with retries to spare.
+    let attempts = 0;
+    const producer = new FakeDlqProducer();
+    const consumer = build(
+      producer,
+      async () => {
+        attempts += 1;
+        throw new UnprocessableEventError(
+          DLQ_REASONS.SOURCE_UNCONFIRMED,
+          'the owner does not confirm it: amount_mismatch',
+        );
+      },
+      { maxRetries: 3 },
+    );
+
+    await consumer.handleMessage(SOURCE_TOPIC, 0, validBytes(), undefined);
+
+    expect(attempts).toBe(1);
+    expect(producer.sent).toHaveLength(1);
+    const headers = producer.sent[0]?.messages[0]?.headers ?? {};
+    expect(headers['x-dlq-reason']).toBe(DLQ_REASONS.SOURCE_UNCONFIRMED);
+    expect(String(headers['x-dlq-error'])).toContain('amount_mismatch');
+    expect(await counted()).toEqual([
+      {
+        labels: { service: CLIENT_ID, topic: SOURCE_TOPIC, reason: DLQ_REASONS.SOURCE_UNCONFIRMED },
+        value: 1,
+      },
+    ]);
+  });
+
+  it('retries an unreachable upstream, then parks it as UPSTREAM_UNAVAILABLE', async () => {
+    // Fail closed, but say why: the event may be perfectly good and only
+    // needs replaying once the owner is back.
+    let attempts = 0;
+    const producer = new FakeDlqProducer();
+    const consumer = build(
+      producer,
+      async () => {
+        attempts += 1;
+        throw attempts % 2 === 0
+          ? RastaError.upstreamTimeout('maintenance-service', 3000)
+          : RastaError.upstreamUnavailable('maintenance-service');
+      },
+      { maxRetries: 3 },
+    );
+
+    await consumer.handleMessage(SOURCE_TOPIC, 0, validBytes(), undefined);
+
+    expect(attempts).toBe(3);
+    expect(producer.sent).toHaveLength(1);
+    expect(await counted()).toEqual([
+      {
+        labels: {
+          service: CLIENT_ID,
+          topic: SOURCE_TOPIC,
+          reason: DLQ_REASONS.UPSTREAM_UNAVAILABLE,
+        },
+        value: 1,
+      },
+    ]);
+  });
+
   it('labels with the closed set only, never an identifier, error text or position', async () => {
     const producer = new FakeDlqProducer();
     const consumer = build(producer, failingHandler);
@@ -674,7 +739,7 @@ describe('EventConsumer dead-letter metric zero series', () => {
     ).sort();
 
     expect(samples.map((sample) => key(sample.labels)).sort()).toEqual(expected);
-    expect(samples).toHaveLength(TOPICS.length * 5);
+    expect(samples).toHaveLength(TOPICS.length * Object.keys(DLQ_REASONS).length);
     for (const sample of samples) {
       expect(sample.value).toBe(0);
       expect(Object.keys(sample.labels).sort()).toEqual(['reason', 'service', 'topic']);
@@ -722,7 +787,7 @@ describe('EventConsumer dead-letter metric zero series', () => {
     new EventConsumer(options, async () => undefined, silent);
 
     const samples = await exposedFor(CLIENT_ID);
-    expect(samples).toHaveLength(TOPICS.length * 5);
+    expect(samples).toHaveLength(TOPICS.length * Object.keys(DLQ_REASONS).length);
     const counted = samples.filter((sample) => sample.value > 0);
     expect(counted).toEqual([
       {
