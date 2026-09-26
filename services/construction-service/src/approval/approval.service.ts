@@ -34,7 +34,7 @@ export const APPROVAL_ID_PREFIX = 'APR';
 
 /** What opening a round decided. */
 export type RoundOutcome =
-  | { opened: true; round: number; first: Approval | { id: string } }
+  | { opened: true; round: number; first: { id: string } }
   | { opened: false; reason: 'NO_POLICY' | 'NO_APPLICABLE_STEP' };
 
 /**
@@ -315,8 +315,10 @@ export class ApprovalService {
       createdAt: input.at,
       createdCorrelationId: correlationId,
     }));
+    const [first] = rows;
+    if (!first) return { opened: false, reason: 'NO_APPLICABLE_STEP' };
     await this.approvals.createApprovals(tx, rows);
-    return { opened: true, round: input.round, first: { id: rows[0]!.id } };
+    return { opened: true, round: input.round, first: { id: first.id } };
   }
 
   /** Publishes APPROVAL_REQUESTED for a step that has just become PENDING. */

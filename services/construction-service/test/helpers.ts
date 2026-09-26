@@ -248,3 +248,80 @@ export async function waitFor<T>(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
+
+/** Runs `fn` as a user of `organizationId` with the given roles. */
+export function asUser<T>(
+  organizationId: string,
+  roles: string[],
+  fn: () => T,
+  userId = newUserId(),
+): T {
+  return runWithContext(
+    context({ organizationId, organizationIds: [organizationId], userId, roles }),
+    fn,
+  );
+}
+
+/** Runs `fn` as a policy setter of `organizationId` (UNION_ADMIN, the default setter role). */
+export function asSetter<T>(organizationId: string, fn: () => T): T {
+  return asUser(organizationId, ['UNION_ADMIN'], fn);
+}
+
+export interface StepSpec {
+  authorityOrganizationId: string;
+  authorityRole?: string;
+  minAmountMinor?: string;
+  maxAmountMinor?: string;
+  approvalType?: string;
+}
+
+/** Creates and activates a policy for `organizationId`. Returns its id. */
+export async function activePolicy(
+  w: Wiring,
+  organizationId: string,
+  steps: StepSpec[],
+  workflowKey: 'project.execution' | 'project.completion' = 'project.execution',
+): Promise<string> {
+  const policy = await asSetter(organizationId, () =>
+    w.policies.create({
+      workflowKey,
+      label: `Policy for ${workflowKey}`,
+      rationale: 'Written by the integration suite to exercise the round',
+      isSample: true,
+      steps: steps.map((step, index) => ({
+        approvalType: step.approvalType ?? `Approval ${index + 1}`,
+        authorityOrganizationId: step.authorityOrganizationId,
+        authorityRole: (step.authorityRole ?? 'ORGANIZATION_ADMIN') as 'ORGANIZATION_ADMIN',
+        authorityLabel: `Authority ${index + 1}`,
+        ...(step.minAmountMinor ? { minAmountMinor: step.minAmountMinor } : {}),
+        ...(step.maxAmountMinor ? { maxAmountMinor: step.maxAmountMinor } : {}),
+      })),
+    }),
+  );
+  await asSetter(organizationId, () => w.policies.activate(policy.id, { expectedVersion: 1 }));
+  return policy.id;
+}
+
+/**
+ * A project ready to request approval: an estimate and one submitted need.
+ * Returns the project id and its current version.
+ */
+export async function readyProject(
+  w: Wiring,
+  organizationId: string,
+  estimatedCostMinor = '1000000',
+): Promise<{ id: string; version: number }> {
+  const project = await asAdmin(organizationId, () =>
+    w.projects.create({ ...PROJECT, estimatedCostMinor }),
+  );
+  const need = await asAdmin(organizationId, () =>
+    w.needs.add(project.id, { title: 'Gravel', description: 'Base course' }),
+  );
+  await asAdmin(organizationId, () => w.needs.submit(project.id, need.id, { expectedVersion: 1 }));
+  return { id: project.id, version: project.version };
+}
+
+/** The approvals of a project, read as its own administrator. */
+export async function approvalsOf(w: Wiring, organizationId: string, projectId: string) {
+  return asAdmin(organizationId, () => w.approvals.listForProject(projectId, {}));
+}
