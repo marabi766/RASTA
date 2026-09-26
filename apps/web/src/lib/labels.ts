@@ -29,7 +29,7 @@ const ASSET_TYPE_LABELS: Readonly<Record<AssetType, string>> = {
   EXCAVATOR: 'بیل مکانیکی',
   BULLDOZER: 'بولدوزر',
   TRUCK: 'کامیون',
-  LIGHT_TRUCK: 'کامیونت',
+  LIGHT_TRUCK: 'کامیون سبک',
   TRACTOR: 'تراکتور',
   WATER_TANKER: 'تانکر آب',
   WASTE_COLLECTOR: 'خودرو جمع‌آوری پسماند',
