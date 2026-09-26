@@ -22,11 +22,11 @@ import { open, seal } from './session';
  *      holding a random owner token. The holder alone calls Keycloak.
  *   2. The holder publishes the outcome and releases the lease in one Lua
  *      script, **fenced** by its owner token (`PUBLISH_SCRIPT`, Codex #113
- *      R2-1): a holder that lost its lease cannot release its successor's, and
- *      cannot store a refusal over anything. A rotation, though, is stored
- *      whoever reports it and is never overwritten — it is the one thing that
- *      is now true of the token. The outcome is **sealed** with the session
- *      secret (AES-256-GCM, `session.ts`) and bound to its key.
+ *      R2-1, R3-2): only the current holder writes anything — a holder that
+ *      lost its lease changes neither the lease nor the result — and a stored
+ *      rotation is never overwritten, by anyone. The outcome is **sealed**
+ *      with the session secret (AES-256-GCM, `session.ts`) and bound to its
+ *      key.
  *   3. Everybody else waits for the result and uses it, so every replica
  *      writes the *same* rotated cookie.
  *
@@ -211,8 +211,10 @@ export class LocalRefreshFlights {
 
 /**
  * When each refresh token was first refused, per process — the no-Redis
- * counterpart of the stored `REJECTED` outcome. Bounded and self-expiring
- * like the flights.
+ * counterpart of the stored `REJECTED` outcome, and what keeps that time
+ * steady while Redis is down (Codex #113 R3-1). Bounded and self-expiring
+ * like the flights. It keeps the *earliest* time it is told: a time Redis
+ * reports from another replica can only move it earlier, never restart it.
  */
 export class RejectionMemory {
   private readonly entries = new Map<
@@ -225,10 +227,13 @@ export class RejectionMemory {
     private readonly limit: number = LOCAL_FLIGHT_LIMIT,
   ) {}
 
-  /** The first time `key` was refused, recording `at` if it is the first. */
+  /** The first time `key` was refused: the earliest `at` it has been given. */
   firstRejectedAt(key: string, at: number): number {
     const existing = this.entries.get(key);
-    if (existing) return existing.at;
+    if (existing) {
+      if (at < existing.at) existing.at = at;
+      return existing.at;
+    }
     while (this.entries.size >= this.limit) {
       const oldest = this.entries.keys().next().value as string;
       clearTimeout(this.entries.get(oldest)!.timer);
@@ -250,6 +255,20 @@ export class RejectionMemory {
   }
 }
 
+/** A `REJECTED` outcome, with its time taken from `rejections`; anything else as is. */
+function remembered(
+  rejections: RejectionMemory,
+  key: string,
+  outcome: RefreshOutcome,
+): RefreshOutcome {
+  return outcome.kind === 'REJECTED'
+    ? {
+        kind: 'REJECTED',
+        firstRejectedAt: rejections.firstRejectedAt(key, outcome.firstRejectedAt),
+      }
+    : outcome;
+}
+
 /** Coordination within one process only: used when no Redis is configured. */
 export function processRefreshCoordinator(
   flights: LocalRefreshFlights = new LocalRefreshFlights(),
@@ -259,15 +278,9 @@ export function processRefreshCoordinator(
     flights,
     refresh: (refreshToken, call) => {
       const key = refreshKeyOf(refreshToken);
-      return flights.share(key, async () => {
-        const outcome = await called(refreshToken, call);
-        return outcome.kind === 'REJECTED'
-          ? {
-              kind: 'REJECTED',
-              firstRejectedAt: rejections.firstRejectedAt(key, outcome.firstRejectedAt),
-            }
-          : outcome;
-      });
+      return flights.share(key, async () =>
+        remembered(rejections, key, await called(refreshToken, call)),
+      );
     },
   };
 }
@@ -309,6 +322,13 @@ export interface RedisCoordinationOptions {
   /** How often a waiting replica looks for the outcome. */
   readonly pollMs?: number;
   readonly flights?: LocalRefreshFlights;
+  /**
+   * This process's memory of first rejections. Every `REJECTED` this
+   * coordinator returns passes through it — read from Redis, published by
+   * this replica, or found with Redis down — so the time a session's grace
+   * runs from never restarts because Redis stopped answering (R3-1).
+   */
+  readonly rejections?: RejectionMemory;
   /** Told when Redis fails and a refresh goes ahead uncoordinated. Names no token. */
   readonly onRedisError?: (error: unknown) => void;
   /** The clock `firstRejectedAt` is read from. A seam for tests. */
@@ -331,45 +351,37 @@ return 0
 
 /**
  * Publishes an outcome and releases the lease, atomically, fenced by the
- * owner token (Codex #113 R2-1).
+ * owner token (Codex #113 R2-1, R3-2).
  *
  * The stored value starts with its kind — `R` rotated, `X` refused, `J`
- * rejected — which is not secret; the tokens after it are sealed. Precedence:
+ * rejected — which is not secret; the tokens after it are sealed. In order:
  *
- *   - a rotation is written whoever reports it: it is the truth about what
- *     happened to the token, and a holder that lost its lease still learned
- *     it — nothing else can ever be true of that token again;
- *   - nothing overwrites a rotation;
- *   - a refusal or rejection is written only by the current holder, and a
- *     rejection keeps the first rejection's time;
- *   - the lease is deleted only by its holder.
+ *   1. Not the current holder — the lease expired, or somebody else holds it
+ *      now: change nothing, neither key. Whatever this caller learned, the
+ *      lease is how writes are ordered, and a caller outside it is not in
+ *      that order. (What it hands its own caller: see `asHolder`.)
+ *   2. A rotation is already stored: keep it — nothing overwrites a
+ *      rotation, not even another one — and release.
+ *   3. A rejection over a rejection: keep the first one's time, and release.
+ *   4. Otherwise: store the outcome, and release.
  *
- * Returns what is stored afterwards, so a holder that lost the race still
- * hands its caller the authoritative outcome.
+ * Returns what is stored afterwards, so the caller can hand on the
+ * authoritative outcome.
  *
  * KEYS[1] lock, KEYS[2] result; ARGV[1] owner, ARGV[2] kind, ARGV[3] value,
  * ARGV[4] ttl (ms).
  */
 export const PUBLISH_SCRIPT = `
-local holder = redis.call('GET', KEYS[1])
-local isOwner = holder == ARGV[1]
 local current = redis.call('GET', KEYS[2])
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return current
+end
 local currentKind = ''
 if current then currentKind = string.sub(current, 1, 1) end
-local write = false
-if ARGV[2] == 'R' then
-  write = true
-elseif currentKind == 'R' then
-  write = false
-elseif isOwner then
-  write = not (ARGV[2] == 'J' and currentKind == 'J')
-end
-if write then
+if currentKind ~= 'R' and not (ARGV[2] == 'J' and currentKind == 'J') then
   redis.call('SET', KEYS[2], ARGV[3], 'PX', tonumber(ARGV[4]))
 end
-if isOwner then
-  redis.call('DEL', KEYS[1])
-end
+redis.call('DEL', KEYS[1])
 return redis.call('GET', KEYS[2])
 `;
 
@@ -424,6 +436,7 @@ export function redisRefreshCoordinator(
     resultTtlMs = LOCAL_FLIGHT_WINDOW_MS,
     pollMs = 100,
     flights = new LocalRefreshFlights(),
+    rejections = new RejectionMemory(),
     onRedisError = () => undefined,
     now = Date.now,
   } = options;
@@ -484,7 +497,14 @@ export function redisRefreshCoordinator(
           String(ttlOf(outcome)),
         )) as string | null;
         released = true;
-        return decode(key, stored) ?? outcome;
+        const authoritative = decode(key, stored);
+        // A rotation this replica obtained is real — the provider spent the
+        // token and issued new ones — even when a lost lease kept it out of
+        // Redis. Its own caller gets it, unless a stored rotation exists; what
+        // anyone else stored (a refusal of the token this replica spent)
+        // must not replace it.
+        if (outcome.kind === 'ROTATED' && authoritative?.kind !== 'ROTATED') return outcome;
+        return authoritative ?? outcome;
       } catch (error) {
         onRedisError(error);
         return outcome;
@@ -539,15 +559,20 @@ export function redisRefreshCoordinator(
     refresh: (refreshToken, call) => {
       const key = refreshKeyOf(refreshToken);
       return flights.share(key, async () => {
+        let outcome: RefreshOutcome;
         try {
-          return await coordinated(refreshToken, key, call);
+          outcome = await coordinated(refreshToken, key, call);
         } catch (error) {
           if (!(error instanceof RedisUnavailable)) throw error;
           onRedisError(error.cause);
           // Uncoordinated, as before coordination existed; a resulting
           // refusal still never clears a cookie.
-          return called(refreshToken, call, now);
+          outcome = await called(refreshToken, call, now);
         }
+        // Every path — Redis's stored rejection, this replica's publish, a
+        // publish that failed, Redis down altogether — through one memory,
+        // so a rejection's time is the first one this process saw (R3-1).
+        return remembered(rejections, key, outcome);
       });
     },
   };

@@ -14,7 +14,12 @@ import {
   type RefreshOutcome,
 } from './refresh-coordinator';
 import { openSession, seal, sealSession, type WebSession } from './session';
-import type { RenewalDependencies, SessionRenewal } from './session-refresh';
+import {
+  REJECTION_GRACE_MS,
+  renewSession,
+  type RenewalDependencies,
+  type SessionRenewal,
+} from './session-refresh';
 
 /**
  * One refresh per refresh token across replicas (Codex #113 R1-1), and a
@@ -128,16 +133,13 @@ class FakeRedis implements RedisLike {
         string,
         string,
       ];
-      const isOwner = this.live(lockKey)?.value === owner;
-      const currentKind = this.live(resultKey)?.value.slice(0, 1) ?? '';
-      const write =
-        kind === 'R'
-          ? true
-          : currentKind === 'R'
-            ? false
-            : isOwner && !(kind === 'J' && currentKind === 'J');
-      if (write) this.store.set(resultKey, { value, expiresAt: Date.now() + Number(ttl) });
-      if (isOwner) this.store.delete(lockKey);
+      const current = this.live(resultKey)?.value ?? null;
+      if (this.live(lockKey)?.value !== owner) return current;
+      const currentKind = current?.slice(0, 1) ?? '';
+      if (currentKind !== 'R' && !(kind === 'J' && currentKind === 'J')) {
+        this.store.set(resultKey, { value, expiresAt: Date.now() + Number(ttl) });
+      }
+      this.store.delete(lockKey);
       return this.live(resultKey)?.value ?? null;
     }
     throw new Error('FakeRedis: an unknown script');
@@ -279,6 +281,60 @@ describe('two replicas, one refresh token (Codex #113 R1-1)', () => {
 
     expect(outcome.kind).toBe('ROTATED');
     expect(errors).toHaveLength(1);
+  });
+
+  describe('a revoked session still ends while Redis fails (Codex #113 R3-1)', () => {
+    const revoked = () =>
+      jest.fn(async (): Promise<TokenResponse> => {
+        throw new OidcError('INVALID_GRANT', 'invalid_grant');
+      });
+
+    /** Two requests with one cookie, more than the grace apart. */
+    async function twoRequestsAcrossTheGrace(redis: RedisLike) {
+      let clock = NOW;
+      const coordinator = redisRefreshCoordinator({
+        redis,
+        secret: SECRET,
+        now: () => clock,
+        onRedisError: () => undefined,
+      });
+      const refresh = revoked();
+      const cookie = sealSession(session(), SECRET);
+
+      const first = await renewSession(cookie, { env: ENV, refresh, coordinator, now: clock });
+      // The refusal's own flight is long gone by then (REFUSAL_WINDOW_MS).
+      coordinator.flights.clear();
+      clock += REJECTION_GRACE_MS + 1;
+      const second = await renewSession(cookie, { env: ENV, refresh, coordinator, now: clock });
+      return { first, second, refresh };
+    }
+
+    it('with Redis down, the second request clears the cookie', async () => {
+      // Before: each fallback call stamped a fresh rejection time, so the
+      // grace never passed and the dead cookie stayed until absolute expiry.
+      const redis = new FakeRedis();
+      redis.down = true;
+
+      const { first, second, refresh } = await twoRequestsAcrossTheGrace(redis);
+
+      expect(first).toEqual({ kind: 'REFUSED', usable: true });
+      expect(second).toEqual({ kind: 'ENDED' });
+      expect(refresh).toHaveBeenCalledTimes(2);
+    });
+
+    it('with every publish failing, the second request clears the cookie', async () => {
+      class PublishFails extends FakeRedis {
+        override async eval(script: string, keys: number, ...args: string[]) {
+          if (script === PUBLISH_SCRIPT) throw new Error('Command timed out');
+          return super.eval(script, keys, ...args);
+        }
+      }
+
+      const { first, second } = await twoRequestsAcrossTheGrace(new PublishFails());
+
+      expect(first).toEqual({ kind: 'REFUSED', usable: true });
+      expect(second).toEqual({ kind: 'ENDED' });
+    });
   });
 
   it('takes over from a winner that vanished holding the lock', async () => {
@@ -568,9 +624,11 @@ describe.each(backends)('fencing and TTLs, against %s (Codex #113 R2-1)', (_name
       pollMs: 5,
     });
 
-  it('lets a holder that lost its lease still publish the rotation it obtained', async () => {
+  it('lets a holder that lost its lease publish nothing — but hand its own caller its rotation', async () => {
     // A reaches Keycloak, which spends the token, but A stalls past its lease.
-    // B takes the lease and is refused (invalid_grant). A's rotation must win.
+    // B takes the lease and is refused (invalid_grant), and publishes that.
+    // A is outside the lease now: it may not write (Codex #113 R3-2) — yet
+    // the rotation it obtained is real, and its own caller gets it.
     const token = `refresh-fence-a-${Date.now()}`;
     const spent = new Set<string>();
     const a = heldCall(() => rotation('a'));
@@ -588,19 +646,45 @@ describe.each(backends)('fencing and TTLs, against %s (Codex #113 R2-1)', (_name
       return rotation('b');
     });
     expect(bOutcome.kind).toBe('REJECTED');
+    const storedByB = await backend.get(resultKeyOf(token));
+    expect(storedByB?.slice(0, 1)).toBe('J');
 
     a.release();
     expect(await aOutcome).toMatchObject({ kind: 'ROTATED', tokens: { access_token: 'access-a' } });
 
-    expect((await backend.get(resultKeyOf(token)))?.slice(0, 1)).toBe('R');
-    // Everybody after that gets the rotation, and nobody asks Keycloak again.
-    const late = jest.fn(async () => rotation('late'));
-    expect(await replicaOn(2).refresh(token, late)).toMatchObject({
-      kind: 'ROTATED',
-      tokens: { access_token: 'access-a' },
-    });
-    expect(late).not.toHaveBeenCalled();
+    // Neither key moved: B's rejection stands, and there is no lease to release.
+    expect(await backend.get(resultKeyOf(token))).toBe(storedByB);
+    expect(await backend.get(lockKeyOf(token))).toBeNull();
     expect(bCalls).toEqual([token]);
+  });
+
+  it('lets a stale non-owner change neither key, and nobody overwrite a stored rotation', async () => {
+    // The script itself, on the real Redis when one is given (Codex #113 R3-2).
+    const [redis] = backend.clients as [RedisLike];
+    const lock = `rasta:web:refresh:lock:fence-lua-${Date.now()}`;
+    const result = `rasta:web:refresh:result:fence-lua-${Date.now()}`;
+    const publish = (owner: string, kind: string, value: string) =>
+      redis.eval(PUBLISH_SCRIPT, 2, lock, result, owner, kind, value, '30000');
+
+    // Somebody else holds the lease; nothing is stored yet.
+    await redis.set(lock, 'current-owner', 'PX', 5_000);
+    for (const kind of ['R', 'X', 'J']) {
+      expect(await publish('stale-owner', kind, `${kind}:stale`)).toBeNull();
+      expect(await backend.get(result)).toBeNull();
+      expect(await backend.get(lock)).toBe('current-owner');
+    }
+
+    // A rotation is stored while the current owner still holds the lease.
+    await redis.set(result, 'R:existing', 'PX', 5_000);
+    for (const kind of ['R', 'X', 'J']) {
+      expect(await publish('stale-owner', kind, `${kind}:stale`)).toBe('R:existing');
+      expect(await backend.get(lock)).toBe('current-owner');
+    }
+
+    // Not even the owner overwrites it — it only releases its lease.
+    expect(await publish('current-owner', 'R', 'R:another')).toBe('R:existing');
+    expect(await backend.get(result)).toBe('R:existing');
+    expect(await backend.get(lock)).toBeNull();
   });
 
   it('never lets a late refusal overwrite a rotation', async () => {
