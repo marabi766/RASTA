@@ -24,6 +24,7 @@ const LOCAL = {
   auditUrl: 'http://localhost:3115',
   identityUrl: 'http://[::1]:3101',
   constructionUrl: 'http://localhost:3110',
+  organizationUrl: 'http://localhost:3102',
   keycloakUrl: 'http://localhost:8080',
   kafkaBrokers: ['localhost:9092', '127.0.0.1:9093'],
 };
@@ -58,6 +59,7 @@ describe('assertDisposableE2eTarget', () => {
     ['auditUrl', 'E2E_AUDIT_URL'],
     ['identityUrl', 'E2E_IDENTITY_URL'],
     ['constructionUrl', 'E2E_CONSTRUCTION_URL'],
+    ['organizationUrl', 'E2E_ORGANIZATION_URL'],
     ['keycloakUrl', 'KEYCLOAK_URL'],
   ] as const) {
     it(`refuses a remote ${setting}, naming the setting but not the host`, () => {
@@ -196,6 +198,7 @@ describe('globalSetup checks everything before it writes (Codex review of #117, 
       'audit-service to be ready',
       'identity-service to be ready',
       'construction-service to be ready',
+      'organization-service to be ready',
       'Keycloak realm ${config.realm} to be reachable',
       'await verifyDisposableRealm(config)',
       'admin.describeCluster()',
