@@ -175,6 +175,21 @@ describe('payment authorisation atomicity (real database)', () => {
     await cleanup(prisma, [organizationId]);
   });
 
+  it('treats a provider refund that throws like one that refuses', async () => {
+    // A provider down at the worst moment: the refund call itself fails.
+    const organizationId = `${org.c}-STUCK-THROW`;
+    jest.spyOn(wiring.wallets, 'credit').mockRejectedValueOnce(walletBalanceLimit('WLT_STAND_IN'));
+    jest.spyOn(provider, 'refund').mockRejectedValueOnce(new Error('provider unreachable'));
+
+    await expect(topUpBy(organizationId, 900n)).rejects.toMatchObject({
+      code: 'BUSINESS_RULE_VIOLATION',
+    });
+    const [intent] = await intentsOf(organizationId);
+    expect(intent).toMatchObject({ status: 'AUTHORIZED', failureReason: 'CAPTURED_NOT_CREDITED' });
+
+    await cleanup(prisma, [organizationId]);
+  });
+
   it('marks, and does not hide, a capture it could neither credit nor refund', async () => {
     const organizationId = `${org.b}-STUCK`;
     jest.spyOn(wiring.wallets, 'credit').mockRejectedValueOnce(new Error('connection reset'));

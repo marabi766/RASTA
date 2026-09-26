@@ -680,6 +680,22 @@ describe('economic consumers', () => {
     expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).not.toBeNull();
   });
 
+  it('treats a failure that is not even an Error as transient, and redelivers it', async () => {
+    // A driver or a library can reject with a bare value. Unclassified means
+    // transient: rethrown for the framework to retry, never finalised.
+    const payload = usage();
+    sources.recorded(payload, { recordedBy: 'USR-ODD-FAILURE' });
+    const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
+
+    const spy = jest.spyOn(wiring.rewards, 'grantFor').mockRejectedValueOnce('socket hang up');
+    await expect(rewardTrigger.handle(event)).rejects.toBe('socket hang up');
+    spy.mockRestore();
+    expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).toBeNull();
+
+    await expect(rewardTrigger.handle(event)).resolves.toBeUndefined();
+    expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).not.toBeNull();
+  });
+
   it('reads a completed repair as a reward trigger too, keyed on the request', async () => {
     await asActor({ organizationId: org.a, roles: ['SYSTEM_ADMIN'] }, () =>
       wiring.rewards.createRule({

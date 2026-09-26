@@ -526,6 +526,19 @@ describe('economic internals', () => {
       );
     });
 
+    it('pages through the wallets, one snapshot per page', async () => {
+      // Two wallets per page, so every wallet this run opened is reached
+      // across several pages and none is reported that agrees with its ledger.
+      const organizationId = `${org.c}-PAGED`;
+      const { walletId } = await fundWallet(wiring, organizationId, 1_000n);
+      const paged = new LedgerBalanceAudit(wiring.walletRepository, wiring.ledger, {
+        ...testEnv(),
+        ECONOMIC_BALANCE_AUDIT_BATCH_SIZE: 2,
+      });
+      expect((await paged.run()).find((row) => row.walletId === walletId)).toBeUndefined();
+      await cleanup(prisma, [organizationId]);
+    });
+
     it('reads a wallet and its escrow from one snapshot, so a hold committing between them is not a deviation', async () => {
       // Codex review of PR #121, finding 3. The hold commits after the audit
       // read the wallet page and before it reads the escrow account: under
@@ -655,6 +668,55 @@ describe('economic internals', () => {
       await cleanup(prisma, [organizationId]);
     });
   });
+  // -------------------------------------------------------------------------
+  // A balance is a sum (Codex review of PR #121, finding 1)
+  // -------------------------------------------------------------------------
+
+  describe('the wallet recompute', () => {
+    it('refuses a credit that would take the balance past a BIGINT, and stores nothing', async () => {
+      // Every credit path meets this guard: a top-up is refused earlier by its
+      // reservation, but a settlement or a reward to a full wallet is not.
+      const organizationId = `${org.a}-FULL`;
+      const { walletId } = await fundWallet(wiring, organizationId, 9_223_372_036_854_775_807n);
+
+      await expect(
+        asActor({ organizationId }, () =>
+          wiring.prisma.transaction(async (tx) => {
+            const [locked] = await wiring.walletRepository.lock(tx, [walletId]);
+            return wiring.wallets.credit(tx, {
+              wallet: locked!,
+              amountMinor: 1n,
+              counterpartPurpose: 'REWARD_EXPENSE',
+              journalType: 'REWARD_GRANT',
+              description: 'one past the largest balance',
+              postedBy: 'internals-itest',
+            });
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION', status: 422 });
+
+      const stored = await runUnscoped('the suite reads the full wallet', () =>
+        prisma.client.wallet.findUniqueOrThrow({ where: { id: walletId } }),
+      );
+      expect(stored.availableBalanceMinor).toBe(9_223_372_036_854_775_807n);
+      await cleanup(prisma, [organizationId]);
+    });
+
+    it('tells a wallet that vanished from one that is full', async () => {
+      await expect(
+        asActor({ organizationId: org.a }, () =>
+          wiring.prisma.transaction((tx) =>
+            wiring.walletRepository.recomputeFromLedger(tx, {
+              id: `WLT_${ulid()}`,
+              organizationId: org.a,
+              currency: 'IRR',
+            }),
+          ),
+        ),
+      ).rejects.toThrow(/disappeared while recomputing/);
+    });
+  });
+
   // -------------------------------------------------------------------------
   // Doing nothing, correctly
   // -------------------------------------------------------------------------
