@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { RastaError } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletRepository } from '../wallet/wallet.repository';
+import { TransactionRepository } from '../transaction/transaction.repository';
+import { canTransition } from '../transaction/state-machine';
 import { assertPlatformScope, canCommitOrganization } from '../access/access';
 import { LedgerService } from './ledger.service';
 import type { JournalType } from '../generated/prisma';
@@ -31,6 +33,8 @@ import type { JournalType } from '../generated/prisma';
 export const CORRECTION_OF: { readonly [T in JournalType]: string | null } = {
   WALLET_TOP_UP:
     'a top-up is corrected by refunding its payment: POST /v1/payment-intents/{id}/refund',
+  // Only while the hold is still ACTIVE and the transaction may still be
+  // refunded: `JournalReversalService.holdCorrection` narrows it per journal.
   FUNDS_HELD: 'a hold is returned by refunding its transaction: POST /v1/transactions/{id}/refund',
   FUNDS_REFUNDED: 'a refund is final; no operation undoes one yet (docs/24 Q-76)',
   SETTLEMENT:
@@ -55,6 +59,7 @@ export class JournalReversalService {
     private readonly prisma: PrismaService,
     private readonly ledger: LedgerService,
     private readonly wallets: WalletRepository,
+    private readonly transactions: TransactionRepository,
   ) {}
 
   /**
@@ -74,7 +79,10 @@ export class JournalReversalService {
     const original = await this.ledger.getJournal(journalId);
     canCommitOrganization(original.organizationId);
 
-    const correction = this.correctionFor(original.journalType);
+    let correction = this.correctionFor(original.journalType);
+    if (correction !== null && original.journalType === 'FUNDS_HELD') {
+      correction = await this.holdCorrection(original, correction);
+    }
     if (correction !== null) {
       throw RastaError.businessRule(
         `A ${original.journalType} journal is not reversed through the ledger: ${correction}`,
@@ -118,5 +126,40 @@ export class JournalReversalService {
    */
   protected correctionFor(journalType: JournalType): string | null {
     return CORRECTION_OF[journalType];
+  }
+
+  /**
+   * What corrects this hold's journal now, not what corrects holds in general
+   * (Codex round 1 on #123, F2).
+   *
+   * The transaction refund returns escrow only while the hold is ACTIVE and
+   * the state machine still lets the transaction be refunded. Once the hold
+   * was released by a settlement, or returned by a refund, that call answers
+   * 409 — and pointing an operator at it sends them round in a circle. What
+   * undoes a settled hold is the settlement correction nobody has defined yet,
+   * so that is what the refusal says.
+   *
+   * Both reads stay inside the journal's organization: the journal was read
+   * tenant-scoped above, the hold is read the same way, and a transaction
+   * whose payer is not that organization is treated as not found.
+   */
+  private async holdCorrection(
+    journal: { id: string; organizationId: string; transactionId: string | null },
+    refund: string,
+  ): Promise<string> {
+    const hold = await this.wallets.findHoldPlacedBy(journal.id);
+    const found = journal.transactionId
+      ? await this.transactions.findByIdForParty(journal.transactionId)
+      : null;
+    const transaction = found?.organizationId === journal.organizationId ? found : null;
+
+    if (hold?.status === 'ACTIVE' && transaction && canTransition(transaction.status, 'REFUND')) {
+      return refund;
+    }
+    return (
+      `the hold is ${hold?.status ?? 'not found'} and its transaction ` +
+      `${transaction?.status ?? 'not found'}, so no transaction refund applies; undoing it is ` +
+      'the settlement correction that is still open (docs/24 Q-76)'
+    );
   }
 }
