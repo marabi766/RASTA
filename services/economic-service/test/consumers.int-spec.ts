@@ -450,14 +450,16 @@ describe('economic consumers', () => {
     await expect(rewardTrigger.handle(envelope('ASSET_CREATED', usage()))).resolves.toBe('SKIPPED');
   });
 
-  it('asks no owner when no rule could pay', async () => {
-    // No rule exists yet. Nothing can be granted whatever the record says, so
-    // the busiest event on the platform costs no round trip.
+  it('asks the owner even when no rule could pay', async () => {
+    // No rule exists yet. Nothing can be granted, but the evaluation is
+    // recorded permanently, so it may only be recorded for a confirmed fact
+    // (PR #110 round 2 #4).
     const payload = usage();
+    sources.recorded(payload, { recordedBy: 'USR-NO-RULE' });
     await expect(
       rewardTrigger.handle(envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor())),
     ).resolves.toBeUndefined();
-    expect(sources.calls.some((call) => call.id === payload.usageRecordId)).toBe(false);
+    expect(sources.calls.some((call) => call.id === payload.usageRecordId)).toBe(true);
   });
 
   it('grants points once per source fact, however many times the event arrives', async () => {
@@ -660,8 +662,8 @@ describe('economic consumers', () => {
     const fact = inB();
     sources.recorded(fact, { recordedBy: 'USR-REWARD-B' });
 
-    // Consumed while nothing could pay: nobody is asked, but the fact is
-    // recorded as evaluated.
+    // Consumed while nothing could pay: the owner confirms it, and the fact
+    // is recorded as evaluated.
     await expect(
       rewardTrigger.handle(envelope(CONSUMED_EVENTS.USAGE_RECORDED, fact, userActor())),
     ).resolves.toBeUndefined();
@@ -744,5 +746,188 @@ describe('economic consumers', () => {
     await expect(
       rewardTrigger.handle(envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor())),
     ).resolves.toBe('SKIPPED');
+  });
+  // -------------------------------------------------------------------------
+  // PR #110 round 2
+  // -------------------------------------------------------------------------
+
+  const ruleIn = (organizationId: string, points: number, validFrom?: Date) =>
+    asActor({ organizationId, roles: ['SYSTEM_ADMIN'] }, () =>
+      wiring.rewards.createRule({
+        organizationId,
+        triggerEvent: 'USAGE_RECORDED',
+        rewardType: 'POINTS',
+        points,
+        status: 'ACTIVE',
+        validFrom: (validFrom ?? new Date(Date.now() - 86_400_000)).toISOString(),
+        // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any),
+    );
+
+  const evaluationFor = (sourceReference: string) =>
+    runUnscoped('the suite reads evaluations across tenants', () =>
+      prisma.client.rewardSourceEvaluation.findMany({ where: { sourceReference } }),
+    );
+
+  const rewardsFor = (sourceReference: string) =>
+    runUnscoped('the suite counts grants across tenants', () =>
+      prisma.client.reward.findMany({ where: { sourceReference } }),
+    );
+
+  it('never resumes a backfilled evaluation, whatever event id arrives (round 2 #1)', async () => {
+    // A fact paid before the evaluation table existed: the migration records
+    // it with origin BACKFILL and no event id at all.
+    const payload = usage({ organizationId: org.c });
+    sources.recorded(payload, { recordedBy: 'USR-BACKFILLED' });
+    await runUnscoped('the suite stands in for the migration backfill', () =>
+      prisma.client.rewardSourceEvaluation.create({
+        data: {
+          organizationId: org.c,
+          triggerEvent: 'USAGE_RECORDED',
+          sourceReference: payload.usageRecordId,
+          origin: 'BACKFILL',
+          eventId: null,
+          outcome: 'EVALUATED',
+        },
+      }),
+    );
+    // A rerun of the suite must exercise the path, not stop at processed_event.
+    await runUnscoped('the suite resets its fixed event id', () =>
+      prisma.client.processedEvent.deleteMany({ where: { eventId: 'BACKFILL' } }),
+    );
+    await ruleIn(org.c, 3);
+
+    // The old sentinel is a valid envelope event id, and no longer means anything.
+    for (const eventId of ['BACKFILL', ulid()]) {
+      const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, {
+        ...userActor(),
+        eventId,
+      });
+      await expect(rewardTrigger.handle(event)).resolves.toBe('SKIPPED');
+    }
+    expect(await rewardsFor(payload.usageRecordId)).toHaveLength(0);
+    expect(sources.calls.some((call) => call.id === payload.usageRecordId)).toBe(false);
+
+    // And the database refuses a backfill row that names an event, or an
+    // event row that names none.
+    await expect(
+      runUnscoped('the suite writes past the consumer to test the constraint', () =>
+        prisma.client.rewardSourceEvaluation.create({
+          data: {
+            organizationId: org.c,
+            triggerEvent: 'USAGE_RECORDED',
+            sourceReference: `USG_${ulid()}`,
+            origin: 'BACKFILL',
+            eventId: 'BACKFILL',
+            outcome: 'EVALUATED',
+          },
+        }),
+      ),
+    ).rejects.toThrow(/ck_reward_source_evaluation_event_id/);
+    await expect(
+      runUnscoped('the suite writes past the consumer to test the constraint', () =>
+        prisma.client.rewardSourceEvaluation.create({
+          data: {
+            organizationId: org.c,
+            triggerEvent: 'USAGE_RECORDED',
+            sourceReference: `USG_${ulid()}`,
+            origin: 'EVENT',
+            eventId: null,
+            outcome: 'EVALUATED',
+          },
+        }),
+      ),
+    ).rejects.toThrow(/ck_reward_source_evaluation_event_id/);
+  });
+
+  it('resumes after a crash with the rules the first evaluation saw, not a rule added since (round 2 #2)', async () => {
+    const tenant = `${org.c}-CRASH`;
+    const first = await ruleIn(tenant, 2);
+    const payload = usage({ organizationId: tenant });
+    sources.recorded(payload, { recordedBy: 'USR-CRASH-WINDOW' });
+    const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
+
+    // The claim commits, then the process dies before any grant or
+    // processed_event.
+    const spy = jest
+      .spyOn(wiring.rewards, 'grantFor')
+      .mockRejectedValueOnce(new Error('process died between the claim and the grant'));
+    await rewardTrigger.handle(event);
+    spy.mockRestore();
+    await runUnscoped('the suite simulates a crash before processed_event committed', () =>
+      prisma.client.processedEvent.delete({
+        where: {
+          eventId_consumerName: {
+            eventId: event.eventId,
+            consumerName: RewardTriggerConsumer.CONSUMER_NAME,
+          },
+        },
+      }),
+    );
+
+    const [claimed] = await evaluationFor(payload.usageRecordId);
+    expect(claimed).toMatchObject({
+      origin: 'EVENT',
+      eventId: event.eventId,
+      outcome: 'EVALUATED',
+    });
+    expect(claimed!.ruleIds).toEqual([first.id]);
+
+    // During the crash window an administrator activates a backdated rule.
+    await ruleIn(tenant, 50);
+
+    await expect(rewardTrigger.handle(event)).resolves.toBeUndefined();
+    const paid = await rewardsFor(payload.usageRecordId);
+    expect(paid.map((reward) => reward.ruleId)).toEqual([first.id]);
+    expect(paid[0]!.points).toBe(2);
+  });
+
+  it('refuses a never-evaluated fact from before the cutover (round 2 #3)', async () => {
+    const payload = usage({ organizationId: org.c });
+    // Recorded long before the migration ran: it may have been consumed with
+    // no rule back then, and left nothing but an event id behind.
+    sources.recorded(payload, {
+      recordedBy: 'USR-HISTORY',
+      recordedAt: '2020-01-01T00:00:00.000Z',
+    });
+    await ruleIn(org.c, 7, new Date('2019-01-01T00:00:00.000Z'));
+    const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
+
+    const failure = await rewardTrigger.handle(event).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(UnprocessableEventError);
+    expect((failure as UnprocessableEventError).reason).toBe(DLQ_REASONS.BACKFILL_REQUIRED);
+
+    expect(await evaluationFor(payload.usageRecordId)).toHaveLength(0);
+    expect(await rewardsFor(payload.usageRecordId)).toHaveLength(0);
+    expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).toBeNull();
+  });
+
+  it('writes no evaluation row from an event the owner does not confirm, rule or none (round 2 #4)', async () => {
+    const tenant = `${org.c}-NORULE`;
+
+    // No rule in this tenant. An invented record: the owner is asked anyway,
+    // refutes it, and nothing is recorded that could suppress a genuine event.
+    const invented = usage({ organizationId: tenant });
+    await expectRefused(
+      rewardTrigger,
+      envelope(CONSUMED_EVENTS.USAGE_RECORDED, invented, userActor('USR-FORGED-ACTOR')),
+      'not_found',
+    );
+    expect(sources.calls.some((call) => call.id === invented.usageRecordId)).toBe(true);
+    expect(await evaluationFor(invented.usageRecordId)).toHaveLength(0);
+
+    // A real record, confirmed, with no rule: NO_RULE, and processed.
+    const real = usage({ organizationId: tenant });
+    sources.recorded(real, { recordedBy: 'USR-REAL' });
+    const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, real, userActor());
+    await expect(rewardTrigger.handle(event)).resolves.toBeUndefined();
+    const [row] = await evaluationFor(real.usageRecordId);
+    expect(row).toMatchObject({ origin: 'EVENT', eventId: event.eventId, outcome: 'NO_RULE' });
+    expect(row!.ruleIds).toEqual([]);
+    expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).not.toBeNull();
   });
 });

@@ -840,16 +840,35 @@ model RewardSourceEvaluation {
   /// The usage record id or maintenance request id.
   sourceReference String @map("source_reference")
 
-  /// The event that evaluated it. `BACKFILL` for rows derived from rewards
-  /// granted before this table existed.
-  eventId String @map("event_id")
+  /// `EVENT`: decided by a consumed event, which alone may resume it after a
+  /// crash. `BACKFILL`: derived from rewards granted before this table
+  /// existed; terminal, never resumable (PR #110 round 2 #1).
+  origin  String
+  /// The event that evaluated it. Null exactly when `origin` is `BACKFILL`,
+  /// so no envelope's event id can ever match a backfilled row.
+  eventId String? @map("event_id")
   /// `NO_RULE`, `NO_SUBJECT` or `EVALUATED`: what the first evaluation found.
   outcome String
+  /// The rules the first evaluation found applicable. A redelivery after a
+  /// crash evaluates only these (PR #110 round 2 #2).
+  ruleIds String[] @default([]) @map("rule_ids")
 
   evaluatedAt DateTime @default(now()) @map("evaluated_at")
 
   @@id([organizationId, triggerEvent, sourceReference])
   @@map("reward_source_evaluation")
+}
+
+/// The reward evaluation cutover (PR #110 round 2 #3): one platform-wide row,
+/// set by the migration that created `reward_source_evaluation` to when it ran.
+/// A fact that occurred before it and has no evaluation row may have been
+/// consumed before evaluations were recorded, so the consumer refuses it
+/// (`BACKFILL_REQUIRED`) rather than evaluating it as new.
+model RewardEvaluationCutover {
+  singleton Boolean  @id @default(true)
+  cutoverAt DateTime @map("cutover_at")
+
+  @@map("reward_evaluation_cutover")
 }
 
 /// A named level reached at a points threshold (docs/10 § 10.8).

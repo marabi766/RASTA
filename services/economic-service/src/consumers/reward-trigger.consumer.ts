@@ -73,13 +73,24 @@ import type { SourceFacts } from '../provenance/source-facts.client';
  * in identity-service. And a record written by no user (`SYSTEM`: an import, a
  * job) has nobody to reward: `rewards_skipped_total{reason="no_actor"}`.
  *
- * ## Only when a rule could pay
+ * ## The owner is asked even when no rule could pay
  *
- * The owner is asked only if an active rule exists for the trigger and the
- * claimed organization. With none, nothing can be granted whatever the fact
- * says, and usage recording, the busiest write path on the platform, costs
- * no round trip. A forged organization gains nothing from this: with no rule,
- * nothing is granted; with one, the owner is asked and refutes it.
+ * Until PR #110 round 2 the owner was skipped when no rule was active, to
+ * spare usage recording, the busiest write path on the platform, a round trip.
+ * That was harmless while nothing was written for such a fact. It stopped
+ * being harmless once every evaluation, `NO_RULE` included, became a permanent
+ * row: a forged event could then plant one for a real fact ahead of the
+ * genuine event and suppress its reward, or plant rows for facts that do not
+ * exist. So no evaluation row is written from an unconfirmed event, and the
+ * extra call is the price.
+ *
+ * ## The cutover
+ *
+ * A fact that occurred before `reward_evaluation_cutover` and has no
+ * evaluation row may have been consumed before evaluations were recorded,
+ * leaving only an event id behind. It is dead-lettered `BACKFILL_REQUIRED`,
+ * never evaluated as new: only an authorised backfill may decide it (ADR-061
+ * § 4.2).
  *
  * ## Idempotency, three times over
  *
@@ -157,44 +168,28 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
       }
 
       // One evaluation per fact, whatever event id carries it (PR #110 review
-      // #1). Checked here only to spare the owner a round trip; the claim
-      // below is what decides.
+      // #1). Only the event that holds an event-origin evaluation may resume
+      // it; a backfilled row, or another event's, is final. Checked here to
+      // spare the owner a round trip; the claim below is what decides.
       const prior = await this.evaluationOf(envelope.eventName, claim);
-      if (prior && prior.eventId !== envelope.eventId) {
-        return this.alreadyEvaluated(envelope, claim);
-      }
+      if (prior && !resumes(prior, envelope)) return this.alreadyEvaluated(envelope, claim);
 
-      if (!(await this.rewards.hasActiveRules(claim.organizationId, envelope.eventName))) {
-        rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_rule' });
-        // Recorded even though nothing could pay. A rule activated later, even
-        // one backdated over this fact, must not pay it when the same fact is
-        // re-emitted under a new event id: that is a retroactive grant, and
-        // one belongs to a separately authorised backfill, not to a replay.
-        await this.prisma.transaction(async (tx) => {
-          await this.recordEvaluation(tx, envelope, claim, 'NO_RULE');
-          await this.markProcessed(envelope.eventId, tx);
-        });
-        return undefined;
-      }
-
-      // Throws on an owner that cannot be asked: retried, never granted.
+      // The owner first, always — even when no rule could pay (round 2 #4).
+      // An evaluation row is permanent: one written from an unverified event
+      // would let a forged event suppress a genuine one's reward, and plant
+      // rows for facts that do not exist. Throws on a refusal (dead-lettered)
+      // and on an owner that cannot be asked (retried, never granted).
       const fact = await this.confirmedFact(envelope.eventName, claim);
 
-      // Claimed only once the owner has confirmed the fact, so an event the
-      // owner refutes claims nothing. Two events for one fact racing here are
-      // decided by the primary key: exactly one of them evaluates it.
-      const evaluation = fact.subject ? 'EVALUATED' : 'NO_SUBJECT';
-      if (!(await this.claimEvaluation(envelope, claim, evaluation))) {
-        return this.alreadyEvaluated(envelope, claim);
-      }
+      const evaluation = prior ?? (await this.evaluateFirst(envelope, claim, fact));
+      if (!evaluation) return this.alreadyEvaluated(envelope, claim);
 
-      if (!fact.subject) {
-        rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_actor' });
-        this.logger.debug(
-          `${envelope.eventName} ${claim.sourceReference} was recorded by no user; no reward subject`,
-        );
-        await this.markProcessed(envelope.eventId);
-        return 'SKIPPED';
+      if (evaluation.outcome !== 'EVALUATED' || !fact.subject) {
+        // A first NO_RULE or NO_SUBJECT evaluation committed together with its
+        // processed_event. Reaching here with a prior row means a resumed one,
+        // which has nothing left to do but say so.
+        if (prior) await this.markProcessed(envelope.eventId);
+        return evaluation.outcome === 'NO_SUBJECT' ? 'SKIPPED' : undefined;
       }
 
       const subject = fact.subject;
@@ -214,6 +209,10 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
             sourceReference: claim.sourceReference,
             occurredAt: fact.occurredAt,
             payload: fact.payload,
+            // The rules the claim recorded, and no others: a redelivery after
+            // a crash decides exactly what the first delivery would have
+            // (round 2 #2).
+            onlyRuleIds: evaluation.ruleIds,
           }),
         );
 
@@ -329,7 +328,7 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
   }
 
   // --------------------------------------------------------------------------
-  // One evaluation per source fact (PR #110 review #1)
+  // One evaluation per source fact (PR #110 review #1, round 2)
   //
   // `processed_event` stops the same envelope twice, and `(rule_id,
   // source_reference)` stops one rule paying one fact twice. Neither stopped a
@@ -337,9 +336,9 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
   // existed, from being re-emitted under a new event id after a rule was
   // activated with a `validFrom` over the fact: it would then pay. The
   // evaluation row records the first event that decided the fact, whether or
-  // not anything was paid. Only that event, redelivered, may decide it again,
-  // which is what a crash between the claim and the grants needs; the grants
-  // themselves stay idempotent per rule.
+  // not anything was paid, and the rules it found applicable. Only that event,
+  // redelivered, may finish it, which is what a crash between the claim and
+  // the grants needs — and it finishes it with those rules, not today's.
   // --------------------------------------------------------------------------
 
   private evaluationOf(triggerEvent: string, claim: Claim) {
@@ -354,43 +353,133 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
     });
   }
 
-  /** Inserts the row unless one exists; `ON CONFLICT DO NOTHING`, so a transaction survives. */
-  private async recordEvaluation(
+  /**
+   * The first evaluation of a confirmed fact: refused before the cutover,
+   * otherwise claimed. Null when another event claimed it first.
+   */
+  private async evaluateFirst(
+    envelope: EventEnvelope,
+    claim: Claim,
+    fact: ConfirmedFact,
+  ): Promise<Evaluation | null> {
+    // Round 2 #3. Before the cutover a fact may have been consumed with no
+    // rule and left nothing behind but an event id, so "no evaluation row"
+    // does not mean "never evaluated". Evaluating it as new is exactly the
+    // replay review #1 closed; only an authorised backfill may decide it.
+    const cutoverAt = await this.cutoverAt();
+    if (fact.occurredAt.getTime() < cutoverAt.getTime()) {
+      rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'before_cutover' });
+      throw new UnprocessableEventError(
+        DLQ_REASONS.BACKFILL_REQUIRED,
+        `${envelope.eventName} ${claim.sourceReference} occurred at ` +
+          `${fact.occurredAt.toISOString()}, before the reward evaluation cutover ` +
+          `${cutoverAt.toISOString()}, and was never evaluated; only an authorised backfill may`,
+      );
+    }
+
+    const ruleIds = fact.subject
+      ? await this.rewards.applicableRuleIds(
+          fact.organizationId,
+          envelope.eventName,
+          fact.occurredAt,
+        )
+      : [];
+    const outcome: EvaluationOutcome = !fact.subject
+      ? 'NO_SUBJECT'
+      : ruleIds.length === 0
+        ? 'NO_RULE'
+        : 'EVALUATED';
+
+    if (outcome === 'EVALUATED') {
+      // Committed on its own, before any grant: the grants run in their own
+      // transactions (RewardService.grantFor), and a crash between them is
+      // what the recorded rule ids are for.
+      const held = await this.claimEvaluation(
+        this.prisma.client,
+        envelope,
+        claim,
+        outcome,
+        ruleIds,
+      );
+      return held ? { outcome, ruleIds } : null;
+    }
+
+    if (outcome === 'NO_SUBJECT') {
+      rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_actor' });
+      this.logger.debug(
+        `${envelope.eventName} ${claim.sourceReference} was recorded by no user; no reward subject`,
+      );
+    } else {
+      rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_rule' });
+    }
+
+    // Nothing to grant: the claim and processed_event commit together.
+    // Recorded even though nothing could pay: a rule activated later, even
+    // one backdated over this fact, must not pay it when the same fact is
+    // re-emitted under a new event id. That is a retroactive grant, and one
+    // belongs to an authorised backfill, not to a replay.
+    return this.prisma.transaction(async (tx) => {
+      const held = await this.claimEvaluation(tx, envelope, claim, outcome, []);
+      if (!held) return null;
+      await this.markProcessed(envelope.eventId, tx);
+      return { outcome, ruleIds: [] };
+    });
+  }
+
+  /** True when this event now holds the fact's evaluation. */
+  private async claimEvaluation(
     client: Pick<PrismaService['client'], 'rewardSourceEvaluation'>,
     envelope: EventEnvelope,
     claim: Claim,
     outcome: EvaluationOutcome,
-  ): Promise<void> {
+    ruleIds: readonly string[],
+  ): Promise<boolean> {
+    // `ON CONFLICT DO NOTHING`: two events for one fact racing here are
+    // decided by the primary key, and the loser's transaction survives.
     await client.rewardSourceEvaluation.createMany({
       data: [
         {
           organizationId: claim.organizationId,
           triggerEvent: envelope.eventName,
           sourceReference: claim.sourceReference,
+          origin: 'EVENT',
           eventId: envelope.eventId,
           outcome,
+          ruleIds: [...ruleIds],
         },
       ],
       skipDuplicates: true,
     });
+    const holder = await client.rewardSourceEvaluation.findUnique({
+      where: {
+        organizationId_triggerEvent_sourceReference: {
+          organizationId: claim.organizationId,
+          triggerEvent: envelope.eventName,
+          sourceReference: claim.sourceReference,
+        },
+      },
+    });
+    return holder !== null && resumes(holder, envelope);
   }
 
-  /** True when this event holds the fact's evaluation, now or from before a crash. */
-  private async claimEvaluation(
-    envelope: EventEnvelope,
-    claim: Claim,
-    outcome: EvaluationOutcome,
-  ): Promise<boolean> {
-    await this.recordEvaluation(this.prisma.client, envelope, claim, outcome);
-    const holder = await this.evaluationOf(envelope.eventName, claim);
-    return holder?.eventId === envelope.eventId;
+  /** The platform-wide cutover the migration recorded. Fails closed if it is missing. */
+  private async cutoverAt(): Promise<Date> {
+    const row = await runUnscoped('the evaluation cutover is one platform-wide row', () =>
+      this.prisma.client.rewardEvaluationCutover.findUnique({ where: { singleton: true } }),
+    );
+    if (!row) {
+      // Retried, then dead-lettered: evaluating without a cutover would
+      // reopen the replay it exists to close.
+      throw new Error('reward_evaluation_cutover has no row; refusing to evaluate reward triggers');
+    }
+    return row.cutoverAt;
   }
 
   private async alreadyEvaluated(envelope: EventEnvelope, claim: Claim): Promise<'SKIPPED'> {
     rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'already_evaluated' });
     this.logger.warn(
       `${envelope.eventName} ${envelope.eventId} names ${claim.sourceReference}, which another ` +
-        'event already evaluated; nothing granted',
+        'event or a backfill already evaluated; nothing granted',
     );
     await this.markProcessed(envelope.eventId);
     return 'SKIPPED';
@@ -432,6 +521,23 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
 
 /** What the first evaluation of a fact found; kept for the audit trail. */
 type EvaluationOutcome = 'NO_RULE' | 'NO_SUBJECT' | 'EVALUATED';
+
+/** What a fact's evaluation decided: its outcome, and the rules that may pay. */
+interface Evaluation {
+  outcome: string;
+  ruleIds: readonly string[];
+}
+
+/**
+ * Whether this envelope holds the evaluation and may finish it. A backfilled
+ * row has no event id, so no envelope ever does (PR #110 round 2 #1).
+ */
+function resumes(
+  evaluation: { origin: string; eventId: string | null },
+  envelope: EventEnvelope,
+): boolean {
+  return evaluation.origin === 'EVENT' && evaluation.eventId === envelope.eventId;
+}
 
 interface Claim {
   organizationId: string;

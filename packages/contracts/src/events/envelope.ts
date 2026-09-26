@@ -206,6 +206,14 @@ export const DLQ_REASONS = {
    * from it. The field that disagreed rides in `x-dlq-error`.
    */
   SOURCE_UNCONFIRMED: 'SOURCE_UNCONFIRMED',
+  /**
+   * ADR-061 § 4.2. A reward trigger for a fact that occurred before the
+   * reward evaluation cutover and was never evaluated: it may have been
+   * consumed before evaluations were recorded, so evaluating it now as new
+   * could pay it a second time. Only an authorised backfill may evaluate it;
+   * no replay changes the answer.
+   */
+  BACKFILL_REQUIRED: 'BACKFILL_REQUIRED',
 } as const;
 
 export type DlqReason = (typeof DLQ_REASONS)[keyof typeof DLQ_REASONS];
