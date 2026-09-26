@@ -3,6 +3,7 @@ import { PLATFORM_ROLES } from '@rasta/nest-common';
 import {
   authEnvSchema,
   baseEnvSchema,
+  booleanEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
@@ -74,8 +75,28 @@ function roleList(name: string, options: { min: number }) {
  *                                       means only those values. The platform
  *                                       ships no list of its own.
  *
- * `SYSTEM_ADMIN` is always accepted, as everywhere on the platform, and never
- * needs to be listed.
+ *   CONSTRUCTION_POLICY_SETTER_ROLES    Q-70 (reusing the Q-64 answer). Who writes
+ *                                       approval policies, for their own
+ *                                       organization. Default
+ *                                       `SYSTEM_ADMIN,UNION_ADMIN`.
+ *   CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS
+ *                                       Q-68. Submitted needs a project must
+ *                                       have before it may request approval.
+ *   CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE
+ *                                       Q-68. Whether an estimate is required
+ *                                       before requesting approval.
+ *   CONSTRUCTION_START_REQUIRES_CONTRACT
+ *                                       Q-71. `true` refuses to start any
+ *                                       project until the contract boundary
+ *                                       (CON-003) exists.
+ *   CONSTRUCTION_PROGRESS_ALLOW_DECREASE
+ *                                       Q-72. Whether a submitted progress
+ *                                       report may report less than the last.
+ *
+ * `SYSTEM_ADMIN` is always accepted for project and policy commands, as
+ * everywhere on the platform, and never needs to be listed. It is **not**
+ * accepted as an approval authority: only the (organization, role) a policy
+ * names decides (ADR-023).
  *
  * Nothing here names an approval authority, an approval threshold or a legal
  * procedure. Those are rows in `approval_policy` (PR 2, ADR-063), never
@@ -130,6 +151,16 @@ export const constructionEnvSchema = baseEnvSchema
           ),
         ),
       ),
+
+    CONSTRUCTION_POLICY_SETTER_ROLES: z
+      .string()
+      .default('SYSTEM_ADMIN,UNION_ADMIN')
+      .pipe(roleList('CONSTRUCTION_POLICY_SETTER_ROLES', { min: 1 })),
+
+    CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).default(1),
+    CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),
+    CONSTRUCTION_START_REQUIRES_CONTRACT: booleanEnv(false),
+    CONSTRUCTION_PROGRESS_ALLOW_DECREASE: booleanEnv(false),
 
     /** docs/06 § 6.8: 24 hours unless configured. */
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),

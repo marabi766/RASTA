@@ -54,14 +54,110 @@ export interface ProjectOwnership {
   readonly organizationId: string;
 }
 
+/** What an authority check needs to know about an approval. */
+export interface ApprovalAuthority {
+  readonly id: string;
+  readonly organizationId: string;
+  readonly authorityOrganizationId: string;
+  readonly authorityRole: string;
+}
+
 @Injectable()
 export class ProjectAccess {
   private readonly writers: readonly string[];
   private readonly readers: readonly string[];
+  private readonly policySetters: readonly string[];
+  private readonly policyReaders: readonly string[];
 
   constructor(@Inject(ENV) env: ConstructionEnv) {
     this.writers = [SUPER_ROLE, ...env.CONSTRUCTION_PROJECT_ROLES];
     this.readers = [...this.writers, ...env.CONSTRUCTION_PROJECT_READER_ROLES];
+    this.policySetters = [SUPER_ROLE, ...env.CONSTRUCTION_POLICY_SETTER_ROLES];
+    this.policyReaders = [...new Set([...this.readers, ...this.policySetters])];
+  }
+
+  /**
+   * May the caller write approval policies for the organization they act for?
+   * (`CONSTRUCTION_POLICY_SETTER_ROLES`, Q-70 reusing Q-64.) A setter writes
+   * only its own organization's policies — `UNION_ADMIN` included (ADR-060).
+   */
+  assertCanWritePolicy(): { organizationId: string; actor: string } {
+    return this.assert(this.policySetters, 'change approval policies');
+  }
+
+  assertCanReadPolicy(): { organizationId: string } {
+    const { organizationId } = this.assert(this.policyReaders, 'read approval policies');
+    return { organizationId };
+  }
+
+  /** Whether the caller reads projects of the organization they act for. */
+  canReadProjectsOf(organizationId: string): boolean {
+    const context = getContext();
+    return (
+      context.authType !== 'SERVICE' &&
+      !context.roles.includes(OVERSIGHT_ROLE) &&
+      context.organizationId === organizationId &&
+      this.readers.some((role) => context.roles.includes(role))
+    );
+  }
+
+  /**
+   * The rule that keeps the platform from becoming an authority (ADR-023).
+   *
+   * Only a caller acting for the approval's `authorityOrganizationId` **and**
+   * holding its `authorityRole` there may decide. There is no super-role
+   * bypass: `SYSTEM_ADMIN` decides only if the policy named `SYSTEM_ADMIN` —
+   * otherwise the platform operator would be a decision-maker nobody
+   * configured.
+   *
+   * A caller who can already see the project is told `403` (they know it
+   * exists; the decision is not theirs). Anyone else gets `404`.
+   */
+  assertIsAuthority(approval: ApprovalAuthority): { actor: string } {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    const context = getContext();
+
+    const isAuthority =
+      context.organizationId === approval.authorityOrganizationId &&
+      context.roles.includes(approval.authorityRole);
+    if (!isAuthority) {
+      if (this.canReadProjectsOf(approval.organizationId)) {
+        throw RastaError.forbidden(
+          'Only the authority this approval names may decide it; the platform decides nothing',
+        );
+      }
+      throw RastaError.notFound('Approval', approval.id);
+    }
+    if (!context.userId) {
+      throw RastaError.forbidden('This operation records an actor and the request names none');
+    }
+    return { actor: context.userId };
+  }
+
+  /** May the caller see this approval: its project's readers, or its authority. */
+  assertCanSeeApproval(approval: ApprovalAuthority): void {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    const context = getContext();
+    const authority =
+      context.organizationId === approval.authorityOrganizationId &&
+      (context.roles.includes(approval.authorityRole) || context.roles.includes(SUPER_ROLE));
+    if (authority || this.canReadProjectsOf(approval.organizationId)) return;
+    throw RastaError.notFound('Approval', approval.id);
+  }
+
+  /** The caller's organization and roles, for the authority inbox. */
+  inboxScope(): { organizationId: string; roles: readonly string[] } {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    const context = getContext();
+    if (!context.organizationId) {
+      throw RastaError.forbidden(
+        'Select an organization with X-Organization-Id to read its approvals',
+      );
+    }
+    return { organizationId: context.organizationId, roles: context.roles };
   }
 
   /**
