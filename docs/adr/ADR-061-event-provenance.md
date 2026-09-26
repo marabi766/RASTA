@@ -1,6 +1,6 @@
 # ADR-061: منشأ رویداد — پیام Kafka ادعای ناشرش است، نه واقعیت
 
-- **وضعیت:** **Accepted — implementation in progress.** مدیر پروژه در 2026-09-25 همان‌طور که پیشنهاد شد پذیرفت (§ «تصمیم مدیر پروژه»). بند ۴: شاخهٔ `fix/economic-source-verification` (§ «پیاده‌سازی»). بندهای ۱، ۲، ۵ تا ۷: هنوز نه.
+- **وضعیت:** **Accepted — implementation in progress.** مدیر پروژه در 2026-09-25 همان‌طور که پیشنهاد شد پذیرفت (§ «تصمیم مدیر پروژه»). بند ۴: شاخهٔ `fix/economic-source-verification` (§ «پیاده‌سازی»). بندهای ۱ و ۲: `TOPIC_PRODUCERS` و بررسی ناشر در `EventConsumer` (§ «وضعیت PR بند ۱ و ۲»)؛ مشتق‌کردن ثابت‌های audit هنوز نه. بندهای ۵ تا ۷: هنوز نه.
 - **تاریخ:** 2026-09-25
 - **تصمیم‌گیرنده:** معماری پلتفرم، زیر اختیار صریح مدیر پروژه برای تصمیم‌های امنیت و کیفیت
 - **اهمیت:** **بحرانی.** هر Consumerی که از یک رویداد پول یا وضعیت می‌سازد
@@ -204,6 +204,15 @@ _ترتیب اجرا طبق تصمیم مدیر پروژه: ۳ ← ۱ ← ۲._
 `UnprocessableEventError` را بی Retry به DLQ می‌فرستد، و `DLQ_REASONS` دلیل `SOURCE_UNCONFIRMED` را دارد. Retryِ
 تمام‌شده روی منبعِ در دسترس‌ناپذیر اکنون `UPSTREAM_UNAVAILABLE` است، نه `MAX_RETRIES_EXCEEDED`. قاعدهٔ A-13 در
 `AGENTS.md` ثبت شد.
+
+**وضعیت PR بند ۱ و ۲:** `TOPIC_PRODUCERS` در `packages/contracts/src/events/topic-producers.ts`، ثابت و Frozen؛
+هر Topicی که Consumerی روی `main` مشترکش است، با مالکش. `EventConsumer` پس از خواندن Envelope و پیش از هر Handler
+ناشر را با **Topic تحویل** می‌سنجد (Topic `.retry` با Topic اصلش) و ناهم‌خوانی را بی Retry با `PRODUCER_NOT_ALLOWED`
+(تلاش `0`) به DLQ می‌فرستد؛ اشتراک روی Topic اعلام‌نشده در سازندهٔ `EventConsumer` خطا می‌دهد. آزمون: همهٔ جفت‌های
+«Topic × ناشر بیگانه» و «Topic × ناشر مجاز» (`producer-allowlist.spec.ts`) و یک مورد روی Broker واقعی در
+`kafka-projector.int-spec.ts`. هیچ Consumerی پیکربندی تازه نخواست. **هنوز نه:** مشتق‌کردن
+`AUDIT_DOMAIN_TOPIC_OWNERS` و `AUDIT_TRAIL_PRODUCERS` از `TOPIC_PRODUCERS` (بند ۱) — تغییر در کد audit-service، منتظر
+تصمیم مدیر پروژه؛ تا آن زمان دو فهرست هم‌ارزند و هر دو در آزمون‌ها کامل نوشته شده‌اند.
 
 **جدا از این سه PR، تصمیم استقرار:** SASL/SCRAM و ACL برای هر محیط غیرتوسعه، و Broker با ACL در CI. مالکش باید
 مدیر پروژه تعیین کند؛ این ADR فقط شرط Gate بودنش را تثبیت می‌کند.

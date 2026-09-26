@@ -7,6 +7,7 @@ import {
   AUDIT_TRAIL_TOPIC,
   DLQ_HEADERS,
   ERROR_CODES,
+  TOPIC_PRODUCERS,
   type EventEnvelope,
 } from '@rasta/contracts';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -158,6 +159,17 @@ describeWithKafka('domain projector over Kafka', () => {
     });
   }
 
+  /**
+   * The service allowed to publish on `topic` (ADR-061 § 1). The shared
+   * consumer dead-letters any other producer before the projector sees it, so
+   * a fixture meant to become a row has to name the topic's owner.
+   */
+  function ownerOf(topic: string): string {
+    const owner = TOPIC_PRODUCERS[topic]?.[0];
+    if (!owner) throw new Error(`${topic} has no producer declared in TOPIC_PRODUCERS`);
+    return owner;
+  }
+
   /** This run's row for a given source event id, or undefined. */
   function rowFor(sourceEventId: string) {
     return () => prisma.client.auditEvent.findFirst({ where: { sourceEventId } });
@@ -209,7 +221,10 @@ describeWithKafka('domain projector over Kafka', () => {
     // consumer reaches it only after everything before it. Every later wait in
     // this file is then a real assertion about the projector rather than a
     // race against a backlog.
-    const sentinel = envelope({ aggregateType: 'Sentinel' });
+    const sentinel = envelope({
+      aggregateType: 'Sentinel',
+      producer: ownerOf('rasta.identity.v1'),
+    });
     await publish('rasta.identity.v1', sentinel);
     await waitFor(
       'the projector to catch up with the broker backlog',
@@ -233,7 +248,7 @@ describeWithKafka('domain projector over Kafka', () => {
     // the producer.
     const sent = new Map<string, string>();
     for (const topic of DOMAIN_TOPICS) {
-      const source = envelope({ aggregateType: 'Probe' });
+      const source = envelope({ aggregateType: 'Probe', producer: ownerOf(topic) });
       sent.set(topic, source.eventId);
       await publish(topic, source);
     }
@@ -272,7 +287,7 @@ describeWithKafka('domain projector over Kafka', () => {
   }, 120_000);
 
   it('writes one row for a message delivered twice', async () => {
-    const source = envelope();
+    const source = envelope({ producer: ownerOf('rasta.fleet.v1') });
 
     await publish('rasta.fleet.v1', source);
     await waitFor('the first delivery', rowFor(source.eventId));
@@ -293,7 +308,7 @@ describeWithKafka('domain projector over Kafka', () => {
     // `fromBeginning: true` means a rebalance or a fresh replica re-reads the
     // log. That must be safe, because the alternative is an audit store that
     // multiplies its own evidence.
-    const source = envelope();
+    const source = envelope({ producer: ownerOf('rasta.maintenance.v1') });
     await publish('rasta.maintenance.v1', source);
     await waitFor('the original row', rowFor(source.eventId));
 
@@ -333,7 +348,10 @@ describeWithKafka('domain projector over Kafka', () => {
   }, 180_000);
 
   it('stores an event whose name nothing declares', async () => {
-    const source = envelope({ eventName: 'A_NAME_NO_SERVICE_HAS_DECLARED' });
+    const source = envelope({
+      eventName: 'A_NAME_NO_SERVICE_HAS_DECLARED',
+      producer: ownerOf('rasta.supplier.v1'),
+    });
     await publish('rasta.supplier.v1', source);
 
     const row = await waitFor('the unknown-name row', rowFor(source.eventId));
@@ -347,9 +365,10 @@ describeWithKafka('domain projector over Kafka', () => {
     // evidence that the event existed, and ordering is a read-time question.
     // This asserts storage and nothing about D-027 or ADR-051 B4-B6, neither of
     // which is implemented.
-    const later = envelope({ streamSeq: 9 });
-    const earlier = envelope({ streamSeq: 2 });
-    const none = envelope({ streamSeq: undefined });
+    const economic = ownerOf('rasta.economic.v1');
+    const later = envelope({ producer: economic, streamSeq: 9 });
+    const earlier = envelope({ producer: economic, streamSeq: 2 });
+    const none = envelope({ producer: economic, streamSeq: undefined });
 
     await publish('rasta.economic.v1', later);
     await publish('rasta.economic.v1', earlier);
@@ -364,7 +383,7 @@ describeWithKafka('domain projector over Kafka', () => {
     expect(noneRow.sourceStreamSeq).toBeNull();
   }, 120_000);
 
-  it('dead-letters a malformed envelope without leaking its body, and keeps consuming', async () => {
+  it('dead-letters a malformed envelope without leaking its body, refuses a foreign producer, and keeps consuming', async () => {
     const dlqTopic = 'rasta.audit.v1.dlq';
     const dlq = new Kafka({
       clientId: 'audit-itest-dlq-reader',
@@ -442,6 +461,23 @@ describeWithKafka('domain projector over Kafka', () => {
       expect(dead.error).toBeDefined();
       expect(dead.error).not.toContain(secret);
 
+      // ADR-061 § 2 over the real broker: a well-formed envelope on the
+      // document topic that names another service as its producer is refused
+      // before the projector runs — dead-lettered, and never an audit row.
+      const forged = envelope({
+        producer: ownerOf('rasta.asset.v1'),
+        aggregateType: 'Document',
+        payload: { probe: `FORGED-${RUN_TAG}` },
+      });
+      await publish('rasta.document.v1', forged);
+      const refused = await waitFor(
+        'the foreign-producer message on the dlq',
+        async () => dlqMessages.find((message) => message.body.includes(forged.eventId)),
+        DELIVERY_TIMEOUT_MS,
+      );
+      expect(refused.reason).toBe('PRODUCER_NOT_ALLOWED');
+      expect(refused.originalTopic).toBe('rasta.document.v1');
+
       // A valid message on the same topic afterwards still lands, which is the
       // real assertion: one bad message must not stop the partition.
       const good = envelope({ producer: 'document-service', aggregateType: 'Document' });
@@ -452,6 +488,14 @@ describeWithKafka('domain projector over Kafka', () => {
         DELIVERY_TIMEOUT_MS,
       );
       expect(row.sourceTopic).toBe('rasta.document.v1');
+      // The consumer dead-letters a message only once it is done with it, so
+      // the forged event, already on the dlq, has had every chance to land.
+      expect(
+        await prisma.client.auditEvent.count({ where: { sourceEventId: forged.eventId } }),
+      ).toBe(0);
+      expect(await prisma.client.processedEvent.count({ where: { eventId: forged.eventId } })).toBe(
+        0,
+      );
     } finally {
       reader.stop();
       await dlqConsumer.disconnect();

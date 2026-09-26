@@ -214,6 +214,14 @@ export const DLQ_REASONS = {
    * no replay changes the answer.
    */
   BACKFILL_REQUIRED: 'BACKFILL_REQUIRED',
+  /**
+   * ADR-061 § 2. The envelope names a producer that `TOPIC_PRODUCERS` does not
+   * allow on the topic the broker delivered it on — or the topic itself has no
+   * declared producer. Refused before any handler runs, and never retried: the
+   * claim does not change on a second delivery. Consistency, not
+   * authentication; see `TOPIC_PRODUCERS`.
+   */
+  PRODUCER_NOT_ALLOWED: 'PRODUCER_NOT_ALLOWED',
 } as const;
 
 export type DlqReason = (typeof DLQ_REASONS)[keyof typeof DLQ_REASONS];

@@ -76,6 +76,14 @@ export {
 export type { ActorType, EventActor, EventEnvelope, DlqReason } from './events/envelope';
 
 export {
+  TOPIC_PRODUCERS,
+  RETRY_TOPIC_SUFFIX,
+  ownerTopicOf,
+  isDeclaredTopic,
+  isAllowedProducer,
+} from './events/topic-producers';
+
+export {
   AUDIT_EVENT_RECORDED,
   AUDIT_EVENT_RECORDED_VERSION,
   AUDIT_OUTCOMES,

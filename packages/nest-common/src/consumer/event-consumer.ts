@@ -4,6 +4,8 @@ import {
   DLQ_REASONS,
   EVENT_HEADERS,
   eventEnvelopeSchema,
+  isAllowedProducer,
+  isDeclaredTopic,
   type DlqReason,
   type EventEnvelope,
 } from '@rasta/contracts';
@@ -168,6 +170,18 @@ export class EventConsumer {
     private readonly handler: EventHandler,
     private readonly logger: ConsumerLogger,
   ) {
+    // ADR-061 § 2: a consumer does not subscribe to a topic nobody is declared
+    // to own. Refused here, at construction, so a mistyped or undeclared topic
+    // fails the service at startup rather than dead-lettering every message.
+    const undeclared = options.topics.filter((topic) => !isDeclaredTopic(topic));
+    if (undeclared.length > 0) {
+      throw new Error(
+        `${options.groupId} subscribes to ${undeclared.join(', ')}, which ` +
+          `${undeclared.length === 1 ? 'has' : 'have'} no producer declared in TOPIC_PRODUCERS ` +
+          '(@rasta/contracts, ADR-061 § 1). Declare the owner there first.',
+      );
+    }
+
     this.kafka = new Kafka({
       clientId: options.clientId,
       brokers: options.brokers,
@@ -287,6 +301,22 @@ export class EventConsumer {
       // Unprocessable by construction — no number of retries changes the bytes.
       this.logger.error(`Unparseable message on ${topic}[${partition}]: ${describe(error)}`);
       await this.deadLetter(topic, value, headers, DLQ_REASONS.VALIDATION_FAILED, error, 0);
+      return;
+    }
+
+    // ADR-061 § 2, before any handler and before any retry: the producer the
+    // envelope names must be allowed on the topic the *broker* delivered it on
+    // — never a topic the envelope claims. A refusal is a verdict, not a
+    // failure, so it is dead-lettered at once and the partition moves on.
+    // Consistency, not authentication: see `TOPIC_PRODUCERS`.
+    if (!isAllowedProducer(topic, envelope.producer)) {
+      const refusal = new UnprocessableEventError(
+        DLQ_REASONS.PRODUCER_NOT_ALLOWED,
+        `${envelope.eventName} ${envelope.eventId} names producer ${envelope.producer}, ` +
+          `which is not allowed on ${topic}`,
+      );
+      this.logger.error(`Refused before any handler (PRODUCER_NOT_ALLOWED): ${refusal.message}`);
+      await this.deadLetter(topic, value, headers, refusal.reason, refusal, 0);
       return;
     }
 
