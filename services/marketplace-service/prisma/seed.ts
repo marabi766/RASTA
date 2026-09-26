@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
-import { assertDemoSeedAllowed } from '@rasta/config';
+import { assertDemoSeedAllowed, assertDemoSeedDatabase } from '@rasta/config';
 
 /**
  * Demo seed for marketplace-service.
@@ -506,11 +506,15 @@ async function main(): Promise<void> {
   const url = resolveDatabaseUrl();
   const prisma = new PrismaClient({ datasources: { db: { url } } });
 
-  console.warn('Seeding marketplace-service…');
-  console.warn(`  target: ${describeTarget(url)}`);
-  console.warn('  all catalogue data below is illustrative, not an agreed commercial offer.');
-
   try {
+    // …and only into a database the development bootstrap marked disposable:
+    // the shell's settings cannot tell a production URL from a local one.
+    await assertDemoSeedDatabase('marketplace-service', prisma);
+
+    console.warn('Seeding marketplace-service…');
+    console.warn(`  target: ${describeTarget(url)}`);
+    console.warn('  all catalogue data below is illustrative, not an agreed commercial offer.');
+
     // Create-once. `createMany` with `skipDuplicates` is one
     // `INSERT ... ON CONFLICT DO NOTHING`: a row that already exists is not
     // touched, so a second run issues no UPDATE for it and `updated_at`

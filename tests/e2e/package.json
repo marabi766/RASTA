@@ -4,6 +4,7 @@
   "private": true,
   "description": "End-to-end scenarios against a running Rasta stack (Playwright).",
   "scripts": {
+    "test:unit": "node --test src/target-guard.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:report": "playwright show-report",
     "lint": "eslint .",

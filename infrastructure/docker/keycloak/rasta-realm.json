@@ -3,6 +3,9 @@
   "displayName": "Rasta Platform",
   "displayNameHtml": "<b>رستا</b> — Rasta Platform",
   "enabled": "${RASTA_DEV_REALM_GATE}",
+  "attributes": {
+    "rasta.disposable_stack": "true"
+  },
   "sslRequired": "external",
   "registrationAllowed": false,
   "registrationEmailAsUsername": false,

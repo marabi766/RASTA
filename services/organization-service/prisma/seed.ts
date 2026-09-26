@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
-import { assertDemoSeedAllowed } from '@rasta/config';
+import { assertDemoSeedAllowed, assertDemoSeedDatabase } from '@rasta/config';
 import { toLabel } from '../src/organization/organization.repository';
 
 /**
@@ -191,6 +191,9 @@ async function main(): Promise<void> {
   // Before anything touches the database: this seed overwrites fixed ids with
   // demo values, so it runs only in an explicit development or test run.
   assertDemoSeedAllowed('organization-service');
+  // …and only into a database the development bootstrap marked disposable:
+  // the shell's settings above cannot tell a production URL from a local one.
+  await assertDemoSeedDatabase('organization-service', prisma);
 
   console.warn('Seeding organization-service…');
 

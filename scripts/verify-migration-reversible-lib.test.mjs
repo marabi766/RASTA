@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,6 +12,7 @@ import {
   ledgerAssertionScript,
   recordSnapshotScript,
   snapshotQuery,
+  snapshotStoreScript,
 } from './verify-migration-reversible-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -494,20 +496,183 @@ test('every migration of every service has a down.sql', () => {
   assert.deepEqual(missing, []);
 });
 
+/** SQL with its comments removed, so a commented-out statement never counts. */
+function withoutComments(sql) {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
+}
+
+/**
+ * The names a script deletes from the ledger — only real `DELETE FROM
+ * "_prisma_migrations" WHERE "migration_name" = '…'` statements, one or two
+ * lines, outside comments.
+ */
+function ledgerDeletes(sql) {
+  return [
+    ...withoutComments(sql).matchAll(
+      /^\s*DELETE\s+FROM\s+"_prisma_migrations"\s+WHERE\s+"migration_name"\s*=\s*'([^']+)'\s*;/gim,
+    ),
+  ].map((m) => m[1]);
+}
+
 test('every down.sql of every service deletes exactly its own ledger row', () => {
   // supplier's blank-text hardening was the one that did not: after a
   // whole-chain rollback its row survived, `migrate deploy` skipped it, and
   // the weaker predicates came back under the same names.
+  //
+  // A DELETE, not merely the name next to a `migration_name` predicate (Codex
+  // post-merge review of #105, finding 4): an UPDATE that marks the row rolled
+  // back, or a SELECT, names it just as well and removes nothing.
   for (const service of servicesWithMigrations()) {
     for (const name of migrationNames(service)) {
       const down = readFileSync(
         join(ROOT, 'services', `${service}-service`, 'prisma', 'migrations', name, 'down.sql'),
         'utf8',
       );
-      const deleted = [...down.matchAll(/"migration_name"\s*=\s*'([^']+)'/g)].map((m) => m[1]);
-      assert.deepEqual(deleted, [name], `${service}/${name}/down.sql`);
+      assert.deepEqual(ledgerDeletes(down), [name], `${service}/${name}/down.sql`);
+      const named = [...withoutComments(down).matchAll(/"migration_name"\s*=\s*'([^']+)'/g)];
+      assert.equal(
+        named.length,
+        1,
+        `${service}/${name}/down.sql touches the ledger other than by its one DELETE`,
+      );
     }
   }
+});
+
+test('the ledger-delete matcher accepts only a real DELETE of the row', () => {
+  const row = `"_prisma_migrations" WHERE "migration_name" = '20260101000000_a';`;
+  assert.deepEqual(ledgerDeletes(`DELETE FROM ${row}`), ['20260101000000_a']);
+  assert.deepEqual(
+    ledgerDeletes(
+      `DELETE FROM "_prisma_migrations"\n WHERE "migration_name" = '20260101000000_a';`,
+    ),
+    ['20260101000000_a'],
+  );
+  assert.deepEqual(
+    ledgerDeletes(
+      `UPDATE "_prisma_migrations" SET rolled_back_at = now() WHERE "migration_name" = '20260101000000_a';`,
+    ),
+    [],
+  );
+  assert.deepEqual(ledgerDeletes(`SELECT 1 FROM ${row}`), []);
+  assert.deepEqual(ledgerDeletes(`-- DELETE FROM ${row}`), []);
+  assert.deepEqual(ledgerDeletes(`/* DELETE FROM ${row} */`), []);
+});
+
+// ---------------------------------------------------------------------------
+// Extensions (Codex post-merge review of #105, finding 3)
+// ---------------------------------------------------------------------------
+
+/** Extension names a script creates, and names it drops, outside comments. */
+function extensionStatements(sql) {
+  const text = withoutComments(sql);
+  const names = (pattern) => [...text.matchAll(pattern)].map((m) => m[1].replaceAll('"', ''));
+  return {
+    created: names(/CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?("?[a-z0-9_]+"?)/gi),
+    dropped: names(/DROP\s+EXTENSION\s+(?:IF\s+EXISTS\s+)?("?[a-z0-9_]+"?)/gi),
+  };
+}
+
+test('an extension a migration creates is dropped by its down.sql or kept by a named allowance', () => {
+  for (const service of servicesWithMigrations()) {
+    const kept = EXPECTED[service].keptExtensions ?? {};
+    for (const name of migrationNames(service)) {
+      const dir = join(ROOT, 'services', `${service}-service`, 'prisma', 'migrations', name);
+      const up = extensionStatements(readFileSync(join(dir, 'migration.sql'), 'utf8'));
+      const down = extensionStatements(readFileSync(join(dir, 'down.sql'), 'utf8'));
+      for (const extension of up.created) {
+        assert.ok(
+          down.dropped.includes(extension) || (kept[name] ?? []).includes(extension),
+          `${service}/${name} creates ${extension}; its down.sql must drop it, or ` +
+            `EXPECTED.${service}.keptExtensions must name it for this migration`,
+        );
+      }
+    }
+  }
+});
+
+test('every kept-extension allowance is for an extension its migration creates and its down keeps', () => {
+  // The allowance cannot be required to match at run time — whether
+  // `IF NOT EXISTS` created anything depends on the cluster — so it is pinned
+  // here: it may not outlive the statement that justifies it.
+  for (const [service, entry] of Object.entries(EXPECTED)) {
+    for (const [name, extensions] of Object.entries(entry.keptExtensions ?? {})) {
+      const dir = join(ROOT, 'services', `${service}-service`, 'prisma', 'migrations', name);
+      const up = extensionStatements(readFileSync(join(dir, 'migration.sql'), 'utf8'));
+      const down = extensionStatements(readFileSync(join(dir, 'down.sql'), 'utf8'));
+      for (const extension of extensions) {
+        assert.ok(
+          up.created.includes(extension),
+          `${service}/${name} does not create ${extension}`,
+        );
+        assert.ok(
+          !down.dropped.includes(extension),
+          `${service}/${name} drops ${extension} after all`,
+        );
+      }
+    }
+  }
+});
+
+test('the only kept-extension allowances are marketplace pg_trgm and organization btree_gist', () => {
+  const allowances = Object.entries(EXPECTED).flatMap(([service, entry]) =>
+    Object.entries(entry.keptExtensions ?? {}).flatMap(([name, extensions]) =>
+      extensions.map((extension) => `${service}/${name}: ${extension}`),
+    ),
+  );
+  assert.deepEqual(allowances, [
+    'marketplace/20260829185748_init_marketplace: pg_trgm',
+    'organization/20260925150000_policy_timeline_and_primary_contact: btree_gist',
+  ]);
+});
+
+test('the snapshot lists every extension with its version and schema, unstripped', () => {
+  const sql = snapshotQuery('migration_check');
+  assert.match(sql, /FROM pg_extension e JOIN pg_namespace n ON n\.oid = e\.extnamespace/);
+  assert.match(sql, /'extension ' \|\| e\.extname \|\| ' version=' \|\| e\.extversion/);
+  // Outside the stripped items: a scratch database's target schema is public,
+  // and stripping `public.` there would rename every extension's schema.
+  assert.match(sql, /AS item FROM items\s+UNION ALL[\s\S]*FROM pg_extension/);
+  // The schema under test reads `(target)`; any other schema by its name.
+  assert.match(
+    sql,
+    /CASE WHEN n\.nspname IN \('migration_check', 'migration_check'\) THEN '\(target\)'\s+ELSE n\.nspname END/,
+  );
+  // In a scratch database the target's deploy puts extensions in public.
+  assert.match(
+    snapshotQuery('migration_check_ref', 'public'),
+    /IN \('migration_check_ref', 'public'\)/,
+  );
+  assert.throws(() => snapshotQuery('migration_check', 'bad"home'));
+});
+
+test('a kept extension is excused by exact name, and only as its exact post-deploy row', () => {
+  const script = assertSnapshotScript('meta', 'after:m1', 'target', 'down: m1', undefined, {
+    keptExtensions: ['btree_gist'],
+    keptFrom: 'post-up',
+  });
+  assert.match(script, /split_part\(u, ' ', 1\) = 'extension'/);
+  assert.match(script, /split_part\(u, ' ', 2\) = ANY \(ARRAY\['btree_gist'\]::text\[\]\)/);
+  // The whole row — name, version and schema — must be one recorded after deploy.
+  assert.match(script, /AND u IN \(SELECT item FROM "meta"\.snapshot WHERE label = 'post-up'\)/);
+  assert.doesNotMatch(script, /LIKE/);
+  // No allowance: an empty list, so every extension difference fails.
+  assert.match(
+    assertSnapshotScript('meta', 'after:m1', 'target', 'ctx'),
+    /ANY \(ARRAY\[\]::text\[\]\)/,
+  );
+  assert.throws(() =>
+    assertSnapshotScript('meta', 'l', 'target', 'ctx', undefined, {
+      keptExtensions: ["x' OR 1=1"],
+      keptFrom: 'post-up',
+    }),
+  );
+  // An allowance without the state it must match is refused, not widened.
+  assert.throws(
+    () =>
+      assertSnapshotScript('meta', 'l', 'target', 'ctx', undefined, { keptExtensions: ['citext'] }),
+    /needs keptFrom/,
+  );
 });
 
 test('every service with migrations is in EXPECTED and in test:migration', () => {
@@ -555,11 +720,25 @@ test('an allowance is escaped, and required to match rather than merely tolerate
   assert.match(script, /down: it''s/);
 });
 
-test('the ledger assertion compares the full set, finished and not rolled back', () => {
+test('the ledger assertion reads every row: any unfinished or rolled-back one fails', () => {
   const script = ledgerAssertionScript(['20260101000000_a', '20260102000000_b'], 'after up');
-  assert.match(script, /finished_at IS NOT NULL AND rolled_back_at IS NULL/);
   assert.match(script, /ARRAY\['20260101000000_a', '20260102000000_b'\]/);
+  assert.match(script, /WHERE finished_at IS NULL OR rolled_back_at IS NOT NULL/);
+  // The compared set is every row — no filter that could hide a leftover.
+  assert.match(script, /INTO actual\s+FROM "_prisma_migrations";/);
+  assert.doesNotMatch(script, /finished_at IS NOT NULL AND rolled_back_at IS NULL/);
+  assert.doesNotMatch(script, /still has a row/);
   assert.match(ledgerAssertionScript([], 'after the last down'), /ARRAY\[\]::text\[\]/);
+});
+
+test('after a down, the ledger assertion requires that migration to have no row at all', () => {
+  const script = ledgerAssertionScript(['20260101000000_a'], 'down: b', '20260102000000_b');
+  assert.match(
+    script,
+    /IF EXISTS \(SELECT 1 FROM "_prisma_migrations" WHERE migration_name = '20260102000000_b'\)/,
+  );
+  assert.match(script, /still has a row for %, in any state/);
+  assert.throws(() => ledgerAssertionScript([], 'ctx', "b'; DROP TABLE x; --"));
 });
 
 test('the only inexact-inverse allowance is marketplace cancel_before_hold', () => {
@@ -568,3 +747,111 @@ test('the only inexact-inverse allowance is marketplace cancel_before_hold', () 
   );
   assert.deepEqual(allowances, ['marketplace/20260830103500_cancel_before_hold']);
 });
+
+// ---------------------------------------------------------------------------
+// Kept extensions against PostgreSQL (Codex review of #117, finding 4)
+//
+// With MIGRATION_LIB_TEST_DATABASE_URL (a role that may CREATE DATABASE, as
+// the development and CI service roles may), each case runs in a throwaway
+// database: record the state before, "deploy" citext at one version into the
+// schema under test, record that as post-up, apply the case's "down", and
+// assert. CI sets MIGRATION_LIB_TEST_DATABASE_REQUIRED=true, so there the cases
+// cannot be skipped by a missing URL.
+// ---------------------------------------------------------------------------
+
+const libDatabaseUrl = process.env.MIGRATION_LIB_TEST_DATABASE_URL;
+if (process.env.MIGRATION_LIB_TEST_DATABASE_REQUIRED === 'true' && !libDatabaseUrl) {
+  throw new Error(
+    'MIGRATION_LIB_TEST_DATABASE_REQUIRED is set but MIGRATION_LIB_TEST_DATABASE_URL is not',
+  );
+}
+
+function psqlAt(url, script, database) {
+  const target = new URL(url);
+  target.search = '';
+  if (database) target.pathname = `/${database}`;
+  return spawnSync('psql', [target.toString(), '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', script], {
+    encoding: 'utf8',
+  });
+}
+
+/** Runs `down` after a citext 1.5 "deploy", then the down-script assertion. */
+function keptExtensionCase(down, keptExtensions) {
+  const database = `mlt_kept_ext_${process.pid}_${Math.floor(Math.random() * 1e9)}`;
+  const must = (result, what) => {
+    if (result.status !== 0) throw new Error(`${what}: ${result.stderr}`);
+  };
+  must(psqlAt(libDatabaseUrl, `CREATE DATABASE "${database}" TEMPLATE template1;`), 'create');
+  try {
+    const run = (script) => psqlAt(libDatabaseUrl, script, database);
+    must(
+      run(
+        'CREATE SCHEMA target; CREATE SCHEMA elsewhere;' +
+          snapshotStoreScript('meta') +
+          recordSnapshotScript('meta', 'before', 'target'),
+      ),
+      'record before',
+    );
+    must(
+      run(
+        "CREATE EXTENSION citext VERSION '1.5' SCHEMA target;" +
+          recordSnapshotScript('meta', 'post-up', 'target'),
+      ),
+      'deploy',
+    );
+    if (down) must(run(down), 'down');
+    return run(
+      assertSnapshotScript('meta', 'before', 'target', 'down: m1', undefined, {
+        keptExtensions,
+        keptFrom: 'post-up',
+      }),
+    );
+  } finally {
+    psqlAt(libDatabaseUrl, `DROP DATABASE IF EXISTS "${database}" WITH (FORCE);`);
+  }
+}
+
+test(
+  'a kept extension left exactly as deployed passes',
+  { skip: !libDatabaseUrl && 'MIGRATION_LIB_TEST_DATABASE_URL is not set' },
+  () => {
+    const result = keptExtensionCase(null, ['citext']);
+    assert.equal(result.status, 0, result.stderr);
+  },
+);
+
+test(
+  'a kept extension left at another version fails',
+  { skip: !libDatabaseUrl && 'MIGRATION_LIB_TEST_DATABASE_URL is not set' },
+  () => {
+    const result = keptExtensionCase("ALTER EXTENSION citext UPDATE TO '1.6';", ['citext']);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /present but not expected:\s+extension citext version=1\.6/);
+  },
+);
+
+test(
+  'a kept extension moved to another schema fails',
+  { skip: !libDatabaseUrl && 'MIGRATION_LIB_TEST_DATABASE_URL is not set' },
+  () => {
+    // Left at the same version, in another schema. (Recreated rather than
+    // ALTER … SET SCHEMA, which a trusted extension's members refuse to a
+    // non-superuser.)
+    const result = keptExtensionCase(
+      "DROP EXTENSION citext; CREATE EXTENSION citext VERSION '1.5' SCHEMA elsewhere;",
+      ['citext'],
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /extension citext version=1\.5 schema=elsewhere/);
+  },
+);
+
+test(
+  'an extension left behind without an allowance fails',
+  { skip: !libDatabaseUrl && 'MIGRATION_LIB_TEST_DATABASE_URL is not set' },
+  () => {
+    const result = keptExtensionCase(null, []);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /extension citext version=1\.5 schema=\(target\)/);
+  },
+);

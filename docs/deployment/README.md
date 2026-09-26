@@ -254,6 +254,20 @@ helm history rasta -n rasta-prod               # مشاهده تاریخچه
 **CONSTRAINT.** یک Backup که Restore آن تست نشده، Backup نیست. تست ماهانه شامل بازیابی
 کامل، اجرای Migration، و **اثبات توازن دفتر کل** پس از بازیابی است.
 
+## Demo seeds
+
+Seedهای نمایشی (`services/*/prisma/seed.ts`) فقط در پایگاه داده‌ای می‌نویسند که نشانِ
+`rasta.disposable_database=true` را در تنظیمات سطح پایگاه داده داشته باشد (`packages/config`، `assertDemoSeedDatabase`).
+این نشان را فقط Bootstrap توسعه/CI (`infrastructure/docker/postgres/00-init-databases.sh`) و **فقط روی پایگاه داده‌ای
+که خودش در همان اجرا ساخته** می‌گذارد؛ پایگاه دادهٔ ازپیش‌موجود هرگز نشان نمی‌خورد. برای Volume توسعهٔ قدیمی،
+`pnpm db:mark-disposable` (فقط داخل Container محلی `postgres`).
+
+**ریسک باقی‌مانده — Restore.** نشان جزء خود پایگاه داده است: Dumpی از پایگاه دادهٔ توسعه که تنظیمات پایگاه داده را
+با خود می‌برد (`pg_dump --create` یا `pg_dumpall`) نشان را هم می‌برد، و Restore آن در Cluster دیگر آن پایگاه داده را
+برای Seed پذیرفتنی می‌کند. پس **Dump توسعه را هرگز در Cluster غیریک‌بارمصرف Restore نکن**؛ و اگر لازم شد، پس از
+Restore بلافاصله `ALTER DATABASE <db> RESET rasta.disposable_database` را با Superuser اجرا کن. طرح هویت Stack
+(نشانی که به Cluster گره بخورد) عمداً ساخته نشده است.
+
 ## اهداف RPO و RTO
 
 | سرویس                       | RPO         | RTO        |

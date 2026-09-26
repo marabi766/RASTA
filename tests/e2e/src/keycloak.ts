@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { e2eConfig, ORG, type E2eConfig } from './env';
+import { disposableRealmRefusal, E2eTargetRefusedError } from './target-guard';
 
 /**
  * Real tokens from the real identity provider.
@@ -248,6 +249,18 @@ async function tokenCarriesOrganization(config: E2eConfig): Promise<boolean> {
   };
   const roles = Array.isArray(claims.org_roles) ? claims.org_roles : [claims.org_roles];
   return claims.org_id === ORG.b && roles.includes(`${ORG.b}:ORGANIZATION_ADMIN`);
+}
+
+/**
+ * Refuses unless the realm is the disposable development one (Codex review of
+ * #117, finding 2): one admin GET of the realm representation — nothing is
+ * written — and `disposableRealmRefusal` on what comes back. Called by
+ * `globalSetup` after every other check and before the first Keycloak write.
+ */
+export async function verifyDisposableRealm(config: E2eConfig = e2eConfig()): Promise<void> {
+  const response = await adminRequest(config, '');
+  const refusal = disposableRealmRefusal(await response.json(), config.realm);
+  if (refusal) throw new E2eTargetRefusedError([refusal]);
 }
 
 /**

@@ -80,12 +80,18 @@ test('a role set to another role default is caught too', () => {
  * Runs `script` with a stub `psql` first on PATH that records each call and
  * succeeds. Returns the exit status, stderr and the recorded calls.
  */
-function runWithStubPsql(script, env) {
+function runWithStubPsql(script, env, { existing = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'rasta-psql-stub-'));
   try {
     const log = join(dir, 'calls.log');
     const stub = join(dir, 'psql');
-    writeFileSync(stub, `#!/bin/bash\nprintf '%s\\n' "$*" >> '${log}'\nexit 0\n`);
+    // `existing` databases answer the bootstrap's existence query with 1, as
+    // a cluster that already holds them would.
+    const exists = existing.map((db) => `  *"datname='${db}'"*) echo 1 ;;\n`).join('');
+    writeFileSync(
+      stub,
+      `#!/bin/bash\nprintf '%s\\n' "$*" >> '${log}'\ncase "$*" in\n${exists}esac\nexit 0\n`,
+    );
     chmodSync(stub, 0o755);
     const result = spawnSync('bash', [script], {
       encoding: 'utf8',
@@ -146,4 +152,34 @@ test('bootstrap: with distinct passwords it proceeds, and sets each role its own
   assert.equal(alters.length, 17);
   const passwords = alters.map((call) => /PASSWORD '([^']+)'/.exec(call)?.[1]);
   assert.equal(new Set(passwords).size, 17);
+});
+
+// ---------------------------------------------------------------------------
+// The demo-seed marker (Codex review of #117, finding 1)
+// ---------------------------------------------------------------------------
+
+const MARKS = /ALTER DATABASE "(rasta_\w+)" SET rasta\.disposable_database = 'true'/;
+const marked = (calls) => calls.map((call) => MARKS.exec(call)?.[1]).filter(Boolean);
+
+test('bootstrap: marks every service database it creates', () => {
+  const { status, calls } = runWithStubPsql(BOOTSTRAP, {});
+  assert.equal(status, 0);
+  assert.equal(marked(calls).length, 16);
+});
+
+test('bootstrap: never marks a database that already existed', () => {
+  // Run against a cluster it did not create — production, say — the bootstrap
+  // must not make those databases seedable: they stay unmarked, and every
+  // seed keeps refusing them.
+  const { status, calls } = runWithStubPsql(
+    BOOTSTRAP,
+    {},
+    { existing: ['rasta_identity', 'rasta_economic'] },
+  );
+  assert.equal(status, 0);
+  const done = marked(calls);
+  assert.ok(!done.includes('rasta_identity'), 'marked a pre-existing rasta_identity');
+  assert.ok(!done.includes('rasta_economic'), 'marked a pre-existing rasta_economic');
+  assert.equal(done.length, 14);
+  assert.ok(!calls.some((call) => call.includes('CREATE DATABASE rasta_identity ')));
 });

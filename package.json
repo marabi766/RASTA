@@ -75,7 +75,8 @@
     "db:migrate": "turbo run db:migrate",
     "db:generate": "turbo run db:generate",
     "db:seed": "turbo run db:seed",
-    "db:rotate-role-passwords": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/rotate-role-passwords.bash"
+    "db:rotate-role-passwords": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/rotate-role-passwords.bash",
+    "db:mark-disposable": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/disposable-marker.bash"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",

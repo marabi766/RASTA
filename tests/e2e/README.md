@@ -50,16 +50,35 @@ pnpm --filter @rasta/economic-service build && \
 pnpm --filter @rasta/api-gateway build && \
   pnpm --filter @rasta/api-gateway start          # :3000 (یا PORT_API_GATEWAY)
 
-pnpm test:e2e
+NODE_ENV=test E2E_ALLOW_WRITES=true pnpm test:e2e
 ```
 
 اگر پورت‌های محلی‌ات فرق دارد:
 
 ```bash
+NODE_ENV=test E2E_ALLOW_WRITES=true \
 E2E_GATEWAY_URL=http://localhost:3010 \
 KAFKA_BROKERS=localhost:19092 \
 pnpm test:e2e
 ```
+
+**دروازه اجرا (`src/target-guard.ts`).** این Suite می‌نویسد: کاربر Keycloak
+می‌سازد یا بازنویسی می‌کند، ممکن است سیاست User Profile قلمرو را عوض کند، و پول
+جابه‌جا می‌کند. پس `global-setup.ts` پیش از هر درخواستی رد می‌کند مگر هر سه برقرار
+باشند: `NODE_ENV=test`، `E2E_ALLOW_WRITES=true` (جدا از `RASTA_ALLOW_DEMO_SEED`)،
+و اینکه **همه** نشانی‌ها — Gateway، هر سرویس، Keycloak و هر Broker کافکا — روی
+Loopback باشند (`localhost`، `127.0.0.0/8` یا `::1`). راه دور زدنی ندارد؛ Stack
+یک‌بارمصرفِ جای دیگر را با Tunnel یا Port-Forward به localhost بیاور. تست خود
+دروازه: `pnpm --filter @rasta/e2e test:unit` (بدون Stack).
+
+Loopback فقط «کجا» را ثابت می‌کند، نه «کدام Stack» را. پس `global-setup.ts` پیش از نخستین نوشتن در Keycloak
+با یک GET مدیریتی (بدون تغییر) نشانِ `rasta.disposable_stack = "true"` را در Attributeهای قلمرو می‌خواند؛
+این نشان فقط در قلمرو توسعهٔ قابل‌Import (`infrastructure/docker/keycloak/rasta-realm.json`) هست و قلمرو بی‌نشان
+رد می‌شود. **همهٔ بررسی‌ها** — هر سرویس از جمله marketplace، Gateway، Keycloak و نشانش، خوشهٔ Kafka و هر سه Topic —
+پیش از هر نوشتن یا گرفتن توکن اجرا می‌شوند. Keycloak قلمرو را فقط وقتی Import می‌کند که وجود نداشته
+باشد؛ پس Keycloak محلی‌ای که قلمرو را پیش از این نشان Import کرده، یک بار باید قلمرو `rasta` را حذف کند (Admin
+Console) و `docker compose restart keycloak` را اجرا کند. CI هر بار Keycloak تازه می‌سازد. بررسی Upstreamهای Gateway و هویت هر سرویس هنوز انجام نمی‌شود — نیازمند کد سرویس و ثبت‌شده
+به‌عنوان کار بعدی.
 
 `global-setup.ts` پیش از هر سناریو، هر وابستگی را **مثبت** بررسی می‌کند و با
 پیام قابل‌اقدام شکست می‌خورد. هیچ‌جا Skip نمی‌کند: یک مرحله E2E سبز که چیزی

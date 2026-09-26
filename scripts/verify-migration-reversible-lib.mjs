@@ -526,6 +526,16 @@ export const EXPECTED = {
    */
   marketplace: {
     /**
+     * The init migration runs `CREATE EXTENSION IF NOT EXISTS pg_trgm` and its
+     * down script deliberately leaves it: the bootstrap installs pg_trgm into
+     * template1 for every database, so dropping it could remove an extension
+     * the migration did not add (its header explains). Leaving it installed is
+     * the one extension difference this rollback may make.
+     */
+    keptExtensions: {
+      '20260829185748_init_marketplace': ['pg_trgm'],
+    },
+    /**
      * The one documented exception to "down.sql is the exact inverse".
      *
      * `20260830103500_cancel_before_hold/down.sql` restores the narrower
@@ -707,6 +717,12 @@ export const EXPECTED = {
     // ltree / geography, unqualified in its migrations: see `scratchDatabase`
     // in verify-migration-reversible.mjs.
     scratchDatabase: true,
+    // `CREATE EXTENSION IF NOT EXISTS btree_gist` for the policy no-overlap
+    // exclusion; its down script leaves it, for the reason its header gives
+    // (the bootstrap installs it too, so the migration may not have added it).
+    keptExtensions: {
+      '20260925150000_policy_timeline_and_primary_contact': ['btree_gist'],
+    },
     tables: [
       'idempotency_key',
       'organization',
@@ -965,9 +981,24 @@ export function assertSchemaName(schema) {
  * rows are asserted separately, and its structure belongs to Prisma.
  * Extension members are excluded too — they are the extension's, not a
  * migration's.
+ *
+ * The extensions themselves are not (Codex post-merge review of #105,
+ * finding 3): one row per `pg_extension` — name, version and schema — for the
+ * whole database, since that is where an extension lives. A down script that
+ * leaves behind an extension its migration created, drops one that was there
+ * before, or leaves one at another version, differs here like any other
+ * object. These rows are not stripped of the schema name — they are not the
+ * schema's — but an extension in the schema under test, or in
+ * `extensionHome`, reads `schema=(target)`: a migration's
+ * `CREATE EXTENSION IF NOT EXISTS` lands in the first schema on the search
+ * path, which is the reference schema when the reference is built and the
+ * target schema (`public`, in a scratch database) when Prisma deploys. The
+ * two runs put the same extension in different places by construction, and
+ * only a difference a down script makes should show.
  */
-export function snapshotQuery(schema) {
+export function snapshotQuery(schema, extensionHome = schema) {
   assertSchemaName(schema);
+  assertSchemaName(extensionHome);
   const strip = (expression) =>
     `replace(replace(${expression}, '"${schema}".', ''), '${schema}.', '')`;
   return `
@@ -1090,7 +1121,13 @@ export function snapshotQuery(schema) {
       JOIN rel r ON r.oid = dsc.objoid AND dsc.classoid = 'pg_class'::regclass
       LEFT JOIN pg_attribute a ON a.attrelid = r.oid AND a.attnum = dsc.objsubid AND dsc.objsubid > 0
     )
-    SELECT ${strip('item')} AS item FROM items`;
+    SELECT ${strip('item')} AS item FROM items
+    UNION ALL
+    -- Database-wide, so rendered as they are, outside the schema stripping.
+    SELECT 'extension ' || e.extname || ' version=' || e.extversion || ' schema='
+           || CASE WHEN n.nspname IN ('${schema}', '${extensionHome}') THEN '(target)'
+                   ELSE n.nspname END
+    FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace`;
 }
 
 /** The table snapshots are recorded into, in a schema of the verifier's own. */
@@ -1102,17 +1139,31 @@ CREATE TABLE "${metaSchema}".snapshot (label text NOT NULL, item text NOT NULL);
 }
 
 /** Records `schema`'s current state under `label`. */
-export function recordSnapshotScript(metaSchema, label, schema) {
+export function recordSnapshotScript(metaSchema, label, schema, extensionHome = schema) {
   assertSchemaName(metaSchema);
   if (!/^[A-Za-z0-9_:.-]+$/.test(label)) throw new Error(`Unsafe snapshot label ${label}`);
   return `INSERT INTO "${metaSchema}".snapshot (label, item)
-SELECT '${label}', item FROM (${snapshotQuery(schema)}) s;`;
+SELECT '${label}', item FROM (${snapshotQuery(schema, extensionHome)}) s;`;
 }
 
 /**
  * Raises unless `schema` is exactly the state recorded under `label`, listing
  * what is missing and what is extra — as PostgreSQL renders each — so a
  * failure says which object a down script got wrong, not just that one did.
+ *
+ * `keptExtensions` names extensions this down script may leave installed
+ * (`EXPECTED[service].keptExtensions`). Such an extension is tolerated as
+ * extra only as the **exact** row recorded under `keptFrom` — the target's own
+ * state right after `prisma migrate deploy` — name, version and schema alike
+ * (Codex review of #117, finding 4): a down script that leaves it at another
+ * version, or moves it to another schema, still fails. Nothing else is
+ * tolerated — not another extension, and not a missing one. Unlike
+ * `allowance`, it cannot be required to match: whether the migration's
+ * `CREATE EXTENSION IF NOT EXISTS` created anything depends on the cluster
+ * (the bootstrap pre-installs it into template1), so it is pinned statically
+ * instead — see the lib test.
+ *
+ * `extensionHome`: see `snapshotQuery`.
  */
 export function assertSnapshotScript(
   metaSchema,
@@ -1120,9 +1171,19 @@ export function assertSnapshotScript(
   schema,
   context,
   allowance = { missing: [], unexpected: [] },
+  { keptExtensions = [], keptFrom = null, extensionHome = schema } = {},
 ) {
   assertSchemaName(metaSchema);
   if (!/^[A-Za-z0-9_:.-]+$/.test(label)) throw new Error(`Unsafe snapshot label ${label}`);
+  for (const name of keptExtensions) {
+    if (!/^[a-z0-9_]+$/.test(name)) throw new Error(`Unsafe extension name ${name}`);
+  }
+  if (keptExtensions.length > 0 && keptFrom === null) {
+    throw new Error('keptExtensions needs keptFrom: the snapshot whose exact rows it may keep');
+  }
+  if (keptFrom !== null && !/^[A-Za-z0-9_:.-]+$/.test(keptFrom)) {
+    throw new Error(`Unsafe snapshot label ${keptFrom}`);
+  }
   const safeContext = context.replaceAll("'", "''");
   const literalArray = (items) =>
     items.length === 0
@@ -1130,7 +1191,8 @@ export function assertSnapshotScript(
       : `ARRAY[${items.map((item) => `'${item.replaceAll("'", "''")}'`).join(', ')}]::text[]`;
   const allowedMissing = literalArray(allowance.missing ?? []);
   const allowedUnexpected = literalArray(allowance.unexpected ?? []);
-  const live = snapshotQuery(schema);
+  const kept = literalArray(keptExtensions);
+  const live = snapshotQuery(schema, extensionHome);
   const recorded = `SELECT item FROM "${metaSchema}".snapshot WHERE label = '${label}'`;
   return `DO $exact$
 DECLARE
@@ -1152,6 +1214,17 @@ BEGIN
   END IF;
   missing := ARRAY(SELECT unnest(missing) EXCEPT ALL SELECT unnest(${allowedMissing}));
   unexpected := ARRAY(SELECT unnest(unexpected) EXCEPT ALL SELECT unnest(${allowedUnexpected}));
+  -- An extension this down script is documented to leave installed: by exact
+  -- name (btree_gist must not also excuse btree_gin), and only as the exact
+  -- row the target had right after its deploy — same version, same schema.
+  unexpected := ARRAY(
+    SELECT u FROM unnest(unexpected) u
+    WHERE NOT (
+      split_part(u, ' ', 1) = 'extension'
+      AND split_part(u, ' ', 2) = ANY (${kept})
+      AND u IN (SELECT item FROM "${metaSchema}".snapshot WHERE label = ${keptFrom === null ? 'NULL' : `'${keptFrom}'`})
+    )
+  );
 
   IF cardinality(missing) > 0 OR cardinality(unexpected) > 0 THEN
     RAISE EXCEPTION E'${safeContext}: not the exact expected schema\\n expected but missing:\\n  %\\n present but not expected:\\n  %',
@@ -1163,24 +1236,49 @@ $exact$;`;
 }
 
 /**
- * Raises unless the ledger holds exactly `applied` — every one finished and
- * none rolled back. After a down script, that is every earlier migration and
- * not this one; after a re-deploy, all of them.
+ * Raises unless the ledger holds exactly `applied`, one row each, every one
+ * finished and none rolled back. After a down script, that is every earlier
+ * migration and not this one; after a re-deploy, all of them.
+ *
+ * Every row counts (Codex post-merge review of #105, finding 4). Reading only
+ * finished, non-rolled-back rows let a down script that marked its row rolled
+ * back — or a half-applied deploy's unfinished row — pass as removed, and
+ * `migrate deploy` treats neither like an absent row. So: an unfinished or
+ * rolled-back row anywhere fails, a duplicate fails, and `removed` (the
+ * migration whose down script just ran) must have no row at all.
  */
-export function ledgerAssertionScript(applied, context) {
-  const names = applied.map((name) => {
+export function ledgerAssertionScript(applied, context, removed = null) {
+  const safeName = (name) => {
     if (!/^[A-Za-z0-9_]+$/.test(name)) throw new Error(`Unsafe migration name ${name}`);
     return `'${name}'`;
-  });
+  };
+  const names = applied.map(safeName);
   const expected = names.length > 0 ? `ARRAY[${names.join(', ')}]::text[]` : `ARRAY[]::text[]`;
+  const removedCheck =
+    removed === null
+      ? ''
+      : `
+  IF EXISTS (SELECT 1 FROM "_prisma_migrations" WHERE migration_name = ${safeName(removed)}) THEN
+    RAISE EXCEPTION E'${context.replaceAll("'", "''")}: _prisma_migrations still has a row for %, in any state', ${safeName(removed)};
+  END IF;`;
   const safeContext = context.replaceAll("'", "''");
   return `DO $ledger$
 DECLARE
   actual text[];
-BEGIN
+  irregular text[];
+BEGIN${removedCheck}
+  irregular := ARRAY(
+    SELECT migration_name || CASE WHEN finished_at IS NULL THEN ' (unfinished)' ELSE ' (rolled back)' END
+    FROM "_prisma_migrations"
+    WHERE finished_at IS NULL OR rolled_back_at IS NOT NULL
+    ORDER BY 1
+  );
+  IF cardinality(irregular) > 0 THEN
+    RAISE EXCEPTION E'${safeContext}: _prisma_migrations holds rows that are not cleanly applied: %', irregular;
+  END IF;
+  -- Every row, duplicates included: two rows for one name is not one migration.
   SELECT coalesce(array_agg(migration_name ORDER BY migration_name), ARRAY[]::text[]) INTO actual
-  FROM "_prisma_migrations"
-  WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL;
+  FROM "_prisma_migrations";
   IF actual IS DISTINCT FROM (SELECT coalesce(array_agg(x ORDER BY x), ARRAY[]::text[]) FROM unnest(${expected}) x) THEN
     RAISE EXCEPTION E'${safeContext}: _prisma_migrations holds %, expected %', actual, ${expected};
   END IF;
