@@ -247,6 +247,16 @@ export class PolicyService implements OnModuleInit {
     await this.prisma
       .transaction(async (tx) => {
         const at = await transactionNow(tx);
+        // Serialise with every round being opened on this workflow, and with
+        // any other approval or retirement of it (no project lock is held
+        // here, so the one lock order holds). Organization and workflow key
+        // never change, so `found` names the slot; everything else is re-read
+        // under the lock.
+        await this.repository.lockPolicySlot(
+          tx,
+          found.organizationId,
+          found.workflowKey as WorkflowKey,
+        );
         const policy = await this.policyOrNotFound(tx, policyId);
         this.assertVersion(policy.id, policy.version, dto.expectedVersion);
         assertPolicyTransition(policyId, policy.status as PolicyStateName, 'ACTIVE');
@@ -356,6 +366,13 @@ export class PolicyService implements OnModuleInit {
 
     await this.prisma.transaction(async (tx) => {
       const at = await transactionNow(tx);
+      // Taking a policy out of force is serialised with rounds being opened on
+      // it (ApprovalRepository.lockPolicySlot); re-read under the lock.
+      await this.repository.lockPolicySlot(
+        tx,
+        found.organizationId,
+        found.workflowKey as WorkflowKey,
+      );
       const policy = await this.policyOrNotFound(tx, policyId);
       this.assertVersion(policy.id, policy.version, dto.expectedVersion);
       assertPolicyTransition(policyId, policy.status as PolicyStateName, 'RETIRED');

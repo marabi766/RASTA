@@ -335,6 +335,11 @@ export class ApprovalService {
       at: Date;
     },
   ): Promise<RoundOutcome> {
+    // The caller already holds the project row lock; the slot lock comes
+    // second (the one lock order — ApprovalRepository.lockPolicySlot). From
+    // here to commit, no policy of this workflow can be approved or retired,
+    // so the policy read below is the one the round is opened on.
+    await this.approvals.lockPolicySlot(tx, input.organizationId, input.workflowKey);
     const policy = await this.approvals.findActivePolicy(tx, input.workflowKey);
     if ((policy?.id ?? null) !== input.confirmedPolicyId) {
       // The policy in force changed after it was confirmed: never open a

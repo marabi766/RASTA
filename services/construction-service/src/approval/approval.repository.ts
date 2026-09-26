@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import type { Approval, ApprovalPolicy, ApprovalPolicyStep, Prisma } from '../generated/prisma';
@@ -27,6 +28,20 @@ import type { ProjectStateName } from '../project/project.state-machine';
  */
 
 export type PolicyWithSteps = ApprovalPolicy & { steps: ApprovalPolicyStep[] };
+
+/**
+ * The 64-bit key of one policy slot — the policy in force for one
+ * (organization, workflow key) — for `pg_advisory_xact_lock`. Derived here,
+ * from SHA-256, so it is stable across PostgreSQL versions and builds (it
+ * does not depend on the server's internal hash functions), and namespaced so
+ * it cannot collide with any other advisory lock this database may take.
+ */
+export function policySlotLockKey(organizationId: string, workflowKey: string): bigint {
+  return createHash('sha256')
+    .update(`construction.approval-policy-slot\u0000${organizationId}\u0000${workflowKey}`)
+    .digest()
+    .readBigInt64BE(0);
+}
 
 export interface StepInput {
   id: string;
@@ -172,6 +187,32 @@ export class ApprovalRepository {
       where: { workflowKey, status: 'ACTIVE' },
       include: STEPS_IN_ORDER,
     });
+  }
+
+  /**
+   * Serialises everything that reads the policy in force for one
+   * (organization, workflow key) and then acts on that answer: opening an
+   * approval round (`ApprovalService.openRound`), and putting a policy in
+   * force or taking it out (`PolicyService.approve` / `retire`). Without it, a
+   * round could be opened on "no policy" — or on a policy already replaced —
+   * while an approval committed alongside (Codex review of #122, round 2).
+   *
+   * A transaction-scoped advisory lock, not a row lock: when no policy is in
+   * force there is no row to lock. Released at commit or rollback. The caller
+   * re-reads the policy in force **after** taking it (READ COMMITTED, so the
+   * next statement sees every commit that preceded the lock).
+   *
+   * **Lock order, everywhere:** the project row (`ProjectRepository.lockProject`)
+   * first, when the command has one, then this slot, then policy rows.
+   * `approve`/`retire` take no project lock, so no cycle is possible.
+   */
+  async lockPolicySlot(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    workflowKey: WorkflowKey,
+  ): Promise<void> {
+    const key = policySlotLockKey(organizationId, workflowKey);
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${key})`;
   }
 
   /** The policy in force for a named organization (the platform approval swap). */
