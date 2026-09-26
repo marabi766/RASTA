@@ -305,6 +305,11 @@ export class FakeHierarchy {
     this.parents.set(child, parent);
   }
 
+  /** The organization moved out from under its parent (organization-service's MOVE). */
+  disown(child: string): void {
+    this.parents.delete(child);
+  }
+
   async isWithin(scope: string, organizationId: string): Promise<boolean> {
     this.asked.push([scope, organizationId]);
     if (this.unavailable) throw RastaError.upstreamUnavailable('organization-service');
