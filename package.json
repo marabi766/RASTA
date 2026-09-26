@@ -60,6 +60,7 @@
     "verify:grafana-dashboard-live": "node scripts/verify-grafana-dashboard-live.mjs",
     "test:outbox-b2-pg": "node --env-file=.env --test scripts/outbox-b2-backfill.pg.test.mjs",
     "test:outbox-b3": "node --env-file-if-exists=.env --test scripts/outbox-b3-protocol.pg.test.mjs",
+    "test:supplier-privilege-split": "node --env-file-if-exists=.env --test scripts/supplier-privilege-split.pg.test.mjs",
     "ci:image-matrix": "node scripts/ci-image-matrix.mjs",
     "progress:validate": "node scripts/progress.mjs validate",
     "progress:report": "node scripts/progress.mjs write",
@@ -76,6 +77,7 @@
     "db:generate": "turbo run db:generate",
     "db:seed": "turbo run db:seed",
     "db:rotate-role-passwords": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/rotate-role-passwords.bash",
+    "db:supplier-privilege-split": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/supplier-privilege-split.bash",
     "db:mark-disposable": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/disposable-marker.bash"
   },
   "devDependencies": {

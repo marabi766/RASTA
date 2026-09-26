@@ -1,4 +1,9 @@
-import type { SupplierEventName } from './events';
+import {
+  PERFORMANCE_FORMULA_EVENTS,
+  type PerformanceFormulaEventName,
+  type PublishedEventName,
+  type SupplierEventName,
+} from './events';
 
 /**
  * Where each supplier event goes on the wire, and what it is ordered by.
@@ -50,7 +55,10 @@ export const AGGREGATE_OF = {
   SUPPLIER_REJECTED: 'Qualification',
   SUPPLIER_SUSPENDED: 'Suspension',
   SUPPLIER_REINSTATED: 'Suspension',
-} as const satisfies Record<SupplierEventName, string>;
+  PERFORMANCE_FORMULA_VERSION_CREATED: 'PerformanceFormulaVersion',
+  PERFORMANCE_FORMULA_VERSION_ACTIVATED: 'PerformanceFormulaVersion',
+  PERFORMANCE_FORMULA_VERSION_RETIRED: 'PerformanceFormulaVersion',
+} as const satisfies Record<PublishedEventName, string>;
 
 export interface PartitionDecision {
   readonly key: string;
@@ -63,15 +71,56 @@ export interface PartitionDecision {
  * Read off the payload rather than taken from the call site, so the key and
  * what the consumer sees cannot disagree — the failure Q-26 recorded in the
  * economic domain, where a service passed one identifier and published another.
+ *
+ * ## The formula events are the one documented exception to `supplierId`
+ *
+ * A formula version is about no supplier — it is platform-wide configuration
+ * (docs/24 Q-75). Its events are keyed by the version's own id (PM ruling on
+ * ADR-052 step 2), which is also its aggregate id: the default of `docs/07`
+ * § 7.7, not a deviation from it. An activation therefore puts the new
+ * version's CREATED and ACTIVATED on one key and the predecessor's RETIRED on
+ * another; the two carry each other's id, so no consumer needs them ordered.
  */
 export function resolvePartitionKey(
   eventName: SupplierEventName,
   payload: { supplierId: string },
+): PartitionDecision;
+export function resolvePartitionKey(
+  eventName: PerformanceFormulaEventName,
+  payload: { formulaVersionId: string },
+): PartitionDecision;
+export function resolvePartitionKey(
+  eventName: PublishedEventName,
+  payload: { supplierId: string } | { formulaVersionId: string },
+): PartitionDecision;
+export function resolvePartitionKey(
+  eventName: PublishedEventName,
+  payload: { supplierId: string } | { formulaVersionId: string },
 ): PartitionDecision {
+  if (isFormulaEvent(eventName)) {
+    if (!('formulaVersionId' in payload)) {
+      throw new Error(`${eventName} must name the formula version it concerns`);
+    }
+    return {
+      key: payload.formulaVersionId,
+      reason:
+        `${eventName} concerns platform-wide configuration, not a supplier, and is ` +
+        'keyed by the formula version it announces (ADR-052 step 2)',
+    };
+  }
+  if (!('supplierId' in payload)) {
+    throw new Error(`${eventName} must name the supplier it concerns`);
+  }
   return {
     key: payload.supplierId,
     reason:
       `${eventName} is co-partitioned by the supplier it concerns, because every ` +
       'consumer of this topic reasons about one counterparty (docs/07 § 7.7)',
   };
+}
+
+export function isFormulaEvent(
+  eventName: PublishedEventName,
+): eventName is PerformanceFormulaEventName {
+  return (Object.values(PERFORMANCE_FORMULA_EVENTS) as string[]).includes(eventName);
 }

@@ -1,5 +1,5 @@
-import { SUPPLIER_EVENTS, type SupplierEventName } from './events';
-import { AGGREGATE_OF, resolvePartitionKey } from './routing';
+import { PERFORMANCE_FORMULA_EVENTS, SUPPLIER_EVENTS, type SupplierEventName } from './events';
+import { AGGREGATE_OF, isFormulaEvent, resolvePartitionKey } from './routing';
 
 /**
  * Event routing and the partition-key policy.
@@ -89,5 +89,41 @@ describe('the decision carries its reason', () => {
     const decision = resolvePartitionKey('SUPPLIER_SUSPENDED', { supplierId: SUPPLIER_ID });
 
     expect(decision.reason).not.toMatch(/guarantee|ordered in|in order/i);
+  });
+});
+
+describe('the performance formula events', () => {
+  const VERSION_ID = 'PFV_01JBQ8Z4K7M2N5P8R1T3V6X9Y2';
+
+  it.each(Object.values(PERFORMANCE_FORMULA_EVENTS))(
+    '%s is keyed by the formula version, which is also its aggregate',
+    (name) => {
+      expect(AGGREGATE_OF[name]).toBe('PerformanceFormulaVersion');
+      expect(resolvePartitionKey(name, { formulaVersionId: VERSION_ID }).key).toBe(VERSION_ID);
+      expect(isFormulaEvent(name)).toBe(true);
+    },
+  );
+
+  it('says why it is not keyed by a supplier', () => {
+    const decision = resolvePartitionKey('PERFORMANCE_FORMULA_VERSION_CREATED', {
+      formulaVersionId: VERSION_ID,
+    });
+
+    expect(decision.reason).toMatch(/platform-wide/);
+  });
+
+  it('refuses to key a formula event without its version, or a supplier event without its supplier', () => {
+    expect(() =>
+      resolvePartitionKey('PERFORMANCE_FORMULA_VERSION_CREATED', { supplierId: SUPPLIER_ID }),
+    ).toThrow();
+    expect(() =>
+      resolvePartitionKey('SUPPLIER_REGISTERED', { formulaVersionId: VERSION_ID }),
+    ).toThrow();
+  });
+
+  it('leaves every supplier event on the supplier key', () => {
+    for (const name of Object.values(SUPPLIER_EVENTS)) {
+      expect(isFormulaEvent(name)).toBe(false);
+    }
   });
 });

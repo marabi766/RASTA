@@ -29,7 +29,10 @@ export const ROLE_LIBRARY = resolve(
   'infrastructure/docker/postgres/lib/role-passwords.bash',
 );
 
-/** `rasta_<service>` for every entry of `RASTA_SERVICES=( … )`, then the audit migrator. */
+/**
+ * `rasta_<service>` for every entry of `RASTA_SERVICES=( … )`, then the two
+ * migrators (audit, supplier) — the order `rasta_roles` prints them in.
+ */
 export function rolesFromLibrary(text = readFileSync(ROLE_LIBRARY, 'utf8')) {
   const block = /^RASTA_SERVICES=\(([\s\S]*?)^\)/m.exec(text);
   if (!block) throw new Error('RASTA_SERVICES=( … ) not found in the role library');
@@ -37,7 +40,11 @@ export function rolesFromLibrary(text = readFileSync(ROLE_LIBRARY, 'utf8')) {
     .split('\n')
     .map((line) => line.replace(/#.*/, '').trim())
     .filter(Boolean);
-  return [...services.map((service) => `rasta_${service}`), 'rasta_audit_migrator'];
+  return [
+    ...services.map((service) => `rasta_${service}`),
+    'rasta_audit_migrator',
+    'rasta_supplier_migrator',
+  ];
 }
 
 export const passwordVariable = (role) =>
