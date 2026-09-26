@@ -524,14 +524,14 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | رویداد                                  | مصرف‌کنندگان | Payload کلیدی                                                                                                                                         |
 | --------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`APPROVAL_POLICY_CREATED`**           | audit        | `policyId`, `organizationId`, `authorOrganizationId`, `authorRole`, `workflowKey`, `policyVersion`, `stepCount`, `isSample`, `createdBy`, `createdAt` |
-| **`APPROVAL_POLICY_SUBMITTED`** ⏳      | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `submittedBy`, `submittedAt`                                                            |
-| **`APPROVAL_POLICY_REJECTED`** ⏳       | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `rejectedBy`, `rejectedAt`                                                              |
+| **`APPROVAL_POLICY_SUBMITTED`**         | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `submittedBy`, `submittedAt`                                                            |
+| **`APPROVAL_POLICY_REJECTED`**          | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `rejectedBy`, `rejectedAt`                                                              |
 | **`APPROVAL_POLICY_ACTIVATED`**         | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredPolicyId`, `activatedBy`, `activatedAt`                                         |
 | **`APPROVAL_POLICY_RETIRED`**           | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredBy`, `retiredAt`                                                                |
 | **`PROJECT_PROGRESS_REPORT_DRAFTED`**   | audit        | `projectId`, `reportId`, `organizationId`, `draftedBy`, `draftedAt`                                                                                   |
 | **`PROJECT_PROGRESS_REPORT_DISCARDED`** | audit        | `projectId`, `reportId`, `organizationId`, `discardedBy`, `discardedAt`                                                                               |
 
-⏳ **پیشنهادی — در انتظار تأیید نام به‌دست مدیر پروژه.** Q-70 بند ۷ (تصمیم مالک، 2026-09-26) گام تأیید پلتفرم را
+**دو رویداد گام تأیید پلتفرم** (نام‌ها پذیرفته‌شده به‌دست مدیر پروژه، 2026-09-26؛ همان الگوی Aggregate + فعل گذشته). Q-70 بند ۷ (تصمیم مالک، 2026-09-26) گام تأیید پلتفرم را
 افزود: `APPROVAL_POLICY_SUBMITTED` (`DRAFT → PENDING_PLATFORM_APPROVAL`) و `APPROVAL_POLICY_REJECTED`
 (`PENDING_PLATFORM_APPROVAL → REJECTED`). دلیل رد روی رویداد نمی‌آید و روی سیاست می‌ماند. `APPROVAL_POLICY_CREATED`
 اکنون نویسنده را هم حمل می‌کند (`authorOrganizationId`، `authorRole` ∈ `UNION_ADMIN`/`SYSTEM_ADMIN`)، و
