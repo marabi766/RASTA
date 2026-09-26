@@ -24,10 +24,12 @@ describe('legacy data migration (20260925110000)', () => {
   const org = tenants();
   const orgC = `ORG-ITEST-C-${ulid().slice(-10)}`;
   const day = 86_400_000;
-  const migrationFile = path.resolve(
+  const migrationDir = path.resolve(
     __dirname,
-    '../prisma/migrations/20260925110000_asset_legacy_dossier_and_identifiers/migration.sql',
+    '../prisma/migrations/20260925110000_asset_legacy_dossier_and_identifiers',
   );
+  const migrationFile = path.join(migrationDir, 'migration.sql');
+  const downFile = path.join(migrationDir, 'down.sql');
 
   let prisma: PrismaService;
   let repository: AssetRepository;
@@ -42,8 +44,8 @@ describe('legacy data migration (20260925110000)', () => {
     userId: `USR-ADMIN-${organizationId.slice(-4)}`,
   });
 
-  /** Runs the shipped migration file, as a deploy would. */
-  function runMigration(): void {
+  /** Runs a shipped SQL file through `prisma db execute`. */
+  function runFile(file: string): void {
     execFileSync(
       process.execPath,
       [
@@ -51,13 +53,16 @@ describe('legacy data migration (20260925110000)', () => {
         'db',
         'execute',
         '--file',
-        migrationFile,
+        file,
         '--url',
         databaseUrl(),
       ],
       { stdio: 'pipe' },
     );
   }
+
+  /** Runs the shipped migration file, as a deploy would. */
+  const runMigration = (): void => runFile(migrationFile);
 
   beforeAll(async () => {
     prisma = newPrisma();
@@ -226,6 +231,89 @@ describe('legacy data migration (20260925110000)', () => {
       assetId,
     );
     expect(original[0]!.old_value).toBe('ماشين-۱۲');
+
+    // PR #108 round 2 #3: the asset changed hands after the migration, so its
+    // dossier rows no longer hold what the migration wrote. Rolling back would
+    // put them under A while the asset is C's. The rollback refuses, names
+    // them, and changes nothing.
+    let refusal = '';
+    try {
+      runFile(downFile);
+    } catch (error) {
+      refusal = String((error as { stderr?: Buffer }).stderr ?? error);
+    }
+    expect(refusal).toMatch(/changed after the migration; nothing was rolled back/);
+
+    const after = await prisma.client.$queryRawUnsafe<{ organization_id: string }[]>(
+      `SELECT organization_id FROM insurance_claim WHERE id = $1`,
+      claim.id,
+    );
+    expect(after[0]!.organization_id).toBe(orgC);
+    const kept = await prisma.client.$queryRawUnsafe<{ asset_tag: string }[]>(
+      `SELECT asset_tag FROM asset WHERE id = $1`,
+      assetId,
+    );
+    expect(kept[0]!.asset_tag).toBe('ماشین-12');
+    const log = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+      `SELECT count(*)::int AS n FROM asset_legacy_migration_log WHERE asset_id = $1`,
+      assetId,
+    );
+    expect(log[0]!.n).toBeGreaterThan(0);
+  });
+
+  it('runs around no writer: a write in flight fails it on the lock, changing nothing (round 2 #2)', async () => {
+    const created = await asActor(manager(org.a), () =>
+      assets.create({ name: 'قفل', type: 'LOADER', specifications: {} } as never),
+    );
+    await prisma.client.$executeRawUnsafe(
+      `UPDATE asset SET asset_tag = $2 WHERE id = $1`,
+      created.id,
+      'قفل-۳',
+    );
+
+    // A transfer in flight on another connection: its row write holds the
+    // table in ROW EXCLUSIVE mode until it commits.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => (holding = resolve));
+    const writer = prisma.client.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe(
+          `UPDATE asset_timeline_entry SET organization_id = organization_id WHERE asset_id = $1`,
+          created.id,
+        );
+        holding();
+        await released;
+      },
+      { timeout: 120_000 },
+    );
+    await held;
+
+    let failure = '';
+    try {
+      runMigration();
+    } catch (error) {
+      failure = String((error as { stderr?: Buffer }).stderr ?? error);
+    }
+    release();
+    await writer;
+    expect(failure).toMatch(/lock timeout/);
+
+    // Nothing was canonicalised or moved while the writer held the table.
+    const before = await prisma.client.$queryRawUnsafe<{ asset_tag: string }[]>(
+      `SELECT asset_tag FROM asset WHERE id = $1`,
+      created.id,
+    );
+    expect(before[0]!.asset_tag).toBe('قفل-۳');
+
+    // Once it has committed, the migration goes through.
+    runMigration();
+    const after = await prisma.client.$queryRawUnsafe<{ asset_tag: string }[]>(
+      `SELECT asset_tag FROM asset WHERE id = $1`,
+      created.id,
+    );
+    expect(after[0]!.asset_tag).toBe('قفل-3');
   });
 
   it('refuses, changing nothing, when canonical spellings would collide', async () => {

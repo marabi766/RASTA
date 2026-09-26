@@ -11,14 +11,13 @@
  * Which coverages follow is configuration, `INSURANCE_COVERAGES_FOLLOWING_VEHICLE`,
  * all four by default, so a later legal change narrows it without code
  * (AGENTS.md § 9). A coverage outside the list counts only when the current
- * owner recorded it: its `createdAt` is at or after the latest transfer.
+ * owner recorded it.
  *
- * Both instants come from one clock, PostgreSQL's (PR #108 review #6):
- * `created_at` defaults to the database's `now()`, and a transfer's
- * `transferred_at` is the database's `clock_timestamp()`, read under the
- * asset's row lock (AssetRepository.databaseClock). Policy writes take the
- * same lock and re-check the owner, so a policy is either recorded before the
- * transfer takes the lock, under the old owner, or refused.
+ * "Recorded by the current owner" is a generation, not a time (PR #108 round
+ * 2 #5). Each transfer increments `asset.ownership_generation` in its
+ * compare-and-set, under the asset's row lock; a policy write takes the same
+ * lock and stamps the generation it read. Two timestamps can round to the same
+ * millisecond; two generations cannot be equal unless no transfer came between.
  */
 
 /** The coverages asset-service records (its `InsuranceCoverage` enum). */
@@ -45,35 +44,45 @@ export const DEFAULT_TRANSFER_INSURANCE_POLICY: TransferInsurancePolicy = {
 export const TRANSFER_INSURANCE_POLICY = Symbol('TRANSFER_INSURANCE_POLICY');
 
 /**
- * `ownedSince` is the latest transfer's instant, or `null` when the asset has
- * never changed hands, in which case every policy is its owner's.
+ * `assetGeneration` is the asset's current `ownershipGeneration`. A policy
+ * stamped with it was recorded by the current owner; one stamped lower, by an
+ * earlier one.
  */
 export function countsForCurrentOwner(
-  policy: { coverage: string; createdAt: Date },
-  ownedSince: Date | null,
+  policy: { coverage: string; ownershipGeneration: number },
+  assetGeneration: number,
   rule: TransferInsurancePolicy,
 ): boolean {
-  if (!ownedSince) return true;
   if ((rule.coveragesFollowingVehicle as readonly string[]).includes(policy.coverage)) {
     return true;
   }
-  return policy.createdAt >= ownedSince;
+  return policy.ownershipGeneration === assetGeneration;
 }
 
 /**
  * The same rule as a query filter, for "the active policy that counts".
- * `undefined` when every policy counts, so the query carries no extra clause.
+ * `undefined` when every coverage follows the vehicle, so the query carries no
+ * extra clause.
  */
 export function currentOwnerPolicyFilter(
-  ownedSince: Date | null,
+  assetGeneration: number,
   rule: TransferInsurancePolicy,
 ): { OR: object[] } | undefined {
-  if (!ownedSince) return undefined;
-  if (rule.coveragesFollowingVehicle.length === INSURANCE_COVERAGES.length) return undefined;
+  if (everyCoverageFollows(rule)) return undefined;
   return {
     OR: [
       { coverage: { in: [...rule.coveragesFollowingVehicle] } },
-      { createdAt: { gte: ownedSince } },
+      { ownershipGeneration: assetGeneration },
     ],
   };
+}
+
+/**
+ * Set equality with every coverage, not a length comparison: a list with a
+ * repeated entry would otherwise pass for "all four" (PR #108 round 2 #6).
+ * The configuration also refuses duplicates; this does not rely on it.
+ */
+export function everyCoverageFollows(rule: TransferInsurancePolicy): boolean {
+  const following = new Set<string>(rule.coveragesFollowingVehicle);
+  return INSURANCE_COVERAGES.every((coverage) => following.has(coverage));
 }

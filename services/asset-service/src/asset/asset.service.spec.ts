@@ -148,7 +148,7 @@ function harness(overrides: Partial<Record<string, unknown>> = {}): Harness {
         return 1;
       },
     ),
-    latestTransferAt: jest.fn(async () => null),
+    ownershipGeneration: jest.fn(async () => 0),
     databaseClock: jest.fn(async () => new Date('2026-09-25T12:00:00.000Z')),
     lockAsset: jest.fn(async () => ({ status: 'ACTIVE' })),
     hasOpenClaims: jest.fn(async () => false),
@@ -300,7 +300,7 @@ describe('AssetService', () => {
       // every coverage follows, so the lookup carries no ownership clause.
       const h = harness({
         findById: jest.fn(async () => assetRow({ status: 'REGISTERED' })),
-        latestTransferAt: jest.fn(async () => new Date('2026-09-01T00:00:00.000Z')),
+        ownershipGeneration: jest.fn(async () => 1),
       });
 
       await expect(run(() => h.service.activate(ASSET_ID, {}))).rejects.toThrow(/insurance/);

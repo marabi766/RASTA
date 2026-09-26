@@ -87,6 +87,13 @@ model Asset {
   version   Int       @default(1)
   deletedAt DateTime? @map("deleted_at")
 
+  /// How many times the asset has changed hands: 0 for the organization that
+  /// registered it, incremented by each transfer under the asset's row lock.
+  /// An insurance policy is stamped with the generation it was recorded in, so
+  /// "recorded by the current owner" is an equality, never a timestamp
+  /// comparison two writes in one millisecond can confuse (PR #108 round 2 #5).
+  ownershipGeneration Int @default(0) @map("ownership_generation")
+
   locations   AssetLocation[]
   documents   AssetDocumentRef[]
   policies    InsurancePolicy[]
@@ -325,6 +332,10 @@ model InsurancePolicy {
   status PolicyStatus @default(ACTIVE)
 
   documentId String? @map("document_id")
+
+  /// The asset's `ownershipGeneration` when this policy was recorded, read
+  /// under the same row lock a transfer takes (docs/24 Q-66).
+  ownershipGeneration Int @default(0) @map("ownership_generation")
 
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")

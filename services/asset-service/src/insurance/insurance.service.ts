@@ -76,7 +76,7 @@ export class InsuranceService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const created = await this.repository.transaction(async (tx) => {
-      await this.lockOwned(tx, assetId, asset.organizationId);
+      const { ownershipGeneration } = await this.lockOwned(tx, assetId, asset.organizationId);
 
       let row;
       try {
@@ -94,6 +94,9 @@ export class InsuranceService {
             validTo,
             documentId: dto.documentId ?? null,
             status: 'ACTIVE',
+            // Read under the lock just taken: this owner's generation, which
+            // is what decides whether the policy counts after a transfer.
+            ownershipGeneration,
             createdBy: actor,
             updatedBy: actor,
           },
@@ -359,9 +362,10 @@ export class InsuranceService {
     tx: ExtendedPrismaClient,
     assetId: string,
     organizationId: string,
-  ): Promise<void> {
+  ): Promise<{ ownershipGeneration: number }> {
     const locked = await this.repository.lockAsset(tx, assetId, organizationId, 'SHARE');
     if (!locked) throw RastaError.notFound('Asset', assetId);
+    return locked;
   }
 
   private async assertAssetExists(assetId: string) {

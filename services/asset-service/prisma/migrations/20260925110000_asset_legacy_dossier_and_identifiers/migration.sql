@@ -23,21 +23,43 @@
 -- real one is an operator's decision.
 --
 -- Reversible. Every value changed is written to asset_legacy_migration_log
--- first, and down.sql restores from it.
+-- first, with the value this migration wrote, and down.sql restores from it
+-- only while that value is still in place (PR #108 round 2 #3).
+--
+-- Quiescent by lock (PR #108 round 2 #2). A transaction alone gives rollback,
+-- not a stable view across eight tables: a transfer committing between two of
+-- the loops below would leave a dossier split. So the asset and its seven
+-- child tables are locked first, before any preflight, in one fixed order,
+-- in SHARE ROW EXCLUSIVE mode: reads go on, every write waits for this commit,
+-- and a write already in flight makes the migration fail on lock_timeout,
+-- having changed nothing, rather than run around it.
 --
 -- Re-runnable on a database that already has it (the legacy-state integration
 -- test does exactly that): CREATE ... IF NOT EXISTS / OR REPLACE, the log keeps
 -- the first original value of a row, and the updates only touch rows that
 -- still differ.
 --
--- Atomic: prisma migrate deploy already runs a PostgreSQL migration as one
--- transaction (verified 2026-09-25: a failing statement rolled back a
--- CREATE TABLE before it). The explicit BEGIN/COMMIT keeps that true however
--- the script is run.
+-- Atomic because of the explicit BEGIN/COMMIT below, and only because of it.
+-- Nothing here relies on the deployment tool wrapping the file in a
+-- transaction (PR #108 round 2 #7). test/legacy-migration.int-spec.ts runs the
+-- shipped file and proves a refused run changes nothing.
 
 BEGIN;
 
 SET LOCAL lock_timeout = '3s';
+
+-- The same order in down.sql. Asset first, then the children as the transfer
+-- in src/asset/asset.service.ts moves them.
+LOCK TABLE
+  "asset",
+  "asset_timeline_entry",
+  "asset_location",
+  "asset_document_ref",
+  "insurance_policy",
+  "insurance_claim",
+  "technical_inspection",
+  "asset_transfer"
+  IN SHARE ROW EXCLUSIVE MODE;
 
 -- The canonical form, exactly as canonicalIdentifier() computes it: NFKC;
 -- Arabic yeh (ي ى) and kaf (ك) to Persian (ی ک); Persian and Arabic-Indic
@@ -61,7 +83,11 @@ CREATE TABLE IF NOT EXISTS "asset_legacy_migration_log" (
     "table_name"  TEXT         NOT NULL,
     "row_id"      TEXT         NOT NULL,
     "column_name" TEXT         NOT NULL,
+    -- The asset the row belongs to, so down.sql can see a later transfer.
+    "asset_id"    TEXT         NOT NULL,
     "old_value"   TEXT,
+    -- What this migration wrote. down.sql restores only rows that still hold it.
+    "new_value"   TEXT,
     "logged_at"   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "asset_legacy_migration_log_pkey" PRIMARY KEY ("table_name", "row_id", "column_name")
@@ -119,18 +145,20 @@ DECLARE
 BEGIN
   FOR target IN
     SELECT * FROM (VALUES
-      ('asset', 'asset_tag'),
-      ('asset', 'serial_number'),
-      ('insurance_policy', 'policy_number'),
-      ('insurance_policy', 'insurer_name')
-    ) AS t (table_name, column_name)
+      ('asset', 'asset_tag', 'id'),
+      ('asset', 'serial_number', 'id'),
+      ('insurance_policy', 'policy_number', 'asset_id'),
+      ('insurance_policy', 'insurer_name', 'asset_id')
+    ) AS t (table_name, column_name, asset_column)
   LOOP
     EXECUTE format(
-      'INSERT INTO asset_legacy_migration_log (table_name, row_id, column_name, old_value)
-       SELECT %L, id, %L, %I FROM %I
+      'INSERT INTO asset_legacy_migration_log
+              (table_name, row_id, column_name, asset_id, old_value, new_value)
+       SELECT %L, id, %L, %I, %I, canonical_identifier(%I) FROM %I
         WHERE %I IS NOT NULL AND %I IS DISTINCT FROM canonical_identifier(%I)
        ON CONFLICT DO NOTHING',
-      target.table_name, target.column_name, target.column_name, target.table_name,
+      target.table_name, target.column_name, target.asset_column, target.column_name,
+      target.column_name, target.table_name,
       target.column_name, target.column_name, target.column_name);
     EXECUTE format(
       'UPDATE %I SET %I = canonical_identifier(%I)
@@ -160,8 +188,9 @@ BEGIN
   ]
   LOOP
     EXECUTE format(
-      'INSERT INTO asset_legacy_migration_log (table_name, row_id, column_name, old_value)
-       SELECT %L, c.id, ''organization_id'', c.organization_id
+      'INSERT INTO asset_legacy_migration_log
+              (table_name, row_id, column_name, asset_id, old_value, new_value)
+       SELECT %L, c.id, ''organization_id'', c.asset_id, c.organization_id, a.organization_id
          FROM %I c JOIN asset a ON a.id = c.asset_id
         WHERE c.organization_id <> a.organization_id
        ON CONFLICT DO NOTHING',

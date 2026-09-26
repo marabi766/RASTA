@@ -443,14 +443,13 @@ export class AssetRepository {
     return row.now;
   }
 
-  /** When the asset last changed hands, or null if it never has. */
-  async latestTransferAt(assetId: string): Promise<Date | null> {
-    const latest = await this.client.assetTransfer.findFirst({
-      where: { assetId },
-      orderBy: { transferredAt: 'desc' },
-      select: { transferredAt: true },
+  /** How many times the asset has changed hands; 0 if it never has (or is not visible). */
+  async ownershipGeneration(assetId: string): Promise<number> {
+    const asset = await this.client.asset.findFirst({
+      where: { id: assetId },
+      select: { ownershipGeneration: true },
     });
-    return latest?.transferredAt ?? null;
+    return asset?.ownershipGeneration ?? 0;
   }
 
   // -------------------------------------------------------------------------
@@ -505,15 +504,17 @@ export class AssetRepository {
     id: string,
     organizationId: string,
     mode: 'SHARE' | 'EXCLUSIVE',
-  ): Promise<{ status: string } | null> {
+  ): Promise<{ status: string; ownershipGeneration: number } | null> {
+    // The generation is read under the lock, so a policy stamped with it
+    // cannot straddle a transfer (PR #108 round 2 #5).
     const rows =
       mode === 'SHARE'
-        ? await tx.$queryRaw<{ status: string }[]>`
-            SELECT status::text AS status FROM asset
+        ? await tx.$queryRaw<{ status: string; ownershipGeneration: number }[]>`
+            SELECT status::text AS status, ownership_generation AS "ownershipGeneration" FROM asset
             WHERE id = ${id} AND organization_id = ${organizationId} AND deleted_at IS NULL
             FOR SHARE`
-        : await tx.$queryRaw<{ status: string }[]>`
-            SELECT status::text AS status FROM asset
+        : await tx.$queryRaw<{ status: string; ownershipGeneration: number }[]>`
+            SELECT status::text AS status, ownership_generation AS "ownershipGeneration" FROM asset
             WHERE id = ${id} AND organization_id = ${organizationId} AND deleted_at IS NULL
             FOR NO KEY UPDATE`;
     return rows[0] ?? null;

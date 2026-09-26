@@ -549,10 +549,21 @@ describe('asset integrity', () => {
       );
       expect(filed[0]!.organization_id).toBe(org.b);
 
+      // The previous owner's policy, even dated to the transfer's very
+      // millisecond, is still the previous owner's: ownership is a generation,
+      // not a timestamp (PR #108 round 2 #5).
+      await prisma.client.$executeRawUnsafe(
+        `UPDATE insurance_policy p SET created_at = t.transferred_at
+           FROM asset_transfer t WHERE p.id = $1 AND t.asset_id = p.asset_id`,
+        policy.id,
+      );
+      expect(
+        (await asActor(manager(org.b), () => narrowAssets.dossier(assetId))).compliance
+          .activeInsurance,
+      ).toBeNull();
+
       // Narrowed again: a policy the new owner records after the transfer
-      // counts. Its created_at and the transfer's instant are both
-      // PostgreSQL's clock, so no skew between hosts can misfile it (PR #108
-      // review #6).
+      // counts. It is stamped with the generation the transfer started.
       const own = await asActor(manager(org.b), () =>
         insurance.recordPolicy(assetId, {
           policyNumber: `POL-${ulid().slice(-8)}`,
@@ -566,6 +577,18 @@ describe('asset integrity', () => {
         (await asActor(manager(org.b), () => narrowAssets.dossier(assetId))).compliance
           .activeInsurance,
       ).toMatchObject({ id: own.id });
+      const generations = await prisma.client.$queryRawUnsafe<{ id: string; g: number }[]>(
+        `SELECT id, ownership_generation AS g FROM asset WHERE id = $1
+         UNION ALL
+         SELECT id, ownership_generation AS g FROM insurance_policy WHERE id = ANY($2::text[])`,
+        assetId,
+        [policy.id, own.id],
+      );
+      expect(Object.fromEntries(generations.map((row) => [row.id, row.g]))).toEqual({
+        [assetId]: 1,
+        [policy.id]: 0,
+        [own.id]: 1,
+      });
 
       const activated = await asActor(manager(org.b), () => assets.activate(assetId, {}));
       expect(activated.status).toBe('ACTIVE');

@@ -607,6 +607,9 @@ export class AssetService {
               // their own paperwork. The insurance may be the one that came with
               // the vehicle (docs/24 Q-66).
               status: 'REGISTERED',
+              // A new ownership generation, under the row lock this takes.
+              // Policies recorded from here on carry it (PR #108 round 2 #5).
+              ownershipGeneration: { increment: 1 },
               updatedBy: actor,
             },
             { organizationId: from },
@@ -918,19 +921,19 @@ export class AssetService {
    */
   async policyCountsForCurrentOwner(
     assetId: string,
-    policy: { coverage: string; createdAt: Date },
+    policy: { coverage: string; ownershipGeneration: number },
   ): Promise<boolean> {
-    const ownedSince = await this.repository.latestTransferAt(assetId);
-    return countsForCurrentOwner(policy, ownedSince, this.transferInsurance);
+    const generation = await this.repository.ownershipGeneration(assetId);
+    return countsForCurrentOwner(policy, generation, this.transferInsurance);
   }
 
   /** The in-force policy that counts for the current owner, if any. */
   private async findCountingPolicy(assetId: string) {
-    const ownedSince = await this.repository.latestTransferAt(assetId);
+    const generation = await this.repository.ownershipGeneration(assetId);
     return this.repository.findActivePolicy(
       assetId,
       new Date(),
-      currentOwnerPolicyFilter(ownedSince, this.transferInsurance),
+      currentOwnerPolicyFilter(generation, this.transferInsurance),
     );
   }
 

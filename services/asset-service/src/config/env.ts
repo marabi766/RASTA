@@ -76,7 +76,15 @@ export const assetEnvSchema = baseEnvSchema
           .map((coverage) => coverage.trim())
           .filter((coverage) => coverage.length > 0),
       )
-      .pipe(z.array(z.enum(INSURANCE_COVERAGES))),
+      .pipe(
+        z
+          .array(z.enum(INSURANCE_COVERAGES))
+          // A repeated coverage is a typo, not a wider rule, and it made
+          // "all four" and "this one" disagree (PR #108 round 2 #6).
+          .refine((list) => new Set(list).size === list.length, {
+            message: 'INSURANCE_COVERAGES_FOLLOWING_VEHICLE lists a coverage more than once',
+          }),
+      ),
   });
 
 export type AssetEnv = z.infer<typeof assetEnvSchema>;
