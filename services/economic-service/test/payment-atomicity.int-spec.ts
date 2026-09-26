@@ -1,0 +1,101 @@
+import { ulid } from 'ulid';
+import { runUnscoped } from '@rasta/nest-common';
+import { asActor, cleanup, newPrisma, tenants, wire, type Wiring } from './helpers';
+import { PaymentService } from '../src/payment/payment.service';
+import { MockPaymentProvider } from '../src/payment/mock.provider';
+import { ECONOMIC_EVENTS } from '../src/events/events';
+import type { PrismaService } from '../src/prisma/prisma.service';
+
+/**
+ * A payment's state and the event announcing it commit together (ADR-021;
+ * economic batch 2, item c).
+ *
+ * `PAYMENT_AUTHORIZED` used to be written in a second transaction after the
+ * intent was marked AUTHORIZED. A failure between the two left an intent in a
+ * state no consumer ever heard about. The failure is injected at the outbox
+ * write, which is the second half of the unit; everything else is real.
+ */
+describe('payment authorisation atomicity (real database)', () => {
+  let prisma: PrismaService;
+  let wiring: Wiring;
+  let payments: PaymentService;
+  const org = tenants();
+
+  beforeAll(() => {
+    prisma = newPrisma();
+    wiring = wire(prisma);
+    payments = new PaymentService(
+      prisma,
+      wiring.ledger,
+      wiring.wallets,
+      wiring.walletRepository,
+      new MockPaymentProvider(),
+    );
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  afterAll(async () => {
+    await cleanup(prisma, [org.a, org.b, org.c]);
+    await prisma.onModuleDestroy();
+  });
+
+  const intentsOf = (organizationId: string) =>
+    runUnscoped('the suite reads the intents it created', () =>
+      prisma.client.paymentIntent.findMany({ where: { organizationId } }),
+    );
+
+  const eventsOf = (organizationId: string, eventName: string) =>
+    runUnscoped('the suite reads the outbox rows it caused', () =>
+      prisma.client.outboxMessage.findMany({ where: { organizationId, eventName } }),
+    );
+
+  async function topUp(organizationId: string) {
+    const wallet = await asActor({ organizationId }, () => wiring.wallets.getOrOpen('IRR'));
+    return asActor({ organizationId }, () =>
+      payments.topUp(wallet.id, {
+        amountMinor: '500000',
+        idempotencyKey: `ATOMIC-${ulid()}`,
+      }),
+    );
+  }
+
+  it('leaves the intent CREATED when its PAYMENT_AUTHORIZED row cannot be written', async () => {
+    const organizationId = `${org.a}-AUTHROLLBACK`;
+    const enqueue = wiring.ledger.enqueue.bind(wiring.ledger);
+    jest.spyOn(wiring.ledger, 'enqueue').mockImplementation(async (tx, input) => {
+      if (input.eventName === ECONOMIC_EVENTS.PAYMENT_AUTHORIZED) {
+        throw new Error('outbox write failed');
+      }
+      return enqueue(tx, input);
+    });
+
+    await expect(topUp(organizationId)).rejects.toThrow('outbox write failed');
+
+    // Neither half: the intent was never marked, and no event claims it was.
+    const [intent] = await intentsOf(organizationId);
+    expect(intent).toMatchObject({
+      status: 'CREATED',
+      authorizedAt: null,
+      providerReference: null,
+    });
+    expect(await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_AUTHORIZED)).toHaveLength(0);
+
+    await cleanup(prisma, [organizationId]);
+  });
+
+  it('writes both halves when nothing fails', async () => {
+    const organizationId = `${org.b}-AUTHOK`;
+    const result = await topUp(organizationId);
+    expect(result.status).toBe('CAPTURED');
+
+    const [authorized] = await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_AUTHORIZED);
+    expect(authorized?.aggregateId).toBe(result.paymentIntentId);
+    const [intent] = await intentsOf(organizationId);
+    expect(intent?.authorizedAt).not.toBeNull();
+
+    await cleanup(prisma, [organizationId]);
+  });
+});

@@ -135,18 +135,21 @@ export class PaymentService {
       );
     }
 
+    // The state change and its event commit together or not at all (ADR-021).
+    // They were two transactions: a failure between them left an intent
+    // AUTHORIZED that no consumer ever heard of (economic batch 2, item c).
     const authorizedAt = new Date();
-    await this.prisma.client.paymentIntent.update({
-      where: { id: intentId },
-      data: {
-        status: 'AUTHORIZED',
-        authorizedAt,
-        providerReference: authorization.providerReference,
-      },
-    });
+    await this.prisma.transaction(async (tx) => {
+      await tx.paymentIntent.update({
+        where: { id: intentId },
+        data: {
+          status: 'AUTHORIZED',
+          authorizedAt,
+          providerReference: authorization.providerReference,
+        },
+      });
 
-    await this.prisma.transaction((tx) =>
-      this.ledger.enqueue(tx, {
+      await this.ledger.enqueue(tx, {
         eventName: ECONOMIC_EVENTS.PAYMENT_AUTHORIZED,
         aggregateId: intentId,
         organizationId,
@@ -160,8 +163,8 @@ export class PaymentService {
           simulated: this.provider.simulated,
           authorizedAt: authorizedAt.toISOString(),
         },
-      }),
-    );
+      });
+    });
 
     paymentIntentsTotal.inc({
       service: SERVICE_NAME,
