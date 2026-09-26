@@ -1,6 +1,7 @@
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { asActor, cleanup, newPrisma, readBalances, tenants, wire, type Wiring } from './helpers';
+import { RewardGrantError } from '../src/reward/reward.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -120,6 +121,45 @@ describe('rewards (real database)', () => {
         0n,
       );
       expect(delta).toBe(0n);
+
+      await cleanup(prisma, [org.a]);
+    });
+
+    it('refuses, as a verdict, a grant from an older rule whose value exceeds a BIGINT', async () => {
+      // `createRule` now refuses such terms (economic batch 2, item d); a rule
+      // written before it did is stood in for by a direct insert. Its grant is
+      // refused permanently, so the consumer dead-letters it instead of
+      // retrying a number that will never fit, and nothing is paid.
+      const ruleId = `RWR_${ulid()}`;
+      await runUnscoped('the suite writes a rule that predates the create-time check', () =>
+        prisma.client.rewardRule.create({
+          data: {
+            id: ruleId,
+            organizationId: org.a,
+            triggerEvent: 'USAGE_RECORDED',
+            rewardType: 'POINTS',
+            points: 1_000_000,
+            creditPerPointMinor: 9_223_372_036_854_775n,
+            validFrom: new Date(Date.now() - 60_000),
+            status: 'ACTIVE',
+            createdBy: 'itest',
+            updatedBy: 'itest',
+          },
+        }),
+      );
+
+      const failure = await grant(`USG_${ulid()}`).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(RewardGrantError);
+      expect((failure as RewardGrantError).permanent).toBe(true);
+      expect((failure as RewardGrantError).failures[0]?.ruleId).toBe(ruleId);
+
+      const paid = await runUnscoped('the suite counts grants for the rule', () =>
+        prisma.client.reward.count({ where: { ruleId } }),
+      );
+      expect(paid).toBe(0);
 
       await cleanup(prisma, [org.a]);
     });

@@ -15,7 +15,7 @@ import {
   type RewardRuleView,
 } from './rule-engine';
 import { ECONOMIC_EVENTS } from '../events/events';
-import { formatMinor, parseMinor } from '../shared/money';
+import { formatMinor, isStorableMinor, parseMinor } from '../shared/money';
 import { nextValidTo } from '../shared/rule-validity';
 import { rewardsGrantedTotal, rewardsSkippedTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
@@ -172,6 +172,16 @@ export class RewardService {
         if (isRefusal(decision)) {
           rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: decision.reason });
           return { kind: 'SKIPPED', reason: decision.reason, ruleId: rule.id } as GrantOutcome;
+        }
+
+        // Unreachable for a rule created since the check in `createRule`, and
+        // kept for one created before it: a verdict, so the consumer
+        // dead-letters it rather than retrying a number that will never fit.
+        if (!isStorableMinor(decision.creditAmountMinor)) {
+          throw RastaError.businessRule(
+            'This reward rule would pay more than the largest storable amount',
+            { ruleId: rule.id },
+          );
         }
 
         const rewardId = `${ID_PREFIXES.reward}_${ulid()}`;
@@ -455,6 +465,27 @@ export class RewardService {
       );
     }
 
+    const creditPerPointMinor = dto.creditPerPointMinor
+      ? parseMinor(dto.creditPerPointMinor, 'creditPerPointMinor')
+      : null;
+    // A grant pays `points × creditPerPointMinor`, and each factor fitting a
+    // BIGINT does not make the product fit. Refused where the terms are set,
+    // since they never change afterwards (economic batch 2, item d).
+    if (
+      creditPerPointMinor !== null &&
+      !isStorableMinor(BigInt(dto.points) * creditPerPointMinor)
+    ) {
+      throw RastaError.validation(
+        [
+          {
+            path: 'creditPerPointMinor',
+            message: 'points × creditPerPointMinor exceeds the largest storable amount',
+          },
+        ],
+        'Reward value out of range',
+      );
+    }
+
     const data: Prisma.RewardRuleUncheckedCreateInput = {
       id: `RWR_${ulid()}`,
       organizationId: dto.organizationId ?? null,
@@ -462,9 +493,7 @@ export class RewardService {
       rewardType: dto.rewardType ?? 'POINTS',
       condition: (dto.condition ?? null) as Prisma.InputJsonValue,
       points: dto.points,
-      creditPerPointMinor: dto.creditPerPointMinor
-        ? parseMinor(dto.creditPerPointMinor, 'creditPerPointMinor')
-        : null,
+      creditPerPointMinor,
       periodCap: dto.periodCap ?? null,
       periodType: dto.periodType ?? null,
       validFrom: dto.validFrom ? new Date(dto.validFrom) : new Date(),

@@ -20,6 +20,8 @@ export type { IdPrefix, OrganizationId, UserId, AssetId } from './common/identif
 
 export {
   CURRENCIES,
+  MAX_AMOUNT_MINOR,
+  MIN_SIGNED_AMOUNT_MINOR,
   currencySchema,
   amountMinorSchema,
   signedAmountMinorSchema,

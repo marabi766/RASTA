@@ -2,6 +2,7 @@ import {
   clampCommission,
   commissionFor,
   formatMinor,
+  isStorableMinor,
   opposite,
   parseMinor,
   signedValue,
@@ -46,6 +47,20 @@ describe('parseMinor', () => {
     expect(() => parseMinor(value)).toThrow(expect.objectContaining({ code: 'VALIDATION_FAILED' }));
   });
 
+  it('accepts the largest amount a BIGINT column stores, and refuses one more', () => {
+    // Economic batch 2, item d: past 2^63 - 1 the insert failed as a 500.
+    expect(parseMinor('9223372036854775807')).toBe(9_223_372_036_854_775_807n);
+    expect(() => parseMinor('9223372036854775808', 'grossAmountMinor')).toThrow(
+      expect.objectContaining({
+        code: 'VALIDATION_FAILED',
+        details: [expect.objectContaining({ path: 'grossAmountMinor' })],
+      }),
+    );
+    expect(() => parseMinor('9'.repeat(30))).toThrow(
+      expect.objectContaining({ code: 'VALIDATION_FAILED' }),
+    );
+  });
+
   it('names the field so a client can point at the right input', () => {
     try {
       parseMinor('12.5', 'grossAmountMinor');
@@ -55,6 +70,17 @@ describe('parseMinor', () => {
         'grossAmountMinor',
       );
     }
+  });
+});
+
+describe('isStorableMinor', () => {
+  it('admits zero through 2^63 - 1 and nothing else', () => {
+    expect(isStorableMinor(0n)).toBe(true);
+    expect(isStorableMinor(9_223_372_036_854_775_807n)).toBe(true);
+    expect(isStorableMinor(9_223_372_036_854_775_808n)).toBe(false);
+    expect(isStorableMinor(-1n)).toBe(false);
+    // The reward product it exists for: each factor fits, the result does not.
+    expect(isStorableMinor(1_000_000n * 9_223_372_036_854_775n)).toBe(false);
   });
 });
 

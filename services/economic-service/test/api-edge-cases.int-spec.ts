@@ -379,6 +379,23 @@ describe('economic edge cases', () => {
       expect(backdated.body.code).toBe('BUSINESS_RULE_VIOLATION');
     });
 
+    it('refuses terms whose single grant would exceed a BIGINT, as a 400', async () => {
+      // Each factor fits; the product does not. Refused where the terms are
+      // set, since they never change (economic batch 2, item d).
+      const refused = await request(http)
+        .post('/v1/rewards/rules')
+        .set('authorization', asSystem())
+        .send({
+          organizationId: org,
+          triggerEvent: 'USAGE_RECORDED',
+          rewardType: 'POINTS',
+          points: 1_000_000,
+          creditPerPointMinor: '9223372036854775',
+        })
+        .expect(400);
+      expect(refused.body.code).toBe('VALIDATION_FAILED');
+    });
+
     it('answers 404 for a rule that does not exist, and lists all triggers', async () => {
       await request(http)
         .patch('/v1/rewards/rules/RWR_0000000000000000000000000')
@@ -391,6 +408,52 @@ describe('economic edge cases', () => {
         .set('authorization', asOrg())
         .expect(200);
       expect(all.body.items.length).toBeGreaterThan(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Amounts past what a BIGINT column holds (economic batch 2, item d)
+  // -------------------------------------------------------------------------
+
+  describe('an amount no column can store', () => {
+    const PAST_BIGINT = '9223372036854775808';
+
+    it('is a 400 on a top-up, not a 500 from the database', async () => {
+      const wallet = await request(http).get('/v1/wallets/me').set('authorization', asOrg());
+      const refused = await request(http)
+        .post(`/v1/wallets/${wallet.body.id}/top-up`)
+        .set('authorization', asOrg())
+        .set('idempotency-key', id('edge-huge'))
+        .send({ amountMinor: PAST_BIGINT })
+        .expect(400);
+      expect(refused.body.code).toBe('VALIDATION_FAILED');
+    });
+
+    it('is a 400 on a transaction, and on a commission floor', async () => {
+      const transaction = await request(http)
+        .post('/v1/transactions')
+        .set('authorization', asOrg())
+        .set('idempotency-key', id('edge-huge-txn'))
+        .send({
+          transactionType: 'MARKETPLACE_ORDER',
+          counterpartyOrganizationId: payee,
+          grossAmountMinor: '9'.repeat(30),
+          currency: 'IRR',
+        })
+        .expect(400);
+      expect(transaction.body.code).toBe('VALIDATION_FAILED');
+
+      const rule = await request(http)
+        .post('/v1/commissions/rules')
+        .set('authorization', asSystem())
+        .send({
+          organizationId: org,
+          transactionType: 'MARKETPLACE_ORDER',
+          rateBasisPoints: 100,
+          minAmountMinor: PAST_BIGINT,
+        })
+        .expect(400);
+      expect(rule.body.code).toBe('VALIDATION_FAILED');
     });
   });
 
