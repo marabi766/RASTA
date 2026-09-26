@@ -10,7 +10,8 @@
 > سرویس از حالت تمیز، تست زنده Auth/Tenant Isolation/Event Flow، و بررسی مستقیم
 > GitHub Actions.
 >
-> **آخرین به‌روزرسانی:** 2026-09-21 — `main` روی `6ea1260`؛ کانال ایمیل (`NTF-004`)، نشست سمت سرور پورتال (`ADR-059`) و نخستین صفحه‌های دارایی (`EXP-002`). وضعیت جاری در بخش ۲ است؛ بلوک زیر، سابقهٔ 2026-09-07 است.
+> **آخرین به‌روزرسانی:** 2026-09-26 — `construction-service` (CON-001) در بازبینی: #119 و #122، هنوز روی `main` نیست (§ ۷-ه).
+> **پیشین:** 2026-09-21 — `main` روی `6ea1260`؛ کانال ایمیل (`NTF-004`)، نشست سمت سرور پورتال (`ADR-059`) و نخستین صفحه‌های دارایی (`EXP-002`). وضعیت جاری در بخش ۲ است؛ بلوک زیر، سابقهٔ 2026-09-07 است.
 >
 > **به‌روزرسانی 2026-09-07** — **بستهٔ تصمیم اعلان و حسابرسی: ADR-053 و ADR-054 نوشته شدند، هر دو `Proposed`.**
 >
@@ -1922,7 +1923,8 @@ PR #54، #55 و #56 روی `main` نشست. امروز `apps/web` یک Workspace
 | **بررسی Magic Number روی بایت‌های واقعی**                                   |                          ✅                           |             ✅             | ✅ زنده: HTML آپلودشده زیر ادعای PDF → `422`                                                                                                                                                                                                                               |
 | **اسکن بدافزار واقعی (ClamAV)**                                             |                          ✅                           |  ✅ واحد + یکپارچگی + E2E  | ✅ **زنده** — ClamAV 1.5.4 پین‌شده، ناهمزمان، EICAR روی موتور واقعی تشخیص داده شد (ADR-049، Q-18 بسته)                                                                                                                                                                     |
 | **supplier-service — فاز ۱: پروفایل/صلاحیت/تعلیق/فهرست**                    |                          ✅                           | ✅ ۴۱۷ واحد + ۱۲۶ یکپارچگی | ✅ **Merge شد** روی `main` (`36d718cf`، 2026-09-06)؛ Coverage ۹۲٫۰۸٪ Statement / ۸۴٫۲۵٪ Branch با دروازهٔ ۷۵٪ در CI. امتیاز عملکرد همچنان پیاده **نشد**: Q-12 در 2026-09-07 بسته شد (ADR-052) ولی **Phase 2 شروع نشده**. `COM-005` همچنان IN_PROGRESS و بدون امتیاز Story. |
-| procurement/inventory/construction/…                                        |                          ❌                           |             —              | مطابق فازبندی؛ وضعیت هر قابلیت در `docs/17`                                                                                                                                                                                                                                |
+| **construction-service — CON-001 (در بازبینی؛ #119 و #122)**                |                          ✅                           |  ✅ واحد + یکپارچگی + E2E  | روی `main` نیست. پروژه و نیاز (#119)، موافقت پیکربندی‌شده و پیشرفت (#122)؛ جزئیات و شکاف‌ها در § ۷-ه                                                                                                                                                                       |
+| procurement/inventory/…                                                     |                          ❌                           |             —              | مطابق فازبندی؛ وضعیت هر قابلیت در `docs/17`                                                                                                                                                                                                                                |
 
 ---
 
@@ -1972,8 +1974,9 @@ services/
   maintenance-service/    IMPLEMENTED — کد، تست و تأیید زنده کامل
   economic-service/       IMPLEMENTED — کد، تست و تأیید زنده کامل
   marketplace/document/supplier/notification/audit-service  IMPLEMENTED
-  (۵ سرویس دیگر)          NOT_STARTED — procurement، inventory، construction،
-                          contract، analytics (بخش ۲۷)
+  construction-service/   IN REVIEW — CON-001 PR 1 (#119) و PR 2 روی شاخه؛ هنوز روی main نیست (§ ۷-ه)
+  (۴ سرویس دیگر)          NOT_STARTED — procurement، inventory، contract،
+                          analytics (بخش ۲۷)
 
 packages/
   contracts/    شیء‌های مشترک: ID، Money، Error، Event Envelope
@@ -2631,6 +2634,41 @@ Migration با `node scripts/verify-migration-reversible.mjs document` واقع�
 
 ---
 
+## ۷-ه. construction-service — ورودی کامل حافظه
+
+> **وضعیت (2026-09-26):** IMPLEMENTED · TESTED (محلی) · **روی `main` نیست**. پورت **۳۱۱۰**، پایگاه داده
+> `rasta_construction`، Topic ‏`rasta.construction.v1`. دیگر `NOT_STARTED` نیست. تصمیم معماری:
+> [ADR-063](docs/adr/ADR-063-construction-lifecycles-and-approval-policy-ownership.md) (`Proposed`). پرسش‌های باز:
+> Q-68..Q-73 (`docs/24` § ۲۴٫۹-الف)، همه با پاسخ موقت پیکربندی‌پذیر و همه **باز**.
+
+**CON-001 PR 1 — #119** (شاخهٔ `claude/new-session-6ektto`): پروژه و نیاز پروژه؛ ماشین حالت صریح پایگاه داده
+(بی Temporal)، CAS روی `version`، قفل ردیف پروژه، Outbox تراکنشی، هفت رویداد (یکی از کاتالوگ، شش افزوده با تأیید
+مدیر پروژه)، ساخت Idempotent (تکمیل کلید در **همان** تراکنش دامنه، پس از بازبینی Codex)، Migration برگشت‌پذیر،
+ثبت در Audit Topology، و سناریوی E2E از راه Gateway (بسته بودن بی‌توکن، Idempotency، چرخهٔ پروژه و نیاز، ۴۰۹، ۴۰۴
+میان‌مستأجری، رکورد Audit). Payloadها هیچ متن آزادی حمل نمی‌کنند.
+
+**CON-001 PR 2** (شاخهٔ `claude/new-session-6ektto-pr2`، روی PR 1 بنا شده): `approval_policy` داده‌ای (مرجع =
+سازمان + نقش؛ پلتفرم هرگز پیش‌فرض موافقت نمی‌کند — نبود سیاست = ۴۲۲)، گام‌های ترتیبی، آغاز، گزارش پیشرفت (Basis
+Point، نزولی‌نشدنی مگر با پیکربندی)، پایان با تأیید فنی نهایی پیکربندی‌پذیر، بی هیچ Timer.
+
+**شواهد محلی (نه CI):** PR 1 — ۴۰۱ تست (واحد + یکپارچگی)، پوشش شاخه‌ای ≈ ۸۸٪ (دروازهٔ ۸۵٪)، Migration بالا → پایین →
+بالا سبز. PR 2 — ۵۹۳ تست پیش از ادغام اصلاحات PR 1. **E2E محلی اجرا نشد** (Docker/Keycloak در محیط نبود)؛ نخستین
+اجرای واقعی‌اش در CI است.
+
+**شکاف‌های باقی‌مانده (صادقانه):**
+
+- پیوست مدارک پروژه و تصویر پیشرفت (Q-72) — پیاده نشده.
+- مناقصه و پیشنهاد (CON-002) و قرارداد (CON-003) — شروع نشده؛ `PROJECT_STARTED.contractId` همیشه `null`.
+- هیچ قاعدهٔ تعارض منافع درخواست‌کننده/تصمیم‌گیرنده (سندی تعریفش نکرده).
+- شناسهٔ سازمان مرجع در سیاست با `organization-service` اعتبارسنجی نمی‌شود.
+- با نقش‌های پیش‌فرض و Realm نمونه، هیچ سازمانی هم نقش پروژه و هم نقش نویسندهٔ سیاست را ندارد؛ E2E ‏PR 2 برای همین
+  `CONSTRUCTION_POLICY_SETTER_ROLES` را گسترده می‌کند — پرسش Q-70 (۷) برای مالک.
+- ترتیب تحویل رویداد میان Replicaهای Relay تضمین نشده (D-027، ADR-051 B4) — مشترک با همهٔ سرویس‌ها.
+- همان الگوی Idempotency «تکمیل پس از Commit» در `marketplace-service` و `economic-service` هنوز هست (این PR فقط
+  construction را اصلاح کرد).
+
+---
+
 ## ۸. Domain Ownership
 
 | دامنه                                   | سرویس مالک             | یادداشت                                                 |
@@ -2735,7 +2773,10 @@ Promise های Prisma، Scope را زودتر از موعد می‌بست و Que
 aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
 - Topic هر دامنه: `rasta.<domain>.v1` (+ `.retry` و `.dlq`). امروز
   `asset`, `insurance`, `fleet` و **`maintenance`** تولیدکننده واقعی دارند؛
-  `marketplace` و `construction` هنوز فقط مصرف‌شونده‌اند (توسط asset-service). ۴۹ Topic از قبل در Kafka ساخته شده
+  `marketplace` و `construction` هنوز فقط مصرف‌شونده‌اند (توسط asset-service).
+  **به‌روزرسانی 2026-09-26:** `rasta.construction.v1` با #119 تولیدکننده دارد (`construction-service`؛ کلید پارتیشن
+  `projectId`، Payload بی متن آزاد) و `audit-service` آن را مصرف می‌کند. کلید مشترک هم‌Partition‌کردن است، نه ترتیب
+  تضمین‌شده (D-027، ADR-051 B4). ۴۹ Topic از قبل در Kafka ساخته شده
   (`infrastructure/docker/kafka/create-topics.sh`) — بقیه خالی منتظرند.
 - کاتالوگ کامل رویدادها: [`docs/events/README.md`](docs/events/README.md) —
   این جلسه با کد Sync شد (۵ رویداد گم‌شده اضافه، نام فیلدهای غلط اصلاح).
@@ -5824,7 +5865,8 @@ un\` است — تغییر نام آن پوشه رفعش می‌کند.
 
 ---
 
-_آخرین Audit کامل: 2026-08-27. آخرین به‌روزرسانی: **2026-09-21** — هم‌خوانی اسناد
+_آخرین Audit کامل: 2026-08-27. آخرین به‌روزرسانی: **2026-09-26** — `construction-service` در بازبینی (#119، #122؛
+§ ۷-ه). پیش‌تر: **2026-09-21** — هم‌خوانی اسناد
 با `main` روی `6ea1260` پس از PR #64 تا #67: `NTF-004`، `ADR-059`، `EXP-002` الف و
 ب، و رفع نشت Relay. پیش‌تر: 2026-09-20 — `NTF-003`،
 بستن `Q-38` و رفع نشت Producer کافکا در خاموشی؛ PR #60، `main` روی `e6d509e`،

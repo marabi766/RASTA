@@ -1,4 +1,5 @@
 import {
+  PERFORMANCE_FORMULA_EVENTS,
   SUPPLIER_EVENT_SCHEMAS,
   SUPPLIER_EVENTS,
   validateSupplierPayload,
@@ -210,5 +211,98 @@ describe('every mutation names its actor', () => {
     const { [field]: _omitted, ...withoutActor } = VALID[name] as Record<string, unknown>;
 
     expect(() => validateSupplierPayload(name, withoutActor)).toThrow();
+  });
+});
+
+describe('the performance formula audit events (ADR-052 step 2)', () => {
+  const CREATED = {
+    formulaVersionId: 'PFV_01JBQ8Z4K7M2N5P8R1T3V6X9Y2',
+    formulaVersion: 1,
+    windowDays: 180,
+    minSampleCount: 5,
+    minCoverageBp: 5000,
+    ratingMapping: { scaleMin: 1, scaleMax: 5, minScoreCentis: 0, maxScoreCentis: 10_000 },
+    weights: [
+      { component: 'CANCELLATION_ABSENCE', weightBp: 1000 },
+      { component: 'CUSTOMER_SATISFACTION', weightBp: 2000 },
+      { component: 'DISPUTE_ABSENCE', weightBp: 1500 },
+      { component: 'ON_TIME', weightBp: 2500 },
+      { component: 'QUALITY', weightBp: 3000 },
+    ],
+    createdBy: 'USR_01JBQ8Z4K7M2N5P8R1T3V6X9Y4',
+    createdAt: '2026-09-26T10:00:00.000Z',
+  };
+  const ACTIVATED = {
+    formulaVersionId: 'PFV_01JBQ8Z4K7M2N5P8R1T3V6X9Y2',
+    formulaVersion: 1,
+    supersededFormulaVersionId: null,
+    activatedBy: 'USR_01JBQ8Z4K7M2N5P8R1T3V6X9Y4',
+    activatedAt: '2026-09-26T10:05:00.000Z',
+  };
+  const RETIRED = {
+    formulaVersionId: 'PFV_01JBQ8Z4K7M2N5P8R1T3V6X9Y1',
+    formulaVersion: 1,
+    successorFormulaVersionId: 'PFV_01JBQ8Z4K7M2N5P8R1T3V6X9Y2',
+    retiredBy: 'USR_01JBQ8Z4K7M2N5P8R1T3V6X9Y4',
+    retiredAt: '2026-09-26T10:05:00.000Z',
+  };
+
+  it('declares exactly the three formula events, beside the five supplier events', () => {
+    expect(Object.keys(PERFORMANCE_FORMULA_EVENTS).sort()).toEqual([
+      'PERFORMANCE_FORMULA_VERSION_ACTIVATED',
+      'PERFORMANCE_FORMULA_VERSION_CREATED',
+      'PERFORMANCE_FORMULA_VERSION_RETIRED',
+    ]);
+    for (const name of Object.values(PERFORMANCE_FORMULA_EVENTS)) {
+      expect(SUPPLIER_EVENT_SCHEMAS[name]).toBeDefined();
+    }
+  });
+
+  it.each([
+    ['PERFORMANCE_FORMULA_VERSION_CREATED', CREATED],
+    ['PERFORMANCE_FORMULA_VERSION_ACTIVATED', ACTIVATED],
+    ['PERFORMANCE_FORMULA_VERSION_RETIRED', RETIRED],
+  ] as const)('accepts a valid %s', (name, payload) => {
+    expect(validateSupplierPayload(name, payload)).toEqual(payload);
+  });
+
+  it.each([
+    ['PERFORMANCE_FORMULA_VERSION_CREATED', CREATED, 'createdBy'],
+    ['PERFORMANCE_FORMULA_VERSION_ACTIVATED', ACTIVATED, 'activatedBy'],
+    ['PERFORMANCE_FORMULA_VERSION_RETIRED', RETIRED, 'retiredBy'],
+  ] as const)('%s names its actor', (name, payload, field) => {
+    const { [field]: _omitted, ...withoutActor } = payload as Record<string, unknown>;
+
+    expect(() => validateSupplierPayload(name, withoutActor)).toThrow();
+  });
+
+  it('refuses a fractional weight — no float in the formula', () => {
+    const weights = [{ component: 'QUALITY', weightBp: 9999.5 }];
+
+    expect(() =>
+      validateSupplierPayload('PERFORMANCE_FORMULA_VERSION_CREATED', { ...CREATED, weights }),
+    ).toThrow();
+  });
+
+  it('refuses a component ADR-052 did not accept', () => {
+    const weights = [{ component: 'PRICE', weightBp: 10_000 }];
+
+    expect(() =>
+      validateSupplierPayload('PERFORMANCE_FORMULA_VERSION_CREATED', { ...CREATED, weights }),
+    ).toThrow();
+  });
+
+  it('refuses a retirement that names no successor — there is no standalone retire', () => {
+    const { successorFormulaVersionId: _omitted, ...standalone } = RETIRED;
+
+    expect(() =>
+      validateSupplierPayload('PERFORMANCE_FORMULA_VERSION_RETIRED', standalone),
+    ).toThrow();
+  });
+
+  it('carries no score', () => {
+    expect(() =>
+      validateSupplierPayload('PERFORMANCE_FORMULA_VERSION_ACTIVATED', { ...ACTIVATED, score: 1 }),
+    ).toThrow();
   });
 });

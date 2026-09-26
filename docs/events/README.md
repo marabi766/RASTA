@@ -436,14 +436,22 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 
 ## Supplier — `rasta.supplier.v1`
 
-| رویداد                      | مصرف‌کنندگان                                                      | Payload کلیدی                                          |
-| --------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------ |
-| `SUPPLIER_REGISTERED`       | analytics · audit                                                 | `supplierId`, `organizationId`, `capabilities[]`       |
-| `SUPPLIER_QUALIFIED`        | marketplace · procurement · construction                          | `supplierId`, `qualifiedFor[]`                         |
-| `SUPPLIER_REJECTED`         | notification                                                      | `supplierId`, `reason`                                 |
-| `SUPPLIER_SUSPENDED`        | **marketplace (پنهان‌سازی پیشنهاد)** · procurement · construction | `supplierId`, `reason`, `until`                        |
-| `SUPPLIER_REINSTATED`       | **audit** · مصرف‌کنندگانِ `SUPPLIER_SUSPENDED`                    | `supplierId`, `suspensionId`, `reason`, `reinstatedBy` |
-| `PERFORMANCE_SCORE_UPDATED` | **marketplace (رتبه‌بندی)** · search                              | `supplierId`, `score`, `breakdown`                     |
+| رویداد                                  | مصرف‌کنندگان                                                      | Payload کلیدی                                                                                                                    |
+| --------------------------------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `SUPPLIER_REGISTERED`                   | analytics · audit                                                 | `supplierId`, `organizationId`, `capabilities[]`                                                                                 |
+| `SUPPLIER_QUALIFIED`                    | marketplace · procurement · construction                          | `supplierId`, `qualifiedFor[]`                                                                                                   |
+| `SUPPLIER_REJECTED`                     | notification                                                      | `supplierId`, `reason`                                                                                                           |
+| `SUPPLIER_SUSPENDED`                    | **marketplace (پنهان‌سازی پیشنهاد)** · procurement · construction | `supplierId`, `reason`, `until`                                                                                                  |
+| `SUPPLIER_REINSTATED`                   | **audit** · مصرف‌کنندگانِ `SUPPLIER_SUSPENDED`                    | `supplierId`, `suspensionId`, `reason`, `reinstatedBy`                                                                           |
+| `PERFORMANCE_SCORE_UPDATED`             | **marketplace (رتبه‌بندی)** · search                              | `supplierId`, `score`, `breakdown`                                                                                               |
+| `PERFORMANCE_FORMULA_VERSION_CREATED`   | **audit**                                                         | `formulaVersionId`, `formulaVersion`, `windowDays`, `minSampleCount`, `minCoverageBp`, `ratingMapping`, `weights[]`, `createdBy` |
+| `PERFORMANCE_FORMULA_VERSION_ACTIVATED` | **audit**                                                         | `formulaVersionId`, `formulaVersion`, `supersededFormulaVersionId`, `activatedBy`                                                |
+| `PERFORMANCE_FORMULA_VERSION_RETIRED`   | **audit**                                                         | `formulaVersionId`, `formulaVersion`, `successorFormulaVersionId`, `retiredBy`                                                   |
+
+> **سه رویداد `PERFORMANCE_FORMULA_VERSION_*` (ADR-052 گام ۲).** رکورد Audit هر تغییر فرمول سراسری امتیاز عملکرد
+> (S-06) — در همان تراکنش ردیف، از راه Outbox. فرمول به هیچ مستأجری تعلق ندارد (`docs/24` Q-75)، پس این رویدادها
+> `tenantId` ندارند و کلید جریانشان **شناسهٔ نسخهٔ فرمول** است، نه `supplierId`. بازنشستگی فقط همراه فعال‌سازی جانشین رخ
+> می‌دهد و `successorFormulaVersionId` همیشه پر است. `PERFORMANCE_SCORE_UPDATED` همچنان منتشر **نمی‌شود** (گام ۸).
 
 ## Inventory — `rasta.inventory.v1`
 
@@ -460,20 +468,55 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 
 ## Construction — `rasta.construction.v1`
 
-| رویداد                     | مصرف‌کنندگان                                            | Payload کلیدی                                          |
-| -------------------------- | ------------------------------------------------------- | ------------------------------------------------------ |
-| `PROJECT_CREATED`          | analytics · audit                                       | `projectId`, `title`, `estimate`, `location`           |
-| `APPROVAL_REQUESTED`       | **notification (مرجع تأیید)** · audit                   | `approvalId`, `projectId`, `approvalType`, `authority` |
-| `APPROVAL_GRANTED`         | notification · audit · analytics                        | `approvalId`, `grantedBy`, `conditions`                |
-| `APPROVAL_REJECTED`        | notification · audit                                    | `approvalId`, `reason`                                 |
-| `TENDER_CREATED`           | audit                                                   | `tenderId`, `projectId`, `procurementNature`           |
-| `TENDER_PUBLISHED`         | **notification (پیمانکاران)** · search · analytics      | `tenderId`, `bidOpeningAt`, `bidClosingAt`             |
-| `BID_SUBMITTED`            | notification · **audit (مهر زمانی)**                    | `bidId`, `tenderId`, `contractorId`, `submittedAt`     |
-| `BIDS_EVALUATED`           | audit · analytics                                       | `tenderId`, `matrix`, `ranking`                        |
-| `TENDER_AWARDED`           | **contract (ایجاد پیش‌نویس)** · notification · supplier | `tenderId`, `winnerId`, `amount`, `justification`      |
-| `PROJECT_STARTED`          | fleet · analytics                                       | `projectId`, `contractId`                              |
-| `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `percentage`, `assetsUsed[]`              |
-| `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `completedAt`                             |
+> **CON-001 PR نخست (2026-09-26).** `construction-service` هفت رویداد زیر را تولید می‌کند: `PROJECT_CREATED` و شش
+> رویداد تازه‌ای که مدیر پروژه برای همین PR پذیرفت (ردیف‌های **پررنگ** در جدول دوم). بقیهٔ ردیف‌های جدول نخست هنوز
+> **برنامه‌ریزی‌شده**‌اند: موافقت‌ها، آغاز و پایان و پیشرفت با PR دوم CON-001، و مناقصه با CON-002. Payloadها در
+> `services/construction-service/src/events/events.ts` تعریف و در زمان انتشار اعتبارسنجی می‌شوند (`.strict()`).
+>
+> **کلید پارتیشن همهٔ رویدادهای این Topic `projectId` است** و `aggregateType` همهٔ آن‌ها `Project`: نیاز، موافقت و
+> گزارش پیشرفت درون مرز Aggregate پروژه‌اند (`docs/03` § ۳٫۳)، و هر مصرف‌کننده دربارهٔ **یک پروژه** استدلال می‌کند.
+> شناسهٔ نیاز در Payload می‌آید (`needId`). این هم‌Partition‌کردن است، نه ترتیب تضمین‌شده (D-027).
+>
+> **Payloadها فقط شناسه، وضعیت، مهر زمانی، مبلغ و کدهای کران‌دار حمل می‌کنند — هیچ متن آزاد، داده شخصی، شناسهٔ سند
+> یا چندضلعی محدوده.** عنوان پروژه، نوع عملیات (که بی‌فهرست پیکربندی‌شده متن آزاد است، Q-68)، شرح کار، شرح نیاز و
+> دلیل نوشته‌شدهٔ لغو یا انصراف نثری‌اند که کسی برای سازمان خودش نوشته، نه برای هر مصرف‌کنندهٔ پلتفرم؛ در پایگاه دادهٔ
+> همین سرویس می‌مانند و مصرف‌کننده از API (با مجوز خودش) می‌خواندشان (بازبینی Codex روی #119، یافتهٔ ۴). `PROJECT_CREATED`
+> به‌جای `location` فقط `hasArea` دارد. `estimate` با نام `estimatedCostMinor` (رشتهٔ ریالی، یا `null`) می‌آید.
+> تحویل مرتب میان Replicaهای Relay تضمین **نمی‌شود** (D-027، ADR-051 B4).
+
+| رویداد                     | مصرف‌کنندگان                                            | Payload کلیدی                                                                            |
+| -------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `PROJECT_CREATED`          | analytics · audit                                       | `projectId`, `organizationId`, `estimatedCostMinor`, `hasArea`, `createdBy`, `createdAt` |
+| `APPROVAL_REQUESTED`       | **notification (مرجع تأیید)** · audit                   | `approvalId`, `projectId`, `approvalType`, `authority`                                   |
+| `APPROVAL_GRANTED`         | notification · audit · analytics                        | `approvalId`, `grantedBy`, `conditions`                                                  |
+| `APPROVAL_REJECTED`        | notification · audit                                    | `approvalId`, `reason`                                                                   |
+| `TENDER_CREATED`           | audit                                                   | `tenderId`, `projectId`, `procurementNature`                                             |
+| `TENDER_PUBLISHED`         | **notification (پیمانکاران)** · search · analytics      | `tenderId`, `bidOpeningAt`, `bidClosingAt`                                               |
+| `BID_SUBMITTED`            | notification · **audit (مهر زمانی)**                    | `bidId`, `tenderId`, `contractorId`, `submittedAt`                                       |
+| `BIDS_EVALUATED`           | audit · analytics                                       | `tenderId`, `matrix`, `ranking`                                                          |
+| `TENDER_AWARDED`           | **contract (ایجاد پیش‌نویس)** · notification · supplier | `tenderId`, `winnerId`, `amount`, `justification`                                        |
+| `PROJECT_STARTED`          | fleet · analytics                                       | `projectId`, `contractId`                                                                |
+| `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `percentage`, `assetsUsed[]`                                                |
+| `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `completedAt`                                                               |
+
+**رویدادهای افزودهٔ CON-001** (پذیرفته‌شده به‌دست مدیر پروژه، 2026-09-26). هر تغییر وضعیت پروژه و نیاز باید به
+`audit-service` برسد (`AGENTS.md` S-06، A-08)، و کاتالوگ برای ویرایش پروژه، لغو، و چرخهٔ نیاز رویدادی نداشت — همان
+شکافی که `DRIVER_UPDATED` و `SUPPLIER_REINSTATED` بستند.
+
+| رویداد                       | مصرف‌کنندگان      | Payload کلیدی                                                                        |
+| ---------------------------- | ----------------- | ------------------------------------------------------------------------------------ |
+| **`PROJECT_UPDATED`**        | audit · analytics | `projectId`, `organizationId`, `changedFields[]`, `updatedBy`, `updatedAt`           |
+| **`PROJECT_STATUS_CHANGED`** | audit · analytics | `projectId`, `organizationId`, `from`, `to`, `changedBy`, `changedAt`                |
+| **`PROJECT_NEED_ADDED`**     | audit · analytics | `projectId`, `needId`, `organizationId`, `addedBy`, `addedAt`                        |
+| **`PROJECT_NEED_UPDATED`**   | audit             | `projectId`, `needId`, `organizationId`, `changedFields[]`, `updatedBy`, `updatedAt` |
+| **`PROJECT_NEED_SUBMITTED`** | audit · analytics | `projectId`, `needId`, `organizationId`, `submittedBy`, `submittedAt`                |
+| **`PROJECT_NEED_WITHDRAWN`** | audit · analytics | `projectId`, `needId`, `organizationId`, `withdrawnBy`, `withdrawnAt`                |
+
+`PROJECT_UPDATED` و `PROJECT_NEED_UPDATED` فقط **نام** فیلدهای تغییریافته را حمل می‌کنند، نه مقدارشان (همان قاعدهٔ
+`ASSET_UPDATED` و `DRIVER_UPDATED`). `PROJECT_STATUS_CHANGED` گذارهایی را می‌پوشاند که رویداد اختصاصی ندارند — در PR
+نخست فقط لغو (`to = CANCELLED`)، و در PR دوم ورود به `PENDING_APPROVAL`، `APPROVED` و `CHANGES_REQUESTED`. گذارهای
+`PROJECT_STARTED` و `PROJECT_COMPLETED` رویداد خودشان را دارند و `PROJECT_STATUS_CHANGED` تکراری برایشان منتشر
+نمی‌شود. دلیل لغو یا انصراف روی رویداد نمی‌آید؛ در `project.status_reason` و `project_need.withdrawal_reason` می‌ماند.
 
 ## Contract — `rasta.contract.v1`
 

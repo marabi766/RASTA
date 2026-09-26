@@ -641,6 +641,9 @@ export const EXPECTED = {
    * predating the thing it decides.
    */
   supplier: {
+    // The runtime role owns nothing and cannot create the scratch schema
+    // (lib/supplier-privilege-split.bash); the migrator owns the database.
+    connectAs: 'migrator',
     tables: [
       'supplier',
       'supplier_capability',
@@ -650,8 +653,74 @@ export const EXPECTED = {
       'outbox_message',
       'outbox_stream_sequence',
       'processed_event',
+      // ADR-052 step 2: the platform-wide performance formula.
+      'performance_formula_version',
+      'performance_formula_weight',
+      // ADR-052 step 3: the append-only performance-event store.
+      'performance_event',
+      // ADR-052 step 4: the score snapshot and its provenance.
+      'performance_score_snapshot',
+      'performance_score_component',
+      'performance_score_source_event',
     ],
-    triggers: [],
+    // ADR-052 step 2. The freeze, the no-truncate pair, the deferred 100% sum
+    // and the successor rule. A round trip that lost any one of them would
+    // leave a formula table that accepts exactly the edit it exists to refuse.
+    triggers: [
+      'trg_performance_formula_version_guard',
+      'trg_performance_formula_version_no_truncate',
+      'trg_performance_formula_weight_guard',
+      'trg_performance_formula_weight_no_truncate',
+      'trg_performance_formula_weight_sum',
+      'trg_performance_formula_version_sum',
+      'trg_performance_formula_successor',
+      // ADR-052 step 3. Both, because the row trigger never sees a TRUNCATE.
+      'trg_performance_event_append_only',
+      'trg_performance_event_no_truncate',
+      // ADR-052 step 4. Insert-only on all three tables, the seal that keeps
+      // provenance from being added after the fact, and the commit-time check
+      // that the snapshot agrees with its formula version.
+      'trg_performance_score_snapshot_append_only',
+      'trg_performance_score_snapshot_no_truncate',
+      'trg_performance_score_component_append_only',
+      'trg_performance_score_component_no_truncate',
+      'trg_performance_score_source_event_append_only',
+      'trg_performance_score_source_event_no_truncate',
+      'trg_performance_score_component_sealed',
+      'trg_performance_score_source_event_sealed',
+      'trg_performance_score_snapshot_consistent',
+    ],
+    functions: [
+      'performance_formula_version_guard',
+      'performance_formula_weight_guard',
+      'performance_formula_weight_sum_check',
+      'performance_formula_successor_check',
+      'performance_event_append_only',
+      'performance_score_append_only',
+      'performance_score_child_sealed',
+      'performance_score_snapshot_consistent',
+    ],
+    indexes: [
+      'ux_performance_formula_version_number',
+      // "At most one ACTIVE" is this partial index and nothing else.
+      'ux_performance_formula_single_active',
+      // ADR-052 rule 8: the idempotency key. Without it a redelivery is
+      // counted twice and the score moves.
+      'ux_performance_event_source',
+      'ux_performance_event_compensation_target',
+      // ADR-052 step 4: the targets of the composite foreign keys that keep a
+      // snapshot's version number and cited events consistent and in-tenant.
+      'ux_performance_formula_version_identity',
+      'ux_performance_event_tenant_source',
+      'ux_performance_score_snapshot_tenant',
+    ],
+    types: [
+      'PerformanceFormulaStatus',
+      'PerformanceComponent',
+      'ResponsibilityAttribution',
+      'PerformanceOutcomeKind',
+      'PerformanceScoreStatus',
+    ],
     constraints: [
       // Domain invariants.
       'ck_supplier_display_name_not_blank',
@@ -669,6 +738,93 @@ export const EXPECTED = {
       'ck_suspension_text_not_blank',
       // ADR-050 / ADR-051 B1, folded into the initial migration and therefore
       // out of reach of the by-name outbox verifiers.
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_next_attempt_requires_failure',
+      'ck_outbox_published_is_clean',
+      // ADR-052 step 2.
+      'ck_formula_version_positive',
+      'ck_formula_window_positive',
+      'ck_formula_min_sample_positive',
+      'ck_formula_min_coverage_range',
+      'ck_formula_rating_mapping',
+      'ck_formula_activation_complete',
+      'ck_formula_retirement_complete',
+      'ck_formula_status_stamps',
+      'ck_formula_chronology',
+      'ck_formula_text_not_blank',
+      'ck_formula_weight_bp_range',
+      // ADR-052 step 3.
+      'performance_event_compensates_fkey',
+      'ck_performance_event_not_self_compensating',
+      'ck_performance_event_quality_unmeasured',
+      'ck_performance_event_responsibility',
+      'ck_performance_event_rating',
+      'ck_performance_event_timeliness',
+      'ck_performance_event_text_not_blank',
+      // ADR-052 step 4.
+      'performance_score_snapshot_version_fkey',
+      'performance_score_component_snapshot_fkey',
+      'performance_score_source_event_snapshot_fkey',
+      'performance_score_source_event_event_fkey',
+      'ck_score_snapshot_window',
+      'ck_score_snapshot_score_only_when_published',
+      'ck_score_snapshot_ranges',
+      'ck_score_snapshot_text_not_blank',
+      'ck_score_component_absent_is_null',
+      'ck_score_component_ranges',
+      'ck_score_component_present_has_samples',
+    ],
+  },
+  /**
+   * construction-service (CON-001, ADR-063). One initial migration that folds
+   * the domain schema and the outbox together, as supplier's does, so its
+   * outbox objects are verified here rather than by the by-name outbox
+   * verifiers (`verify-outbox-claim-migration.mjs` lists it as folded).
+   *
+   * A scratch database, because `project.area` is `geography` and the
+   * migration names it unqualified: it resolves only where PostGIS is on the
+   * search path, which a throwaway schema in the service database is not.
+   *
+   * The domain constraints listed are the ones carrying a claim a reader would
+   * otherwise take on trust: a cancellation always has a reason, a withdrawal
+   * names who, when and why, a submission names its actor, and an operating
+   * area is valid geometry.
+   */
+  construction: {
+    scratchDatabase: true,
+    tables: [
+      'idempotency_key',
+      'outbox_message',
+      'outbox_stream_sequence',
+      'processed_event',
+      'project',
+      'project_need',
+    ],
+    triggers: [],
+    constraints: [
+      'ck_project_text_not_blank',
+      'ck_project_actor_recorded',
+      'ck_project_estimate_nonneg',
+      'ck_project_cancellation_has_reason',
+      'ck_project_version_positive',
+      'ck_project_timestamps_ordered',
+      'ck_project_area_valid',
+      'ck_need_text_not_blank',
+      'ck_need_actor_recorded',
+      'ck_need_quantity_positive',
+      'ck_need_estimate_nonneg',
+      'ck_need_version_positive',
+      'ck_need_submission_complete',
+      'ck_need_withdrawal_complete',
+      'ck_need_timestamps_ordered',
+      // A completed idempotency key always names the resource it created.
+      'ck_idempotency_completed_has_result',
+      'ck_idempotency_claim_token_not_blank',
+      // The tenant-bound foreign key: a need can only reference a project of
+      // its own organization.
+      'project_need_organization_id_project_id_fkey',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',
@@ -1033,7 +1189,14 @@ export function snapshotQuery(schema, extensionHome = schema) {
       SELECT 'relation ' || r.relname || ' kind=' || r.relkind::text
              || ' persistence=' || r.relpersistence::text
              || ' rls=' || r.relrowsecurity || '/' || r.relforcerowsecurity
-             || ' acl=' || coalesce(r.relacl::text, '-')
+             -- NULL means "the owner's default privileges"; a GRANT followed
+             -- by its REVOKE leaves the same privileges spelled out. Compared
+             -- through acldefault so that exact inverse is not a false failure
+             -- (supplier's runtime-privileges migration).
+             || ' acl=' || coalesce(
+                  r.relacl,
+                  acldefault(CASE WHEN r.relkind = 'S' THEN 's' ELSE 'r' END::"char", r.relowner)
+                )::text
              || ' partkey=' || coalesce(pg_get_partkeydef(r.oid), '-')
              || ' bound=' || coalesce(pg_get_expr(r.relpartbound, r.oid), '-') AS item
       FROM rel r WHERE r.relkind IN ('r', 'p', 'v', 'm', 'S', 'f', 'c')
