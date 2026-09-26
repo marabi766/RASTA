@@ -3,10 +3,13 @@
  */
 import { OidcError, type TokenResponse } from './oidc';
 import {
+  PUBLISH_SCRIPT,
+  RELEASE_SCRIPT,
   LocalRefreshFlights,
   processRefreshCoordinator,
   redisRefreshCoordinator,
   refreshKeyOf,
+  REJECTION_MEMORY_MS,
   type RedisLike,
   type RefreshOutcome,
 } from './refresh-coordinator';
@@ -107,11 +110,37 @@ class FakeRedis implements RedisLike {
     return this.live(key) ? 1 : 0;
   }
 
-  async eval(_script: string, _keys: number, key: string, owner: string) {
+  /** The two scripts the coordinator runs, emulated line for line. */
+  async eval(script: string, _keys: number, ...args: string[]): Promise<unknown> {
     await this.hop();
-    if (this.live(key)?.value !== owner) return 0;
-    this.store.delete(key);
-    return 1;
+    if (script === RELEASE_SCRIPT) {
+      const [key, owner] = args as [string, string];
+      if (this.live(key)?.value !== owner) return 0;
+      this.store.delete(key);
+      return 1;
+    }
+    if (script === PUBLISH_SCRIPT) {
+      const [lockKey, resultKey, owner, kind, value, ttl] = args as [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ];
+      const isOwner = this.live(lockKey)?.value === owner;
+      const currentKind = this.live(resultKey)?.value.slice(0, 1) ?? '';
+      const write =
+        kind === 'R'
+          ? true
+          : currentKind === 'R'
+            ? false
+            : isOwner && !(kind === 'J' && currentKind === 'J');
+      if (write) this.store.set(resultKey, { value, expiresAt: Date.now() + Number(ttl) });
+      if (isOwner) this.store.delete(lockKey);
+      return this.live(resultKey)?.value ?? null;
+    }
+    throw new Error('FakeRedis: an unknown script');
   }
 }
 
@@ -444,34 +473,244 @@ describe('the per-process cache (Codex #113 R1-2)', () => {
 });
 
 /**
- * The same race against a real Redis, when one is given
- * (`WEB_TEST_REDIS_URL=redis://127.0.0.1:6379`). Skipped visibly otherwise;
- * the fake above carries the same assertions everywhere.
+ * Lost leases, fencing and TTLs (Codex #113 R2-1, R2-3) — against the fake
+ * above and, when `WEB_TEST_REDIS_URL` is given, against a real Redis, where
+ * the Lua itself runs. CI sets `WEB_TEST_REDIS_REQUIRED=true` in a job with a
+ * Redis service, so there the real run cannot be skipped by accident.
  */
 const realRedisUrl = process.env.WEB_TEST_REDIS_URL;
-(realRedisUrl ? describe : describe.skip)('two replicas against a real Redis', () => {
-  it('spends the token once across two clients', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports -- loaded only when a Redis is given
-    const { default: Redis } = require('ioredis') as typeof import('ioredis');
-    const clients = [new Redis(realRedisUrl as string), new Redis(realRedisUrl as string)];
-    try {
-      const keycloak = sharedKeycloak();
-      const token = `refresh-real-${Date.now()}`;
-      const [a, b] = clients.map((redis) =>
-        redisRefreshCoordinator({ redis, secret: SECRET, pollMs: 5 }),
-      );
+if (process.env.WEB_TEST_REDIS_REQUIRED === 'true' && !realRedisUrl) {
+  throw new Error('WEB_TEST_REDIS_REQUIRED is set but WEB_TEST_REDIS_URL is not');
+}
 
-      const outcomes = await Promise.all([
-        a.refresh(token, keycloak.refresh),
-        b.refresh(token, keycloak.refresh),
-      ]);
+interface Backend {
+  readonly clients: RedisLike[];
+  /** Milliseconds `key` has left, or -2 when it does not exist. */
+  pttl(key: string): Promise<number>;
+  get(key: string): Promise<string | null>;
+  close(): Promise<void>;
+}
 
-      expect(keycloak.calls).toEqual([token]);
-      expect(outcomes.map((outcome) => outcome.kind)).toEqual(['ROTATED', 'ROTATED']);
-      a.flights.clear();
-      b.flights.clear();
-    } finally {
+function fakeBackend(): Backend {
+  const redis = new FakeRedis();
+  return {
+    clients: [redis, redis, redis],
+    pttl: async (key) => {
+      const entry = redis.store.get(key);
+      return entry ? entry.expiresAt - Date.now() : -2;
+    },
+    get: (key) => redis.get(key),
+    close: async () => undefined,
+  };
+}
+
+function realBackend(): Backend {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- loaded only when a Redis is given
+  const { default: Redis } = require('ioredis') as typeof import('ioredis');
+  const clients = [0, 1, 2].map(() => new Redis(realRedisUrl as string));
+  return {
+    clients,
+    pttl: (key) => clients[0]!.pttl(key),
+    get: (key) => clients[0]!.get(key),
+    close: async () => {
       await Promise.all(clients.map((client) => client.quit()));
+    },
+  };
+}
+
+const backends: Array<[string, () => Backend]> = [
+  ['a fake Redis', fakeBackend],
+  ...(realRedisUrl ? ([['a real Redis', realBackend]] as Array<[string, () => Backend]>) : []),
+];
+
+const rotation = (n: string): TokenResponse => ({
+  access_token: `access-${n}`,
+  refresh_token: `refresh-${n}`,
+  id_token: `id-${n}`,
+  expires_in: 900,
+  token_type: 'Bearer',
+});
+
+/** A call that reaches the provider now and answers only when released. */
+function heldCall(answer: () => TokenResponse) {
+  let release!: () => void;
+  let reached!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const atProvider = new Promise<void>((resolve) => (reached = resolve));
+  const call = async (): Promise<TokenResponse> => {
+    reached();
+    await gate;
+    return answer();
+  };
+  return { call, release, atProvider };
+}
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const lockKeyOf = (token: string) => `rasta:web:refresh:lock:${refreshKeyOf(token)}`;
+const resultKeyOf = (token: string) => `rasta:web:refresh:result:${refreshKeyOf(token)}`;
+
+describe.each(backends)('fencing and TTLs, against %s (Codex #113 R2-1)', (_name, make) => {
+  let backend: Backend;
+  beforeEach(() => {
+    backend = make();
+  });
+  afterEach(async () => {
+    await backend.close();
+  });
+
+  /** A replica with a lease short enough to lose on purpose. */
+  const replicaOn = (index: number) =>
+    redisRefreshCoordinator({
+      redis: backend.clients[index]!,
+      secret: SECRET,
+      lockTtlMs: 60,
+      waitMs: 30,
+      pollMs: 5,
+    });
+
+  it('lets a holder that lost its lease still publish the rotation it obtained', async () => {
+    // A reaches Keycloak, which spends the token, but A stalls past its lease.
+    // B takes the lease and is refused (invalid_grant). A's rotation must win.
+    const token = `refresh-fence-a-${Date.now()}`;
+    const spent = new Set<string>();
+    const a = heldCall(() => rotation('a'));
+    const aOutcome = replicaOn(0).refresh(token, async (t) => {
+      spent.add(t);
+      return a.call();
+    });
+    await a.atProvider;
+    await pause(90); // A's lease has expired
+
+    const bCalls: string[] = [];
+    const bOutcome = await replicaOn(1).refresh(token, async (t) => {
+      bCalls.push(t);
+      if (spent.has(t)) throw new OidcError('INVALID_GRANT', 'invalid_grant');
+      return rotation('b');
+    });
+    expect(bOutcome.kind).toBe('REJECTED');
+
+    a.release();
+    expect(await aOutcome).toMatchObject({ kind: 'ROTATED', tokens: { access_token: 'access-a' } });
+
+    expect((await backend.get(resultKeyOf(token)))?.slice(0, 1)).toBe('R');
+    // Everybody after that gets the rotation, and nobody asks Keycloak again.
+    const late = jest.fn(async () => rotation('late'));
+    expect(await replicaOn(2).refresh(token, late)).toMatchObject({
+      kind: 'ROTATED',
+      tokens: { access_token: 'access-a' },
+    });
+    expect(late).not.toHaveBeenCalled();
+    expect(bCalls).toEqual([token]);
+  });
+
+  it('never lets a late refusal overwrite a rotation', async () => {
+    // A stalls past its lease and then times out; B takes over and rotates.
+    const token = `refresh-fence-b-${Date.now()}`;
+    const a = heldCall(() => {
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider did not answer');
+    });
+    const aOutcome = replicaOn(0).refresh(token, a.call);
+    await a.atProvider;
+    await pause(90);
+
+    expect(await replicaOn(1).refresh(token, async () => rotation('b'))).toMatchObject({
+      kind: 'ROTATED',
+    });
+
+    a.release();
+    // A hands its caller the authoritative outcome rather than its own refusal.
+    expect(await aOutcome).toMatchObject({ kind: 'ROTATED', tokens: { access_token: 'access-b' } });
+    expect((await backend.get(resultKeyOf(token)))?.slice(0, 1)).toBe('R');
+  });
+
+  it('never lets a stale holder release — or publish a refusal over — the current holder', async () => {
+    const token = `refresh-fence-c-${Date.now()}`;
+    const a = heldCall(() => {
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider did not answer');
+    });
+    const aOutcome = replicaOn(0).refresh(token, a.call);
+    await a.atProvider;
+    await pause(90);
+
+    const b = heldCall(() => rotation('b'));
+    const bOutcome = redisRefreshCoordinator({
+      redis: backend.clients[1]!,
+      secret: SECRET,
+      lockTtlMs: 5_000, // B keeps its lease for the rest of the test
+      pollMs: 5,
+    }).refresh(token, b.call);
+    await b.atProvider;
+    const bLease = await backend.get(lockKeyOf(token));
+    expect(bLease).not.toBeNull();
+
+    a.release();
+    expect((await aOutcome).kind).toBe('REFUSED');
+    // B's lease is untouched, and A's refusal was not stored.
+    expect(await backend.get(lockKeyOf(token))).toBe(bLease);
+    expect(await backend.get(resultKeyOf(token))).toBeNull();
+
+    b.release();
+    expect((await bOutcome).kind).toBe('ROTATED');
+    expect(await backend.get(lockKeyOf(token))).toBeNull();
+  });
+
+  it('keeps the first rejection time, and each kind for its own TTL', async () => {
+    const rejected = `refresh-ttl-j-${Date.now()}`;
+    let clock = 1_000_000;
+    const refuseGrant = async (): Promise<TokenResponse> => {
+      throw new OidcError('INVALID_GRANT', 'invalid_grant');
+    };
+    const first = await redisRefreshCoordinator({
+      redis: backend.clients[0]!,
+      secret: SECRET,
+      now: () => clock,
+    }).refresh(rejected, refuseGrant);
+    clock += 5_000;
+    const second = await redisRefreshCoordinator({
+      redis: backend.clients[1]!,
+      secret: SECRET,
+      now: () => clock,
+    }).refresh(rejected, refuseGrant);
+    expect(first).toEqual({ kind: 'REJECTED', firstRejectedAt: 1_000_000 });
+    expect(second).toEqual({ kind: 'REJECTED', firstRejectedAt: 1_000_000 });
+    expect(await backend.pttl(resultKeyOf(rejected))).toBeGreaterThan(REJECTION_MEMORY_MS - 5_000);
+
+    const rotated = `refresh-ttl-r-${Date.now()}`;
+    await redisRefreshCoordinator({ redis: backend.clients[0]!, secret: SECRET }).refresh(
+      rotated,
+      async () => rotation('r'),
+    );
+    const rotatedTtl = await backend.pttl(resultKeyOf(rotated));
+    expect(rotatedTtl).toBeGreaterThan(25_000);
+    expect(rotatedTtl).toBeLessThanOrEqual(30_000);
+
+    const refused = `refresh-ttl-x-${Date.now()}`;
+    await redisRefreshCoordinator({ redis: backend.clients[0]!, secret: SECRET }).refresh(
+      refused,
+      async () => {
+        throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider did not answer');
+      },
+    );
+    expect(await backend.pttl(resultKeyOf(refused))).toBeLessThanOrEqual(5_000);
+    // The lease is always gone once an outcome is published.
+    for (const token of [rejected, rotated, refused]) {
+      expect(await backend.get(lockKeyOf(token))).toBeNull();
     }
+  });
+
+  it('spends the token once across two clients', async () => {
+    const keycloak = sharedKeycloak();
+    const token = `refresh-real-${Date.now()}`;
+    const [a, b] = [0, 1].map((index) =>
+      redisRefreshCoordinator({ redis: backend.clients[index]!, secret: SECRET, pollMs: 5 }),
+    );
+
+    const outcomes = await Promise.all([
+      a!.refresh(token, keycloak.refresh),
+      b!.refresh(token, keycloak.refresh),
+    ]);
+
+    expect(keycloak.calls).toEqual([token]);
+    expect(outcomes.map((outcome) => outcome.kind)).toEqual(['ROTATED', 'ROTATED']);
   });
 });

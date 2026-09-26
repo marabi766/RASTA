@@ -18,11 +18,15 @@ import { open, seal } from './session';
  *
  * So the refresh is coordinated through the platform's Redis:
  *
- *   1. A lock keyed by a **hash** of the refresh token (`SET … NX PX`). The
- *      winner alone calls Keycloak.
- *   2. The winner stores the outcome under a result key for a short while,
- *      **sealed** with the session secret (AES-256-GCM, `session.ts`) and
- *      bound to that key, then releases the lock.
+ *   1. A lease keyed by a **hash** of the refresh token (`SET … NX PX`),
+ *      holding a random owner token. The holder alone calls Keycloak.
+ *   2. The holder publishes the outcome and releases the lease in one Lua
+ *      script, **fenced** by its owner token (`PUBLISH_SCRIPT`, Codex #113
+ *      R2-1): a holder that lost its lease cannot release its successor's, and
+ *      cannot store a refusal over anything. A rotation, though, is stored
+ *      whoever reports it and is never overwritten — it is the one thing that
+ *      is now true of the token. The outcome is **sealed** with the session
+ *      secret (AES-256-GCM, `session.ts`) and bound to its key.
  *   3. Everybody else waits for the result and uses it, so every replica
  *      writes the *same* rotated cookie.
  *
@@ -35,14 +39,15 @@ import { open, seal } from './session';
  *
  * Coordination narrows the race; it cannot make a refusal proof that the
  * session is over. Redis can be unreachable, a replica can die holding the
- * lock after spending the token, and during a rolling deploy a replica
- * without this code can spend it outside the lock. In each of those a refusal
- * may mean "somebody else already rotated it" — and the cookie that somebody
- * else sent back is the good one. So a refusal is reported as `REFUSED`, and
- * **`REFUSED` never clears the cookie** (`session-refresh.ts`). Only facts
- * about the cookie itself — it does not open, or it is past its absolute
- * lifetime — end a session, and those are the same on every replica at every
- * moment.
+ * lease after spending the token, and a replica without this code can spend
+ * it outside the lease. So:
+ *
+ *   - no answer, a 5xx or a malformed body is `REFUSED`, which never clears
+ *     the cookie;
+ *   - `invalid_grant` is `REJECTED`, remembered with the time the token was
+ *     first refused, and `session-refresh.ts` clears the cookie only once a
+ *     grace has passed with no rotation of that token having appeared
+ *     (Codex #113 R2-2). A rotation stored in the meantime outranks it.
  *
  * ## Inside one process
  *
@@ -57,11 +62,21 @@ import { open, seal } from './session';
 export type RefreshOutcome =
   | { readonly kind: 'ROTATED'; readonly tokens: TokenResponse }
   /**
-   * The provider refused, or did not answer in time, or the winner of a
-   * coordinated refresh could not be heard from. Never proof the session is
-   * dead — see the file comment.
+   * The provider did not answer in time, answered with something that says
+   * nothing about the grant (a 5xx, a malformed body), or the winner of a
+   * coordinated refresh could not be heard from. Transient or ambiguous:
+   * never proof the session is dead — see the file comment.
    */
-  | { readonly kind: 'REFUSED' };
+  | { readonly kind: 'REFUSED' }
+  /**
+   * The provider refused the grant itself (`invalid_grant`). Terminal for the
+   * token — but a *rotation* of the same token by somebody else is refused
+   * the same way, so on its own it still does not end the session.
+   * `firstRejectedAt` is when this token was first seen refused, shared by
+   * every replica; `session-refresh.ts` ends the session only once a grace
+   * period has passed since then with no rotation having appeared.
+   */
+  | { readonly kind: 'REJECTED'; readonly firstRejectedAt: number };
 
 export interface RefreshCoordinator {
   /**
@@ -83,14 +98,24 @@ export function refreshKeyOf(refreshToken: string): string {
 async function called(
   refreshToken: string,
   call: (refreshToken: string) => Promise<TokenResponse>,
+  now: () => number = Date.now,
 ): Promise<RefreshOutcome> {
   try {
     return { kind: 'ROTATED', tokens: await call(refreshToken) };
   } catch (error) {
-    if (error instanceof OidcError) return { kind: 'REFUSED' };
-    throw error;
+    if (!(error instanceof OidcError)) throw error;
+    return error.reason === 'INVALID_GRANT'
+      ? { kind: 'REJECTED', firstRejectedAt: now() }
+      : { kind: 'REFUSED' };
   }
 }
+
+/**
+ * How long a token's rejection is remembered. Long enough that a session the
+ * provider refused is ended from the memory rather than by asking the
+ * provider again on every request; far shorter than a session's lifetime.
+ */
+export const REJECTION_MEMORY_MS = 10 * 60_000;
 
 // ---------------------------------------------------------------------------
 // One process
@@ -156,7 +181,7 @@ export class LocalRefreshFlights {
     const expire = (settled: RefreshOutcome) => {
       // Only this flight: a later one under the same key is its own entry.
       if (this.flights.get(key) !== flight) return;
-      const window = settled.kind === 'REFUSED' ? this.refusalWindowMs : this.windowMs;
+      const window = settled.kind === 'ROTATED' ? this.windowMs : this.refusalWindowMs;
       flight.timer = setTimeout(() => this.drop(key, flight), window);
       flight.timer.unref?.();
     };
@@ -184,14 +209,66 @@ export class LocalRefreshFlights {
   }
 }
 
+/**
+ * When each refresh token was first refused, per process — the no-Redis
+ * counterpart of the stored `REJECTED` outcome. Bounded and self-expiring
+ * like the flights.
+ */
+export class RejectionMemory {
+  private readonly entries = new Map<
+    string,
+    { at: number; timer: ReturnType<typeof setTimeout> }
+  >();
+
+  constructor(
+    private readonly ttlMs: number = REJECTION_MEMORY_MS,
+    private readonly limit: number = LOCAL_FLIGHT_LIMIT,
+  ) {}
+
+  /** The first time `key` was refused, recording `at` if it is the first. */
+  firstRejectedAt(key: string, at: number): number {
+    const existing = this.entries.get(key);
+    if (existing) return existing.at;
+    while (this.entries.size >= this.limit) {
+      const oldest = this.entries.keys().next().value as string;
+      clearTimeout(this.entries.get(oldest)!.timer);
+      this.entries.delete(oldest);
+    }
+    const timer = setTimeout(() => this.entries.delete(key), this.ttlMs);
+    timer.unref?.();
+    this.entries.set(key, { at, timer });
+    return at;
+  }
+
+  get size(): number {
+    return this.entries.size;
+  }
+
+  clear(): void {
+    for (const { timer } of this.entries.values()) clearTimeout(timer);
+    this.entries.clear();
+  }
+}
+
 /** Coordination within one process only: used when no Redis is configured. */
 export function processRefreshCoordinator(
   flights: LocalRefreshFlights = new LocalRefreshFlights(),
+  rejections: RejectionMemory = new RejectionMemory(),
 ): RefreshCoordinator & { readonly flights: LocalRefreshFlights } {
   return {
     flights,
-    refresh: (refreshToken, call) =>
-      flights.share(refreshKeyOf(refreshToken), () => called(refreshToken, call)),
+    refresh: (refreshToken, call) => {
+      const key = refreshKeyOf(refreshToken);
+      return flights.share(key, async () => {
+        const outcome = await called(refreshToken, call);
+        return outcome.kind === 'REJECTED'
+          ? {
+              kind: 'REJECTED',
+              firstRejectedAt: rejections.firstRejectedAt(key, outcome.firstRejectedAt),
+            }
+          : outcome;
+      });
+    },
   };
 }
 
@@ -213,29 +290,90 @@ export interface RedisCoordinationOptions {
   /** `WEB_SESSION_SECRET`: seals the stored outcome. */
   readonly secret: string;
   /**
-   * How long the winner may hold the lock. Longer than the token endpoint's
-   * whole deadline (`TOKEN_ENDPOINT_TIMEOUT_MS`, 10 s), so a winner is never
-   * overtaken while it is still waiting for Keycloak.
+   * The lease. At least twice the owner's bounded worst case — after taking
+   * the lock it does one Redis read (≤ 2 s, `commandTimeout`), one token call
+   * (≤ 10 s, `TOKEN_ENDPOINT_TIMEOUT_MS`) and one publish (≤ 2 s): 14 s. A
+   * holder past that (a paused process) loses the lease to a waiter, and the
+   * fencing in `PUBLISH_SCRIPT` keeps what it reports afterwards honest.
    */
   readonly lockTtlMs?: number;
-  /** How long a stored outcome is served to latecomers. */
+  /**
+   * How long a waiter waits for the holder before giving up with a
+   * (non-terminal) refusal: the holder's bounded worst case and a margin.
+   * Shorter than the lease on purpose — a person's request does not sit out
+   * a lease that only exists to fence a holder that is past its bound.
+   */
+  readonly waitMs?: number;
+  /** How long a rotation is served to latecomers. */
   readonly resultTtlMs?: number;
   /** How often a waiting replica looks for the outcome. */
   readonly pollMs?: number;
   readonly flights?: LocalRefreshFlights;
   /** Told when Redis fails and a refresh goes ahead uncoordinated. Names no token. */
   readonly onRedisError?: (error: unknown) => void;
+  /** The clock `firstRejectedAt` is read from. A seam for tests. */
+  readonly now?: () => number;
 }
 
 const KEY_PREFIX = 'rasta:web:refresh';
 
+/** The lease, and how long a waiter waits for its holder (see the options). */
+export const LOCK_TTL_MS = 30_000;
+export const WAIT_MS = 16_000;
+
 /** Deletes the lock only if this replica still holds it. */
-const RELEASE_SCRIPT = `
+export const RELEASE_SCRIPT = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('DEL', KEYS[1])
 end
 return 0
 `;
+
+/**
+ * Publishes an outcome and releases the lease, atomically, fenced by the
+ * owner token (Codex #113 R2-1).
+ *
+ * The stored value starts with its kind — `R` rotated, `X` refused, `J`
+ * rejected — which is not secret; the tokens after it are sealed. Precedence:
+ *
+ *   - a rotation is written whoever reports it: it is the truth about what
+ *     happened to the token, and a holder that lost its lease still learned
+ *     it — nothing else can ever be true of that token again;
+ *   - nothing overwrites a rotation;
+ *   - a refusal or rejection is written only by the current holder, and a
+ *     rejection keeps the first rejection's time;
+ *   - the lease is deleted only by its holder.
+ *
+ * Returns what is stored afterwards, so a holder that lost the race still
+ * hands its caller the authoritative outcome.
+ *
+ * KEYS[1] lock, KEYS[2] result; ARGV[1] owner, ARGV[2] kind, ARGV[3] value,
+ * ARGV[4] ttl (ms).
+ */
+export const PUBLISH_SCRIPT = `
+local holder = redis.call('GET', KEYS[1])
+local isOwner = holder == ARGV[1]
+local current = redis.call('GET', KEYS[2])
+local currentKind = ''
+if current then currentKind = string.sub(current, 1, 1) end
+local write = false
+if ARGV[2] == 'R' then
+  write = true
+elseif currentKind == 'R' then
+  write = false
+elseif isOwner then
+  write = not (ARGV[2] == 'J' and currentKind == 'J')
+end
+if write then
+  redis.call('SET', KEYS[2], ARGV[3], 'PX', tonumber(ARGV[4]))
+end
+if isOwner then
+  redis.call('DEL', KEYS[1])
+end
+return redis.call('GET', KEYS[2])
+`;
+
+const KIND_CODE = { ROTATED: 'R', REFUSED: 'X', REJECTED: 'J' } as const;
 
 /** What is stored under the result key: the outcome, bound to its own key. */
 const storedOutcomeSchema = z.object({
@@ -252,6 +390,7 @@ const storedOutcomeSchema = z.object({
       }),
     }),
     z.object({ kind: z.literal('REFUSED') }),
+    z.object({ kind: z.literal('REJECTED'), firstRejectedAt: z.number().int().nonnegative() }),
   ]),
 });
 
@@ -280,11 +419,13 @@ export function redisRefreshCoordinator(
   const {
     redis,
     secret,
-    lockTtlMs = 15_000,
+    lockTtlMs = LOCK_TTL_MS,
+    waitMs = WAIT_MS,
     resultTtlMs = LOCAL_FLIGHT_WINDOW_MS,
     pollMs = 100,
     flights = new LocalRefreshFlights(),
     onRedisError = () => undefined,
+    now = Date.now,
   } = options;
 
   const redisOp = async <T>(op: () => Promise<T>): Promise<T> => {
@@ -295,14 +436,62 @@ export function redisRefreshCoordinator(
     }
   };
 
-  const readOutcome = async (key: string): Promise<RefreshOutcome | null> => {
-    const stored = await redisOp(() => redis.get(`${KEY_PREFIX}:result:${key}`));
+  const decode = (key: string, stored: string | null): RefreshOutcome | null => {
     if (!stored) return null;
-    const opened = open(stored, secret, storedOutcomeSchema);
-    // Unopenable, or sealed for another key: not ours, and not evidence of
-    // anything. Treated as absent.
+    const separator = stored.indexOf(':');
+    const opened = open(stored.slice(separator + 1), secret, storedOutcomeSchema);
+    // Unopenable, sealed for another key, or labelled as a kind it is not:
+    // not ours, and not evidence of anything. Treated as absent.
     if (!opened || opened.key !== key) return null;
+    if (stored.slice(0, separator) !== KIND_CODE[opened.outcome.kind]) return null;
     return opened.outcome;
+  };
+
+  const readOutcome = async (key: string): Promise<RefreshOutcome | null> =>
+    decode(key, await redisOp(() => redis.get(`${KEY_PREFIX}:result:${key}`)));
+
+  const ttlOf = (outcome: RefreshOutcome): number =>
+    outcome.kind === 'ROTATED'
+      ? resultTtlMs
+      : outcome.kind === 'REJECTED'
+        ? REJECTION_MEMORY_MS
+        : Math.min(resultTtlMs, REFUSAL_WINDOW_MS);
+
+  /** The holder's part: call the provider once, publish fenced, release. */
+  const asHolder = async (
+    refreshToken: string,
+    key: string,
+    lockKey: string,
+    owner: string,
+    call: (refreshToken: string) => Promise<TokenResponse>,
+  ): Promise<RefreshOutcome> => {
+    let released = false;
+    try {
+      // Somebody may have finished between the caller's read and the lock.
+      const meanwhile = await readOutcome(key);
+      if (meanwhile) return meanwhile;
+
+      const outcome = await called(refreshToken, call, now);
+      try {
+        const stored = (await redis.eval(
+          PUBLISH_SCRIPT,
+          2,
+          lockKey,
+          `${KEY_PREFIX}:result:${key}`,
+          owner,
+          KIND_CODE[outcome.kind],
+          `${KIND_CODE[outcome.kind]}:${seal({ key, outcome }, secret)}`,
+          String(ttlOf(outcome)),
+        )) as string | null;
+        released = true;
+        return decode(key, stored) ?? outcome;
+      } catch (error) {
+        onRedisError(error);
+        return outcome;
+      }
+    } finally {
+      if (!released) await redis.eval(RELEASE_SCRIPT, 1, lockKey, owner).catch(onRedisError);
+    }
   };
 
   const coordinated = async (
@@ -312,7 +501,7 @@ export function redisRefreshCoordinator(
   ): Promise<RefreshOutcome> => {
     const lockKey = `${KEY_PREFIX}:lock:${key}`;
 
-    // Two rounds: the second covers a winner that vanished — crashed, or hit
+    // Two rounds: the second covers a holder that vanished — crashed, or hit
     // a bug — without leaving an outcome, so somebody else takes its place.
     for (let round = 0; round < 2; round += 1) {
       const done = await readOutcome(key);
@@ -320,42 +509,28 @@ export function redisRefreshCoordinator(
 
       const owner = randomUUID();
       const won = await redisOp(() => redis.set(lockKey, owner, 'PX', lockTtlMs, 'NX'));
+      if (won === 'OK') return asHolder(refreshToken, key, lockKey, owner, call);
 
-      if (won === 'OK') {
-        try {
-          // Somebody may have finished between the read above and the lock.
-          const meanwhile = await readOutcome(key);
-          if (meanwhile) return meanwhile;
-
-          const outcome = await called(refreshToken, call);
-          await redis
-            .set(
-              `${KEY_PREFIX}:result:${key}`,
-              seal({ key, outcome }, secret),
-              'PX',
-              outcome.kind === 'REFUSED' ? Math.min(resultTtlMs, REFUSAL_WINDOW_MS) : resultTtlMs,
-            )
-            .catch(onRedisError);
-          return outcome;
-        } finally {
-          await redis.eval(RELEASE_SCRIPT, 1, lockKey, owner).catch(onRedisError);
-        }
-      }
-
-      // Somebody else is refreshing: wait for what they find.
-      const deadline = Date.now() + lockTtlMs + pollMs;
+      // Somebody else is refreshing: wait for what they find — for as long
+      // as a holder can legitimately take, not for the whole lease.
+      const deadline = Date.now() + waitMs;
+      let held = true;
       while (Date.now() < deadline) {
         await sleep(pollMs);
         const outcome = await readOutcome(key);
         if (outcome) return outcome;
-        if ((await redisOp(() => redis.exists(lockKey))) === 0) break;
+        if ((await redisOp(() => redis.exists(lockKey))) === 0) {
+          held = false;
+          break;
+        }
       }
       const late = await readOutcome(key);
       if (late) return late;
+      // A holder past its bound still holds the lease: not proof of anything,
+      // so a refusal — this request only; the next one asks again.
+      if (held) return { kind: 'REFUSED' };
     }
 
-    // Nobody could be heard from. Not proof of anything — so a refusal, which
-    // leaves the cookie exactly as the browser has it.
     return { kind: 'REFUSED' };
   };
 
@@ -371,7 +546,7 @@ export function redisRefreshCoordinator(
           onRedisError(error.cause);
           // Uncoordinated, as before coordination existed; a resulting
           // refusal still never clears a cookie.
-          return called(refreshToken, call);
+          return called(refreshToken, call, now);
         }
       });
     },

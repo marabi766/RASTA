@@ -2,7 +2,13 @@
  * @jest-environment node
  */
 import { OidcError, type TokenResponse } from './oidc';
-import { forgetSharedRefreshes, renewSession, type RenewalDependencies } from './session-refresh';
+import {
+  forgetSharedRefreshes,
+  REJECTION_GRACE_MS,
+  renewSession,
+  type RenewalDependencies,
+} from './session-refresh';
+import type { RefreshCoordinator, RefreshOutcome } from './refresh-coordinator';
 import { openSession, seal, sealSession, type WebSession } from './session';
 
 /**
@@ -184,6 +190,63 @@ describe('refreshing', () => {
     await expect(renewSession(sealed(), { env: ENV, refresh, now: at(T0 + 880) })).rejects.toThrow(
       'a bug',
     );
+  });
+});
+
+describe('a refused grant ends the session — after a grace (Codex #113 R2-2)', () => {
+  const answering = (outcome: RefreshOutcome): RefreshCoordinator => ({
+    refresh: async () => outcome,
+  });
+  const NOW = at(T0 + 880);
+
+  it('keeps the cookie within the grace: a concurrent rotation may still land', async () => {
+    const coordinator = answering({ kind: 'REJECTED', firstRejectedAt: NOW - 10_000 });
+    expect(await renewSession(sealed(), { env: ENV, coordinator, now: NOW })).toEqual({
+      kind: 'REFUSED',
+      usable: true,
+    });
+  });
+
+  it('ends the session once the grace has passed with no rotation of the token', async () => {
+    const coordinator = answering({
+      kind: 'REJECTED',
+      firstRejectedAt: NOW - REJECTION_GRACE_MS,
+    });
+    expect(await renewSession(sealed(), { env: ENV, coordinator, now: NOW })).toEqual({
+      kind: 'ENDED',
+    });
+  });
+
+  it('never ends it for a transient failure, however long it lasts', async () => {
+    // A timeout, a 5xx, a malformed body: nothing about the grant.
+    const coordinator = answering({ kind: 'REFUSED' });
+    const late = at(T0 + 6 * 60 * 60);
+    expect(await renewSession(sealed(), { env: ENV, coordinator, now: late })).toEqual({
+      kind: 'REFUSED',
+      usable: false,
+    });
+  });
+
+  it('ends a revoked session end to end, through the process coordinator', async () => {
+    // The provider says invalid_grant every time; the rejection is remembered,
+    // so a request past the grace ends the session instead of re-asking.
+    const calls: string[] = [];
+    const refresh = async (token: string): Promise<TokenResponse> => {
+      calls.push(token);
+      throw new OidcError('INVALID_GRANT', 'the identity provider refused the grant');
+    };
+    const cookie = sealed({ accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 30 });
+    const first = await renewSession(cookie, { env: ENV, refresh, now: Date.now() });
+    expect(first).toEqual({ kind: 'REFUSED', usable: true });
+
+    const later = await renewSession(cookie, {
+      env: ENV,
+      refresh,
+      now: Date.now() + REJECTION_GRACE_MS,
+    });
+    expect(later).toEqual({ kind: 'ENDED' });
+    // The second answer came from the memory, not from asking again.
+    expect(calls).toHaveLength(1);
   });
 });
 

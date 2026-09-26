@@ -100,7 +100,14 @@ export type TokenResponse = z.infer<typeof tokenResponseSchema>;
 
 export class OidcError extends Error {
   constructor(
-    readonly reason: 'TOKEN_REQUEST_FAILED' | 'MALFORMED_RESPONSE' | 'ID_TOKEN_REJECTED',
+    /**
+     * `INVALID_GRANT` is the one terminal answer: the provider looked at the
+     * code or refresh token and refused it (RFC 6749 § 5.2). Everything else —
+     * no answer, a 5xx, a body that is not a token response — says nothing
+     * about the grant and may succeed on a retry.
+     */
+    readonly reason:
+      'TOKEN_REQUEST_FAILED' | 'INVALID_GRANT' | 'MALFORMED_RESPONSE' | 'ID_TOKEN_REJECTED',
     detail: string,
   ) {
     super(`${reason}: ${detail}`);
@@ -157,8 +164,16 @@ async function postForm(
   }
 
   if (!response.ok) {
-    // The status, and nothing from the body. Keycloak's error bodies are
-    // useful in a log and are also where a token can end up echoed back.
+    // Only the standard `error` code is read from the body, and only to tell
+    // a refused grant from everything else. The message carries the status
+    // and that code, nothing more: Keycloak's error bodies are also where a
+    // token can end up echoed back.
+    if (response.status === 400 && (await errorCodeOf(response)) === 'invalid_grant') {
+      throw new OidcError(
+        'INVALID_GRANT',
+        'the identity provider refused the grant (invalid_grant)',
+      );
+    }
     throw new OidcError(
       'TOKEN_REQUEST_FAILED',
       `the identity provider answered ${response.status}`,
@@ -188,6 +203,17 @@ async function postForm(
     );
   }
   return parsed.data;
+}
+
+/** The RFC 6749 § 5.2 `error` code of an error response, or null. Never throws. */
+async function errorCodeOf(response: Response): Promise<string | null> {
+  try {
+    const body: unknown = await response.json();
+    const code = (body as { error?: unknown } | null)?.error;
+    return typeof code === 'string' ? code : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface ExchangeRequest {

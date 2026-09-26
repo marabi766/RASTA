@@ -35,17 +35,32 @@ import { openSession, sealSession, sessionSecondsLeft, type WebSession } from '.
  * replicas. `refresh-coordinator.ts` makes them share one refresh, across
  * replicas through Redis when `WEB_REDIS_URL` is set.
  *
- * ## A refusal never clears the cookie
+ * ## When a refusal clears the cookie, and when it does not
  *
  * When the provider refuses a refresh, it may be because another replica
  * spent the token a moment ago and is sending the rotated cookie back right
- * now. Clearing the cookie here would race that response, and whichever
- * arrived last would decide whether the person stays signed in. So a refusal
- * leaves the browser's cookie untouched; only this render stops using a
- * session whose access token has already run out. A cookie that genuinely
- * died is harmless where it is — its refresh token is spent and its access
- * token expired — and the next sign-in replaces it.
+ * now. Clearing the cookie at once would race that response, and whichever
+ * arrived last would decide whether the person stays signed in. So:
+ *
+ *   - a transient or ambiguous failure (no answer, a 5xx, a malformed body,
+ *     an unheard-from holder) never clears it;
+ *   - `invalid_grant` — the provider refused the token itself — clears it only
+ *     after `REJECTION_GRACE_MS` since the token was first refused, with no
+ *     rotation of it having appeared (Codex #113 R2-2). Within the grace the
+ *     browser keeps its cookie, and a rotated one in flight still lands.
+ *
+ * Until then only this render stops using a session whose access token has
+ * already run out. Without the terminal rule a revoked session kept its
+ * cookie, and re-asked the provider, until its absolute lifetime ran out.
  */
+
+/**
+ * How long after a token's first `invalid_grant` its cookie is still left
+ * alone. Longer than a rotation takes to reach the browser, and than a
+ * rotation stays in the shared store (30 s), so a concurrent rotation always
+ * wins the race it would otherwise lose.
+ */
+export const REJECTION_GRACE_MS = 60_000;
 
 /** What a request's session cookie turned out to be. */
 export type SessionRenewal =
@@ -134,8 +149,14 @@ export async function renewSession(
 
   const coordinator = deps.coordinator ?? defaultCoordinator(env);
   const outcome = await coordinator.refresh(session.refreshToken, refresh);
-  if (outcome.kind === 'REFUSED') {
-    return { kind: 'REFUSED', usable: session.accessTokenExpiresAt > Math.floor(now / 1000) };
+  const usable = session.accessTokenExpiresAt > Math.floor(now / 1000);
+  if (outcome.kind === 'REFUSED') return { kind: 'REFUSED', usable };
+  if (outcome.kind === 'REJECTED') {
+    // Terminal for the token — once the grace has passed with no rotation of
+    // it having appeared anywhere (a rotation would have been returned here
+    // instead: it outranks a rejection in the shared store).
+    if (now - outcome.firstRejectedAt >= REJECTION_GRACE_MS) return { kind: 'ENDED' };
+    return { kind: 'REFUSED', usable };
   }
   const { tokens } = outcome;
 

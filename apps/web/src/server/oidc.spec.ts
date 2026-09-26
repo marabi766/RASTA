@@ -122,23 +122,29 @@ describe('exchanging the code', () => {
     expect(sent.get('code_verifier')).toBe('the-verifier');
   });
 
-  it('reports a refusal by status alone', async () => {
-    // Keycloak's error bodies are useful in a log and are also where a token
-    // can end up echoed back, so none of it is carried.
+  it('tells a refused grant apart, without carrying anything else from the body', async () => {
+    // Codex #113 R2-2: invalid_grant is terminal; everything else is not. The
+    // error code is the only thing read — Keycloak's error bodies are also
+    // where a token can end up echoed back.
     const { impl } = fakeFetch({ error: 'invalid_grant', code: 'the-code' }, 400);
-    await expect(
-      exchangeCode(
-        { endpoints, clientId: CLIENT, redirectUri: 'http://x/cb', code: 'c', verifier: 'v' },
-        impl,
-      ),
-    ).rejects.toMatchObject({ reason: 'TOKEN_REQUEST_FAILED' });
+    const refusal = exchangeCode(
+      { endpoints, clientId: CLIENT, redirectUri: 'http://x/cb', code: 'c', verifier: 'v' },
+      impl,
+    );
+    await expect(refusal).rejects.toMatchObject({ reason: 'INVALID_GRANT' });
+    await expect(refusal).rejects.not.toThrow(/the-code/);
+  });
 
+  it.each([
+    ['another 400', { error: 'invalid_request' }, 400],
+    ['a 401', { error: 'invalid_client' }, 401],
+    ['a 5xx', { error: 'invalid_grant' }, 503],
+    ['a 400 that is not JSON', 'not json', 400],
+  ])('reports %s by status alone, as not terminal', async (_label, body, status) => {
+    const { impl } = fakeFetch(body, status);
     await expect(
-      exchangeCode(
-        { endpoints, clientId: CLIENT, redirectUri: 'http://x/cb', code: 'c', verifier: 'v' },
-        impl,
-      ),
-    ).rejects.not.toThrow(/the-code/);
+      refreshTokens({ endpoints, clientId: CLIENT, refreshToken: 'r' }, impl),
+    ).rejects.toMatchObject({ reason: 'TOKEN_REQUEST_FAILED' });
   });
 
   it('refuses an answer that is missing a token', async () => {
