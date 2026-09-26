@@ -40,6 +40,22 @@ const EXPECTED_GRANTS: Record<string, readonly string[]> = {
   _prisma_migrations: [],
 };
 
+/**
+ * The relations this service's migrations created: every table in the schema
+ * except an extension's. The bootstrap installs postgis into every service
+ * database, and postgis puts `spatial_ref_sys` into `public`, owned by the
+ * superuser — a table no migration made and no grant of ours touches.
+ * Recognised by extension membership (pg_depend, deptype 'e'), never by name:
+ * the same rule the reversibility verifier applies.
+ */
+const NOT_AN_EXTENSION_TABLE = `
+  NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+     WHERE d.classid = 'pg_class'::regclass
+       AND d.objid = format('%I.%I', t.schemaname, t.tablename)::regclass
+       AND d.deptype = 'e'
+  )`;
+
 const PROTECTED_TABLES = [
   'performance_formula_version',
   'performance_formula_weight',
@@ -85,7 +101,8 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
     );
     const owners = await raw(() =>
       runtime.client.$queryRawUnsafe<{ owner: string }[]>(
-        `SELECT DISTINCT tableowner::text AS owner FROM pg_tables WHERE schemaname = current_schema()`,
+        `SELECT DISTINCT t.tableowner::text AS owner FROM pg_tables t
+          WHERE t.schemaname = current_schema() AND ${NOT_AN_EXTENSION_TABLE}`,
       ),
     );
 
@@ -165,7 +182,7 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
                   WHERE has_table_privilege('rasta_supplier', format('%I.%I', t.schemaname, t.tablename), p)
                 ) AS privileges
            FROM pg_tables t
-          WHERE t.schemaname = current_schema()
+          WHERE t.schemaname = current_schema() AND ${NOT_AN_EXTENSION_TABLE}
           ORDER BY 1`,
       ),
     );
@@ -174,6 +191,32 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
     expect(actual).toEqual(
       Object.fromEntries(Object.entries(EXPECTED_GRANTS).map(([t, p]) => [t, [...p].sort()])),
     );
+  });
+
+  it('gets nothing from an extension’s tables beyond what the extension grants everyone', async () => {
+    // The other half of excluding them above: postgis's tables are the
+    // superuser's, and the runtime role may at most read them — never own,
+    // write, truncate or alter them. On a cluster without postgis there are
+    // none, and this holds trivially.
+    const rows = await raw(() =>
+      owner.client.$queryRawUnsafe<{ table: string; owner: string; writes: string[] | null }[]>(
+        `SELECT t.tablename::text AS "table", t.tableowner::text AS "owner",
+                (SELECT array_agg(p ORDER BY p)
+                   FROM unnest(ARRAY['INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p
+                  WHERE has_table_privilege('rasta_supplier', format('%I.%I', t.schemaname, t.tablename), p)
+                ) AS writes
+           FROM pg_tables t
+          WHERE t.schemaname = current_schema() AND NOT (${NOT_AN_EXTENSION_TABLE})`,
+      ),
+    );
+
+    for (const row of rows) {
+      expect(row.owner).not.toBe('rasta_supplier');
+      expect({ table: row.table, writes: row.writes ?? [] }).toEqual({
+        table: row.table,
+        writes: [],
+      });
+    }
   });
 
   it('still does the work the service needs: insert and read a formula draft', async () => {

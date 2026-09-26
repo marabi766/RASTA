@@ -203,7 +203,19 @@ test('the migrator owns the database and every relation; the runtime role owns n
     MIGRATOR,
   );
   assert.equal(
-    ok(`SELECT string_agg(DISTINCT tableowner, ',') FROM pg_tables WHERE schemaname = 'public'`),
+    // Every table a migration made. The scratch database is cloned from
+    // template1, where the bootstrap installed postgis, so `public` also holds
+    // postgis's `spatial_ref_sys`, owned by the superuser — excluded by
+    // extension membership, never by name.
+    ok(
+      `SELECT string_agg(DISTINCT t.tableowner, ',') FROM pg_tables t
+        WHERE t.schemaname = 'public'
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_depend d
+             WHERE d.classid = 'pg_class'::regclass AND d.deptype = 'e'
+               AND d.objid = format('%I.%I', t.schemaname, t.tablename)::regclass
+          )`,
+    ),
     MIGRATOR,
   );
   assert.equal(ok(`SELECT rolcreatedb FROM pg_roles WHERE rolname = '${RUNTIME}'`), 'f');
