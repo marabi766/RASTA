@@ -96,7 +96,7 @@ describe('OrganizationDirectory against the organization-service contract', () =
     new OrganizationDirectory(
       testEnv({
         ORGANIZATION_SERVICE_URL: url,
-        ORGANIZATION_REQUEST_TIMEOUT_MS: timeoutMs,
+        CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS: timeoutMs,
         INTERNAL_TOKEN_SECRET: SECRET,
       }),
       tokens,

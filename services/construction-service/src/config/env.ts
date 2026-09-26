@@ -83,6 +83,9 @@ function roleList(name: string, options: { min: number }) {
  *                                       (UNION_ADMIN for its union's
  *                                       organizations, SYSTEM_ADMIN for any).
  *   ORGANIZATION_SERVICE_URL            Where the union hierarchy is confirmed.
+ *   CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS
+ *                                       How long that confirmation may take;
+ *                                       no answer in time refuses (504).
  *   CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS
  *                                       Q-68. Submitted needs a project must
  *                                       have before it may request approval.
@@ -168,7 +171,12 @@ export const constructionEnvSchema = baseEnvSchema
      * union?" (Q-70 (7)). Anything but a 200 or a 404 refuses the policy write.
      */
     ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
-    ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+    CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(30_000)
+      .default(3000),
 
     CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).default(1),
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),

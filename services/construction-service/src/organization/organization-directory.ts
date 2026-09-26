@@ -56,7 +56,10 @@ export class OrganizationDirectory {
       `/v1/organizations/${encodeURIComponent(organizationId)}`;
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.env.ORGANIZATION_REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => controller.abort(),
+      this.env.CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS,
+    );
     let response: Response;
     try {
       response = await fetch(url, {
@@ -72,7 +75,7 @@ export class OrganizationDirectory {
       if (controller.signal.aborted) {
         throw RastaError.upstreamTimeout(
           ORGANIZATION_SERVICE,
-          this.env.ORGANIZATION_REQUEST_TIMEOUT_MS,
+          this.env.CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS,
         );
       }
       throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE, error);

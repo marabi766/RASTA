@@ -177,7 +177,7 @@ describe('PR 2 settings (Q-68, Q-70 to Q-72)', () => {
     const env = load();
     expect(env.CONSTRUCTION_POLICY_FOUR_EYES).toBe(true);
     expect(env.ORGANIZATION_SERVICE_URL).toBe('http://localhost:3102');
-    expect(env.ORGANIZATION_REQUEST_TIMEOUT_MS).toBe(3000);
+    expect(env.CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS).toBe(3000);
     expect(env.CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS).toBe(1);
     expect(env.CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE).toBe(true);
     expect(env.CONSTRUCTION_START_REQUIRES_CONTRACT).toBe(false);
@@ -201,7 +201,7 @@ describe('PR 2 settings (Q-68, Q-70 to Q-72)', () => {
 
   it('refuses an organization-service address that is not a URL, and an absurd timeout', () => {
     expect(() => load({ ORGANIZATION_SERVICE_URL: 'organization-service' })).toThrow();
-    expect(() => load({ ORGANIZATION_REQUEST_TIMEOUT_MS: '0' })).toThrow();
+    expect(() => load({ CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS: '0' })).toThrow();
   });
 
   it('refuses a negative need minimum', () => {

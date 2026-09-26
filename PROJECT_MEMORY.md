@@ -2661,8 +2661,16 @@ Point، نزولی‌نشدنی مگر با پیکربندی)، پایان با 
 - مناقصه و پیشنهاد (CON-002) و قرارداد (CON-003) — شروع نشده؛ `PROJECT_STARTED.contractId` همیشه `null`.
 - هیچ قاعدهٔ تعارض منافع درخواست‌کننده/تصمیم‌گیرنده (سندی تعریفش نکرده).
 - شناسهٔ سازمان مرجع در سیاست با `organization-service` اعتبارسنجی نمی‌شود.
-- با نقش‌های پیش‌فرض و Realm نمونه، هیچ سازمانی هم نقش پروژه و هم نقش نویسندهٔ سیاست را ندارد؛ E2E ‏PR 2 برای همین
-  `CONSTRUCTION_POLICY_SETTER_ROLES` را گسترده می‌کند — پرسش Q-70 (۷) برای مالک.
+- ~~نویسندهٔ سیاست~~ — **Q-70 (۷) با تصمیم مالک (2026-09-26) بسته و در PR 2 پیاده شد:** `UNION_ADMIN` برای سازمان
+  خودش یا زیرمجموعه می‌نویسد (پرسش سلسله‌مراتب از `organization-service`، Fail Closed)، هر سیاست تأیید `SYSTEM_ADMIN`
+  می‌خواهد (`PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED`، چهارچشمی پیکربندی‌پذیر)، `ORGANIZATION_ADMIN` نمی‌نویسد.
+  E2E دیگر نقشی را گسترده نمی‌کند. نام دو رویداد تازه (`APPROVAL_POLICY_SUBMITTED`، `APPROVAL_POLICY_REJECTED`) در
+  انتظار تأیید مدیر پروژه.
+- مسیر «اتحادیه برای دهیاری زیرمجموعه» در Seed نمونهٔ E2E نیست؛ با تست قرارداد در هر دو سو
+  (`organization-service` واقعی + کلاینت construction) اثبات شده، نه در E2E.
+- `organization-service` نقش `UNION_ADMIN` را اپراتور پلتفرم می‌شمارد
+  (`services/organization-service/src/organization/organization.service.ts:32`) — برای بررسی مدیر پروژه در برابر
+  Q-43؛ construction به آن تکیه نمی‌کند (پرسش سلسله‌مراتب مستقل از آن پاسخ می‌گیرد).
 - ترتیب تحویل رویداد میان Replicaهای Relay تضمین نشده (D-027، ADR-051 B4) — مشترک با همهٔ سرویس‌ها.
 - همان الگوی Idempotency «تکمیل پس از Commit» در `marketplace-service` و `economic-service` هنوز هست (این PR فقط
   construction را اصلاح کرد).
