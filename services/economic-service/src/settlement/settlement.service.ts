@@ -64,9 +64,10 @@ import type { DraftEntry } from '../ledger/journal';
  *
  * ## The reward step is deliberately outside
  *
- * docs/10 § 10.10: if the reward step fails, the settlement stays valid and
- * the reward is retried separately. Keeping it in a different transaction is
- * what makes that structural rather than aspirational.
+ * docs/10 § 10.10: if the reward step fails, the settlement stays valid.
+ * Keeping it in a different transaction is what makes that structural rather
+ * than aspirational. The controller runs it after this commits; it is not
+ * retried there (see `SettlementController.grantSettlementRewards`).
  */
 @Injectable()
 export class SettlementService {

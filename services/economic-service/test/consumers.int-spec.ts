@@ -1,6 +1,12 @@
 import { ulid } from 'ulid';
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
-import { runUnscoped, UnprocessableEventError, type EventConsumer } from '@rasta/nest-common';
+import {
+  RastaError,
+  runUnscoped,
+  UnprocessableEventError,
+  type EventConsumer,
+} from '@rasta/nest-common';
+import { RewardGrantError } from '../src/reward/reward.service';
 import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authority.consumer';
 import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer';
 import { CONSUMED_EVENTS } from '../src/events/consumed';
@@ -577,38 +583,101 @@ describe('economic consumers', () => {
     expect(rewards).toBe(0);
   });
 
-  it('records the event as processed even when the reward rule throws', async () => {
-    // A reward is not why `rasta.fleet.v1` exists. A misconfigured rule must
-    // not stall a partition that fleet-service's other consumers depend on, so
-    // the failure is logged, counted and moved past.
-    //
-    // This pins today's behaviour; it does not endorse it for a transient
-    // failure. A grant lost to a database blip is never retried, which is
-    // pre-existing on main and tracked as global audit L7-13 (PR #110 round 3
-    // #4, economic batch 2 item c).
-    const payload = usage();
-    sources.recorded(payload, { recordedBy: 'USR-THROWS' });
-    const failing = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor('USR-THROWS'));
+  // Global audit L7-13: a failed grant is redelivered, never finalised.
 
-    const spy = jest
-      .spyOn(wiring.rewards, 'grantFor')
-      .mockRejectedValueOnce(new Error('a rule blew up'));
-
-    // The handler resolves rather than rejecting: the event is consumed.
-    await expect(rewardTrigger.handle(failing)).resolves.toBeUndefined();
-    spy.mockRestore();
-
-    const processed = await runUnscoped('the suite reads the processed-event ledger', () =>
-      prisma.client.processedEvent.findUnique({
-        where: {
-          eventId_consumerName: {
-            eventId: failing.eventId,
-            consumerName: RewardTriggerConsumer.CONSUMER_NAME,
-          },
-        },
-      }),
+  /** A monetised rule: every point also credits the organization's wallet. */
+  const monetisedRuleIn = (organizationId: string, points: number) =>
+    asActor({ organizationId, roles: ['SYSTEM_ADMIN'] }, () =>
+      wiring.rewards.createRule({
+        organizationId,
+        triggerEvent: 'USAGE_RECORDED',
+        rewardType: 'POINTS',
+        points,
+        creditPerPointMinor: '1000',
+        status: 'ACTIVE',
+        validFrom: new Date(Date.now() - 86_400_000).toISOString(),
+        // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any),
     );
-    expect(processed).not.toBeNull();
+
+  it('leaves a transiently failed grant unprocessed, and a redelivery pays it exactly once', async () => {
+    const tenant = `${org.a}-GRANTFAIL`;
+    await monetisedRuleIn(tenant, 5);
+    const payload = usage({ organizationId: tenant });
+    sources.recorded(payload, { recordedBy: 'USR-TRANSIENT' });
+    const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
+
+    // A database blip inside the grant's own transaction, after the claim
+    // committed: the wallet credit fails once.
+    const blip = jest
+      .spyOn(wiring.wallets, 'credit')
+      .mockRejectedValueOnce(new Error('Connection terminated unexpectedly'));
+
+    // Rethrown, not swallowed: the framework retries it, and it is not a
+    // verdict, so it is not dead-lettered at once either.
+    const failure = await rewardTrigger.handle(event).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    blip.mockRestore();
+    expect(failure).toBeInstanceOf(RewardGrantError);
+    expect(failure).not.toBeInstanceOf(UnprocessableEventError);
+    expect((failure as RewardGrantError).permanent).toBe(false);
+
+    // Nothing paid, nothing finalised; the claim is held by this event.
+    expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).toBeNull();
+    expect(await rewardsFor(payload.usageRecordId)).toHaveLength(0);
+    const [claim] = await evaluationFor(payload.usageRecordId);
+    expect(claim).toMatchObject({ origin: 'EVENT', eventId: event.eventId, outcome: 'EVALUATED' });
+
+    // The redelivery pays, once, with the money the rule promised.
+    await expect(rewardTrigger.handle(event)).resolves.toBeUndefined();
+    const paid = await rewardsFor(payload.usageRecordId);
+    expect(paid).toHaveLength(1);
+    expect(paid[0]!.monetised).toBe(true);
+    expect(paid[0]!.creditAmountMinor).toBe(5000n);
+    expect(paid[0]!.journalId).not.toBeNull();
+    expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).not.toBeNull();
+
+    // A third delivery, or the same fact under a new event id, pays nothing.
+    await expect(rewardTrigger.handle(event)).resolves.toBe('SKIPPED');
+    await expect(
+      rewardTrigger.handle(envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor())),
+    ).resolves.toBe('SKIPPED');
+    expect(await rewardsFor(payload.usageRecordId)).toHaveLength(1);
+  });
+
+  it('dead-letters a grant a rule refuses, keeps the other rules, and a replay finishes it', async () => {
+    const tenant = `${org.a}-GRANTREFUSED`;
+    const rules = [await monetisedRuleIn(tenant, 2), await monetisedRuleIn(tenant, 3)];
+    const payload = usage({ organizationId: tenant });
+    sources.recorded(payload, { recordedBy: 'USR-REFUSED' });
+    const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
+
+    // A verdict, not a blip: whichever rule is granted first is refused.
+    const refusal = jest
+      .spyOn(wiring.wallets, 'credit')
+      .mockRejectedValueOnce(RastaError.businessRule('A credit must be positive'));
+
+    const failure = await rewardTrigger.handle(event).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    refusal.mockRestore();
+    expect(failure).toBeInstanceOf(UnprocessableEventError);
+    expect((failure as UnprocessableEventError).reason).toBe(DLQ_REASONS.BUSINESS_RULE_VIOLATION);
+
+    // The other rule committed; the event is not finalised.
+    expect(await rewardsFor(payload.usageRecordId)).toHaveLength(1);
+    expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).toBeNull();
+
+    // The dead letter replayed once the rule is fixed: the missing grant is
+    // paid, the one already paid is not paid again.
+    await expect(rewardTrigger.handle(event)).resolves.toBeUndefined();
+    const paid = await rewardsFor(payload.usageRecordId);
+    expect(paid.map((reward) => reward.ruleId).sort()).toEqual(rules.map((rule) => rule.id).sort());
+    expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).not.toBeNull();
   });
 
   it('reads a completed repair as a reward trigger too, keyed on the request', async () => {
@@ -736,28 +805,15 @@ describe('economic consumers', () => {
     sources.recorded(payload, { recordedBy: 'USR-CRASH' });
     const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
 
+    // A process that dies after the claim commits leaves the claim and no
+    // processed_event. A grant that throws now leaves exactly that state
+    // (global audit L7-13), so the throw stands in for the crash.
     const spy = jest
       .spyOn(wiring.rewards, 'grantFor')
       .mockRejectedValueOnce(new Error('process died between the claim and the grant'));
-    await rewardTrigger.handle(event);
+    await expect(rewardTrigger.handle(event)).rejects.toThrow('process died');
     spy.mockRestore();
-    // A process that dies after the claim commits leaves the claim and no
-    // processed_event. The test cannot kill the process, so it rebuilds that
-    // state: the thrown grant is tolerated and the event marked processed,
-    // and the marker is removed. What follows covers only the resume from
-    // that state. It proves nothing about a grant that throws in a live
-    // process: that is finalised and never retried (global audit L7-13, PR
-    // #110 round 3 #4).
-    await runUnscoped('the suite simulates a crash before processed_event committed', () =>
-      prisma.client.processedEvent.delete({
-        where: {
-          eventId_consumerName: {
-            eventId: event.eventId,
-            consumerName: RewardTriggerConsumer.CONSUMER_NAME,
-          },
-        },
-      }),
-    );
+    expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).toBeNull();
 
     await expect(rewardTrigger.handle(event)).resolves.toBeUndefined();
     const rewards = await runUnscoped('the suite counts grants across tenants', () =>
@@ -873,24 +929,13 @@ describe('economic consumers', () => {
     const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
 
     // The claim commits, then the process dies before any grant or
-    // processed_event. Rebuilt as in the crash case above (a tolerated throw,
-    // then the marker removed); it covers the resume only, not a transient
-    // grant failure (PR #110 round 3 #4).
+    // processed_event: the state a thrown grant leaves, as in the crash case
+    // above.
     const spy = jest
       .spyOn(wiring.rewards, 'grantFor')
       .mockRejectedValueOnce(new Error('process died between the claim and the grant'));
-    await rewardTrigger.handle(event);
+    await expect(rewardTrigger.handle(event)).rejects.toThrow('process died');
     spy.mockRestore();
-    await runUnscoped('the suite simulates a crash before processed_event committed', () =>
-      prisma.client.processedEvent.delete({
-        where: {
-          eventId_consumerName: {
-            eventId: event.eventId,
-            consumerName: RewardTriggerConsumer.CONSUMER_NAME,
-          },
-        },
-      }),
-    );
 
     const [claimed] = await evaluationFor(payload.usageRecordId);
     expect(claimed).toMatchObject({

@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
-import { ID_PREFIXES } from '@rasta/contracts';
+import { ERROR_CODES, ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
@@ -66,11 +66,17 @@ export class RewardService {
   /**
    * Evaluates every rule for a trigger and grants what they say.
    *
-   * Runs in its own transaction, **never inside a settlement's**. docs/10 §
-   * 10.10 is explicit: if the reward step fails, the settlement stays valid
-   * and the reward is retried separately — a reward must never roll back a
-   * settlement. Keeping the transactions separate is what makes that true
-   * structurally rather than by convention.
+   * Runs in its own transactions, **never inside a settlement's**. docs/10 §
+   * 10.10 is explicit: if the reward step fails, the settlement stays valid —
+   * a reward must never roll back a settlement. Keeping the transactions
+   * separate is what makes that true structurally rather than by convention.
+   *
+   * Nothing here retries. Every rule is attempted, each in its own
+   * transaction, and if any of them failed the call throws a
+   * {@link RewardGrantError} naming them, after the others have committed.
+   * Retrying is the caller's to arrange: the reward consumer lets the event
+   * be redelivered, and a redelivery grants only what is still missing,
+   * because each grant is unique on `(rule_id, source_reference)`.
    */
   async grantFor(input: {
     organizationId: string;
@@ -106,10 +112,19 @@ export class RewardService {
       return [];
     }
 
+    // A failed rule does not stop the next one: they are independent grants,
+    // and holding a healthy campaign's reward hostage to a broken one would
+    // only delay money that is owed.
     const outcomes: GrantOutcome[] = [];
+    const failures: RewardGrantFailure[] = [];
     for (const rule of applicable) {
-      outcomes.push(await this.grantOne({ ...input, userId: input.userId, rule }));
+      try {
+        outcomes.push(await this.grantOne({ ...input, userId: input.userId, rule }));
+      } catch (error) {
+        failures.push({ ruleId: rule.id, error });
+      }
     }
+    if (failures.length > 0) throw new RewardGrantError(outcomes, failures);
     return outcomes;
   }
 
@@ -600,6 +615,59 @@ export type GrantOutcome =
       levelChangedTo: string | null;
     }
   | { kind: 'SKIPPED'; reason: string; ruleId: string };
+
+export interface RewardGrantFailure {
+  ruleId: string;
+  error: unknown;
+}
+
+/**
+ * Platform error codes that name a verdict on the grant itself: the rule's
+ * terms, the amount they produce, or a journal they would post. Asking again
+ * gives the same answer. Anything else — a lost connection, a deadlock, a
+ * serialisation failure, an error nobody classified — may not, and is treated
+ * as transient, because the cost of retrying a permanent failure is a delay
+ * while the cost of abandoning a transient one is a reward lost for good.
+ */
+const PERMANENT_GRANT_FAILURES: ReadonlySet<string> = new Set([
+  ERROR_CODES.VALIDATION_FAILED,
+  ERROR_CODES.BUSINESS_RULE_VIOLATION,
+  ERROR_CODES.LEDGER_UNBALANCED,
+]);
+
+/**
+ * One or more rules failed to grant for a fact; the rest committed.
+ *
+ * `permanent` is true only when every failure is one a retry would repeat
+ * (global audit L7-13). A single transient failure makes the whole error
+ * transient: the retry that fixes it re-attempts the permanent ones too,
+ * which costs nothing, while the reverse would abandon a grant that could
+ * still succeed.
+ */
+export class RewardGrantError extends Error {
+  readonly permanent: boolean;
+
+  constructor(
+    readonly outcomes: readonly GrantOutcome[],
+    readonly failures: readonly RewardGrantFailure[],
+  ) {
+    super(
+      `${failures.length} reward rule(s) failed to grant: ` +
+        failures.map(({ ruleId, error }) => `${ruleId} (${describeFailure(error)})`).join('; '),
+    );
+    this.name = 'RewardGrantError';
+    this.permanent = failures.every(({ error }) => isPermanentGrantFailure(error));
+  }
+}
+
+export function isPermanentGrantFailure(error: unknown): boolean {
+  return error instanceof RastaError && PERMANENT_GRANT_FAILURES.has(error.code);
+}
+
+function describeFailure(error: unknown): string {
+  if (error instanceof RastaError) return `${error.code}: ${error.message}`;
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
 
 type RewardRuleRow = Prisma.RewardRuleGetPayload<Record<string, never>>;
 

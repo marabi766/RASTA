@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  Logger,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   AllowService,
@@ -36,13 +46,18 @@ import { SERVICE_NAME } from '../config/env';
  *
  * The settlement itself is one ACID transaction and is complete when this
  * returns (ADR-031). The **reward evaluation is not part of it** — docs/10 §
- * 10.10 is explicit that a failed reward must leave the settlement valid and
- * be retried separately, so it runs afterwards, in its own transaction, and
- * its failure is logged rather than propagated.
+ * 10.10 is explicit that a failed reward must leave the settlement valid, so
+ * it runs afterwards, in its own transactions, and its failure is logged
+ * rather than propagated. It is **not** retried: no durable retry exists for
+ * this hook, unlike the reward consumer's redelivery (global audit L7-13).
+ * Harmless today because no rule targets `SETTLEMENT_COMPLETED`; whoever
+ * configures one must build that retry first.
  */
 @ApiTags('settlements')
 @Controller({ path: 'settlements', version: '1' })
 export class SettlementController {
+  private readonly logger = new Logger(SettlementController.name);
+
   constructor(
     private readonly settlements: SettlementService,
     private readonly transactions: TransactionService,
@@ -120,7 +135,8 @@ export class SettlementController {
    * defines one, it is a configuration row rather than a code change (ADR-023).
    *
    * Its failure is logged and swallowed, which is the whole reason it is here
-   * rather than inside the settlement transaction.
+   * rather than inside the settlement transaction — and it is not retried
+   * (see the class comment).
    */
   private async grantSettlementRewards(
     payeeOrganizationId: string,
@@ -135,9 +151,13 @@ export class SettlementController {
         occurredAt: new Date(),
         payload: { transactionId },
       });
-    } catch {
-      // Intentionally swallowed. A settlement that has committed must not be
+    } catch (error) {
+      // Swallowed, not hidden. A settlement that has committed must not be
       // reported as failed because a reward rule threw.
+      this.logger.error(
+        `Settlement reward evaluation failed for ${transactionId}; not retried`,
+        error instanceof Error ? error.stack : String(error),
+      );
     }
   }
 
