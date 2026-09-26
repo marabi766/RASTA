@@ -5,7 +5,11 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GATE_PLACEHOLDER, validateDevRealmGate } from './check-keycloak-dev-realm-lib.mjs';
+import {
+  DISPOSABLE_STACK_ATTRIBUTE,
+  GATE_PLACEHOLDER,
+  validateDevRealmGate,
+} from './check-keycloak-dev-realm-lib.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -14,7 +18,8 @@ const REALM = resolve(root, 'infrastructure/docker/keycloak/rasta-realm.json');
 const CLI = resolve(here, 'check-keycloak-dev-realm.mjs');
 
 const gateText = readFileSync(GATE, 'utf8');
-const realm = (enabled) => JSON.stringify({ realm: 'rasta', enabled });
+const realm = (enabled, attributes = { [DISPOSABLE_STACK_ATTRIBUTE]: 'true' }) =>
+  JSON.stringify({ realm: 'rasta', enabled, attributes });
 const valid = (overrides = {}) => ({
   realmText: realm(GATE_PLACEHOLDER),
   gateScriptText: gateText,
@@ -38,6 +43,19 @@ test('the repository as committed passes', () => {
 test('the committed realm carries the placeholder, not a literal true', () => {
   assert.equal(JSON.parse(readFileSync(REALM, 'utf8')).enabled, GATE_PLACEHOLDER);
 });
+
+test('the committed realm carries the disposable-stack marker the E2E suite reads', () => {
+  const committed = JSON.parse(readFileSync(REALM, 'utf8'));
+  assert.equal(committed.attributes?.[DISPOSABLE_STACK_ATTRIBUTE], 'true');
+});
+
+for (const attributes of [null, {}, { [DISPOSABLE_STACK_ATTRIBUTE]: 'false' }]) {
+  test(`refuses a realm whose attributes are ${JSON.stringify(attributes)}`, () => {
+    const errors = validateDevRealmGate(valid({ realmText: realm(GATE_PLACEHOLDER, attributes) }));
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /rasta\.disposable_stack/);
+  });
+}
 
 test('a valid input has no problems', () => {
   assert.deepEqual(validateDevRealmGate(valid()), []);

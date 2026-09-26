@@ -23,7 +23,46 @@ import type { E2eConfig } from './env';
  *      port-forward to localhost, which is a deliberate act.
  *
  * Refusals name the variable, never its value (S-09).
+ *
+ * Loopback proves where an endpoint is, not what it is: a tunnel, or a local
+ * gateway with production upstreams, passes it (Codex review of #117,
+ * finding 2). So before its first Keycloak write the suite also reads — with a
+ * non-mutating admin GET — a marker the realm itself carries:
+ * `rasta.disposable_stack = "true"`, a realm attribute set only in the
+ * importable development realm (`infrastructure/docker/keycloak/
+ * rasta-realm.json`, which only `dev-realm-gate.sh` loads, only into a
+ * `start-dev` Keycloak). A realm without it is refused. The gateway's
+ * upstreams and each service's identity are not verified yet: that needs
+ * service code, and is a recorded follow-up.
  */
+
+/** The realm attribute only the importable development realm carries. */
+export const DISPOSABLE_REALM_ATTRIBUTE = 'rasta.disposable_stack';
+
+/**
+ * Why the realm representation an admin GET returned is not the disposable
+ * development realm — or `null` when it is. Fails closed on any shape but a
+ * representation of the expected realm carrying the marker exactly.
+ */
+export function disposableRealmRefusal(representation: unknown, realm: string): string | null {
+  if (typeof representation !== 'object' || representation === null) {
+    return `Keycloak returned no realm representation for KEYCLOAK_REALM`;
+  }
+  const rep = representation as { realm?: unknown; attributes?: unknown };
+  if (rep.realm !== realm) return 'Keycloak answered for a different realm than KEYCLOAK_REALM';
+  const attributes = rep.attributes;
+  const marker =
+    typeof attributes === 'object' && attributes !== null
+      ? (attributes as Record<string, unknown>)[DISPOSABLE_REALM_ATTRIBUTE]
+      : undefined;
+  if (marker !== 'true') {
+    return (
+      `the Keycloak realm does not carry ${DISPOSABLE_REALM_ATTRIBUTE}="true", which only the ` +
+      'importable development realm sets — it is not the disposable stack'
+    );
+  }
+  return null;
+}
 
 /** The environment this suite may run in. */
 export const E2E_ENVIRONMENT = 'test';

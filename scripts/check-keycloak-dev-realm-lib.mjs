@@ -20,6 +20,12 @@
 
 export const GATE_PLACEHOLDER = '${RASTA_DEV_REALM_GATE}';
 export const GATE_SCRIPT = 'dev-realm-gate.sh';
+/**
+ * The realm attribute the E2E suite reads before its first Keycloak write
+ * (tests/e2e/src/target-guard.ts): only this importable development realm
+ * carries it, so it must not be dropped from the file.
+ */
+export const DISPOSABLE_STACK_ATTRIBUTE = 'rasta.disposable_stack';
 
 /** The checks `dev-realm-gate.sh` must keep, each as a fragment of its text. */
 const GATE_SCRIPT_REQUIREMENTS = [
@@ -49,6 +55,13 @@ export function validateDevRealmGate({ realmText, gateScriptText, launchers }) {
     errors.push(
       `rasta-realm.json: "enabled" must be the string "${GATE_PLACEHOLDER}", so an ungated import fails; ` +
         `found ${JSON.stringify(realm.enabled)}`,
+    );
+  }
+
+  if (realm && realm.attributes?.[DISPOSABLE_STACK_ATTRIBUTE] !== 'true') {
+    errors.push(
+      `rasta-realm.json: attributes["${DISPOSABLE_STACK_ATTRIBUTE}"] must be "true" — the E2E suite ` +
+        'refuses any realm without it',
     );
   }
 

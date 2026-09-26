@@ -1,7 +1,7 @@
 import { request } from '@playwright/test';
 import { Kafka, logLevel } from 'kafkajs';
 import { e2eConfig } from './src/env';
-import { accessToken, ensureTenantBUser, E2E_USERS } from './src/keycloak';
+import { accessToken, ensureTenantBUser, E2E_USERS, verifyDisposableRealm } from './src/keycloak';
 import { waitFor } from './src/events';
 import { assertDisposableE2eTarget } from './src/target-guard';
 
@@ -16,6 +16,12 @@ import { assertDisposableE2eTarget } from './src/target-guard';
  *
  * There is no `--pass-with-no-tests` anywhere in this package, and nothing here
  * degrades to a mock when a dependency is missing.
+ *
+ * **Every check runs before the first write** (Codex review of #117,
+ * finding 3): each service including marketplace, the gateway, Keycloak and
+ * its disposable-realm marker, the Kafka cluster and every topic a scenario
+ * reads. Only then does anything write — `ensureTenantBUser` — or ask for a
+ * token. A stack that fails any check is left exactly as it was.
  */
 export default async function globalSetup(): Promise<void> {
   const config = e2eConfig();
@@ -34,6 +40,20 @@ export default async function globalSetup(): Promise<void> {
       `economic-service to be ready at ${config.economicUrl}/health/ready`,
       async () => {
         const response = await context.get(`${config.economicUrl}/health/ready`, {
+          failOnStatusCode: false,
+        });
+        return response.status() === 200;
+      },
+      120_000,
+    );
+
+    // ---- marketplace-service ------------------------------------------------
+    // The order scenarios read its saga view directly and tap its topic; a
+    // suite that started without it would fail as a timeout in a scenario.
+    await waitFor(
+      `marketplace-service to be ready at ${config.marketplaceUrl}/health/ready`,
+      async () => {
+        const response = await context.get(`${config.marketplaceUrl}/health/ready`, {
           failOnStatusCode: false,
         });
         return response.status() === 200;
@@ -120,14 +140,9 @@ export default async function globalSetup(): Promise<void> {
       180_000,
     );
 
-    const reconciled = await ensureTenantBUser(config);
-    console.warn(`[e2e] second-tenant user ${E2E_USERS.tenantB}: ${reconciled}`);
-
-    // Prove every actor can actually authenticate before a single scenario
-    // runs. A token failure inside a test reads as a domain failure.
-    for (const username of Object.values(E2E_USERS)) {
-      await accessToken(username, config);
-    }
+    // The realm must be the disposable development one: a non-mutating admin
+    // GET, before anything below writes to it (src/target-guard.ts).
+    await verifyDisposableRealm(config);
 
     // ---- Kafka --------------------------------------------------------------
     // Required, not optional. The correlation scenario asserts on what the
@@ -141,8 +156,14 @@ export default async function globalSetup(): Promise<void> {
     const admin = kafka.admin();
     await admin.connect();
     try {
+      // The cluster answers as a cluster, not merely a port that accepts TCP.
+      const cluster = await admin.describeCluster();
+      if (cluster.brokers.length === 0) {
+        throw new Error(`Kafka at ${config.kafkaBrokers.join(', ')} reports no brokers.`);
+      }
       const topics = await admin.listTopics();
-      for (const topic of [config.economicTopic, config.documentTopic]) {
+      // Every topic a scenario taps — marketplace's too.
+      for (const topic of [config.economicTopic, config.marketplaceTopic, config.documentTopic]) {
         if (!topics.includes(topic)) {
           throw new Error(
             `Topic ${topic} does not exist on ${config.kafkaBrokers.join(', ')}. ` +
@@ -156,6 +177,16 @@ export default async function globalSetup(): Promise<void> {
     }
 
     console.warn(`[e2e] stack verified in ${Date.now() - started}ms`);
+
+    // ---- writes, only now ---------------------------------------------------
+    const reconciled = await ensureTenantBUser(config);
+    console.warn(`[e2e] second-tenant user ${E2E_USERS.tenantB}: ${reconciled}`);
+
+    // Prove every actor can actually authenticate before a single scenario
+    // runs. A token failure inside a test reads as a domain failure.
+    for (const username of Object.values(E2E_USERS)) {
+      await accessToken(username, config);
+    }
   } finally {
     await context.dispose();
   }

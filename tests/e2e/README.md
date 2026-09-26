@@ -71,6 +71,15 @@ Loopback باشند (`localhost`، `127.0.0.0/8` یا `::1`). راه دور زد
 یک‌بارمصرفِ جای دیگر را با Tunnel یا Port-Forward به localhost بیاور. تست خود
 دروازه: `pnpm --filter @rasta/e2e test:unit` (بدون Stack).
 
+Loopback فقط «کجا» را ثابت می‌کند، نه «کدام Stack» را. پس `global-setup.ts` پیش از نخستین نوشتن در Keycloak
+با یک GET مدیریتی (بدون تغییر) نشانِ `rasta.disposable_stack = "true"` را در Attributeهای قلمرو می‌خواند؛
+این نشان فقط در قلمرو توسعهٔ قابل‌Import (`infrastructure/docker/keycloak/rasta-realm.json`) هست و قلمرو بی‌نشان
+رد می‌شود. **همهٔ بررسی‌ها** — هر سرویس از جمله marketplace، Gateway، Keycloak و نشانش، خوشهٔ Kafka و هر سه Topic —
+پیش از هر نوشتن یا گرفتن توکن اجرا می‌شوند. Keycloak قلمرو را فقط وقتی Import می‌کند که وجود نداشته
+باشد؛ پس Keycloak محلی‌ای که قلمرو را پیش از این نشان Import کرده، یک بار باید قلمرو `rasta` را حذف کند (Admin
+Console) و `docker compose restart keycloak` را اجرا کند. CI هر بار Keycloak تازه می‌سازد. بررسی Upstreamهای Gateway و هویت هر سرویس هنوز انجام نمی‌شود — نیازمند کد سرویس و ثبت‌شده
+به‌عنوان کار بعدی.
+
 `global-setup.ts` پیش از هر سناریو، هر وابستگی را **مثبت** بررسی می‌کند و با
 پیام قابل‌اقدام شکست می‌خورد. هیچ‌جا Skip نمی‌کند: یک مرحله E2E سبز که چیزی
 اجرا نکرده، بدتر از یک مرحله قرمز است، چون به‌عنوان شاهد خوانده می‌شود.
