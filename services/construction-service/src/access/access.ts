@@ -122,7 +122,8 @@ export class ProjectAccess {
       context.organizationId === approval.authorityOrganizationId &&
       context.roles.includes(approval.authorityRole);
     if (!isAuthority) {
-      if (this.canReadProjectsOf(approval.organizationId)) {
+      // A caller who may see the approval learns why; anyone else learns nothing.
+      if (this.canSeeApproval(approval)) {
         throw RastaError.forbidden(
           'Only the authority this approval names may decide it; the platform decides nothing',
         );
@@ -139,12 +140,16 @@ export class ProjectAccess {
   assertCanSeeApproval(approval: ApprovalAuthority): void {
     assertNotAuditor();
     assertNotServiceCaller();
+    if (this.canSeeApproval(approval)) return;
+    throw RastaError.notFound('Approval', approval.id);
+  }
+
+  private canSeeApproval(approval: ApprovalAuthority): boolean {
     const context = getContext();
     const authority =
       context.organizationId === approval.authorityOrganizationId &&
       (context.roles.includes(approval.authorityRole) || context.roles.includes(SUPER_ROLE));
-    if (authority || this.canReadProjectsOf(approval.organizationId)) return;
-    throw RastaError.notFound('Approval', approval.id);
+    return authority || this.canReadProjectsOf(approval.organizationId);
   }
 
   /** The caller's organization and roles, for the authority inbox. */

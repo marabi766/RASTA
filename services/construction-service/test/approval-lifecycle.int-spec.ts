@@ -408,8 +408,19 @@ describe('approval policies and rounds', () => {
     it('gives SYSTEM_ADMIN no decision the policy did not name', async () => {
       const council = org();
       const { step } = await pendingStep(council, 'ORGANIZATION_ADMIN');
+      // It may see the step in its own organization, so it is told why (403),
+      // but it cannot decide it.
+      await expect(
+        asUser(council, ['SYSTEM_ADMIN'], () => w.approvals.get(step.id)),
+      ).resolves.toMatchObject({ id: step.id });
       await expect(
         asUser(council, ['SYSTEM_ADMIN'], () =>
+          w.approvals.decide(step.id, { expectedVersion: 1, decision: 'GRANT' }),
+        ),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      // A SYSTEM_ADMIN of an organization the step does not name learns nothing.
+      await expect(
+        asUser(org(), ['SYSTEM_ADMIN'], () =>
           w.approvals.decide(step.id, { expectedVersion: 1, decision: 'GRANT' }),
         ),
       ).rejects.toMatchObject({ code: 'NOT_FOUND' });
