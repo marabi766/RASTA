@@ -23,6 +23,7 @@ import { PAYMENT_PROVIDER } from '../tokens';
 import { SERVICE_NAME } from '../config/env';
 import type { PaymentProvider } from './provider';
 import type { TopUpDto } from './dto';
+import type { PaymentIntent } from '../generated/prisma';
 
 /**
  * Payments — the boundary between this platform and money it does not hold
@@ -103,6 +104,16 @@ export class PaymentService {
     if (wallet.status !== 'ACTIVE') {
       throw RastaError.businessRule('This wallet cannot be topped up', { walletId });
     }
+
+    // A retry with the same key resumes the intent the first attempt left
+    // (Codex round 2 on #121, F2). Inserting another collided with the unique
+    // key, so a capture left uncredited could never be finished by a retry.
+    const existing = await this.prisma.client.paymentIntent.findUnique({
+      where: {
+        organizationId_idempotencyKey: { organizationId, idempotencyKey: dto.idempotencyKey },
+      },
+    });
+    if (existing) return this.resume(existing, walletId, amountMinor, actor);
 
     // The balance this top-up would leave is checked before the provider is
     // asked for anything, and reserved (Codex review of PR #121, finding 1).
@@ -216,26 +227,174 @@ export class PaymentService {
       );
     }
 
+    const intent = { intentId, walletId, organizationId, amountMinor, currency: wallet.currency };
+    const recorded = await this.recordCaptureOrFindIt(intent, actor);
+    if (recorded.captured) return recorded.captured;
+    return this.returnUncreditedCapture(
+      intent,
+      authorization.providerReference,
+      dto.idempotencyKey,
+      recorded.cause,
+    );
+  }
+
+  /**
+   * Writes the capture, and when the write reports a failure, finds out
+   * whether it committed before anyone compensates (Codex round 2 on #121, F1).
+   *
+   * An exception from a transaction is not proof it rolled back: PostgreSQL
+   * can commit and the connection drop before the acknowledgement arrives.
+   * Refunding the provider then left a credited wallet over a returned
+   * charge. So the intent is read again in a fresh query: CAPTURED means the
+   * write happened and its result is rebuilt; still not captured, with no
+   * top-up transaction for it, is the only state that may be compensated.
+   * When even the re-read fails, the outcome is unknown and nothing is
+   * compensated: the original error propagates, the intent stays AUTHORIZED,
+   * and a same-key retry resumes it.
+   *
+   * The metrics count a capture after this decision, outside it, so a failing
+   * counter can never be mistaken for a failed write.
+   */
+  private async recordCaptureOrFindIt(
+    intent: CaptureTarget,
+    actor: string,
+  ): Promise<{ captured: TopUpResult; cause?: undefined } | { captured: null; cause: unknown }> {
+    let captured: TopUpResult | null;
+    let cause: unknown;
     try {
-      return await this.completeCapture(
-        intentId,
-        walletId,
-        organizationId,
-        amountMinor,
-        wallet.currency,
-        actor,
-      );
+      captured = await this.completeCapture(intent, actor);
     } catch (error) {
-      return this.returnUncreditedCapture(
-        intentId,
-        organizationId,
-        amountMinor,
-        wallet.currency,
-        authorization.providerReference,
-        dto.idempotencyKey,
-        error,
+      cause = error;
+      captured = await this.committedCapture(intent.intentId).catch((readError: unknown) => {
+        this.logger.error(
+          `Payment intent ${intent.intentId}: the capture write failed and its outcome could ` +
+            'not be read back; not compensating',
+          readError instanceof Error ? readError.stack : String(readError),
+        );
+        throw error;
+      });
+      if (captured) {
+        this.logger.warn(
+          `Payment intent ${intent.intentId}: the capture write reported a failure but had ` +
+            'committed; returning the committed result',
+        );
+      }
+    }
+    if (!captured) return { captured: null, cause };
+
+    transactionsCreatedTotal.inc({ service: SERVICE_NAME, type: 'WALLET_TOP_UP', source: 'api' });
+    paymentIntentsTotal.inc({
+      service: SERVICE_NAME,
+      provider: this.provider.name,
+      simulated: String(this.provider.simulated),
+      outcome: 'CAPTURED',
+    });
+    return { captured };
+  }
+
+  /**
+   * The committed result of a capture, or `null` when provably none was
+   * written: the intent is not CAPTURED and no top-up transaction names it.
+   * The two commit together, so disagreement between them is refused rather
+   * than guessed at.
+   */
+  private async committedCapture(intentId: string): Promise<TopUpResult | null> {
+    const intent = await this.prisma.client.paymentIntent.findUnique({ where: { id: intentId } });
+    if (!intent) throw RastaError.internal(`Payment intent ${intentId} vanished`);
+    const transaction = await this.prisma.client.transaction.findFirst({
+      where: { sourceType: 'PAYMENT_INTENT', sourceReference: intentId },
+    });
+    if (intent.status !== 'CAPTURED' && !transaction) return null;
+    if (intent.status !== 'CAPTURED' || !intent.transactionId) {
+      throw RastaError.internal(`Payment intent ${intentId} disagrees with its top-up transaction`);
+    }
+    return this.capturedView(intent);
+  }
+
+  /**
+   * A captured intent as the response that captured it. The balances are the
+   * wallet's now, which a retry reads as current; the ids are the originals.
+   */
+  private async capturedView(intent: PaymentIntent): Promise<TopUpResult> {
+    const journal = await this.prisma.client.journal.findFirst({
+      where: { transactionId: intent.transactionId, journalType: 'WALLET_TOP_UP' },
+    });
+    const wallet = await this.wallets.getById(intent.walletId);
+    return {
+      paymentIntentId: intent.id,
+      transactionId: intent.transactionId,
+      journalId: journal?.id ?? null,
+      status: 'CAPTURED',
+      amountMinor: intent.amountMinor,
+      currency: intent.currency,
+      balances: {
+        ledgerBalanceMinor: wallet.ledgerBalanceMinor,
+        pendingBalanceMinor: wallet.pendingBalanceMinor,
+        availableBalanceMinor: wallet.availableBalanceMinor,
+      },
+      provider: intent.provider,
+      simulated: intent.simulated,
+    };
+  }
+
+  /**
+   * A same-key retry of a top-up (Codex round 2 on #121, F2).
+   *
+   * The API's idempotency store replays a completed response itself, so this
+   * is reached when the first attempt ended in an error and released its
+   * claim. A finished intent answers as it finished. One the provider captured
+   * and the ledger did not credit (`CAPTURED_NOT_CREDITED`) is credited now,
+   * when the wallet has the headroom — the provider already holds the money,
+   * so it is not asked again — or refused exactly as before. Anything else is
+   * mid-flight with an outcome only a reconciliation can establish (the
+   * durable reconciler is a recorded follow-up), and is refused without
+   * touching it.
+   */
+  private async resume(
+    intent: PaymentIntent,
+    walletId: string,
+    amountMinor: bigint,
+    actor: string,
+  ): Promise<TopUpResult> {
+    if (intent.walletId !== walletId || intent.amountMinor !== amountMinor) {
+      throw RastaError.idempotencyKeyReused(intent.idempotencyKey);
+    }
+    if (intent.status === 'CAPTURED' || intent.status === 'REFUNDED') {
+      return this.capturedView(intent);
+    }
+    if (intent.status === 'FAILED') {
+      return {
+        paymentIntentId: intent.id,
+        transactionId: null,
+        journalId: null,
+        status: 'FAILED',
+        amountMinor: intent.amountMinor,
+        currency: intent.currency,
+        balances: null,
+        provider: intent.provider,
+        simulated: intent.simulated,
+        failureReason: intent.failureReason ?? 'UNKNOWN',
+      };
+    }
+    if (intent.status !== 'AUTHORIZED' || intent.failureReason !== CAPTURED_NOT_CREDITED) {
+      throw RastaError.businessRule(
+        'A top-up with this idempotency key has not finished; its outcome is being reconciled',
+        { paymentIntentId: intent.id, status: intent.status },
       );
     }
+
+    const target = {
+      intentId: intent.id,
+      walletId,
+      organizationId: intent.organizationId,
+      amountMinor,
+      currency: intent.currency,
+    };
+    const recorded = await this.recordCaptureOrFindIt(target, actor);
+    if (recorded.captured) return recorded.captured;
+    // Still uncreditable: the same refusal the first attempt gave, and the
+    // intent stays marked. Its unreconciled event was published then.
+    throw recorded.cause;
   }
 
   /**
@@ -255,13 +414,13 @@ export class PaymentService {
    * charge to return. Should the provider refuse the refund too, the intent
    * keeps `CAPTURED_NOT_CREDITED` as its failure reason, stays AUTHORIZED
    * (the lifecycle constraint forbids calling it FAILED while money is held),
-   * holds its reserved headroom, and the error propagates: a case for a person.
+   * holds its reserved headroom, `PAYMENT_CAPTURE_UNRECONCILED` announces it in
+   * the same transaction, and the error propagates. A same-key retry credits
+   * it once the wallet has room ({@link resume}); a durable reconciler that
+   * asks the provider is a recorded follow-up.
    */
   private async returnUncreditedCapture(
-    intentId: string,
-    organizationId: string,
-    amountMinor: bigint,
-    currency: string,
+    { intentId, walletId, organizationId, amountMinor, currency }: CaptureTarget,
     providerReference: string,
     idempotencyKey: string,
     cause: unknown,
@@ -288,16 +447,41 @@ export class PaymentService {
       );
 
     if (!refunded) {
-      await this.prisma.client.paymentIntent.update({
-        where: { id: intentId },
-        data: { failureReason: 'CAPTURED_NOT_CREDITED' },
+      // The mark and its alert commit together (Codex round 2 on #121, F2):
+      // a stranded capture is never recorded without being announced.
+      await this.prisma.transaction(async (tx) => {
+        await tx.paymentIntent.update({
+          where: { id: intentId },
+          data: { failureReason: CAPTURED_NOT_CREDITED },
+        });
+        await this.ledger.enqueue(tx, {
+          eventName: ECONOMIC_EVENTS.PAYMENT_CAPTURE_UNRECONCILED,
+          aggregateId: intentId,
+          organizationId,
+          payload: {
+            paymentIntentId: intentId,
+            organizationId,
+            walletId,
+            amountMinor: formatMinor(amountMinor),
+            currency,
+            provider: this.provider.name,
+            simulated: this.provider.simulated,
+            reason,
+            detectedAt: new Date().toISOString(),
+          },
+        });
       });
       paymentIntentsTotal.inc({
         service: SERVICE_NAME,
         provider: this.provider.name,
         simulated: String(this.provider.simulated),
-        outcome: 'CAPTURED_NOT_CREDITED',
+        outcome: CAPTURED_NOT_CREDITED,
       });
+      this.logger.error(
+        `Payment intent ${intentId} is captured at the provider and not credited (${reason}); ` +
+          'the provider refund failed. A same-key retry credits it once the wallet has room; ' +
+          'otherwise it needs a person',
+      );
       throw cause;
     }
 
@@ -315,11 +499,7 @@ export class PaymentService {
    * really in.
    */
   private async completeCapture(
-    intentId: string,
-    walletId: string,
-    organizationId: string,
-    amountMinor: bigint,
-    currency: string,
+    { intentId, walletId, organizationId, amountMinor, currency }: CaptureTarget,
     actor: string,
   ): Promise<TopUpResult> {
     const stop = financialTransactionDuration.startTimer({
@@ -328,7 +508,7 @@ export class PaymentService {
     });
 
     try {
-      const result = await this.prisma.transaction(async (tx) => {
+      return await this.prisma.transaction(async (tx) => {
         const [locked] = await this.walletRepository.lock(tx, [walletId]);
         if (!locked) throw RastaError.internal('Wallet vanished while locking it');
 
@@ -402,20 +582,6 @@ export class PaymentService {
           simulated: this.provider.simulated,
         };
       });
-
-      transactionsCreatedTotal.inc({
-        service: SERVICE_NAME,
-        type: 'WALLET_TOP_UP',
-        source: 'api',
-      });
-      paymentIntentsTotal.inc({
-        service: SERVICE_NAME,
-        provider: this.provider.name,
-        simulated: String(this.provider.simulated),
-        outcome: 'CAPTURED',
-      });
-
-      return result;
     } finally {
       stop();
     }
@@ -614,6 +780,21 @@ export function failureCodeFrom(code: string | undefined, fallback: string): str
 }
 
 const FAILURE_CODE = /^[A-Z][A-Z_]{0,63}$/;
+
+/**
+ * The failure reason an AUTHORIZED intent keeps while the provider holds a
+ * capture the ledger has not credited (Codex round 2 on #121, F2).
+ */
+export const CAPTURED_NOT_CREDITED = 'CAPTURED_NOT_CREDITED';
+
+/** The intent a capture is written for. */
+interface CaptureTarget {
+  intentId: string;
+  walletId: string;
+  organizationId: string;
+  amountMinor: bigint;
+  currency: string;
+}
 
 export interface TopUpResult {
   paymentIntentId: string;

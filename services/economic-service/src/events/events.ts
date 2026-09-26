@@ -37,6 +37,7 @@ export const ECONOMIC_EVENTS = {
   PAYMENT_AUTHORIZED: 'PAYMENT_AUTHORIZED',
   PAYMENT_COMPLETED: 'PAYMENT_COMPLETED',
   PAYMENT_FAILED: 'PAYMENT_FAILED',
+  PAYMENT_CAPTURE_UNRECONCILED: 'PAYMENT_CAPTURE_UNRECONCILED',
   COMMISSION_APPLIED: 'COMMISSION_APPLIED',
   REWARD_GRANTED: 'REWARD_GRANTED',
   REWARD_LEVEL_CHANGED: 'REWARD_LEVEL_CHANGED',
@@ -166,6 +167,28 @@ export const paymentFailedPayload = z.object({
   simulated: z.boolean(),
   reason: z.string(),
   failedAt: z.string(),
+});
+/**
+ * The provider captured the money, the wallet could not be credited, and
+ * returning the capture at the provider failed too (Codex round 2 on #121,
+ * F2). The intent stays AUTHORIZED with `failure_reason =
+ * CAPTURED_NOT_CREDITED`: the payer has been charged and nothing is credited
+ * until a same-key retry credits it or a person reconciles it.
+ *
+ * Published in the transaction that records the failure reason, so the alert
+ * cannot be lost while the state persists. Codes only, no free text
+ * (AGENTS.md S-09).
+ */
+export const paymentCaptureUnreconciledPayload = z.object({
+  paymentIntentId: z.string(),
+  organizationId: z.string(),
+  walletId: z.string(),
+  amountMinor,
+  currency,
+  provider: z.string(),
+  simulated: z.boolean(),
+  reason: z.enum(['WALLET_BALANCE_LIMIT', 'CAPTURE_NOT_CREDITED']),
+  detectedAt: z.string(),
 });
 
 // ---------------------------------------------------------------------------
@@ -443,6 +466,7 @@ export const ECONOMIC_EVENT_SCHEMAS = {
   [ECONOMIC_EVENTS.PAYMENT_AUTHORIZED]: paymentAuthorizedPayload,
   [ECONOMIC_EVENTS.PAYMENT_COMPLETED]: paymentCompletedPayload,
   [ECONOMIC_EVENTS.PAYMENT_FAILED]: paymentFailedPayload,
+  [ECONOMIC_EVENTS.PAYMENT_CAPTURE_UNRECONCILED]: paymentCaptureUnreconciledPayload,
   [ECONOMIC_EVENTS.COMMISSION_APPLIED]: commissionAppliedPayload,
   [ECONOMIC_EVENTS.REWARD_GRANTED]: rewardGrantedPayload,
   [ECONOMIC_EVENTS.REWARD_LEVEL_CHANGED]: rewardLevelChangedPayload,

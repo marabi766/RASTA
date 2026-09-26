@@ -186,6 +186,12 @@ describe('payment authorisation atomicity (real database)', () => {
     });
     const [intent] = await intentsOf(organizationId);
     expect(intent).toMatchObject({ status: 'AUTHORIZED', failureReason: 'CAPTURED_NOT_CREDITED' });
+    // Announced in the transaction that marked it (Codex round 2, F2).
+    const [alert] = await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_CAPTURE_UNRECONCILED);
+    expect(alert?.aggregateId).toBe(intent?.id);
+    expect((alert?.payload as { payload?: { reason?: string } })?.payload?.reason).toBe(
+      'WALLET_BALANCE_LIMIT',
+    );
 
     await cleanup(prisma, [organizationId]);
   });
@@ -204,6 +210,164 @@ describe('payment authorisation atomicity (real database)', () => {
     const [intent] = await intentsOf(organizationId);
     // AUTHORIZED, because money is held at the provider; marked for a person.
     expect(intent).toMatchObject({ status: 'AUTHORIZED', failureReason: 'CAPTURED_NOT_CREDITED' });
+
+    await cleanup(prisma, [organizationId]);
+  });
+
+  // Codex review of PR #121, round 2.
+
+  async function topUpWith(organizationId: string, amountMinor: bigint, idempotencyKey: string) {
+    const wallet = await asActor({ organizationId }, () => wiring.wallets.getOrOpen('IRR'));
+    return asActor({ organizationId }, () =>
+      payments.topUp(wallet.id, { amountMinor: amountMinor.toString(), idempotencyKey }),
+    );
+  }
+
+  it('does not refund a capture whose write committed and then reported a failure', async () => {
+    // F1: the commit succeeds and its acknowledgement is lost. The third
+    // transaction of a top-up is the capture write (after the reservation and
+    // the authorisation).
+    const organizationId = `${org.a}-AMBIGUOUS`;
+    await asActor({ organizationId }, () => wiring.wallets.getOrOpen('IRR'));
+    const original = prisma.transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+    let calls = 0;
+    jest.spyOn(prisma, 'transaction').mockImplementation((async (...args: unknown[]) => {
+      calls += 1;
+      const result = await original(...args);
+      if (calls === 3) throw new Error('connection lost after commit');
+      return result;
+    }) as PrismaService['transaction']);
+    const refund = jest.spyOn(provider, 'refund');
+
+    const result = await topUpWith(organizationId, 600n, `AMBIG-${ulid()}`);
+
+    expect(calls).toBe(3);
+    expect(result).toMatchObject({ status: 'CAPTURED', amountMinor: 600n });
+    expect(result.journalId).toMatch(/^JRN_/);
+    expect(refund).not.toHaveBeenCalled();
+    const [intent] = await intentsOf(organizationId);
+    expect(intent).toMatchObject({ status: 'CAPTURED', transactionId: result.transactionId });
+    expect(await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_FAILED)).toHaveLength(0);
+    const wallet = await asActor({ organizationId }, () => wiring.wallets.getOrOpen('IRR'));
+    expect((await readBalances(prisma, wallet.id)).ledger).toBe(600n);
+
+    await cleanup(prisma, [organizationId]);
+  });
+
+  it('compensates nothing when the outcome of a failed write cannot be read back', async () => {
+    const organizationId = `${org.b}-UNKNOWN`;
+    jest.spyOn(wiring.wallets, 'credit').mockRejectedValueOnce(new Error('connection reset'));
+    jest
+      .spyOn(
+        payments as unknown as { committedCapture: () => Promise<unknown> },
+        'committedCapture',
+      )
+      .mockRejectedValueOnce(new Error('database unreachable'));
+    const refund = jest.spyOn(provider, 'refund');
+
+    await expect(topUpWith(organizationId, 650n, `UNKNOWN-${ulid()}`)).rejects.toThrow(
+      'connection reset',
+    );
+    expect(refund).not.toHaveBeenCalled();
+    const [intent] = await intentsOf(organizationId);
+    expect(intent).toMatchObject({ status: 'AUTHORIZED', failureReason: null });
+
+    await cleanup(prisma, [organizationId]);
+  });
+
+  it('credits a stranded capture on a same-key retry, once, without asking the provider again', async () => {
+    // F2: the first attempt can neither credit nor refund.
+    const organizationId = `${org.c}-RESUME`;
+    const key = `RESUME-${ulid()}`;
+    jest.spyOn(wiring.wallets, 'credit').mockRejectedValueOnce(walletBalanceLimit('WLT_STAND_IN'));
+    jest.spyOn(provider, 'refund').mockRejectedValueOnce(new Error('provider unreachable'));
+    await expect(topUpWith(organizationId, 750n, key)).rejects.toMatchObject({
+      code: 'BUSINESS_RULE_VIOLATION',
+    });
+
+    // Still uncreditable on the first retry: the same refusal, still marked.
+    jest.spyOn(wiring.wallets, 'credit').mockRejectedValueOnce(walletBalanceLimit('WLT_STAND_IN'));
+    await expect(topUpWith(organizationId, 750n, key)).rejects.toMatchObject({
+      code: 'BUSINESS_RULE_VIOLATION',
+    });
+    expect((await intentsOf(organizationId))[0]).toMatchObject({
+      status: 'AUTHORIZED',
+      failureReason: 'CAPTURED_NOT_CREDITED',
+    });
+
+    const authorize = jest.spyOn(provider, 'authorize');
+    const capture = jest.spyOn(provider, 'capture');
+    const result = await topUpWith(organizationId, 750n, key);
+    expect(result).toMatchObject({ status: 'CAPTURED', amountMinor: 750n });
+    expect(authorize).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
+
+    const intents = await intentsOf(organizationId);
+    expect(intents).toHaveLength(1);
+    expect(intents[0]).toMatchObject({ id: result.paymentIntentId, status: 'CAPTURED' });
+    const wallet = await asActor({ organizationId }, () => wiring.wallets.getOrOpen('IRR'));
+    expect((await readBalances(prisma, wallet.id)).ledger).toBe(750n);
+    expect(await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_COMPLETED)).toHaveLength(1);
+    expect(
+      await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_CAPTURE_UNRECONCILED),
+    ).toHaveLength(1);
+
+    // And a further retry replays it rather than crediting twice.
+    const replay = await topUpWith(organizationId, 750n, key);
+    expect(replay).toMatchObject({
+      status: 'CAPTURED',
+      paymentIntentId: result.paymentIntentId,
+      journalId: result.journalId,
+    });
+    expect((await readBalances(prisma, wallet.id)).ledger).toBe(750n);
+
+    await cleanup(prisma, [organizationId]);
+  });
+
+  it('answers a same-key retry as the intent finished, and refuses a changed request', async () => {
+    const organizationId = `${org.a}-REPLAY`;
+
+    const failedKey = `REPLAY-F-${ulid()}`;
+    jest.spyOn(wiring.wallets, 'credit').mockRejectedValueOnce(walletBalanceLimit('WLT_STAND_IN'));
+    expect((await topUpWith(organizationId, 300n, failedKey)).status).toBe('FAILED');
+    const refund = jest.spyOn(provider, 'refund');
+    expect(await topUpWith(organizationId, 300n, failedKey)).toMatchObject({
+      status: 'FAILED',
+      failureReason: 'WALLET_BALANCE_LIMIT',
+    });
+    expect(refund).not.toHaveBeenCalled();
+
+    const capturedKey = `REPLAY-C-${ulid()}`;
+    const first = await topUpWith(organizationId, 400n, capturedKey);
+    expect(await topUpWith(organizationId, 400n, capturedKey)).toMatchObject({
+      status: 'CAPTURED',
+      paymentIntentId: first.paymentIntentId,
+      transactionId: first.transactionId,
+    });
+    await expect(topUpWith(organizationId, 401n, capturedKey)).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    });
+    expect(await intentsOf(organizationId)).toHaveLength(2);
+
+    await cleanup(prisma, [organizationId]);
+  });
+
+  it('refuses a same-key retry of an intent whose outcome is not known yet', async () => {
+    const organizationId = `${org.b}-INFLIGHT`;
+    const key = `INFLIGHT-${ulid()}`;
+    const enqueue = wiring.ledger.enqueue.bind(wiring.ledger);
+    jest.spyOn(wiring.ledger, 'enqueue').mockImplementation(async (tx, input) => {
+      if (input.eventName === ECONOMIC_EVENTS.PAYMENT_AUTHORIZED) throw new Error('outbox down');
+      return enqueue(tx, input);
+    });
+    await expect(topUpWith(organizationId, 200n, key)).rejects.toThrow('outbox down');
+
+    const authorize = jest.spyOn(provider, 'authorize');
+    await expect(topUpWith(organizationId, 200n, key)).rejects.toMatchObject({
+      code: 'BUSINESS_RULE_VIOLATION',
+    });
+    expect(authorize).not.toHaveBeenCalled();
+    expect((await intentsOf(organizationId))[0]).toMatchObject({ status: 'CREATED' });
 
     await cleanup(prisma, [organizationId]);
   });

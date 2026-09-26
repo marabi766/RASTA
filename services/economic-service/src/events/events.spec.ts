@@ -19,7 +19,7 @@ import { CONSUMED_EVENTS, DEFERRED_CONSUMPTION, maintenanceApprovedSchema } from
 const EVENT_NAMES = Object.values(ECONOMIC_EVENTS) as EconomicEventName[];
 
 describe('the catalogue', () => {
-  it('publishes exactly the fourteen events docs/07 § 7.5 lists', () => {
+  it('publishes exactly the fifteen events docs/07 § 7.5 lists', () => {
     expect(EVENT_NAMES.sort()).toEqual(
       [
         'COMMISSION_APPLIED',
@@ -28,6 +28,7 @@ describe('the catalogue', () => {
         'FUNDS_RELEASED',
         'JOURNAL_POSTED',
         'PAYMENT_AUTHORIZED',
+        'PAYMENT_CAPTURE_UNRECONCILED',
         'PAYMENT_COMPLETED',
         'PAYMENT_FAILED',
         'REWARD_GRANTED',

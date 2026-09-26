@@ -84,6 +84,17 @@ const PAYLOADS = {
     reason: 'PROVIDER_DECLINED',
     failedAt: '2026-08-29T00:00:02.000Z',
   },
+  PAYMENT_CAPTURE_UNRECONCILED: {
+    paymentIntentId: INTENT,
+    organizationId: ORG,
+    walletId: 'WAL_1',
+    amountMinor: '5000',
+    currency: 'IRR',
+    provider: 'mock',
+    simulated: true,
+    reason: 'WALLET_BALANCE_LIMIT',
+    detectedAt: '2026-08-29T00:00:02.000Z',
+  },
   COMMISSION_APPLIED: {
     commissionId: 'CMS_1',
     transactionId: TXN,
@@ -217,6 +228,7 @@ const EXPECTED: { [N in EconomicEventName]: { scope: PartitionScope; key: string
   PAYMENT_AUTHORIZED: { scope: 'PAYMENT_INTENT', key: INTENT },
   PAYMENT_COMPLETED: { scope: 'TRANSACTION', key: TXN },
   PAYMENT_FAILED: { scope: 'PAYMENT_INTENT', key: INTENT },
+  PAYMENT_CAPTURE_UNRECONCILED: { scope: 'PAYMENT_INTENT', key: INTENT },
   COMMISSION_APPLIED: { scope: 'TRANSACTION', key: TXN },
   REWARD_GRANTED: { scope: 'REWARD', key: 'RWD_1' },
   REWARD_LEVEL_CHANGED: { scope: 'REWARD_SUBJECT', key: `${ORG}:USR-1` },
@@ -239,13 +251,13 @@ describe('every published economic event has a partition decision', () => {
     expect(resolve(name)).toEqual(EXPECTED[name]);
   });
 
-  it('covers exactly the fourteen events the catalogue publishes', () => {
+  it('covers exactly the fifteen events the catalogue publishes', () => {
     // Guards the table above against drift in both directions: an event added
     // to the catalogue without a row here, and a row left behind for an event
     // that no longer exists.
     expect(Object.keys(EXPECTED).sort()).toEqual([...NAMES].sort());
     expect(Object.keys(PARTITION_KEY_POLICY).sort()).toEqual([...NAMES].sort());
-    expect(NAMES).toHaveLength(14);
+    expect(NAMES).toHaveLength(15);
   });
 });
 
@@ -374,6 +386,7 @@ describe('aggregate identity is untouched by this change', () => {
       PAYMENT_AUTHORIZED: 'PaymentIntent',
       PAYMENT_COMPLETED: 'PaymentIntent',
       PAYMENT_FAILED: 'PaymentIntent',
+      PAYMENT_CAPTURE_UNRECONCILED: 'PaymentIntent',
       COMMISSION_APPLIED: 'Commission',
       REWARD_GRANTED: 'Reward',
       REWARD_LEVEL_CHANGED: 'RewardBalance',
