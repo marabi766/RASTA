@@ -232,17 +232,30 @@ export type DlqReason = (typeof DLQ_REASONS)[keyof typeof DLQ_REASONS];
  * Financial events never may. Replaying a settlement without first checking
  * what actually happened to the money is a larger risk than the original
  * failure. See docs/runbooks/replay-dlq.md.
+ *
+ * Every economic-service event is here, as ADR-036 already said: the list had
+ * fallen behind the catalogue (Codex round 3 on #121, L1), and economic's
+ * `events.spec.ts` now checks it against `ECONOMIC_EVENTS` exhaustively.
  */
 export const NEVER_AUTO_REPLAY = new Set([
   'ORDER_RECEIPT_CONFIRMED',
+  'STATEMENT_APPROVED',
+  // economic-service — all of `ECONOMIC_EVENTS`
+  'WALLET_OPENED',
+  'FUNDS_HELD',
+  'FUNDS_RELEASED',
   'PAYMENT_AUTHORIZED',
   'PAYMENT_COMPLETED',
   'PAYMENT_FAILED',
+  'PAYMENT_CAPTURE_UNRECONCILED',
   'COMMISSION_APPLIED',
-  'SETTLEMENT_COMPLETED',
-  'STATEMENT_APPROVED',
-  'JOURNAL_POSTED',
   'REWARD_GRANTED',
+  'REWARD_LEVEL_CHANGED',
+  'SETTLEMENT_COMPLETED',
+  'JOURNAL_POSTED',
+  'COMMISSION_RULE_CHANGED',
+  'REWARD_RULE_CHANGED',
+  'TRANSACTION_STATUS_CHANGED',
 ]);
 
 export function isAutoReplayable(eventName: string): boolean {

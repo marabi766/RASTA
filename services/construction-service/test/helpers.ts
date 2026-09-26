@@ -1,4 +1,4 @@
-import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
+import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
@@ -7,6 +7,12 @@ import { ProjectService } from '../src/project/project.service';
 import { NeedService } from '../src/project/need.service';
 import { ProjectAccess } from '../src/access/access';
 import { IdempotencyStore } from '../src/shared/idempotency';
+import { ApprovalRepository } from '../src/approval/approval.repository';
+import { ApprovalService } from '../src/approval/approval.service';
+import { PolicyService } from '../src/approval/policy.service';
+import { ExecutionService } from '../src/project/execution.service';
+import { ProgressService } from '../src/progress/progress.service';
+import { OrganizationDirectory } from '../src/organization/organization-directory';
 import { loadConstructionEnv, type ConstructionEnv } from '../src/config/env';
 import type { CreateProjectDto } from '../src/project/dto';
 
@@ -59,6 +65,13 @@ export interface Wiring {
   repository: ProjectRepository;
   projects: ProjectService;
   needs: NeedService;
+  approvalRepository: ApprovalRepository;
+  approvals: ApprovalService;
+  policies: PolicyService;
+  /** The organization hierarchy these suites see instead of organization-service. */
+  hierarchy: FakeHierarchy;
+  execution: ExecutionService;
+  progress: ProgressService;
   close(): Promise<void>;
 }
 
@@ -68,16 +81,60 @@ export interface Wiring {
  */
 export function wire(env: ConstructionEnv = testEnv()): Wiring {
   const prisma = new PrismaService(databaseUrl());
+  const hierarchy = new FakeHierarchy();
   const events = new EventPublisher(env);
   const repository = new ProjectRepository(prisma);
   const access = new ProjectAccess(env);
   const idempotency = new IdempotencyStore(prisma, env);
+  const approvalRepository = new ApprovalRepository(prisma);
+  const projects = new ProjectService(
+    prisma,
+    repository,
+    events,
+    access,
+    idempotency,
+    env,
+    approvalRepository,
+  );
+  const approvals = new ApprovalService(
+    prisma,
+    approvalRepository,
+    repository,
+    projects,
+    events,
+    access,
+    env,
+    hierarchy as unknown as OrganizationDirectory,
+  );
   return {
     prisma,
     env,
     repository,
-    projects: new ProjectService(prisma, repository, events, access, idempotency, env),
+    projects,
     needs: new NeedService(prisma, repository, events, access, idempotency),
+    approvalRepository,
+    approvals,
+    policies: new PolicyService(
+      prisma,
+      approvalRepository,
+      events,
+      access,
+      hierarchy as unknown as OrganizationDirectory,
+      env,
+      idempotency,
+    ),
+    hierarchy,
+    execution: new ExecutionService(
+      prisma,
+      repository,
+      projects,
+      approvals,
+      approvalRepository,
+      events,
+      access,
+      env,
+    ),
+    progress: new ProgressService(prisma, repository, events, access, env, idempotency),
     close: () => prisma.onModuleDestroy(),
   };
 }
@@ -157,6 +214,10 @@ export async function cleanup(prisma: PrismaService, organizationIds: string[]):
   if (organizationIds.length === 0) return;
   const where = { organizationId: { in: organizationIds } };
   await runUnscoped('integration cleanup removes exactly what the suite wrote', async () => {
+    await prisma.client.approval.deleteMany({ where });
+    await prisma.client.progressReport.deleteMany({ where });
+    await prisma.client.approvalPolicyStep.deleteMany({ where });
+    await prisma.client.approvalPolicy.deleteMany({ where });
     await prisma.client.projectNeed.deleteMany({ where });
     await prisma.client.project.deleteMany({ where });
     await prisma.client.idempotencyKey.deleteMany({ where });
@@ -200,4 +261,133 @@ export async function waitFor<T>(
       throw new Error(`Timed out after ${timeoutMs}ms waiting for ${describe}`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+}
+
+/** Runs `fn` as a user of `organizationId` with the given roles. */
+export function asUser<T>(
+  organizationId: string,
+  roles: string[],
+  fn: () => T,
+  userId = newUserId(),
+): T {
+  return runWithContext(
+    context({ organizationId, organizationIds: [organizationId], userId, roles }),
+    fn,
+  );
+}
+
+/** Runs `fn` as the union administrator of `organizationId` (a policy author, Q-70 (7)). */
+export function asSetter<T>(organizationId: string, fn: () => T): T {
+  return asUser(organizationId, ['UNION_ADMIN'], fn);
+}
+
+/** The platform organization the suites' SYSTEM_ADMIN acts for. */
+export const PLATFORM_ORG = 'ORG-ITEST-PLATFORM';
+
+/** Runs `fn` as a platform administrator — a different person each call unless `userId` is given. */
+export function asPlatform<T>(fn: () => T, userId = newUserId()): T {
+  return asUser(PLATFORM_ORG, ['SYSTEM_ADMIN'], fn, userId);
+}
+
+/**
+ * organization-service's hierarchy, as these suites need it: an organization
+ * is within itself and within every ancestor registered with `adopt`. The
+ * contract this stands in for is proven twice over — against the real
+ * organization-service (`construction-hierarchy-contract.int-spec.ts` there)
+ * and, for the HTTP client, in `organization-directory.int-spec.ts` here.
+ * `unavailable` makes every answer fail as an unreachable service would.
+ */
+export class FakeHierarchy {
+  private readonly parents = new Map<string, string>();
+  unavailable = false;
+  timedOut = false;
+  readonly asked: [string, string][] = [];
+
+  adopt(parent: string, child: string): void {
+    this.parents.set(child, parent);
+  }
+
+  /** The organization moved out from under its parent (organization-service's MOVE). */
+  disown(child: string): void {
+    this.parents.delete(child);
+  }
+
+  async isWithin(scope: string, organizationId: string): Promise<boolean> {
+    this.asked.push([scope, organizationId]);
+    if (this.unavailable) throw RastaError.upstreamUnavailable('organization-service');
+    if (this.timedOut) throw RastaError.upstreamTimeout('organization-service', 3000);
+    for (
+      let current: string | undefined = organizationId;
+      current;
+      current = this.parents.get(current)
+    ) {
+      if (current === scope) return true;
+    }
+    return false;
+  }
+}
+
+export interface StepSpec {
+  authorityOrganizationId: string;
+  authorityRole?: string;
+  minAmountMinor?: string;
+  maxAmountMinor?: string;
+  approvalType?: string;
+}
+
+/**
+ * Puts a policy in force for `organizationId` the decided way (Q-70 (7)): its
+ * union administrator writes and submits it, a different platform
+ * administrator approves it. Returns its id.
+ */
+export async function activePolicy(
+  w: Wiring,
+  organizationId: string,
+  steps: StepSpec[],
+  workflowKey: 'project.execution' | 'project.completion' = 'project.execution',
+): Promise<string> {
+  const policy = await asSetter(organizationId, () =>
+    w.policies.create({
+      organizationId,
+      workflowKey,
+      label: `Policy for ${workflowKey}`,
+      rationale: 'Written by the integration suite to exercise the round',
+      isSample: true,
+      steps: steps.map((step, index) => ({
+        approvalType: step.approvalType ?? `Approval ${index + 1}`,
+        authorityOrganizationId: step.authorityOrganizationId,
+        authorityRole: (step.authorityRole ?? 'ORGANIZATION_ADMIN') as 'ORGANIZATION_ADMIN',
+        authorityLabel: `Authority ${index + 1}`,
+        ...(step.minAmountMinor ? { minAmountMinor: step.minAmountMinor } : {}),
+        ...(step.maxAmountMinor ? { maxAmountMinor: step.maxAmountMinor } : {}),
+      })),
+    }),
+  );
+  await asSetter(organizationId, () => w.policies.submit(policy.id, { expectedVersion: 1 }));
+  await asPlatform(() => w.policies.approve(policy.id, { expectedVersion: 2 }));
+  return policy.id;
+}
+
+/**
+ * A project ready to request approval: an estimate and one submitted need.
+ * Returns the project id and its current version.
+ */
+export async function readyProject(
+  w: Wiring,
+  organizationId: string,
+  estimatedCostMinor = '1000000',
+): Promise<{ id: string; version: number }> {
+  const project = await asAdmin(organizationId, () =>
+    w.projects.create({ ...PROJECT, estimatedCostMinor }),
+  );
+  const need = await asAdmin(organizationId, () =>
+    w.needs.add(project.id, { title: 'Gravel', description: 'Base course' }),
+  );
+  await asAdmin(organizationId, () => w.needs.submit(project.id, need.id, { expectedVersion: 1 }));
+  return { id: project.id, version: project.version };
+}
+
+/** The approvals of a project, read as its own administrator. */
+export async function approvalsOf(w: Wiring, organizationId: string, projectId: string) {
+  return asAdmin(organizationId, () => w.approvals.listForProject(projectId, {}));
 }

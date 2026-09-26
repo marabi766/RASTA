@@ -19,7 +19,7 @@ import { CONSUMED_EVENTS, DEFERRED_CONSUMPTION, maintenanceApprovedSchema } from
 const EVENT_NAMES = Object.values(ECONOMIC_EVENTS) as EconomicEventName[];
 
 describe('the catalogue', () => {
-  it('publishes exactly the thirteen events docs/07 § 7.5 lists', () => {
+  it('publishes exactly the fifteen events docs/07 § 7.5 lists', () => {
     expect(EVENT_NAMES.sort()).toEqual(
       [
         'COMMISSION_APPLIED',
@@ -28,15 +28,54 @@ describe('the catalogue', () => {
         'FUNDS_RELEASED',
         'JOURNAL_POSTED',
         'PAYMENT_AUTHORIZED',
+        'PAYMENT_CAPTURE_UNRECONCILED',
         'PAYMENT_COMPLETED',
         'PAYMENT_FAILED',
         'REWARD_GRANTED',
         'REWARD_LEVEL_CHANGED',
         'REWARD_RULE_CHANGED',
         'SETTLEMENT_COMPLETED',
+        'TRANSACTION_STATUS_CHANGED',
         'WALLET_OPENED',
       ].sort(),
     );
+  });
+
+  it('refuses a status change whose fromStatus disagrees with its action', () => {
+    const change = {
+      transactionId: 'TXN_1',
+      organizationId: 'ORG-A',
+      counterpartyOrganizationId: null,
+      transactionType: 'MARKETPLACE_ORDER',
+      grossAmountMinor: '1000',
+      currency: 'IRR',
+      changedBy: 'USR-1',
+      changedAt: '2026-09-26T00:00:00.000Z',
+    };
+    expect(() =>
+      validateEconomicPayload(ECONOMIC_EVENTS.TRANSACTION_STATUS_CHANGED, {
+        ...change,
+        action: 'CREATE',
+        fromStatus: null,
+        toStatus: 'CREATED',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateEconomicPayload(ECONOMIC_EVENTS.TRANSACTION_STATUS_CHANGED, {
+        ...change,
+        action: 'CANCEL',
+        fromStatus: null,
+        toStatus: 'CANCELLED',
+      }),
+    ).toThrow(/fromStatus is null exactly when/);
+    expect(() =>
+      validateEconomicPayload(ECONOMIC_EVENTS.TRANSACTION_STATUS_CHANGED, {
+        ...change,
+        action: 'CREATE',
+        fromStatus: 'CREATED',
+        toStatus: 'HELD',
+      }),
+    ).toThrow(/fromStatus is null exactly when/);
   });
 
   it('gives every event a schema', () => {
@@ -51,15 +90,10 @@ describe('no financial event may be replayed automatically', () => {
   // settlement out of a dead-letter topic without first establishing what
   // happened to the money is a larger risk than the original failure
   // (docs/runbooks/replay-dlq.md).
-  it.each([
-    'PAYMENT_AUTHORIZED',
-    'PAYMENT_COMPLETED',
-    'PAYMENT_FAILED',
-    'COMMISSION_APPLIED',
-    'REWARD_GRANTED',
-    'SETTLEMENT_COMPLETED',
-    'JOURNAL_POSTED',
-  ])('%s is marked never-auto-replay', (name) => {
+  //
+  // Every event in the catalogue, not a hand-written subset: the subset
+  // missed PAYMENT_CAPTURE_UNRECONCILED (Codex round 3 on #121, L1).
+  it.each(Object.values(ECONOMIC_EVENTS))('%s is marked never-auto-replay', (name) => {
     expect(NEVER_AUTO_REPLAY.has(name)).toBe(true);
     expect(isAutoReplayable(name)).toBe(false);
   });

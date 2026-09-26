@@ -473,7 +473,13 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 > **برنامه‌ریزی‌شده**‌اند: موافقت‌ها، آغاز و پایان و پیشرفت با PR دوم CON-001، و مناقصه با CON-002. Payloadها در
 > `services/construction-service/src/events/events.ts` تعریف و در زمان انتشار اعتبارسنجی می‌شوند (`.strict()`).
 >
-> **کلید پارتیشن همهٔ رویدادهای این Topic `projectId` است** و `aggregateType` همهٔ آن‌ها `Project`: نیاز، موافقت و
+> **CON-001 PR دوم.** شش ردیف کاتالوگ `APPROVAL_REQUESTED`، `APPROVAL_GRANTED`، `APPROVAL_REJECTED`، `PROJECT_STARTED`،
+> `PROJECT_PROGRESS_UPDATED` و `PROJECT_COMPLETED` پیاده شدند؛ ستون Payload آن‌ها اکنون Payload واقعی است. نثرِ
+> کاتالوگ (`approvalType`، `conditions`، `reason`) طبق همان قاعدهٔ حریم روی رویداد نمی‌آید؛ `percentage` به
+> `progressBasisPoints` تبدیل شد. پنج رویداد تازه (جدول سوم) را مدیر پروژه **پذیرفت** (2026-09-26).
+>
+> **کلید پارتیشن همهٔ رویدادهای پروژه `projectId` است** و `aggregateType` آن‌ها `Project` (رویدادهای سیاست موافقت
+> استثنایند؛ جدول سوم): نیاز، موافقت و
 > گزارش پیشرفت درون مرز Aggregate پروژه‌اند (`docs/03` § ۳٫۳)، و هر مصرف‌کننده دربارهٔ **یک پروژه** استدلال می‌کند.
 > شناسهٔ نیاز در Payload می‌آید (`needId`). این هم‌Partition‌کردن است، نه ترتیب تضمین‌شده (D-027).
 >
@@ -484,20 +490,26 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 > به‌جای `location` فقط `hasArea` دارد. `estimate` با نام `estimatedCostMinor` (رشتهٔ ریالی، یا `null`) می‌آید.
 > تحویل مرتب میان Replicaهای Relay تضمین **نمی‌شود** (D-027، ADR-051 B4).
 
-| رویداد                     | مصرف‌کنندگان                                            | Payload کلیدی                                                                            |
-| -------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `PROJECT_CREATED`          | analytics · audit                                       | `projectId`, `organizationId`, `estimatedCostMinor`, `hasArea`, `createdBy`, `createdAt` |
-| `APPROVAL_REQUESTED`       | **notification (مرجع تأیید)** · audit                   | `approvalId`, `projectId`, `approvalType`, `authority`                                   |
-| `APPROVAL_GRANTED`         | notification · audit · analytics                        | `approvalId`, `grantedBy`, `conditions`                                                  |
-| `APPROVAL_REJECTED`        | notification · audit                                    | `approvalId`, `reason`                                                                   |
-| `TENDER_CREATED`           | audit                                                   | `tenderId`, `projectId`, `procurementNature`                                             |
-| `TENDER_PUBLISHED`         | **notification (پیمانکاران)** · search · analytics      | `tenderId`, `bidOpeningAt`, `bidClosingAt`                                               |
-| `BID_SUBMITTED`            | notification · **audit (مهر زمانی)**                    | `bidId`, `tenderId`, `contractorId`, `submittedAt`                                       |
-| `BIDS_EVALUATED`           | audit · analytics                                       | `tenderId`, `matrix`, `ranking`                                                          |
-| `TENDER_AWARDED`           | **contract (ایجاد پیش‌نویس)** · notification · supplier | `tenderId`, `winnerId`, `amount`, `justification`                                        |
-| `PROJECT_STARTED`          | fleet · analytics                                       | `projectId`, `contractId`                                                                |
-| `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `percentage`, `assetsUsed[]`                                                |
-| `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `completedAt`                                                               |
+| رویداد                     | مصرف‌کنندگان                                            | Payload کلیدی                                                                                                                                                            |
+| -------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PROJECT_CREATED`          | analytics · audit                                       | `projectId`, `organizationId`, `estimatedCostMinor`, `hasArea`, `createdBy`, `createdAt`                                                                                 |
+| `APPROVAL_REQUESTED`       | **notification (مرجع تأیید)** · audit                   | `approvalId`, `projectId`, `organizationId`, `workflowKey`, `round`, `stepOrder`, `authorityOrganizationId`, `authorityRole`, `policyId`, `policyVersion`, `requestedAt` |
+| `APPROVAL_GRANTED`         | notification · audit · analytics                        | `approvalId`, `projectId`, `organizationId`, `workflowKey`, `round`, `stepOrder`, `decidedBy`, `decidedAt`, `hasConditions`                                              |
+| `APPROVAL_REJECTED`        | notification · audit                                    | `approvalId`, `projectId`, `organizationId`, `workflowKey`, `round`, `stepOrder`, `decidedBy`, `decidedAt`                                                               |
+| `TENDER_CREATED`           | audit                                                   | `tenderId`, `projectId`, `procurementNature`                                                                                                                             |
+| `TENDER_PUBLISHED`         | **notification (پیمانکاران)** · search · analytics      | `tenderId`, `bidOpeningAt`, `bidClosingAt`                                                                                                                               |
+| `BID_SUBMITTED`            | notification · **audit (مهر زمانی)**                    | `bidId`, `tenderId`, `contractorId`, `submittedAt`                                                                                                                       |
+| `BIDS_EVALUATED`           | audit · analytics                                       | `tenderId`, `matrix`, `ranking`                                                                                                                                          |
+| `TENDER_AWARDED`           | **contract (ایجاد پیش‌نویس)** · notification · supplier | `tenderId`, `winnerId`, `amount`, `justification`                                                                                                                        |
+| `PROJECT_STARTED`          | fleet · analytics                                       | `projectId`, `organizationId`, `contractId` (تا CON-003 همیشه `null`), `startedBy`, `startedAt`                                                                          |
+| `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `reportId`, `organizationId`, `progressBasisPoints` (۰..۱۰۰۰۰), `submittedBy`, `submittedAt` — **بدون `assetsUsed`** (پایین‌تر)                             |
+| `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `organizationId`, `completedBy`, `completedAt`                                                                                                              |
+
+**`assetsUsed` روی Kafka نمی‌آید** (بازبینی Codex روی #122). شناسه‌های دارایی گزارش پیشرفت فقط در قالب شناسهٔ
+دارایی پلتفرم (`AST_<ULID>`، `assetIdSchema` در `@rasta/contracts`) پذیرفته می‌شوند — هر چیز دیگر `400` — و همراه
+گزارش در پایگاه داده می‌مانند؛ ولی تا مالکیتشان در برابر `asset-service` سنجیده نشود، روی `rasta.construction.v1`
+منتشر نمی‌شوند (`.strict()` فیلد را رد می‌کند). مصرف‌کننده هرگز ادعای سنجیده‌نشدهٔ «پروژهٔ P از دارایی A استفاده کرد»
+را نمی‌خواند.
 
 **رویدادهای افزودهٔ CON-001** (پذیرفته‌شده به‌دست مدیر پروژه، 2026-09-26). هر تغییر وضعیت پروژه و نیاز باید به
 `audit-service` برسد (`AGENTS.md` S-06، A-08)، و کاتالوگ برای ویرایش پروژه، لغو، و چرخهٔ نیاز رویدادی نداشت — همان
@@ -518,6 +530,27 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 `PROJECT_STARTED` و `PROJECT_COMPLETED` رویداد خودشان را دارند و `PROJECT_STATUS_CHANGED` تکراری برایشان منتشر
 نمی‌شود. دلیل لغو یا انصراف روی رویداد نمی‌آید؛ در `project.status_reason` و `project_need.withdrawal_reason` می‌ماند.
 
+**رویدادهای تازهٔ CON-001 PR دوم** (پذیرفته‌شده به‌دست مدیر پروژه، 2026-09-26). نوشتن، فعال‌سازی و بازنشسته‌کردن سیاست موافقت و
+پیش‌نویس و کنارگذاشتن گزارش پیشرفت تغییر وضعیت‌اند و باید به `audit-service` برسند (S-06). رویدادهای سیاست دربارهٔ
+`ApprovalPolicy` هستند، نه پروژه، و کلیدشان `{organizationId}/{workflowKey}` است: همهٔ نسخه‌های سیاست یک گردش‌کار
+یک جریان‌اند.
+
+| رویداد                                  | مصرف‌کنندگان | Payload کلیدی                                                                                                                                         |
+| --------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`APPROVAL_POLICY_CREATED`**           | audit        | `policyId`, `organizationId`, `authorOrganizationId`, `authorRole`, `workflowKey`, `policyVersion`, `stepCount`, `isSample`, `createdBy`, `createdAt` |
+| **`APPROVAL_POLICY_SUBMITTED`**         | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `submittedBy`, `submittedAt`                                                            |
+| **`APPROVAL_POLICY_REJECTED`**          | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `rejectedBy`, `rejectedAt`                                                              |
+| **`APPROVAL_POLICY_ACTIVATED`**         | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredPolicyId`, `activatedBy`, `activatedAt`                                         |
+| **`APPROVAL_POLICY_RETIRED`**           | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredBy`, `retiredAt`                                                                |
+| **`PROJECT_PROGRESS_REPORT_DRAFTED`**   | audit        | `projectId`, `reportId`, `organizationId`, `draftedBy`, `draftedAt`                                                                                   |
+| **`PROJECT_PROGRESS_REPORT_DISCARDED`** | audit        | `projectId`, `reportId`, `organizationId`, `discardedBy`, `discardedAt`                                                                               |
+
+**دو رویداد گام تأیید پلتفرم** (نام‌ها پذیرفته‌شده به‌دست مدیر پروژه، 2026-09-26؛ همان الگوی Aggregate + فعل گذشته). Q-70 بند ۷ (تصمیم مالک، 2026-09-26) گام تأیید پلتفرم را
+افزود: `APPROVAL_POLICY_SUBMITTED` (`DRAFT → PENDING_PLATFORM_APPROVAL`) و `APPROVAL_POLICY_REJECTED`
+(`PENDING_PLATFORM_APPROVAL → REJECTED`). دلیل رد روی رویداد نمی‌آید و روی سیاست می‌ماند. `APPROVAL_POLICY_CREATED`
+اکنون نویسنده را هم حمل می‌کند (`authorOrganizationId`، `authorRole` ∈ `UNION_ADMIN`/`SYSTEM_ADMIN`)، و
+`APPROVAL_POLICY_ACTIVATED` نتیجهٔ تأیید `SYSTEM_ADMIN` است (`activatedBy` همان تأییدکننده).
+
 ## Contract — `rasta.contract.v1`
 
 | رویداد                | مصرف‌کنندگان                           | Payload کلیدی                                                                      |
@@ -536,40 +569,44 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 Schema رسمی در `services/economic-service/src/events/events.ts` و اعتبارسنجی
 **پیش از رسیدن به Outbox** انجام می‌شود.
 
-| رویداد                    | مصرف‌کنندگان                                        | Payload واقعی                                                                                                                                             |
-| ------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WALLET_OPENED`           | notification                                        | `walletId`, `organizationId`, `currency`, `openedAt`                                                                                                      |
-| `FUNDS_HELD`              | marketplace (Saga) · analytics                      | `holdId`, `walletId`, `organizationId`, `transactionId`, `reference`, `referenceType`, `amountMinor`, `currency`, `heldAt`                                |
-| `FUNDS_RELEASED`          | marketplace · analytics                             | `holdId`, `walletId`, `transactionId`, `reference`, `amountMinor`, `currency`, **`resolution`**, `resolvedAt`                                             |
-| `PAYMENT_AUTHORIZED`      | marketplace · contract                              | `paymentIntentId`, `organizationId`, `walletId`, `amountMinor`, `currency`, `provider`, **`simulated`**, `authorizedAt`                                   |
-| `PAYMENT_COMPLETED`       | marketplace · maintenance · contract · notification | `paymentIntentId`, `transactionId`, `journalId`, `amountMinor`, `currency`, `provider`, **`simulated`**, `completedAt`                                    |
-| `PAYMENT_FAILED`          | **marketplace (جبران)** · notification              | `paymentIntentId`, `amountMinor`, `currency`, `provider`, **`simulated`**, `reason`, `failedAt`                                                           |
-| `COMMISSION_APPLIED`      | **analytics (درآمد پلتفرم)** · audit                | `commissionId`, `transactionId`, `organizationId`, **`ruleId` (nullable)**, `rateBasisPoints`, `grossAmountMinor`, `amountMinor`                          |
-| `REWARD_GRANTED`          | notification · analytics                            | `rewardId`, `userId`, `ruleId`, `triggerEvent`, `sourceReference`, `points`, `creditAmountMinor`, **`monetised`**, `journalId`                            |
-| `REWARD_LEVEL_CHANGED`    | notification                                        | `organizationId`, `userId`, `from` (nullable), `to`, `totalPoints`, `changedAt`                                                                           |
-| `SETTLEMENT_COMPLETED`    | marketplace · supplier · notification               | `settlementId`, `transactionId`, `payerOrganizationId`, `payeeOrganizationId`, `journalId`, `grossAmountMinor`, `commissionAmountMinor`, `netAmountMinor` |
-| `JOURNAL_POSTED`          | audit · analytics                                   | `journalId`, `transactionId`, `journalType`, `reversesJournalId`, `entries[]` (حداقل دو)                                                                  |
-| `COMMISSION_RULE_CHANGED` | audit                                               | `ruleId`, **`change`** (`CREATED`/`UPDATED`), `changedBy`, `changedAt`, **`before` (nullable)**, `after` — شرایط کامل قاعده، نرخ به Basis Point           |
-| `REWARD_RULE_CHANGED`     | audit                                               | `ruleId`, `change`, `changedBy`, `changedAt`, `before` (nullable), `after` — شرایط کامل قاعده، `creditPerPointMinor` به‌صورت رشته                         |
+| رویداد                         | مصرف‌کنندگان                                        | Payload واقعی                                                                                                                                                                                                                                                                                                         |
+| ------------------------------ | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WALLET_OPENED`                | notification                                        | `walletId`, `organizationId`, `currency`, `openedAt`                                                                                                                                                                                                                                                                  |
+| `FUNDS_HELD`                   | marketplace (Saga) · analytics                      | `holdId`, `walletId`, `organizationId`, `transactionId`, `reference`, `referenceType`, `amountMinor`, `currency`, `heldAt`                                                                                                                                                                                            |
+| `FUNDS_RELEASED`               | marketplace · analytics                             | `holdId`, `walletId`, `transactionId`, `reference`, `amountMinor`, `currency`, **`resolution`**, `resolvedAt`                                                                                                                                                                                                         |
+| `PAYMENT_AUTHORIZED`           | marketplace · contract                              | `paymentIntentId`, `organizationId`, `walletId`, `amountMinor`, `currency`, `provider`, **`simulated`**, `authorizedAt`                                                                                                                                                                                               |
+| `PAYMENT_COMPLETED`            | marketplace · maintenance · contract · notification | `paymentIntentId`, `transactionId`, `journalId`, `amountMinor`, `currency`, `provider`, **`simulated`**, `completedAt`                                                                                                                                                                                                |
+| `PAYMENT_FAILED`               | **marketplace (جبران)** · notification              | `paymentIntentId`, `amountMinor`, `currency`, `provider`, **`simulated`**, `reason`, `failedAt`                                                                                                                                                                                                                       |
+| `PAYMENT_CAPTURE_UNRECONCILED` | audit · هشدار عملیات                                | `paymentIntentId`, `organizationId`, `walletId`, `amountMinor`, `currency`, `provider`, **`simulated`**, **`reason`** (`WALLET_BALANCE_LIMIT`/`CAPTURE_NOT_CREDITED`), `detectedAt` — Capture شده، اعتبار نگرفته، بازپرداخت Provider شکست خورده؛ در همان تراکنش علامت `CAPTURED_NOT_CREDITED` (بازبینی دور ۲ PR #121) |
+| `COMMISSION_APPLIED`           | **analytics (درآمد پلتفرم)** · audit                | `commissionId`, `transactionId`, `organizationId`, **`ruleId` (nullable)**, `rateBasisPoints`, `grossAmountMinor`, `amountMinor`                                                                                                                                                                                      |
+| `REWARD_GRANTED`               | notification · analytics                            | `rewardId`, `userId`, `ruleId`, `triggerEvent`, `sourceReference`, `points`, `creditAmountMinor`, **`monetised`**, `journalId`                                                                                                                                                                                        |
+| `REWARD_LEVEL_CHANGED`         | notification                                        | `organizationId`, `userId`, `from` (nullable), `to`, `totalPoints`, `changedAt`                                                                                                                                                                                                                                       |
+| `SETTLEMENT_COMPLETED`         | marketplace · supplier · notification               | `settlementId`, `transactionId`, `payerOrganizationId`, `payeeOrganizationId`, `journalId`, `grossAmountMinor`, `commissionAmountMinor`, `netAmountMinor`                                                                                                                                                             |
+| `JOURNAL_POSTED`               | audit · analytics                                   | `journalId`, `transactionId`, `journalType`, `reversesJournalId`, `entries[]` (حداقل دو)                                                                                                                                                                                                                              |
+| `COMMISSION_RULE_CHANGED`      | audit                                               | `ruleId`, **`change`** (`CREATED`/`UPDATED`), `changedBy`, `changedAt`, **`before` (nullable)**, `after` — شرایط کامل قاعده، نرخ به Basis Point                                                                                                                                                                       |
+| `REWARD_RULE_CHANGED`          | audit                                               | `ruleId`, `change`, `changedBy`, `changedAt`, `before` (nullable), `after` — شرایط کامل قاعده، `creditPerPointMinor` به‌صورت رشته                                                                                                                                                                                     |
+| `TRANSACTION_STATUS_CHANGED`   | audit                                               | `transactionId`, `organizationId`, `counterpartyOrganizationId` (nullable), `transactionType`, **`action`**, **`fromStatus`** (nullable فقط در ثبت), `toStatus`, `grossAmountMinor`, `currency`, `changedBy`, `changedAt` — بدون متن آزاد دلیل                                                                        |
 
-**کلید پارتیشن هر سیزده رویداد (ADR-036).** «درباره چیست» و «با چه چیزی مرتب
+**کلید پارتیشن هر پانزده رویداد (ADR-036).** «درباره چیست» و «با چه چیزی مرتب
 می‌ماند» دو پرسش‌اند و اینجا برای چهار رویداد پاسخشان یکی نیست:
 
-| رویداد                    | Aggregate (Envelope) | کلید پارتیشن                     |
-| ------------------------- | -------------------- | -------------------------------- |
-| `WALLET_OPENED`           | `Wallet`             | `walletId`                       |
-| `FUNDS_HELD`              | `WalletHold`         | **`transactionId`**              |
-| `FUNDS_RELEASED`          | `WalletHold`         | **`transactionId`**              |
-| `PAYMENT_AUTHORIZED`      | `PaymentIntent`      | `paymentIntentId`                |
-| `PAYMENT_COMPLETED`       | `PaymentIntent`      | **`transactionId`**              |
-| `PAYMENT_FAILED`          | `PaymentIntent`      | `paymentIntentId`                |
-| `COMMISSION_APPLIED`      | `Commission`         | `transactionId`                  |
-| `REWARD_GRANTED`          | `Reward`             | `rewardId`                       |
-| `REWARD_LEVEL_CHANGED`    | `RewardBalance`      | `${organizationId}:${userId}`    |
-| `SETTLEMENT_COMPLETED`    | `Settlement`         | `transactionId`                  |
-| `JOURNAL_POSTED`          | `Journal`            | **`transactionId ?? journalId`** |
-| `COMMISSION_RULE_CHANGED` | `CommissionRule`     | `ruleId`                         |
-| `REWARD_RULE_CHANGED`     | `RewardRule`         | `ruleId`                         |
+| رویداد                         | Aggregate (Envelope) | کلید پارتیشن                     |
+| ------------------------------ | -------------------- | -------------------------------- |
+| `WALLET_OPENED`                | `Wallet`             | `walletId`                       |
+| `FUNDS_HELD`                   | `WalletHold`         | **`transactionId`**              |
+| `FUNDS_RELEASED`               | `WalletHold`         | **`transactionId`**              |
+| `PAYMENT_AUTHORIZED`           | `PaymentIntent`      | `paymentIntentId`                |
+| `PAYMENT_COMPLETED`            | `PaymentIntent`      | **`transactionId`**              |
+| `PAYMENT_FAILED`               | `PaymentIntent`      | `paymentIntentId`                |
+| `PAYMENT_CAPTURE_UNRECONCILED` | `PaymentIntent`      | `paymentIntentId`                |
+| `COMMISSION_APPLIED`           | `Commission`         | `transactionId`                  |
+| `REWARD_GRANTED`               | `Reward`             | `rewardId`                       |
+| `REWARD_LEVEL_CHANGED`         | `RewardBalance`      | `${organizationId}:${userId}`    |
+| `SETTLEMENT_COMPLETED`         | `Settlement`         | `transactionId`                  |
+| `JOURNAL_POSTED`               | `Journal`            | **`transactionId ?? journalId`** |
+| `COMMISSION_RULE_CHANGED`      | `CommissionRule`     | `ruleId`                         |
+| `REWARD_RULE_CHANGED`          | `RewardRule`         | `ruleId`                         |
+| `TRANSACTION_STATUS_CHANGED`   | `Transaction`        | `transactionId`                  |
 
 `PAYMENT_AUTHORIZED` و `PAYMENT_FAILED` عمداً تراکنشی نیستند: در لحظه انتشارشان
 هیچ تراکنشی وجود ندارد (`PaymentIntent.transaction_id` هنگام Capture نوشته

@@ -367,6 +367,50 @@ describe('idempotency (real database)', () => {
       const purged = await asActor({ organizationId: org.a }, () => idempotency.purgeExpired());
       expect(purged).toBeGreaterThanOrEqual(1);
     });
+
+    it('lets exactly one of many concurrent claims take over an expired key', async () => {
+      // Economic batch 2, item g. Every claimer finds the same expired row.
+      // Deleting it by key alone let a late claimer remove the fresh claim an
+      // earlier one had just written — two PROCEEDs for one key — and a claimer
+      // whose delete found the row already gone answered a 500.
+      const organizationId = `${org.b}-RECLAIM`;
+      const key = `key-reclaim-${organizationId}`;
+      await asActor({ organizationId }, () =>
+        idempotency.run('POST /itest', key, { a: 1 }, 201, async () => ({})),
+      );
+      await runUnscoped('the race test back-dates a record it created', () =>
+        prisma.client.$executeRawUnsafe(
+          `UPDATE idempotency_key
+              SET created_at = now() - interval '48 hours',
+                  expires_at = now() - interval '24 hours'
+            WHERE key = $1 AND organization_id = $2`,
+          key,
+          organizationId,
+        ),
+      );
+
+      const outcomes = await Promise.all(
+        Array.from({ length: 12 }, () =>
+          asActor({ organizationId }, () => idempotency.claim('POST /itest', key, { a: 1 })).then(
+            (claim) => claim.kind,
+            (error: { code?: string }) => error.code ?? 'UNKNOWN',
+          ),
+        ),
+      );
+
+      expect(outcomes.filter((outcome) => outcome === 'PROCEED')).toHaveLength(1);
+      // Everyone else was told the key is in flight: no 500, no second owner.
+      expect(
+        outcomes.filter((outcome) => outcome !== 'PROCEED').every((o) => o === 'CONFLICT'),
+      ).toBe(true);
+
+      const rows = await runUnscoped('the race test reads the one live claim', () =>
+        prisma.client.idempotencyKey.findMany({ where: { organizationId, key } }),
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.state).toBe('IN_PROGRESS');
+      expect(rows[0]!.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    });
   });
 
   async function walletId(organizationId: string): Promise<string> {

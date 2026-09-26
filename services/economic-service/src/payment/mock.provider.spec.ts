@@ -1,4 +1,23 @@
-import { MockPaymentProvider } from './mock.provider';
+import {
+  MOCK_DIRECTIVE_CODES,
+  MockPaymentProvider,
+  UNSUPPORTED,
+  mockReferenceWithDirective,
+} from './mock.provider';
+import { failureCodeFrom } from './payment.service';
+
+describe('failureCodeFrom — what a provider code may become in storage, events and logs', () => {
+  it('keeps a code-shaped value', () => {
+    expect(failureCodeFrom('INSUFFICIENT_FUNDS', 'X')).toBe('INSUFFICIENT_FUNDS');
+  });
+
+  it.each([undefined, '', '4111111111111111', 'CARD4111', 'lower_case', 'WITH SPACE'])(
+    'replaces anything else with the fallback: %s',
+    (code) => {
+      expect(failureCodeFrom(code, 'PROVIDER_DECLINED')).toBe('PROVIDER_DECLINED');
+    },
+  );
+});
 
 /**
  * The simulated payment provider (ADR-024).
@@ -132,6 +151,93 @@ describe('refund', () => {
       providerReference: 'mock_PAY_1_fail-refund:NOT_PERMITTED',
     });
     expect(result).toMatchObject({ outcome: 'FAILED', failureCode: 'NOT_PERMITTED' });
+  });
+});
+
+describe('the reference carries the directives that act after authorisation (L7-20)', () => {
+  const capture = (providerReference: string) =>
+    provider.capture({
+      paymentIntentId: 'PAY_9',
+      providerReference,
+      amountMinor: 1_000n,
+      currency: 'IRR',
+      idempotencyKey: 'idem-key-0009',
+    });
+  const refund = (providerReference: string) =>
+    provider.refund({
+      paymentIntentId: 'PAY_9',
+      providerReference,
+      amountMinor: 1_000n,
+      currency: 'IRR',
+      idempotencyKey: 'idem-key-0009:refund',
+      reason: 'cancelled',
+    });
+
+  it('keeps a refund directive from the instrument, so the refund later fails', async () => {
+    const authorized = await provider.authorize({
+      ...authorizeRequest,
+      paymentIntentId: 'PAY_9',
+      instrument: 'fail-refund:NOT_PERMITTED',
+    });
+    expect(authorized.outcome).toBe('AUTHORIZED');
+    expect(authorized.providerReference).toBe(
+      mockReferenceWithDirective('PAY_9', 'fail-refund:NOT_PERMITTED'),
+    );
+
+    expect((await capture(authorized.providerReference)).outcome).toBe('CAPTURED');
+    expect(await refund(authorized.providerReference)).toMatchObject({
+      outcome: 'FAILED',
+      failureCode: 'NOT_PERMITTED',
+    });
+  });
+
+  it('keeps both directives, codes with underscores intact', async () => {
+    const authorized = await provider.authorize({
+      ...authorizeRequest,
+      paymentIntentId: 'PAY_9',
+      instrument: 'fail-refund:NOT_PERMITTED fail-capture:ISSUER_TIMEOUT',
+    });
+    expect(await capture(authorized.providerReference)).toMatchObject({
+      outcome: 'FAILED',
+      failureCode: 'ISSUER_TIMEOUT',
+    });
+    expect(await refund(authorized.providerReference)).toMatchObject({
+      outcome: 'FAILED',
+      failureCode: 'NOT_PERMITTED',
+    });
+  });
+
+  it.each(['fail:4111111111111111', 'fail-capture:4111111111111111', 'fail-refund:DROP TABLE'])(
+    'refuses a code outside the closed set, and carries none of it: %s',
+    async (instrument) => {
+      // Codex review of PR #121, finding 4.
+      const authorized = await provider.authorize({
+        ...authorizeRequest,
+        paymentIntentId: 'PAY_9',
+        instrument,
+      });
+      expect(authorized).toMatchObject({
+        outcome: 'FAILED',
+        failureCode: UNSUPPORTED,
+        providerReference: 'mock_PAY_9',
+      });
+    },
+  );
+
+  it('accepts every code in the closed set', async () => {
+    for (const code of MOCK_DIRECTIVE_CODES) {
+      const result = await provider.authorize({ ...authorizeRequest, instrument: `fail:${code}` });
+      expect(result).toMatchObject({ outcome: 'FAILED', failureCode: code });
+    }
+  });
+
+  it('issues a plain reference for an ordinary instrument, which carries no instrument data', async () => {
+    const authorized = await provider.authorize({
+      ...authorizeRequest,
+      paymentIntentId: 'PAY_9',
+      instrument: 'tok_abc123',
+    });
+    expect(authorized.providerReference).toBe('mock_PAY_9');
   });
 });
 

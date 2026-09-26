@@ -1,6 +1,7 @@
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { asActor, cleanup, newPrisma, readBalances, tenants, wire, type Wiring } from './helpers';
+import { RewardGrantError } from '../src/reward/reward.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -121,6 +122,93 @@ describe('rewards (real database)', () => {
       );
       expect(delta).toBe(0n);
 
+      await cleanup(prisma, [org.a]);
+    });
+
+    it('refuses, as a verdict, a grant from an older rule whose value exceeds a BIGINT', async () => {
+      // `createRule` now refuses such terms (economic batch 2, item d); a rule
+      // written before it did is stood in for by a direct insert. Its grant is
+      // refused permanently, so the consumer dead-letters it instead of
+      // retrying a number that will never fit, and nothing is paid.
+      const ruleId = `RWR_${ulid()}`;
+      await runUnscoped('the suite writes a rule that predates the create-time check', () =>
+        prisma.client.rewardRule.create({
+          data: {
+            id: ruleId,
+            organizationId: org.a,
+            triggerEvent: 'USAGE_RECORDED',
+            rewardType: 'POINTS',
+            points: 1_000_000,
+            creditPerPointMinor: 9_223_372_036_854_775n,
+            validFrom: new Date(Date.now() - 60_000),
+            status: 'ACTIVE',
+            createdBy: 'itest',
+            updatedBy: 'itest',
+          },
+        }),
+      );
+
+      const failure = await grant(`USG_${ulid()}`).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(RewardGrantError);
+      expect((failure as RewardGrantError).permanent).toBe(true);
+      expect((failure as RewardGrantError).failures[0]?.ruleId).toBe(ruleId);
+
+      const paid = await runUnscoped('the suite counts grants for the rule', () =>
+        prisma.client.reward.count({ where: { ruleId } }),
+      );
+      expect(paid).toBe(0);
+
+      await cleanup(prisma, [org.a]);
+    });
+  });
+
+  describe('the running totals stay storable (Codex review of PR #121, finding 2)', () => {
+    async function subjectNearLimit(
+      column: 'total_points' | 'lifetime_credit_minor',
+      value: string,
+    ) {
+      await createRule({ points: 10, creditPerPointMinor: '1000' });
+      // A first grant creates the subject's balance row; it is then set just
+      // below the bound, as years of grants would leave it.
+      await grant(`USG_${ulid()}`);
+      await runUnscoped('the suite moves a reward balance to the edge of its column', () =>
+        prisma.client.$executeRawUnsafe(
+          `UPDATE reward_balance SET ${column} = $1::bigint
+            WHERE organization_id = $2 AND user_id = $3`,
+          value,
+          org.a,
+          user,
+        ),
+      );
+    }
+
+    async function expectRefusedAsVerdict() {
+      const failure = await grant(`USG_${ulid()}`).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(RewardGrantError);
+      // A verdict: the consumer dead-letters it as BUSINESS_RULE_VIOLATION
+      // at once, rather than retrying an overflow into MAX_RETRIES_EXCEEDED.
+      expect((failure as RewardGrantError).permanent).toBe(true);
+      const rewards = await runUnscoped('the suite counts the subject grants', () =>
+        prisma.client.reward.count({ where: { organizationId: org.a, userId: user } }),
+      );
+      expect(rewards).toBe(1);
+    }
+
+    it('refuses a grant that would take total points past an INTEGER', async () => {
+      await subjectNearLimit('total_points', String(2_147_483_647 - 5));
+      await expectRefusedAsVerdict();
+      await cleanup(prisma, [org.a]);
+    });
+
+    it('refuses a grant that would take lifetime credit past a BIGINT', async () => {
+      await subjectNearLimit('lifetime_credit_minor', String(9_223_372_036_854_775_807n - 5n));
+      await expectRefusedAsVerdict();
       await cleanup(prisma, [org.a]);
     });
   });

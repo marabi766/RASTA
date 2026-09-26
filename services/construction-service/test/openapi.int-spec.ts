@@ -148,6 +148,40 @@ describe('the published OpenAPI contract (real application)', () => {
       ),
     ); // 422
 
+    // Q-70 (7): organization-service could not confirm the hierarchy (503),
+    // or did not answer in time (504) — the policy write is refused.
+    const policy = {
+      organizationId: org,
+      workflowKey: 'project.execution',
+      label: 'Council approval',
+      rationale: 'Written by the contract suite',
+      steps: [
+        {
+          approvalType: 'Council approval',
+          authorityOrganizationId: org,
+          authorityRole: 'ORGANIZATION_ADMIN',
+          authorityLabel: 'Council',
+        },
+      ],
+    };
+    for (const mode of ['unavailable', 'timedOut'] as const) {
+      api.hierarchy[mode] = true;
+      try {
+        reached.add(
+          String(
+            (
+              await http()
+                .post('/v1/approval-policies')
+                .set('authorization', `Bearer ${actor(org, ['UNION_ADMIN'])}`)
+                .send(policy)
+            ).status,
+          ),
+        ); // 503, then 504
+      } finally {
+        api.hierarchy[mode] = false;
+      }
+    }
+
     documented.delete('500');
     expect([...reached].sort()).toEqual([...documented].sort());
   });

@@ -12,6 +12,7 @@ import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { projectTransitionsTotal, versionConflictsTotal } from '../observability/metrics';
 import { ProjectRepository, type LockedProject } from './project.repository';
+import { ApprovalRepository } from '../approval/approval.repository';
 import { assertProjectCancellable, assertProjectEditable } from './project.state-machine';
 import { toProjectSummaryView, toProjectView } from './views';
 import type {
@@ -50,6 +51,7 @@ export class ProjectService {
     private readonly access: ProjectAccess,
     private readonly idempotency: IdempotencyStore,
     @Inject(ENV) private readonly env: ConstructionEnv,
+    private readonly approvals: ApprovalRepository,
   ) {}
 
   /**
@@ -232,7 +234,8 @@ export class ProjectService {
   /**
    * CancelProject — terminal, with a stated reason, from the states this
    * deployment allows (`CONSTRUCTION_CANCELLABLE_STATES`, Q-69). No
-   * cancellation approval is required in PR 1 (Q-69).
+   * cancellation approval is required (Q-69). Any open approval round ends
+   * with it.
    */
   async cancel(projectId: string, dto: CancelProjectDto): Promise<ProjectView> {
     const { organizationId, actor } = this.access.assertCanWrite();
@@ -253,6 +256,11 @@ export class ProjectService {
         at,
       });
       if (matched === 0) throw this.conflict('Project', projectId);
+
+      // A cancelled project has no round left to decide: every undecided step
+      // ends here, in the same transaction, so no authority can decide a step
+      // of a project that no longer exists as a proposal.
+      await this.approvals.supersedeOpen(tx, { organizationId, projectId }, at);
 
       await this.events.enqueue(tx, {
         eventName: 'PROJECT_STATUS_CHANGED',

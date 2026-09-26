@@ -153,12 +153,58 @@ describe('what is deliberately not configurable', () => {
     // Those are approval_policy rows (ADR-023, ADR-063), never environment.
     const keys = Object.keys(load());
     expect(
-      keys.filter((key) => /AUTHORITY|THRESHOLD|APPROV|PROCUREMENT_NATURE/i.test(key)),
+      keys.filter(
+        (key) =>
+          /AUTHORITY|THRESHOLD|APPROV|PROCUREMENT_NATURE/i.test(key) &&
+          // The two approval *preconditions* (Q-68) say when a project may ask,
+          // never who approves or above what amount.
+          ![
+            'CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS',
+            'CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE',
+          ].includes(key),
+      ),
     ).toEqual([]);
   });
 
   it('bounds the idempotency window', () => {
     expect(load().CONSTRUCTION_IDEMPOTENCY_TTL_HOURS).toBe(24);
     expect(() => load({ CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: '0' })).toThrow();
+  });
+});
+
+describe('PR 2 settings (Q-68, Q-70 to Q-72)', () => {
+  it('defaults to the recorded provisional answers', () => {
+    const env = load();
+    expect(env.CONSTRUCTION_POLICY_FOUR_EYES).toBe(true);
+    expect(env.ORGANIZATION_SERVICE_URL).toBe('http://localhost:3102');
+    expect(env.CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS).toBe(3000);
+    expect(env.CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS).toBe(1);
+    expect(env.CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE).toBe(true);
+    expect(env.CONSTRUCTION_START_REQUIRES_CONTRACT).toBe(false);
+    expect(env.CONSTRUCTION_PROGRESS_ALLOW_DECREASE).toBe(false);
+  });
+
+  it('accepts each as configuration', () => {
+    const env = load({
+      CONSTRUCTION_POLICY_FOUR_EYES: 'false',
+      CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: '0',
+      CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: 'false',
+      CONSTRUCTION_START_REQUIRES_CONTRACT: 'true',
+      CONSTRUCTION_PROGRESS_ALLOW_DECREASE: 'on',
+    });
+    expect(env.CONSTRUCTION_POLICY_FOUR_EYES).toBe(false);
+    expect(env.CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS).toBe(0);
+    expect(env.CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE).toBe(false);
+    expect(env.CONSTRUCTION_START_REQUIRES_CONTRACT).toBe(true);
+    expect(env.CONSTRUCTION_PROGRESS_ALLOW_DECREASE).toBe(true);
+  });
+
+  it('refuses an organization-service address that is not a URL, and an absurd timeout', () => {
+    expect(() => load({ ORGANIZATION_SERVICE_URL: 'organization-service' })).toThrow();
+    expect(() => load({ CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS: '0' })).toThrow();
+  });
+
+  it('refuses a negative need minimum', () => {
+    expect(() => load({ CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: '-1' })).toThrow();
   });
 });

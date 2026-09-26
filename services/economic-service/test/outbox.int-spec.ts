@@ -132,10 +132,17 @@ describe('transactional outbox (real database)', () => {
           transaction.id,
       );
 
-      // The hold, its release, and both journals — every row whose payload
-      // names this transaction.
+      // The hold, its release, both journals, and each lifecycle step (the
+      // creation and the receipt confirmed) — every row whose payload names
+      // this transaction.
       expect(new Set(ofThisTransaction.map((row) => row.eventName))).toEqual(
-        new Set(['FUNDS_HELD', 'FUNDS_RELEASED', 'SETTLEMENT_COMPLETED', 'JOURNAL_POSTED']),
+        new Set([
+          'FUNDS_HELD',
+          'FUNDS_RELEASED',
+          'SETTLEMENT_COMPLETED',
+          'JOURNAL_POSTED',
+          'TRANSACTION_STATUS_CHANGED',
+        ]),
       );
       expect(ofThisTransaction.length).toBeGreaterThanOrEqual(4);
       expect(new Set(ofThisTransaction.map((row) => row.partitionKey))).toEqual(

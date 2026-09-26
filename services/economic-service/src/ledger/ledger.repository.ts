@@ -304,11 +304,14 @@ export class LedgerRepository {
    * reconciliation recomputes (docs/10 § 10.3). Unscoped because the audit runs
    * on a timer with no request context.
    */
-  async accountBalance(accountId: string): Promise<{ debitMinor: bigint; creditMinor: bigint }> {
+  async accountBalance(
+    accountId: string,
+    client: Pick<ExtendedPrismaClient, 'ledgerEntry'> = this.client,
+  ): Promise<{ debitMinor: bigint; creditMinor: bigint }> {
     const grouped = await runUnscoped(
       'the ledger/wallet reconciliation runs on a timer with no request context',
       () =>
-        this.client.ledgerEntry.groupBy({
+        client.ledgerEntry.groupBy({
           by: ['direction'],
           where: { accountId },
           _sum: { amountMinor: true },

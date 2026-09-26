@@ -9,13 +9,22 @@ import {
   type HandlerOutcome,
 } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
-import { RewardService } from '../reward/reward.service';
+import {
+  RewardGrantError,
+  RewardService,
+  isPermanentGrantFailure,
+  type GrantOutcome,
+} from '../reward/reward.service';
 import {
   CONSUMED_EVENTS,
   maintenanceCompletedSchema,
   usageRecordedSchema,
 } from '../events/consumed';
-import { rewardsSkippedTotal, sourceVerificationsTotal } from '../observability/metrics';
+import {
+  rewardGrantFailuresTotal,
+  rewardsSkippedTotal,
+  sourceVerificationsTotal,
+} from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
 import {
   confirmCompletion,
@@ -108,13 +117,31 @@ import type { SourceFacts } from '../provenance/source-facts.client';
  * activated with a `validFrom` over it (PR #110 review #1). Those are
  * anti-fraud controls as much as idempotency ones (docs/10 § 10.9).
  *
- * ## A grant that fails does not stall the partition
+ * ## A grant that fails is redelivered, never finalised (global audit L7-13)
  *
- * A reward is not the reason these events exist. If *granting* throws (a
- * database blip, a misconfigured rule), the consumer records the event as
- * processed anyway and logs it, rather than retrying forever. That tolerance
- * covers the grant only. Confirming the fact is not a grant, and an
- * unconfirmed fact is never granted.
+ * `processed_event` is written only once every grant has committed or was
+ * deliberately skipped by the rule engine (no rule, a cap, a condition,
+ * cashback disabled). A monetised reward is money, and marking the event
+ * processed after a failed grant would lose it for good.
+ *
+ *   - **A transient failure** — a lost connection, a deadlock, anything not
+ *     classified below — is rethrown. The consumer framework retries it with
+ *     backoff and, once the attempts run out, dead-letters it as
+ *     `MAX_RETRIES_EXCEEDED`, still unmarked.
+ *   - **A permanent failure** — every failed rule refused with a validation,
+ *     business-rule or unbalanced-ledger verdict — is dead-lettered at once as
+ *     `BUSINESS_RULE_VIOLATION`: asking again gives the same answer, and the
+ *     partition should not wait three backoffs to learn it.
+ *
+ * Either way the evaluation claim stays with this event id, so the redelivery
+ * (in-process, or a replay of the dead letter once the rule is fixed) resumes
+ * it with the rules it recorded and no others, and grants only what is still
+ * missing: every grant is unique on `(rule_id, source_reference)`. Any other
+ * event id for the same fact is refused as already evaluated, as before.
+ *
+ * The cost is that one partition waits through the retries of a failing
+ * grant. That is the price of not losing a reward, and it is bounded by the
+ * framework's retry budget.
  */
 export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(RewardTriggerConsumer.name);
@@ -206,42 +233,65 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
         callerService: SERVICE_NAME,
       });
 
-      try {
-        const outcomes = await runWithContext(grantContext, () =>
-          this.rewards.grantFor({
-            organizationId: fact.organizationId,
-            userId: subject,
-            triggerEvent: envelope.eventName,
-            sourceReference: claim.sourceReference,
-            occurredAt: fact.occurredAt,
-            payload: fact.payload,
-            // The rules the claim recorded, and no others: a redelivery after
-            // a crash decides exactly what the first delivery would have
-            // (round 2 #2).
-            onlyRuleIds: evaluation.ruleIds,
-          }),
-        );
+      const outcomes = await this.grant(envelope, claim, grantContext, {
+        organizationId: fact.organizationId,
+        userId: subject,
+        triggerEvent: envelope.eventName,
+        sourceReference: claim.sourceReference,
+        occurredAt: fact.occurredAt,
+        payload: fact.payload,
+        // The rules the claim recorded, and no others: a redelivery after a
+        // crash or a failed grant decides exactly what the first delivery
+        // would have (round 2 #2).
+        onlyRuleIds: evaluation.ruleIds,
+      });
 
-        const granted = outcomes.filter((outcome) => outcome.kind === 'GRANTED').length;
-        if (granted > 0) {
-          this.logger.log(
-            `Granted ${granted} reward(s) for ${envelope.eventName} ${claim.sourceReference}`,
-          );
-        }
-      } catch (error) {
-        // Deliberately swallowed after being recorded. See the class comment:
-        // a reward rule must not stall a partition that fleet-service and
-        // maintenance-service's other consumers depend on.
-        this.logger.error(
-          `Reward evaluation failed for ${envelope.eventName} ${envelope.eventId}`,
-          error instanceof Error ? error.stack : String(error),
+      const granted = outcomes.filter((outcome) => outcome.kind === 'GRANTED').length;
+      if (granted > 0) {
+        this.logger.log(
+          `Granted ${granted} reward(s) for ${envelope.eventName} ${claim.sourceReference}`,
         );
-        rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'evaluation_failed' });
       }
 
+      // Only now: every grant committed or was deliberately skipped.
       await this.markProcessed(envelope.eventId);
       return undefined;
     });
+  }
+
+  /**
+   * Runs the grants, and turns a failure into redelivery or a dead letter —
+   * never into a processed event (global audit L7-13; see the class comment).
+   */
+  private async grant(
+    envelope: EventEnvelope,
+    claim: Claim,
+    context: ReturnType<typeof createSystemContext>,
+    input: Parameters<RewardService['grantFor']>[0],
+  ): Promise<GrantOutcome[]> {
+    try {
+      return await runWithContext(context, () => this.rewards.grantFor(input));
+    } catch (error) {
+      const permanent =
+        error instanceof RewardGrantError ? error.permanent : isPermanentGrantFailure(error);
+      rewardGrantFailuresTotal.inc({
+        service: SERVICE_NAME,
+        outcome: permanent ? 'dead_lettered' : 'retried',
+      });
+      const description = error instanceof Error ? error.message : String(error);
+      if (!permanent) {
+        this.logger.warn(
+          `Reward grant failed for ${envelope.eventName} ${envelope.eventId}; ` +
+            `left unprocessed for redelivery: ${description}`,
+        );
+        throw error;
+      }
+      throw new UnprocessableEventError(
+        DLQ_REASONS.BUSINESS_RULE_VIOLATION,
+        `A reward rule refused ${envelope.eventName} ${claim.sourceReference}; ` +
+          `replay once the rule is fixed: ${description}`,
+      );
+    }
   }
 
   /**
