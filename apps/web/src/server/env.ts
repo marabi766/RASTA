@@ -92,10 +92,12 @@ const schema = z.object({
    */
   /**
    * Redis, for coordinating token refreshes across replicas
-   * (`refresh-coordinator.ts`). Optional: without it the coordination is
-   * per process, which is safe — a lost race never signs anybody out — but
-   * shows the loser one request as signed out. Set it wherever the portal runs
-   * more than one replica or worker (`docs/12` § 12.4 runs two).
+   * (`refresh-coordinator.ts`).
+   *
+   * **Required in production** (see `loadWebServerEnv`): the documented
+   * topology runs two replicas (`docs/12` § 12.4), where per-process
+   * coordination is not a safe fallback. Optional in development and test,
+   * where one process is the norm and a warning says what is missing.
    */
   WEB_REDIS_URL: z
     .string()
@@ -122,16 +124,22 @@ export type WebServerEnv = z.infer<typeof schema>;
  */
 export function loadWebServerEnv(
   // A plain record rather than `NodeJS.ProcessEnv`: that type requires
-  // `NODE_ENV`, which this schema has no opinion about, and a test would have
-  // to supply it to talk about anything else.
+  // `NODE_ENV`, and a test would have to supply it to talk about anything
+  // else. `NODE_ENV` is read for one rule only: `WEB_REDIS_URL` in production.
   source: Record<string, string | undefined> = process.env,
 ): WebServerEnv {
   const parsed = schema.safeParse(source);
-  if (!parsed.success) {
+  const missing = parsed.success ? [] : parsed.error.issues.map((issue) => issue.path.join('.'));
+
+  // The one rule that depends on where the portal runs. Production is two
+  // replicas, and two replicas without shared coordination race for every
+  // refresh token (ADR-059 addendum).
+  if (source.NODE_ENV === 'production' && !source.WEB_REDIS_URL) missing.push('WEB_REDIS_URL');
+
+  if (!parsed.success || missing.length > 0) {
     // Names only, never values: this object holds the session key.
-    const missing = parsed.error.issues.map((issue) => issue.path.join('.')).join(', ');
     throw new Error(
-      `The portal cannot start: its server configuration is incomplete or invalid (${missing}). ` +
+      `The portal cannot start: its server configuration is incomplete or invalid (${missing.join(', ')}). ` +
         'See ADR-059 and .env.example.',
     );
   }
