@@ -31,6 +31,7 @@ describe('journal reversal refusals (real database)', () => {
   const org = tenants();
   const payer = `${org.a}-REV`;
   const payee = `${org.b}-REV`;
+  const unownedOrg = `${org.c}-REV-POST`;
 
   beforeAll(async () => {
     prisma = newPrisma();
@@ -41,7 +42,7 @@ describe('journal reversal refusals (real database)', () => {
   });
 
   afterAll(async () => {
-    await cleanup(prisma, [payer, payee]);
+    await cleanup(prisma, [payer, payee, unownedOrg]);
     await prisma.onModuleDestroy();
   });
 
@@ -218,7 +219,7 @@ describe('journal reversal refusals (real database)', () => {
     }
     const unowned = new TopUpsUnowned(prisma, wiring.ledger, wiring.walletRepository);
 
-    const organizationId = `${org.c}-REV-POST`;
+    const organizationId = unownedOrg;
     const { walletId } = await fundWallet(wiring, organizationId, 40_000n);
     const topUp = await latestJournal(organizationId, 'WALLET_TOP_UP');
     expect((await readBalances(prisma, walletId)).available).toBe(40_000n);
@@ -234,7 +235,8 @@ describe('journal reversal refusals (real database)', () => {
     await expect(
       asPlatform(organizationId, () => unowned.reverse(topUp.id, 'a second reversal is refused')),
     ).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
-
-    await cleanup(prisma, [organizationId]);
+    // Cleaned up with the suite's other tenants in afterAll: a mid-suite
+    // cleanup also deletes this run's reward rules by author, while the
+    // reward granted to another tenant above still references one.
   });
 });
