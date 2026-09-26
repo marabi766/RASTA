@@ -43,7 +43,7 @@ export const duplicateRequestsTotal = new Counter({
 
 /**
  * Open work found under the previous owner when a transfer is consumed
- * (ADR-062 § 5, docs/24 Q-68).
+ * (ADR-062 § 5, docs/24 Q-74).
  *
  * A transfer is refused while the owner has open work, so this should stay at
  * zero. Anything else is work from before that rule, or one of the bounded

@@ -9,6 +9,7 @@ import { AssetService } from './asset.service';
 import type { AssetRepository } from './asset.repository';
 import { ASSET_EVENTS } from './events';
 import type { CreateAssetDto, TransferAssetDto } from './dto';
+import type { ClearanceAnswer, TransferClearance, WorkOwner } from './transfer-clearance';
 
 /**
  * Asset service behaviour, with the repository stubbed.
@@ -85,6 +86,43 @@ interface Harness {
   timeline: Array<Record<string, unknown>>;
   updates: Array<Record<string, unknown>>;
   tx: TxMock;
+  clearance: FakeClearance;
+}
+
+/**
+ * The owners of the machine's work (ADR-062), answering from a script.
+ * Clear by default; `answers` replaces an owner's answer, and a function is
+ * called so it can throw.
+ */
+interface FakeClearance extends TransferClearance {
+  asked: WorkOwner[];
+  released: WorkOwner[];
+  clock: number;
+}
+
+function fakeClearance(
+  answers: Partial<Record<WorkOwner, ClearanceAnswer | (() => Promise<ClearanceAnswer>)>> = {},
+): FakeClearance {
+  const fake: FakeClearance = {
+    fenceTtlSeconds: 600,
+    asked: [],
+    released: [],
+    clock: 0,
+    now: () => fake.clock,
+    ask: async (owner, organizationId, assetId, fenceId) => {
+      expect(organizationId).toBe(DEH1);
+      expect(assetId).toBe(ASSET_ID);
+      expect(fenceId).toMatch(/^TRF_[0-9A-Z]{26}$/);
+      fake.asked.push(owner);
+      const answer = answers[owner];
+      if (typeof answer === 'function') return answer();
+      return answer ?? { clear: true };
+    },
+    release: async (owner) => {
+      fake.released.push(owner);
+    },
+  };
+  return fake;
 }
 
 interface TxMock {
@@ -98,7 +136,10 @@ interface TxMock {
   technicalInspection: { updateMany: jest.Mock };
 }
 
-function harness(overrides: Partial<Record<string, unknown>> = {}): Harness {
+function harness(
+  overrides: Partial<Record<string, unknown>> = {},
+  clearance: FakeClearance = fakeClearance(),
+): Harness {
   const enqueued: Harness['enqueued'] = [];
   const timeline: Harness['timeline'] = [];
   const updates: Harness['updates'] = [];
@@ -182,12 +223,13 @@ function harness(overrides: Partial<Record<string, unknown>> = {}): Harness {
   }) as never;
 
   return {
-    service: new AssetService(repository),
+    service: new AssetService(repository, undefined, clearance),
     repository,
     enqueued,
     timeline,
     updates,
     tx: tx as unknown as TxMock,
+    clearance,
   };
 }
 
@@ -608,6 +650,141 @@ describe('AssetService', () => {
       await expect(
         run(() => h.service.transfer(ASSET_ID, { ...dto, toOrganizationId: DEH1 })),
       ).rejects.toThrow(/already belongs/);
+    });
+
+    // ADR-062, docs/23 D-033: the owners of the work are asked, not the
+    // status this service built from their events.
+    describe('clearance from the owners of the work', () => {
+      it('asks fleet and maintenance, and keeps their fences when the transfer lands', async () => {
+        const h = harness();
+        await run(() => h.service.transfer(ASSET_ID, dto));
+
+        expect(h.clearance.asked.sort()).toEqual(['fleet-service', 'maintenance-service']);
+        // Their consumers lift them on ASSET_TRANSFERRED; lifted now, the
+        // previous owner could open work before the replicas catch up.
+        expect(h.clearance.released).toEqual([]);
+        expect(h.tx.assetTransfer.create).toHaveBeenCalled();
+      });
+
+      it('refuses when maintenance has open work the status never showed, and lifts fleet’s fence', async () => {
+        const h = harness(
+          {},
+          fakeClearance({ 'maintenance-service': { clear: false, open: { openRequests: 1 } } }),
+        );
+
+        await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toMatchObject({
+          code: 'BUSINESS_RULE_VIOLATION',
+          internalContext: expect.objectContaining({
+            rule: 'OPEN_OPERATIONAL_ACTIVITY',
+            owner: 'maintenance-service',
+            openRequests: 1,
+          }),
+        });
+        expect(h.clearance.released).toEqual(['fleet-service']);
+        expect(h.updates).toEqual([]);
+        expect(h.tx.assetTransfer.create).not.toHaveBeenCalled();
+        expect(h.enqueued).toEqual([]);
+      });
+
+      it('refuses when fleet has an assignment it has not published yet', async () => {
+        const h = harness(
+          {},
+          fakeClearance({ 'fleet-service': { clear: false, open: { openAssignments: 1 } } }),
+        );
+
+        await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toMatchObject({
+          internalContext: expect.objectContaining({ owner: 'fleet-service', openAssignments: 1 }),
+        });
+        expect(h.clearance.released).toEqual(['maintenance-service']);
+        expect(h.tx.assetTransfer.create).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['unreachable', () => RastaError.upstreamUnavailable('maintenance-service')],
+        ['timed out', () => RastaError.upstreamTimeout('maintenance-service', 3000)],
+      ])('fails closed when an owner is %s', async (_label, failure) => {
+        const h = harness(
+          {},
+          fakeClearance({
+            'maintenance-service': async () => {
+              throw failure();
+            },
+          }),
+        );
+
+        await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toBeInstanceOf(
+          RastaError,
+        );
+        expect(h.clearance.released).toEqual(['fleet-service']);
+        expect(h.updates).toEqual([]);
+        expect(h.tx.assetTransfer.create).not.toHaveBeenCalled();
+      });
+
+      it('names open work before an outage, because a person can act on it', async () => {
+        const h = harness(
+          {},
+          fakeClearance({
+            'fleet-service': async () => {
+              throw RastaError.upstreamUnavailable('fleet-service');
+            },
+            'maintenance-service': { clear: false, open: { openRepairOrders: 2 } },
+          }),
+        );
+
+        await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toMatchObject({
+          internalContext: expect.objectContaining({ rule: 'OPEN_OPERATIONAL_ACTIVITY' }),
+        });
+        expect(h.clearance.released).toEqual([]);
+      });
+
+      it('never transfers when no clearance was configured', async () => {
+        const h = harness();
+        const bare = new AssetService(h.repository);
+
+        await expect(run(() => bare.transfer(ASSET_ID, dto))).rejects.toMatchObject({
+          code: 'UPSTREAM_UNAVAILABLE',
+        });
+        expect(h.tx.assetTransfer.create).not.toHaveBeenCalled();
+      });
+
+      it('lifts the fences when the transfer itself fails', async () => {
+        const h = harness({ compareAndSetStatus: jest.fn(async () => 0) });
+
+        await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+        });
+        expect(h.clearance.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+      });
+
+      it('does not record a transfer confirmed more than half a fence ago, measured from before asking', async () => {
+        const clearance = fakeClearance();
+        const h = harness(
+          {
+            // The owners answer, then the commit stalls until the fences
+            // are about to lapse.
+            databaseClock: jest.fn(async () => {
+              clearance.clock = 300_000;
+              return new Date('2026-09-25T12:00:00.000Z');
+            }),
+          },
+          clearance,
+        );
+
+        await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toThrow(
+          /took too long to confirm/,
+        );
+        expect(h.tx.assetTransfer.create).not.toHaveBeenCalled();
+        expect(h.enqueued).toEqual([]);
+        expect(clearance.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+      });
+
+      it('does not ask anyone when the local checks already refuse', async () => {
+        const h = harness();
+        await expect(
+          run(() => h.service.transfer(ASSET_ID, { ...dto, toOrganizationId: DEH1 })),
+        ).rejects.toThrow(/already belongs/);
+        expect(h.clearance.asked).toEqual([]);
+      });
     });
   });
 

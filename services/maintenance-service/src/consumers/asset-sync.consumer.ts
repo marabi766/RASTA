@@ -203,7 +203,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
    *
    * Its open work should not exist, because the transfer was cleared against
    * it. If it does, it is counted and logged, and it stays exactly where it
-   * is. What should happen to it is docs/24 Q-68; cancelling it or handing it
+   * is. What should happen to it is docs/24 Q-74; cancelling it or handing it
    * to the new owner would each be a decision in someone's name.
    */
   private async settleTransfer(
@@ -220,7 +220,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(
         `${assetId} was transferred with open maintenance work left under its previous owner ` +
           `(${open.openRequests} request(s), ${open.openRepairOrders} repair order(s)); ` +
-          'kept as is pending docs/24 Q-68',
+          'kept as is pending docs/24 Q-74',
       );
     }
   }

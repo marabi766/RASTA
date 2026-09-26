@@ -914,7 +914,7 @@ export class RepairOrderService {
    * holds only for work opened before that rule existed, or in the bounded
    * windows ADR-062 names. Starting it would publish MAINTENANCE_STARTED
    * under the previous owner, which asset-service can only set aside. The
-   * work itself stays as it is (docs/24 Q-68); only new steps on it stop.
+   * work itself stays as it is (docs/24 Q-74); only new steps on it stop.
    */
   private async assertStillOwner(assetId: string, organizationId: string): Promise<void> {
     const asset = await this.repository.findAssetRef(assetId);

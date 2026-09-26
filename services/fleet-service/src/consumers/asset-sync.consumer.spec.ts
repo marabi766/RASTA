@@ -50,6 +50,7 @@ function buildConsumer(options: {
     }),
     findAssetRef: jest.fn(async () => options.existing ?? null),
     lockAssetRef: jest.fn(async () => undefined),
+    dropTransferFences: jest.fn(async () => 0),
     transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn({})),
     markEventProcessed: jest.fn(async (_tx: unknown, eventId: string) => {
       if (options.alreadyProcessed) return false;
@@ -82,6 +83,34 @@ function envelope(overrides: Partial<EventEnvelope> & { eventName: string }): Ev
 }
 
 describe('AssetSyncConsumer', () => {
+  describe('the transfer fence (ADR-062)', () => {
+    it('lifts the previous owner’s fence under the asset lock, and only on a transfer', async () => {
+      const { consumer, repository } = harness({ existing: { organizationId: 'ORG-DEH-0001' } });
+
+      await consumer.handle(
+        envelope('ASSET_TRANSFERRED', {
+          assetId: 'AST-SEED-0001',
+          fromOrganizationId: 'ORG-DEH-0001',
+          toOrganizationId: 'ORG-DEH-0002',
+        }),
+      );
+
+      expect(repository.dropTransferFences).toHaveBeenCalledWith(
+        expect.anything(),
+        'AST-SEED-0001',
+        'ORG-DEH-0001',
+      );
+      const lock = (repository.lockAssetRef as jest.Mock).mock.invocationCallOrder[0]!;
+      const drop = (repository.dropTransferFences as jest.Mock).mock.invocationCallOrder[0]!;
+      expect(lock).toBeLessThan(drop);
+
+      await consumer.handle(
+        envelope('ASSET_STATUS_CHANGED', { assetId: 'AST-SEED-0001', newStatus: 'ACTIVE' }),
+      );
+      expect(repository.dropTransferFences).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('events it does not project', () => {
     it('skips rather than failing', async () => {
       // These topics carry far more than this service cares about — every

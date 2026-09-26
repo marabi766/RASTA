@@ -249,8 +249,10 @@ export class TransferClearanceClient implements TransferClearance {
         `${this.options.baseUrls[owner].replace(/\/+$/, '')}${path}`,
         { method, headers, body, signal: controller.signal },
       );
-      // The body is read inside the deadline too.
+      // The body is read inside the deadline too, and an answer that arrives
+      // after it is not taken, even from a transport that ignored the abort.
       const text = await response.text();
+      if (controller.signal.aborted) throw new Error('deadline passed');
       return new Response(text.length > 0 ? text : null, { status: response.status });
     } catch {
       // No cause attached: a runtime's transport error can quote the URL.
