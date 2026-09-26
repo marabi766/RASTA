@@ -154,6 +154,15 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
       return { walletId: wallet.id, kind: 'AVAILABLE_VS_LEDGER' };
     }
 
+    // Relation 2, which this class documented and did not check until economic
+    // batch 2 item e. Read, never resolved: an audit must not open an account.
+    // A wallet with no escrow account has nothing in escrow.
+    const escrow = await this.wallets.findEscrowAccount(wallet.organizationId, wallet.currency);
+    const escrowBalance = escrow ? await this.ledger.balanceOf(escrow.id, 'LIABILITY') : 0n;
+    if (escrowBalance !== wallet.pendingBalanceMinor) {
+      return { walletId: wallet.id, kind: 'PENDING_VS_ESCROW' };
+    }
+
     const holdTotal = await this.wallets.activeHoldTotal(wallet.id);
     if (holdTotal !== wallet.pendingBalanceMinor) {
       return { walletId: wallet.id, kind: 'PENDING_VS_HOLDS' };
@@ -165,5 +174,5 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
 
 export interface Deviation {
   walletId: string;
-  kind: 'INTERNAL_INCONSISTENCY' | 'AVAILABLE_VS_LEDGER' | 'PENDING_VS_HOLDS';
+  kind: 'INTERNAL_INCONSISTENCY' | 'AVAILABLE_VS_LEDGER' | 'PENDING_VS_ESCROW' | 'PENDING_VS_HOLDS';
 }

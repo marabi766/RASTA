@@ -290,6 +290,24 @@ export class WalletRepository {
     });
   }
 
+  /**
+   * A wallet owner's escrow account, if it has one — read only.
+   *
+   * For the reconciliation, which must compare `pendingBalance` with it
+   * (relation 2) and must never create an account while doing so, as
+   * `LedgerService.resolveAccount` would.
+   */
+  findEscrowAccount(organizationId: string, currency: string) {
+    return runUnscoped('the wallet/ledger reconciliation is a platform-wide integrity check', () =>
+      this.client.ledgerAccount.findUnique({
+        where: {
+          organizationId_purpose_currency: { organizationId, purpose: 'ESCROW', currency },
+        },
+        select: { id: true },
+      }),
+    );
+  }
+
   /** Σ of active holds on a wallet — the cross-check for `pendingBalance`. */
   async activeHoldTotal(walletId: string): Promise<bigint> {
     const result = await runUnscoped(

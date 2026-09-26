@@ -525,6 +525,84 @@ describe('economic internals', () => {
         ),
       );
     });
+
+    it('finds a wallet whose pending balance disagrees with its escrow ledger', async () => {
+      // Economic batch 2, item e: relation 2 was documented and never checked.
+      // The drift here is one only it can see — the escrow account moves while
+      // the wallet account, the stored pending figure and the holds all still
+      // agree with one another.
+      const organizationId = `${org.c}-ESCROW-DRIFT`;
+      const { walletId } = await fundWallet(wiring, organizationId, 80_000n);
+      const transactionId = `TXN_${ulid()}`;
+
+      await asActor({ organizationId }, () =>
+        wiring.prisma.transaction(async (tx) => {
+          const [locked] = await wiring.walletRepository.lock(tx, [walletId]);
+          return wiring.wallets.placeHold(tx, {
+            wallet: locked!,
+            amountMinor: 20_000n,
+            reference: transactionId,
+            referenceType: 'TRANSACTION',
+            transactionId,
+            placedBy: 'internals-itest',
+          });
+        }),
+      );
+      expect((await audit().run()).find((row) => row.walletId === walletId)).toBeUndefined();
+
+      // A balanced journal into escrow from a platform account, posted behind
+      // the wallet's back: no hold, no recompute.
+      await asActor({ organizationId }, () =>
+        wiring.prisma.transaction(async (tx) => {
+          const expense = await wiring.ledger.resolveAccount(
+            tx,
+            'REWARD_EXPENSE',
+            organizationId,
+            'IRR',
+            'internals-itest',
+          );
+          const escrow = await wiring.ledger.resolveAccount(
+            tx,
+            'ESCROW',
+            organizationId,
+            'IRR',
+            'internals-itest',
+          );
+          await runUnscoped('the suite posts a drifting journal on purpose', () =>
+            wiring.ledger.post(
+              tx,
+              {
+                journalType: 'REWARD_GRANT',
+                description: 'escrow drift',
+                organizationId,
+                entries: [
+                  {
+                    accountId: expense.id,
+                    organizationId: expense.organizationId,
+                    direction: 'DEBIT',
+                    amountMinor: 5_000n,
+                    currency: 'IRR',
+                  },
+                  {
+                    accountId: escrow.id,
+                    organizationId: escrow.organizationId,
+                    direction: 'CREDIT',
+                    amountMinor: 5_000n,
+                    currency: 'IRR',
+                  },
+                ],
+              },
+              'internals-itest',
+            ),
+          );
+        }),
+      );
+
+      const found = (await audit().run()).find((row) => row.walletId === walletId);
+      expect(found?.kind).toBe('PENDING_VS_ESCROW');
+
+      await cleanup(prisma, [organizationId]);
+    });
   });
   // -------------------------------------------------------------------------
   // Doing nothing, correctly
