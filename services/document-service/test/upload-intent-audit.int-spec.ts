@@ -137,4 +137,44 @@ describe('upload intent audit (L7-14)', () => {
       expect((row.payload as { tenantId?: string }).tenantId).toBe(org.b);
     }
   });
+
+  it('records nothing when the upload URL cannot be signed (Codex #114 R1-5)', async () => {
+    // A failing signer: the caller gets an error, so the audit trail must not
+    // say a permission was issued, and no intent may be left to redeem.
+    const env = testEnv();
+    const failing = {
+      createUploadUrl: jest.fn(async () => {
+        throw new Error('the signer is unavailable');
+      }),
+    } as unknown as ObjectStorage;
+    const unsigned = new DocumentService(
+      prisma,
+      new DocumentRepository(prisma),
+      events,
+      env,
+      failing,
+    );
+    const intentsBefore = await runUnscoped('assertions read the rows directly', () =>
+      prisma.client.uploadIntent.count({ where: { organizationId: org.a } }),
+    );
+    const eventsBefore = (await intentEvents(org.a)).length;
+
+    await expect(
+      asActor({ organizationId: org.a, userId: 'USR-DOC-A' }, () =>
+        unsigned.requestUploadUrl({
+          documentClass: 'CONTRACT',
+          contentType: 'application/pdf',
+          sizeBytes: 2048,
+          filename: 'contract.pdf',
+        }),
+      ),
+    ).rejects.toThrow('the signer is unavailable');
+
+    expect(
+      await runUnscoped('assertions read the rows directly', () =>
+        prisma.client.uploadIntent.count({ where: { organizationId: org.a } }),
+      ),
+    ).toBe(intentsBefore);
+    expect(await intentEvents(org.a)).toHaveLength(eventsBefore);
+  });
 });

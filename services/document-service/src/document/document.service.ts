@@ -115,17 +115,37 @@ export class DocumentService {
     const expiresAt = new Date(Date.now() + this.env.DOCUMENT_UPLOAD_INTENT_TTL_SECONDS * 1000);
 
     const intentId = newId(ID_PREFIX.uploadIntent);
+    const declaredContentType = dto.contentType.trim().toLowerCase();
+
+    // Signed first, recorded second (Codex #114 R1-5). Signing has no side
+    // effect — the URL is not handed to anybody until the intent and its
+    // audit record have committed — so a signer that fails leaves no intent
+    // and no `UPLOAD_INTENT_ISSUED` claiming a permission nobody received.
+    const uploadUrl = await this.timeStorage('createUploadUrl', () =>
+      this.storage.createUploadUrl({
+        objectKey,
+        contentType: declaredContentType,
+        // Bound into the signature, the same way the content type is: an
+        // upload that sends a different number of bytes than this fails at
+        // storage rather than being accepted and caught later at finalize.
+        contentLength: dto.sizeBytes,
+        // The URL is shorter-lived than the intent: a client that uploaded at
+        // the last second can still finalize, but the credential itself is
+        // gone.
+        expiresInSeconds: this.env.DOCUMENT_SIGNED_URL_TTL_SECONDS,
+      }),
+    );
 
     // The intent row and its audit record commit together (AGENTS.md S-06,
-    // A-08). The URL is signed only after that commit, so no credential is
-    // ever handed out for an intent the log does not know about.
+    // A-08). If this fails, the signed URL above is simply never returned, and
+    // `finalize` would refuse it anyway: it redeems intents, not keys.
     const intent = await this.prisma.transaction(async (tx) => {
       const created = await this.repository.createIntent(tx, {
         id: intentId,
         organizationId,
         objectKey,
         documentClass,
-        declaredContentType: dto.contentType.trim().toLowerCase(),
+        declaredContentType,
         declaredSizeBytes: dto.sizeBytes,
         declaredFilename: sanitizeFilename(dto.filename),
         expiresAt,
@@ -150,21 +170,6 @@ export class DocumentService {
 
       return created;
     });
-
-    const uploadUrl = await this.timeStorage('createUploadUrl', () =>
-      this.storage.createUploadUrl({
-        objectKey,
-        contentType: intent.declaredContentType,
-        // Bound into the signature, the same way the content type is: an
-        // upload that sends a different number of bytes than this fails at
-        // storage rather than being accepted and caught later at finalize.
-        contentLength: intent.declaredSizeBytes,
-        // The URL is shorter-lived than the intent: a client that uploaded at
-        // the last second can still finalize, but the credential itself is
-        // gone.
-        expiresInSeconds: this.env.DOCUMENT_SIGNED_URL_TTL_SECONDS,
-      }),
-    );
 
     uploadUrlsIssuedTotal.inc({ service: SERVICE_NAME, document_class: documentClass });
 

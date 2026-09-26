@@ -181,6 +181,10 @@ export const virusDetectedPayload = z
  * (AGENTS.md S-06). It is not a document yet — nothing has been uploaded, and
  * `DOCUMENT_UPLOADED` is still the fact that one exists.
  *
+ * "Issued" is exact: the upload URL was signed *before* this commits, and it
+ * reaches the caller only after. A signer that fails leaves no intent and no
+ * event.
+ *
  * What the client *declared*, and only that. **No object key and no URL** —
  * the reasons at the top of this file apply with more force here, because the
  * upload URL is a live write credential for the key — and no filename: an
