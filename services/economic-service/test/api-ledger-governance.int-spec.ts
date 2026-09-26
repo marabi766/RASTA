@@ -1,5 +1,6 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
+import { runUnscoped } from '@rasta/nest-common';
 import { admin, apiTenant, auditor, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id } from './helpers';
 
@@ -8,10 +9,11 @@ import { cleanup, id } from './helpers';
  *
  * Two properties are asserted here that exist nowhere else above the domain:
  *
- *  - **A reversal is the ledger's only correction** (AGENTS.md A-06). It posts
- *    a mirror journal, leaves history untouched, and can happen at most once —
- *    enforced by a unique constraint rather than by a check two concurrent
- *    requests could both pass.
+ *  - **A reversal is the ledger's only correction** (AGENTS.md A-06) — and
+ *    the generic one refuses any journal a record owns, naming the operation
+ *    that corrects the record and the ledger together (global audit L7-07).
+ *    That a journal is reversed at most once is still a unique constraint;
+ *    `ledger-immutability.int-spec.ts` asserts it.
  *
  *  - **A rate is configuration, never code** (ADR-023). Creating one is
  *    restricted to `SYSTEM_ADMIN` because the steering group approves it and
@@ -126,7 +128,13 @@ describe('ledger and governance API', () => {
   // Reversal — the ledger's only correction
   // -------------------------------------------------------------------------
 
-  it('reverses a journal exactly once, returning the balances it had before', async () => {
+  it('refuses to reverse a journal a record owns, names the correction, and writes nothing', async () => {
+    // Global audit L7-07. A top-up is the ledger half of a payment intent:
+    // reversing the ledger alone left the intent CAPTURED over money the
+    // ledger had taken back. The correction is the payment refund, which moves
+    // both together. Every journal type has such an owner today, so the
+    // generic reversal posts nothing; `journal-reversal.int-spec.ts` refuses
+    // each type in turn.
     const walletBefore = await request(http)
       .get('/v1/wallets/me')
       .set('authorization', asOrg())
@@ -138,6 +146,10 @@ describe('ledger and governance API', () => {
       .set('idempotency-key', id('api-reversible'))
       .send({ amountMinor: '11000' })
       .expect(201);
+    const balanceAfterTopUp = BigInt(
+      (await request(http).get('/v1/wallets/me').set('authorization', asOrg()).expect(200)).body
+        .ledgerBalanceMinor,
+    );
 
     const journal = await request(http)
       .get(`/v1/ledger/journals/${topUp.body.journalId}`)
@@ -168,43 +180,44 @@ describe('ledger and governance API', () => {
       .send({ reason: 'attempted by an organization administrator' })
       .expect(403);
 
-    const reversal = await request(http)
+    // A platform administrator is refused too, with the operation to use.
+    const refused = await request(http)
       .post(`/v1/ledger/journals/${topUp.body.journalId}/reverse`)
       .set('authorization', asPlatform())
       .send({ reason: 'the top-up was recorded against the wrong organization' })
-      .expect(201);
+      .expect(422);
+    expect(refused.body.code).toBe('BUSINESS_RULE_VIOLATION');
+    expect(refused.body.message).toContain('POST /v1/payment-intents/{id}/refund');
 
-    expect(reversal.body.reversesId).toBe(topUp.body.journalId);
-
+    // Nothing moved: the balance is the one the top-up left.
     const walletAfter = await request(http)
       .get('/v1/wallets/me')
       .set('authorization', asOrg())
       .expect(200);
-    expect(BigInt(walletAfter.body.ledgerBalanceMinor)).toBe(
-      BigInt(walletBefore.body.ledgerBalanceMinor),
-    );
+    expect(BigInt(walletAfter.body.ledgerBalanceMinor)).toBe(balanceAfterTopUp);
 
-    // At most once, and enforced by a unique constraint rather than by a read
-    // two concurrent requests could both pass.
-    await request(http)
-      .post(`/v1/ledger/journals/${topUp.body.journalId}/reverse`)
-      .set('authorization', asPlatform())
-      .send({ reason: 'a second reversal of the same journal must be refused' })
-      .expect(409);
-
-    // The original journal is unchanged: history is not edited, it is added to.
+    // And the journal is exactly as it was, with no reversal pointing at it.
     const original = await request(http)
       .get(`/v1/ledger/journals/${topUp.body.journalId}`)
       .set('authorization', asOrg())
       .expect(200);
     expect(original.body.reversesId).toBeNull();
     expect(original.body.entries).toHaveLength(journal.body.entries.length);
+    const reversalsOf = await runUnscoped('the suite looks for a reversal of the journal', () =>
+      harness.prisma.client.journal.count({ where: { reversesId: topUp.body.journalId } }),
+    );
+    expect(reversalsOf).toBe(0);
   });
 
-  it('answers 404 for a journal that does not exist', async () => {
+  it('answers 404 for a journal that does not exist, read or reversed', async () => {
     await request(http)
       .get('/v1/ledger/journals/JRN_0000000000000000000000000')
       .set('authorization', asOrg())
+      .expect(404);
+    await request(http)
+      .post('/v1/ledger/journals/JRN_0000000000000000000000000/reverse')
+      .set('authorization', asPlatform())
+      .send({ reason: 'a journal that was never posted' })
       .expect(404);
   });
 

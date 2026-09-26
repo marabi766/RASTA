@@ -35,6 +35,7 @@ import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { LedgerRepository } from './ledger/ledger.repository';
 import { LedgerService } from './ledger/ledger.service';
 import { LedgerController } from './ledger/ledger.controller';
+import { JournalReversalService } from './ledger/journal-reversal.service';
 import { WalletRepository } from './wallet/wallet.repository';
 import { WalletService } from './wallet/wallet.service';
 import { WalletController } from './wallet/wallet.controller';
@@ -145,6 +146,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
 
     LedgerRepository,
     LedgerService,
+    JournalReversalService,
     WalletRepository,
     WalletService,
     TransactionRepository,
