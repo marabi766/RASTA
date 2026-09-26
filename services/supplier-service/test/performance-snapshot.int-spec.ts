@@ -87,6 +87,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
       rating: 4,
       promisedAt: null,
       deliveredAt: null,
+      disputeId: null,
       compensatesSourceEventId: null,
       occurredAt: new Date('2026-09-20T00:00:00.000Z'),
       correlationId: ulid(),

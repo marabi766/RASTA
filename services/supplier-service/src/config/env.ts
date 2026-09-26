@@ -55,10 +55,10 @@ export type SupplierEnv = z.infer<typeof supplierEnvSchema>;
  *                 connected to some other database would violate A-01 quietly,
  *                 and `postgresUrlSchema` refuses an absent value loudly.
  *
- * `KAFKA_CONSUMER_GROUP` is set even though this service registers no consumer
- * (see `app.module.ts`): the value is part of the service's identity on the
- * broker, and defining it here means the first real consumer inherits the
- * platform-standard name rather than inventing one.
+ * `KAFKA_CONSUMER_GROUP` is the platform-standard default. The one consumer this
+ * service registers (`app.module.ts`) names its own group,
+ * `supplier-service.performance`, because its `processed_event` key is that
+ * same name and must not change with an environment variable.
  */
 export function loadSupplierEnv(source: NodeJS.ProcessEnv = process.env): SupplierEnv {
   return loadEnv(supplierEnvSchema, {

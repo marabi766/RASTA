@@ -51,6 +51,7 @@ export const FACT_FIELDS = [
   'rating',
   'promisedAt',
   'deliveredAt',
+  'disputeId',
   'compensatesSourceEventId',
   'occurredAt',
 ] as const satisfies readonly (keyof PerformanceEventInput)[];
@@ -108,6 +109,7 @@ export class PerformanceEventRepository {
           rating: input.rating,
           promisedAt: input.promisedAt,
           deliveredAt: input.deliveredAt,
+          disputeId: input.disputeId,
           compensatesSourceEventId: input.compensatesSourceEventId,
           occurredAt: input.occurredAt,
           correlationId: input.correlationId,

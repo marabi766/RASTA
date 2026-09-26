@@ -10,6 +10,7 @@ import {
   AllExceptionsFilter,
   AuthGuard,
   AUTH_OPTIONS,
+  EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
   OutboxRelay,
@@ -38,6 +39,14 @@ import { QualificationService } from './supplier/qualification.service';
 import { SuspensionService } from './supplier/suspension.service';
 import { SupplierController } from './supplier/supplier.controller';
 import { HealthController, MetricsController } from './health/health.controller';
+import { ConcludedOutcomeRepository } from './performance/concluded-outcome.repository';
+import { PerformanceEventRepository } from './performance/performance-event.repository';
+import {
+  PERFORMANCE_CONSUMED_TOPICS,
+  PERFORMANCE_CONSUMER,
+  PerformanceConsumer,
+  SUPPLIER_DEAD_LETTER_TOPIC,
+} from './performance/performance.consumer';
 import { ENV, LOGGER } from './tokens';
 import { brokersOf, loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './config/env';
 
@@ -58,19 +67,19 @@ import { brokersOf, loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './co
  * shape `WorkshopDirectory` uses on the maintenance side of this same gap
  * (ADR-029).
  *
- * ## No Kafka consumer is registered, and that is a decision
+ * ## One Kafka consumer: the performance facts (ADR-052 step 5)
  *
- * `docs/04` § 4.10 lists six consumed events — `REVIEW_SUBMITTED`,
- * `ORDER_COMPLETED`, `ORDER_DISPUTED`, `REPAIR_COMPLETED`, `CONTRACT_COMPLETED`,
- * `CONTRACTOR_RATED` — and every one of them exists to feed the performance
- * score. Q-12 has not defined that score, so a handler would consume the event,
- * compute nothing, and write a `processed_event` row saying it was handled. That
- * is precisely the failure ADR-032 refuses and ADR-041 § 4 repeated: a handler
- * that swallows an event leaves a trace indistinguishable from one that acted on
- * it.
+ * `PerformanceConsumer` reads `rasta.marketplace.v1` and records what each
+ * event says about a supplier — a promise, a delivery, a rating, an attributed
+ * dispute or cancellation, a concluded order — and nothing else. Its effect is
+ * a stored fact, so the `processed_event` marker it writes is true: ADR-032's
+ * objection to a handler that swallows an event does not apply. No score is
+ * computed from those facts yet (step 6, docs/24 Q-77..Q-79).
  *
- * The `processed_event` table exists anyway, so the first real consumer does not
- * also have to build its own infrastructure.
+ * maintenance-service's `REPAIR_COMPLETED` / `REPAIR_CANCELLED` carry nothing
+ * a component can measure (no promise, no rating, no structured attribution),
+ * and contract-service and construction-service publish no rating, so none of
+ * those topics is subscribed.
  */
 @Module({
   controllers: [SupplierController, HealthController, MetricsController],
@@ -116,6 +125,46 @@ import { brokersOf, loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './co
     SupplierService,
     QualificationService,
     SuspensionService,
+    PerformanceEventRepository,
+    ConcludedOutcomeRepository,
+
+    {
+      provide: PerformanceConsumer,
+      inject: [ENV, LOGGER, PrismaService, PerformanceEventRepository, ConcludedOutcomeRepository],
+      useFactory: (
+        env: SupplierEnv,
+        logger: Logger,
+        prisma: PrismaService,
+        events: PerformanceEventRepository,
+        outcomes: ConcludedOutcomeRepository,
+      ) =>
+        new PerformanceConsumer(
+          (handler) =>
+            new EventConsumer(
+              {
+                brokers: brokersOf(env),
+                clientId: `${env.KAFKA_CLIENT_ID}-performance`,
+                groupId: PERFORMANCE_CONSUMER,
+                topics: [...PERFORMANCE_CONSUMED_TOPICS],
+                deadLetterTopic: SUPPLIER_DEAD_LETTER_TOPIC,
+                // A performance history is rebuilt from whatever the topic still
+                // retains (ADR-052 § 12); starting at deploy time would begin it
+                // empty. Rows are idempotent on the source event id.
+                fromBeginning: true,
+              },
+              handler,
+              {
+                log: (m) => logger.info(m),
+                warn: (m) => logger.warn(m),
+                error: (m, trace) => logger.error({ err: trace }, m),
+              },
+            ),
+          prisma,
+          events,
+          outcomes,
+          logger,
+        ),
+    },
 
     {
       provide: InternalTokenService,
@@ -186,6 +235,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly relay: OutboxRelay,
     private readonly store: PrismaOutboxStore,
     private readonly prisma: PrismaService,
+    private readonly performance: PerformanceConsumer,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -201,6 +251,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.prisma.assertRuntimeRole();
 
     this.relay.start();
+    await this.performance.start();
 
     const sample = async () => {
       try {
@@ -223,6 +274,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
+    await this.performance.stop();
     await this.relay.stop();
   }
 }
