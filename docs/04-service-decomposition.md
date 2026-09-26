@@ -271,7 +271,7 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 | **Queries**      | `GetSupplier` · `SearchSuppliers` · `GetPerformanceScore` · `ListQualifiedFor`                                                                                            |
 | **REST**         | `POST /suppliers` · `GET /suppliers` · `GET /suppliers/{id}` · `POST /suppliers/{id}/qualifications` · `POST /suppliers/{id}/suspend` · `GET /suppliers/{id}/performance` |
 | **Publishes**    | `SUPPLIER_REGISTERED` · `SUPPLIER_QUALIFIED` · `SUPPLIER_REJECTED` · `SUPPLIER_SUSPENDED` · `PERFORMANCE_SCORE_UPDATED`                                                   |
-| **Consumes**     | `REVIEW_SUBMITTED` · `ORDER_COMPLETED` · `ORDER_DISPUTED` · `REPAIR_COMPLETED` · `CONTRACT_COMPLETED` · `CONTRACTOR_RATED` → همه برای محاسبه امتیاز                       |
+| **Consumes**     | از `rasta.marketplace.v1`: `ORDER_CREATED` · `ORDER_FULFILLED` · `REVIEW_SUBMITTED` · `ORDER_DISPUTE_RESOLVED` · `ORDER_CANCELLED` · `ORDER_COMPLETED` (ADR-052 گام ۵)    |
 | **Dependencies** | PostgreSQL · Kafka · OpenSearch · `document-service`                                                                                                                      |
 | **مرز امنیتی**   | تأمین‌کننده پروفایل خود را می‌بیند و ویرایش می‌کند؛ **امتیاز عملکرد را نمی‌تواند تغییر دهد.**                                                                             |
 | **Scale**        | کم. خواندن‌محور با Cache.                                                                                                                                                 |
@@ -284,9 +284,9 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 کیفیت ۳۰٪ · تحویل/تکمیل به‌موقع ۲۵٪ · رضایت مشتری ۲۰٪ · نبودِ اختلاف معتبر ۱۵٪ ·
 نبودِ لغو منتسب ۱۰٪. وزن‌ها نسخه‌دارند و مجموع نسخهٔ فعال دقیقاً ۱۰۰٪ است.
 
-**تصمیم پذیرفته شد؛ پیاده‌سازی نشد.** Supplier Phase 2 شروع نشده است. هیچ جدول
-پیکربندی، هیچ رویداد عملکرد، هیچ Snapshot، هیچ Consumer و هیچ Endpoint امتیازی
-وجود ندارد. جدول «وضعیت پیاده‌سازی» پایین بدون تغییر معتبر است.
+**تصمیم پذیرفته شد؛ امتیازی محاسبه نمی‌شود.** ذخیره‌سازی (گام‌های ۲ تا ۴) و Consumer رویدادهای
+marketplace (گام ۵) پیاده شده‌اند؛ موتور محاسبه (گام ۶)، Endpoint امتیاز و `PERFORMANCE_SCORE_UPDATED` نه — وضعیت هر گام
+در [برنامهٔ پیاده‌سازی ADR-052](adr/ADR-052-implementation-plan.md).
 
 **و امروز ۸۰٪ وزن تولیدکننده ندارد.** از پنج مؤلفه فقط «رضایت مشتری» از
 `REVIEW_SUBMITTED` قابل محاسبه است؛ کیفیت هیچ سیگنالی ندارد، «به‌موقع بودن» هیچ
