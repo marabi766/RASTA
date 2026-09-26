@@ -4,6 +4,7 @@ import { runUnscoped, UnprocessableEventError, type EventConsumer } from '@rasta
 import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authority.consumer';
 import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer';
 import { CONSUMED_EVENTS } from '../src/events/consumed';
+import { recordCutoverIfMissing } from '../src/reward/evaluation-cutover';
 import { asActor, cleanup, newPrisma, tenants, wire, type Wiring } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
@@ -72,10 +73,7 @@ describe('economic consumers', () => {
   // can never be moved back anyway.
   beforeAll(async () => {
     await runUnscoped('the suite records the platform-wide cutover as an operator would', () =>
-      prisma.client.rewardEvaluationCutover.createMany({
-        data: [{ singleton: true, cutoverAt: new Date('2021-01-01T00:00:00.000Z') }],
-        skipDuplicates: true,
-      }),
+      recordCutoverIfMissing(prisma.client, new Date('2021-01-01T00:00:00.000Z')),
     );
   });
 
@@ -1059,6 +1057,18 @@ describe('economic consumers', () => {
       }),
     ).rejects.toBe(rollback);
     expect(await cutover()).toEqual(current);
+  });
+
+  it('records a missing cutover once, as the development seed does, and never moves it', async () => {
+    // The suite's beforeAll made the first call, on CI's empty database the one
+    // that recorded it. A second call, as a second `pnpm db:seed` makes, finds
+    // it and leaves it exactly as it is.
+    const before = await cutover();
+    const again = await runUnscoped('the suite runs the seed step again', () =>
+      recordCutoverIfMissing(prisma.client, new Date()),
+    );
+    expect(again).toEqual({ cutoverAt: before, recorded: false });
+    expect(await cutover()).toEqual(before);
   });
 
   it('evaluates nothing until the operator records the cutover (round 3 #1)', async () => {
