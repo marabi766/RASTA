@@ -7,13 +7,14 @@ import type { FormulaDraftInput } from './formula';
 /**
  * Reads and writes of the platform-wide performance formula (ADR-052 step 2).
  *
- * ## Every query here crosses the tenant boundary, and says why
+ * ## Every query here crosses the tenant boundary, and says why — raw ones too
  *
  * `PerformanceFormulaVersion` and `PerformanceFormulaWeight` carry no
  * `organizationId` — the formula is one platform-wide configuration read for
  * every supplier in every tenant (docs/24 Q-75). The tenant guard has nothing
  * to scope on these models, so each query runs under `runUnscoped` with that
- * reason anyway: an auditor enumerating the service's boundary crossings
+ * reason anyway — including the two raw `FOR UPDATE` reads, which the guard
+ * never sees but an auditor still has to find: an auditor enumerating the service's boundary crossings
  * should find these too, not infer them from an absence (the precedent is
  * economic-service's `reward_evaluation_cutover`).
  *
@@ -138,21 +139,29 @@ export class PerformanceFormulaRepository {
    * second sees the status the first committed.
    */
   async lockById(tx: ExtendedPrismaClient, id: string): Promise<LockedFormulaVersion | null> {
-    const rows = await tx.$queryRaw<LockedFormulaVersion[]>`
-      SELECT "id", "formula_version" AS "formulaVersion", "status"::text AS "status"
-        FROM "performance_formula_version"
-       WHERE "id" = ${id}
-         FOR UPDATE`;
+    const rows = await runUnscoped(
+      PLATFORM_WIDE,
+      () =>
+        tx.$queryRaw<LockedFormulaVersion[]>`
+        SELECT "id", "formula_version" AS "formulaVersion", "status"::text AS "status"
+          FROM "performance_formula_version"
+         WHERE "id" = ${id}
+           FOR UPDATE`,
+    );
     return rows[0] ?? null;
   }
 
   /** Locks the one ACTIVE version, if there is one. */
   async lockActive(tx: ExtendedPrismaClient): Promise<LockedFormulaVersion | null> {
-    const rows = await tx.$queryRaw<LockedFormulaVersion[]>`
-      SELECT "id", "formula_version" AS "formulaVersion", "status"::text AS "status"
-        FROM "performance_formula_version"
-       WHERE "status" = 'ACTIVE'
-         FOR UPDATE`;
+    const rows = await runUnscoped(
+      PLATFORM_WIDE,
+      () =>
+        tx.$queryRaw<LockedFormulaVersion[]>`
+        SELECT "id", "formula_version" AS "formulaVersion", "status"::text AS "status"
+          FROM "performance_formula_version"
+         WHERE "status" = 'ACTIVE'
+           FOR UPDATE`,
+    );
     return rows[0] ?? null;
   }
 
