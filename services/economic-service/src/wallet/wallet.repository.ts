@@ -275,6 +275,11 @@ export class WalletRepository {
     );
   }
 
+  /** The hold a `FUNDS_HELD` journal placed, in the caller's organization. */
+  findHoldPlacedBy(journalId: string) {
+    return this.client.walletHold.findFirst({ where: { placedJournalId: journalId } });
+  }
+
   listHolds(walletId: string, status?: Prisma.WalletHoldWhereInput['status']) {
     return this.client.walletHold.findMany({
       where: { walletId, ...(status ? { status } : {}) },

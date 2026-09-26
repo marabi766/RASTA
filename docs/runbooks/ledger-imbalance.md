@@ -95,12 +95,19 @@ FROM ledger_entry WHERE journal_id = ANY($1);
 
 ```
 ۱. با correlationId، Trace کامل را بررسی کن و بفهم چه چیزی ناقص مانده
-۲. یک Reversal Journal برای Journal ناقص از راه API ثبت کن:
-      POST /v1/ledger/journals/{id}/reverse
-      Idempotency-Key: <ULID جدید>
-      { "reason": "Incident <شماره>: partial post recovery" }
+۲. Journal را با عملیات مالکش اصلاح کن، نه با Reversal عمومی:
+      Top-up        ← POST /v1/payment-intents/{id}/refund
+      Hold          ← POST /v1/transactions/{id}/refund
+      بقیه          ← عملیاتی هنوز نیست (docs/24 Q-76): تسویه را متوقف نگه دار و تصمیم را بالا ببر
 ۳. تراکنش کسب‌وکاری را از ابتدا با Idempotency-Key جدید اجرا کن
 ```
+
+> **از 2026-09-26 (ممیزی L7-07).** `POST /v1/ledger/journals/{id}/reverse` هر Journal
+> دارای رکورد مالک را با ۴۲۲ رد می‌کند و عملیات درست را در پیام نام می‌برد؛ امروز همهٔ
+> انواع Journal مالک دارند. Reversal عمومی فقط دفتر کل را برمی‌گرداند و رکورد مالک
+> (Hold، تراکنش، تسویه، پاداش) را در وضعیتی متناقض با دفتر کل رها می‌کرد.
+> Journalی که **نامتوازن** است هرگز Commit نمی‌شود (`trg_journal_balanced`)؛ این حالت
+> یعنی Journal متوازن ولی **ناقص از نظر کسب‌وکار**.
 
 ### حالت B — چند Journal از یک نوع نامتوازن‌اند
 
@@ -112,7 +119,7 @@ FROM ledger_entry WHERE journal_id = ANY($1);
 ۳. کد سازنده آن Journal را بررسی کن
 ۴. تست بازتولیدکننده بنویس  ← پیش از هر اصلاح داده
 ۵. باگ را رفع کن و مستقر کن
-۶. سپس Reversal + بازاجرا برای همه Journalهای آسیب‌دیده
+۶. سپس اصلاح با عملیات مالک (حالت A) + بازاجرا برای همه Journalهای آسیب‌دیده
 ```
 
 ### حالت C — Trigger تغییرناپذیری شلیک شد
