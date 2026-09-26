@@ -1743,6 +1743,10 @@ jobs:
         # repository.
         run: pnpm run test:e2e
         env:
+          # The suite refuses to start without both, and refuses any endpoint
+          # off loopback (tests/e2e/src/target-guard.ts).
+          NODE_ENV: test
+          E2E_ALLOW_WRITES: 'true'
           E2E_GATEWAY_URL: http://localhost:3000
           E2E_ECONOMIC_URL: http://localhost:3112
           E2E_MARKETPLACE_URL: http://localhost:3106

@@ -225,7 +225,7 @@ pnpm format:check           # formatting check without rewriting files
 pnpm test                   # workspace test phase
 pnpm test:unit              # unit tests
 pnpm test:integration       # real integration suites; local infrastructure required
-pnpm test:e2e               # Playwright critical paths; complete running stack required
+NODE_ENV=test E2E_ALLOW_WRITES=true pnpm test:e2e   # Playwright critical paths; complete local stack required
 pnpm test:migration         # registered migration reversibility and outbox checks
 pnpm progress:check         # ensure the generated progress report matches the backlog
 pnpm ci:image-matrix        # require every tracked service Dockerfile in the scan matrix

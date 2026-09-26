@@ -50,16 +50,26 @@ pnpm --filter @rasta/economic-service build && \
 pnpm --filter @rasta/api-gateway build && \
   pnpm --filter @rasta/api-gateway start          # :3000 (یا PORT_API_GATEWAY)
 
-pnpm test:e2e
+NODE_ENV=test E2E_ALLOW_WRITES=true pnpm test:e2e
 ```
 
 اگر پورت‌های محلی‌ات فرق دارد:
 
 ```bash
+NODE_ENV=test E2E_ALLOW_WRITES=true \
 E2E_GATEWAY_URL=http://localhost:3010 \
 KAFKA_BROKERS=localhost:19092 \
 pnpm test:e2e
 ```
+
+**دروازه اجرا (`src/target-guard.ts`).** این Suite می‌نویسد: کاربر Keycloak
+می‌سازد یا بازنویسی می‌کند، ممکن است سیاست User Profile قلمرو را عوض کند، و پول
+جابه‌جا می‌کند. پس `global-setup.ts` پیش از هر درخواستی رد می‌کند مگر هر سه برقرار
+باشند: `NODE_ENV=test`، `E2E_ALLOW_WRITES=true` (جدا از `RASTA_ALLOW_DEMO_SEED`)،
+و اینکه **همه** نشانی‌ها — Gateway، هر سرویس، Keycloak و هر Broker کافکا — روی
+Loopback باشند (`localhost`، `127.0.0.0/8` یا `::1`). راه دور زدنی ندارد؛ Stack
+یک‌بارمصرفِ جای دیگر را با Tunnel یا Port-Forward به localhost بیاور. تست خود
+دروازه: `pnpm --filter @rasta/e2e test:unit` (بدون Stack).
 
 `global-setup.ts` پیش از هر سناریو، هر وابستگی را **مثبت** بررسی می‌کند و با
 پیام قابل‌اقدام شکست می‌خورد. هیچ‌جا Skip نمی‌کند: یک مرحله E2E سبز که چیزی

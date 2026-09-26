@@ -3,8 +3,11 @@
   "compilerOptions": {
     "rootDir": ".",
     "noEmit": true,
+    // src/target-guard.test.ts runs under `node --test`, which needs the
+    // extension on the import; tsc accepts it because nothing is emitted.
+    "allowImportingTsExtensions": true,
     "types": ["node"]
   },
-  "include": ["src/**/*", "specs/**/*", "playwright.config.ts"],
+  "include": ["src/**/*", "specs/**/*", "playwright.config.ts", "global-setup.ts"],
   "exclude": ["node_modules", "test-results", "playwright-report"]
 }

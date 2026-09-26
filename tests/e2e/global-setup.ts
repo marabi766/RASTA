@@ -3,6 +3,7 @@ import { Kafka, logLevel } from 'kafkajs';
 import { e2eConfig } from './src/env';
 import { accessToken, ensureTenantBUser, E2E_USERS } from './src/keycloak';
 import { waitFor } from './src/events';
+import { assertDisposableE2eTarget } from './src/target-guard';
 
 /**
  * Refuses to start unless the whole stack is genuinely there.
@@ -18,6 +19,10 @@ import { waitFor } from './src/events';
  */
 export default async function globalSetup(): Promise<void> {
   const config = e2eConfig();
+  // Before any request: this suite creates a Keycloak user, may rewrite the
+  // realm's user profile, and moves money. It runs only as an explicit test
+  // run against a stack that is entirely on loopback (src/target-guard.ts).
+  assertDisposableE2eTarget(config);
   const started = Date.now();
 
   const context = await request.newContext();
