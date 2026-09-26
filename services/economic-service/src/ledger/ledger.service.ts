@@ -389,8 +389,12 @@ export class LedgerService {
    * `wallet.ledgerBalanceMinor`, so the two can be compared meaningfully
    * (docs/10 § 10.3).
    */
-  async balanceOf(accountId: string, accountType: Parameters<typeof naturalBalance>[0]) {
-    const { debitMinor, creditMinor } = await this.repository.accountBalance(accountId);
+  async balanceOf(
+    accountId: string,
+    accountType: Parameters<typeof naturalBalance>[0],
+    client?: Pick<ExtendedPrismaClient, 'ledgerEntry'>,
+  ) {
+    const { debitMinor, creditMinor } = await this.repository.accountBalance(accountId, client);
     return naturalBalance(accountType, debitMinor, creditMinor);
   }
 

@@ -526,6 +526,50 @@ describe('economic internals', () => {
       );
     });
 
+    it('reads a wallet and its escrow from one snapshot, so a hold committing between them is not a deviation', async () => {
+      // Codex review of PR #121, finding 3. The hold commits after the audit
+      // read the wallet page and before it reads the escrow account: under
+      // READ COMMITTED that paired the old pending figure with the new escrow
+      // balance and reported a PENDING_VS_ESCROW that was never true.
+      const organizationId = `${org.c}-SNAPSHOT`;
+      const { walletId } = await fundWallet(wiring, organizationId, 50_000n);
+      const transactionId = `TXN_${ulid()}`;
+
+      const findEscrow = wiring.walletRepository.findEscrowAccount.bind(wiring.walletRepository);
+      let interleaved = false;
+      jest
+        .spyOn(wiring.walletRepository, 'findEscrowAccount')
+        .mockImplementation(async (owner, currency, client) => {
+          if (owner === organizationId && !interleaved) {
+            interleaved = true;
+            await asActor({ organizationId }, () =>
+              wiring.prisma.transaction(async (tx) => {
+                const [locked] = await wiring.walletRepository.lock(tx, [walletId]);
+                return wiring.wallets.placeHold(tx, {
+                  wallet: locked!,
+                  amountMinor: 20_000n,
+                  reference: transactionId,
+                  referenceType: 'TRANSACTION',
+                  transactionId,
+                  placedBy: 'internals-itest',
+                });
+              }),
+            );
+          }
+          return findEscrow(owner, currency, client);
+        });
+
+      const deviations = await audit().run();
+      jest.restoreAllMocks();
+
+      expect(interleaved).toBe(true);
+      expect(deviations.find((row) => row.walletId === walletId)).toBeUndefined();
+      // And the next pass, on a fresh snapshot, sees the hold and still agrees.
+      expect((await audit().run()).find((row) => row.walletId === walletId)).toBeUndefined();
+
+      await cleanup(prisma, [organizationId]);
+    });
+
     it('finds a wallet whose pending balance disagrees with its escrow ledger', async () => {
       // Economic batch 2, item e: relation 2 was documented and never checked.
       // The drift here is one only it can see — the escrow account moves while

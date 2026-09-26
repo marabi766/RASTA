@@ -195,9 +195,13 @@ export class WalletRepository {
   }
 
   /** A page of wallets for the reconciliation to check. */
-  pageForAudit(skip: number, take: number) {
+  pageForAudit(
+    skip: number,
+    take: number,
+    client: Pick<ExtendedPrismaClient, 'wallet'> = this.client,
+  ) {
     return runUnscoped('the wallet/ledger reconciliation is a platform-wide integrity check', () =>
-      this.client.wallet.findMany({
+      client.wallet.findMany({
         orderBy: { id: 'asc' },
         skip,
         take,
@@ -297,9 +301,13 @@ export class WalletRepository {
    * (relation 2) and must never create an account while doing so, as
    * `LedgerService.resolveAccount` would.
    */
-  findEscrowAccount(organizationId: string, currency: string) {
+  findEscrowAccount(
+    organizationId: string,
+    currency: string,
+    client: Pick<ExtendedPrismaClient, 'ledgerAccount'> = this.client,
+  ) {
     return runUnscoped('the wallet/ledger reconciliation is a platform-wide integrity check', () =>
-      this.client.ledgerAccount.findUnique({
+      client.ledgerAccount.findUnique({
         where: {
           organizationId_purpose_currency: { organizationId, purpose: 'ESCROW', currency },
         },
@@ -309,11 +317,14 @@ export class WalletRepository {
   }
 
   /** Σ of active holds on a wallet — the cross-check for `pendingBalance`. */
-  async activeHoldTotal(walletId: string): Promise<bigint> {
+  async activeHoldTotal(
+    walletId: string,
+    client: Pick<ExtendedPrismaClient, 'walletHold'> = this.client,
+  ): Promise<bigint> {
     const result = await runUnscoped(
       'the wallet/ledger reconciliation is a platform-wide integrity check',
       () =>
-        this.client.walletHold.aggregate({
+        client.walletHold.aggregate({
           where: { walletId, status: 'ACTIVE' },
           _sum: { amountMinor: true },
         }),
