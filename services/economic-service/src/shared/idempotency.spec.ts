@@ -227,9 +227,9 @@ describe('IdempotencyStore.claim — who may proceed', () => {
       }),
     });
 
-    const error = await asTenant(() => store.claim('POST /x', RAW_KEY, body)).catch(
-      (thrown: unknown) => thrown as { code: string; internalContext?: unknown },
-    );
+    const error = (await asTenant(() => store.claim('POST /x', RAW_KEY, body)).catch(
+      (thrown: unknown) => thrown,
+    )) as { code: string; internalContext?: unknown };
     expect(error).toMatchObject({ code });
     expect(JSON.stringify(error.internalContext)).not.toContain(RAW_KEY);
     expect(JSON.stringify(error.internalContext)).toContain(keyDigest(RAW_KEY));

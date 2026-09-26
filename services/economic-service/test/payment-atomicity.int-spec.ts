@@ -483,10 +483,12 @@ describe('payment authorisation atomicity (real database)', () => {
       code: 'BUSINESS_RULE_VIOLATION',
     });
 
+    // The same spy as above: forget the first attempt's call.
     const credit = jest.spyOn(wiring.wallets, 'credit');
-    const refused = await topUpWith(organizationId, 820n, key, 'tok_other').catch(
-      (error: unknown) => error as { code: string; internalContext?: unknown },
-    );
+    credit.mockClear();
+    const refused = (await topUpWith(organizationId, 820n, key, 'tok_other').catch(
+      (error: unknown) => error,
+    )) as { code: string; internalContext?: unknown };
     expect(refused).toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
     // S-09 (M2): a digest of the key reaches the log, never the key.
     expect(JSON.stringify(refused.internalContext)).not.toContain(key);
@@ -534,6 +536,7 @@ describe('payment authorisation atomicity (real database)', () => {
     // AUTHORIZED; a second writer finds it CAPTURED and is refused.
     const organizationId = `${org.c}-TWICE`;
     const done = await topUpWith(organizationId, 210n, `TWICE-${ulid()}`);
+    const walletId = (await intentsOf(organizationId))[0]?.walletId;
     const capture = (
       payments as unknown as {
         completeCapture: (target: unknown, actor: string) => Promise<unknown>;
@@ -545,7 +548,7 @@ describe('payment authorisation atomicity (real database)', () => {
         capture(
           {
             intentId: done.paymentIntentId,
-            walletId: (await intentsOf(organizationId))[0]?.walletId,
+            walletId,
             organizationId,
             amountMinor: 210n,
             currency: 'IRR',
