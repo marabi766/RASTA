@@ -30,6 +30,7 @@ const SESSION: WebSession = {
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
+  issuedAt: 1_900_000_000,
 };
 
 const ENV = {
@@ -211,6 +212,15 @@ describe('one form into one command body', () => {
   it('refuses a dispute reason shorter than the service accepts, in Persian', () => {
     const parsed = parseOrderCommand(values({ command: 'RAISE_DISPUTE', reason: 'بد بود' }));
     expect(parsed).toMatchObject({ ok: false, fieldErrors: { reason: expect.any(String) } });
+  });
+
+  it('writes the limit in its message in Persian digits (L5-09)', () => {
+    const parsed = parseOrderCommand(values({ command: 'RAISE_DISPUTE', reason: 'بد بود' }));
+    expect(parsed).toMatchObject({
+      ok: false,
+      fieldErrors: { reason: expect.stringContaining('دست‌کم در ۱۰ نویسه') },
+    });
+    if (!parsed.ok) expect(parsed.fieldErrors.reason).not.toMatch(/[0-9]/);
   });
 
   it('refuses a dispute reason longer than the service accepts', () => {

@@ -1,97 +1,51 @@
 import { cookies } from 'next/headers';
 import { webServerEnv } from './env';
-import { endpointsFor, OidcError, refreshTokens } from './oidc';
-import {
-  SESSION_COOKIE,
-  openSession,
-  sealSession,
-  sessionCookieOptions,
-  type WebSession,
-} from './session';
+import { SESSION_COOKIE, openSession, sessionSecondsLeft, type WebSession } from './session';
 
 /**
- * Reading the current session, and keeping its access token usable.
+ * Reading the current session.
  *
  * Server components and route handlers ask for this; nothing else in the app
  * touches the cookie. That single entry point is what makes "no token reaches
  * the browser" checkable rather than hopeful.
+ *
+ * Nothing here refreshes. `middleware.ts` has already done that for this
+ * request, through `session-refresh.ts`, because middleware is the one place
+ * a rotated refresh token can always be written back — see that file for why
+ * a refresh during a render signed people out.
  */
 
 /**
- * How close to expiry counts as expired.
+ * The session as it is stored, or null.
  *
- * A token that has thirty seconds left will very likely be rejected by the
- * time the gateway looks at it, and the request it fails is one a person is
- * waiting on. Refreshing early costs one call to Keycloak; not refreshing
- * costs a visible error on a page that was fine.
+ * Null for a cookie that will not open and for one past the configured
+ * absolute lifetime (`WEB_SESSION_MAX_AGE_SECONDS`), checked here on the
+ * server rather than left to the cookie's `Max-Age`, which only the browser
+ * that received it honours.
  */
-const REFRESH_SKEW_SECONDS = 60;
-
-export function isExpiring(session: WebSession, now = Date.now()): boolean {
-  return session.accessTokenExpiresAt - REFRESH_SKEW_SECONDS <= Math.floor(now / 1000);
-}
-
-/** The session as it is stored, or null. No refresh, no side effects. */
-export async function readSession(): Promise<WebSession | null> {
+export async function readSession(now: number = Date.now()): Promise<WebSession | null> {
   const sealed = (await cookies()).get(SESSION_COOKIE)?.value;
   if (!sealed) return null;
-  return openSession(sealed, webServerEnv().WEB_SESSION_SECRET);
+
+  const env = webServerEnv();
+  const session = openSession(sealed, env.WEB_SESSION_SECRET);
+  if (!session) return null;
+  if (sessionSecondsLeft(session, env.WEB_SESSION_MAX_AGE_SECONDS, now) <= 0) return null;
+  return session;
 }
 
 /**
- * The session with a usable access token, refreshing it if it is about to
- * expire.
+ * The session a page or an action should act with, or null.
  *
- * Returns null when there is no session or when the refresh failed — a
- * refresh token can be revoked, expired or already used, and all three mean
- * the person has to log in again. The caller redirects; it is not this
- * function's business to decide where.
- *
- * ## Why the rewritten cookie may not reach the browser
- *
- * A server component cannot set a cookie in Next.js: only a route handler or
- * a server action can. When a refresh happens during a page render, the new
- * tokens are used for that render and the cookie is rewritten on the next
- * request that can write one. The session stays valid either way, because the
- * refresh token in the cookie is still the one Keycloak accepted — this costs
- * an extra refresh, not a broken session.
+ * Middleware refreshed the access token before this request reached here if
+ * it was near expiry. One whose access token has nonetheless already expired
+ * — the refresh failed, or middleware did not run — is not used: the caller
+ * sends the person to sign in rather than sending the gateway a token it
+ * will refuse.
  */
-export async function currentSession(): Promise<WebSession | null> {
-  const session = await readSession();
+export async function currentSession(now: number = Date.now()): Promise<WebSession | null> {
+  const session = await readSession(now);
   if (!session) return null;
-  if (!isExpiring(session)) return session;
-
-  const env = webServerEnv();
-  try {
-    const tokens = await refreshTokens({
-      endpoints: endpointsFor(env.OIDC_ISSUER_URL),
-      clientId: env.OIDC_CLIENT_ID,
-      refreshToken: session.refreshToken,
-    });
-
-    const refreshed: WebSession = {
-      ...session,
-      accessToken: tokens.access_token,
-      accessTokenExpiresAt: Math.floor(Date.now() / 1000) + tokens.expires_in,
-      refreshToken: tokens.refresh_token,
-    };
-
-    try {
-      (await cookies()).set(
-        SESSION_COOKIE,
-        sealSession(refreshed, env.WEB_SESSION_SECRET),
-        sessionCookieOptions({
-          secure: env.WEB_COOKIE_SECURE,
-          maxAgeSeconds: env.WEB_SESSION_MAX_AGE_SECONDS,
-        }),
-      );
-    } catch {
-      // Rendering a page, where writing is not allowed. See the note above.
-    }
-
-    return refreshed;
-  } catch (error) {
-    if (error instanceof OidcError) return null;
-    throw error;
-  }
+  if (session.accessTokenExpiresAt <= Math.floor(now / 1000)) return null;
+  return session;
 }

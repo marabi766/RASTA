@@ -12,9 +12,26 @@
  * invents one.
  */
 
-const ASSET_TYPES: Readonly<Record<string, string>> = {
-  HEAVY_MACHINERY: 'ماشین‌آلات سنگین',
-  LIGHT_VEHICLE: 'خودرو سبک',
+import {
+  ASSET_STATUSES,
+  ASSET_TYPES,
+  TIMELINE_CATEGORIES,
+  type AssetStatus,
+  type AssetType,
+  type InspectionResult,
+  type TimelineCategory,
+} from './asset-fields';
+
+/** `ASSET_TYPES`, `./asset-fields.ts` — typed, so a type added there without a label does not compile. */
+const ASSET_TYPE_LABELS: Readonly<Record<AssetType, string>> = {
+  GRADER: 'گریدر',
+  LOADER: 'لودر',
+  EXCAVATOR: 'بیل مکانیکی',
+  BULLDOZER: 'بولدوزر',
+  TRUCK: 'کامیون',
+  LIGHT_TRUCK: 'کامیون سبک',
+  TRACTOR: 'تراکتور',
+  WATER_TANKER: 'تانکر آب',
   WASTE_COLLECTOR: 'خودرو جمع‌آوری پسماند',
   EMERGENCY_VEHICLE: 'خودرو امدادی',
   PASSENGER_VEHICLE: 'خودرو مسافری',
@@ -22,7 +39,8 @@ const ASSET_TYPES: Readonly<Record<string, string>> = {
   OTHER: 'سایر',
 };
 
-const ASSET_STATUSES: Readonly<Record<string, string>> = {
+/** `ASSET_STATUSES`, `./asset-fields.ts`. */
+const ASSET_STATUS_LABELS: Readonly<Record<AssetStatus, string>> = {
   REGISTERED: 'ثبت‌شده',
   ACTIVE: 'فعال',
   ASSIGNED: 'تخصیص‌یافته',
@@ -32,29 +50,47 @@ const ASSET_STATUSES: Readonly<Record<string, string>> = {
   DECOMMISSIONED: 'از رده خارج',
 };
 
-/**
- * Why an asset may not be dispatched, in the words asset-service uses.
- *
- * The service returns every blocker rather than the first, because an operator
- * who clears one should not have to discover the next by trying again. The
- * labels keep that shape: one line per reason.
- */
-const COMPLIANCE_BLOCKERS: Readonly<Record<string, string>> = {
-  NO_ACTIVE_INSURANCE: 'بیمه‌نامهٔ معتبر ندارد',
-  INSURANCE_EXPIRED: 'بیمه‌نامه منقضی شده',
-  NO_TECHNICAL_INSPECTION: 'معاینهٔ فنی ندارد',
-  INSPECTION_EXPIRED: 'معاینهٔ فنی منقضی شده',
-  INSPECTION_FAILED: 'معاینهٔ فنی مردود شده',
-  OUT_OF_SERVICE: 'خارج از سرویس است',
-  DECOMMISSIONED: 'از رده خارج شده',
+/** `INSPECTION_RESULTS`, `./asset-fields.ts` — the dossier's latest technical inspection. */
+const INSPECTION_RESULT_LABELS: Readonly<Record<InspectionResult, string>> = {
+  PASSED: 'قبول',
+  CONDITIONAL: 'مشروط',
+  FAILED: 'مردود',
 };
 
 /**
- * `TIMELINE_CATEGORIES`, `services/asset-service/src/asset/dto.ts` — the nine
+ * Why an asset may not be dispatched, keyed by the exact sentence
+ * asset-service sends.
+ *
+ * Sentences, not codes, because that is the contract today:
+ * `AssetService.complianceBlockers()` pushes English prose into
+ * `compliance.blockers`. This table used to be keyed by codes
+ * (`NO_ACTIVE_INSURANCE`, …) the service has never sent, so every blocker
+ * reached a Persian reader untranslated (audit finding L5-02).
+ * `labels.contract.spec.ts` reads the sentences out of the service's source,
+ * so a reworded one fails a test here rather than going quietly English on
+ * screen. Stable codes on the service's side would be the better contract;
+ * that change belongs to asset-service, not to this file.
+ *
+ * The service returns every blocker rather than the first, because an
+ * operator who clears one should not have to discover the next by trying
+ * again. The labels keep that shape: one line per reason.
+ */
+const COMPLIANCE_BLOCKERS: Readonly<Record<string, string>> = {
+  'No insurance policy is currently in force': 'بیمه‌نامهٔ معتبری ندارد',
+  'No technical inspection on record': 'معاینهٔ فنی ثبت نشده',
+  'The most recent technical inspection failed': 'آخرین معاینهٔ فنی مردود شده',
+  'The technical inspection certificate has expired': 'گواهی معاینهٔ فنی منقضی شده',
+};
+
+/** The one blocker that carries a value: `Asset status is ${status}`. */
+const STATUS_BLOCKER = /^Asset status is ([A-Z_]+)$/;
+
+/**
+ * `TIMELINE_CATEGORIES`, `./asset-fields.ts` — the nine
  * sections `appendTimeline()` writes into, shared by the dossier's recent
  * activity and the full `/assets/[id]/timeline` history.
  */
-const TIMELINE_CATEGORIES: Readonly<Record<string, string>> = {
+const TIMELINE_CATEGORY_LABELS: Readonly<Record<TimelineCategory, string>> = {
   LIFECYCLE: 'چرخهٔ عمر',
   USAGE: 'کارکرد',
   MAINTENANCE: 'نگهداری',
@@ -175,10 +211,18 @@ function lookup(table: Readonly<Record<string, string>>, value: string): string 
   return table[value] ?? value;
 }
 
-export const assetTypeLabel = (value: string): string => lookup(ASSET_TYPES, value);
-export const assetStatusLabel = (value: string): string => lookup(ASSET_STATUSES, value);
-export const blockerLabel = (value: string): string => lookup(COMPLIANCE_BLOCKERS, value);
-export const timelineCategoryLabel = (value: string): string => lookup(TIMELINE_CATEGORIES, value);
+export const assetTypeLabel = (value: string): string => lookup(ASSET_TYPE_LABELS, value);
+export const assetStatusLabel = (value: string): string => lookup(ASSET_STATUS_LABELS, value);
+export const inspectionResultLabel = (value: string): string =>
+  lookup(INSPECTION_RESULT_LABELS, value);
+export const timelineCategoryLabel = (value: string): string =>
+  lookup(TIMELINE_CATEGORY_LABELS, value);
+
+export function blockerLabel(value: string): string {
+  const status = STATUS_BLOCKER.exec(value)?.[1];
+  if (status !== undefined) return `وضعیت دارایی «${assetStatusLabel(status)}» است`;
+  return lookup(COMPLIANCE_BLOCKERS, value);
+}
 export const maintenanceTypeLabel = (value: string): string => lookup(MAINTENANCE_TYPES, value);
 export const maintenanceRequestStatusLabel = (value: string): string =>
   lookup(MAINTENANCE_REQUEST_STATUSES, value);
@@ -196,14 +240,14 @@ export const walletHoldStatusLabel = (value: string): string => lookup(WALLET_HO
 export const productKindLabel = (value: string): string => lookup(PRODUCT_KINDS, value);
 
 /** The options a filter offers, in the order a person reads them. */
-export const assetTypeOptions = Object.entries(ASSET_TYPES).map(([value, label]) => ({
+export const assetTypeOptions = ASSET_TYPES.map((value) => ({
   value,
-  label,
+  label: ASSET_TYPE_LABELS[value],
 }));
 
-export const assetStatusOptions = Object.entries(ASSET_STATUSES).map(([value, label]) => ({
+export const assetStatusOptions = ASSET_STATUSES.map((value) => ({
   value,
-  label,
+  label: ASSET_STATUS_LABELS[value],
 }));
 
 export const maintenanceTypeOptions = Object.entries(MAINTENANCE_TYPES).map(([value, label]) => ({
@@ -229,9 +273,10 @@ export const assignmentEndReasonOptions = Object.entries(ASSIGNMENT_END_REASONS)
   ([value, label]) => ({ value, label }),
 );
 
-export const timelineCategoryOptions = Object.entries(TIMELINE_CATEGORIES).map(
-  ([value, label]) => ({ value, label }),
-);
+export const timelineCategoryOptions = TIMELINE_CATEGORIES.map((value) => ({
+  value,
+  label: TIMELINE_CATEGORY_LABELS[value],
+}));
 
 export const transactionStatusOptions = Object.entries(TRANSACTION_STATUSES).map(
   ([value, label]) => ({ value, label }),

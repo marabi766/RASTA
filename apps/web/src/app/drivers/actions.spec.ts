@@ -38,6 +38,7 @@ const SESSION = {
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
+  issuedAt: 1_900_000_000,
 } satisfies WebSession;
 
 const VALID = { userId: 'USR_01J00000000000000000000000' };

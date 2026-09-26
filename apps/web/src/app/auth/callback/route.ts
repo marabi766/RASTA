@@ -74,6 +74,7 @@ export async function GET(request: Request): Promise<NextResponse> {
       nonce: attempt.nonce,
     });
 
+    const now = Math.floor(Date.now() / 1000);
     const response = NextResponse.redirect(`${origin}${safeReturnTo(attempt.returnTo)}`);
     response.cookies.set(
       SESSION_COOKIE,
@@ -85,9 +86,11 @@ export async function GET(request: Request): Promise<NextResponse> {
           accessToken: tokens.access_token,
           // From the server clock and the provider's own lifetime, never from
           // anything the browser could influence.
-          accessTokenExpiresAt: Math.floor(Date.now() / 1000) + tokens.expires_in,
+          accessTokenExpiresAt: now + tokens.expires_in,
           refreshToken: tokens.refresh_token,
           csrfToken: newCsrfToken(),
+          // The start of the session's absolute lifetime; no refresh moves it.
+          issuedAt: now,
         },
         env.WEB_SESSION_SECRET,
       ),

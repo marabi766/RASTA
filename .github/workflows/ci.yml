@@ -529,6 +529,15 @@ jobs:
           cat /tmp/rasta-web-e2e-logs/gateway.log
           exit 1
 
+      - name: Refresh coordination against a real Redis
+        # The coordinator's lease, fencing (the Lua itself), lost-lease and TTL
+        # tests, against this job's Redis service. REQUIRED makes a missing
+        # URL fail the step instead of quietly skipping the real run.
+        run: pnpm --filter @rasta/web exec jest src/server/refresh-coordinator
+        env:
+          WEB_TEST_REDIS_URL: redis://localhost:6379
+          WEB_TEST_REDIS_REQUIRED: 'true'
+
       # Chromium only. A second engine doubles the job for a page whose
       # critical behavior is server-rendered HTML and a native form post.
       - name: Install the browser
@@ -544,6 +553,8 @@ jobs:
           OIDC_CLIENT_ID: rasta-web
           WEB_PUBLIC_ORIGIN: http://localhost:3200
           WEB_COOKIE_SECURE: 'false'
+          # The job's Redis service: the portal coordinates refreshes through it.
+          WEB_REDIS_URL: redis://localhost:6379
 
       - name: Live-stack logs
         if: failure()

@@ -56,7 +56,7 @@ function hrefWith(query: OrderListQuery, changes: Partial<OrderListQuery>): stri
  */
 export function formatOrderAmount(minorUnits: string, currency: string): string {
   if (currency === IRR.code) return formatMoney(minorUnits, IRR);
-  return `${minorUnits} ${currency}`;
+  return `${toPersianDigits(minorUnits)} ${currency}`;
 }
 
 function SideTabs({ query }: { query: OrderListQuery }) {

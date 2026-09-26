@@ -18,28 +18,9 @@ import type { WebSession } from './session';
  * (`docs/16 § ۱۶٫۱۱`: hiding a control is not a security control).
  */
 
-export const ASSET_STATUSES = [
-  'REGISTERED',
-  'ACTIVE',
-  'ASSIGNED',
-  'IDLE',
-  'IN_MAINTENANCE',
-  'OUT_OF_SERVICE',
-  'DECOMMISSIONED',
-] as const;
-
-export const ASSET_TYPES = [
-  'HEAVY_MACHINERY',
-  'LIGHT_VEHICLE',
-  'WASTE_COLLECTOR',
-  'EMERGENCY_VEHICLE',
-  'PASSENGER_VEHICLE',
-  'FIXED_EQUIPMENT',
-  'OTHER',
-] as const;
-
 /**
- * The status and type vocabularies are `catch`-free on purpose.
+ * The status and type vocabularies (`@/lib/asset-fields`) are not enforced
+ * on a response, on purpose.
  *
  * A value this portal does not know means asset-service has moved ahead of it.
  * Rendering it plainly is better than refusing the whole page, so the schema

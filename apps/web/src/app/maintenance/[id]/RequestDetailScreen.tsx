@@ -15,7 +15,7 @@ import {
   repairOrderStatusLabel,
   severityLabel,
 } from '@/lib/labels';
-import { formatJalaliDateLong, formatMoney } from '@/lib/format';
+import { formatJalaliDateLong, formatMoney, toPersianDigits } from '@/lib/format';
 import type {
   MaintenanceRequestDetail,
   ReadResult,
@@ -216,7 +216,7 @@ export function RequestDetailScreen({ result, requestId }: RequestDetailScreenPr
               <dt className="text-sm text-content-subtle">مدت توقف</dt>
               <dd className="text-content">
                 {request.downtimeMinutes !== null
-                  ? `${request.downtimeMinutes} دقیقه`
+                  ? `${toPersianDigits(String(request.downtimeMinutes))} دقیقه`
                   : 'محاسبه نشده'}
               </dd>
             </div>

@@ -109,6 +109,12 @@ describe('parseMoneyInput', () => {
     expect(() => parseMoneyInput('1.234', TWO_DECIMAL)).toThrow(MoneyInputError);
   });
 
+  it('names the decimal limit in Persian digits (L5-09)', () => {
+    expect(() => parseMoneyInput('1.234', TWO_DECIMAL)).toThrow(
+      'حداکثر ۲ رقم اعشار پذیرفته می‌شود',
+    );
+  });
+
   it('round-trips with formatMoney', () => {
     const minor = parseMoneyInput(`۱۲${sep}۳۴۵${sep}۶۷۸`);
     expect(formatMoney(minor, IRR, { withLabel: false })).toBe(`۱۲${sep}۳۴۵${sep}۶۷۸`);

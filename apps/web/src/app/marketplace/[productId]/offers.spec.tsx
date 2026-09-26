@@ -72,6 +72,14 @@ describe('the offers table', () => {
     expect(getByText('ORG_9')).toBeInTheDocument();
   });
 
+  it('writes quantities and lead time in Persian digits (L5-09)', () => {
+    // The offer arrived as 15, 1 and 5 — Latin, as the API sends every number.
+    const { getByText } = render_();
+    expect(getByText('۱۵')).toBeInTheDocument();
+    expect(getByText('۱')).toBeInTheDocument();
+    expect(getByText('۵ روز')).toBeInTheDocument();
+  });
+
   it('never renders the qualification as a check nobody performed', () => {
     const { getByText, queryByText } = render_();
     expect(getByText('هنوز فعال نیست')).toBeInTheDocument();

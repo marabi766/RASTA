@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { normalizePersianText, toLatinDigits } from '@/lib/format';
+import { normalizePersianText, toLatinDigits, toPersianDigits } from '@/lib/format';
 import {
   DISPUTE_OUTCOMES,
   IRREVERSIBLE_COMMANDS,
@@ -185,6 +185,13 @@ const optionalText = (max: number, message: string) =>
     .max(max, message)
     .transform((value) => (value.length === 0 ? undefined : value));
 
+/**
+ * A limit as it appears inside a message a person reads: Persian digits, at
+ * the last moment. The limit itself stays a number, and is what the schema
+ * enforces (docs/16 § 16.3).
+ */
+const digits = (limit: number): string => toPersianDigits(String(limit));
+
 const COMMAND_SCHEMAS = {
   // `confirm` takes no body. `{}` is sent so the request is a well-formed JSON
   // post like every other, and the service ignores it.
@@ -193,13 +200,19 @@ const COMMAND_SCHEMAS = {
   FULFILL: z.object({
     trackingReference: optionalText(
       LIMITS.trackingReference.max,
-      `کد رهگیری نباید بیش از ${LIMITS.trackingReference.max} نویسه باشد`,
+      `کد رهگیری نباید بیش از ${digits(LIMITS.trackingReference.max)} نویسه باشد`,
     ),
-    note: optionalText(LIMITS.note.max, `یادداشت نباید بیش از ${LIMITS.note.max} نویسه باشد`),
+    note: optionalText(
+      LIMITS.note.max,
+      `یادداشت نباید بیش از ${digits(LIMITS.note.max)} نویسه باشد`,
+    ),
   }),
 
   CONFIRM_RECEIPT: z.object({
-    note: optionalText(LIMITS.note.max, `یادداشت نباید بیش از ${LIMITS.note.max} نویسه باشد`),
+    note: optionalText(
+      LIMITS.note.max,
+      `یادداشت نباید بیش از ${digits(LIMITS.note.max)} نویسه باشد`,
+    ),
   }),
 
   RAISE_DISPUTE: z.object({
@@ -208,9 +221,12 @@ const COMMAND_SCHEMAS = {
       .trim()
       .min(
         LIMITS.disputeReason.min,
-        `دلیل اختلاف را دست‌کم در ${LIMITS.disputeReason.min} نویسه بنویسید — کسی که رسیدگی می‌کند باید بداند موضوع چیست`,
+        `دلیل اختلاف را دست‌کم در ${digits(LIMITS.disputeReason.min)} نویسه بنویسید — کسی که رسیدگی می‌کند باید بداند موضوع چیست`,
       )
-      .max(LIMITS.disputeReason.max, `دلیل نباید بیش از ${LIMITS.disputeReason.max} نویسه باشد`),
+      .max(
+        LIMITS.disputeReason.max,
+        `دلیل نباید بیش از ${digits(LIMITS.disputeReason.max)} نویسه باشد`,
+      ),
   }),
 
   RESOLVE_DISPUTE: z.object({
@@ -218,8 +234,11 @@ const COMMAND_SCHEMAS = {
     resolution: z
       .string()
       .trim()
-      .min(LIMITS.resolution.min, `شرح تصمیم را دست‌کم در ${LIMITS.resolution.min} نویسه بنویسید`)
-      .max(LIMITS.resolution.max, `شرح نباید بیش از ${LIMITS.resolution.max} نویسه باشد`),
+      .min(
+        LIMITS.resolution.min,
+        `شرح تصمیم را دست‌کم در ${digits(LIMITS.resolution.min)} نویسه بنویسید`,
+      )
+      .max(LIMITS.resolution.max, `شرح نباید بیش از ${digits(LIMITS.resolution.max)} نویسه باشد`),
     // Required, never defaulted: ADR-052 rule 14 forbids reading
     // responsibility out of the outcome or out of free text.
     responsibility: z.enum(RESPONSIBILITIES, {
@@ -232,7 +251,10 @@ const COMMAND_SCHEMAS = {
       .string()
       .trim()
       .min(LIMITS.cancelReason.min, 'دلیل لغو را بنویسید')
-      .max(LIMITS.cancelReason.max, `دلیل نباید بیش از ${LIMITS.cancelReason.max} نویسه باشد`),
+      .max(
+        LIMITS.cancelReason.max,
+        `دلیل نباید بیش از ${digits(LIMITS.cancelReason.max)} نویسه باشد`,
+      ),
   }),
 
   REVIEW: z.object({
@@ -242,7 +264,7 @@ const COMMAND_SCHEMAS = {
       .transform((value) => Number(value)),
     comment: optionalText(
       LIMITS.reviewComment.max,
-      `نظر نباید بیش از ${LIMITS.reviewComment.max} نویسه باشد`,
+      `نظر نباید بیش از ${digits(LIMITS.reviewComment.max)} نویسه باشد`,
     ),
   }),
 } satisfies Record<OrderCommand, z.ZodTypeAny>;

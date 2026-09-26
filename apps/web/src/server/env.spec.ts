@@ -78,6 +78,43 @@ describe('the rest of the configuration', () => {
   });
 });
 
+describe('refresh coordination in production (ADR-059 addendum)', () => {
+  it('refuses to start in production without WEB_REDIS_URL', () => {
+    // Two replicas are the documented topology; without shared coordination
+    // they race for every refresh token.
+    expect(() => loadWebServerEnv({ ...REQUIRED, NODE_ENV: 'production' })).toThrow(
+      /WEB_REDIS_URL/,
+    );
+  });
+
+  it('names every missing key at once, WEB_REDIS_URL among them', () => {
+    expect(() =>
+      loadWebServerEnv({ ...omitting('OIDC_CLIENT_ID'), NODE_ENV: 'production' }),
+    ).toThrow(/OIDC_CLIENT_ID, WEB_REDIS_URL/);
+  });
+
+  it('starts in production with it', () => {
+    const env = loadWebServerEnv({
+      ...REQUIRED,
+      NODE_ENV: 'production',
+      WEB_REDIS_URL: 'redis://redis:6379',
+    });
+    expect(env.WEB_REDIS_URL).toBe('redis://redis:6379');
+  });
+
+  it.each(['development', 'test', undefined])('leaves it optional when NODE_ENV is %s', (mode) => {
+    expect(() =>
+      loadWebServerEnv({ ...REQUIRED, ...(mode ? { NODE_ENV: mode } : {}) }),
+    ).not.toThrow();
+  });
+
+  it('refuses a Redis address that is not a redis URL', () => {
+    expect(() => loadWebServerEnv({ ...REQUIRED, WEB_REDIS_URL: 'http://redis:6379' })).toThrow(
+      /WEB_REDIS_URL/,
+    );
+  });
+});
+
 describe('nothing secret reaches the browser bundle', () => {
   it('declares no NEXT_PUBLIC_ variable', () => {
     // Next.js decides what ships to the browser by exactly that prefix, and

@@ -34,6 +34,7 @@ function session(overrides: Partial<WebSession> = {}): WebSession {
     accessTokenExpiresAt: 1_800_000_000,
     refreshToken: 'refresh-token-value',
     csrfToken: 'csrf-token-value',
+    issuedAt: 1_790_000_000,
     ...overrides,
   };
 }

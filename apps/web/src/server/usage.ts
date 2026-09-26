@@ -2,7 +2,12 @@ import { TZDate } from '@date-fns/tz';
 import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
-import { DISPLAY_TIME_ZONE, normalizePersianText, toLatinDigits } from '@/lib/format';
+import {
+  DISPLAY_TIME_ZONE,
+  normalizePersianText,
+  toLatinDigits,
+  toPersianDigits,
+} from '@/lib/format';
 import {
   EMPTY_USAGE_FORM,
   USAGE_FIELDS,
@@ -87,7 +92,7 @@ const optionalQuantity = (maxIntegerDigits: number) =>
       } else if ((value.split('.')[0] ?? '').length > maxIntegerDigits) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `حداکثر ${maxIntegerDigits} رقم پیش از اعشار مجاز است`,
+          message: `حداکثر ${toPersianDigits(String(maxIntegerDigits))} رقم پیش از اعشار مجاز است`,
         });
       }
     })

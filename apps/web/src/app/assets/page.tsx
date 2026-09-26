@@ -3,6 +3,7 @@ import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchAssets, type AssetListQuery } from '@/server/assets';
 import { PORTAL_NAV } from '@/app/nav';
+import { ASSET_STATUSES, ASSET_TYPES, oneOf } from '@/lib/asset-fields';
 import { AssetsScreen } from './AssetsScreen';
 
 /**
@@ -30,9 +31,12 @@ export default async function AssetsPage({
   if (!session) redirect('/login?returnTo=/assets');
 
   const params = await searchParams;
+  // `status` and `type` are strict enums on asset-service's side: a value
+  // outside them (a stale bookmark, a hand-edited URL) is dropped here rather
+  // than sent, where it would turn the whole list into an error page.
   const query: AssetListQuery = {
-    status: one(params.status),
-    type: one(params.type),
+    status: oneOf(ASSET_STATUSES, one(params.status)),
+    type: oneOf(ASSET_TYPES, one(params.type)),
     q: one(params.q),
     cursor: one(params.cursor),
   };
