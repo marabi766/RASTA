@@ -1474,8 +1474,10 @@ jobs:
           pnpm --filter @rasta/marketplace-service run db:migrate
           pnpm --filter @rasta/document-service run db:migrate
           pnpm --filter @rasta/audit-service run db:migrate
+          pnpm --filter @rasta/construction-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
@@ -1641,7 +1643,7 @@ jobs:
             setTimeout(() => { console.error("clamd did not answer the runner"); process.exit(1); }, 15000);
           '
 
-      - name: Start identity, economic, marketplace, document and audit services and api-gateway
+      - name: Start identity, economic, marketplace, document, audit and construction services and api-gateway
         # From `dist`, the same artefact the container image runs, rather than
         # from a watch-mode dev server. Started here rather than by Playwright's
         # `webServer` because several processes have to come up in order and
@@ -1751,6 +1753,17 @@ jobs:
             DATABASE_URL_AUDIT=postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit \
             node dist/main.js > /tmp/rasta-logs/audit.log 2>&1 & )
 
+          # CON-001. The E2E owner organization writes its own approval
+          # policies, which the default setter roles (SYSTEM_ADMIN, UNION_ADMIN)
+          # do not allow: no seeded organization holds both a project role and a
+          # setter role. A deployment choice under Q-70 (7), made here and named
+          # in the scenario, not a platform default.
+          ( cd services/construction-service && \
+            PORT=3110 SERVICE_NAME=construction-service \
+            DATABASE_URL=postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public \
+            CONSTRUCTION_POLICY_SETTER_ROLES=UNION_ADMIN,ORGANIZATION_ADMIN \
+            node dist/main.js > /tmp/rasta-logs/construction.log 2>&1 & )
+
           ( cd services/api-gateway && \
             PORT=3000 SERVICE_NAME=api-gateway \
             node dist/main.js > /tmp/rasta-logs/gateway.log 2>&1 & )
@@ -1770,23 +1783,26 @@ jobs:
             # recorded, and it would time out blaming the query API.
             audit="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3115/health/ready || true)"
+            construction="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3110/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/wallets/me || true)"
             if [ "$identity" = "200" ] && [ "$economic" = "200" ] && [ "$marketplace" = "200" ] \
                && [ "$document" = "200" ] && [ "$audit" = "200" ] \
-               && [ "$gateway" = "401" ]; then
+               && [ "$construction" = "200" ] && [ "$gateway" = "401" ]; then
               echo "stack up after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 3
           done
 
-          echo "the stack did not come up (identity=${identity}, economic=${economic}, marketplace=${marketplace}, document=${document}, audit=${audit}, gateway=${gateway})"
+          echo "the stack did not come up (identity=${identity}, economic=${economic}, marketplace=${marketplace}, document=${document}, audit=${audit}, construction=${construction}, gateway=${gateway})"
           cat /tmp/rasta-logs/identity.log
           cat /tmp/rasta-logs/economic.log
           cat /tmp/rasta-logs/marketplace.log
           cat /tmp/rasta-logs/document.log
           cat /tmp/rasta-logs/audit.log
+          cat /tmp/rasta-logs/construction.log
           cat /tmp/rasta-logs/gateway.log
           exit 1
 
@@ -1806,6 +1822,7 @@ jobs:
           E2E_DOCUMENT_URL: http://localhost:3114
           E2E_AUDIT_URL: http://localhost:3115
           E2E_IDENTITY_URL: http://localhost:3101
+          E2E_CONSTRUCTION_URL: http://localhost:3110
           SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: '10'
           KEYCLOAK_URL: http://localhost:8080
           KEYCLOAK_REALM: rasta
@@ -1826,6 +1843,8 @@ jobs:
           tail -n 200 /tmp/rasta-logs/document.log || true
           echo '--- audit-service ---'
           tail -n 200 /tmp/rasta-logs/audit.log || true
+          echo '--- construction-service ---'
+          tail -n 200 /tmp/rasta-logs/construction.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-logs/gateway.log || true
           echo '--- keycloak ---'

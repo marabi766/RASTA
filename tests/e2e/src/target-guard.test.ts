@@ -23,6 +23,7 @@ const LOCAL = {
   documentUrl: 'http://localhost:3114',
   auditUrl: 'http://localhost:3115',
   identityUrl: 'http://[::1]:3101',
+  constructionUrl: 'http://localhost:3110',
   keycloakUrl: 'http://localhost:8080',
   kafkaBrokers: ['localhost:9092', '127.0.0.1:9093'],
 };
@@ -56,6 +57,7 @@ describe('assertDisposableE2eTarget', () => {
     ['documentUrl', 'E2E_DOCUMENT_URL'],
     ['auditUrl', 'E2E_AUDIT_URL'],
     ['identityUrl', 'E2E_IDENTITY_URL'],
+    ['constructionUrl', 'E2E_CONSTRUCTION_URL'],
     ['keycloakUrl', 'KEYCLOAK_URL'],
   ] as const) {
     it(`refuses a remote ${setting}, naming the setting but not the host`, () => {
@@ -193,10 +195,14 @@ describe('globalSetup checks everything before it writes (Codex review of #117, 
       'document-service to be ready',
       'audit-service to be ready',
       'identity-service to be ready',
+      'construction-service to be ready',
       'Keycloak realm ${config.realm} to be reachable',
       'await verifyDisposableRealm(config)',
       'admin.describeCluster()',
-      '[config.economicTopic, config.marketplaceTopic, config.documentTopic]',
+      'config.economicTopic,',
+      'config.marketplaceTopic,',
+      'config.documentTopic,',
+      'config.constructionTopic,',
     ].map(at);
     const firstWrite = Math.min(at('await ensureTenantBUser(config)'), at('await accessToken('));
 
