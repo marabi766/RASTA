@@ -269,7 +269,7 @@ export class PaymentService {
         this.logger.error(
           `Payment intent ${intent.intentId}: the capture write failed and its outcome could ` +
             'not be read back; not compensating',
-          readError instanceof Error ? readError.stack : String(readError),
+          readError,
         );
         throw error;
       });
@@ -299,13 +299,14 @@ export class PaymentService {
    * than guessed at.
    */
   private async committedCapture(intentId: string): Promise<TopUpResult | null> {
-    const intent = await this.prisma.client.paymentIntent.findUnique({ where: { id: intentId } });
-    if (!intent) throw RastaError.internal(`Payment intent ${intentId} vanished`);
+    const intent = await this.prisma.client.paymentIntent.findUniqueOrThrow({
+      where: { id: intentId },
+    });
     const transaction = await this.prisma.client.transaction.findFirst({
       where: { sourceType: 'PAYMENT_INTENT', sourceReference: intentId },
     });
     if (intent.status !== 'CAPTURED' && !transaction) return null;
-    if (intent.status !== 'CAPTURED' || !intent.transactionId) {
+    if (intent.status !== 'CAPTURED') {
       throw RastaError.internal(`Payment intent ${intentId} disagrees with its top-up transaction`);
     }
     return this.capturedView(intent);
@@ -316,14 +317,14 @@ export class PaymentService {
    * wallet's now, which a retry reads as current; the ids are the originals.
    */
   private async capturedView(intent: PaymentIntent): Promise<TopUpResult> {
-    const journal = await this.prisma.client.journal.findFirst({
+    const journal = await this.prisma.client.journal.findFirstOrThrow({
       where: { transactionId: intent.transactionId, journalType: 'WALLET_TOP_UP' },
     });
     const wallet = await this.wallets.getById(intent.walletId);
     return {
       paymentIntentId: intent.id,
       transactionId: intent.transactionId,
-      journalId: journal?.id ?? null,
+      journalId: journal.id,
       status: 'CAPTURED',
       amountMinor: intent.amountMinor,
       currency: intent.currency,
