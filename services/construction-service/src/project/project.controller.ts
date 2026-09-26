@@ -142,8 +142,9 @@ export class ProjectController {
     summary: 'Cancel a project (terminal)',
     description:
       `${VERSION_NOTE} Allowed from the states CONSTRUCTION_CANCELLABLE_STATES keeps (Q-69); ` +
-      'never from IN_PROGRESS or a terminal state (422). The reason is required and is published ' +
-      'on PROJECT_STATUS_CHANGED. No cancellation approval is required in this release (Q-69).',
+      'never from IN_PROGRESS or a terminal state (422). The reason is required and kept as ' +
+      'statusReason; PROJECT_STATUS_CHANGED does not carry it (no free text on events). No ' +
+      'cancellation approval is required in this release (Q-69).',
   })
   async cancel(@Param('id') id: string, @Body(zodPipe(cancelProjectSchema)) dto: CancelProjectDto) {
     return this.projects.cancel(id, dto);
@@ -208,7 +209,9 @@ export class ProjectController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Withdraw a need (terminal)',
-    description: `${VERSION_NOTE} The reason is required and is published on PROJECT_NEED_WITHDRAWN.`,
+    description:
+      `${VERSION_NOTE} The reason is required and kept as withdrawalReason; ` +
+      'PROJECT_NEED_WITHDRAWN does not carry it (no free text on events).',
   })
   async withdrawNeed(
     @Param('id') id: string,

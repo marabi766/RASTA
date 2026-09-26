@@ -1000,7 +1000,7 @@
     },
     "/v1/projects/{id}/cancel": {
       "post": {
-        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Allowed from the states CONSTRUCTION_CANCELLABLE_STATES keeps (Q-69); never from IN_PROGRESS or a terminal state (422). The reason is required and is published on PROJECT_STATUS_CHANGED. No cancellation approval is required in this release (Q-69).",
+        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Allowed from the states CONSTRUCTION_CANCELLABLE_STATES keeps (Q-69); never from IN_PROGRESS or a terminal state (422). The reason is required and kept as statusReason; PROJECT_STATUS_CHANGED does not carry it (no free text on events). No cancellation approval is required in this release (Q-69).",
         "operationId": "ProjectController_cancel_v1",
         "parameters": [
           {
@@ -2178,7 +2178,7 @@
     },
     "/v1/projects/{id}/needs/{needId}/withdraw": {
       "post": {
-        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. The reason is required and is published on PROJECT_NEED_WITHDRAWN.",
+        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. The reason is required and kept as withdrawalReason; PROJECT_NEED_WITHDRAWN does not carry it (no free text on events).",
         "operationId": "ProjectController_withdrawNeed_v1",
         "parameters": [
           {

@@ -127,6 +127,20 @@ export default async function globalSetup(): Promise<void> {
       120_000,
     );
 
+    // ---- construction-service -------------------------------------------------
+    // The project lifecycle scenario drives it through the gateway and taps its
+    // topic; its readiness probe reports the database and the broker.
+    await waitFor(
+      `construction-service to be ready at ${config.constructionUrl}/health/ready`,
+      async () => {
+        const response = await context.get(`${config.constructionUrl}/health/ready`, {
+          failOnStatusCode: false,
+        });
+        return response.status() === 200;
+      },
+      120_000,
+    );
+
     // ---- Keycloak -----------------------------------------------------------
     await waitFor(
       `Keycloak realm ${config.realm} to be reachable`,
@@ -163,7 +177,12 @@ export default async function globalSetup(): Promise<void> {
       }
       const topics = await admin.listTopics();
       // Every topic a scenario taps — marketplace's too.
-      for (const topic of [config.economicTopic, config.marketplaceTopic, config.documentTopic]) {
+      for (const topic of [
+        config.economicTopic,
+        config.marketplaceTopic,
+        config.documentTopic,
+        config.constructionTopic,
+      ]) {
         if (!topics.includes(topic)) {
           throw new Error(
             `Topic ${topic} does not exist on ${config.kafkaBrokers.join(', ')}. ` +

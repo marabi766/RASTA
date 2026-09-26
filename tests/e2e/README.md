@@ -9,13 +9,14 @@
 مسیر بحرانی دامنه اقتصادی، سرتاسر — از توکن واقعی Keycloak تا رویدادی که روی
 Kafka منتشر می‌شود:
 
-| فایل                       | سناریو                                                                     |
-| -------------------------- | -------------------------------------------------------------------------- |
-| `01-authenticated-context` | ورود، تشخیص سازمان فعال، رد کردن عضویت جعلی                                |
-| `02-critical-path`         | کیف پول → شارژ شبیه‌سازی‌شده → تعهد + Hold → Replay → تأیید → تسویه → دفتر |
-| `03-authorization`         | ۴۰۴ میان‌مستأجری، دید دو طرف تراکنش، و «`AUDITOR` هیچ دسترسی ندارد»        |
-| `04-financial-safety`      | خرج بیش از موجودی، Idempotency، اعتراض، عدد بزرگ‌تر از `Number`            |
-| `05-correlation`           | یک `correlationId` از HTTP تا Header و Envelope رویداد روی Kafka           |
+| فایل                       | سناریو                                                                                                         |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `01-authenticated-context` | ورود، تشخیص سازمان فعال، رد کردن عضویت جعلی                                                                    |
+| `02-critical-path`         | کیف پول → شارژ شبیه‌سازی‌شده → تعهد + Hold → Replay → تأیید → تسویه → دفتر                                     |
+| `03-authorization`         | ۴۰۴ میان‌مستأجری، دید دو طرف تراکنش، و «`AUDITOR` هیچ دسترسی ندارد»                                            |
+| `04-financial-safety`      | خرج بیش از موجودی، Idempotency، اعتراض، عدد بزرگ‌تر از `Number`                                                |
+| `05-correlation`           | یک `correlationId` از HTTP تا Header و Envelope رویداد روی Kafka                                               |
+| `construction/01-…`        | CON-001: بسته بودن بی‌توکن، ساخت Idempotent، چرخهٔ پروژه و نیاز، ۴۰۹ نسخهٔ کهنه، ۴۰۴ میان‌مستأجری، رکورد Audit |
 
 `docs/14 § 14.7` ردیف‌های ۱، ۴، ۸ و ۹ — با نیمه Marketplace حذف‌شده، نه
 شبیه‌سازی‌شده: قرارداد `ORDER_*` طبق ADR-032 موکول است و نوشتن Payload سرویسی که
@@ -47,6 +48,8 @@ pnpm db:migrate
 
 pnpm --filter @rasta/economic-service build && \
   pnpm --filter @rasta/economic-service start     # :3112
+pnpm --filter @rasta/construction-service build && \
+  pnpm --filter @rasta/construction-service start # :3110 (CON-001؛ E2E_CONSTRUCTION_URL)
 pnpm --filter @rasta/api-gateway build && \
   pnpm --filter @rasta/api-gateway start          # :3000 (یا PORT_API_GATEWAY)
 
