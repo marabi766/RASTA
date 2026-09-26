@@ -240,8 +240,15 @@ BEGIN
     CASE WHEN TG_OP <> 'DELETE' THEN NEW."formula_version_id" END
   ] LOOP
     CONTINUE WHEN version_id IS NULL;
+    -- FOR UPDATE, not a plain read (Codex review of #120, finding 3). A plain
+    -- read sees the committed status as of this statement: an activation in
+    -- flight in another transaction still reads as DRAFT, so a re-weighting
+    -- could pass here and commit after the version became ACTIVE. Locking the
+    -- parent row serialises the two — whichever comes second waits, and under
+    -- READ COMMITTED re-reads the row the first one committed.
     SELECT "status" INTO version_status
-      FROM "performance_formula_version" WHERE "id" = version_id;
+      FROM "performance_formula_version" WHERE "id" = version_id
+       FOR UPDATE;
     IF version_status IS DISTINCT FROM 'DRAFT' AND version_status IS NOT NULL THEN
       RAISE EXCEPTION 'the weights of performance formula version % are frozen: it is %',
         version_id, version_status

@@ -319,6 +319,131 @@ describe('performance formula storage (ADR-052 step 2)', () => {
     });
   });
 
+  describe('a re-weighting and an activation race (Codex review of #120, finding 3)', () => {
+    // Two real connections, both as the owner so the trigger — not a missing
+    // grant — is what decides. The weight guard locks the parent version row;
+    // without that lock, the re-weighting below reads DRAFT while the
+    // activation is uncommitted, passes, and commits after it: an ACTIVE
+    // formula whose weights changed after it was frozen.
+
+    const REWEIGHT = (id: string): string[] => [
+      `UPDATE "performance_formula_weight" SET "weight_bp" = 2500 WHERE "formula_version_id" = '${id}' AND "component" = 'QUALITY'`,
+      `UPDATE "performance_formula_weight" SET "weight_bp" = 3000 WHERE "formula_version_id" = '${id}' AND "component" = 'ON_TIME'`,
+    ];
+
+    const ACTIVATE = (id: string): string[] => [
+      `UPDATE "performance_formula_version" SET "status" = 'RETIRED', "retired_by" = 'USR_RACE', "retired_at" = now(), "retired_correlation_id" = 'COR_RACE' WHERE "status" = 'ACTIVE'`,
+      `UPDATE "performance_formula_version" SET "status" = 'ACTIVE', "activated_by" = 'USR_RACE', "activated_at" = now(), "activated_correlation_id" = 'COR_RACE' WHERE "id" = '${id}'`,
+    ];
+
+    /** Runs `statements` in one transaction and holds it open until `release` resolves. */
+    function holdOpen(
+      client: PrismaService,
+      statements: string[],
+      release: Promise<void>,
+    ): Promise<void> {
+      return raw(() =>
+        client.client.$transaction(
+          async (tx) => {
+            for (const statement of statements) await tx.$executeRawUnsafe(statement);
+            await release;
+          },
+          { timeout: 30_000, maxWait: 10_000 },
+        ),
+      );
+    }
+
+    /** Waits until some backend of this database is waiting on a row lock. */
+    async function someoneWaitsOnALock(watcher: PrismaService): Promise<boolean> {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const [row] = await raw(() =>
+          watcher.client.$queryRawUnsafe<{ waiting: number }[]>(
+            `SELECT count(*)::int AS "waiting" FROM pg_stat_activity
+              WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+          ),
+        );
+        if ((row?.waiting ?? 0) > 0) return true;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return false;
+    }
+
+    async function weightsOf(id: string): Promise<Record<string, number>> {
+      const rows = await raw(() =>
+        owner.client.performanceFormulaWeight.findMany({ where: { formulaVersionId: id } }),
+      );
+      return Object.fromEntries(rows.map((row) => [row.component, row.weightBp]));
+    }
+
+    let second: PrismaService;
+    let watcher: PrismaService;
+
+    beforeAll(() => {
+      second = ownerPrisma();
+      watcher = ownerPrisma();
+    });
+
+    afterAll(async () => {
+      await second.onModuleDestroy();
+      await watcher.onModuleDestroy();
+    });
+
+    it('refuses a balanced re-weighting that waited on an activation, once that activation commits', async () => {
+      const { id } = await seedDraft(owner);
+      const before = await weightsOf(id);
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+
+      const activation = holdOpen(owner, ACTIVATE(id), released);
+      // Let the activation take its row locks before the re-weighting starts.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const reweighting = inOneTransaction(second, REWEIGHT(id));
+      const outcome = reweighting.then(
+        () => 'committed',
+        (error: Error) => error.message,
+      );
+
+      // Released in `finally`, so a failed expectation reports instead of
+      // leaving the activation's transaction open until the test times out.
+      let waited: boolean;
+      try {
+        waited = await someoneWaitsOnALock(watcher);
+      } finally {
+        release();
+      }
+      await activation;
+
+      expect(await outcome).toMatch(FROZEN);
+      expect(waited).toBe(true);
+      expect(await statusOf(id)).toBe('ACTIVE');
+      expect(await weightsOf(id)).toEqual(before);
+    });
+
+    it('lets an activation that waited on a re-weighting go ahead, with the weights the draft committed', async () => {
+      const { id } = await seedDraft(owner);
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+
+      const reweighting = holdOpen(second, REWEIGHT(id), released);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const activation = inOneTransaction(owner, ACTIVATE(id));
+
+      let waited: boolean;
+      try {
+        waited = await someoneWaitsOnALock(watcher);
+      } finally {
+        release();
+      }
+      await reweighting;
+      await activation;
+
+      expect(waited).toBe(true);
+
+      expect(await statusOf(id)).toBe('ACTIVE');
+      expect(await weightsOf(id)).toMatchObject({ QUALITY: 2500, ON_TIME: 3000 });
+    });
+  });
+
   describe('nothing is ever deleted', () => {
     it('refuses deleting a version, even a DRAFT', async () => {
       const { id } = await seedDraft(prisma);
