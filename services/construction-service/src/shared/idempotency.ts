@@ -140,9 +140,7 @@ export class IdempotencyStore {
         continue;
       }
 
-      if (existing.requestHash !== requestHash) {
-        throw RastaError.idempotencyKeyReused(key);
-      }
+      if (existing.requestHash !== requestHash) throw this.reused(endpoint, key);
 
       if (existing.state === 'IN_PROGRESS') throw this.inFlight(endpoint, key);
 
@@ -283,11 +281,32 @@ export class IdempotencyStore {
     return result.count;
   }
 
+  // The raw key never reaches an error, and so never a log (S-09): a client's
+  // key can be guessable or meaningful, and whoever holds it can replay the
+  // stored response. The digest still lets an operator match two log lines.
+
   private inFlight(endpoint: string, key: string): RastaError {
     return new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
-      internalContext: { endpoint, key, retryAfterSeconds: 1 },
+      internalContext: { endpoint, keyDigest: keyDigest(key), retryAfterSeconds: 1 },
     });
   }
+
+  private reused(endpoint: string, key: string): RastaError {
+    return new RastaError(
+      'IDEMPOTENCY_KEY_REUSED',
+      'This Idempotency-Key was already used with a different request body',
+      { internalContext: { endpoint, keyDigest: keyDigest(key) } },
+    );
+  }
+}
+
+/**
+ * A one-way digest of an Idempotency-Key, for logs: the first 16 hex digits of
+ * its SHA-256. Enough to tell two keys apart in an incident, useless for
+ * replaying either.
+ */
+export function keyDigest(key: string): string {
+  return createHash('sha256').update(key, 'utf8').digest('hex').slice(0, 16);
 }
 
 /**

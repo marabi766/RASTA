@@ -97,8 +97,10 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
 
     const producer = await this.getProducer();
 
-    // One batch per topic, with the partition key preserved so ordering per
-    // aggregate survives (ADR-006).
+    // One batch per topic, with the partition key preserved so every event of
+    // one aggregate lands on the same partition (ADR-006). That is
+    // co-partitioning, not ordering: relay replicas can still publish rows of
+    // one key concurrently (D-027, ADR-051 B4).
     const byTopic = new Map<string, OutboxRow[]>();
     for (const row of rows) {
       const bucket = byTopic.get(row.topic);
