@@ -537,27 +537,34 @@ describe('economic internals', () => {
 
       const findEscrow = wiring.walletRepository.findEscrowAccount.bind(wiring.walletRepository);
       let interleaved = false;
+      const interleave = async (
+        owner: string,
+        currency: string,
+        client?: Parameters<typeof findEscrow>[2],
+      ) => {
+        if (owner === organizationId && !interleaved) {
+          interleaved = true;
+          await asActor({ organizationId }, () =>
+            wiring.prisma.transaction(async (tx) => {
+              const [locked] = await wiring.walletRepository.lock(tx, [walletId]);
+              return wiring.wallets.placeHold(tx, {
+                wallet: locked!,
+                amountMinor: 20_000n,
+                reference: transactionId,
+                referenceType: 'TRANSACTION',
+                transactionId,
+                placedBy: 'internals-itest',
+              });
+            }),
+          );
+        }
+        return findEscrow(owner, currency, client);
+      };
+      // The repository returns Prisma's lazy promise type; the interleaving
+      // is an ordinary async function awaiting the same query.
       jest
         .spyOn(wiring.walletRepository, 'findEscrowAccount')
-        .mockImplementation(async (owner, currency, client) => {
-          if (owner === organizationId && !interleaved) {
-            interleaved = true;
-            await asActor({ organizationId }, () =>
-              wiring.prisma.transaction(async (tx) => {
-                const [locked] = await wiring.walletRepository.lock(tx, [walletId]);
-                return wiring.wallets.placeHold(tx, {
-                  wallet: locked!,
-                  amountMinor: 20_000n,
-                  reference: transactionId,
-                  referenceType: 'TRANSACTION',
-                  transactionId,
-                  placedBy: 'internals-itest',
-                });
-              }),
-            );
-          }
-          return findEscrow(owner, currency, client);
-        });
+        .mockImplementation(interleave as unknown as typeof findEscrow);
 
       const deviations = await audit().run();
       jest.restoreAllMocks();
