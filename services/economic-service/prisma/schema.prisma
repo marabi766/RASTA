@@ -591,6 +591,11 @@ model PaymentIntent {
 
   /// Required. A retried top-up must not charge twice (docs/06 § 6.8).
   idempotencyKey String @map("idempotency_key")
+  /// SHA-256 of the canonical request (wallet, amount, currency, instrument),
+  /// in the IdempotencyStore's canonical form. A same-key retry resumes this
+  /// intent only when it is the same request (Codex round 3 on #121, H2).
+  /// NULL on rows written before it existed: such an intent is never resumed.
+  requestHash String? @map("request_hash")
 
   correlationId String @map("correlation_id")
 

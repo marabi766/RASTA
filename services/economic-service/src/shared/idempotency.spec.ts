@@ -1,5 +1,5 @@
 import { createSystemContext, runWithContext } from '@rasta/nest-common';
-import { IdempotencyStore, hashRequestBody, targeted } from './idempotency';
+import { IdempotencyStore, hashRequestBody, keyDigest, targeted } from './idempotency';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { EconomicEnv } from '../config/env';
 
@@ -208,5 +208,36 @@ describe('IdempotencyStore.claim — who may proceed', () => {
     await expect(asTenant(() => store.claim('POST /x', 'K', {}))).rejects.toThrow(
       'connection reset',
     );
+  });
+
+  // Codex round 3 on #121, M2: the key is client text and `internalContext`
+  // reaches the debug log (AGENTS.md S-09).
+  const RAW_KEY = 'client-chosen-key-with-anything-in-it';
+
+  it.each([
+    ['reused with another body', 'COMPLETED', { other: true }, 'IDEMPOTENCY_KEY_REUSED'],
+    ['in flight', 'IN_PROGRESS', {}, 'CONFLICT'],
+  ])('keeps the raw key out of the error when it is %s', async (_case, state, body, code) => {
+    const { store } = storeWith({
+      create: jest.fn().mockRejectedValue(uniqueViolation),
+      findUnique: jest.fn().mockResolvedValue({
+        requestHash: hashRequestBody({}),
+        state,
+        expiresAt: new Date(Date.now() + hour),
+      }),
+    });
+
+    const error = await asTenant(() => store.claim('POST /x', RAW_KEY, body)).catch(
+      (thrown: unknown) => thrown as { code: string; internalContext?: unknown },
+    );
+    expect(error).toMatchObject({ code });
+    expect(JSON.stringify(error.internalContext)).not.toContain(RAW_KEY);
+    expect(JSON.stringify(error.internalContext)).toContain(keyDigest(RAW_KEY));
+  });
+
+  it('fingerprints a key one way, bounded and stably', () => {
+    expect(keyDigest(RAW_KEY)).toMatch(/^[0-9a-f]{16}$/);
+    expect(keyDigest(RAW_KEY)).toBe(keyDigest(RAW_KEY));
+    expect(keyDigest(RAW_KEY)).not.toBe(keyDigest(`${RAW_KEY}!`));
   });
 });

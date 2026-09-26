@@ -137,7 +137,7 @@ export class IdempotencyStore {
     }
 
     if (existing.requestHash !== requestHash) {
-      throw RastaError.idempotencyKeyReused(key);
+      throw RastaError.idempotencyKeyReused(keyDigest(key));
     }
 
     if (existing.state === 'IN_PROGRESS') throw inFlight(endpoint, key);
@@ -250,7 +250,7 @@ const RETRY_CLAIM = Symbol('retry-claim');
 
 function inFlight(endpoint: string, key: string): RastaError {
   return new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
-    internalContext: { endpoint, key, retryAfterSeconds: 1 },
+    internalContext: { endpoint, key: keyDigest(key), retryAfterSeconds: 1 },
   });
 }
 
@@ -270,6 +270,18 @@ function inFlight(endpoint: string, key: string): RastaError {
  */
 export function targeted(id: string, body?: unknown): { id: string; body?: unknown } {
   return body === undefined ? { id } : { id, body };
+}
+
+/**
+ * A one-way, bounded fingerprint of an idempotency key, for errors and logs
+ * (Codex round 3 on #121, M2; AGENTS.md S-09).
+ *
+ * The key is client-chosen and may carry anything, and an error's
+ * `internalContext` reaches the debug log. Sixteen hex characters of its
+ * SHA-256 are enough to correlate two log lines and reveal nothing.
+ */
+export function keyDigest(key: string): string {
+  return createHash('sha256').update(key).digest('hex').slice(0, 16);
 }
 
 /**

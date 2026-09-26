@@ -90,15 +90,10 @@ describe('no financial event may be replayed automatically', () => {
   // settlement out of a dead-letter topic without first establishing what
   // happened to the money is a larger risk than the original failure
   // (docs/runbooks/replay-dlq.md).
-  it.each([
-    'PAYMENT_AUTHORIZED',
-    'PAYMENT_COMPLETED',
-    'PAYMENT_FAILED',
-    'COMMISSION_APPLIED',
-    'REWARD_GRANTED',
-    'SETTLEMENT_COMPLETED',
-    'JOURNAL_POSTED',
-  ])('%s is marked never-auto-replay', (name) => {
+  //
+  // Every event in the catalogue, not a hand-written subset: the subset
+  // missed PAYMENT_CAPTURE_UNRECONCILED (Codex round 3 on #121, L1).
+  it.each(Object.values(ECONOMIC_EVENTS))('%s is marked never-auto-replay', (name) => {
     expect(NEVER_AUTO_REPLAY.has(name)).toBe(true);
     expect(isAutoReplayable(name)).toBe(false);
   });

@@ -6,6 +6,7 @@ import { walletBalanceLimit } from '../src/wallet/wallet.repository';
 import { MockPaymentProvider } from '../src/payment/mock.provider';
 import { ECONOMIC_EVENTS } from '../src/events/events';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import { PaymentIntentStatus } from '../src/generated/prisma';
 
 /**
  * A payment's state and the event announcing it commit together (ADR-021;
@@ -216,10 +217,19 @@ describe('payment authorisation atomicity (real database)', () => {
 
   // Codex review of PR #121, round 2.
 
-  async function topUpWith(organizationId: string, amountMinor: bigint, idempotencyKey: string) {
+  async function topUpWith(
+    organizationId: string,
+    amountMinor: bigint,
+    idempotencyKey: string,
+    instrument?: string,
+  ) {
     const wallet = await asActor({ organizationId }, () => wiring.wallets.getOrOpen('IRR'));
     return asActor({ organizationId }, () =>
-      payments.topUp(wallet.id, { amountMinor: amountMinor.toString(), idempotencyKey }),
+      payments.topUp(wallet.id, {
+        amountMinor: amountMinor.toString(),
+        idempotencyKey,
+        ...(instrument === undefined ? {} : { instrument }),
+      }),
     );
   }
 
@@ -241,7 +251,8 @@ describe('payment authorisation atomicity (real database)', () => {
 
     const result = await topUpWith(organizationId, 600n, `AMBIG-${ulid()}`);
 
-    expect(calls).toBe(3);
+    // The reservation, the authorisation, the capture, and the locked read-back.
+    expect(calls).toBe(4);
     expect(result).toMatchObject({ status: 'CAPTURED', amountMinor: 600n });
     expect(result.journalId).toMatch(/^JRN_/);
     expect(refund).not.toHaveBeenCalled();
@@ -271,6 +282,15 @@ describe('payment authorisation atomicity (real database)', () => {
     expect(refund).not.toHaveBeenCalled();
     const [intent] = await intentsOf(organizationId);
     expect(intent).toMatchObject({ status: 'AUTHORIZED', failureReason: null });
+
+    // AUTHORIZED without the stranded marker: a retry cannot know what the
+    // provider did, so it is refused and nothing is touched (round 3, M3).
+    await expect(
+      topUpWith(organizationId, 650n, intent?.idempotencyKey ?? ''),
+    ).rejects.toMatchObject({
+      code: 'BUSINESS_RULE_VIOLATION',
+    });
+    expect(refund).not.toHaveBeenCalled();
 
     await cleanup(prisma, [organizationId]);
   });
@@ -304,7 +324,12 @@ describe('payment authorisation atomicity (real database)', () => {
 
     const intents = await intentsOf(organizationId);
     expect(intents).toHaveLength(1);
-    expect(intents[0]).toMatchObject({ id: result.paymentIntentId, status: 'CAPTURED' });
+    // The marker does not outlive the recovery (round 3, M1).
+    expect(intents[0]).toMatchObject({
+      id: result.paymentIntentId,
+      status: 'CAPTURED',
+      failureReason: null,
+    });
     const wallet = await asActor({ organizationId }, () => wiring.wallets.getOrOpen('IRR'));
     expect((await readBalances(prisma, wallet.id)).ledger).toBe(750n);
     expect(await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_COMPLETED)).toHaveLength(1);
@@ -370,5 +395,179 @@ describe('payment authorisation atomicity (real database)', () => {
     expect((await intentsOf(organizationId))[0]).toMatchObject({ status: 'CREATED' });
 
     await cleanup(prisma, [organizationId]);
+  });
+  // Codex review of PR #121, round 3.
+
+  /** Sessions waiting on a payment-intent row lock right now. */
+  const intentLockWaiters = async () => {
+    const [row] = await runUnscoped(
+      'the suite reads lock waits',
+      () =>
+        prisma.client.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND query LIKE '%FROM payment_intent%FOR UPDATE%'
+      `,
+    );
+    return row?.n ?? 0;
+  };
+
+  async function eventually(check: () => Promise<boolean>, what: string) {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      if (await check()) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  }
+
+  it('waits for a capture still committing before deciding, and does not refund it', async () => {
+    // H1: the caller is told the capture failed while its transaction is
+    // still open, before COMMIT. A plain read-back saw AUTHORIZED and no
+    // transaction, and refunded a capture that then committed.
+    const organizationId = `${org.c}-COMMITTING`;
+    await asActor({ organizationId }, () => wiring.wallets.getOrOpen('IRR'));
+    const original = prisma.transaction.bind(prisma) as (
+      fn: (tx: unknown) => Promise<unknown>,
+      ...rest: unknown[]
+    ) => Promise<unknown>;
+    let release = () => undefined as void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let pending: Promise<unknown> | undefined;
+    let calls = 0;
+    jest.spyOn(prisma, 'transaction').mockImplementation(((
+      fn: (tx: unknown) => Promise<unknown>,
+      ...rest: unknown[]
+    ) => {
+      calls += 1;
+      if (calls !== 3) return original(fn, ...rest);
+      return new Promise((_resolve, reject) => {
+        pending = original(
+          async (tx) => {
+            const result = await fn(tx);
+            reject(new Error('connection lost during commit'));
+            await gate;
+            return result;
+          },
+          ...rest,
+        );
+      });
+    }) as unknown as PrismaService['transaction']);
+    const refund = jest.spyOn(provider, 'refund');
+
+    const topUp = topUpWith(organizationId, 550n, `COMMITTING-${ulid()}`);
+    // The read-back blocks on the capture's row lock instead of deciding.
+    await eventually(async () => (await intentLockWaiters()) > 0, 'the read-back to wait');
+    expect(refund).not.toHaveBeenCalled();
+    release();
+
+    const result = await topUp;
+    await pending;
+    expect(result).toMatchObject({ status: 'CAPTURED', amountMinor: 550n });
+    expect(refund).not.toHaveBeenCalled();
+    expect(await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_FAILED)).toHaveLength(0);
+    const [intent] = await intentsOf(organizationId);
+    expect(intent).toMatchObject({ status: 'CAPTURED', transactionId: result.transactionId });
+
+    await cleanup(prisma, [organizationId]);
+  });
+
+  it('refuses a same-key retry that changed the instrument, or has no recorded request', async () => {
+    // H2: the stranded first attempt released its idempotency claim, and the
+    // retry changed only the instrument.
+    const organizationId = `${org.a}-INSTRUMENT`;
+    const key = `INSTRUMENT-${ulid()}`;
+    jest.spyOn(wiring.wallets, 'credit').mockRejectedValueOnce(walletBalanceLimit('WLT_STAND_IN'));
+    jest.spyOn(provider, 'refund').mockRejectedValueOnce(new Error('provider unreachable'));
+    await expect(topUpWith(organizationId, 820n, key, 'tok_first')).rejects.toMatchObject({
+      code: 'BUSINESS_RULE_VIOLATION',
+    });
+
+    const credit = jest.spyOn(wiring.wallets, 'credit');
+    const refused = await topUpWith(organizationId, 820n, key, 'tok_other').catch(
+      (error: unknown) => error as { code: string; internalContext?: unknown },
+    );
+    expect(refused).toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+    // S-09 (M2): a digest of the key reaches the log, never the key.
+    expect(JSON.stringify(refused.internalContext)).not.toContain(key);
+    expect(credit).not.toHaveBeenCalled();
+    expect((await intentsOf(organizationId))[0]).toMatchObject({
+      status: 'AUTHORIZED',
+      failureReason: 'CAPTURED_NOT_CREDITED',
+    });
+
+    // An intent written before the hash existed is never resumed.
+    await runUnscoped('the suite blanks a hash as a pre-migration row', () =>
+      prisma.client.paymentIntent.updateMany({
+        where: { organizationId },
+        data: { requestHash: null },
+      }),
+    );
+    await expect(topUpWith(organizationId, 820n, key, 'tok_first')).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    });
+    expect(credit).not.toHaveBeenCalled();
+
+    await cleanup(prisma, [organizationId]);
+  });
+
+  it('refuses a same-key retry of a refunded top-up instead of calling it captured', async () => {
+    // M3: refunded since, so CAPTURED would describe money that went back.
+    const organizationId = `${org.b}-REFUNDED`;
+    const key = `REFUNDED-${ulid()}`;
+    const captured = await topUpWith(organizationId, 330n, key);
+    await asActor({ organizationId }, () =>
+      payments.refund(captured.paymentIntentId, 'the suite refunds the top-up'),
+    );
+
+    await expect(topUpWith(organizationId, 330n, key)).rejects.toMatchObject({
+      code: 'INVALID_STATE_TRANSITION',
+      status: 409,
+    });
+    expect((await intentsOf(organizationId))[0]).toMatchObject({ status: 'REFUNDED' });
+
+    await cleanup(prisma, [organizationId]);
+  });
+
+  it('never captures an intent twice, even when two resumes race to it', async () => {
+    // The capture write re-checks, under the intent's lock, that it is still
+    // AUTHORIZED; a second writer finds it CAPTURED and is refused.
+    const organizationId = `${org.c}-TWICE`;
+    const done = await topUpWith(organizationId, 210n, `TWICE-${ulid()}`);
+    const capture = (
+      payments as unknown as {
+        completeCapture: (target: unknown, actor: string) => Promise<unknown>;
+      }
+    ).completeCapture.bind(payments);
+
+    await expect(
+      asActor({ organizationId }, () =>
+        capture(
+          {
+            intentId: done.paymentIntentId,
+            walletId: (await intentsOf(organizationId))[0]?.walletId,
+            organizationId,
+            amountMinor: 210n,
+            currency: 'IRR',
+          },
+          'itest',
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
+
+    await cleanup(prisma, [organizationId]);
+  });
+
+  it('decides a same-key retry for every intent status', () => {
+    // Compile-time exhaustive: a new status does not build until a test above
+    // says what a retry of it does (round 3, M3).
+    const covered: Record<PaymentIntentStatus, string> = {
+      CREATED: 'refuses a same-key retry of an intent whose outcome is not known yet',
+      AUTHORIZED: 'compensates nothing … / credits a stranded capture …',
+      CAPTURED: 'answers a same-key retry as the intent finished …',
+      FAILED: 'answers a same-key retry as the intent finished …',
+      REFUNDED: 'refuses a same-key retry of a refunded top-up …',
+    };
+    expect(Object.keys(covered).sort()).toEqual(Object.values(PaymentIntentStatus).sort());
   });
 });

@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES, MAX_AMOUNT_MINOR } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { WalletService } from '../wallet/wallet.service';
 import {
@@ -23,6 +23,7 @@ import { PAYMENT_PROVIDER } from '../tokens';
 import { SERVICE_NAME } from '../config/env';
 import type { PaymentProvider } from './provider';
 import type { TopUpDto } from './dto';
+import { hashRequestBody, keyDigest } from '../shared/idempotency';
 import type { PaymentIntent } from '../generated/prisma';
 
 /**
@@ -105,6 +106,16 @@ export class PaymentService {
       throw RastaError.businessRule('This wallet cannot be topped up', { walletId });
     }
 
+    // The request this intent is for, kept on the row (Codex round 3 on #121,
+    // H2): by the time a retry reaches `resume`, the API's idempotency record
+    // of the first attempt is gone, so this is what proves it is the same one.
+    const requestHash = hashRequestBody({
+      walletId,
+      amountMinor: formatMinor(amountMinor),
+      currency: wallet.currency,
+      instrument: dto.instrument ?? null,
+    });
+
     // A retry with the same key resumes the intent the first attempt left
     // (Codex round 2 on #121, F2). Inserting another collided with the unique
     // key, so a capture left uncredited could never be finished by a retry.
@@ -113,7 +124,7 @@ export class PaymentService {
         organizationId_idempotencyKey: { organizationId, idempotencyKey: dto.idempotencyKey },
       },
     });
-    if (existing) return this.resume(existing, walletId, amountMinor, actor);
+    if (existing) return this.resume(existing, requestHash, actor);
 
     // The balance this top-up would leave is checked before the provider is
     // asked for anything, and reserved (Codex review of PR #121, finding 1).
@@ -144,6 +155,7 @@ export class PaymentService {
           currency: wallet.currency,
           status: 'CREATED',
           idempotencyKey: dto.idempotencyKey,
+          requestHash,
           correlationId: getContext().correlationId,
           createdBy: actor,
         },
@@ -265,7 +277,7 @@ export class PaymentService {
       captured = await this.completeCapture(intent, actor);
     } catch (error) {
       cause = error;
-      captured = await this.committedCapture(intent.intentId).catch((readError: unknown) => {
+      captured = await this.committedCapture(intent).catch((readError: unknown) => {
         this.logger.error(
           `Payment intent ${intent.intentId}: the capture write failed and its outcome could ` +
             'not be read back; not compensating',
@@ -297,19 +309,54 @@ export class PaymentService {
    * written: the intent is not CAPTURED and no top-up transaction names it.
    * The two commit together, so disagreement between them is refused rather
    * than guessed at.
+   *
+   * Decided in its own transaction, behind the intent's row lock (Codex round
+   * 3 on #121, H1). The capture write takes that lock first, so while its
+   * COMMIT is still in flight this waits for it; plain reads could run inside
+   * that window, see the old row, and let the caller refund a capture that
+   * then became visible. Once the lock is granted the writer has resolved, and
+   * the reads after it see what it left.
    */
-  private async committedCapture(intentId: string): Promise<TopUpResult | null> {
-    const intent = await this.prisma.client.paymentIntent.findUniqueOrThrow({
-      where: { id: intentId },
+  private async committedCapture({
+    intentId,
+    organizationId,
+  }: CaptureTarget): Promise<TopUpResult | null> {
+    const intent = await this.prisma.transaction(async (tx) => {
+      await this.lockIntent(tx, intentId, organizationId);
+      const row = await tx.paymentIntent.findUniqueOrThrow({ where: { id: intentId } });
+      const transaction = await tx.transaction.findFirst({
+        where: { sourceType: 'PAYMENT_INTENT', sourceReference: intentId },
+      });
+      if (row.status !== 'CAPTURED' && !transaction) return null;
+      if (row.status !== 'CAPTURED') {
+        throw RastaError.internal(
+          `Payment intent ${intentId} disagrees with its top-up transaction`,
+        );
+      }
+      return row;
     });
-    const transaction = await this.prisma.client.transaction.findFirst({
-      where: { sourceType: 'PAYMENT_INTENT', sourceReference: intentId },
-    });
-    if (intent.status !== 'CAPTURED' && !transaction) return null;
-    if (intent.status !== 'CAPTURED') {
-      throw RastaError.internal(`Payment intent ${intentId} disagrees with its top-up transaction`);
-    }
-    return this.capturedView(intent);
+    return intent ? this.capturedView(intent) : null;
+  }
+
+  /**
+   * `SELECT … FOR UPDATE` on one intent, and its status. Raw, so the tenant
+   * guard cannot scope it; it names the organization itself.
+   */
+  private async lockIntent(
+    tx: ExtendedPrismaClient,
+    intentId: string,
+    organizationId: string,
+  ): Promise<string | undefined> {
+    const [row] = await runUnscoped(
+      'a raw row lock is filtered by the organization explicitly',
+      () =>
+        tx.$queryRaw<{ status: string }[]>`
+          SELECT status::text AS status FROM payment_intent
+          WHERE id = ${intentId} AND organization_id = ${organizationId}
+          FOR UPDATE
+        `,
+    );
+    return row?.status;
   }
 
   /**
@@ -353,15 +400,21 @@ export class PaymentService {
    */
   private async resume(
     intent: PaymentIntent,
-    walletId: string,
-    amountMinor: bigint,
+    requestHash: string,
     actor: string,
   ): Promise<TopUpResult> {
-    if (intent.walletId !== walletId || intent.amountMinor !== amountMinor) {
-      throw RastaError.idempotencyKeyReused(intent.idempotencyKey);
+    // The whole request, first (Codex round 3 on #121, H2): a retry that
+    // changed the instrument was resumed as if it were the original. An intent
+    // written before the hash existed has none and is never resumed. The key
+    // itself stays out of the error: only a one-way digest of it (S-09).
+    if (intent.requestHash !== requestHash) {
+      throw RastaError.idempotencyKeyReused(keyDigest(intent.idempotencyKey));
     }
-    if (intent.status === 'CAPTURED' || intent.status === 'REFUNDED') {
-      return this.capturedView(intent);
+    if (intent.status === 'CAPTURED') return this.capturedView(intent);
+    // Refunded since: answering CAPTURED would describe money that went back
+    // (round 3, M3). Terminal, and not replayable under this key.
+    if (intent.status === 'REFUNDED') {
+      throw RastaError.invalidStateTransition('PaymentIntent', 'REFUNDED', 'CAPTURED');
     }
     if (intent.status === 'FAILED') {
       return {
@@ -386,9 +439,9 @@ export class PaymentService {
 
     const target = {
       intentId: intent.id,
-      walletId,
+      walletId: intent.walletId,
       organizationId: intent.organizationId,
-      amountMinor,
+      amountMinor: intent.amountMinor,
       currency: intent.currency,
     };
     const recorded = await this.recordCaptureOrFindIt(target, actor);
@@ -510,6 +563,13 @@ export class PaymentService {
 
     try {
       return await this.prisma.transaction(async (tx) => {
+        // The intent's row lock first, held to COMMIT: a read-back after an
+        // ambiguous failure waits on it (round 3, H1). And only an AUTHORIZED
+        // intent is captured, so two resumes of one intent cannot both credit.
+        const status = await this.lockIntent(tx, intentId, organizationId);
+        if (status !== 'AUTHORIZED') {
+          throw RastaError.invalidStateTransition('PaymentIntent', String(status), 'CAPTURED');
+        }
         const [locked] = await this.walletRepository.lock(tx, [walletId]);
         if (!locked) throw RastaError.internal('Wallet vanished while locking it');
 
@@ -550,7 +610,8 @@ export class PaymentService {
 
         await tx.paymentIntent.update({
           where: { id: intentId },
-          data: { status: 'CAPTURED', capturedAt, transactionId },
+          // Resolved: a stranded marker does not outlive its recovery (M1).
+          data: { status: 'CAPTURED', capturedAt, transactionId, failureReason: null },
         });
 
         await this.ledger.enqueue(tx, {
