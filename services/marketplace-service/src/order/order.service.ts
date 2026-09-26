@@ -595,19 +595,40 @@ export class OrderService {
    * left the order stuck in `CANCELLING` with the buyer's funds held.
    */
   async markFundsHeld(orderId: string, transactionId: string): Promise<OrderStatus> {
-    const recordHold = (tx: ExtendedPrismaClient, order: LockedOrderRow, status: OrderStatus) =>
-      runUnscoped('the saga records the hold on an order on behalf of neither party', () =>
+    const recordHold = async (
+      tx: ExtendedPrismaClient,
+      order: LockedOrderRow,
+      status: 'FUNDS_HELD' | 'CANCELLING',
+    ) => {
+      await runUnscoped('the saga records the hold on an order on behalf of neither party', () =>
         tx.order.update({
           where: { id: order.id },
           data: { status, economicTransactionId: transactionId },
         }),
       );
 
+      // The audit record of the hold (L7-14), in the same transaction. Only
+      // the write that first records this obligation announces it: a Temporal
+      // retry of the yielding branch re-runs this with the id already stored.
+      if (order.economicTransactionId === transactionId) return;
+      await this.events.enqueue(tx, {
+        eventName: MARKETPLACE_EVENTS.ORDER_FUNDS_HELD,
+        aggregateId: order.id,
+        organizationId: order.organizationId,
+        payload: {
+          ...this.partiesOf(order),
+          transactionId,
+          status,
+          heldAt: new Date().toISOString(),
+        },
+      });
+    };
+
     return this.systemTransition(orderId, 'FUNDS_HELD', {
       from: ['PENDING'],
       apply: (tx, order) => recordHold(tx, order, 'FUNDS_HELD'),
       yieldTo: ['CANCELLING'],
-      onYield: (tx, order) => recordHold(tx, order, order.status),
+      onYield: (tx, order) => recordHold(tx, order, 'CANCELLING'),
     });
   }
 
@@ -630,6 +651,14 @@ export class OrderService {
             data: { status: 'FAILED', failureReason: reason },
           }),
         );
+        // No reason on the wire: it is economic-service's refusal text. It
+        // stays on the row, behind the API (L7-14).
+        await this.events.enqueue(tx, {
+          eventName: MARKETPLACE_EVENTS.ORDER_FAILED,
+          aggregateId: order.id,
+          organizationId: order.organizationId,
+          payload: { ...this.partiesOf(order), failedAt: new Date().toISOString() },
+        });
         // Nothing was delivered, so what the order reserved goes back.
         const lines = await runUnscoped('a failed order returns what it reserved', () =>
           tx.orderLine.findMany({ where: { orderId: order.id } }),
@@ -654,6 +683,12 @@ export class OrderService {
         await runUnscoped('the saga records that settlement is in flight', () =>
           tx.order.update({ where: { id: order.id }, data: { status: 'SETTLING' } }),
         );
+        await this.events.enqueue(tx, {
+          eventName: MARKETPLACE_EVENTS.ORDER_SETTLEMENT_STARTED,
+          aggregateId: order.id,
+          organizationId: order.organizationId,
+          payload: { ...this.partiesOf(order), startedAt: new Date().toISOString() },
+        });
       },
     });
   }
@@ -675,6 +710,12 @@ export class OrderService {
         await runUnscoped('the saga returns an order whose settlement attempt failed', () =>
           tx.order.update({ where: { id: order.id }, data: { status: 'RECEIPT_CONFIRMED' } }),
         );
+        await this.events.enqueue(tx, {
+          eventName: MARKETPLACE_EVENTS.ORDER_SETTLEMENT_FAILED,
+          aggregateId: order.id,
+          organizationId: order.organizationId,
+          payload: { ...this.partiesOf(order), failedAt: new Date().toISOString() },
+        });
       },
     });
   }
@@ -1023,6 +1064,17 @@ export class OrderService {
 
     if (outcome.moved) orderTransitionsTotal.inc({ service: SERVICE_NAME, to });
     return outcome.status;
+  }
+
+  /** The parties and amount every saga audit record names (L7-14). */
+  private partiesOf(order: LockedOrderRow) {
+    return {
+      orderId: order.id,
+      buyerOrganizationId: order.organizationId,
+      supplierOrganizationId: order.supplierOrganizationId,
+      totalAmountMinor: order.totalAmountMinor.toString(),
+      currency: order.currency,
+    };
   }
 
   private async load(tx: ExtendedPrismaClient, orderId: string): Promise<OrderView> {
