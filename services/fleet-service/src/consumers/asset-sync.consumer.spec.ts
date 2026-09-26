@@ -85,13 +85,19 @@ function envelope(overrides: Partial<EventEnvelope> & { eventName: string }): Ev
 describe('AssetSyncConsumer', () => {
   describe('the transfer fence (ADR-062)', () => {
     it('lifts the previous owner’s fence under the asset lock, and only on a transfer', async () => {
-      const { consumer, repository } = harness({ existing: { organizationId: 'ORG-DEH-0001' } });
+      const { consumer, repository } = buildConsumer({
+        existing: { organizationId: 'ORG-DEH-0001', status: 'ACTIVE' },
+      });
 
       await consumer.handle(
-        envelope('ASSET_TRANSFERRED', {
-          assetId: 'AST-SEED-0001',
-          fromOrganizationId: 'ORG-DEH-0001',
-          toOrganizationId: 'ORG-DEH-0002',
+        envelope({
+          eventName: 'ASSET_TRANSFERRED',
+          payload: {
+            assetId: 'AST-SEED-0001',
+            fromOrganizationId: 'ORG-DEH-0001',
+            toOrganizationId: 'ORG-DEH-0002',
+            reason: 'x',
+          },
         }),
       );
 
@@ -105,7 +111,11 @@ describe('AssetSyncConsumer', () => {
       expect(lock).toBeLessThan(drop);
 
       await consumer.handle(
-        envelope('ASSET_STATUS_CHANGED', { assetId: 'AST-SEED-0001', newStatus: 'ACTIVE' }),
+        envelope({
+          eventId: 'EVT-STATUS-1',
+          eventName: 'ASSET_STATUS_CHANGED',
+          payload: { assetId: 'AST-SEED-0001', newStatus: 'ACTIVE' },
+        }),
       );
       expect(repository.dropTransferFences).toHaveBeenCalledTimes(1);
     });

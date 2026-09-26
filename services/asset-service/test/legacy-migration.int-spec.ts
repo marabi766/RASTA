@@ -8,6 +8,7 @@ import { InsuranceService } from '../src/insurance/insurance.service';
 import { ClaimService } from '../src/insurance/claim.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, databaseUrl, newPrisma, tenants } from './helpers';
+import { clearingOwners } from './transfer-clearance.fake';
 
 /**
  * Migration 20260925110000_asset_legacy_dossier_and_identifiers, against the
@@ -130,7 +131,7 @@ describe('legacy data migration (20260925110000)', () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new AssetRepository(prisma);
-    assets = new AssetService(repository);
+    assets = new AssetService(repository, undefined, clearingOwners());
     insurance = new InsuranceService(repository, assets, 30);
     claims = new ClaimService(repository, assets, {
       decisionRoles: ['ORGANIZATION_ADMIN'],

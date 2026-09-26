@@ -128,6 +128,10 @@ export async function cleanup(
     orgs,
   );
   await client.$executeRawUnsafe(
+    `DELETE FROM asset_transfer_fence WHERE organization_id = ANY($1::text[])`,
+    orgs,
+  );
+  await client.$executeRawUnsafe(
     `DELETE FROM outbox_message WHERE organization_id = ANY($1::text[])`,
     orgs,
   );
