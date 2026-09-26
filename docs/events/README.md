@@ -465,7 +465,13 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 > **برنامه‌ریزی‌شده**‌اند: موافقت‌ها، آغاز و پایان و پیشرفت با PR دوم CON-001، و مناقصه با CON-002. Payloadها در
 > `services/construction-service/src/events/events.ts` تعریف و در زمان انتشار اعتبارسنجی می‌شوند (`.strict()`).
 >
-> **کلید پارتیشن همهٔ رویدادهای این Topic `projectId` است** و `aggregateType` همهٔ آن‌ها `Project`: نیاز، موافقت و
+> **CON-001 PR دوم.** شش ردیف کاتالوگ `APPROVAL_REQUESTED`، `APPROVAL_GRANTED`، `APPROVAL_REJECTED`، `PROJECT_STARTED`،
+> `PROJECT_PROGRESS_UPDATED` و `PROJECT_COMPLETED` پیاده شدند؛ ستون Payload آن‌ها اکنون Payload واقعی است. نثرِ
+> کاتالوگ (`approvalType`، `conditions`، `reason`) طبق همان قاعدهٔ حریم روی رویداد نمی‌آید؛ `percentage` به
+> `progressBasisPoints` تبدیل شد. پنج رویداد تازه (جدول سوم) **در انتظار تأیید مدیر پروژه**‌اند.
+>
+> **کلید پارتیشن همهٔ رویدادهای پروژه `projectId` است** و `aggregateType` آن‌ها `Project` (رویدادهای سیاست موافقت
+> استثنایند؛ جدول سوم): نیاز، موافقت و
 > گزارش پیشرفت درون مرز Aggregate پروژه‌اند (`docs/03` § ۳٫۳)، و هر مصرف‌کننده دربارهٔ **یک پروژه** استدلال می‌کند.
 > شناسهٔ نیاز در Payload می‌آید (`needId`). این هم‌Partition‌کردن است، نه ترتیب تضمین‌شده (D-027).
 >
@@ -476,20 +482,20 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 > به‌جای `location` فقط `hasArea` دارد. `estimate` با نام `estimatedCostMinor` (رشتهٔ ریالی، یا `null`) می‌آید.
 > تحویل مرتب میان Replicaهای Relay تضمین **نمی‌شود** (D-027، ADR-051 B4).
 
-| رویداد                     | مصرف‌کنندگان                                            | Payload کلیدی                                                                            |
-| -------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `PROJECT_CREATED`          | analytics · audit                                       | `projectId`, `organizationId`, `estimatedCostMinor`, `hasArea`, `createdBy`, `createdAt` |
-| `APPROVAL_REQUESTED`       | **notification (مرجع تأیید)** · audit                   | `approvalId`, `projectId`, `approvalType`, `authority`                                   |
-| `APPROVAL_GRANTED`         | notification · audit · analytics                        | `approvalId`, `grantedBy`, `conditions`                                                  |
-| `APPROVAL_REJECTED`        | notification · audit                                    | `approvalId`, `reason`                                                                   |
-| `TENDER_CREATED`           | audit                                                   | `tenderId`, `projectId`, `procurementNature`                                             |
-| `TENDER_PUBLISHED`         | **notification (پیمانکاران)** · search · analytics      | `tenderId`, `bidOpeningAt`, `bidClosingAt`                                               |
-| `BID_SUBMITTED`            | notification · **audit (مهر زمانی)**                    | `bidId`, `tenderId`, `contractorId`, `submittedAt`                                       |
-| `BIDS_EVALUATED`           | audit · analytics                                       | `tenderId`, `matrix`, `ranking`                                                          |
-| `TENDER_AWARDED`           | **contract (ایجاد پیش‌نویس)** · notification · supplier | `tenderId`, `winnerId`, `amount`, `justification`                                        |
-| `PROJECT_STARTED`          | fleet · analytics                                       | `projectId`, `contractId`                                                                |
-| `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `percentage`, `assetsUsed[]`                                                |
-| `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `completedAt`                                                               |
+| رویداد                     | مصرف‌کنندگان                                            | Payload کلیدی                                                                                                                                                            |
+| -------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PROJECT_CREATED`          | analytics · audit                                       | `projectId`, `organizationId`, `estimatedCostMinor`, `hasArea`, `createdBy`, `createdAt`                                                                                 |
+| `APPROVAL_REQUESTED`       | **notification (مرجع تأیید)** · audit                   | `approvalId`, `projectId`, `organizationId`, `workflowKey`, `round`, `stepOrder`, `authorityOrganizationId`, `authorityRole`, `policyId`, `policyVersion`, `requestedAt` |
+| `APPROVAL_GRANTED`         | notification · audit · analytics                        | `approvalId`, `projectId`, `organizationId`, `workflowKey`, `round`, `stepOrder`, `decidedBy`, `decidedAt`, `hasConditions`                                              |
+| `APPROVAL_REJECTED`        | notification · audit                                    | `approvalId`, `projectId`, `organizationId`, `workflowKey`, `round`, `stepOrder`, `decidedBy`, `decidedAt`                                                               |
+| `TENDER_CREATED`           | audit                                                   | `tenderId`, `projectId`, `procurementNature`                                                                                                                             |
+| `TENDER_PUBLISHED`         | **notification (پیمانکاران)** · search · analytics      | `tenderId`, `bidOpeningAt`, `bidClosingAt`                                                                                                                               |
+| `BID_SUBMITTED`            | notification · **audit (مهر زمانی)**                    | `bidId`, `tenderId`, `contractorId`, `submittedAt`                                                                                                                       |
+| `BIDS_EVALUATED`           | audit · analytics                                       | `tenderId`, `matrix`, `ranking`                                                                                                                                          |
+| `TENDER_AWARDED`           | **contract (ایجاد پیش‌نویس)** · notification · supplier | `tenderId`, `winnerId`, `amount`, `justification`                                                                                                                        |
+| `PROJECT_STARTED`          | fleet · analytics                                       | `projectId`, `organizationId`, `contractId` (تا CON-003 همیشه `null`), `startedBy`, `startedAt`                                                                          |
+| `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `reportId`, `organizationId`, `progressBasisPoints` (۰..۱۰۰۰۰), `assetsUsed[]`, `submittedBy`, `submittedAt`                                                |
+| `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `organizationId`, `completedBy`, `completedAt`                                                                                                              |
 
 **رویدادهای افزودهٔ CON-001** (پذیرفته‌شده به‌دست مدیر پروژه، 2026-09-26). هر تغییر وضعیت پروژه و نیاز باید به
 `audit-service` برسد (`AGENTS.md` S-06، A-08)، و کاتالوگ برای ویرایش پروژه، لغو، و چرخهٔ نیاز رویدادی نداشت — همان
@@ -509,6 +515,19 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 نخست فقط لغو (`to = CANCELLED`)، و در PR دوم ورود به `PENDING_APPROVAL`، `APPROVED` و `CHANGES_REQUESTED`. گذارهای
 `PROJECT_STARTED` و `PROJECT_COMPLETED` رویداد خودشان را دارند و `PROJECT_STATUS_CHANGED` تکراری برایشان منتشر
 نمی‌شود. دلیل لغو یا انصراف روی رویداد نمی‌آید؛ در `project.status_reason` و `project_need.withdrawal_reason` می‌ماند.
+
+**رویدادهای تازهٔ CON-001 PR دوم — در انتظار تأیید مدیر پروژه.** نوشتن، فعال‌سازی و بازنشسته‌کردن سیاست موافقت و
+پیش‌نویس و کنارگذاشتن گزارش پیشرفت تغییر وضعیت‌اند و باید به `audit-service` برسند (S-06). رویدادهای سیاست دربارهٔ
+`ApprovalPolicy` هستند، نه پروژه، و کلیدشان `{organizationId}/{workflowKey}` است: همهٔ نسخه‌های سیاست یک گردش‌کار
+یک جریان‌اند.
+
+| رویداد                                             | مصرف‌کنندگان | Payload کلیدی                                                                                                   |
+| -------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------- |
+| **`APPROVAL_POLICY_CREATED`** (پیشنهادی)           | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `stepCount`, `isSample`, `createdBy`, `createdAt` |
+| **`APPROVAL_POLICY_ACTIVATED`** (پیشنهادی)         | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredPolicyId`, `activatedBy`, `activatedAt`   |
+| **`APPROVAL_POLICY_RETIRED`** (پیشنهادی)           | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredBy`, `retiredAt`                          |
+| **`PROJECT_PROGRESS_REPORT_DRAFTED`** (پیشنهادی)   | audit        | `projectId`, `reportId`, `organizationId`, `draftedBy`, `draftedAt`                                             |
+| **`PROJECT_PROGRESS_REPORT_DISCARDED`** (پیشنهادی) | audit        | `projectId`, `reportId`, `organizationId`, `discardedBy`, `discardedAt`                                         |
 
 ## Contract — `rasta.contract.v1`
 
