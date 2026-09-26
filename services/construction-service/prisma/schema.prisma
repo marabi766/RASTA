@@ -1,0 +1,257 @@
+// construction-service — civil-works projects and their needs (CON-001,
+// docs/04 § 4.12). Configurable approvals and progress reports arrive in the
+// next change; tenders, bids and evaluation are CON-002.
+//
+// Everything here is owned by this service alone (AGENTS.md A-01). There is no
+// foreign key into another service's database: `organizationId` is a plain
+// external identifier whose authority is the verified token.
+//
+// ## Tenant isolation is in the keys, not only in the guard
+//
+// Every tenant table leads its keys and indexes with `organization_id`, and a
+// need references its project by the **pair** (organization_id, project_id) →
+// project(organization_id, id). A need of organization A pointing at a project
+// of organization B is therefore refused by PostgreSQL itself, whatever a
+// future write path forgets (ADR-011, CON-001 design note).
+//
+// ## What this schema deliberately does not model yet
+//
+//   approval, approval_policy   PR 2 of CON-001 (ADR-063, Q-70).
+//   progress_report             PR 2 of CON-001 (Q-72).
+//   tender and everything below it   CON-002.
+//   attachments                 Q-72; a document reference is never stored
+//                               before somebody decides what it may point at.
+//
+// Extensions (postgis, pgcrypto) are provisioned by the postgres init script,
+// not by a migration: the application role is not a superuser, and
+// `CREATE EXTENSION postgis` needs one.
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../src/generated/prisma"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Project
+// ---------------------------------------------------------------------------
+
+/// The project lifecycle (`src/project/project.state-machine.ts`, ADR-063).
+/// The whole lifecycle is declared now; PR 1 reaches DRAFT and CANCELLED only.
+enum ProjectStatus {
+  DRAFT
+  PENDING_APPROVAL
+  CHANGES_REQUESTED
+  APPROVED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+/// A civil-works project — the aggregate root of `ProjectNeed` (docs/03 § 3.3).
+///
+/// The descriptive fields are exactly the ones docs/03 names — title,
+/// operation type, location, scope of work, estimate — plus the operating area
+/// docs/05 § 5.7 declares. The product document is not in the repository, so
+/// nothing else is modelled until it is read (Q-68).
+model Project {
+  id String @id
+
+  organizationId String @map("organization_id")
+
+  title               String
+  /// Free text unless `CONSTRUCTION_OPERATION_TYPES` configures a list (Q-68).
+  operationType       String @map("operation_type")
+  scopeOfWork         String @map("scope_of_work")
+  locationDescription String @map("location_description")
+
+  /// The operating area (docs/05 § 5.7). Written and read through raw SQL —
+  /// Prisma has no geography type — and checked valid by
+  /// `ck_project_area_valid`.
+  area Unsupported("geography(Polygon, 4326)")?
+
+  /// The estimate, in rial minor units (AGENTS.md § 3). Optional while a draft.
+  estimatedCostMinor BigInt? @map("estimated_cost_minor")
+
+  status          ProjectStatus @default(DRAFT)
+  /// Why the project entered its current status; required for CANCELLED.
+  statusReason    String?       @map("status_reason")
+  statusChangedAt DateTime      @map("status_changed_at")
+  statusChangedBy String        @map("status_changed_by")
+
+  createdAt            DateTime @map("created_at")
+  createdBy            String   @map("created_by")
+  createdCorrelationId String   @map("created_correlation_id")
+  updatedAt            DateTime @map("updated_at")
+  updatedBy            String   @map("updated_by")
+
+  /// The compare-and-set token. Every change matches on it and increments it.
+  version Int @default(1)
+
+  needs ProjectNeed[]
+
+  /// The composite target of `project_need`'s tenant-bound foreign key, and
+  /// the index every tenant-scoped id lookup and listing uses.
+  @@unique([organizationId, id], map: "ux_project_org_id")
+  @@index([organizationId, status, id], map: "ix_project_org_status")
+  @@map("project")
+}
+
+// ---------------------------------------------------------------------------
+// ProjectNeed
+// ---------------------------------------------------------------------------
+
+/// `src/project/need.state-machine.ts`.
+enum ProjectNeedStatus {
+  DRAFT
+  SUBMITTED
+  WITHDRAWN
+}
+
+/// One line of what a project requires (Q-68, provisional).
+///
+/// Never deleted: a withdrawn need is the record that it was once part of the
+/// scope, and by whom and why it left.
+model ProjectNeed {
+  id String @id
+
+  organizationId String @map("organization_id")
+  projectId      String @map("project_id")
+
+  /// Bound to the project **and** its tenant. `Restrict`: deleting a project
+  /// must never silently erase the needs recorded against it.
+  project Project @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  title              String
+  description        String
+  /// A decimal quantity, never a float. `unit` is free text (Q-68).
+  quantity           Decimal? @db.Decimal(18, 4)
+  unit               String?
+  estimatedCostMinor BigInt?  @map("estimated_cost_minor")
+
+  status ProjectNeedStatus @default(DRAFT)
+
+  createdAt            DateTime @map("created_at")
+  createdBy            String   @map("created_by")
+  createdCorrelationId String   @map("created_correlation_id")
+  updatedAt            DateTime @map("updated_at")
+  updatedBy            String   @map("updated_by")
+
+  submittedAt DateTime? @map("submitted_at")
+  submittedBy String?   @map("submitted_by")
+
+  withdrawnAt      DateTime? @map("withdrawn_at")
+  withdrawnBy      String?   @map("withdrawn_by")
+  withdrawalReason String?   @map("withdrawal_reason")
+
+  version Int @default(1)
+
+  @@index([organizationId, projectId, status], map: "ix_project_need_org_project_status")
+  @@index([organizationId, projectId, id], map: "ix_project_need_org_project_id")
+  @@map("project_need")
+}
+
+// ---------------------------------------------------------------------------
+// Idempotency (docs/06 § 6.8)
+// ---------------------------------------------------------------------------
+
+enum IdempotencyState {
+  IN_PROGRESS
+  COMPLETED
+}
+
+/// Reservation and stored response for an `Idempotency-Key` on the two create
+/// endpoints. The claim is committed before the work begins, so a concurrent
+/// duplicate finds `IN_PROGRESS` and backs off (the marketplace mechanism).
+model IdempotencyKey {
+  key            String
+  organizationId String @map("organization_id")
+  endpoint       String
+
+  /// SHA-256 of the canonical request. A repeated key with a different body is
+  /// `409 IDEMPOTENCY_KEY_REUSED`, never a silent replay of the wrong response.
+  requestHash String @map("request_hash")
+
+  responseStatus Int?             @map("response_status")
+  responseBody   Json?            @map("response_body")
+  state          IdempotencyState
+
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@id([organizationId, endpoint, key])
+  @@index([expiresAt], map: "ix_idempotency_expires")
+  @@map("idempotency_key")
+}
+
+// ---------------------------------------------------------------------------
+// Platform plumbing — identical in shape to every other service's
+// ---------------------------------------------------------------------------
+
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic        String
+  /// `projectId` for every event this service publishes (docs/07 § 7.7).
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  publishedAt DateTime? @map("published_at")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  /// ADR-050 durable claim. `claimToken` is the only fence.
+  claimToken     String?   @map("claim_token")
+  claimOwner     String?   @map("claim_owner")
+  claimExpiresAt DateTime? @map("claim_expires_at")
+  claimCount     Int       @default(0) @map("claim_count")
+  nextAttemptAt  DateTime? @map("next_attempt_at")
+
+  /// ADR-051 B3: allocated by `EventPublisher.enqueue` inside the caller's
+  /// transaction. `isStreamHead` stays false: head maintenance is B4.
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
+
+  @@index([publishedAt, createdAt], map: "ix_outbox_pending")
+  @@map("outbox_message")
+}
+
+/// ADR-051 — one row per ordered stream (`topic + partitionKey`).
+model OutboxStreamSequence {
+  topic        String
+  partitionKey String @map("partition_key")
+
+  nextSeq      BigInt @default(1) @map("next_seq")
+  publishedSeq BigInt @default(0) @map("published_seq")
+
+  @@id([topic, partitionKey])
+  @@map("outbox_stream_sequence")
+}
+
+/// Consumer idempotency (A-09). No consumer is registered in CON-001: every
+/// event docs/04 § 4.12 lists as consumed feeds CON-002 or the fleet analysis.
+/// The table exists so the first real consumer does not also build plumbing.
+model ProcessedEvent {
+  eventId      String   @map("event_id")
+  consumerName String   @map("consumer_name")
+  processedAt  DateTime @default(now()) @map("processed_at")
+
+  @@id([eventId, consumerName])
+  @@map("processed_event")
+}

@@ -1,0 +1,2442 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/v1/projects": {
+      "post": {
+        "description": "The organization is the one the request acts for; there is no field for it. Fields are the provisional set of docs/24 Q-68 (from docs/03 and docs/05, not the product document). An optional Idempotency-Key makes a retry return the first response. Publishes PROJECT_CREATED in the same transaction. Allowed roles come from configuration (CONSTRUCTION_PROJECT_ROLES to change, plus CONSTRUCTION_PROJECT_READER_ROLES to read; SYSTEM_ADMIN acting for a selected organization always) — docs/24 Q-69. AUDITOR is always refused.",
+        "operationId": "ProjectController_create_v1",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "operationType": {
+                      "type": "string"
+                    },
+                    "locationDescription": {
+                      "type": "string"
+                    },
+                    "hasArea": {
+                      "type": "boolean"
+                    },
+                    "estimatedCostMinor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_APPROVAL",
+                        "CHANGES_REQUESTED",
+                        "APPROVED",
+                        "IN_PROGRESS",
+                        "COMPLETED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "statusReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "statusChangedAt": {
+                      "type": "string"
+                    },
+                    "statusChangedBy": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "updatedBy": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    },
+                    "scopeOfWork": {
+                      "type": "string"
+                    },
+                    "area": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "Polygon"
+                        },
+                        "coordinates": {
+                          "type": "array",
+                          "items": {
+                            "type": "array",
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "type": "number"
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "required": ["type", "coordinates"],
+                      "additionalProperties": false,
+                      "nullable": true
+                    },
+                    "needsSummary": {
+                      "type": "object",
+                      "properties": {
+                        "draft": {
+                          "type": "integer"
+                        },
+                        "submitted": {
+                          "type": "integer"
+                        },
+                        "withdrawn": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": ["draft", "submitted", "withdrawn"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "title",
+                    "operationType",
+                    "locationDescription",
+                    "hasArea",
+                    "estimatedCostMinor",
+                    "status",
+                    "statusReason",
+                    "statusChangedAt",
+                    "statusChangedBy",
+                    "createdAt",
+                    "createdBy",
+                    "updatedAt",
+                    "updatedBy",
+                    "version",
+                    "scopeOfWork",
+                    "area",
+                    "needsSummary"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), or an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Create a project (DRAFT)",
+        "tags": ["projects"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 200,
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «عنوان», not from the product document."
+                  },
+                  "operationType": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 100,
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «نوع عملیات». Free text unless CONSTRUCTION_OPERATION_TYPES configures a list."
+                  },
+                  "scopeOfWork": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 5000,
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «شرح کار»."
+                  },
+                  "locationDescription": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 500,
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «محل», as text."
+                  },
+                  "area": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "Polygon"
+                      },
+                      "coordinates": {
+                        "type": "array",
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "array",
+                            "items": {
+                              "type": "number"
+                            }
+                          },
+                          "minItems": 4,
+                          "maxItems": 1000
+                        },
+                        "minItems": 1,
+                        "maxItems": 20
+                      }
+                    },
+                    "required": ["type", "coordinates"],
+                    "additionalProperties": false,
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/05 § 5.7 (project area, GEOGRAPHY(Polygon, 4326)). GeoJSON, [longitude, latitude]."
+                  },
+                  "estimatedCostMinor": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9]\\d{0,18})$",
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string."
+                  }
+                },
+                "required": ["title", "operationType", "scopeOfWork", "locationDescription"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "description": "A summary view without the polygon. Only the organization the request acts for: a project of any other organization answers 404, never 403, so its existence is not disclosed. Allowed roles come from configuration (CONSTRUCTION_PROJECT_ROLES to change, plus CONSTRUCTION_PROJECT_READER_ROLES to read; SYSTEM_ADMIN acting for a selected organization always) — docs/24 Q-69. AUDITOR is always refused.",
+        "operationId": "ProjectController_list_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "DRAFT",
+                "PENDING_APPROVAL",
+                "CHANGES_REQUESTED",
+                "APPROVED",
+                "IN_PROGRESS",
+                "COMPLETED",
+                "CANCELLED"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "operationType": {
+                            "type": "string"
+                          },
+                          "locationDescription": {
+                            "type": "string"
+                          },
+                          "hasArea": {
+                            "type": "boolean"
+                          },
+                          "estimatedCostMinor": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "DRAFT",
+                              "PENDING_APPROVAL",
+                              "CHANGES_REQUESTED",
+                              "APPROVED",
+                              "IN_PROGRESS",
+                              "COMPLETED",
+                              "CANCELLED"
+                            ]
+                          },
+                          "statusReason": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "statusChangedAt": {
+                            "type": "string"
+                          },
+                          "statusChangedBy": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "createdBy": {
+                            "type": "string"
+                          },
+                          "updatedAt": {
+                            "type": "string"
+                          },
+                          "updatedBy": {
+                            "type": "string"
+                          },
+                          "version": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "organizationId",
+                          "title",
+                          "operationType",
+                          "locationDescription",
+                          "hasArea",
+                          "estimatedCostMinor",
+                          "status",
+                          "statusReason",
+                          "statusChangedAt",
+                          "statusChangedBy",
+                          "createdAt",
+                          "createdBy",
+                          "updatedAt",
+                          "updatedBy",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List the organization's projects, newest first",
+        "tags": ["projects"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/projects/{id}": {
+      "get": {
+        "description": "Only the organization the request acts for: a project of any other organization answers 404, never 403, so its existence is not disclosed. Allowed roles come from configuration (CONSTRUCTION_PROJECT_ROLES to change, plus CONSTRUCTION_PROJECT_READER_ROLES to read; SYSTEM_ADMIN acting for a selected organization always) — docs/24 Q-69. AUDITOR is always refused.",
+        "operationId": "ProjectController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "operationType": {
+                      "type": "string"
+                    },
+                    "locationDescription": {
+                      "type": "string"
+                    },
+                    "hasArea": {
+                      "type": "boolean"
+                    },
+                    "estimatedCostMinor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_APPROVAL",
+                        "CHANGES_REQUESTED",
+                        "APPROVED",
+                        "IN_PROGRESS",
+                        "COMPLETED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "statusReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "statusChangedAt": {
+                      "type": "string"
+                    },
+                    "statusChangedBy": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "updatedBy": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    },
+                    "scopeOfWork": {
+                      "type": "string"
+                    },
+                    "area": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "Polygon"
+                        },
+                        "coordinates": {
+                          "type": "array",
+                          "items": {
+                            "type": "array",
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "type": "number"
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "required": ["type", "coordinates"],
+                      "additionalProperties": false,
+                      "nullable": true
+                    },
+                    "needsSummary": {
+                      "type": "object",
+                      "properties": {
+                        "draft": {
+                          "type": "integer"
+                        },
+                        "submitted": {
+                          "type": "integer"
+                        },
+                        "withdrawn": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": ["draft", "submitted", "withdrawn"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "title",
+                    "operationType",
+                    "locationDescription",
+                    "hasArea",
+                    "estimatedCostMinor",
+                    "status",
+                    "statusReason",
+                    "statusChangedAt",
+                    "statusChangedBy",
+                    "createdAt",
+                    "createdBy",
+                    "updatedAt",
+                    "updatedBy",
+                    "version",
+                    "scopeOfWork",
+                    "area",
+                    "needsSummary"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a project (or a need of a project) that belongs to another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read one project",
+        "tags": ["projects"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Another state answers 422. `null` clears area or estimatedCostMinor. A request that changes nothing commits nothing. Publishes PROJECT_UPDATED with the names of the changed fields only. Only the organization the request acts for: a project of any other organization answers 404, never 403, so its existence is not disclosed.",
+        "operationId": "ProjectController_update_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "operationType": {
+                      "type": "string"
+                    },
+                    "locationDescription": {
+                      "type": "string"
+                    },
+                    "hasArea": {
+                      "type": "boolean"
+                    },
+                    "estimatedCostMinor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_APPROVAL",
+                        "CHANGES_REQUESTED",
+                        "APPROVED",
+                        "IN_PROGRESS",
+                        "COMPLETED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "statusReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "statusChangedAt": {
+                      "type": "string"
+                    },
+                    "statusChangedBy": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "updatedBy": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    },
+                    "scopeOfWork": {
+                      "type": "string"
+                    },
+                    "area": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "Polygon"
+                        },
+                        "coordinates": {
+                          "type": "array",
+                          "items": {
+                            "type": "array",
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "type": "number"
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "required": ["type", "coordinates"],
+                      "additionalProperties": false,
+                      "nullable": true
+                    },
+                    "needsSummary": {
+                      "type": "object",
+                      "properties": {
+                        "draft": {
+                          "type": "integer"
+                        },
+                        "submitted": {
+                          "type": "integer"
+                        },
+                        "withdrawn": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": ["draft", "submitted", "withdrawn"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "title",
+                    "operationType",
+                    "locationDescription",
+                    "hasArea",
+                    "estimatedCostMinor",
+                    "status",
+                    "statusReason",
+                    "statusChangedAt",
+                    "statusChangedBy",
+                    "createdAt",
+                    "createdBy",
+                    "updatedAt",
+                    "updatedBy",
+                    "version",
+                    "scopeOfWork",
+                    "area",
+                    "needsSummary"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a project (or a need of a project) that belongs to another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), or an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): editing a project that is not DRAFT or CHANGES_REQUESTED, cancelling from a state this deployment does not allow, submitting a need twice, editing a submitted need, or changing a withdrawn one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Edit a project while it is DRAFT or CHANGES_REQUESTED",
+        "tags": ["projects"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 200,
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «عنوان», not from the product document."
+                  },
+                  "operationType": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 100,
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «نوع عملیات». Free text unless CONSTRUCTION_OPERATION_TYPES configures a list."
+                  },
+                  "scopeOfWork": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 5000,
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «شرح کار»."
+                  },
+                  "locationDescription": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 500,
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «محل», as text."
+                  },
+                  "area": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "Polygon"
+                      },
+                      "coordinates": {
+                        "type": "array",
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "array",
+                            "items": {
+                              "type": "number"
+                            }
+                          },
+                          "minItems": 4,
+                          "maxItems": 1000
+                        },
+                        "minItems": 1,
+                        "maxItems": 20
+                      }
+                    },
+                    "required": ["type", "coordinates"],
+                    "additionalProperties": false,
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/05 § 5.7 (project area, GEOGRAPHY(Polygon, 4326)). GeoJSON, [longitude, latitude].",
+                    "nullable": true
+                  },
+                  "estimatedCostMinor": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9]\\d{0,18})$",
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string.",
+                    "nullable": true
+                  }
+                },
+                "required": ["expectedVersion"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects/{id}/cancel": {
+      "post": {
+        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Allowed from the states CONSTRUCTION_CANCELLABLE_STATES keeps (Q-69); never from IN_PROGRESS or a terminal state (422). The reason is required and is published on PROJECT_STATUS_CHANGED. No cancellation approval is required in this release (Q-69).",
+        "operationId": "ProjectController_cancel_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "operationType": {
+                      "type": "string"
+                    },
+                    "locationDescription": {
+                      "type": "string"
+                    },
+                    "hasArea": {
+                      "type": "boolean"
+                    },
+                    "estimatedCostMinor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_APPROVAL",
+                        "CHANGES_REQUESTED",
+                        "APPROVED",
+                        "IN_PROGRESS",
+                        "COMPLETED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "statusReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "statusChangedAt": {
+                      "type": "string"
+                    },
+                    "statusChangedBy": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "updatedBy": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    },
+                    "scopeOfWork": {
+                      "type": "string"
+                    },
+                    "area": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "Polygon"
+                        },
+                        "coordinates": {
+                          "type": "array",
+                          "items": {
+                            "type": "array",
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "type": "number"
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "required": ["type", "coordinates"],
+                      "additionalProperties": false,
+                      "nullable": true
+                    },
+                    "needsSummary": {
+                      "type": "object",
+                      "properties": {
+                        "draft": {
+                          "type": "integer"
+                        },
+                        "submitted": {
+                          "type": "integer"
+                        },
+                        "withdrawn": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": ["draft", "submitted", "withdrawn"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "title",
+                    "operationType",
+                    "locationDescription",
+                    "hasArea",
+                    "estimatedCostMinor",
+                    "status",
+                    "statusReason",
+                    "statusChangedAt",
+                    "statusChangedBy",
+                    "createdAt",
+                    "createdBy",
+                    "updatedAt",
+                    "updatedBy",
+                    "version",
+                    "scopeOfWork",
+                    "area",
+                    "needsSummary"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a project (or a need of a project) that belongs to another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), or an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): editing a project that is not DRAFT or CHANGES_REQUESTED, cancelling from a state this deployment does not allow, submitting a need twice, editing a submitted need, or changing a withdrawn one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Cancel a project (terminal)",
+        "tags": ["projects"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 500
+                  }
+                },
+                "required": ["expectedVersion", "reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects/{id}/needs": {
+      "post": {
+        "description": "Only while the project is DRAFT or CHANGES_REQUESTED (422 otherwise). Fields are the provisional set of docs/24 Q-68. An optional Idempotency-Key makes a retry return the first response. Publishes PROJECT_NEED_ADDED. Only the organization the request acts for: a project of any other organization answers 404, never 403, so its existence is not disclosed.",
+        "operationId": "ProjectController_addNeed_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "projectId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "quantity": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "unit": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "estimatedCostMinor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["DRAFT", "SUBMITTED", "WITHDRAWN"]
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "updatedBy": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "withdrawnAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "withdrawnBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "withdrawalReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "projectId",
+                    "title",
+                    "description",
+                    "quantity",
+                    "unit",
+                    "estimatedCostMinor",
+                    "status",
+                    "createdAt",
+                    "createdBy",
+                    "updatedAt",
+                    "updatedBy",
+                    "submittedAt",
+                    "submittedBy",
+                    "withdrawnAt",
+                    "withdrawnBy",
+                    "withdrawalReason",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a project (or a need of a project) that belongs to another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), or an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): editing a project that is not DRAFT or CHANGES_REQUESTED, cancelling from a state this deployment does not allow, submitting a need twice, editing a submitted need, or changing a withdrawn one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Add a need (DRAFT) to an editable project",
+        "tags": ["projects"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 200,
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note: what this line of the project requires."
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "quantity": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9]\\d{0,13})(\\.\\d{1,4})?$",
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. A decimal string, never a float."
+                  },
+                  "unit": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 50,
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. Free text; no unit list is defined."
+                  },
+                  "estimatedCostMinor": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9]\\d{0,18})$",
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string."
+                  }
+                },
+                "required": ["title", "description"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "description": "Only the organization the request acts for: a project of any other organization answers 404, never 403, so its existence is not disclosed.",
+        "operationId": "ProjectController_listNeeds_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["DRAFT", "SUBMITTED", "WITHDRAWN"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "projectId": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "quantity": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "unit": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "estimatedCostMinor": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": ["DRAFT", "SUBMITTED", "WITHDRAWN"]
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "createdBy": {
+                            "type": "string"
+                          },
+                          "updatedAt": {
+                            "type": "string"
+                          },
+                          "updatedBy": {
+                            "type": "string"
+                          },
+                          "submittedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "submittedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "withdrawnAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "withdrawnBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "withdrawalReason": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "version": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "projectId",
+                          "title",
+                          "description",
+                          "quantity",
+                          "unit",
+                          "estimatedCostMinor",
+                          "status",
+                          "createdAt",
+                          "createdBy",
+                          "updatedAt",
+                          "updatedBy",
+                          "submittedAt",
+                          "submittedBy",
+                          "withdrawnAt",
+                          "withdrawnBy",
+                          "withdrawalReason",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a project (or a need of a project) that belongs to another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List a project's needs, oldest first",
+        "tags": ["projects"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/projects/{id}/needs/{needId}": {
+      "patch": {
+        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. A submitted need cannot be edited: withdraw it and add a new one. Publishes PROJECT_NEED_UPDATED.",
+        "operationId": "ProjectController_updateNeed_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "needId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "projectId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "quantity": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "unit": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "estimatedCostMinor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["DRAFT", "SUBMITTED", "WITHDRAWN"]
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "updatedBy": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "withdrawnAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "withdrawnBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "withdrawalReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "projectId",
+                    "title",
+                    "description",
+                    "quantity",
+                    "unit",
+                    "estimatedCostMinor",
+                    "status",
+                    "createdAt",
+                    "createdBy",
+                    "updatedAt",
+                    "updatedBy",
+                    "submittedAt",
+                    "submittedBy",
+                    "withdrawnAt",
+                    "withdrawnBy",
+                    "withdrawalReason",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a project (or a need of a project) that belongs to another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), or an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): editing a project that is not DRAFT or CHANGES_REQUESTED, cancelling from a state this deployment does not allow, submitting a need twice, editing a submitted need, or changing a withdrawn one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Edit a DRAFT need of an editable project",
+        "tags": ["projects"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 200,
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note: what this line of the project requires."
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "quantity": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9]\\d{0,13})(\\.\\d{1,4})?$",
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. A decimal string, never a float.",
+                    "nullable": true
+                  },
+                  "unit": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 50,
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. Free text; no unit list is defined.",
+                    "nullable": true
+                  },
+                  "estimatedCostMinor": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9]\\d{0,18})$",
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string.",
+                    "nullable": true
+                  }
+                },
+                "required": ["expectedVersion"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects/{id}/needs/{needId}/submit": {
+      "post": {
+        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Publishes PROJECT_NEED_SUBMITTED.",
+        "operationId": "ProjectController_submitNeed_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "needId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "projectId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "quantity": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "unit": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "estimatedCostMinor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["DRAFT", "SUBMITTED", "WITHDRAWN"]
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "updatedBy": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "withdrawnAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "withdrawnBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "withdrawalReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "projectId",
+                    "title",
+                    "description",
+                    "quantity",
+                    "unit",
+                    "estimatedCostMinor",
+                    "status",
+                    "createdAt",
+                    "createdBy",
+                    "updatedAt",
+                    "updatedBy",
+                    "submittedAt",
+                    "submittedBy",
+                    "withdrawnAt",
+                    "withdrawnBy",
+                    "withdrawalReason",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a project (or a need of a project) that belongs to another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), or an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): editing a project that is not DRAFT or CHANGES_REQUESTED, cancelling from a state this deployment does not allow, submitting a need twice, editing a submitted need, or changing a withdrawn one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Submit a need into the project scope (DRAFT → SUBMITTED)",
+        "tags": ["projects"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  }
+                },
+                "required": ["expectedVersion"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects/{id}/needs/{needId}/withdraw": {
+      "post": {
+        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. The reason is required and is published on PROJECT_NEED_WITHDRAWN.",
+        "operationId": "ProjectController_withdrawNeed_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "needId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "projectId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "quantity": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "unit": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "estimatedCostMinor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["DRAFT", "SUBMITTED", "WITHDRAWN"]
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "updatedBy": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "withdrawnAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "withdrawnBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "withdrawalReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "projectId",
+                    "title",
+                    "description",
+                    "quantity",
+                    "unit",
+                    "estimatedCostMinor",
+                    "status",
+                    "createdAt",
+                    "createdBy",
+                    "updatedAt",
+                    "updatedBy",
+                    "submittedAt",
+                    "submittedBy",
+                    "withdrawnAt",
+                    "withdrawnBy",
+                    "withdrawalReason",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a project (or a need of a project) that belongs to another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), or an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): editing a project that is not DRAFT or CHANGES_REQUESTED, cancelling from a state this deployment does not allow, submitting a need twice, editing a submitted need, or changing a withdrawn one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Withdraw a need (terminal)",
+        "tags": ["projects"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 500
+                  }
+                },
+                "required": ["expectedVersion", "reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "info": {
+    "title": "Rasta — Construction Service",
+    "description": "Civil-works projects and their needs (CON-001, first release). A project is created as DRAFT, edited while DRAFT or CHANGES_REQUESTED, and may be cancelled with a stated reason; needs are drafted, submitted into the project scope, or withdrawn. Every change is a compare-and-set on `version` and publishes its event on rasta.construction.v1 in the same transaction (ADR-063). Nothing is approved, started or completed in this release: configurable approvals — whose authorities come from approval_policy rows, never from code, and which never create a legal authority — and progress reports arrive in the next. The project fields are a provisional set taken from docs/03 and docs/05 because the product document is not in the repository (docs/24 Q-68); roles and cancellable states are configuration (Q-69). Every read and write is confined to the organization the request acts for.",
+    "version": "0.1.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "type": "http"
+      }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "correlationId": {
+            "type": "string"
+          },
+          "details": {
+            "type": "array",
+            "items": {}
+          }
+        },
+        "required": ["code", "message"],
+        "additionalProperties": false
+      }
+    }
+  }
+}
