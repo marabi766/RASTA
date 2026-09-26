@@ -17,11 +17,12 @@ import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
  * | same key, different body           | `409 IDEMPOTENCY_KEY_REUSED`          |
  * | key currently in flight            | `409 CONFLICT`                        |
  *
- * Used by the two create endpoints (`POST /v1/projects`,
- * `POST /v1/projects/{id}/needs`), where a retried request would otherwise
- * create a second project or need. The key is **optional** there: the gateway
- * does not require it for `projects`, and a request without one simply is not
- * deduplicated. Every other command carries `expectedVersion`, and a retry of
+ * Used by the four create endpoints (`POST /v1/projects`,
+ * `POST /v1/projects/{id}/needs`, `POST /v1/projects/{id}/progress` and
+ * `POST /v1/approval-policies`), where a retried request would otherwise
+ * create a second project, need, progress draft or policy version. The key is
+ * **optional** there: the gateway does not require it for these prefixes, and
+ * a request without one simply is not deduplicated. Every other command carries `expectedVersion`, and a retry of
  * one that already committed is refused by the compare-and-set instead.
  *
  * ## Two transactions, and why the second is the domain's own

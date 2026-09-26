@@ -746,6 +746,7 @@ export const EXPECTED = {
       'ck_approval_authority_not_oversight',
       'ck_progress_basis_points_range',
       'ck_progress_submission_complete',
+      'ck_progress_submission_sequence_positive',
       'ck_progress_discard_complete',
       'approval_organization_id_project_id_fkey',
       'approval_organization_id_policy_id_fkey',

@@ -75,13 +75,16 @@ function roleList(name: string, options: { min: number }) {
  *                                       means only those values. The platform
  *                                       ships no list of its own.
  *
- *   CONSTRUCTION_POLICY_FOUR_EYES       Q-70 (7), decided. Whether the SYSTEM_ADMIN
- *                                       who approves a policy must differ from
- *                                       its author and submitter. Default
- *                                       `true`. Who writes a policy is not
- *                                       configurable: the owner decided it
- *                                       (UNION_ADMIN for its union's
- *                                       organizations, SYSTEM_ADMIN for any).
+ *   CONSTRUCTION_POLICY_FOUR_EYES       PROVISIONAL, pending the owner (Q-70):
+ *                                       whether this may be switched off is
+ *                                       still open. Default `true`: the
+ *                                       SYSTEM_ADMIN who approves a policy
+ *                                       differs from its author and submitter.
+ *                                       `false` lets a SYSTEM_ADMIN approve its
+ *                                       own policy only — never a union's —
+ *                                       and logs a WARN at startup. Who writes
+ *                                       a policy is not configurable: the owner
+ *                                       decided that (Q-70 (7)).
  *   ORGANIZATION_SERVICE_URL            Where the union hierarchy is confirmed.
  *   CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS
  *                                       How long that confirmation may take;

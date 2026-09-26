@@ -172,10 +172,15 @@ export class ProjectAccess {
     return { actor: author.actor, role: author.role };
   }
 
-  /** Retiring: the author's organization, or any platform administrator. */
+  /**
+   * Retiring: any platform administrator — who, like approving, needs no
+   * selected organization (the policy names its own) — or a union
+   * administrator acting for the organization that wrote it.
+   */
   assertCanRetirePolicy(policy: PolicyOwnership): { actor: string } {
+    if (getContext().roles.includes(SUPER_ROLE)) return this.assertPlatformAdministrator();
     const author = this.refuseUnlessPolicyVisible(policy, () => this.assertPolicyAuthor());
-    if (author.role !== SUPER_ROLE && author.organizationId !== policy.authorOrganizationId) {
+    if (author.organizationId !== policy.authorOrganizationId) {
       throw RastaError.forbidden('Only the organization that wrote this policy may retire it');
     }
     return { actor: author.actor };

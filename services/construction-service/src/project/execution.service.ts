@@ -15,6 +15,7 @@ import { ProjectService } from './project.service';
 import { assertProjectTransition } from './project.state-machine';
 import type { ProjectView } from './dto';
 import type { ProjectCommandDto } from '../approval/dto';
+import { latestSubmitted } from '../progress/progress.service';
 
 /**
  * StartProject and CompleteProject (Q-71, provisional).
@@ -94,6 +95,11 @@ export class ExecutionService {
 
   async complete(projectId: string, dto: ProjectCommandDto): Promise<ProjectView> {
     const { organizationId, actor } = this.access.assertCanWrite();
+    // Re-confirm a union-written completion policy before using it (Q-70 (7)).
+    const confirmedPolicyId = await this.approvals.confirmGoverningPolicy(
+      organizationId,
+      'project.completion',
+    );
 
     await this.prisma.transaction(async (tx) => {
       const at = await transactionNow(tx);
@@ -101,10 +107,7 @@ export class ExecutionService {
       if (locked.version !== dto.expectedVersion) throw this.conflict(projectId);
       assertProjectTransition(projectId, locked.status, 'COMPLETED');
 
-      const latest = await tx.progressReport.findFirst({
-        where: { projectId, status: 'SUBMITTED' },
-        orderBy: [{ submittedAt: 'desc' }, { id: 'desc' }],
-      });
+      const latest = await latestSubmitted(tx, projectId);
       if (!latest || latest.progressBasisPoints < FULL_PROGRESS_BASIS_POINTS) {
         throw RastaError.businessRule(
           'A project completes only when its latest submitted progress report says 100%',
@@ -126,6 +129,7 @@ export class ExecutionService {
       const outcome = await this.approvals.openRound(tx, {
         organizationId,
         projectId,
+        confirmedPolicyId,
         workflowKey: 'project.completion',
         estimate: project.estimatedCostMinor,
         round: project.approvalRound + 1,

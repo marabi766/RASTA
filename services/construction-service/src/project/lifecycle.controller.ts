@@ -1,4 +1,14 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { zodPipe } from '@rasta/nest-common';
 import { ApprovalService } from '../approval/approval.service';
@@ -18,6 +28,7 @@ import {
   type ProgressTransitionDto,
 } from '../progress/dto';
 import { ExecutionService } from './execution.service';
+import { parseIdempotencyKey } from './project.controller';
 
 /**
  * The project lifecycle beyond drafting (CON-001 PR 2): approval, start,
@@ -96,13 +107,16 @@ export class ProjectLifecycleController {
   @ApiOperation({
     summary: 'Draft a progress report (project IN_PROGRESS)',
     description:
-      'Progress in basis points (10000 = 100%). Publishes PROJECT_PROGRESS_REPORT_DRAFTED.',
+      'Progress in basis points (10000 = 100%). assetsUsed takes platform asset identifiers ' +
+      'only, and is stored but not published. An optional Idempotency-Key makes a retry return ' +
+      'the first draft. Publishes PROJECT_PROGRESS_REPORT_DRAFTED.',
   })
   async draftProgress(
     @Param('id') id: string,
     @Body(zodPipe(createProgressSchema)) dto: CreateProgressDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.progress.draft(id, dto);
+    return this.progress.draft(id, dto, parseIdempotencyKey(idempotencyKey));
   }
 
   @Get(':id/progress')

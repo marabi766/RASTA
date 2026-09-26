@@ -494,8 +494,14 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `BIDS_EVALUATED`           | audit · analytics                                       | `tenderId`, `matrix`, `ranking`                                                                                                                                          |
 | `TENDER_AWARDED`           | **contract (ایجاد پیش‌نویس)** · notification · supplier | `tenderId`, `winnerId`, `amount`, `justification`                                                                                                                        |
 | `PROJECT_STARTED`          | fleet · analytics                                       | `projectId`, `organizationId`, `contractId` (تا CON-003 همیشه `null`), `startedBy`, `startedAt`                                                                          |
-| `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `reportId`, `organizationId`, `progressBasisPoints` (۰..۱۰۰۰۰), `assetsUsed[]`, `submittedBy`, `submittedAt`                                                |
+| `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `reportId`, `organizationId`, `progressBasisPoints` (۰..۱۰۰۰۰), `submittedBy`, `submittedAt` — **بدون `assetsUsed`** (پایین‌تر)                             |
 | `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `organizationId`, `completedBy`, `completedAt`                                                                                                              |
+
+**`assetsUsed` روی Kafka نمی‌آید** (بازبینی Codex روی #122). شناسه‌های دارایی گزارش پیشرفت فقط در قالب شناسهٔ
+دارایی پلتفرم (`AST_<ULID>`، `assetIdSchema` در `@rasta/contracts`) پذیرفته می‌شوند — هر چیز دیگر `400` — و همراه
+گزارش در پایگاه داده می‌مانند؛ ولی تا مالکیتشان در برابر `asset-service` سنجیده نشود، روی `rasta.construction.v1`
+منتشر نمی‌شوند (`.strict()` فیلد را رد می‌کند). مصرف‌کننده هرگز ادعای سنجیده‌نشدهٔ «پروژهٔ P از دارایی A استفاده کرد»
+را نمی‌خواند.
 
 **رویدادهای افزودهٔ CON-001** (پذیرفته‌شده به‌دست مدیر پروژه، 2026-09-26). هر تغییر وضعیت پروژه و نیاز باید به
 `audit-service` برسد (`AGENTS.md` S-06، A-08)، و کاتالوگ برای ویرایش پروژه، لغو، و چرخهٔ نیاز رویدادی نداشت — همان

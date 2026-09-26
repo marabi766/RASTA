@@ -118,6 +118,7 @@ CREATE TABLE "progress_report" (
     "submitted_by" TEXT,
     "discarded_at" TIMESTAMP(3),
     "discarded_by" TEXT,
+    "submission_sequence" INTEGER,
     "version" INTEGER NOT NULL DEFAULT 1,
 
     CONSTRAINT "progress_report_pkey" PRIMARY KEY ("id")
@@ -146,6 +147,9 @@ CREATE UNIQUE INDEX "ux_approval_round_step" ON "approval"("organization_id", "p
 
 -- CreateIndex
 CREATE INDEX "ix_progress_org_project_status" ON "progress_report"("organization_id", "project_id", "status", "id");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "ux_progress_submission_sequence" ON "progress_report"("organization_id", "project_id", "submission_sequence");
 
 -- AddForeignKey
 ALTER TABLE "approval_policy_step" ADD CONSTRAINT "approval_policy_step_organization_id_policy_id_fkey" FOREIGN KEY ("organization_id", "policy_id") REFERENCES "approval_policy"("organization_id", "id") ON DELETE RESTRICT ON UPDATE RESTRICT;
@@ -282,8 +286,14 @@ ALTER TABLE "progress_report" ADD CONSTRAINT "ck_progress_assets_bounded"
   CHECK (cardinality("assets_used") <= 100);
 
 ALTER TABLE "progress_report" ADD CONSTRAINT "ck_progress_submission_complete"
-  CHECK (num_nonnulls("submitted_at", "submitted_by") IN (0, 2)
+  CHECK (num_nonnulls("submitted_at", "submitted_by", "submission_sequence") IN (0, 3)
          AND (("status" = 'SUBMITTED') = ("submitted_at" IS NOT NULL)));
+
+-- The order of a project's submissions is the sequence assigned under the
+-- project row lock, never the clock: two submissions in the same millisecond
+-- still have a first and a second (ux_progress_submission_sequence).
+ALTER TABLE "progress_report" ADD CONSTRAINT "ck_progress_submission_sequence_positive"
+  CHECK ("submission_sequence" IS NULL OR "submission_sequence" >= 1);
 
 ALTER TABLE "progress_report" ADD CONSTRAINT "ck_progress_discard_complete"
   CHECK (num_nonnulls("discarded_at", "discarded_by") IN (0, 2)

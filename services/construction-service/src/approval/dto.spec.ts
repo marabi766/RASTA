@@ -1,3 +1,4 @@
+import { ulid } from 'ulid';
 import { createPolicySchema, decisionSchema, inboxQuerySchema } from './dto';
 import { createProgressSchema } from '../progress/dto';
 
@@ -124,12 +125,26 @@ describe('progress', () => {
     }
   });
 
-  it('refuses a duplicated asset and more than a hundred', () => {
+  it('accepts only platform asset identifiers — never free text', () => {
+    const asset = `AST_${ulid()}`;
     expect(
-      createProgressSchema.safeParse({ progressBasisPoints: 1, assetsUsed: ['AST_1', 'AST_1'] })
+      createProgressSchema.safeParse({ progressBasisPoints: 1, assetsUsed: [asset, 'AST-SEED-01'] })
+        .success,
+    ).toBe(true);
+    for (const bad of ['the grader', 'AST_1', `DRV_${ulid()}`, `ast_${ulid()}`, '', `${asset} `]) {
+      expect(
+        createProgressSchema.safeParse({ progressBasisPoints: 1, assetsUsed: [bad] }).success,
+      ).toBe(false);
+    }
+  });
+
+  it('refuses a duplicated asset and more than a hundred', () => {
+    const asset = `AST_${ulid()}`;
+    expect(
+      createProgressSchema.safeParse({ progressBasisPoints: 1, assetsUsed: [asset, asset] })
         .success,
     ).toBe(false);
-    const many = Array.from({ length: 101 }, (_, i) => `AST_${i}`);
+    const many = Array.from({ length: 101 }, () => `AST_${ulid()}`);
     expect(
       createProgressSchema.safeParse({ progressBasisPoints: 1, assetsUsed: many }).success,
     ).toBe(false);

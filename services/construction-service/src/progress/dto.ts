@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cursorPaginationSchema } from '@rasta/contracts';
+import { assetIdSchema, cursorPaginationSchema } from '@rasta/contracts';
 import { PROGRESS_STATES } from './progress.state-machine';
 
 /**
@@ -25,8 +25,14 @@ export const createProgressSchema = z
     machinery: note.optional(),
     labor: note.optional(),
     obstacles: note.optional(),
-    /** Asset identifiers as reported; stored, never resolved against fleet. */
-    assetsUsed: z.array(z.string().trim().min(1).max(64)).max(MAX_ASSETS_PER_REPORT).default([]),
+    /**
+     * Platform asset identifiers only (`AST_<ULID>`, `@rasta/contracts`'s
+     * `assetIdSchema`); anything else is a 400, so no free text can ride in
+     * here. Stored with the report. Not yet checked against asset-service for
+     * ownership, and therefore **not** published on `rasta.construction.v1`
+     * until it is.
+     */
+    assetsUsed: z.array(assetIdSchema).max(MAX_ASSETS_PER_REPORT).default([]),
   })
   .strict()
   .refine((value) => new Set(value.assetsUsed).size === value.assetsUsed.length, {
@@ -58,6 +64,8 @@ export const progressViewSchema = z
     createdBy: z.string(),
     submittedAt: z.string().nullable(),
     submittedBy: z.string().nullable(),
+    /** 1, 2, 3… — the order of this project's submissions (null until submitted). */
+    submissionSequence: z.number().int().nullable(),
     discardedAt: z.string().nullable(),
     discardedBy: z.string().nullable(),
     version: z.number().int(),

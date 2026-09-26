@@ -237,7 +237,12 @@ export const projectStartedPayload = z
 /**
  * A progress report was submitted. The catalogue's `percentage` is carried as
  * `progressBasisPoints` (0..10000), an integer, never a float (AGENTS.md § 3).
- * `assetsUsed` are identifiers as reported, not resolved against fleet.
+ *
+ * `assetsUsed` is deliberately **not** here (Codex review of #122): the
+ * identifiers are stored with the report, but their ownership is not yet
+ * verified against asset-service, so they are not published — a consumer
+ * must never read an unverified claim that project P used asset A. `.strict()`
+ * refuses the field.
  */
 export const projectProgressUpdatedPayload = z
   .object({
@@ -245,7 +250,6 @@ export const projectProgressUpdatedPayload = z
     reportId: identifier,
     organizationId: identifier,
     progressBasisPoints: z.number().int().min(0).max(10_000),
-    assetsUsed: z.array(identifier).max(100),
     submittedBy: identifier,
     submittedAt: isoTimestamp,
   })

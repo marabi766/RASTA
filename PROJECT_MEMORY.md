@@ -2671,6 +2671,11 @@ Point، نزولی‌نشدنی مگر با پیکربندی)، پایان با 
 - `organization-service` نقش `UNION_ADMIN` را اپراتور پلتفرم می‌شمارد
   (`services/organization-service/src/organization/organization.service.ts:32`) — برای بررسی مدیر پروژه در برابر
   Q-43؛ construction به آن تکیه نمی‌کند (پرسش سلسله‌مراتب مستقل از آن پاسخ می‌گیرد).
+- `CONSTRUCTION_POLICY_FOUR_EYES` **موقت، در انتظار مالک** است (خاموش‌شدنش تصمیم نشده)؛ خاموش فقط خودتأییدی سیاستِ
+  خودِ `SYSTEM_ADMIN` را مجاز می‌کند و در راه‌اندازی WARN می‌دهد.
+- رابطهٔ اتحادیه→سازمان هنگام گشودن هر دور موافقت دوباره پرسیده می‌شود، ولی پنجرهٔ میان این پاسخ و Commit باز است؛
+  تعلیق رویدادمحور سیاست با `ORGANIZATION_MOVED` کار بعدی است (ADR-063).
+- `assetsUsed` گزارش پیشرفت منتشر نمی‌شود تا سنجش مالکیت دارایی در برابر `asset-service` ساخته شود.
 - ترتیب تحویل رویداد میان Replicaهای Relay تضمین نشده (D-027، ADR-051 B4) — مشترک با همهٔ سرویس‌ها.
 - همان الگوی Idempotency «تکمیل پس از Commit» در `marketplace-service` و `economic-service` هنوز هست (این PR فقط
   construction را اصلاح کرد).

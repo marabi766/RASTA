@@ -1,3 +1,4 @@
+import { ulid } from 'ulid';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import {
   activePolicy,
@@ -115,18 +116,19 @@ describe('execution, progress and completion', () => {
     it('drafts, submits and publishes PROJECT_PROGRESS_UPDATED in basis points', async () => {
       const a = org();
       const project = await startedProject(a);
+      const assets = [`AST_${ulid()}`, `AST_${ulid()}`];
       const draft = await asAdmin(a, () =>
         w.progress.draft(project.id, {
           progressBasisPoints: 2500,
           materials: 'Gravel delivered',
           obstacles: 'Rain on two days',
-          assetsUsed: ['AST_1', 'AST_2'],
+          assetsUsed: assets,
         }),
       );
       expect(draft).toMatchObject({
         status: 'DRAFT',
         progressBasisPoints: 2500,
-        assetsUsed: ['AST_1', 'AST_2'],
+        assetsUsed: assets,
       });
 
       const submitted = await asAdmin(a, () =>
@@ -137,11 +139,11 @@ describe('execution, progress and completion', () => {
       const row = (await outboxFor(w.prisma, a)).find(
         (candidate) => candidate.eventName === 'PROJECT_PROGRESS_UPDATED',
       )!;
-      expect(eventEnvelopeSchema.parse(row.payload).payload).toMatchObject({
-        reportId: draft.id,
-        progressBasisPoints: 2500,
-        assetsUsed: ['AST_1', 'AST_2'],
-      });
+      const published = eventEnvelopeSchema.parse(row.payload).payload;
+      expect(published).toMatchObject({ reportId: draft.id, progressBasisPoints: 2500 });
+      // Stored with the report, never published until asset-service verifies ownership.
+      expect(published).not.toHaveProperty('assetsUsed');
+      expect(JSON.stringify(row.payload)).not.toContain(assets[0]);
       expect(JSON.stringify(row.payload)).not.toContain('Rain');
     });
 
@@ -179,6 +181,76 @@ describe('execution, progress and completion', () => {
       } finally {
         await lenient.close();
       }
+    });
+
+    it('orders submissions by the sequence taken under the project lock, never the clock', async () => {
+      const a = org();
+      const project = await startedProject(a);
+      // Created first, submitted second — the reverse of creation order.
+      const earlier = await asAdmin(a, () =>
+        w.progress.draft(project.id, { progressBasisPoints: 4000, assetsUsed: [] }),
+      );
+      const later = await asAdmin(a, () =>
+        w.progress.draft(project.id, { progressBasisPoints: 3000, assetsUsed: [] }),
+      );
+      const first = await asAdmin(a, () =>
+        w.progress.submit(project.id, later.id, { expectedVersion: 1 }),
+      );
+      const second = await asAdmin(a, () =>
+        w.progress.submit(project.id, earlier.id, { expectedVersion: 1 }),
+      );
+      expect([first.submissionSequence, second.submissionSequence]).toEqual([1, 2]);
+
+      // The same millisecond: the clock can no longer tell them apart, and the
+      // id (creation order) would name the wrong one.
+      await w.prisma.client.$executeRawUnsafe(
+        `UPDATE progress_report SET submitted_at = $1 WHERE id IN ($2, $3)`,
+        new Date('2026-09-26T12:00:00.000Z'),
+        earlier.id,
+        later.id,
+      );
+
+      // The last submission says 40%; 35% is a decrease, whatever the ids say.
+      const dip = await asAdmin(a, () =>
+        w.progress.draft(project.id, { progressBasisPoints: 3500, assetsUsed: [] }),
+      );
+      await expect(
+        asAdmin(a, () => w.progress.submit(project.id, dip.id, { expectedVersion: 1 })),
+      ).rejects.toThrow(/last submitted report says 4000/);
+      const next = await asAdmin(a, () =>
+        w.progress.draft(project.id, { progressBasisPoints: 4000, assetsUsed: [] }),
+      );
+      await expect(
+        asAdmin(a, () => w.progress.submit(project.id, next.id, { expectedVersion: 1 })),
+      ).resolves.toMatchObject({ submissionSequence: 3 });
+    });
+
+    it('drafting with an Idempotency-Key: a retry returns the first draft, a new body is refused', async () => {
+      const a = org();
+      const project = await startedProject(a);
+      const body = { progressBasisPoints: 1500, assetsUsed: [] };
+      const first = await asAdmin(a, () => w.progress.draft(project.id, body, 'draft-key'));
+      const again = await asAdmin(a, () => w.progress.draft(project.id, body, 'draft-key'));
+      expect(again).toEqual(first);
+
+      await expect(
+        asAdmin(a, () =>
+          w.progress.draft(project.id, { progressBasisPoints: 1600, assetsUsed: [] }, 'draft-key'),
+        ),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+
+      // The same body for another project is another request, too.
+      const other = await startedProject(a);
+      await expect(
+        asAdmin(a, () => w.progress.draft(other.id, body, 'draft-key')),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+
+      const page = await asAdmin(a, () => w.progress.list(project.id, { limit: 25 }));
+      expect(page.items.map((item) => item.id)).toEqual([first.id]);
+      const drafted = (await outboxFor(w.prisma, a)).filter(
+        (row) => row.eventName === 'PROJECT_PROGRESS_REPORT_DRAFTED',
+      );
+      expect(drafted).toHaveLength(1);
     });
 
     it('refuses progress outside IN_PROGRESS', async () => {
@@ -223,6 +295,31 @@ describe('execution, progress and completion', () => {
       expect((await outboxFor(w.prisma, a)).map((row) => row.eventName)).toContain(
         'PROJECT_COMPLETED',
       );
+    });
+
+    it('completes on the last submission by sequence, even when two share a millisecond', async () => {
+      const a = org();
+      const project = await startedProject(a);
+      const full = await asAdmin(a, () =>
+        w.progress.draft(project.id, { progressBasisPoints: 10_000, assetsUsed: [] }),
+      );
+      const partial = await asAdmin(a, () =>
+        w.progress.draft(project.id, { progressBasisPoints: 9000, assetsUsed: [] }),
+      );
+      // 90% (created second) is submitted first, then 100% (created first).
+      await asAdmin(a, () => w.progress.submit(project.id, partial.id, { expectedVersion: 1 }));
+      await asAdmin(a, () => w.progress.submit(project.id, full.id, { expectedVersion: 1 }));
+      await w.prisma.client.$executeRawUnsafe(
+        `UPDATE progress_report SET submitted_at = $1 WHERE id IN ($2, $3)`,
+        new Date('2026-09-26T12:00:00.000Z'),
+        full.id,
+        partial.id,
+      );
+
+      const current = await asAdmin(a, () => w.projects.get(project.id));
+      await expect(
+        asAdmin(a, () => w.execution.complete(project.id, { expectedVersion: current.version })),
+      ).resolves.toMatchObject({ status: 'COMPLETED' });
     });
 
     it('refuses to complete below 100%, or with no report at all', async () => {

@@ -37,7 +37,7 @@ function within(scope: string, id: string): boolean {
   return false;
 }
 
-type Behaviour = 'contract' | 'error' | 'wrong-body' | 'slow';
+type Behaviour = 'contract' | 'error' | 'wrong-body' | 'slow' | 'stalled-body' | 'oversized';
 
 describe('OrganizationDirectory against the organization-service contract', () => {
   let server: Server;
@@ -55,6 +55,17 @@ describe('OrganizationDirectory against the organization-service contract', () =
           correlationId: req.headers['x-correlation-id'] as string | undefined,
         });
         if (behaviour === 'slow') return; // never answers
+        if (behaviour === 'stalled-body') {
+          // Headers and half a body, then nothing: the deadline must cover the read.
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.write('{"id":');
+          return;
+        }
+        if (behaviour === 'oversized') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 'ORG-DEHYARI', padding: 'x'.repeat(4096) }));
+          return;
+        }
         if (behaviour === 'error') {
           res.writeHead(500).end();
           return;
@@ -161,6 +172,20 @@ describe('OrganizationDirectory against the organization-service contract', () =
     await expect(
       asked(() => directory(baseUrl, '150').isWithin('ORG-UNION', 'ORG-DEHYARI')),
     ).rejects.toMatchObject({ code: 'UPSTREAM_TIMEOUT' });
+  });
+
+  it('fails closed on a 200 whose body stalls — the deadline covers the body read (504)', async () => {
+    behaviour = 'stalled-body';
+    await expect(
+      asked(() => directory(baseUrl, '150').isWithin('ORG-UNION', 'ORG-DEHYARI')),
+    ).rejects.toMatchObject({ code: 'UPSTREAM_TIMEOUT' });
+  });
+
+  it('fails closed on a body larger than { id } allows, even one naming the organization (503)', async () => {
+    behaviour = 'oversized';
+    await expect(
+      asked(() => directory().isWithin('ORG-UNION', 'ORG-DEHYARI')),
+    ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
   });
 
   it('fails closed when organization-service cannot be reached (503)', async () => {

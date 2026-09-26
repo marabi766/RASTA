@@ -362,9 +362,13 @@ model ProgressReport {
   submittedBy          String?   @map("submitted_by")
   discardedAt          DateTime? @map("discarded_at")
   discardedBy          String?   @map("discarded_by")
+  /// 1, 2, 3… per project, assigned at submission under the project row lock.
+  /// The order of submissions — never `submittedAt`, which can tie.
+  submissionSequence   Int?      @map("submission_sequence")
 
   version Int @default(1)
 
+  @@unique([organizationId, projectId, submissionSequence], map: "ux_progress_submission_sequence")
   @@index([organizationId, projectId, status, id], map: "ix_progress_org_project_status")
   @@map("progress_report")
 }

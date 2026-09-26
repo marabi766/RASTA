@@ -104,6 +104,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     events,
     access,
     env,
+    hierarchy as unknown as OrganizationDirectory,
   );
   return {
     prisma,
@@ -120,6 +121,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       access,
       hierarchy as unknown as OrganizationDirectory,
       env,
+      idempotency,
     ),
     hierarchy,
     execution: new ExecutionService(
@@ -132,7 +134,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       access,
       env,
     ),
-    progress: new ProgressService(prisma, repository, events, access, env),
+    progress: new ProgressService(prisma, repository, events, access, env, idempotency),
     close: () => prisma.onModuleDestroy(),
   };
 }

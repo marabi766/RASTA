@@ -5,7 +5,8 @@ import { ulid } from 'ulid';
 import type { Approval } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { EventPublisher } from '../events/publisher';
-import { ProjectAccess, assertOwnProject } from '../access/access';
+import { ProjectAccess, UNION_ROLE, assertOwnProject } from '../access/access';
+import { OrganizationDirectory } from '../organization/organization-directory';
 import { transactionNow } from '../shared/clock';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
@@ -69,11 +70,16 @@ export class ApprovalService {
     private readonly events: EventPublisher,
     private readonly access: ProjectAccess,
     @Inject(ENV) private readonly env: ConstructionEnv,
+    private readonly directory: OrganizationDirectory,
   ) {}
 
   /** RequestApproval: DRAFT | CHANGES_REQUESTED → PENDING_APPROVAL. */
   async request(projectId: string, dto: ProjectCommandDto): Promise<ProjectView> {
     const { organizationId, actor } = this.access.assertCanWrite();
+    const confirmedPolicyId = await this.confirmGoverningPolicy(
+      organizationId,
+      'project.execution',
+    );
 
     await this.prisma.transaction(async (tx) => {
       const at = await transactionNow(tx);
@@ -88,6 +94,7 @@ export class ApprovalService {
       const outcome = await this.openRound(tx, {
         organizationId,
         projectId,
+        confirmedPolicyId,
         workflowKey: 'project.execution',
         estimate: project.estimatedCostMinor,
         round: project.approvalRound + 1,
@@ -268,6 +275,46 @@ export class ApprovalService {
   // -- the round machinery, shared with completion ---------------------------
 
   /**
+   * Q-70 (7): a policy is re-confirmed when it is **used**, not only when it
+   * was written, submitted and approved. If a union wrote the policy in force
+   * for `organizationId`, organization-service is asked again whether that
+   * organization is still the union's or beneath it; "no" refuses (403) and
+   * "could not confirm" refuses (503/504) — no round is opened on a relation
+   * that no longer holds. A platform administrator's policy needs no
+   * hierarchy.
+   *
+   * Asked **before** the project transaction, so no row lock is held across a
+   * network call. The id returned is pinned into `openRound`: if another
+   * policy came into force in between, the round is not opened on it (409).
+   * The window between this answer and the commit is the documented residual
+   * race (ADR-063); event-driven suspension on `ORGANIZATION_MOVED` is the
+   * follow-up that closes it.
+   *
+   * Returns the id of the confirmed policy, or `null` when none is in force
+   * (the caller's 422 / "none configured" path, unchanged).
+   */
+  async confirmGoverningPolicy(
+    organizationId: string,
+    workflowKey: WorkflowKey,
+  ): Promise<string | null> {
+    const policy = await this.approvals.findActivePolicyOf(
+      this.prisma.client,
+      organizationId,
+      workflowKey,
+    );
+    if (!policy) return null;
+    if (policy.authorRole === UNION_ROLE) {
+      const within = await this.directory.isWithin(policy.authorOrganizationId, organizationId);
+      if (!within) {
+        throw RastaError.forbidden(
+          'The union that wrote the approval policy in force no longer governs this organization',
+        );
+      }
+    }
+    return policy.id;
+  }
+
+  /**
    * Copies the applicable steps of the active policy into a new round.
    *
    * Returns `opened: false` when there is no active policy or no step applies
@@ -280,6 +327,8 @@ export class ApprovalService {
     input: {
       organizationId: string;
       projectId: string;
+      /** From `confirmGoverningPolicy`, asked before this transaction. */
+      confirmedPolicyId: string | null;
       workflowKey: WorkflowKey;
       estimate: bigint | null;
       round: number;
@@ -287,6 +336,11 @@ export class ApprovalService {
     },
   ): Promise<RoundOutcome> {
     const policy = await this.approvals.findActivePolicy(tx, input.workflowKey);
+    if ((policy?.id ?? null) !== input.confirmedPolicyId) {
+      // The policy in force changed after it was confirmed: never open a
+      // round on one that was not checked. The caller retries.
+      throw this.conflict('ApprovalPolicy', policy?.id ?? input.confirmedPolicyId ?? 'none');
+    }
     if (!policy) return { opened: false, reason: 'NO_POLICY' };
 
     const steps = policy.steps.filter((step) => stepApplies(step, input.estimate));

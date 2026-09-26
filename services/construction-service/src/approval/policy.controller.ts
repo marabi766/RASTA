@@ -1,7 +1,18 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { zodPipe } from '@rasta/nest-common';
 import { PolicyService } from './policy.service';
+import { parseIdempotencyKey } from '../project/project.controller';
 import {
   createPolicySchema,
   listPoliciesQuerySchema,
@@ -37,10 +48,14 @@ export class PolicyController {
       'Steps are asked strictly in order. A step applies when the project estimate is ≥ ' +
       'minAmountMinor and < maxAmountMinor; a step with neither bound always applies. The ' +
       'authority is an (organization, role) and never the oversight role. A DRAFT governs ' +
-      `nothing until a platform administrator approves it. ${WRITERS_NOTE}`,
+      `nothing until a platform administrator approves it. An optional Idempotency-Key makes a ` +
+      `retry return the first response. ${WRITERS_NOTE}`,
   })
-  async create(@Body(zodPipe(createPolicySchema)) dto: CreatePolicyDto) {
-    return this.policies.create(dto);
+  async create(
+    @Body(zodPipe(createPolicySchema)) dto: CreatePolicyDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.policies.create(dto, parseIdempotencyKey(idempotencyKey));
   }
 
   @Get()

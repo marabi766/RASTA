@@ -85,7 +85,6 @@ Object.assign(VALID, {
     ...BASE,
     reportId: 'PRG_1',
     progressBasisPoints: 2500,
-    assetsUsed: ['AST_1'],
     submittedBy: 'USR_1',
     submittedAt: AT,
   },
@@ -274,6 +273,10 @@ describe('payload rules', () => {
     ['PROJECT_CREATED', { operationType: 'road' }],
     ['PROJECT_STATUS_CHANGED', { reason: 'Funding withdrawn' }],
     ['PROJECT_NEED_WITHDRAWN', { reason: 'Covered by another line' }],
+    // Codex review of #122, finding 4: unverified asset claims stay in the database.
+    ['PROJECT_PROGRESS_UPDATED', { assetsUsed: ['AST_01JBQ4Y8ZK3M5N7P9R1S3T5V7W'] }],
+    ['PROJECT_PROGRESS_UPDATED', { assetsUsed: ['the grader and two trucks'] }],
+    ['PROJECT_PROGRESS_UPDATED', { obstacles: 'Rain on two days' }],
   ])('refuses free text on %s (%j)', (name, prose) => {
     expect(() => validateConstructionPayload(name, { ...VALID[name]!, ...prose })).toThrow();
   });

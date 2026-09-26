@@ -167,8 +167,13 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/approvals': inboxQuerySchema,
 };
 
-/** The two endpoints that accept an optional `Idempotency-Key`. */
-const IDEMPOTENT = new Set(['POST /v1/projects', 'POST /v1/projects/{id}/needs']);
+/** The four create endpoints that accept an optional `Idempotency-Key`. */
+const IDEMPOTENT = new Set([
+  'POST /v1/projects',
+  'POST /v1/projects/{id}/needs',
+  'POST /v1/projects/{id}/progress',
+  'POST /v1/approval-policies',
+]);
 
 /** Operations that act on an existing row and so can lose a compare-and-set. */
 const VERSIONED = new Set([
@@ -197,12 +202,16 @@ const LIFECYCLE_CREATES = new Set([
 
 /**
  * Operations that ask organization-service whether the target organization is
- * within the author's union (Q-70 (7)); an unconfirmable answer refuses them.
+ * within the author's union (Q-70 (7)): when a policy is written, submitted
+ * and approved, and again when a union-written policy is used to open an
+ * approval round. An unconfirmable answer refuses them.
  */
 const HIERARCHY_CHECKED = new Set([
   'POST /v1/approval-policies',
   'POST /v1/approval-policies/{id}/submit',
   'POST /v1/approval-policies/{id}/approve',
+  'POST /v1/projects/{id}/approvals',
+  'POST /v1/projects/{id}/complete',
 ]);
 
 /** A create that can lose a race on a unique key (409 CONFLICT, retry). */
@@ -211,13 +220,13 @@ const RACING_CREATES = new Set(['POST /v1/approval-policies']);
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
-  403: 'Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the same SYSTEM_ADMIN who wrote or submitted it approving it (four eyes).',
+  403: 'Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use).',
   404: 'Not found — also returned for a project, need, progress report, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed.',
-  409: 'Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), or two policy versions created at once (CONFLICT — retry).',
+  409: 'Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry).',
   422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS.',
   500: 'Unexpected server error.',
-  503: 'organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write is refused, never assumed (Q-70 (7), fail closed).',
-  504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write is refused.',
+  503: 'organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write, or the approval round a union-written policy would open, is refused — never assumed (Q-70 (7), fail closed).',
+  504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write, or the approval round, is refused.',
 };
 
 const DESCRIPTION =

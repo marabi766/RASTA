@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { RastaError, getContext } from '@rasta/nest-common';
 import type { CursorPage } from '@rasta/contracts';
 import { ulid } from 'ulid';
@@ -8,6 +8,7 @@ import { ProjectAccess, SUPER_ROLE, UNION_ROLE, type PolicyAuthorRole } from '..
 import { OrganizationDirectory } from '../organization/organization-directory';
 import { transactionNow } from '../shared/clock';
 import { isUniqueViolation } from '../shared/prisma-errors';
+import { IdempotencyStore, type RecordCompletion } from '../shared/idempotency';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { versionConflictsTotal } from '../observability/metrics';
@@ -44,10 +45,12 @@ export const POLICY_STEP_ID_PREFIX = 'APS';
  *   submit and approval, and "could not confirm" refuses the write. A
  *   `SYSTEM_ADMIN` may write for any organization organization-service knows.
  *   An `ORGANIZATION_ADMIN` never writes its own policy (conflict of interest).
- * - **Platform approval.** Only a `SYSTEM_ADMIN` approves or rejects. With
- *   `CONSTRUCTION_POLICY_FOUR_EYES` (default on), the approver must be neither
- *   the policy's author nor its submitter. Approval puts the policy in force and
- *   retires the one it replaces, in one transaction.
+ * - **Platform approval.** Only a `SYSTEM_ADMIN` approves or rejects, and
+ *   never one who wrote or submitted the policy (four eyes). Only a
+ *   `SYSTEM_ADMIN`'s own policy may be self-approved, and only with
+ *   `CONSTRUCTION_POLICY_FOUR_EYES` off — a provisional, pending-owner flag.
+ *   Approval puts the policy in force and retires the one it replaces, in one
+ *   transaction.
  * - **Governing.** Only an ACTIVE policy governs a project; a DRAFT, PENDING or
  *   REJECTED one never does (`ApprovalRepository.findActivePolicy`).
  *
@@ -55,8 +58,12 @@ export const POLICY_STEP_ID_PREFIX = 'APS';
  * union wrote it and the platform approved it; this service stores it. Every
  * transition writes its event in the same transaction.
  */
+export const CREATE_POLICY_ENDPOINT = 'POST /v1/approval-policies';
+
 @Injectable()
-export class PolicyService {
+export class PolicyService implements OnModuleInit {
+  private readonly logger = new Logger(PolicyService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly repository: ApprovalRepository,
@@ -64,15 +71,46 @@ export class PolicyService {
     private readonly access: ProjectAccess,
     private readonly directory: OrganizationDirectory,
     @Inject(ENV) private readonly env: ConstructionEnv,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
-  async create(dto: CreatePolicyDto): Promise<PolicyView> {
+  /**
+   * Switching four eyes off is a provisional, pending-owner choice (Q-70);
+   * say so loudly every time the service starts that way.
+   */
+  onModuleInit(): void {
+    if (!this.env.CONSTRUCTION_POLICY_FOUR_EYES) {
+      this.logger.warn(
+        'CONSTRUCTION_POLICY_FOUR_EYES is off: a SYSTEM_ADMIN may approve an approval policy it ' +
+          'wrote itself. Provisional, pending the owner (Q-70); union-written policies are still ' +
+          'never self-approved.',
+      );
+    }
+  }
+
+  /**
+   * Writes a DRAFT policy version. With an `Idempotency-Key`, a retry of the
+   * same request returns the first response and writes nothing; the same key
+   * with a different body is `409 IDEMPOTENCY_KEY_REUSED` (docs/06 § 6.8).
+   * The key is scoped to the organization the author acts for.
+   */
+  async create(dto: CreatePolicyDto, idempotencyKey?: string): Promise<PolicyView> {
     const author = this.access.assertPolicyAuthor();
+    return this.idempotency.run(CREATE_POLICY_ENDPOINT, idempotencyKey, dto, 201, (record) =>
+      this.writePolicy(author, dto, record),
+    );
+  }
+
+  private async writePolicy(
+    author: { organizationId: string; actor: string; role: PolicyAuthorRole },
+    dto: CreatePolicyDto,
+    record: RecordCompletion<PolicyView>,
+  ): Promise<PolicyView> {
     await this.assertMayGovern(author.role, author.organizationId, dto.organizationId);
 
     const policyId = `${POLICY_ID_PREFIX}_${ulid()}`;
     try {
-      await this.prisma.transaction(async (tx) => {
+      return await this.prisma.transaction(async (tx) => {
         const at = await transactionNow(tx);
         const policyVersion = await this.repository.nextPolicyVersion(
           tx,
@@ -126,6 +164,11 @@ export class PolicyService {
           },
           occurredAt: at,
         });
+
+        // The policy and its key's completion commit together.
+        const created = toPolicyView(await this.policyOrNotFound(tx, policyId));
+        await record(tx, policyId, created);
+        return created;
       });
     } catch (error) {
       if (isUniqueViolation(error)) {
@@ -139,8 +182,6 @@ export class PolicyService {
       }
       throw error;
     }
-
-    return this.view(policyId);
   }
 
   /** DRAFT → PENDING_PLATFORM_APPROVAL, by the organization that wrote it. */
@@ -379,12 +420,25 @@ export class PolicyService {
   }
 
   /**
-   * Four eyes (Q-70 (7)): with `CONSTRUCTION_POLICY_FOUR_EYES`, the platform
-   * administrator who approves is neither the author nor the submitter.
+   * Four eyes (Q-70 (7)): the platform administrator who approves is neither
+   * the policy's author nor its submitter.
+   *
+   * `CONSTRUCTION_POLICY_FOUR_EYES` (default on) is **provisional, pending the
+   * owner**: whether it may be switched off at all is an open question. Even
+   * switched off, it relaxes only one case — a `SYSTEM_ADMIN` approving the
+   * policy it wrote itself. A policy a `UNION_ADMIN` wrote is never approved by
+   * the person who wrote or submitted it, whatever the flag says: the platform
+   * approval exists to check the union, and nobody checks themselves.
    */
   private assertFourEyes(policy: PolicyWithSteps, approver: string): void {
-    if (!this.env.CONSTRUCTION_POLICY_FOUR_EYES) return;
-    if (policy.createdBy === approver || policy.submittedBy === approver) {
+    const ownWork = policy.createdBy === approver || policy.submittedBy === approver;
+    if (!ownWork) return;
+    if (policy.authorRole === UNION_ROLE) {
+      throw RastaError.forbidden(
+        'A policy written by a union is approved by a different person, always',
+      );
+    }
+    if (this.env.CONSTRUCTION_POLICY_FOUR_EYES) {
       throw RastaError.forbidden(
         'A different platform administrator must approve this policy (CONSTRUCTION_POLICY_FOUR_EYES)',
       );

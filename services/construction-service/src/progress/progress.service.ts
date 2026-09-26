@@ -8,6 +8,7 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import { EventPublisher } from '../events/publisher';
 import { ProjectAccess, assertOwnProject } from '../access/access';
 import { transactionNow } from '../shared/clock';
+import { IdempotencyStore, targeted, type RecordCompletion } from '../shared/idempotency';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { versionConflictsTotal } from '../observability/metrics';
@@ -19,6 +20,23 @@ import type {
   ProgressTransitionDto,
   ProgressView,
 } from './dto';
+
+export const DRAFT_PROGRESS_ENDPOINT = 'POST /v1/projects/:id/progress';
+
+/**
+ * The project's latest submitted report: the highest submission sequence,
+ * assigned under the project row lock — never `submittedAt`, which two
+ * submissions in one millisecond share. Callers hold the project lock.
+ */
+export function latestSubmitted(
+  tx: ExtendedPrismaClient,
+  projectId: string,
+): Promise<ProgressReport | null> {
+  return tx.progressReport.findFirst({
+    where: { projectId, status: 'SUBMITTED' },
+    orderBy: { submissionSequence: 'desc' },
+  });
+}
 
 /**
  * SubmitProgressReport and its draft lifecycle (`docs/04` § 4.12, Q-72).
@@ -37,13 +55,39 @@ export class ProgressService {
     private readonly events: EventPublisher,
     private readonly access: ProjectAccess,
     @Inject(ENV) private readonly env: ConstructionEnv,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
-  async draft(projectId: string, dto: CreateProgressDto): Promise<ProgressView> {
+  /**
+   * Drafts a progress report. With an `Idempotency-Key`, a retry of the same
+   * request returns the first draft instead of a second one; the same key with
+   * a different body or project is `409 IDEMPOTENCY_KEY_REUSED`.
+   */
+  async draft(
+    projectId: string,
+    dto: CreateProgressDto,
+    idempotencyKey?: string,
+  ): Promise<ProgressView> {
     const { organizationId, actor } = this.access.assertCanWrite();
+    return this.idempotency.run(
+      DRAFT_PROGRESS_ENDPOINT,
+      idempotencyKey,
+      targeted(projectId, dto),
+      201,
+      (record) => this.writeDraft(organizationId, actor, projectId, dto, record),
+    );
+  }
+
+  private async writeDraft(
+    organizationId: string,
+    actor: string,
+    projectId: string,
+    dto: CreateProgressDto,
+    record: RecordCompletion<ProgressView>,
+  ): Promise<ProgressView> {
     const reportId = `${ID_PREFIXES.progressReport}_${ulid()}`;
 
-    await this.prisma.transaction(async (tx) => {
+    return this.prisma.transaction(async (tx) => {
       const at = await transactionNow(tx);
       await this.lockExecutingProject(tx, organizationId, projectId);
 
@@ -80,9 +124,12 @@ export class ProgressService {
         },
         occurredAt: at,
       });
-    });
 
-    return this.view(projectId, reportId);
+      // The draft and its key's completion commit together.
+      const created = await this.view(projectId, reportId, tx);
+      await record(tx, reportId, created);
+      return created;
+    });
   }
 
   async submit(
@@ -99,11 +146,12 @@ export class ProgressService {
       if (report.version !== dto.expectedVersion) throw this.conflict(reportId);
       assertProgressTransition(reportId, report.status as ProgressStateName, 'SUBMITTED');
 
+      // The project row is locked, so this is the latest submission and the
+      // next sequence number is ours alone: order never depends on the clock.
+      const last = await latestSubmitted(tx, projectId);
+      const submissionSequence = (last?.submissionSequence ?? 0) + 1;
+
       if (!this.env.CONSTRUCTION_PROGRESS_ALLOW_DECREASE) {
-        const last = await tx.progressReport.findFirst({
-          where: { projectId, status: 'SUBMITTED' },
-          orderBy: [{ submittedAt: 'desc' }, { id: 'desc' }],
-        });
         if (last && report.progressBasisPoints < last.progressBasisPoints) {
           throw RastaError.businessRule(
             `Progress may not go down: the last submitted report says ${last.progressBasisPoints} ` +
@@ -122,6 +170,7 @@ export class ProgressService {
         status: 'SUBMITTED',
         submittedAt: at,
         submittedBy: actor,
+        submissionSequence,
         updatedAt: at,
         updatedBy: actor,
       });
@@ -136,7 +185,6 @@ export class ProgressService {
           reportId,
           organizationId,
           progressBasisPoints: report.progressBasisPoints,
-          assetsUsed: report.assetsUsed,
           submittedBy: actor,
           submittedAt: at.toISOString(),
         },
@@ -266,8 +314,12 @@ export class ProgressService {
     return report;
   }
 
-  private async view(projectId: string, reportId: string): Promise<ProgressView> {
-    const report = await this.prisma.client.progressReport.findFirst({
+  private async view(
+    projectId: string,
+    reportId: string,
+    db: ExtendedPrismaClient = this.prisma.client,
+  ): Promise<ProgressView> {
+    const report = await db.progressReport.findFirst({
       where: { id: reportId, projectId },
     });
     if (!report) throw RastaError.notFound('ProgressReport', reportId);
@@ -295,6 +347,7 @@ export function toProgressView(row: ProgressReport): ProgressView {
     createdBy: row.createdBy,
     submittedAt: row.submittedAt?.toISOString() ?? null,
     submittedBy: row.submittedBy,
+    submissionSequence: row.submissionSequence,
     discardedAt: row.discardedAt?.toISOString() ?? null,
     discardedBy: row.discardedBy,
     version: row.version,

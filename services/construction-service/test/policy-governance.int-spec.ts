@@ -1,4 +1,6 @@
+import { Logger } from '@nestjs/common';
 import { eventEnvelopeSchema } from '@rasta/contracts';
+import { runWithContext } from '@rasta/nest-common';
 import type { CreatePolicyDto } from '../src/approval/dto';
 import {
   approvalsOf,
@@ -7,6 +9,7 @@ import {
   asSetter,
   asUser,
   cleanup,
+  context,
   newOrganizationId,
   newUserId,
   outboxFor,
@@ -161,6 +164,64 @@ describe('approval policy governance (Q-70 (7), decided)', () => {
     });
   });
 
+  describe('idempotent writing (docs/06 § 6.8)', () => {
+    const policyRows = (organizationId: string) =>
+      w.prisma.client.$queryRawUnsafe<{ id: string }[]>(
+        `SELECT id FROM approval_policy WHERE organization_id = $1`,
+        organizationId,
+      );
+
+    it('a retry with the same key and body returns the first policy and writes nothing', async () => {
+      const { union, dehyari } = tree();
+      const first = await asSetter(union, () => w.policies.create(policyFor(dehyari), 'key-1'));
+      w.hierarchy.asked.length = 0;
+      const again = await asSetter(union, () => w.policies.create(policyFor(dehyari), 'key-1'));
+      expect(again).toEqual(first);
+      expect(w.hierarchy.asked).toEqual([]); // a replay runs nothing
+      expect(await policyRows(dehyari)).toHaveLength(1);
+      const created = (await outboxFor(w.prisma, dehyari)).filter(
+        (row) => row.eventName === 'APPROVAL_POLICY_CREATED',
+      );
+      expect(created).toHaveLength(1);
+    });
+
+    it('the same key with a different body is refused, and nothing is written', async () => {
+      const { union, dehyari } = tree();
+      await asSetter(union, () => w.policies.create(policyFor(dehyari), 'key-2'));
+      await expect(
+        asSetter(union, () =>
+          w.policies.create({ ...policyFor(dehyari), label: 'Another label' }, 'key-2'),
+        ),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+      expect(await policyRows(dehyari)).toHaveLength(1);
+    });
+
+    it('a refused write releases its key: the retry after the hierarchy recovers runs', async () => {
+      const { union, dehyari } = tree();
+      w.hierarchy.unavailable = true;
+      await expect(
+        asSetter(union, () => w.policies.create(policyFor(dehyari), 'key-3')),
+      ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      w.hierarchy.unavailable = false;
+      await expect(
+        asSetter(union, () => w.policies.create(policyFor(dehyari), 'key-3')),
+      ).resolves.toMatchObject({ status: 'DRAFT' });
+    });
+
+    it("keys are per author organization: another union's same key is its own", async () => {
+      const first = tree();
+      const second = tree();
+      const a = await asSetter(first.union, () =>
+        w.policies.create(policyFor(first.dehyari), 'shared-key'),
+      );
+      const b = await asSetter(second.union, () =>
+        w.policies.create(policyFor(second.dehyari), 'shared-key'),
+      );
+      expect(b.id).not.toBe(a.id);
+      expect(b.organizationId).toBe(second.dehyari);
+    });
+  });
+
   describe('what governs', () => {
     it('a pending policy does not govern; the platform approval puts it in force', async () => {
       const { union, dehyari } = tree();
@@ -188,6 +249,61 @@ describe('approval policy governance (Q-70 (7), decided)', () => {
         w.approvals.request(project.id, { expectedVersion: project.version }),
       );
       expect(await approvalsOf(w, dehyari, project.id)).toHaveLength(1);
+    });
+
+    it('re-confirms the union at use: the organization moved away, so no round opens (403)', async () => {
+      const { union, county, dehyari } = tree();
+      const policy = await asSetter(union, async () => {
+        const created = await w.policies.create(policyFor(dehyari));
+        await w.policies.submit(created.id, { expectedVersion: 1 });
+        return created;
+      });
+      await asPlatform(() => w.policies.approve(policy.id, { expectedVersion: 2 }));
+      const project = await readyProject(w, dehyari);
+      const request = () =>
+        asAdmin(dehyari, () =>
+          w.approvals.request(project.id, { expectedVersion: project.version }),
+        );
+
+      // The dehyari leaves the union (organization-service's MOVE).
+      w.hierarchy.disown(dehyari);
+      w.hierarchy.asked.length = 0;
+      await expect(request()).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      expect(w.hierarchy.asked).toEqual([[union, dehyari]]);
+      expect(await approvalsOf(w, dehyari, project.id)).toHaveLength(0);
+      const unchanged = await asAdmin(dehyari, () => w.projects.get(project.id));
+      expect(unchanged).toMatchObject({ status: 'DRAFT', version: project.version });
+
+      // Unconfirmable is refused too — never read as "still within".
+      w.hierarchy.adopt(county, dehyari);
+      w.hierarchy.unavailable = true;
+      await expect(request()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      w.hierarchy.unavailable = false;
+      w.hierarchy.timedOut = true;
+      await expect(request()).rejects.toMatchObject({ code: 'UPSTREAM_TIMEOUT' });
+      w.hierarchy.timedOut = false;
+      expect(await approvalsOf(w, dehyari, project.id)).toHaveLength(0);
+
+      // Back under the union, the same policy opens the round.
+      await request();
+      expect(await approvalsOf(w, dehyari, project.id)).toHaveLength(1);
+    });
+
+    it("a platform administrator's policy asks no hierarchy when used", async () => {
+      const target = org();
+      const policy = await asPlatform(async () => {
+        const created = await w.policies.create(policyFor(target));
+        await w.policies.submit(created.id, { expectedVersion: 1 });
+        return created;
+      });
+      await asPlatform(() => w.policies.approve(policy.id, { expectedVersion: 2 }));
+      const project = await readyProject(w, target);
+      w.hierarchy.asked.length = 0;
+      await asAdmin(target, () =>
+        w.approvals.request(project.id, { expectedVersion: project.version }),
+      );
+      expect(w.hierarchy.asked).toEqual([]);
+      expect(await approvalsOf(w, target, project.id)).toHaveLength(1);
     });
 
     it('a rejected policy never governs, and keeps its reason off the event', async () => {
@@ -280,9 +396,14 @@ describe('approval policy governance (Q-70 (7), decided)', () => {
       ).resolves.toMatchObject({ status: 'ACTIVE' });
     });
 
-    it('four eyes can be switched off where the platform has one administrator (recorded choice)', async () => {
+    it('four eyes off (provisional flag): a SYSTEM_ADMIN may approve its own policy, and startup warns', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
       const single = wire(testEnv({ CONSTRUCTION_POLICY_FOUR_EYES: 'false' }));
       try {
+        single.policies.onModuleInit();
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining('CONSTRUCTION_POLICY_FOUR_EYES is off'),
+        );
         const target = org();
         const only = newUserId();
         const policy = await asPlatform(() => single.policies.create(policyFor(target)), only);
@@ -291,8 +412,91 @@ describe('approval policy governance (Q-70 (7), decided)', () => {
           asPlatform(() => single.policies.approve(policy.id, { expectedVersion: 2 }), only),
         ).resolves.toMatchObject({ status: 'ACTIVE' });
       } finally {
+        warn.mockRestore();
         await single.close();
       }
+    });
+
+    it('four eyes on: startup says nothing about it', () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        w.policies.onModuleInit();
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('even with four eyes off, a union-written policy is never approved by its author or submitter', async () => {
+      const single = wire(testEnv({ CONSTRUCTION_POLICY_FOUR_EYES: 'false' }));
+      try {
+        const { union, dehyari } = tree();
+        single.hierarchy.adopt(union, dehyari);
+        // One person holding both roles: union administrator and platform administrator.
+        const both = newUserId();
+        const policy = await asUser(
+          union,
+          ['UNION_ADMIN'],
+          () => single.policies.create(policyFor(dehyari)),
+          both,
+        );
+        await asUser(
+          union,
+          ['UNION_ADMIN'],
+          () => single.policies.submit(policy.id, { expectedVersion: 1 }),
+          both,
+        );
+        await expect(
+          asPlatform(() => single.policies.approve(policy.id, { expectedVersion: 2 }), both),
+        ).rejects.toThrow(/written by a union is approved by a different person/);
+        expect(
+          (await single.approvalRepository.findPolicy(single.prisma.client, policy.id))?.status,
+        ).toBe('PENDING_PLATFORM_APPROVAL');
+        await expect(
+          asPlatform(() => single.policies.approve(policy.id, { expectedVersion: 2 })),
+        ).resolves.toMatchObject({ status: 'ACTIVE' });
+      } finally {
+        await single.close();
+      }
+    });
+
+    it('a union-written policy is refused to its own author with four eyes on, too', async () => {
+      const { union, dehyari } = tree();
+      const both = newUserId();
+      const policy = await asUser(
+        union,
+        ['UNION_ADMIN'],
+        () => w.policies.create(policyFor(dehyari)),
+        both,
+      );
+      await asUser(
+        union,
+        ['UNION_ADMIN'],
+        () => w.policies.submit(policy.id, { expectedVersion: 1 }),
+        both,
+      );
+      await expect(
+        asPlatform(() => w.policies.approve(policy.id, { expectedVersion: 2 }), both),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    });
+
+    it('a SYSTEM_ADMIN retires a policy with no organization selected; a union only its own', async () => {
+      const { union, dehyari } = tree();
+      const policyId = await asSetter(union, async () => {
+        const created = await w.policies.create(policyFor(dehyari));
+        await w.policies.submit(created.id, { expectedVersion: 1 });
+        return created.id;
+      });
+      await asPlatform(() => w.policies.approve(policyId, { expectedVersion: 2 }));
+
+      await expect(
+        asSetter(org(), () => w.policies.retire(policyId, { expectedVersion: 3 })),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+      const noSelection = context({ userId: newUserId(), roles: ['SYSTEM_ADMIN'] });
+      await expect(
+        runWithContext(noSelection, () => w.policies.retire(policyId, { expectedVersion: 3 })),
+      ).resolves.toMatchObject({ status: 'RETIRED' });
     });
 
     it('re-checks the hierarchy at submit and approval: a moved organization is refused', async () => {
