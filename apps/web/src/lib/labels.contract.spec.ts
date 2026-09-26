@@ -146,32 +146,54 @@ function enumBinding(sf: ts.SourceFile, expression: ts.Expression, seen = 0): Bi
   throw new Error(`cannot read the enum binding ${where(node)}`);
 }
 
-/** The binding of `field` in the one object literal a schema is built from. */
-function fieldBinding(sf: ts.SourceFile, schema: string, field: string): Binding {
-  const objects: ts.ObjectLiteralExpression[] = [];
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isCallExpression(node) &&
-      (isMember(node.expression, 'z', 'object') ||
-        (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'extend'))
-    ) {
-      for (const argument of node.arguments) {
-        if (ts.isObjectLiteralExpression(argument)) objects.push(argument);
-        else throw new Error(`cannot read ${schema}: ${where(argument)} is not an object literal`);
-      }
-    }
-    // Refinement callbacks are not the shape; do not descend into functions.
-    if (!ts.isArrowFunction(node) && !ts.isFunctionExpression(node)) {
-      ts.forEachChild(node, visit);
-    }
-  };
-  visit(exportedConst(sf, schema));
-  if (objects.length !== 1) {
-    throw new Error(`cannot read ${schema}: expected one object shape, found ${objects.length}`);
+/**
+ * Modifiers a schema's root may carry that change nothing about which values a
+ * field accepts. Their arguments are checks on the whole object, not shapes.
+ */
+const SHAPE_PRESERVING = new Set(['strict', 'refine', 'superRefine']);
+
+/**
+ * The one object literal a schema is built from, read from its **root**
+ * (Codex #113 R2-4).
+ *
+ * The root, after any `SHAPE_PRESERVING` modifiers, must be `z.object({…})`
+ * or `<base>.extend({…})` — nothing else. A union, an intersection, a merge,
+ * a pipe, a transform or a preprocess could accept values the object literal
+ * never mentions, and a reader that looked for "an object literal somewhere
+ * inside" would still find one and pass.
+ */
+function rootShape(sf: ts.SourceFile, schema: string): ts.ObjectLiteralExpression {
+  let node = exportedConst(sf, schema);
+  while (
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    SHAPE_PRESERVING.has(node.expression.name.text)
+  ) {
+    node = node.expression.expression;
   }
 
+  const shapeCall =
+    ts.isCallExpression(node) &&
+    (isMember(node.expression, 'z', 'object') ||
+      (ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === 'extend' &&
+        ts.isIdentifier(node.expression.expression)));
+  if (!shapeCall) {
+    throw new Error(
+      `cannot read ${schema}: its root ${where(node)} is not z.object({…}) or <base>.extend({…})`,
+    );
+  }
+  const args = (node as ts.CallExpression).arguments;
+  if (args.length !== 1 || !ts.isObjectLiteralExpression(args[0]!)) {
+    throw new Error(`cannot read ${schema}: ${where(node)} does not take one object literal`);
+  }
+  return args[0];
+}
+
+/** The binding of `field` in the object literal at a schema's root. */
+function fieldBinding(sf: ts.SourceFile, schema: string, field: string): Binding {
   const matches: ts.Expression[] = [];
-  for (const property of objects[0]!.properties) {
+  for (const property of rootShape(sf, schema).properties) {
     if (ts.isSpreadAssignment(property)) {
       throw new Error(`cannot read ${schema}: ${where(property)} spreads fields in`);
     }
@@ -351,6 +373,34 @@ describe('the reader refuses what it cannot read (Codex #113 R1-3)', () => {
 
     const missing = parse(`export const q = base.extend({ type: z.enum(ASSET_TYPES) }).strict();`);
     expect(() => fieldBinding(missing, 'q', 'status')).toThrow(/cannot find q.status/);
+  });
+
+  it.each([
+    [
+      'a union at the root',
+      `export const q = z.union([cursor.extend({ status: z.enum(S) }).strict(), legacyQuerySchema]);`,
+    ],
+    ['an .or() at the root', `export const q = cursor.extend({ status: z.enum(S) }).or(legacy);`],
+    ['an .and() at the root', `export const q = cursor.extend({ status: z.enum(S) }).and(extra);`],
+    [
+      'a .merge() at the root',
+      `export const q = cursor.extend({ status: z.enum(S) }).merge(extra);`,
+    ],
+    ['a .pipe() at the root', `export const q = cursor.extend({ status: z.enum(S) }).pipe(other);`],
+    [
+      'a preprocess at the root',
+      `export const q = z.preprocess(fn, z.object({ status: z.enum(S) }));`,
+    ],
+    ['an extend of an expression', `export const q = make().extend({ status: z.enum(S) });`],
+  ])('refuses %s (Codex #113 R2-4)', (_label, source) => {
+    expect(() => fieldBinding(parse(source), 'q', 'status')).toThrow(/cannot read q/);
+  });
+
+  it('still reads the shapes the service uses', () => {
+    const plain = parse(
+      `export const q = cursor.extend({ status: z.enum(S) }).strict().refine((v) => v, { message: 'x' });`,
+    );
+    expect(fieldBinding(plain, 'q', 'status')).toEqual({ list: 'S' });
   });
 });
 
