@@ -26,16 +26,20 @@ import { AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
 /**
  * Path A: each subscribed domain topic and the one service that owns it.
  *
- * Eleven topics, ten owners — `asset-service` publishes both `rasta.asset.v1`
- * and `rasta.insurance.v1`. `procurement`, `inventory`, `construction` and
- * `contract` have no producer yet and are deliberately absent (see
- * `DOMAIN_TOPICS` in `audit.mapper.ts`, which is derived from this list).
+ * Twelve topics, eleven owners — `asset-service` publishes both `rasta.asset.v1`
+ * and `rasta.insurance.v1`. `procurement`, `inventory` and `contract` have no
+ * producer yet and are deliberately absent (see `DOMAIN_TOPICS` in
+ * `audit.mapper.ts`, which is derived from this list).
  *
  * `rasta.notification.v1` arrived last, with `NTF-002`'s audit events.
  * notification-service consumed for its whole life and produced nothing, so it
  * was absent here for the same reason it had no outbox. `ADR-054 § 3` recorded
  * that as a deviation from `AGENTS.md` S-06 rather than a design choice, and
  * this row is the consuming half of closing it.
+ *
+ * `rasta.construction.v1` arrived with CON-001: construction-service's project
+ * and need lifecycle events (docs/events/README.md § Construction), so every
+ * project state change reaches this record (AGENTS.md S-06).
  */
 export const AUDIT_DOMAIN_TOPIC_OWNERS = Object.freeze([
   Object.freeze({ topic: 'rasta.identity.v1', owner: 'identity-service' }),
@@ -49,6 +53,7 @@ export const AUDIT_DOMAIN_TOPIC_OWNERS = Object.freeze([
   Object.freeze({ topic: 'rasta.document.v1', owner: 'document-service' }),
   Object.freeze({ topic: 'rasta.supplier.v1', owner: 'supplier-service' }),
   Object.freeze({ topic: 'rasta.notification.v1', owner: 'notification-service' }),
+  Object.freeze({ topic: 'rasta.construction.v1', owner: 'construction-service' }),
 ] as const);
 
 export type AuditDomainTopic = (typeof AUDIT_DOMAIN_TOPIC_OWNERS)[number]['topic'];
@@ -73,7 +78,7 @@ export const AUDIT_UNKNOWN_SOURCE_SERVICE = 'unknown';
 
 export type AuditSourceServiceLabel = AuditSourceService | typeof AUDIT_UNKNOWN_SOURCE_SERVICE;
 
-/** Every known producer, deduplicated, in topology order. Ten today. */
+/** Every known producer, deduplicated, in topology order. Eleven today. */
 export const AUDIT_SOURCE_SERVICES: readonly AuditSourceService[] = Object.freeze([
   ...new Set<AuditSourceService>([
     ...AUDIT_DOMAIN_TOPIC_OWNERS.map((entry) => entry.owner),

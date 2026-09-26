@@ -22,7 +22,7 @@ test('the committed Dockerfiles pass', () => {
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /12 Dockerfiles on one base/);
+  assert.match(result.stdout, /13 Dockerfiles on one base/);
 });
 
 test('a pinned file, including a FROM of an earlier stage, passes', () => {

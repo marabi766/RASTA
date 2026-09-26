@@ -43,7 +43,7 @@ import { join } from 'node:path';
 export const TENANT_COLUMN = 'organization_id';
 
 /** Services whose schemas this check owns. Others opt in as their owners adopt it. */
-export const SERVICES = ['supplier', 'notification', 'document', 'audit'];
+export const SERVICES = ['supplier', 'notification', 'document', 'audit', 'construction'];
 
 /**
  * Tables that carry `organization_id` but are platform plumbing, not tenant
@@ -93,6 +93,10 @@ export const EXEMPTIONS = {
     uq_grant_document_subject: `one grant per (document, subject) — an invariant of one document; ${perParentUnique('document_id')}`,
     ix_document_scan_queue: 'the scan worker claims queued documents for every tenant at once',
   },
+  // construction: no exemption. `project_need` references its project by
+  // (organization_id, project_id), so even its per-parent indexes lead with
+  // the tenant column without weakening anything.
+  construction: {},
   audit: {
     audit_event_pkey:
       'audit_event is partitioned by occurred_at, and PostgreSQL requires the partition key in every unique index',

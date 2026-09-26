@@ -33,6 +33,9 @@ export const SENSITIVE_KEYS = [
   'otp',
   'totp',
   'mfaCode',
+  // A client's Idempotency-Key can be guessable or carry business meaning, and
+  // anyone holding it can replay the stored response (S-09).
+  'idempotencyKey',
 
   // personal identifiers
   'nationalId',
@@ -84,6 +87,7 @@ export function buildRedactionPaths(): string[] {
   paths.push('req.headers.authorization', 'req.headers.Authorization');
   paths.push('req.headers.cookie', 'req.headers["set-cookie"]');
   paths.push('req.headers["x-internal-token"]');
+  paths.push('req.headers["idempotency-key"]');
 
   return Array.from(new Set(paths));
 }

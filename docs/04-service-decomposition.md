@@ -372,6 +372,21 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 هیچ وزن معیاری در کد Hard-Code نمی‌شود. `Tender.procurementNature` اجباری است و پیش از انتشار
 توسط کارفرما تعیین می‌شود.
 
+### وضعیت پیاده‌سازی — CON-001، PR نخست (2026-09-26)
+
+اسکلت سرویس و دو چرخهٔ عمر `Project` و `ProjectNeed` ساخته شد؛ ماشین حالت صریح پایگاه داده با گذار Compare-and-Set و
+رویداد Outbox در همان تراکنش، بی Temporal ([ADR-063](adr/ADR-063-construction-lifecycles-and-approval-policy-ownership.md)).
+Endpointها: `POST/GET /v1/projects`، `GET/PATCH /v1/projects/{id}`، `POST /v1/projects/{id}/cancel` و
+`/v1/projects/{id}/needs[/{needId}[/submit|/withdraw]]`. رویدادها: `PROJECT_CREATED` و شش رویداد افزوده
+(`docs/events/README.md` § Construction). فیلدهای پروژه و نقش‌ها پاسخ موقت Q-68 و Q-69‌اند.
+
+**هنوز نیست:** موافقت‌های پیکربندی‌شده (`approval_policy`، `approval`) و گزارش پیشرفت — PR دوم CON-001؛ مناقصه، پیشنهاد،
+ارزیابی و انتخاب — CON-002؛ تحلیل ناوگان؛ هیچ Consumer رویدادی.
+
+**رابطه با `organization_policy`.** منبع حقیقت موافقت‌های پروژه جدول `approval_policy` همین سرویس است (ADR-063).
+کلیدهای `approval.*` در `organization_policy` (`organization-service`) **هیچ موافقتی را برای پروژه الزامی یا مجاز
+نمی‌کنند** و این سرویس آن‌ها را نمی‌خواند؛ پر کردنشان سیاست پروژه نمی‌سازد (Q-70).
+
 ---
 
 ## ۴٫۱۳ contract-service
