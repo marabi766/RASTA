@@ -194,7 +194,10 @@ export const rewardsGrantedTotal = new Counter({
  * Reward evaluations that granted nothing, and why.
  *
  * `reason` is a closed set: `no_rule`, `cap_reached`, `duplicate`, `no_actor`,
- * `condition_unmet`. The last two are the ones worth alerting on — a trigger
+ * `condition_unmet`, and `already_evaluated` (the same source fact under a
+ * second event id, PR #110 review #1). A steady `already_evaluated` rate is
+ * worth a look: producers do not normally re-emit a fact. `no_actor` and
+ * `condition_unmet` are the ones worth alerting on — a trigger
  * arriving without a user actor grants nothing at all (ADR-033), and a rule
  * whose condition never matches is a rule somebody configured wrongly.
  */
@@ -202,6 +205,25 @@ export const rewardsSkippedTotal = new Counter({
   name: 'rasta_economic_rewards_skipped_total',
   help: 'Reward evaluations that granted nothing, by reason',
   labelNames: ['service', 'reason'] as const,
+  registers: [registry],
+});
+
+/**
+ * Every question a money-making consumer put to a fact's owner (ADR-061 § 4).
+ *
+ * `consumer` is `settlement_authority` or `reward_trigger`. `outcome` is a
+ * closed set: `confirmed`; `tenant_mismatch` (the envelope's tenant is not
+ * the payload's organization, ADR-061 § 5), `not_found`, `organization_mismatch`,
+ * `status_mismatch`, `amount_mismatch`, `currency_mismatch`,
+ * `workshop_mismatch`, `approval_mismatch` and `asset_mismatch` (each one
+ * dead-lettered as `SOURCE_UNCONFIRMED`); and `unavailable`, which is retried.
+ * Any mismatch is worth an alert: either a producer has a defect or somebody
+ * is publishing events they do not own.
+ */
+export const sourceVerificationsTotal = new Counter({
+  name: 'rasta_economic_source_verifications_total',
+  help: 'Checks of an event against the owning service, by consumer and outcome',
+  labelNames: ['service', 'consumer', 'outcome'] as const,
   registers: [registry],
 });
 

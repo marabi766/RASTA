@@ -139,6 +139,42 @@ describe('what an event must never carry', () => {
  * polling — and the most security-relevant transition on the platform would be
  * the one thing the event log did not record.
  */
+/**
+ * The upload intent's audit record (global audit L7-14).
+ *
+ * What the client declared and who asked — never the object key or the upload
+ * URL, which is a live write credential for that key.
+ */
+describe('UPLOAD_INTENT_ISSUED', () => {
+  const issued = (overrides: Record<string, unknown> = {}) => ({
+    uploadIntentId: 'UPI_01JBQ8',
+    organizationId: 'ORG-1',
+    documentClass: 'CONTRACT',
+    declaredContentType: 'application/pdf',
+    declaredSizeBytes: 1024,
+    requestedBy: 'USR-1',
+    issuedAt: '2026-08-31T00:00:00.000Z',
+    expiresAt: '2026-08-31T00:15:00.000Z',
+    ...overrides,
+  });
+
+  it('accepts what the client declared', () => {
+    expect(validateDocumentPayload(DOCUMENT_EVENTS.UPLOAD_INTENT_ISSUED, issued())).toMatchObject({
+      uploadIntentId: 'UPI_01JBQ8',
+      declaredSizeBytes: 1024,
+    });
+  });
+
+  it.each(['objectKey', 'uploadUrl', 'filename', 'declaredFilename'])(
+    'refuses %s, which the event never carries',
+    (field) => {
+      expect(() =>
+        validateDocumentPayload(DOCUMENT_EVENTS.UPLOAD_INTENT_ISSUED, issued({ [field]: 'x' })),
+      ).toThrow(/UPLOAD_INTENT_ISSUED/);
+    },
+  );
+});
+
 describe('DOCUMENT_SCANNED', () => {
   const scanned = (overrides: Record<string, unknown> = {}) => ({
     documentId: 'DOC_01JBQ8',
@@ -222,10 +258,27 @@ describe('the event catalogue', () => {
     expect(Object.keys(DOCUMENT_EVENT_SCHEMAS).sort()).toEqual(Object.keys(DOCUMENT_EVENTS).sort());
   });
 
-  it('routes every event by the document it concerns', () => {
-    for (const name of Object.values(DOCUMENT_EVENTS)) {
+  it('routes every document event by the document it concerns', () => {
+    const documentEvents = Object.values(DOCUMENT_EVENTS).filter(
+      (name) => name !== DOCUMENT_EVENTS.UPLOAD_INTENT_ISSUED,
+    );
+    expect(documentEvents).toHaveLength(4);
+    for (const name of documentEvents) {
       expect(AGGREGATE_OF[name]).toBe('Document');
       expect(resolvePartitionKey(name, { documentId: 'DOC_1' }).key).toBe('DOC_1');
     }
+  });
+
+  it('routes the upload intent event by its own intent, which has no document yet', () => {
+    expect(AGGREGATE_OF.UPLOAD_INTENT_ISSUED).toBe('UploadIntent');
+    expect(
+      resolvePartitionKey(DOCUMENT_EVENTS.UPLOAD_INTENT_ISSUED, { uploadIntentId: 'UPI_1' }).key,
+    ).toBe('UPI_1');
+  });
+
+  it('refuses to route an event whose key field is missing', () => {
+    expect(() =>
+      resolvePartitionKey(DOCUMENT_EVENTS.UPLOAD_INTENT_ISSUED, { documentId: 'DOC_1' }),
+    ).toThrow(/empty partition key/);
   });
 });

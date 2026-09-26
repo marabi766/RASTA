@@ -35,12 +35,17 @@ describe('KeycloakProjectionConsumer', () => {
     expect(project).toHaveBeenCalledWith('USR_1', 'event');
   });
 
-  it('ignores the events that change no membership', async () => {
-    await expect(consumer.handle(envelope('USER_UPDATED', { userId: 'USR_1' }))).resolves.toBe(
-      'SKIPPED',
-    );
-    expect(project).not.toHaveBeenCalled();
-  });
+  it.each(['USER_UPDATED', 'ACTIVE_ORGANIZATION_SWITCHED'])(
+    'ignores %s, which changes no membership',
+    async (eventName) => {
+      // The switch projects synchronously and reports its own failure; its
+      // event is the audit record, not a second, silent retry path.
+      await expect(
+        consumer.handle(envelope(eventName, { userId: 'USR_1', organizationId: 'ORG-A' })),
+      ).resolves.toBe('SKIPPED');
+      expect(project).not.toHaveBeenCalled();
+    },
+  );
 
   it('skips, rather than retries, an event that names no user', async () => {
     await expect(

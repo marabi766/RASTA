@@ -32,11 +32,19 @@ export const AGGREGATE_OF = {
   ORDER_DISPUTED: 'Order',
   ORDER_DISPUTE_RESOLVED: 'Order',
   REVIEW_SUBMITTED: 'Review',
+  PRODUCT_CREATED: 'Product',
+  OFFER_DRAFTED: 'Offer',
+  OFFER_UPDATED: 'Offer',
+  ORDER_FUNDS_HELD: 'Order',
+  ORDER_FAILED: 'Order',
+  ORDER_SETTLEMENT_STARTED: 'Order',
+  ORDER_SETTLEMENT_FAILED: 'Order',
 } as const satisfies Record<MarketplaceEventName, string>;
 
 export const PARTITION_SCOPES = {
   ORDER: 'ORDER',
   OFFER: 'OFFER',
+  PRODUCT: 'PRODUCT',
 } as const;
 
 export type PartitionScope = (typeof PARTITION_SCOPES)[keyof typeof PARTITION_SCOPES];
@@ -72,6 +80,17 @@ export const PARTITION_KEY_POLICY: { [N in MarketplaceEventName]: PartitionRule<
   ORDER_CANCELLED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
   ORDER_DISPUTED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
   ORDER_DISPUTE_RESOLVED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
+  // The saga's own steps (L7-14) are keyed by the order like the rest of it,
+  // so they land on the same partition. Co-partitioned, **not** delivered in
+  // order: the relay can still publish a later row of one key before an
+  // earlier one (backoff, a live lease, a DLQ replay). That is D-027, open;
+  // its fix is ADR-051 B4 and is not in this change. A consumer must not read
+  // arrival order as the order things happened in — `occurredAt` and the
+  // envelope's `streamSeq` are what say that.
+  ORDER_FUNDS_HELD: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
+  ORDER_FAILED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
+  ORDER_SETTLEMENT_STARTED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
+  ORDER_SETTLEMENT_FAILED: (payload) => ({ scope: 'ORDER', key: payload.orderId }),
 
   /**
    * Ordered by the order, not by the review.
@@ -91,6 +110,14 @@ export const PARTITION_KEY_POLICY: { [N in MarketplaceEventName]: PartitionRule<
    * order; it has no relationship to any particular order.
    */
   OFFER_PUBLISHED: (payload) => ({ scope: 'OFFER', key: payload.offerId }),
+  // A draft and a change that leaves an offer unpublished are keyed by the
+  // offer like its publications (L7-14): the same partition, with the same
+  // caveat as the saga steps above — co-partitioned, not ordered (D-027).
+  OFFER_DRAFTED: (payload) => ({ scope: 'OFFER', key: payload.offerId }),
+  OFFER_UPDATED: (payload) => ({ scope: 'OFFER', key: payload.offerId }),
+
+  /** A product is its own lifecycle; nothing else is ordered against it (L7-14). */
+  PRODUCT_CREATED: (payload) => ({ scope: 'PRODUCT', key: payload.productId }),
 };
 
 /**

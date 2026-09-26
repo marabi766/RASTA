@@ -13,8 +13,9 @@ import { asActor, id, newPrisma, tenants } from './helpers';
  * database and with a controlled clock.
  *
  * Only `Date` is faked: Prisma's own timers and the pool keep real time, while
- * every `new Date()` the service reads — the switch, the projection — is the
- * instant the test chooses. Keycloak is the one stand-in: a recorder of the
+ * every `new Date()` the service reads — the sweep, the projection — is the
+ * instant the test chooses. The switch reads the database's clock instead
+ * (inside its lock), so its refusal waits for real time to pass validUntil. Keycloak is the one stand-in: a recorder of the
  * attribute sets the projector writes, which is exactly what reaches the token.
  *
  * The same membership is observed on both sides of its validUntil: before,
@@ -34,9 +35,11 @@ describe('membership validUntil (ADR-060 § 5)', () => {
   const inA = id('MBR-EXP-A');
   const inB = id('MBR-EXP-B');
 
-  // A validUntil far enough ahead of the real clock that nothing else in the
-  // database can have seen it pass.
-  const validUntil = new Date(Date.now() + 24 * 3600 * 1000);
+  // A validUntil a few seconds ahead of the *real* clock. The sweep and the
+  // projection read the faked `Date`, but the switch judges a membership on the
+  // database's clock (Codex #114 R1-1: inside its lock), which no fake reaches —
+  // so the refusal after validUntil waits for real time to pass it.
+  const validUntil = new Date(Date.now() + 10_000);
   const before = new Date(validUntil.getTime() - 60_000);
   const after = new Date(validUntil.getTime() + 60_000);
 
@@ -200,6 +203,9 @@ describe('membership validUntil (ADR-060 § 5)', () => {
 
   it('after validUntil: switching back to the organization is refused', async () => {
     setClock(after);
+    // The database clock must have passed validUntil too (see the fixture).
+    const wait = validUntil.getTime() - jest.getRealSystemTime() + 250;
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
 
     await expect(
       asUser(() => service.switchActiveOrganization({ organizationId: org.b })),

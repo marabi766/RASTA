@@ -41,21 +41,45 @@ export class CatalogueService {
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? SERVICE_NAME;
 
+    const productId = newId(ID_PREFIX.product);
+
     try {
-      const row = await this.prisma.client.product.create({
-        data: {
-          id: newId(ID_PREFIX.product),
+      // The product and its audit record commit together (AGENTS.md S-06,
+      // A-08; global audit L7-14).
+      const row = await this.prisma.transaction(async (tx) => {
+        const created = await tx.product.create({
+          data: {
+            id: productId,
+            organizationId,
+            sku: dto.sku,
+            name: dto.name,
+            description: dto.description ?? null,
+            category: dto.category,
+            kind: dto.kind,
+            unit: dto.unit,
+            // Written here rather than generated, so one write does it (ADR-042).
+            searchText: searchTextFor(dto),
+            createdBy: actor,
+          },
+        });
+
+        await this.events.enqueue(tx, {
+          eventName: MARKETPLACE_EVENTS.PRODUCT_CREATED,
+          aggregateId: productId,
           organizationId,
-          sku: dto.sku,
-          name: dto.name,
-          description: dto.description ?? null,
-          category: dto.category,
-          kind: dto.kind,
-          unit: dto.unit,
-          // Written here rather than generated, so one write does it (ADR-042).
-          searchText: searchTextFor(dto),
-          createdBy: actor,
-        },
+          payload: {
+            productId,
+            organizationId,
+            sku: created.sku,
+            category: created.category,
+            kind: created.kind,
+            unit: created.unit,
+            createdBy: actor,
+            createdAt: created.createdAt.toISOString(),
+          },
+        });
+
+        return created;
       });
       return toProductView(row);
     } catch (error) {
@@ -201,6 +225,29 @@ export class CatalogueService {
         },
       });
 
+      if (!dto.publish) {
+        // A draft is a state change too (L7-14); a published offer is
+        // announced by OFFER_PUBLISHED below, as before.
+        await this.events.enqueue(tx, {
+          eventName: MARKETPLACE_EVENTS.OFFER_DRAFTED,
+          aggregateId: offerId,
+          organizationId,
+          payload: {
+            offerId,
+            productId: dto.productId,
+            supplierOrganizationId: organizationId,
+            unitPriceMinor: dto.unitPriceMinor,
+            currency: dto.currency,
+            availableQuantity: dto.availableQuantity,
+            leadTimeDays: dto.leadTimeDays,
+            minimumQuantity: created.minimumQuantity,
+            version: 1,
+            createdBy: actor,
+            createdAt: created.createdAt.toISOString(),
+          },
+        });
+      }
+
       if (dto.publish) {
         await this.events.enqueue(tx, {
           eventName: MARKETPLACE_EVENTS.OFFER_PUBLISHED,
@@ -241,6 +288,15 @@ export class CatalogueService {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     return this.prisma.transaction(async (tx) => {
+      // Locked before it is read (Codex #115 R1-1). Every field compared
+      // below — and the `previousStatus` an audit record names — comes from
+      // this snapshot, which no concurrent update can change until this
+      // transaction ends. Read unlocked, a withdrawal committed by somebody
+      // else in between was reported as this caller's change. The lock is
+      // taken by id alone, before the owner check, and holds nothing a
+      // stranger could learn from.
+      await tx.$executeRaw`SELECT 1 FROM "offer" WHERE id = ${offerId} FOR UPDATE`;
+
       const existing = await runUnscoped('an offer is located before its owner is checked', () =>
         tx.offer.findUnique({ where: { id: offerId } }),
       );
@@ -248,14 +304,33 @@ export class CatalogueService {
 
       assertOfferOwner(existing);
 
-      const repriced = dto.unitPriceMinor !== undefined;
+      const nextPrice =
+        dto.unitPriceMinor !== undefined ? BigInt(dto.unitPriceMinor) : existing.unitPriceMinor;
+      const nextStatus = dto.status ?? existing.status;
+      const changedFields = [
+        ...(nextPrice !== existing.unitPriceMinor ? ['unitPriceMinor' as const] : []),
+        ...(dto.availableQuantity !== undefined &&
+        dto.availableQuantity !== existing.availableQuantity
+          ? ['availableQuantity' as const]
+          : []),
+        ...(dto.leadTimeDays !== undefined && dto.leadTimeDays !== existing.leadTimeDays
+          ? ['leadTimeDays' as const]
+          : []),
+        ...(nextStatus !== existing.status ? ['status' as const] : []),
+      ];
+
+      // An update that changes nothing writes nothing and announces nothing
+      // (Codex #115 R1-2) — not even `updatedBy`/`updatedAt`, and not a
+      // re-publication of terms nobody changed.
+      if (changedFields.length === 0) return toOfferView(existing);
+
+      const repriced = changedFields.includes('unitPriceMinor');
       const nextVersion = repriced ? existing.version + 1 : existing.version;
-      const nextPrice = repriced ? BigInt(dto.unitPriceMinor as string) : existing.unitPriceMinor;
-      const willPublish = dto.status === 'PUBLISHED';
+      const willPublish = nextStatus === 'PUBLISHED';
       const publishedAt =
         willPublish && !existing.publishedAt
           ? new Date()
-          : dto.status && !willPublish
+          : !willPublish
             ? null
             : existing.publishedAt;
 
@@ -272,11 +347,11 @@ export class CatalogueService {
           where: { id: offerId },
           data: {
             ...(repriced ? { unitPriceMinor: nextPrice, version: nextVersion } : {}),
-            ...(dto.availableQuantity !== undefined
+            ...(changedFields.includes('availableQuantity')
               ? { availableQuantity: dto.availableQuantity }
               : {}),
-            ...(dto.leadTimeDays !== undefined ? { leadTimeDays: dto.leadTimeDays } : {}),
-            ...(dto.status ? { status: dto.status } : {}),
+            ...(changedFields.includes('leadTimeDays') ? { leadTimeDays: dto.leadTimeDays } : {}),
+            ...(changedFields.includes('status') ? { status: nextStatus } : {}),
             publishedAt,
             updatedBy: actor,
           },
@@ -300,6 +375,35 @@ export class CatalogueService {
             },
           }),
         );
+      }
+
+      // Anything else that changed is recorded too (L7-14): an edit to a
+      // draft, and every move out of PUBLISHED — which is exactly what a
+      // search index built from this stream must not miss. `changedFields`
+      // comes from the locked snapshot above, so it names this caller's
+      // change and nobody else's.
+      if (updated.status !== 'PUBLISHED') {
+        await this.events.enqueue(tx, {
+          eventName: MARKETPLACE_EVENTS.OFFER_UPDATED,
+          aggregateId: offerId,
+          organizationId: existing.organizationId,
+          payload: {
+            offerId,
+            productId: updated.productId,
+            supplierOrganizationId: existing.organizationId,
+            unitPriceMinor: updated.unitPriceMinor.toString(),
+            currency: updated.currency,
+            availableQuantity: updated.availableQuantity,
+            leadTimeDays: updated.leadTimeDays,
+            minimumQuantity: updated.minimumQuantity,
+            version: updated.version,
+            previousStatus: existing.status,
+            status: updated.status,
+            changedFields,
+            updatedBy: actor,
+            updatedAt: updated.updatedAt.toISOString(),
+          },
+        });
       }
 
       // Republished on any change that makes it visible or changes what a

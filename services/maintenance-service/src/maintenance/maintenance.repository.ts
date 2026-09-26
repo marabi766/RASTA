@@ -192,6 +192,25 @@ export class MaintenanceRepository {
     return (tx ?? this.client).maintenanceRequest.findFirst({ where: { id } });
   }
 
+  /**
+   * The workshop an approval settles with: the one that finished the job last.
+   *
+   * One definition, read by the approval that publishes `MAINTENANCE_APPROVED`
+   * and by the internal fact economic-service checks that event against
+   * (ADR-061 § 4). Two copies of the rule could disagree, and every
+   * disagreement would dead-letter a genuine approval. `id` breaks a tie
+   * between two orders completed at the same instant (a completion time can
+   * be supplied), so the answer is the same on every read.
+   */
+  async findSettlingWorkshop(tx: ExtendedPrismaClient, requestId: string): Promise<string | null> {
+    const workshop = await tx.repairOrder.findFirst({
+      where: { maintenanceRequestId: requestId, status: 'COMPLETED' },
+      orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
+      select: { workshopOrganizationId: true },
+    });
+    return workshop?.workshopOrganizationId ?? null;
+  }
+
   async findRequestWithDetail(id: string) {
     return this.client.maintenanceRequest.findFirst({
       where: { id },

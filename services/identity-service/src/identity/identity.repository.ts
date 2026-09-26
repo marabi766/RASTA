@@ -53,6 +53,29 @@ export class IdentityRepository {
   }
 
   /**
+   * The per-user serialisation point for membership changes and the
+   * active-organization switch (global audit L7-14, Codex #114 R1-1).
+   *
+   * Locks the user row for the rest of the caller's transaction and returns
+   * its active organization together with the database's own clock. Every
+   * transaction that can end a membership (revocation, the expiry sweep),
+   * change one (roles) or move the active organization takes it **first**,
+   * before reading or writing any membership. So a switch that validated a
+   * membership cannot commit around a revocation of that same membership: one
+   * of them waits for the other, then reads what it committed. `null` when no
+   * such user exists.
+   */
+  async lockUserMemberships(
+    tx: ExtendedPrismaClient,
+    userId: string,
+  ): Promise<{ activeOrganizationId: string | null; now: Date } | null> {
+    const rows = await tx.$queryRaw<Array<{ active_organization_id: string | null; now: Date }>>`
+      SELECT active_organization_id, now() AS now FROM "user" WHERE id = ${userId} FOR UPDATE`;
+    const row = rows[0];
+    return row ? { activeOrganizationId: row.active_organization_id, now: row.now } : null;
+  }
+
+  /**
    * Writes an event to the outbox.
    *
    * Takes the transaction client explicitly rather than reaching for the

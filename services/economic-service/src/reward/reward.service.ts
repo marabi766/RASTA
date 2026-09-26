@@ -79,6 +79,13 @@ export class RewardService {
     sourceReference: string;
     occurredAt: Date;
     payload: Record<string, unknown>;
+    /**
+     * When given, only these rules may pay — the ones an earlier evaluation of
+     * the same fact found applicable (PR #110 round 2 #2). A rule activated
+     * since is not among them, and one deactivated since is not ACTIVE, so the
+     * set can only shrink. Absent, every applicable rule is evaluated.
+     */
+    onlyRuleIds?: readonly string[];
   }): Promise<GrantOutcome[]> {
     if (!input.userId) {
       rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_actor' });
@@ -86,12 +93,13 @@ export class RewardService {
     }
 
     const rules = await this.candidateRules(input.organizationId, input.triggerEvent);
+    const allowed = input.onlyRuleIds ? new Set(input.onlyRuleIds) : null;
     const applicable = applicableRules(
       rules as RewardRuleView[],
       input.organizationId,
       input.triggerEvent,
       input.occurredAt,
-    );
+    ).filter((rule) => allowed === null || allowed.has(rule.id));
 
     if (applicable.length === 0) {
       rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_rule' });
@@ -373,6 +381,35 @@ export class RewardService {
     });
 
     return level.name;
+  }
+
+  /**
+   * Whether any active rule could reward this trigger for this organization.
+   *
+   * Asked before the reward consumer checks the event with the fact's owner
+   * (ADR-061 § 4). With no rule configured, which is the MVP's real state,
+   * nothing can be granted, so there is nothing to confirm, and the busiest
+   * event on the platform costs no round trip. Validity windows are left to
+   * `grantFor`, which evaluates them against the source's own instant.
+   */
+  /**
+   * The ids of the rules that would evaluate this fact now, in a stable order.
+   *
+   * What the reward consumer records when it claims a fact, so that a
+   * redelivery after a crash evaluates the same rules and no others (PR #110
+   * round 2 #2). Rule terms cannot change once created — only the status, a
+   * forward-moving `validTo` and the label can — so the ids are the whole of
+   * what the first evaluation decided with.
+   */
+  async applicableRuleIds(
+    organizationId: string,
+    triggerEvent: string,
+    occurredAt: Date,
+  ): Promise<string[]> {
+    const rules = await this.candidateRules(organizationId, triggerEvent);
+    return applicableRules(rules as RewardRuleView[], organizationId, triggerEvent, occurredAt)
+      .map((rule) => rule.id)
+      .sort();
   }
 
   private candidateRules(organizationId: string, triggerEvent: string) {

@@ -21,9 +21,16 @@ import {
 const NAMES = Object.values(MARKETPLACE_EVENTS);
 
 describe('the catalogue', () => {
-  it('publishes the nine events docs/04 § 4.8 lists plus ORDER_DISPUTE_RESOLVED (ADR-052 § 1-b)', () => {
+  it('publishes the nine events docs/04 § 4.8 lists, ORDER_DISPUTE_RESOLVED (ADR-052 § 1-b) and the seven L7-14 audit records', () => {
     expect([...NAMES].sort()).toEqual(
       [
+        'PRODUCT_CREATED',
+        'OFFER_DRAFTED',
+        'OFFER_UPDATED',
+        'ORDER_FUNDS_HELD',
+        'ORDER_FAILED',
+        'ORDER_SETTLEMENT_STARTED',
+        'ORDER_SETTLEMENT_FAILED',
         'OFFER_PUBLISHED',
         'ORDER_CANCELLED',
         'ORDER_COMPLETED',
@@ -359,5 +366,74 @@ describe('no payload carries personal or financial detail it should not', () => 
       expect(keys).not.toContain(forbidden);
     }
     expect(serialised).toBeDefined();
+  });
+});
+
+describe('the L7-14 audit records', () => {
+  const parties = {
+    orderId: 'ORD_1',
+    buyerOrganizationId: 'ORG-A',
+    supplierOrganizationId: 'ORG-B',
+    totalAmountMinor: '500000',
+    currency: 'IRR',
+  };
+
+  it('never puts the saga’s failure reason on the wire', () => {
+    // The reason is economic-service's refusal text; it stays on the order row
+    // behind the API. The schema strips it rather than carrying it.
+    const parsed = validateMarketplacePayload('ORDER_FAILED', {
+      ...parties,
+      failedAt: '2026-08-29T00:00:00.000Z',
+      reason: 'connect ECONNREFUSED economic-service.internal:3112',
+    });
+    expect(parsed).not.toHaveProperty('reason');
+  });
+
+  it('records a funds hold only as FUNDS_HELD or CANCELLING', () => {
+    const held = { ...parties, transactionId: 'TXN_1', heldAt: '2026-08-29T00:00:00.000Z' };
+    expect(() =>
+      validateMarketplacePayload('ORDER_FUNDS_HELD', { ...held, status: 'CANCELLING' }),
+    ).not.toThrow();
+    expect(() =>
+      validateMarketplacePayload('ORDER_FUNDS_HELD', { ...held, status: 'COMPLETED' }),
+    ).toThrow();
+  });
+
+  it('records an offer change only when it leaves the offer unpublished, and names what changed', () => {
+    const updated = {
+      offerId: 'OFR_1',
+      productId: 'PRD_1',
+      supplierOrganizationId: 'ORG-B',
+      unitPriceMinor: '250000',
+      currency: 'IRR',
+      availableQuantity: 1,
+      leadTimeDays: 1,
+      minimumQuantity: 1,
+      version: 2,
+      previousStatus: 'PUBLISHED',
+      status: 'WITHDRAWN',
+      changedFields: ['status'],
+      updatedBy: 'USR-1',
+      updatedAt: '2026-08-29T00:00:00.000Z',
+    };
+    expect(() => validateMarketplacePayload('OFFER_UPDATED', updated)).not.toThrow();
+    // A change that leaves it PUBLISHED is OFFER_PUBLISHED's to announce.
+    expect(() =>
+      validateMarketplacePayload('OFFER_UPDATED', { ...updated, status: 'PUBLISHED' }),
+    ).toThrow();
+    // A change that changed nothing records nothing.
+    expect(() =>
+      validateMarketplacePayload('OFFER_UPDATED', { ...updated, changedFields: [] }),
+    ).toThrow();
+  });
+
+  it('carries money as a string on every saga record', () => {
+    expect(() =>
+      validateMarketplacePayload('ORDER_SETTLEMENT_STARTED', {
+        ...parties,
+        totalAmountMinor: 500000,
+        startedAt: '2026-08-29T00:00:00.000Z',
+      }),
+    ).toThrow();
   });
 });

@@ -56,7 +56,8 @@ import { SettlementAuthorityConsumer } from './consumers/settlement-authority.co
 import { RewardTriggerConsumer } from './consumers/reward-trigger.consumer';
 import { transactionsDisputed, transactionsPendingSettlement } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
-import { ENV, LOGGER, PAYMENT_PROVIDER } from './tokens';
+import { ENV, LOGGER, PAYMENT_PROVIDER, SOURCE_FACTS } from './tokens';
+import { SourceFactsClient, type SourceFacts } from './provenance/source-facts.client';
 import { ECONOMIC_DLQ_TOPIC, loadEconomicEnv, SERVICE_NAME, type EconomicEnv } from './config/env';
 
 /**
@@ -171,14 +172,37 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
         new MockPaymentProvider(env.ECONOMIC_MOCK_PAYMENT_LATENCY_MS),
     },
 
+    /**
+     * The owners of the facts the two consumers make money from (ADR-061 § 4).
+     * Its own `InternalTokenService`, from the same secret the guard verifies
+     * with: minting and verifying are separate roles, and neither needs the
+     * other's instance.
+     */
+    {
+      provide: SOURCE_FACTS,
+      inject: [ENV],
+      useFactory: (env: EconomicEnv): SourceFacts =>
+        new SourceFactsClient({
+          maintenanceBaseUrl: env.MAINTENANCE_SERVICE_URL,
+          fleetBaseUrl: env.FLEET_SERVICE_URL,
+          timeoutMs: env.ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS,
+          tokens: new InternalTokenService(
+            env.INTERNAL_TOKEN_SECRET,
+            env.INTERNAL_TOKEN_ISSUER,
+            env.INTERNAL_TOKEN_TTL_SECONDS,
+          ),
+        }),
+    },
+
     {
       provide: SettlementAuthorityConsumer,
-      inject: [ENV, LOGGER, PrismaService, TransactionService],
+      inject: [ENV, LOGGER, PrismaService, TransactionService, SOURCE_FACTS],
       useFactory: (
         env: EconomicEnv,
         logger: Logger,
         prisma: PrismaService,
         transactions: TransactionService,
+        sources: SourceFacts,
       ) =>
         new SettlementAuthorityConsumer(
           (handler) =>
@@ -200,17 +224,19 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
             ),
           prisma,
           transactions,
+          sources,
         ),
     },
 
     {
       provide: RewardTriggerConsumer,
-      inject: [ENV, LOGGER, PrismaService, RewardService],
+      inject: [ENV, LOGGER, PrismaService, RewardService, SOURCE_FACTS],
       useFactory: (
         env: EconomicEnv,
         logger: Logger,
         prisma: PrismaService,
         rewards: RewardService,
+        sources: SourceFacts,
       ) =>
         new RewardTriggerConsumer(
           (handler) =>
@@ -232,6 +258,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
             ),
           prisma,
           rewards,
+          sources,
         ),
     },
 

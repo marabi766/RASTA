@@ -19,6 +19,8 @@ const base = {
   OIDC_JWKS_URI: 'http://localhost:8080/realms/rasta/protocol/openid-connect/certs',
   OIDC_AUDIENCE: 'rasta-api',
   INTERNAL_TOKEN_SECRET: 'a_secret_that_is_at_least_thirty_two_chars',
+  MAINTENANCE_SERVICE_URL: 'http://localhost:3105',
+  FLEET_SERVICE_URL: 'http://localhost:3104',
 } as NodeJS.ProcessEnv;
 
 describe('loadEconomicEnv', () => {
@@ -43,6 +45,18 @@ describe('loadEconomicEnv', () => {
 
     expect(env.DATABASE_URL).toBe('postgresql://u:p@localhost:5432/rasta_economic');
     expect(env.PORT).toBe(4112);
+  });
+
+  it('will not start without the services that own the facts it makes money from', () => {
+    // ADR-061 § 4. With no maintenance-service to ask, no approval can be
+    // confirmed and every obligation would dead-letter. Refused at boot.
+    for (const name of ['MAINTENANCE_SERVICE_URL', 'FLEET_SERVICE_URL']) {
+      expect(() => loadEconomicEnv({ ...base, [name]: undefined })).toThrow(EnvValidationError);
+      expect(() => loadEconomicEnv({ ...base, [name]: 'maintenance-service' })).toThrow(
+        EnvValidationError,
+      );
+    }
+    expect(loadEconomicEnv(base).ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS).toBe(3000);
   });
 
   it('defaults the platform operator organization rather than naming one', () => {

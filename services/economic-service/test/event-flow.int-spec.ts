@@ -20,6 +20,7 @@ import {
   type Wiring,
 } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import { FakeSourceFacts } from './source-facts.fake';
 
 /**
  * The event path, end to end, over a real broker.
@@ -74,6 +75,15 @@ describeWithKafka('economic event flow over Kafka', () => {
   let rewardTrigger: RewardTriggerConsumer;
 
   const publishedToEconomic: EventEnvelope[] = [];
+
+  /**
+   * maintenance-service's internal read (ADR-061 § 4). The stand-in producer
+   * below records each approval here before publishing it, as the real owner
+   * commits the approval with its outbox row, so every event on this path is
+   * one its owner confirms. What happens to one it does not confirm is
+   * proved in `consumers.int-spec.ts`.
+   */
+  const sources = new FakeSourceFacts();
 
   /** Waits for a consumer to actually join its group, not merely for `run()`. */
   function groupJoin(target: Consumer, name: string): Promise<void> {
@@ -147,6 +157,7 @@ describeWithKafka('economic event flow over Kafka', () => {
         ),
       prisma,
       wiring.transactions,
+      sources,
     );
     await settlementAuthority.onModuleInit();
 
@@ -165,6 +176,7 @@ describeWithKafka('economic event flow over Kafka', () => {
         ),
       prisma,
       wiring.rewards,
+      sources,
     );
     await rewardTrigger.onModuleInit();
 
@@ -212,6 +224,10 @@ describeWithKafka('economic event flow over Kafka', () => {
       ...overrides,
     };
 
+    if (eventName === 'MAINTENANCE_APPROVED' && !sources.requests.has(String(payload.requestId))) {
+      sources.approved(payload as Parameters<FakeSourceFacts['approved']>[0]);
+    }
+
     await maintenanceProducer.send({
       topic: MAINTENANCE_TOPIC,
       messages: [
@@ -234,6 +250,7 @@ describeWithKafka('economic event flow over Kafka', () => {
 
   describe('maintenance → economic: an approval becomes a settleable obligation', () => {
     const requestId = `MNT_ITEST_${ulid()}`;
+    const approvedAt = new Date().toISOString();
     let envelope: EventEnvelope;
 
     it('records the obligation, and moves no money at all', async () => {
@@ -245,7 +262,7 @@ describeWithKafka('economic event flow over Kafka', () => {
         assetId: `AST_ITEST_${suffix}`,
         organizationId: org.a,
         approvedBy: `USR-ITEST-${suffix}`,
-        approvedAt: new Date().toISOString(),
+        approvedAt,
         workshopOrganizationId: org.b,
         totalCostMinor: '11850000',
         currency: 'IRR',
@@ -337,7 +354,7 @@ describeWithKafka('economic event flow over Kafka', () => {
         assetId: `AST_ITEST_${suffix}`,
         organizationId: org.a,
         approvedBy: `USR-ITEST-${suffix}`,
-        approvedAt: new Date().toISOString(),
+        approvedAt,
         workshopOrganizationId: org.b,
         totalCostMinor: '11850000',
         currency: 'IRR',

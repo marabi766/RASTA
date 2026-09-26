@@ -26,6 +26,7 @@ export const IDENTITY_EVENTS = {
   REGISTRATION_SUBMITTED: 'REGISTRATION_SUBMITTED',
   REGISTRATION_APPROVED: 'REGISTRATION_APPROVED',
   REGISTRATION_REJECTED: 'REGISTRATION_REJECTED',
+  ACTIVE_ORGANIZATION_SWITCHED: 'ACTIVE_ORGANIZATION_SWITCHED',
 } as const;
 
 export type IdentityEventName = (typeof IDENTITY_EVENTS)[keyof typeof IDENTITY_EVENTS];
@@ -119,6 +120,24 @@ export const registrationReviewedPayload = z.object({
   rejectionReason: z.string().optional(),
 });
 
+/**
+ * A user changed which of their organizations their requests act for.
+ *
+ * The audit record for that choice (AGENTS.md S-06): which tenant the user's
+ * later actions are attributed to is exactly what an investigator asks first.
+ * Identifiers only. The envelope's `actor` is the user who switched, and the
+ * envelope's tenant is the organization switched *to*.
+ *
+ * `previousOrganizationId` is null when the user had no active organization.
+ * Published only when the value actually changed; re-selecting the current
+ * organization changes nothing and records nothing.
+ */
+export const activeOrganizationSwitchedPayload = z.object({
+  userId: z.string(),
+  previousOrganizationId: z.string().nullable(),
+  organizationId: z.string(),
+});
+
 /** Payload schema per event, used to validate on publish and on consume. */
 export const IDENTITY_EVENT_SCHEMAS = {
   [IDENTITY_EVENTS.USER_REGISTERED]: userRegisteredPayload,
@@ -134,6 +153,7 @@ export const IDENTITY_EVENT_SCHEMAS = {
   [IDENTITY_EVENTS.REGISTRATION_SUBMITTED]: registrationSubmittedPayload,
   [IDENTITY_EVENTS.REGISTRATION_APPROVED]: registrationReviewedPayload,
   [IDENTITY_EVENTS.REGISTRATION_REJECTED]: registrationReviewedPayload,
+  [IDENTITY_EVENTS.ACTIVE_ORGANIZATION_SWITCHED]: activeOrganizationSwitchedPayload,
 } as const satisfies Record<IdentityEventName, z.ZodTypeAny>;
 
 /**

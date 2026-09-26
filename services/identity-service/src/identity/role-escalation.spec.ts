@@ -265,6 +265,7 @@ const repository = {
     },
   },
   transaction: async (fn: (t: unknown) => Promise<unknown>) => fn(tx),
+  lockUserMemberships: async () => ({ activeOrganizationId: ORG_A, now: new Date() }),
   enqueueEvent: async () => 'evt-1',
   findUserById: async () => (lookups.user ? userRow() : null),
   findUserByUsernameOrEmail: async () => null,

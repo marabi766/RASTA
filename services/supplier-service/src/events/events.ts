@@ -11,7 +11,7 @@ import { SUPPLIER_CAPABILITIES } from '../supplier/capabilities';
  *
  * ## PERFORMANCE_SCORE_UPDATED is not here, and that is the point
  *
- * The catalogue lists five events for this service. Four are below. The fifth
+ * The catalogue lists six events for this service. Five are below. The sixth
  * carries `score` and `breakdown`, and there is no formula: Q-12 — the weights
  * of quality, time, satisfaction and dispute rate — is open, and the "equal
  * weights" line in `docs/24` is a placeholder inside an open question rather
@@ -50,6 +50,7 @@ export const SUPPLIER_EVENTS = {
   SUPPLIER_QUALIFIED: 'SUPPLIER_QUALIFIED',
   SUPPLIER_REJECTED: 'SUPPLIER_REJECTED',
   SUPPLIER_SUSPENDED: 'SUPPLIER_SUSPENDED',
+  SUPPLIER_REINSTATED: 'SUPPLIER_REINSTATED',
 } as const;
 
 export type SupplierEventName = (typeof SUPPLIER_EVENTS)[keyof typeof SUPPLIER_EVENTS];
@@ -136,14 +137,10 @@ export const supplierRejectedPayload = z
  * distinguish "no end date" from "this producer does not tell you" — the same
  * distinction ADR-041 drew between `false` and `UNAVAILABLE`.
  *
- * ## The reinstatement gap
+ * ## Its counterpart
  *
- * There is no `SUPPLIER_REINSTATED` in the platform catalogue and none is
- * published here. A consumer that hides a supplier's offers on this event has
- * nothing that tells it to stop, so it must re-read this service rather than
- * treat the suspension as permanent. Recorded as a known issue and an
- * Integration Handoff item rather than closed by inventing an event this
- * service has no mandate to add.
+ * `SUPPLIER_REINSTATED` closes the same episode (`suspensionId`) and is the
+ * event a consumer that hid this supplier's offers waits for.
  */
 export const supplierSuspendedPayload = z
   .object({
@@ -158,11 +155,35 @@ export const supplierSuspendedPayload = z
   })
   .strict();
 
+/**
+ * A platform operator lifted a supplier's suspension.
+ *
+ * Added for the global audit's L7-14: the reinstatement is a state change —
+ * `SUSPENDED → ACTIVE`, and the episode stamped closed — and it published
+ * nothing, so audit-service held the suspension and never its end
+ * (AGENTS.md S-06). Its shape mirrors `SUPPLIER_SUSPENDED`: the same episode
+ * id, the operator's stated reason, who and when. Nothing about
+ * qualifications is carried — reinstating makes no new decision about them
+ * (`isCurrentlyQualified` simply stops withholding what was approved).
+ */
+export const supplierReinstatedPayload = z
+  .object({
+    supplierId: identifier,
+    organizationId: identifier,
+    /** The episode this closes — the `suspensionId` of its `SUPPLIER_SUSPENDED`. */
+    suspensionId: identifier,
+    reason: z.string().min(1).max(500),
+    reinstatedBy: identifier,
+    reinstatedAt: isoTimestamp,
+  })
+  .strict();
+
 export const SUPPLIER_EVENT_SCHEMAS = {
   SUPPLIER_REGISTERED: supplierRegisteredPayload,
   SUPPLIER_QUALIFIED: supplierQualifiedPayload,
   SUPPLIER_REJECTED: supplierRejectedPayload,
   SUPPLIER_SUSPENDED: supplierSuspendedPayload,
+  SUPPLIER_REINSTATED: supplierReinstatedPayload,
 } as const satisfies Record<SupplierEventName, z.ZodTypeAny>;
 
 /**

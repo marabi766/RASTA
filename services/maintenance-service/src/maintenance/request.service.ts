@@ -283,11 +283,7 @@ export class RequestService {
         maintenanceRequestId: id,
       });
 
-      const workshop = await tx.repairOrder.findFirst({
-        where: { maintenanceRequestId: id, status: 'COMPLETED' },
-        orderBy: { completedAt: 'desc' },
-        select: { workshopOrganizationId: true },
-      });
+      const workshopOrganizationId = await this.repository.findSettlingWorkshop(tx, id);
 
       await this.repository.enqueueEvent(tx, {
         aggregateType: 'MaintenanceRequest',
@@ -301,7 +297,7 @@ export class RequestService {
           organizationId: request.organizationId,
           approvedBy: actor,
           approvedAt: approvedAt.toISOString(),
-          workshopOrganizationId: workshop?.workshopOrganizationId ?? null,
+          workshopOrganizationId,
           totalCostMinor: request.totalCostMinor.toString(),
           currency: request.currency,
           // The breakdown is what makes the total auditable rather than

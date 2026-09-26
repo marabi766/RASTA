@@ -153,9 +153,12 @@ describe('order lifecycle (real database)', () => {
     expect(new Set(forThisOrder.map((row) => row.eventName))).toEqual(
       new Set([
         'ORDER_CREATED',
+        // The saga's own steps are audited too (L7-14).
+        'ORDER_FUNDS_HELD',
         'ORDER_CONFIRMED',
         'ORDER_FULFILLED',
         'ORDER_RECEIPT_CONFIRMED',
+        'ORDER_SETTLEMENT_STARTED',
         'ORDER_COMPLETED',
       ]),
     );
