@@ -9,24 +9,24 @@
 
 هر سرویس یک پایگاه داده منطقی با نقش اختصاصی خودش دارد:
 
-| سرویس        | پایگاه داده          | نقش پایگاه داده      | افزونه‌ها                     |
-| ------------ | -------------------- | -------------------- | ----------------------------- |
-| identity     | `rasta_identity`     | `rasta_identity`     | `pg_trgm`                     |
-| organization | `rasta_organization` | `rasta_organization` | `postgis`, `pg_trgm`, `ltree` |
-| asset        | `rasta_asset`        | `rasta_asset`        | `postgis`, `pg_trgm`          |
-| fleet        | `rasta_fleet`        | `rasta_fleet`        | `postgis`                     |
-| maintenance  | `rasta_maintenance`  | `rasta_maintenance`  | —                             |
-| marketplace  | `rasta_marketplace`  | `rasta_marketplace`  | `pg_trgm`                     |
-| procurement  | `rasta_procurement`  | `rasta_procurement`  | `pgcrypto`                    |
-| supplier     | `rasta_supplier`     | `rasta_supplier`     | `pg_trgm`                     |
-| inventory    | `rasta_inventory`    | `rasta_inventory`    | `postgis`                     |
-| construction | `rasta_construction` | `rasta_construction` | `postgis`, `pgcrypto`         |
-| contract     | `rasta_contract`     | `rasta_contract`     | —                             |
-| economic     | `rasta_economic`     | `rasta_economic`     | —                             |
-| notification | `rasta_notification` | `rasta_notification` | —                             |
-| document     | `rasta_document`     | `rasta_document`     | —                             |
-| audit        | `rasta_audit`        | `rasta_audit`        | —                             |
-| analytics    | `rasta_analytics`    | `rasta_analytics`    | `postgis`                     |
+| سرویس        | پایگاه داده          | نقش پایگاه داده      | افزونه‌ها                                   |
+| ------------ | -------------------- | -------------------- | ------------------------------------------- |
+| identity     | `rasta_identity`     | `rasta_identity`     | `pg_trgm`                                   |
+| organization | `rasta_organization` | `rasta_organization` | `postgis`, `pg_trgm`, `ltree`, `btree_gist` |
+| asset        | `rasta_asset`        | `rasta_asset`        | `postgis`, `pg_trgm`                        |
+| fleet        | `rasta_fleet`        | `rasta_fleet`        | `postgis`                                   |
+| maintenance  | `rasta_maintenance`  | `rasta_maintenance`  | —                                           |
+| marketplace  | `rasta_marketplace`  | `rasta_marketplace`  | `pg_trgm`                                   |
+| procurement  | `rasta_procurement`  | `rasta_procurement`  | `pgcrypto`                                  |
+| supplier     | `rasta_supplier`     | `rasta_supplier`     | `pg_trgm`                                   |
+| inventory    | `rasta_inventory`    | `rasta_inventory`    | `postgis`                                   |
+| construction | `rasta_construction` | `rasta_construction` | `postgis`, `pgcrypto`                       |
+| contract     | `rasta_contract`     | `rasta_contract`     | —                                           |
+| economic     | `rasta_economic`     | `rasta_economic`     | —                                           |
+| notification | `rasta_notification` | `rasta_notification` | —                                           |
+| document     | `rasta_document`     | `rasta_document`     | —                                           |
+| audit        | `rasta_audit`        | `rasta_audit`        | —                                           |
+| analytics    | `rasta_analytics`    | `rasta_analytics`    | `postgis`                                   |
 
 **MVP → PRODUCTION.**
 MVP: ۱۶ پایگاه داده روی یک Cluster PostgreSQL؛ هر کدام با نقش و اعتبارنامه اختصاصی و

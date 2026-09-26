@@ -68,7 +68,11 @@ export class OrganizationController {
   }
 
   @Get(':id/ancestors')
-  @ApiOperation({ summary: 'Ancestors, root first — for breadcrumbs' })
+  @ApiOperation({
+    summary: 'Ancestors, root first',
+    description:
+      'For a caller who is not a platform operator, the chain starts at their own organization: ancestors above it are outside what they may read (Q-67).',
+  })
   ancestors(@Param('id') id: string) {
     return this.organizations.ancestors(id);
   }
