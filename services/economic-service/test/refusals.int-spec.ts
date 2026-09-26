@@ -155,6 +155,46 @@ describe('refusals and defaults', () => {
     expect(response.body.failureReason).toBeTruthy();
   });
 
+  it('refuses a directive code outside the closed set, and never stores, publishes or echoes it', async () => {
+    // Codex review of PR #121, finding 4. The instrument is caller-controlled;
+    // a code copied from it reached the provider reference, failure_reason,
+    // PAYMENT_FAILED and the log. A card number is the case that matters.
+    const wallet = await request(http).get('/v1/wallets/me').set('authorization', asOrg());
+    const pan = '4111111111111111';
+
+    for (const instrument of [`fail-capture:${pan}`, `fail:${pan}`, `fail-refund:${pan}`]) {
+      const response = await request(http)
+        .post(`/v1/wallets/${wallet.body.id}/top-up`)
+        .set('authorization', asOrg())
+        .set('idempotency-key', id('ref-unsupported-directive'))
+        .send({ amountMinor: '5000', instrument })
+        .expect(201);
+
+      expect(response.body.status).toBe('FAILED');
+      expect(response.body.failureReason).toBe('UNSUPPORTED_DIRECTIVE');
+      expect(JSON.stringify(response.body)).not.toContain(pan);
+
+      const intent = await runUnscoped('the suite reads what was stored for the intent', () =>
+        harness.prisma.client.paymentIntent.findUniqueOrThrow({
+          where: { id: response.body.paymentIntentId as string },
+        }),
+      );
+      expect(
+        JSON.stringify(intent, (_key, value: unknown) =>
+          typeof value === 'bigint' ? value.toString() : value,
+        ),
+      ).not.toContain(pan);
+
+      const published = await runUnscoped('the suite reads what was published for it', () =>
+        harness.prisma.client.outboxMessage.findMany({
+          where: { aggregateId: response.body.paymentIntentId as string },
+        }),
+      );
+      expect(published.length).toBeGreaterThan(0);
+      expect(JSON.stringify(published.map((row) => row.payload))).not.toContain(pan);
+    }
+  });
+
   it('refuses a refund the provider itself refuses, and moves nothing', async () => {
     const wallet = await request(http).get('/v1/wallets/me').set('authorization', asOrg());
 
@@ -162,25 +202,22 @@ describe('refusals and defaults', () => {
       .post(`/v1/wallets/${wallet.body.id}/top-up`)
       .set('authorization', asOrg())
       .set('idempotency-key', id('ref-refund-declined'))
-      .send({ amountMinor: '8000' })
+      .send({ amountMinor: '8000', instrument: 'fail-refund:PROVIDER_UNAVAILABLE' })
       .expect(201);
     expect(topUp.body.status).toBe('CAPTURED');
 
-    // The refund directive rides on the **provider reference**, not on the
-    // instrument: `refund` is called with the reference the authorisation
-    // issued, exactly as a real provider's would be. `mockReferenceWithDirective`
-    // is exported for this, so the encoding is not restated here as a literal
-    // that could drift from the provider's own.
-    await runUnscoped('the suite arms a refund failure on the intent it created', () =>
-      harness.prisma.client.paymentIntent.update({
+    // Armed from the API, end to end: the directive rides on the instrument
+    // at top-up, and the provider keeps it inside the opaque reference it
+    // issues, which is what `refund` is later called with. Until global audit
+    // L7-20 the provider dropped it and this suite had to write the reference
+    // into the database by hand to reach this path at all.
+    const intentRow = await runUnscoped('the suite reads the reference the provider issued', () =>
+      harness.prisma.client.paymentIntent.findUniqueOrThrow({
         where: { id: topUp.body.paymentIntentId },
-        data: {
-          providerReference: mockReferenceWithDirective(
-            topUp.body.paymentIntentId,
-            'fail-refund:PROVIDER_UNAVAILABLE',
-          ),
-        },
       }),
+    );
+    expect(intentRow.providerReference).toBe(
+      mockReferenceWithDirective(topUp.body.paymentIntentId, 'fail-refund:PROVIDER_UNAVAILABLE'),
     );
 
     const before = await request(http).get('/v1/wallets/me').set('authorization', asOrg());

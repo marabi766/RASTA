@@ -8,12 +8,14 @@ import { WalletRepository } from '../wallet/wallet.repository';
 import { TransactionRepository, type TransactionFilter } from './transaction.repository';
 import { nextStatus } from './state-machine';
 import { assertMayRefund, assertTransactionVisible, canCommitOrganization } from '../access/access';
-import { parseMinor } from '../shared/money';
+import { formatMinor, parseMinor } from '../shared/money';
 import { isUniqueViolation } from '../ledger/ledger.repository';
+import { LedgerService } from '../ledger/ledger.service';
+import { ECONOMIC_EVENTS } from '../events/events';
 import { financialTransactionDuration, transactionsCreatedTotal } from '../observability/metrics';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { ENV } from '../tokens';
-import type { Prisma, TransactionType } from '../generated/prisma';
+import type { Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
 import type { CreateTransactionDto, DisputeTransactionDto, ResolveDisputeDto } from './dto';
 
 /**
@@ -37,6 +39,7 @@ export class TransactionService {
     private readonly wallets: WalletService,
     private readonly walletRepository: WalletRepository,
     @Inject(ENV) private readonly env: EconomicEnv,
+    private readonly ledger: LedgerService,
   ) {}
 
   // ==========================================================================
@@ -132,6 +135,27 @@ export class TransactionService {
             nextStatus(id, 'CREATED', 'HOLD_PLACED'),
           );
         }
+
+        // One record of the creation, naming the status the row ends in: a
+        // hold placed in the same breath is announced by its own FUNDS_HELD.
+        await this.announce(
+          tx,
+          {
+            id,
+            organizationId,
+            counterpartyOrganizationId: dto.counterpartyOrganizationId ?? null,
+            transactionType: dto.transactionType,
+            grossAmountMinor,
+            currency: dto.currency ?? 'IRR',
+          },
+          {
+            action: 'CREATE',
+            from: null,
+            to: payerWallet ? 'HELD' : 'CREATED',
+            by: actor,
+            at: new Date(),
+          },
+        );
 
         return id;
       });
@@ -262,6 +286,26 @@ export class TransactionService {
       return { id: winner.id, created: false };
     }
 
+    await this.announce(
+      tx,
+      {
+        id,
+        organizationId: input.organizationId,
+        counterpartyOrganizationId: input.counterpartyOrganizationId,
+        transactionType: input.transactionType,
+        grossAmountMinor: input.grossAmountMinor,
+        currency: input.currency,
+      },
+      {
+        action: 'RECORD_AUTHORISED_OBLIGATION',
+        from: null,
+        to: 'PENDING_SETTLEMENT',
+        by: SERVICE_NAME,
+        at: new Date(),
+        causationId: input.causationId,
+      },
+    );
+
     transactionsCreatedTotal.inc({
       service: SERVICE_NAME,
       type: input.transactionType,
@@ -322,7 +366,12 @@ export class TransactionService {
    * "تأیید دریافت" control indistinguishable from the payment.
    */
   async authoriseSettlement(transactionId: string): Promise<TransactionDetail> {
-    return this.move(transactionId, 'AUTHORISE_SETTLEMENT', {});
+    const actor = getContext().userId ?? SERVICE_NAME;
+    const at = new Date();
+    return this.move(transactionId, 'AUTHORISE_SETTLEMENT', actor, at, {
+      settlementAuthorisedAt: at,
+      settlementAuthorisedBy: actor,
+    });
   }
 
   /**
@@ -334,8 +383,9 @@ export class TransactionService {
    */
   async dispute(transactionId: string, dto: DisputeTransactionDto): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
-    return this.move(transactionId, 'DISPUTE', {
-      disputedAt: new Date(),
+    const at = new Date();
+    return this.move(transactionId, 'DISPUTE', actor, at, {
+      disputedAt: at,
       disputedBy: actor,
       disputeReason: dto.reason,
     });
@@ -349,8 +399,9 @@ export class TransactionService {
    */
   async resolveDispute(transactionId: string, dto: ResolveDisputeDto): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
-    return this.move(transactionId, 'RESOLVE_DISPUTE', {
-      disputeResolvedAt: new Date(),
+    const at = new Date();
+    return this.move(transactionId, 'RESOLVE_DISPUTE', actor, at, {
+      disputeResolvedAt: at,
       disputeResolvedBy: actor,
       disputeReason: dto.resolution,
     });
@@ -415,14 +466,23 @@ export class TransactionService {
           );
         }
 
+        const refundedAt = new Date();
         const moved = await this.repository.transition(
           tx,
           transactionId,
           transaction.status,
           target,
-          { failureReason: reason },
+          { failureReason: reason, refundedAt, refundedBy: actor },
         );
         if (moved === 0) throw RastaError.optimisticLockFailed('Transaction', transactionId);
+
+        await this.announce(tx, transaction, {
+          action: 'REFUND',
+          from: transaction.status,
+          to: target,
+          by: actor,
+          at: refundedAt,
+        });
       });
 
       return this.get(transactionId);
@@ -433,7 +493,13 @@ export class TransactionService {
 
   /** Cancels a transaction nothing has moved against yet. */
   async cancel(transactionId: string, reason: string): Promise<TransactionDetail> {
-    return this.move(transactionId, 'CANCEL', { failureReason: reason });
+    const actor = getContext().userId ?? SERVICE_NAME;
+    const at = new Date();
+    return this.move(transactionId, 'CANCEL', actor, at, {
+      failureReason: reason,
+      cancelledAt: at,
+      cancelledBy: actor,
+    });
   }
 
   /**
@@ -442,11 +508,15 @@ export class TransactionService {
    * Under the row lock so that the read of the current status and the write of
    * the next one are one decision — and with `assertTransactionVisible` so
    * that a caller who is neither payer nor payee gets a 404 rather than
-   * discovering the transaction exists.
+   * discovering the transaction exists. The actor and the instant go on the
+   * row (through `extra`) and on the `TRANSACTION_STATUS_CHANGED` record, in
+   * the same transaction as the move.
    */
   private async move(
     transactionId: string,
-    event: Parameters<typeof nextStatus>[2],
+    event: 'AUTHORISE_SETTLEMENT' | 'DISPUTE' | 'RESOLVE_DISPUTE' | 'CANCEL',
+    actor: string,
+    at: Date,
     extra: Prisma.TransactionUncheckedUpdateManyInput,
   ): Promise<TransactionDetail> {
     await this.prisma.transaction(async (tx) => {
@@ -464,9 +534,63 @@ export class TransactionService {
         extra,
       );
       if (moved === 0) throw RastaError.optimisticLockFailed('Transaction', transactionId);
+
+      await this.announce(tx, transaction, {
+        action: event,
+        from: transaction.status,
+        to: target,
+        by: actor,
+        at,
+      });
     });
 
     return this.get(transactionId);
+  }
+
+  /**
+   * The audit record of one lifecycle step (`TRANSACTION_STATUS_CHANGED`,
+   * AGENTS.md S-06), written into the outbox by the transaction that makes
+   * the step, so the step and its record commit together or not at all
+   * (ADR-021).
+   */
+  private announce(
+    tx: ExtendedPrismaClient,
+    transaction: {
+      id: string;
+      organizationId: string;
+      counterpartyOrganizationId: string | null;
+      transactionType: string;
+      grossAmountMinor: bigint;
+      currency: string;
+    },
+    change: {
+      action: StatusChangeAction;
+      from: TransactionStatus | null;
+      to: TransactionStatus;
+      by: string;
+      at: Date;
+      causationId?: string;
+    },
+  ): Promise<void> {
+    return this.ledger.enqueue(tx, {
+      eventName: ECONOMIC_EVENTS.TRANSACTION_STATUS_CHANGED,
+      aggregateId: transaction.id,
+      organizationId: transaction.organizationId,
+      ...(change.causationId ? { causationId: change.causationId } : {}),
+      payload: {
+        transactionId: transaction.id,
+        organizationId: transaction.organizationId,
+        counterpartyOrganizationId: transaction.counterpartyOrganizationId,
+        transactionType: transaction.transactionType,
+        action: change.action,
+        fromStatus: change.from,
+        toStatus: change.to,
+        grossAmountMinor: formatMinor(transaction.grossAmountMinor),
+        currency: transaction.currency,
+        changedBy: change.by,
+        changedAt: change.at.toISOString(),
+      },
+    });
   }
 
   // ==========================================================================
@@ -492,6 +616,15 @@ export class TransactionService {
     return this.repository.list(getOrganizationId(), filter);
   }
 }
+
+type StatusChangeAction =
+  | 'CREATE'
+  | 'RECORD_AUTHORISED_OBLIGATION'
+  | 'AUTHORISE_SETTLEMENT'
+  | 'DISPUTE'
+  | 'RESOLVE_DISPUTE'
+  | 'CANCEL'
+  | 'REFUND';
 
 export interface TransactionDetail {
   id: string;

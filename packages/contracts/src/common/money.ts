@@ -18,15 +18,51 @@ export type Currency = (typeof CURRENCIES)[number];
 
 export const currencySchema = z.enum(CURRENCIES);
 
-/** A non-negative integer amount encoded as a decimal string. */
+/**
+ * The largest amount any service can store: PostgreSQL `BIGINT`, 2^63 − 1.
+ *
+ * Every money column on the platform is `BIGINT`. An amount past this used to
+ * pass validation — the pattern allows thirty digits — and then fail at the
+ * database as a 500, or in a consumer as a retry until it dead-lettered. It is
+ * refused here instead, as the 400 it is.
+ */
+export const MAX_AMOUNT_MINOR = 9_223_372_036_854_775_807n;
+
+/** The smallest signed amount `BIGINT` stores, −2^63. */
+export const MIN_SIGNED_AMOUNT_MINOR = -9_223_372_036_854_775_808n;
+
+/**
+ * Whether an amount string is within `BIGINT`. A string the pattern already
+ * refused is left to the pattern's message: zod runs a refinement even after a
+ * failed regex, and `BigInt('12.5')` would throw rather than report.
+ */
+function storable(value: string, min: bigint): boolean {
+  if (!/^-?\d+$/.test(value)) return true;
+  const amount = BigInt(value);
+  return amount >= min && amount <= MAX_AMOUNT_MINOR;
+}
+
+/**
+ * A non-negative integer amount encoded as a decimal string, at most
+ * {@link MAX_AMOUNT_MINOR}. The pattern is unchanged; the bound is a
+ * refinement, so only amounts no service could ever store are newly refused.
+ */
 export const amountMinorSchema = z
   .string()
-  .regex(/^\d{1,30}$/, 'Amount must be a non-negative integer string in minor units');
+  .regex(/^\d{1,30}$/, 'Amount must be a non-negative integer string in minor units')
+  .refine(
+    (value) => storable(value, 0n),
+    'Amount exceeds the largest storable amount (2^63 - 1 minor units)',
+  );
 
 /** A signed integer amount — used by ledger entries, which may be negative. */
 export const signedAmountMinorSchema = z
   .string()
-  .regex(/^-?\d{1,30}$/, 'Amount must be an integer string in minor units');
+  .regex(/^-?\d{1,30}$/, 'Amount must be an integer string in minor units')
+  .refine(
+    (value) => storable(value, MIN_SIGNED_AMOUNT_MINOR),
+    'Amount is outside the storable range (-2^63 to 2^63 - 1 minor units)',
+  );
 
 export const moneySchema = z.object({
   amountMinor: amountMinorSchema,

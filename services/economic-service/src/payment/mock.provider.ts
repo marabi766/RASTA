@@ -33,6 +33,10 @@ import type {
  *   `fail-capture:<code>`       authorize succeeds, capture fails
  *   `fail-refund:<code>`        authorize and capture succeed, refund fails
  *
+ * `<code>` is one of {@link MOCK_DIRECTIVE_CODES}, or empty for
+ * `PROVIDER_DECLINED`. Any other code fails the authorisation as
+ * `UNSUPPORTED_DIRECTIVE` and is neither stored nor echoed.
+ *
  * so a test can reach the compensation path deliberately, and the same request
  * behaves the same way every time it is replayed.
  *
@@ -68,7 +72,25 @@ export class MockPaymentProvider implements PaymentProvider {
   async authorize(request: AuthorizeRequest): Promise<AuthorizeResult> {
     await this.delay();
 
-    const reference = this.reference(request.paymentIntentId);
+    // A directive naming a code outside the closed set is refused whole: the
+    // instrument is caller-controlled, and a code copied from it would reach
+    // the stored reference, `failure_reason`, `PAYMENT_FAILED` and the log —
+    // `fail-capture:4111111111111111` would carry a card number into all four
+    // (S-09; Codex review of PR #121, finding 4). The reference issued for it
+    // carries nothing from the instrument.
+    const directives = ['fail', ...CARRIED_DIRECTIVES] as const;
+    if (directives.some((prefix) => directive(request.instrument, prefix) === UNSUPPORTED)) {
+      const plain = this.reference(request.paymentIntentId, undefined);
+      this.states.set(plain, 'FAILED');
+      return {
+        outcome: 'FAILED',
+        providerReference: plain,
+        failureCode: UNSUPPORTED,
+        simulated: true,
+      };
+    }
+
+    const reference = this.reference(request.paymentIntentId, request.instrument);
     const failure = directive(request.instrument, 'fail');
 
     if (failure) {
@@ -132,12 +154,22 @@ export class MockPaymentProvider implements PaymentProvider {
   /**
    * A reference that carries the intent id and any capture/refund directive.
    *
-   * Encoding the directive into the reference is what makes a capture failure
-   * reachable: `capture` is called with the reference, not with the original
-   * instrument, and a real provider's reference is opaque anyway.
+   * Encoding the directive into the reference is what makes a capture or
+   * refund failure reachable: `capture` and `refund` are called with the
+   * reference, not with the original instrument, and a real provider's
+   * reference is opaque anyway. The refund one is only reachable this way — a
+   * refund runs later, from the reference stored on the intent. Until global
+   * audit L7-20 the directive was dropped here, so a `fail-refund:` top-up
+   * refunded normally and the refusal path was untestable from the API.
    */
-  private reference(paymentIntentId: string): string {
-    return `mock_${paymentIntentId}`;
+  private reference(paymentIntentId: string, instrument: string | undefined): string {
+    const carried = CARRIED_DIRECTIVES.flatMap((prefix) => {
+      const code = directive(instrument, prefix);
+      return code === undefined ? [] : [`${prefix}:${code}`];
+    });
+    return carried.length === 0
+      ? `mock_${paymentIntentId}`
+      : mockReferenceWithDirective(paymentIntentId, carried.join(','));
   }
 
   private async delay(): Promise<void> {
@@ -147,10 +179,19 @@ export class MockPaymentProvider implements PaymentProvider {
 }
 
 /**
+ * The directives that act after authorisation, and so must travel inside the
+ * reference. Comma-separated there, because `directive` ends a code at a comma
+ * and a code may itself contain underscores.
+ */
+const CARRIED_DIRECTIVES = ['fail-capture', 'fail-refund'] as const;
+
+/**
  * Reads `<prefix>:<CODE>` out of a directive string.
  *
  * Returns undefined for anything else, so an ordinary instrument reference —
- * or none at all — takes the success path.
+ * or none at all — takes the success path. A code outside
+ * {@link MOCK_DIRECTIVE_CODES} comes back as `UNSUPPORTED_DIRECTIVE`, never as
+ * itself.
  */
 function directive(value: string | undefined, prefix: string): string | undefined {
   if (!value) return undefined;
@@ -158,8 +199,25 @@ function directive(value: string | undefined, prefix: string): string | undefine
   const index = value.indexOf(marker);
   if (index === -1) return undefined;
   const code = value.slice(index + marker.length).split(/[\s,]/)[0];
-  return code && code.length > 0 ? code : 'PROVIDER_DECLINED';
+  const named = code && code.length > 0 ? code : 'PROVIDER_DECLINED';
+  return (MOCK_DIRECTIVE_CODES as readonly string[]).includes(named) ? named : UNSUPPORTED;
 }
+
+/**
+ * The only failure codes a directive may name. A closed set, because the
+ * code is copied into the provider reference and from there into what this
+ * service stores, publishes and logs (Codex review of PR #121, finding 4).
+ */
+export const MOCK_DIRECTIVE_CODES = [
+  'PROVIDER_DECLINED',
+  'INSUFFICIENT_FUNDS',
+  'ISSUER_TIMEOUT',
+  'NOT_PERMITTED',
+  'PROVIDER_UNAVAILABLE',
+] as const;
+
+/** The code a directive outside the closed set fails with, in place of its own. */
+export const UNSUPPORTED = 'UNSUPPORTED_DIRECTIVE';
 
 /**
  * Builds the reference a mock authorize would issue for an intent, with a

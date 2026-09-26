@@ -11,6 +11,12 @@ import { balancesFrom, isConsistent } from './balances';
 import { walletLedgerDeviationsTotal, walletsOpenTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
+import { Prisma } from '../generated/prisma';
+import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+
+/** One page's snapshot waits this long for a connection, and lives this long. */
+const AUDIT_TX_MAX_WAIT_MS = 30_000;
+const AUDIT_TX_TIMEOUT_MS = 120_000;
 
 /**
  * The wallet/ledger reconciliation (docs/10 § 10.3).
@@ -93,16 +99,11 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
       let checked = 0;
 
       for (;;) {
-        const page = await this.wallets.pageForAudit(skip, batchSize);
-        if (page.length === 0) break;
+        const { size, found } = await this.auditPage(skip, batchSize);
+        checked += size;
+        deviations.push(...found);
 
-        for (const wallet of page) {
-          checked += 1;
-          const deviation = await this.check(wallet);
-          if (deviation) deviations.push(deviation);
-        }
-
-        if (page.length < batchSize) break;
+        if (size < batchSize) break;
         skip += batchSize;
       }
 
@@ -131,15 +132,50 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
     return deviations;
   }
 
-  private async check(wallet: {
-    id: string;
-    organizationId: string;
-    currency: string;
-    ledgerAccountId: string;
-    ledgerBalanceMinor: bigint;
-    pendingBalanceMinor: bigint;
-    availableBalanceMinor: bigint;
-  }): Promise<Deviation | null> {
+  /**
+   * One page of wallets, and every figure each is compared with, read from
+   * **one snapshot** (Codex review of PR #121, finding 3).
+   *
+   * Under READ COMMITTED every statement saw its own moment, so a hold that
+   * committed between reading a wallet and reading its escrow account
+   * showed the old `pending` beside the new escrow balance: a
+   * `PENDING_VS_ESCROW` that was never true. REPEATABLE READ fixes the
+   * snapshot at the first read, and the transaction is READ ONLY — the audit
+   * writes nothing, and says so to the database. It takes no row lock, so
+   * the money paths never wait on it.
+   */
+  private auditPage(skip: number, take: number): Promise<{ size: number; found: Deviation[] }> {
+    return this.wallets.client.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+        const page = await this.wallets.pageForAudit(skip, take, tx);
+        const found: Deviation[] = [];
+        for (const wallet of page) {
+          const deviation = await this.check(wallet, tx as ExtendedPrismaClient);
+          if (deviation) found.push(deviation);
+        }
+        return { size: page.length, found };
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+        maxWait: AUDIT_TX_MAX_WAIT_MS,
+        timeout: AUDIT_TX_TIMEOUT_MS,
+      },
+    );
+  }
+
+  private async check(
+    wallet: {
+      id: string;
+      organizationId: string;
+      currency: string;
+      ledgerAccountId: string;
+      ledgerBalanceMinor: bigint;
+      pendingBalanceMinor: bigint;
+      availableBalanceMinor: bigint;
+    },
+    snapshot: ExtendedPrismaClient,
+  ): Promise<Deviation | null> {
     const stored = balancesFrom(wallet.availableBalanceMinor, wallet.pendingBalanceMinor);
 
     // The stored figures must satisfy the invariant among themselves. The
@@ -149,12 +185,31 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
       return { walletId: wallet.id, kind: 'INTERNAL_INCONSISTENCY' };
     }
 
-    const walletAccountBalance = await this.ledger.balanceOf(wallet.ledgerAccountId, 'LIABILITY');
+    const walletAccountBalance = await this.ledger.balanceOf(
+      wallet.ledgerAccountId,
+      'LIABILITY',
+      snapshot,
+    );
     if (walletAccountBalance !== wallet.availableBalanceMinor) {
       return { walletId: wallet.id, kind: 'AVAILABLE_VS_LEDGER' };
     }
 
-    const holdTotal = await this.wallets.activeHoldTotal(wallet.id);
+    // Relation 2, which this class documented and did not check until economic
+    // batch 2 item e. Read, never resolved: an audit must not open an account.
+    // A wallet with no escrow account has nothing in escrow.
+    const escrow = await this.wallets.findEscrowAccount(
+      wallet.organizationId,
+      wallet.currency,
+      snapshot,
+    );
+    const escrowBalance = escrow
+      ? await this.ledger.balanceOf(escrow.id, 'LIABILITY', snapshot)
+      : 0n;
+    if (escrowBalance !== wallet.pendingBalanceMinor) {
+      return { walletId: wallet.id, kind: 'PENDING_VS_ESCROW' };
+    }
+
+    const holdTotal = await this.wallets.activeHoldTotal(wallet.id, snapshot);
     if (holdTotal !== wallet.pendingBalanceMinor) {
       return { walletId: wallet.id, kind: 'PENDING_VS_HOLDS' };
     }
@@ -165,5 +220,5 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
 
 export interface Deviation {
   walletId: string;
-  kind: 'INTERNAL_INCONSISTENCY' | 'AVAILABLE_VS_LEDGER' | 'PENDING_VS_HOLDS';
+  kind: 'INTERNAL_INCONSISTENCY' | 'AVAILABLE_VS_LEDGER' | 'PENDING_VS_ESCROW' | 'PENDING_VS_HOLDS';
 }

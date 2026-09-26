@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
-import { ID_PREFIXES } from '@rasta/contracts';
+import { ERROR_CODES, ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
@@ -15,7 +15,7 @@ import {
   type RewardRuleView,
 } from './rule-engine';
 import { ECONOMIC_EVENTS } from '../events/events';
-import { formatMinor, parseMinor } from '../shared/money';
+import { formatMinor, isStorableMinor, parseMinor } from '../shared/money';
 import { nextValidTo } from '../shared/rule-validity';
 import { rewardsGrantedTotal, rewardsSkippedTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
@@ -66,11 +66,17 @@ export class RewardService {
   /**
    * Evaluates every rule for a trigger and grants what they say.
    *
-   * Runs in its own transaction, **never inside a settlement's**. docs/10 §
-   * 10.10 is explicit: if the reward step fails, the settlement stays valid
-   * and the reward is retried separately — a reward must never roll back a
-   * settlement. Keeping the transactions separate is what makes that true
-   * structurally rather than by convention.
+   * Runs in its own transactions, **never inside a settlement's**. docs/10 §
+   * 10.10 is explicit: if the reward step fails, the settlement stays valid —
+   * a reward must never roll back a settlement. Keeping the transactions
+   * separate is what makes that true structurally rather than by convention.
+   *
+   * Nothing here retries. Every rule is attempted, each in its own
+   * transaction, and if any of them failed the call throws a
+   * {@link RewardGrantError} naming them, after the others have committed.
+   * Retrying is the caller's to arrange: the reward consumer lets the event
+   * be redelivered, and a redelivery grants only what is still missing,
+   * because each grant is unique on `(rule_id, source_reference)`.
    */
   async grantFor(input: {
     organizationId: string;
@@ -106,10 +112,19 @@ export class RewardService {
       return [];
     }
 
+    // A failed rule does not stop the next one: they are independent grants,
+    // and holding a healthy campaign's reward hostage to a broken one would
+    // only delay money that is owed.
     const outcomes: GrantOutcome[] = [];
+    const failures: RewardGrantFailure[] = [];
     for (const rule of applicable) {
-      outcomes.push(await this.grantOne({ ...input, userId: input.userId, rule }));
+      try {
+        outcomes.push(await this.grantOne({ ...input, userId: input.userId, rule }));
+      } catch (error) {
+        failures.push({ ruleId: rule.id, error });
+      }
     }
+    if (failures.length > 0) throw new RewardGrantError(outcomes, failures);
     return outcomes;
   }
 
@@ -157,6 +172,33 @@ export class RewardService {
         if (isRefusal(decision)) {
           rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: decision.reason });
           return { kind: 'SKIPPED', reason: decision.reason, ruleId: rule.id } as GrantOutcome;
+        }
+
+        // Unreachable for a rule created since the check in `createRule`, and
+        // kept for one created before it: a verdict, so the consumer
+        // dead-letters it rather than retrying a number that will never fit.
+        if (!isStorableMinor(decision.creditAmountMinor)) {
+          throw RastaError.businessRule(
+            'This reward rule would pay more than the largest storable amount',
+            { ruleId: rule.id },
+          );
+        }
+
+        // The running totals, not only this grant (Codex review of PR #121,
+        // finding 2): `total_points` is INTEGER and `lifetime_credit_minor` is
+        // BIGINT, and a sum past either failed as a numeric overflow — which
+        // the consumer took for transient and retried until the DLQ said
+        // MAX_RETRIES_EXCEEDED. A verdict instead, so it is dead-lettered as
+        // BUSINESS_RULE_VIOLATION at once. Checked under the balance lock,
+        // so the totals are still true when written.
+        if (
+          balance.totalPoints + decision.points > MAX_TOTAL_POINTS ||
+          !isStorableMinor(BigInt(balance.lifetimeCreditMinor) + decision.creditAmountMinor)
+        ) {
+          throw RastaError.businessRule(
+            'This grant would take the subject past the largest reward balance it can hold',
+            { ruleId: rule.id },
+          );
         }
 
         const rewardId = `${ID_PREFIXES.reward}_${ulid()}`;
@@ -293,12 +335,15 @@ export class RewardService {
     tx: ExtendedPrismaClient,
     organizationId: string,
     userId: string,
-  ): Promise<{ totalPoints: number; levelId: string | null }> {
+  ): Promise<{ totalPoints: number; levelId: string | null; lifetimeCreditMinor: bigint }> {
     const rows = await runUnscoped(
       'the reward cap is enforced by locking the subject balance row',
       () =>
-        tx.$queryRaw<{ totalPoints: number; levelId: string | null }[]>`
-          SELECT total_points AS "totalPoints", level_id AS "levelId"
+        tx.$queryRaw<
+          { totalPoints: number; levelId: string | null; lifetimeCreditMinor: bigint }[]
+        >`
+          SELECT total_points AS "totalPoints", level_id AS "levelId",
+                 lifetime_credit_minor AS "lifetimeCreditMinor"
             FROM reward_balance
            WHERE organization_id = ${organizationId} AND user_id = ${userId}
              FOR UPDATE
@@ -440,6 +485,27 @@ export class RewardService {
       );
     }
 
+    const creditPerPointMinor = dto.creditPerPointMinor
+      ? parseMinor(dto.creditPerPointMinor, 'creditPerPointMinor')
+      : null;
+    // A grant pays `points × creditPerPointMinor`, and each factor fitting a
+    // BIGINT does not make the product fit. Refused where the terms are set,
+    // since they never change afterwards (economic batch 2, item d).
+    if (
+      creditPerPointMinor !== null &&
+      !isStorableMinor(BigInt(dto.points) * creditPerPointMinor)
+    ) {
+      throw RastaError.validation(
+        [
+          {
+            path: 'creditPerPointMinor',
+            message: 'points × creditPerPointMinor exceeds the largest storable amount',
+          },
+        ],
+        'Reward value out of range',
+      );
+    }
+
     const data: Prisma.RewardRuleUncheckedCreateInput = {
       id: `RWR_${ulid()}`,
       organizationId: dto.organizationId ?? null,
@@ -447,9 +513,7 @@ export class RewardService {
       rewardType: dto.rewardType ?? 'POINTS',
       condition: (dto.condition ?? null) as Prisma.InputJsonValue,
       points: dto.points,
-      creditPerPointMinor: dto.creditPerPointMinor
-        ? parseMinor(dto.creditPerPointMinor, 'creditPerPointMinor')
-        : null,
+      creditPerPointMinor,
       periodCap: dto.periodCap ?? null,
       periodType: dto.periodType ?? null,
       validFrom: dto.validFrom ? new Date(dto.validFrom) : new Date(),
@@ -600,6 +664,62 @@ export type GrantOutcome =
       levelChangedTo: string | null;
     }
   | { kind: 'SKIPPED'; reason: string; ruleId: string };
+
+/** `reward_balance.total_points` is a PostgreSQL INTEGER: 2^31 − 1. */
+const MAX_TOTAL_POINTS = 2_147_483_647;
+
+export interface RewardGrantFailure {
+  ruleId: string;
+  error: unknown;
+}
+
+/**
+ * Platform error codes that name a verdict on the grant itself: the rule's
+ * terms, the amount they produce, or a journal they would post. Asking again
+ * gives the same answer. Anything else — a lost connection, a deadlock, a
+ * serialisation failure, an error nobody classified — may not, and is treated
+ * as transient, because the cost of retrying a permanent failure is a delay
+ * while the cost of abandoning a transient one is a reward lost for good.
+ */
+const PERMANENT_GRANT_FAILURES: ReadonlySet<string> = new Set([
+  ERROR_CODES.VALIDATION_FAILED,
+  ERROR_CODES.BUSINESS_RULE_VIOLATION,
+  ERROR_CODES.LEDGER_UNBALANCED,
+]);
+
+/**
+ * One or more rules failed to grant for a fact; the rest committed.
+ *
+ * `permanent` is true only when every failure is one a retry would repeat
+ * (global audit L7-13). A single transient failure makes the whole error
+ * transient: the retry that fixes it re-attempts the permanent ones too,
+ * which costs nothing, while the reverse would abandon a grant that could
+ * still succeed.
+ */
+export class RewardGrantError extends Error {
+  readonly permanent: boolean;
+
+  constructor(
+    readonly outcomes: readonly GrantOutcome[],
+    readonly failures: readonly RewardGrantFailure[],
+  ) {
+    super(
+      `${failures.length} reward rule(s) failed to grant: ` +
+        failures.map(({ ruleId, error }) => `${ruleId} (${describeFailure(error)})`).join('; '),
+    );
+    this.name = 'RewardGrantError';
+    this.permanent = failures.every(({ error }) => isPermanentGrantFailure(error));
+  }
+}
+
+export function isPermanentGrantFailure(error: unknown): boolean {
+  return error instanceof RastaError && PERMANENT_GRANT_FAILURES.has(error.code);
+}
+
+function describeFailure(error: unknown): string {
+  if (error instanceof RastaError) return `${error.code}: ${error.message}`;
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
 
 type RewardRuleRow = Prisma.RewardRuleGetPayload<Record<string, never>>;
 

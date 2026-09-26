@@ -450,6 +450,17 @@ model Transaction {
   disputeResolvedAt DateTime? @map("dispute_resolved_at")
   disputeResolvedBy String?   @map("dispute_resolved_by")
 
+  /// Who confirmed receipt, cancelled or refunded, and when (economic batch 2,
+  /// item b). Every lifecycle step is also announced as
+  /// `TRANSACTION_STATUS_CHANGED` in the same transaction. NULL on rows moved
+  /// before migration `20260926120000_transaction_state_actors`.
+  settlementAuthorisedAt DateTime? @map("settlement_authorised_at")
+  settlementAuthorisedBy String?   @map("settlement_authorised_by")
+  cancelledAt            DateTime? @map("cancelled_at")
+  cancelledBy            String?   @map("cancelled_by")
+  refundedAt             DateTime? @map("refunded_at")
+  refundedBy             String?   @map("refunded_by")
+
   settledAt DateTime? @map("settled_at")
 
   failureReason String? @map("failure_reason")

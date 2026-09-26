@@ -38,6 +38,7 @@ export const AGGREGATE_OF = {
   PAYMENT_AUTHORIZED: 'PaymentIntent',
   PAYMENT_COMPLETED: 'PaymentIntent',
   PAYMENT_FAILED: 'PaymentIntent',
+  PAYMENT_CAPTURE_UNRECONCILED: 'PaymentIntent',
   COMMISSION_APPLIED: 'Commission',
   REWARD_GRANTED: 'Reward',
   REWARD_LEVEL_CHANGED: 'RewardBalance',
@@ -45,6 +46,7 @@ export const AGGREGATE_OF = {
   JOURNAL_POSTED: 'Journal',
   COMMISSION_RULE_CHANGED: 'CommissionRule',
   REWARD_RULE_CHANGED: 'RewardRule',
+  TRANSACTION_STATUS_CHANGED: 'Transaction',
 } as const satisfies Record<EconomicEventName, string>;
 
 /**
@@ -96,6 +98,7 @@ export const PARTITION_KEY_POLICY: { [N in EconomicEventName]: PartitionRule<N> 
   PAYMENT_COMPLETED: (payload) => ({ scope: 'TRANSACTION', key: payload.transactionId }),
   COMMISSION_APPLIED: (payload) => ({ scope: 'TRANSACTION', key: payload.transactionId }),
   SETTLEMENT_COMPLETED: (payload) => ({ scope: 'TRANSACTION', key: payload.transactionId }),
+  TRANSACTION_STATUS_CHANGED: (payload) => ({ scope: 'TRANSACTION', key: payload.transactionId }),
 
   /**
    * A journal that records a transaction is ordered with it; one that does
@@ -131,6 +134,10 @@ export const PARTITION_KEY_POLICY: { [N in EconomicEventName]: PartitionRule<N> 
     key: payload.paymentIntentId,
   }),
   PAYMENT_FAILED: (payload) => ({ scope: 'PAYMENT_INTENT', key: payload.paymentIntentId }),
+  PAYMENT_CAPTURE_UNRECONCILED: (payload) => ({
+    scope: 'PAYMENT_INTENT',
+    key: payload.paymentIntentId,
+  }),
 
   REWARD_GRANTED: (payload) => ({ scope: 'REWARD', key: payload.rewardId }),
   /** The subject's reward balance, which is what this event is a change to. */

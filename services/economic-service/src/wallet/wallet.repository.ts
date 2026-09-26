@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '../generated/prisma';
-import { runUnscoped } from '@rasta/nest-common';
+import { MAX_AMOUNT_MINOR } from '@rasta/contracts';
+import { RastaError, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { balancesFrom, type Balances } from './balances';
 
@@ -75,10 +76,17 @@ export class WalletRepository {
    *
    * **Recomputed, never incremented** (ADR-034). `balance = balance + amount`
    * is a read-modify-write: two concurrent writers read the same value and one
-   * update is lost. The row lock above prevents that for callers that take it,
-   * but recomputation removes the failure mode instead of guarding it — the
-   * stored figure is a function of the ledger and nothing else, so it cannot
-   * drift from the ledger no matter how it was reached.
+   * update is lost. Recomputation makes the stored figure a function of the
+   * ledger and nothing else.
+   *
+   * **The caller must hold the wallet's row lock ({@link lock}) from before it
+   * posted.** Recomputation alone does not remove the race. Under READ
+   * COMMITTED the sum below is read from the statement's snapshot; a second
+   * writer that blocks on the first one's row lock re-checks only the `WHERE`
+   * when it wakes, not the sum, so it writes a total that lacks the first
+   * writer's entries. Locking before posting serialises the writers, and each
+   * one's statement then starts after the other committed (economic batch 2,
+   * item a).
    *
    * One statement rather than read-then-write, so there is no window between
    * the two, and it deliberately reads `ledger_entry` rather than trusting any
@@ -88,6 +96,15 @@ export class WalletRepository {
    * validates. A negative result — a wallet that somehow spent more than it
    * had — fails the constraint and rolls the whole transaction back rather
    * than being stored.
+   *
+   * A result past `BIGINT` is refused as a business rule, not left to the
+   * database (Codex review of PR #121, finding 1). Each amount is capped on
+   * the way in, but a balance is a sum: an empty wallet topped up by 2^63 − 1
+   * and then by 1 wrote 2^63 into `BIGINT`, failed as a numeric overflow and
+   * reached the caller as a 500 — or, in the reward consumer, as a transient
+   * retry that could never succeed. The sums are compared in `numeric`, where
+   * they cannot overflow, and a wallet that would pass the bound is not
+   * updated at all.
    */
   async recomputeFromLedger(
     tx: ExtendedPrismaClient,
@@ -121,6 +138,9 @@ export class WalletRepository {
                AND a.purpose IN ('WALLET', 'ESCROW')
             ) b
            WHERE w.id = ${wallet.id}
+             AND b.wallet_balance + b.escrow_balance <= ${MAX_BALANCE}::numeric
+             AND b.wallet_balance <= ${MAX_BALANCE}::numeric
+             AND b.escrow_balance <= ${MAX_BALANCE}::numeric
         RETURNING w.available_balance_minor AS "availableBalanceMinor",
                   w.pending_balance_minor   AS "pendingBalanceMinor",
                   w.ledger_balance_minor    AS "ledgerBalanceMinor"
@@ -129,7 +149,13 @@ export class WalletRepository {
 
     const row = rows[0];
     if (!row) {
-      throw new Error(`Wallet ${wallet.id} disappeared while recomputing its balances`);
+      const exists = await runUnscoped('the recompute tells a missing wallet from a full one', () =>
+        tx.wallet.count({ where: { id: wallet.id } }),
+      );
+      if (exists === 0) {
+        throw new Error(`Wallet ${wallet.id} disappeared while recomputing its balances`);
+      }
+      throw walletBalanceLimit(wallet.id);
     }
     return balancesFrom(BigInt(row.availableBalanceMinor), BigInt(row.pendingBalanceMinor));
   }
@@ -188,9 +214,13 @@ export class WalletRepository {
   }
 
   /** A page of wallets for the reconciliation to check. */
-  pageForAudit(skip: number, take: number) {
+  pageForAudit(
+    skip: number,
+    take: number,
+    client: Pick<ExtendedPrismaClient, 'wallet'> = this.client,
+  ) {
     return runUnscoped('the wallet/ledger reconciliation is a platform-wide integrity check', () =>
-      this.client.wallet.findMany({
+      client.wallet.findMany({
         orderBy: { id: 'asc' },
         skip,
         take,
@@ -283,12 +313,37 @@ export class WalletRepository {
     });
   }
 
+  /**
+   * A wallet owner's escrow account, if it has one — read only.
+   *
+   * For the reconciliation, which must compare `pendingBalance` with it
+   * (relation 2) and must never create an account while doing so, as
+   * `LedgerService.resolveAccount` would.
+   */
+  findEscrowAccount(
+    organizationId: string,
+    currency: string,
+    client: Pick<ExtendedPrismaClient, 'ledgerAccount'> = this.client,
+  ) {
+    return runUnscoped('the wallet/ledger reconciliation is a platform-wide integrity check', () =>
+      client.ledgerAccount.findUnique({
+        where: {
+          organizationId_purpose_currency: { organizationId, purpose: 'ESCROW', currency },
+        },
+        select: { id: true },
+      }),
+    );
+  }
+
   /** Σ of active holds on a wallet — the cross-check for `pendingBalance`. */
-  async activeHoldTotal(walletId: string): Promise<bigint> {
+  async activeHoldTotal(
+    walletId: string,
+    client: Pick<ExtendedPrismaClient, 'walletHold'> = this.client,
+  ): Promise<bigint> {
     const result = await runUnscoped(
       'the wallet/ledger reconciliation is a platform-wide integrity check',
       () =>
-        this.client.walletHold.aggregate({
+        client.walletHold.aggregate({
           where: { walletId, status: 'ACTIVE' },
           _sum: { amountMinor: true },
         }),
@@ -301,6 +356,27 @@ export class WalletRepository {
       this.client.walletHold.count({ where: { status: 'ACTIVE' } }),
     );
   }
+}
+
+/** `BIGINT`'s bound as the decimal text a `numeric` comparison takes. */
+const MAX_BALANCE = MAX_AMOUNT_MINOR.toString();
+
+/**
+ * A movement that would take a wallet past what `BIGINT` stores. A verdict,
+ * not a fault: the same movement fails the same way every time, so a consumer
+ * dead-letters it rather than retrying it.
+ */
+export function walletBalanceLimit(walletId: string): RastaError {
+  return RastaError.businessRule(
+    'This movement would take the wallet past the largest balance it can hold',
+    { walletId, reason: WALLET_BALANCE_LIMIT },
+  );
+}
+
+export const WALLET_BALANCE_LIMIT = 'WALLET_BALANCE_LIMIT';
+
+export function isWalletBalanceLimit(error: unknown): boolean {
+  return error instanceof RastaError && error.internalContext?.reason === WALLET_BALANCE_LIMIT;
 }
 
 export interface LockedWallet {

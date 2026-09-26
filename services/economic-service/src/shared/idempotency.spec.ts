@@ -1,4 +1,7 @@
-import { hashRequestBody, targeted } from './idempotency';
+import { createSystemContext, runWithContext } from '@rasta/nest-common';
+import { IdempotencyStore, hashRequestBody, targeted } from './idempotency';
+import type { PrismaService } from '../prisma/prisma.service';
+import type { EconomicEnv } from '../config/env';
 
 /**
  * Request-body canonicalisation for idempotent writes (docs/06 § 6.8).
@@ -90,5 +93,120 @@ describe('targeted — the request identity of a route that acts on one resource
   it('with no body, hashes exactly what authorise-settlement always stored', () => {
     // So keys that route recorded before this change still match after it.
     expect(hashRequestBody(targeted('TXN_A'))).toBe(hashRequestBody({ id: 'TXN_A' }));
+  });
+});
+
+/**
+ * The claim race (economic batch 2, item g), with the database scripted so
+ * each interleaving happens exactly, every run. The same property against a
+ * real database, under real concurrency, is in `idempotency.int-spec.ts`.
+ *
+ * The rule under test: `PROCEED` comes only from the insert that wrote the
+ * reservation. Anything else that "finds nothing there" has reserved nothing.
+ */
+describe('IdempotencyStore.claim — who may proceed', () => {
+  const uniqueViolation = Object.assign(new Error('Unique constraint failed'), { code: 'P2002' });
+  const hour = 60 * 60 * 1000;
+
+  function storeWith(script: {
+    create: jest.Mock;
+    findUnique?: jest.Mock;
+    deleteMany?: jest.Mock;
+  }) {
+    const idempotencyKey = {
+      create: script.create,
+      findUnique: script.findUnique ?? jest.fn(),
+      deleteMany: script.deleteMany ?? jest.fn().mockResolvedValue({ count: 1 }),
+    };
+    const prisma = { client: { idempotencyKey } } as unknown as PrismaService;
+    const store = new IdempotencyStore(prisma, {
+      ECONOMIC_IDEMPOTENCY_TTL_HOURS: 24,
+    } as EconomicEnv);
+    return { store, idempotencyKey };
+  }
+
+  const asTenant = <T>(fn: () => Promise<T>) =>
+    runWithContext(
+      createSystemContext({ correlationId: 'unit-claim', organizationId: 'ORG-UNIT' }),
+      fn,
+    );
+
+  it('retries the insert, rather than proceeding, when the row it lost to has vanished', async () => {
+    // Lost the insert; the winner then released its failed attempt before
+    // this read. Proceeding here reserved nothing — a third request could
+    // insert and proceed alongside it.
+    const { store, idempotencyKey } = storeWith({
+      create: jest.fn().mockRejectedValueOnce(uniqueViolation).mockResolvedValueOnce({}),
+      findUnique: jest.fn().mockResolvedValueOnce(null),
+    });
+
+    await expect(asTenant(() => store.claim('POST /x', 'K', {}))).resolves.toEqual({
+      kind: 'PROCEED',
+    });
+    expect(idempotencyKey.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('removes an expired row only while it is still expired, then retries the insert', async () => {
+    const { store, idempotencyKey } = storeWith({
+      create: jest.fn().mockRejectedValueOnce(uniqueViolation).mockResolvedValueOnce({}),
+      findUnique: jest.fn().mockResolvedValueOnce({
+        requestHash: 'whatever',
+        state: 'COMPLETED',
+        expiresAt: new Date(Date.now() - hour),
+      }),
+    });
+
+    await expect(asTenant(() => store.claim('POST /x', 'K', {}))).resolves.toEqual({
+      kind: 'PROCEED',
+    });
+    // Conditional on expiry, so a fresh claim a racer put in its place — or
+    // a row a racer already deleted — is never touched and never a 500.
+    expect(idempotencyKey.deleteMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        organizationId: 'ORG-UNIT',
+        endpoint: 'POST /x',
+        key: 'K',
+        expiresAt: { lte: expect.any(Date) },
+      }),
+    });
+    expect(idempotencyKey.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers 409 in flight, never PROCEED, when the key keeps vanishing', async () => {
+    const { store, idempotencyKey } = storeWith({
+      create: jest.fn().mockRejectedValue(uniqueViolation),
+      findUnique: jest.fn().mockResolvedValue(null),
+    });
+
+    await expect(asTenant(() => store.claim('POST /x', 'K', {}))).rejects.toMatchObject({
+      code: 'CONFLICT',
+    });
+    expect(idempotencyKey.create).toHaveBeenCalledTimes(3);
+  });
+
+  it('still refuses a live key in flight at once', async () => {
+    const { store, idempotencyKey } = storeWith({
+      create: jest.fn().mockRejectedValue(uniqueViolation),
+      findUnique: jest.fn().mockResolvedValue({
+        requestHash: hashRequestBody({}),
+        state: 'IN_PROGRESS',
+        expiresAt: new Date(Date.now() + hour),
+      }),
+    });
+
+    await expect(asTenant(() => store.claim('POST /x', 'K', {}))).rejects.toMatchObject({
+      code: 'CONFLICT',
+    });
+    expect(idempotencyKey.create).toHaveBeenCalledTimes(1);
+    expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('passes through an error that is not a lost race', async () => {
+    const { store } = storeWith({
+      create: jest.fn().mockRejectedValue(new Error('connection reset')),
+    });
+    await expect(asTenant(() => store.claim('POST /x', 'K', {}))).rejects.toThrow(
+      'connection reset',
+    );
   });
 });

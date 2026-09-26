@@ -99,37 +99,52 @@ describe('the economic suite mutates only what it owns', () => {
     );
 
     // A balanced journal whose every leg is this tenant's. Written raw so both
-    // sides can be tenant-owned; `trg_journal_balanced` is deferred to COMMIT
-    // and both legs arrive in one statement, so it is checked and passes.
+    // sides can be tenant-owned, header and legs in one transaction: a journal
+    // is posted whole (`trg_ledger_entry_open_journal`), and
+    // `trg_journal_balanced` is deferred to COMMIT, so it is checked and passes.
     const ownJournalId = `JRN_CONTROL_${ulid()}`;
-    await runUnscoped('the control seeds a journal owned entirely by one tenant', async () => {
-      await prisma.client.$executeRawUnsafe(
-        `INSERT INTO journal (id, organization_id, journal_type, description, posted_at, posted_by, correlation_id, created_at)
-         VALUES ($1, $2, 'FUNDS_HELD', 'isolation control', now(), 'itest', 'itest', now())`,
-        ownJournalId,
-        organizationId,
-      );
-      await prisma.client.$executeRawUnsafe(
-        `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
-         VALUES ($1, $2, $3, $4, 'DEBIT', 5000, 'IRR', now()),
-                ($5, $2, $6, $4, 'CREDIT', 5000, 'IRR', now())`,
-        `${ownJournalId}_E1`,
-        ownJournalId,
-        accounts.debit,
-        organizationId,
-        `${ownJournalId}_E2`,
-        accounts.credit,
-      );
-    });
+    await runUnscoped('the control seeds a journal owned entirely by one tenant', () =>
+      prisma.client.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(
+          `INSERT INTO journal (id, organization_id, journal_type, description, posted_at, posted_by, correlation_id, created_at)
+           VALUES ($1, $2, 'FUNDS_HELD', 'isolation control', now(), 'itest', 'itest', now())`,
+          ownJournalId,
+          organizationId,
+        );
+        await tx.$executeRawUnsafe(
+          `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
+           VALUES ($1, $2, $3, $4, 'DEBIT', 5000, 'IRR', now()),
+                  ($5, $2, $6, $4, 'CREDIT', 5000, 'IRR', now())`,
+          `${ownJournalId}_E1`,
+          ownJournalId,
+          accounts.debit,
+          organizationId,
+          `${ownJournalId}_E2`,
+          accounts.credit,
+        );
+      }),
+    );
 
+    // An entry-less journal: the shape the unbounded cleanup deletes removed.
+    // The database refuses it now (`trg_journal_has_entries`, economic batch 2
+    // item f), but one committed before that trigger existed can still sit in
+    // a populated database, so the control keeps seeding it — with the guard
+    // suspended inside one transaction, as `cleanup` suspends the ledger
+    // triggers, so no exit path leaves it off.
     const emptyJournalId = `JRN_CONTROL_EMPTY_${ulid()}`;
     await runUnscoped('the control seeds an entry-less journal on purpose', () =>
-      prisma.client.$executeRawUnsafe(
-        `INSERT INTO journal (id, organization_id, journal_type, description, posted_at, posted_by, correlation_id, created_at)
-         VALUES ($1, $2, 'FUNDS_HELD', 'isolation control', now(), 'itest', 'itest', now())`,
-        emptyJournalId,
-        organizationId,
-      ),
+      prisma.client.$transaction(async (tx) => {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; this
+        // transaction bounds it and reverts it on every exit path.
+        await tx.$executeRawUnsafe('ALTER TABLE journal DISABLE TRIGGER trg_journal_has_entries');
+        await tx.$executeRawUnsafe(
+          `INSERT INTO journal (id, organization_id, journal_type, description, posted_at, posted_by, correlation_id, created_at)
+           VALUES ($1, $2, 'FUNDS_HELD', 'isolation control', now(), 'itest', 'itest', now())`,
+          emptyJournalId,
+          organizationId,
+        );
+        await tx.$executeRawUnsafe('ALTER TABLE journal ENABLE TRIGGER trg_journal_has_entries');
+      }),
     );
 
     const author = `USR-ITEST-CONTROL-${ulid().slice(-8)}`;
