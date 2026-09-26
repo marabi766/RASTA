@@ -1,3 +1,4 @@
+import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { OrderCommand, OrderCommandField, OrderCommandFormValues } from '@/lib/order-fields';
 
 /**
@@ -31,6 +32,7 @@ export type OrderCommandFormState =
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   /** Gone, or never visible to this caller — the service says 404 for both. */
   | { readonly kind: 'NOT_FOUND' }
-  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string };
+  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
+  | UnconfirmedWriteState;
 
 export const IDLE_ORDER_COMMAND_FORM: OrderCommandFormState = { kind: 'IDLE' };
