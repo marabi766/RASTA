@@ -7,7 +7,7 @@ import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { ProjectAccess, assertOwnProject } from '../access/access';
 import { transactionNow } from '../shared/clock';
 import { isCheckViolation } from '../shared/prisma-errors';
-import { IdempotencyStore } from '../shared/idempotency';
+import { IdempotencyStore, type RecordCompletion } from '../shared/idempotency';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { projectTransitionsTotal, versionConflictsTotal } from '../observability/metrics';
@@ -60,9 +60,9 @@ export class ProjectService {
     const { organizationId, actor } = this.access.assertCanWrite();
     this.assertOperationTypeAllowed(dto.operationType);
 
-    const work = async (): Promise<ProjectView> => {
+    const work = async (record: RecordCompletion<ProjectView>): Promise<ProjectView> => {
       const projectId = newId(ID_PREFIX.project);
-      await this.withCheckMapping(() =>
+      const view = await this.withCheckMapping(() =>
         this.prisma.transaction(async (tx) => {
           const at = await transactionNow(tx);
           await this.repository.createProject(tx, {
@@ -98,13 +98,18 @@ export class ProjectService {
             },
             occurredAt: at,
           });
+
+          // The response, read in the same transaction, and the key's
+          // completion with it: the project and its key commit together.
+          const created = await this.view(organizationId, projectId, tx);
+          await record(tx, projectId, created);
+          return created;
         }),
       );
       projectTransitionsTotal.inc({ service: SERVICE_NAME, command: 'create' });
-      return this.view(organizationId, projectId);
+      return view;
     };
 
-    if (!idempotencyKey) return work();
     return this.idempotency.run(CREATE_PROJECT_ENDPOINT, idempotencyKey, dto, 201, work);
   }
 
@@ -274,14 +279,18 @@ export class ProjectService {
 
   // -- helpers ----------------------------------------------------------------
 
-  private async view(organizationId: string, projectId: string): Promise<ProjectView> {
-    const row = await this.repository.findProject(projectId);
+  private async view(
+    organizationId: string,
+    projectId: string,
+    client: ExtendedPrismaClient = this.prisma.client,
+  ): Promise<ProjectView> {
+    const row = await this.repository.findProject(projectId, client);
     if (!row) throw RastaError.notFound('Project', projectId);
     assertOwnProject(row, organizationId);
 
     const [area, needsSummary] = await Promise.all([
-      this.repository.readArea(organizationId, projectId),
-      this.repository.needsSummary(projectId),
+      this.repository.readArea(organizationId, projectId, client),
+      this.repository.needsSummary(projectId, client),
     ]);
     return toProjectView(row, area, needsSummary);
   }

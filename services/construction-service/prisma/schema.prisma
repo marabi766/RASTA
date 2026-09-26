@@ -177,8 +177,16 @@ model IdempotencyKey {
   /// `409 IDEMPOTENCY_KEY_REUSED`, never a silent replay of the wrong response.
   requestHash String @map("request_hash")
 
+  /// Minted per claim. Completion and release name it, so a caller whose claim
+  /// was purged and re-taken by another caller can neither complete nor
+  /// release the new owner's row.
+  claimToken String @map("claim_token")
+
   responseStatus Int?             @map("response_status")
   responseBody   Json?            @map("response_body")
+  /// The resource the completed request created. Written in the same
+  /// transaction as the resource itself (`ck_idempotency_completed_has_result`).
+  resourceId     String?          @map("resource_id")
   state          IdempotencyState
 
   createdAt DateTime @default(now()) @map("created_at")

@@ -718,6 +718,9 @@ export const EXPECTED = {
       'ck_need_submission_complete',
       'ck_need_withdrawal_complete',
       'ck_need_timestamps_ordered',
+      // A completed idempotency key always names the resource it created.
+      'ck_idempotency_completed_has_result',
+      'ck_idempotency_claim_token_not_blank',
       // The tenant-bound foreign key: a need can only reference a project of
       // its own organization.
       'project_need_organization_id_project_id_fkey',

@@ -1,15 +1,14 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { RastaError, getOrganizationId, runUnscoped } from '@rasta/nest-common';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { isUniqueViolation } from '../shared/prisma-errors';
 import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 
 /**
- * Idempotent creation (docs/06 § 6.8) — the marketplace mechanism, copied
- * because services share no source (A-02).
+ * Idempotent creation (docs/06 § 6.8).
  *
  * | situation                          | response                              |
  * | ---------------------------------- | ------------------------------------- |
@@ -25,10 +24,48 @@ import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
  * deduplicated. Every other command carries `expectedVersion`, and a retry of
  * one that already committed is refused by the compare-and-set instead.
  *
- * The claim is its own committed transaction, before the work begins, so a
- * concurrent duplicate finds `IN_PROGRESS` immediately rather than doing the
- * work and discovering the collision afterwards.
+ * ## Two transactions, and why the second is the domain's own
+ *
+ * 1. **The claim** is its own committed insert, before the work begins, so a
+ *    concurrent duplicate finds `IN_PROGRESS` at once instead of doing the
+ *    work and colliding afterwards. Each claim mints a `claimToken`.
+ * 2. **The completion** — response, status and the id of the created resource
+ *    — is written **inside the domain transaction**, by the `record` callback
+ *    the work receives, and only if the row still carries this claim's token.
+ *    The resource and its completed key therefore commit together or not at
+ *    all:
+ *    - a crash after the domain commit leaves a `COMPLETED` key, never an
+ *      `IN_PROGRESS` one that would run the request again once it expired;
+ *    - a claim that was purged and re-taken by another caller while this one
+ *      worked fails the token check, which rolls the domain write back — two
+ *      callers can never both create under one key;
+ *    - a crash before the domain commit leaves an `IN_PROGRESS` key with
+ *      nothing behind it: retries get `409 CONFLICT` until it expires, and then
+ *      the request runs for the first time.
+ *
+ * A caller never proceeds without owning a claim it inserted itself. A
+ * collision whose row has vanished by the time it is read (released or
+ * purged) retries the atomic insert; an expired row is removed by a delete
+ * conditioned on that row's own token and expiry, then the insert is retried.
  */
+
+/** Records the completion inside the caller's domain transaction. */
+export type RecordCompletion<T> = (
+  tx: ExtendedPrismaClient,
+  resourceId: string,
+  response: T,
+) => Promise<void>;
+
+interface Claim {
+  organizationId: string;
+  endpoint: string;
+  key: string;
+  token: string;
+}
+
+/** How often a claim retries the atomic insert after its collision vanished. */
+const CLAIM_ATTEMPTS = 3;
+
 @Injectable()
 export class IdempotencyStore {
   constructor(
@@ -44,110 +81,142 @@ export class IdempotencyStore {
   /**
    * Reserves the key, or reports what to do instead.
    *
-   * Returns:
-   *   `{ kind: 'PROCEED' }`  — the caller owns the key and should do the work
-   *   `{ kind: 'REPLAY' }`   — a stored response to return unchanged
-   *
-   * and throws for the two conflict cases, because they are errors rather than
-   * outcomes.
+   * Returns `PROCEED` with the claim this caller inserted, or `REPLAY` with a
+   * stored response; throws for the two conflict cases, because they are
+   * errors rather than outcomes, and when the claim could not be settled in
+   * {@link CLAIM_ATTEMPTS} attempts.
    */
   async claim(
     endpoint: string,
     key: string,
     body: unknown,
-  ): Promise<{ kind: 'PROCEED' } | { kind: 'REPLAY'; status: number; body: unknown }> {
+  ): Promise<{ kind: 'PROCEED'; claim: Claim } | { kind: 'REPLAY'; body: unknown }> {
     const organizationId = getOrganizationId();
     const requestHash = this.hash(body);
-    const now = new Date();
-    const expiresAt = new Date(
-      now.getTime() + this.env.CONSTRUCTION_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000,
-    );
+    const where = { organizationId_endpoint_key: { organizationId, endpoint, key } };
 
-    try {
-      await this.prisma.client.idempotencyKey.create({
-        data: { key, organizationId, endpoint, requestHash, state: 'IN_PROGRESS', expiresAt },
-      });
-      return { kind: 'PROCEED' };
-    } catch (error) {
-      if (!isUniqueViolation(error)) throw error;
+    for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt += 1) {
+      const now = new Date();
+      const token = randomUUID();
+      const expiresAt = new Date(
+        now.getTime() + this.env.CONSTRUCTION_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000,
+      );
+
+      try {
+        await this.prisma.client.idempotencyKey.create({
+          data: {
+            key,
+            organizationId,
+            endpoint,
+            requestHash,
+            claimToken: token,
+            state: 'IN_PROGRESS',
+            expiresAt,
+          },
+        });
+        return { kind: 'PROCEED', claim: { organizationId, endpoint, key, token } };
+      } catch (error) {
+        if (!isUniqueViolation(error)) throw error;
+      }
+
+      const existing = await this.prisma.client.idempotencyKey.findUnique({ where });
+
+      // Released or purged between the failed insert and this read. Nothing
+      // is owned yet: try the insert again rather than proceeding.
+      if (!existing) continue;
+
+      if (existing.expiresAt <= now) {
+        // Only the row that was read, and only while it is still expired: a
+        // fresh claim another caller inserted meanwhile is never touched.
+        await this.prisma.client.idempotencyKey.deleteMany({
+          where: {
+            organizationId,
+            endpoint,
+            key,
+            claimToken: existing.claimToken,
+            expiresAt: { lte: now },
+          },
+        });
+        continue;
+      }
+
+      if (existing.requestHash !== requestHash) {
+        throw RastaError.idempotencyKeyReused(key);
+      }
+
+      if (existing.state === 'IN_PROGRESS') throw this.inFlight(endpoint, key);
+
+      idempotentReplaysTotal.inc({ service: SERVICE_NAME, endpoint });
+      return { kind: 'REPLAY', body: existing.responseBody };
     }
 
-    const existing = await this.prisma.client.idempotencyKey.findUnique({
-      where: { organizationId_endpoint_key: { organizationId, endpoint, key } },
-    });
-
-    // Expired between the failed insert and this read. Treat it as absent and
-    // let the caller retry the whole claim rather than guessing.
-    if (!existing) return { kind: 'PROCEED' };
-
-    if (existing.expiresAt <= now) {
-      await this.prisma.client.idempotencyKey.delete({
-        where: { organizationId_endpoint_key: { organizationId, endpoint, key } },
-      });
-      return this.claim(endpoint, key, body);
-    }
-
-    if (existing.requestHash !== requestHash) {
-      throw RastaError.idempotencyKeyReused(key);
-    }
-
-    if (existing.state === 'IN_PROGRESS') {
-      throw new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
-        internalContext: { endpoint, key, retryAfterSeconds: 1 },
-      });
-    }
-
-    idempotentReplaysTotal.inc({ service: SERVICE_NAME, endpoint });
-    return {
-      kind: 'REPLAY',
-      status: existing.responseStatus ?? 200,
-      body: existing.responseBody,
-    };
+    throw this.inFlight(endpoint, key);
   }
 
   /**
-   * Records the response so a retry can replay it.
+   * Marks the claim completed, inside the domain transaction `tx`.
    *
-   * Deliberately **not** inside the caller's transaction: if the work
-   * committed and this write then failed, a retry finds `IN_PROGRESS` and is
-   * refused — annoying, and safe. Sharing the transaction would roll back a
-   * creation that had already succeeded.
+   * Matches only this claim's own `IN_PROGRESS` row. If it matches nothing —
+   * the claim expired and was purged, and perhaps re-taken — it throws, and
+   * the domain transaction rolls back with it: the work is not done twice.
    */
-  async complete(endpoint: string, key: string, status: number, body: unknown): Promise<void> {
-    const organizationId = getOrganizationId();
-    await this.prisma.client.idempotencyKey.updateMany({
-      where: { organizationId, endpoint, key, state: 'IN_PROGRESS' },
-      data: { state: 'COMPLETED', responseStatus: status, responseBody: body as object },
+  async complete(
+    tx: ExtendedPrismaClient,
+    claim: Claim,
+    status: number,
+    resourceId: string,
+    response: unknown,
+  ): Promise<void> {
+    const { count } = await tx.idempotencyKey.updateMany({
+      where: {
+        organizationId: claim.organizationId,
+        endpoint: claim.endpoint,
+        key: claim.key,
+        claimToken: claim.token,
+        state: 'IN_PROGRESS',
+      },
+      data: {
+        state: 'COMPLETED',
+        responseStatus: status,
+        responseBody: response as object,
+        resourceId,
+      },
     });
+    if (count === 0) throw this.inFlight(claim.endpoint, claim.key);
   }
 
   /**
-   * Releases a claim whose work failed.
+   * Releases a claim whose work failed, so a corrected retry is not blocked.
    *
-   * A failed attempt must not block a corrected retry with the same key. Only
-   * `IN_PROGRESS` rows are removed, so a completed response is never dropped.
+   * Only this claim's own `IN_PROGRESS` row. If the domain transaction did
+   * commit — and with it the completion — before the failure surfaced, the row
+   * is `COMPLETED` and this removes nothing.
    */
-  async release(endpoint: string, key: string): Promise<void> {
-    const organizationId = getOrganizationId();
+  async release(claim: Claim): Promise<void> {
     await this.prisma.client.idempotencyKey.deleteMany({
-      where: { organizationId, endpoint, key, state: 'IN_PROGRESS' },
+      where: {
+        organizationId: claim.organizationId,
+        endpoint: claim.endpoint,
+        key: claim.key,
+        claimToken: claim.token,
+        state: 'IN_PROGRESS',
+      },
     });
   }
 
   /**
-   * Runs `work` at most once for this key.
+   * Runs `work` at most once for this key; without a key, simply runs it.
    *
-   * The wrapper every idempotent endpoint uses, so the claim/complete/release
-   * sequence is written once. A handler that forgot the `release` on failure
-   * would leave a key wedged until expiry, and that is exactly the kind of
-   * detail that is got wrong when it is repeated per endpoint.
+   * `work` receives `record`, which it must call inside its own domain
+   * transaction with the created resource's id and the response. That is what
+   * makes the resource and its completed key one commit.
    */
   async run<T>(
     endpoint: string,
-    key: string,
+    key: string | undefined,
     body: unknown,
     successStatus: number,
-    work: () => Promise<T>,
+    work: (record: RecordCompletion<T>) => Promise<T>,
   ): Promise<T> {
     return (await this.execute(endpoint, key, body, successStatus, work)).result;
   }
@@ -160,22 +229,38 @@ export class IdempotencyStore {
    */
   async execute<T>(
     endpoint: string,
-    key: string,
+    key: string | undefined,
     body: unknown,
     successStatus: number,
-    work: () => Promise<T>,
+    work: (record: RecordCompletion<T>) => Promise<T>,
   ): Promise<{ result: T; executed: boolean }> {
-    const claim = await this.claim(endpoint, key, body);
-    if (claim.kind === 'REPLAY') return { result: claim.body as T, executed: false };
+    if (key === undefined) {
+      return { result: await work(async () => undefined), executed: true };
+    }
 
+    const claimed = await this.claim(endpoint, key, body);
+    if (claimed.kind === 'REPLAY') return { result: claimed.body as T, executed: false };
+
+    let recorded = false;
+    let result: T;
     try {
-      const result = await work();
-      await this.complete(endpoint, key, successStatus, result);
-      return { result, executed: true };
+      result = await work(async (tx, resourceId, response) => {
+        await this.complete(tx, claimed.claim, successStatus, resourceId, response);
+        recorded = true;
+      });
     } catch (error) {
-      await this.release(endpoint, key);
+      // Unconditional: if the domain transaction committed (and the key with
+      // it) before the failure surfaced, the row is COMPLETED and this removes
+      // nothing; if it rolled back, even after recording, the claim is freed.
+      await this.release(claimed.claim);
       throw error;
     }
+    if (!recorded) {
+      // A programming error: the work committed without its key. The claim is
+      // left IN_PROGRESS (retries are refused) rather than released.
+      throw new Error(`Idempotent work for ${endpoint} did not record its completion`);
+    }
+    return { result, executed: true };
   }
 
   /**
@@ -184,7 +269,8 @@ export class IdempotencyStore {
    * Unscoped, and it has to be: the timer in `app.module.ts` runs outside any
    * request, so there is no tenant in context. Safe because the predicate is
    * `expiresAt < now` and nothing else — it can only remove records that are
-   * already unusable, and it reads no tenant data.
+   * already unusable, and it reads no tenant data. A work still running under
+   * a purged claim cannot complete it (see {@link complete}).
    */
   async purgeExpired(): Promise<number> {
     const result = await runUnscoped(
@@ -195,6 +281,12 @@ export class IdempotencyStore {
         }),
     );
     return result.count;
+  }
+
+  private inFlight(endpoint: string, key: string): RastaError {
+    return new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
+      internalContext: { endpoint, key, retryAfterSeconds: 1 },
+    });
   }
 }
 

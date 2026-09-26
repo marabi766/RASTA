@@ -79,8 +79,10 @@ CREATE TABLE "idempotency_key" (
     "organization_id" TEXT NOT NULL,
     "endpoint" TEXT NOT NULL,
     "request_hash" TEXT NOT NULL,
+    "claim_token" TEXT NOT NULL,
     "response_status" INTEGER,
     "response_body" JSONB,
+    "resource_id" TEXT,
     "state" "IdempotencyState" NOT NULL,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "expires_at" TIMESTAMP(3) NOT NULL,
@@ -235,6 +237,21 @@ ALTER TABLE "project_need" ADD CONSTRAINT "ck_need_timestamps_ordered"
   CHECK ("updated_at" >= "created_at"
          AND ("submitted_at" IS NULL OR "submitted_at" >= "created_at")
          AND ("withdrawn_at" IS NULL OR "withdrawn_at" >= "created_at"));
+
+-- ---- Idempotency ------------------------------------------------------------
+
+-- A completed key carries the response it replays and the resource it created.
+-- Completion is written in the same transaction as that resource, so a key
+-- that says COMPLETED always names something that exists, and a resource
+-- created under a key always has its key completed (docs/06 § 6.8).
+ALTER TABLE "idempotency_key" ADD CONSTRAINT "ck_idempotency_completed_has_result"
+  CHECK ("state" <> 'COMPLETED'
+         OR ("response_status" IS NOT NULL
+             AND "response_body" IS NOT NULL
+             AND "resource_id" IS NOT NULL));
+
+ALTER TABLE "idempotency_key" ADD CONSTRAINT "ck_idempotency_claim_token_not_blank"
+  CHECK (length(btrim("claim_token")) > 0);
 
 -- =============================================================================
 -- Transactional outbox — the claim and stream objects Prisma cannot declare
