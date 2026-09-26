@@ -1,4 +1,11 @@
-import { applyBasisPoints, money, toBigInt, type Currency, type Money } from '@rasta/contracts';
+import {
+  MAX_AMOUNT_MINOR,
+  applyBasisPoints,
+  money,
+  toBigInt,
+  type Currency,
+  type Money,
+} from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
 
 /**
@@ -26,6 +33,10 @@ export const MINOR_UNIT_PATTERN = /^\d{1,30}$/;
  * arithmetic, because `BigInt('12.5')` throws a `SyntaxError` a caller cannot
  * interpret, and `Number('12.5')` would quietly introduce a fraction of a rial
  * into a ledger.
+ *
+ * Capped at {@link MAX_AMOUNT_MINOR}, what a `BIGINT` column holds: past it the
+ * insert fails as a 500, so it is refused here as the 400 it is (economic
+ * batch 2, item d).
  */
 export function parseMinor(value: string, field = 'amountMinor'): bigint {
   if (!MINOR_UNIT_PATTERN.test(value)) {
@@ -34,7 +45,22 @@ export function parseMinor(value: string, field = 'amountMinor'): bigint {
       'Malformed monetary amount',
     );
   }
-  return BigInt(value);
+  const amount = BigInt(value);
+  if (amount > MAX_AMOUNT_MINOR) {
+    throw RastaError.validation(
+      [{ path: field, message: 'Exceeds the largest storable amount (2^63 - 1 minor units)' }],
+      'Monetary amount out of range',
+    );
+  }
+  return amount;
+}
+
+/**
+ * Whether an amount computed here, not parsed, still fits a `BIGINT` column.
+ * For a product of two stored values, which can exceed either.
+ */
+export function isStorableMinor(value: bigint): boolean {
+  return value >= 0n && value <= MAX_AMOUNT_MINOR;
 }
 
 /** The transport form: a decimal string, never a JSON number. */

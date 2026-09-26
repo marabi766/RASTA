@@ -189,6 +189,17 @@ export class WalletService {
    * it is a parameter rather than a branch: this method's job is "credit a
    * wallet against something", and what that something is belongs to the
    * caller who knows why.
+   *
+   * ## It takes the wallet's row lock itself, before posting
+   *
+   * The top-up path already holds it; a monetised reward did not, and two
+   * rewards crediting one organization at once each recomputed the wallet
+   * from a snapshot that did not contain the other's journal. The later
+   * UPDATE overwrote the earlier with a figure one credit short — the ledger
+   * right, the wallet wrong, and nothing to say so until the balance audit
+   * ran. Locking here makes the credit correct whoever calls it. Taking a
+   * lock the transaction already holds is a no-op, and a credit touches one
+   * wallet only, so the ascending-id rule of ADR-031 has nothing to order.
    */
   async credit(
     tx: ExtendedPrismaClient,
@@ -205,6 +216,9 @@ export class WalletService {
     if (input.amountMinor <= 0n) {
       throw RastaError.businessRule('A credit must be positive', { walletId: input.wallet.id });
     }
+
+    const [locked] = await this.repository.lock(tx, [input.wallet.id]);
+    if (!locked) throw RastaError.notFound('Wallet', input.wallet.id);
 
     const walletAccount = await this.ledger.resolveAccount(
       tx,
@@ -248,7 +262,7 @@ export class WalletService {
       input.postedBy,
     );
 
-    const balances = await this.repository.recomputeFromLedger(tx, input.wallet);
+    const balances = await this.repository.recomputeFromLedger(tx, locked);
     return { journalId: journal.id, balances };
   }
 
