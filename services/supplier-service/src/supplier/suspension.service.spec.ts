@@ -221,16 +221,50 @@ describe('reinstating', () => {
     );
   });
 
-  it('publishes nothing — the platform catalogue names no SUPPLIER_REINSTATED', async () => {
-    // A consumer that hid this supplier on SUPPLIER_SUSPENDED has no event
-    // telling it to stop and must re-read the service. Asserted so the gap is
-    // visible in the suite rather than only in a comment.
+  it('publishes exactly one SUPPLIER_REINSTATED for the closed episode, in the same transaction', async () => {
+    // L7-14: the reinstatement is a state change and is audited (AGENTS.md
+    // S-06). The fake transaction commits events only when the callback
+    // returns, so `committed` holding it means it rode the status change.
     const h = await suspended();
+    const episode = h.supplier.suspensions[0];
 
     await asOperatorOf(OTHER_ORG, () =>
       h.service.reinstate('SUP_1', { reason: 'The orders were delivered late, not never' }),
     );
 
+    expect(h.prisma.committed).toEqual([
+      {
+        eventName: 'SUPPLIER_REINSTATED',
+        aggregateId: episode.id,
+        // The supplier's tenant — not the operator's, whose organization
+        // decided about somebody else's.
+        organizationId: SUPPLIER_ORG,
+        occurredAt: h.prisma.transactionInstant,
+        payload: {
+          supplierId: 'SUP_1',
+          organizationId: SUPPLIER_ORG,
+          suspensionId: episode.id,
+          reason: 'The orders were delivered late, not never',
+          reinstatedBy: 'USR_OPERATOR',
+          reinstatedAt: h.prisma.transactionInstant.toISOString(),
+        },
+      },
+    ]);
+    // The episode and the event state one instant (D-5).
+    expect(episode.reinstatedAt).toEqual(h.prisma.transactionInstant);
+  });
+
+  it('publishes nothing when the reinstatement loses its race', async () => {
+    const h = await suspended();
+    h.repository.raceOn = 'reinstate';
+
+    expect(
+      await codeOf(() =>
+        asOperatorOf(OTHER_ORG, () =>
+          h.service.reinstate('SUP_1', { reason: 'The orders were delivered late, not never' }),
+        ),
+      ),
+    ).toBe('BUSINESS_RULE_VIOLATION');
     expect(h.prisma.committed).toEqual([]);
   });
 
@@ -243,6 +277,7 @@ describe('reinstating', () => {
       ),
     ).toBe('FORBIDDEN');
     expect(h.supplier.status).toBe('SUSPENDED');
+    expect(h.prisma.committed).toEqual([]);
   });
 
   it('refuses reinstating a supplier that is not suspended', async () => {

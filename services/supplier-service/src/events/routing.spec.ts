@@ -32,7 +32,7 @@ describe('stream identity is not aggregate identity', () => {
     expect(resolvePartitionKey(name, { supplierId: SUPPLIER_ID }).key).toBe(SUPPLIER_ID);
   });
 
-  it('deviates from the aggregate id for the three non-Supplier aggregates', () => {
+  it('deviates from the aggregate id for the four non-Supplier aggregates', () => {
     // The documented deviation (docs/07 § 7.7, ADR-051 § C-7). A qualification
     // event keyed by its own id could land on a different partition from the
     // suspension that followed it, and a consumer could apply the approval
@@ -43,6 +43,7 @@ describe('stream identity is not aggregate identity', () => {
 
     expect(deviating.sort()).toEqual([
       'SUPPLIER_QUALIFIED',
+      'SUPPLIER_REINSTATED',
       'SUPPLIER_REJECTED',
       'SUPPLIER_SUSPENDED',
     ]);

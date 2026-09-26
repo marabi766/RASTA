@@ -49,6 +49,7 @@ export const AGGREGATE_OF = {
   SUPPLIER_QUALIFIED: 'Qualification',
   SUPPLIER_REJECTED: 'Qualification',
   SUPPLIER_SUSPENDED: 'Suspension',
+  SUPPLIER_REINSTATED: 'Suspension',
 } as const satisfies Record<SupplierEventName, string>;
 
 export interface PartitionDecision {

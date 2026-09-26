@@ -26,18 +26,21 @@ export class DocumentRepository {
 
   // ---- Upload intents ----------------------------------------------------
 
-  async createIntent(input: {
-    id: string;
-    organizationId: string;
-    objectKey: string;
-    documentClass: string;
-    declaredContentType: string;
-    declaredSizeBytes: number;
-    declaredFilename: string;
-    expiresAt: Date;
-    createdBy: string;
-  }) {
-    return this.prisma.client.uploadIntent.create({
+  async createIntent(
+    tx: ExtendedPrismaClient,
+    input: {
+      id: string;
+      organizationId: string;
+      objectKey: string;
+      documentClass: string;
+      declaredContentType: string;
+      declaredSizeBytes: number;
+      declaredFilename: string;
+      expiresAt: Date;
+      createdBy: string;
+    },
+  ) {
+    return tx.uploadIntent.create({
       // JUSTIFIED-ANY: the generated enum type is structurally a string union
       // and the class was validated by the DTO before reaching here.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

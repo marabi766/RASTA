@@ -98,6 +98,10 @@ function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harn
     findMembershipById: jest.fn(),
     listMembershipsForUser: jest.fn(async () => []),
     lockUserProjection: jest.fn(async () => undefined),
+    lockUserMemberships: jest.fn(async () => ({
+      activeOrganizationId: TEST_ORG_A,
+      now: new Date(),
+    })),
     findOrganizationRefs: jest.fn(async () => []),
     listUsersInOrganization: jest.fn(),
     ...overrides,
@@ -140,6 +144,111 @@ describe('switchActiveOrganization', () => {
     );
 
     expect(result.activeOrganizationId).toBe(TEST_ORG_B);
+  });
+
+  it('records exactly one ACTIVE_ORGANIZATION_SWITCHED, in the switch transaction, under the new tenant', async () => {
+    // AGENTS.md S-06: the switch is a state change, so it is audited. The
+    // envelope's actor comes from the request context (`buildOutboxRow`); what
+    // the call site owns is the tenant, the aggregate and the payload.
+    const h = harness();
+    h.repository.findMembership.mockResolvedValue(
+      membershipRow({ organizationId: TEST_ORG_B }) as never,
+    );
+    const tx = h.repository.client as unknown as { user: { update: jest.Mock } };
+    tx.user.update.mockResolvedValue(userRow({ activeOrganizationId: TEST_ORG_B }));
+
+    await runWithContext(context(), () =>
+      h.service.switchActiveOrganization({ organizationId: TEST_ORG_B }),
+    );
+
+    expect(h.enqueued).toEqual([
+      {
+        eventName: IDENTITY_EVENTS.ACTIVE_ORGANIZATION_SWITCHED,
+        payload: {
+          userId: TEST_USER_A,
+          previousOrganizationId: TEST_ORG_A,
+          organizationId: TEST_ORG_B,
+        },
+      },
+    ]);
+    expect(h.repository.enqueueEvent).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({
+        aggregateType: 'User',
+        aggregateId: TEST_USER_A,
+        organizationId: TEST_ORG_B,
+        topic: 'rasta.identity.v1',
+      }),
+    );
+    // The row was locked in the same transaction the event was written in, so
+    // the recorded previous organization is the one this switch replaced.
+    expect(h.repository.lockUserMemberships).toHaveBeenCalledWith(tx, TEST_USER_A);
+  });
+
+  it('records null as the previous organization when none was active', async () => {
+    const h = harness();
+    h.repository.lockUserMemberships.mockResolvedValue({
+      activeOrganizationId: null,
+      now: new Date(),
+    });
+    h.repository.findMembership.mockResolvedValue(
+      membershipRow({ organizationId: TEST_ORG_B }) as never,
+    );
+    (
+      h.repository.client as unknown as { user: { update: jest.Mock } }
+    ).user.update.mockResolvedValue(userRow({ activeOrganizationId: TEST_ORG_B }));
+
+    await runWithContext(context(), () =>
+      h.service.switchActiveOrganization({ organizationId: TEST_ORG_B }),
+    );
+
+    expect(h.enqueued).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({ previousOrganizationId: null }),
+      }),
+    ]);
+  });
+
+  it('writes nothing and records nothing when the organization asked for is already active', async () => {
+    // Codex #114 R1-2: returning before any write, not merely before the event.
+    const h = harness();
+    h.repository.findMembership.mockResolvedValue(membershipRow() as never);
+    h.repository.findUserById.mockResolvedValue(userRow() as never);
+    const tx = h.repository.client as unknown as { user: { update: jest.Mock } };
+
+    const result = await runWithContext(context(), () =>
+      h.service.switchActiveOrganization({ organizationId: TEST_ORG_A }),
+    );
+
+    expect(result.activeOrganizationId).toBe(TEST_ORG_A);
+    expect(tx.user.update).not.toHaveBeenCalled();
+    expect(h.enqueued).toEqual([]);
+  });
+
+  it('judges the membership inside the lock, on the database clock', async () => {
+    // Codex #114 R1-1: validated before the transaction, a membership revoked
+    // in between still let the switch commit.
+    const h = harness();
+    h.repository.findMembership.mockResolvedValue(
+      membershipRow({
+        organizationId: TEST_ORG_B,
+        validUntil: new Date('2026-01-01T00:00:00.000Z'),
+      }) as never,
+    );
+    // The application clock says the membership is live; the database says not.
+    h.repository.lockUserMemberships.mockResolvedValue({
+      activeOrganizationId: TEST_ORG_A,
+      now: new Date('2026-06-01T00:00:00.000Z'),
+    });
+    const tx = h.repository.client as unknown as { user: { update: jest.Mock } };
+
+    await expect(
+      runWithContext(context(), () =>
+        h.service.switchActiveOrganization({ organizationId: TEST_ORG_B }),
+      ),
+    ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
+    expect(h.repository.findMembership).toHaveBeenCalledWith(TEST_USER_A, TEST_ORG_B, tx);
+    expect(tx.user.update).not.toHaveBeenCalled();
   });
 
   it('refuses an organization the user is not a member of', async () => {
@@ -187,10 +296,12 @@ describe('switchActiveOrganization', () => {
       expect(refusal).toBeInstanceOf(RastaError);
       expect(refusal).toMatchObject({ status: 403, code: 'TENANT_MISMATCH' });
       expect(refusalSiteOf(refusal)).toBe(REFUSAL_SITES.SWITCH_ACTIVE_ORGANIZATION);
-      // The active organization was not changed.
+      // The active organization was not changed, and nothing was recorded as
+      // though it had been: the refusal's own audit record is path B's.
       expect(
         (h.repository.client as unknown as { user: { update: jest.Mock } }).user.update,
       ).not.toHaveBeenCalled();
+      expect(h.enqueued).toEqual([]);
     },
   );
 });
@@ -676,7 +787,7 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
     ).resolves.toMatchObject({ roles: ['DRIVER'] });
   });
 
-  it('reports a failed switch, which has no event to retry from', async () => {
+  it('reports a failed switch: its audit event is not a re-projection trigger', async () => {
     const h = harness();
     h.repository.findMembership.mockResolvedValue(
       membershipRow({ organizationId: TEST_ORG_B }) as never,

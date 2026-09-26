@@ -34,6 +34,10 @@ export const NOTIFICATION_EVENTS = {
   NOTIFICATION_SENT: 'NOTIFICATION_SENT',
   /** NTF-004. A message did not, and will not without somebody acting. */
   NOTIFICATION_FAILED: 'NOTIFICATION_FAILED',
+  /** L7-14. Somebody replaced their own preference set. */
+  NOTIFICATION_PREFERENCES_REPLACED: 'NOTIFICATION_PREFERENCES_REPLACED',
+  /** L7-14. Somebody set, changed or cleared their own quiet window. */
+  NOTIFICATION_QUIET_HOURS_CHANGED: 'NOTIFICATION_QUIET_HOURS_CHANGED',
 } as const;
 
 export type NotificationEventName = (typeof NOTIFICATION_EVENTS)[keyof typeof NOTIFICATION_EVENTS];
@@ -139,12 +143,62 @@ export const notificationFailedPayload = z.object({
   ...actorFields,
 });
 
+/**
+ * Somebody replaced their own preference set (global audit L7-14).
+ *
+ * The same evidential reason the inbox events exist for: "they had turned
+ * email off for this rule before the reminder was sent" is a fact a dispute
+ * about whether somebody was told turns on. Carries the **whole new set** —
+ * `PUT` means "this is what I have now", so the set is the fact, and each
+ * event reads on its own without replaying the ones before it. Bounded by the
+ * API's own limit of 200 rows. Settings only: scope, rule or category key,
+ * channel, on or off — no address, no content.
+ *
+ * Published only when the stored set actually changed; a `PUT` of the set
+ * already in force changes nothing and announces nothing.
+ */
+export const notificationPreferencesReplacedPayload = z.object({
+  preferences: z
+    .array(
+      z.object({
+        scope: z.string().max(32),
+        scopeKey: z.string().max(128).nullable(),
+        channel: z.string().max(32),
+        enabled: z.boolean(),
+      }),
+    )
+    .max(200),
+  ...actorFields,
+});
+
+/**
+ * Somebody set, changed or cleared their own quiet window (global audit
+ * L7-14).
+ *
+ * A quiet window defers deliveries, so it is part of the answer to "why did
+ * this arrive at 07:00 and not at 22:00". Minutes from local midnight and the
+ * zone they were given in, as stored; `null` is "no quiet window". Published
+ * only when the stored window actually changed.
+ */
+export const notificationQuietHoursChangedPayload = z.object({
+  quietHours: z
+    .object({
+      startMinute: z.number().int().min(0).max(1439),
+      endMinute: z.number().int().min(0).max(1439),
+      timezone: z.string().max(64),
+    })
+    .nullable(),
+  ...actorFields,
+});
+
 export const NOTIFICATION_EVENT_SCHEMAS = {
   [NOTIFICATION_EVENTS.NOTIFICATION_READ]: notificationReadPayload,
   [NOTIFICATION_EVENTS.NOTIFICATION_DISMISSED]: notificationDismissedPayload,
   [NOTIFICATION_EVENTS.NOTIFICATION_ALL_READ]: notificationAllReadPayload,
   [NOTIFICATION_EVENTS.NOTIFICATION_SENT]: notificationSentPayload,
   [NOTIFICATION_EVENTS.NOTIFICATION_FAILED]: notificationFailedPayload,
+  [NOTIFICATION_EVENTS.NOTIFICATION_PREFERENCES_REPLACED]: notificationPreferencesReplacedPayload,
+  [NOTIFICATION_EVENTS.NOTIFICATION_QUIET_HOURS_CHANGED]: notificationQuietHoursChangedPayload,
 } as const satisfies Record<NotificationEventName, z.ZodTypeAny>;
 
 /**
@@ -162,6 +216,10 @@ export const AGGREGATE_OF = {
   // channel, and "the email failed" is a fact about one of them.
   NOTIFICATION_SENT: 'NotificationDelivery',
   NOTIFICATION_FAILED: 'NotificationDelivery',
+  // The person's settings in one tenant, not any one row: `PUT` replaces the
+  // whole set, and quiet hours are one row per (organization, user).
+  NOTIFICATION_PREFERENCES_REPLACED: 'NotificationPreferences',
+  NOTIFICATION_QUIET_HOURS_CHANGED: 'NotificationQuietHours',
 } as const satisfies Record<NotificationEventName, string>;
 
 /**

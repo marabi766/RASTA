@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { NotificationActor } from '../access/access';
+import { EventPublisher } from '../events/publisher';
+import { NOTIFICATION_EVENTS } from '../events/published';
 import { newId } from '../intake/intake';
 import type { PreferenceInput } from './preferences.dto';
 import type { PreferenceRow } from './precedence';
@@ -21,10 +23,22 @@ export interface QuietHoursRow {
  * without having to know the guard exists, and the guard proves only the tenant
  * half. The *user* half (S-03, two people in one organization must not read each
  * other's settings) is this file's job.
+ *
+ * ## Every change is audited
+ *
+ * Both writes publish their audit event in the same transaction as the rows
+ * (AGENTS.md S-06, A-08; global audit L7-14), and only when the stored state
+ * actually changed — the rule `markAllRead` set: an audit record for an action
+ * with no effect is noise that makes the real records harder to find. A call
+ * that changes nothing writes nothing either, and every change of one person's
+ * settings is serialised by `lockSettings`.
  */
 @Injectable()
 export class PreferencesRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: EventPublisher,
+  ) {}
 
   async listOwn(actor: NotificationActor): Promise<PreferenceRow[]> {
     const rows = await this.prisma.client.notificationPreference.findMany({
@@ -35,15 +49,6 @@ export class PreferencesRepository {
     return rows;
   }
 
-  /**
-   * Replaces the caller's whole preference set for this tenant, atomically.
-   *
-   * Delete-then-insert rather than an upsert loop, because `PUT` means "this is
-   * what I have now" and a row the caller left out has to disappear. Inside one
-   * transaction, so a crash between the two halves cannot leave somebody with no
-   * preferences at all — which would silently restore every default they had
-   * turned off.
-   */
   /**
    * The caller's own quiet window, or null.
    *
@@ -61,52 +66,183 @@ export class PreferencesRepository {
     return row ?? null;
   }
 
-  /** Sets or clears it. `null` is "no quiet window", which is the default state. */
-  async replaceQuietHours(actor: NotificationActor, window: QuietHoursRow | null): Promise<void> {
-    if (!window) {
-      await this.prisma.client.notificationQuietHours.deleteMany({
-        where: { userId: actor.userId, organizationId: actor.organizationId },
-      });
-      return;
-    }
+  /**
+   * Serialises every settings change of one person in one tenant (Codex #114
+   * R1-4).
+   *
+   * A transaction-scoped advisory lock keyed on `(organization, user)`, taken
+   * before anything is read. Without it two concurrent `PUT`s both read, both
+   * delete and both insert under READ COMMITTED — leaving the union of the two
+   * sets, or failing on the unique index — and each would announce a change
+   * computed against a state the other had already replaced. The key is a
+   * bound parameter hashed by PostgreSQL; nothing is interpolated.
+   */
+  private async lockSettings(tx: ExtendedPrismaClient, actor: NotificationActor): Promise<void> {
+    const key = `notification-settings:${actor.organizationId}:${actor.userId}`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+  }
 
-    await this.prisma.client.notificationQuietHours.upsert({
-      where: {
+  /**
+   * Sets or clears it. `null` is "no quiet window", which is the default state.
+   *
+   * Read and compared first, under the lock: a call that would store what is
+   * already stored writes nothing and announces nothing (Codex #114 R1-3).
+   */
+  async replaceQuietHours(
+    actor: NotificationActor,
+    window: QuietHoursRow | null,
+    now: Date = new Date(),
+  ): Promise<void> {
+    await this.prisma.transaction(async (tx) => {
+      await this.lockSettings(tx, actor);
+
+      const where = {
         organizationId_userId: { organizationId: actor.organizationId, userId: actor.userId },
-      },
-      create: {
-        userId: actor.userId,
+      };
+      const before = await tx.notificationQuietHours.findUnique({
+        where,
+        select: { startMinute: true, endMinute: true, timezone: true },
+      });
+
+      if (sameWindow(before, window)) return;
+
+      if (!window) {
+        await tx.notificationQuietHours.deleteMany({
+          where: { userId: actor.userId, organizationId: actor.organizationId },
+        });
+      } else {
+        await tx.notificationQuietHours.upsert({
+          where,
+          create: {
+            userId: actor.userId,
+            organizationId: actor.organizationId,
+            ...window,
+            updatedBy: actor.userId,
+          },
+          update: { ...window, updatedBy: actor.userId },
+        });
+      }
+
+      await this.events.enqueue(tx, {
+        eventName: NOTIFICATION_EVENTS.NOTIFICATION_QUIET_HOURS_CHANGED,
+        aggregateId: `${actor.organizationId}:${actor.userId}`,
         organizationId: actor.organizationId,
-        ...window,
-        updatedBy: actor.userId,
-      },
-      update: { ...window, updatedBy: actor.userId },
+        payload: {
+          quietHours: window
+            ? {
+                startMinute: window.startMinute,
+                endMinute: window.endMinute,
+                timezone: window.timezone,
+              }
+            : null,
+          organizationId: actor.organizationId,
+          userId: actor.userId,
+          occurredAt: now.toISOString(),
+        },
+      });
     });
   }
 
+  /**
+   * Replaces the caller's whole preference set for this tenant, atomically.
+   *
+   * Delete-then-insert rather than an upsert loop, because `PUT` means "this is
+   * what I have now" and a row the caller left out has to disappear. Inside one
+   * transaction, so a crash between the two halves cannot leave somebody with no
+   * preferences at all — which would silently restore every default they had
+   * turned off. Under the per-person lock, and compared before any write: the
+   * set already in force is left exactly as it is, ids and timestamps included.
+   */
   async replaceOwn(
     actor: NotificationActor,
     preferences: readonly PreferenceInput[],
+    now: Date = new Date(),
   ): Promise<void> {
+    const next = normalise(
+      preferences.map((preference) => ({
+        scope: preference.scope,
+        scopeKey: preference.scope === 'GLOBAL' ? null : (preference.scopeKey ?? null),
+        channel: preference.channel,
+        enabled: preference.enabled,
+      })),
+    );
+
     await this.prisma.transaction(async (tx) => {
+      await this.lockSettings(tx, actor);
+
+      const before = normalise(
+        await tx.notificationPreference.findMany({
+          where: { userId: actor.userId, organizationId: actor.organizationId },
+          select: { scope: true, scopeKey: true, channel: true, enabled: true },
+        }),
+      );
+
+      if (JSON.stringify(before) === JSON.stringify(next)) return;
+
       await tx.notificationPreference.deleteMany({
         where: { userId: actor.userId, organizationId: actor.organizationId },
       });
 
-      if (preferences.length === 0) return;
+      if (preferences.length > 0) {
+        await tx.notificationPreference.createMany({
+          data: preferences.map((preference) => ({
+            id: newId('preference'),
+            organizationId: actor.organizationId,
+            userId: actor.userId,
+            scope: preference.scope,
+            scopeKey: preference.scope === 'GLOBAL' ? null : (preference.scopeKey ?? null),
+            channel: preference.channel,
+            enabled: preference.enabled,
+            updatedBy: actor.userId,
+          })),
+        });
+      }
 
-      await tx.notificationPreference.createMany({
-        data: preferences.map((preference) => ({
-          id: newId('preference'),
+      await this.events.enqueue(tx, {
+        eventName: NOTIFICATION_EVENTS.NOTIFICATION_PREFERENCES_REPLACED,
+        aggregateId: `${actor.organizationId}:${actor.userId}`,
+        organizationId: actor.organizationId,
+        payload: {
+          preferences: next,
           organizationId: actor.organizationId,
           userId: actor.userId,
-          scope: preference.scope,
-          scopeKey: preference.scope === 'GLOBAL' ? null : (preference.scopeKey ?? null),
-          channel: preference.channel,
-          enabled: preference.enabled,
-          updatedBy: actor.userId,
-        })),
+          occurredAt: now.toISOString(),
+        },
       });
     });
   }
+}
+
+interface StoredPreference {
+  readonly scope: string;
+  readonly scopeKey: string | null;
+  readonly channel: string;
+  readonly enabled: boolean;
+}
+
+/**
+ * A preference set in one fixed order, with exactly the four stored fields.
+ *
+ * So that "did this change anything" is a comparison of two canonical lists,
+ * and the event carries the set in an order that does not depend on the order
+ * a client happened to send it in.
+ */
+function normalise(rows: readonly StoredPreference[]): StoredPreference[] {
+  const key = (row: StoredPreference) =>
+    `${row.scope}\u0000${row.scopeKey ?? ''}\u0000${row.channel}`;
+  return rows
+    .map((row) => ({
+      scope: row.scope,
+      scopeKey: row.scopeKey,
+      channel: row.channel,
+      enabled: row.enabled,
+    }))
+    .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+}
+
+function sameWindow(a: QuietHoursRow | null, b: QuietHoursRow | null): boolean {
+  if (!a || !b) return a === b;
+  return (
+    a.startMinute === b.startMinute && a.endMinute === b.endMinute && a.timezone === b.timezone
+  );
 }

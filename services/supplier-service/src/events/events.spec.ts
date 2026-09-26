@@ -51,21 +51,46 @@ const SUSPENDED = {
   suspendedAt: '2026-09-05T12:00:00.000Z',
 };
 
+const REINSTATED = {
+  supplierId: 'SUP_01JBQ8Z4K7M2N5P8R1T3V6X9Y2',
+  organizationId: 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9Y3',
+  suspensionId: 'SSP_01JBQ8Z4K7M2N5P8R1T3V6X9Y7',
+  reason: 'The orders were delivered late, not never',
+  reinstatedBy: 'USR_01JBQ8Z4K7M2N5P8R1T3V6X9Y6',
+  reinstatedAt: '2026-09-06T09:00:00.000Z',
+};
+
 const VALID: Record<SupplierEventName, Record<string, unknown>> = {
   SUPPLIER_REGISTERED: REGISTERED,
   SUPPLIER_QUALIFIED: QUALIFIED,
   SUPPLIER_REJECTED: REJECTED,
   SUPPLIER_SUSPENDED: SUSPENDED,
+  SUPPLIER_REINSTATED: REINSTATED,
 };
 
 describe('the published event set', () => {
-  it('publishes exactly the four events this phase is scoped to', () => {
+  it('publishes exactly the five events this phase is scoped to', () => {
+    // SUPPLIER_REINSTATED was added by the global audit's L7-14: the lifting
+    // of a suspension is a state change and is audited (AGENTS.md S-06).
     expect(Object.keys(SUPPLIER_EVENTS).sort()).toEqual([
       'SUPPLIER_QUALIFIED',
       'SUPPLIER_REGISTERED',
+      'SUPPLIER_REINSTATED',
       'SUPPLIER_REJECTED',
       'SUPPLIER_SUSPENDED',
     ]);
+  });
+
+  it('carries the closed episode, the stated reason and the operator on SUPPLIER_REINSTATED', () => {
+    expect(validateSupplierPayload('SUPPLIER_REINSTATED', REINSTATED)).toEqual(REINSTATED);
+    // Nothing about qualifications — reinstating decides nothing about them —
+    // and nothing unlisted.
+    expect(() =>
+      validateSupplierPayload('SUPPLIER_REINSTATED', {
+        ...REINSTATED,
+        qualifiedFor: ['GOODS_SUPPLY'],
+      }),
+    ).toThrow(/SUPPLIER_REINSTATED/);
   });
 
   it('does not publish PERFORMANCE_SCORE_UPDATED', () => {
