@@ -151,18 +151,23 @@ test.describe.serial('construction projects and needs (CON-001 PR 1)', () => {
       () => tenantB.get(`/v1/projects/${projectId}`),
       () => tenantB.get(`/v1/projects/${projectId}/needs`),
       () =>
-        tenantB.patch(`/v1/projects/${projectId}`, { body: { expectedVersion: 2, title: 'x' } }),
+        tenantB.patch(`/v1/projects/${projectId}`, {
+          body: { expectedVersion: 2, title: 'Probe title' },
+        }),
       () =>
-        tenantB.post(`/v1/projects/${projectId}/needs`, { body: { title: 'x', description: 'y' } }),
+        tenantB.post(`/v1/projects/${projectId}/needs`, {
+          body: { title: 'Probe title', description: 'Probe description' },
+        }),
       () =>
         tenantB.post(`/v1/projects/${projectId}/cancel`, {
-          body: { expectedVersion: 2, reason: 'Not yours' },
+          body: { expectedVersion: 2, reason: 'Not this tenant’s project' },
         }),
     ];
     for (const probe of probes) {
       const response = await probe();
-      // 404, not 403: a refusal by name would confirm the project exists.
-      expect(response.status).toBe(404);
+      // 404, not 403: a refusal by name would confirm the project exists. Each
+      // body is valid, so the answer is the tenant check, not validation.
+      expect(response.status, JSON.stringify(response.body)).toBe(404);
     }
     const list = await tenantB.get('/v1/projects?limit=100');
     expect((list.body as { items: { id: string }[] }).items.map((item) => item.id)).not.toContain(
@@ -188,7 +193,7 @@ test.describe.serial('construction projects and needs (CON-001 PR 1)', () => {
       version: 3,
     });
     const again = await tenantA.post(`/v1/projects/${projectId}/cancel`, {
-      body: { expectedVersion: 3, reason: 'Twice' },
+      body: { expectedVersion: 3, reason: 'Cancelled a second time' },
     });
     expect(again.status).toBe(422);
   });

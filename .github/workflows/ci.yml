@@ -619,7 +619,11 @@ jobs:
   integration:
     name: Integration and security tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 40, not 30: on main this job already took 28m50s (run 36243143881, the
+    # migration reversibility step alone 14m34s), and construction-service's
+    # coverage gate and reversibility check add about a minute. A cancelled
+    # job proves nothing either way; the budget follows the work.
+    timeout-minutes: 40
     needs: quality
 
     services:
