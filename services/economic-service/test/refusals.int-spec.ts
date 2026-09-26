@@ -155,6 +155,46 @@ describe('refusals and defaults', () => {
     expect(response.body.failureReason).toBeTruthy();
   });
 
+  it('refuses a directive code outside the closed set, and never stores, publishes or echoes it', async () => {
+    // Codex review of PR #121, finding 4. The instrument is caller-controlled;
+    // a code copied from it reached the provider reference, failure_reason,
+    // PAYMENT_FAILED and the log. A card number is the case that matters.
+    const wallet = await request(http).get('/v1/wallets/me').set('authorization', asOrg());
+    const pan = '4111111111111111';
+
+    for (const instrument of [`fail-capture:${pan}`, `fail:${pan}`, `fail-refund:${pan}`]) {
+      const response = await request(http)
+        .post(`/v1/wallets/${wallet.body.id}/top-up`)
+        .set('authorization', asOrg())
+        .set('idempotency-key', id('ref-unsupported-directive'))
+        .send({ amountMinor: '5000', instrument })
+        .expect(201);
+
+      expect(response.body.status).toBe('FAILED');
+      expect(response.body.failureReason).toBe('UNSUPPORTED_DIRECTIVE');
+      expect(JSON.stringify(response.body)).not.toContain(pan);
+
+      const intent = await runUnscoped('the suite reads what was stored for the intent', () =>
+        harness.prisma.client.paymentIntent.findUniqueOrThrow({
+          where: { id: response.body.paymentIntentId as string },
+        }),
+      );
+      expect(
+        JSON.stringify(intent, (_key, value: unknown) =>
+          typeof value === 'bigint' ? value.toString() : value,
+        ),
+      ).not.toContain(pan);
+
+      const published = await runUnscoped('the suite reads what was published for it', () =>
+        harness.prisma.client.outboxMessage.findMany({
+          where: { aggregateId: response.body.paymentIntentId as string },
+        }),
+      );
+      expect(published.length).toBeGreaterThan(0);
+      expect(JSON.stringify(published.map((row) => row.payload))).not.toContain(pan);
+    }
+  });
+
   it('refuses a refund the provider itself refuses, and moves nothing', async () => {
     const wallet = await request(http).get('/v1/wallets/me').set('authorization', asOrg());
 

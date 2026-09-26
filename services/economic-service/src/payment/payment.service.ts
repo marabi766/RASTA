@@ -1,11 +1,16 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
-import { ID_PREFIXES } from '@rasta/contracts';
+import { ID_PREFIXES, MAX_AMOUNT_MINOR } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { WalletService } from '../wallet/wallet.service';
-import { WalletRepository } from '../wallet/wallet.repository';
+import {
+  WALLET_BALANCE_LIMIT,
+  WalletRepository,
+  isWalletBalanceLimit,
+  walletBalanceLimit,
+} from '../wallet/wallet.repository';
 import { assertSufficient, balancesFrom } from '../wallet/balances';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor, parseMinor } from '../shared/money';
@@ -99,21 +104,39 @@ export class PaymentService {
       throw RastaError.businessRule('This wallet cannot be topped up', { walletId });
     }
 
+    // The balance this top-up would leave is checked before the provider is
+    // asked for anything, and reserved (Codex review of PR #121, finding 1).
+    // Each amount fits a BIGINT; their sum need not, and a capture the ledger
+    // then cannot record left the provider CAPTURED over an intent that was
+    // not. Under the wallet's row lock, so two concurrent top-ups each count
+    // the other: intents still CREATED or AUTHORIZED are money on its way in.
     const intentId = `${ID_PREFIXES.payment}_${ulid()}`;
-    await this.prisma.client.paymentIntent.create({
-      data: {
-        id: intentId,
-        organizationId,
-        walletId,
-        provider: this.provider.name,
-        simulated: this.provider.simulated,
-        amountMinor,
-        currency: wallet.currency,
-        status: 'CREATED',
-        idempotencyKey: dto.idempotencyKey,
-        correlationId: getContext().correlationId,
-        createdBy: actor,
-      },
+    await this.prisma.transaction(async (tx) => {
+      const [locked] = await this.walletRepository.lock(tx, [walletId]);
+      if (!locked) throw RastaError.notFound('Wallet', walletId);
+
+      const inFlight = await tx.paymentIntent.aggregate({
+        where: { walletId, status: { in: ['CREATED', 'AUTHORIZED'] } },
+        _sum: { amountMinor: true },
+      });
+      const projected = locked.ledgerBalanceMinor + (inFlight._sum.amountMinor ?? 0n) + amountMinor;
+      if (projected > MAX_AMOUNT_MINOR) throw walletBalanceLimit(walletId);
+
+      await tx.paymentIntent.create({
+        data: {
+          id: intentId,
+          organizationId,
+          walletId,
+          provider: this.provider.name,
+          simulated: this.provider.simulated,
+          amountMinor,
+          currency: wallet.currency,
+          status: 'CREATED',
+          idempotencyKey: dto.idempotencyKey,
+          correlationId: getContext().correlationId,
+          createdBy: actor,
+        },
+      });
     });
 
     const authorization = await this.provider.authorize({
@@ -131,7 +154,7 @@ export class PaymentService {
         organizationId,
         amountMinor,
         wallet.currency,
-        authorization.failureCode ?? 'PROVIDER_DECLINED',
+        failureCodeFrom(authorization.failureCode, 'PROVIDER_DECLINED'),
       );
     }
 
@@ -189,18 +212,96 @@ export class PaymentService {
         organizationId,
         amountMinor,
         wallet.currency,
-        capture.failureCode ?? 'CAPTURE_DECLINED',
+        failureCodeFrom(capture.failureCode, 'CAPTURE_DECLINED'),
       );
     }
 
-    return this.completeCapture(
-      intentId,
-      walletId,
-      organizationId,
-      amountMinor,
-      wallet.currency,
-      actor,
+    try {
+      return await this.completeCapture(
+        intentId,
+        walletId,
+        organizationId,
+        amountMinor,
+        wallet.currency,
+        actor,
+      );
+    } catch (error) {
+      return this.returnUncreditedCapture(
+        intentId,
+        organizationId,
+        amountMinor,
+        wallet.currency,
+        authorization.providerReference,
+        dto.idempotencyKey,
+        error,
+      );
+    }
+  }
+
+  /**
+   * The provider captured the money and the ledger could not record it.
+   *
+   * The reservation above makes the balance limit unreachable for concurrent
+   * top-ups, but another credit (a settlement to this wallet, a reward) can
+   * still land between the reservation and the capture, and a database fault
+   * can fail the write. Leaving the provider CAPTURED over an intent still
+   * AUTHORIZED is the one outcome that must not happen (Codex review of
+   * PR #121, finding 1): the payer is charged and nothing is credited.
+   *
+   * So the capture is refunded at the provider and the intent recorded
+   * FAILED, which is the response a retry with the same key then replays. It
+   * is not the compensating movement docs/08 § 8.6 forbids: no ledger entry
+   * was written, so there is nothing of ours to move — only the provider's
+   * charge to return. Should the provider refuse the refund too, the intent
+   * keeps `CAPTURED_NOT_CREDITED` as its failure reason, stays AUTHORIZED
+   * (the lifecycle constraint forbids calling it FAILED while money is held),
+   * holds its reserved headroom, and the error propagates: a case for a person.
+   */
+  private async returnUncreditedCapture(
+    intentId: string,
+    organizationId: string,
+    amountMinor: bigint,
+    currency: string,
+    providerReference: string,
+    idempotencyKey: string,
+    cause: unknown,
+  ): Promise<TopUpResult> {
+    const reason = isWalletBalanceLimit(cause) ? WALLET_BALANCE_LIMIT : 'CAPTURE_NOT_CREDITED';
+    this.logger.error(
+      `Payment intent ${intentId} was captured but could not be credited (${reason}); ` +
+        'refunding it at the provider',
+      cause instanceof Error ? cause.stack : String(cause),
     );
+
+    const refunded = await this.provider
+      .refund({
+        paymentIntentId: intentId,
+        providerReference,
+        amountMinor,
+        currency,
+        idempotencyKey: `${idempotencyKey}:uncredited`,
+        reason: 'the capture could not be credited to the wallet',
+      })
+      .then(
+        (result) => result.outcome === 'REFUNDED',
+        () => false,
+      );
+
+    if (!refunded) {
+      await this.prisma.client.paymentIntent.update({
+        where: { id: intentId },
+        data: { failureReason: 'CAPTURED_NOT_CREDITED' },
+      });
+      paymentIntentsTotal.inc({
+        service: SERVICE_NAME,
+        provider: this.provider.name,
+        simulated: String(this.provider.simulated),
+        outcome: 'CAPTURED_NOT_CREDITED',
+      });
+      throw cause;
+    }
+
+    return this.fail(intentId, organizationId, amountMinor, currency, reason);
   }
 
   /**
@@ -422,7 +523,7 @@ export class PaymentService {
     if (providerResult.outcome === 'FAILED') {
       throw RastaError.businessRule('The payment provider refused the refund', {
         intentId,
-        code: providerResult.failureCode,
+        code: failureCodeFrom(providerResult.failureCode, 'REFUND_DECLINED'),
       });
     }
 
@@ -498,6 +599,21 @@ export class PaymentService {
     });
   }
 }
+
+/**
+ * A provider failure code as this service will store, publish and log it.
+ *
+ * Codes land in `failure_reason`, on `PAYMENT_FAILED` and in the log, so only
+ * a code-shaped value is kept: upper-case letters and underscores. Anything
+ * else — a digit string that could be a card number, free text — is replaced
+ * by the fallback rather than copied (AGENTS.md S-09; Codex review of PR #121,
+ * finding 4).
+ */
+export function failureCodeFrom(code: string | undefined, fallback: string): string {
+  return code !== undefined && FAILURE_CODE.test(code) ? code : fallback;
+}
+
+const FAILURE_CODE = /^[A-Z][A-Z_]{0,63}$/;
 
 export interface TopUpResult {
   paymentIntentId: string;

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '../generated/prisma';
-import { runUnscoped } from '@rasta/nest-common';
+import { MAX_AMOUNT_MINOR } from '@rasta/contracts';
+import { RastaError, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { balancesFrom, type Balances } from './balances';
 
@@ -95,6 +96,15 @@ export class WalletRepository {
    * validates. A negative result — a wallet that somehow spent more than it
    * had — fails the constraint and rolls the whole transaction back rather
    * than being stored.
+   *
+   * A result past `BIGINT` is refused as a business rule, not left to the
+   * database (Codex review of PR #121, finding 1). Each amount is capped on
+   * the way in, but a balance is a sum: an empty wallet topped up by 2^63 − 1
+   * and then by 1 wrote 2^63 into `BIGINT`, failed as a numeric overflow and
+   * reached the caller as a 500 — or, in the reward consumer, as a transient
+   * retry that could never succeed. The sums are compared in `numeric`, where
+   * they cannot overflow, and a wallet that would pass the bound is not
+   * updated at all.
    */
   async recomputeFromLedger(
     tx: ExtendedPrismaClient,
@@ -128,6 +138,9 @@ export class WalletRepository {
                AND a.purpose IN ('WALLET', 'ESCROW')
             ) b
            WHERE w.id = ${wallet.id}
+             AND b.wallet_balance + b.escrow_balance <= ${MAX_BALANCE}::numeric
+             AND b.wallet_balance <= ${MAX_BALANCE}::numeric
+             AND b.escrow_balance <= ${MAX_BALANCE}::numeric
         RETURNING w.available_balance_minor AS "availableBalanceMinor",
                   w.pending_balance_minor   AS "pendingBalanceMinor",
                   w.ledger_balance_minor    AS "ledgerBalanceMinor"
@@ -136,7 +149,13 @@ export class WalletRepository {
 
     const row = rows[0];
     if (!row) {
-      throw new Error(`Wallet ${wallet.id} disappeared while recomputing its balances`);
+      const exists = await runUnscoped('the recompute tells a missing wallet from a full one', () =>
+        tx.wallet.count({ where: { id: wallet.id } }),
+      );
+      if (exists === 0) {
+        throw new Error(`Wallet ${wallet.id} disappeared while recomputing its balances`);
+      }
+      throw walletBalanceLimit(wallet.id);
     }
     return balancesFrom(BigInt(row.availableBalanceMinor), BigInt(row.pendingBalanceMinor));
   }
@@ -337,6 +356,27 @@ export class WalletRepository {
       this.client.walletHold.count({ where: { status: 'ACTIVE' } }),
     );
   }
+}
+
+/** `BIGINT`'s bound as the decimal text a `numeric` comparison takes. */
+const MAX_BALANCE = MAX_AMOUNT_MINOR.toString();
+
+/**
+ * A movement that would take a wallet past what `BIGINT` stores. A verdict,
+ * not a fault: the same movement fails the same way every time, so a consumer
+ * dead-letters it rather than retrying it.
+ */
+export function walletBalanceLimit(walletId: string): RastaError {
+  return RastaError.businessRule(
+    'This movement would take the wallet past the largest balance it can hold',
+    { walletId, reason: WALLET_BALANCE_LIMIT },
+  );
+}
+
+export const WALLET_BALANCE_LIMIT = 'WALLET_BALANCE_LIMIT';
+
+export function isWalletBalanceLimit(error: unknown): boolean {
+  return error instanceof RastaError && error.internalContext?.reason === WALLET_BALANCE_LIMIT;
 }
 
 export interface LockedWallet {

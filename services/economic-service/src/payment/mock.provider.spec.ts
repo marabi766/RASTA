@@ -1,4 +1,23 @@
-import { MockPaymentProvider, mockReferenceWithDirective } from './mock.provider';
+import {
+  MOCK_DIRECTIVE_CODES,
+  MockPaymentProvider,
+  UNSUPPORTED,
+  mockReferenceWithDirective,
+} from './mock.provider';
+import { failureCodeFrom } from './payment.service';
+
+describe('failureCodeFrom — what a provider code may become in storage, events and logs', () => {
+  it('keeps a code-shaped value', () => {
+    expect(failureCodeFrom('INSUFFICIENT_FUNDS', 'X')).toBe('INSUFFICIENT_FUNDS');
+  });
+
+  it.each([undefined, '', '4111111111111111', 'CARD4111', 'lower_case', 'WITH SPACE'])(
+    'replaces anything else with the fallback: %s',
+    (code) => {
+      expect(failureCodeFrom(code, 'PROVIDER_DECLINED')).toBe('PROVIDER_DECLINED');
+    },
+  );
+});
 
 /**
  * The simulated payment provider (ADR-024).
@@ -186,6 +205,30 @@ describe('the reference carries the directives that act after authorisation (L7-
       outcome: 'FAILED',
       failureCode: 'NOT_PERMITTED',
     });
+  });
+
+  it.each(['fail:4111111111111111', 'fail-capture:4111111111111111', 'fail-refund:DROP TABLE'])(
+    'refuses a code outside the closed set, and carries none of it: %s',
+    async (instrument) => {
+      // Codex review of PR #121, finding 4.
+      const authorized = await provider.authorize({
+        ...authorizeRequest,
+        paymentIntentId: 'PAY_9',
+        instrument,
+      });
+      expect(authorized).toMatchObject({
+        outcome: 'FAILED',
+        failureCode: UNSUPPORTED,
+        providerReference: 'mock_PAY_9',
+      });
+    },
+  );
+
+  it('accepts every code in the closed set', async () => {
+    for (const code of MOCK_DIRECTIVE_CODES) {
+      const result = await provider.authorize({ ...authorizeRequest, instrument: `fail:${code}` });
+      expect(result).toMatchObject({ outcome: 'FAILED', failureCode: code });
+    }
   });
 
   it('issues a plain reference for an ordinary instrument, which carries no instrument data', async () => {
