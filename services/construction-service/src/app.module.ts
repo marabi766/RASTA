@@ -37,13 +37,21 @@ import { ProjectService } from './project/project.service';
 import { NeedService } from './project/need.service';
 import { ProjectController } from './project/project.controller';
 import { ProjectAccess } from './access/access';
+import { ProjectLifecycleController } from './project/lifecycle.controller';
+import { ExecutionService } from './project/execution.service';
+import { ApprovalRepository } from './approval/approval.repository';
+import { ApprovalService } from './approval/approval.service';
+import { PolicyService } from './approval/policy.service';
+import { PolicyController } from './approval/policy.controller';
+import { ApprovalController } from './approval/approval.controller';
+import { ProgressService } from './progress/progress.service';
 import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER } from './tokens';
 import { brokersOf, loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './config/env';
 
 /**
- * construction-service wiring (CON-001 PR 1).
+ * construction-service wiring (CON-001).
  *
  * ## No external boundary, no consumer, no workflow — by decision
  *
@@ -58,7 +66,14 @@ import { brokersOf, loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } fr
  * looks like work done (ADR-032). The table exists for the first real one.
  */
 @Module({
-  controllers: [ProjectController, HealthController, MetricsController],
+  controllers: [
+    ProjectController,
+    ProjectLifecycleController,
+    PolicyController,
+    ApprovalController,
+    HealthController,
+    MetricsController,
+  ],
   providers: [
     { provide: ENV, useFactory: () => loadConstructionEnv() },
 
@@ -102,6 +117,11 @@ import { brokersOf, loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } fr
     ProjectRepository,
     ProjectService,
     NeedService,
+    ApprovalRepository,
+    ApprovalService,
+    PolicyService,
+    ExecutionService,
+    ProgressService,
 
     {
       provide: InternalTokenService,

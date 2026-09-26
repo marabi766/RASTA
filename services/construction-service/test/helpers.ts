@@ -7,6 +7,11 @@ import { ProjectService } from '../src/project/project.service';
 import { NeedService } from '../src/project/need.service';
 import { ProjectAccess } from '../src/access/access';
 import { IdempotencyStore } from '../src/shared/idempotency';
+import { ApprovalRepository } from '../src/approval/approval.repository';
+import { ApprovalService } from '../src/approval/approval.service';
+import { PolicyService } from '../src/approval/policy.service';
+import { ExecutionService } from '../src/project/execution.service';
+import { ProgressService } from '../src/progress/progress.service';
 import { loadConstructionEnv, type ConstructionEnv } from '../src/config/env';
 import type { CreateProjectDto } from '../src/project/dto';
 
@@ -59,6 +64,11 @@ export interface Wiring {
   repository: ProjectRepository;
   projects: ProjectService;
   needs: NeedService;
+  approvalRepository: ApprovalRepository;
+  approvals: ApprovalService;
+  policies: PolicyService;
+  execution: ExecutionService;
+  progress: ProgressService;
   close(): Promise<void>;
 }
 
@@ -72,12 +82,45 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
   const repository = new ProjectRepository(prisma);
   const access = new ProjectAccess(env);
   const idempotency = new IdempotencyStore(prisma, env);
+  const approvalRepository = new ApprovalRepository(prisma);
+  const projects = new ProjectService(
+    prisma,
+    repository,
+    events,
+    access,
+    idempotency,
+    env,
+    approvalRepository,
+  );
+  const approvals = new ApprovalService(
+    prisma,
+    approvalRepository,
+    repository,
+    projects,
+    events,
+    access,
+    env,
+  );
   return {
     prisma,
     env,
     repository,
-    projects: new ProjectService(prisma, repository, events, access, idempotency, env),
+    projects,
     needs: new NeedService(prisma, repository, events, access, idempotency),
+    approvalRepository,
+    approvals,
+    policies: new PolicyService(prisma, approvalRepository, events, access),
+    execution: new ExecutionService(
+      prisma,
+      repository,
+      projects,
+      approvals,
+      approvalRepository,
+      events,
+      access,
+      env,
+    ),
+    progress: new ProgressService(prisma, repository, events, access, env),
     close: () => prisma.onModuleDestroy(),
   };
 }
@@ -157,6 +200,10 @@ export async function cleanup(prisma: PrismaService, organizationIds: string[]):
   if (organizationIds.length === 0) return;
   const where = { organizationId: { in: organizationIds } };
   await runUnscoped('integration cleanup removes exactly what the suite wrote', async () => {
+    await prisma.client.approval.deleteMany({ where });
+    await prisma.client.progressReport.deleteMany({ where });
+    await prisma.client.approvalPolicyStep.deleteMany({ where });
+    await prisma.client.approvalPolicy.deleteMany({ where });
     await prisma.client.projectNeed.deleteMany({ where });
     await prisma.client.project.deleteMany({ where });
     await prisma.client.idempotencyKey.deleteMany({ where });

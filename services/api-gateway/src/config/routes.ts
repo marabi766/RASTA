@@ -150,6 +150,9 @@ export const ROUTES: readonly RouteRule[] = [
   // ---- civil works -------------------------------------------------------
   { prefix: 'projects', service: 'construction' },
   { prefix: 'approvals', service: 'construction' },
+  // Approval policies are configuration as data (ADR-023, ADR-063): the
+  // authorities and thresholds a project's approvals come from.
+  { prefix: 'approval-policies', service: 'construction' },
   { prefix: 'tenders', service: 'construction', requiresIdempotencyKey: true },
   { prefix: 'contracts', service: 'contract' },
   { prefix: 'statements', service: 'contract', requiresIdempotencyKey: true },

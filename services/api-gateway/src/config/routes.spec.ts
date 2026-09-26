@@ -190,6 +190,9 @@ describe('resolveRoute', () => {
     ['/products', 'marketplace'],
     ['/offers/OFR_1', 'marketplace'],
     ['/tenders/TND_1/bids', 'construction'],
+    ['/projects/PRJ_1/approvals', 'construction'],
+    ['/approvals/APR_1/decision', 'construction'],
+    ['/approval-policies/APL_1/activate', 'construction'],
     ['/ledger/trial-balance', 'economic'],
   ])('routes %s to %s', (path, service) => {
     expect(resolveRoute(path)?.service).toBe(service);
