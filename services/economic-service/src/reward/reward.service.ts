@@ -184,6 +184,23 @@ export class RewardService {
           );
         }
 
+        // The running totals, not only this grant (Codex review of PR #121,
+        // finding 2): `total_points` is INTEGER and `lifetime_credit_minor` is
+        // BIGINT, and a sum past either failed as a numeric overflow — which
+        // the consumer took for transient and retried until the DLQ said
+        // MAX_RETRIES_EXCEEDED. A verdict instead, so it is dead-lettered as
+        // BUSINESS_RULE_VIOLATION at once. Checked under the balance lock,
+        // so the totals are still true when written.
+        if (
+          balance.totalPoints + decision.points > MAX_TOTAL_POINTS ||
+          !isStorableMinor(BigInt(balance.lifetimeCreditMinor) + decision.creditAmountMinor)
+        ) {
+          throw RastaError.businessRule(
+            'This grant would take the subject past the largest reward balance it can hold',
+            { ruleId: rule.id },
+          );
+        }
+
         const rewardId = `${ID_PREFIXES.reward}_${ulid()}`;
         const grantedAt = new Date();
 
@@ -318,12 +335,15 @@ export class RewardService {
     tx: ExtendedPrismaClient,
     organizationId: string,
     userId: string,
-  ): Promise<{ totalPoints: number; levelId: string | null }> {
+  ): Promise<{ totalPoints: number; levelId: string | null; lifetimeCreditMinor: bigint }> {
     const rows = await runUnscoped(
       'the reward cap is enforced by locking the subject balance row',
       () =>
-        tx.$queryRaw<{ totalPoints: number; levelId: string | null }[]>`
-          SELECT total_points AS "totalPoints", level_id AS "levelId"
+        tx.$queryRaw<
+          { totalPoints: number; levelId: string | null; lifetimeCreditMinor: bigint }[]
+        >`
+          SELECT total_points AS "totalPoints", level_id AS "levelId",
+                 lifetime_credit_minor AS "lifetimeCreditMinor"
             FROM reward_balance
            WHERE organization_id = ${organizationId} AND user_id = ${userId}
              FOR UPDATE
@@ -644,6 +664,9 @@ export type GrantOutcome =
       levelChangedTo: string | null;
     }
   | { kind: 'SKIPPED'; reason: string; ruleId: string };
+
+/** `reward_balance.total_points` is a PostgreSQL INTEGER: 2^31 − 1. */
+const MAX_TOTAL_POINTS = 2_147_483_647;
 
 export interface RewardGrantFailure {
   ruleId: string;

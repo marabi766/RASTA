@@ -165,6 +165,54 @@ describe('rewards (real database)', () => {
     });
   });
 
+  describe('the running totals stay storable (Codex review of PR #121, finding 2)', () => {
+    async function subjectNearLimit(
+      column: 'total_points' | 'lifetime_credit_minor',
+      value: string,
+    ) {
+      await createRule({ points: 10, creditPerPointMinor: '1000' });
+      // A first grant creates the subject's balance row; it is then set just
+      // below the bound, as years of grants would leave it.
+      await grant(`USG_${ulid()}`);
+      await runUnscoped('the suite moves a reward balance to the edge of its column', () =>
+        prisma.client.$executeRawUnsafe(
+          `UPDATE reward_balance SET ${column} = $1::bigint
+            WHERE organization_id = $2 AND user_id = $3`,
+          value,
+          org.a,
+          user,
+        ),
+      );
+    }
+
+    async function expectRefusedAsVerdict() {
+      const failure = await grant(`USG_${ulid()}`).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(RewardGrantError);
+      // A verdict: the consumer dead-letters it as BUSINESS_RULE_VIOLATION
+      // at once, rather than retrying an overflow into MAX_RETRIES_EXCEEDED.
+      expect((failure as RewardGrantError).permanent).toBe(true);
+      const rewards = await runUnscoped('the suite counts the subject grants', () =>
+        prisma.client.reward.count({ where: { organizationId: org.a, userId: user } }),
+      );
+      expect(rewards).toBe(1);
+    }
+
+    it('refuses a grant that would take total points past an INTEGER', async () => {
+      await subjectNearLimit('total_points', String(2_147_483_647 - 5));
+      await expectRefusedAsVerdict();
+      await cleanup(prisma, [org.a]);
+    });
+
+    it('refuses a grant that would take lifetime credit past a BIGINT', async () => {
+      await subjectNearLimit('lifetime_credit_minor', String(9_223_372_036_854_775_807n - 5n));
+      await expectRefusedAsVerdict();
+      await cleanup(prisma, [org.a]);
+    });
+  });
+
   describe('the period cap holds under parallel events', () => {
     it('never grants more than the cap, however many triggers arrive at once', async () => {
       // The mandatory scenario. Twenty simultaneous triggers against a rule
