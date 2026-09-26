@@ -207,6 +207,17 @@ describe('the registration form', () => {
     expect(getByText(/corr-sample/)).toBeInTheDocument();
   });
 
+  it('says an unconfirmed write may have been saved, and never that nothing was', () => {
+    const { container, getByText } = renderForm({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-sample',
+    });
+    expect(getByText(/نتوانستیم تأیید کنیم/)).toBeInTheDocument();
+    expect(getByText(/صفحه را تازه کنید/)).toBeInTheDocument();
+    expect(getByText(/corr-sample/)).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/چیزی ذخیره نشد|ثبت انجام نشد/);
+  });
+
   it('disables the submit button while a submission is in flight', () => {
     const { getByRole } = renderForm({ kind: 'IDLE' }, true);
     expect(getByRole('button', { name: 'در حال ثبت…' })).toBeDisabled();

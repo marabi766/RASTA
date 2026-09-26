@@ -1,3 +1,4 @@
+import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type {
   RevokeMembershipField,
   RevokeMembershipFormValues,
@@ -53,7 +54,8 @@ export type UpdateOrganizationFormState =
     }
   | RefusedState
   | ForbiddenState
-  | FailedState;
+  | FailedState
+  | UnconfirmedWriteState;
 
 export const IDLE_UPDATE_ORGANIZATION_FORM: UpdateOrganizationFormState = { kind: 'IDLE' };
 
@@ -77,7 +79,8 @@ export type UpdateMemberRolesFormState =
    */
   | ForbiddenState
   | { readonly kind: 'NOT_FOUND' }
-  | FailedState;
+  | FailedState
+  | UnconfirmedWriteState;
 
 export const IDLE_UPDATE_MEMBER_ROLES_FORM: UpdateMemberRolesFormState = { kind: 'IDLE' };
 
@@ -95,6 +98,7 @@ export type RevokeMembershipFormState =
   | RefusedState
   | ForbiddenState
   | { readonly kind: 'NOT_FOUND' }
-  | FailedState;
+  | FailedState
+  | UnconfirmedWriteState;
 
 export const IDLE_REVOKE_MEMBERSHIP_FORM: RevokeMembershipFormState = { kind: 'IDLE' };

@@ -3,6 +3,7 @@
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
+import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { EMPTY_ASSIGN_DRIVER_FORM, type AssignDriverField } from '@/lib/driver-fields';
 
@@ -125,6 +126,10 @@ function FormBanner({ state }: { state: AssignFormState }) {
         اجازهٔ تخصیص برای این راننده به شما داده نشده است. کد پیگیری: {state.correlationId}
       </Alert>
     );
+  }
+
+  if (state.kind === 'UNCONFIRMED') {
+    return <UnconfirmedWriteAlert correlationId={state.correlationId} />;
   }
 
   if (state.kind === 'FAILED') {

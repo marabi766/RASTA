@@ -151,6 +151,17 @@ describe('what the service refuses', () => {
     expect(redirect).not.toHaveBeenCalled();
   });
 
+  it('reports a sent-but-unconfirmed write as UNCONFIRMED, never as a failure (Codex #106)', async () => {
+    // The service may have created the driver; "nothing was saved" would
+    // invite a retry that reports a duplicate.
+    createDriver.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-sample' });
+    expect(await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-sample',
+    });
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
   it('reports an outage with its status and correlation id', async () => {
     createDriver.mockResolvedValue({
       kind: 'UNAVAILABLE',

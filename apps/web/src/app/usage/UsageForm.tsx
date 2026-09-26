@@ -3,6 +3,7 @@
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
+import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { EMPTY_USAGE_FORM, type UsageField, type UsageFormValues } from '@/lib/usage-fields';
 
@@ -227,6 +228,10 @@ function FormBanner({ state }: { state: UsageFormState }) {
         اجازهٔ ثبت کارکرد برای این ماشین به شما داده نشده است. کد پیگیری: {state.correlationId}
       </Alert>
     );
+  }
+
+  if (state.kind === 'UNCONFIRMED') {
+    return <UnconfirmedWriteAlert correlationId={state.correlationId} />;
   }
 
   if (state.kind === 'FAILED') {
