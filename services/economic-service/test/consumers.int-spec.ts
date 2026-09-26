@@ -6,6 +6,8 @@ import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer'
 import { CONSUMED_EVENTS } from '../src/events/consumed';
 import { asActor, cleanup, newPrisma, tenants, wire, type Wiring } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
+
+type Transaction = Parameters<Parameters<PrismaService['transaction']>[0]>[0];
 import { FakeSourceFacts } from './source-facts.fake';
 
 /**
@@ -61,6 +63,20 @@ describe('economic consumers', () => {
       sources,
     );
     rewardTrigger = new RewardTriggerConsumer(noBroker, prisma, wiring.rewards, sources);
+  });
+
+  // The operator records the cutover after draining the old consumers; no
+  // migration does (PR #110 round 3 #1). This suite stands in for the
+  // operator: an instant before any fact it writes, after the 2020 fact the
+  // round 2 #3 case needs refused. Kept if an earlier run recorded one; it
+  // can never be moved back anyway.
+  beforeAll(async () => {
+    await runUnscoped('the suite records the platform-wide cutover as an operator would', () =>
+      prisma.client.rewardEvaluationCutover.createMany({
+        data: [{ singleton: true, cutoverAt: new Date('2021-01-01T00:00:00.000Z') }],
+        skipDuplicates: true,
+      }),
+    );
   });
 
   afterEach(() => {
@@ -567,6 +583,11 @@ describe('economic consumers', () => {
     // A reward is not why `rasta.fleet.v1` exists. A misconfigured rule must
     // not stall a partition that fleet-service's other consumers depend on, so
     // the failure is logged, counted and moved past.
+    //
+    // This pins today's behaviour; it does not endorse it for a transient
+    // failure. A grant lost to a database blip is never retried, which is
+    // pre-existing on main and tracked as global audit L7-13 (PR #110 round 3
+    // #4, economic batch 2 item c).
     const payload = usage();
     sources.recorded(payload, { recordedBy: 'USR-THROWS' });
     const failing = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor('USR-THROWS'));
@@ -722,8 +743,13 @@ describe('economic consumers', () => {
       .mockRejectedValueOnce(new Error('process died between the claim and the grant'));
     await rewardTrigger.handle(event);
     spy.mockRestore();
-    // The grant failure is tolerated and the event marked processed; remove
-    // that marker to stand for the crash that never wrote it.
+    // A process that dies after the claim commits leaves the claim and no
+    // processed_event. The test cannot kill the process, so it rebuilds that
+    // state: the thrown grant is tolerated and the event marked processed,
+    // and the marker is removed. What follows covers only the resume from
+    // that state. It proves nothing about a grant that throws in a live
+    // process: that is finalised and never retried (global audit L7-13, PR
+    // #110 round 3 #4).
     await runUnscoped('the suite simulates a crash before processed_event committed', () =>
       prisma.client.processedEvent.delete({
         where: {
@@ -849,7 +875,9 @@ describe('economic consumers', () => {
     const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
 
     // The claim commits, then the process dies before any grant or
-    // processed_event.
+    // processed_event. Rebuilt as in the crash case above (a tolerated throw,
+    // then the marker removed); it covers the resume only, not a transient
+    // grant failure (PR #110 round 3 #4).
     const spy = jest
       .spyOn(wiring.rewards, 'grantFor')
       .mockRejectedValueOnce(new Error('process died between the claim and the grant'));
@@ -929,5 +957,140 @@ describe('economic consumers', () => {
     expect(row).toMatchObject({ origin: 'EVENT', eventId: event.eventId, outcome: 'NO_RULE' });
     expect(row!.ruleIds).toEqual([]);
     expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).not.toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #110 round 3
+  // -------------------------------------------------------------------------
+
+  const cutover = async () =>
+    (
+      await runUnscoped('the suite reads the platform-wide cutover', () =>
+        prisma.client.rewardEvaluationCutover.findUniqueOrThrow({ where: { singleton: true } }),
+      )
+    ).cutoverAt;
+
+  it("decides a concurrent delivery of the same event with the holder's rules, not its own (round 3 #3)", async () => {
+    const tenant = `${org.c}-RACE`;
+    const first = await ruleIn(tenant, 3);
+    const payload = usage({ organizationId: tenant });
+    sources.recorded(payload, { recordedBy: 'USR-RACE' });
+    const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
+
+    // Two deliveries of one event, interleaved at the worst point. Delivery A
+    // found no evaluation, looked up [first], and its claim commits while
+    // delivery B is between its own lookup and its insert. Between the two
+    // lookups an administrator activates a backdated rule, so B's lookup sees
+    // both. B is the handle() below; A is what the stub writes just before
+    // B's lookup returns.
+    const lookup = wiring.rewards.applicableRuleIds.bind(wiring.rewards);
+    const spy = jest
+      .spyOn(wiring.rewards, 'applicableRuleIds')
+      .mockImplementationOnce(async (...args) => {
+        await runUnscoped("the suite stands in for delivery A's committed claim", () =>
+          prisma.client.rewardSourceEvaluation.create({
+            data: {
+              organizationId: tenant,
+              triggerEvent: 'USAGE_RECORDED',
+              sourceReference: payload.usageRecordId,
+              origin: 'EVENT',
+              eventId: event.eventId,
+              outcome: 'EVALUATED',
+              ruleIds: [first.id],
+            },
+          }),
+        );
+        await ruleIn(tenant, 40);
+        const seen = await lookup(...args);
+        expect(seen).toHaveLength(2);
+        return seen;
+      });
+    await expect(rewardTrigger.handle(event)).resolves.toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+
+    // B lost the insert to A and decided with A's snapshot: only `first`.
+    const [held] = await evaluationFor(payload.usageRecordId);
+    expect(held!.ruleIds).toEqual([first.id]);
+    const paid = await rewardsFor(payload.usageRecordId);
+    expect(paid.map((reward) => reward.ruleId)).toEqual([first.id]);
+    expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).not.toBeNull();
+  });
+
+  it('never lets the cutover move backward or disappear, only forward (round 3 #2)', async () => {
+    const current = await cutover();
+    // Each attempt runs in a transaction that is rolled back even if the
+    // trigger failed to refuse it, so a broken trigger fails this case
+    // without taking the shared cutover from the rest of the suite.
+    const rollback = new Error('the suite rolls the attempt back');
+    const attempt = (change: (tx: Transaction) => Promise<unknown>) =>
+      prisma.transaction(async (tx) => {
+        await runUnscoped('the suite edits the cutover as an operator would', () => change(tx));
+        throw rollback;
+      });
+
+    // Lowering it would reopen every tenant's history at once.
+    await expect(
+      attempt((tx) =>
+        tx.rewardEvaluationCutover.update({
+          where: { singleton: true },
+          data: { cutoverAt: new Date(current.getTime() - 1) },
+        }),
+      ),
+    ).rejects.toThrow(/may only move forward/);
+    await expect(
+      attempt((tx) => tx.rewardEvaluationCutover.delete({ where: { singleton: true } })),
+    ).rejects.toThrow(/may only move forward/);
+    await expect(
+      // ISOLATION-ALLOW-UNBOUNDED: asserts TRUNCATE is refused, which only a
+      // TRUNCATE can test; the transaction is rolled back whatever happens.
+      attempt((tx) => tx.$executeRawUnsafe('TRUNCATE "reward_evaluation_cutover"')),
+    ).rejects.toThrow(/may only move forward/);
+
+    // Forward is allowed (it only refuses more), and rolled back here so the
+    // rest of the suite keeps its cutover.
+    await expect(
+      attempt(async (tx) => {
+        const moved = await tx.rewardEvaluationCutover.update({
+          where: { singleton: true },
+          data: { cutoverAt: new Date(current.getTime() + 60_000) },
+        });
+        expect(moved.cutoverAt.getTime()).toBe(current.getTime() + 60_000);
+      }),
+    ).rejects.toBe(rollback);
+    expect(await cutover()).toEqual(current);
+  });
+
+  it('evaluates nothing until the operator records the cutover (round 3 #1)', async () => {
+    // The migration applied and the new binary started before the operator
+    // recorded the cutover: a delivery is retried, never evaluated. The shared
+    // row cannot be deleted (round 3 #2), so this consumer is shown the table
+    // as the migration leaves it: empty.
+    const beforeCutover = new Proxy(prisma.client, {
+      get: (target, property, receiver) =>
+        property === 'rewardEvaluationCutover'
+          ? { findUnique: async () => null }
+          : Reflect.get(target, property, receiver),
+    });
+    const undeployed = new RewardTriggerConsumer(
+      noBroker,
+      Object.assign(Object.create(prisma) as PrismaService, { client: beforeCutover }),
+      wiring.rewards,
+      sources,
+    );
+    const tenant = `${org.c}-FENCE`;
+    await ruleIn(tenant, 5);
+    const payload = usage({ organizationId: tenant });
+    sources.recorded(payload, { recordedBy: 'USR-FENCE' });
+    const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
+
+    await expect(undeployed.handle(event)).rejects.toThrow(/reward_evaluation_cutover has no row/);
+    expect(await evaluationFor(payload.usageRecordId)).toHaveLength(0);
+    expect(await rewardsFor(payload.usageRecordId)).toHaveLength(0);
+    expect(await processedBy(RewardTriggerConsumer.CONSUMER_NAME, event.eventId)).toBeNull();
+
+    // Once it is recorded, the same delivery is evaluated normally.
+    await expect(rewardTrigger.handle(event)).resolves.toBeUndefined();
+    expect(await rewardsFor(payload.usageRecordId)).toHaveLength(1);
   });
 });

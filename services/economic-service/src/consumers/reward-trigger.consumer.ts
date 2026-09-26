@@ -92,6 +92,12 @@ import type { SourceFacts } from '../provenance/source-facts.client';
  * never evaluated as new: only an authorised backfill may decide it (ADR-061
  * § 4.2).
  *
+ * The migration does not set it. The operator records it once every consumer
+ * of the old binary has been stopped, so no fact consumed without an
+ * evaluation can fall after it, and it can never move backward (a trigger in
+ * the database refuses that, and any delete). Until it is recorded this
+ * consumer evaluates nothing (docs/runbooks/reward-evaluation-cutover.md).
+ *
  * ## Idempotency, three times over
  *
  * `processed_event` handles a replayed envelope. `(rule_id, source_reference)`
@@ -401,7 +407,8 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
         outcome,
         ruleIds,
       );
-      return held ? { outcome, ruleIds } : null;
+      // The holder's outcome and rules, not `ruleIds` (round 3 #3).
+      return held?.evaluation ?? null;
     }
 
     if (outcome === 'NO_SUBJECT') {
@@ -421,22 +428,35 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
     return this.prisma.transaction(async (tx) => {
       const held = await this.claimEvaluation(tx, envelope, claim, outcome, []);
       if (!held) return null;
-      await this.markProcessed(envelope.eventId, tx);
-      return { outcome, ruleIds: [] };
+      // Only the delivery that wrote the row marks the event: a concurrent
+      // delivery of the same event that wrote it first commits its own
+      // processed_event, or, if it found rules, still has grants to run.
+      if (held.inserted) await this.markProcessed(envelope.eventId, tx);
+      return held.evaluation;
     });
   }
 
-  /** True when this event now holds the fact's evaluation. */
+  /**
+   * The fact's evaluation as the database holds it, when this event holds it;
+   * null when another event or a backfill does.
+   *
+   * Always the persisted row, never the caller's own lookup (round 3 #3): two
+   * deliveries of the same event can each find the fact unevaluated, compute
+   * their rules at different instants, and both reach the insert. The one
+   * that loses must decide with the winner's rules, or a rule activated
+   * between the two lookups would pay although the durable snapshot does not
+   * name it.
+   */
   private async claimEvaluation(
     client: Pick<PrismaService['client'], 'rewardSourceEvaluation'>,
     envelope: EventEnvelope,
     claim: Claim,
     outcome: EvaluationOutcome,
     ruleIds: readonly string[],
-  ): Promise<boolean> {
+  ): Promise<{ inserted: boolean; evaluation: Evaluation } | null> {
     // `ON CONFLICT DO NOTHING`: two events for one fact racing here are
     // decided by the primary key, and the loser's transaction survives.
-    await client.rewardSourceEvaluation.createMany({
+    const { count } = await client.rewardSourceEvaluation.createMany({
       data: [
         {
           organizationId: claim.organizationId,
@@ -459,10 +479,18 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
         },
       },
     });
-    return holder !== null && resumes(holder, envelope);
+    if (holder === null || !resumes(holder, envelope)) return null;
+    return {
+      inserted: count === 1,
+      evaluation: { outcome: holder.outcome, ruleIds: holder.ruleIds },
+    };
   }
 
-  /** The platform-wide cutover the migration recorded. Fails closed if it is missing. */
+  /**
+   * The platform-wide cutover the operator recorded once the old reward
+   * consumers were drained (round 3 #1; docs/runbooks/reward-evaluation-cutover.md).
+   * Fails closed while it is missing.
+   */
   private async cutoverAt(): Promise<Date> {
     const row = await runUnscoped('the evaluation cutover is one platform-wide row', () =>
       this.prisma.client.rewardEvaluationCutover.findUnique({ where: { singleton: true } }),

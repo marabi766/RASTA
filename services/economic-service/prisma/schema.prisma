@@ -859,11 +859,13 @@ model RewardSourceEvaluation {
   @@map("reward_source_evaluation")
 }
 
-/// The reward evaluation cutover (PR #110 round 2 #3): one platform-wide row,
-/// set by the migration that created `reward_source_evaluation` to when it ran.
-/// A fact that occurred before it and has no evaluation row may have been
-/// consumed before evaluations were recorded, so the consumer refuses it
-/// (`BACKFILL_REQUIRED`) rather than evaluating it as new.
+/// The reward evaluation cutover (PR #110 round 2 #3, round 3 #1-#2): one
+/// platform-wide row, recorded by the operator once the old reward consumers
+/// are drained (docs/runbooks/reward-evaluation-cutover.md), never by a
+/// migration. A fact that occurred before it and has no evaluation row may
+/// have been consumed before evaluations were recorded, so the consumer
+/// refuses it (`BACKFILL_REQUIRED`) rather than evaluating it as new. A
+/// trigger refuses moving it backward and deleting it.
 model RewardEvaluationCutover {
   singleton Boolean  @id @default(true)
   cutoverAt DateTime @map("cutover_at")
