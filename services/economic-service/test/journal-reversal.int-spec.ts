@@ -12,6 +12,7 @@ import {
 } from './helpers';
 import { JournalReversalService } from '../src/ledger/journal-reversal.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import type { JournalType } from '../src/generated/prisma';
 
 /**
  * The generic journal reversal refuses every journal that has an owning
@@ -203,5 +204,37 @@ describe('journal reversal refusals (real database)', () => {
     await expect(
       asActor({ organizationId: payer }, () => reversals.reverse(journal.id, 'not my decision')),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('posts the reversal and recomputes every touched wallet for a journal no record owns', async () => {
+    // No journal type is unowned today, so the posting path is reached by
+    // declaring one unowned in a subclass — the path a future type without
+    // an owner would take. A top-up's legs are the payer's wallet account and
+    // the platform's clearing account, whose organization has no wallet.
+    class TopUpsUnowned extends JournalReversalService {
+      protected override correctionFor(type: JournalType): string | null {
+        return type === 'WALLET_TOP_UP' ? null : super.correctionFor(type);
+      }
+    }
+    const unowned = new TopUpsUnowned(prisma, wiring.ledger, wiring.walletRepository);
+
+    const organizationId = `${org.c}-REV-POST`;
+    const { walletId } = await fundWallet(wiring, organizationId, 40_000n);
+    const topUp = await latestJournal(organizationId, 'WALLET_TOP_UP');
+    expect((await readBalances(prisma, walletId)).available).toBe(40_000n);
+
+    const result = await asPlatform(organizationId, () =>
+      unowned.reverse(topUp.id, 'the suite reverses an unowned journal'),
+    );
+    expect(result.reversesId).toBe(topUp.id);
+    // Recomputed in the same transaction: the wallet agrees with the ledger.
+    expect((await readBalances(prisma, walletId)).available).toBe(0n);
+
+    // And at most once.
+    await expect(
+      asPlatform(organizationId, () => unowned.reverse(topUp.id, 'a second reversal is refused')),
+    ).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
+
+    await cleanup(prisma, [organizationId]);
   });
 });

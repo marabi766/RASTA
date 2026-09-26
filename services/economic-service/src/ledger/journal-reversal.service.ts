@@ -74,7 +74,7 @@ export class JournalReversalService {
     const original = await this.ledger.getJournal(journalId);
     canCommitOrganization(original.organizationId);
 
-    const correction = CORRECTION_OF[original.journalType];
+    const correction = this.correctionFor(original.journalType);
     if (correction !== null) {
       throw RastaError.businessRule(
         `A ${original.journalType} journal is not reversed through the ledger: ${correction}`,
@@ -95,9 +95,11 @@ export class JournalReversalService {
           organizationId,
           reversal.currency,
         );
+        // A platform account's organization has no wallet to recompute.
         if (!wallet) continue;
-        const [locked] = await this.wallets.lock(tx, [wallet.id]);
-        if (locked) await this.wallets.recomputeFromLedger(tx, locked);
+        for (const locked of await this.wallets.lock(tx, [wallet.id])) {
+          await this.wallets.recomputeFromLedger(tx, locked);
+        }
       }
 
       return {
@@ -106,5 +108,15 @@ export class JournalReversalService {
         postedAt: reversal.postedAt.toISOString(),
       };
     });
+  }
+
+  /**
+   * The operation that corrects a journal of this type, or `null` when no
+   * record owns it and the ledger may reverse it alone. {@link CORRECTION_OF},
+   * behind a method so the posting path — which no journal type reaches today
+   * — is still exercised by a test that declares one type unowned.
+   */
+  protected correctionFor(journalType: JournalType): string | null {
+    return CORRECTION_OF[journalType];
   }
 }
