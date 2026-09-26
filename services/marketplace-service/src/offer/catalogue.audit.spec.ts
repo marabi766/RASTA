@@ -58,6 +58,7 @@ function harness(existingOffer = offerRow()) {
     payload: unknown;
   }> = [];
   const tx = {
+    $executeRaw: jest.fn(async () => 1),
     product: {
       create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => ({
         ...data,
@@ -208,12 +209,36 @@ describe('updateOffer — audit', () => {
     });
   });
 
-  it('records nothing for a draft update that changed nothing', async () => {
-    const h = harness(offerRow({ status: 'DRAFT', publishedAt: null }));
+  it('writes nothing and records nothing for an update that changed nothing', async () => {
+    // Codex #115 R1-2: no updatedBy/updatedAt either — and that holds for a
+    // published offer too, which is not re-announced with terms nobody changed.
+    for (const status of ['DRAFT', 'PUBLISHED']) {
+      const h = harness(offerRow({ status, publishedAt: status === 'PUBLISHED' ? T0 : null }));
 
-    await asSupplier(() => h.service.updateOffer('OFR_1', { leadTimeDays: 3 } as never));
+      await asSupplier(() =>
+        h.service.updateOffer('OFR_1', {
+          leadTimeDays: 3,
+          unitPriceMinor: '250000',
+          status,
+        } as never),
+      );
 
-    expect(h.enqueued).toEqual([]);
+      expect(h.tx.offer.update).not.toHaveBeenCalled();
+      expect(h.tx.offerPriceHistory.create).not.toHaveBeenCalled();
+      expect(h.enqueued).toEqual([]);
+    }
+  });
+
+  it('locks the offer before reading the snapshot it compares against', async () => {
+    // Codex #115 R1-1: read unlocked, a concurrent withdrawal was attributed
+    // to this caller.
+    const h = harness();
+
+    await asSupplier(() => h.service.updateOffer('OFR_1', { availableQuantity: 4 } as never));
+
+    const [locked] = h.tx.$executeRaw.mock.invocationCallOrder;
+    const [read] = h.tx.offer.findUnique.mock.invocationCallOrder;
+    expect(locked).toBeLessThan(read!);
   });
 
   it('leaves a change to a published offer to OFFER_PUBLISHED, as before', async () => {
