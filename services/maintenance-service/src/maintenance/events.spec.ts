@@ -316,3 +316,92 @@ describe('MAINTENANCE_SCHEDULE_CHANGED', () => {
     ).toThrow();
   });
 });
+
+/**
+ * The cost-line events (L7-14): money as minor-unit strings, and no free text
+ * in a durable log that every service reads.
+ */
+describe('cost-line event contracts', () => {
+  const base = {
+    repairOrderId: 'RPO_1',
+    requestId: 'MNT_1',
+    assetId: 'AST-SEED-0002',
+    organizationId: 'ORG-DEH-0001',
+    workshopOrganizationId: 'ORG-WORKSHOP-1',
+    costId: 'MCS_1',
+    currency: 'IRR',
+    recordedAt: '2026-09-25T10:00:00.000Z',
+    recordedBy: 'USR-1',
+    orderTotalCostMinor: '500000',
+    requestTotalCostMinor: '500000',
+  };
+  const part = {
+    ...base,
+    partUsageId: 'PRT_1',
+    source: 'MARKETPLACE',
+    quantity: '2',
+    unitCostMinor: '250000',
+    totalCostMinor: '500000',
+  };
+
+  it('accepts a part line with every amount as a minor-unit string', () => {
+    expect(() =>
+      validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_PART_RECORDED, part),
+    ).not.toThrow();
+  });
+
+  it.each(['totalCostMinor', 'unitCostMinor', 'orderTotalCostMinor', 'requestTotalCostMinor'])(
+    'refuses %s as a JSON number, which would drift',
+    (field) => {
+      expect(() =>
+        validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_PART_RECORDED, {
+          ...part,
+          [field]: 500000,
+        }),
+      ).toThrow();
+    },
+  );
+
+  it('refuses a negative or fractional amount on a cost line', () => {
+    for (const amountMinor of ['-1', '1.5']) {
+      expect(() =>
+        validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_COST_RECORDED, {
+          ...base,
+          category: 'SERVICE',
+          amountMinor,
+        }),
+      ).toThrow();
+    }
+  });
+
+  it('drops free text a caller might pass along — a technician is a person', () => {
+    const payload = validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_LABOUR_RECORDED, {
+      ...base,
+      laborEntryId: 'LBR_1',
+      hours: '1.50',
+      hourlyRateMinor: '900000',
+      totalCostMinor: '1350000',
+      performedAt: '2026-09-25T09:00:00.000Z',
+      technician: 'نام تکنسین',
+      description: 'شرح کار',
+    }) as Record<string, unknown>;
+
+    expect(payload).not.toHaveProperty('technician');
+    expect(payload).not.toHaveProperty('description');
+  });
+
+  it.each(['REPAIR_PART_RECORDED', 'REPAIR_LABOUR_RECORDED', 'REPAIR_COST_RECORDED'] as const)(
+    '%s names the actor and the totals after the line',
+    (name) => {
+      const shape = (MAINTENANCE_EVENT_SCHEMAS[name] as { shape: Record<string, unknown> }).shape;
+      for (const field of [
+        'recordedBy',
+        'costId',
+        'orderTotalCostMinor',
+        'requestTotalCostMinor',
+      ]) {
+        expect(Object.keys(shape)).toContain(field);
+      }
+    },
+  );
+});

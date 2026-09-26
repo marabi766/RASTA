@@ -15,6 +15,7 @@ import {
   assertRepairOrderTransition,
   assertRequestTransition,
   COSTABLE_REPAIR_ORDER_STATUSES,
+  type RepairOrderStatus,
 } from './lifecycle';
 import { lineTotalMinor } from './quantity';
 import { WorkshopDirectory } from './workshop.directory';
@@ -249,6 +250,10 @@ export class RepairOrderService {
     }
 
     const updated = await this.repository.transaction(async (tx) => {
+      // The request before the order, as every combined write takes them
+      // (PR #116 review #3).
+      await this.lockRequest(tx, request.id, order.organizationId);
+
       const result = await tx.repairOrder.updateMany({
         // The status guard is the concurrency control: two simultaneous starts
         // and exactly one updates a row.
@@ -367,6 +372,10 @@ export class RepairOrderService {
     );
 
     const updated = await this.repository.transaction(async (tx) => {
+      // The request before the order (PR #116 review #3): request
+      // cancellation takes them in that order, and so does cost entry.
+      await this.lockRequest(tx, request.id, order.organizationId);
+
       const result = await tx.repairOrder.updateMany({
         where: { id, status: 'IN_PROGRESS' },
         data: {
@@ -454,7 +463,13 @@ export class RepairOrderService {
       // announce again. Doing it here, in the same transaction, is what stops
       // a completed service from leaving a schedule permanently overdue.
       if (request.scheduleId) {
-        await this.rollScheduleForward(tx, request.scheduleId, request.id, completedAt);
+        await this.rollScheduleForward(tx, {
+          scheduleId: request.scheduleId,
+          requestId: request.id,
+          repairOrderId: id,
+          completedAt,
+          actor,
+        });
       }
 
       return tx.repairOrder.findFirstOrThrow({ where: { id } });
@@ -553,9 +568,10 @@ export class RepairOrderService {
     const actor = getContext().userId ?? 'SYSTEM';
     const recordedAt = dto.recordedAt ? new Date(dto.recordedAt) : new Date();
     const partId = `${ID_PREFIXES.partUsage}_${ulid()}`;
+    const costId = `${ID_PREFIXES.maintenanceCost}_${ulid()}`;
 
     const part = await this.repository.transaction(async (tx) => {
-      await this.lock(tx, order.id, order.organizationId);
+      await this.lockCostable(tx, order);
 
       const created = await tx.partUsage.create({
         data: {
@@ -580,7 +596,7 @@ export class RepairOrderService {
       // without the part it came from (ADR-028).
       await tx.maintenanceCost.create({
         data: {
-          id: `${ID_PREFIXES.maintenanceCost}_${ulid()}`,
+          id: costId,
           organizationId: order.organizationId,
           repairOrderId: order.id,
           maintenanceRequestId: order.maintenanceRequestId,
@@ -594,7 +610,30 @@ export class RepairOrderService {
         },
       });
 
-      await this.recomputeTotals(tx, order.organizationId, order.id, order.maintenanceRequestId);
+      const totals = await this.recomputeTotals(
+        tx,
+        order.organizationId,
+        order.id,
+        order.maintenanceRequestId,
+      );
+
+      // Money entered the bill: audit-service must see it, in the same commit
+      // as the line (L7-14, AGENTS.md S-06).
+      await this.repository.enqueueEvent(tx, {
+        aggregateType: 'RepairOrder',
+        aggregateId: order.id,
+        eventName: MAINTENANCE_EVENTS.REPAIR_PART_RECORDED,
+        topic: MAINTENANCE_TOPIC,
+        organizationId: order.organizationId,
+        payload: validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_PART_RECORDED, {
+          ...this.costLineFacts(order, costId, recordedAt, actor, totals),
+          partUsageId: partId,
+          source: dto.source,
+          quantity: String(created.quantity),
+          unitCostMinor: unitCostMinor.toString(),
+          totalCostMinor: totalCostMinor.toString(),
+        }),
+      });
 
       return created;
     });
@@ -619,9 +658,10 @@ export class RepairOrderService {
     const recordedAt = dto.recordedAt ? new Date(dto.recordedAt) : new Date();
     const performedAt = dto.performedAt ? new Date(dto.performedAt) : recordedAt;
     const labourId = `${ID_PREFIXES.laborEntry}_${ulid()}`;
+    const costId = `${ID_PREFIXES.maintenanceCost}_${ulid()}`;
 
     const entry = await this.repository.transaction(async (tx) => {
-      await this.lock(tx, order.id, order.organizationId);
+      await this.lockCostable(tx, order);
 
       const created = await tx.laborEntry.create({
         data: {
@@ -641,7 +681,7 @@ export class RepairOrderService {
 
       await tx.maintenanceCost.create({
         data: {
-          id: `${ID_PREFIXES.maintenanceCost}_${ulid()}`,
+          id: costId,
           organizationId: order.organizationId,
           repairOrderId: order.id,
           maintenanceRequestId: order.maintenanceRequestId,
@@ -655,7 +695,28 @@ export class RepairOrderService {
         },
       });
 
-      await this.recomputeTotals(tx, order.organizationId, order.id, order.maintenanceRequestId);
+      const totals = await this.recomputeTotals(
+        tx,
+        order.organizationId,
+        order.id,
+        order.maintenanceRequestId,
+      );
+
+      await this.repository.enqueueEvent(tx, {
+        aggregateType: 'RepairOrder',
+        aggregateId: order.id,
+        eventName: MAINTENANCE_EVENTS.REPAIR_LABOUR_RECORDED,
+        topic: MAINTENANCE_TOPIC,
+        organizationId: order.organizationId,
+        payload: validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_LABOUR_RECORDED, {
+          ...this.costLineFacts(order, costId, recordedAt, actor, totals),
+          laborEntryId: labourId,
+          hours: String(created.hours),
+          hourlyRateMinor: hourlyRateMinor.toString(),
+          totalCostMinor: totalCostMinor.toString(),
+          performedAt: performedAt.toISOString(),
+        }),
+      });
 
       return created;
     });
@@ -687,8 +748,10 @@ export class RepairOrderService {
     const recordedAt = dto.recordedAt ? new Date(dto.recordedAt) : new Date();
     const costId = `${ID_PREFIXES.maintenanceCost}_${ulid()}`;
 
+    const amount = BigInt(dto.amountMinor);
+
     const cost = await this.repository.transaction(async (tx) => {
-      await this.lock(tx, order.id, order.organizationId);
+      await this.lockCostable(tx, order);
 
       const created = await tx.maintenanceCost.create({
         data: {
@@ -697,7 +760,7 @@ export class RepairOrderService {
           repairOrderId: order.id,
           maintenanceRequestId: order.maintenanceRequestId,
           category: dto.category,
-          amountMinor: BigInt(dto.amountMinor),
+          amountMinor: amount,
           currency: dto.currency,
           description: dto.description,
           recordedAt,
@@ -705,7 +768,25 @@ export class RepairOrderService {
         },
       });
 
-      await this.recomputeTotals(tx, order.organizationId, order.id, order.maintenanceRequestId);
+      const totals = await this.recomputeTotals(
+        tx,
+        order.organizationId,
+        order.id,
+        order.maintenanceRequestId,
+      );
+
+      await this.repository.enqueueEvent(tx, {
+        aggregateType: 'RepairOrder',
+        aggregateId: order.id,
+        eventName: MAINTENANCE_EVENTS.REPAIR_COST_RECORDED,
+        topic: MAINTENANCE_TOPIC,
+        organizationId: order.organizationId,
+        payload: validateMaintenancePayload(MAINTENANCE_EVENTS.REPAIR_COST_RECORDED, {
+          ...this.costLineFacts(order, costId, recordedAt, actor, totals),
+          category: dto.category,
+          amountMinor: amount.toString(),
+        }),
+      });
 
       return created;
     });
@@ -772,16 +853,62 @@ export class RepairOrderService {
     return { orderTotal, requestTotal };
   }
 
-  private async lock(
+  /** What every cost-line event says about where the line landed. */
+  private costLineFacts(
+    order: CostableOrder,
+    costId: string,
+    recordedAt: Date,
+    recordedBy: string,
+    totals: { orderTotal: bigint; requestTotal: bigint },
+  ) {
+    return {
+      repairOrderId: order.id,
+      requestId: order.maintenanceRequestId,
+      assetId: order.assetId,
+      organizationId: order.organizationId,
+      workshopOrganizationId: order.workshopOrganizationId,
+      costId,
+      currency: order.currency,
+      recordedAt: recordedAt.toISOString(),
+      recordedBy,
+      orderTotalCostMinor: totals.orderTotal.toString(),
+      requestTotalCostMinor: totals.requestTotal.toString(),
+    };
+  }
+
+  /**
+   * The locks a cost write needs, in the one order every combined write
+   * takes them: the request, then the order (PR #116 review #3). Then the
+   * order is judged again, as it is under the lock (review #1).
+   *
+   * `assertCostable` ran before the transaction, and a completion, or a
+   * cancellation, can commit between that read and this lock. Adding money
+   * then would change a bill that REPAIR_COMPLETED and MAINTENANCE_COMPLETED
+   * have already published, and that an owner may already have approved.
+   */
+  private async lockCostable(
     tx: ExtendedPrismaClient,
-    repairOrderId: string,
-    organizationId: string,
+    order: { id: string; maintenanceRequestId: string; organizationId: string },
   ): Promise<void> {
-    const locked = await this.repository.lockRepairOrder(tx, repairOrderId, organizationId);
+    await this.lockRequest(tx, order.maintenanceRequestId, order.organizationId);
+    const locked = await this.repository.lockRepairOrder(tx, order.id, order.organizationId);
     if (!locked) {
       // The row vanished between the check and the lock, or belongs to another
       // tenant. Either way the caller learns nothing about which.
-      throw RastaError.notFound('RepairOrder', repairOrderId);
+      throw RastaError.notFound('RepairOrder', order.id);
+    }
+    if (!COSTABLE_REPAIR_ORDER_STATUSES.includes(locked.status as RepairOrderStatus)) {
+      throw notCostable(order.id, locked.status);
+    }
+  }
+
+  private async lockRequest(
+    tx: ExtendedPrismaClient,
+    requestId: string,
+    organizationId: string,
+  ): Promise<void> {
+    if (!(await this.repository.lockRequest(tx, requestId, organizationId))) {
+      throw RastaError.notFound('MaintenanceRequest', requestId);
     }
   }
 
@@ -797,13 +924,24 @@ export class RepairOrderService {
    * Runs inside the completion transaction so a served schedule and the
    * completion that served it commit together. A crash between them would
    * leave a repaired machine reporting as overdue.
+   *
+   * And announced there, as every other schedule write is (PR #116 review
+   * #2): `MAINTENANCE_SCHEDULE_CHANGED`, `UPDATED` for a cycle rolled forward
+   * and `STATUS_CHANGED` for a one-time schedule archived, caused by the
+   * repair order that completed. Before this, audit-service never learned
+   * that a completion had moved a schedule or retired it.
    */
   private async rollScheduleForward(
     tx: ExtendedPrismaClient,
-    scheduleId: string,
-    requestId: string,
-    completedAt: Date,
+    served: {
+      scheduleId: string;
+      requestId: string;
+      repairOrderId: string;
+      completedAt: Date;
+      actor: string;
+    },
   ): Promise<void> {
+    const { scheduleId, requestId, completedAt } = served;
     const schedule = await this.repository.findScheduleById(scheduleId, tx);
     if (!schedule) {
       this.logger.warn(`Request ${requestId} names schedule ${scheduleId}, which no longer exists`);
@@ -811,8 +949,9 @@ export class RepairOrderService {
     }
 
     const meter = await this.repository.findMeter(schedule.assetId, tx);
+    const archives = schedule.recurrence === 'ONE_TIME';
 
-    await tx.maintenanceSchedule.update({
+    const updated = await tx.maintenanceSchedule.update({
       where: { id: scheduleId },
       data: {
         lastServicedAt: completedAt,
@@ -820,8 +959,30 @@ export class RepairOrderService {
         lastServicedOdometer: meter?.odometer ?? schedule.lastServicedOdometer,
         lastServiceRequestId: requestId,
         dueAnnouncedAt: null,
-        ...(schedule.recurrence === 'ONE_TIME' ? { status: 'ARCHIVED' as const } : {}),
+        ...(archives ? { status: 'ARCHIVED' as const } : {}),
       },
+    });
+
+    await this.repository.enqueueEvent(tx, {
+      aggregateType: 'MaintenanceSchedule',
+      aggregateId: scheduleId,
+      eventName: MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED,
+      topic: MAINTENANCE_TOPIC,
+      organizationId: schedule.organizationId,
+      causationId: served.repairOrderId,
+      payload: validateMaintenancePayload(MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED, {
+        scheduleId,
+        assetId: schedule.assetId,
+        organizationId: schedule.organizationId,
+        change: archives ? 'STATUS_CHANGED' : 'UPDATED',
+        status: updated.status,
+        previousStatus: archives ? schedule.status : null,
+        // A fixed reason the system wrote, never free text.
+        reason: archives ? 'ONE_TIME_SCHEDULE_SERVED' : null,
+        changedFields: [...SERVICE_ANCHOR_FIELDS, ...(archives ? ['status'] : [])],
+        changedAt: completedAt.toISOString(),
+        changedBy: served.actor,
+      }),
     });
   }
 
@@ -833,10 +994,7 @@ export class RepairOrderService {
     await this.assertVisible(order.maintenanceRequestId, 'RepairOrder', id);
 
     if (!COSTABLE_REPAIR_ORDER_STATUSES.includes(order.status)) {
-      throw RastaError.businessRule(
-        `Cost cannot be added to a ${order.status.toLowerCase()} repair order.`,
-        { rule: 'REPAIR_ORDER_NOT_COSTABLE', repairOrderId: id, status: order.status },
-      );
+      throw notCostable(id, order.status);
     }
 
     return order;
@@ -863,6 +1021,37 @@ export class RepairOrderService {
     }
   }
 }
+
+/** The repair-order fields a cost-line event is built from. */
+interface CostableOrder {
+  id: string;
+  maintenanceRequestId: string;
+  assetId: string;
+  organizationId: string;
+  workshopOrganizationId: string;
+  currency: string;
+}
+
+/** Refused: cost cannot be added to a repair order in this status. */
+function notCostable(repairOrderId: string, status: string): RastaError {
+  return RastaError.businessRule(
+    `Cost cannot be added to a ${status.toLowerCase()} repair order.`,
+    {
+      rule: 'REPAIR_ORDER_NOT_COSTABLE',
+      repairOrderId,
+      status,
+    },
+  );
+}
+
+/** What a completion moves on a served schedule: its service anchor. */
+const SERVICE_ANCHOR_FIELDS = [
+  'lastServicedAt',
+  'lastServicedHourMeter',
+  'lastServicedOdometer',
+  'lastServiceRequestId',
+  'dueAnnouncedAt',
+] as const;
 
 /** Part quantities carry three decimals; labour hours carry two. */
 const PART_QUANTITY_DECIMALS = 3;

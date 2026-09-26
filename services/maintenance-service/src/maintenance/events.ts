@@ -32,6 +32,11 @@ import { z } from 'zod';
  * would never learn what happened (AGENTS.md S-06). The same reasoning
  * fleet-service used for `DRIVER_STATUS_CHANGED` and `DRIVER_UPDATED`.
  *
+ * Three more for the cost lines (L7-14): `REPAIR_PART_RECORDED`,
+ * `REPAIR_LABOUR_RECORDED` and `REPAIR_COST_RECORDED`. Each one writes money
+ * into the total an owner later approves, and until these existed none of them
+ * left any trace outside this service's own tables.
+ *
  * ## Money on these events
  *
  * Costs cross the wire as `totalCostMinor`: a **string, in minor units**,
@@ -56,6 +61,9 @@ export const MAINTENANCE_EVENTS = {
   MAINTENANCE_CANCELLED: 'MAINTENANCE_CANCELLED',
   REPAIR_CANCELLED: 'REPAIR_CANCELLED',
   MAINTENANCE_SCHEDULE_CHANGED: 'MAINTENANCE_SCHEDULE_CHANGED',
+  REPAIR_PART_RECORDED: 'REPAIR_PART_RECORDED',
+  REPAIR_LABOUR_RECORDED: 'REPAIR_LABOUR_RECORDED',
+  REPAIR_COST_RECORDED: 'REPAIR_COST_RECORDED',
 } as const;
 
 export type MaintenanceEventName = (typeof MAINTENANCE_EVENTS)[keyof typeof MAINTENANCE_EVENTS];
@@ -300,6 +308,69 @@ export const maintenanceScheduleChangedPayload = z.object({
   changedBy: z.string(),
 });
 
+/**
+ * The fields every cost-line event shares.
+ *
+ * A cost line belongs to its repair order's aggregate (docs/03 § 3.3), so the
+ * events are *about* the repair order and carry the line's id beside it. The
+ * totals after the write travel with the line: an auditor reading one event
+ * sees what was added and what the bill came to, without replaying the rest.
+ *
+ * Free text stays out — the part name, the labour description, the cost
+ * description and above all the technician, who is a person. Identifiers,
+ * quantities and amounts are enough to reconcile; the words are in this
+ * service's tables, where they can be corrected (docs/07 § 7.3).
+ */
+const costLineBase = {
+  repairOrderId: z.string(),
+  requestId: z.string(),
+  /** Load-bearing: every maintenance event is partitioned by it. */
+  assetId: z.string(),
+  organizationId: z.string(),
+  workshopOrganizationId: z.string(),
+  /** The `MaintenanceCost` row this write produced. */
+  costId: z.string(),
+  currency: z.string(),
+  recordedAt: z.string(),
+  /** The user who entered the line, or `SYSTEM`. */
+  recordedBy: z.string(),
+  /** The repair order's total after this line — recomputed, not incremented. */
+  orderTotalCostMinor: amountMinor,
+  /** The request's total after this line, across every referral it had. */
+  requestTotalCostMinor: amountMinor,
+};
+
+/** A part was fitted, and priced. */
+export const repairPartRecordedPayload = z.object({
+  ...costLineBase,
+  partUsageId: z.string(),
+  /** Where the part came from — `MARKETPLACE`, `WORKSHOP_SUPPLIED`, … */
+  source: z.string(),
+  /** A decimal string, as stored: a float would drift (ADR-022). */
+  quantity: z.string(),
+  unitCostMinor: amountMinor,
+  totalCostMinor: amountMinor,
+});
+
+/** Labour was spent on the repair, and priced. */
+export const repairLabourRecordedPayload = z.object({
+  ...costLineBase,
+  laborEntryId: z.string(),
+  /** A decimal string, as stored. */
+  hours: z.string(),
+  hourlyRateMinor: amountMinor,
+  totalCostMinor: amountMinor,
+  performedAt: z.string(),
+});
+
+/** A cost that is neither a part nor metered labour was recorded. */
+export const repairCostRecordedPayload = z.object({
+  ...costLineBase,
+  /** Never `PART` or `LABOUR`: those arrive only through the two events above. */
+  category: z.string(),
+  amountMinor,
+});
+
 export const MAINTENANCE_EVENT_SCHEMAS = {
   [MAINTENANCE_EVENTS.MAINTENANCE_DUE]: maintenanceDuePayload,
   [MAINTENANCE_EVENTS.BREAKDOWN_REPORTED]: breakdownReportedPayload,
@@ -312,6 +383,9 @@ export const MAINTENANCE_EVENT_SCHEMAS = {
   [MAINTENANCE_EVENTS.MAINTENANCE_CANCELLED]: maintenanceCancelledPayload,
   [MAINTENANCE_EVENTS.REPAIR_CANCELLED]: repairCancelledPayload,
   [MAINTENANCE_EVENTS.MAINTENANCE_SCHEDULE_CHANGED]: maintenanceScheduleChangedPayload,
+  [MAINTENANCE_EVENTS.REPAIR_PART_RECORDED]: repairPartRecordedPayload,
+  [MAINTENANCE_EVENTS.REPAIR_LABOUR_RECORDED]: repairLabourRecordedPayload,
+  [MAINTENANCE_EVENTS.REPAIR_COST_RECORDED]: repairCostRecordedPayload,
 } as const satisfies Record<MaintenanceEventName, z.ZodTypeAny>;
 
 /**

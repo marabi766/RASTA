@@ -31,6 +31,9 @@ export const AGGREGATE_OF = {
   MAINTENANCE_CANCELLED: 'MaintenanceRequest',
   REPAIR_CANCELLED: 'RepairOrder',
   MAINTENANCE_SCHEDULE_CHANGED: 'MaintenanceSchedule',
+  REPAIR_PART_RECORDED: 'RepairOrder',
+  REPAIR_LABOUR_RECORDED: 'RepairOrder',
+  REPAIR_COST_RECORDED: 'RepairOrder',
 } as const satisfies Record<MaintenanceEventName, string>;
 
 export const PARTITION_SCOPES = { ASSET: 'ASSET' } as const;
@@ -79,6 +82,9 @@ export const PARTITION_KEY_POLICY: { [N in MaintenanceEventName]: PartitionRule<
   MAINTENANCE_CANCELLED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
   REPAIR_CANCELLED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
   MAINTENANCE_SCHEDULE_CHANGED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
+  REPAIR_PART_RECORDED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
+  REPAIR_LABOUR_RECORDED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
+  REPAIR_COST_RECORDED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
 };
 
 /**
