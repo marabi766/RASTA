@@ -175,7 +175,9 @@ export class PaymentService {
 
     const capture = await this.provider.capture({
       paymentIntentId: intentId,
-      providerReference: dto.instrument ?? authorization.providerReference,
+      // The reference the provider issued, as with any real provider — never
+      // the caller's raw instrument (global audit L7-20).
+      providerReference: authorization.providerReference,
       amountMinor,
       currency: wallet.currency,
       idempotencyKey: dto.idempotencyKey,

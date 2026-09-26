@@ -1,4 +1,4 @@
-import { MockPaymentProvider } from './mock.provider';
+import { MockPaymentProvider, mockReferenceWithDirective } from './mock.provider';
 
 /**
  * The simulated payment provider (ADR-024).
@@ -132,6 +132,69 @@ describe('refund', () => {
       providerReference: 'mock_PAY_1_fail-refund:NOT_PERMITTED',
     });
     expect(result).toMatchObject({ outcome: 'FAILED', failureCode: 'NOT_PERMITTED' });
+  });
+});
+
+describe('the reference carries the directives that act after authorisation (L7-20)', () => {
+  const capture = (providerReference: string) =>
+    provider.capture({
+      paymentIntentId: 'PAY_9',
+      providerReference,
+      amountMinor: 1_000n,
+      currency: 'IRR',
+      idempotencyKey: 'idem-key-0009',
+    });
+  const refund = (providerReference: string) =>
+    provider.refund({
+      paymentIntentId: 'PAY_9',
+      providerReference,
+      amountMinor: 1_000n,
+      currency: 'IRR',
+      idempotencyKey: 'idem-key-0009:refund',
+      reason: 'cancelled',
+    });
+
+  it('keeps a refund directive from the instrument, so the refund later fails', async () => {
+    const authorized = await provider.authorize({
+      ...authorizeRequest,
+      paymentIntentId: 'PAY_9',
+      instrument: 'fail-refund:NOT_PERMITTED',
+    });
+    expect(authorized.outcome).toBe('AUTHORIZED');
+    expect(authorized.providerReference).toBe(
+      mockReferenceWithDirective('PAY_9', 'fail-refund:NOT_PERMITTED'),
+    );
+
+    expect((await capture(authorized.providerReference)).outcome).toBe('CAPTURED');
+    expect(await refund(authorized.providerReference)).toMatchObject({
+      outcome: 'FAILED',
+      failureCode: 'NOT_PERMITTED',
+    });
+  });
+
+  it('keeps both directives, codes with underscores intact', async () => {
+    const authorized = await provider.authorize({
+      ...authorizeRequest,
+      paymentIntentId: 'PAY_9',
+      instrument: 'fail-refund:NOT_PERMITTED fail-capture:ISSUER_TIMEOUT',
+    });
+    expect(await capture(authorized.providerReference)).toMatchObject({
+      outcome: 'FAILED',
+      failureCode: 'ISSUER_TIMEOUT',
+    });
+    expect(await refund(authorized.providerReference)).toMatchObject({
+      outcome: 'FAILED',
+      failureCode: 'NOT_PERMITTED',
+    });
+  });
+
+  it('issues a plain reference for an ordinary instrument, which carries no instrument data', async () => {
+    const authorized = await provider.authorize({
+      ...authorizeRequest,
+      paymentIntentId: 'PAY_9',
+      instrument: 'tok_abc123',
+    });
+    expect(authorized.providerReference).toBe('mock_PAY_9');
   });
 });
 

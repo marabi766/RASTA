@@ -68,7 +68,7 @@ export class MockPaymentProvider implements PaymentProvider {
   async authorize(request: AuthorizeRequest): Promise<AuthorizeResult> {
     await this.delay();
 
-    const reference = this.reference(request.paymentIntentId);
+    const reference = this.reference(request.paymentIntentId, request.instrument);
     const failure = directive(request.instrument, 'fail');
 
     if (failure) {
@@ -132,12 +132,22 @@ export class MockPaymentProvider implements PaymentProvider {
   /**
    * A reference that carries the intent id and any capture/refund directive.
    *
-   * Encoding the directive into the reference is what makes a capture failure
-   * reachable: `capture` is called with the reference, not with the original
-   * instrument, and a real provider's reference is opaque anyway.
+   * Encoding the directive into the reference is what makes a capture or
+   * refund failure reachable: `capture` and `refund` are called with the
+   * reference, not with the original instrument, and a real provider's
+   * reference is opaque anyway. The refund one is only reachable this way — a
+   * refund runs later, from the reference stored on the intent. Until global
+   * audit L7-20 the directive was dropped here, so a `fail-refund:` top-up
+   * refunded normally and the refusal path was untestable from the API.
    */
-  private reference(paymentIntentId: string): string {
-    return `mock_${paymentIntentId}`;
+  private reference(paymentIntentId: string, instrument: string | undefined): string {
+    const carried = CARRIED_DIRECTIVES.flatMap((prefix) => {
+      const code = directive(instrument, prefix);
+      return code === undefined ? [] : [`${prefix}:${code}`];
+    });
+    return carried.length === 0
+      ? `mock_${paymentIntentId}`
+      : mockReferenceWithDirective(paymentIntentId, carried.join(','));
   }
 
   private async delay(): Promise<void> {
@@ -145,6 +155,13 @@ export class MockPaymentProvider implements PaymentProvider {
     await new Promise((resolve) => setTimeout(resolve, this.latencyMs));
   }
 }
+
+/**
+ * The directives that act after authorisation, and so must travel inside the
+ * reference. Comma-separated there, because `directive` ends a code at a comma
+ * and a code may itself contain underscores.
+ */
+const CARRIED_DIRECTIVES = ['fail-capture', 'fail-refund'] as const;
 
 /**
  * Reads `<prefix>:<CODE>` out of a directive string.
