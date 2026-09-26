@@ -98,7 +98,10 @@ function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harn
     findMembershipById: jest.fn(),
     listMembershipsForUser: jest.fn(async () => []),
     lockUserProjection: jest.fn(async () => undefined),
-    lockUserActiveOrganization: jest.fn(async () => ({ activeOrganizationId: TEST_ORG_A })),
+    lockUserMemberships: jest.fn(async () => ({
+      activeOrganizationId: TEST_ORG_A,
+      now: new Date(),
+    })),
     findOrganizationRefs: jest.fn(async () => []),
     listUsersInOrganization: jest.fn(),
     ...overrides,
@@ -179,12 +182,15 @@ describe('switchActiveOrganization', () => {
     );
     // The row was locked in the same transaction the event was written in, so
     // the recorded previous organization is the one this switch replaced.
-    expect(h.repository.lockUserActiveOrganization).toHaveBeenCalledWith(tx, TEST_USER_A);
+    expect(h.repository.lockUserMemberships).toHaveBeenCalledWith(tx, TEST_USER_A);
   });
 
   it('records null as the previous organization when none was active', async () => {
     const h = harness();
-    h.repository.lockUserActiveOrganization.mockResolvedValue({ activeOrganizationId: null });
+    h.repository.lockUserMemberships.mockResolvedValue({
+      activeOrganizationId: null,
+      now: new Date(),
+    });
     h.repository.findMembership.mockResolvedValue(
       membershipRow({ organizationId: TEST_ORG_B }) as never,
     );
@@ -203,20 +209,46 @@ describe('switchActiveOrganization', () => {
     ]);
   });
 
-  it('records nothing when the organization asked for is already active', async () => {
-    // An action that changed nothing publishes nothing (the precedent
-    // notification-service's NOTIFICATION_ALL_READ set).
+  it('writes nothing and records nothing when the organization asked for is already active', async () => {
+    // Codex #114 R1-2: returning before any write, not merely before the event.
     const h = harness();
     h.repository.findMembership.mockResolvedValue(membershipRow() as never);
-    (
-      h.repository.client as unknown as { user: { update: jest.Mock } }
-    ).user.update.mockResolvedValue(userRow());
+    h.repository.findUserById.mockResolvedValue(userRow() as never);
+    const tx = h.repository.client as unknown as { user: { update: jest.Mock } };
 
-    await runWithContext(context(), () =>
+    const result = await runWithContext(context(), () =>
       h.service.switchActiveOrganization({ organizationId: TEST_ORG_A }),
     );
 
+    expect(result.activeOrganizationId).toBe(TEST_ORG_A);
+    expect(tx.user.update).not.toHaveBeenCalled();
     expect(h.enqueued).toEqual([]);
+  });
+
+  it('judges the membership inside the lock, on the database clock', async () => {
+    // Codex #114 R1-1: validated before the transaction, a membership revoked
+    // in between still let the switch commit.
+    const h = harness();
+    h.repository.findMembership.mockResolvedValue(
+      membershipRow({
+        organizationId: TEST_ORG_B,
+        validUntil: new Date('2026-01-01T00:00:00.000Z'),
+      }) as never,
+    );
+    // The application clock says the membership is live; the database says not.
+    h.repository.lockUserMemberships.mockResolvedValue({
+      activeOrganizationId: TEST_ORG_A,
+      now: new Date('2026-06-01T00:00:00.000Z'),
+    });
+    const tx = h.repository.client as unknown as { user: { update: jest.Mock } };
+
+    await expect(
+      runWithContext(context(), () =>
+        h.service.switchActiveOrganization({ organizationId: TEST_ORG_B }),
+      ),
+    ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
+    expect(h.repository.findMembership).toHaveBeenCalledWith(TEST_USER_A, TEST_ORG_B, tx);
+    expect(tx.user.update).not.toHaveBeenCalled();
   });
 
   it('refuses an organization the user is not a member of', async () => {

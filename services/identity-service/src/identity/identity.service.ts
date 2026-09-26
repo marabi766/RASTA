@@ -431,6 +431,9 @@ export class IdentityService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
+      // Every membership change for one user takes the same lock first.
+      await this.repository.lockUserMemberships(tx, membership.userId);
+
       const result = await tx.membership.update({
         where: { id: membershipId },
         data: { roles: dto.roles, updatedBy: actor, version: { increment: 1 } },
@@ -497,6 +500,10 @@ export class IdentityService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     await this.repository.transaction(async (tx) => {
+      // Before the membership is touched: a switch to this organization either
+      // commits first and is then moved off below, or waits and is refused.
+      await this.repository.lockUserMemberships(tx, membership.userId);
+
       await tx.membership.update({
         where: { id: membershipId },
         data: {
@@ -537,24 +544,40 @@ export class IdentityService {
     const context = getContext();
     if (!context.userId) throw RastaError.unauthenticated('This endpoint requires a user token');
 
-    const membership = await this.repository.findMembership(context.userId, dto.organizationId);
-    // Live, not merely ACTIVE: a membership past its validUntil is not one the
-    // caller may act for, and this is where acting for it would begin.
-    if (!membership || !isMembershipLive(membership, new Date())) {
-      // Marked as the one refusal this service records as audit evidence
-      // (ADR-053 § 4). The mark changes nothing about the error or its `403`;
-      // it only tells the exception filter that *this* decision is the one the
-      // allowlist in `refusal-sites.ts` describes.
-      throw markRefusal(
-        RastaError.tenantMismatch(dto.organizationId, []),
-        'SWITCH_ACTIVE_ORGANIZATION',
-      );
-    }
-
     const userId = context.userId;
     const user = await this.repository.transaction(async (tx) => {
-      const current = await this.repository.lockUserActiveOrganization(tx, userId);
-      if (!current) throw RastaError.notFound('User', userId);
+      // Serialised with every membership change for this user, so the
+      // membership checked below is still the membership when this commits
+      // (Codex #114 R1-1).
+      const current = await this.repository.lockUserMemberships(tx, userId);
+
+      // Read and judged inside the lock, against the database's clock: a
+      // revocation or an expiry that committed first is seen here. A caller
+      // with no user row holds no membership either, and is refused the same
+      // way — a `404` here would tell them something the `403` does not.
+      const membership = current
+        ? await this.repository.findMembership(userId, dto.organizationId, tx)
+        : null;
+      // Live, not merely ACTIVE: a membership past its validUntil is not one the
+      // caller may act for, and this is where acting for it would begin.
+      if (!current || !membership || !isMembershipLive(membership, current.now)) {
+        // Marked as the one refusal this service records as audit evidence
+        // (ADR-053 § 4). The mark changes nothing about the error or its `403`;
+        // it only tells the exception filter that *this* decision is the one the
+        // allowlist in `refusal-sites.ts` describes.
+        throw markRefusal(
+          RastaError.tenantMismatch(dto.organizationId, []),
+          'SWITCH_ACTIVE_ORGANIZATION',
+        );
+      }
+
+      // Re-selecting the organization already active changes nothing, so it
+      // writes nothing and records nothing (Codex #114 R1-2).
+      if (current.activeOrganizationId === dto.organizationId) {
+        const unchanged = await this.repository.findUserById(userId, tx);
+        if (!unchanged) throw RastaError.notFound('User', userId);
+        return unchanged;
+      }
 
       const updated = await runUnscoped(
         'a user may switch between organizations they belong to',
@@ -566,22 +589,19 @@ export class IdentityService {
       );
 
       // The audit record of the switch, in the same transaction as the write
-      // (AGENTS.md S-06, A-08). Re-selecting the organization already active
-      // changed nothing, so it records nothing.
-      if (current.activeOrganizationId !== dto.organizationId) {
-        await this.repository.enqueueEvent(tx, {
-          aggregateType: 'User',
-          aggregateId: userId,
-          eventName: IDENTITY_EVENTS.ACTIVE_ORGANIZATION_SWITCHED,
-          topic: IDENTITY_TOPIC,
+      // (AGENTS.md S-06, A-08).
+      await this.repository.enqueueEvent(tx, {
+        aggregateType: 'User',
+        aggregateId: userId,
+        eventName: IDENTITY_EVENTS.ACTIVE_ORGANIZATION_SWITCHED,
+        topic: IDENTITY_TOPIC,
+        organizationId: dto.organizationId,
+        payload: validateIdentityPayload(IDENTITY_EVENTS.ACTIVE_ORGANIZATION_SWITCHED, {
+          userId,
+          previousOrganizationId: current.activeOrganizationId,
           organizationId: dto.organizationId,
-          payload: validateIdentityPayload(IDENTITY_EVENTS.ACTIVE_ORGANIZATION_SWITCHED, {
-            userId,
-            previousOrganizationId: current.activeOrganizationId,
-            organizationId: dto.organizationId,
-          }),
-        });
-      }
+        }),
+      });
 
       return updated;
     });
@@ -959,6 +979,9 @@ export class IdentityService {
       }),
       () =>
         this.repository.transaction(async (tx) => {
+          // The same per-user serialisation as revocation and the switch.
+          await this.repository.lockUserMemberships(tx, membership.userId);
+
           const claim = await tx.membership.updateMany({
             where: { id: membership.id, lapseHandledAt: null, deletedAt: null },
             data: { lapseHandledAt: now },

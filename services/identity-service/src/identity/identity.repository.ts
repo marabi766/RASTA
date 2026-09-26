@@ -53,22 +53,26 @@ export class IdentityRepository {
   }
 
   /**
-   * Locks one user row for the rest of the caller's transaction and returns
-   * its active organization.
+   * The per-user serialisation point for membership changes and the
+   * active-organization switch (global audit L7-14, Codex #114 R1-1).
    *
-   * Used by the organization switch, so the `previousOrganizationId` its audit
-   * event records is the value this transaction replaced — not one a
-   * concurrent switch overwrote between the read and the write. `null` when
-   * no such user exists.
+   * Locks the user row for the rest of the caller's transaction and returns
+   * its active organization together with the database's own clock. Every
+   * transaction that can end a membership (revocation, the expiry sweep),
+   * change one (roles) or move the active organization takes it **first**,
+   * before reading or writing any membership. So a switch that validated a
+   * membership cannot commit around a revocation of that same membership: one
+   * of them waits for the other, then reads what it committed. `null` when no
+   * such user exists.
    */
-  async lockUserActiveOrganization(
+  async lockUserMemberships(
     tx: ExtendedPrismaClient,
     userId: string,
-  ): Promise<{ activeOrganizationId: string | null } | null> {
-    const rows = await tx.$queryRaw<Array<{ active_organization_id: string | null }>>`
-      SELECT active_organization_id FROM "user" WHERE id = ${userId} FOR UPDATE`;
+  ): Promise<{ activeOrganizationId: string | null; now: Date } | null> {
+    const rows = await tx.$queryRaw<Array<{ active_organization_id: string | null; now: Date }>>`
+      SELECT active_organization_id, now() AS now FROM "user" WHERE id = ${userId} FOR UPDATE`;
     const row = rows[0];
-    return row ? { activeOrganizationId: row.active_organization_id } : null;
+    return row ? { activeOrganizationId: row.active_organization_id, now: row.now } : null;
   }
 
   /**
