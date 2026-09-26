@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Roles, zodPipe } from '@rasta/nest-common';
+import { AllowService, Roles, getContext, zodPipe } from '@rasta/nest-common';
 import { z } from 'zod';
 import { OrganizationService } from './organization.service';
 import {
@@ -23,6 +23,9 @@ import {
   type SetPolicyDto,
   type UpdateOrganizationDto,
 } from './dto';
+
+/** The one service that may ask `GET /v1/organizations/:id` (Q-70 (7)). */
+export const CONSTRUCTION_SERVICE = 'construction-service';
 
 const subtreeQuerySchema = z
   .object({ maxDepth: z.coerce.number().int().min(1).max(10).optional() })
@@ -55,9 +58,25 @@ export class OrganizationController {
     return this.organizations.nearby(query);
   }
 
+  /**
+   * One organization, for a person; for construction-service, only a yes.
+   *
+   * construction-service asks one question here (Q-70 (7), decided
+   * 2026-09-26): is this organization the one its service token is signed
+   * for, or beneath it? It calls with an `X-Internal-Token` signed for the
+   * union's organization, and gets `{ id }` or 404 — never the organization's
+   * record, locations or contacts. A person's request is unchanged.
+   */
   @Get(':id')
-  @ApiOperation({ summary: 'Get one organization with locations and contacts' })
+  @AllowService(CONSTRUCTION_SERVICE)
+  @ApiOperation({
+    summary: 'Get one organization with locations and contacts',
+    description:
+      'Service callers (construction-service only) receive `{ id }` when the organization is ' +
+      'the one their token is signed for or beneath it, and 404 otherwise.',
+  })
   get(@Param('id') id: string) {
+    if (getContext().authType === 'SERVICE') return this.organizations.confirmWithinCaller(id);
     return this.organizations.get(id);
   }
 
