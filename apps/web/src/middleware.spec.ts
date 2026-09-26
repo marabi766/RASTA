@@ -166,6 +166,40 @@ describe('the session cookie, renewed before the route runs', () => {
     );
   });
 
+  it('never touches the browser’s cookie on a refused refresh — another replica may be rotating it', async () => {
+    // Codex #113 R1-1. Clearing here raced the replica that won the refresh:
+    // whichever response arrived last decided whether the person stayed in.
+    for (const usable of [true, false]) {
+      renew.mockResolvedValue({ kind: 'REFUSED', usable });
+
+      const response = await middleware(withSession('raced-cookie'));
+
+      expect(response.cookies.get(SESSION_COOKIE)).toBeUndefined();
+      expect(response.headers.get('set-cookie') ?? '').not.toContain(SESSION_COOKIE);
+    }
+  });
+
+  it('hides a refused session from the render once its access token has run out', async () => {
+    // Otherwise `/login` (openable session → `/`) and `/` (expired → `/login`)
+    // would bounce the person between them.
+    renew.mockResolvedValue({ kind: 'REFUSED', usable: false });
+
+    const response = await middleware(withSession('raced-cookie'));
+
+    expect(response.headers.get('x-middleware-request-cookie') ?? '').not.toContain('raced-cookie');
+  });
+
+  it('lets the render keep a refused session whose access token is still good', async () => {
+    renew.mockResolvedValue({ kind: 'REFUSED', usable: true });
+
+    const response = await middleware(withSession('raced-cookie'));
+
+    // The render reads the cookie exactly as the browser sent it.
+    expect(response.headers.get('x-middleware-request-cookie')).toBe(
+      `${SESSION_COOKIE}=raced-cookie`,
+    );
+  });
+
   it('leaves a valid session untouched', async () => {
     renew.mockResolvedValue({ kind: 'VALID' });
 

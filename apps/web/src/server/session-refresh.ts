@@ -1,6 +1,11 @@
-import { createHash } from 'node:crypto';
+import Redis from 'ioredis';
 import type { WebServerEnv } from './env';
-import { endpointsFor, OidcError, refreshTokens, type TokenResponse } from './oidc';
+import { endpointsFor, refreshTokens, type TokenResponse } from './oidc';
+import {
+  processRefreshCoordinator,
+  redisRefreshCoordinator,
+  type RefreshCoordinator,
+} from './refresh-coordinator';
 import { openSession, sealSession, sessionSecondsLeft, type WebSession } from './session';
 
 /**
@@ -26,13 +31,20 @@ import { openSession, sealSession, sessionSecondsLeft, type WebSession } from '.
  * ## Two requests, one refresh token
  *
  * A browser can send several requests with the same cookie at once — a
- * navigation and its prefetches, two tabs. With reuse refused, the second
- * refresh of the same token would fail and end a perfectly good session. So
- * a refresh in flight — or finished moments ago — is shared by every request
- * that presents the same token, within this process. Replicas behind a load
- * balancer do not share this map: covering them needs sticky sessions or a
- * realm `refreshTokenMaxReuse` above zero, a decision for the realm's owner
- * rather than for this file.
+ * navigation and its prefetches, two tabs — and they may land on different
+ * replicas. `refresh-coordinator.ts` makes them share one refresh, across
+ * replicas through Redis when `WEB_REDIS_URL` is set.
+ *
+ * ## A refusal never clears the cookie
+ *
+ * When the provider refuses a refresh, it may be because another replica
+ * spent the token a moment ago and is sending the rotated cookie back right
+ * now. Clearing the cookie here would race that response, and whichever
+ * arrived last would decide whether the person stays signed in. So a refusal
+ * leaves the browser's cookie untouched; only this render stops using a
+ * session whose access token has already run out. A cookie that genuinely
+ * died is harmless where it is — its refresh token is spent and its access
+ * token expired — and the next sign-in replaces it.
  */
 
 /** What a request's session cookie turned out to be. */
@@ -43,7 +55,16 @@ export type SessionRenewal =
   | { readonly kind: 'VALID' }
   /** Refreshed: write this cookie back, living no longer than `maxAgeSeconds`. */
   | { readonly kind: 'RENEWED'; readonly sealed: string; readonly maxAgeSeconds: number }
-  /** Unreadable, past its lifetime, or refused by the provider: clear it. */
+  /**
+   * The refresh was refused or went unanswered. Leave the browser's cookie
+   * alone (see above); `usable` says whether this request may still act on
+   * the session — true while its access token has not yet expired.
+   */
+  | { readonly kind: 'REFUSED'; readonly usable: boolean }
+  /**
+   * Definitively over, on any replica at any moment: the cookie does not open,
+   * or it is past `WEB_SESSION_MAX_AGE_SECONDS`. Clear it.
+   */
   | { readonly kind: 'ENDED' };
 
 /**
@@ -60,63 +81,30 @@ export function isExpiring(session: WebSession, now: number = Date.now()): boole
   return session.accessTokenExpiresAt - REFRESH_SKEW_SECONDS <= Math.floor(now / 1000);
 }
 
-/**
- * How long a refresh result is shared with other requests presenting the
- * same, now spent, refresh token. Longer than the token endpoint's own
- * deadline, so a request that arrives while the first is still waiting is
- * covered, and short enough that the tokens do not outstay their purpose in
- * memory.
- */
-const SHARED_REFRESH_WINDOW_MS = 30_000;
-
-interface SharedRefresh {
-  readonly startedAt: number;
-  readonly result: Promise<TokenResponse>;
-}
-
-/** Keyed by a hash of the refresh token, so the map never holds one it was given. */
-const inFlight = new Map<string, SharedRefresh>();
-
-function keyOf(refreshToken: string): string {
-  return createHash('sha256').update(refreshToken, 'utf8').digest('base64url');
-}
-
-/** One refresh per refresh token, however many requests ask for it at once. */
-function sharedRefresh(
-  refreshToken: string,
-  now: number,
-  refresh: (refreshToken: string) => Promise<TokenResponse>,
-): Promise<TokenResponse> {
-  for (const [key, entry] of inFlight) {
-    if (now - entry.startedAt > SHARED_REFRESH_WINDOW_MS) inFlight.delete(key);
-  }
-
-  const key = keyOf(refreshToken);
-  const existing = inFlight.get(key);
-  if (existing) return existing.result;
-
-  const result = refresh(refreshToken);
-  inFlight.set(key, { startedAt: now, result });
-  return result;
-}
-
 export interface RenewalDependencies {
   readonly env: Pick<
     WebServerEnv,
-    'OIDC_ISSUER_URL' | 'OIDC_CLIENT_ID' | 'WEB_SESSION_SECRET' | 'WEB_SESSION_MAX_AGE_SECONDS'
+    | 'OIDC_ISSUER_URL'
+    | 'OIDC_CLIENT_ID'
+    | 'WEB_SESSION_SECRET'
+    | 'WEB_SESSION_MAX_AGE_SECONDS'
+    | 'WEB_REDIS_URL'
   >;
   /** The token endpoint call. Defaults to the real one; a seam for tests. */
   readonly refresh?: (refreshToken: string) => Promise<TokenResponse>;
+  /** Who shares the refresh. Defaults to the process-wide one for this env. */
+  readonly coordinator?: RefreshCoordinator;
   readonly now?: number;
 }
 
 /**
  * Decides what to do with a request's sealed session cookie.
  *
- * Fails closed on every path that cannot prove the session is still good: a
- * cookie that will not open, one past `WEB_SESSION_MAX_AGE_SECONDS`, and a
- * refresh the provider refused or did not answer in time all end it. Only an
- * error that is not the provider's — a bug — propagates.
+ * A cookie that will not open or is past `WEB_SESSION_MAX_AGE_SECONDS` is
+ * ended. A refresh the provider refused or did not answer in time is
+ * `REFUSED`: the cookie stays, and the session is used only while its access
+ * token is still valid — so nothing past its expiry is ever sent onward. Only
+ * an error that is not the provider's — a bug — propagates.
  */
 export async function renewSession(
   sealed: string | undefined,
@@ -144,13 +132,12 @@ export async function renewSession(
         refreshToken,
       }));
 
-  let tokens: TokenResponse;
-  try {
-    tokens = await sharedRefresh(session.refreshToken, now, refresh);
-  } catch (error) {
-    if (error instanceof OidcError) return { kind: 'ENDED' };
-    throw error;
+  const coordinator = deps.coordinator ?? defaultCoordinator(env);
+  const outcome = await coordinator.refresh(session.refreshToken, refresh);
+  if (outcome.kind === 'REFUSED') {
+    return { kind: 'REFUSED', usable: session.accessTokenExpiresAt > Math.floor(now / 1000) };
   }
+  const { tokens } = outcome;
 
   const renewed: WebSession = {
     ...session,
@@ -169,7 +156,71 @@ export async function renewSession(
   };
 }
 
-/** Test seam: forget every shared refresh. */
+// ---------------------------------------------------------------------------
+// The process-wide coordinator
+// ---------------------------------------------------------------------------
+
+let coordinator: RefreshCoordinator | undefined;
+
+/** Warnings an operator must see, at most once a minute each. Names no token. */
+const lastWarned = new Map<string, number>();
+function warnOperator(code: string, message: string): void {
+  const now = Date.now();
+  if (now - (lastWarned.get(code) ?? 0) < 60_000) return;
+  lastWarned.set(code, now);
+  process.emitWarning(message, { code });
+}
+
+/**
+ * Redis when `WEB_REDIS_URL` is set, this process alone otherwise.
+ *
+ * Without Redis, two replicas can still race for one refresh token; the
+ * loser's refusal leaves the cookie alone, so the cost is one request that
+ * sees the person as signed out, never a sign-out. That is acceptable for
+ * one replica and development, and said out loud for anything else.
+ */
+function defaultCoordinator(env: RenewalDependencies['env']): RefreshCoordinator {
+  if (coordinator) return coordinator;
+
+  if (!env.WEB_REDIS_URL) {
+    warnOperator(
+      'RASTA_WEB_REFRESH_UNCOORDINATED',
+      'WEB_REDIS_URL is not set: session refreshes are coordinated within this process only. ' +
+        'Set it wherever the portal runs more than one replica or worker.',
+    );
+    coordinator = processRefreshCoordinator();
+    return coordinator;
+  }
+
+  const redis = new Redis(env.WEB_REDIS_URL, {
+    // Bounded, not instant: a command may wait for the connection being
+    // established — the first refresh after a start or a reconnect would
+    // otherwise always go uncoordinated — but never longer than
+    // `commandTimeout`. Past it the command fails and the refresh goes ahead
+    // uncoordinated rather than holding a person's request.
+    enableOfflineQueue: true,
+    maxRetriesPerRequest: 1,
+    connectTimeout: 2_000,
+    commandTimeout: 2_000,
+  });
+  // A connection error is reported per command; the client's own event would
+  // otherwise be an unhandled 'error' and take the process down.
+  redis.on('error', () => undefined);
+
+  coordinator = redisRefreshCoordinator({
+    redis,
+    secret: env.WEB_SESSION_SECRET,
+    onRedisError: () =>
+      warnOperator(
+        'RASTA_WEB_REFRESH_REDIS_UNAVAILABLE',
+        'Redis is unavailable: session refreshes are proceeding uncoordinated.',
+      ),
+  });
+  return coordinator;
+}
+
+/** Test seam: drop the process-wide coordinator and everything it holds. */
 export function forgetSharedRefreshes(): void {
-  inFlight.clear();
+  coordinator = undefined;
+  lastWarned.clear();
 }

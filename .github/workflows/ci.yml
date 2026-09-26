@@ -544,6 +544,8 @@ jobs:
           OIDC_CLIENT_ID: rasta-web
           WEB_PUBLIC_ORIGIN: http://localhost:3200
           WEB_COOKIE_SECURE: 'false'
+          # The job's Redis service: the portal coordinates refreshes through it.
+          WEB_REDIS_URL: redis://localhost:6379
 
       - name: Live-stack logs
         if: failure()

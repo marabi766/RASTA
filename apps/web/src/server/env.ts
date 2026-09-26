@@ -90,6 +90,22 @@ const schema = z.object({
    * development over plain HTTP, where a `Secure` cookie is simply never sent
    * and the portal appears to log nobody in.
    */
+  /**
+   * Redis, for coordinating token refreshes across replicas
+   * (`refresh-coordinator.ts`). Optional: without it the coordination is
+   * per process, which is safe — a lost race never signs anybody out — but
+   * shows the loser one request as signed out. Set it wherever the portal runs
+   * more than one replica or worker (`docs/12` § 12.4 runs two).
+   */
+  WEB_REDIS_URL: z
+    .string()
+    .url()
+    .refine(
+      (value) => value.startsWith('redis://') || value.startsWith('rediss://'),
+      'Expected a redis:// or rediss:// URL',
+    )
+    .optional(),
+
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
     .default('true')

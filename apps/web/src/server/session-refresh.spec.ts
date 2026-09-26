@@ -144,13 +144,37 @@ describe('refreshing', () => {
     }
   });
 
-  it('ends the session when the provider refuses or does not answer', async () => {
+  it('reports a refusal without ending the session — another replica may have rotated it', async () => {
+    // Codex #113 R1-1: ending here raced the replica that won the refresh,
+    // and response order decided whether the person stayed signed in.
     const refresh = async (): Promise<TokenResponse> => {
       throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider did not answer');
     };
     expect(await renewSession(sealed(), { env: ENV, refresh, now: at(T0 + 880) })).toEqual({
-      kind: 'ENDED',
+      kind: 'REFUSED',
+      // 20 s of access token left: this request may still use it.
+      usable: true,
     });
+  });
+
+  it('marks a refused session unusable once its access token has run out', async () => {
+    const refresh = async (): Promise<TokenResponse> => {
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider answered 400');
+    };
+    expect(await renewSession(sealed(), { env: ENV, refresh, now: at(T0 + 900) })).toEqual({
+      kind: 'REFUSED',
+      usable: false,
+    });
+  });
+
+  it('never ends a session for presenting a spent refresh token', async () => {
+    const { refresh } = rotatingProvider();
+    const cookie = sealed();
+    await renewSession(cookie, { env: ENV, refresh, now: at(T0 + 880) });
+    forgetSharedRefreshes(); // as if the second request reached another process
+
+    const late = await renewSession(cookie, { env: ENV, refresh, now: at(T0 + 890) });
+    expect(late.kind).toBe('REFUSED');
   });
 
   it('lets a failure that is not the provider’s propagate, rather than hiding a bug', async () => {

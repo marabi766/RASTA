@@ -76,6 +76,13 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
  * render that follows reads the cookie *it* was sent, and must see the
  * rotated session in this same request rather than the spent one.
  *
+ * A refused refresh (`REFUSED`) leaves the browser's cookie alone — another
+ * replica may be sending back the rotated one right now — but a session whose
+ * access token has already run out is hidden from *this* render, which then
+ * treats the person as signed out. Hiding it matters beyond the page: `/login`
+ * sends anybody with an openable session to `/`, and `/` sends an expired one
+ * back to `/login`, so leaving it visible would loop.
+ *
  * The environment is read only when there is a cookie to act on, so a
  * signed-out request — the login page itself — never depends on it.
  */
@@ -86,6 +93,7 @@ async function renewSessionCookie(request: NextRequest): Promise<SessionRenewal>
   const renewal = await renewSession(sealed, { env: webServerEnv() });
   if (renewal.kind === 'RENEWED') request.cookies.set(SESSION_COOKIE, renewal.sealed);
   if (renewal.kind === 'ENDED') request.cookies.delete(SESSION_COOKIE);
+  if (renewal.kind === 'REFUSED' && !renewal.usable) request.cookies.delete(SESSION_COOKIE);
   return renewal;
 }
 
@@ -99,6 +107,7 @@ function applyRenewal(response: NextResponse, renewal: SessionRenewal): void {
     );
   }
   if (renewal.kind === 'ENDED') response.cookies.delete(SESSION_COOKIE);
+  // `REFUSED` writes nothing, deliberately: see `renewSessionCookie`.
 }
 
 export const config = {
