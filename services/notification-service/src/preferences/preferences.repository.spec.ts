@@ -33,6 +33,7 @@ function harness(initial: { preferences?: Stored[]; quietHours?: QuietHoursRow |
   let quietHours: QuietHoursRow | null = initial.quietHours ?? null;
 
   const tx = {
+    $executeRaw: jest.fn(async () => 1),
     notificationPreference: {
       findMany: jest.fn(async () => preferences.map((row) => ({ ...row }))),
       deleteMany: jest.fn(async () => {
@@ -169,9 +170,10 @@ describe('replaceOwn — audit', () => {
     );
 
     expect(h.enqueued).toEqual([]);
-    // The write itself still happens exactly as it always did.
-    expect(h.tx.notificationPreference.deleteMany).toHaveBeenCalledTimes(1);
-    expect(h.tx.notificationPreference.createMany).toHaveBeenCalledTimes(1);
+    // Nor is anything written: the rows, their ids and timestamps stay as they
+    // are (Codex #114 R1-3).
+    expect(h.tx.notificationPreference.deleteMany).not.toHaveBeenCalled();
+    expect(h.tx.notificationPreference.createMany).not.toHaveBeenCalled();
   });
 
   it('records a flip of one flag', async () => {
@@ -182,6 +184,27 @@ describe('replaceOwn — audit', () => {
     await h.repository.replaceOwn(ACTOR, [input({ scope: 'GLOBAL', enabled: true })], NOW);
 
     expect(h.enqueued).toHaveLength(1);
+  });
+});
+
+describe('serialisation (Codex #114 R1-4)', () => {
+  it('takes the per-person lock before reading, in both operations', async () => {
+    for (const run of [
+      (h: ReturnType<typeof harness>) => h.repository.replaceOwn(ACTOR, [], NOW),
+      (h: ReturnType<typeof harness>) => h.repository.replaceQuietHours(ACTOR, null, NOW),
+    ]) {
+      const h = harness();
+      await run(h);
+      expect(h.tx.$executeRaw).toHaveBeenCalledTimes(1);
+      const lockedAt = h.tx.$executeRaw.mock.invocationCallOrder[0]!;
+      const firstRead = Math.min(
+        ...[
+          ...h.tx.notificationPreference.findMany.mock.invocationCallOrder,
+          ...h.tx.notificationQuietHours.findUnique.mock.invocationCallOrder,
+        ],
+      );
+      expect(lockedAt).toBeLessThan(firstRead);
+    }
   });
 });
 
@@ -239,5 +262,8 @@ describe('replaceQuietHours — audit', () => {
     await h.repository.replaceQuietHours(ACTOR, next, NOW);
 
     expect(h.enqueued).toEqual([]);
+    // …and writes nothing (Codex #114 R1-3).
+    expect(h.tx.notificationQuietHours.deleteMany).not.toHaveBeenCalled();
+    expect(h.tx.notificationQuietHours.upsert).not.toHaveBeenCalled();
   });
 });

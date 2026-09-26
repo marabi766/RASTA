@@ -163,4 +163,145 @@ describe('preference changes are audited (L7-14)', () => {
       await eventsFor(orgB, NOTIFICATION_EVENTS.NOTIFICATION_PREFERENCES_REPLACED),
     ).toHaveLength(0);
   });
+
+  // -------------------------------------------------------------------------
+  // A call that changes nothing writes nothing (Codex #114 R1-3)
+  // -------------------------------------------------------------------------
+
+  it('leaves the stored rows exactly as they are when the same settings are submitted again', async () => {
+    const org = organization();
+    const me = newUserId();
+    const set = [
+      { scope: 'GLOBAL' as const, channel: 'EMAIL' as const, enabled: false },
+      { scope: 'GLOBAL' as const, channel: 'IN_APP' as const, enabled: true },
+    ];
+    const window = { start: '22:00', end: '07:00', timezone: 'Asia/Tehran' };
+    await asUser(org, me, () => service.replaceOwn(set));
+    await asUser(org, me, () => service.replaceQuietHours(window));
+
+    const snapshot = () =>
+      runUnscoped('assertions read the rows directly', async () => ({
+        preferences: await prisma.client.notificationPreference.findMany({
+          where: { organizationId: org },
+          orderBy: { id: 'asc' },
+          select: { id: true, updatedAt: true, createdAt: true },
+        }),
+        quietHours: await prisma.client.notificationQuietHours.findMany({
+          where: { organizationId: org },
+          select: { updatedAt: true, createdAt: true },
+        }),
+        events: await prisma.client.outboxMessage.count({ where: { organizationId: org } }),
+      }));
+    const before = await snapshot();
+
+    await asUser(org, me, () => service.replaceOwn([...set].reverse()));
+    await asUser(org, me, () => service.replaceQuietHours(window));
+
+    expect(await snapshot()).toEqual(before);
+  });
+
+  // -------------------------------------------------------------------------
+  // Concurrent PUTs of one person's settings (Codex #114 R1-4)
+  // -------------------------------------------------------------------------
+
+  it('makes a second PUT wait for the first, then replace it — never merge with it', async () => {
+    const org = organization();
+    const me = newUserId();
+    const first = [{ scope: 'GLOBAL' as const, channel: 'EMAIL' as const, enabled: false }];
+    const second = [{ scope: 'GLOBAL' as const, channel: 'IN_APP' as const, enabled: false }];
+
+    // Pause the first PUT after its writes, before its commit.
+    let reached!: () => void;
+    let release!: () => void;
+    const atGate = new Promise<void>((resolve) => (reached = resolve));
+    const open = new Promise<void>((resolve) => (release = resolve));
+    const original = events.enqueue.bind(events);
+    const spy = jest.spyOn(events, 'enqueue').mockImplementationOnce(async (tx, input) => {
+      reached();
+      await open;
+      return original(tx, input);
+    });
+
+    try {
+      const one = asUser(org, me, () => service.replaceOwn(first));
+      await atGate;
+      const two = asUser(org, me, () => service.replaceOwn(second));
+
+      const marker = Symbol('pending');
+      const raced = await Promise.race([
+        two.then(() => undefined),
+        new Promise((resolve) => setTimeout(() => resolve(marker), 400)),
+      ]);
+      expect(raced).toBe(marker); // blocked behind the first
+
+      release();
+      await one;
+      await two;
+    } finally {
+      spy.mockRestore();
+    }
+
+    const stored = await runUnscoped('assertions read the rows directly', () =>
+      prisma.client.notificationPreference.findMany({
+        where: { organizationId: org },
+        select: { scope: true, channel: true, enabled: true },
+      }),
+    );
+    expect(stored).toEqual([{ scope: 'GLOBAL', channel: 'IN_APP', enabled: false }]);
+    const announced = await eventsFor(org, NOTIFICATION_EVENTS.NOTIFICATION_PREFERENCES_REPLACED);
+    expect(
+      announced.map((row) =>
+        ((row.payload as Envelope).payload.preferences as Array<{ channel: string }>).map(
+          (p) => p.channel,
+        ),
+      ),
+    ).toEqual([['EMAIL'], ['IN_APP']]);
+  });
+
+  it('survives a burst of concurrent PUTs: one of them wins whole, and the last event says which', async () => {
+    const org = organization();
+    const me = newUserId();
+    const sets = [
+      [{ scope: 'GLOBAL' as const, channel: 'EMAIL' as const, enabled: false }],
+      [{ scope: 'GLOBAL' as const, channel: 'IN_APP' as const, enabled: false }],
+      [
+        { scope: 'GLOBAL' as const, channel: 'EMAIL' as const, enabled: true },
+        { scope: 'GLOBAL' as const, channel: 'IN_APP' as const, enabled: true },
+      ],
+      [],
+    ];
+    const burst = Array.from({ length: 8 }, (_, i) => sets[i % sets.length]!);
+
+    const results = await Promise.allSettled(
+      burst.map((set) => asUser(org, me, () => service.replaceOwn(set))),
+    );
+    // No unique violation, no lost update surfacing as an error.
+    expect(results.filter((r) => r.status === 'rejected')).toEqual([]);
+
+    const stored = await runUnscoped('assertions read the rows directly', () =>
+      prisma.client.notificationPreference.findMany({
+        where: { organizationId: org },
+        select: { scope: true, scopeKey: true, channel: true, enabled: true },
+      }),
+    );
+    const key = (rows: Array<{ channel: string; enabled: boolean }>) =>
+      JSON.stringify([...rows].map((r) => `${r.channel}:${r.enabled}`).sort());
+    // Exactly one submitted set — never the union of two.
+    expect(sets.map(key)).toContain(key(stored));
+
+    const announced = await eventsFor(org, NOTIFICATION_EVENTS.NOTIFICATION_PREFERENCES_REPLACED);
+    const last = announced.at(-1);
+    if (last) {
+      expect(
+        key(
+          (last.payload as Envelope).payload.preferences as Array<{
+            channel: string;
+            enabled: boolean;
+          }>,
+        ),
+      ).toBe(key(stored));
+    } else {
+      expect(stored).toEqual([]);
+    }
+  });
 });

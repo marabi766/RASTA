@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { NotificationActor } from '../access/access';
 import { EventPublisher } from '../events/publisher';
 import { NOTIFICATION_EVENTS } from '../events/published';
@@ -29,8 +29,9 @@ export interface QuietHoursRow {
  * Both writes publish their audit event in the same transaction as the rows
  * (AGENTS.md S-06, A-08; global audit L7-14), and only when the stored state
  * actually changed — the rule `markAllRead` set: an audit record for an action
- * with no effect is noise that makes the real records harder to find. The
- * writes themselves are unchanged; only what they announce is new.
+ * with no effect is noise that makes the real records harder to find. A call
+ * that changes nothing writes nothing either, and every change of one person's
+ * settings is serialised by `lockSettings`.
  */
 @Injectable()
 export class PreferencesRepository {
@@ -65,13 +66,36 @@ export class PreferencesRepository {
     return row ?? null;
   }
 
-  /** Sets or clears it. `null` is "no quiet window", which is the default state. */
+  /**
+   * Serialises every settings change of one person in one tenant (Codex #114
+   * R1-4).
+   *
+   * A transaction-scoped advisory lock keyed on `(organization, user)`, taken
+   * before anything is read. Without it two concurrent `PUT`s both read, both
+   * delete and both insert under READ COMMITTED — leaving the union of the two
+   * sets, or failing on the unique index — and each would announce a change
+   * computed against a state the other had already replaced. The key is a
+   * bound parameter hashed by PostgreSQL; nothing is interpolated.
+   */
+  private async lockSettings(tx: ExtendedPrismaClient, actor: NotificationActor): Promise<void> {
+    const key = `notification-settings:${actor.organizationId}:${actor.userId}`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+  }
+
+  /**
+   * Sets or clears it. `null` is "no quiet window", which is the default state.
+   *
+   * Read and compared first, under the lock: a call that would store what is
+   * already stored writes nothing and announces nothing (Codex #114 R1-3).
+   */
   async replaceQuietHours(
     actor: NotificationActor,
     window: QuietHoursRow | null,
     now: Date = new Date(),
   ): Promise<void> {
     await this.prisma.transaction(async (tx) => {
+      await this.lockSettings(tx, actor);
+
       const where = {
         organizationId_userId: { organizationId: actor.organizationId, userId: actor.userId },
       };
@@ -79,6 +103,8 @@ export class PreferencesRepository {
         where,
         select: { startMinute: true, endMinute: true, timezone: true },
       });
+
+      if (sameWindow(before, window)) return;
 
       if (!window) {
         await tx.notificationQuietHours.deleteMany({
@@ -96,8 +122,6 @@ export class PreferencesRepository {
           update: { ...window, updatedBy: actor.userId },
         });
       }
-
-      if (sameWindow(before, window)) return;
 
       await this.events.enqueue(tx, {
         eventName: NOTIFICATION_EVENTS.NOTIFICATION_QUIET_HOURS_CHANGED,
@@ -126,7 +150,8 @@ export class PreferencesRepository {
    * what I have now" and a row the caller left out has to disappear. Inside one
    * transaction, so a crash between the two halves cannot leave somebody with no
    * preferences at all — which would silently restore every default they had
-   * turned off.
+   * turned off. Under the per-person lock, and compared before any write: the
+   * set already in force is left exactly as it is, ids and timestamps included.
    */
   async replaceOwn(
     actor: NotificationActor,
@@ -143,12 +168,16 @@ export class PreferencesRepository {
     );
 
     await this.prisma.transaction(async (tx) => {
+      await this.lockSettings(tx, actor);
+
       const before = normalise(
         await tx.notificationPreference.findMany({
           where: { userId: actor.userId, organizationId: actor.organizationId },
           select: { scope: true, scopeKey: true, channel: true, enabled: true },
         }),
       );
+
+      if (JSON.stringify(before) === JSON.stringify(next)) return;
 
       await tx.notificationPreference.deleteMany({
         where: { userId: actor.userId, organizationId: actor.organizationId },
@@ -168,8 +197,6 @@ export class PreferencesRepository {
           })),
         });
       }
-
-      if (JSON.stringify(before) === JSON.stringify(next)) return;
 
       await this.events.enqueue(tx, {
         eventName: NOTIFICATION_EVENTS.NOTIFICATION_PREFERENCES_REPLACED,
