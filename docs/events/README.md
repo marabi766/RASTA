@@ -460,20 +460,52 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 
 ## Construction — `rasta.construction.v1`
 
-| رویداد                     | مصرف‌کنندگان                                            | Payload کلیدی                                          |
-| -------------------------- | ------------------------------------------------------- | ------------------------------------------------------ |
-| `PROJECT_CREATED`          | analytics · audit                                       | `projectId`, `title`, `estimate`, `location`           |
-| `APPROVAL_REQUESTED`       | **notification (مرجع تأیید)** · audit                   | `approvalId`, `projectId`, `approvalType`, `authority` |
-| `APPROVAL_GRANTED`         | notification · audit · analytics                        | `approvalId`, `grantedBy`, `conditions`                |
-| `APPROVAL_REJECTED`        | notification · audit                                    | `approvalId`, `reason`                                 |
-| `TENDER_CREATED`           | audit                                                   | `tenderId`, `projectId`, `procurementNature`           |
-| `TENDER_PUBLISHED`         | **notification (پیمانکاران)** · search · analytics      | `tenderId`, `bidOpeningAt`, `bidClosingAt`             |
-| `BID_SUBMITTED`            | notification · **audit (مهر زمانی)**                    | `bidId`, `tenderId`, `contractorId`, `submittedAt`     |
-| `BIDS_EVALUATED`           | audit · analytics                                       | `tenderId`, `matrix`, `ranking`                        |
-| `TENDER_AWARDED`           | **contract (ایجاد پیش‌نویس)** · notification · supplier | `tenderId`, `winnerId`, `amount`, `justification`      |
-| `PROJECT_STARTED`          | fleet · analytics                                       | `projectId`, `contractId`                              |
-| `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `percentage`, `assetsUsed[]`              |
-| `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `completedAt`                             |
+> **CON-001 PR نخست (2026-09-26).** `construction-service` هفت رویداد زیر را تولید می‌کند: `PROJECT_CREATED` و شش
+> رویداد تازه‌ای که مدیر پروژه برای همین PR پذیرفت (ردیف‌های **پررنگ** در جدول دوم). بقیهٔ ردیف‌های جدول نخست هنوز
+> **برنامه‌ریزی‌شده**‌اند: موافقت‌ها، آغاز و پایان و پیشرفت با PR دوم CON-001، و مناقصه با CON-002. Payloadها در
+> `services/construction-service/src/events/events.ts` تعریف و در زمان انتشار اعتبارسنجی می‌شوند (`.strict()`).
+>
+> **کلید پارتیشن همهٔ رویدادهای این Topic `projectId` است** و `aggregateType` همهٔ آن‌ها `Project`: نیاز، موافقت و
+> گزارش پیشرفت درون مرز Aggregate پروژه‌اند (`docs/03` § ۳٫۳)، و هر مصرف‌کننده دربارهٔ **یک پروژه** استدلال می‌کند.
+> شناسهٔ نیاز در Payload می‌آید (`needId`). این هم‌Partition‌کردن است، نه ترتیب تضمین‌شده (D-027).
+>
+> **هیچ Payloadی داده شخصی، شناسهٔ سند یا چندضلعی محدوده حمل نمی‌کند.** `PROJECT_CREATED` به‌جای `location` فقط
+> `hasArea` دارد: محدودهٔ نقشه تا صدها رأس دارد و روی یک Log هفت‌روزه که همه می‌خوانند جایی ندارد؛ مصرف‌کننده‌ای که
+> آن را لازم دارد از API می‌گیرد. `estimate` با نام `estimatedCostMinor` (رشتهٔ ریالی، یا `null`) می‌آید.
+
+| رویداد                     | مصرف‌کنندگان                                            | Payload کلیدی                                                                                                      |
+| -------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `PROJECT_CREATED`          | analytics · audit                                       | `projectId`, `organizationId`, `title`, `operationType`, `estimatedCostMinor`, `hasArea`, `createdBy`, `createdAt` |
+| `APPROVAL_REQUESTED`       | **notification (مرجع تأیید)** · audit                   | `approvalId`, `projectId`, `approvalType`, `authority`                                                             |
+| `APPROVAL_GRANTED`         | notification · audit · analytics                        | `approvalId`, `grantedBy`, `conditions`                                                                            |
+| `APPROVAL_REJECTED`        | notification · audit                                    | `approvalId`, `reason`                                                                                             |
+| `TENDER_CREATED`           | audit                                                   | `tenderId`, `projectId`, `procurementNature`                                                                       |
+| `TENDER_PUBLISHED`         | **notification (پیمانکاران)** · search · analytics      | `tenderId`, `bidOpeningAt`, `bidClosingAt`                                                                         |
+| `BID_SUBMITTED`            | notification · **audit (مهر زمانی)**                    | `bidId`, `tenderId`, `contractorId`, `submittedAt`                                                                 |
+| `BIDS_EVALUATED`           | audit · analytics                                       | `tenderId`, `matrix`, `ranking`                                                                                    |
+| `TENDER_AWARDED`           | **contract (ایجاد پیش‌نویس)** · notification · supplier | `tenderId`, `winnerId`, `amount`, `justification`                                                                  |
+| `PROJECT_STARTED`          | fleet · analytics                                       | `projectId`, `contractId`                                                                                          |
+| `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `percentage`, `assetsUsed[]`                                                                          |
+| `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `completedAt`                                                                                         |
+
+**رویدادهای افزودهٔ CON-001** (پذیرفته‌شده به‌دست مدیر پروژه، 2026-09-26). هر تغییر وضعیت پروژه و نیاز باید به
+`audit-service` برسد (`AGENTS.md` S-06، A-08)، و کاتالوگ برای ویرایش پروژه، لغو، و چرخهٔ نیاز رویدادی نداشت — همان
+شکافی که `DRIVER_UPDATED` و `SUPPLIER_REINSTATED` بستند.
+
+| رویداد                       | مصرف‌کنندگان      | Payload کلیدی                                                                        |
+| ---------------------------- | ----------------- | ------------------------------------------------------------------------------------ |
+| **`PROJECT_UPDATED`**        | audit · analytics | `projectId`, `organizationId`, `changedFields[]`, `updatedBy`, `updatedAt`           |
+| **`PROJECT_STATUS_CHANGED`** | audit · analytics | `projectId`, `organizationId`, `from`, `to`, `reason`, `changedBy`, `changedAt`      |
+| **`PROJECT_NEED_ADDED`**     | audit · analytics | `projectId`, `needId`, `organizationId`, `addedBy`, `addedAt`                        |
+| **`PROJECT_NEED_UPDATED`**   | audit             | `projectId`, `needId`, `organizationId`, `changedFields[]`, `updatedBy`, `updatedAt` |
+| **`PROJECT_NEED_SUBMITTED`** | audit · analytics | `projectId`, `needId`, `organizationId`, `submittedBy`, `submittedAt`                |
+| **`PROJECT_NEED_WITHDRAWN`** | audit · analytics | `projectId`, `needId`, `organizationId`, `reason`, `withdrawnBy`, `withdrawnAt`      |
+
+`PROJECT_UPDATED` و `PROJECT_NEED_UPDATED` فقط **نام** فیلدهای تغییریافته را حمل می‌کنند، نه مقدارشان (همان قاعدهٔ
+`ASSET_UPDATED` و `DRIVER_UPDATED`). `PROJECT_STATUS_CHANGED` گذارهایی را می‌پوشاند که رویداد اختصاصی ندارند — در PR
+نخست فقط لغو (`to = CANCELLED`)، و در PR دوم ورود به `PENDING_APPROVAL`، `APPROVED` و `CHANGES_REQUESTED`. گذارهای
+`PROJECT_STARTED` و `PROJECT_COMPLETED` رویداد خودشان را دارند و `PROJECT_STATUS_CHANGED` تکراری برایشان منتشر
+نمی‌شود. `reason` فقط در لغو و رد مقدار دارد و در بقیه `null` است.
 
 ## Contract — `rasta.contract.v1`
 
