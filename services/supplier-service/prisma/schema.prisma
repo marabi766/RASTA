@@ -10,21 +10,17 @@
 //
 // ## What this schema deliberately does not model
 //
-// `docs/04` § 4.10 also names `supplier_license`, `performance_score` and
-// `performance_event`. None of the three is here, and each is absent for a
-// reason rather than by omission:
+// `docs/04` § 4.10 also names `supplier_license`. It is absent for a reason
+// rather than by omission: a licence has an issuing authority, a validity
+// period and a renewal rule. The product document names none of them, and
+// inventing them would be inventing regulatory fact (AGENTS.md § 9).
+// Qualification evidence carries an opaque document reference instead, which
+// claims nothing about validity.
 //
-//   supplier_license    A licence has an issuing authority, a validity period
-//                       and a renewal rule. The product document names none of
-//                       them, and inventing them would be inventing regulatory
-//                       fact (AGENTS.md § 9). Qualification evidence carries an
-//                       opaque document reference instead, which claims
-//                       nothing about validity.
-//   performance_score   Q-12 — the formula and its weights — is open. "Equal
-//                       weights" is the temporary note in `docs/24`, not an
-//                       approved production policy, so no column stores a
-//                       number nobody has agreed how to compute.
-//   performance_event   Its only purpose is feeding that formula.
+// `performance_score` and `performance_event` were absent while Q-12 was open.
+// ADR-052 closed it, and the storage for Phase B steps 2–4 is at the end of
+// this file. No consumer, calculation engine, API or event reads or writes it
+// yet (steps 5–8).
 
 generator client {
   provider      = "prisma-client-js"
@@ -359,4 +355,82 @@ model ProcessedEvent {
 
   @@id([eventId, consumerName])
   @@map("processed_event")
+}
+
+// ---------------------------------------------------------------------------
+// Supplier performance — ADR-052 Phase B, steps 2–4
+//
+// Storage only. What the database refuses is in the migrations
+// (`20260926100000_performance_formula_version` onward) because Prisma cannot
+// express triggers or partial unique indexes; `test/performance-*.int-spec.ts`
+// proves each refusal against a real PostgreSQL.
+// ---------------------------------------------------------------------------
+
+enum PerformanceFormulaStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+}
+
+/// The five components ADR-052 § 1 accepted. QUALITY has a weight and no
+/// producer yet (Q-56).
+enum PerformanceComponent {
+  QUALITY
+  ON_TIME
+  CUSTOMER_SATISFACTION
+  DISPUTE_ABSENCE
+  CANCELLATION_ABSENCE
+}
+
+/// One immutable set of scoring rules (ADR-052 § 3).
+///
+/// **Platform-wide, with no `organizationId`** (docs/24 Q-75): one ACTIVE
+/// version for the whole platform, because the published score is one public
+/// score per supplier read by buyers in every tenant. Listed in
+/// `PLATFORM_SCOPED_MODELS` with that reason; every read states it under
+/// `runUnscoped`.
+///
+/// Frozen once it leaves DRAFT; ACTIVE may only become RETIRED, and only as
+/// part of activating a successor. Never deleted.
+model PerformanceFormulaVersion {
+  id String @id
+
+  formulaVersion Int                      @unique(map: "ux_performance_formula_version_number") @map("formula_version")
+  status         PerformanceFormulaStatus @default(DRAFT)
+
+  windowDays     Int @map("window_days")
+  minSampleCount Int @map("min_sample_count")
+  minCoverageBp  Int @map("min_coverage_bp")
+
+  ratingScaleMin       Int @map("rating_scale_min") @db.SmallInt
+  ratingScaleMax       Int @map("rating_scale_max") @db.SmallInt
+  ratingMinScoreCentis Int @map("rating_min_score_centis")
+  ratingMaxScoreCentis Int @map("rating_max_score_centis")
+
+  createdBy              String    @map("created_by")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  createdCorrelationId   String    @map("created_correlation_id")
+  activatedBy            String?   @map("activated_by")
+  activatedAt            DateTime? @map("activated_at")
+  activatedCorrelationId String?   @map("activated_correlation_id")
+  retiredBy              String?   @map("retired_by")
+  retiredAt              DateTime? @map("retired_at")
+  retiredCorrelationId   String?   @map("retired_correlation_id")
+
+  weights PerformanceFormulaWeight[]
+
+  @@map("performance_formula_version")
+}
+
+/// A component's configured weight in one version, in integer basis points.
+/// The weights of a version sum to exactly 10 000 at every commit.
+model PerformanceFormulaWeight {
+  formulaVersionId String                    @map("formula_version_id")
+  formulaVersion   PerformanceFormulaVersion @relation(fields: [formulaVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "performance_formula_weight_version_fkey")
+
+  component PerformanceComponent
+  weightBp  Int                  @map("weight_bp")
+
+  @@id([formulaVersionId, component])
+  @@map("performance_formula_weight")
 }

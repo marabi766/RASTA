@@ -650,8 +650,34 @@ export const EXPECTED = {
       'outbox_message',
       'outbox_stream_sequence',
       'processed_event',
+      // ADR-052 step 2: the platform-wide performance formula.
+      'performance_formula_version',
+      'performance_formula_weight',
     ],
-    triggers: [],
+    // ADR-052 step 2. The freeze, the no-truncate pair, the deferred 100% sum
+    // and the successor rule. A round trip that lost any one of them would
+    // leave a formula table that accepts exactly the edit it exists to refuse.
+    triggers: [
+      'trg_performance_formula_version_guard',
+      'trg_performance_formula_version_no_truncate',
+      'trg_performance_formula_weight_guard',
+      'trg_performance_formula_weight_no_truncate',
+      'trg_performance_formula_weight_sum',
+      'trg_performance_formula_version_sum',
+      'trg_performance_formula_successor',
+    ],
+    functions: [
+      'performance_formula_version_guard',
+      'performance_formula_weight_guard',
+      'performance_formula_weight_sum_check',
+      'performance_formula_successor_check',
+    ],
+    indexes: [
+      'ux_performance_formula_version_number',
+      // "At most one ACTIVE" is this partial index and nothing else.
+      'ux_performance_formula_single_active',
+    ],
+    types: ['PerformanceFormulaStatus', 'PerformanceComponent'],
     constraints: [
       // Domain invariants.
       'ck_supplier_display_name_not_blank',
@@ -674,6 +700,18 @@ export const EXPECTED = {
       'ck_outbox_attempts_nonneg',
       'ck_outbox_next_attempt_requires_failure',
       'ck_outbox_published_is_clean',
+      // ADR-052 step 2.
+      'ck_formula_version_positive',
+      'ck_formula_window_positive',
+      'ck_formula_min_sample_positive',
+      'ck_formula_min_coverage_range',
+      'ck_formula_rating_mapping',
+      'ck_formula_activation_complete',
+      'ck_formula_retirement_complete',
+      'ck_formula_status_stamps',
+      'ck_formula_chronology',
+      'ck_formula_text_not_blank',
+      'ck_formula_weight_bp_range',
     ],
   },
   /*

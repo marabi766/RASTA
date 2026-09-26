@@ -38,6 +38,30 @@ export const TENANT_SCOPED_MODELS = [
  */
 export const TENANT_SCOPE_EXEMPT_MODELS = ['OutboxMessage'] as const;
 
+/**
+ * Models that deliberately carry **no** organization column, and why.
+ *
+ * The guard derives nothing from these — there is no column to scope on — but
+ * a table without a tenant key in a multi-tenant service is a claim that has
+ * to be written down, so `tenant-scope.spec.ts` requires every model without
+ * `organizationId` to appear here or in `PLUMBING_MODELS`.
+ *
+ * The performance formula is platform-wide configuration: ADR-052 § 3 allows
+ * one ACTIVE version at any moment, and the score it produces is one public
+ * score per supplier that buyers in every tenant read (§ 16). docs/24 Q-75,
+ * closed by the project owner: only SYSTEM_ADMIN changes it. Every query on
+ * these models runs under `runUnscoped` with that reason
+ * (`performance/formula.repository.ts`), the precedent being
+ * economic-service's `reward_evaluation_cutover`.
+ */
+export const PLATFORM_SCOPED_MODELS = {
+  PerformanceFormulaVersion: 'the platform-wide performance formula (ADR-052 § 3, docs/24 Q-75)',
+  PerformanceFormulaWeight: 'the weights of that formula, frozen with their version',
+} as const;
+
+/** Relay and consumer bookkeeping with no tenant meaning (ADR-021, ADR-032, ADR-051). */
+export const PLUMBING_MODELS = ['OutboxStreamSequence', 'ProcessedEvent'] as const;
+
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
 @Injectable()

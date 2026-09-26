@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { TENANT_SCOPED_MODELS, TENANT_SCOPE_EXEMPT_MODELS } from './prisma.service';
+import {
+  PLATFORM_SCOPED_MODELS,
+  PLUMBING_MODELS,
+  TENANT_SCOPED_MODELS,
+  TENANT_SCOPE_EXEMPT_MODELS,
+} from './prisma.service';
 
 /**
  * Proves the tenant guard is configured for **this** service's schema.
@@ -101,13 +106,54 @@ describe('the schema keeps history from being erased', () => {
   });
 });
 
-describe('the schema models nothing Q-12 has not decided', () => {
-  it('has no performance score or performance event model', () => {
-    // Q-12 — the formula and its weights — is open. A column storing a number
-    // nobody has agreed how to compute would become the number people build on.
-    const names = [...models(SCHEMA).keys()];
+describe('a model without a tenant column is a written decision', () => {
+  function modelsWithoutTenantColumn(schema: string): string[] {
+    return [...models(schema)]
+      .filter(([, body]) => !/^\s*organizationId\s/m.test(body))
+      .map(([name]) => name)
+      .sort();
+  }
 
-    expect(names.filter((name) => /Performance|Score|Rating/i.test(name))).toEqual([]);
+  it('accounts for every model that carries no organization', () => {
+    // Anything new without `organizationId` fails here until somebody writes
+    // down why it is not tenant data.
+    expect(modelsWithoutTenantColumn(SCHEMA)).toEqual(
+      [...Object.keys(PLATFORM_SCOPED_MODELS), ...PLUMBING_MODELS].sort(),
+    );
+  });
+
+  it('keeps the performance formula platform-wide (docs/24 Q-75)', () => {
+    expect(Object.keys(PLATFORM_SCOPED_MODELS).sort()).toEqual([
+      'PerformanceFormulaVersion',
+      'PerformanceFormulaWeight',
+    ]);
+    for (const reason of Object.values(PLATFORM_SCOPED_MODELS)) {
+      expect(reason.length).toBeGreaterThan(20);
+    }
+  });
+
+  it('scopes the supplier-owned performance history by the supplier organization', () => {
+    // Events and snapshots are about one supplier and belong to its tenant;
+    // only the formula is platform-wide. Checked against the schema so a
+    // model added in a later step cannot quietly land on the wrong side.
+    const performanceModels = [...models(SCHEMA).keys()].filter((name) =>
+      /^Performance/.test(name),
+    );
+    const tenantOwned = performanceModels.filter(
+      (name) => !Object.keys(PLATFORM_SCOPED_MODELS).includes(name),
+    );
+
+    for (const name of tenantOwned) {
+      expect(TENANT_SCOPED_MODELS).toContain(name);
+    }
+  });
+});
+
+describe('the schema models nothing nobody has decided', () => {
+  it('stores no floating-point or decimal number anywhere', () => {
+    // ADR-052 § 7 and § 24: no float in the scoring path, the same rule as
+    // money. An integer column is the only thing that makes it structural.
+    expect(SCHEMA).not.toMatch(/^\s*\w+\s+(Float|Decimal)\b/m);
   });
 
   it('has no licence model with a validity period', () => {

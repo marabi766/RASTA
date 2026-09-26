@@ -4,7 +4,7 @@ import { ulid } from 'ulid';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, SUPPLIER_TOPIC, type SupplierEnv } from '../config/env';
-import { validateSupplierPayload, type SupplierEventName } from './events';
+import { validateSupplierPayload, type PublishedEventName } from './events';
 import { AGGREGATE_OF, resolvePartitionKey } from './routing';
 
 /**
@@ -39,13 +39,18 @@ import { AGGREGATE_OF, resolvePartitionKey } from './routing';
 export class EventPublisher {
   constructor(@Inject(ENV) private readonly env: SupplierEnv) {}
 
-  async enqueue<N extends SupplierEventName>(
+  async enqueue<N extends PublishedEventName>(
     tx: ExtendedPrismaClient,
     input: {
       eventName: N;
       /** The aggregate the event is about — a qualification, a suspension. */
       aggregateId: string;
-      organizationId: string;
+      /**
+       * The tenant the event belongs to, or `null` for a platform-wide fact —
+       * today only the performance formula (docs/24 Q-75). An explicit null
+       * is kept as "no tenant", never replaced by the request context's.
+       */
+      organizationId: string | null;
       payload: unknown;
       causationId?: string;
       /**
@@ -64,7 +69,10 @@ export class EventPublisher {
     const payload = validateSupplierPayload(input.eventName, input.payload);
     // Read off the validated payload, never off the call site, so the key and
     // what the consumer sees cannot disagree (the Q-26 failure).
-    const partition = resolvePartitionKey(input.eventName, payload);
+    const partition = resolvePartitionKey(
+      input.eventName,
+      payload as { supplierId: string } | { formulaVersionId: string },
+    );
 
     // ADR-051 B3. Allocated *after* routing is final and *before* the row is
     // built, inside the caller's transaction: the counter row lock is held to
@@ -143,6 +151,7 @@ export const ID_PREFIX = {
   qualification: 'QLF',
   evidence: 'QEV',
   suspension: 'SSP',
+  formulaVersion: 'PFV',
 } as const;
 
 export function newId(prefix: (typeof ID_PREFIX)[keyof typeof ID_PREFIX]): string {

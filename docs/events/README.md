@@ -436,14 +436,22 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 
 ## Supplier — `rasta.supplier.v1`
 
-| رویداد                      | مصرف‌کنندگان                                                      | Payload کلیدی                                          |
-| --------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------ |
-| `SUPPLIER_REGISTERED`       | analytics · audit                                                 | `supplierId`, `organizationId`, `capabilities[]`       |
-| `SUPPLIER_QUALIFIED`        | marketplace · procurement · construction                          | `supplierId`, `qualifiedFor[]`                         |
-| `SUPPLIER_REJECTED`         | notification                                                      | `supplierId`, `reason`                                 |
-| `SUPPLIER_SUSPENDED`        | **marketplace (پنهان‌سازی پیشنهاد)** · procurement · construction | `supplierId`, `reason`, `until`                        |
-| `SUPPLIER_REINSTATED`       | **audit** · مصرف‌کنندگانِ `SUPPLIER_SUSPENDED`                    | `supplierId`, `suspensionId`, `reason`, `reinstatedBy` |
-| `PERFORMANCE_SCORE_UPDATED` | **marketplace (رتبه‌بندی)** · search                              | `supplierId`, `score`, `breakdown`                     |
+| رویداد                                  | مصرف‌کنندگان                                                      | Payload کلیدی                                                                                                                    |
+| --------------------------------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `SUPPLIER_REGISTERED`                   | analytics · audit                                                 | `supplierId`, `organizationId`, `capabilities[]`                                                                                 |
+| `SUPPLIER_QUALIFIED`                    | marketplace · procurement · construction                          | `supplierId`, `qualifiedFor[]`                                                                                                   |
+| `SUPPLIER_REJECTED`                     | notification                                                      | `supplierId`, `reason`                                                                                                           |
+| `SUPPLIER_SUSPENDED`                    | **marketplace (پنهان‌سازی پیشنهاد)** · procurement · construction | `supplierId`, `reason`, `until`                                                                                                  |
+| `SUPPLIER_REINSTATED`                   | **audit** · مصرف‌کنندگانِ `SUPPLIER_SUSPENDED`                    | `supplierId`, `suspensionId`, `reason`, `reinstatedBy`                                                                           |
+| `PERFORMANCE_SCORE_UPDATED`             | **marketplace (رتبه‌بندی)** · search                              | `supplierId`, `score`, `breakdown`                                                                                               |
+| `PERFORMANCE_FORMULA_VERSION_CREATED`   | **audit**                                                         | `formulaVersionId`, `formulaVersion`, `windowDays`, `minSampleCount`, `minCoverageBp`, `ratingMapping`, `weights[]`, `createdBy` |
+| `PERFORMANCE_FORMULA_VERSION_ACTIVATED` | **audit**                                                         | `formulaVersionId`, `formulaVersion`, `supersededFormulaVersionId`, `activatedBy`                                                |
+| `PERFORMANCE_FORMULA_VERSION_RETIRED`   | **audit**                                                         | `formulaVersionId`, `formulaVersion`, `successorFormulaVersionId`, `retiredBy`                                                   |
+
+> **سه رویداد `PERFORMANCE_FORMULA_VERSION_*` (ADR-052 گام ۲).** رکورد Audit هر تغییر فرمول سراسری امتیاز عملکرد
+> (S-06) — در همان تراکنش ردیف، از راه Outbox. فرمول به هیچ مستأجری تعلق ندارد (`docs/24` Q-75)، پس این رویدادها
+> `tenantId` ندارند و کلید جریانشان **شناسهٔ نسخهٔ فرمول** است، نه `supplierId`. بازنشستگی فقط همراه فعال‌سازی جانشین رخ
+> می‌دهد و `successorFormulaVersionId` همیشه پر است. `PERFORMANCE_SCORE_UPDATED` همچنان منتشر **نمی‌شود** (گام ۸).
 
 ## Inventory — `rasta.inventory.v1`
 
