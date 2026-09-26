@@ -47,7 +47,10 @@ const { EVENT_HEADERS } = require(join(REPO_ROOT, 'packages', 'contracts', 'dist
 
 function baseUrl(service) {
   const key = `DATABASE_URL_${service.toUpperCase()}`;
-  const url = process.env[key];
+  // These tests create and drop throwaway schemas. Where a service separates a
+  // migrator from its runtime role (supplier), only the migrator — which owns
+  // the database — may; scripts/prisma.mjs makes the same choice for DDL.
+  const url = process.env[`${key}_MIGRATOR`] ?? process.env[key];
   if (!url) {
     throw new Error(
       `${key} is not set. These tests run against a real PostgreSQL: start it with ` +

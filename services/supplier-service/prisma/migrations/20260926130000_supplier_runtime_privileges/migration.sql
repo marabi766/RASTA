@@ -11,12 +11,17 @@
 -- the migrations and so owned every table, which made each of those guarantees
 -- something the running service could switch off.
 --
--- The fix is audit-service's (ADR-053 § 6): the tables live in schema
--- `supplier`, owned by `rasta_supplier_migrator`; migrations connect as that
--- role (`DATABASE_URL_SUPPLIER_MIGRATOR`, picked by scripts/prisma.mjs); the
--- service connects as `rasta_supplier`, which owns nothing there and holds
--- only the grants below. It cannot widen them — only an owner can grant.
--- `test/runtime-privileges.int-spec.ts` proves each refusal is SQLSTATE 42501.
+-- The fix follows audit-service (ADR-053 § 6) with one difference: the tables
+-- stay in `public`, because supplier-service was already migrated there on
+-- main and moving schemas would strand its rows. Instead the database and every
+-- object in it belong to `rasta_supplier_migrator`
+-- (infrastructure/docker/postgres/lib/supplier-privilege-split.bash, run by the
+-- bootstrap and as an upgrade step), migrations connect as that role
+-- (`DATABASE_URL_SUPPLIER_MIGRATOR`, picked by scripts/prisma.mjs), and the
+-- service connects as `rasta_supplier`, which owns nothing, has no CREATEDB and
+-- holds only CONNECT, USAGE on `public` and the grants below. It cannot widen
+-- them — only an owner can grant. `test/runtime-privileges.int-spec.ts` proves
+-- each refusal is SQLSTATE 42501.
 --
 -- ## What the runtime role may do
 --
@@ -30,14 +35,12 @@
 --   performance_event            SELECT, INSERT — append-only.
 --   performance_score_*          SELECT, INSERT — insert-only.
 --
--- ## Why the grants are conditional
+-- ## Reversibility
 --
--- Granting to a table's owner is meaningless — it already holds everything —
--- but it still rewrites `relacl` from NULL to an explicit list, and a REVOKE
--- cannot put the NULL back. The reversibility verifier runs as `rasta_supplier`
--- in a scratch schema it owns, and compares `relacl` exactly; so when the
--- migration runs as `rasta_supplier` itself there is nothing to grant, and it
--- grants nothing. Every real deployment runs as the migrator.
+-- `down.sql` revokes what this grants. That leaves each table's ACL as the
+-- owner's explicit default rather than NULL, which PostgreSQL treats as the
+-- same thing; the reversibility verifier compares ACLs through `acldefault`
+-- for exactly that reason.
 --
 -- A table added by a later migration needs its own grant: the runtime-role
 -- suite enumerates every table in the schema and fails on one it cannot
@@ -46,31 +49,23 @@
 
 SET LOCAL lock_timeout = '5s';
 
-DO $$
-BEGIN
-  IF current_user = 'rasta_supplier' THEN
-    RETURN;
-  END IF;
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+  "supplier",
+  "supplier_capability",
+  "qualification",
+  "qualification_evidence",
+  "suspension",
+  "outbox_message",
+  "outbox_stream_sequence",
+  "processed_event"
+TO rasta_supplier;
 
-  GRANT SELECT, INSERT, UPDATE, DELETE ON
-    "supplier",
-    "supplier_capability",
-    "qualification",
-    "qualification_evidence",
-    "suspension",
-    "outbox_message",
-    "outbox_stream_sequence",
-    "processed_event"
-  TO rasta_supplier;
+GRANT SELECT, INSERT, UPDATE ON "performance_formula_version" TO rasta_supplier;
 
-  GRANT SELECT, INSERT, UPDATE ON "performance_formula_version" TO rasta_supplier;
-
-  GRANT SELECT, INSERT ON
-    "performance_formula_weight",
-    "performance_event",
-    "performance_score_snapshot",
-    "performance_score_component",
-    "performance_score_source_event"
-  TO rasta_supplier;
-END;
-$$;
+GRANT SELECT, INSERT ON
+  "performance_formula_weight",
+  "performance_event",
+  "performance_score_snapshot",
+  "performance_score_component",
+  "performance_score_source_event"
+TO rasta_supplier;

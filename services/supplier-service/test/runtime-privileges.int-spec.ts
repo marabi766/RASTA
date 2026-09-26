@@ -1,4 +1,4 @@
-import type { PrismaService } from '../src/prisma/prisma.service';
+import { PrismaService } from '../src/prisma/prisma.service';
 import { newPrisma } from './helpers';
 import { ownerPrisma, raw, seedDraft } from './performance-helpers';
 
@@ -8,8 +8,8 @@ import { ownerPrisma, raw, seedDraft } from './performance-helpers';
  *
  * The performance tables are frozen, append-only or insert-only by trigger,
  * and a trigger binds only a role that cannot disable, alter or drop it. The
- * service connects as `rasta_supplier`; the tables belong to
- * `rasta_supplier_migrator` in schema `supplier`. Every statement below is run
+ * service connects as `rasta_supplier`; the database and every table in it
+ * belong to `rasta_supplier_migrator` (lib/supplier-privilege-split.bash). Every statement below is run
  * **as the runtime role** and must fail with SQLSTATE 42501 — insufficient
  * privilege — rather than with a trigger message: the point is that it never
  * reaches the table at all.
@@ -89,7 +89,7 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
       ),
     );
 
-    expect(who).toEqual({ role: 'rasta_supplier', schema: 'supplier' });
+    expect(who).toEqual({ role: 'rasta_supplier', schema: 'public' });
     expect(owners.map((row) => row.owner)).toEqual(['rasta_supplier_migrator']);
   });
 
@@ -131,7 +131,7 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
       'create a function in the schema',
       'CREATE FUNCTION "noop"() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$',
     ],
-    ['drop the schema', 'DROP SCHEMA "supplier" CASCADE'],
+    ['drop the schema', 'DROP SCHEMA "public" CASCADE'],
     ['drop a trigger function', 'DROP FUNCTION "performance_event_append_only"()'],
   ])('refuses to %s with 42501', async (_label, sql) => {
     await expect(asRuntime(sql)).rejects.toThrow(DENIED);
@@ -185,14 +185,70 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
     expect(found?.status).toBe('DRAFT');
   });
 
+  describe('the database itself (Codex review of #120, round 2 finding 2)', () => {
+    /** The runtime role, connected to the maintenance database `postgres`. */
+    let elsewhere: PrismaService;
+
+    beforeAll(() => {
+      const url = new URL(process.env.DATABASE_URL_SUPPLIER ?? '');
+      url.pathname = '/postgres';
+      elsewhere = new PrismaService(url.toString());
+    });
+
+    afterAll(async () => {
+      await elsewhere.onModuleDestroy();
+    });
+
+    it('does not own the database and holds neither CREATEDB nor CREATEROLE', async () => {
+      const [facts] = await raw(() =>
+        runtime.client.$queryRawUnsafe<
+          { owner: string; createDb: boolean; createRole: boolean; superuser: boolean }[]
+        >(
+          `SELECT pg_get_userbyid(d.datdba)::text AS "owner", r.rolcreatedb AS "createDb",
+                  r.rolcreaterole AS "createRole", r.rolsuper AS "superuser"
+             FROM pg_database d, pg_roles r
+            WHERE d.datname = current_database() AND r.rolname = current_user`,
+        ),
+      );
+
+      expect(facts).toEqual({
+        owner: 'rasta_supplier_migrator',
+        createDb: false,
+        createRole: false,
+        superuser: false,
+      });
+    });
+
+    it.each([
+      ['drop its own database from another', 'DROP DATABASE "rasta_supplier" WITH (FORCE)'],
+      ['take the database back', 'ALTER DATABASE "rasta_supplier" OWNER TO rasta_supplier'],
+      ['create a database', 'CREATE DATABASE "rasta_supplier_shadow_attempt"'],
+    ])('refuses to %s with 42501', async (_label, sql) => {
+      await expect(raw(() => elsewhere.client.$executeRawUnsafe(sql))).rejects.toThrow(DENIED);
+    });
+
+    it('refuses CREATE and TEMP on its own database', async () => {
+      const [row] = await raw(() =>
+        runtime.client.$queryRawUnsafe<{ create: boolean; temp: boolean; connect: boolean }[]>(
+          `SELECT has_database_privilege(current_database(), 'CREATE') AS "create",
+                  has_database_privilege(current_database(), 'TEMP') AS "temp",
+                  has_database_privilege(current_database(), 'CONNECT') AS "connect"`,
+        ),
+      );
+
+      expect(row).toEqual({ create: false, temp: false, connect: true });
+      await expect(asRuntime('CREATE SCHEMA "smuggled"')).rejects.toThrow(DENIED);
+    });
+  });
+
   describe('startup refuses any role that could', () => {
     it('accepts the runtime role', async () => {
       await expect(runtime.assertRuntimeRole()).resolves.toBeUndefined();
     });
 
-    it('refuses the migrator, which owns the schema', async () => {
+    it('refuses the migrator — it holds CREATEDB and owns the database', async () => {
       await expect(owner.assertRuntimeRole()).rejects.toThrow(
-        /refuses to start.*rasta_supplier_migrator/,
+        /refuses to start.*rasta_supplier_migrator.*holds CREATEDB.*owner of database rasta_supplier/,
       );
     });
   });

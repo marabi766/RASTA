@@ -641,6 +641,9 @@ export const EXPECTED = {
    * predating the thing it decides.
    */
   supplier: {
+    // The runtime role owns nothing and cannot create the scratch schema
+    // (lib/supplier-privilege-split.bash); the migrator owns the database.
+    connectAs: 'migrator',
     tables: [
       'supplier',
       'supplier_capability',
@@ -1130,7 +1133,14 @@ export function snapshotQuery(schema, extensionHome = schema) {
       SELECT 'relation ' || r.relname || ' kind=' || r.relkind::text
              || ' persistence=' || r.relpersistence::text
              || ' rls=' || r.relrowsecurity || '/' || r.relforcerowsecurity
-             || ' acl=' || coalesce(r.relacl::text, '-')
+             -- NULL means "the owner's default privileges"; a GRANT followed
+             -- by its REVOKE leaves the same privileges spelled out. Compared
+             -- through acldefault so that exact inverse is not a false failure
+             -- (supplier's runtime-privileges migration).
+             || ' acl=' || coalesce(
+                  r.relacl,
+                  acldefault(CASE WHEN r.relkind = 'S' THEN 's' ELSE 'r' END::"char", r.relowner)
+                )::text
              || ' partkey=' || coalesce(pg_get_partkeydef(r.oid), '-')
              || ' bound=' || coalesce(pg_get_expr(r.relpartbound, r.oid), '-') AS item
       FROM rel r WHERE r.relkind IN ('r', 'p', 'v', 'm', 'S', 'f', 'c')
