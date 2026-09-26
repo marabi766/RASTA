@@ -3,6 +3,7 @@
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
+import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { EMPTY_END_ASSIGNMENT_FORM } from '@/lib/driver-fields';
 import { assignmentEndReasonOptions } from '@/lib/labels';
@@ -106,6 +107,10 @@ function FormBanner({ state }: { state: EndAssignmentFormState }) {
         اجازهٔ پایان‌دادن به این تخصیص به شما داده نشده است. کد پیگیری: {state.correlationId}
       </Alert>
     );
+  }
+
+  if (state.kind === 'UNCONFIRMED') {
+    return <UnconfirmedWriteAlert correlationId={state.correlationId} />;
   }
 
   if (state.kind === 'FAILED') {

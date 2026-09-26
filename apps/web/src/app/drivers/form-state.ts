@@ -1,3 +1,4 @@
+import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { CreateDriverField, CreateDriverFormValues } from '@/lib/driver-fields';
 
 /**
@@ -22,6 +23,7 @@ export type CreateDriverFormState =
   /** The request could not be trusted as this person's own. */
   | { readonly kind: 'REFUSED'; readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
-  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string };
+  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
+  | UnconfirmedWriteState;
 
 export const IDLE_CREATE_DRIVER_FORM: CreateDriverFormState = { kind: 'IDLE' };

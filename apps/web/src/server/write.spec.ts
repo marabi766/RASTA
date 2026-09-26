@@ -210,10 +210,11 @@ describe('what comes back', () => {
     expect(JSON.stringify(result)).not.toContain('stack trace here');
   });
 
-  it('treats an unparsable success as malformed rather than rendering it', async () => {
+  it('treats a success it cannot read as unconfirmed, never as a failure', async () => {
+    // A 2xx: the write happened; its answer is simply not one to show.
     const result = await call((async () =>
       jsonResponse(201, { unexpected: true })) as unknown as typeof fetch);
-    expect(result.kind).toBe('MALFORMED');
+    expect(result.kind).toBe('UNKNOWN_OUTCOME');
   });
 
   it('survives a 4xx that is not JSON at all', async () => {
@@ -258,5 +259,63 @@ describe('mapProblemToFields', () => {
     );
     expect(mapped.fieldErrors).toEqual({});
     expect(mapped.message).toBe('required');
+  });
+});
+
+/**
+ * A write that was sent but not answered is not a write that failed (Codex
+ * post-merge review of #106): the service may have committed, and a person
+ * told "nothing was saved" retries it.
+ */
+describe('sent, but not confirmed', () => {
+  const rejecting = (error: unknown) =>
+    (async () => {
+      throw error;
+    }) as unknown as typeof fetch;
+  const socket = (code: string) => new TypeError('fetch failed', { cause: { code } });
+
+  it.each([
+    ['a connection reset after the request went out', socket('ECONNRESET')],
+    ['the socket closing mid-response', socket('UND_ERR_SOCKET')],
+    ['this portal’s own deadline', new DOMException('The operation was aborted.', 'TimeoutError')],
+    ['a rejection with no cause at all', new TypeError('fetch failed')],
+  ])('is UNKNOWN_OUTCOME for %s', async (_label, error) => {
+    const result = await call(rejecting(error));
+    expect(result).toEqual({ kind: 'UNKNOWN_OUTCOME', correlationId: expect.any(String) });
+  });
+
+  it.each([
+    ['a refused connection', 'ECONNREFUSED'],
+    ['an unknown host', 'ENOTFOUND'],
+    ['a connect timeout', 'UND_ERR_CONNECT_TIMEOUT'],
+  ])('is still UNAVAILABLE for %s: nothing was sent', async (_label, code) => {
+    const result = await call(rejecting(socket(code)));
+    expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 503 });
+  });
+
+  it('is UNKNOWN_OUTCOME for a 2xx whose body does not parse', async () => {
+    const result = await call(
+      (async () =>
+        new Response('{"id": "USG_1"', {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        })) as unknown as typeof fetch,
+    );
+    expect(result.kind).toBe('UNKNOWN_OUTCOME');
+  });
+
+  it('is UNKNOWN_OUTCOME when the gateway forwarded it and its upstream timed out (504)', async () => {
+    const result = await call((async () =>
+      jsonResponse(504, { code: 'UPSTREAM_TIMEOUT', message: 'late' })) as unknown as typeof fetch);
+    expect(result.kind).toBe('UNKNOWN_OUTCOME');
+  });
+
+  it('is still UNAVAILABLE when the gateway refused to forward it (503)', async () => {
+    const result = await call((async () =>
+      jsonResponse(503, {
+        code: 'UPSTREAM_UNAVAILABLE',
+        message: 'open',
+      })) as unknown as typeof fetch);
+    expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 503 });
   });
 });

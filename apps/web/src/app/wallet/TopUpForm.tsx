@@ -3,6 +3,7 @@
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
+import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { EMPTY_TOP_UP_FORM } from '@/lib/wallet-fields';
 
@@ -88,6 +89,10 @@ function FormBanner({ state }: { state: TopUpFormState }) {
         اجازهٔ افزایش موجودی به شما داده نشده است. کد پیگیری: {state.correlationId}
       </Alert>
     );
+  }
+
+  if (state.kind === 'UNCONFIRMED') {
+    return <UnconfirmedWriteAlert correlationId={state.correlationId} />;
   }
 
   if (state.kind === 'FAILED') {

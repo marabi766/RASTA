@@ -6,7 +6,14 @@
  * `fetch`, `Response` and `node:crypto`, and a browser-shaped environment
  * would be testing a different runtime than the one that serves the request.
  */
-import { GatewayOriginError, GatewayRequestError, callGateway, gatewayUrl } from './gateway';
+import {
+  GatewayOriginError,
+  GatewayOutcomeUnknownError,
+  GatewayRequestError,
+  callGateway,
+  gatewayUrl,
+  neverSent,
+} from './gateway';
 
 /**
  * ADR-058 § 3 said the browser talks only to the API Gateway, and added that
@@ -190,6 +197,62 @@ describe('a transport failure never escapes as a bare throw', () => {
     await expect(
       callGateway({ baseUrl: GATEWAY, path: '/v1/users/me', accessToken: 't', fetchImpl: impl }),
     ).rejects.toMatchObject({ status: 502 });
+  });
+});
+
+describe('a read keeps today’s outcome; a write learns the outcome is unknown (Codex #106)', () => {
+  const rejecting = (error: unknown) =>
+    (async () => {
+      throw error;
+    }) as unknown as typeof fetch;
+
+  it('marks a failure after dispatch as outcome-unknown, still a 503 GatewayRequestError', async () => {
+    const error = await callGateway({
+      baseUrl: GATEWAY,
+      path: '/v1/drivers',
+      accessToken: 't',
+      fetchImpl: rejecting(new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } })),
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(GatewayRequestError);
+    expect(error).toBeInstanceOf(GatewayOutcomeUnknownError);
+    expect(error).toMatchObject({ status: 503, reason: 'TRANSPORT' });
+  });
+
+  it('marks an unreadable 2xx as outcome-unknown, still a 502 GatewayRequestError', async () => {
+    const error = await callGateway({
+      baseUrl: GATEWAY,
+      path: '/v1/drivers',
+      accessToken: 't',
+      fetchImpl: (async () =>
+        new Response('not json', {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        })) as unknown as typeof fetch,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(GatewayOutcomeUnknownError);
+    expect(error).toMatchObject({ status: 502, reason: 'UNREADABLE_BODY' });
+  });
+
+  it('keeps a failure before anything was sent a plain 503', async () => {
+    const error = await callGateway({
+      baseUrl: GATEWAY,
+      path: '/v1/drivers',
+      accessToken: 't',
+      fetchImpl: rejecting(new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } })),
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(GatewayRequestError);
+    expect(error).not.toBeInstanceOf(GatewayOutcomeUnknownError);
+    expect(error).toMatchObject({ status: 503 });
+  });
+
+  it('finds a never-sent code however deep undici nests it', () => {
+    expect(neverSent({ cause: { cause: { code: 'EAI_AGAIN' } } })).toBe(true);
+    expect(neverSent({ cause: { code: 'ECONNRESET' } })).toBe(false);
+    expect(neverSent(new DOMException('aborted', 'TimeoutError'))).toBe(false);
+    expect(neverSent(undefined)).toBe(false);
   });
 });
 
