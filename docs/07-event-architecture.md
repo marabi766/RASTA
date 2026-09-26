@@ -426,22 +426,23 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 
 ### Economic
 
-| رویداد                       | Producer | مصرف‌کنندگان اصلی                                   |
-| ---------------------------- | -------- | --------------------------------------------------- |
-| `WALLET_OPENED`              | economic | notification                                        |
-| `FUNDS_HELD`                 | economic | marketplace (پیشبرد Saga) · analytics               |
-| `FUNDS_RELEASED`             | economic | marketplace · analytics                             |
-| `PAYMENT_AUTHORIZED`         | economic | marketplace · contract                              |
-| `PAYMENT_COMPLETED`          | economic | marketplace · maintenance · contract · notification |
-| `PAYMENT_FAILED`             | economic | marketplace (جبران) · notification                  |
-| `COMMISSION_APPLIED`         | economic | analytics (**درآمد پلتفرم**) · audit                |
-| `REWARD_GRANTED`             | economic | notification · analytics                            |
-| `REWARD_LEVEL_CHANGED`       | economic | notification                                        |
-| `SETTLEMENT_COMPLETED`       | economic | marketplace · supplier · notification               |
-| `JOURNAL_POSTED`             | economic | audit · analytics                                   |
-| `COMMISSION_RULE_CHANGED`    | economic | audit                                               |
-| `REWARD_RULE_CHANGED`        | economic | audit                                               |
-| `TRANSACTION_STATUS_CHANGED` | economic | audit                                               |
+| رویداد                         | Producer | مصرف‌کنندگان اصلی                                   |
+| ------------------------------ | -------- | --------------------------------------------------- |
+| `WALLET_OPENED`                | economic | notification                                        |
+| `FUNDS_HELD`                   | economic | marketplace (پیشبرد Saga) · analytics               |
+| `FUNDS_RELEASED`               | economic | marketplace · analytics                             |
+| `PAYMENT_AUTHORIZED`           | economic | marketplace · contract                              |
+| `PAYMENT_COMPLETED`            | economic | marketplace · maintenance · contract · notification |
+| `PAYMENT_FAILED`               | economic | marketplace (جبران) · notification                  |
+| `PAYMENT_CAPTURE_UNRECONCILED` | economic | audit · (هشدار عملیات)                              |
+| `COMMISSION_APPLIED`           | economic | analytics (**درآمد پلتفرم**) · audit                |
+| `REWARD_GRANTED`               | economic | notification · analytics                            |
+| `REWARD_LEVEL_CHANGED`         | economic | notification                                        |
+| `SETTLEMENT_COMPLETED`         | economic | marketplace · supplier · notification               |
+| `JOURNAL_POSTED`               | economic | audit · analytics                                   |
+| `COMMISSION_RULE_CHANGED`      | economic | audit                                               |
+| `REWARD_RULE_CHANGED`          | economic | audit                                               |
+| `TRANSACTION_STATUS_CHANGED`   | economic | audit                                               |
 
 > **افزوده (2026-09-26).** `TRANSACTION_STATUS_CHANGED` رکورد Audit هر گام چرخهٔ
 > عمر تراکنش است که رویداد پولی خودش را ندارد: ثبت، ثبت تعهد از رویداد، تأیید
