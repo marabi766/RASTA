@@ -103,13 +103,15 @@ describe('need lifecycle', () => {
       withdrawalReason: 'Covered by the county',
     });
 
-    const names = (await outboxFor(w.prisma, a)).map((row) => row.eventName);
-    expect(names).toEqual([
+    const rows = await outboxFor(w.prisma, a);
+    expect(rows.map((row) => row.eventName)).toEqual([
       'PROJECT_CREATED',
       'PROJECT_NEED_ADDED',
       'PROJECT_NEED_SUBMITTED',
       'PROJECT_NEED_WITHDRAWN',
     ]);
+    // The withdrawal reason is prose: kept in the database, never on the log.
+    expect(JSON.stringify(rows.map((row) => row.payload))).not.toContain('Covered by the county');
 
     const detail = await asAdmin(a, () => w.projects.get(project.id));
     expect(detail.needsSummary).toEqual({ draft: 0, submitted: 0, withdrawn: 1 });

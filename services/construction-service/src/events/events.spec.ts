@@ -20,8 +20,6 @@ const BASE = { projectId: 'PRJ_01', organizationId: 'ORG_A' };
 const VALID: Record<ConstructionEventName, Record<string, unknown>> = {
   PROJECT_CREATED: {
     ...BASE,
-    title: 'Road repair',
-    operationType: 'road',
     estimatedCostMinor: '1500000000',
     hasArea: true,
     createdBy: 'USR_1',
@@ -32,7 +30,6 @@ const VALID: Record<ConstructionEventName, Record<string, unknown>> = {
     ...BASE,
     from: 'DRAFT',
     to: 'CANCELLED',
-    reason: 'Funding withdrawn',
     changedBy: 'USR_1',
     changedAt: AT,
   },
@@ -48,7 +45,6 @@ const VALID: Record<ConstructionEventName, Record<string, unknown>> = {
   PROJECT_NEED_WITHDRAWN: {
     ...BASE,
     needId: 'PND_1',
-    reason: 'Covered by another line',
     withdrawnBy: 'USR_1',
     withdrawnAt: AT,
   },
@@ -169,9 +165,14 @@ describe('payload rules', () => {
     ).toThrow();
   });
 
-  it('requires a withdrawal to carry its reason', () => {
-    const { reason: _r, ...withoutReason } = VALID.PROJECT_NEED_WITHDRAWN;
-    expect(() => validateConstructionPayload('PROJECT_NEED_WITHDRAWN', withoutReason)).toThrow();
+  // Codex review of #119, finding 4: prose stays in the database.
+  it.each<[ConstructionEventName, Record<string, unknown>]>([
+    ['PROJECT_CREATED', { title: 'Road repair' }],
+    ['PROJECT_CREATED', { operationType: 'road' }],
+    ['PROJECT_STATUS_CHANGED', { reason: 'Funding withdrawn' }],
+    ['PROJECT_NEED_WITHDRAWN', { reason: 'Covered by another line' }],
+  ])('refuses free text on %s (%j)', (name, prose) => {
+    expect(() => validateConstructionPayload(name, { ...VALID[name], ...prose })).toThrow();
   });
 });
 

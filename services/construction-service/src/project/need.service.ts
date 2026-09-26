@@ -276,7 +276,6 @@ export class NeedService {
           projectId,
           needId,
           organizationId,
-          reason: dto.reason,
           withdrawnBy: actor,
           withdrawnAt: at.toISOString(),
         },

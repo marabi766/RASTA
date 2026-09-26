@@ -89,8 +89,6 @@ export class ProjectService {
             payload: {
               projectId,
               organizationId,
-              title: dto.title,
-              operationType: dto.operationType,
               estimatedCostMinor: dto.estimatedCostMinor ?? null,
               hasArea: dto.area !== undefined,
               createdBy: actor,
@@ -265,7 +263,6 @@ export class ProjectService {
           organizationId,
           from: locked.status,
           to: 'CANCELLED',
-          reason: dto.reason,
           changedBy: actor,
           changedAt: at.toISOString(),
         },

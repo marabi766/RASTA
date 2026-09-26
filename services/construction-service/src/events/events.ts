@@ -15,13 +15,16 @@ import { PROJECT_STATES } from '../project/project.state-machine';
  *
  * ## What these payloads never carry
  *
- * **No personal data, no document identifier, no free-text description and no
- * geometry.** An event lives seven days in a log every service can read
- * (`docs/07` § 7.3). The operating area can hold hundreds of vertices, so
- * `PROJECT_CREATED` says only `hasArea`; the scope of work and a need's
- * description are prose somebody wrote for their own organization, not for
- * every consumer on the platform. A consumer that needs either asks the API,
- * under its authorization.
+ * **Identifiers, states, timestamps, amounts and bounded codes only — no free
+ * text, no personal data, no document identifier and no geometry.** An event
+ * lives seven days in a log every service can read (`docs/07` § 7.3). A title,
+ * an operation type (free text unless a deployment lists the allowed values,
+ * Q-68), a scope of work, a need's description and a stated cancellation or
+ * withdrawal reason are prose somebody wrote for their own organization, not
+ * for every consumer on the platform; they stay in this service's database. The
+ * operating area can hold hundreds of vertices, so `PROJECT_CREATED` says only
+ * `hasArea`. A consumer that needs any of it asks the API, under its
+ * authorization (Codex review of #119, finding 4).
  *
  * The `*_UPDATED` events carry the **names** of the fields that changed, never
  * their values — the rule `ASSET_UPDATED` and `DRIVER_UPDATED` already follow.
@@ -49,7 +52,6 @@ const identifier = z.string().min(1).max(64);
 const isoTimestamp = z.string().datetime();
 const amountMinor = z.string().regex(/^\d{1,19}$/);
 const projectState = z.enum(PROJECT_STATES);
-const statedReason = z.string().min(1).max(500);
 
 /** Field names only; sorted and unique so the payload is stable for one change. */
 const changedFields = z
@@ -61,8 +63,6 @@ export const projectCreatedPayload = z
   .object({
     projectId: identifier,
     organizationId: identifier,
-    title: z.string().min(1).max(200),
-    operationType: z.string().min(1).max(100),
     /** Rial minor units as a string, or null while no estimate was given. */
     estimatedCostMinor: amountMinor.nullable(),
     /** Whether an operating area was recorded. The polygon itself is not carried. */
@@ -85,8 +85,8 @@ export const projectUpdatedPayload = z
 /**
  * A project changed status by a transition that has no dedicated event.
  *
- * In PR 1 that is only cancellation. `reason` is the caller's stated reason for
- * a cancellation and `null` where a transition carries none.
+ * In PR 1 that is only cancellation. The stated reason is not carried: it is
+ * prose, kept in `project.status_reason` and read through the API.
  */
 export const projectStatusChangedPayload = z
   .object({
@@ -94,7 +94,6 @@ export const projectStatusChangedPayload = z
     organizationId: identifier,
     from: projectState,
     to: projectState,
-    reason: statedReason.nullable(),
     changedBy: identifier,
     changedAt: isoTimestamp,
   })
@@ -137,7 +136,6 @@ export const projectNeedWithdrawnPayload = z
     projectId: identifier,
     needId: identifier,
     organizationId: identifier,
-    reason: statedReason,
     withdrawnBy: identifier,
     withdrawnAt: isoTimestamp,
   })

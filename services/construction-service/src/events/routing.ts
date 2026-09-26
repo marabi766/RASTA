@@ -1,11 +1,12 @@
 import type { ConstructionEventName } from './events';
 
 /**
- * Where each construction event goes on the wire, and what it is ordered by.
+ * Where each construction event goes on the wire, and what it shares a stream with.
  *
  * `docs/07` § 7.7 and ADR-051 § C-7 keep two questions apart:
  * `aggregateType`/`aggregateId` say what an event is **about**; `partitionKey`
- * says what it must stay **in order with**.
+ * says which stream it belongs to — the stream ADR-051 will one day keep in
+ * order, and which today is only co-partitioned (below).
  *
  * Here the two answers coincide. A need lives inside the project aggregate
  * (`docs/03` § 3.3: `Project` holds `ProjectNeed` and `Approval`), so every
