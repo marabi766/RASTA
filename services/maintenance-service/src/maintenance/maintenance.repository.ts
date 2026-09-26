@@ -9,7 +9,7 @@ import { resolvePartitionKey } from './routing';
 import type { MaintenanceEventName } from './events';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
-import { OPEN_REQUEST_STATUSES } from './lifecycle';
+import { COSTABLE_REPAIR_ORDER_STATUSES, OPEN_REQUEST_STATUSES } from './lifecycle';
 import type { ListRepairOrdersQuery, ListRequestsQuery, ListSchedulesQuery } from './dto';
 
 /**
@@ -366,6 +366,120 @@ export class MaintenanceRepository {
       FOR NO KEY UPDATE
     `;
     return rows.length === 1;
+  }
+
+  // -------------------------------------------------------------------------
+  // Transfer fence (ADR-062)
+  //
+  // Raw SQL for the lock and the fence: the expiry is compared with the
+  // database's clock, the same one that set it, never with this process's.
+  // The fence table is keyed by the machine, not scoped by tenant, because the
+  // check that reads it must see a fence whichever organization is asking.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Orders new work on one machine against a transfer's fence.
+   *
+   * `SHARED` for a writer that opens work, so two breakdown reports on one
+   * machine do not queue behind each other; `EXCLUSIVE` for the clearance and
+   * for the consumer that moves the replica on `ASSET_TRANSFERRED`, so each of
+   * those sees every committed piece of work and no new one starts under it.
+   * An advisory lock, because the replica row may not exist yet and
+   * `FOR UPDATE` on a missing row locks nothing.
+   */
+  async lockAssetForWork(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    mode: 'SHARED' | 'EXCLUSIVE',
+  ): Promise<void> {
+    const key = `asset-work:${assetId}`;
+    if (mode === 'SHARED') {
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock_shared(hashtextextended(${key}, 0))`;
+    } else {
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+    }
+  }
+
+  /**
+   * Open work on one machine in one organization: requests not yet finished
+   * and repair orders not yet finished. Unscoped with the organization named,
+   * because the consumer that also asks has the new owner's context, not the
+   * previous owner's.
+   */
+  async countOpenWork(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    organizationId: string,
+  ): Promise<{ openRequests: number; openRepairOrders: number }> {
+    return runUnscoped(
+      'open work of one named organization on one machine, for a transfer (ADR-062)',
+      async () => {
+        // One after the other: a transaction runs on one connection.
+        const openRequests = await tx.maintenanceRequest.count({
+          where: { assetId, organizationId, status: { in: [...OPEN_REQUEST_STATUSES] } },
+        });
+        const openRepairOrders = await tx.repairOrder.count({
+          where: { assetId, organizationId, status: { in: [...COSTABLE_REPAIR_ORDER_STATUSES] } },
+        });
+        return { openRequests, openRepairOrders };
+      },
+    );
+  }
+
+  /**
+   * Places the fence, or renews it for the same transfer. Returns its expiry,
+   * or `null` when another transfer's fence is still live.
+   */
+  async placeTransferFence(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    organizationId: string,
+    fenceId: string,
+    ttlSeconds: number,
+  ): Promise<Date | null> {
+    const rows = await tx.$queryRaw<{ expires_at: Date }[]>`
+      INSERT INTO asset_transfer_fence (asset_id, organization_id, fence_id, expires_at, created_at)
+      VALUES (${assetId}, ${organizationId}, ${fenceId},
+              now() + make_interval(secs => ${ttlSeconds}::int), now())
+      ON CONFLICT (asset_id) DO UPDATE
+        SET organization_id = EXCLUDED.organization_id,
+            fence_id = EXCLUDED.fence_id,
+            expires_at = EXCLUDED.expires_at,
+            created_at = EXCLUDED.created_at
+        WHERE asset_transfer_fence.expires_at <= now()
+           OR (asset_transfer_fence.fence_id = EXCLUDED.fence_id
+               AND asset_transfer_fence.organization_id = EXCLUDED.organization_id)
+      RETURNING expires_at`;
+    return rows[0]?.expires_at ?? null;
+  }
+
+  /** Whether a live fence stands on the machine. */
+  async hasLiveTransferFence(tx: ExtendedPrismaClient, assetId: string): Promise<boolean> {
+    const rows = await tx.$queryRaw<{ fence_id: string }[]>`
+      SELECT fence_id FROM asset_transfer_fence WHERE asset_id = ${assetId} AND expires_at > now()`;
+    return rows.length > 0;
+  }
+
+  /** Lifts one transfer's fence. Only the organization that placed it can. */
+  async releaseTransferFence(
+    assetId: string,
+    organizationId: string,
+    fenceId: string,
+  ): Promise<number> {
+    return this.client.$executeRaw`
+      DELETE FROM asset_transfer_fence
+      WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}`;
+  }
+
+  /** The transfer landed: whatever the previous owner fenced is moot. */
+  async dropTransferFences(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    organizationId: string,
+  ): Promise<number> {
+    return tx.$executeRaw`
+      DELETE FROM asset_transfer_fence
+      WHERE asset_id = ${assetId} AND organization_id = ${organizationId}`;
   }
 
   /**

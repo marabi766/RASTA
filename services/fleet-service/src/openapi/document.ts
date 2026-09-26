@@ -15,6 +15,7 @@ import {
   updateDriverSchema,
   utilizationQuerySchema,
 } from '../fleet/dto';
+import { transferClearanceSchema } from '../fleet/transfer-clearance';
 
 /**
  * Completes the OpenAPI document Nest builds from the decorators.
@@ -41,6 +42,7 @@ const REQUEST_BODIES: Record<string, JsonSchema> = {
   'POST /v1/assignments/{id}/end': toJsonSchema(endAssignmentSchema),
   'POST /v1/usage-records': toJsonSchema(recordUsageSchema),
   'POST /v1/fleet/availability': toJsonSchema(declareAvailabilitySchema),
+  'POST /v1/internal/assets/{assetId}/transfer-clearance': toJsonSchema(transferClearanceSchema),
 };
 
 /** Query schemas, so filtering and pagination are described, not implied. */
@@ -81,6 +83,10 @@ const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/usage-records/{id}': READ_ONE,
   // A tenant claim the token does not carry is a 403; a record outside it, 404.
   'GET /v1/internal/usage-records/{id}': READ_ONE,
+  // ADR-062: 404 for a machine the replica places elsewhere, 409 while another
+  // transfer holds the fence.
+  'POST /v1/internal/assets/{assetId}/transfer-clearance': [...COMMON, 400, 404, 409],
+  'DELETE /v1/internal/assets/{assetId}/transfer-clearance/{fenceId}': [...COMMON, 400],
   'POST /v1/usage-records': WRITE,
   'GET /v1/fleet/availability': COMMON,
   'POST /v1/fleet/availability': WRITE,

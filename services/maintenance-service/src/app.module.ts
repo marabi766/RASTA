@@ -41,7 +41,11 @@ import { DueScanner } from './maintenance/due-scanner';
 import { WorkshopDirectory, UnverifiedWorkshopDirectory } from './maintenance/workshop.directory';
 import { ScheduleController } from './maintenance/schedule.controller';
 import { RequestController } from './maintenance/request.controller';
-import { MaintenanceInternalController } from './maintenance/internal.controller';
+import {
+  MaintenanceInternalController,
+  MaintenanceTransferClearanceController,
+} from './maintenance/internal.controller';
+import { TransferClearanceService } from './maintenance/transfer-clearance';
 import { MaintenanceFactService } from './maintenance/source-fact';
 import { RepairOrderController } from './maintenance/repair-order.controller';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
@@ -92,6 +96,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
     RequestController,
     RepairOrderController,
     MaintenanceInternalController,
+    MaintenanceTransferClearanceController,
     HealthController,
     MetricsController,
   ],
@@ -136,6 +141,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
     ScheduleService,
     RequestService,
     MaintenanceFactService,
+    TransferClearanceService,
     RepairOrderService,
     DueAnnouncerService,
     DueScanner,

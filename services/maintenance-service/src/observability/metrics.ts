@@ -41,6 +41,22 @@ export const duplicateRequestsTotal = new Counter({
   registers: [registry],
 });
 
+/**
+ * Open work found under the previous owner when a transfer is consumed
+ * (ADR-062 § 5, docs/24 Q-68).
+ *
+ * A transfer is refused while the owner has open work, so this should stay at
+ * zero. Anything else is work from before that rule, or one of the bounded
+ * windows ADR-062 names, and it waits for a person: the work is neither
+ * cancelled nor moved.
+ */
+export const transferOpenWorkTotal = new Counter({
+  name: 'rasta_maintenance_transfer_open_work_total',
+  help: 'Open maintenance requests left with the previous owner of a transferred machine',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
 export const requestsCompletedTotal = new Counter({
   name: 'rasta_maintenance_requests_completed_total',
   help: 'Maintenance requests completed',

@@ -21,6 +21,13 @@ import {
   currentOwnerPolicyFilter,
   type TransferInsurancePolicy,
 } from '../insurance/ownership';
+import {
+  TRANSFER_CLEARANCE,
+  UNCONFIGURED_TRANSFER_CLEARANCE,
+  WORK_OWNERS,
+  type TransferClearance,
+  type WorkOwner,
+} from './transfer-clearance';
 import type {
   ActivateAssetDto,
   AssetDossierView,
@@ -51,6 +58,11 @@ export class AssetService {
     @Optional()
     @Inject(TRANSFER_INSURANCE_POLICY)
     private readonly transferInsurance: TransferInsurancePolicy = DEFAULT_TRANSFER_INSURANCE_POLICY,
+    // Optional for the same reason. Without one, every transfer is refused
+    // (ADR-062): a missing dependency never reads as "nothing is open".
+    @Optional()
+    @Inject(TRANSFER_CLEARANCE)
+    private readonly clearance: TransferClearance = UNCONFIGURED_TRANSFER_CLEARANCE,
   ) {}
 
   // =========================================================================
@@ -556,7 +568,8 @@ export class AssetService {
     // An open assignment or repair belongs to the current owner and would stay
     // behind with them (audit L3-03). Refused rather than closed from here:
     // fleet-service and maintenance-service own that work, and this service
-    // has no business ending it on their behalf.
+    // has no business ending it on their behalf. This check is the cheap,
+    // readable one; the owners are asked below (ADR-062).
     if (OPEN_ACTIVITY_STATUSES.includes(asset.status as AssetStatus)) {
       throw RastaError.businessRule(
         `The asset is ${asset.status}. End the assignment or repair before transferring it.`,
@@ -579,6 +592,94 @@ export class AssetService {
     const actor = getContext().userId ?? 'SYSTEM';
     const from = asset.organizationId;
 
+    // Read before the first question is sent, so the time counted here is
+    // never shorter than a fence's real age: no clock needs to agree with
+    // another service's (ADR-062 § 3).
+    const askedAt = this.clearance.now();
+    const fenced = await this.clearTransfer(id, from, transferId);
+    const deadlineMs = (this.clearance.fenceTtlSeconds * 1000) / 2;
+
+    try {
+      return await this.commitTransfer(id, asset.status, from, dto, transferId, actor, () => {
+        if (this.clearance.now() - askedAt >= deadlineMs) {
+          throw RastaError.invalidStateTransition(
+            'Asset',
+            asset.status,
+            'TRANSFERRED',
+            'The transfer took too long to confirm and was not recorded. Try again.',
+          );
+        }
+      });
+    } catch (error) {
+      await this.releaseFences(fenced, id, from, transferId);
+      throw error;
+    }
+  }
+
+  /**
+   * Asks every owner of the machine's work, at once, whether any is open, and
+   * returns the owners that fenced it (ADR-062).
+   *
+   * Every owner must answer clear. On any other outcome the fences already
+   * placed are released and the transfer is refused: open work as a business
+   * rule naming the owner, anything unanswerable as the owner's error.
+   */
+  private async clearTransfer(
+    assetId: string,
+    organizationId: string,
+    transferId: string,
+  ): Promise<WorkOwner[]> {
+    const outcomes = await Promise.allSettled(
+      WORK_OWNERS.map((owner) => this.clearance.ask(owner, organizationId, assetId, transferId)),
+    );
+
+    const fenced = WORK_OWNERS.filter((_, index) => {
+      const outcome = outcomes[index]!;
+      return outcome.status === 'fulfilled' && outcome.value.clear;
+    });
+    if (fenced.length === WORK_OWNERS.length) return fenced;
+
+    await this.releaseFences(fenced, assetId, organizationId, transferId);
+
+    // Open work first: it is the refusal a person can act on.
+    for (const [index, outcome] of outcomes.entries()) {
+      if (outcome.status === 'fulfilled' && !outcome.value.clear) {
+        throw RastaError.businessRule(
+          'The asset still has open work with its current owner. End the assignment or repair before transferring it.',
+          {
+            rule: 'OPEN_OPERATIONAL_ACTIVITY',
+            owner: WORK_OWNERS[index],
+            ...outcome.value.open,
+          },
+        );
+      }
+    }
+    const failure = outcomes.find((outcome) => outcome.status === 'rejected');
+    throw failure?.reason ?? RastaError.internal('Transfer clearance returned no answer');
+  }
+
+  private async releaseFences(
+    owners: readonly WorkOwner[],
+    assetId: string,
+    organizationId: string,
+    transferId: string,
+  ): Promise<void> {
+    await Promise.all(
+      owners.map((owner) => this.clearance.release(owner, organizationId, assetId, transferId)),
+    );
+  }
+
+  /** The ownership change itself, once every owner of the machine's work has cleared it. */
+  private async commitTransfer(
+    id: string,
+    status: string,
+    from: string,
+    dto: TransferAssetDto,
+    transferId: string,
+    actor: string,
+    assertWithinDeadline: () => void,
+  ): Promise<AssetView> {
+
     // A transfer is the one operation that legitimately writes rows belonging
     // to another tenant — the transfer record, the asset and its whole history
     // all land in the receiving organization. The tenant guard refuses that by
@@ -600,7 +701,7 @@ export class AssetService {
           const row = await this.compareAndSet(
             tx,
             id,
-            asset.status,
+            status,
             {
               organizationId: dto.toOrganizationId,
               // Ownership changed, so the new owner must re-commission it with
@@ -620,6 +721,11 @@ export class AssetService {
           // review #6). A policy write takes the same lock, so it lands
           // before this instant under the old owner, or is refused.
           const transferredAt = await this.repository.databaseClock(tx);
+
+          // The fences hold for their TTL. Past half of it, measured from
+          // before they were asked for, the transfer is not recorded: the
+          // owners may already be letting new work start (ADR-062 § 3).
+          assertWithinDeadline();
 
           // An open claim is being decided under the current owner's authority.
           // Moving it would hand that decision to the new owner. Checked under

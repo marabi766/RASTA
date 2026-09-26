@@ -575,6 +575,32 @@ model AssetRef {
   @@map("asset_ref")
 }
 
+/// A transfer in progress on one machine (ADR-062).
+///
+/// Written by the internal transfer-clearance endpoint when asset-service asks
+/// whether the machine has open work, in the same transaction and under the
+/// same per-asset lock that found none. While it is live, no new work can
+/// start on the machine, so the answer "no open work" stays true until the
+/// transfer commits. The asset-sync consumer removes it when
+/// `ASSET_TRANSFERRED` moves the replica to the new owner; asset-service
+/// removes it when the transfer does not happen; the expiry removes it if
+/// asset-service never comes back.
+///
+/// Keyed by the machine, not scoped by tenant: the check that reads it must
+/// see it whichever organization's work is asking. It holds no data beyond
+/// the ids. Every read and write is raw SQL against the database's own clock.
+model AssetTransferFence {
+  assetId        String   @id @map("asset_id")
+  /// The organization that asked, i.e. the owner at the moment of the fence.
+  organizationId String   @map("organization_id")
+  /// The transfer's id in asset-service (`TRF_…`).
+  fenceId        String   @map("fence_id")
+  expiresAt      DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt      DateTime @map("created_at") @db.Timestamptz(3)
+
+  @@map("asset_transfer_fence")
+}
+
 /// How much each machine has run, reduced from fleet-service's usage stream.
 ///
 /// This is **not** a copy of `UsageRecord`. fleet-service owns those rows and

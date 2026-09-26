@@ -21,6 +21,7 @@ import {
   OPEN_REQUEST_STATUSES,
 } from './lifecycle';
 import { assessDue } from './due';
+import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { toRule } from './schedule.service';
 import {
   toRepairOrderView,
@@ -155,6 +156,19 @@ export class RequestService {
 
     try {
       const created = await this.repository.transaction(async (tx) => {
+        // The machine again, under the lock a transfer's clearance takes
+        // exclusively (ADR-062). Either the clearance committed first and its
+        // fence refuses this, or this commits first and the clearance counts
+        // it. The consumer that moves the replica on a transfer takes it too.
+        await this.repository.lockAssetForWork(tx, dto.assetId, 'SHARED');
+        await this.assertAssetMaintainable(dto.assetId, tx);
+        if (await this.repository.hasLiveTransferFence(tx, dto.assetId)) {
+          throw RastaError.businessRule(
+            'This machine is being transferred to another organization; raise the work after the transfer.',
+            { rule: 'ASSET_TRANSFER_IN_PROGRESS', assetId: dto.assetId, owner: 'asset-service' },
+          );
+        }
+
         const request = await tx.maintenanceRequest.create({
           data: {
             id,
@@ -444,8 +458,11 @@ export class RequestService {
    * a breakdown fail whenever asset-service is down, which is the wrong
    * failure mode for a safety report (docs/03 § 3.6).
    */
-  private async assertAssetMaintainable(assetId: string): Promise<void> {
-    const asset = await this.repository.findAssetRef(assetId);
+  private async assertAssetMaintainable(
+    assetId: string,
+    tx?: ExtendedPrismaClient,
+  ): Promise<void> {
+    const asset = await this.repository.findAssetRef(assetId, tx);
 
     // Reported as absent, not as forbidden: confirming the machine exists
     // elsewhere would let a caller enumerate another organization's fleet.

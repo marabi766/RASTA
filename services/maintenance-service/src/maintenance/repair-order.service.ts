@@ -145,6 +145,8 @@ export class RepairOrderService {
       );
     }
 
+    await this.assertStillOwner(request.assetId, request.organizationId);
+
     const verdict = await this.workshops.verify({
       workshopOrganizationId: dto.workshopOrganizationId,
       organizationId: request.organizationId,
@@ -237,6 +239,8 @@ export class RepairOrderService {
     if (!request) throw RastaError.notFound('MaintenanceRequest', order.maintenanceRequestId);
 
     if (request.status === 'OPEN') assertRequestTransition(request.status, 'IN_PROGRESS');
+
+    await this.assertStillOwner(request.assetId, request.organizationId);
 
     const actor = getContext().userId ?? 'SYSTEM';
     const startedAt = dto.startedAt ? new Date(dto.startedAt) : new Date();
@@ -899,6 +903,26 @@ export class RepairOrderService {
     }
     if (!COSTABLE_REPAIR_ORDER_STATUSES.includes(locked.status as RepairOrderStatus)) {
       throw notCostable(order.id, locked.status);
+    }
+  }
+
+  /**
+   * Refuses to refer or start work for an organization that no longer owns
+   * the machine (ADR-062, docs/23 D-033).
+   *
+   * A transfer is refused while this organization has open work, so this
+   * holds only for work opened before that rule existed, or in the bounded
+   * windows ADR-062 names. Starting it would publish MAINTENANCE_STARTED
+   * under the previous owner, which asset-service can only set aside. The
+   * work itself stays as it is (docs/24 Q-68); only new steps on it stop.
+   */
+  private async assertStillOwner(assetId: string, organizationId: string): Promise<void> {
+    const asset = await this.repository.findAssetRef(assetId);
+    if (asset && asset.organizationId !== organizationId) {
+      throw RastaError.businessRule(
+        'The machine has been transferred to another organization; this work cannot go ahead.',
+        { rule: 'ASSET_OWNER_CHANGED', assetId, owner: 'asset-service' },
+      );
     }
   }
 

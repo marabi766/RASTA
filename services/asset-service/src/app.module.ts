@@ -35,6 +35,13 @@ import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { AssetRepository } from './asset/asset.repository';
 import { AssetService } from './asset/asset.service';
 import { TRANSFER_INSURANCE_POLICY, type TransferInsurancePolicy } from './insurance/ownership';
+import {
+  FLEET_SERVICE,
+  MAINTENANCE_SERVICE,
+  TRANSFER_CLEARANCE,
+  TransferClearanceClient,
+  type TransferClearance,
+} from './asset/transfer-clearance';
 import { AssetController } from './asset/asset.controller';
 import { InsuranceService } from './insurance/insurance.service';
 import { ClaimService } from './insurance/claim.service';
@@ -110,6 +117,27 @@ const CONSUMED_TOPICS = [
       useFactory: (env: AssetEnv): TransferInsurancePolicy => ({
         coveragesFollowingVehicle: env.INSURANCE_COVERAGES_FOLLOWING_VEHICLE,
       }),
+    },
+    // ADR-062: the owners of a machine's open work, asked before a transfer.
+    // Its own `InternalTokenService`, from the same secret the guard verifies
+    // with: minting and verifying are separate roles.
+    {
+      provide: TRANSFER_CLEARANCE,
+      inject: [ENV],
+      useFactory: (env: AssetEnv): TransferClearance =>
+        new TransferClearanceClient({
+          baseUrls: {
+            [FLEET_SERVICE]: env.FLEET_SERVICE_URL,
+            [MAINTENANCE_SERVICE]: env.MAINTENANCE_SERVICE_URL,
+          },
+          timeoutMs: env.ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS,
+          fenceTtlSeconds: env.ASSET_TRANSFER_FENCE_TTL_SECONDS,
+          tokens: new InternalTokenService(
+            env.INTERNAL_TOKEN_SECRET,
+            env.INTERNAL_TOKEN_ISSUER,
+            env.INTERNAL_TOKEN_TTL_SECONDS,
+          ),
+        }),
     },
     AssetService,
 

@@ -20,6 +20,7 @@ import {
   startRepairSchema,
   updateScheduleSchema,
 } from '../maintenance/dto';
+import { transferClearanceSchema } from '../maintenance/transfer-clearance';
 
 /**
  * Completes the OpenAPI document Nest builds from the decorators.
@@ -52,6 +53,7 @@ const REQUEST_BODIES: Record<string, JsonSchema> = {
   'POST /v1/repair-orders/{id}/parts': toJsonSchema(recordPartSchema),
   'POST /v1/repair-orders/{id}/labour': toJsonSchema(recordLabourSchema),
   'POST /v1/repair-orders/{id}/costs': toJsonSchema(recordCostSchema),
+  'POST /v1/internal/assets/{assetId}/transfer-clearance': toJsonSchema(transferClearanceSchema),
 };
 
 /** Query schemas, so filtering and pagination are described, not implied. */
@@ -96,6 +98,10 @@ const ERRORS: Record<string, readonly number[]> = {
   'POST /v1/repair-orders/{id}/costs': WRITE,
   // A tenant claim the token does not carry is a 403; a record outside it, 404.
   'GET /v1/internal/maintenance-requests/{id}': READ_ONE,
+  // ADR-062: 404 for a machine the replica places elsewhere, 409 while another
+  // transfer holds the fence.
+  'POST /v1/internal/assets/{assetId}/transfer-clearance': [...COMMON, 400, 404, 409],
+  'DELETE /v1/internal/assets/{assetId}/transfer-clearance/{fenceId}': [...COMMON, 400],
 };
 
 const STATUS_TEXT: Record<number, string> = {

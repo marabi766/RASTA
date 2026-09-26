@@ -296,6 +296,16 @@ export class AssignmentService {
       throw RastaError.notFound('Asset', assetId);
     }
 
+    // A transfer asked whether the machine is free and was told yes (ADR-062).
+    // Under `lockAssetRef` this is exact: the fence and this insert cannot
+    // both succeed.
+    if (await this.repository.hasLiveTransferFence(tx ?? this.repository.client, assetId)) {
+      throw RastaError.businessRule(
+        'This machine is being transferred to another organization and cannot be assigned.',
+        { rule: 'ASSET_TRANSFER_IN_PROGRESS', assetId, owner: 'asset-service' },
+      );
+    }
+
     // Independent causes (L3-02): a machine can be blocked on inspection,
     // insurance, or both, and each ends independently. Insurance is decided
     // now, against the recorded policy windows, not read from a stored flag

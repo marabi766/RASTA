@@ -298,6 +298,77 @@ export class FleetRepository {
     );
   }
 
+  // -------------------------------------------------------------------------
+  // Transfer fence (ADR-062)
+  //
+  // Raw SQL, all of it: the expiry is compared with the database's clock, the
+  // same one that set it, and never with this process's. The table is keyed by
+  // the asset, not scoped by tenant, because the check that reads it must see
+  // a fence whichever organization's work is asking. Every caller holds
+  // `lockAssetRef` first.
+  // -------------------------------------------------------------------------
+
+  /** Active assignments on one machine in the caller's organization. Scoped. */
+  async countActiveAssignmentsForAsset(tx: ExtendedPrismaClient, assetId: string) {
+    return tx.assignment.count({ where: { assetId, endedAt: null } });
+  }
+
+  /**
+   * Places the fence, or renews it for the same transfer. Returns its expiry,
+   * or `null` when another transfer's fence is still live.
+   */
+  async placeTransferFence(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    organizationId: string,
+    fenceId: string,
+    ttlSeconds: number,
+  ): Promise<Date | null> {
+    const rows = await tx.$queryRaw<{ expires_at: Date }[]>`
+      INSERT INTO asset_transfer_fence (asset_id, organization_id, fence_id, expires_at, created_at)
+      VALUES (${assetId}, ${organizationId}, ${fenceId},
+              now() + make_interval(secs => ${ttlSeconds}::int), now())
+      ON CONFLICT (asset_id) DO UPDATE
+        SET organization_id = EXCLUDED.organization_id,
+            fence_id = EXCLUDED.fence_id,
+            expires_at = EXCLUDED.expires_at,
+            created_at = EXCLUDED.created_at
+        WHERE asset_transfer_fence.expires_at <= now()
+           OR (asset_transfer_fence.fence_id = EXCLUDED.fence_id
+               AND asset_transfer_fence.organization_id = EXCLUDED.organization_id)
+      RETURNING expires_at`;
+    return rows[0]?.expires_at ?? null;
+  }
+
+  /** Whether a live fence stands on the machine. */
+  async hasLiveTransferFence(tx: ExtendedPrismaClient, assetId: string): Promise<boolean> {
+    const rows = await tx.$queryRaw<{ fence_id: string }[]>`
+      SELECT fence_id FROM asset_transfer_fence WHERE asset_id = ${assetId} AND expires_at > now()`;
+    return rows.length > 0;
+  }
+
+  /** Lifts one transfer's fence. Only the organization that placed it can. */
+  async releaseTransferFence(
+    assetId: string,
+    organizationId: string,
+    fenceId: string,
+  ): Promise<number> {
+    return this.client.$executeRaw`
+      DELETE FROM asset_transfer_fence
+      WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}`;
+  }
+
+  /** The transfer landed: whatever the previous owner fenced is moot. */
+  async dropTransferFences(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    organizationId: string,
+  ): Promise<number> {
+    return tx.$executeRaw`
+      DELETE FROM asset_transfer_fence
+      WHERE asset_id = ${assetId} AND organization_id = ${organizationId}`;
+  }
+
   /**
    * Any existing record for this asset whose period overlaps the given one.
    *

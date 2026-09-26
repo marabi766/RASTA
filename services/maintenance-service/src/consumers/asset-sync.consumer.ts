@@ -4,6 +4,8 @@ import type { EventConsumer, EventHandler } from '@rasta/nest-common';
 import { MaintenanceRepository } from '../maintenance/maintenance.repository';
 import { CONSUMED_EVENTS, assetSourceSchema, type ConsumedEventName } from '../maintenance/events';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+import { SERVICE_NAME } from '../config/env';
+import { transferOpenWorkTotal } from '../observability/metrics';
 
 /**
  * Keeps maintenance's picture of the machines accurate.
@@ -161,6 +163,14 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
+      const transfer = envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED;
+      if (transfer) {
+        // Exclusive, against the shared lock a new request takes (ADR-062).
+        // Without it, a request could read the owner before this commits and
+        // the fence after, and pass both.
+        await this.repository.lockAssetForWork(tx, assetId, 'EXCLUSIVE');
+      }
+
       await this.repository.upsertAssetRef(tx, {
         // The patch first, then the resolved values — never the other way
         // round. A patch key present but undefined (an ASSET_CREATED whose
@@ -176,7 +186,43 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         organizationId: tenant,
         sourceEvent: envelope.eventName,
       });
+
+      const previousOwner = str(payload.fromOrganizationId);
+      if (transfer && previousOwner) {
+        await this.settleTransfer(tx, assetId, previousOwner);
+      }
     });
+  }
+
+  /**
+   * The previous owner's side of a transfer that has landed (ADR-062).
+   *
+   * Its fence goes: the replica now names the new owner, which refuses the
+   * previous one from here on, and a fence left in place would refuse the new
+   * owner until it expired.
+   *
+   * Its open work should not exist, because the transfer was cleared against
+   * it. If it does, it is counted and logged, and it stays exactly where it
+   * is. What should happen to it is docs/24 Q-68; cancelling it or handing it
+   * to the new owner would each be a decision in someone's name.
+   */
+  private async settleTransfer(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    previousOwner: string,
+  ): Promise<void> {
+    await this.repository.dropTransferFences(tx, assetId, previousOwner);
+
+    const open = await this.repository.countOpenWork(tx, assetId, previousOwner);
+    if (open.openRequests > 0 || open.openRepairOrders > 0) {
+      transferOpenWorkTotal.inc({ service: SERVICE_NAME }, open.openRequests);
+      // Identifiers and counts only; no title or workshop.
+      this.logger.warn(
+        `${assetId} was transferred with open maintenance work left under its previous owner ` +
+          `(${open.openRequests} request(s), ${open.openRepairOrders} repair order(s)); ` +
+          'kept as is pending docs/24 Q-68',
+      );
+    }
   }
 }
 

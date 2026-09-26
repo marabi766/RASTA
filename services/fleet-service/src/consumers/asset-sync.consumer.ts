@@ -386,6 +386,14 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
 
       if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
         await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
+        // The fence the previous owner placed to clear this transfer
+        // (ADR-062). The replica now names the new owner, which refuses the
+        // previous one from here on; left in place, the fence would refuse the
+        // new owner until it expired.
+        const previousOwner = payload.fromOrganizationId;
+        if (typeof previousOwner === 'string' && previousOwner.length > 0) {
+          await this.repository.dropTransferFences(tx, assetId, previousOwner);
+        }
       }
     });
 
