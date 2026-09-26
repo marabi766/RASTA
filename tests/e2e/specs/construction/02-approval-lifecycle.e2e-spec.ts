@@ -52,7 +52,8 @@ interface ApprovalBody {
   stepOrder: number;
   authorityOrganizationId: string;
   authorityRole: string;
-  project: { id: string; status: string };
+  projectId: string;
+  project: { status: string };
 }
 
 /** Creates and activates a sample policy with one step naming the union administrator. */
@@ -217,9 +218,12 @@ test.describe.serial('the construction project lifecycle', () => {
       body: { expectedVersion: step.version, decision: 'GRANT', decisionNumber: 'E2E-1' },
     });
     expect(granted.status, JSON.stringify(granted.body)).toBe(200);
+    // The approval names its project at the top level; `project` is the brief
+    // the authority decides on (title, estimate, status).
     expect(granted.body).toMatchObject({
       status: 'GRANTED',
-      project: { id: projectId, status: 'APPROVED' },
+      projectId,
+      project: { status: 'APPROVED' },
     });
   });
 
