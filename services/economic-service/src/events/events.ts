@@ -44,6 +44,7 @@ export const ECONOMIC_EVENTS = {
   JOURNAL_POSTED: 'JOURNAL_POSTED',
   COMMISSION_RULE_CHANGED: 'COMMISSION_RULE_CHANGED',
   REWARD_RULE_CHANGED: 'REWARD_RULE_CHANGED',
+  TRANSACTION_STATUS_CHANGED: 'TRANSACTION_STATUS_CHANGED',
 } as const;
 
 export type EconomicEventName = (typeof ECONOMIC_EVENTS)[keyof typeof ECONOMIC_EVENTS];
@@ -238,6 +239,68 @@ export const rewardLevelChangedPayload = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Transaction lifecycle
+// ---------------------------------------------------------------------------
+
+/** Every status a transaction can hold (the Prisma enum, restated for the wire). */
+const transactionStatus = z.enum([
+  'CREATED',
+  'HELD',
+  'PENDING_SETTLEMENT',
+  'DISPUTED',
+  'SETTLED',
+  'REFUNDED',
+  'CANCELLED',
+  'FAILED',
+]);
+
+/**
+ * A transaction was recorded, or moved from one status to another, by whom
+ * and when (AGENTS.md S-06; economic batch 2, item b).
+ *
+ * The audit record of every lifecycle step that has no money event of its
+ * own: an obligation recorded with or without a hold, a receipt confirmed,
+ * a cancellation, a dispute and its resolution, a refund. Settlement keeps
+ * `SETTLEMENT_COMPLETED`, which already says who and when. audit-service
+ * keeps it (the economic topic is projected into the trail as a whole).
+ *
+ * `action` is the state-machine event that caused the move, or `CREATE` /
+ * `RECORD_AUTHORISED_OBLIGATION` for a transaction that did not exist
+ * before, in which case `fromStatus` is null. No free-text reason travels:
+ * a dispute reason is whatever a person typed, and this log is retained
+ * where every service can read it (S-09). It stays on the row, under
+ * authorization.
+ */
+export const transactionStatusChangedPayload = z
+  .object({
+    transactionId: z.string(),
+    organizationId: z.string(),
+    counterpartyOrganizationId: z.string().nullable(),
+    transactionType: z.string(),
+    action: z.enum([
+      'CREATE',
+      'RECORD_AUTHORISED_OBLIGATION',
+      'AUTHORISE_SETTLEMENT',
+      'DISPUTE',
+      'RESOLVE_DISPUTE',
+      'CANCEL',
+      'REFUND',
+    ]),
+    fromStatus: transactionStatus.nullable(),
+    toStatus: transactionStatus,
+    grossAmountMinor: amountMinor,
+    currency,
+    changedBy: z.string(),
+    changedAt: z.string(),
+  })
+  .refine(
+    (change) =>
+      (change.fromStatus === null) ===
+      (change.action === 'CREATE' || change.action === 'RECORD_AUTHORISED_OBLIGATION'),
+    'fromStatus is null exactly when the transaction was created',
+  );
+
+// ---------------------------------------------------------------------------
 // Settlement and ledger
 // ---------------------------------------------------------------------------
 
@@ -387,6 +450,7 @@ export const ECONOMIC_EVENT_SCHEMAS = {
   [ECONOMIC_EVENTS.JOURNAL_POSTED]: journalPostedPayload,
   [ECONOMIC_EVENTS.COMMISSION_RULE_CHANGED]: commissionRuleChangedPayload,
   [ECONOMIC_EVENTS.REWARD_RULE_CHANGED]: rewardRuleChangedPayload,
+  [ECONOMIC_EVENTS.TRANSACTION_STATUS_CHANGED]: transactionStatusChangedPayload,
 } as const satisfies Record<EconomicEventName, z.ZodTypeAny>;
 
 /**

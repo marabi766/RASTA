@@ -19,7 +19,7 @@ import { CONSUMED_EVENTS, DEFERRED_CONSUMPTION, maintenanceApprovedSchema } from
 const EVENT_NAMES = Object.values(ECONOMIC_EVENTS) as EconomicEventName[];
 
 describe('the catalogue', () => {
-  it('publishes exactly the thirteen events docs/07 § 7.5 lists', () => {
+  it('publishes exactly the fourteen events docs/07 § 7.5 lists', () => {
     expect(EVENT_NAMES.sort()).toEqual(
       [
         'COMMISSION_APPLIED',
@@ -34,9 +34,47 @@ describe('the catalogue', () => {
         'REWARD_LEVEL_CHANGED',
         'REWARD_RULE_CHANGED',
         'SETTLEMENT_COMPLETED',
+        'TRANSACTION_STATUS_CHANGED',
         'WALLET_OPENED',
       ].sort(),
     );
+  });
+
+  it('refuses a status change whose fromStatus disagrees with its action', () => {
+    const change = {
+      transactionId: 'TXN_1',
+      organizationId: 'ORG-A',
+      counterpartyOrganizationId: null,
+      transactionType: 'MARKETPLACE_ORDER',
+      grossAmountMinor: '1000',
+      currency: 'IRR',
+      changedBy: 'USR-1',
+      changedAt: '2026-09-26T00:00:00.000Z',
+    };
+    expect(() =>
+      validateEconomicPayload(ECONOMIC_EVENTS.TRANSACTION_STATUS_CHANGED, {
+        ...change,
+        action: 'CREATE',
+        fromStatus: null,
+        toStatus: 'CREATED',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateEconomicPayload(ECONOMIC_EVENTS.TRANSACTION_STATUS_CHANGED, {
+        ...change,
+        action: 'CANCEL',
+        fromStatus: null,
+        toStatus: 'CANCELLED',
+      }),
+    ).toThrow(/fromStatus is null exactly when/);
+    expect(() =>
+      validateEconomicPayload(ECONOMIC_EVENTS.TRANSACTION_STATUS_CHANGED, {
+        ...change,
+        action: 'CREATE',
+        fromStatus: 'CREATED',
+        toStatus: 'HELD',
+      }),
+    ).toThrow(/fromStatus is null exactly when/);
   });
 
   it('gives every event a schema', () => {
