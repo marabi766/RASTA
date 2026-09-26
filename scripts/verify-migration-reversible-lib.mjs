@@ -774,6 +774,7 @@ export const EXPECTED = {
       'ck_score_snapshot_text_not_blank',
       'ck_score_component_absent_is_null',
       'ck_score_component_ranges',
+      'ck_score_component_present_has_samples',
     ],
   },
   /*

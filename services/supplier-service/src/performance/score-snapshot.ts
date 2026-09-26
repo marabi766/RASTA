@@ -126,6 +126,9 @@ export function scoreSnapshotProblems(input: ScoreSnapshotInput): ErrorDetail[] 
     }
     if (present) {
       availableBp += row.configuredWeightBp;
+      if (row.sampleCount <= 0) {
+        problem(`${path}.sampleCount`, 'a component with a score counted at least one sample');
+      }
       if (!isIntIn(row.componentScoreCentis, 0, SCORE_CENTIS_MAX)) {
         problem(`${path}.componentScoreCentis`, `must be a whole number in 0..${SCORE_CENTIS_MAX}`);
       }

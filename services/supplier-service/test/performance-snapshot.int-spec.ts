@@ -454,6 +454,38 @@ describe('score snapshots (ADR-052 step 4)', () => {
       );
     });
 
+    it('refuses a window that is not the version’s window_days long (ADR-052 § 9)', async () => {
+      const input = published(newOrganizationId());
+      const oneDayShort = new Date(input.windowEnd.getTime() - 24 * 60 * 60 * 1000);
+      const { statements } = snapshotSql(input, { window_end: lit(oneDayShort.toISOString()) });
+
+      await expect(inOneTransaction(owner, statements)).rejects.toThrow(
+        /which is not the 180 days of formula version/,
+      );
+    });
+
+    it('refuses a present component that counted no sample', async () => {
+      const input = published(newOrganizationId());
+      input.components = input.components.map((row) =>
+        row.component === 'ON_TIME' ? { ...row, sampleCount: 0 } : row,
+      );
+
+      await expect(inOneTransaction(owner, snapshotSql(input).statements)).rejects.toThrow(
+        /ck_score_component_present_has_samples/,
+      );
+    });
+
+    it('accepts an absent component that counted facts it had to exclude', async () => {
+      const organizationId = newOrganizationId();
+      const input = published(organizationId);
+      input.components = input.components.map((row) =>
+        row.component === 'QUALITY' ? { ...row, sampleCount: 3 } : row,
+      );
+
+      await insert(input);
+      expect(await snapshotCount(organizationId)).toBe(1);
+    });
+
     it('refuses a missing component row', async () => {
       const input = published(newOrganizationId());
       input.components = input.components.filter((row) => row.component !== 'QUALITY');

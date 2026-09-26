@@ -23,6 +23,8 @@
 --     formula version, INSUFFICIENT_COVERAGE at or above the coverage
 --     threshold, INSUFFICIENT_DATA at or above the minimum sample;
 --   * a snapshot of a DRAFT version, whose weights could still change under it;
+--   * a window that is not exactly its version's `window_days` long, and a
+--     present component that counted no sample;
 --   * provenance that does not add up, at commit: a component row for every
 --     weighted component and no other, its configured weight equal to the
 --     version's, `coverage_bp` equal to the configured weight of the available
@@ -33,6 +35,15 @@
 --
 -- What it does not decide: which status wins when both thresholds fail, and
 -- how facts become a component score. Those are the calculation (step 6).
+--
+-- ## What these checks do NOT prove (Codex review of #120, round 2)
+--
+-- They are structural. They do not recompute anything, so they cannot tell
+-- that `score_centis` is the weighted sum of the component scores, that a
+-- component score follows from its facts, or that the cited source events are
+-- exactly the ones the sample counts were taken from. That consistency is the
+-- step-6 engine's to guarantee, and it is not claimed here: a snapshot this
+-- table accepts is well-formed, not proven correct.
 -- =============================================================================
 
 SET LOCAL lock_timeout = '5s';
@@ -133,6 +144,13 @@ CREATE TABLE "performance_score_component" (
 -- "not measured" (ADR-052 § 5).
 ALTER TABLE "performance_score_component" ADD CONSTRAINT "ck_score_component_absent_is_null"
   CHECK (num_nonnulls("effective_weight_bp", "component_score_centis") IN (0, 2));
+
+-- A component with a score counted something (Codex review of #120, round 2):
+-- a present component resting on zero samples is a number with nothing
+-- under it. The converse is allowed — an absent component may have counted
+-- facts that were all excluded from its denominator (UNDETERMINED).
+ALTER TABLE "performance_score_component" ADD CONSTRAINT "ck_score_component_present_has_samples"
+  CHECK ("effective_weight_bp" IS NULL OR "sample_count" > 0);
 
 ALTER TABLE "performance_score_component" ADD CONSTRAINT "ck_score_component_ranges"
   CHECK (
@@ -244,12 +262,19 @@ DECLARE
   wrong_effective INTEGER;
   available_count INTEGER;
 BEGIN
-  SELECT "status", "min_sample_count", "min_coverage_bp" INTO version
+  SELECT "status", "window_days", "min_sample_count", "min_coverage_bp" INTO version
     FROM "performance_formula_version" WHERE "id" = NEW."formula_version_id";
 
   IF version."status" = 'DRAFT' THEN
     RAISE EXCEPTION 'snapshot % names DRAFT formula version %; a draft is never scored against',
       NEW."id", NEW."formula_version"
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- The window is the version's (ADR-052 § 9): exactly `window_days` long.
+  IF NEW."window_end" <> NEW."window_start" + make_interval(days => version."window_days") THEN
+    RAISE EXCEPTION 'snapshot % covers [%, %), which is not the % days of formula version %',
+      NEW."id", NEW."window_start", NEW."window_end", version."window_days", NEW."formula_version"
       USING ERRCODE = 'check_violation';
   END IF;
 

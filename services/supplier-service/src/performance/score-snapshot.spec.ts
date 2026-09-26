@@ -193,6 +193,24 @@ describe('absent is NULL, never 0 (ADR-052 § 5)', () => {
   });
 });
 
+describe('a present component counted something', () => {
+  it('refuses a score resting on zero samples', () => {
+    const components = PUBLISHED.components.map((row, i) =>
+      i === 1 ? { ...row, sampleCount: 0 } : row,
+    );
+
+    expect(paths({ ...PUBLISHED, components })).toEqual(['components[1].sampleCount']);
+  });
+
+  it('allows an absent component to have counted facts it excluded', () => {
+    const components = PUBLISHED.components.map((row, i) =>
+      i === 0 ? { ...row, sampleCount: 2 } : row,
+    );
+
+    expect(paths({ ...PUBLISHED, components })).toEqual([]);
+  });
+});
+
 describe('shape', () => {
   it('refuses an empty window', () => {
     expect(paths({ ...PUBLISHED, windowEnd: PUBLISHED.windowStart })).toEqual(['windowStart']);
