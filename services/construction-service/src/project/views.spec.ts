@@ -20,6 +20,7 @@ const PROJECT: Project = {
   createdCorrelationId: 'corr',
   updatedAt: AT,
   updatedBy: 'USR_1',
+  approvalRound: 0,
   version: 3,
 };
 

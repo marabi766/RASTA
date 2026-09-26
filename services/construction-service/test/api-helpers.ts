@@ -13,7 +13,8 @@ import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
-import { databaseUrl } from './helpers';
+import { FakeHierarchy, databaseUrl } from './helpers';
+import { OrganizationDirectory } from '../src/organization/organization-directory';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule` — the harness
@@ -31,6 +32,8 @@ export interface ApiHarness {
   app: INestApplication;
   prisma: PrismaService;
   publisher: InMemoryEventPublisher;
+  /** organization-service's hierarchy, as this suite sees it (Q-70 (7)). */
+  hierarchy: FakeHierarchy;
   close(): Promise<void>;
 }
 
@@ -162,12 +165,17 @@ export async function startApi(): Promise<ApiHarness> {
   applyEnvironment();
 
   const publisher = new InMemoryEventPublisher();
+  const hierarchy = new FakeHierarchy();
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(KafkaEventPublisher)
     .useValue(publisher)
     .overrideProvider(OutboxRelay)
     .useValue(inertRelay)
+    // The HTTP client to organization-service is proven against its contract
+    // in organization-directory.int-spec.ts; here the hierarchy is given.
+    .overrideProvider(OrganizationDirectory)
+    .useValue(hierarchy)
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
       factory: (): AuthGuardOptions => ({
@@ -208,6 +216,7 @@ export async function startApi(): Promise<ApiHarness> {
     app,
     prisma: moduleRef.get(PrismaService),
     publisher,
+    hierarchy,
     close: async () => {
       await app.close();
     },

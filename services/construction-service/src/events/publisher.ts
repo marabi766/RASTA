@@ -43,7 +43,7 @@ export class EventPublisher {
     tx: ExtendedPrismaClient,
     input: {
       eventName: N;
-      /** The project the event is about (`routing.ts`). */
+      /** What the event is about: the project, or the policy for policy events (`routing.ts`). */
       aggregateId: string;
       organizationId: string;
       payload: unknown;

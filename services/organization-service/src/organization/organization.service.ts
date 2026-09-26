@@ -197,6 +197,27 @@ export class OrganizationService {
     };
   }
 
+  /**
+   * Whether `id` is the calling service's organization or beneath it — and
+   * nothing more (Q-70 (7)).
+   *
+   * Only for a service caller. The answer is `{ id }` or 404: no name, no
+   * record, no location, so the caller learns less than a member of its own
+   * organization could already read. The organization comes from the signed
+   * token alone; without one, the answer is 404 (fail closed). One statement
+   * answers both "exists" and "is within", so the two cannot disagree.
+   */
+  async confirmWithinCaller(id: string): Promise<{ id: string }> {
+    const { authType, organizationId } = getContext();
+    if (authType !== 'SERVICE' || !organizationId) throw RastaError.notFound('Organization', id);
+
+    const within = await this.repository.readSnapshot((db) =>
+      this.repository.isAncestorOf(organizationId, id, db),
+    );
+    if (!within) throw RastaError.notFound('Organization', id);
+    return { id };
+  }
+
   async list(query: ListOrganizationsQuery) {
     const viewer = await this.visibleRoot();
     const result = await this.repository.list(query, viewer);

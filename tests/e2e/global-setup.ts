@@ -141,6 +141,21 @@ export default async function globalSetup(): Promise<void> {
       120_000,
     );
 
+    // ---- organization-service -------------------------------------------------
+    // construction-service asks it whether an organization is within a
+    // policy author's union (Q-70 (7)); without it every union write would be
+    // refused (fail closed) and the approval scenario would fail far from here.
+    await waitFor(
+      `organization-service to be ready at ${config.organizationUrl}/health/ready`,
+      async () => {
+        const response = await context.get(`${config.organizationUrl}/health/ready`, {
+          failOnStatusCode: false,
+        });
+        return response.status() === 200;
+      },
+      120_000,
+    );
+
     // ---- Keycloak -----------------------------------------------------------
     await waitFor(
       `Keycloak realm ${config.realm} to be reachable`,

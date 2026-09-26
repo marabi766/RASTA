@@ -3,6 +3,7 @@ import { PLATFORM_ROLES } from '@rasta/nest-common';
 import {
   authEnvSchema,
   baseEnvSchema,
+  booleanEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
@@ -74,8 +75,38 @@ function roleList(name: string, options: { min: number }) {
  *                                       means only those values. The platform
  *                                       ships no list of its own.
  *
- * `SYSTEM_ADMIN` is always accepted, as everywhere on the platform, and never
- * needs to be listed.
+ *   CONSTRUCTION_POLICY_FOUR_EYES       PROVISIONAL, pending the owner (Q-70):
+ *                                       whether this may be switched off is
+ *                                       still open. Default `true`: the
+ *                                       SYSTEM_ADMIN who approves a policy
+ *                                       differs from its author and submitter.
+ *                                       `false` lets a SYSTEM_ADMIN approve its
+ *                                       own policy only — never a union's —
+ *                                       and logs a WARN at startup. Who writes
+ *                                       a policy is not configurable: the owner
+ *                                       decided that (Q-70 (7)).
+ *   ORGANIZATION_SERVICE_URL            Where the union hierarchy is confirmed.
+ *   CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS
+ *                                       How long that confirmation may take;
+ *                                       no answer in time refuses (504).
+ *   CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS
+ *                                       Q-68. Submitted needs a project must
+ *                                       have before it may request approval.
+ *   CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE
+ *                                       Q-68. Whether an estimate is required
+ *                                       before requesting approval.
+ *   CONSTRUCTION_START_REQUIRES_CONTRACT
+ *                                       Q-71. `true` refuses to start any
+ *                                       project until the contract boundary
+ *                                       (CON-003) exists.
+ *   CONSTRUCTION_PROGRESS_ALLOW_DECREASE
+ *                                       Q-72. Whether a submitted progress
+ *                                       report may report less than the last.
+ *
+ * `SYSTEM_ADMIN` is always accepted for project and policy commands, as
+ * everywhere on the platform, and never needs to be listed. It is **not**
+ * accepted as an approval authority: only the (organization, role) a policy
+ * names decides (ADR-023).
  *
  * Nothing here names an approval authority, an approval threshold or a legal
  * procedure. Those are rows in `approval_policy` (PR 2, ADR-063), never
@@ -130,6 +161,30 @@ export const constructionEnvSchema = baseEnvSchema
           ),
         ),
       ),
+
+    /**
+     * Q-70 (7), decided 2026-09-26: a SYSTEM_ADMIN approving a policy must not
+     * be the one who wrote or submitted it. `false` only where the platform
+     * has a single administrator — a choice the owner records.
+     */
+    CONSTRUCTION_POLICY_FOUR_EYES: booleanEnv(true),
+
+    /**
+     * Where organization-service answers "is this organization within the
+     * union?" (Q-70 (7)). Anything but a 200 or a 404 refuses the policy write.
+     */
+    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(30_000)
+      .default(3000),
+
+    CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).default(1),
+    CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),
+    CONSTRUCTION_START_REQUIRES_CONTRACT: booleanEnv(false),
+    CONSTRUCTION_PROGRESS_ALLOW_DECREASE: booleanEnv(false),
 
     /** docs/06 § 6.8: 24 hours unless configured. */
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),

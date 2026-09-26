@@ -1500,8 +1500,10 @@ jobs:
           pnpm --filter @rasta/document-service run db:migrate
           pnpm --filter @rasta/audit-service run db:migrate
           pnpm --filter @rasta/construction-service run db:migrate
+          pnpm --filter @rasta/organization-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
@@ -1541,6 +1543,17 @@ jobs:
           NODE_ENV: test
           RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+
+      - name: Seed organization-service
+        # Q-70 (7): construction-service asks organization-service whether an
+        # organization is within the policy author's union. The seeded tree is
+        # used as it is — the scenario writes a union policy for the union's
+        # own organization and is refused for a dehyari outside it.
+        run: pnpm exec turbo run db:seed --filter=@rasta/organization-service
+        env:
+          NODE_ENV: test
+          RASTA_ALLOW_DEMO_SEED: 'true'
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
 
       - name: Build
         run: pnpm run build
@@ -1669,7 +1682,7 @@ jobs:
             setTimeout(() => { console.error("clamd did not answer the runner"); process.exit(1); }, 15000);
           '
 
-      - name: Start identity, economic, marketplace, document, audit and construction services and api-gateway
+      - name: Start identity, organization, economic, marketplace, document, audit and construction services and api-gateway
         # From `dist`, the same artefact the container image runs, rather than
         # from a watch-mode dev server. Started here rather than by Playwright's
         # `webServer` because several processes have to come up in order and
@@ -1779,7 +1792,16 @@ jobs:
             DATABASE_URL_AUDIT=postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit \
             node dist/main.js > /tmp/rasta-logs/audit.log 2>&1 & )
 
+          # Q-70 (7): the hierarchy construction-service confirms a union's
+          # policy against. Only construction-service's service token is
+          # admitted, on GET /v1/organizations/:id alone.
+          ( cd services/organization-service && \
+            PORT=3102 SERVICE_NAME=organization-service \
+            DATABASE_URL=postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public \
+            node dist/main.js > /tmp/rasta-logs/organization.log 2>&1 & )
+
           # CON-001: its project scenarios, and the audit record they produce.
+          # No widened roles: the union writes, the platform approves (Q-70 (7)).
           ( cd services/construction-service && \
             PORT=3110 SERVICE_NAME=construction-service \
             DATABASE_URL=postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public \
@@ -1806,24 +1828,28 @@ jobs:
               http://localhost:3115/health/ready || true)"
             construction="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3110/health/ready || true)"
+            organization="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3102/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/wallets/me || true)"
             if [ "$identity" = "200" ] && [ "$economic" = "200" ] && [ "$marketplace" = "200" ] \
                && [ "$document" = "200" ] && [ "$audit" = "200" ] \
-               && [ "$construction" = "200" ] && [ "$gateway" = "401" ]; then
+               && [ "$construction" = "200" ] && [ "$organization" = "200" ] \
+               && [ "$gateway" = "401" ]; then
               echo "stack up after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 3
           done
 
-          echo "the stack did not come up (identity=${identity}, economic=${economic}, marketplace=${marketplace}, document=${document}, audit=${audit}, construction=${construction}, gateway=${gateway})"
+          echo "the stack did not come up (identity=${identity}, economic=${economic}, marketplace=${marketplace}, document=${document}, audit=${audit}, construction=${construction}, organization=${organization}, gateway=${gateway})"
           cat /tmp/rasta-logs/identity.log
           cat /tmp/rasta-logs/economic.log
           cat /tmp/rasta-logs/marketplace.log
           cat /tmp/rasta-logs/document.log
           cat /tmp/rasta-logs/audit.log
           cat /tmp/rasta-logs/construction.log
+          cat /tmp/rasta-logs/organization.log
           cat /tmp/rasta-logs/gateway.log
           exit 1
 
@@ -1844,6 +1870,7 @@ jobs:
           E2E_AUDIT_URL: http://localhost:3115
           E2E_IDENTITY_URL: http://localhost:3101
           E2E_CONSTRUCTION_URL: http://localhost:3110
+          E2E_ORGANIZATION_URL: http://localhost:3102
           SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: '10'
           KEYCLOAK_URL: http://localhost:8080
           KEYCLOAK_REALM: rasta
@@ -1866,6 +1893,8 @@ jobs:
           tail -n 200 /tmp/rasta-logs/audit.log || true
           echo '--- construction-service ---'
           tail -n 200 /tmp/rasta-logs/construction.log || true
+          echo '--- organization-service ---'
+          tail -n 200 /tmp/rasta-logs/organization.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-logs/gateway.log || true
           echo '--- keycloak ---'

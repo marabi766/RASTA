@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { PROJECT_STATES } from '../project/project.state-machine';
+import { WORKFLOW_KEYS } from '../approval/approval.state-machine';
 
 /**
  * Events published by construction-service, on `rasta.construction.v1`.
@@ -31,9 +32,10 @@ import { PROJECT_STATES } from '../project/project.state-machine';
  *
  * ## What these payloads never claim
  *
- * Nothing here says a project was approved or may be executed. PR 1 has no
- * approval path; `PROJECT_STATUS_CHANGED` with `to = CANCELLED` is the only
- * status change it can publish.
+ * `PROJECT_STATUS_CHANGED` to `APPROVED` is published only in the transaction
+ * of the last required grant, and only a named authority's decision produces
+ * one: no policy, no applicable step, a timeout or silence never approves
+ * anything (ADR-023, Q-70, Q-73).
  */
 
 export const CONSTRUCTION_EVENTS = {
@@ -44,6 +46,24 @@ export const CONSTRUCTION_EVENTS = {
   PROJECT_NEED_UPDATED: 'PROJECT_NEED_UPDATED',
   PROJECT_NEED_SUBMITTED: 'PROJECT_NEED_SUBMITTED',
   PROJECT_NEED_WITHDRAWN: 'PROJECT_NEED_WITHDRAWN',
+  // CON-001 PR 2 — catalogue events.
+  APPROVAL_REQUESTED: 'APPROVAL_REQUESTED',
+  APPROVAL_GRANTED: 'APPROVAL_GRANTED',
+  APPROVAL_REJECTED: 'APPROVAL_REJECTED',
+  PROJECT_STARTED: 'PROJECT_STARTED',
+  PROJECT_PROGRESS_UPDATED: 'PROJECT_PROGRESS_UPDATED',
+  PROJECT_COMPLETED: 'PROJECT_COMPLETED',
+  // CON-001 PR 2 — added so policy and progress-draft changes reach audit;
+  // approved by the project manager (2026-09-26).
+  APPROVAL_POLICY_CREATED: 'APPROVAL_POLICY_CREATED',
+  APPROVAL_POLICY_ACTIVATED: 'APPROVAL_POLICY_ACTIVATED',
+  APPROVAL_POLICY_RETIRED: 'APPROVAL_POLICY_RETIRED',
+  // Q-70 (7), decided 2026-09-26: the platform approval step (names approved
+  // by the PM, 2026-09-26).
+  APPROVAL_POLICY_SUBMITTED: 'APPROVAL_POLICY_SUBMITTED',
+  APPROVAL_POLICY_REJECTED: 'APPROVAL_POLICY_REJECTED',
+  PROJECT_PROGRESS_REPORT_DRAFTED: 'PROJECT_PROGRESS_REPORT_DRAFTED',
+  PROJECT_PROGRESS_REPORT_DISCARDED: 'PROJECT_PROGRESS_REPORT_DISCARDED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -141,6 +161,198 @@ export const projectNeedWithdrawnPayload = z
   })
   .strict();
 
+// ---------------------------------------------------------------------------
+// CON-001 PR 2
+// ---------------------------------------------------------------------------
+
+const workflowKey = z.enum(WORKFLOW_KEYS);
+const positive = z.number().int().positive();
+
+/** The step identity every approval event carries. */
+const approvalStep = {
+  approvalId: identifier,
+  projectId: identifier,
+  organizationId: identifier,
+  workflowKey,
+  round: positive,
+  stepOrder: positive,
+};
+
+/**
+ * One step of a round was put to its authority. The authority is named as the
+ * policy named it — an (organization, role) — which is what notification-service
+ * needs to reach it (`docs/07`: notification (مرجع تأیید)). The step's
+ * `approvalType` and `authorityLabel` are text a policy writer typed; they stay
+ * in the database with the step, like every other prose field.
+ */
+export const approvalRequestedPayload = z
+  .object({
+    ...approvalStep,
+    authorityOrganizationId: identifier,
+    authorityRole: z.string().min(1).max(64),
+    policyId: identifier,
+    policyVersion: positive,
+    requestedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * The authority granted the step. The catalogue's `conditions` is prose, so the
+ * event says only whether conditions were recorded; they, and the decision
+ * number, are read through the API.
+ */
+export const approvalGrantedPayload = z
+  .object({
+    ...approvalStep,
+    decidedBy: identifier,
+    decidedAt: isoTimestamp,
+    hasConditions: z.boolean(),
+  })
+  .strict();
+
+/** The authority rejected the step. The stated reason stays in the database. */
+export const approvalRejectedPayload = z
+  .object({
+    ...approvalStep,
+    decidedBy: identifier,
+    decidedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * Execution began. `contractId` is the catalogue field and is always `null`
+ * until the contract boundary exists (CON-003, Q-71): null says "no contract
+ * is claimed", not "this producer does not know".
+ */
+export const projectStartedPayload = z
+  .object({
+    projectId: identifier,
+    organizationId: identifier,
+    contractId: z.null(),
+    startedBy: identifier,
+    startedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * A progress report was submitted. The catalogue's `percentage` is carried as
+ * `progressBasisPoints` (0..10000), an integer, never a float (AGENTS.md § 3).
+ *
+ * `assetsUsed` is deliberately **not** here (Codex review of #122): the
+ * identifiers are stored with the report, but their ownership is not yet
+ * verified against asset-service, so they are not published — a consumer
+ * must never read an unverified claim that project P used asset A. `.strict()`
+ * refuses the field.
+ */
+export const projectProgressUpdatedPayload = z
+  .object({
+    projectId: identifier,
+    reportId: identifier,
+    organizationId: identifier,
+    progressBasisPoints: z.number().int().min(0).max(10_000),
+    submittedBy: identifier,
+    submittedAt: isoTimestamp,
+  })
+  .strict();
+
+export const projectCompletedPayload = z
+  .object({
+    projectId: identifier,
+    organizationId: identifier,
+    completedBy: identifier,
+    completedAt: isoTimestamp,
+  })
+  .strict();
+
+export const approvalPolicyCreatedPayload = z
+  .object({
+    policyId: identifier,
+    /** The organization the policy governs. */
+    organizationId: identifier,
+    /** Who wrote it: the governed organization's union, or the platform. */
+    authorOrganizationId: identifier,
+    authorRole: z.enum(['UNION_ADMIN', 'SYSTEM_ADMIN']),
+    workflowKey,
+    policyVersion: positive,
+    stepCount: positive,
+    isSample: z.boolean(),
+    createdBy: identifier,
+    createdAt: isoTimestamp,
+  })
+  .strict();
+
+/** Sent for the platform administrator's approval (Q-70 (7)). */
+export const approvalPolicySubmittedPayload = z
+  .object({
+    policyId: identifier,
+    organizationId: identifier,
+    workflowKey,
+    policyVersion: positive,
+    submittedBy: identifier,
+    submittedAt: isoTimestamp,
+  })
+  .strict();
+
+/** Refused by the platform administrator. The reason stays with the policy. */
+export const approvalPolicyRejectedPayload = z
+  .object({
+    policyId: identifier,
+    organizationId: identifier,
+    workflowKey,
+    policyVersion: positive,
+    rejectedBy: identifier,
+    rejectedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * Put in force by the platform administrator's approval (Q-70 (7));
+ * `activatedBy` is that administrator.
+ */
+export const approvalPolicyActivatedPayload = z
+  .object({
+    policyId: identifier,
+    organizationId: identifier,
+    workflowKey,
+    policyVersion: positive,
+    /** The policy this one replaced, retired in the same transaction. */
+    retiredPolicyId: identifier.nullable(),
+    activatedBy: identifier,
+    activatedAt: isoTimestamp,
+  })
+  .strict();
+
+export const approvalPolicyRetiredPayload = z
+  .object({
+    policyId: identifier,
+    organizationId: identifier,
+    workflowKey,
+    policyVersion: positive,
+    retiredBy: identifier,
+    retiredAt: isoTimestamp,
+  })
+  .strict();
+
+export const progressReportDraftedPayload = z
+  .object({
+    projectId: identifier,
+    reportId: identifier,
+    organizationId: identifier,
+    draftedBy: identifier,
+    draftedAt: isoTimestamp,
+  })
+  .strict();
+
+export const progressReportDiscardedPayload = z
+  .object({
+    projectId: identifier,
+    reportId: identifier,
+    organizationId: identifier,
+    discardedBy: identifier,
+    discardedAt: isoTimestamp,
+  })
+  .strict();
+
 export const CONSTRUCTION_EVENT_SCHEMAS = {
   PROJECT_CREATED: projectCreatedPayload,
   PROJECT_UPDATED: projectUpdatedPayload,
@@ -149,6 +361,19 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   PROJECT_NEED_UPDATED: projectNeedUpdatedPayload,
   PROJECT_NEED_SUBMITTED: projectNeedSubmittedPayload,
   PROJECT_NEED_WITHDRAWN: projectNeedWithdrawnPayload,
+  APPROVAL_REQUESTED: approvalRequestedPayload,
+  APPROVAL_GRANTED: approvalGrantedPayload,
+  APPROVAL_REJECTED: approvalRejectedPayload,
+  PROJECT_STARTED: projectStartedPayload,
+  PROJECT_PROGRESS_UPDATED: projectProgressUpdatedPayload,
+  PROJECT_COMPLETED: projectCompletedPayload,
+  APPROVAL_POLICY_CREATED: approvalPolicyCreatedPayload,
+  APPROVAL_POLICY_ACTIVATED: approvalPolicyActivatedPayload,
+  APPROVAL_POLICY_RETIRED: approvalPolicyRetiredPayload,
+  APPROVAL_POLICY_SUBMITTED: approvalPolicySubmittedPayload,
+  APPROVAL_POLICY_REJECTED: approvalPolicyRejectedPayload,
+  PROJECT_PROGRESS_REPORT_DRAFTED: progressReportDraftedPayload,
+  PROJECT_PROGRESS_REPORT_DISCARDED: progressReportDiscardedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<
