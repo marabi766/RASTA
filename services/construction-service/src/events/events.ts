@@ -53,7 +53,8 @@ export const CONSTRUCTION_EVENTS = {
   PROJECT_STARTED: 'PROJECT_STARTED',
   PROJECT_PROGRESS_UPDATED: 'PROJECT_PROGRESS_UPDATED',
   PROJECT_COMPLETED: 'PROJECT_COMPLETED',
-  // CON-001 PR 2 — added so policy and progress-draft changes reach audit.
+  // CON-001 PR 2 — added so policy and progress-draft changes reach audit;
+  // approved by the project manager (2026-09-26).
   APPROVAL_POLICY_CREATED: 'APPROVAL_POLICY_CREATED',
   APPROVAL_POLICY_ACTIVATED: 'APPROVAL_POLICY_ACTIVATED',
   APPROVAL_POLICY_RETIRED: 'APPROVAL_POLICY_RETIRED',

@@ -468,7 +468,7 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 > **CON-001 PR دوم.** شش ردیف کاتالوگ `APPROVAL_REQUESTED`، `APPROVAL_GRANTED`، `APPROVAL_REJECTED`، `PROJECT_STARTED`،
 > `PROJECT_PROGRESS_UPDATED` و `PROJECT_COMPLETED` پیاده شدند؛ ستون Payload آن‌ها اکنون Payload واقعی است. نثرِ
 > کاتالوگ (`approvalType`، `conditions`، `reason`) طبق همان قاعدهٔ حریم روی رویداد نمی‌آید؛ `percentage` به
-> `progressBasisPoints` تبدیل شد. پنج رویداد تازه (جدول سوم) **در انتظار تأیید مدیر پروژه**‌اند.
+> `progressBasisPoints` تبدیل شد. پنج رویداد تازه (جدول سوم) را مدیر پروژه **پذیرفت** (2026-09-26).
 >
 > **کلید پارتیشن همهٔ رویدادهای پروژه `projectId` است** و `aggregateType` آن‌ها `Project` (رویدادهای سیاست موافقت
 > استثنایند؛ جدول سوم): نیاز، موافقت و
@@ -516,18 +516,18 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 `PROJECT_STARTED` و `PROJECT_COMPLETED` رویداد خودشان را دارند و `PROJECT_STATUS_CHANGED` تکراری برایشان منتشر
 نمی‌شود. دلیل لغو یا انصراف روی رویداد نمی‌آید؛ در `project.status_reason` و `project_need.withdrawal_reason` می‌ماند.
 
-**رویدادهای تازهٔ CON-001 PR دوم — در انتظار تأیید مدیر پروژه.** نوشتن، فعال‌سازی و بازنشسته‌کردن سیاست موافقت و
+**رویدادهای تازهٔ CON-001 PR دوم** (پذیرفته‌شده به‌دست مدیر پروژه، 2026-09-26). نوشتن، فعال‌سازی و بازنشسته‌کردن سیاست موافقت و
 پیش‌نویس و کنارگذاشتن گزارش پیشرفت تغییر وضعیت‌اند و باید به `audit-service` برسند (S-06). رویدادهای سیاست دربارهٔ
 `ApprovalPolicy` هستند، نه پروژه، و کلیدشان `{organizationId}/{workflowKey}` است: همهٔ نسخه‌های سیاست یک گردش‌کار
 یک جریان‌اند.
 
-| رویداد                                             | مصرف‌کنندگان | Payload کلیدی                                                                                                   |
-| -------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------- |
-| **`APPROVAL_POLICY_CREATED`** (پیشنهادی)           | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `stepCount`, `isSample`, `createdBy`, `createdAt` |
-| **`APPROVAL_POLICY_ACTIVATED`** (پیشنهادی)         | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredPolicyId`, `activatedBy`, `activatedAt`   |
-| **`APPROVAL_POLICY_RETIRED`** (پیشنهادی)           | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredBy`, `retiredAt`                          |
-| **`PROJECT_PROGRESS_REPORT_DRAFTED`** (پیشنهادی)   | audit        | `projectId`, `reportId`, `organizationId`, `draftedBy`, `draftedAt`                                             |
-| **`PROJECT_PROGRESS_REPORT_DISCARDED`** (پیشنهادی) | audit        | `projectId`, `reportId`, `organizationId`, `discardedBy`, `discardedAt`                                         |
+| رویداد                                  | مصرف‌کنندگان | Payload کلیدی                                                                                                   |
+| --------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------- |
+| **`APPROVAL_POLICY_CREATED`**           | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `stepCount`, `isSample`, `createdBy`, `createdAt` |
+| **`APPROVAL_POLICY_ACTIVATED`**         | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredPolicyId`, `activatedBy`, `activatedAt`   |
+| **`APPROVAL_POLICY_RETIRED`**           | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredBy`, `retiredAt`                          |
+| **`PROJECT_PROGRESS_REPORT_DRAFTED`**   | audit        | `projectId`, `reportId`, `organizationId`, `draftedBy`, `draftedAt`                                             |
+| **`PROJECT_PROGRESS_REPORT_DISCARDED`** | audit        | `projectId`, `reportId`, `organizationId`, `discardedBy`, `discardedAt`                                         |
 
 ## Contract — `rasta.contract.v1`
 
