@@ -131,6 +131,18 @@ export const TERMINAL_STATUSES: readonly AssetStatus[] = ['DECOMMISSIONED'];
 /** Statuses in which the asset can actually be dispatched. */
 export const DISPATCHABLE_STATUSES: readonly AssetStatus[] = ['ACTIVE', 'IDLE'];
 
+/**
+ * Statuses that mean another service has open work on the asset.
+ *
+ * ASSIGNED is an open assignment in fleet-service and IN_MAINTENANCE an open
+ * repair in maintenance-service. Ownership cannot change under either: the
+ * open record would stay with the previous owner, and the new owner would get
+ * a machine that another tenant's assignment or repair still holds (audit
+ * L3-03). The owning service closes its work first. Its release event moves
+ * the asset back to ACTIVE, and then the transfer can go ahead.
+ */
+export const OPEN_ACTIVITY_STATUSES: readonly AssetStatus[] = ['ASSIGNED', 'IN_MAINTENANCE'];
+
 export function canTransition(from: AssetStatus, to: AssetStatus, actor: TransitionActor): boolean {
   return TRANSITIONS.some((t) => t.from === from && t.to === to && t.actor === actor);
 }

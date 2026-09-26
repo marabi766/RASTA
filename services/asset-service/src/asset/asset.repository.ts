@@ -5,11 +5,13 @@ import {
   runUnscoped,
   type OutboxMessageInput,
 } from '@rasta/nest-common';
+import { canonicalIdentifier } from './identifier';
 import { resolvePartitionKey } from './routing';
 import type { AssetEventName, InsuranceEventName } from './events';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
 import type { ListAssetsQuery, NearbyQuery, TimelineQuery } from './dto';
+import { TERMINAL_CLAIM_STATUSES } from '../insurance/claim-lifecycle';
 
 /**
  * Data access for assets.
@@ -99,6 +101,21 @@ export class AssetRepository {
     );
   }
 
+  /**
+   * Whether an asset with this id exists in any organization.
+   *
+   * Unscoped, and answers only yes or no: the timeline consumer uses it to
+   * tell an event that lost a race with a transfer from one about an unknown
+   * asset, and never learns, logs or returns the other owner.
+   */
+  async assetExistsInAnyTenant(id: string): Promise<boolean> {
+    const row = await runUnscoped(
+      'classifies a skipped event: does the asset exist under another owner; the owner is not read',
+      () => this.client.asset.findFirst({ where: { id, deletedAt: null }, select: { id: true } }),
+    );
+    return row !== null;
+  }
+
   async findByAssetTag(organizationId: string, assetTag: string) {
     return this.client.asset.findFirst({
       where: { organizationId, assetTag, deletedAt: null },
@@ -131,8 +148,22 @@ export class AssetRepository {
           ? {
               OR: [
                 { name: { contains: query.q, mode: 'insensitive' as const } },
-                { assetTag: { contains: query.q, mode: 'insensitive' as const } },
-                { serialNumber: { contains: query.q, mode: 'insensitive' as const } },
+                // Identifiers are stored canonical (src/asset/identifier.ts,
+                // and migration 20260925110000 for older rows), so they are
+                // searched canonical: `ماشين-۱۲` finds `ماشین-12` (PR #108
+                // review #5). Free text is searched as typed.
+                {
+                  assetTag: {
+                    contains: canonicalIdentifier(query.q),
+                    mode: 'insensitive' as const,
+                  },
+                },
+                {
+                  serialNumber: {
+                    contains: canonicalIdentifier(query.q),
+                    mode: 'insensitive' as const,
+                  },
+                },
                 { manufacturer: { contains: query.q, mode: 'insensitive' as const } },
                 { model: { contains: query.q, mode: 'insensitive' as const } },
               ],
@@ -163,8 +194,17 @@ export class AssetRepository {
    * status: the expiry sweep runs periodically, so a policy can be `ACTIVE`
    * in the row and already lapsed in reality. Compliance must not depend on a
    * background job having run recently.
+   *
+   * `ownerFilter` is which of the asset's policies count for its current
+   * owner (src/insurance/ownership.ts, docs/24 Q-66). Under the project
+   * owner's decision every coverage follows the vehicle, so it is normally
+   * absent and the previous owner's in-force policy counts.
    */
-  async findActivePolicy(assetId: string, at: Date = new Date()) {
+  async findActivePolicy(
+    assetId: string,
+    at: Date = new Date(),
+    ownerFilter: { OR: object[] } | undefined = undefined,
+  ) {
     return this.client.insurancePolicy.findFirst({
       where: {
         assetId,
@@ -172,6 +212,7 @@ export class AssetRepository {
         status: { not: 'CANCELLED' },
         validFrom: { lte: at },
         validTo: { gt: at },
+        ...(ownerFilter ?? {}),
       },
       orderBy: { validTo: 'desc' },
     });
@@ -201,32 +242,54 @@ export class AssetRepository {
   }
 
   /**
-   * Marks lapsed policies EXPIRED and returns them.
+   * Marks up to `limit` lapsed policies EXPIRED and returns them, in `tx`.
    *
-   * Runs unscoped because it is a platform-wide sweep with no request context —
-   * there is no single tenant it belongs to.
+   * One statement, so the status change and the caller's INSURANCE_EXPIRED
+   * outbox rows commit together (audit L3-04). Before, the rows were flipped
+   * and committed on their own, and the events were written later in a second
+   * transaction: a crash in between left policies EXPIRED that no consumer
+   * ever heard about, and fleet kept dispatching the uninsured machine.
+   *
+   * `FOR UPDATE SKIP LOCKED` lets two sweep replicas share the work. Each
+   * claims different rows, and neither emits an event for a policy the other
+   * expired. Raw SQL for the `RETURNING` and the skip-locked subselect, which
+   * Prisma cannot express; it is outside the tenant extension, which this
+   * platform-wide sweep would lift anyway.
    */
-  async expireLapsedPolicies(): Promise<
+  async claimLapsedPolicies(
+    tx: ExtendedPrismaClient,
+    limit: number,
+    now: Date = new Date(),
+  ): Promise<
     { id: string; assetId: string; organizationId: string; coverage: string; validTo: Date }[]
   > {
-    return runUnscoped(
-      'scheduled platform-wide sweep; runs outside any request context',
-      async () => {
-        const lapsed = await this.client.insurancePolicy.findMany({
-          where: { status: 'ACTIVE', validTo: { lt: new Date() }, deletedAt: null },
-          select: { id: true, assetId: true, organizationId: true, coverage: true, validTo: true },
-        });
-
-        if (lapsed.length > 0) {
-          await this.client.insurancePolicy.updateMany({
-            where: { id: { in: lapsed.map((p) => p.id) } },
-            data: { status: 'EXPIRED' },
-          });
-        }
-
-        return lapsed;
-      },
-    );
+    const rows = await tx.$queryRaw<
+      {
+        id: string;
+        asset_id: string;
+        organization_id: string;
+        coverage: string;
+        valid_to: Date;
+      }[]
+    >`
+      UPDATE insurance_policy
+         SET status = 'EXPIRED', updated_at = ${now}
+       WHERE id IN (
+         SELECT id FROM insurance_policy
+          WHERE status = 'ACTIVE' AND valid_to < ${now} AND deleted_at IS NULL
+          ORDER BY valid_to, id
+          LIMIT ${limit}
+          FOR UPDATE SKIP LOCKED
+       )
+      RETURNING id, asset_id, organization_id, coverage::text AS coverage, valid_to
+    `;
+    return rows.map((row) => ({
+      id: row.id,
+      assetId: row.asset_id,
+      organizationId: row.organization_id,
+      coverage: row.coverage,
+      validTo: row.valid_to,
+    }));
   }
 
   // -------------------------------------------------------------------------
@@ -364,6 +427,106 @@ export class AssetRepository {
 
   async countTransfers(assetId: string): Promise<number> {
     return this.client.assetTransfer.count({ where: { assetId } });
+  }
+
+  /**
+   * The database's own clock, now, inside `tx`.
+   *
+   * A transfer is dated with this, under the asset's row lock, so that it and
+   * every policy's `created_at` (the database's `now()`) are read from one
+   * clock. Comparing an application timestamp with a database one let a skew
+   * between the two hosts misfile a policy (PR #108 review #6).
+   */
+  async databaseClock(tx: ExtendedPrismaClient): Promise<Date> {
+    const [row] = await tx.$queryRaw<{ now: Date }[]>`SELECT clock_timestamp() AS now`;
+    if (!row) throw new Error('clock_timestamp() returned no row');
+    return row.now;
+  }
+
+  /** How many times the asset has changed hands; 0 if it never has (or is not visible). */
+  async ownershipGeneration(assetId: string): Promise<number> {
+    const asset = await this.client.asset.findFirst({
+      where: { id: assetId },
+      select: { ownershipGeneration: true },
+    });
+    return asset?.ownershipGeneration ?? 0;
+  }
+
+  // -------------------------------------------------------------------------
+  // Concurrency — compare-and-set and row locks
+  // -------------------------------------------------------------------------
+
+  /**
+   * Compare-and-set on one asset's status.
+   *
+   * Matches on the status the caller decided from. A write computed from a
+   * stale read then updates nothing instead of overwriting a newer state, and
+   * in particular it can never turn a DECOMMISSIONED row back into anything
+   * else (audit L3-07). Returns the number of rows changed, 0 or 1.
+   *
+   * `where` narrows the match further. A transfer, which runs unscoped, passes
+   * the owning organization here so a concurrent transfer also counts as a
+   * conflict.
+   */
+  async compareAndSetStatus(
+    tx: ExtendedPrismaClient,
+    id: string,
+    expected: string,
+    data: Record<string, unknown>,
+    where: { organizationId?: string } = {},
+  ): Promise<number> {
+    const result = await tx.asset.updateMany({
+      where: { id, status: expected as never, deletedAt: null, ...where },
+      data: { ...data, version: { increment: 1 } },
+    });
+    return result.count;
+  }
+
+  /**
+   * Locks the asset row for a write that hangs a record off it.
+   *
+   * A location, document or claim is written under the asset's organization,
+   * read a moment earlier. A transfer that commits in between would leave the
+   * new record with the previous owner. The transfer's compare-and-set takes
+   * the row lock, so holding a lock here orders the two: either this write
+   * lands first and the transfer moves it, or the transfer lands first and
+   * this lookup finds no asset for the caller's organization.
+   *
+   * `SHARE` lets independent writes run side by side. `EXCLUSIVE` (`FOR NO KEY
+   * UPDATE`) serialises writers on the same asset, which the current-location
+   * swap needs: two concurrent swaps would both see the old row as current.
+   *
+   * Raw SQL, so outside the tenant extension. The organization is therefore
+   * part of the predicate.
+   */
+  async lockAsset(
+    tx: ExtendedPrismaClient,
+    id: string,
+    organizationId: string,
+    mode: 'SHARE' | 'EXCLUSIVE',
+  ): Promise<{ status: string; ownershipGeneration: number } | null> {
+    // The generation is read under the lock, so a policy stamped with it
+    // cannot straddle a transfer (PR #108 round 2 #5).
+    const rows =
+      mode === 'SHARE'
+        ? await tx.$queryRaw<{ status: string; ownershipGeneration: number }[]>`
+            SELECT status::text AS status, ownership_generation AS "ownershipGeneration" FROM asset
+            WHERE id = ${id} AND organization_id = ${organizationId} AND deleted_at IS NULL
+            FOR SHARE`
+        : await tx.$queryRaw<{ status: string; ownershipGeneration: number }[]>`
+            SELECT status::text AS status, ownership_generation AS "ownershipGeneration" FROM asset
+            WHERE id = ${id} AND organization_id = ${organizationId} AND deleted_at IS NULL
+            FOR NO KEY UPDATE`;
+    return rows[0] ?? null;
+  }
+
+  /** Whether any claim on the asset is still open, meaning not REJECTED and not SETTLED. */
+  async hasOpenClaims(tx: ExtendedPrismaClient, assetId: string): Promise<boolean> {
+    const open = await tx.insuranceClaim.findFirst({
+      where: { assetId, status: { notIn: [...TERMINAL_CLAIM_STATUSES] } },
+      select: { id: true },
+    });
+    return open !== null;
   }
 
   async findOrganizationRef(id: string) {

@@ -3,6 +3,8 @@ import type { EventEnvelope } from '@rasta/contracts';
 import type { EventConsumer, EventHandler } from '@rasta/nest-common';
 import { AssetRepository } from '../asset/asset.repository';
 import { AssetService } from '../asset/asset.service';
+import { SERVICE_NAME } from '../config/env';
+import { timelineEventsSkippedTotal } from '../observability/metrics';
 import { CONSUMED_EVENT_CATEGORY, timelineSourceSchema } from '../asset/events';
 import type { AssetStatus } from '../asset/lifecycle';
 
@@ -150,17 +152,33 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
 
     const asset = await this.repository.findById(assetId);
     if (!asset) {
-      // Either the asset belongs to another deployment, or it was deleted.
-      // Not an error: the projector's job is to record history for assets it
-      // owns, and it owns none by this id.
-      this.logger.debug(`No local asset ${assetId} for ${envelope.eventName}`);
+      // Read in the event's tenant. Nothing there means one of two things,
+      // and they are not equally harmless, so they are told apart.
+      await this.skipped(envelope, assetId);
       return 'SKIPPED';
     }
 
     const appended = await this.repository.transaction(async (tx) => {
-      // The idempotency ledger and the entry commit together, so a crash
-      // between them cannot leave the event marked handled with nothing to
-      // show for it.
+      // The asset row is locked first, and the lock also checks that the asset
+      // still belongs to the organization read above. A transfer committed in
+      // between would otherwise get an entry filed under the previous owner.
+      // The lock is exclusive when a status change follows, so the change does
+      // not have to upgrade a shared lock that another consumer also holds.
+      const locked = await this.repository.lockAsset(
+        tx,
+        assetId,
+        asset.organizationId,
+        projection.status ? 'EXCLUSIVE' : 'SHARE',
+      );
+      if (!locked) {
+        await this.skipped(envelope, assetId);
+        return false;
+      }
+
+      // The idempotency ledger, the entry and the status change commit
+      // together (AGENTS.md A-09). If the marker committed alone, a crash
+      // before the status change would lose it for good: the redelivery
+      // finds the marker and skips (audit L4-03).
       const fresh = await this.repository.markEventProcessed(tx, envelope.eventId, CONSUMER_NAME);
       if (!fresh) return false;
 
@@ -178,20 +196,49 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
         occurredAt: new Date(envelope.occurredAt),
       });
 
+      // The history is a record of what happened, and it survives a status
+      // change that is illegal from the asset's current state: that case is
+      // logged and ignored, not thrown. A conflict with a concurrent write
+      // does throw, so everything above rolls back and the redelivery is
+      // judged again.
+      if (projection.status) {
+        await this.assets.applyEventStatusChange(
+          tx,
+          assetId,
+          projection.status,
+          `${envelope.eventName} از ${envelope.producer}`,
+        );
+      }
+
       return true;
     });
 
     if (!appended) return 'SKIPPED';
+  }
 
-    // Applied after the entry is durable, and in its own transaction: the
-    // history is a record of what happened and must survive even if the status
-    // change turns out to be illegal from the asset's current state.
-    if (projection.status) {
-      await this.assets.applyEventStatusChange(
-        assetId,
-        projection.status,
-        `${envelope.eventName} از ${envelope.producer}`,
+  /**
+   * Records why an event was not attached (PR #108 review #1).
+   *
+   * `owner_changed` is the case that loses something: an assignment or a
+   * repair published under the previous owner and consumed after a transfer.
+   * Its dossier entry and status change are not applied, because filing the
+   * previous owner's event under the new owner would cross the tenant
+   * boundary. Kafka treats the message as handled, so the only trace is this
+   * warning and `rasta_asset_timeline_events_skipped_total`, which an alert
+   * watches (docs/23 records the risk). The unscoped read returns nothing
+   * but whether the asset exists elsewhere.
+   */
+  private async skipped(envelope: EventEnvelope, assetId: string): Promise<void> {
+    const elsewhere = await this.repository.assetExistsInAnyTenant(assetId);
+    const reason = elsewhere ? 'owner_changed' : 'asset_unknown';
+    timelineEventsSkippedTotal.inc({ service: SERVICE_NAME, event: envelope.eventName, reason });
+    if (elsewhere) {
+      this.logger.warn(
+        `${envelope.eventName} ${envelope.eventId} names ${assetId}, which no longer belongs to ` +
+          'the organization that published it; its dossier entry and status change are not applied',
       );
+    } else {
+      this.logger.debug(`No local asset ${assetId} for ${envelope.eventName}`);
     }
   }
 }

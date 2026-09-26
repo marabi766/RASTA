@@ -88,10 +88,14 @@ interface Harness {
 }
 
 interface TxMock {
-  assetTransfer: { create: jest.Mock };
+  asset: { create: jest.Mock; updateMany: jest.Mock };
+  assetTransfer: { create: jest.Mock; updateMany: jest.Mock };
   assetLocation: { updateMany: jest.Mock };
   assetDocumentRef: { updateMany: jest.Mock };
   assetTimelineEntry: { updateMany: jest.Mock };
+  insurancePolicy: { updateMany: jest.Mock };
+  insuranceClaim: { updateMany: jest.Mock };
+  technicalInspection: { updateMany: jest.Mock };
 }
 
 function harness(overrides: Partial<Record<string, unknown>> = {}): Harness {
@@ -102,12 +106,15 @@ function harness(overrides: Partial<Record<string, unknown>> = {}): Harness {
   const tx = {
     asset: {
       create: jest.fn((args: { data: Record<string, unknown> }) => assetRow(args.data)),
-      update: jest.fn((args: { data: Record<string, unknown> }) => {
+      updateMany: jest.fn((args: { data: Record<string, unknown> }) => {
         updates.push(args.data);
-        return assetRow(args.data);
+        return { count: 1 };
       }),
     },
-    assetTransfer: { create: jest.fn() },
+    assetTransfer: { create: jest.fn(), updateMany: jest.fn() },
+    insurancePolicy: { updateMany: jest.fn() },
+    insuranceClaim: { updateMany: jest.fn() },
+    technicalInspection: { updateMany: jest.fn() },
     assetLocation: { create: jest.fn(), updateMany: jest.fn(), findFirst: jest.fn() },
     assetDocumentRef: { create: jest.fn(), updateMany: jest.fn(), findFirst: jest.fn() },
     assetTimelineEntry: {
@@ -133,6 +140,18 @@ function harness(overrides: Partial<Record<string, unknown>> = {}): Harness {
       },
     ),
     findById: jest.fn(async () => assetRow()),
+    // Every status write is a compare-and-set. The data is recorded where the
+    // tests look for it, and one row matches unless a test says otherwise.
+    compareAndSetStatus: jest.fn(
+      async (_tx: unknown, _id: string, _expected: string, data: Record<string, unknown>) => {
+        updates.push(data);
+        return 1;
+      },
+    ),
+    ownershipGeneration: jest.fn(async () => 0),
+    databaseClock: jest.fn(async () => new Date('2026-09-25T12:00:00.000Z')),
+    lockAsset: jest.fn(async () => ({ status: 'ACTIVE' })),
+    hasOpenClaims: jest.fn(async () => false),
     findBySerialNumber: jest.fn(async () => null),
     findByAssetTag: jest.fn(async () => null),
     findActivePolicy: jest.fn(async () => null),
@@ -151,6 +170,16 @@ function harness(overrides: Partial<Record<string, unknown>> = {}): Harness {
     readCoordinate: jest.fn(async () => null),
     ...overrides,
   } as unknown as jest.Mocked<AssetRepository>;
+
+  // The re-read after a compare-and-set sees the write, as it would in the
+  // database: the row the lookup returns, with the last update applied.
+  const lookup = repository.findById;
+  repository.findById = jest.fn(async (...args: Parameters<AssetRepository['findById']>) => {
+    const row = await lookup(...args);
+    return row && args[1] !== undefined && updates.length > 0
+      ? { ...row, ...(updates.at(-1) as object) }
+      : row;
+  }) as never;
 
   return {
     service: new AssetService(repository),
@@ -266,6 +295,22 @@ describe('AssetService', () => {
       expect(h.enqueued.map((e) => e.eventName)).toContain(ASSET_EVENTS.ASSET_ACTIVATED);
     });
 
+    it("counts the previous owner's policy after a transfer, as the project owner decided", async () => {
+      // docs/24 Q-66: the insurance follows the vehicle. Under the default,
+      // every coverage follows, so the lookup carries no ownership clause.
+      const h = harness({
+        findById: jest.fn(async () => assetRow({ status: 'REGISTERED' })),
+        ownershipGeneration: jest.fn(async () => 1),
+      });
+
+      await expect(run(() => h.service.activate(ASSET_ID, {}))).rejects.toThrow(/insurance/);
+      expect(h.repository.findActivePolicy).toHaveBeenCalledWith(
+        ASSET_ID,
+        expect.any(Date),
+        undefined,
+      );
+    });
+
     it('refuses to activate an asset that is already active', async () => {
       const h = harness({ findById: jest.fn(async () => assetRow({ status: 'ACTIVE' })) });
       await expect(run(() => h.service.activate(ASSET_ID, {}))).rejects.toThrow(RastaError);
@@ -286,7 +331,9 @@ describe('AssetService', () => {
 
     it('accepts the same transition when it arrives as an event', async () => {
       const h = harness();
-      await run(() => h.service.applyEventStatusChange(ASSET_ID, 'ASSIGNED', 'from fleet'));
+      await run(() =>
+        h.service.applyEventStatusChange(h.tx as never, ASSET_ID, 'ASSIGNED', 'from fleet'),
+      );
 
       expect(h.enqueued.map((e) => e.eventName)).toContain(ASSET_EVENTS.ASSET_STATUS_CHANGED);
     });
@@ -297,7 +344,9 @@ describe('AssetService', () => {
       const h = harness({ findById: jest.fn(async () => assetRow({ status: 'DECOMMISSIONED' })) });
 
       await expect(
-        run(() => h.service.applyEventStatusChange(ASSET_ID, 'ACTIVE', 'from maintenance')),
+        run(() =>
+          h.service.applyEventStatusChange(h.tx as never, ASSET_ID, 'ACTIVE', 'from maintenance'),
+        ),
       ).resolves.toBeUndefined();
       expect(h.enqueued).toHaveLength(0);
     });
@@ -306,7 +355,7 @@ describe('AssetService', () => {
       const h = harness({ findById: jest.fn(async () => null) });
 
       await expect(
-        run(() => h.service.applyEventStatusChange('AST_UNKNOWN', 'ASSIGNED', 'x')),
+        run(() => h.service.applyEventStatusChange(h.tx as never, 'AST_UNKNOWN', 'ASSIGNED', 'x')),
       ).resolves.toBeUndefined();
     });
 
@@ -316,6 +365,67 @@ describe('AssetService', () => {
 
       expect(h.timeline.map((t) => t.category)).toContain('LIFECYCLE');
       expect(h.timeline.at(-1)?.description).toBe('فصل غیرکاری');
+    });
+  });
+
+  describe('compare-and-set on status (audit L3-07)', () => {
+    it('matches the update on the status the transition was judged from', async () => {
+      const h = harness();
+      await run(() => h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'x' }));
+
+      expect(h.repository.compareAndSetStatus).toHaveBeenCalledWith(
+        h.tx,
+        ASSET_ID,
+        'ACTIVE',
+        expect.objectContaining({ status: 'IDLE' }),
+        {},
+      );
+    });
+
+    it.each<[string, (h: Harness) => Promise<unknown>]>([
+      [
+        'a user status change',
+        (h: Harness) => h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'x' }),
+      ],
+      ['a decommission', (h: Harness) => h.service.decommission(ASSET_ID, { reason: 'فرسوده' })],
+      [
+        'an event-driven status change',
+        (h: Harness) => h.service.applyEventStatusChange(h.tx as never, ASSET_ID, 'ASSIGNED', 'x'),
+      ],
+    ])('fails %s with a conflict when the status changed since the read', async (_name, act) => {
+      // The race the audit describes: both requests read ACTIVE, one commits
+      // DECOMMISSIONED, and the other must not write over it.
+      const h = harness({ compareAndSetStatus: jest.fn(async () => 0) });
+
+      await expect(run(() => act(h))).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+      expect(h.enqueued).toHaveLength(0);
+      expect(h.timeline).toHaveLength(0);
+    });
+
+    it('refuses an edit that lost the race to a decommission', async () => {
+      const h = harness();
+      h.tx.asset.updateMany.mockResolvedValueOnce({ count: 0 });
+
+      await expect(
+        run(() => h.service.update(ASSET_ID, { name: 'نام تازه' })),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+      expect(h.tx.asset.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ id: ASSET_ID, status: { not: 'DECOMMISSIONED' } }),
+        }),
+      );
+    });
+
+    it('turns a unique-index violation from a concurrent create into ALREADY_EXISTS', async () => {
+      // Both requests pass the tag pre-check; the partial unique index decides.
+      const h = harness();
+      h.tx.asset.create.mockRejectedValueOnce(
+        Object.assign(new Error('unique'), { code: 'P2002' }),
+      );
+
+      await expect(
+        run(() => h.service.create({ ...CREATE, assetTag: 'T-1' })),
+      ).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
     });
   });
 
@@ -340,7 +450,6 @@ describe('AssetService', () => {
       const h = harness();
       await run(() => h.service.transfer(ASSET_ID, dto));
 
-      // The previous owner's insurance does not cover the new owner.
       expect(h.updates.at(-1)?.status).toBe('REGISTERED');
     });
 
@@ -361,6 +470,19 @@ describe('AssetService', () => {
       expect(h.tx.assetDocumentRef.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({ data: moved }),
       );
+      // Audit L3-08: the insurance and inspection record, and the earlier
+      // transfers, are part of that history too.
+      for (const table of [
+        h.tx.insurancePolicy,
+        h.tx.insuranceClaim,
+        h.tx.technicalInspection,
+        h.tx.assetTransfer,
+      ]) {
+        expect(table.updateMany).toHaveBeenCalledWith({
+          where: { assetId: ASSET_ID },
+          data: moved,
+        });
+      }
 
       // All of it in one transaction: a partial move would split a machine's
       // history across two tenants.
@@ -401,15 +523,17 @@ describe('AssetService', () => {
       // scoped — so the caller has provably got it — and only then is scoping
       // lifted for the write.
       const h = harness();
-      let scopedAtLookup = true;
+      const scoped: boolean[] = [];
       (h.repository.findById as jest.Mock).mockImplementation(async () => {
-        scopedAtLookup = !isUnscoped();
+        scoped.push(!isUnscoped());
         return assetRow();
       });
 
       await run(() => h.service.transfer(ASSET_ID, dto));
 
-      expect(scopedAtLookup).toBe(true);
+      // The first lookup, the one that proves ownership, is scoped. The re-read
+      // after the write runs inside the declared crossing, by design.
+      expect(scoped[0]).toBe(true);
     });
 
     it('refuses a transfer to an organization that does not exist', async () => {
@@ -427,6 +551,56 @@ describe('AssetService', () => {
     it('refuses to transfer a decommissioned asset', async () => {
       const h = harness({ findById: jest.fn(async () => assetRow({ status: 'DECOMMISSIONED' })) });
       await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toThrow(RastaError);
+    });
+
+    it.each(['ASSIGNED', 'IN_MAINTENANCE'])(
+      'refuses to transfer an asset that is %s (audit L3-03)',
+      async (status) => {
+        // The open assignment or repair would stay with the previous owner.
+        const h = harness({ findById: jest.fn(async () => assetRow({ status })) });
+
+        await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toMatchObject({
+          code: 'BUSINESS_RULE_VIOLATION',
+        });
+        expect(h.repository.transaction).not.toHaveBeenCalled();
+      },
+    );
+
+    it('refuses to transfer an asset with an open insurance claim, and moves nothing', async () => {
+      const h = harness({ hasOpenClaims: jest.fn(async () => true) });
+
+      await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toThrow(
+        /claim that is still open/,
+      );
+      // The check runs inside the transaction, so the throw rolls back the
+      // compare-and-set too. Nothing after it ran.
+      expect(h.tx.assetTransfer.create).not.toHaveBeenCalled();
+      expect(h.tx.insurancePolicy.updateMany).not.toHaveBeenCalled();
+      expect(h.enqueued).toHaveLength(0);
+    });
+
+    it('matches the transfer on the owner as well as the status', async () => {
+      // Unscoped, so without the owner in the predicate a concurrent transfer
+      // that already moved the asset would go unnoticed.
+      const h = harness();
+      await run(() => h.service.transfer(ASSET_ID, dto));
+
+      expect(h.repository.compareAndSetStatus).toHaveBeenCalledWith(
+        h.tx,
+        ASSET_ID,
+        'ACTIVE',
+        expect.objectContaining({ organizationId: DEH2, status: 'REGISTERED' }),
+        { organizationId: DEH1 },
+      );
+    });
+
+    it('fails a transfer that lost a race, before writing anything', async () => {
+      const h = harness({ compareAndSetStatus: jest.fn(async () => 0) });
+
+      await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toMatchObject({
+        code: 'OPTIMISTIC_LOCK_FAILED',
+      });
+      expect(h.tx.assetTransfer.create).not.toHaveBeenCalled();
     });
 
     it('refuses a transfer to the organization that already owns it', async () => {
@@ -538,6 +712,34 @@ describe('AssetService', () => {
       );
 
       expect(h.repository.findNearby).toHaveBeenCalledWith(DEH1, expect.anything());
+    });
+
+    it('locks the asset exclusively before swapping its current location', async () => {
+      // Two concurrent recordings would otherwise both demote the same row and
+      // both insert a current one.
+      const h = harness();
+      Object.assign(h.repository.client.assetLocation, {
+        findFirstOrThrow: jest.fn(async () => ({
+          id: 'ALC_1',
+          siteName: null,
+          addressLine: null,
+          source: 'MANUAL',
+          recordedAt: new Date(0),
+        })),
+      });
+
+      await run(() => h.service.recordLocation(ASSET_ID, { source: 'MANUAL' }));
+
+      expect(h.repository.lockAsset).toHaveBeenCalledWith(h.tx, ASSET_ID, DEH1, 'EXCLUSIVE');
+    });
+
+    it('refuses a location for an asset that changed owner after the read', async () => {
+      const h = harness({ lockAsset: jest.fn(async () => null) });
+
+      await expect(
+        run(() => h.service.recordLocation(ASSET_ID, { source: 'MANUAL' })),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      expect(h.tx.assetLocation.updateMany).not.toHaveBeenCalled();
     });
   });
 });

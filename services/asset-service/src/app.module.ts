@@ -34,6 +34,7 @@ import { PrismaOutboxStore } from './outbox/outbox.store';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { AssetRepository } from './asset/asset.repository';
 import { AssetService } from './asset/asset.service';
+import { TRANSFER_INSURANCE_POLICY, type TransferInsurancePolicy } from './insurance/ownership';
 import { AssetController } from './asset/asset.controller';
 import { InsuranceService } from './insurance/insurance.service';
 import { ClaimService } from './insurance/claim.service';
@@ -102,6 +103,14 @@ const CONSUMED_TOPICS = [
 
     PrismaOutboxStore,
     AssetRepository,
+    // docs/24 Q-66: which coverages follow the vehicle across a transfer.
+    {
+      provide: TRANSFER_INSURANCE_POLICY,
+      inject: [ENV],
+      useFactory: (env: AssetEnv): TransferInsurancePolicy => ({
+        coveragesFollowingVehicle: env.INSURANCE_COVERAGES_FOLLOWING_VEHICLE,
+      }),
+    },
     AssetService,
 
     {

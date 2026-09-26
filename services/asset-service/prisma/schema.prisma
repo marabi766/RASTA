@@ -87,6 +87,13 @@ model Asset {
   version   Int       @default(1)
   deletedAt DateTime? @map("deleted_at")
 
+  /// How many times the asset has changed hands: 0 for the organization that
+  /// registered it, incremented by each transfer under the asset's row lock.
+  /// An insurance policy is stamped with the generation it was recorded in, so
+  /// "recorded by the current owner" is an equality, never a timestamp
+  /// comparison two writes in one millisecond can confuse (PR #108 round 2 #5).
+  ownershipGeneration Int @default(0) @map("ownership_generation")
+
   locations   AssetLocation[]
   documents   AssetDocumentRef[]
   policies    InsurancePolicy[]
@@ -94,8 +101,12 @@ model Asset {
   transfers   AssetTransfer[]
   timeline    AssetTimelineEntry[]
 
-  /// Partial on deletedAt so a tag freed by a removed record can be reused.
-  @@unique([organizationId, assetTag, deletedAt], name: "unique_asset_tag_per_org")
+  /// One live asset tag per organization: `ux_asset_tag_active`, a partial
+  /// unique index on (organization_id, asset_tag) WHERE deleted_at IS NULL, so
+  /// a tag freed by a removed record can be reused. It lives in migration
+  /// 20260925120000_asset_partial_unique_indexes, because Prisma cannot
+  /// express a partial index. A composite `@@unique` with `deletedAt` did not
+  /// work: PostgreSQL treats every NULL as distinct (audit L3-10).
   @@index([organizationId, status])
   @@index([organizationId, type])
   @@index([status])
@@ -218,8 +229,11 @@ model AssetLocation {
   asset Asset @relation(fields: [assetId], references: [id])
 
   /// One current location per asset, enforced by the database rather than by
-  /// remembering to clear the flag.
-  @@unique([assetId, isCurrent], name: "one_current_location")
+  /// remembering to clear the flag: `ux_asset_location_current`, a partial
+  /// unique index on (asset_id) WHERE is_current, in migration
+  /// 20260925120000_asset_partial_unique_indexes. The earlier
+  /// `@@unique([assetId, isCurrent])` also allowed only one historical row
+  /// (audit L3-09).
   @@index([assetId, recordedAt])
   @@index([organizationId])
   @@map("asset_location")
@@ -319,6 +333,10 @@ model InsurancePolicy {
 
   documentId String? @map("document_id")
 
+  /// The asset's `ownershipGeneration` when this policy was recorded, read
+  /// under the same row lock a transfer takes (docs/24 Q-66).
+  ownershipGeneration Int @default(0) @map("ownership_generation")
+
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   createdBy String    @map("created_by")
@@ -328,7 +346,9 @@ model InsurancePolicy {
   asset  Asset            @relation(fields: [assetId], references: [id])
   claims InsuranceClaim[]
 
-  @@unique([policyNumber, insurerName, deletedAt], name: "unique_policy_per_insurer")
+  /// One live policy number per insurer: `ux_insurance_policy_number_active`,
+  /// a partial unique index WHERE deleted_at IS NULL, in migration
+  /// 20260925120000_asset_partial_unique_indexes (audit L3-10).
   /// Drives the expiry sweep: "policies ending soon, still active".
   @@index([validTo, status])
   @@index([assetId, status])
@@ -468,7 +488,7 @@ model AssetTimelineEntry {
   organizationId String @map("organization_id")
 
   /// The event that produced this line, e.g. `MAINTENANCE_COMPLETED`.
-  eventName   String @map("event_name")
+  eventName     String @map("event_name")
   /// Which service reported it.
   sourceService String @map("source_service")
   /// The originating event's id, so a rebuild is idempotent.
@@ -582,8 +602,8 @@ model OutboxMessage {
   ///
   /// Nothing sets either field in B1: no allocation, no head maintenance, no
   /// ordering guarantee. D-027 stays open until B2–B6 ship and are accepted.
-  streamSeq      BigInt?   @map("stream_seq")
-  isStreamHead   Boolean   @default(false) @map("is_stream_head")
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
 
   @@index([createdAt], map: "idx_outbox_pending")
   @@map("outbox_message")
@@ -631,8 +651,8 @@ model IdempotencyKey {
 
   requestHash String @map("request_hash")
 
-  responseStatus Int?  @map("response_status")
-  responseBody   Json? @map("response_body")
+  responseStatus Int?   @map("response_status")
+  responseBody   Json?  @map("response_body")
   state          String
 
   createdAt DateTime @default(now()) @map("created_at")

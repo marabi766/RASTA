@@ -108,6 +108,18 @@ export class ClaimService {
       });
     }
 
+    // The insurance follows the vehicle (docs/24 Q-66, project owner's
+    // decision 2026-09-25): the new owner may claim on a policy the previous
+    // owner recorded, and the claim is theirs, filed under their organization
+    // below. Only a coverage configured as *not* following the vehicle is
+    // refused, and by default every coverage follows.
+    if (!(await this.assets.policyCountsForCurrentOwner(assetId, policy))) {
+      throw RastaError.businessRule(
+        "This policy was recorded under the asset's previous owner, and its coverage does not follow the vehicle",
+        { rule: 'POLICY_FROM_PREVIOUS_OWNER', policyId: policy.id },
+      );
+    }
+
     // A policy covers incidents inside its term. Outside it, the claim is
     // either against the wrong policy or a data-entry error — and accepting it
     // would put an uncovered loss on the dossier as if it were covered.
@@ -126,6 +138,12 @@ export class ClaimService {
     const claimedAmountMinor = dto.claimedAmountMinor ? BigInt(dto.claimedAmountMinor) : null;
 
     const created = await this.repository.transaction(async (tx) => {
+      // Ordered against a concurrent transfer. The transfer refuses while a
+      // claim is open, and this lock makes sure it sees one filed a moment
+      // before (audit L3-03, L3-08).
+      const locked = await this.repository.lockAsset(tx, assetId, asset.organizationId, 'SHARE');
+      if (!locked) throw RastaError.notFound('Asset', assetId);
+
       const row = await tx.insuranceClaim.create({
         data: {
           id: claimId,
