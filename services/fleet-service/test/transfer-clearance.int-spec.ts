@@ -5,7 +5,11 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
-import { CLEARANCE_CALLER, TransferClearanceService } from '../src/fleet/transfer-clearance';
+import {
+  CLEARANCE_CALLER,
+  CLEARANCE_HANDLER_MAX_MS,
+  TransferClearanceService,
+} from '../src/fleet/transfer-clearance';
 import type { TransferRecordSource } from '../src/fleet/transfer-record';
 import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
 
@@ -603,6 +607,118 @@ describe('transfer clearance', () => {
 
         expect(await answer).toBe('INVALID_STATE_TRANSITION');
         expect(await fenceRow(assetId)).toBeUndefined();
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Review #127 round 3
+  // -------------------------------------------------------------------------
+
+  describe('round 3', () => {
+    const settle = (promise: Promise<unknown>) =>
+      promise.then(
+        () => 'OK',
+        (error: { code?: string }) => error.code ?? 'ERROR',
+      );
+
+    const tombstones = async (assetId: string) =>
+      (
+        await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+          `SELECT count(*)::int AS n FROM asset_transfer_release WHERE asset_id = $1`,
+          assetId,
+        )
+      )[0]!.n;
+
+    const tombstone = (assetId: string, fenceId: string, expired: boolean) =>
+      prisma.client.$executeRawUnsafe(
+        `INSERT INTO asset_transfer_release (asset_id, fence_id, organization_id, released_at, expires_at)
+         VALUES ($1, $2, $3, now() - interval '2 hours',
+                 now() + (CASE WHEN $4 THEN interval '-1 hour' ELSE interval '1 hour' END))`,
+        assetId,
+        fenceId,
+        org.a,
+        expired,
+      );
+
+    describe('tombstones expire (#1)', () => {
+      it('purges expired tombstones of any machine on a release, and keeps live ones', async () => {
+        const stale = [await machine(org.a), await machine(org.a)];
+        for (const assetId of stale) await tombstone(assetId, fence(), true);
+        const live = await machine(org.a);
+        await tombstone(live, fence(), false);
+
+        const other = await machine(org.a);
+        await asService(CLEARANCE_CALLER, org.a, () => clearance.release(other, fence()));
+
+        for (const assetId of stale) expect(await tombstones(assetId)).toBe(0);
+        expect(await tombstones(live)).toBe(1);
+      });
+
+      it('no longer withdraws a transfer whose tombstone has expired', async () => {
+        const assetId = await machine(org.a);
+        const fenceId = fence();
+        await tombstone(assetId, fenceId, true);
+
+        await expect(ask(org.a, assetId, fenceId)).resolves.toMatchObject({ clear: true });
+      });
+    });
+
+    describe('a clearance cannot outlive its tombstone (#2)', () => {
+      it(`places no fence once ${CLEARANCE_HANDLER_MAX_MS} ms have passed since it arrived, tombstone or not`, async () => {
+        const assetId = await machine(org.a);
+        // An older expired fence of this organization makes the clearance
+        // stop at its source question, before the lock.
+        await ask(org.a, assetId);
+        await prisma.client.$executeRawUnsafe(
+          `UPDATE asset_transfer_fence SET expires_at = now() - interval '1 second' WHERE asset_id = $1`,
+          assetId,
+        );
+        let now = 0;
+        let open!: () => void;
+        const gate = new Promise<void>((resolve) => (open = resolve));
+        const asked: unknown[] = [];
+        const records: TransferRecordSource = {
+          resolve: async (...args) => {
+            asked.push(args);
+            await gate;
+            return 'NOT_RECORDED';
+          },
+        };
+        const next = fence();
+
+        const answer = settle(
+          asService(CLEARANCE_CALLER, org.a, () =>
+            new TransferClearanceService(repository, records, () => now).clear(assetId, {
+              fenceId: next,
+              ttlSeconds: 600,
+            }),
+          ),
+        );
+        for (let attempt = 0; attempt < 200 && asked.length === 0; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        // Held past the bound; asset-service's release, and its tombstone,
+        // are long gone — none is written here.
+        now = CLEARANCE_HANDLER_MAX_MS + 1;
+        open();
+
+        expect(await answer).toBe('INVALID_STATE_TRANSITION');
+        expect(await fenceRow(assetId)).toBeUndefined();
+        expect(await tombstones(assetId)).toBe(0);
+      });
+
+      it('fences normally within the bound', async () => {
+        const assetId = await machine(org.a);
+        const now = 0;
+        await expect(
+          asService(CLEARANCE_CALLER, org.a, () =>
+            new TransferClearanceService(repository, undefined, () => now).clear(assetId, {
+              fenceId: fence(),
+              ttlSeconds: 600,
+            }),
+          ),
+        ).resolves.toMatchObject({ clear: true });
       });
     });
   });

@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { z } from 'zod';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
@@ -49,6 +50,20 @@ import {
 /** The only caller. */
 export const CLEARANCE_CALLER = 'asset-service';
 
+/**
+ * The longest a clearance may take, from its arrival to the fence (review #127
+ * round 3, #2). A request that has been held longer — waiting for a
+ * connection, or resolving an older fence at its source — places no fence:
+ * asset-service has long given up on it and may already have released it.
+ * Measured on this service's monotonic clock only. Far below the release
+ * tombstone's life (FENCE_TTL_MAX_SECONDS, an hour), so a clearance can never
+ * outlive the tombstone that withdraws it (ADR-062 § 2).
+ */
+export const CLEARANCE_HANDLER_MAX_MS = 60_000;
+
+/** The monotonic clock the bound is measured on; replaced in tests. */
+export const CLEARANCE_CLOCK = Symbol('TRANSFER_CLEARANCE_CLOCK');
+
 /** Bounds on the fence's life, whatever the caller asks for. */
 export const FENCE_TTL_MIN_SECONDS = 30;
 export const FENCE_TTL_MAX_SECONDS = 3600;
@@ -96,9 +111,13 @@ export class TransferClearanceService {
     @Optional()
     @Inject(TRANSFER_RECORD_SOURCE)
     private readonly records: TransferRecordSource = UNCONFIGURED_TRANSFER_RECORD_SOURCE,
+    @Optional()
+    @Inject(CLEARANCE_CLOCK)
+    private readonly clock: () => number = () => performance.now(),
   ) {}
 
   async clear(assetId: string, dto: TransferClearanceDto): Promise<TransferClearanceView> {
+    const arrivedAt = this.clock();
     assertClearanceCaller();
     // A token with no organization is a 403 here, before any query.
     const organizationId = getOrganizationId();
@@ -130,16 +149,13 @@ export class TransferClearanceService {
     return this.repository.transaction(async (tx) => {
       await this.repository.lockAssetForWork(tx, assetId, 'EXCLUSIVE');
 
+      await this.repository.purgeExpiredReleases(tx);
+
       // Released already: asset-service gave up on this transfer, and its
       // release reached the lock first (review #127 round 2, #2). No fence
       // for a transfer that no longer exists.
       if (await this.repository.isTransferReleased(tx, assetId, organizationId, dto.fenceId)) {
-        throw RastaError.invalidStateTransition(
-          'Asset',
-          'TRANSFER_PENDING',
-          'TRANSFER_PENDING',
-          'This transfer was withdrawn',
-        );
+        throw withdrawn();
       }
 
       // Absent is fine: no request can exist for a machine the replica has
@@ -155,6 +171,11 @@ export class TransferClearanceService {
       if (open.openRequests > 0 || open.openRepairOrders > 0) {
         return { assetId, fenceId: dto.fenceId, clear: false, fencedUntil: null, ...open };
       }
+
+      // Too old to fence (review #127 round 3, #2): a release, and even its
+      // expired tombstone, may already be gone. Under the lock, just before
+      // the fence, so nothing after this check can delay it.
+      if (this.clock() - arrivedAt > CLEARANCE_HANDLER_MAX_MS) throw withdrawn();
 
       const fencedUntil = await this.repository.placeTransferFence(
         tx,
@@ -200,5 +221,14 @@ function anotherTransfer(): RastaError {
     'TRANSFER_PENDING',
     'TRANSFER_PENDING',
     'Another transfer of this asset is in progress',
+  );
+}
+
+function withdrawn(): RastaError {
+  return RastaError.invalidStateTransition(
+    'Asset',
+    'TRANSFER_PENDING',
+    'TRANSFER_PENDING',
+    'This transfer was withdrawn',
   );
 }

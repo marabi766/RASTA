@@ -18,6 +18,9 @@ import type {
   UtilizationQuery,
 } from './dto';
 
+/** Expired release tombstones removed per release or clearance (ADR-062 § 2). */
+const RELEASE_PURGE_BATCH = 100;
+
 /**
  * Data access for fleet.
  *
@@ -400,8 +403,7 @@ export class FleetRepository {
   ): Promise<number> {
     return this.transaction(async (tx) => {
       await this.lockAssetRef(tx, assetId);
-      await tx.$executeRaw`
-        DELETE FROM asset_transfer_release WHERE asset_id = ${assetId} AND expires_at <= now()`;
+      await this.purgeExpiredReleases(tx);
       await tx.$executeRaw`
         INSERT INTO asset_transfer_release
           (asset_id, fence_id, organization_id, released_at, expires_at)
@@ -425,7 +427,25 @@ export class FleetRepository {
       WHERE asset_id = ${assetId} AND organization_id = ${organizationId}`;
   }
 
-  /** Whether this organization already released this transfer on this machine. Under the lock. */
+  /**
+   * Removes a bounded batch of expired release tombstones, of any machine,
+   * oldest first (review #127 round 3, #1). Called from every release and
+   * clearance, so the table stays as small as the releases of the last hour.
+   * A clearance cannot outlive a tombstone (ADR-062 § 2), so an expired one
+   * protects nothing.
+   */
+  async purgeExpiredReleases(tx: ExtendedPrismaClient): Promise<number> {
+    return tx.$executeRaw`
+      DELETE FROM asset_transfer_release
+      WHERE (asset_id, fence_id) IN (
+        SELECT asset_id, fence_id FROM asset_transfer_release
+        WHERE expires_at < now()
+        ORDER BY expires_at
+        LIMIT ${RELEASE_PURGE_BATCH}
+      )`;
+  }
+
+  /** Whether this organization released this transfer on this machine, and the tombstone is live. Under the lock. */
   async isTransferReleased(
     tx: ExtendedPrismaClient,
     assetId: string,
@@ -434,7 +454,8 @@ export class FleetRepository {
   ): Promise<boolean> {
     const rows = await tx.$queryRaw<{ fence_id: string }[]>`
       SELECT fence_id FROM asset_transfer_release
-      WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}`;
+      WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}
+        AND expires_at > now()`;
     return rows.length > 0;
   }
 

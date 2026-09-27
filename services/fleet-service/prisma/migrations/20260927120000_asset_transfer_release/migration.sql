@@ -8,9 +8,10 @@
 -- row here, under the same exclusive lock; a clearance that finds its own
 -- transfer here refuses and fences nothing.
 --
--- Rows hold ids only and are kept at least an hour (the longest fence life),
--- removed by expiry when the same machine is next released. A new, empty
--- table: nothing existing is read or rewritten.
+-- Rows hold ids only and are kept an hour (the longest fence life), far
+-- longer than a clearance may run (60 s, ADR-062 § 2); every release and
+-- clearance purges a bounded batch of expired ones. A new, empty table:
+-- nothing existing is read or rewritten.
 SET LOCAL lock_timeout = '3s';
 
 CREATE TABLE "asset_transfer_release" (
@@ -22,3 +23,7 @@ CREATE TABLE "asset_transfer_release" (
 
     CONSTRAINT "asset_transfer_release_pkey" PRIMARY KEY ("asset_id", "fence_id")
 );
+
+-- The purge removes expired rows of any machine, oldest first and a bounded
+-- batch at a time (review #127 round 3, #1).
+CREATE INDEX "asset_transfer_release_expires_at_idx" ON "asset_transfer_release" ("expires_at");
