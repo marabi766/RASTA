@@ -662,6 +662,8 @@ export const EXPECTED = {
       'performance_score_snapshot',
       'performance_score_component',
       'performance_score_source_event',
+      // ADR-052 step 5: orders that concluded, for the Q-78 denominator.
+      'performance_concluded_outcome',
     ],
     // ADR-052 step 2. The freeze, the no-truncate pair, the deferred 100% sum
     // and the successor rule. A round trip that lost any one of them would
@@ -689,6 +691,9 @@ export const EXPECTED = {
       'trg_performance_score_component_sealed',
       'trg_performance_score_source_event_sealed',
       'trg_performance_score_snapshot_consistent',
+      // ADR-052 step 5. The concluded-outcome store is append-only too.
+      'trg_performance_concluded_outcome_append_only',
+      'trg_performance_concluded_outcome_no_truncate',
     ],
     functions: [
       'performance_formula_version_guard',
@@ -699,6 +704,7 @@ export const EXPECTED = {
       'performance_score_append_only',
       'performance_score_child_sealed',
       'performance_score_snapshot_consistent',
+      'performance_concluded_outcome_append_only',
     ],
     indexes: [
       'ux_performance_formula_version_number',
@@ -713,6 +719,8 @@ export const EXPECTED = {
       'ux_performance_formula_version_identity',
       'ux_performance_event_tenant_source',
       'ux_performance_score_snapshot_tenant',
+      // ADR-052 step 5: rule 8 for concluded outcomes.
+      'ux_performance_concluded_outcome_source',
     ],
     types: [
       'PerformanceFormulaStatus',
@@ -775,6 +783,9 @@ export const EXPECTED = {
       'ck_score_component_absent_is_null',
       'ck_score_component_ranges',
       'ck_score_component_present_has_samples',
+      // ADR-052 step 5.
+      'ck_performance_event_dispute',
+      'ck_performance_concluded_outcome_text_not_blank',
     ],
   },
   /**

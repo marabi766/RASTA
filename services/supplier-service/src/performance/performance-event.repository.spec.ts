@@ -17,6 +17,7 @@ const STORED: PerformanceEventInput = {
   rating: null,
   promisedAt: null,
   deliveredAt: null,
+  disputeId: 'DSP_1',
   compensatesSourceEventId: null,
   occurredAt: new Date('2026-09-20T10:00:00.000Z'),
   correlationId: 'COR_1',
@@ -32,6 +33,7 @@ const MUTATIONS: Record<(typeof FACT_FIELDS)[number], Partial<PerformanceEventIn
   rating: { rating: 3 },
   promisedAt: { promisedAt: new Date('2026-10-01T00:00:00.000Z') },
   deliveredAt: { deliveredAt: new Date('2026-10-01T00:00:00.000Z') },
+  disputeId: { disputeId: 'DSP_2' },
   compensatesSourceEventId: { compensatesSourceEventId: 'EVT_0' },
   occurredAt: { occurredAt: new Date('2026-09-20T10:00:00.001Z') },
 };

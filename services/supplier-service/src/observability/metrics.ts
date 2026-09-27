@@ -73,3 +73,23 @@ export const directoryQueriesTotal = new Counter({
   labelNames: ['service', 'query'] as const,
   registers: [registry],
 });
+
+/**
+ * What the performance consumer did with each marketplace event it reads
+ * (ADR-052 step 5), by event name and result — both closed sets:
+ *
+ *   recorded            a fact or concluded outcome was counted;
+ *   duplicate           a redelivery, already counted;
+ *   promise_absent      an ORDER_CREATED without `promisedDeliveryAt`;
+ *   attribution_absent  an ORDER_CANCELLED without `cancellationCause`.
+ *
+ * Refusals are dead letters and are counted by the platform's
+ * `rasta_dlq_messages_total`, not here. Still no supplier, no rating and no
+ * score on any label.
+ */
+export const performanceFactsTotal = new Counter({
+  name: 'rasta_supplier_performance_facts_total',
+  help: 'Marketplace events read by the performance consumer, by result',
+  labelNames: ['service', 'event', 'result'] as const,
+  registers: [registry],
+});
