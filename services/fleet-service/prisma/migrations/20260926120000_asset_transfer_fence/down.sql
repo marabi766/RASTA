@@ -10,3 +10,5 @@
 SET LOCAL lock_timeout = '3s';
 
 DROP TABLE IF EXISTS "asset_transfer_fence";
+
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20260926120000_asset_transfer_fence';
