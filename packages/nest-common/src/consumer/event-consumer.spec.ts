@@ -127,7 +127,14 @@ describe('EventConsumer delivery metadata', () => {
       silentLogger,
     );
 
-    await deliver(consumer, 'rasta.economic.v1', 5, envelopeBytes());
+    // economic-service on its own topic: since ADR-061 § 2 a producer from
+    // another topic would be refused before the handler ever saw metadata.
+    await deliver(
+      consumer,
+      'rasta.economic.v1',
+      5,
+      envelopeBytes({ producer: 'economic-service' }),
+    );
 
     expect(Object.isFrozen(captured)).toBe(true);
     // Mutation is silently ignored in sloppy mode and throws in strict mode;

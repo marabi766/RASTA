@@ -21,6 +21,18 @@ export const eventActorSchema = z.object({
 });
 export type EventActor = z.infer<typeof eventActorSchema>;
 
+/**
+ * What a `producer` may look like: a service name, as every `SERVICE_NAME` on
+ * the platform is (`asset-service`, `api-gateway`).
+ *
+ * The field is the sender's claim and reaches logs, metrics and dead-letter
+ * headers of every consumer group on the topic (ADR-061 § 2). Bounded and
+ * printable by construction, so a padded or control-character claim is an
+ * invalid envelope — refused before anyone repeats it — rather than a string
+ * each consumer has to remember to sanitise.
+ */
+export const PRODUCER_NAME_PATTERN = /^[a-z][a-z0-9-]{1,62}$/;
+
 export const eventEnvelopeSchema = z.object({
   /** ULID. The consumer-side idempotency key. */
   eventId: z.string().min(1),
@@ -31,7 +43,10 @@ export const eventEnvelopeSchema = z.object({
   /** When it happened in the domain — not when it was published. */
   occurredAt: z.string().datetime(),
 
-  producer: z.string().min(1),
+  /** The publishing service's `SERVICE_NAME` — see `PRODUCER_NAME_PATTERN`. */
+  producer: z
+    .string()
+    .regex(PRODUCER_NAME_PATTERN, 'producer must be a service name (lower-case, digits, hyphens)'),
   producerVersion: z.string().default('0.0.0'),
 
   aggregateType: z.string().min(1),
@@ -214,6 +229,14 @@ export const DLQ_REASONS = {
    * no replay changes the answer.
    */
   BACKFILL_REQUIRED: 'BACKFILL_REQUIRED',
+  /**
+   * ADR-061 § 2. The envelope names a producer that `TOPIC_PRODUCERS` does not
+   * allow on the topic the broker delivered it on — or the topic itself has no
+   * declared producer. Refused before any handler runs, and never retried: the
+   * claim does not change on a second delivery. Consistency, not
+   * authentication; see `TOPIC_PRODUCERS`.
+   */
+  PRODUCER_NOT_ALLOWED: 'PRODUCER_NOT_ALLOWED',
 } as const;
 
 export type DlqReason = (typeof DLQ_REASONS)[keyof typeof DLQ_REASONS];

@@ -4,6 +4,8 @@ import {
   DLQ_REASONS,
   EVENT_HEADERS,
   eventEnvelopeSchema,
+  isAllowedProducer,
+  isDeclaredTopic,
   type DlqReason,
   type EventEnvelope,
 } from '@rasta/contracts';
@@ -168,6 +170,18 @@ export class EventConsumer {
     private readonly handler: EventHandler,
     private readonly logger: ConsumerLogger,
   ) {
+    // ADR-061 § 2: a consumer does not subscribe to a topic nobody is declared
+    // to own. Refused here, at construction, so a mistyped or undeclared topic
+    // fails the service at startup rather than dead-lettering every message.
+    const undeclared = options.topics.filter((topic) => !isDeclaredTopic(topic));
+    if (undeclared.length > 0) {
+      throw new Error(
+        `${options.groupId} subscribes to ${undeclared.join(', ')}, which ` +
+          `${undeclared.length === 1 ? 'has' : 'have'} no producer declared in TOPIC_PRODUCERS ` +
+          '(@rasta/contracts, ADR-061 § 1). Declare the owner there first.',
+      );
+    }
+
     this.kafka = new Kafka({
       clientId: options.clientId,
       brokers: options.brokers,
@@ -287,6 +301,31 @@ export class EventConsumer {
       // Unprocessable by construction — no number of retries changes the bytes.
       this.logger.error(`Unparseable message on ${topic}[${partition}]: ${describe(error)}`);
       await this.deadLetter(topic, value, headers, DLQ_REASONS.VALIDATION_FAILED, error, 0);
+      return;
+    }
+
+    // ADR-061 § 2, before any handler and before any retry: the producer the
+    // envelope names must be allowed on the topic the *broker* delivered it on
+    // — never a topic the envelope claims. A refusal is a verdict, not a
+    // failure, so it is dead-lettered at once and the partition moves on.
+    // Consistency, not authentication: see `TOPIC_PRODUCERS`.
+    //
+    // The claim itself is never repeated as free text (Codex review of #124,
+    // finding 1). The dead-letter header is fixed text naming only the topic
+    // this consumer subscribed to; the log line is fixed text plus bounded,
+    // escaped fields. The envelope schema already bounds `producer` to a
+    // service name, so the escaping is a second line, not the only one.
+    if (!isAllowedProducer(topic, envelope.producer)) {
+      const refusal = new UnprocessableEventError(
+        DLQ_REASONS.PRODUCER_NOT_ALLOWED,
+        `The envelope's producer is not declared for ${topic} (ADR-061 § 2)`,
+      );
+      this.logger.error(
+        `Refused before any handler (PRODUCER_NOT_ALLOWED) on ${topic}: ` +
+          `eventId=${logField(envelope.eventId)} eventName=${logField(envelope.eventName)} ` +
+          `producer=${logField(envelope.producer)}`,
+      );
+      await this.deadLetter(topic, value, headers, refusal.reason, refusal, 0);
       return;
     }
 
@@ -419,6 +458,21 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+/**
+ * A sender-supplied value made safe to put in a log line: at most 64
+ * characters, in quotes, with everything outside printable ASCII escaped — so
+ * a newline, an ANSI sequence or a right-to-left override cannot forge or
+ * disguise output. Longer values say how long they were, not what followed.
+ */
+export function logField(value: string, max = 64): string {
+  const clipped = value.length > max ? value.slice(0, max) : value;
+  const escaped = clipped.replace(
+    /[^\x20-\x7e]|["\\]/g,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+  return value.length > max ? `"${escaped}"...(${value.length} chars)` : `"${escaped}"`;
 }
 
 function describe(error: unknown): string {
