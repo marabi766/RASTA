@@ -372,6 +372,28 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 هیچ وزن معیاری در کد Hard-Code نمی‌شود. `Tender.procurementNature` اجباری است و پیش از انتشار
 توسط کارفرما تعیین می‌شود.
 
+### وضعیت پیاده‌سازی — CON-001، PR نخست (2026-09-26)
+
+اسکلت سرویس و دو چرخهٔ عمر `Project` و `ProjectNeed` ساخته شد؛ ماشین حالت صریح پایگاه داده با گذار Compare-and-Set و
+رویداد Outbox در همان تراکنش، بی Temporal ([ADR-063](adr/ADR-063-construction-lifecycles-and-approval-policy-ownership.md)).
+Endpointها: `POST/GET /v1/projects`، `GET/PATCH /v1/projects/{id}`، `POST /v1/projects/{id}/cancel` و
+`/v1/projects/{id}/needs[/{needId}[/submit|/withdraw]]`. رویدادها: `PROJECT_CREATED` و شش رویداد افزوده
+(`docs/events/README.md` § Construction). فیلدهای پروژه و نقش‌ها پاسخ موقت Q-68 و Q-69‌اند.
+
+**PR دوم CON-001 (2026-09-26):** موافقت‌های پیکربندی‌شده (`/v1/approval-policies`، `/v1/approvals`،
+`/v1/projects/{id}/approvals`)، آغاز (`/start`)، گزارش پیشرفت (`/progress`) و پایان با تأیید فنی نهایی پیکربندی‌پذیر
+(`/complete`)؛ نبود سیاست = ۴۲۲، بی هیچ Timer (ADR-063 § Implementation notes).
+سیاست را `UNION_ADMIN` برای سازمان خودش یا زیرمجموعه می‌نویسد و `SYSTEM_ADMIN` پیش از حاکم‌شدن تأیید می‌کند (Q-70
+بند ۷، تصمیم مالک 2026-09-26)؛ تنها وابستگی هم‌زمان این سرویس، پرسش سلسله‌مراتب از `organization-service` هنگام نوشتن
+سیاست است (`GET /v1/organizations/{id}` با توکن داخلی؛ پاسخ فقط `{ id }` یا `404`؛ هر پاسخ دیگر رد).
+
+**هنوز نیست:** پیوست مدارک و تصویر پیشرفت (Q-72)؛ مناقصه، پیشنهاد، ارزیابی و انتخاب — CON-002؛ قرارداد — CON-003؛
+تحلیل ناوگان؛ هیچ Consumer رویدادی.
+
+**رابطه با `organization_policy`.** منبع حقیقت موافقت‌های پروژه جدول `approval_policy` همین سرویس است (ADR-063).
+کلیدهای `approval.*` در `organization_policy` (`organization-service`) **هیچ موافقتی را برای پروژه الزامی یا مجاز
+نمی‌کنند** و این سرویس آن‌ها را نمی‌خواند؛ پر کردنشان سیاست پروژه نمی‌سازد (Q-70).
+
 ---
 
 ## ۴٫۱۳ contract-service

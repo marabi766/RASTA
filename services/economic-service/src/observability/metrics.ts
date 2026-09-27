@@ -209,6 +209,22 @@ export const rewardsSkippedTotal = new Counter({
 });
 
 /**
+ * Reward grants that failed in the reward consumer (global audit L7-13).
+ *
+ * `outcome` is `retried` (a transient failure: the event is left unprocessed
+ * and redelivered) or `dead_lettered` (every failed rule refused with a
+ * verdict a retry would repeat: `BUSINESS_RULE_VIOLATION`). Neither marks the
+ * event processed, so neither loses the reward; a steady `retried` rate is a
+ * database in trouble, and any `dead_lettered` is a rule to fix and replay.
+ */
+export const rewardGrantFailuresTotal = new Counter({
+  name: 'rasta_economic_reward_grant_failures_total',
+  help: 'Reward grants that failed in the reward consumer, by what happened to the event',
+  labelNames: ['service', 'outcome'] as const,
+  registers: [registry],
+});
+
+/**
  * Every question a money-making consumer put to a fact's owner (ADR-061 § 4).
  *
  * `consumer` is `settlement_authority` or `reward_trigger`. `outcome` is a

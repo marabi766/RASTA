@@ -79,7 +79,17 @@ if (!existsSync(serviceDir)) usage(`No such service directory: ${serviceDir}`);
 // Connection
 // ---------------------------------------------------------------------------
 
-const envKey = `DATABASE_URL_${service.replaceAll('-', '_').toUpperCase()}`;
+const serviceKey = `DATABASE_URL_${service.replaceAll('-', '_').toUpperCase()}`;
+/**
+ * The runtime url, or — for a service whose EXPECTED entry says
+ * `connectAs: 'migrator'` — its migrator url. supplier-service's runtime role
+ * owns nothing and may not create a schema (lib/supplier-privilege-split.bash),
+ * so its throwaway schemas are made by the role that owns the database, which is
+ * also the role its migrations really run as. Opt-in: audit's migrator owns only
+ * its schema, not the database, and keeps verifying as before.
+ */
+const envKey =
+  EXPECTED[service]?.connectAs === 'migrator' ? `${serviceKey}_MIGRATOR` : serviceKey;
 const baseUrl = process.env.DATABASE_URL ?? process.env[envKey];
 if (!baseUrl) {
   console.error(

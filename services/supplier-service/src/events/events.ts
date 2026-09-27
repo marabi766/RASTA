@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PERFORMANCE_COMPONENTS } from '../performance/components';
 import { SUPPLIER_CAPABILITIES } from '../supplier/capabilities';
 
 /**
@@ -11,11 +12,11 @@ import { SUPPLIER_CAPABILITIES } from '../supplier/capabilities';
  *
  * ## PERFORMANCE_SCORE_UPDATED is not here, and that is the point
  *
- * The catalogue lists six events for this service. Five are below. The sixth
- * carries `score` and `breakdown`, and there is no formula: Q-12 — the weights
- * of quality, time, satisfaction and dispute rate — is open, and the "equal
- * weights" line in `docs/24` is a placeholder inside an open question rather
- * than an approved policy.
+ * The catalogue lists six supplier events for this service. Five are below. The
+ * sixth carries `score` and `breakdown`. ADR-052 has since decided the formula
+ * (Q-12), but no score is computed yet: the calculation engine is Phase B step
+ * 6 and the event is step 8. Until a real computation exists there is nothing
+ * true to publish.
  *
  * Publishing it with an invented number would be worse than not publishing it.
  * `marketplace-service` ranks search results, and ADR-042 records that it
@@ -178,13 +179,110 @@ export const supplierReinstatedPayload = z
   })
   .strict();
 
+// ---------------------------------------------------------------------------
+// The performance formula — audit of a platform-wide configuration change
+// ---------------------------------------------------------------------------
+
+/**
+ * Every change to the platform-wide scoring formula (ADR-052 § 3, § 18, S-06).
+ *
+ * A separate set from `SUPPLIER_EVENTS` because they are about no supplier:
+ * a formula version belongs to the platform, so these events carry no tenant
+ * and are keyed by the formula version's own id, not by `supplierId` (PM
+ * ruling, `routing.ts`). audit-service reads them off `rasta.supplier.v1`
+ * like every other event on the topic.
+ *
+ * They announce configuration, never a score: `PERFORMANCE_SCORE_UPDATED` is
+ * still ADR-052 step 8 and is still not here.
+ */
+export const PERFORMANCE_FORMULA_EVENTS = {
+  PERFORMANCE_FORMULA_VERSION_CREATED: 'PERFORMANCE_FORMULA_VERSION_CREATED',
+  PERFORMANCE_FORMULA_VERSION_ACTIVATED: 'PERFORMANCE_FORMULA_VERSION_ACTIVATED',
+  PERFORMANCE_FORMULA_VERSION_RETIRED: 'PERFORMANCE_FORMULA_VERSION_RETIRED',
+} as const;
+
+export type PerformanceFormulaEventName =
+  (typeof PERFORMANCE_FORMULA_EVENTS)[keyof typeof PERFORMANCE_FORMULA_EVENTS];
+
+/** Every event this service may put in its outbox. */
+export type PublishedEventName = SupplierEventName | PerformanceFormulaEventName;
+
+const basisPoints = z.number().int().min(0).max(10_000);
+const formulaVersionNumber = z.number().int().positive();
+
+/**
+ * A DRAFT version was recorded, with everything it would compute by.
+ *
+ * The full content rather than a reference: the audit trail should answer
+ * "what did the operator propose" without this service's database.
+ */
+export const performanceFormulaVersionCreatedPayload = z
+  .object({
+    formulaVersionId: identifier,
+    formulaVersion: formulaVersionNumber,
+    windowDays: z.number().int().positive(),
+    minSampleCount: z.number().int().positive(),
+    minCoverageBp: basisPoints,
+    ratingMapping: z
+      .object({
+        scaleMin: z.number().int(),
+        scaleMax: z.number().int(),
+        minScoreCentis: basisPoints,
+        maxScoreCentis: basisPoints,
+      })
+      .strict(),
+    weights: z
+      .array(
+        z
+          .object({
+            component: z.enum(PERFORMANCE_COMPONENTS),
+            weightBp: basisPoints.min(1),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(PERFORMANCE_COMPONENTS.length),
+    createdBy: identifier,
+    createdAt: isoTimestamp,
+  })
+  .strict();
+
+/** A DRAFT became the platform's one ACTIVE version. */
+export const performanceFormulaVersionActivatedPayload = z
+  .object({
+    formulaVersionId: identifier,
+    formulaVersion: formulaVersionNumber,
+    /** The version this one replaced; null only for the very first activation. */
+    supersededFormulaVersionId: identifier.nullable(),
+    activatedBy: identifier,
+    activatedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * The ACTIVE version was retired — always by the activation of a successor,
+ * named here, in the same transaction.
+ */
+export const performanceFormulaVersionRetiredPayload = z
+  .object({
+    formulaVersionId: identifier,
+    formulaVersion: formulaVersionNumber,
+    successorFormulaVersionId: identifier,
+    retiredBy: identifier,
+    retiredAt: isoTimestamp,
+  })
+  .strict();
+
 export const SUPPLIER_EVENT_SCHEMAS = {
   SUPPLIER_REGISTERED: supplierRegisteredPayload,
   SUPPLIER_QUALIFIED: supplierQualifiedPayload,
   SUPPLIER_REJECTED: supplierRejectedPayload,
   SUPPLIER_SUSPENDED: supplierSuspendedPayload,
   SUPPLIER_REINSTATED: supplierReinstatedPayload,
-} as const satisfies Record<SupplierEventName, z.ZodTypeAny>;
+  PERFORMANCE_FORMULA_VERSION_CREATED: performanceFormulaVersionCreatedPayload,
+  PERFORMANCE_FORMULA_VERSION_ACTIVATED: performanceFormulaVersionActivatedPayload,
+  PERFORMANCE_FORMULA_VERSION_RETIRED: performanceFormulaVersionRetiredPayload,
+} as const satisfies Record<PublishedEventName, z.ZodTypeAny>;
 
 /**
  * Validates a payload at publish time, not only in a test.
@@ -194,7 +292,7 @@ export const SUPPLIER_EVENT_SCHEMAS = {
  * inside the caller's transaction, so an invalid payload rolls back the state
  * change too rather than committing a fact nobody will hear about.
  */
-export function validateSupplierPayload<N extends SupplierEventName>(
+export function validateSupplierPayload<N extends PublishedEventName>(
   eventName: N,
   payload: unknown,
 ): z.infer<(typeof SUPPLIER_EVENT_SCHEMAS)[N]> {

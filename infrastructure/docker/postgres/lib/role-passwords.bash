@@ -51,6 +51,7 @@ rasta_roles() {
   local svc
   for svc in "${RASTA_SERVICES[@]}"; do printf '%s\n' "rasta_${svc}"; done
   printf '%s\n' rasta_audit_migrator
+  printf '%s\n' rasta_supplier_migrator
 }
 
 role_password_var() {

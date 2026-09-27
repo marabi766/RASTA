@@ -2,9 +2,8 @@ import { Body, Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/com
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { LedgerService } from './ledger.service';
-import { PrismaService } from '../prisma/prisma.service';
-import { WalletRepository } from '../wallet/wallet.repository';
-import { assertNotAuditor, assertPlatformScope, canCommitOrganization } from '../access/access';
+import { JournalReversalService } from './journal-reversal.service';
+import { assertNotAuditor, assertPlatformScope } from '../access/access';
 import {
   toAccountView,
   toEntryView,
@@ -54,8 +53,7 @@ import {
 export class LedgerController {
   constructor(
     private readonly ledger: LedgerService,
-    private readonly prisma: PrismaService,
-    private readonly wallets: WalletRepository,
+    private readonly reversals: JournalReversalService,
   ) {}
 
   // ---- Accounts ------------------------------------------------------------
@@ -115,59 +113,24 @@ export class LedgerController {
   }
 
   /**
-   * Reverses a posted journal — the ledger's only correction (AGENTS.md A-06).
-   *
-   * Restricted to platform administrators. Reversing a journal changes what
-   * two organizations' balances are, and it is the one operation in this
-   * service that can undo a settlement's effect; putting it in the hands of a
-   * single tenant's administrator would let one party unwind a movement the
-   * other party relied on.
-   *
-   * The wallets touched by the original journal are recomputed from the ledger
-   * in the same transaction, so the reversal and the balances it implies
-   * commit together.
+   * Reverses a posted journal that no record owns — and refuses every one
+   * that has an owner (global audit L7-07). See {@link JournalReversalService}.
    */
   @Post('journals/:id/reverse')
   @HttpCode(201)
   @Roles('SYSTEM_ADMIN', 'UNION_ADMIN')
   @ApiOperation({
-    summary: 'Reverse a posted journal',
+    summary: 'Reverse a posted journal that no record owns',
     description:
-      'Posts a new journal mirroring every leg in the opposite direction, returning the ' +
-      'affected accounts to exactly the balances they had before — without changing a single ' +
-      'row of history. A journal can be reversed at most once, enforced by a unique ' +
-      'constraint rather than by a check two concurrent requests could both pass. It does not ' +
-      'post the corrected journal: that is a separate, deliberate act.',
+      'Refused with 422 for every journal that is the ledger half of a record — a top-up, a ' +
+      'hold, a refund, a settlement, a reward — because reversing the ledger alone leaves that ' +
+      'record contradicting it. The refusal names the operation that corrects it (a payment ' +
+      'refund, a transaction refund), or says that none exists yet (docs/24 Q-76), and writes ' +
+      'nothing. A reversal itself is never reversed. Today every journal type has an owner, so ' +
+      'this endpoint posts nothing.',
   })
-  async reverse(
-    @Param('id') id: string,
-    @Body(zodPipe(reverseJournalSchema)) dto: ReverseJournalDto,
-  ) {
-    assertPlatformScope('Reversing a journal');
-
-    return this.prisma.transaction(async (tx) => {
-      const original = await this.ledger.getJournal(id);
-      canCommitOrganization(original.organizationId);
-
-      const reversal = await this.ledger.reverse(tx, id, dto.reason, 'platform-administrator');
-
-      // Every wallet whose account appears in the reversal has to be brought
-      // back into line with the ledger in the same transaction, or the two
-      // disagree until the hourly reconciliation notices.
-      const organizations = new Set(reversal.entries.map((entry) => entry.organizationId));
-      for (const organizationId of organizations) {
-        const wallet = await this.wallets.findByOrganizationUnscoped(
-          tx,
-          organizationId,
-          reversal.currency,
-        );
-        if (!wallet) continue;
-        const [locked] = await this.wallets.lock(tx, [wallet.id]);
-        if (locked) await this.wallets.recomputeFromLedger(tx, locked);
-      }
-
-      return { journalId: reversal.id, reversesId: id, postedAt: reversal.postedAt.toISOString() };
-    });
+  reverse(@Param('id') id: string, @Body(zodPipe(reverseJournalSchema)) dto: ReverseJournalDto) {
+    return this.reversals.reverse(id, dto.reason);
   }
 
   // ---- Trial balance -------------------------------------------------------

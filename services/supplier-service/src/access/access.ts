@@ -200,6 +200,29 @@ export function assertCanReviewQualifications(): void {
   }
 }
 
+/**
+ * Whether the caller may create or activate a performance formula version.
+ *
+ * **SYSTEM_ADMIN only** — the project owner's decision on docs/24 Q-75
+ * (2026-09-26). The formula is platform-wide: one ACTIVE version scores every
+ * supplier for buyers in every tenant, so it is not a decision a tenant-bound
+ * role makes. UNION_ADMIN, which ADR-052 § 16 originally listed, is refused;
+ * § 16 records the amendment.
+ *
+ * Enforced in the domain service now, although the management API is ADR-052
+ * step 7: the service is the only write path, and a write path with no role
+ * check is a hole waiting for its first caller.
+ */
+export const FORMULA_MANAGER_ROLES = ['SYSTEM_ADMIN'] as const;
+
+export function assertCanManagePerformanceFormula(): void {
+  assertNotAuditor();
+  assertNotServiceCaller();
+  if (!hasAnyRole(FORMULA_MANAGER_ROLES)) {
+    throw RastaError.forbidden('Only a platform administrator may change the performance formula');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Object-level checks
 // ---------------------------------------------------------------------------

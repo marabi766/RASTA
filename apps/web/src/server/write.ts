@@ -1,5 +1,10 @@
 import type { z } from 'zod';
-import { callGateway, GatewayRequestError, type GatewayProblem } from './gateway';
+import {
+  callGateway,
+  GatewayOutcomeUnknownError,
+  GatewayRequestError,
+  type GatewayProblem,
+} from './gateway';
 import { webServerEnv } from './env';
 import type { WebSession } from './session';
 
@@ -32,8 +37,16 @@ export type WriteResult<T, F extends string> =
   /** The thing written *about* is not visible to this person — the platform's
    *  non-disclosure 404. */
   | { readonly kind: 'NOT_FOUND'; readonly correlationId: string }
+  /** Refused before it could act: nothing was written. */
   | { readonly kind: 'UNAVAILABLE'; readonly status: number; readonly correlationId: string }
-  | { readonly kind: 'MALFORMED'; readonly correlationId: string };
+  /**
+   * Sent, and possibly committed, but not confirmed (Codex post-merge review
+   * of #106): the connection failed after dispatch, this portal's deadline
+   * passed, the gateway's own upstream timed out (504), or a 2xx came back
+   * that could not be read or did not look like the resource. A form must
+   * not say nothing changed — a retry could apply the change twice.
+   */
+  | { readonly kind: 'UNKNOWN_OUTCOME'; readonly correlationId: string };
 
 /**
  * How a service's error details map onto a form.
@@ -109,12 +122,19 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
     });
 
     const parsed = call.schema.safeParse(response.data);
-    if (!parsed.success) return { kind: 'MALFORMED', correlationId: response.correlationId };
+    // A 2xx: the write happened, but its answer is not one this portal can
+    // show — so it cannot be confirmed either.
+    if (!parsed.success) return { kind: 'UNKNOWN_OUTCOME', correlationId: response.correlationId };
     return { kind: 'CREATED', data: parsed.data, correlationId: response.correlationId };
   } catch (error) {
     if (!(error instanceof GatewayRequestError)) throw error;
 
     const { status, correlationId, problem } = error;
+    if (error instanceof GatewayOutcomeUnknownError)
+      return { kind: 'UNKNOWN_OUTCOME', correlationId };
+    // UPSTREAM_TIMEOUT: the gateway forwarded the write and gave up waiting —
+    // the same unknown, one hop further on.
+    if (status === 504) return { kind: 'UNKNOWN_OUTCOME', correlationId };
     if (status === 403) return { kind: 'FORBIDDEN', correlationId };
     if (status === 404) return { kind: 'NOT_FOUND', correlationId };
     if ((status === 400 || status === 422 || status === 409) && problem) {

@@ -228,14 +228,16 @@ const nullableLocalDate = z.string().transform((raw, ctx) => {
 });
 
 /**
- * Bidi control characters — LRM/RLM, the embeddings and overrides, the
- * isolates — refused in short free-text identifiers.
+ * Bidi control characters — the whole Unicode `Bidi_Control` set: ALM, LRM
+ * and RLM, the embeddings and overrides, the isolates — refused in short
+ * free-text identifiers.
  *
- * Built from code points rather than written as literals, the same reason
- * `format/codepoints.ts` gives for doing the same with ZWNJ and the rest:
- * every one of these is invisible, so a literal in source is a character no
- * diff and no reviewer can see — which would be a strange way to write the
- * check for exactly that failure mode.
+ * The Unicode property rather than a list (Codex post-merge review of #106):
+ * the hand-written list this replaces had eleven of the twelve and missed
+ * U+061C ARABIC LETTER MARK — in a Persian-first portal, the one most likely
+ * to arrive by paste. `\p{Bidi_Control}` is the Unicode Character Database's
+ * own definition, so it cannot fall behind a new version of it, and it holds
+ * no invisible character in source for a reviewer to miss.
  *
  * fleet-service accepts these unchanged today — it checks only length and
  * trim (`dto.ts`) — and a value carrying one can be rendered to look like a
@@ -245,22 +247,7 @@ const nullableLocalDate = z.string().transform((raw, ctx) => {
  * that can write these fields, so refusing here narrows the surface rather
  * than closing it — the service-side check is a separate fix.
  */
-const BIDI_CONTROL_CODEPOINTS = [
-  0x200e, // LEFT-TO-RIGHT MARK
-  0x200f, // RIGHT-TO-LEFT MARK
-  0x202a, // LEFT-TO-RIGHT EMBEDDING
-  0x202b, // RIGHT-TO-LEFT EMBEDDING
-  0x202c, // POP DIRECTIONAL FORMATTING
-  0x202d, // LEFT-TO-RIGHT OVERRIDE
-  0x202e, // RIGHT-TO-LEFT OVERRIDE
-  0x2066, // LEFT-TO-RIGHT ISOLATE
-  0x2067, // RIGHT-TO-LEFT ISOLATE
-  0x2068, // FIRST STRONG ISOLATE
-  0x2069, // POP DIRECTIONAL ISOLATE
-];
-const BIDI_CONTROL = new RegExp(
-  `[${BIDI_CONTROL_CODEPOINTS.map((codePoint) => String.fromCodePoint(codePoint)).join('')}]`,
-);
+export const BIDI_CONTROL = /\p{Bidi_Control}/u;
 const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
 
 const nullableShortText = (max: number, message: string) =>

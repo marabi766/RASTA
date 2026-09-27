@@ -450,6 +450,17 @@ model Transaction {
   disputeResolvedAt DateTime? @map("dispute_resolved_at")
   disputeResolvedBy String?   @map("dispute_resolved_by")
 
+  /// Who confirmed receipt, cancelled or refunded, and when (economic batch 2,
+  /// item b). Every lifecycle step is also announced as
+  /// `TRANSACTION_STATUS_CHANGED` in the same transaction. NULL on rows moved
+  /// before migration `20260926120000_transaction_state_actors`.
+  settlementAuthorisedAt DateTime? @map("settlement_authorised_at")
+  settlementAuthorisedBy String?   @map("settlement_authorised_by")
+  cancelledAt            DateTime? @map("cancelled_at")
+  cancelledBy            String?   @map("cancelled_by")
+  refundedAt             DateTime? @map("refunded_at")
+  refundedBy             String?   @map("refunded_by")
+
   settledAt DateTime? @map("settled_at")
 
   failureReason String? @map("failure_reason")
@@ -580,6 +591,11 @@ model PaymentIntent {
 
   /// Required. A retried top-up must not charge twice (docs/06 § 6.8).
   idempotencyKey String @map("idempotency_key")
+  /// SHA-256 of the canonical request (wallet, amount, currency, instrument),
+  /// in the IdempotencyStore's canonical form. A same-key retry resumes this
+  /// intent only when it is the same request (Codex round 3 on #121, H2).
+  /// NULL on rows written before it existed: such an intent is never resumed.
+  requestHash String? @map("request_hash")
 
   correlationId String @map("correlation_id")
 

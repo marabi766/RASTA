@@ -1,3 +1,4 @@
+import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { TopUpFormField, TopUpFormValues } from '@/lib/wallet-fields';
 
 /**
@@ -22,6 +23,7 @@ export type TopUpFormState =
     }
   | { readonly kind: 'REFUSED'; readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
-  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string };
+  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
+  | UnconfirmedWriteState;
 
 export const IDLE_TOP_UP_FORM: TopUpFormState = { kind: 'IDLE' };

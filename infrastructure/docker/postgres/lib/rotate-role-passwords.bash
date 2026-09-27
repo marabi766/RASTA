@@ -38,6 +38,7 @@ superuser_sql() {
 role_database() {
   case "$1" in
     rasta_audit_migrator) printf 'rasta_audit' ;;
+    rasta_supplier_migrator) printf 'rasta_supplier' ;;
     *) printf '%s' "$1" ;;
   esac
 }

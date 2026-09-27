@@ -97,6 +97,16 @@ describe('UpdateDriverForm', () => {
     );
   });
 
+  it('says an unconfirmed update may have been applied, and never that nothing changed', () => {
+    const { container, getByText } = renderForm({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-sample',
+    });
+    expect(getByText(/نتوانستیم تأیید کنیم/)).toBeInTheDocument();
+    expect(getByText(/corr-sample/)).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/چیزی تغییر نکرد|ذخیره انجام نشد/);
+  });
+
   it('shows the optimistic-lock refusal as a banner', () => {
     const { getByText } = renderForm({
       kind: 'INVALID',

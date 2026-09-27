@@ -448,7 +448,7 @@ GET    /v1/settlements/{id}                        دریافت
 GET    /v1/ledger/accounts                         نمودار حساب‌های سازمان
 GET    /v1/ledger/accounts/{id}/entries            صورت‌حساب (Cursor)
 GET    /v1/ledger/journals/{id}                    یک Journal با همه خطوطش
-POST   /v1/ledger/journals/{id}/reverse            معکوس کردن — تنها اصلاح ممکن   (SYSTEM_ADMIN/UNION_ADMIN)
+POST   /v1/ledger/journals/{id}/reverse            معکوس کردن Journal بی‌مالک؛ Journal دارای مالک ← ۴۲۲ با نام عملیات اصلاح (L7-07، Q-76)   (SYSTEM_ADMIN/UNION_ADMIN)
 GET    /v1/ledger/trial-balance                    تراز آزمایشی   (SYSTEM_ADMIN/UNION_ADMIN)
 
 GET    /v1/commissions                             کارمزدهای اعمال‌شده

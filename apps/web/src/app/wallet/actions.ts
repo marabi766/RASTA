@@ -64,7 +64,8 @@ export async function submitTopUp(
       return { kind: 'FAILED', status: 404, correlationId: result.correlationId };
     case 'UNAVAILABLE':
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
-    case 'MALFORMED':
-      return { kind: 'FAILED', status: 502, correlationId: result.correlationId };
+    case 'UNKNOWN_OUTCOME':
+      // Sent, maybe committed, not confirmed: never "nothing was saved".
+      return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }

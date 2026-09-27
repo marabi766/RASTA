@@ -43,7 +43,7 @@ import { join } from 'node:path';
 export const TENANT_COLUMN = 'organization_id';
 
 /** Services whose schemas this check owns. Others opt in as their owners adopt it. */
-export const SERVICES = ['supplier', 'notification', 'document', 'audit'];
+export const SERVICES = ['supplier', 'notification', 'document', 'audit', 'construction'];
 
 /**
  * Tables that carry `organization_id` but are platform plumbing, not tenant
@@ -92,6 +92,13 @@ export const EXEMPTIONS = {
   document: {
     uq_grant_document_subject: `one grant per (document, subject) — an invariant of one document; ${perParentUnique('document_id')}`,
     ix_document_scan_queue: 'the scan worker claims queued documents for every tenant at once',
+  },
+  // construction: every child references its parent by (organization_id,
+  // parent_id), so per-parent indexes lead with the tenant column without
+  // weakening anything. One exemption:
+  construction: {
+    ix_approval_authority_inbox:
+      "the authority's inbox (GET /v1/approvals): an approval belongs to the project's organization, but the authority asking is another tenant, whose organization is authority_organization_id — the column this index leads with",
   },
   audit: {
     audit_event_pkey:

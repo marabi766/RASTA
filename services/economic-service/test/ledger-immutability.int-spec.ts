@@ -49,35 +49,87 @@ describe('ledger immutability (real database)', () => {
     await prisma.onModuleDestroy();
   });
 
-  /** Posts a balanced journal through raw SQL and returns its id. */
+  /** A fresh, unique raw journal id. */
+  const rawJournalId = (label: string) =>
+    `JRN_${label}_${Date.now()}_${Math.trunc(performance.now() * 1000)}`;
+
+  /** Inserts a journal header, raw, inside the caller's transaction. */
+  function insertJournalHeader(
+    tx: { $executeRawUnsafe: typeof prisma.client.$executeRawUnsafe },
+    journalId: string,
+    description = 'raw',
+  ) {
+    return tx.$executeRawUnsafe(
+      `INSERT INTO journal (id, organization_id, journal_type, description, posted_at, posted_by, correlation_id, created_at)
+       VALUES ($1, $2, 'FUNDS_HELD', $3, now(), 'itest', 'itest', now())`,
+      journalId,
+      org.a,
+      description,
+    );
+  }
+
+  /**
+   * Posts a balanced journal through raw SQL and returns its id.
+   *
+   * Header and entries in **one transaction**: a journal is posted whole,
+   * and entries may join only a journal their own transaction opened
+   * (`trg_ledger_entry_open_journal`). This helper wrote them as two
+   * autocommit statements until economic batch 2 item f, which is exactly
+   * the append that trigger now refuses.
+   */
   async function postRawJournal(
     amountMinor: bigint,
   ): Promise<{ journalId: string; entryId: string }> {
-    const journalId = `JRN_RAW_${Date.now()}_${Math.trunc(performance.now() * 1000)}`;
+    const journalId = rawJournalId('RAW');
     const entryId = `${journalId}_E1`;
 
-    await runUnscoped('the immutability suite writes raw rows on purpose', async () => {
-      await prisma.client.$executeRawUnsafe(
-        `INSERT INTO journal (id, organization_id, journal_type, description, posted_at, posted_by, correlation_id, created_at)
-         VALUES ($1, $2, 'FUNDS_HELD', 'raw', now(), 'itest', 'itest', now())`,
-        journalId,
-        org.a,
-      );
-      await prisma.client.$executeRawUnsafe(
-        `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
-         VALUES ($1, $2, $3, $4, 'DEBIT', $5, 'IRR', now()),
-                ($6, $2, $7, $4, 'CREDIT', $5, 'IRR', now())`,
-        entryId,
-        journalId,
-        accountA,
-        org.a,
-        amountMinor,
-        `${entryId}_2`,
-        accountB,
-      );
-    });
+    await runUnscoped('the immutability suite writes raw rows on purpose', () =>
+      prisma.client.$transaction(async (tx) => {
+        await insertJournalHeader(tx, journalId);
+        await tx.$executeRawUnsafe(
+          `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
+           VALUES ($1, $2, $3, $4, 'DEBIT', $5, 'IRR', now()),
+                  ($6, $2, $7, $4, 'CREDIT', $5, 'IRR', now())`,
+          entryId,
+          journalId,
+          accountA,
+          org.a,
+          amountMinor,
+          `${entryId}_2`,
+          accountB,
+        );
+      }),
+    );
 
     return { journalId, entryId };
+  }
+
+  /**
+   * Inserts one raw entry into a journal opened by the same transaction, so
+   * the constraint under test, and not the closed-journal trigger, is what
+   * refuses it.
+   */
+  function insertEntryIntoFreshJournal(values: {
+    amountMinor: number;
+    currency: string;
+    organizationId: string;
+  }) {
+    const journalId = rawJournalId('FRESH');
+    return runUnscoped('the constraint suite writes raw rows on purpose', () =>
+      prisma.client.$transaction(async (tx) => {
+        await insertJournalHeader(tx, journalId, 'constraint probe');
+        await tx.$executeRawUnsafe(
+          `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
+           VALUES ($1, $2, $3, $4, 'DEBIT', $5, $6, now())`,
+          `${journalId}_E1`,
+          journalId,
+          accountA,
+          values.organizationId,
+          values.amountMinor,
+          values.currency,
+        );
+      }),
+    );
   }
 
   describe('a posted entry cannot be changed', () => {
@@ -235,38 +287,63 @@ describe('ledger immutability (real database)', () => {
       // once at the end.
       await expect(postRawJournal(7_000n)).resolves.toBeDefined();
     });
+
+    // Economic batch 2, item f: the two shapes `trg_journal_balanced` let
+    // through, because it fires only when an entry is inserted.
+
+    it('refuses a journal with no entries at all', async () => {
+      await expect(
+        runUnscoped('the balance suite writes raw rows on purpose', () =>
+          prisma.client.$transaction(async (tx) => {
+            await insertJournalHeader(tx, rawJournalId('EMPTY'), 'no legs');
+          }),
+        ),
+      ).rejects.toThrow(/has 0 ledger entries; a posted journal needs at least two/i);
+    });
+
+    it('refuses a balanced pair appended to a journal posted earlier', async () => {
+      // Balanced, so the balance trigger passes it; but the journal was
+      // closed when its transaction committed. A correction is a new journal.
+      const { journalId } = await postRawJournal(11_000n);
+
+      await expect(
+        runUnscoped('the balance suite writes raw rows on purpose', () =>
+          prisma.client.$transaction(async (tx) => {
+            await tx.$executeRawUnsafe(
+              `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
+               VALUES ($1, $2, $3, $4, 'DEBIT', 500, 'IRR', now()),
+                      ($5, $2, $6, $4, 'CREDIT', 500, 'IRR', now())`,
+              `${journalId}_APPENDED_1`,
+              journalId,
+              accountA,
+              org.a,
+              `${journalId}_APPENDED_2`,
+              accountB,
+            );
+          }),
+        ),
+      ).rejects.toThrow(/was not opened in this transaction/i);
+
+      const legs = await runUnscoped('the balance suite counts the legs', () =>
+        prisma.client.ledgerEntry.count({ where: { journalId } }),
+      );
+      expect(legs).toBe(2);
+    });
   });
 
   describe('the amount and currency constraints', () => {
     it('refuses a zero-amount entry', async () => {
       await expect(
-        runUnscoped('the constraint suite writes raw rows on purpose', () =>
-          prisma.client.$executeRawUnsafe(
-            `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
-             VALUES ('LGE_ZERO', 'JRN_NONE', $1, $2, 'DEBIT', 0, 'IRR', now())`,
-            accountA,
-            org.a,
-          ),
-        ),
-      ).rejects.toThrow();
+        insertEntryIntoFreshJournal({ amountMinor: 0, currency: 'IRR', organizationId: org.a }),
+      ).rejects.toThrow(/ck_ledger_entry_amount_positive|check constraint/i);
     });
 
     it('refuses an entry whose currency differs from its account', async () => {
       // A rial entry on a foreign-currency account would make the balance
       // meaningless, and the composite foreign key is what makes it
       // impossible rather than merely unlikely.
-      const { journalId } = await postRawJournal(8_000n);
-
       await expect(
-        runUnscoped('the constraint suite writes raw rows on purpose', () =>
-          prisma.client.$executeRawUnsafe(
-            `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
-             VALUES ('LGE_USD', $1, $2, $3, 'DEBIT', 100, 'USD', now())`,
-            journalId,
-            accountA,
-            org.a,
-          ),
-        ),
+        insertEntryIntoFreshJournal({ amountMinor: 100, currency: 'USD', organizationId: org.a }),
       ).rejects.toThrow(/fk_ledger_entry_account_identity|foreign key/i);
     });
 
@@ -274,18 +351,8 @@ describe('ledger immutability (real database)', () => {
       // The silent leak this prevents: an entry with the wrong tenant would
       // appear in another organization's statement, which reads
       // `ledger_entry.organization_id`.
-      const { journalId } = await postRawJournal(9_000n);
-
       await expect(
-        runUnscoped('the constraint suite writes raw rows on purpose', () =>
-          prisma.client.$executeRawUnsafe(
-            `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
-             VALUES ('LGE_WRONGORG', $1, $2, $3, 'DEBIT', 100, 'IRR', now())`,
-            journalId,
-            accountA,
-            org.b,
-          ),
-        ),
+        insertEntryIntoFreshJournal({ amountMinor: 100, currency: 'IRR', organizationId: org.b }),
       ).rejects.toThrow(/fk_ledger_entry_account_identity|foreign key/i);
     });
   });

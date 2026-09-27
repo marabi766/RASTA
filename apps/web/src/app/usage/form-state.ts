@@ -1,3 +1,4 @@
+import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { UsageField, UsageFormValues } from '@/lib/usage-fields';
 
 /**
@@ -31,6 +32,7 @@ export type UsageFormState =
       readonly values: UsageFormValues;
       readonly correlationId: string;
     }
-  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string };
+  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
+  | UnconfirmedWriteState;
 
 export const IDLE_USAGE_FORM: UsageFormState = { kind: 'IDLE' };

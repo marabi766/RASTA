@@ -20,7 +20,7 @@
     "test:integration": "node scripts/run-test-phases.mjs test:integration",
     "test:aggregation-stress": "turbo run test:aggregation-stress --filter=@rasta/identity-service",
     "test:e2e": "turbo run test:e2e",
-    "test:migration": "node scripts/verify-migration-reversible.mjs identity && node scripts/verify-migration-reversible.mjs organization && node scripts/verify-migration-reversible.mjs asset && node scripts/verify-migration-reversible.mjs fleet && node scripts/verify-migration-reversible.mjs maintenance && node scripts/verify-migration-reversible.mjs economic && node scripts/verify-migration-reversible.mjs marketplace && node scripts/verify-migration-reversible.mjs document && node scripts/verify-migration-reversible.mjs supplier && node scripts/verify-migration-reversible.mjs audit && node scripts/verify-migration-reversible.mjs notification && node scripts/verify-outbox-claim-migration.mjs --in-place && node scripts/verify-security-event-outbox-migration.mjs && node scripts/verify-audit-correction-command-migration.mjs",
+    "test:migration": "node scripts/verify-migration-reversible.mjs identity && node scripts/verify-migration-reversible.mjs organization && node scripts/verify-migration-reversible.mjs asset && node scripts/verify-migration-reversible.mjs fleet && node scripts/verify-migration-reversible.mjs maintenance && node scripts/verify-migration-reversible.mjs economic && node scripts/verify-migration-reversible.mjs marketplace && node scripts/verify-migration-reversible.mjs document && node scripts/verify-migration-reversible.mjs supplier && node scripts/verify-migration-reversible.mjs audit && node scripts/verify-migration-reversible.mjs notification && node scripts/verify-migration-reversible.mjs construction && node scripts/verify-outbox-claim-migration.mjs --in-place && node scripts/verify-security-event-outbox-migration.mjs && node scripts/verify-audit-correction-command-migration.mjs",
     "test:independence": "node scripts/verify-test-independence.mjs services/maintenance-service event-flow",
     "test:progress": "node --test scripts/progress.test.mjs",
     "test:image-matrix": "node --test scripts/ci-image-matrix.test.mjs",
@@ -60,6 +60,7 @@
     "verify:grafana-dashboard-live": "node scripts/verify-grafana-dashboard-live.mjs",
     "test:outbox-b2-pg": "node --env-file=.env --test scripts/outbox-b2-backfill.pg.test.mjs",
     "test:outbox-b3": "node --env-file-if-exists=.env --test scripts/outbox-b3-protocol.pg.test.mjs",
+    "test:supplier-privilege-split": "node --env-file-if-exists=.env --test scripts/supplier-privilege-split.pg.test.mjs",
     "ci:image-matrix": "node scripts/ci-image-matrix.mjs",
     "progress:validate": "node scripts/progress.mjs validate",
     "progress:report": "node scripts/progress.mjs write",
@@ -76,6 +77,7 @@
     "db:generate": "turbo run db:generate",
     "db:seed": "turbo run db:seed",
     "db:rotate-role-passwords": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/rotate-role-passwords.bash",
+    "db:supplier-privilege-split": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/supplier-privilege-split.bash",
     "db:mark-disposable": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/disposable-marker.bash"
   },
   "devDependencies": {

@@ -90,6 +90,20 @@ export interface E2eConfig {
    * burst to the window the running service actually uses (AUD-004 Phase C2).
    */
   identityAggregationWindowSeconds: number;
+  /**
+   * construction-service directly.
+   *
+   * The project scenarios go through the **gateway**, like every other
+   * scenario here. This URL exists only for health gating before the run.
+   */
+  constructionUrl: string;
+  /** Topic construction-service publishes to. */
+  constructionTopic: string;
+  /**
+   * organization-service directly — health gating only. construction-service
+   * confirms a union's approval policy against its hierarchy (Q-70 (7)).
+   */
+  organizationUrl: string;
   /** Keycloak admin, used once to reconcile the E2E users into an imported realm. */
   keycloakAdmin: { username: string; password: string };
   /**
@@ -128,6 +142,15 @@ export function e2eConfig(): E2eConfig {
     identityUrl: required(
       'E2E_IDENTITY_URL',
       `http://localhost:${process.env.PORT_IDENTITY?.trim() || '3101'}`,
+    ).replace(/\/+$/, ''),
+    constructionUrl: required(
+      'E2E_CONSTRUCTION_URL',
+      `http://localhost:${process.env.PORT_CONSTRUCTION?.trim() || '3110'}`,
+    ).replace(/\/+$/, ''),
+    constructionTopic: 'rasta.construction.v1',
+    organizationUrl: required(
+      'E2E_ORGANIZATION_URL',
+      `http://localhost:${process.env.PORT_ORGANIZATION?.trim() || '3102'}`,
     ).replace(/\/+$/, ''),
     identityAggregationWindowSeconds: windowSeconds(
       required('SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS', '60'),

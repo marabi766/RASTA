@@ -153,6 +153,56 @@ describe('wallet concurrency (real database)', () => {
     await cleanup(prisma, [organizationId]);
   });
 
+  it('keeps every concurrent monetised reward in the wallet (economic batch 2, item a)', async () => {
+    // A monetised reward credits the organization's wallet without the caller
+    // holding its lock. Before `credit` took the lock itself, each concurrent
+    // grant recomputed the wallet from a snapshot without the others'
+    // journals, and the last writer stored a balance several credits short:
+    // the ledger right, the wallet wrong.
+    const organizationId = `${org.c}-REWARDS`;
+    const grants = 20;
+    const creditPerGrant = 5_000n;
+
+    await asActor({ organizationId, roles: ['SYSTEM_ADMIN'] }, () =>
+      wiring.rewards.createRule({
+        organizationId,
+        triggerEvent: 'USAGE_RECORDED',
+        rewardType: 'POINTS',
+        points: 5,
+        creditPerPointMinor: '1000',
+        status: 'ACTIVE',
+        validFrom: new Date(Date.now() - 60_000).toISOString(),
+      } as never),
+    );
+    // Opened first, so the grants race on the balance and not on opening it.
+    const wallet = await asActor({ organizationId }, () => wiring.wallets.getOrOpen('IRR'));
+
+    // A different subject each, so the per-subject reward lock does not
+    // serialise them: only the wallet is shared.
+    const outcomes = await Promise.all(
+      Array.from({ length: grants }, (_, index) => {
+        const userId = `USR-ITEST-RACE-${index}`;
+        return asActor({ organizationId, userId }, () =>
+          wiring.rewards.grantFor({
+            organizationId,
+            userId,
+            triggerEvent: 'USAGE_RECORDED',
+            sourceReference: `USG_RACE_${organizationId}_${index}`,
+            occurredAt: new Date(),
+            payload: {},
+          }),
+        );
+      }),
+    );
+    expect(outcomes.flat().filter((outcome) => outcome.kind === 'GRANTED')).toHaveLength(grants);
+
+    const balances = await readBalances(prisma, wallet.id);
+    expect(balances.available).toBe(creditPerGrant * BigInt(grants));
+    expect(balances.ledger).toBe(creditPerGrant * BigInt(grants));
+
+    await cleanup(prisma, [organizationId]);
+  });
+
   it('settles two opposite transactions between the same pair without deadlocking', async () => {
     // The deadlock the ascending-id lock order makes structurally impossible
     // (ADR-031). Without it, A→B locking "mine first" and B→A doing the same

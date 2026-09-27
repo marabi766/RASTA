@@ -161,6 +161,17 @@ describe('updating a driver — the full order of checks', () => {
     expect(redirect).toHaveBeenCalledWith(`/drivers/${DRIVER_ID}?updated=1`);
   });
 
+  it('reports a sent-but-unconfirmed update as UNCONFIRMED, never as a failure (Codex #106)', async () => {
+    // The service may have applied it: fleet keeps no idempotency ledger, so
+    // a retry would bump the version and emit another DRIVER_UPDATED.
+    updateDriver.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-sample' });
+    expect(await submitUpdateDriver(DRIVER_ID, IDLE_UPDATE_DRIVER_FORM, formData({}))).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-sample',
+    });
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
   it('returns the optimistic-lock refusal as a banner, not a field error', async () => {
     updateDriver.mockResolvedValue({
       kind: 'INVALID',

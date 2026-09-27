@@ -5,7 +5,12 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkInfraEnv, passwordVariable, rolesFromLibrary } from './infra-preflight-lib.mjs';
+import {
+  checkInfraEnv,
+  passwordVariable,
+  ROLE_LIBRARY,
+  rolesFromLibrary,
+} from './infra-preflight-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BOOTSTRAP = join(ROOT, 'infrastructure/docker/postgres/00-init-databases.sh');
@@ -21,12 +26,23 @@ const noValues = (messages, ...values) => {
 // infra:up preflight
 // ---------------------------------------------------------------------------
 
-test('reads all sixteen service roles and the audit migrator from the bash library', () => {
+test('reads all sixteen service roles and both migrators from the bash library', () => {
   const roles = rolesFromLibrary();
-  assert.equal(roles.length, 17);
+  assert.equal(roles.length, 18);
   assert.ok(roles.includes('rasta_identity'));
-  assert.equal(roles.at(-1), 'rasta_audit_migrator');
+  assert.deepEqual(roles.slice(-2), ['rasta_audit_migrator', 'rasta_supplier_migrator']);
   assert.equal(passwordVariable('rasta_audit_migrator'), 'POSTGRES_PASSWORD_AUDIT_MIGRATOR');
+  assert.equal(passwordVariable('rasta_supplier_migrator'), 'POSTGRES_PASSWORD_SUPPLIER_MIGRATOR');
+});
+
+test('the JS role list is the one the bootstrap library prints', () => {
+  // `rolesFromLibrary` parses RASTA_SERVICES and appends the migrators itself;
+  // a migrator added to `rasta_roles` but not here would go unchecked.
+  const printed = spawnSync('bash', ['-c', `source "${ROLE_LIBRARY}"; rasta_roles`], {
+    encoding: 'utf8',
+  });
+  assert.equal(printed.status, 0);
+  assert.deepEqual(printed.stdout.trim().split('\n'), rolesFromLibrary());
 });
 
 test('the committed defaults pass with no warning', () => {
@@ -149,9 +165,10 @@ test('bootstrap: with distinct passwords it proceeds, and sets each role its own
   const { status, calls } = runWithStubPsql(BOOTSTRAP, {});
   assert.equal(status, 0);
   const alters = calls.filter((call) => /ALTER ROLE \w+ WITH LOGIN PASSWORD/.test(call));
-  assert.equal(alters.length, 17);
+  // Sixteen service roles and two migrators (audit, supplier).
+  assert.equal(alters.length, 18);
   const passwords = alters.map((call) => /PASSWORD '([^']+)'/.exec(call)?.[1]);
-  assert.equal(new Set(passwords).size, 17);
+  assert.equal(new Set(passwords).size, 18);
 });
 
 // ---------------------------------------------------------------------------

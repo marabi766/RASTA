@@ -3,6 +3,7 @@ import {
   assertActingAsSupplier,
   assertCanBrowseDirectory,
   assertCanDecideAbout,
+  assertCanManagePerformanceFormula,
   assertCanRegisterSupplier,
   assertCanReviewQualifications,
   assertNotAuditor,
@@ -10,6 +11,7 @@ import {
   assertNotServiceCaller,
   assertSupplierReadable,
   DIRECTORY_ROLES,
+  FORMULA_MANAGER_ROLES,
   hasPlatformScope,
   PLATFORM_ROLES,
   SUPPLIER_SIDE_ROLES,
@@ -65,6 +67,7 @@ const EVERY_COMMAND: [string, () => unknown][] = [
   ['read a profile', () => assertSupplierReadable(SUPPLIER)],
   ['act as the supplier', () => assertActingAsSupplier(SUPPLIER)],
   ['decide about the supplier', () => assertCanDecideAbout(SUPPLIER)],
+  ['change the performance formula', () => assertCanManagePerformanceFormula()],
 ];
 
 // ---------------------------------------------------------------------------
@@ -510,6 +513,47 @@ describe('D-2 — the self-judgement rule reads memberships, not the selected te
         as(
           { organizationId: OTHER_ORG, organizationIds: [SUPPLIER.organizationId], roles: [] },
           () => assertNotDecidingOwnCase(SUPPLIER),
+        ),
+      ),
+    ).toBe('FORBIDDEN');
+  });
+});
+
+describe('changing the platform-wide performance formula (docs/24 Q-75)', () => {
+  it('is granted to SYSTEM_ADMIN alone', () => {
+    expect(FORMULA_MANAGER_ROLES).toEqual(['SYSTEM_ADMIN']);
+    expect(
+      codeOf(() =>
+        as({ userId: 'USR-1', roles: ['SYSTEM_ADMIN'] }, () => assertCanManagePerformanceFormula()),
+      ),
+    ).toBe('NO_ERROR');
+  });
+
+  it('refuses UNION_ADMIN — a tenant-bound role does not set a platform-wide formula', () => {
+    expect(
+      codeOf(() =>
+        as({ userId: 'USR-1', organizationId: OTHER_ORG, roles: ['UNION_ADMIN'] }, () =>
+          assertCanManagePerformanceFormula(),
+        ),
+      ),
+    ).toBe('FORBIDDEN');
+  });
+
+  it.each(['SUPPLIER', 'PROCUREMENT_USER', 'ORG_ADMIN'])('refuses %s', (role) => {
+    expect(
+      codeOf(() =>
+        as({ userId: 'USR-1', organizationId: SUPPLIER_ORG, roles: [role] }, () =>
+          assertCanManagePerformanceFormula(),
+        ),
+      ),
+    ).toBe('FORBIDDEN');
+  });
+
+  it('refuses SYSTEM_ADMIN presented by a service token', () => {
+    expect(
+      codeOf(() =>
+        as({ authType: 'SERVICE', roles: ['SYSTEM_ADMIN'] }, () =>
+          assertCanManagePerformanceFormula(),
         ),
       ),
     ).toBe('FORBIDDEN');

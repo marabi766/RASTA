@@ -3,6 +3,7 @@
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
+import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 
 import { submitRevokeMembership } from './actions';
@@ -100,6 +101,10 @@ function RevokeBanner({ state }: { state: RevokeMembershipFormState }) {
 
   if (state.kind === 'NOT_FOUND') {
     return <Alert tone="warning">این عضویت دیگر وجود ندارد. صفحه را تازه کنید.</Alert>;
+  }
+
+  if (state.kind === 'UNCONFIRMED') {
+    return <UnconfirmedWriteAlert correlationId={state.correlationId} />;
   }
 
   if (state.kind === 'FAILED') {

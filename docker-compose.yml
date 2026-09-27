@@ -43,6 +43,7 @@ services:
       POSTGRES_PASSWORD_AUDIT: ${POSTGRES_PASSWORD_AUDIT:-rasta_audit_dev_password}
       POSTGRES_PASSWORD_ANALYTICS: ${POSTGRES_PASSWORD_ANALYTICS:-rasta_analytics_dev_password}
       POSTGRES_PASSWORD_AUDIT_MIGRATOR: ${POSTGRES_PASSWORD_AUDIT_MIGRATOR:-rasta_audit_migrator_dev_password}
+      POSTGRES_PASSWORD_SUPPLIER_MIGRATOR: ${POSTGRES_PASSWORD_SUPPLIER_MIGRATOR:-rasta_supplier_migrator_dev_password}
       LANG: C.UTF-8
     ports:
       - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432'

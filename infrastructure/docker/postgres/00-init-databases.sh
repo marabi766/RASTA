@@ -129,6 +129,20 @@ psql_exec rasta_audit "GRANT USAGE ON SCHEMA audit TO rasta_audit"
 echo "    - schema audit (owner rasta_audit_migrator, rasta_audit has USAGE only)"
 
 # -----------------------------------------------------------------------------
+# supplier-service: the database and everything in it belong to
+# rasta_supplier_migrator; the runtime role rasta_supplier gets CONNECT and
+# USAGE on `public`, loses CREATEDB, and gets its table grants from the
+# migrations. Unlike audit, the tables stay in `public`: supplier-service was
+# already migrated there on main, and a schema move would strand that data.
+# The whole reasoning, and the upgrade for an existing cluster, is in
+# lib/supplier-privilege-split.bash.
+# -----------------------------------------------------------------------------
+echo "==> Splitting supplier-service ownership from its runtime role"
+# shellcheck source=lib/supplier-privilege-split.bash
+source "$(dirname "${BASH_SOURCE[0]}")/lib/supplier-privilege-split.bash"
+split_supplier_privileges rasta_supplier
+
+# -----------------------------------------------------------------------------
 # Extensions go into template1, so every database created afterwards inherits
 # them — including the throwaway shadow databases `prisma migrate dev` creates.
 #

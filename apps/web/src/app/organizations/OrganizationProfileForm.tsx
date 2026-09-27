@@ -3,6 +3,7 @@
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
+import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import type {
   UpdateOrganizationField,
@@ -126,6 +127,10 @@ function ProfileBanner({ state }: { state: UpdateOrganizationFormState }) {
         اجازهٔ ویرایش مشخصات این سازمان به شما داده نشده است. کد پیگیری: {state.correlationId}
       </Alert>
     );
+  }
+
+  if (state.kind === 'UNCONFIRMED') {
+    return <UnconfirmedWriteAlert correlationId={state.correlationId} />;
   }
 
   if (state.kind === 'FAILED') {

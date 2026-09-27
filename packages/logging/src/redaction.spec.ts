@@ -1,3 +1,5 @@
+import { Writable } from 'node:stream';
+import pino from 'pino';
 import { buildRedactionPaths, scrubMessage, REDACTED, SENSITIVE_KEYS } from './redaction';
 
 describe('buildRedactionPaths', () => {
@@ -21,6 +23,29 @@ describe('buildRedactionPaths', () => {
     const paths = buildRedactionPaths();
     expect(paths).toContain('bidAmount');
     expect(paths).toContain('sealedPayload');
+  });
+
+  it('censors an Idempotency-Key in a request header and in a logged object (S-09)', () => {
+    const lines: string[] = [];
+    const sink = new Writable({
+      write(chunk: Buffer, _encoding, done) {
+        lines.push(chunk.toString('utf8'));
+        done();
+      },
+    });
+    const logger = pino({ redact: { paths: buildRedactionPaths(), censor: REDACTED } }, sink);
+
+    logger.info(
+      {
+        req: { headers: { 'idempotency-key': 'create-project-0042' } },
+        internalContext: { idempotencyKey: 'create-project-0042' },
+      },
+      'request',
+    );
+
+    const written = lines.join('');
+    expect(written).not.toContain('create-project-0042');
+    expect(written).toContain(REDACTED);
   });
 
   it('produces no duplicates', () => {

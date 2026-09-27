@@ -127,6 +127,35 @@ export default async function globalSetup(): Promise<void> {
       120_000,
     );
 
+    // ---- construction-service -------------------------------------------------
+    // The project lifecycle scenario drives it through the gateway and taps its
+    // topic; its readiness probe reports the database and the broker.
+    await waitFor(
+      `construction-service to be ready at ${config.constructionUrl}/health/ready`,
+      async () => {
+        const response = await context.get(`${config.constructionUrl}/health/ready`, {
+          failOnStatusCode: false,
+        });
+        return response.status() === 200;
+      },
+      120_000,
+    );
+
+    // ---- organization-service -------------------------------------------------
+    // construction-service asks it whether an organization is within a
+    // policy author's union (Q-70 (7)); without it every union write would be
+    // refused (fail closed) and the approval scenario would fail far from here.
+    await waitFor(
+      `organization-service to be ready at ${config.organizationUrl}/health/ready`,
+      async () => {
+        const response = await context.get(`${config.organizationUrl}/health/ready`, {
+          failOnStatusCode: false,
+        });
+        return response.status() === 200;
+      },
+      120_000,
+    );
+
     // ---- Keycloak -----------------------------------------------------------
     await waitFor(
       `Keycloak realm ${config.realm} to be reachable`,
@@ -163,7 +192,12 @@ export default async function globalSetup(): Promise<void> {
       }
       const topics = await admin.listTopics();
       // Every topic a scenario taps — marketplace's too.
-      for (const topic of [config.economicTopic, config.marketplaceTopic, config.documentTopic]) {
+      for (const topic of [
+        config.economicTopic,
+        config.marketplaceTopic,
+        config.documentTopic,
+        config.constructionTopic,
+      ]) {
         if (!topics.includes(topic)) {
           throw new Error(
             `Topic ${topic} does not exist on ${config.kafkaBrokers.join(', ')}. ` +

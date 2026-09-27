@@ -57,6 +57,55 @@ export class GatewayRequestError extends Error {
 }
 
 /**
+ * The request may have reached the platform, but no answer it could be judged
+ * by came back: the connection failed after it was opened, this portal's own
+ * deadline passed, or a 2xx arrived whose body would not parse.
+ *
+ * A read treats it like any other unavailable gateway — it still *is* a
+ * `GatewayRequestError`, with the status it always had. A write must not
+ * (Codex post-merge review of #106): the service may have committed, and
+ * fleet, for one, keeps no HTTP idempotency ledger, so telling a person that
+ * nothing was saved invites a retry that duplicates the effect. `write.ts`
+ * turns this into `UNKNOWN_OUTCOME`.
+ */
+export class GatewayOutcomeUnknownError extends GatewayRequestError {
+  constructor(
+    status: number,
+    correlationId: string,
+    readonly reason: 'TRANSPORT' | 'UNREADABLE_BODY',
+  ) {
+    super(status, correlationId, null);
+    this.name = 'GatewayOutcomeUnknownError';
+  }
+}
+
+/**
+ * Connection failures that happen before a single byte of the request is
+ * sent — nothing reached the gateway, so the outcome is known: nothing
+ * happened. Anything else, including this portal's own deadline, may have
+ * been sent, and is treated as unknown. Read from the error and every
+ * `cause` below it: undici wraps the socket error as `TypeError('fetch
+ * failed', { cause })`.
+ */
+const NEVER_SENT_CODES = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+]);
+
+export function neverSent(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 5; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string' && NEVER_SENT_CODES.has(code)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
  * Builds the absolute URL for a gateway path, refusing anything else.
  *
  * Takes a path, never a URL, and still checks the result. A caller that passes
@@ -138,14 +187,17 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
       cache: 'no-store',
       signal: AbortSignal.timeout(call.timeoutMs ?? GATEWAY_TIMEOUT_MS),
     });
-  } catch {
+  } catch (error) {
     // A refused connection, a DNS failure, a reset, or this function's own
     // timeout above all reject `fetch` rather than answering it, and none of
     // them carries a platform status. Every read and write module already
-    // maps `GatewayRequestError` to a safe `UNAVAILABLE` outcome; wrapping a
-    // transport failure as one here — rather than in each of those modules —
-    // is what makes that mapping actually total (`docs/16 § ۱۶٫۱۱`).
-    throw new GatewayRequestError(503, correlationId, null);
+    // maps `GatewayRequestError` to a safe outcome; wrapping a transport
+    // failure as one here — rather than in each of those modules — is what
+    // makes that mapping actually total (`docs/16 § ۱۶٫۱۱`). Only a failure
+    // before anything was sent is a plain one; after that, whether the
+    // platform acted is unknown.
+    if (neverSent(error)) throw new GatewayRequestError(503, correlationId, null);
+    throw new GatewayOutcomeUnknownError(503, correlationId, 'TRANSPORT');
   }
 
   if (!response.ok) {
@@ -177,8 +229,9 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     return { data: (await response.json()) as T, correlationId };
   } catch {
     // A 2xx whose body does not parse is the gateway's contract broken, not
-    // something a screen mid-form can be asked to make sense of.
-    throw new GatewayRequestError(502, correlationId, null);
+    // something a screen mid-form can be asked to make sense of — but it is
+    // still a 2xx: a write it answers has most likely happened.
+    throw new GatewayOutcomeUnknownError(502, correlationId, 'UNREADABLE_BODY');
   }
 }
 

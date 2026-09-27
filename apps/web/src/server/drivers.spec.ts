@@ -2,6 +2,7 @@
  * @jest-environment node
  */
 import {
+  BIDI_CONTROL,
   canManageDrivers,
   changeStatusFormValues,
   createDriverFormValues,
@@ -276,6 +277,44 @@ describe('registering a driver', () => {
     expect(licenceNumber.ok).toBe(false);
     const licenceClass = parseCreateDriverForm(values({ licenceClass: `B${RLO}` }));
     expect(licenceClass.ok).toBe(false);
+  });
+});
+
+describe('the bidi-control set (Codex post-merge review of #106)', () => {
+  const values = (overrides: Partial<typeof EMPTY_CREATE_DRIVER_FORM> = {}) => ({
+    ...EMPTY_CREATE_DRIVER_FORM,
+    userId: 'USR_01J00000000000000000000000',
+    ...overrides,
+  });
+
+  // Every Bidi_Control code point in Unicode 15/16, by number: invisible, so
+  // never written as a literal.
+  const ALL = [
+    0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069,
+  ];
+
+  it.each(ALL.map((codePoint) => [codePoint.toString(16).padStart(4, '0'), codePoint]))(
+    'refuses U+%s in an identifier field',
+    (_hex, codePoint) => {
+      const parsed = parseCreateDriverForm(
+        values({ employeeNo: `EMP-${String.fromCodePoint(codePoint as number)}102` }),
+      );
+      expect(parsed.ok).toBe(false);
+    },
+  );
+
+  it('matches exactly the Unicode set — U+061C ARABIC LETTER MARK included', () => {
+    const matched: number[] = [];
+    for (let codePoint = 0; codePoint <= 0x10ffff; codePoint += 1) {
+      if (codePoint >= 0xd800 && codePoint <= 0xdfff) continue;
+      if (BIDI_CONTROL.test(String.fromCodePoint(codePoint))) matched.push(codePoint);
+    }
+    expect(matched).toEqual(ALL);
+  });
+
+  it('still accepts Persian letters, ZWNJ and ordinary punctuation', () => {
+    const parsed = parseCreateDriverForm(values({ employeeNo: 'کد\u200cراننده-۱۲' }));
+    expect(parsed.ok).toBe(true);
   });
 });
 

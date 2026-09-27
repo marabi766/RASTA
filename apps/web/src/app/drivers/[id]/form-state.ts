@@ -1,3 +1,4 @@
+import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type {
   AssignDriverField,
   AssignDriverFormValues,
@@ -39,7 +40,8 @@ export type UpdateDriverFormState =
     }
   | WriteRefusal
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
-  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string };
+  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
+  | UnconfirmedWriteState;
 
 export const IDLE_UPDATE_DRIVER_FORM: UpdateDriverFormState = { kind: 'IDLE' };
 
@@ -54,7 +56,8 @@ export type ChangeStatusFormState =
     }
   | WriteRefusal
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
-  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string };
+  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
+  | UnconfirmedWriteState;
 
 export const IDLE_CHANGE_STATUS_FORM: ChangeStatusFormState = { kind: 'IDLE' };
 
@@ -75,7 +78,8 @@ export type AssignFormState =
       readonly values: AssignDriverFormValues;
       readonly correlationId: string;
     }
-  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string };
+  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
+  | UnconfirmedWriteState;
 
 export const IDLE_ASSIGN_FORM: AssignFormState = { kind: 'IDLE' };
 
@@ -90,6 +94,7 @@ export type EndAssignmentFormState =
     }
   | WriteRefusal
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
-  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string };
+  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
+  | UnconfirmedWriteState;
 
 export const IDLE_END_ASSIGNMENT_FORM: EndAssignmentFormState = { kind: 'IDLE' };
