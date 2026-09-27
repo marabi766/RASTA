@@ -462,7 +462,7 @@ describe('asset integrity', () => {
           internalContext: expect.objectContaining({ owner: 'maintenance-service' }),
         });
         await nothingMoved(assetId);
-        expect(owners.released).toEqual(['fleet-service']);
+        expect(owners.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
       });
 
       it('rolls back every write of a transfer that commits after half the fence', async () => {

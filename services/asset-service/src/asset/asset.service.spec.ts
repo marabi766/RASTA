@@ -207,7 +207,6 @@ function harness(
     listTimeline: jest.fn(async () => ({ items: [], nextCursor: null, hasMore: false })),
     costSummary: jest.fn(async () => []),
     countTransfers: jest.fn(async () => 0),
-    transferRecorded: jest.fn(async () => false),
     findNearby: jest.fn(async () => []),
     setLocationPoint: jest.fn(),
     readCoordinate: jest.fn(async () => null),
@@ -682,7 +681,8 @@ describe('AssetService', () => {
             openRequests: 1,
           }),
         });
-        expect(h.clearance.released).toEqual(['fleet-service']);
+        // Every owner, not only the one that answered clear (review #127 #4).
+        expect(h.clearance.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
         expect(h.updates).toEqual([]);
         expect(h.tx.assetTransfer.create).not.toHaveBeenCalled();
         expect(h.enqueued).toEqual([]);
@@ -697,7 +697,7 @@ describe('AssetService', () => {
         await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toMatchObject({
           internalContext: expect.objectContaining({ owner: 'fleet-service', openAssignments: 1 }),
         });
-        expect(h.clearance.released).toEqual(['maintenance-service']);
+        expect(h.clearance.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
         expect(h.tx.assetTransfer.create).not.toHaveBeenCalled();
       });
 
@@ -717,7 +717,9 @@ describe('AssetService', () => {
         await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toBeInstanceOf(
           RastaError,
         );
-        expect(h.clearance.released).toEqual(['fleet-service']);
+        // The owner that failed may have committed its fence before its
+        // answer was lost: it is released too.
+        expect(h.clearance.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
         expect(h.updates).toEqual([]);
         expect(h.tx.assetTransfer.create).not.toHaveBeenCalled();
       });
@@ -736,7 +738,7 @@ describe('AssetService', () => {
         await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toMatchObject({
           internalContext: expect.objectContaining({ rule: 'OPEN_OPERATIONAL_ACTIVITY' }),
         });
-        expect(h.clearance.released).toEqual([]);
+        expect(h.clearance.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
       });
 
       it('never transfers when no clearance was configured', async () => {
@@ -796,37 +798,35 @@ describe('AssetService', () => {
         );
       });
 
-      it('keeps the fences when the transfer landed but its acknowledgement was lost', async () => {
+      it('keeps the fences when the commit’s outcome is unknown: the transaction ran to its end', async () => {
         const h = harness({
-          transaction: jest.fn(async () => {
+          // Every write and the deadline ran; then COMMIT failed or its
+          // acknowledgement was lost. The transfer may have landed.
+          transaction: jest.fn(async (fn: (t: unknown) => Promise<unknown>) => {
+            await fn(h.tx);
             throw new Error('Connection terminated unexpectedly');
           }),
-          transferRecorded: jest.fn(async () => true),
         });
 
         await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toThrow(
           /Connection terminated/,
         );
         // Released now, the previous owner could open work before the owners
-        // consume ASSET_TRANSFERRED.
+        // consume ASSET_TRANSFERRED; the owners resolve them at expiry instead.
         expect(h.clearance.released).toEqual([]);
       });
 
-      it('keeps the fences when it cannot tell whether the transfer landed', async () => {
+      it('releases every fence for an error raised before the transaction’s last step', async () => {
         const h = harness({
-          transaction: jest.fn(async () => {
+          hasOpenClaims: jest.fn(async () => {
             throw new Error('Connection terminated unexpectedly');
-          }),
-          transferRecorded: jest.fn(async () => {
-            throw new Error('still down');
           }),
         });
 
         await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toThrow(
           /Connection terminated/,
         );
-        // Their expiry lifts them.
-        expect(h.clearance.released).toEqual([]);
+        expect(h.clearance.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
       });
 
       it('counts each owner’s answer by outcome', async () => {

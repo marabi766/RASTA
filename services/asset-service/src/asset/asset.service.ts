@@ -28,7 +28,6 @@ import {
   WORK_OWNERS,
   type ClearanceAnswer,
   type TransferClearance,
-  type WorkOwner,
 } from './transfer-clearance';
 import type {
   ActivateAssetDto,
@@ -598,54 +597,59 @@ export class AssetService {
     // never shorter than a fence's real age: no clock needs to agree with
     // another service's (ADR-062 § 3).
     const askedAt = this.clearance.now();
-    const fenced = await this.clearTransfer(id, from, transferId);
+    await this.clearTransfer(id, from, transferId);
     const deadlineMs = (this.clearance.fenceTtlSeconds * 1000) / 2;
 
+    // Set as the transaction callback's last step. An error before it rolls
+    // the transfer back for certain; an error after it (the COMMIT failing or
+    // its acknowledgement lost) leaves the outcome unknown, and an unknown
+    // outcome keeps the fences: the owners resolve them against this
+    // service's record once they expire (ADR-062 § 3b), never by guessing.
+    const boundary = { reached: false };
+
     try {
-      return await this.commitTransfer(id, asset.status, from, dto, transferId, actor, () => {
-        if (this.clearance.now() - askedAt >= deadlineMs) {
-          throw RastaError.invalidStateTransition(
-            'Asset',
-            asset.status,
-            'TRANSFERRED',
-            'The transfer took too long to confirm and was not recorded. Try again.',
-          );
-        }
-      });
+      return await this.commitTransfer(
+        id,
+        asset.status,
+        from,
+        dto,
+        transferId,
+        actor,
+        () => {
+          if (this.clearance.now() - askedAt >= deadlineMs) {
+            throw RastaError.invalidStateTransition(
+              'Asset',
+              asset.status,
+              'TRANSFERRED',
+              'The transfer took too long to confirm and was not recorded. Try again.',
+            );
+          }
+        },
+        () => {
+          boundary.reached = true;
+        },
+      );
     } catch (error) {
-      // Only a transfer that did not land gives its fences back. An error can
-      // arrive after the commit (a lost acknowledgement), and releasing then
-      // would reopen the machine to its previous owner's work until the
-      // owners consume ASSET_TRANSFERRED. When that cannot be told, the
-      // fences stay and their expiry lifts them.
-      if (!(await this.transferMayHaveLanded(transferId))) {
-        await this.releaseFences(fenced, id, from, transferId);
-      }
+      if (!boundary.reached) await this.releaseFences(id, from, transferId);
       throw error;
     }
   }
 
-  private async transferMayHaveLanded(transferId: string): Promise<boolean> {
-    try {
-      return await this.repository.transferRecorded(transferId);
-    } catch {
-      return true;
-    }
-  }
-
   /**
-   * Asks every owner of the machine's work, at once, whether any is open, and
-   * returns the owners that fenced it (ADR-062).
+   * Asks every owner of the machine's work, at once, whether any is open
+   * (ADR-062). Each owner that finds none fences the machine.
    *
-   * Every owner must answer clear. On any other outcome the fences already
-   * placed are released and the transfer is refused: open work as a business
-   * rule naming the owner, anything unanswerable as the owner's error.
+   * Every owner must answer clear. On any other outcome the transfer is
+   * refused — open work as a business rule naming the owner, anything
+   * unanswerable as the owner's error — and every owner is sent the release,
+   * not only those that answered clear: an owner whose answer was lost (a
+   * timeout, a truncated body) may have committed its fence all the same.
    */
   private async clearTransfer(
     assetId: string,
     organizationId: string,
     transferId: string,
-  ): Promise<WorkOwner[]> {
+  ): Promise<void> {
     const outcomes = await Promise.allSettled(
       WORK_OWNERS.map((owner) => this.clearance.ask(owner, organizationId, assetId, transferId)),
     );
@@ -658,13 +662,11 @@ export class AssetService {
       });
     }
 
-    const fenced = WORK_OWNERS.filter((_, index) => {
-      const outcome = outcomes[index];
-      return outcome?.status === 'fulfilled' && outcome.value.clear;
-    });
-    if (fenced.length === WORK_OWNERS.length) return fenced;
+    if (outcomes.every((outcome) => outcome.status === 'fulfilled' && outcome.value.clear)) {
+      return;
+    }
 
-    await this.releaseFences(fenced, assetId, organizationId, transferId);
+    await this.releaseFences(assetId, organizationId, transferId);
 
     // Open work first: it is the refusal a person can act on.
     for (const [index, outcome] of outcomes.entries()) {
@@ -683,14 +685,16 @@ export class AssetService {
     throw failure?.reason ?? RastaError.internal('Transfer clearance returned no answer');
   }
 
+  /** Sends the idempotent release to every owner; best effort, never throws. */
   private async releaseFences(
-    owners: readonly WorkOwner[],
     assetId: string,
     organizationId: string,
     transferId: string,
   ): Promise<void> {
     await Promise.all(
-      owners.map((owner) => this.clearance.release(owner, organizationId, assetId, transferId)),
+      WORK_OWNERS.map((owner) =>
+        this.clearance.release(owner, organizationId, assetId, transferId),
+      ),
     );
   }
 
@@ -703,6 +707,7 @@ export class AssetService {
     transferId: string,
     actor: string,
     assertWithinDeadline: () => void,
+    markCommitBoundary: () => void,
   ): Promise<AssetView> {
     // A transfer is the one operation that legitimately writes rows belonging
     // to another tenant — the transfer record, the asset and its whole history
@@ -819,6 +824,7 @@ export class AssetService {
           // owners may soon let new work start (ADR-062 § 3). Last, after
           // every write, so only the commit itself is left outside the bound.
           assertWithinDeadline();
+          markCommitBoundary();
 
           return row;
         }),
