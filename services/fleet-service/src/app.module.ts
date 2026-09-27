@@ -46,6 +46,11 @@ import {
   FleetTransferClearanceController,
 } from './fleet/internal.controller';
 import { TransferClearanceService } from './fleet/transfer-clearance';
+import {
+  TRANSFER_RECORD_SOURCE,
+  TransferRecordClient,
+  type TransferRecordSource,
+} from './fleet/transfer-record';
 import { UsageFactService } from './fleet/source-fact';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
 import { assignmentsActiveTotal } from './observability/metrics';
@@ -128,6 +133,23 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
     UsageService,
     UsageFactService,
     TransferClearanceService,
+    // ADR-062 § 3b: asset-service, asked whether a transfer was recorded when
+    // an assignment meets an expired transfer fence. Its own
+    // `InternalTokenService`, from the same secret the guard verifies with.
+    {
+      provide: TRANSFER_RECORD_SOURCE,
+      inject: [ENV],
+      useFactory: (env: FleetEnv): TransferRecordSource =>
+        new TransferRecordClient({
+          baseUrl: env.ASSET_SERVICE_URL,
+          timeoutMs: env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS,
+          tokens: new InternalTokenService(
+            env.INTERNAL_TOKEN_SECRET,
+            env.INTERNAL_TOKEN_ISSUER,
+            env.INTERNAL_TOKEN_TTL_SECONDS,
+          ),
+        }),
+    },
     AvailabilityService,
 
     {

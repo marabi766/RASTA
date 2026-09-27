@@ -5,6 +5,14 @@ import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
 import { assignmentConflictsTotal, assignmentsCreatedTotal } from '../observability/metrics';
 import { FleetRepository, isUniqueViolation, violatedConstraint } from './fleet.repository';
 import { FLEET_EVENTS, validateFleetPayload } from './events';
+import {
+  TRANSFER_RECORD_SOURCE,
+  UNCONFIGURED_TRANSFER_RECORD_SOURCE,
+  ownerChanged,
+  settleExpiredFence,
+  transferInProgress,
+  type TransferRecordSource,
+} from './transfer-record';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
 import { assertOwnDriverRecord, currentFleetScope } from './access';
 import { isAssignable } from './driver-lifecycle';
@@ -50,6 +58,11 @@ export class AssignmentService {
     @Optional()
     @Inject(DISPATCH_POLICY)
     private readonly dispatchPolicy: DispatchPolicy = DEFAULT_DISPATCH_POLICY,
+    // Optional for the same reason. Without a source, an expired transfer
+    // fence is never lifted: the assignment is refused (ADR-062 § 3b).
+    @Optional()
+    @Inject(TRANSFER_RECORD_SOURCE)
+    private readonly records: TransferRecordSource = UNCONFIGURED_TRANSFER_RECORD_SOURCE,
   ) {}
 
   // =========================================================================
@@ -115,6 +128,12 @@ export class AssignmentService {
         `A ${driver.status.toLowerCase()} driver cannot be given a new assignment.`,
         { rule: 'DRIVER_NOT_ASSIGNABLE', driverId: driver.id, status: driver.status },
       );
+    }
+
+    // An expired transfer fence is resolved at its source, never by time
+    // (ADR-062 § 3b): a transfer that landed refuses the assignment.
+    if ((await settleExpiredFence(this.repository, this.records, dto.assetId)) === 'RECORDED') {
+      throw ownerChanged(dto.assetId);
     }
 
     await this.assertAssetAssignable(dto.assetId);
@@ -298,12 +317,10 @@ export class AssignmentService {
 
     // A transfer asked whether the machine is free and was told yes (ADR-062).
     // Under `lockAssetRef` this is exact: the fence and this insert cannot
-    // both succeed.
-    if (await this.repository.hasLiveTransferFence(tx ?? this.repository.client, assetId)) {
-      throw RastaError.businessRule(
-        'This machine is being transferred to another organization and cannot be assigned.',
-        { rule: 'ASSET_TRANSFER_IN_PROGRESS', assetId, owner: 'asset-service' },
-      );
+    // both succeed. Any fence, expired or not: an expired one that was not
+    // resolved before the lock (or appeared since) is no answer either.
+    if (await this.repository.hasTransferFence(tx ?? this.repository.client, assetId)) {
+      throw transferInProgress(assetId);
     }
 
     // Independent causes (L3-02): a machine can be blocked on inspection,

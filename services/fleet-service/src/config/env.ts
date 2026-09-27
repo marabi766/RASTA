@@ -3,6 +3,7 @@ import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
+  httpUrlSchema,
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
@@ -17,6 +18,21 @@ export const fleetEnvSchema = baseEnvSchema
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),
+
+    /**
+     * asset-service, asked whether a transfer was recorded when an assignment
+     * meets an expired transfer fence (ADR-062 § 3b). Required, with no
+     * default: a missing one is found at boot, not at the first expired fence.
+     */
+    ASSET_SERVICE_URL: httpUrlSchema,
+
+    /** One such question, body included. A timeout refuses the assignment. */
+    ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(30_000)
+      .default(3000),
 
     /**
      * Default window for the utilization report, in days.

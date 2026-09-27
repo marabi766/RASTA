@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext } from '@rasta/nest-common';
@@ -9,6 +9,14 @@ import {
 } from '../observability/metrics';
 import { MaintenanceRepository, isUniqueViolation } from './maintenance.repository';
 import { MAINTENANCE_EVENTS, validateMaintenancePayload } from './events';
+import {
+  TRANSFER_RECORD_SOURCE,
+  UNCONFIGURED_TRANSFER_RECORD_SOURCE,
+  ownerChanged,
+  settleExpiredFence,
+  transferInProgress,
+  type TransferRecordSource,
+} from './transfer-record';
 import { MAINTENANCE_TOPIC, SERVICE_NAME } from '../config/env';
 import { currentMaintenanceScope } from './access';
 import {
@@ -82,6 +90,11 @@ export class RepairOrderService {
   constructor(
     private readonly repository: MaintenanceRepository,
     private readonly workshops: WorkshopDirectory,
+    // Optional so a test can build the service without asset-service. Without
+    // a source, an expired transfer fence is never lifted (ADR-062 § 3b).
+    @Optional()
+    @Inject(TRANSFER_RECORD_SOURCE)
+    private readonly records: TransferRecordSource = UNCONFIGURED_TRANSFER_RECORD_SOURCE,
   ) {}
 
   // =========================================================================
@@ -146,6 +159,7 @@ export class RepairOrderService {
     }
 
     await this.assertStillOwner(request.assetId, request.organizationId);
+    await this.settleFence(request.assetId);
 
     const verdict = await this.workshops.verify({
       workshopOrganizationId: dto.workshopOrganizationId,
@@ -168,6 +182,30 @@ export class RepairOrderService {
 
     try {
       const created = await this.repository.transaction(async (tx) => {
+        // Everything above was read before the workshop was asked, and any of
+        // it may have changed since (review #127 #1). A referral adds open
+        // work to the machine, so it is ordered like one: the per-asset lock a
+        // transfer's clearance takes exclusively, then the request's row, then
+        // every decision again. Either the clearance counts this referral, or
+        // this referral meets the clearance's fence; and a cancellation that
+        // committed first is seen here, not overwritten by a live referral.
+        await this.repository.lockAssetForWork(tx, request.assetId, 'SHARED');
+        const status = await this.repository.lockRequestStatus(
+          tx,
+          requestId,
+          request.organizationId,
+        );
+        if (status === null) throw RastaError.notFound('MaintenanceRequest', requestId);
+        if (status !== 'OPEN' && status !== 'IN_PROGRESS') {
+          throw RastaError.invalidStateTransition(
+            'MaintenanceRequest',
+            status,
+            'ASSIGNED',
+            `A ${status.toLowerCase()} request cannot be referred to a workshop`,
+          );
+        }
+        await this.assertWorkMayStart(tx, request.assetId, request.organizationId);
+
         const order = await tx.repairOrder.create({
           data: {
             id,
@@ -241,6 +279,7 @@ export class RepairOrderService {
     if (request.status === 'OPEN') assertRequestTransition(request.status, 'IN_PROGRESS');
 
     await this.assertStillOwner(request.assetId, request.organizationId);
+    await this.settleFence(request.assetId);
 
     const actor = getContext().userId ?? 'SYSTEM';
     const startedAt = dto.startedAt ? new Date(dto.startedAt) : new Date();
@@ -254,9 +293,14 @@ export class RepairOrderService {
     }
 
     const updated = await this.repository.transaction(async (tx) => {
+      // The per-asset lock first, as every write that starts work takes it
+      // (review #127 #1): starting publishes MAINTENANCE_STARTED under this
+      // owner, so the owner and the fence are checked again under it.
+      await this.repository.lockAssetForWork(tx, order.assetId, 'SHARED');
       // The request before the order, as every combined write takes them
       // (PR #116 review #3).
       await this.lockRequest(tx, request.id, order.organizationId);
+      await this.assertWorkMayStart(tx, order.assetId, order.organizationId);
 
       const result = await tx.repairOrder.updateMany({
         // The status guard is the concurrency control: two simultaneous starts
@@ -918,12 +962,33 @@ export class RepairOrderService {
    */
   private async assertStillOwner(assetId: string, organizationId: string): Promise<void> {
     const asset = await this.repository.findAssetRef(assetId);
-    if (asset && asset.organizationId !== organizationId) {
-      throw RastaError.businessRule(
-        'The machine has been transferred to another organization; this work cannot go ahead.',
-        { rule: 'ASSET_OWNER_CHANGED', assetId, owner: 'asset-service' },
-      );
+    if (asset && asset.organizationId !== organizationId) throw ownerChanged(assetId);
+  }
+
+  /**
+   * Resolves an expired transfer fence on the machine at its source before a
+   * work-start takes the lock (ADR-062 § 3b). A transfer that landed refuses
+   * the work; no answer refuses it too, retryably.
+   */
+  private async settleFence(assetId: string): Promise<void> {
+    if ((await settleExpiredFence(this.repository, this.records, assetId)) === 'RECORDED') {
+      throw ownerChanged(assetId);
     }
+  }
+
+  /**
+   * Under the per-asset lock: the organization still owns the machine as the
+   * replica sees it, and no transfer fence stands on it — live, or expired and
+   * unresolved.
+   */
+  private async assertWorkMayStart(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    organizationId: string,
+  ): Promise<void> {
+    const asset = await this.repository.findAssetRef(assetId, tx);
+    if (asset && asset.organizationId !== organizationId) throw ownerChanged(assetId);
+    if (await this.repository.hasTransferFence(tx, assetId)) throw transferInProgress(assetId);
   }
 
   private async lockRequest(

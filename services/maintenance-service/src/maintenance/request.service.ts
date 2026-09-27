@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
@@ -13,6 +13,14 @@ import {
   violatedConstraint,
 } from './maintenance.repository';
 import { MAINTENANCE_EVENTS, validateMaintenancePayload } from './events';
+import {
+  TRANSFER_RECORD_SOURCE,
+  UNCONFIGURED_TRANSFER_RECORD_SOURCE,
+  ownerChanged,
+  settleExpiredFence,
+  transferInProgress,
+  type TransferRecordSource,
+} from './transfer-record';
 import { MAINTENANCE_TOPIC, SERVICE_NAME } from '../config/env';
 import { assertOwnReport, currentMaintenanceScope } from './access';
 import {
@@ -66,7 +74,15 @@ import type {
 export class RequestService {
   private readonly logger = new Logger(RequestService.name);
 
-  constructor(private readonly repository: MaintenanceRepository) {}
+  constructor(
+    private readonly repository: MaintenanceRepository,
+    // Optional so a test can build the service with the repository alone.
+    // Without a source, an expired transfer fence is never lifted: the work
+    // is refused rather than let through (ADR-062 § 3b).
+    @Optional()
+    @Inject(TRANSFER_RECORD_SOURCE)
+    private readonly records: TransferRecordSource = UNCONFIGURED_TRANSFER_RECORD_SOURCE,
+  ) {}
 
   // =========================================================================
   // Reads
@@ -154,6 +170,12 @@ export class RequestService {
 
     const id = `${ID_PREFIXES.maintenanceRequest}_${ulid()}`;
 
+    // An expired transfer fence is resolved at its source, never by time
+    // (ADR-062 § 3b): a transfer that landed refuses the report.
+    if ((await settleExpiredFence(this.repository, this.records, dto.assetId)) === 'RECORDED') {
+      throw ownerChanged(dto.assetId);
+    }
+
     try {
       const created = await this.repository.transaction(async (tx) => {
         // The machine again, under the lock a transfer's clearance takes
@@ -162,11 +184,10 @@ export class RequestService {
         // it. The consumer that moves the replica on a transfer takes it too.
         await this.repository.lockAssetForWork(tx, dto.assetId, 'SHARED');
         await this.assertAssetMaintainable(dto.assetId, tx);
-        if (await this.repository.hasLiveTransferFence(tx, dto.assetId)) {
-          throw RastaError.businessRule(
-            'This machine is being transferred to another organization; raise the work after the transfer.',
-            { rule: 'ASSET_TRANSFER_IN_PROGRESS', assetId: dto.assetId, owner: 'asset-service' },
-          );
+        // Any fence, expired or not: an expired one that was not resolved
+        // above (or appeared since) is no answer either.
+        if (await this.repository.hasTransferFence(tx, dto.assetId)) {
+          throw transferInProgress(dto.assetId);
         }
 
         const request = await tx.maintenanceRequest.create({

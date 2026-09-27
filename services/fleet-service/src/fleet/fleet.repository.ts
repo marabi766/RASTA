@@ -315,7 +315,11 @@ export class FleetRepository {
 
   /**
    * Places the fence, or renews it for the same transfer. Returns its expiry,
-   * or `null` when another transfer's fence is still live.
+   * or `null` when any other fence stands on the machine — live or expired.
+   *
+   * An expired fence is never taken over here (review #127 #2): whether its
+   * transfer landed is asked of asset-service first
+   * ({@link settleExpiredFence}), and only a NOT_RECORDED answer removes it.
    */
   async placeTransferFence(
     tx: ExtendedPrismaClient,
@@ -329,33 +333,72 @@ export class FleetRepository {
       VALUES (${assetId}, ${organizationId}, ${fenceId},
               now() + make_interval(secs => ${ttlSeconds}::int), now())
       ON CONFLICT (asset_id) DO UPDATE
-        SET organization_id = EXCLUDED.organization_id,
-            fence_id = EXCLUDED.fence_id,
-            expires_at = EXCLUDED.expires_at,
+        SET expires_at = EXCLUDED.expires_at,
             created_at = EXCLUDED.created_at
-        WHERE asset_transfer_fence.expires_at <= now()
-           OR (asset_transfer_fence.fence_id = EXCLUDED.fence_id
-               AND asset_transfer_fence.organization_id = EXCLUDED.organization_id)
+        WHERE asset_transfer_fence.fence_id = EXCLUDED.fence_id
+          AND asset_transfer_fence.organization_id = EXCLUDED.organization_id
       RETURNING expires_at`;
     return rows[0]?.expires_at ?? null;
   }
 
-  /** Whether a live fence stands on the machine. */
-  async hasLiveTransferFence(tx: ExtendedPrismaClient, assetId: string): Promise<boolean> {
+  /**
+   * Whether any fence stands on the machine, live or expired. An expired one
+   * still refuses an assignment: expiry is not an answer (ADR-062 § 3b).
+   */
+  async hasTransferFence(tx: ExtendedPrismaClient, assetId: string): Promise<boolean> {
     const rows = await tx.$queryRaw<{ fence_id: string }[]>`
-      SELECT fence_id FROM asset_transfer_fence WHERE asset_id = ${assetId} AND expires_at > now()`;
+      SELECT fence_id FROM asset_transfer_fence WHERE asset_id = ${assetId}`;
     return rows.length > 0;
   }
 
-  /** Lifts one transfer's fence. Only the organization that placed it can. */
+  /** The machine's fence, if any, and whether it has expired by the database's clock. */
+  async findTransferFence(
+    assetId: string,
+  ): Promise<{ fenceId: string; organizationId: string; expired: boolean } | null> {
+    const rows = await this.client.$queryRaw<
+      { fence_id: string; organization_id: string; expired: boolean }[]
+    >`
+      SELECT fence_id, organization_id, expires_at <= now() AS expired
+      FROM asset_transfer_fence WHERE asset_id = ${assetId}`;
+    const row = rows[0];
+    return row
+      ? { fenceId: row.fence_id, organizationId: row.organization_id, expired: row.expired }
+      : null;
+  }
+
+  /**
+   * Removes one expired fence whose transfer asset-service says was not
+   * recorded, under {@link lockAssetRef}. Only that fence, and only while
+   * expired: a fence renewed or replaced in between is left alone.
+   */
+  async clearExpiredFence(assetId: string, fenceId: string): Promise<void> {
+    await this.transaction(async (tx) => {
+      await this.lockAssetRef(tx, assetId);
+      await tx.$executeRaw`
+        DELETE FROM asset_transfer_fence
+        WHERE asset_id = ${assetId} AND fence_id = ${fenceId} AND expires_at <= now()`;
+    });
+  }
+
+  /**
+   * Lifts one transfer's fence. Only the organization that placed it can.
+   *
+   * Under {@link lockAssetRef}, the lock the clearance holds while it counts
+   * and fences (review #127 #4): a release that arrives while that clearance
+   * is still running waits for its fence and removes it, rather than finding
+   * nothing and letting the fence be written after it.
+   */
   async releaseTransferFence(
     assetId: string,
     organizationId: string,
     fenceId: string,
   ): Promise<number> {
-    return this.client.$executeRaw`
-      DELETE FROM asset_transfer_fence
-      WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}`;
+    return this.transaction(async (tx) => {
+      await this.lockAssetRef(tx, assetId);
+      return tx.$executeRaw`
+        DELETE FROM asset_transfer_fence
+        WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}`;
+    });
   }
 
   /** The transfer landed: whatever the previous owner fenced is moot. */

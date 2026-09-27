@@ -52,7 +52,7 @@ export const duplicateRequestsTotal = new Counter({
  */
 export const transferOpenWorkTotal = new Counter({
   name: 'rasta_maintenance_transfer_open_work_total',
-  help: 'Open maintenance requests left with the previous owner of a transferred machine',
+  help: 'Open maintenance requests and repair orders left with the previous owner of a transferred machine',
   labelNames: ['service'] as const,
   registers: [registry],
 });
@@ -143,5 +143,20 @@ export const usageReadingsAppliedTotal = new Counter({
   name: 'rasta_maintenance_usage_readings_applied_total',
   help: 'USAGE_RECORDED events folded into the asset usage meter',
   labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/**
+ * Expired transfer fences resolved against asset-service (ADR-062 § 3b).
+ *
+ * `outcome` is a closed set: `recorded` (the transfer landed; the work was
+ * refused), `not_recorded` (the fence was lifted) and `unavailable` (no
+ * answer; the work was refused). A steady `recorded` means the asset-sync
+ * consumer lags past the fence's life.
+ */
+export const transferFenceResolutionsTotal = new Counter({
+  name: 'rasta_maintenance_transfer_fence_resolutions_total',
+  help: 'Expired transfer fences resolved against asset-service, by outcome',
+  labelNames: ['service', 'outcome'] as const,
   registers: [registry],
 });

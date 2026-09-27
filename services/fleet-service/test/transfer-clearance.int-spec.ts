@@ -1,11 +1,12 @@
 import { ulid } from 'ulid';
 import type { EventEnvelope } from '@rasta/contracts';
-import { runWithContext, type RequestContext } from '@rasta/nest-common';
+import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
 import { CLEARANCE_CALLER, TransferClearanceService } from '../src/fleet/transfer-clearance';
+import type { TransferRecordSource } from '../src/fleet/transfer-record';
 import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
 
 /**
@@ -187,20 +188,134 @@ describe('transfer clearance', () => {
     expect((await fenceRow(assetId))!.fence_id).toBe(first);
   });
 
-  it('lets an expired fence be taken over and no longer refuse work', async () => {
-    const assetId = await machine(org.a);
-    await ask(org.a, assetId);
-    await prisma.client.$executeRawUnsafe(
-      `UPDATE asset_transfer_fence SET expires_at = now() - interval '1 second' WHERE asset_id = $1`,
-      assetId,
-    );
+  describe('an expired fence whose ASSET_TRANSFERRED has not arrived (review #127 #2)', () => {
+    type Answer = 'RECORDED' | 'NOT_RECORDED' | 'UNREACHABLE';
 
-    await expect(ask(org.a, assetId)).resolves.toMatchObject({ clear: true });
-    await prisma.client.$executeRawUnsafe(
-      `UPDATE asset_transfer_fence SET expires_at = now() - interval '1 second' WHERE asset_id = $1`,
-      assetId,
+    function source(answer: Answer) {
+      const asked: unknown[][] = [];
+      const records: TransferRecordSource & { asked: unknown[][] } = {
+        asked,
+        resolve: async (...args) => {
+          asked.push(args);
+          if (answer === 'UNREACHABLE') throw RastaError.upstreamUnavailable('asset-service');
+          return answer;
+        },
+      };
+      return records;
+    }
+
+    async function expiredFence(assetId: string): Promise<string> {
+      const fenceId = fence();
+      await ask(org.a, assetId, fenceId);
+      await prisma.client.$executeRawUnsafe(
+        `UPDATE asset_transfer_fence SET expires_at = now() - interval '1 second' WHERE asset_id = $1`,
+        assetId,
+      );
+      return fenceId;
+    }
+
+    const assignWith = async (records: TransferRecordSource, assetId: string) => {
+      const driverId = await driver(org.a);
+      return asActor({ organizationId: org.a }, () =>
+        new AssignmentService(repository, undefined, records).create({ driverId, assetId }),
+      ).then(
+        () => 'OK',
+        (error: { code?: string; internalContext?: { rule?: string } }) =>
+          error.internalContext?.rule ?? error.code ?? 'ERROR',
+      );
+    };
+
+    it('refuses the assignment when the transfer was recorded, and keeps the fence', async () => {
+      const assetId = await machine(org.a);
+      const fenceId = await expiredFence(assetId);
+      const records = source('RECORDED');
+
+      expect(await assignWith(records, assetId)).toBe('ASSET_OWNER_CHANGED');
+      expect(records.asked).toEqual([[org.a, assetId, fenceId]]);
+      expect((await fenceRow(assetId))!.fence_id).toBe(fenceId);
+    });
+
+    it('lifts the fence and assigns when the transfer was not recorded', async () => {
+      const assetId = await machine(org.a);
+      await expiredFence(assetId);
+
+      expect(await assignWith(source('NOT_RECORDED'), assetId)).toBe('OK');
+      expect(await fenceRow(assetId)).toBeUndefined();
+    });
+
+    it('refuses, retryably, and keeps the fence when asset-service gives no answer', async () => {
+      const assetId = await machine(org.a);
+      const fenceId = await expiredFence(assetId);
+
+      expect(await assignWith(source('UNREACHABLE'), assetId)).toBe('UPSTREAM_UNAVAILABLE');
+      // And a service built without asset-service never lifts it by time.
+      await expect(assign(org.a, assetId)).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+      expect((await fenceRow(assetId))!.fence_id).toBe(fenceId);
+    });
+
+    it('lets a new clearance take its place only once its transfer is known not recorded', async () => {
+      const assetId = await machine(org.a);
+      const stale = await expiredFence(assetId);
+      const next = fence();
+      const clearWith = (records: TransferRecordSource) =>
+        asService(CLEARANCE_CALLER, org.a, () =>
+          new TransferClearanceService(repository, records).clear(assetId, {
+            fenceId: next,
+            ttlSeconds: 600,
+          }),
+        );
+
+      await expect(clearWith(source('RECORDED'))).rejects.toMatchObject({
+        code: 'INVALID_STATE_TRANSITION',
+      });
+      await expect(ask(org.a, assetId, next)).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+      expect((await fenceRow(assetId))!.fence_id).toBe(stale);
+
+      await expect(clearWith(source('NOT_RECORDED'))).resolves.toMatchObject({
+        clear: true,
+        fenceId: next,
+      });
+      expect((await fenceRow(assetId))!.fence_id).toBe(next);
+    });
+  });
+
+  it('a release that arrives while its clearance is still writing waits for the fence and removes it (review #127 #4)', async () => {
+    const assetId = await machine(org.a);
+    const fenceId = fence();
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => (finish = resolve));
+    let written!: () => void;
+    const isWritten = new Promise<void>((resolve) => (written = resolve));
+
+    const clearing = prisma.client.$transaction(
+      async (tx) => {
+        await repository.lockAssetRef(tx as never, assetId);
+        await repository.placeTransferFence(tx as never, assetId, org.a, fenceId, 600);
+        written();
+        await finished;
+      },
+      { timeout: 30_000 },
     );
-    await expect(assign(org.a, assetId)).resolves.toMatchObject({ assetId });
+    await isWritten;
+
+    const released = asService(CLEARANCE_CALLER, org.a, () => clearance.release(assetId, fenceId));
+    for (let attempt = 0; attempt < 400; attempt++) {
+      const rows = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+      );
+      if (rows[0]!.n >= 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    finish();
+    await clearing;
+    await released;
+
+    expect(await fenceRow(assetId)).toBeUndefined();
   });
 
   it('releases a fence for a transfer that did not happen, and only its own', async () => {

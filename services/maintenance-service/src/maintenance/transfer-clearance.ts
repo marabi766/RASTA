@@ -1,7 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { z } from 'zod';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
 import { MaintenanceRepository } from './maintenance.repository';
+import {
+  TRANSFER_RECORD_SOURCE,
+  UNCONFIGURED_TRANSFER_RECORD_SOURCE,
+  settleExpiredFence,
+  type TransferRecordSource,
+} from './transfer-record';
 
 /**
  * Whether a machine can leave its owner, as maintenance-service sees it
@@ -85,12 +91,24 @@ export function assertClearanceCaller(): void {
 
 @Injectable()
 export class TransferClearanceService {
-  constructor(private readonly repository: MaintenanceRepository) {}
+  constructor(
+    private readonly repository: MaintenanceRepository,
+    @Optional()
+    @Inject(TRANSFER_RECORD_SOURCE)
+    private readonly records: TransferRecordSource = UNCONFIGURED_TRANSFER_RECORD_SOURCE,
+  ) {}
 
   async clear(assetId: string, dto: TransferClearanceDto): Promise<TransferClearanceView> {
     assertClearanceCaller();
     // A token with no organization is a 403 here, before any query.
     const organizationId = getOrganizationId();
+
+    // An expired fence of another transfer is resolved at its source before
+    // this one may take its place (ADR-062 § 3b). One that landed means the
+    // replica has not caught up with it yet: a conflict to retry.
+    if ((await settleExpiredFence(this.repository, this.records, assetId)) === 'RECORDED') {
+      throw anotherTransfer();
+    }
 
     return this.repository.transaction(async (tx) => {
       await this.repository.lockAssetForWork(tx, assetId, 'EXCLUSIVE');
@@ -117,14 +135,10 @@ export class TransferClearanceService {
         dto.ttlSeconds,
       );
       if (!fencedUntil) {
-        // Another transfer's fence is live. Taking it over would let that
-        // transfer's release lift this one's.
-        throw RastaError.invalidStateTransition(
-          'Asset',
-          'TRANSFER_PENDING',
-          'TRANSFER_PENDING',
-          'Another transfer of this asset is in progress',
-        );
+        // Another transfer's fence stands. Taking it over would let that
+        // transfer's release lift this one's, and an expired one is only
+        // lifted by its source's answer, above.
+        throw anotherTransfer();
       }
 
       return {
@@ -138,10 +152,19 @@ export class TransferClearanceService {
     });
   }
 
-  /** Lifts a fence for a transfer that did not happen. Idempotent. */
+  /** Lifts a fence for a transfer that did not happen. Idempotent; under the exclusive lock. */
   async release(assetId: string, fenceId: string): Promise<void> {
     assertClearanceCaller();
     const organizationId = getOrganizationId();
     await this.repository.releaseTransferFence(assetId, organizationId, fenceId);
   }
+}
+
+function anotherTransfer(): RastaError {
+  return RastaError.invalidStateTransition(
+    'Asset',
+    'TRANSFER_PENDING',
+    'TRANSFER_PENDING',
+    'Another transfer of this asset is in progress',
+  );
 }

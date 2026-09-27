@@ -46,6 +46,11 @@ import {
   MaintenanceTransferClearanceController,
 } from './maintenance/internal.controller';
 import { TransferClearanceService } from './maintenance/transfer-clearance';
+import {
+  TRANSFER_RECORD_SOURCE,
+  TransferRecordClient,
+  type TransferRecordSource,
+} from './maintenance/transfer-record';
 import { MaintenanceFactService } from './maintenance/source-fact';
 import { RepairOrderController } from './maintenance/repair-order.controller';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
@@ -150,6 +155,24 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
     // platform can honestly provide today. Filling the gap is a second class
     // and this one line (ADR-029).
     { provide: WorkshopDirectory, useClass: UnverifiedWorkshopDirectory },
+
+    // ADR-062 § 3b: asset-service, asked whether a transfer was recorded when
+    // a work-start meets an expired transfer fence. Its own
+    // `InternalTokenService`, from the same secret the guard verifies with.
+    {
+      provide: TRANSFER_RECORD_SOURCE,
+      inject: [ENV],
+      useFactory: (env: MaintenanceEnv): TransferRecordSource =>
+        new TransferRecordClient({
+          baseUrl: env.ASSET_SERVICE_URL,
+          timeoutMs: env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS,
+          tokens: new InternalTokenService(
+            env.INTERNAL_TOKEN_SECRET,
+            env.INTERNAL_TOKEN_ISSUER,
+            env.INTERNAL_TOKEN_TTL_SECONDS,
+          ),
+        }),
+    },
 
     {
       provide: UsageConsumer,
