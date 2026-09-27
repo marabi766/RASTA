@@ -430,14 +430,40 @@ export class AssetRepository {
   }
 
   /**
-   * Whether a transfer with this id was committed. Unscoped because the
-   * record lives with the receiving organization, while the caller acts for
-   * the previous owner; it reads one row by its own id and returns a boolean.
+   * Whether `transferId` moved `assetId` away from `fromOrganizationId` — the
+   * answer an owner of the machine's work needs before it lifts an expired
+   * transfer fence (ADR-062 § 3b).
+   *
+   * The asset row is locked first. A transfer holds that lock from its
+   * compare-and-set until it commits, so a transfer still committing is
+   * waited for, never read as absent: after the lock, the row is either
+   * visible or never will be. A transfer that has not taken the lock yet can
+   * no longer commit, because its fence has expired and the transfer refuses
+   * to commit past half the fence's life (`AssetService.transfer`).
+   *
+   * Bounded by `lock_timeout`: an answer that cannot be given promptly is an
+   * error, which the caller treats as no answer. Unscoped: the transfer row
+   * belongs to the receiving organization and the asset may have moved; the
+   * caller learns one boolean about its own organization's transfer.
    */
-  async transferRecorded(transferId: string): Promise<boolean> {
+  async transferRecordedFrom(
+    assetId: string,
+    transferId: string,
+    fromOrganizationId: string,
+  ): Promise<boolean> {
     return runUnscoped(
-      'did this transfer commit, before its clearance fences are released (ADR-062)',
-      async () => (await this.client.assetTransfer.count({ where: { id: transferId } })) > 0,
+      "whether one of the calling organization's transfers committed, for its fence (ADR-062)",
+      () =>
+        this.transaction(async (tx) => {
+          await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+          await tx.$queryRaw`SELECT id FROM asset WHERE id = ${assetId} FOR UPDATE`;
+          const rows = await tx.$queryRaw<{ id: string }[]>`
+            SELECT id FROM asset_transfer
+            WHERE id = ${transferId}
+              AND asset_id = ${assetId}
+              AND from_organization_id = ${fromOrganizationId}`;
+          return rows.length === 1;
+        }),
     );
   }
 

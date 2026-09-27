@@ -43,6 +43,7 @@ import {
   type TransferClearance,
 } from './asset/transfer-clearance';
 import { AssetController } from './asset/asset.controller';
+import { AssetInternalController, TransferRecordService } from './asset/transfer-record';
 import { InsuranceService } from './insurance/insurance.service';
 import { ClaimService } from './insurance/claim.service';
 import { TimelineConsumer } from './consumers/timeline.consumer';
@@ -71,7 +72,7 @@ const CONSUMED_TOPICS = [
 ];
 
 @Module({
-  controllers: [AssetController, HealthController, MetricsController],
+  controllers: [AssetController, AssetInternalController, HealthController, MetricsController],
   providers: [
     { provide: ENV, useFactory: () => loadAssetEnv() },
 
@@ -140,6 +141,7 @@ const CONSUMED_TOPICS = [
         }),
     },
     AssetService,
+    TransferRecordService,
 
     {
       provide: InsuranceService,
