@@ -271,7 +271,7 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 | **Queries**      | `GetSupplier` · `SearchSuppliers` · `GetPerformanceScore` · `ListQualifiedFor`                                                                                            |
 | **REST**         | `POST /suppliers` · `GET /suppliers` · `GET /suppliers/{id}` · `POST /suppliers/{id}/qualifications` · `POST /suppliers/{id}/suspend` · `GET /suppliers/{id}/performance` |
 | **Publishes**    | `SUPPLIER_REGISTERED` · `SUPPLIER_QUALIFIED` · `SUPPLIER_REJECTED` · `SUPPLIER_SUSPENDED` · `PERFORMANCE_SCORE_UPDATED`                                                   |
-| **Consumes**     | `REVIEW_SUBMITTED` · `ORDER_COMPLETED` · `ORDER_DISPUTED` · `REPAIR_COMPLETED` · `CONTRACT_COMPLETED` · `CONTRACTOR_RATED` → همه برای محاسبه امتیاز                       |
+| **Consumes**     | از `rasta.marketplace.v1`: `ORDER_CREATED` · `ORDER_FULFILLED` · `REVIEW_SUBMITTED` · `ORDER_DISPUTE_RESOLVED` · `ORDER_CANCELLED` · `ORDER_COMPLETED` (ADR-052 گام ۵)    |
 | **Dependencies** | PostgreSQL · Kafka · OpenSearch · `document-service`                                                                                                                      |
 | **مرز امنیتی**   | تأمین‌کننده پروفایل خود را می‌بیند و ویرایش می‌کند؛ **امتیاز عملکرد را نمی‌تواند تغییر دهد.**                                                                             |
 | **Scale**        | کم. خواندن‌محور با Cache.                                                                                                                                                 |
@@ -284,36 +284,44 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 کیفیت ۳۰٪ · تحویل/تکمیل به‌موقع ۲۵٪ · رضایت مشتری ۲۰٪ · نبودِ اختلاف معتبر ۱۵٪ ·
 نبودِ لغو منتسب ۱۰٪. وزن‌ها نسخه‌دارند و مجموع نسخهٔ فعال دقیقاً ۱۰۰٪ است.
 
-**تصمیم پذیرفته شد؛ پیاده‌سازی نشد.** Supplier Phase 2 شروع نشده است. هیچ جدول
-پیکربندی، هیچ رویداد عملکرد، هیچ Snapshot، هیچ Consumer و هیچ Endpoint امتیازی
-وجود ندارد. جدول «وضعیت پیاده‌سازی» پایین بدون تغییر معتبر است.
+**تصمیم پذیرفته شد؛ امتیازی محاسبه نمی‌شود.** ذخیره‌سازی (گام‌های ۲ تا ۴) و Consumer رویدادهای
+marketplace (گام ۵) پیاده شده‌اند؛ موتور محاسبه (گام ۶)، Endpoint امتیاز و `PERFORMANCE_SCORE_UPDATED` نه — وضعیت هر گام
+در [برنامهٔ پیاده‌سازی ADR-052](adr/ADR-052-implementation-plan.md).
 
-**و امروز ۸۰٪ وزن تولیدکننده ندارد.** از پنج مؤلفه فقط «رضایت مشتری» از
-`REVIEW_SUBMITTED` قابل محاسبه است؛ کیفیت هیچ سیگنالی ندارد، «به‌موقع بودن» هیچ
-تاریخ وعده‌ای در هیچ رویدادی ندارد، `ORDER_DISPUTED` فقط طرح اختلاف است (رویداد
-حل وجود ندارد) و `ORDER_CANCELLED` انتساب ساخت‌یافتهٔ مسئولیت ندارد. ADR-052 § ۲
+**در 2026-09-07، ۸۰٪ وزن تولیدکننده نداشت.** از پنج مؤلفه فقط «رضایت مشتری» از
+`REVIEW_SUBMITTED` قابل محاسبه بود؛ کیفیت هیچ سیگنالی نداشت، «به‌موقع بودن» هیچ
+تاریخ وعده‌ای در هیچ رویدادی نداشت، `ORDER_DISPUTED` فقط طرح اختلاف بود (رویداد
+حل وجود نداشت) و `ORDER_CANCELLED` انتساب ساخت‌یافتهٔ مسئولیت نداشت. ADR-052 § ۲
 این را با شواهد کد ثبت کرده و تا عبور پوشش از ۵۰٪، انتشار هیچ عددی را ممنوع
 می‌کند.
+
+**امروز (2026-09-27) ۷۰٪ وزن تولیدکننده دارد.** marketplace سه سیگنال کم‌شده را
+منتشر می‌کند (ADR-052 گام ۱-الف تا ۱-پ): `promisedDeliveryAt` روی `ORDER_CREATED`،
+رویداد `ORDER_DISPUTE_RESOLVED` با `responsibility` در enum بسته، و
+`cancellationCause` روی `ORDER_CANCELLED`. کیفیت (۳۰٪، گام ۱-ت) هنوز هیچ سیگنالی
+ندارد و پرسش محصول باز است. تولیدکننده داشتن یعنی واقعیت ثبت‌شدنی است، نه اینکه
+عددی محاسبه می‌شود: موتور (گام ۶) منتظر پاسخ Q-77 تا Q-79 است.
 
 ### وضعیت پیاده‌سازی — فاز ۱
 
 جدول بالا طراحی کامل سرویس است. آنچه واقعاً پیاده شده کمتر از آن است، و تفاوت
 عمدی است:
 
-| قابلیت                                                                 | وضعیت                                                                                                                                                |
-| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RegisterSupplier` · پروفایل و حوزه تخصص                               | ✅ پیاده                                                                                                                                             |
-| `SubmitQualification` + ارجاع مدرک (شناسه مبهم)                        | ✅ پیاده                                                                                                                                             |
-| `ApproveQualification` · `RejectQualification`                         | ✅ پیاده — تصمیم انسانی صریح، با ثبت کنشگر و زمان                                                                                                    |
-| `SuspendSupplier` · `ReinstateSupplier`                                | ✅ پیاده — تعلیق **نگه می‌دارد**، باطل نمی‌کند؛ بازگردانی تصمیم تازه لازم ندارد                                                                      |
-| `SearchSuppliers` · `ListQualifiedFor` · `GetSupplier`                 | ✅ پیاده — فهرست عمومی میان‌مستأجری با Projection ایمن                                                                                               |
-| `SUPPLIER_REGISTERED` · `QUALIFIED` · `REJECTED` · `SUSPENDED`         | ✅ پیاده — Outbox (ADR-050) + تخصیص ترتیب ADR-051 B3 روی `supplierId`                                                                                |
-| `RecordPerformanceEvent` · `GetPerformanceScore` · `performance_score` | ❌ **پیاده نشد.** Q-12 در 2026-09-07 بسته شد ([ADR-052](adr/ADR-052-supplier-performance-scoring.md)) اما **Phase 2 شروع نشده**: تصمیم هست، کد نیست. |
-| `PERFORMANCE_SCORE_UPDATED`                                            | ❌ **منتشر نمی‌شود** — رویدادی برای عددی که وجود ندارد. طراحی‌اش در ADR-052 گام ۸ آمده.                                                              |
-| `supplier_license`                                                     | ❌ **مدل نشد.** مجوز مرجع صادرکننده، دورهٔ اعتبار و قاعدهٔ تمدید دارد و سند محصول هیچ‌یک را نام نمی‌برد.                                             |
-| مصرف ۶ رویداد امتیازدهی                                                | ❌ **هیچ Consumer ثبت نشده.** جدول `processed_event` ساخته شده و خالی است؛ Handler ای که چیزی محاسبه نکند ردیف «پردازش شد» جا می‌گذارد (ADR-032).    |
-| `document-service` (بررسی مدرک)                                        | ❌ Port ای وجود ندارد؛ شناسه مدرک هرگز Resolve نمی‌شود. Integration Handoff.                                                                         |
-| OpenSearch                                                             | ❌ استفاده نمی‌شود؛ جست‌وجوی متن آزاد و مرتب‌سازی بر اساس امتیاز وجود ندارد.                                                                         |
+| قابلیت                                                           | وضعیت                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RegisterSupplier` · پروفایل و حوزه تخصص                         | ✅ پیاده                                                                                                                                                                                                                                                                                                                              |
+| `SubmitQualification` + ارجاع مدرک (شناسه مبهم)                  | ✅ پیاده                                                                                                                                                                                                                                                                                                                              |
+| `ApproveQualification` · `RejectQualification`                   | ✅ پیاده — تصمیم انسانی صریح، با ثبت کنشگر و زمان                                                                                                                                                                                                                                                                                     |
+| `SuspendSupplier` · `ReinstateSupplier`                          | ✅ پیاده — تعلیق **نگه می‌دارد**، باطل نمی‌کند؛ بازگردانی تصمیم تازه لازم ندارد                                                                                                                                                                                                                                                       |
+| `SearchSuppliers` · `ListQualifiedFor` · `GetSupplier`           | ✅ پیاده — فهرست عمومی میان‌مستأجری با Projection ایمن                                                                                                                                                                                                                                                                                |
+| `SUPPLIER_REGISTERED` · `QUALIFIED` · `REJECTED` · `SUSPENDED`   | ✅ پیاده — Outbox (ADR-050) + تخصیص ترتیب ADR-051 B3 روی `supplierId`                                                                                                                                                                                                                                                                 |
+| ذخیره‌سازی عملکرد: پیکربندی وزن · `performance_event` · Snapshot | ✅ پیاده (ADR-052 گام‌های ۲ تا ۴، #120) — الحاقی و تغییرناپذیر. هیچ Snapshotی نوشته نمی‌شود: نویسندهٔ آن موتور گام ۶ است.                                                                                                                                                                                                             |
+| `GetPerformanceScore` · موتور امتیاز · `performance_score`       | ❌ **پیاده نشد.** Q-12 در 2026-09-07 بسته شد ([ADR-052](adr/ADR-052-supplier-performance-scoring.md))؛ موتور (گام ۶) منتظر پاسخ Q-77، Q-78 و Q-79 است و API خواندنی (گام ۷) پس از آن.                                                                                                                                                 |
+| `PERFORMANCE_SCORE_UPDATED`                                      | ❌ **منتشر نمی‌شود** — رویدادی برای عددی که وجود ندارد. طراحی‌اش در ADR-052 گام ۸ آمده.                                                                                                                                                                                                                                               |
+| `supplier_license`                                               | ❌ **مدل نشد.** مجوز مرجع صادرکننده، دورهٔ اعتبار و قاعدهٔ تمدید دارد و سند محصول هیچ‌یک را نام نمی‌برد.                                                                                                                                                                                                                              |
+| مصرف ۶ رویداد امتیازدهی (`RecordPerformanceEvent`)               | ✅ پیاده، **به‌طور پیش‌فرض خاموش** (ADR-052 گام ۵، § ۲۵) — Consumer `supplier-service.performance` روی `rasta.marketplace.v1` فقط واقعیت ثبت می‌کند؛ علامت `processed_event` با اثر در یک تراکنش (ADR-032). روشن‌کردنش تا احراز Broker (RUN-006) در راه‌اندازی رد می‌شود — `docs/23` D-036. تا 2026-09-26 هیچ Consumerی ثبت نشده بود. |
+| `document-service` (بررسی مدرک)                                  | ❌ Port ای وجود ندارد؛ شناسه مدرک هرگز Resolve نمی‌شود. Integration Handoff.                                                                                                                                                                                                                                                          |
+| OpenSearch                                                       | ❌ استفاده نمی‌شود؛ جست‌وجوی متن آزاد و مرتب‌سازی بر اساس امتیاز وجود ندارد.                                                                                                                                                                                                                                                          |
 
 یک تأییدیه **نمی‌گوید** مدرکی واکشی، باز، اسکن یا معتبر تشخیص داده شده است؛
 می‌گوید یک اپراتور پلتفرمِ نام‌برده در زمانی مشخص یک درخواست را تأیید کرده است.

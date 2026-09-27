@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   authEnvSchema,
   baseEnvSchema,
+  booleanEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
@@ -38,6 +39,14 @@ export const supplierEnvSchema = baseEnvSchema
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),
+    /**
+     * The ADR-052 step-5 performance consumer. **Off by default, and it fails
+     * closed**: it writes append-only facts into the tenant a payload names,
+     * so it stays off until the broker authenticates who publishes
+     * (ADR-061 § 3, RUN-006). Turning it on without that is refused at
+     * startup — see `assertPerformanceConsumerMayStart`. Codex review of #126.
+     */
+    SUPPLIER_PERFORMANCE_CONSUMER_ENABLED: booleanEnv(false),
   });
 
 export type SupplierEnv = z.infer<typeof supplierEnvSchema>;
@@ -55,13 +64,13 @@ export type SupplierEnv = z.infer<typeof supplierEnvSchema>;
  *                 connected to some other database would violate A-01 quietly,
  *                 and `postgresUrlSchema` refuses an absent value loudly.
  *
- * `KAFKA_CONSUMER_GROUP` is set even though this service registers no consumer
- * (see `app.module.ts`): the value is part of the service's identity on the
- * broker, and defining it here means the first real consumer inherits the
- * platform-standard name rather than inventing one.
+ * `KAFKA_CONSUMER_GROUP` is the platform-standard default. The one consumer this
+ * service registers (`app.module.ts`) names its own group,
+ * `supplier-service.performance`, because its `processed_event` key is that
+ * same name and must not change with an environment variable.
  */
 export function loadSupplierEnv(source: NodeJS.ProcessEnv = process.env): SupplierEnv {
-  return loadEnv(supplierEnvSchema, {
+  const env = loadEnv(supplierEnvSchema, {
     ...source,
     SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
     PORT: source.PORT ?? source.PORT_SUPPLIER ?? DEFAULT_PORT,
@@ -70,6 +79,41 @@ export function loadSupplierEnv(source: NodeJS.ProcessEnv = process.env): Suppli
     KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
     CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
   });
+  assertPerformanceConsumerMayStart(env);
+  return env;
+}
+
+/**
+ * Whether this service's Kafka client authenticates to the broker, so that
+ * the broker — not the envelope — says who published (ADR-061 § 3).
+ *
+ * **Always `false` today**: RUN-006 (SASL/SCRAM and per-topic ACLs) has not
+ * landed, and no configuration on `main` makes the client authenticate. When
+ * it lands, this reads the setting it adds, and nothing else changes.
+ */
+export function brokerConnectionIsAuthenticated(_env: SupplierEnv): boolean {
+  return false;
+}
+
+/**
+ * Refuses to start with the performance consumer enabled over a broker that
+ * does not authenticate producers (Codex review of #126, finding 1).
+ *
+ * Until then anyone who can reach the broker can publish on
+ * `rasta.marketplace.v1` as marketplace-service, with a buyer tenant that
+ * passes ADR-061 § 5 and any supplier they like — and the fact would land,
+ * append-only and uncleanable, in that supplier's tenant. So the flag is not
+ * a warning; it is a gate.
+ */
+export function assertPerformanceConsumerMayStart(env: SupplierEnv): void {
+  if (env.SUPPLIER_PERFORMANCE_CONSUMER_ENABLED && !brokerConnectionIsAuthenticated(env)) {
+    throw new Error(
+      'SUPPLIER_PERFORMANCE_CONSUMER_ENABLED=true is refused: the Kafka client is not configured ' +
+        'to authenticate to the broker, so a performance fact could be forged in any supplier’s ' +
+        'name. Enable it only once RUN-006 (SASL/ACL, ADR-061 § 3) is in place — or once facts are ' +
+        'verified at source (docs/23 D-036).',
+    );
+  }
 }
 
 export function corsOrigins(env: SupplierEnv): string[] {
