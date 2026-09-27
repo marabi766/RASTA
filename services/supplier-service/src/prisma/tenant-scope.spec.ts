@@ -138,6 +138,7 @@ describe('a model without a tenant column is a written decision', () => {
     // when a step's models are missing. Events and snapshots are about one
     // supplier and belong to its tenant; only the formula is platform-wide.
     const TENANT_OWNED_PERFORMANCE_MODELS = [
+      'PerformanceConcludedOutcome',
       'PerformanceEvent',
       'PerformanceScoreComponent',
       'PerformanceScoreSnapshot',

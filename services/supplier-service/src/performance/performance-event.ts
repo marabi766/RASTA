@@ -30,6 +30,12 @@ export interface PerformanceEventInput {
   rating: number | null;
   promisedAt: Date | null;
   deliveredAt: Date | null;
+  /**
+   * The dispute a DISPUTE_ABSENCE fact resolves — required there, absent on
+   * every other component. A later resolution of the same dispute supersedes
+   * an earlier one, and both rows are kept (project manager, 2026-09-26).
+   */
+  disputeId: string | null;
   compensatesSourceEventId: string | null;
   occurredAt: Date;
   correlationId: string;
@@ -104,6 +110,14 @@ export function performanceEventProblems(input: PerformanceEventInput): ErrorDet
     problem('promisedAt', 'an ON_TIME fact carries exactly one of promisedAt or deliveredAt');
   } else if (input.component !== 'ON_TIME' && timeSides !== 0) {
     problem('promisedAt', `is not a fact of ${input.component}`);
+  }
+
+  if (input.component === 'DISPUTE_ABSENCE') {
+    if (input.disputeId === null || !notBlank(input.disputeId)) {
+      problem('disputeId', 'is required for DISPUTE_ABSENCE');
+    }
+  } else if (input.disputeId !== null) {
+    problem('disputeId', `is not a fact of ${input.component}`);
   }
 
   if (input.compensatesSourceEventId === input.sourceEventId) {

@@ -16,9 +16,9 @@ import { assertValidPerformanceEvent, type PerformanceEventInput } from './perfo
  *
  * `PerformanceEvent` is guarded by the supplier organization the fact is
  * about. A write is stamped — and a mismatched `organizationId` refused — by
- * the guard, from the request context the caller runs in; step 5's consumers
- * will run each event in the context of the supplier it names. Reads are
- * scoped the same way.
+ * the guard, from the request context the caller runs in; the step-5 consumer
+ * runs each event in the context of the supplier it names. Reads are scoped
+ * the same way.
  *
  * The one crossing: a duplicate delivery is compared against the row that
  * already holds its `source_event_id`, which may belong to another tenant if a
@@ -51,6 +51,7 @@ export const FACT_FIELDS = [
   'rating',
   'promisedAt',
   'deliveredAt',
+  'disputeId',
   'compensatesSourceEventId',
   'occurredAt',
 ] as const satisfies readonly (keyof PerformanceEventInput)[];
@@ -108,6 +109,7 @@ export class PerformanceEventRepository {
           rating: input.rating,
           promisedAt: input.promisedAt,
           deliveredAt: input.deliveredAt,
+          disputeId: input.disputeId,
           compensatesSourceEventId: input.compensatesSourceEventId,
           occurredAt: input.occurredAt,
           correlationId: input.correlationId,
