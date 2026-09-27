@@ -192,12 +192,37 @@ export const databaseEnvSchema = z.object({
   DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(0).default(15_000),
 });
 
+/** The only SASL mechanism a broker credential is issued for (ADR-061 § 3). */
+export const KAFKA_SASL_MECHANISMS = ['scram-sha-512'] as const;
+
 /** Services that produce or consume domain events. */
 export const kafkaEnvSchema = z.object({
   KAFKA_BROKERS: z.string().min(1),
   KAFKA_CLIENT_ID: z.string().min(1),
   KAFKA_CONSUMER_GROUP: z.string().min(1).optional(),
   KAFKA_SCHEMA_STRICT: booleanEnv(true),
+
+  /**
+   * The service's broker credential (ADR-061 § 3, RUN-006): SASL/SCRAM, one
+   * principal per service, named after it. Both absent means PLAINTEXT, which
+   * only a non-production environment accepts (`kafkaConnection` in
+   * `nest-common` refuses to connect a production service without them).
+   *
+   * Never committed: `.env.example` holds placeholders only. When
+   * `KAFKA_SASL_PASSWORD` is unset, `loadEnv` reads
+   * `KAFKA_SASL_PASSWORD_<SERVICE>` (`fleet-service` → `..._FLEET`), so one
+   * repository `.env` can describe every service, as it does for
+   * `DATABASE_URL_<SERVICE>`. The username defaults to `SERVICE_NAME`.
+   */
+  KAFKA_SASL_USERNAME: z.string().min(1).max(64).optional(),
+  KAFKA_SASL_PASSWORD: z.string().min(1).optional(),
+  KAFKA_SASL_MECHANISM: z.enum(KAFKA_SASL_MECHANISMS).default('scram-sha-512'),
+
+  /** TLS to the broker. A production service requires it together with SASL. */
+  KAFKA_SSL: booleanEnv(false),
+  /** PEM file of the CA that signed the broker's certificate; absent = the system trust store. */
+  KAFKA_SSL_CA_FILE: z.string().min(1).optional(),
+
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(50).default(500),
   OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
 
@@ -236,6 +261,8 @@ export const kafkaEnvSchema = z.object({
    */
   OUTBOX_SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().min(0).max(300).default(30),
 });
+
+export type KafkaEnv = z.infer<typeof kafkaEnvSchema>;
 
 /** Services that use cache, distributed locks or rate limiting. */
 export const redisEnvSchema = z.object({
@@ -279,7 +306,7 @@ export function loadEnv<S extends z.ZodTypeAny>(
   schema: S,
   source: NodeJS.ProcessEnv = process.env,
 ): z.infer<S> {
-  const result = schema.safeParse(source);
+  const result = schema.safeParse(withKafkaCredentialFallback(source));
 
   if (!result.success) {
     throw new EnvValidationError(
@@ -291,6 +318,44 @@ export function loadEnv<S extends z.ZodTypeAny>(
   }
 
   return result.data;
+}
+
+/**
+ * `KAFKA_SASL_PASSWORD_<SERVICE>` for a service that has no
+ * `KAFKA_SASL_PASSWORD`, and `SERVICE_NAME` as the username that goes with it.
+ * Reading only: nothing is invented, and an empty value counts as unset.
+ */
+function withKafkaCredentialFallback(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const withoutEmpty = (value: string | undefined): string | undefined =>
+    value === undefined || value.length === 0 ? undefined : value;
+  const service = withoutEmpty(source.SERVICE_NAME);
+  const own = withoutEmpty(source.KAFKA_SASL_PASSWORD);
+  const shared = service ? withoutEmpty(source[kafkaPasswordVariable(service)]) : undefined;
+  const password = own ?? shared;
+  const username = withoutEmpty(source.KAFKA_SASL_USERNAME) ?? (password ? service : undefined);
+
+  const resolved: NodeJS.ProcessEnv = { ...source };
+  delete resolved.KAFKA_SASL_PASSWORD;
+  delete resolved.KAFKA_SASL_USERNAME;
+  if (password !== undefined) resolved.KAFKA_SASL_PASSWORD = password;
+  if (username !== undefined) resolved.KAFKA_SASL_USERNAME = username;
+  return resolved;
+}
+
+/** `fleet-service` → `KAFKA_SASL_PASSWORD_FLEET`, the name the repository `.env` uses. */
+export function kafkaPasswordVariable(serviceName: string): string {
+  const stem = serviceName
+    .replace(/-service$/, '')
+    .replace(/-/g, '_')
+    .toUpperCase();
+  return `KAFKA_SASL_PASSWORD_${stem}`;
+}
+
+/** Whether this service has a broker credential, i.e. connects with SASL rather than PLAINTEXT. */
+export function kafkaSaslConfigured(
+  env: Partial<Pick<KafkaEnv, 'KAFKA_SASL_USERNAME' | 'KAFKA_SASL_PASSWORD'>>,
+): boolean {
+  return Boolean(env.KAFKA_SASL_USERNAME) && Boolean(env.KAFKA_SASL_PASSWORD);
 }
 
 export function isProduction(env: Pick<BaseEnv, 'NODE_ENV'>): boolean {

@@ -7,6 +7,9 @@ export {
   queryBooleanDefault,
   databaseEnvSchema,
   kafkaEnvSchema,
+  KAFKA_SASL_MECHANISMS,
+  kafkaSaslConfigured,
+  kafkaPasswordVariable,
   redisEnvSchema,
   authEnvSchema,
   loadEnv,
@@ -20,7 +23,7 @@ export {
   redisUrlSchema,
 } from './env';
 
-export type { NodeEnv, LogLevel, BaseEnv, EnvIssue } from './env';
+export type { NodeEnv, LogLevel, BaseEnv, KafkaEnv, EnvIssue } from './env';
 
 export {
   DEMO_SEED_ENVIRONMENTS,

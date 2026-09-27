@@ -2,6 +2,8 @@ import {
   baseEnvSchema,
   databaseEnvSchema,
   kafkaEnvSchema,
+  kafkaPasswordVariable,
+  kafkaSaslConfigured,
   loadEnv,
   EnvValidationError,
 } from './env';
@@ -201,5 +203,83 @@ describe('boolean flags in the shared schemas', () => {
     it.each(['abc', '1.5', ''])('refuses %p as a lease rather than coercing it', (value) => {
       expect(() => load({ OUTBOX_CLAIM_LEASE_SECONDS: value })).toThrow(EnvValidationError);
     });
+  });
+});
+
+/**
+ * RUN-006: the broker credential. Read from the environment only; whether a
+ * service may run without one is decided by `kafkaConnection` (nest-common),
+ * which refuses PLAINTEXT only in production.
+ */
+describe('Kafka SASL credential', () => {
+  const kafkaService = baseEnvSchema.merge(kafkaEnvSchema);
+  const source = {
+    SERVICE_NAME: 'fleet-service',
+    PORT: '3104',
+    KAFKA_BROKERS: 'localhost:9092',
+    KAFKA_CLIENT_ID: 'fleet-service',
+  } as NodeJS.ProcessEnv;
+  const load = (extra: Record<string, string> = {}) =>
+    loadEnv(kafkaService, { ...source, ...extra } as NodeJS.ProcessEnv);
+
+  it('is absent by default: PLAINTEXT, and no TLS', () => {
+    const env = load();
+    expect(env.KAFKA_SASL_USERNAME).toBeUndefined();
+    expect(env.KAFKA_SASL_PASSWORD).toBeUndefined();
+    expect(env.KAFKA_SASL_MECHANISM).toBe('scram-sha-512');
+    expect(env.KAFKA_SSL).toBe(false);
+    expect(kafkaSaslConfigured(env)).toBe(false);
+  });
+
+  it("reads the service's own password from the repository .env, as the service's principal", () => {
+    const env = load({
+      KAFKA_SASL_PASSWORD_FLEET: 'fleet-secret',
+      KAFKA_SASL_PASSWORD_ASSET: 'asset-secret',
+    });
+    expect(env.KAFKA_SASL_USERNAME).toBe('fleet-service');
+    expect(env.KAFKA_SASL_PASSWORD).toBe('fleet-secret');
+    expect(kafkaSaslConfigured(env)).toBe(true);
+  });
+
+  it('prefers an explicit KAFKA_SASL_PASSWORD and username, as a container sets them', () => {
+    const env = load({
+      KAFKA_SASL_PASSWORD: 'own',
+      KAFKA_SASL_USERNAME: 'fleet-service',
+      KAFKA_SASL_PASSWORD_FLEET: 'shared',
+    });
+    expect(env.KAFKA_SASL_PASSWORD).toBe('own');
+  });
+
+  it('treats an empty placeholder as unset', () => {
+    const env = load({
+      KAFKA_SASL_PASSWORD: '',
+      KAFKA_SASL_PASSWORD_FLEET: '',
+      KAFKA_SASL_USERNAME: '',
+    });
+    expect(kafkaSaslConfigured(env)).toBe(false);
+    expect(env.KAFKA_SASL_USERNAME).toBeUndefined();
+  });
+
+  it('never invents a username for a password nobody gave', () => {
+    expect(load({ KAFKA_SASL_USERNAME: 'fleet-service' }).KAFKA_SASL_PASSWORD).toBeUndefined();
+    expect(kafkaSaslConfigured(load({ KAFKA_SASL_USERNAME: 'fleet-service' }))).toBe(false);
+  });
+
+  it.each(['plain', 'scram-sha-256', 'oauthbearer'])('refuses the %s mechanism', (mechanism) => {
+    expect(() => load({ KAFKA_SASL_MECHANISM: mechanism })).toThrow(EnvValidationError);
+  });
+
+  it('reads TLS and its CA file', () => {
+    const env = load({ KAFKA_SSL: 'true', KAFKA_SSL_CA_FILE: '/run/kafka/ca.pem' });
+    expect(env.KAFKA_SSL).toBe(true);
+    expect(env.KAFKA_SSL_CA_FILE).toBe('/run/kafka/ca.pem');
+  });
+
+  it.each([
+    ['fleet-service', 'KAFKA_SASL_PASSWORD_FLEET'],
+    ['audit-service', 'KAFKA_SASL_PASSWORD_AUDIT'],
+    ['api-gateway', 'KAFKA_SASL_PASSWORD_API_GATEWAY'],
+  ])('names %s’s shared variable %s', (service, variable) => {
+    expect(kafkaPasswordVariable(service)).toBe(variable);
   });
 });
