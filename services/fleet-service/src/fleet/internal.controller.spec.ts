@@ -27,11 +27,18 @@ describe('FleetInternalController', () => {
  */
 describe('FleetTransferClearanceController', () => {
   it('lives under /internal and admits only asset-service, on both routes', () => {
-    expect(Reflect.getMetadata(PATH_METADATA, FleetTransferClearanceController)).toBe('internal/assets');
-    for (const handler of [FleetTransferClearanceController.prototype.clear, FleetTransferClearanceController.prototype.release]) {
+    expect(Reflect.getMetadata(PATH_METADATA, FleetTransferClearanceController)).toBe(
+      'internal/assets',
+    );
+    for (const handler of [
+      FleetTransferClearanceController.prototype.clear,
+      FleetTransferClearanceController.prototype.release,
+    ]) {
       expect(Reflect.getMetadata(ALLOW_SERVICE_KEY, handler)).toEqual(['asset-service']);
       expect(Reflect.getMetadata(REQUIRED_ROLES_KEY, handler)).toBeUndefined();
     }
-    expect(Reflect.getMetadata(REQUIRED_ROLES_KEY, FleetTransferClearanceController)).toBeUndefined();
+    expect(
+      Reflect.getMetadata(REQUIRED_ROLES_KEY, FleetTransferClearanceController),
+    ).toBeUndefined();
   });
 });

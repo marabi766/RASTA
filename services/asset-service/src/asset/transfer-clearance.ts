@@ -62,7 +62,12 @@ export interface TransferClearance {
     fenceId: string,
   ): Promise<ClearanceAnswer>;
   /** Best effort: never throws. The fence's expiry is the backstop. */
-  release(owner: WorkOwner, organizationId: string, assetId: string, fenceId: string): Promise<void>;
+  release(
+    owner: WorkOwner,
+    organizationId: string,
+    assetId: string,
+    fenceId: string,
+  ): Promise<void>;
 }
 
 export const TRANSFER_CLEARANCE = Symbol('ASSET_TRANSFER_CLEARANCE');

@@ -132,7 +132,8 @@ describe('TransferClearanceClient', () => {
 
   it('fails closed on a timeout', async () => {
     const { instance } = client(
-      () => new Promise<Response>((resolve) => setTimeout(() => resolve(json(200, fleetClear)), 400)),
+      () =>
+        new Promise<Response>((resolve) => setTimeout(() => resolve(json(200, fleetClear)), 400)),
     );
 
     await expect(instance.ask(FLEET_SERVICE, ORG, ASSET, FENCE)).rejects.toMatchObject({

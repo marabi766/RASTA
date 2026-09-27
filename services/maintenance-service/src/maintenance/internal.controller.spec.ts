@@ -1,6 +1,9 @@
 import { PATH_METADATA } from '@nestjs/common/constants';
 import { ALLOW_SERVICE_KEY, REQUIRED_ROLES_KEY } from '@rasta/nest-common';
-import { MaintenanceInternalController, MaintenanceTransferClearanceController } from './internal.controller';
+import {
+  MaintenanceInternalController,
+  MaintenanceTransferClearanceController,
+} from './internal.controller';
 
 /**
  * The lock on the fact economic-service settles behind (ADR-061 § 4). The
@@ -27,11 +30,18 @@ describe('MaintenanceInternalController', () => {
  */
 describe('MaintenanceTransferClearanceController', () => {
   it('lives under /internal and admits only asset-service, on both routes', () => {
-    expect(Reflect.getMetadata(PATH_METADATA, MaintenanceTransferClearanceController)).toBe('internal/assets');
-    for (const handler of [MaintenanceTransferClearanceController.prototype.clear, MaintenanceTransferClearanceController.prototype.release]) {
+    expect(Reflect.getMetadata(PATH_METADATA, MaintenanceTransferClearanceController)).toBe(
+      'internal/assets',
+    );
+    for (const handler of [
+      MaintenanceTransferClearanceController.prototype.clear,
+      MaintenanceTransferClearanceController.prototype.release,
+    ]) {
       expect(Reflect.getMetadata(ALLOW_SERVICE_KEY, handler)).toEqual(['asset-service']);
       expect(Reflect.getMetadata(REQUIRED_ROLES_KEY, handler)).toBeUndefined();
     }
-    expect(Reflect.getMetadata(REQUIRED_ROLES_KEY, MaintenanceTransferClearanceController)).toBeUndefined();
+    expect(
+      Reflect.getMetadata(REQUIRED_ROLES_KEY, MaintenanceTransferClearanceController),
+    ).toBeUndefined();
   });
 });

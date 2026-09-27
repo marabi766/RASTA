@@ -61,7 +61,8 @@ export class MaintenanceTransferClearanceController {
   @AllowService(CLEARANCE_CALLER)
   @ApiParam({ name: 'assetId', schema: { type: 'string', maxLength: 64 } })
   @ApiOperation({
-    summary: 'Count open maintenance work on a machine and, if none, fence it for a transfer (internal)',
+    summary:
+      'Count open maintenance work on a machine and, if none, fence it for a transfer (internal)',
     description:
       'Reserved for `asset-service`’s service token; every other service and every user token ' +
       'is refused. The organization is the one signed into the token. Answers `clear` and a ' +

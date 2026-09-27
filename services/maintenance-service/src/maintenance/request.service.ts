@@ -458,10 +458,7 @@ export class RequestService {
    * a breakdown fail whenever asset-service is down, which is the wrong
    * failure mode for a safety report (docs/03 § 3.6).
    */
-  private async assertAssetMaintainable(
-    assetId: string,
-    tx?: ExtendedPrismaClient,
-  ): Promise<void> {
+  private async assertAssetMaintainable(assetId: string, tx?: ExtendedPrismaClient): Promise<void> {
     const asset = await this.repository.findAssetRef(assetId, tx);
 
     // Reported as absent, not as forbidden: confirming the machine exists
