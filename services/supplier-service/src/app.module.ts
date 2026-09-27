@@ -45,6 +45,7 @@ import {
   PERFORMANCE_CONSUMED_TOPICS,
   PERFORMANCE_CONSUMER,
   PerformanceConsumer,
+  performanceConsumerFactory,
   SUPPLIER_DEAD_LETTER_TOPIC,
 } from './performance/performance.consumer';
 import { ENV, LOGGER } from './tokens';
@@ -139,26 +140,31 @@ import { brokersOf, loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './co
         outcomes: ConcludedOutcomeRepository,
       ) =>
         new PerformanceConsumer(
-          (handler) =>
-            new EventConsumer(
-              {
-                brokers: brokersOf(env),
-                clientId: `${env.KAFKA_CLIENT_ID}-performance`,
-                groupId: PERFORMANCE_CONSUMER,
-                topics: [...PERFORMANCE_CONSUMED_TOPICS],
-                deadLetterTopic: SUPPLIER_DEAD_LETTER_TOPIC,
-                // A performance history is rebuilt from whatever the topic still
-                // retains (ADR-052 § 12); starting at deploy time would begin it
-                // empty. Rows are idempotent on the source event id.
-                fromBeginning: true,
-              },
-              handler,
-              {
-                log: (m) => logger.info(m),
-                warn: (m) => logger.warn(m),
-                error: (m, trace) => logger.error({ err: trace }, m),
-              },
-            ),
+          // Disabled by default, and refused at startup without an
+          // authenticated broker (Codex review of #126, finding 1).
+          performanceConsumerFactory(
+            env,
+            (handler) =>
+              new EventConsumer(
+                {
+                  brokers: brokersOf(env),
+                  clientId: `${env.KAFKA_CLIENT_ID}-performance`,
+                  groupId: PERFORMANCE_CONSUMER,
+                  topics: [...PERFORMANCE_CONSUMED_TOPICS],
+                  deadLetterTopic: SUPPLIER_DEAD_LETTER_TOPIC,
+                  // A performance history is rebuilt from whatever the topic still
+                  // retains (ADR-052 § 12); starting at deploy time would begin it
+                  // empty. Rows are idempotent on the source event id.
+                  fromBeginning: true,
+                },
+                handler,
+                {
+                  log: (m) => logger.info(m),
+                  warn: (m) => logger.warn(m),
+                  error: (m, trace) => logger.error({ err: trace }, m),
+                },
+              ),
+          ),
           prisma,
           events,
           outcomes,

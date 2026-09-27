@@ -18,9 +18,10 @@
 // claims nothing about validity.
 //
 // `performance_score` and `performance_event` were absent while Q-12 was open.
-// ADR-052 closed it, and the storage for Phase B steps 2–4 is at the end of
-// this file. No consumer, calculation engine, API or event reads or writes it
-// yet (steps 5–8).
+// ADR-052 closed it, and the storage for Phase B steps 2–5 is at the end of
+// this file. The step-5 consumer writes facts into it — and is disabled by
+// default until the broker authenticates producers (ADR-061 § 3, RUN-006;
+// docs/23 D-036). No calculation engine, API or event reads it yet (steps 6–8).
 
 generator client {
   provider      = "prisma-client-js"

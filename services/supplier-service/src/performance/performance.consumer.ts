@@ -2,6 +2,7 @@ import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   createSystemContext,
   RastaError,
+  runUnscoped,
   runWithContext,
   UnprocessableEventError,
   type EventConsumer,
@@ -9,7 +10,7 @@ import {
   type HandlerOutcome,
 } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
-import { SERVICE_NAME } from '../config/env';
+import { SERVICE_NAME, type SupplierEnv } from '../config/env';
 import { performanceFactsTotal } from '../observability/metrics';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { ConcludedOutcomeRepository } from './concluded-outcome.repository';
@@ -25,8 +26,26 @@ export const PERFORMANCE_CONSUMED_TOPICS = ['rasta.marketplace.v1'] as const;
 /** Where a refused event goes: this service's own dead-letter topic. */
 export const SUPPLIER_DEAD_LETTER_TOPIC = 'rasta.supplier.v1.dlq';
 
-/** Built by the module; `null` in a run without a broker. Same shape as asset-service's. */
+/** Built by the module; `null` while the consumer is disabled. Same shape as asset-service's. */
 export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
+
+/** Logged at startup while the consumer is off — which is the default. */
+export const PERFORMANCE_CONSUMER_DISABLED =
+  'Performance consumer not started: SUPPLIER_PERFORMANCE_CONSUMER_ENABLED is false (the default). ' +
+  'It records append-only facts in the tenant a marketplace event names, and stays off until the ' +
+  'broker authenticates producers (ADR-061 § 3, RUN-006; docs/23 D-036).';
+
+/**
+ * The broker-facing half, or `null` — no subscription at all — unless the flag
+ * is on. `loadSupplierEnv` has already refused the flag without an
+ * authenticated broker, so reaching `build` means both held.
+ */
+export function performanceConsumerFactory(
+  env: Pick<SupplierEnv, 'SUPPLIER_PERFORMANCE_CONSUMER_ENABLED'>,
+  build: EventConsumerFactory,
+): EventConsumerFactory | null {
+  return env.SUPPLIER_PERFORMANCE_CONSUMER_ENABLED ? build : null;
+}
 
 /**
  * Records what marketplace events say about a supplier's performance
@@ -65,7 +84,10 @@ export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
  * The `processed_event` marker and the row commit in one transaction. A
  * refusal throws before the commit, so a refused event is never marked. An
  * event that contributes nothing — another name, or a consumed one with no
- * measurement — is not marked either: there is no effect to record.
+ * measurement — is not marked either: there is no effect to record. A marker
+ * is not the end of the check: a redelivery is a duplicate only if it states
+ * the effect already recorded, in either store; one that states another is
+ * dead-lettered `BUSINESS_RULE_VIOLATION`.
  */
 export class PerformanceConsumer {
   private consumer?: EventConsumer;
@@ -80,7 +102,7 @@ export class PerformanceConsumer {
 
   async start(): Promise<void> {
     if (!this.consumerFactory) {
-      this.logger.warn('Performance consumer disabled — no Kafka broker configured');
+      this.logger.warn(PERFORMANCE_CONSUMER_DISABLED);
       return;
     }
     this.consumer = this.consumerFactory((envelope) => this.handle(envelope));
@@ -123,18 +145,67 @@ export class PerformanceConsumer {
     envelope: EventEnvelope,
     contribution: Exclude<MarketplaceContribution, { kind: 'NOT_A_FACT' }>,
   ): Promise<RecordOutcome> {
+    // The marker goes first, and it is what serialises two deliveries of one
+    // event id: the second waits on the first's commit, and every read after
+    // that sees what the first recorded.
     const { count } = await tx.processedEvent.createMany({
       data: [{ eventId: envelope.eventId, consumerName: PERFORMANCE_CONSUMER }],
       skipDuplicates: true,
     });
-    if (count === 0) return 'DUPLICATE';
+    const alreadyMarked = count === 0;
 
+    // A marker is not a verdict on *this* delivery (Codex review of #126,
+    // finding 2). A redelivery is a duplicate only if it states the same
+    // effect: the same kind of row, in the same table, with the same fact. So
+    // the incoming effect is always offered to its store — which records it,
+    // reports it as the same, or refuses it as different — and first checked
+    // against the other store, which it must not also be in.
+    await this.refuseOtherKind(tx, envelope, contribution.kind);
+    let outcome: RecordOutcome;
     try {
-      return contribution.kind === 'FACT'
-        ? await this.events.record(tx, contribution.fact)
-        : await this.outcomes.record(tx, contribution.outcome);
+      outcome =
+        contribution.kind === 'FACT'
+          ? await this.events.record(tx, contribution.fact)
+          : await this.outcomes.record(tx, contribution.outcome);
     } catch (error) {
       throw asVerdict(envelope, error);
+    }
+
+    // Marked, yet nothing was recorded under this id: the marker claims an
+    // effect that does not exist. Refused, and rolled back with the row this
+    // delivery just wrote, rather than silently "repaired".
+    if (alreadyMarked && outcome === 'RECORDED') {
+      throw new UnprocessableEventError(
+        DLQ_REASONS.BUSINESS_RULE_VIOLATION,
+        `${envelope.eventName} ${envelope.eventId} is marked processed but no effect was recorded for it`,
+      );
+    }
+    return outcome;
+  }
+
+  /**
+   * Refuses an event id already recorded in the *other* store — a fact
+   * redelivered as a concluded outcome, or the reverse. Unscoped because that
+   * row may be another tenant's; it returns nothing but the refusal.
+   */
+  private async refuseOtherKind(
+    tx: ExtendedPrismaClient,
+    envelope: EventEnvelope,
+    kind: 'FACT' | 'CONCLUDED_OUTCOME',
+  ): Promise<void> {
+    const where = { sourceEventId: envelope.eventId };
+    const elsewhere = await runUnscoped(
+      'a redelivery is checked against the other performance store',
+      () =>
+        kind === 'FACT'
+          ? tx.performanceConcludedOutcome.findUnique({ where, select: { id: true } })
+          : tx.performanceEvent.findUnique({ where, select: { id: true } }),
+    );
+    if (elsewhere) {
+      throw new UnprocessableEventError(
+        DLQ_REASONS.BUSINESS_RULE_VIOLATION,
+        `${envelope.eventName} ${envelope.eventId} was already recorded as a different kind of effect`,
+      );
     }
   }
 }

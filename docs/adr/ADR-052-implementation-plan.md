@@ -106,7 +106,8 @@
 ### وضعیت گام ۵ (2026-09-26)
 
 **فقط ثبت واقعیت** — یک Consumer (`supplier-service.performance`) روی `rasta.marketplace.v1`، در شاخهٔ
-`feat/supplier-performance-consumer`. شش رویداد: `ORDER_CREATED`، `ORDER_FULFILLED`، `REVIEW_SUBMITTED`،
+`feat/supplier-performance-consumer`. **به‌طور پیش‌فرض خاموش** (`SUPPLIER_PERFORMANCE_CONSUMER_ENABLED=false`) و روشن‌کردنش
+تا احراز Broker (RUN-006) در راه‌اندازی رد می‌شود — `docs/23` D-036. شش رویداد: `ORDER_CREATED`، `ORDER_FULFILLED`، `REVIEW_SUBMITTED`،
 `ORDER_DISPUTE_RESOLVED`، `ORDER_CANCELLED` و `ORDER_COMPLETED` (نتیجهٔ پایان‌یافته، بی مؤلفه). منشأ با ADR-061 § ۲ و § ۵؛
 تنها جابه‌جایی مستأجر به تأمین‌کننده؛ تأمین‌کنندهٔ ثبت‌نشده ثبت می‌شود؛ حل دوبارهٔ اختلاف جانشین می‌شود و هر دو ردیف
 می‌مانند. Migration `20260926140000_performance_consumer_facts` برگشت‌پذیر است. جزئیات و دلیل‌ها: ADR-052 § ۲۵.

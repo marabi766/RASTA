@@ -10,7 +10,6 @@ import {
 import { randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
-import { PerformanceConsumer } from '../src/performance/performance.consumer';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { databaseUrl } from './helpers';
@@ -209,9 +208,6 @@ function applyEnvironment(): void {
 
 const inertRelay = { start: () => undefined, stop: async () => undefined };
 
-/** The HTTP suites need no broker; the consumer has its own suites. */
-const inertConsumer = { start: async () => undefined, stop: async () => undefined };
-
 export async function startApi(): Promise<ApiHarness> {
   applyEnvironment();
 
@@ -222,8 +218,6 @@ export async function startApi(): Promise<ApiHarness> {
     .useValue(publisher)
     .overrideProvider(OutboxRelay)
     .useValue(inertRelay)
-    .overrideProvider(PerformanceConsumer)
-    .useValue(inertConsumer)
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
       factory: (): AuthGuardOptions => ({

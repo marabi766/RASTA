@@ -249,11 +249,141 @@ describe('performance consumer (ADR-052 step 5)', () => {
 
       await consumer.handle(source);
       await consumer.handle(source);
-      await consumer.handle(envelope('ORDER_COMPLETED', order, {}, { eventId: source.eventId }));
+      // A retry or a replay carries a new trace id; that is the same event.
+      await consumer.handle({ ...source, correlationId: `COR_${ulid()}` });
 
       expect(await factsOf(order.supplier)).toHaveLength(1);
-      expect(await outcomesOf(order.supplier)).toEqual([]);
       expect(await marked(source.eventId)).toBe(1);
+    });
+
+    describe('a redelivery that states a different effect is refused, not dropped (Codex review of #126)', () => {
+      async function refusedAfter(first: EventEnvelope, second: EventEnvelope): Promise<void> {
+        await consumer.handle(first);
+        const refusal = await consumer.handle(second).catch((error: unknown) => error);
+        expect(refusal).toBeInstanceOf(UnprocessableEventError);
+        expect((refusal as UnprocessableEventError).reason).toBe(
+          DLQ_REASONS.BUSINESS_RULE_VIOLATION,
+        );
+      }
+
+      it('a changed rating', async () => {
+        const order = newOrder();
+        const first = envelope('REVIEW_SUBMITTED', order, { rating: 2 });
+        await refusedAfter(first, {
+          ...first,
+          payload: { ...(first.payload as object), rating: 5 },
+        });
+
+        expect((await factsOf(order.supplier)).map((row) => row.rating)).toEqual([2]);
+        expect(await marked(first.eventId)).toBe(1);
+      });
+
+      it('a changed supplier — nothing lands in the other tenant', async () => {
+        const order = newOrder();
+        const other = newOrganizationId();
+        const first = envelope('REVIEW_SUBMITTED', order);
+        await refusedAfter(first, {
+          ...first,
+          payload: { ...(first.payload as object), supplierOrganizationId: other },
+        });
+
+        expect(await factsOf(order.supplier)).toHaveLength(1);
+        expect(await factsOf(other)).toEqual([]);
+      });
+
+      it('a changed order', async () => {
+        const order = newOrder();
+        const first = envelope('ORDER_CANCELLED', order);
+        await refusedAfter(first, {
+          ...first,
+          payload: { ...(first.payload as object), orderId: `ORD_${ulid()}` },
+        });
+
+        expect((await factsOf(order.supplier)).map((row) => row.outcomeKey)).toEqual([
+          order.orderId,
+        ]);
+      });
+
+      it('a fact redelivered as a concluded outcome', async () => {
+        const order = newOrder();
+        const first = envelope('ORDER_DISPUTE_RESOLVED', order);
+        await refusedAfter(
+          first,
+          envelope('ORDER_COMPLETED', order, {}, { eventId: first.eventId }),
+        );
+
+        expect(await factsOf(order.supplier)).toHaveLength(1);
+        expect(await outcomesOf(order.supplier)).toEqual([]);
+      });
+
+      it('a concluded outcome redelivered as a fact', async () => {
+        const order = newOrder();
+        const first = envelope('ORDER_COMPLETED', order);
+        await refusedAfter(
+          first,
+          envelope('REVIEW_SUBMITTED', order, {}, { eventId: first.eventId }),
+        );
+
+        expect(await outcomesOf(order.supplier)).toHaveLength(1);
+        expect(await factsOf(order.supplier)).toEqual([]);
+      });
+
+      it('a marker with no recorded effect behind it', async () => {
+        const order = newOrder();
+        const source = envelope('REVIEW_SUBMITTED', order);
+        await raw(() =>
+          prisma.client.processedEvent.create({
+            data: { eventId: source.eventId, consumerName: PERFORMANCE_CONSUMER },
+          }),
+        );
+
+        await expect(consumer.handle(source)).rejects.toMatchObject({
+          reason: DLQ_REASONS.BUSINESS_RULE_VIOLATION,
+        });
+        expect(await factsOf(order.supplier)).toEqual([]);
+      });
+
+      it('two conflicting deliveries at once: one is recorded, the other refused', async () => {
+        const order = newOrder();
+        const first = envelope('REVIEW_SUBMITTED', order, { rating: 1 });
+        const second = { ...first, payload: { ...(first.payload as object), rating: 5 } };
+
+        const results = await Promise.allSettled([consumer.handle(first), consumer.handle(second)]);
+
+        expect(results.map((result) => result.status).sort()).toEqual(['fulfilled', 'rejected']);
+        const rejected = results.find((result) => result.status === 'rejected');
+        expect((rejected as PromiseRejectedResult).reason).toMatchObject({
+          reason: DLQ_REASONS.BUSINESS_RULE_VIOLATION,
+        });
+        expect(await factsOf(order.supplier)).toHaveLength(1);
+        expect(await marked(first.eventId)).toBe(1);
+      });
+
+      it('a fact and an outcome under one id at once: one is recorded, the other refused', async () => {
+        const order = newOrder();
+        const fact = envelope('ORDER_DISPUTE_RESOLVED', order);
+        const outcome = envelope('ORDER_COMPLETED', order, {}, { eventId: fact.eventId });
+
+        const results = await Promise.allSettled([consumer.handle(fact), consumer.handle(outcome)]);
+
+        expect(results.map((result) => result.status).sort()).toEqual(['fulfilled', 'rejected']);
+        const rows =
+          (await factsOf(order.supplier)).length + (await outcomesOf(order.supplier)).length;
+        expect(rows).toBe(1);
+      });
+
+      it('two identical deliveries at once: both succeed, one row', async () => {
+        const order = newOrder();
+        const source = envelope('ORDER_FULFILLED', order);
+
+        const results = await Promise.allSettled([
+          consumer.handle(source),
+          consumer.handle(source),
+        ]);
+
+        expect(results.map((result) => result.status)).toEqual(['fulfilled', 'fulfilled']);
+        expect(await factsOf(order.supplier)).toHaveLength(1);
+      });
     });
 
     it('refuses an event id already counted as a different fact, and leaves no marker', async () => {
