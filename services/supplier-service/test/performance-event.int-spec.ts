@@ -32,6 +32,7 @@ function rating(
     rating: 4,
     promisedAt: null,
     deliveredAt: null,
+    disputeId: null,
     compensatesSourceEventId: null,
     occurredAt: new Date('2026-09-20T10:00:00.000Z'),
     correlationId: ulid(),
@@ -43,13 +44,22 @@ function dispute(
   organizationId: string,
   overrides: Partial<PerformanceEventInput> = {},
 ): PerformanceEventInput {
-  return rating(organizationId, {
+  const fact = rating(organizationId, {
     sourceEventName: 'ORDER_DISPUTE_RESOLVED',
     component: 'DISPUTE_ABSENCE',
     rating: null,
     responsibility: 'SUPPLIER',
     ...overrides,
   });
+  // A dispute id belongs on DISPUTE_ABSENCE and nowhere else, so the default
+  // follows the component a caller ends up with.
+  const disputeId =
+    'disputeId' in overrides
+      ? (overrides.disputeId ?? null)
+      : fact.component === 'DISPUTE_ABSENCE'
+        ? `DSP_${ulid()}`
+        : null;
+  return { ...fact, disputeId };
 }
 
 /** A raw INSERT with every column spelled out — bypassing every TypeScript check. */
@@ -212,11 +222,18 @@ describe('performance-event store (ADR-052 step 3)', () => {
       it.each([
         ['organizationId', 'dispute', () => ({ organizationId: newOrganizationId() })],
         ['sourceEventName', 'dispute', () => ({ sourceEventName: 'ORDER_CANCELLED' })],
-        ['component', 'dispute', () => ({ component: 'CANCELLATION_ABSENCE' as const })],
+        // Moving off DISPUTE_ABSENCE drops the dispute id with it, so this one
+        // redelivery differs in two fields; the rule is the same.
+        [
+          'component',
+          'dispute',
+          () => ({ component: 'CANCELLATION_ABSENCE' as const, disputeId: null }),
+        ],
         ['outcomeKind', 'dispute', () => ({ outcomeKind: 'REPAIR_ORDER' as const })],
         ['outcomeKey', 'dispute', () => ({ outcomeKey: `ORD_${ulid()}` })],
         ['responsibility', 'dispute', () => ({ responsibility: 'UNDETERMINED' as const })],
         ['occurredAt', 'dispute', () => ({ occurredAt: at('2026-09-20T10:00:00.001Z') })],
+        ['disputeId', 'dispute', () => ({ disputeId: `DSP_${ulid()}` })],
         ['rating', 'rating', () => ({ rating: 1 })],
         ['promisedAt', 'promise', () => ({ promisedAt: at('2026-10-05T00:00:00Z') })],
         ['deliveredAt', 'delivery', () => ({ deliveredAt: at('2026-10-06T00:00:00Z') })],
@@ -230,7 +247,9 @@ describe('performance-event store (ADR-052 step 3)', () => {
 
         await expect(attempt).rejects.toMatchObject({
           code: 'BUSINESS_RULE_VIOLATION',
-          internalContext: { differingFields: [field] },
+          internalContext: {
+            differingFields: field === 'component' ? ['component', 'disputeId'] : [field],
+          },
         });
         expect(
           await asSupplier(original.organizationId, () =>
@@ -350,6 +369,59 @@ describe('performance-event store (ADR-052 step 3)', () => {
       await expect(exec(insertSql({ outcome_kind: `'PROJECT'` }))).rejects.toThrow(
         /invalid input value for enum/,
       );
+    });
+  });
+
+  describe('the dispute a DISPUTE_ABSENCE fact resolves (step 5)', () => {
+    const disputeRow = {
+      component: `'DISPUTE_ABSENCE'`,
+      rating: 'NULL',
+      responsibility: `'SUPPLIER'`,
+    };
+
+    it('refuses a DISPUTE_ABSENCE row without a dispute id', async () => {
+      await expect(exec(insertSql(disputeRow))).rejects.toThrow(/ck_performance_event_dispute/);
+    });
+
+    it('refuses a blank dispute id', async () => {
+      await expect(exec(insertSql({ ...disputeRow, dispute_id: `E'\t'` }))).rejects.toThrow(
+        /ck_performance_event_dispute/,
+      );
+    });
+
+    it('refuses a dispute id on any other component', async () => {
+      await expect(exec(insertSql({ dispute_id: `'DSP_${ulid()}'` }))).rejects.toThrow(
+        /ck_performance_event_dispute/,
+      );
+    });
+
+    it('keeps every resolution of one dispute, for the later one to supersede at read time', async () => {
+      // Project manager, 2026-09-26: the later resolution wins — latest by
+      // (occurredAt, sourceEventId) — and both rows stay.
+      const organizationId = newOrganizationId();
+      const disputeId = `DSP_${ulid()}`;
+      const first = dispute(organizationId, {
+        disputeId,
+        responsibility: 'SUPPLIER',
+        occurredAt: new Date('2026-09-20T10:00:00.000Z'),
+      });
+      const reattributed = dispute(organizationId, {
+        disputeId,
+        outcomeKey: first.outcomeKey,
+        responsibility: 'BUYER',
+        occurredAt: new Date('2026-09-21T10:00:00.000Z'),
+      });
+
+      expect(await record(reattributed)).toBe('RECORDED');
+      expect(await record(first)).toBe('RECORDED');
+
+      const window = await asSupplier(organizationId, () =>
+        events.listInWindow(new Date('2026-09-01'), new Date('2026-10-01')),
+      );
+      expect(window.map((row) => [row.disputeId, row.responsibility])).toEqual([
+        [disputeId, 'SUPPLIER'],
+        [disputeId, 'BUYER'],
+      ]);
     });
   });
 

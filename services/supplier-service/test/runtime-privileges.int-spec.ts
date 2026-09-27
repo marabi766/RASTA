@@ -36,6 +36,7 @@ const EXPECTED_GRANTS: Record<string, readonly string[]> = {
   performance_score_snapshot: ['INSERT', 'SELECT'],
   performance_score_component: ['INSERT', 'SELECT'],
   performance_score_source_event: ['INSERT', 'SELECT'],
+  performance_concluded_outcome: ['INSERT', 'SELECT'],
   // Prisma's ledger: migration tooling only.
   _prisma_migrations: [],
 };
@@ -63,6 +64,7 @@ const PROTECTED_TABLES = [
   'performance_score_snapshot',
   'performance_score_component',
   'performance_score_source_event',
+  'performance_concluded_outcome',
 ] as const;
 
 /** One trigger per protected table, by name, for the DROP TRIGGER attempt. */
@@ -73,6 +75,7 @@ const A_TRIGGER: Record<(typeof PROTECTED_TABLES)[number], string> = {
   performance_score_snapshot: 'trg_performance_score_snapshot_consistent',
   performance_score_component: 'trg_performance_score_component_sealed',
   performance_score_source_event: 'trg_performance_score_source_event_sealed',
+  performance_concluded_outcome: 'trg_performance_concluded_outcome_append_only',
 };
 
 describe('the runtime role cannot lift the performance tables’ guarantees', () => {
@@ -126,6 +129,11 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
   it.each([
     ['UPDATE a performance event', `UPDATE "performance_event" SET "correlation_id" = 'X'`],
     ['DELETE a performance event', 'DELETE FROM "performance_event"'],
+    [
+      'UPDATE a concluded outcome',
+      `UPDATE "performance_concluded_outcome" SET "correlation_id" = 'X'`,
+    ],
+    ['DELETE a concluded outcome', 'DELETE FROM "performance_concluded_outcome"'],
     ['UPDATE a snapshot', `UPDATE "performance_score_snapshot" SET "score_centis" = 0`],
     ['DELETE a snapshot', 'DELETE FROM "performance_score_snapshot"'],
     ['UPDATE a snapshot component', 'UPDATE "performance_score_component" SET "sample_count" = 0'],
@@ -278,8 +286,8 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
         ),
       );
 
-      // Not vacuous: the three performance migrations create eight functions.
-      expect(rows.length).toBeGreaterThanOrEqual(8);
+      // Not vacuous: the performance migrations create nine functions.
+      expect(rows.length).toBeGreaterThanOrEqual(9);
       expect(rows.filter((row) => row.can)).toEqual([]);
     });
 

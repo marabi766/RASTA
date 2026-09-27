@@ -25,6 +25,8 @@ export const TENANT_SCOPED_MODELS = [
   'Suspension',
   // ADR-052 step 3 — scoped by the supplier organization the fact is about.
   'PerformanceEvent',
+  // ADR-052 step 5 — a concluded order, scoped by its supplier like the facts.
+  'PerformanceConcludedOutcome',
   // ADR-052 step 4 — a snapshot and its provenance, scoped the same way.
   'PerformanceScoreSnapshot',
   'PerformanceScoreComponent',

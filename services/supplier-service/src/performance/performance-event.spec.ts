@@ -25,6 +25,7 @@ const RATING: PerformanceEventInput = {
   rating: 4,
   promisedAt: null,
   deliveredAt: null,
+  disputeId: null,
   compensatesSourceEventId: null,
   occurredAt: new Date('2026-09-26T10:00:00.000Z'),
   correlationId: 'COR_1',
@@ -36,6 +37,7 @@ const DISPUTE: PerformanceEventInput = {
   component: 'DISPUTE_ABSENCE',
   rating: null,
   responsibility: 'SUPPLIER',
+  disputeId: 'DSP_1',
 };
 
 const PROMISE: PerformanceEventInput = {
@@ -58,7 +60,12 @@ describe('a valid fact', () => {
     ['a delivery', { ...PROMISE, promisedAt: null, deliveredAt: new Date() }],
     [
       'an undetermined cancellation',
-      { ...DISPUTE, component: 'CANCELLATION_ABSENCE', responsibility: 'UNDETERMINED' },
+      {
+        ...DISPUTE,
+        component: 'CANCELLATION_ABSENCE',
+        responsibility: 'UNDETERMINED',
+        disputeId: null,
+      },
     ],
     [
       'a correction naming the fact it corrects',
@@ -89,6 +96,21 @@ describe('responsibility (rule 13)', () => {
       'PLATFORM',
       'UNDETERMINED',
     ]);
+  });
+});
+
+describe('the dispute a DISPUTE_ABSENCE fact resolves (step 5)', () => {
+  it('is required on DISPUTE_ABSENCE, where a later resolution supersedes an earlier one', () => {
+    expect(paths({ ...DISPUTE, disputeId: null })).toEqual(['disputeId']);
+    expect(paths({ ...DISPUTE, disputeId: ' \t' })).toEqual(['disputeId']);
+  });
+
+  it.each([
+    ['a rating', RATING],
+    ['a promise', PROMISE],
+    ['a cancellation', { ...DISPUTE, component: 'CANCELLATION_ABSENCE' as const }],
+  ])('is refused on %s', (_label, input) => {
+    expect(paths({ ...input, disputeId: 'DSP_1' })).toEqual(['disputeId']);
   });
 });
 

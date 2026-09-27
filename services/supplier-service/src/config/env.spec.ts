@@ -1,4 +1,11 @@
-import { brokersOf, corsOrigins, DEFAULT_PORT, loadSupplierEnv, SERVICE_NAME } from './env';
+import {
+  brokerConnectionIsAuthenticated,
+  brokersOf,
+  corsOrigins,
+  DEFAULT_PORT,
+  loadSupplierEnv,
+  SERVICE_NAME,
+} from './env';
 
 /**
  * Configuration parsing, and the fallbacks a deployment actually relies on.
@@ -91,8 +98,9 @@ describe('kafka identity', () => {
   });
 
   it('defaults the consumer group to the platform naming convention', () => {
-    // No consumer is registered in this phase. The name is defined anyway so
-    // the first real one inherits the convention instead of inventing a name.
+    // The platform convention. The performance consumer names its own group
+    // (`supplier-service.performance`), because its processed_event key is the
+    // same name and must not move with an environment variable.
     expect(load().KAFKA_CONSUMER_GROUP).toBe('supplier-service.main');
   });
 
@@ -137,7 +145,12 @@ describe('what is deliberately not configurable', () => {
     // Q-12 is open. A key with a default is a decision: whatever ships becomes
     // the policy every deployment runs, and "equal weights" is a placeholder in
     // an open question rather than an approved policy (AGENTS.md § 9).
-    const keys = Object.keys(load());
+    // The weights are platform data (ADR-052 § 3, Q-75), never configuration.
+    // The one PERFORMANCE key is an operational on/off switch for the step-5
+    // consumer — it decides no weight, rating or score.
+    const keys = Object.keys(load()).filter(
+      (key) => key !== 'SUPPLIER_PERFORMANCE_CONSUMER_ENABLED',
+    );
 
     expect(keys.filter((key) => /SCORE|WEIGHT|RATING|PERFORMANCE/i.test(key))).toEqual([]);
   });
@@ -148,5 +161,28 @@ describe('what is deliberately not configurable', () => {
     const keys = Object.keys(load());
 
     expect(keys.filter((key) => /EXPIR|VALIDITY|RENEW/i.test(key))).toEqual([]);
+  });
+});
+
+describe('the performance consumer is off by default and fails closed (Codex review of #126)', () => {
+  it('is off unless asked for', () => {
+    expect(load().SUPPLIER_PERFORMANCE_CONSUMER_ENABLED).toBe(false);
+    expect(
+      load({ SUPPLIER_PERFORMANCE_CONSUMER_ENABLED: 'false' })
+        .SUPPLIER_PERFORMANCE_CONSUMER_ENABLED,
+    ).toBe(false);
+  });
+
+  it('refuses to start when asked for over a broker that does not authenticate producers', () => {
+    // RUN-006 has not landed, so no configuration authenticates the client:
+    // enabling is refused unconditionally, and the message says why and what
+    // unblocks it.
+    expect(() => load({ SUPPLIER_PERFORMANCE_CONSUMER_ENABLED: 'true' })).toThrow(
+      /SUPPLIER_PERFORMANCE_CONSUMER_ENABLED=true is refused.*RUN-006.*D-036/s,
+    );
+  });
+
+  it('knows of no broker authentication today', () => {
+    expect(brokerConnectionIsAuthenticated(load())).toBe(false);
   });
 });
