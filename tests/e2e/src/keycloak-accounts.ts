@@ -17,9 +17,12 @@ import { e2eConfig, type E2eConfig } from './env';
 /** A password for accounts these tests create. Never a real credential; never logged. */
 export const PROVISIONED_ACCOUNT_PASSWORD = 'Projection-Test-Password-2026!';
 
-interface KeycloakUser {
+export interface KeycloakUser {
   id: string;
+  enabled?: boolean;
+  emailVerified?: boolean;
   requiredActions?: string[];
+  attributes?: Record<string, string[]>;
   [field: string]: unknown;
 }
 
@@ -68,18 +71,17 @@ async function admin(config: E2eConfig, path: string, init: RequestInit = {}): P
  *
  * identity-service creates accounts with no password and `UPDATE_PASSWORD`
  * required, which is right for a person and unusable for a test. This sets a
- * throwaway password and clears the required action — writing the *whole*
- * representation back, because Keycloak 26 treats a partial `PUT` as the whole
- * user and would erase the attributes under test.
+ * throwaway password and clears the required action — sending **only**
+ * `requiredActions`. A body without `attributes` changes nothing else on
+ * Keycloak 26 (ADR-060 § 5), and a whole-representation write would race the
+ * identity projections that land just after provisioning: whichever wrote
+ * last would put back what the other had changed.
  */
 export async function enableSignIn(
   username: string,
   config: E2eConfig = e2eConfig(),
 ): Promise<void> {
-  const [user] = (await (
-    await admin(config, `/users?username=${encodeURIComponent(username)}&exact=true`)
-  ).json()) as KeycloakUser[];
-  if (!user) throw new Error(`No Keycloak account for ${username}; provisioning did not reach it`);
+  const user = await findAccount(username, config);
 
   await admin(config, `/users/${user.id}/reset-password`, {
     method: 'PUT',
@@ -90,11 +92,37 @@ export async function enableSignIn(
     }),
   });
 
-  const current = (await (await admin(config, `/users/${user.id}`)).json()) as KeycloakUser;
-  await admin(config, `/users/${user.id}`, {
-    method: 'PUT',
-    body: JSON.stringify({ ...current, requiredActions: [] }),
-  });
+  await updateAccount(username, { requiredActions: [] }, config);
+}
+
+/** What Keycloak holds for a provisioned account, read as its administrator. */
+export async function readAccount(
+  username: string,
+  config: E2eConfig = e2eConfig(),
+): Promise<KeycloakUser> {
+  const { id } = await findAccount(username, config);
+  return (await (await admin(config, `/users/${id}`)).json()) as KeycloakUser;
+}
+
+/**
+ * Changes an account the way an administrator in the console does — only the
+ * fields named, never `attributes` (which would erase what it leaves out).
+ */
+export async function updateAccount(
+  username: string,
+  fields: { requiredActions?: string[]; enabled?: boolean; emailVerified?: boolean },
+  config: E2eConfig = e2eConfig(),
+): Promise<void> {
+  const { id } = await findAccount(username, config);
+  await admin(config, `/users/${id}`, { method: 'PUT', body: JSON.stringify(fields) });
+}
+
+async function findAccount(username: string, config: E2eConfig): Promise<KeycloakUser> {
+  const [user] = (await (
+    await admin(config, `/users?username=${encodeURIComponent(username)}&exact=true`)
+  ).json()) as KeycloakUser[];
+  if (!user) throw new Error(`No Keycloak account for ${username}; provisioning did not reach it`);
+  return user;
 }
 
 /** A fresh access token for a provisioned account — never a cached one. */

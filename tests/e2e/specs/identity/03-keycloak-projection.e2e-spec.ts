@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import type { APIRequestContext } from '@playwright/test';
 import { test, expect } from '../../src/api';
 import { ORG } from '../../src/env';
 import {
   enableSignIn,
   freshToken,
   membershipClaims,
+  readAccount,
   readOwnAccount,
+  updateAccount,
   writeOwnAccount,
 } from '../../src/keycloak-accounts';
 
@@ -26,6 +29,11 @@ import {
  *   one, `org_id` moves to the organization that remains.
  * - The user can neither read nor write `organization_roles` from their own
  *   account console. Authorization will be built from it (PR B).
+ * - A projection writes **only what identity-service owns**: a completed
+ *   required action, a verified email and — security-relevant — a disabled
+ *   account all survive it (ADR-060 § 5, `docs/23` D-037). It used to write
+ *   the whole user back, which put `UPDATE_PASSWORD` back after
+ *   `enableSignIn` (the flake this file had) and re-enabled disabled accounts.
  *
  * Nothing here depends on the guard reading `org_roles` yet — that is PR B.
  * What is proven is that the token says what the database says.
@@ -145,4 +153,74 @@ test.describe.serial('Keycloak projection of memberships (ADR-060 § 5)', () => 
     // And the next token is exactly what it was.
     expect(membershipClaims(await freshToken(username)).org_roles).toEqual([`${ORG.b}:DRIVER`]);
   });
+
+  // No wait for the asynchronous projections of `USER_ACTIVATED` and
+  // `MEMBERSHIP_CREATED` anywhere above, and none is needed: they and
+  // `enableSignIn` write disjoint fields, so they commute. The role changes
+  // below are projected on the request path before their 200.
+  test('a projection keeps what it does not own: a completed required action and a verified email', async ({
+    tenantB,
+  }) => {
+    await updateAccount(username, { emailVerified: true });
+
+    const changed = await tenantB.post(`/v1/memberships/${membershipInB}/roles`, {
+      idempotencyKey: `e2e-projection-widen-${username}`,
+      body: { roles: ['DRIVER', 'OPERATOR'], reason: 'Also operates the site equipment.' },
+    });
+    expect(changed.status).toBe(200);
+
+    const account = await readAccount(username);
+    expect(account.requiredActions).toEqual([]);
+    expect(account.emailVerified).toBe(true);
+    expect(account.enabled).toBe(true);
+    expect(membershipClaims(await freshToken(username)).org_roles?.sort()).toEqual(
+      [`${ORG.b}:DRIVER`, `${ORG.b}:OPERATOR`].sort(),
+    );
+  });
+
+  // Last in this block: the account cannot sign in afterwards.
+  test('a projection never re-enables an account an administrator disabled', async ({
+    tenantB,
+    request,
+    config,
+  }) => {
+    // Security-relevant: the whole-user write used to send `enabled: true`
+    // back over an administrator's disable.
+    await updateAccount(username, { enabled: false });
+    const eventProjectionsBefore = await eventProjections(request, config.identityUrl);
+
+    const narrowed = await tenantB.post(`/v1/memberships/${membershipInB}/roles`, {
+      idempotencyKey: `e2e-projection-narrow-${username}`,
+      body: { roles: ['DRIVER'], reason: 'No longer operates the site equipment.' },
+    });
+    expect(narrowed.status).toBe(200);
+    // The request-path projection has landed; so has the attribute it wrote.
+    expect((await readAccount(username)).attributes?.organization_roles).toEqual([
+      `${ORG.b}:DRIVER`,
+    ]);
+
+    // And the event-path one, from the `ROLE_REVOKED` the change enqueued.
+    // The suite runs on one worker, so the counter moves for this change.
+    await expect
+      .poll(() => eventProjections(request, config.identityUrl), { timeout: 30_000 })
+      .toBeGreaterThan(eventProjectionsBefore);
+
+    expect((await readAccount(username)).enabled).toBe(false);
+    await expect(freshToken(username)).rejects.toThrow(/refused a token/);
+  });
 });
+
+/** Event-path projections that landed, from identity-service's own metrics. */
+async function eventProjections(request: APIRequestContext, identityUrl: string): Promise<number> {
+  const response = await request.get(`${identityUrl}/metrics`);
+  expect(response.status()).toBe(200);
+  const line = (await response.text())
+    .split('\n')
+    .find(
+      (row) =>
+        row.startsWith('rasta_identity_keycloak_projections_total{') &&
+        row.includes('trigger="event"') &&
+        row.includes('outcome="projected"'),
+    );
+  return line ? Number(line.split(' ').pop()) : 0;
+}

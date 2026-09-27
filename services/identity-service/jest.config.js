@@ -14,7 +14,7 @@ const AGGREGATION_STRESS_SPEC = 'security-event-aggregation\\.int-spec\\.ts$';
 module.exports = {
   // `test:unit` stays fast and runnable without Docker while integration tests
   // — which need a real PostgreSQL — are opt-in. Every package script names the
-  // projects it selects; a bare `jest` runs all three.
+  // projects it selects; a bare `jest` runs all four.
   projects: [
     {
       displayName: 'unit',
@@ -30,6 +30,18 @@ module.exports = {
       testEnvironment: 'node',
       testRegex: '.*\\.int-spec\\.ts$',
       testPathIgnorePatterns: ['/node_modules/', AGGREGATION_STRESS_SPEC],
+      transform: swcTransform,
+      clearMocks: true,
+    },
+    {
+      // Against a running Keycloak 26.0 with the platform realm, not a
+      // database: the Admin API behaviour the projector depends on
+      // (ADR-060 § 5). Only `test:keycloak-live` selects it, and the `e2e`
+      // CI job runs it, because that job is the one with a Keycloak.
+      displayName: 'keycloak-live',
+      rootDir: 'test',
+      testEnvironment: 'node',
+      testRegex: '.*\\.live-spec\\.ts$',
       transform: swcTransform,
       clearMocks: true,
     },
