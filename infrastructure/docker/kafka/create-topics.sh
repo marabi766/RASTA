@@ -38,9 +38,26 @@ DOMAINS=(
   audit
 )
 
+# RUN-006: the broker authenticates. With the admin's password in the
+# environment this connects as `admin` over SASL_SSL, trusting the throwaway CA
+# tls.sh wrote; without it, PLAINTEXT as before.
+ADMIN_CONFIG=()
+if [ -n "${KAFKA_SASL_PASSWORD_ADMIN:-}" ]; then
+  admin_properties="$(mktemp)"
+  escaped="$(printf '%s' "${KAFKA_SASL_PASSWORD_ADMIN}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  {
+    echo 'security.protocol=SASL_SSL'
+    echo 'sasl.mechanism=SCRAM-SHA-512'
+    echo "sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"admin\" password=\"${escaped}\";"
+    echo 'ssl.truststore.type=PEM'
+    echo "ssl.truststore.location=${KAFKA_CA_FILE:-/tls/ca.pem}"
+  } > "${admin_properties}"
+  ADMIN_CONFIG=(--command-config "${admin_properties}")
+fi
+
 echo "==> Waiting for Kafka at ${BOOTSTRAP}"
 for _ in $(seq 1 30); do
-  if "${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" --list >/dev/null 2>&1; then
+  if "${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" --list >/dev/null 2>&1; then
     break
   fi
   sleep 2
@@ -53,7 +70,7 @@ create_topic() {
   local extra="${4:-}"
 
   # shellcheck disable=SC2086
-  "${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" \
+  "${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" \
     --create --if-not-exists \
     --topic "${name}" \
     --partitions "${partitions}" \
@@ -79,4 +96,4 @@ echo "==> Creating compacted state topics"
 create_topic "rasta.audit.trail.v1" "${PARTITIONS}" "2592000000"
 
 echo "==> Kafka topics ready"
-"${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" --list | sort
+"${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" --list | sort
