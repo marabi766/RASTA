@@ -26,3 +26,24 @@ export const timelineEventsSkippedTotal = new Counter({
   labelNames: ['service', 'event', 'reason'] as const,
   registers: [registry],
 });
+
+/**
+ * What each owner of a machine's work answered when a transfer asked it
+ * (ADR-062, docs/23 D-033).
+ *
+ * `owner` is `fleet-service` or `maintenance-service`. `outcome` is a closed
+ * set:
+ *   - `clear`: nothing open; the owner fenced the machine.
+ *   - `open_work`: the owner has open work; the transfer was refused.
+ *   - `conflict`: another transfer holds the fence, or the owner's replica
+ *     does not yet place the machine with this organization.
+ *   - `unavailable`: no usable answer (transport, timeout, 403, 5xx, a body
+ *     that does not parse). The transfer was refused. Worth an alert: every
+ *     transfer fails while it lasts.
+ */
+export const transferClearanceTotal = new Counter({
+  name: 'rasta_asset_transfer_clearance_total',
+  help: 'Answers from the owners of a machine’s work to a transfer’s clearance question',
+  labelNames: ['service', 'owner', 'outcome'] as const,
+  registers: [registry],
+});

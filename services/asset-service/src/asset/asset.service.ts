@@ -4,7 +4,8 @@ import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { AssetRepository, isUniqueViolation, type CostSummaryRow } from './asset.repository';
 import { ASSET_EVENTS, validateAssetPayload } from './events';
-import { ASSET_TOPIC } from '../config/env';
+import { ASSET_TOPIC, SERVICE_NAME } from '../config/env';
+import { transferClearanceTotal } from '../observability/metrics';
 import {
   canTransition,
   explainRefusal,
@@ -25,6 +26,7 @@ import {
   TRANSFER_CLEARANCE,
   UNCONFIGURED_TRANSFER_CLEARANCE,
   WORK_OWNERS,
+  type ClearanceAnswer,
   type TransferClearance,
   type WorkOwner,
 } from './transfer-clearance';
@@ -611,8 +613,23 @@ export class AssetService {
         }
       });
     } catch (error) {
-      await this.releaseFences(fenced, id, from, transferId);
+      // Only a transfer that did not land gives its fences back. An error can
+      // arrive after the commit (a lost acknowledgement), and releasing then
+      // would reopen the machine to its previous owner's work until the
+      // owners consume ASSET_TRANSFERRED. When that cannot be told, the
+      // fences stay and their expiry lifts them.
+      if (!(await this.transferMayHaveLanded(transferId))) {
+        await this.releaseFences(fenced, id, from, transferId);
+      }
       throw error;
+    }
+  }
+
+  private async transferMayHaveLanded(transferId: string): Promise<boolean> {
+    try {
+      return await this.repository.transferRecorded(transferId);
+    } catch {
+      return true;
     }
   }
 
@@ -633,9 +650,17 @@ export class AssetService {
       WORK_OWNERS.map((owner) => this.clearance.ask(owner, organizationId, assetId, transferId)),
     );
 
+    for (const [index, outcome] of outcomes.entries()) {
+      transferClearanceTotal.inc({
+        service: SERVICE_NAME,
+        owner: WORK_OWNERS[index],
+        outcome: clearanceOutcome(outcome),
+      });
+    }
+
     const fenced = WORK_OWNERS.filter((_, index) => {
-      const outcome = outcomes[index]!;
-      return outcome.status === 'fulfilled' && outcome.value.clear;
+      const outcome = outcomes[index];
+      return outcome?.status === 'fulfilled' && outcome.value.clear;
     });
     if (fenced.length === WORK_OWNERS.length) return fenced;
 
@@ -679,7 +704,6 @@ export class AssetService {
     actor: string,
     assertWithinDeadline: () => void,
   ): Promise<AssetView> {
-
     // A transfer is the one operation that legitimately writes rows belonging
     // to another tenant — the transfer record, the asset and its whole history
     // all land in the receiving organization. The tenant guard refuses that by
@@ -721,11 +745,6 @@ export class AssetService {
           // review #6). A policy write takes the same lock, so it lands
           // before this instant under the old owner, or is refused.
           const transferredAt = await this.repository.databaseClock(tx);
-
-          // The fences hold for their TTL. Past half of it, measured from
-          // before they were asked for, the transfer is not recorded: the
-          // owners may already be letting new work start (ADR-062 § 3).
-          assertWithinDeadline();
 
           // An open claim is being decided under the current owner's authority.
           // Moving it would hand that decision to the new owner. Checked under
@@ -794,6 +813,12 @@ export class AssetService {
             detail: { fromOrganizationId: from, toOrganizationId: dto.toOrganizationId },
             occurredAt: transferredAt,
           });
+
+          // The fences hold for their TTL. Past half of it, measured from
+          // before they were asked for, the transfer is not recorded: the
+          // owners may soon let new work start (ADR-062 § 3). Last, after
+          // every write, so only the commit itself is left outside the bound.
+          assertWithinDeadline();
 
           return row;
         }),
@@ -1173,6 +1198,17 @@ export class AssetService {
  * The pre-checks give a readable error in the common case. Under a concurrent
  * create or rename they both pass, and the index is what refuses.
  */
+/** The metric label for one owner's answer (ADR-062). */
+function clearanceOutcome(
+  outcome: PromiseSettledResult<ClearanceAnswer>,
+): 'clear' | 'open_work' | 'conflict' | 'unavailable' {
+  if (outcome.status === 'fulfilled') return outcome.value.clear ? 'clear' : 'open_work';
+  const reason: unknown = outcome.reason;
+  return reason instanceof RastaError && reason.code === 'INVALID_STATE_TRANSITION'
+    ? 'conflict'
+    : 'unavailable';
+}
+
 function rethrowUniqueAsAlreadyExists(error: unknown): never {
   if (isUniqueViolation(error)) throw RastaError.alreadyExists('Asset');
   throw error;

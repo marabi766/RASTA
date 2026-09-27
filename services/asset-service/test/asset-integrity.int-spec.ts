@@ -465,6 +465,22 @@ describe('asset integrity', () => {
         expect(owners.released).toEqual(['fleet-service']);
       });
 
+      it('rolls back every write of a transfer that commits after half the fence', async () => {
+        const assetId = await machine(org.a);
+        await setStatus(assetId, 'ACTIVE');
+        const owners = clearingOwners();
+        // Asked at 0; by the end of the transaction, 400 s have passed on the
+        // monotonic clock, past half of the 600 s fence.
+        let reads = 0;
+        owners.now = () => (reads++ === 0 ? 0 : 400_000);
+
+        await expect(
+          transferWith(new AssetService(repository, undefined, owners), assetId),
+        ).rejects.toThrow(/took too long to confirm/);
+        await nothingMoved(assetId);
+        expect(owners.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+      });
+
       it('fails closed when the owners cannot be reached, with the real client', async () => {
         const assetId = await machine(org.a);
         await setStatus(assetId, 'ACTIVE');
@@ -481,7 +497,9 @@ describe('asset integrity', () => {
 
         await expect(
           transferWith(new AssetService(repository, undefined, unreachable), assetId),
-        ).rejects.toMatchObject({ code: expect.stringMatching(/^UPSTREAM_(UNAVAILABLE|TIMEOUT)$/) });
+        ).rejects.toMatchObject({
+          code: expect.stringMatching(/^UPSTREAM_(UNAVAILABLE|TIMEOUT)$/),
+        });
         await nothingMoved(assetId);
       });
     });

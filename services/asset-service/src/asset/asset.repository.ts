@@ -430,6 +430,18 @@ export class AssetRepository {
   }
 
   /**
+   * Whether a transfer with this id was committed. Unscoped because the
+   * record lives with the receiving organization, while the caller acts for
+   * the previous owner; it reads one row by its own id and returns a boolean.
+   */
+  async transferRecorded(transferId: string): Promise<boolean> {
+    return runUnscoped(
+      'did this transfer commit, before its clearance fences are released (ADR-062)',
+      async () => (await this.client.assetTransfer.count({ where: { id: transferId } })) > 0,
+    );
+  }
+
+  /**
    * The database's own clock, now, inside `tx`.
    *
    * A transfer is dated with this, under the asset's row lock, so that it and

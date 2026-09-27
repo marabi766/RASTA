@@ -10,6 +10,7 @@ import type { AssetRepository } from './asset.repository';
 import { ASSET_EVENTS } from './events';
 import type { CreateAssetDto, TransferAssetDto } from './dto';
 import type { ClearanceAnswer, TransferClearance, WorkOwner } from './transfer-clearance';
+import { transferClearanceTotal } from '../observability/metrics';
 
 /**
  * Asset service behaviour, with the repository stubbed.
@@ -206,6 +207,7 @@ function harness(
     listTimeline: jest.fn(async () => ({ items: [], nextCursor: null, hasMore: false })),
     costSummary: jest.fn(async () => []),
     countTransfers: jest.fn(async () => 0),
+    transferRecorded: jest.fn(async () => false),
     findNearby: jest.fn(async () => []),
     setLocationPoint: jest.fn(),
     readCoordinate: jest.fn(async () => null),
@@ -770,12 +772,83 @@ describe('AssetService', () => {
           clearance,
         );
 
+        // Thrown inside the transaction, after its last write, so the
+        // database rolls all of it back (proved against PostgreSQL in
+        // asset-integrity.int-spec.ts).
         await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toThrow(
           /took too long to confirm/,
         );
-        expect(h.tx.assetTransfer.create).not.toHaveBeenCalled();
-        expect(h.enqueued).toEqual([]);
         expect(clearance.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+      });
+
+      it('checks the deadline after every write, so only the commit is outside it', async () => {
+        const clearance = fakeClearance();
+        const h = harness({}, clearance);
+        // The last write of the transfer stalls until the fences are about to
+        // lapse; a check before it would have passed.
+        h.tx.assetTransfer.updateMany.mockImplementation(() => {
+          clearance.clock = 300_000;
+          return { count: 1 };
+        });
+
+        await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toThrow(
+          /took too long to confirm/,
+        );
+      });
+
+      it('keeps the fences when the transfer landed but its acknowledgement was lost', async () => {
+        const h = harness({
+          transaction: jest.fn(async () => {
+            throw new Error('Connection terminated unexpectedly');
+          }),
+          transferRecorded: jest.fn(async () => true),
+        });
+
+        await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toThrow(
+          /Connection terminated/,
+        );
+        // Released now, the previous owner could open work before the owners
+        // consume ASSET_TRANSFERRED.
+        expect(h.clearance.released).toEqual([]);
+      });
+
+      it('keeps the fences when it cannot tell whether the transfer landed', async () => {
+        const h = harness({
+          transaction: jest.fn(async () => {
+            throw new Error('Connection terminated unexpectedly');
+          }),
+          transferRecorded: jest.fn(async () => {
+            throw new Error('still down');
+          }),
+        });
+
+        await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toThrow(
+          /Connection terminated/,
+        );
+        // Their expiry lifts them.
+        expect(h.clearance.released).toEqual([]);
+      });
+
+      it('counts each owner’s answer by outcome', async () => {
+        const counter = jest.spyOn(transferClearanceTotal, 'inc');
+        const h = harness(
+          {},
+          fakeClearance({
+            'fleet-service': async () => {
+              throw RastaError.upstreamTimeout('fleet-service', 3000);
+            },
+            'maintenance-service': { clear: false, open: { openRequests: 1 } },
+          }),
+        );
+
+        await expect(run(() => h.service.transfer(ASSET_ID, dto))).rejects.toBeInstanceOf(
+          RastaError,
+        );
+        expect(counter.mock.calls.map(([labels]) => labels)).toEqual([
+          { service: 'asset-service', owner: 'fleet-service', outcome: 'unavailable' },
+          { service: 'asset-service', owner: 'maintenance-service', outcome: 'open_work' },
+        ]);
+        counter.mockRestore();
       });
 
       it('does not ask anyone when the local checks already refuse', async () => {
