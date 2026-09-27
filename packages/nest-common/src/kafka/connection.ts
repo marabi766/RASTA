@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs';
 import type { KafkaConfig } from 'kafkajs';
-import { isProduction, kafkaSaslConfigured, type BaseEnv, type KafkaEnv } from '@rasta/config';
+import {
+  isProduction,
+  kafkaPasswordVariable,
+  kafkaSaslConfigured,
+  type BaseEnv,
+  type KafkaEnv,
+} from '@rasta/config';
 
 /**
  * How every Kafka client on the platform reaches the broker (ADR-061 § 3,
@@ -119,4 +125,38 @@ export function kafkaClientConfig(
     ...(connection.sasl ? { sasl: { ...connection.sasl } } : {}),
     ...(connection.ssl ? { ssl: connection.ssl } : {}),
   };
+}
+
+/**
+ * The connection for a named principal, from the environment: for a test
+ * harness or a script that acts as one service (publishing on the topic that
+ * service owns) or as the development observer, never for a service itself —
+ * a service reads its own configuration through {@link kafkaConnection}.
+ *
+ * The password is `KAFKA_SASL_PASSWORD_<PRINCIPAL>` (`fleet-service` →
+ * `..._FLEET`, `itest-observer` → `..._ITEST_OBSERVER`); without one the
+ * connection is PLAINTEXT, which only an unauthenticated broker accepts.
+ * `KAFKA_SSL` and `KAFKA_SSL_CA_FILE` as for a service.
+ */
+export function kafkaConnectionFor(
+  principal: string,
+  clientId: string,
+  source: NodeJS.ProcessEnv = process.env,
+  readFile?: (path: string) => string,
+): KafkaConnectionOptions {
+  const password = source[kafkaPasswordVariable(principal)] || undefined;
+  return kafkaConnection(
+    {
+      NODE_ENV: 'test',
+      SERVICE_NAME: principal,
+      KAFKA_BROKERS: source.KAFKA_BROKERS || 'localhost:9092',
+      KAFKA_SASL_USERNAME: password ? principal : undefined,
+      KAFKA_SASL_PASSWORD: password,
+      KAFKA_SASL_MECHANISM: 'scram-sha-512',
+      KAFKA_SSL: /^(true|1|yes|on)$/i.test((source.KAFKA_SSL ?? '').trim()),
+      KAFKA_SSL_CA_FILE: source.KAFKA_SSL_CA_FILE || undefined,
+    },
+    clientId,
+    readFile,
+  );
 }

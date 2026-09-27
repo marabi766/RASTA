@@ -9,6 +9,7 @@ import {
   KafkaConnectionConfigError,
   kafkaClientConfig,
   kafkaConnection,
+  kafkaConnectionFor,
   type KafkaConnectionEnv,
 } from './connection';
 
@@ -104,6 +105,36 @@ describe('kafkaConnection', () => {
       return undefined;
     })();
     expect(error?.message).not.toContain('fleet-secret');
+  });
+});
+
+describe('kafkaConnectionFor', () => {
+  it('connects as the named principal with its own password, over TLS when asked', () => {
+    const connection = kafkaConnectionFor(
+      'fleet-service',
+      'fleet-itest',
+      {
+        KAFKA_BROKERS: 'localhost:9092',
+        KAFKA_SASL_PASSWORD_FLEET: 'fleet-secret',
+        KAFKA_SASL_PASSWORD_ASSET: 'asset-secret',
+        KAFKA_SSL: 'true',
+        KAFKA_SSL_CA_FILE: '/ca.pem',
+      },
+      () => 'PEM',
+    );
+    expect(connection).toEqual({
+      brokers: ['localhost:9092'],
+      clientId: 'fleet-itest',
+      sasl: { mechanism: 'scram-sha-512', username: 'fleet-service', password: 'fleet-secret' },
+      ssl: { ca: ['PEM'], rejectUnauthorized: true },
+    });
+  });
+
+  it('is PLAINTEXT when the principal has no password', () => {
+    expect(kafkaConnectionFor('itest-observer', 'x', { KAFKA_BROKERS: 'b:9092' })).toEqual({
+      brokers: ['b:9092'],
+      clientId: 'x',
+    });
   });
 });
 
