@@ -47,6 +47,9 @@ import { kafkaClientConfig, type KafkaConnectionOptions } from '../kafka/connect
  * metrics and recoverable; a silently skipped financial event is neither.
  */
 
+/** Every platform service's name ends so (`fleet-service`, `audit-service`). */
+const SERVICE_NAME_SUFFIX = '-service';
+
 export interface EventConsumerOptions extends KafkaConnectionOptions {
   /**
    * Kafka consumer group. One per (service, purpose) — never shared between
@@ -189,8 +192,16 @@ export class EventConsumer {
     // the consumer authenticates, its principal is the service it acts for,
     // and its group must be in that namespace — the same rule the broker's
     // ACLs enforce, refused here first so it fails at startup, legibly.
+    // A group in any `<name>-service.` namespace is a service's consumer and
+    // must be declared, authenticated or not; other groups (test observers)
+    // are left to the topic check above until they authenticate.
     const service = options.sasl?.username ?? consumerGroupService(options.groupId);
-    if (service !== undefined && (options.sasl !== undefined || isDeclaredConsumer(service))) {
+    if (
+      service !== undefined &&
+      (options.sasl !== undefined ||
+        isDeclaredConsumer(service) ||
+        service.endsWith(SERVICE_NAME_SUFFIX))
+    ) {
       const problem = consumerDeclarationProblem(service, options);
       if (problem !== undefined) {
         throw new Error(
