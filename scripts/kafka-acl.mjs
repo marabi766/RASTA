@@ -12,17 +12,27 @@
  * compared. A mismatch fails the bootstrap.
  *
  * Connects as `admin` (KAFKA_SASL_PASSWORD_ADMIN) to KAFKA_BROKERS over
- * SASL_SSL, trusting KAFKA_SSL_CA_FILE. The same script runs in compose
- * (`kafka-acl` service) and in CI (`infrastructure/docker/kafka/ci-up.sh`).
+ * SASL_SSL. It trusts KAFKA_SSL_CA_FILE when that is an absolute path (CI,
+ * `infrastructure/docker/kafka/ci-up.sh`); otherwise — the repository `.env`
+ * names it relative to a service's directory — the CA certificate
+ * `pnpm infra:up` exported to `infrastructure/docker/kafka/.tls/ca.pem`.
+ * `pnpm infra:up` runs it on the host after `docker compose up -d`, with the
+ * repository `.env`, so nothing beyond Node and pnpm is needed.
  */
 import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import kafkajs from 'kafkajs';
 import { connectionFor, diffAcls, fromDescribe, toKafkajsAcl } from './kafka-acl-lib.mjs';
 
-const { Kafka, logLevel, AclResourceTypes, AclOperationTypes, AclPermissionTypes, ResourcePatternTypes } =
-  kafkajs;
+const {
+  Kafka,
+  logLevel,
+  AclResourceTypes,
+  AclOperationTypes,
+  AclPermissionTypes,
+  ResourcePatternTypes,
+} = kafkajs;
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const command = process.argv[2];
@@ -31,10 +41,20 @@ if (command !== 'apply') {
   process.exit(2);
 }
 
-const spec = JSON.parse(readFileSync(resolve(root, 'infrastructure/docker/kafka/broker-acls.json'), 'utf8'));
-const connection = connectionFor(spec.admin, process.env, (path) => readFileSync(path, 'utf8'));
+const spec = JSON.parse(
+  readFileSync(resolve(root, 'infrastructure/docker/kafka/broker-acls.json'), 'utf8'),
+);
+const exportedCa = resolve(root, 'infrastructure/docker/kafka/.tls/ca.pem');
+const configuredCa = process.env.KAFKA_SSL_CA_FILE?.trim();
+const env = {
+  ...process.env,
+  KAFKA_SSL_CA_FILE: configuredCa && isAbsolute(configuredCa) ? configuredCa : exportedCa,
+};
+const connection = connectionFor(spec.admin, env, (path) => readFileSync(path, 'utf8'));
 if (!connection.sasl || !connection.ssl) {
-  process.stderr.write('kafka acl: KAFKA_SASL_PASSWORD_ADMIN and KAFKA_SSL_CA_FILE are required\n');
+  process.stderr.write(
+    'kafka acl: KAFKA_SASL_PASSWORD_ADMIN is required (copy .env.example to .env)\n',
+  );
   process.exit(1);
 }
 

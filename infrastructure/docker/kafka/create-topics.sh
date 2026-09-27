@@ -81,14 +81,34 @@ create_topic() {
   echo "    - ${name} (partitions=${partitions})"
 }
 
-echo "==> Creating domain topics"
-for domain in "${DOMAINS[@]}"; do
+create_domain() {
+  local domain="$1"
   create_topic "rasta.${domain}.v1" "${PARTITIONS}" "${RETENTION_MS}"
   # Retry topic: consumers republish here with a backoff attempt counter.
   create_topic "rasta.${domain}.v1.retry" "${PARTITIONS}" "${RETENTION_MS}"
   # DLQ: retained far longer — these need human eyes, not expiry.
   create_topic "rasta.${domain}.v1.dlq" 1 "2592000000" # 30 days
+}
+
+# Each kafka-topics.sh call is a JVM start, so a few domains run at once
+# (KAFKA_TOPIC_PARALLELISM, default 4). Any failure still fails the script.
+echo "==> Creating domain topics"
+PARALLELISM="${KAFKA_TOPIC_PARALLELISM:-4}"
+pids=()
+failed=0
+for domain in "${DOMAINS[@]}"; do
+  create_domain "${domain}" &
+  pids+=("$!")
+  if [ "${#pids[@]}" -ge "${PARALLELISM}" ]; then
+    for pid in "${pids[@]}"; do wait "${pid}" || failed=1; done
+    pids=()
+  fi
 done
+for pid in "${pids[@]}"; do wait "${pid}" || failed=1; done
+if [ "${failed}" -ne 0 ]; then
+  echo "==> A topic could not be created" >&2
+  exit 1
+fi
 
 echo "==> Creating compacted state topics"
 # The audit stream is the platform's tamper-evident record: never expire it in

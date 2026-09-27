@@ -10,7 +10,10 @@ const { AclOperationTypes, AclPermissionTypes, AclResourceTypes, ResourcePattern
 
 /** `fleet-service` -> `KAFKA_SASL_PASSWORD_FLEET`: the name every script and service reads. */
 export function passwordVariable(principal) {
-  return `KAFKA_SASL_PASSWORD_${principal.replace(/-service$/, '').replace(/-/g, '_').toUpperCase()}`;
+  return `KAFKA_SASL_PASSWORD_${principal
+    .replace(/-service$/, '')
+    .replace(/-/g, '_')
+    .toUpperCase()}`;
 }
 
 /**
@@ -34,11 +37,20 @@ export function connectionFor(principal, env, readFile) {
   return connection;
 }
 
-const RESOURCE = { TOPIC: AclResourceTypes.TOPIC, GROUP: AclResourceTypes.GROUP, CLUSTER: AclResourceTypes.CLUSTER };
+const RESOURCE = {
+  TOPIC: AclResourceTypes.TOPIC,
+  GROUP: AclResourceTypes.GROUP,
+  CLUSTER: AclResourceTypes.CLUSTER,
+};
 const PATTERN = { LITERAL: ResourcePatternTypes.LITERAL, PREFIXED: ResourcePatternTypes.PREFIXED };
-const OPERATION = { READ: AclOperationTypes.READ, WRITE: AclOperationTypes.WRITE, DESCRIBE: AclOperationTypes.DESCRIBE };
+const OPERATION = {
+  READ: AclOperationTypes.READ,
+  WRITE: AclOperationTypes.WRITE,
+  DESCRIBE: AclOperationTypes.DESCRIBE,
+};
 
-const invert = (table) => Object.fromEntries(Object.entries(table).map(([name, code]) => [code, name]));
+const invert = (table) =>
+  Object.fromEntries(Object.entries(table).map(([name, code]) => [code, name]));
 const RESOURCE_NAME = invert(RESOURCE);
 const PATTERN_NAME = invert(PATTERN);
 const OPERATION_NAME = invert(OPERATION);
@@ -71,7 +83,8 @@ export function fromDescribe(resources) {
         principal,
         resourceType: RESOURCE_NAME[resource.resourceType] ?? String(resource.resourceType),
         resourceName: resource.resourceName,
-        patternType: PATTERN_NAME[resource.resourcePatternType] ?? String(resource.resourcePatternType),
+        patternType:
+          PATTERN_NAME[resource.resourcePatternType] ?? String(resource.resourcePatternType),
         operation: OPERATION_NAME[acl.operation] ?? String(acl.operation),
       };
       const expressible =
@@ -81,19 +94,29 @@ export function fromDescribe(resources) {
         RESOURCE_NAME[resource.resourceType] &&
         PATTERN_NAME[resource.resourcePatternType] &&
         OPERATION_NAME[acl.operation];
-      bindings.push(expressible ? binding : { ...binding, unexpected: true, raw: { resource, acl } });
+      bindings.push(
+        expressible ? binding : { ...binding, unexpected: true, raw: { resource, acl } },
+      );
     }
   }
   return bindings;
 }
 
 export const aclKey = (binding) =>
-  [binding.principal, binding.resourceType, binding.patternType, binding.resourceName, binding.operation].join('|');
+  [
+    binding.principal,
+    binding.resourceType,
+    binding.patternType,
+    binding.resourceName,
+    binding.operation,
+  ].join('|');
 
 /** What to add and what to remove so the broker holds exactly `wanted`. */
 export function diffAcls(wanted, actual) {
   const want = new Map(wanted.map((binding) => [aclKey(binding), binding]));
-  const have = new Map(actual.filter((binding) => !binding.unexpected).map((binding) => [aclKey(binding), binding]));
+  const have = new Map(
+    actual.filter((binding) => !binding.unexpected).map((binding) => [aclKey(binding), binding]),
+  );
   return {
     add: [...want.values()].filter((binding) => !have.has(aclKey(binding))),
     remove: [

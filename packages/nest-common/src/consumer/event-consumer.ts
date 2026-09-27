@@ -193,14 +193,14 @@ export class EventConsumer {
     // and its group must be in that namespace — the same rule the broker's
     // ACLs enforce, refused here first so it fails at startup, legibly.
     // A group in any `<name>-service.` namespace is a service's consumer and
-    // must be declared, authenticated or not; other groups (test observers)
-    // are left to the topic check above until they authenticate.
+    // must be declared, authenticated or not. A principal that is not a
+    // service (the development `itest-observer`, `ops-replay`) is not in
+    // TOPIC_CONSUMERS at all: what it may read is the broker's ACLs alone
+    // (broker-acls.json), so it is left to the topic check above.
     const service = options.sasl?.username ?? consumerGroupService(options.groupId);
     if (
       service !== undefined &&
-      (options.sasl !== undefined ||
-        isDeclaredConsumer(service) ||
-        service.endsWith(SERVICE_NAME_SUFFIX))
+      (isDeclaredConsumer(service) || service.endsWith(SERVICE_NAME_SUFFIX))
     ) {
       const problem = consumerDeclarationProblem(service, options);
       if (problem !== undefined) {

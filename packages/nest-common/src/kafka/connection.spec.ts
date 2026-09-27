@@ -215,9 +215,25 @@ describe('EventConsumer and TOPIC_CONSUMERS', () => {
   });
 
   it('leaves an unauthenticated group outside every declared namespace to the topic check alone', () => {
-    // Test observers (`fleet-itest-…`) until PR B gives them credentials.
     expect(() =>
       build({ ...fleet, groupId: 'fleet-itest-01JABC', topics: ['rasta.economic.v1'] }),
     ).not.toThrow();
+  });
+
+  it('leaves a principal that is not a service to the broker ACLs', () => {
+    // The development observer reads every topic under its own group prefix;
+    // TOPIC_CONSUMERS does not describe it, broker-acls.json does.
+    expect(() =>
+      build({
+        ...fleet,
+        groupId: 'itest-observer.audit-trail-01JABC',
+        topics: ['rasta.audit.trail.v1'],
+        deadLetterTopic: undefined,
+        sasl: { ...sasl, username: 'itest-observer' },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      build({ ...fleet, groupId: 'itest-observer.x', sasl: { ...sasl, username: 'ops-service' } }),
+    ).toThrow(/ops-service is not declared/);
   });
 });
