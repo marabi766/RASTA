@@ -1,5 +1,10 @@
 import { Kafka, type Consumer, type Producer } from 'kafkajs';
-import { OutboxRelay, EventConsumer } from '@rasta/nest-common';
+import {
+  OutboxRelay,
+  EventConsumer,
+  kafkaClientConfig,
+  kafkaConnectionFor,
+} from '@rasta/nest-common';
 import { EVENT_HEADERS, type EventEnvelope } from '@rasta/contracts';
 import { ulid } from 'ulid';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
@@ -110,14 +115,15 @@ describeWithKafka('economic event flow over Kafka', () => {
     prisma = newPrisma();
     wiring = wire(prisma);
 
+    // RUN-006: each client authenticates as the principal it stands for — the
+    // observer under its own group prefix, the producer as the topic's owner.
     const kafka = new Kafka({
-      clientId: `economic-itest-${suffix}`,
-      brokers: brokerList!,
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', `economic-itest-${suffix}`)),
       logLevel: 1,
     });
 
     // A listener on the economic topic, so the outbox half can be observed.
-    economicConsumer = kafka.consumer({ groupId: `economic-itest-observer-${suffix}` });
+    economicConsumer = kafka.consumer({ groupId: `itest-observer.economic-${suffix}` });
     await economicConsumer.connect();
     await economicConsumer.subscribe({ topic: ECONOMIC_TOPIC, fromBeginning: false });
     const observerJoined = groupJoin(economicConsumer, 'observer');
@@ -130,14 +136,19 @@ describeWithKafka('economic event flow over Kafka', () => {
     await observerJoined;
 
     // The real relay, publishing this service's outbox to the real broker.
-    publisher = new KafkaEventPublisher({
-      brokers: brokerList!,
-      clientId: `economic-itest-producer-${suffix}`,
-    });
+    publisher = new KafkaEventPublisher(
+      kafkaConnectionFor('economic-service', `economic-itest-producer-${suffix}`),
+    );
     relay = new OutboxRelay({ store: new PrismaOutboxStore(prisma), publisher, batchSize: 50 });
 
-    // A producer standing in for maintenance-service.
-    maintenanceProducer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
+    // A producer standing in for maintenance-service, as maintenance-service.
+    const maintenance = new Kafka({
+      ...kafkaClientConfig(
+        kafkaConnectionFor('maintenance-service', `economic-itest-maintenance-${suffix}`),
+      ),
+      logLevel: 1,
+    });
+    maintenanceProducer = maintenance.producer({ idempotent: true, maxInFlightRequests: 1 });
     await maintenanceProducer.connect();
 
     // The real consumers, on their own groups so this run does not steal
@@ -146,9 +157,8 @@ describeWithKafka('economic event flow over Kafka', () => {
       (handler) =>
         new EventConsumer(
           {
-            brokers: brokerList!,
-            clientId: `economic-itest-settlement-${suffix}`,
-            groupId: `economic-itest-settlement-${suffix}`,
+            ...kafkaConnectionFor('economic-service', `economic-itest-settlement-${suffix}`),
+            groupId: `economic-service.itest-settlement-${suffix}`,
             topics: [MAINTENANCE_TOPIC],
             fromBeginning: false,
           },
@@ -165,9 +175,8 @@ describeWithKafka('economic event flow over Kafka', () => {
       (handler) =>
         new EventConsumer(
           {
-            brokers: brokerList!,
-            clientId: `economic-itest-reward-${suffix}`,
-            groupId: `economic-itest-reward-${suffix}`,
+            ...kafkaConnectionFor('economic-service', `economic-itest-reward-${suffix}`),
+            groupId: `economic-service.itest-reward-${suffix}`,
             topics: [MAINTENANCE_TOPIC],
             fromBeginning: false,
           },

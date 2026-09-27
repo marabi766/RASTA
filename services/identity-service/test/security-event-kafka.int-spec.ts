@@ -9,6 +9,7 @@ import {
 } from '@rasta/contracts';
 import {
   EventConsumer,
+  kafkaConnectionFor,
   runUnscoped,
   type EventDelivery,
   type OutboxRelay,
@@ -110,9 +111,13 @@ class TrailObserver {
   async start(): Promise<void> {
     this.consumer = new EventConsumer(
       {
-        brokers: brokerList as string[],
-        clientId: `identity-itest-trail-observer-${ulid().slice(-8)}`,
-        groupId: `identity-itest-trail-observer-${ulid().slice(-12)}`,
+        // An outside observer, not identity-service: the development
+        // `itest-observer` principal, under its own group prefix (RUN-006).
+        ...kafkaConnectionFor(
+          'itest-observer',
+          `identity-itest-trail-observer-${ulid().slice(-8)}`,
+        ),
+        groupId: `itest-observer.identity-trail-${ulid().slice(-12)}`,
         topics: [AUDIT_TRAIL_TOPIC],
         fromBeginning: true,
         // A message this observer cannot make sense of is not this test's

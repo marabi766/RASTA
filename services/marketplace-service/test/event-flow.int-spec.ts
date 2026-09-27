@@ -1,5 +1,5 @@
 import { Kafka, type Consumer } from 'kafkajs';
-import { OutboxRelay } from '@rasta/nest-common';
+import { OutboxRelay, kafkaClientConfig, kafkaConnectionFor } from '@rasta/nest-common';
 import type { EventEnvelope } from '@rasta/contracts';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
@@ -47,7 +47,7 @@ if (!brokerList) {
 
 describeWithKafka('marketplace performance-signal events over Kafka', () => {
   const org = tenants();
-  const groupId = `marketplace-itest-${id('G').slice(-12)}`;
+  const groupId = `itest-observer.marketplace-${id('G').slice(-12)}`;
 
   let prisma: PrismaService;
   let wiring: Wiring;
@@ -82,15 +82,13 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
     await prisma.onModuleInit();
     wiring = wire(prisma);
 
-    publisher = new KafkaEventPublisher({
-      brokers: brokerList!,
-      clientId: 'marketplace-itest-producer',
-    });
+    publisher = new KafkaEventPublisher(
+      kafkaConnectionFor('marketplace-service', 'marketplace-itest-producer'),
+    );
     relay = new OutboxRelay({ store: new PrismaOutboxStore(prisma), publisher });
 
     const kafka = new Kafka({
-      clientId: 'marketplace-itest-consumer',
-      brokers: brokerList!,
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'marketplace-itest-consumer')),
       logLevel: 1,
     });
     consumer = kafka.consumer({ groupId, sessionTimeout: 30_000 });

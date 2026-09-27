@@ -185,6 +185,13 @@ export async function startIdentityApi(
     DATABASE_URL: withConnectionLimit(databaseUrl(), options.connectionLimit),
     KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:9092',
     KAFKA_CLIENT_ID: `identity-itest-${ulid().slice(-8)}`,
+    // RUN-006: the broker authenticates. The app connects as identity-service
+    // with its own password and the CA, exactly as `pnpm dev` does from .env.
+    ...Object.fromEntries(
+      ['KAFKA_SASL_PASSWORD_IDENTITY', 'KAFKA_SSL', 'KAFKA_SSL_CA_FILE'].flatMap((name) =>
+        process.env[name] ? [[name, process.env[name]]] : [],
+      ),
+    ),
     OIDC_ISSUER_URL: 'http://identitytest.invalid/realms/rasta',
     OIDC_JWKS_URI: 'http://identitytest.invalid/realms/rasta/certs',
     OIDC_AUDIENCE: 'rasta-api',

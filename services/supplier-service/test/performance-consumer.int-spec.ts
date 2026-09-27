@@ -1,6 +1,12 @@
 import { Kafka, type Consumer, type Producer } from 'kafkajs';
 import { DLQ_HEADERS, DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
-import { EventConsumer, UnprocessableEventError, runUnscoped } from '@rasta/nest-common';
+import {
+  EventConsumer,
+  UnprocessableEventError,
+  runUnscoped,
+  kafkaClientConfig,
+  kafkaConnectionFor,
+} from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { ConcludedOutcomeRepository } from '../src/performance/concluded-outcome.repository';
 import { PerformanceEventRepository } from '../src/performance/performance-event.repository';
@@ -598,7 +604,7 @@ if (!brokerList) {
 
 describeWithKafka('performance consumer over Kafka', () => {
   const MARKETPLACE_TOPIC = PERFORMANCE_CONSUMED_TOPICS[0];
-  const groupId = `supplier-perf-itest-${ulid().slice(-12)}`;
+  const groupId = `supplier-service.itest-perf-${ulid().slice(-12)}`;
 
   let prisma: PrismaService;
   let events: PerformanceEventRepository;
@@ -630,14 +636,25 @@ describeWithKafka('performance consumer over Kafka', () => {
   beforeAll(async () => {
     prisma = newPrisma();
     events = new PerformanceEventRepository(prisma);
-    const kafka = new Kafka({ clientId: 'supplier-perf-itest', brokers: brokerList!, logLevel: 1 });
+    // RUN-006: the producer is marketplace-service, the topic's only declared
+    // writer; the dead-letter reader is the development observer.
+    const marketplace = new Kafka({
+      ...kafkaClientConfig(kafkaConnectionFor('marketplace-service', 'supplier-perf-itest')),
+      logLevel: 1,
+    });
+    const observer = new Kafka({
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'supplier-perf-itest-dlq')),
+      logLevel: 1,
+    });
 
-    producer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
+    producer = marketplace.producer({ idempotent: true, maxInFlightRequests: 1 });
     await producer.connect();
 
     // From the beginning, filtered by this run's event ids: no join race, and
     // nothing another run left behind can satisfy a wait.
-    dlqReader = kafka.consumer({ groupId: `${groupId}-dlq` });
+    dlqReader = observer.consumer({
+      groupId: `itest-observer.supplier-perf-dlq-${ulid().slice(-12)}`,
+    });
     await dlqReader.connect();
     await dlqReader.subscribe({ topic: SUPPLIER_DEAD_LETTER_TOPIC, fromBeginning: true });
     await dlqReader.run({
@@ -654,8 +671,7 @@ describeWithKafka('performance consumer over Kafka', () => {
       (handler) =>
         new EventConsumer(
           {
-            brokers: brokerList!,
-            clientId: 'supplier-perf-itest-consumer',
+            ...kafkaConnectionFor('supplier-service', 'supplier-perf-itest-consumer'),
             groupId,
             topics: [...PERFORMANCE_CONSUMED_TOPICS],
             deadLetterTopic: SUPPLIER_DEAD_LETTER_TOPIC,

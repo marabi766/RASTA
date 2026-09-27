@@ -1,6 +1,6 @@
 import { Kafka, type Consumer, type Producer } from 'kafkajs';
 import { ulid } from 'ulid';
-import { EventConsumer } from '@rasta/nest-common';
+import { EventConsumer, kafkaClientConfig, kafkaConnectionFor } from '@rasta/nest-common';
 import {
   AUDIT_EVENT_RECORDED,
   AUDIT_EVENT_RECORDED_VERSION,
@@ -122,9 +122,11 @@ describeWithKafka('domain projector over Kafka', () => {
   let migrator: PrismaService;
   let repository: AuditRepository;
   let projector: DomainProjectorConsumer;
-  let producer: Producer;
+  // RUN-006: one producer per topic owner, created on first use — the broker
+  // lets only a topic's declared producer write it.
+  const producers = new Map<string, Promise<Producer>>();
 
-  const groupId = `audit-itest-${ulid().slice(-12)}`;
+  const groupId = `audit-service.itest-${ulid().slice(-12)}`;
   const silentLogger = {
     info: () => undefined,
     warn: () => undefined,
@@ -153,6 +155,7 @@ describeWithKafka('domain projector over Kafka', () => {
   }
 
   async function publish(topic: string, body: unknown): Promise<void> {
+    const producer = await producerFor(topic);
     await producer.send({
       topic,
       messages: [{ key: ulid(), value: JSON.stringify(body) }],
@@ -170,6 +173,22 @@ describeWithKafka('domain projector over Kafka', () => {
     return owner;
   }
 
+  /** A producer authenticated as `topic`'s owner, connected once per owner. */
+  function producerFor(topic: string): Promise<Producer> {
+    const owner = ownerOf(topic);
+    let producer = producers.get(owner);
+    if (!producer) {
+      const client = new Kafka({
+        ...kafkaClientConfig(kafkaConnectionFor(owner, `audit-itest-${owner}`)),
+        logLevel: 1,
+      });
+      const created = client.producer({ idempotent: true, maxInFlightRequests: 1 });
+      producer = created.connect().then(() => created);
+      producers.set(owner, producer);
+    }
+    return producer;
+  }
+
   /** This run's row for a given source event id, or undefined. */
   function rowFor(sourceEventId: string) {
     return () => prisma.client.auditEvent.findFirst({ where: { sourceEventId } });
@@ -182,20 +201,11 @@ describeWithKafka('domain projector over Kafka', () => {
     await migrator.onModuleInit();
     repository = new AuditRepository(prisma);
 
-    const kafka = new Kafka({
-      clientId: 'audit-itest-producer',
-      brokers: brokerList as string[],
-      logLevel: 1,
-    });
-    producer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
-    await producer.connect();
-
     projector = new DomainProjectorConsumer(
       (handler) =>
         new EventConsumer(
           {
-            brokers: brokerList as string[],
-            clientId: 'audit-itest',
+            ...kafkaConnectionFor('audit-service', 'audit-itest'),
             groupId,
             topics: [...DOMAIN_TOPICS],
             fromBeginning: true,
@@ -236,7 +246,7 @@ describeWithKafka('domain projector over Kafka', () => {
 
   afterAll(async () => {
     await projector?.onModuleDestroy();
-    await producer?.disconnect();
+    for (const producer of producers.values()) await (await producer).disconnect();
     await cleanupRun(migrator);
     await prisma.onModuleDestroy();
     await migrator.onModuleDestroy();
@@ -317,8 +327,7 @@ describeWithKafka('domain projector over Kafka', () => {
       (handler) =>
         new EventConsumer(
           {
-            brokers: brokerList as string[],
-            clientId: 'audit-itest-replay',
+            ...kafkaConnectionFor('audit-service', 'audit-itest-replay'),
             groupId: replayGroup,
             topics: ['rasta.maintenance.v1'],
             fromBeginning: true,
@@ -386,11 +395,10 @@ describeWithKafka('domain projector over Kafka', () => {
   it('dead-letters a malformed envelope without leaking its body, refuses a foreign producer, and keeps consuming', async () => {
     const dlqTopic = 'rasta.audit.v1.dlq';
     const dlq = new Kafka({
-      clientId: 'audit-itest-dlq-reader',
-      brokers: brokerList as string[],
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'audit-itest-dlq-reader')),
       logLevel: 1,
     });
-    const dlqConsumer = dlq.consumer({ groupId: `${groupId}-dlq` });
+    const dlqConsumer = dlq.consumer({ groupId: `itest-observer.audit-dlq-${ulid().slice(-12)}` });
     const dlqMessages: {
       reason?: string;
       originalTopic?: string;
@@ -557,7 +565,7 @@ describeWithKafka('audit-trail consumer over Kafka', () => {
   let trail: AuditTrailConsumer;
   let producer: Producer;
 
-  const groupId = `audit-itest-trail-${ulid().slice(-12)}`;
+  const groupId = `audit-service.itest-trail-${ulid().slice(-12)}`;
   const silentLogger = {
     info: () => undefined,
     warn: () => undefined,
@@ -622,9 +630,9 @@ describeWithKafka('audit-trail consumer over Kafka', () => {
     await migrator.onModuleInit();
     repository = new AuditRepository(prisma);
 
+    // As identity-service, the trail topic's only declared producer (RUN-006).
     const kafka = new Kafka({
-      clientId: 'audit-itest-trail-producer',
-      brokers: brokerList as string[],
+      ...kafkaClientConfig(kafkaConnectionFor('identity-service', 'audit-itest-trail-producer')),
       logLevel: 1,
     });
     producer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
@@ -634,8 +642,7 @@ describeWithKafka('audit-trail consumer over Kafka', () => {
       (handler) =>
         new EventConsumer(
           {
-            brokers: brokerList as string[],
-            clientId: 'audit-itest-trail',
+            ...kafkaConnectionFor('audit-service', 'audit-itest-trail'),
             groupId,
             topics: [AUDIT_TRAIL_TOPIC],
             fromBeginning: true,
@@ -696,11 +703,12 @@ describeWithKafka('audit-trail consumer over Kafka', () => {
 
   it('dead-letters malformed and tenant-mismatched trail messages, records neither, and keeps consuming', async () => {
     const dlq = new Kafka({
-      clientId: 'audit-itest-trail-dlq-reader',
-      brokers: brokerList as string[],
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'audit-itest-trail-dlq-reader')),
       logLevel: 1,
     });
-    const dlqConsumer = dlq.consumer({ groupId: `${groupId}-dlq` });
+    const dlqConsumer = dlq.consumer({
+      groupId: `itest-observer.audit-trail-dlq-${ulid().slice(-12)}`,
+    });
     const dlqMessages: {
       reason?: string;
       originalTopic?: string;

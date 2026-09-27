@@ -1,5 +1,6 @@
-import { Kafka, logLevel, type Consumer } from 'kafkajs';
+import { Kafka, logLevel, type Consumer, type KafkaConfig } from 'kafkajs';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { EVENT_HEADERS } from '@rasta/contracts';
 import { e2eConfig, type E2eConfig } from './env';
 
@@ -15,6 +16,32 @@ import { e2eConfig, type E2eConfig } from './env';
  * real message headers. No stub broker: a `KafkaJS` consumer against the same
  * cluster the service produces to.
  */
+
+/** The development observer's principal (RUN-006, broker-acls.json). */
+export const OBSERVER_PRINCIPAL = 'itest-observer';
+
+/**
+ * How the harness reaches the authenticated broker (RUN-006, ADR-061 § 3): as
+ * the development observer, which may read every platform topic under its own
+ * `itest-observer.` groups and write none, over TLS trusting the CA the local
+ * bootstrap exported. Without `KAFKA_SASL_PASSWORD_ITEST_OBSERVER` it connects
+ * PLAINTEXT, which the authenticated broker refuses.
+ */
+export function observerClient(config: E2eConfig, clientId: string): KafkaConfig {
+  const password = process.env.KAFKA_SASL_PASSWORD_ITEST_OBSERVER?.trim();
+  const caFile = process.env.KAFKA_SSL_CA_FILE?.trim();
+  const ssl = /^(true|1|yes|on)$/i.test(process.env.KAFKA_SSL?.trim() ?? '');
+  return {
+    clientId,
+    brokers: config.kafkaBrokers,
+    ...(password
+      ? { sasl: { mechanism: 'scram-sha-512', username: OBSERVER_PRINCIPAL, password } }
+      : {}),
+    ...(ssl
+      ? { ssl: caFile ? { ca: [readFileSync(caFile, 'utf8')], rejectUnauthorized: true } : true }
+      : {}),
+  };
+}
 
 /**
  * One message off the topic, split the way the platform structures it.
@@ -68,15 +95,14 @@ export class EconomicEventTap {
     topic: string = config.economicTopic,
   ): Promise<EconomicEventTap> {
     const kafka = new Kafka({
-      clientId: `e2e-tap-${randomUUID()}`,
-      brokers: config.kafkaBrokers,
+      ...observerClient(config, `e2e-tap-${randomUUID()}`),
       logLevel: logLevel.ERROR,
       retry: { initialRetryTime: 200, retries: 8 },
     });
 
     // A fresh group per run, so one run never consumes another's offsets and a
     // re-run is not affected by where the previous one stopped.
-    const consumer = kafka.consumer({ groupId: `e2e-tap-${randomUUID()}` });
+    const consumer = kafka.consumer({ groupId: `${OBSERVER_PRINCIPAL}.e2e-tap-${randomUUID()}` });
     const tap = new EconomicEventTap(consumer);
 
     consumer.on(consumer.events.GROUP_JOIN, () => {

@@ -1,6 +1,6 @@
 import { Kafka, type Consumer } from 'kafkajs';
 import type { EventEnvelope } from '@rasta/contracts';
-import { OutboxRelay } from '@rasta/nest-common';
+import { OutboxRelay, kafkaClientConfig, kafkaConnectionFor } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
@@ -37,7 +37,9 @@ if (!brokerList) {
 
 describeWithKafka('fleet event flow over Kafka', () => {
   const org = tenants();
-  const groupId = `fleet-itest-${id('G').slice(-12)}`;
+  // The observer's own namespace (RUN-006): the broker lets `itest-observer`
+  // read every topic, under groups it prefixes, and nothing else.
+  const groupId = `itest-observer.fleet-${id('G').slice(-12)}`;
 
   let prisma: PrismaService;
   let repository: FleetRepository;
@@ -57,17 +59,16 @@ describeWithKafka('fleet event flow over Kafka', () => {
     repository = new FleetRepository(prisma);
     assignments = new AssignmentService(repository);
 
-    publisher = new KafkaEventPublisher({
-      brokers: brokerList!,
-      clientId: 'fleet-itest-producer',
-    });
+    // As fleet-service, the only principal the broker lets write its topic.
+    publisher = new KafkaEventPublisher(
+      kafkaConnectionFor('fleet-service', 'fleet-itest-producer'),
+    );
     relay = new OutboxRelay({ store: new PrismaOutboxStore(prisma), publisher });
 
     // A dedicated consumer group per run, reading only what this run
     // publishes: the topic is shared with whatever else is on the machine.
     const kafka = new Kafka({
-      clientId: 'fleet-itest-consumer',
-      brokers: brokerList!,
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'fleet-itest-consumer')),
       logLevel: 1,
     });
     consumer = kafka.consumer({ groupId, sessionTimeout: 30_000 });

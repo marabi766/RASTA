@@ -1,6 +1,11 @@
 import { Kafka, type Consumer } from 'kafkajs';
 import type { EventEnvelope } from '@rasta/contracts';
-import { OutboxRelay, runUnscoped } from '@rasta/nest-common';
+import {
+  OutboxRelay,
+  runUnscoped,
+  kafkaClientConfig,
+  kafkaConnectionFor,
+} from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
@@ -65,7 +70,7 @@ describeWithKafka('supplier event flow over Kafka', () => {
   const org = newOrganizationId();
   const platformOrg = newOrganizationId();
   const organizations = [org, platformOrg];
-  const groupId = `supplier-itest-${ulid().slice(-12)}`;
+  const groupId = `itest-observer.supplier-${ulid().slice(-12)}`;
 
   let wiring: Wiring;
   let prisma: PrismaService;
@@ -100,16 +105,14 @@ describeWithKafka('supplier event flow over Kafka', () => {
     prisma = wiring.prisma;
     await prisma.onModuleInit();
 
-    publisher = new KafkaEventPublisher({
-      brokers: brokerList as string[],
-      clientId: 'supplier-itest-producer',
-    });
+    publisher = new KafkaEventPublisher(
+      kafkaConnectionFor('supplier-service', 'supplier-itest-producer'),
+    );
     store = new PrismaOutboxStore(prisma);
     relay = new OutboxRelay({ store, publisher });
 
     const kafka = new Kafka({
-      clientId: 'supplier-itest',
-      brokers: brokerList as string[],
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'supplier-itest')),
       logLevel: 1,
     });
 
