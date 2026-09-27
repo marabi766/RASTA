@@ -19,6 +19,7 @@ import {
   TokenVerifier,
   toLogContext,
   type AuthGuardOptions,
+  kafkaConnection,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
@@ -125,10 +126,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
       provide: KafkaEventPublisher,
       inject: [ENV],
       useFactory: (env: MaintenanceEnv) =>
-        new KafkaEventPublisher({
-          brokers: brokersOf(env),
-          clientId: env.KAFKA_CLIENT_ID,
-        }),
+        new KafkaEventPublisher(kafkaConnection(env, env.KAFKA_CLIENT_ID)),
     },
 
     PrismaOutboxStore,
@@ -158,8 +156,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
           (handler) =>
             new EventConsumer(
               {
-                brokers: brokersOf(env),
-                clientId: `${env.KAFKA_CLIENT_ID}-usage`,
+                ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-usage`),
                 groupId: 'maintenance-service.usage',
                 topics: FLEET_TOPICS,
                 deadLetterTopic: MAINTENANCE_DLQ_TOPIC,
@@ -185,8 +182,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
           (handler) =>
             new EventConsumer(
               {
-                brokers: brokersOf(env),
-                clientId: `${env.KAFKA_CLIENT_ID}-asset-sync`,
+                ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-asset-sync`),
                 groupId: 'maintenance-service.asset-sync',
                 topics: ASSET_TOPICS,
                 deadLetterTopic: MAINTENANCE_DLQ_TOPIC,
@@ -309,8 +305,4 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.relay.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }
-}
-
-function brokersOf(env: MaintenanceEnv): string[] {
-  return env.KAFKA_BROKERS.split(',').map((broker) => broker.trim());
 }

@@ -19,6 +19,7 @@ import {
   TokenVerifier,
   toLogContext,
   type AuthGuardOptions,
+  kafkaConnection,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
@@ -95,10 +96,7 @@ const CONSUMED_TOPICS = [
       provide: KafkaEventPublisher,
       inject: [ENV],
       useFactory: (env: AssetEnv) =>
-        new KafkaEventPublisher({
-          brokers: brokersOf(env),
-          clientId: env.KAFKA_CLIENT_ID,
-        }),
+        new KafkaEventPublisher(kafkaConnection(env, env.KAFKA_CLIENT_ID)),
     },
 
     PrismaOutboxStore,
@@ -143,8 +141,7 @@ const CONSUMED_TOPICS = [
           (handler) =>
             new EventConsumer(
               {
-                brokers: brokersOf(env),
-                clientId: `${env.KAFKA_CLIENT_ID}-timeline`,
+                ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-timeline`),
                 groupId: 'asset-service.timeline',
                 topics: CONSUMED_TOPICS,
                 deadLetterTopic: 'rasta.asset.v1.dlq',
@@ -275,8 +272,4 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
     if (this.sweepTimer) clearInterval(this.sweepTimer);
   }
-}
-
-function brokersOf(env: AssetEnv): string[] {
-  return env.KAFKA_BROKERS.split(',').map((broker) => broker.trim());
 }

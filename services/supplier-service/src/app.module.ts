@@ -18,6 +18,7 @@ import {
   TokenVerifier,
   toLogContext,
   type AuthGuardOptions,
+  kafkaConnection,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
@@ -39,7 +40,7 @@ import { SuspensionService } from './supplier/suspension.service';
 import { SupplierController } from './supplier/supplier.controller';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER } from './tokens';
-import { brokersOf, loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './config/env';
+import { loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './config/env';
 
 /**
  * supplier-service wiring.
@@ -104,10 +105,7 @@ import { brokersOf, loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './co
       provide: KafkaEventPublisher,
       inject: [ENV],
       useFactory: (env: SupplierEnv) =>
-        new KafkaEventPublisher({
-          brokers: brokersOf(env),
-          clientId: env.KAFKA_CLIENT_ID,
-        }),
+        new KafkaEventPublisher(kafkaConnection(env, env.KAFKA_CLIENT_ID)),
     },
 
     PrismaOutboxStore,

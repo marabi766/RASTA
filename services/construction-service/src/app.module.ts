@@ -18,6 +18,7 @@ import {
   TokenVerifier,
   toLogContext,
   type AuthGuardOptions,
+  kafkaConnection,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
@@ -49,7 +50,7 @@ import { ProgressService } from './progress/progress.service';
 import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER } from './tokens';
-import { brokersOf, loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './config/env';
+import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './config/env';
 
 /**
  * construction-service wiring (CON-001).
@@ -105,10 +106,7 @@ import { brokersOf, loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } fr
       provide: KafkaEventPublisher,
       inject: [ENV],
       useFactory: (env: ConstructionEnv) =>
-        new KafkaEventPublisher({
-          brokers: brokersOf(env),
-          clientId: env.KAFKA_CLIENT_ID,
-        }),
+        new KafkaEventPublisher(kafkaConnection(env, env.KAFKA_CLIENT_ID)),
     },
 
     PrismaOutboxStore,

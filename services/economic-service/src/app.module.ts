@@ -19,6 +19,7 @@ import {
   TokenVerifier,
   toLogContext,
   type AuthGuardOptions,
+  kafkaConnection,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
@@ -135,10 +136,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
       provide: KafkaEventPublisher,
       inject: [ENV],
       useFactory: (env: EconomicEnv) =>
-        new KafkaEventPublisher({
-          brokers: brokersOf(env),
-          clientId: env.KAFKA_CLIENT_ID,
-        }),
+        new KafkaEventPublisher(kafkaConnection(env, env.KAFKA_CLIENT_ID)),
     },
 
     PrismaOutboxStore,
@@ -210,8 +208,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
           (handler) =>
             new EventConsumer(
               {
-                brokers: brokersOf(env),
-                clientId: `${env.KAFKA_CLIENT_ID}-settlement-authority`,
+                ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-settlement-authority`),
                 groupId: 'economic-service.settlement-authority',
                 topics: MAINTENANCE_TOPICS,
                 deadLetterTopic: ECONOMIC_DLQ_TOPIC,
@@ -244,8 +241,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
           (handler) =>
             new EventConsumer(
               {
-                brokers: brokersOf(env),
-                clientId: `${env.KAFKA_CLIENT_ID}-reward-trigger`,
+                ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-reward-trigger`),
                 groupId: 'economic-service.reward-trigger',
                 topics: REWARD_TRIGGER_TOPICS,
                 deadLetterTopic: ECONOMIC_DLQ_TOPIC,
@@ -381,8 +377,4 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.relay.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }
-}
-
-function brokersOf(env: EconomicEnv): string[] {
-  return env.KAFKA_BROKERS.split(',').map((broker) => broker.trim());
 }

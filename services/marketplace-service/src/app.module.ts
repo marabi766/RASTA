@@ -18,6 +18,7 @@ import {
   TokenVerifier,
   toLogContext,
   type AuthGuardOptions,
+  kafkaConnection,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
@@ -96,10 +97,7 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
       provide: KafkaEventPublisher,
       inject: [ENV],
       useFactory: (env: MarketplaceEnv) =>
-        new KafkaEventPublisher({
-          brokers: brokersOf(env),
-          clientId: env.KAFKA_CLIENT_ID,
-        }),
+        new KafkaEventPublisher(kafkaConnection(env, env.KAFKA_CLIENT_ID)),
     },
 
     PrismaOutboxStore,
@@ -226,10 +224,4 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
     await this.relay.stop();
   }
-}
-
-function brokersOf(env: MarketplaceEnv): string[] {
-  return env.KAFKA_BROKERS.split(',')
-    .map((broker) => broker.trim())
-    .filter((broker) => broker.length > 0);
 }
