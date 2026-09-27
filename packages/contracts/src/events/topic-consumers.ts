@@ -35,8 +35,9 @@ import {
  * declared here, and — once it authenticates to the broker — one whose group
  * is outside its own principal's namespace.
  *
- * A service with no consumer (organization, marketplace, document, supplier,
- * construction today) is absent. Adding a consumer means declaring it here.
+ * A service with no consumer (organization, marketplace, document,
+ * construction today) is absent. Adding a consumer means declaring it here;
+ * `topic-consumers.repo.spec.ts` fails the build for one that is not.
  */
 
 /** Every declared topic: audit-service's domain projector and trail consumer read all of them. */
@@ -75,6 +76,13 @@ export const TOPIC_CONSUMERS = Object.freeze({
   'notification-service': Object.freeze({
     subscribes: Object.freeze(['rasta.insurance.v1', 'rasta.maintenance.v1'] as const),
     deadLetterTopic: 'rasta.notification.v1.dlq',
+  }),
+  // ADR-052 step 5 (#126): scores suppliers on marketplace outcomes. Its
+  // consumer stays refused at startup until the broker authenticates
+  // producers (RUN-006 PR B); the declaration is what the ACLs read.
+  'supplier-service': Object.freeze({
+    subscribes: Object.freeze(['rasta.marketplace.v1'] as const),
+    deadLetterTopic: 'rasta.supplier.v1.dlq',
   }),
   'audit-service': Object.freeze({
     subscribes: EVERY_DECLARED_TOPIC,

@@ -46,6 +46,10 @@ describe('TOPIC_CONSUMERS', () => {
         subscribes: ['rasta.insurance.v1', 'rasta.maintenance.v1'],
         deadLetterTopic: 'rasta.notification.v1.dlq',
       },
+      'supplier-service': {
+        subscribes: ['rasta.marketplace.v1'],
+        deadLetterTopic: 'rasta.supplier.v1.dlq',
+      },
       'audit-service': {
         subscribes: Object.keys(TOPIC_PRODUCERS),
         deadLetterTopic: 'rasta.audit.v1.dlq',
