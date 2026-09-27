@@ -145,8 +145,7 @@ import { loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './config/env';
             (handler) =>
               new EventConsumer(
                 {
-                  brokers: brokersOf(env),
-                  clientId: `${env.KAFKA_CLIENT_ID}-performance`,
+                  ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-performance`),
                   groupId: PERFORMANCE_CONSUMER,
                   topics: [...PERFORMANCE_CONSUMED_TOPICS],
                   deadLetterTopic: SUPPLIER_DEAD_LETTER_TOPIC,
