@@ -159,7 +159,7 @@ export class RepairOrderService {
     }
 
     await this.assertStillOwner(request.assetId, request.organizationId);
-    await this.settleFence(request.assetId);
+    await this.settleFence(request.assetId, request.organizationId);
 
     const verdict = await this.workshops.verify({
       workshopOrganizationId: dto.workshopOrganizationId,
@@ -279,7 +279,7 @@ export class RepairOrderService {
     if (request.status === 'OPEN') assertRequestTransition(request.status, 'IN_PROGRESS');
 
     await this.assertStillOwner(request.assetId, request.organizationId);
-    await this.settleFence(request.assetId);
+    await this.settleFence(request.assetId, request.organizationId);
 
     const actor = getContext().userId ?? 'SYSTEM';
     const startedAt = dto.startedAt ? new Date(dto.startedAt) : new Date();
@@ -970,8 +970,11 @@ export class RepairOrderService {
    * work-start takes the lock (ADR-062 § 3b). A transfer that landed refuses
    * the work; no answer refuses it too, retryably.
    */
-  private async settleFence(assetId: string): Promise<void> {
-    if ((await settleExpiredFence(this.repository, this.records, assetId)) === 'RECORDED') {
+  private async settleFence(assetId: string, organizationId: string): Promise<void> {
+    if (
+      (await settleExpiredFence(this.repository, this.records, assetId, organizationId)) ===
+      'RECORDED'
+    ) {
       throw ownerChanged(assetId);
     }
   }

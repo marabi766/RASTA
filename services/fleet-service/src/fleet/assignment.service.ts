@@ -130,9 +130,22 @@ export class AssignmentService {
       );
     }
 
+    // The machine must be the caller's before anything is asked about its
+    // fence (review #127 round 2, #1): otherwise another organization could
+    // tell a recorded transfer from an absent fence, or lift a fence that is
+    // not its own. The same 404 as for an absent machine.
+    await this.assertAssetOwned(dto.assetId);
+
     // An expired transfer fence is resolved at its source, never by time
     // (ADR-062 § 3b): a transfer that landed refuses the assignment.
-    if ((await settleExpiredFence(this.repository, this.records, dto.assetId)) === 'RECORDED') {
+    if (
+      (await settleExpiredFence(
+        this.repository,
+        this.records,
+        dto.assetId,
+        getOrganizationId(),
+      )) === 'RECORDED'
+    ) {
       throw ownerChanged(dto.assetId);
     }
 
@@ -302,18 +315,22 @@ export class AssignmentService {
    * never appears is a typo or another tenant's machine, and assigning a
    * driver to it would create an assignment nobody can ever see.
    */
-  private async assertAssetAssignable(assetId: string, tx?: ExtendedPrismaClient): Promise<void> {
+  /**
+   * The machine as the replica sees it, only if it belongs to the caller's
+   * organization. Absent and elsewhere are the same 404: confirming the
+   * machine exists elsewhere would let a caller enumerate another
+   * organization's fleet.
+   */
+  private async assertAssetOwned(assetId: string, tx?: ExtendedPrismaClient) {
     const asset = await this.repository.findAssetRef(assetId, tx);
-
-    if (!asset) {
+    if (!asset || asset.organizationId !== getOrganizationId()) {
       throw RastaError.notFound('Asset', assetId);
     }
+    return asset;
+  }
 
-    if (asset.organizationId !== getOrganizationId()) {
-      // Reported as absent, not as forbidden: confirming the machine exists
-      // elsewhere would let a caller enumerate another organization's fleet.
-      throw RastaError.notFound('Asset', assetId);
-    }
+  private async assertAssetAssignable(assetId: string, tx?: ExtendedPrismaClient): Promise<void> {
+    const asset = await this.assertAssetOwned(assetId, tx);
 
     // A transfer asked whether the machine is free and was told yes (ADR-062).
     // Under `lockAssetRef` this is exact: the fence and this insert cannot

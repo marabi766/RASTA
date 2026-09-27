@@ -494,20 +494,33 @@ export class MaintenanceRepository {
   }
 
   /**
-   * Lifts one transfer's fence. Only the organization that placed it can.
+   * Lifts one transfer's fence and remembers that the transfer was released.
+   * Only the organization that placed it can.
    *
-   * Under the exclusive per-asset lock, the one the clearance holds while it
-   * counts and fences (review #127 #4): a release that arrives while that
-   * clearance is still running waits for its fence and removes it, rather
-   * than finding nothing and letting the fence be written after it.
+   * Under the per-asset lock the clearance holds while it counts and fences
+   * (review #127 #4): a release that arrives while that clearance is still
+   * running waits for its fence and removes it. And one that arrives before
+   * the clearance has taken the lock at all leaves a tombstone the clearance
+   * then finds, so it fences nothing (review #127 round 2, #2). The
+   * tombstone outlives the longest fence; this machine's expired ones are
+   * removed here.
    */
   async releaseTransferFence(
     assetId: string,
     organizationId: string,
     fenceId: string,
+    keepSeconds: number,
   ): Promise<number> {
     return this.transaction(async (tx) => {
       await this.lockAssetForWork(tx, assetId, 'EXCLUSIVE');
+      await tx.$executeRaw`
+        DELETE FROM asset_transfer_release WHERE asset_id = ${assetId} AND expires_at <= now()`;
+      await tx.$executeRaw`
+        INSERT INTO asset_transfer_release
+          (asset_id, fence_id, organization_id, released_at, expires_at)
+        VALUES (${assetId}, ${fenceId}, ${organizationId}, now(),
+                now() + make_interval(secs => ${keepSeconds}::int))
+        ON CONFLICT (asset_id, fence_id) DO NOTHING`;
       return tx.$executeRaw`
         DELETE FROM asset_transfer_fence
         WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}`;
@@ -530,6 +543,19 @@ export class MaintenanceRepository {
       WHERE id = ${id} AND organization_id = ${organizationId}
       FOR NO KEY UPDATE`;
     return rows[0]?.status ?? null;
+  }
+
+  /** Whether this organization already released this transfer on this machine. Under the lock. */
+  async isTransferReleased(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    organizationId: string,
+    fenceId: string,
+  ): Promise<boolean> {
+    const rows = await tx.$queryRaw<{ fence_id: string }[]>`
+      SELECT fence_id FROM asset_transfer_release
+      WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}`;
+    return rows.length > 0;
   }
 
   /** The transfer landed: whatever the previous owner fenced is moot. */

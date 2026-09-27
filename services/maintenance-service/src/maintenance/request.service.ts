@@ -172,7 +172,14 @@ export class RequestService {
 
     // An expired transfer fence is resolved at its source, never by time
     // (ADR-062 § 3b): a transfer that landed refuses the report.
-    if ((await settleExpiredFence(this.repository, this.records, dto.assetId)) === 'RECORDED') {
+    if (
+      (await settleExpiredFence(
+        this.repository,
+        this.records,
+        dto.assetId,
+        getOrganizationId(),
+      )) === 'RECORDED'
+    ) {
       throw ownerChanged(dto.assetId);
     }
 

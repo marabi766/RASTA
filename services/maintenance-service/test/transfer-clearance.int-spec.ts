@@ -662,4 +662,184 @@ describe('transfer clearance', () => {
       expect(await fenceRow(assetId)).toMatchObject({ fence_id: next });
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Review #127 round 2
+  // -------------------------------------------------------------------------
+
+  describe('round 2', () => {
+    type Answer = 'RECORDED' | 'NOT_RECORDED' | 'UNREACHABLE';
+
+    function scripted(answer: Answer, gate?: Promise<void>) {
+      const asked: unknown[][] = [];
+      const records: TransferRecordSource & { asked: unknown[][] } = {
+        asked,
+        resolve: async (...args) => {
+          asked.push(args);
+          await gate;
+          if (answer === 'UNREACHABLE') throw RastaError.upstreamUnavailable('asset-service');
+          return answer;
+        },
+      };
+      return records;
+    }
+
+    async function expiredFence(assetId: string): Promise<string> {
+      const fenceId = fence();
+      await ask(org.a, assetId, fenceId);
+      await prisma.client.$executeRawUnsafe(
+        `UPDATE asset_transfer_fence SET expires_at = now() - interval '1 second' WHERE asset_id = $1`,
+        assetId,
+      );
+      return fenceId;
+    }
+
+    describe('tenant isolation of the fence resolution (#1)', () => {
+      it.each(['RECORDED', 'NOT_RECORDED', 'UNREACHABLE'] as const)(
+        'answers another organization’s report with the same 404, and leaves the fence alone, when the source would say %s',
+        async (answer) => {
+          const assetId = await machine();
+          const fenceId = await expiredFence(assetId);
+          const records = scripted(answer);
+
+          const result = await outcome(
+            asActor({ organizationId: org.b }, () =>
+              new RequestService(repository, records).create({
+                assetId,
+                type: 'CORRECTIVE',
+                severity: 'HIGH',
+                title: 'نشتی روغن',
+              }),
+            ),
+          );
+
+          expect(result).toBe('NOT_FOUND');
+          expect(records.asked).toEqual([]);
+          expect(await fenceRow(assetId)).toMatchObject({ fence_id: fenceId });
+        },
+      );
+
+      it.each(['RECORDED', 'NOT_RECORDED', 'UNREACHABLE'] as const)(
+        'answers another organization’s clearance with the same 404, and leaves the fence alone, when the source would say %s',
+        async (answer) => {
+          const assetId = await machine();
+          const fenceId = await expiredFence(assetId);
+          const records = scripted(answer);
+
+          const result = await outcome(
+            asService(CLEARANCE_CALLER, org.b, () =>
+              new TransferClearanceService(repository, records).clear(assetId, {
+                fenceId: fence(),
+                ttlSeconds: 600,
+              }),
+            ),
+          );
+
+          expect(result).toBe('NOT_FOUND');
+          expect(records.asked).toEqual([]);
+          expect(await fenceRow(assetId)).toMatchObject({ fence_id: fenceId });
+        },
+      );
+    });
+
+    describe('a release that overtakes its clearance (#2)', () => {
+      it('leaves a tombstone, so a clearance that reaches the lock later fences nothing', async () => {
+        const assetId = await machine();
+        const fenceId = fence();
+
+        await asService(CLEARANCE_CALLER, org.a, () => clearance.release(assetId, fenceId));
+
+        await expect(ask(org.a, assetId, fenceId)).rejects.toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+        });
+        expect(await fenceRow(assetId)).toBeUndefined();
+        await expect(ask(org.a, assetId)).resolves.toMatchObject({ clear: true });
+      });
+
+      it('holds when the clearance is paused before its lock, resolving an older fence, while the release completes', async () => {
+        const assetId = await machine();
+        await expiredFence(assetId);
+        const next = fence();
+        let open!: () => void;
+        const gate = new Promise<void>((resolve) => (open = resolve));
+        const records = scripted('NOT_RECORDED', gate);
+
+        const answer = outcome(
+          asService(CLEARANCE_CALLER, org.a, () =>
+            new TransferClearanceService(repository, records).clear(assetId, {
+              fenceId: next,
+              ttlSeconds: 600,
+            }),
+          ),
+        );
+        for (let attempt = 0; attempt < 200 && records.asked.length === 0; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(records.asked).toHaveLength(1);
+
+        await asService(CLEARANCE_CALLER, org.a, () => clearance.release(assetId, next));
+        open();
+
+        expect(await answer).toBe('INVALID_STATE_TRANSITION');
+        expect(await fenceRow(assetId)).toBeUndefined();
+      });
+    });
+
+    describe('a repair start under the lock (round 1 follow-up)', () => {
+      async function referred(assetId: string) {
+        const request = await report(org.a, assetId);
+        return asActor({ organizationId: org.a }, () =>
+          repairOrders.assign(request.id, { workshopOrganizationId: workshop }),
+        );
+      }
+
+      const orderStatus = async (id: string) =>
+        (
+          await prisma.client.$queryRawUnsafe<{ status: string }[]>(
+            `SELECT status::text AS status FROM repair_order WHERE id = $1`,
+            id,
+          )
+        )[0]!.status;
+
+      it.each([
+        [
+          'the machine moves to another owner',
+          `UPDATE asset_ref SET organization_id = $2 WHERE id = $1`,
+          'b',
+          'ASSET_OWNER_CHANGED',
+        ],
+        [
+          'a transfer fence is placed',
+          `INSERT INTO asset_transfer_fence (asset_id, organization_id, fence_id, expires_at, created_at)
+           VALUES ($1, $2, 'TRF_01JSTARTRACE000000000000001', now() + interval '600 seconds', now())`,
+          'a',
+          'ASSET_TRANSFER_IN_PROGRESS',
+        ],
+      ] as const)(
+        're-checks under the lock when %s while the start waits for it',
+        async (_label, statement, organization, expected) => {
+          const assetId = await machine();
+          const order = await referred(assetId);
+
+          // The consumer of ASSET_TRANSFERRED, or a clearance, holding the
+          // exclusive lock with its change written but not committed. The
+          // start reads the old owner before it and then queues behind it.
+          const commit = await holding(async (tx: never) => {
+            await repository.lockAssetForWork(tx, assetId, 'EXCLUSIVE');
+            await (
+              tx as { $executeRawUnsafe: (q: string, ...v: unknown[]) => Promise<number> }
+            ).$executeRawUnsafe(statement, assetId, org[organization]);
+          });
+          const started = outcome(
+            asActor({ organizationId: org.a }, () => repairOrders.start(order.id, {})),
+          );
+          await waitForLockWaiters(1);
+          await commit();
+
+          expect(await started).toBe(expected);
+          expect(await orderStatus(order.id)).toBe('OPEN');
+        },
+      );
+    });
+  });
 });

@@ -423,6 +423,24 @@ model AssetTransferFence {
   @@map("asset_transfer_fence")
 }
 
+/// A transfer whose fence asset-service released: the transfer did not
+/// happen (ADR-062, review #127 round 2).
+///
+/// Written under the exclusive per-asset lock by the release, so a clearance
+/// for the same transfer that reaches the lock later finds it and places no
+/// fence. Ids only; kept at least an hour and removed by expiry.
+model AssetTransferRelease {
+  assetId        String   @map("asset_id")
+  /// The transfer's id in asset-service (`TRF_…`).
+  fenceId        String   @map("fence_id")
+  organizationId String   @map("organization_id")
+  releasedAt     DateTime @map("released_at") @db.Timestamptz(3)
+  expiresAt      DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@id([assetId, fenceId])
+  @@map("asset_transfer_release")
+}
+
 // -----------------------------------------------------------------------------
 // Platform plumbing (ADR-021)
 // -----------------------------------------------------------------------------

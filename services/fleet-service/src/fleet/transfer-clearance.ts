@@ -94,15 +94,44 @@ export class TransferClearanceService {
     // A token with no organization is a 403 here, before any query.
     const organizationId = getOrganizationId();
 
+    // Whose machine it is, before anything is asked about its fence (review
+    // #127 round 2, #1). Absent is fine: no work can exist for a machine the
+    // replica has never seen. Present elsewhere is either another tenant's
+    // machine or a replica that has not caught up with a transfer; neither is
+    // answered, and no fence on it is resolved.
+    const asset = await this.repository.findAssetRef(assetId);
+    if (asset && asset.organizationId !== organizationId) {
+      throw RastaError.notFound('Asset', assetId);
+    }
+
     // An expired fence of another transfer is resolved at its source before
     // this one may take its place (ADR-062 § 3b). One that landed means the
-    // replica has not caught up with it yet: a conflict to retry.
-    if ((await settleExpiredFence(this.repository, this.records, assetId)) === 'RECORDED') {
+    // replica has not caught up with it yet, and one another organization
+    // placed is not this caller's to resolve: a conflict either way.
+    const settled = await settleExpiredFence(
+      this.repository,
+      this.records,
+      assetId,
+      organizationId,
+    );
+    if (settled === 'RECORDED' || settled === 'FOREIGN') {
       throw anotherTransfer();
     }
 
     return this.repository.transaction(async (tx) => {
       await this.repository.lockAssetRef(tx, assetId);
+
+      // Released already: asset-service gave up on this transfer, and its
+      // release reached the lock first (review #127 round 2, #2). No fence
+      // for a transfer that no longer exists.
+      if (await this.repository.isTransferReleased(tx, assetId, organizationId, dto.fenceId)) {
+        throw RastaError.invalidStateTransition(
+          'Asset',
+          'TRANSFER_PENDING',
+          'TRANSFER_PENDING',
+          'This transfer was withdrawn',
+        );
+      }
 
       // Absent is fine: no assignment can exist for a machine the replica has
       // never seen, and the fence below still stops the first one. Present in
@@ -146,7 +175,12 @@ export class TransferClearanceService {
   async release(assetId: string, fenceId: string): Promise<void> {
     assertClearanceCaller();
     const organizationId = getOrganizationId();
-    await this.repository.releaseTransferFence(assetId, organizationId, fenceId);
+    await this.repository.releaseTransferFence(
+      assetId,
+      organizationId,
+      fenceId,
+      FENCE_TTL_MAX_SECONDS,
+    );
   }
 }
 

@@ -153,7 +153,8 @@ export interface FenceStore {
  * takes the per-asset lock.
  *
  * `NONE` or `LIVE`: nothing to resolve (the caller's check under the lock
- * refuses a live fence). `CLEARED`: the transfer was not recorded and the
+ * refuses a live fence). `FOREIGN`: an expired fence another organization
+ * placed; not resolved here, and refused under the lock. `CLEARED`: the transfer was not recorded and the
  * fence is gone. `RECORDED`: the transfer landed; the caller refuses. Throws
  * when asset-service gives no answer.
  *
@@ -166,10 +167,16 @@ export async function settleExpiredFence(
   store: FenceStore,
   source: TransferRecordSource,
   assetId: string,
-): Promise<'NONE' | 'LIVE' | 'CLEARED' | 'RECORDED'> {
+  organizationId: string,
+): Promise<'NONE' | 'LIVE' | 'FOREIGN' | 'CLEARED' | 'RECORDED'> {
   const fence = await store.findTransferFence(assetId);
   if (!fence) return 'NONE';
   if (!fence.expired) return 'LIVE';
+  // Only the organization that placed a fence has it resolved (review #127
+  // round 2, #1). The caller has already shown the machine is its own; a
+  // fence of another organization is never asked about or lifted on its
+  // behalf — the check under the lock refuses it instead.
+  if (fence.organizationId !== organizationId) return 'FOREIGN';
 
   let answer: TransferRecord;
   try {

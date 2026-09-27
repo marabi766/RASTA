@@ -141,22 +141,36 @@ describe('settleExpiredFence', () => {
 
   it('asks nothing when there is no fence, or a live one', async () => {
     const source = answering('NOT_RECORDED');
-    expect(await settleExpiredFence(store(null).instance, source, ASSET)).toBe('NONE');
+    expect(await settleExpiredFence(store(null).instance, source, ASSET, ORG)).toBe('NONE');
     expect(
       await settleExpiredFence(
         store({ fenceId: FENCE, organizationId: ORG, expired: false }).instance,
         source,
         ASSET,
+        ORG,
       ),
     ).toBe('LIVE');
     expect(source.asked).toEqual([]);
+  });
+
+  it('never resolves a fence another organization placed', async () => {
+    const { instance, cleared } = store({
+      fenceId: FENCE,
+      organizationId: 'ORG-OTHER',
+      expired: true,
+    });
+    const source = answering('NOT_RECORDED');
+
+    expect(await settleExpiredFence(instance, source, ASSET, ORG)).toBe('FOREIGN');
+    expect(source.asked).toEqual([]);
+    expect(cleared).toEqual([]);
   });
 
   it('keeps the fence of a transfer that was recorded', async () => {
     const { instance, cleared } = store({ fenceId: FENCE, organizationId: ORG, expired: true });
     const source = answering('RECORDED');
 
-    expect(await settleExpiredFence(instance, source, ASSET)).toBe('RECORDED');
+    expect(await settleExpiredFence(instance, source, ASSET, ORG)).toBe('RECORDED');
     expect(source.asked).toEqual([[ORG, ASSET, FENCE]]);
     expect(cleared).toEqual([]);
   });
@@ -164,7 +178,9 @@ describe('settleExpiredFence', () => {
   it('clears exactly that fence when its transfer was not recorded', async () => {
     const { instance, cleared } = store({ fenceId: FENCE, organizationId: ORG, expired: true });
 
-    expect(await settleExpiredFence(instance, answering('NOT_RECORDED'), ASSET)).toBe('CLEARED');
+    expect(await settleExpiredFence(instance, answering('NOT_RECORDED'), ASSET, ORG)).toBe(
+      'CLEARED',
+    );
     expect(cleared).toEqual([FENCE]);
   });
 
@@ -172,7 +188,7 @@ describe('settleExpiredFence', () => {
     const { instance, cleared } = store({ fenceId: FENCE, organizationId: ORG, expired: true });
 
     await expect(
-      settleExpiredFence(instance, UNCONFIGURED_TRANSFER_RECORD_SOURCE, ASSET),
+      settleExpiredFence(instance, UNCONFIGURED_TRANSFER_RECORD_SOURCE, ASSET, ORG),
     ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
     expect(cleared).toEqual([]);
   });

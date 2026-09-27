@@ -477,4 +477,133 @@ describe('transfer clearance', () => {
       expect(answer.clear).toBe(first === 'clearance');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Review #127 round 2
+  // -------------------------------------------------------------------------
+
+  describe('round 2', () => {
+    type Answer = 'RECORDED' | 'NOT_RECORDED' | 'UNREACHABLE';
+
+    function source(answer: Answer, gate?: Promise<void>) {
+      const asked: unknown[][] = [];
+      const records: TransferRecordSource & { asked: unknown[][] } = {
+        asked,
+        resolve: async (...args) => {
+          asked.push(args);
+          await gate;
+          if (answer === 'UNREACHABLE') throw RastaError.upstreamUnavailable('asset-service');
+          return answer;
+        },
+      };
+      return records;
+    }
+
+    async function expiredFence(assetId: string): Promise<string> {
+      const fenceId = fence();
+      await ask(org.a, assetId, fenceId);
+      await prisma.client.$executeRawUnsafe(
+        `UPDATE asset_transfer_fence SET expires_at = now() - interval '1 second' WHERE asset_id = $1`,
+        assetId,
+      );
+      return fenceId;
+    }
+
+    const refusal = (promise: Promise<unknown>) =>
+      promise.then(
+        () => 'OK',
+        (error: { code?: string; internalContext?: { rule?: string } }) =>
+          error.internalContext?.rule ?? error.code ?? 'ERROR',
+      );
+
+    describe('tenant isolation of the fence resolution (#1)', () => {
+      it.each(['RECORDED', 'NOT_RECORDED', 'UNREACHABLE'] as const)(
+        'answers another organization’s assignment with the same 404, and leaves the fence alone, when the source would say %s',
+        async (answer) => {
+          const assetId = await machine(org.a);
+          const fenceId = await expiredFence(assetId);
+          const records = source(answer);
+          const driverId = await driver(org.b);
+
+          const outcome = await refusal(
+            asActor({ organizationId: org.b }, () =>
+              new AssignmentService(repository, undefined, records).create({ driverId, assetId }),
+            ),
+          );
+
+          expect(outcome).toBe('NOT_FOUND');
+          expect(records.asked).toEqual([]);
+          expect((await fenceRow(assetId))!.fence_id).toBe(fenceId);
+        },
+      );
+
+      it.each(['RECORDED', 'NOT_RECORDED', 'UNREACHABLE'] as const)(
+        'answers another organization’s clearance with the same 404, and leaves the fence alone, when the source would say %s',
+        async (answer) => {
+          const assetId = await machine(org.a);
+          const fenceId = await expiredFence(assetId);
+          const records = source(answer);
+
+          const outcome = await refusal(
+            asService(CLEARANCE_CALLER, org.b, () =>
+              new TransferClearanceService(repository, records).clear(assetId, {
+                fenceId: fence(),
+                ttlSeconds: 600,
+              }),
+            ),
+          );
+
+          expect(outcome).toBe('NOT_FOUND');
+          expect(records.asked).toEqual([]);
+          expect((await fenceRow(assetId))!.fence_id).toBe(fenceId);
+        },
+      );
+    });
+
+    describe('a release that overtakes its clearance (#2)', () => {
+      it('leaves a tombstone, so a clearance that reaches the lock later fences nothing', async () => {
+        const assetId = await machine(org.a);
+        const fenceId = fence();
+
+        await asService(CLEARANCE_CALLER, org.a, () => clearance.release(assetId, fenceId));
+
+        await expect(ask(org.a, assetId, fenceId)).rejects.toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+        });
+        expect(await fenceRow(assetId)).toBeUndefined();
+        // Another transfer is not affected.
+        await expect(ask(org.a, assetId)).resolves.toMatchObject({ clear: true });
+      });
+
+      it('holds when the clearance is paused before its lock, resolving an older fence, while the release completes', async () => {
+        const assetId = await machine(org.a);
+        await expiredFence(assetId);
+        const next = fence();
+        let open!: () => void;
+        const gate = new Promise<void>((resolve) => (open = resolve));
+        const records = source('NOT_RECORDED', gate);
+
+        const answer = refusal(
+          asService(CLEARANCE_CALLER, org.a, () =>
+            new TransferClearanceService(repository, records).clear(assetId, {
+              fenceId: next,
+              ttlSeconds: 600,
+            }),
+          ),
+        );
+        // The clearance is inside the source question, before any lock.
+        for (let attempt = 0; attempt < 200 && records.asked.length === 0; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(records.asked).toHaveLength(1);
+
+        // asset-service gave up and released; the release finds no fence yet.
+        await asService(CLEARANCE_CALLER, org.a, () => clearance.release(assetId, next));
+        open();
+
+        expect(await answer).toBe('INVALID_STATE_TRANSITION');
+        expect(await fenceRow(assetId)).toBeUndefined();
+      });
+    });
+  });
 });
