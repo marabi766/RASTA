@@ -1,9 +1,10 @@
-import { AUDIT_TRAIL_TOPIC, DLQ_REASONS } from './envelope';
+import { AUDIT_TRAIL_TOPIC, DLQ_REASONS, PRODUCER_NAME_PATTERN } from './envelope';
 import {
   TOPIC_PRODUCERS,
   isAllowedProducer,
   isDeclaredTopic,
   ownerTopicOf,
+  producersOf,
 } from './topic-producers';
 
 /**
@@ -50,6 +51,12 @@ describe('TOPIC_PRODUCERS', () => {
     expect(Object.keys(TOPIC_PRODUCERS).filter((t) => /\.(retry|dlq)$/.test(t))).toEqual([]);
   });
 
+  it('names only producers a valid envelope can carry', () => {
+    for (const producer of Object.values(TOPIC_PRODUCERS).flat()) {
+      expect([producer, PRODUCER_NAME_PATTERN.test(producer)]).toEqual([producer, true]);
+    }
+  });
+
   it('has a dead-letter reason for a refusal', () => {
     expect(DLQ_REASONS.PRODUCER_NOT_ALLOWED).toBe('PRODUCER_NOT_ALLOWED');
   });
@@ -72,6 +79,13 @@ describe('isAllowedProducer', () => {
     expect(isAllowedProducer('rasta.asset.v1', 'asset-servíce')).toBe(false);
     expect(isAllowedProducer('rasta.asset.v1', '')).toBe(false);
     expect(isAllowedProducer('rasta.procurement.v1', 'procurement-service')).toBe(false);
+  });
+
+  it('lists a topic’s producers, and none for an undeclared topic', () => {
+    expect(producersOf('rasta.insurance.v1')).toEqual(['asset-service']);
+    expect(producersOf('rasta.insurance.v1.retry')).toEqual(['asset-service']);
+    expect(producersOf('rasta.procurement.v1')).toEqual([]);
+    expect(producersOf('__proto__')).toEqual([]);
   });
 
   it('is not fooled by an inherited property name', () => {

@@ -701,11 +701,10 @@ describe('source_service label on path B', () => {
   });
 
   it.each([
-    ['an arbitrary producer', 'SENTINEL-invented-service'],
+    ['an arbitrary, well-formed producer', 'sentinel-invented-service'],
     ['a domain owner that is not a trail producer', 'asset-service'],
     ['audit-service itself', 'audit-service'],
     ['the fallback spelled by the producer', 'unknown'],
-    ['a near-miss casing', 'IDENTITY-SERVICE'],
   ])('counts %s under the fallback and stores the claim unchanged', async (_case, producer) => {
     const record = await write(producer);
 
@@ -720,15 +719,29 @@ describe('source_service label on path B', () => {
     expect(await labelValues()).toEqual(['unknown']);
   });
 
-  it('never turns an overlong producer into a label, and stores it bounded as before', async () => {
-    const producer = `identity-service${'SENTINEL'.repeat(600)}`;
+  it.each([
+    ['a near-miss casing', 'IDENTITY-SERVICE'],
+    ['an overlong producer', `identity-service${'sentinel'.repeat(600)}`],
+    ['a control character', 'identity-service\nsentinel'],
+  ])(
+    'refuses %s as an invalid envelope: nothing stored, no label (Codex review of #124)',
+    async (_case, producer) => {
+      // The envelope schema bounds `producer` to a service name, so these never
+      // reach a label or a row. The shared consumer refuses them first; this
+      // handler, re-validating the envelope, refuses them again.
+      const ingested: IngestCall[] = [];
 
-    const record = await write(producer);
-
-    expect(record.sourceService).toBe(producer.slice(0, 128));
-    expect(await labelValues()).toEqual(['unknown']);
-    expect(JSON.stringify(await series())).not.toContain('SENTINEL');
-  });
+      await expect(
+        trailWith([], async (...args) => {
+          ingested.push(args);
+          return 'WRITTEN';
+        }).handle(envelope(payload(), { producer }), delivery()),
+      ).rejects.toThrow(/trail_invalid_envelope/);
+      expect(ingested).toEqual([]);
+      expect(JSON.stringify(await series())).not.toContain('sentinel');
+      expect(JSON.stringify(await series())).not.toContain('IDENTITY-SERVICE');
+    },
+  );
 
   it('takes a bounded set of label values however many distinct producers publish', async () => {
     for (let index = 0; index < 50; index += 1) await write(`producer-${index}`);

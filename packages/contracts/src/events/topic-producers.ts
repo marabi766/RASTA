@@ -30,21 +30,31 @@ import { AUDIT_TRAIL_TOPIC } from './envelope';
  * The values are the producers' `SERVICE_NAME` — what `buildOutboxRow` writes
  * into `envelope.producer`. `asset-service` owns two topics.
  */
-export const TOPIC_PRODUCERS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  'rasta.identity.v1': Object.freeze(['identity-service']),
-  'rasta.organization.v1': Object.freeze(['organization-service']),
-  'rasta.asset.v1': Object.freeze(['asset-service']),
-  'rasta.insurance.v1': Object.freeze(['asset-service']),
-  'rasta.fleet.v1': Object.freeze(['fleet-service']),
-  'rasta.maintenance.v1': Object.freeze(['maintenance-service']),
-  'rasta.marketplace.v1': Object.freeze(['marketplace-service']),
-  'rasta.economic.v1': Object.freeze(['economic-service']),
-  'rasta.document.v1': Object.freeze(['document-service']),
-  'rasta.supplier.v1': Object.freeze(['supplier-service']),
-  'rasta.notification.v1': Object.freeze(['notification-service']),
-  'rasta.construction.v1': Object.freeze(['construction-service']),
-  [AUDIT_TRAIL_TOPIC]: Object.freeze(['identity-service']),
+export const TOPIC_PRODUCERS = Object.freeze({
+  'rasta.identity.v1': Object.freeze(['identity-service'] as const),
+  'rasta.organization.v1': Object.freeze(['organization-service'] as const),
+  'rasta.asset.v1': Object.freeze(['asset-service'] as const),
+  'rasta.insurance.v1': Object.freeze(['asset-service'] as const),
+  'rasta.fleet.v1': Object.freeze(['fleet-service'] as const),
+  'rasta.maintenance.v1': Object.freeze(['maintenance-service'] as const),
+  'rasta.marketplace.v1': Object.freeze(['marketplace-service'] as const),
+  'rasta.economic.v1': Object.freeze(['economic-service'] as const),
+  'rasta.document.v1': Object.freeze(['document-service'] as const),
+  'rasta.supplier.v1': Object.freeze(['supplier-service'] as const),
+  'rasta.notification.v1': Object.freeze(['notification-service'] as const),
+  'rasta.construction.v1': Object.freeze(['construction-service'] as const),
+  [AUDIT_TRAIL_TOPIC]: Object.freeze(['identity-service'] as const),
 });
+
+/**
+ * Literal types, so a consumer that needs its own typed view — audit-service's
+ * topology — derives it from this constant instead of restating it (§ 1).
+ */
+export type DeclaredTopic = keyof typeof TOPIC_PRODUCERS;
+export type DeclaredProducer = (typeof TOPIC_PRODUCERS)[DeclaredTopic][number];
+
+/** The same map, read by a topic that is only known at runtime. */
+const BY_TOPIC: Readonly<Record<string, readonly string[]>> = TOPIC_PRODUCERS;
 
 /**
  * The suffix of a retry topic. A message redelivered on `<topic>.retry` was
@@ -63,7 +73,12 @@ export function ownerTopicOf(deliveryTopic: string): string {
 
 /** Whether any producer is declared for the topic a delivery belongs to. */
 export function isDeclaredTopic(deliveryTopic: string): boolean {
-  return Object.prototype.hasOwnProperty.call(TOPIC_PRODUCERS, ownerTopicOf(deliveryTopic));
+  return Object.prototype.hasOwnProperty.call(BY_TOPIC, ownerTopicOf(deliveryTopic));
+}
+
+/** The producers declared for the topic a delivery belongs to; empty for an undeclared one. */
+export function producersOf(deliveryTopic: string): readonly string[] {
+  return isDeclaredTopic(deliveryTopic) ? (BY_TOPIC[ownerTopicOf(deliveryTopic)] ?? []) : [];
 }
 
 /**
@@ -73,7 +88,5 @@ export function isDeclaredTopic(deliveryTopic: string): boolean {
  * topic nobody is declared to own has no legitimate producer.
  */
 export function isAllowedProducer(deliveryTopic: string, producer: string): boolean {
-  const topic = ownerTopicOf(deliveryTopic);
-  if (!Object.prototype.hasOwnProperty.call(TOPIC_PRODUCERS, topic)) return false;
-  return (TOPIC_PRODUCERS[topic] ?? []).includes(producer);
+  return producersOf(deliveryTopic).includes(producer);
 }
