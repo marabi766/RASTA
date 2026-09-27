@@ -1,8 +1,13 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import type { EventEnvelope } from '@rasta/contracts';
-import type { EventConsumer, EventHandler } from '@rasta/nest-common';
+import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { UnprocessableEventError, type EventConsumer, type EventHandler } from '@rasta/nest-common';
 import { MaintenanceRepository } from '../maintenance/maintenance.repository';
-import { CONSUMED_EVENTS, assetSourceSchema, type ConsumedEventName } from '../maintenance/events';
+import {
+  CONSUMED_EVENTS,
+  assetSourceSchema,
+  assetTransferredSchema,
+  type ConsumedEventName,
+} from '../maintenance/events';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
 import { transferOpenWorkTotal } from '../observability/metrics';
@@ -119,6 +124,12 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     // (docs/07 § 7.6).
     if (!projection) return 'SKIPPED';
 
+    if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
+      // Before any marker or effect: a transfer this service cannot trust is
+      // dead-lettered, not applied halfway (review #127 #5).
+      assertTransferEnvelope(envelope);
+    }
+
     const parsed = assetSourceSchema.safeParse(envelope.payload);
     if (!parsed.success) {
       // An event this service projects, that names no machine. A producer
@@ -215,7 +226,10 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
 
     const open = await this.repository.countOpenWork(tx, assetId, previousOwner);
     if (open.openRequests > 0 || open.openRepairOrders > 0) {
-      transferOpenWorkTotal.inc({ service: SERVICE_NAME }, open.openRequests);
+      transferOpenWorkTotal.inc(
+        { service: SERVICE_NAME },
+        open.openRequests + open.openRepairOrders,
+      );
       // Identifiers and counts only; no title or workshop.
       this.logger.warn(
         `${assetId} was transferred with open maintenance work left under its previous owner ` +
@@ -223,6 +237,32 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           'kept as is pending docs/24 Q-74',
       );
     }
+  }
+}
+
+/**
+ * Refuses an `ASSET_TRANSFERRED` whose payload lacks what the handler acts on,
+ * or whose envelope disagrees with it. The message is fixed text and the
+ * event id: nothing the publisher wrote is repeated (ADR-061 § 2).
+ */
+function assertTransferEnvelope(envelope: EventEnvelope): void {
+  const parsed = assetTransferredSchema.safeParse(envelope.payload);
+  if (!parsed.success) {
+    throw new UnprocessableEventError(
+      DLQ_REASONS.VALIDATION_FAILED,
+      `ASSET_TRANSFERRED ${envelope.eventId} lacks assetId, fromOrganizationId, ` +
+        'toOrganizationId or transferredAt, or names one organization twice',
+    );
+  }
+  if (
+    envelope.aggregateId !== parsed.data.assetId ||
+    envelope.tenantId !== parsed.data.toOrganizationId
+  ) {
+    throw new UnprocessableEventError(
+      DLQ_REASONS.VALIDATION_FAILED,
+      `ASSET_TRANSFERRED ${envelope.eventId}: the envelope's aggregate or tenant ` +
+        'disagrees with the transferred asset or its new owner',
+    );
   }
 }
 

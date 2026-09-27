@@ -92,10 +92,12 @@ describe('AssetSyncConsumer', () => {
       await consumer.handle(
         envelope({
           eventName: 'ASSET_TRANSFERRED',
+          tenantId: 'ORG-DEH-0002',
           payload: {
             assetId: 'AST-SEED-0001',
             fromOrganizationId: 'ORG-DEH-0001',
             toOrganizationId: 'ORG-DEH-0002',
+            transferredAt: '2026-08-27T10:00:00.000Z',
             reason: 'x',
           },
         }),
@@ -197,10 +199,12 @@ describe('AssetSyncConsumer', () => {
       await consumer.handle(
         envelope({
           eventName: 'ASSET_TRANSFERRED',
+          tenantId: 'ORG-DEH-0002',
           payload: {
             assetId: 'AST-SEED-0001',
             fromOrganizationId: 'ORG-DEH-0001',
             toOrganizationId: 'ORG-DEH-0002',
+            transferredAt: '2026-08-27T10:00:00.000Z',
             reason: 'واگذاری',
           },
         }),
@@ -247,15 +251,49 @@ describe('AssetSyncConsumer', () => {
       envelope({
         eventId: 'EVT-TRANSFER-1',
         eventName: 'ASSET_TRANSFERRED',
+        tenantId: 'ORG-DEH-0002',
         correlationId: 'corr-transfer',
         payload: {
           assetId: 'AST-SEED-0001',
           fromOrganizationId: 'ORG-DEH-0001',
           toOrganizationId: 'ORG-DEH-0002',
+          transferredAt: '2026-08-27T10:00:00.000Z',
           reason: 'واگذاری',
         },
         ...overrides,
       });
+
+    it.each([
+      ['no toOrganizationId', { toOrganizationId: undefined }, {}],
+      ['no fromOrganizationId', { fromOrganizationId: undefined }, {}],
+      ['no transferredAt', { transferredAt: undefined }, {}],
+      [
+        'one organization twice',
+        { toOrganizationId: 'ORG-DEH-0001' },
+        { tenantId: 'ORG-DEH-0001' },
+      ],
+      ['an envelope tenant other than the new owner', {}, { tenantId: 'ORG-DEH-0003' }],
+      ['an aggregate other than the asset', {}, { aggregateId: 'AST-OTHER' }],
+    ])(
+      'dead-letters a transfer with %s, before any marker or effect (review #127 #5)',
+      async (_label, payloadOverride, envelopeOverride) => {
+        const { consumer, repository, recorded } = buildConsumer({
+          existing: { organizationId: 'ORG-DEH-0001', status: 'ACTIVE' },
+        });
+        const base = transfer();
+
+        await expect(
+          consumer.handle({
+            ...base,
+            ...envelopeOverride,
+            payload: { ...(base.payload as object), ...payloadOverride },
+          } as EventEnvelope),
+        ).rejects.toMatchObject({ name: 'UnprocessableEventError', reason: 'VALIDATION_FAILED' });
+        expect(repository.transaction).not.toHaveBeenCalled();
+        expect(repository.markEventProcessed).not.toHaveBeenCalled();
+        expect(recorded.upserts).toEqual([]);
+      },
+    );
 
     const open: OpenAssignment = {
       id: 'ASG-1',
