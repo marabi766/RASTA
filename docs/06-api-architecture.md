@@ -168,6 +168,13 @@ Endpoint در Schema اعلام می‌شود. مرتب‌سازی آزاد رو
 **قاعده.** کلاینت روی `code` شاخه می‌زند، نه روی `message` (بومی‌سازی‌شده و متغیر) و
 نه صرفاً روی کد وضعیت HTTP (بیش از حد درشت).
 
+**S-09 در پاسخ خطا.** `details` فقط واقعیت‌های Schema را دارد، نه ورودی کاربر (`ZodValidationPipe`، `toErrorDetails`):
+پیام `invalid_enum_value` فقط گزینه‌های مجاز را می‌گوید (بی «received»)، `unrecognized_keys` فقط تعداد کلیدهای اضافه را، و
+بخشی از `path` که کلاینت انتخاب کرده (کلید `z.record` یا `.catchall()`) `*` می‌شود. پیام نوشتهٔ Schema (`refine`،
+`errorMap`، پیام Regex) باید متن ثابت باشد؛ اگر مقدار ورودی را تکرار کند، پیام ثابت همان کد جایش می‌نشیند. پاسخ هر 5xx
+پیام عمومی است — پیام خطای ناشناخته یا `HttpException` 5xx هرگز به کلاینت نمی‌رسد — و آن پیام فقط در Log سرور، پاک‌سازی‌شده
+و حداکثر ۲۰۰ نویسه (`safeLogText`) ثبت می‌شود.
+
 فهرست کامل کدها: [`packages/contracts/src/common/errors.ts`](../packages/contracts/src/common/errors.ts)
 
 | وضعیت | کدهای نمونه                                                                                                      |

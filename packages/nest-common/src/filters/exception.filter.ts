@@ -9,6 +9,7 @@ import {
 import { ERROR_CODES, type ApiError, type ErrorCode, type ErrorDetail } from '@rasta/contracts';
 import type { Logger } from '@rasta/logging';
 import { RastaError, isRastaError } from '../errors/rasta-error';
+import { safeLogText } from '../errors/safe-log-text';
 import { tryGetContext } from '../context/request-context';
 
 export const EXCEPTION_FILTER_LOGGER = Symbol('RASTA_EXCEPTION_FILTER_LOGGER');
@@ -29,7 +30,17 @@ interface MinimalResponse {
  *    receives, so support can join them without the client ever seeing them.
  *
  *  - An unrecognised exception becomes a generic 500. Echoing an arbitrary
- *    error's message is how connection strings and file paths leak.
+ *    error's message is how connection strings and file paths leak. So does a
+ *    Nest `HttpException` of 5xx: its text is replaced the same way.
+ *
+ * And one rule governs what reaches the log (S-09): a message this service
+ * did not author — the unrecognised error's, a driver's, a cause's — is
+ * logged only through `safeLogText` (credentials scrubbed, control characters
+ * stripped, at most 200 characters), the rule `EventConsumer` applies to
+ * handler text. The error is logged as {@link LoggedError}, not as the raw
+ * object, so neither its message nor an enumerable property of it (a driver's
+ * `meta`, say) escapes that rule; the stack keeps its frames, not its first
+ * line, which repeats the message.
  */
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -52,7 +63,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     };
 
     const logPayload = {
-      err: exception instanceof Error ? exception : new Error(String(exception)),
+      err: loggableError(exception),
       errorCode: code,
       status,
       internalContext,
@@ -94,6 +105,14 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     if (exception instanceof HttpException) {
       const status = exception.getStatus();
+      if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
+        return {
+          status,
+          code: httpStatusToCode(status),
+          message: GENERIC_SERVER_ERROR,
+          internalContext: { originalMessage: safeLogText(extractHttpMessage(exception)) },
+        };
+      }
       return {
         status,
         code: httpStatusToCode(status),
@@ -104,13 +123,54 @@ export class AllExceptionsFilter implements ExceptionFilter {
     return {
       status: HttpStatus.INTERNAL_SERVER_ERROR,
       code: ERROR_CODES.INTERNAL_ERROR,
-      // Deliberately generic. The real message is in the log.
-      message: 'An unexpected error occurred',
+      // Deliberately generic. The real message is in the log, made safe.
+      message: GENERIC_SERVER_ERROR,
       internalContext: {
-        originalMessage: exception instanceof Error ? exception.message : String(exception),
+        originalMessage: safeLogText(
+          exception instanceof Error ? exception.message : String(exception),
+        ),
       },
     };
   }
+}
+
+/** What a client is told about a failure that is the server's. */
+const GENERIC_SERVER_ERROR = 'An unexpected error occurred';
+
+/** How deep a chain of `cause`s is followed into the log. */
+const MAX_CAUSE_DEPTH = 3;
+
+/** How many stack frames a logged error keeps. */
+const MAX_STACK_FRAMES = 30;
+
+/** An error as the log records it: class, code, safe message, frames, cause. */
+export interface LoggedError {
+  type: string;
+  code?: string;
+  message: string;
+  stack?: string;
+  cause?: LoggedError;
+}
+
+export function loggableError(error: unknown, depth = 0): LoggedError {
+  if (!(error instanceof Error)) {
+    return { type: typeof error, message: safeLogText(String(error)) };
+  }
+  // Frames only: a stack's first line is `Name: message`, the text above.
+  const frames = (error.stack ?? '')
+    .split('\n')
+    .filter((line) => /^\s+at /.test(line))
+    .slice(0, MAX_STACK_FRAMES)
+    .join('\n');
+  return {
+    type: error.name,
+    ...(isRastaError(error) ? { code: error.code } : {}),
+    message: safeLogText(error.message),
+    ...(frames ? { stack: frames } : {}),
+    ...(error.cause !== undefined && depth < MAX_CAUSE_DEPTH
+      ? { cause: loggableError(error.cause, depth + 1) }
+      : {}),
+  };
 }
 
 export function httpStatusToCode(status: number): ErrorCode {

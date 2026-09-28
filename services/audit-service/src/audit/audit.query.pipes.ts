@@ -55,7 +55,9 @@ abstract class SchemaQueryPipe<T> implements PipeTransform {
     try {
       return this.schema.parse(value);
     } catch (error) {
-      if (error instanceof ZodError) throw RastaError.validation(toErrorDetails(error));
+      if (error instanceof ZodError) {
+        throw RastaError.validation(toErrorDetails(error, this.schema, value));
+      }
       throw error;
     }
   }

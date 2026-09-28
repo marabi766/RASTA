@@ -716,6 +716,33 @@ export function isPermanentGrantFailure(error: unknown): boolean {
   return error instanceof RastaError && PERMANENT_GRANT_FAILURES.has(error.code);
 }
 
+/** How many failed rules a summary names before it only counts the rest. */
+const SUMMARY_MAX_RULES = 5;
+
+/**
+ * A grant failure in identifiers only (S-09): each failed rule's id and its
+ * error's code — a platform `ErrorCode`, or an error's class name — and never
+ * a message. An underlying message can be anything a driver or a downstream
+ * wrote, and this text reaches `x-dlq-error` and the log.
+ */
+export function grantFailureCodes(error: unknown): string {
+  const failures: readonly { ruleId?: string; error: unknown }[] =
+    error instanceof RewardGrantError ? error.failures : [{ error }];
+  const named = failures
+    .slice(0, SUMMARY_MAX_RULES)
+    .map(({ ruleId, error: cause }) =>
+      ruleId === undefined ? failureCode(cause) : `${ruleId} (${failureCode(cause)})`,
+    );
+  const more =
+    failures.length > SUMMARY_MAX_RULES ? `; and ${failures.length - SUMMARY_MAX_RULES} more` : '';
+  return `${named.join('; ')}${more}`;
+}
+
+function failureCode(error: unknown): string {
+  if (error instanceof RastaError) return error.code;
+  return error instanceof Error ? error.name : 'non-error value';
+}
+
 function describeFailure(error: unknown): string {
   if (error instanceof RastaError) return `${error.code}: ${error.message}`;
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);

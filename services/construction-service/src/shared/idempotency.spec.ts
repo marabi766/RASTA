@@ -1,7 +1,10 @@
-import { runWithContext, type RequestContext } from '@rasta/nest-common';
+import { createHash } from 'node:crypto';
+import type { ArgumentsHost } from '@nestjs/common';
+import type { Logger } from '@rasta/logging';
+import { AllExceptionsFilter, runWithContext, type RequestContext } from '@rasta/nest-common';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { ConstructionEnv } from '../config/env';
-import { IdempotencyStore, keyDigest } from './idempotency';
+import { IdempotencyStore } from './idempotency';
 
 /**
  * The claim's race branches, which a real database hits only by timing: a
@@ -149,29 +152,59 @@ describe('IdempotencyStore.execute', () => {
   });
 });
 
-describe('no raw Idempotency-Key in an error (S-09)', () => {
-  const RAW = 'create-project-for-village-0042';
+describe('nothing of the Idempotency-Key in an error (S-09)', () => {
+  const RAW = 'SENTINEL-create-project-for-village-0042';
+  // What the service used to log: an unkeyed, truncated SHA-256 of the key,
+  // which a low-entropy key makes reversible by guessing (review of #135).
+  const OLD_DIGEST = createHash('sha256').update(RAW, 'utf8').digest('hex').slice(0, 16);
+
+  function throughTheFilter(error: unknown): { logged: string; body: string } {
+    const lines: unknown[] = [];
+    const record = (...args: unknown[]) => {
+      lines.push(args);
+    };
+    const logger = { debug: record, warn: record, error: record } as unknown as Logger;
+    let body: unknown;
+    const response = {
+      status: () => response,
+      json: (sent: unknown) => {
+        body = sent;
+      },
+    };
+    new AllExceptionsFilter(logger).catch(error, {
+      switchToHttp: () => ({ getResponse: () => response }),
+    } as unknown as ArgumentsHost);
+    return { logged: JSON.stringify(lines), body: JSON.stringify(body) };
+  }
 
   it.each([
-    ['reused with another body', row({ state: 'COMPLETED', responseBody: {} }), { a: 2 }],
-    ['still in flight', row({}), { a: 1 }],
-  ])('%s: the logged context carries a digest, never the key', async (_case, existing, body) => {
-    const { store, delegate } = fakeStore();
-    delegate.create.mockRejectedValue(UNIQUE);
-    delegate.findUnique.mockResolvedValue(existing);
+    [
+      'reused with another body',
+      row({ state: 'COMPLETED', responseBody: {} }),
+      { a: 2 },
+      'IDEMPOTENCY_KEY_REUSED',
+    ],
+    ['still in flight', row({}), { a: 1 }, 'CONFLICT'],
+  ])(
+    '%s: neither the key nor its digest, in the context, the log or the body',
+    async (_case, existing, body, code) => {
+      const { store, delegate } = fakeStore();
+      delegate.create.mockRejectedValue(UNIQUE);
+      delegate.findUnique.mockResolvedValue(existing);
 
-    const error = (await inTenant(() => store.claim(ENDPOINT, RAW, body)).catch(
-      (caught: unknown) => caught,
-    )) as { internalContext?: Record<string, unknown>; message: string };
+      const error = (await inTenant(() => store.claim(ENDPOINT, RAW, body)).catch(
+        (caught: unknown) => caught,
+      )) as { code: string; internalContext?: Record<string, unknown>; message: string };
 
-    expect(JSON.stringify(error.internalContext)).not.toContain(RAW);
-    expect(error.message).not.toContain(RAW);
-    expect(error.internalContext).toMatchObject({ endpoint: ENDPOINT, keyDigest: keyDigest(RAW) });
-  });
-
-  it('digests one-way and stably', () => {
-    expect(keyDigest(RAW)).toMatch(/^[0-9a-f]{16}$/);
-    expect(keyDigest(RAW)).toBe(keyDigest(RAW));
-    expect(keyDigest(RAW)).not.toBe(keyDigest(`${RAW}-other`));
-  });
+      expect(error.code).toBe(code);
+      // Where the clash was stays: the endpoint (and the request's correlationId).
+      expect(error.internalContext).toMatchObject({ endpoint: ENDPOINT });
+      const { logged, body: answered } = throughTheFilter(error);
+      expect(logged).toContain(code); // the line was written
+      for (const text of [JSON.stringify(error.internalContext), error.message, logged, answered]) {
+        expect(text).not.toContain('SENTINEL');
+        expect(text).not.toContain(OLD_DIGEST);
+      }
+    },
+  );
 });
