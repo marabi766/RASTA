@@ -47,9 +47,12 @@ import {
   EXPECTED,
   assertionScript,
   assertSnapshotScript,
+  createScratchDatabase,
   dropScratchDatabase,
   ledgerAssertionScript,
+  psqlRunner,
   recordSnapshotScript,
+  scratchDatabaseName,
   snapshotStoreScript,
 } from './verify-migration-reversible-lib.mjs';
 
@@ -133,9 +136,17 @@ const extensionHome = targetSchema;
 
 /** The label the target's own state is recorded under, right after its deploy. */
 const POST_UP = 'post-up';
+/**
+ * The throwaway database, when there is one: the reserved scratch prefix, the
+ * service database's name and the scratch schema's. It is created marked, and
+ * only a database carrying that mark is ever dropped (scratchDatabaseSql) — a
+ * database that merely has this name is refused and left alone.
+ */
 const scratchDatabase = inDatabase
-  ? `${new URL(baseUrl).pathname.slice(1)}_${scratchSchema}`
+  ? scratchDatabaseName(new URL(baseUrl).pathname.slice(1), scratchSchema)
   : null;
+/** What a scratch database made by this script says it is for. */
+const SCRATCH_PURPOSE = 'migration-reversibility';
 
 /** A throwaway schema (or database). Nothing this script does can reach the real one. */
 function scratchUrl(schema = targetSchema) {
@@ -256,12 +267,9 @@ function fail(message) {
 /** Removes everything this run created. Best effort: also called on failure. */
 function dropScratch() {
   if (scratchDatabase) {
-    // Not `WITH (FORCE)`: the service role may not terminate an autovacuum
-    // worker, and FORCE then fails the whole drop (scratchDatabaseDropSteps).
-    return dropScratchDatabase(
-      (script) => prisma(['db', 'execute', '--url', baseUrl, '--stdin'], { stdin: script }),
-      scratchDatabase,
-    );
+    // As its owner, only if marked, never `WITH (FORCE)`: see scratchDatabaseSql.
+    // psql rather than Prisma, whose errors carry no SQLSTATE.
+    return dropScratchDatabase(psqlRunner(baseUrl), scratchDatabase, SCRATCH_PURPOSE);
   }
   return sql(
     `DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE; ` +
@@ -287,14 +295,12 @@ console.log(
 console.log('');
 
 if (scratchDatabase) {
-  // A leftover from an earlier run first, then the new one. Separate calls:
-  // CREATE DATABASE refuses to run inside the implicit transaction a
-  // multi-statement script gets.
+  // A leftover from an earlier run first — only if it is this role's marked
+  // scratch database — then the new one, created and marked.
   const leftover = dropScratch();
   if (!leftover.ok) fail(`scratch database: removing a leftover failed:\n${leftover.output}`);
-  const statement = `CREATE DATABASE "${scratchDatabase}" TEMPLATE template1;`;
-  const created = prisma(['db', 'execute', '--url', baseUrl, '--stdin'], { stdin: statement });
-  if (!created.ok) fail(`scratch database: ${statement} failed:\n${created.output}`);
+  const created = createScratchDatabase(psqlRunner(baseUrl), scratchDatabase, SCRATCH_PURPOSE);
+  if (!created.ok) fail(`scratch database: creating ${scratchDatabase} failed:\n${created.output}`);
   console.log('  ✓ clean scratch database');
 } else {
   mustRun(

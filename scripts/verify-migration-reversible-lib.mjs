@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+
 // -----------------------------------------------------------------------------
 // What each service's migration chain must leave behind, and the SQL that
 // checks it.
@@ -1489,81 +1491,221 @@ $ledger$;`;
 }
 
 // ---------------------------------------------------------------------------
-// Dropping a scratch database as a role that is not a superuser
+// Scratch databases: created marked, dropped only if marked, as their owner
 // ---------------------------------------------------------------------------
 
+/** Every scratch database's name starts with this; nothing else may be dropped. */
+export const SCRATCH_DATABASE_PREFIX = 'rasta_scratch_';
+
+/** `COMMENT ON DATABASE` a scratch database carries: this prefix and its purpose. */
+export const SCRATCH_MARKER_PREFIX = 'rasta-scratch:';
+
+const SCRATCH_NAME = /^rasta_scratch_[a-z0-9_]{1,49}$/;
+const PURPOSE = /^[a-z0-9-]{1,40}$/;
+
 /**
- * The statements that remove a throwaway database, for a caller that owns it
- * but is not a superuser — the service roles CI verifies as.
- *
- * Why not `DROP DATABASE … WITH (FORCE)`: FORCE terminates **every** backend
- * connected to the database first, and a role that is not a superuser may only
- * terminate its own. Any other backend there makes the whole statement fail
- * with "permission denied to terminate process" — and the one CI meets is an
- * **autovacuum worker**, which a freshly migrated database attracts within a
- * second and which runs under no ordinary role (reproduced on PostgreSQL
- * 16.13; seen once on main, cd0c39a).
- *
- * What these do instead, all within the owner's own rights:
- *
- *   1. `prepare` — if the database exists, close it to new connections
- *      (`ALLOW_CONNECTIONS false`, which binds a superuser too) and terminate
- *      only this role's own sessions there, e.g. one a crashed run left behind.
- *   2. `drop` — a plain `DROP DATABASE`. PostgreSQL itself signals autovacuum
- *      workers in the database and waits up to five seconds for every other
- *      backend to leave; one that stays makes it fail with SQLSTATE 55006
- *      ("is being accessed by other users"), which `dropScratchDatabase`
- *      retries a bounded number of times.
- *
- * Nothing here terminates another role's session: a backend that is not ours
- * and does not leave is reported, never killed.
+ * A scratch database's name: the reserved prefix and `parts`, lower-case.
+ * Throws for anything that would not be a plain identifier of at most 63
+ * characters — the name is interpolated into SQL.
  */
-export function scratchDatabaseDropSteps(database) {
-  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(database)) {
+export function scratchDatabaseName(...parts) {
+  const name = `${SCRATCH_DATABASE_PREFIX}${parts.join('_')}`.toLowerCase();
+  assertScratchDatabaseName(name);
+  return name;
+}
+
+function assertScratchDatabaseName(database) {
+  if (
+    typeof database !== 'string' ||
+    !SCRATCH_NAME.test(database) ||
+    database === 'postgres' ||
+    database.startsWith('template')
+  ) {
     throw new Error(`Not a scratch database name: ${database}`);
   }
+}
+
+function assertPurpose(purpose) {
+  if (typeof purpose !== 'string' || !PURPOSE.test(purpose)) {
+    throw new Error(`Not a scratch database purpose: ${purpose}`);
+  }
+}
+
+/**
+ * The SQL of a scratch database's life, for a caller that owns it but is not a
+ * superuser — the service roles CI verifies as (review of #133).
+ *
+ * **Provenance before any change.** A scratch database is created with the
+ * reserved prefix **and** a marker comment naming its purpose. `inspect` reads
+ * — and changes nothing — whether a database of that name is absent, or is
+ * this role's marked scratch database for this purpose, or neither; and the
+ * `prepare` block checks the same again before it alters anything. A database
+ * with a matching name but no marker, another purpose, another owner, or the
+ * one the session is connected to is refused: left as it is, connectable.
+ *
+ * **Why not `DROP DATABASE … WITH (FORCE)`.** FORCE must terminate every
+ * backend in the database, and a role that is not a superuser may terminate
+ * only its own: an autovacuum worker — which a freshly migrated database
+ * attracts within a second and which runs under no ordinary role — fails the
+ * whole statement with "permission denied to terminate process" (main,
+ * cd0c39a; reproduced on PostgreSQL 16.13). Instead, `prepare` closes the
+ * database to new connections (`ALLOW_CONNECTIONS false`, which binds a
+ * superuser too) and terminates only this role's own sessions there, and
+ * `drop` is a plain `DROP DATABASE`: PostgreSQL itself signals autovacuum
+ * workers and waits up to five seconds for every other backend. Another
+ * role's session is waited for, never killed.
+ */
+export function scratchDatabaseSql(database, purpose) {
+  assertScratchDatabaseName(database);
+  assertPurpose(purpose);
+  const marker = `${SCRATCH_MARKER_PREFIX}${purpose}`;
+  const notOurs = `d.datname = current_database()
+      OR pg_get_userbyid(d.datdba) <> current_user
+      OR shobj_description(d.oid, 'pg_database') IS DISTINCT FROM '${marker}'`;
   return {
+    create: `CREATE DATABASE "${database}" TEMPLATE template1;`,
+    mark: `COMMENT ON DATABASE "${database}" IS '${marker}';`,
+    inspect: `SELECT CASE
+  WHEN d.oid IS NULL THEN 'absent'
+  WHEN d.datname = current_database() THEN 'refuse:it is the database this session is connected to'
+  WHEN pg_get_userbyid(d.datdba) <> current_user THEN 'refuse:it is owned by another role'
+  WHEN shobj_description(d.oid, 'pg_database') IS DISTINCT FROM '${marker}'
+    THEN 'refuse:it does not carry the scratch marker ${marker}'
+  ELSE 'marked'
+END
+FROM (SELECT 1) AS one LEFT JOIN pg_database AS d ON d.datname = '${database}';`,
     prepare: `DO $drop$
+DECLARE
+  d record;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_database WHERE datname = '${database}') THEN
-    EXECUTE format('ALTER DATABASE %I ALLOW_CONNECTIONS false', '${database}');
-    PERFORM pg_terminate_backend(pid)
-      FROM pg_stat_activity
-     WHERE datname = '${database}' AND usename = current_user AND pid <> pg_backend_pid();
+  SELECT oid, datname, datdba INTO d FROM pg_database WHERE datname = '${database}';
+  IF NOT FOUND THEN
+    RETURN;
   END IF;
+  IF ${notOurs} THEN
+    RAISE EXCEPTION 'rasta-scratch: refusing to touch database %: not this role''s marked scratch database', '${database}';
+  END IF;
+  EXECUTE format('ALTER DATABASE %I ALLOW_CONNECTIONS false', '${database}');
+  PERFORM pg_terminate_backend(pid)
+    FROM pg_stat_activity
+   WHERE datname = '${database}' AND usename = current_user AND pid <> pg_backend_pid();
 END
 $drop$;`,
     drop: `DROP DATABASE IF EXISTS "${database}";`,
   };
 }
 
-/** SQLSTATE 55006 — `object_in_use`: the database still has another backend after PostgreSQL's own wait. */
-const STILL_IN_USE = /is being accessed by other users|55006/;
+/**
+ * The SQLSTATE of the error psql reported, from the structured field — never
+ * the message text, which is localized and may contain anything, a database
+ * name included. Needs `VERBOSITY=verbose`, where an error line is
+ * `<severity>:  <SQLSTATE>: <message>`; the severity is localized, the code
+ * is not. Notices and warnings (classes 00 and 01) are skipped.
+ */
+export function sqlstateFrom(stderr) {
+  let found = null;
+  for (const match of String(stderr ?? '').matchAll(/^[^\s:]+:\s+([0-9A-Z]{5}):/gm)) {
+    const code = match[1];
+    if (!code.startsWith('00') && !code.startsWith('01')) found = code;
+  }
+  return found;
+}
 
 /**
- * Drops a scratch database with `scratchDatabaseDropSteps`, retrying the drop
- * while another backend is still leaving. `run(sql)` executes one script
- * against a database other than the one being dropped and returns
- * `{ ok, output }`; `pause(ms)` waits. Returns `{ ok, output, attempts }`:
- * never throws, so a caller's cleanup path can report and carry on.
+ * Runs one SQL script with psql against `url`'s database (query parameters,
+ * such as Prisma's `schema`, removed). Returns `{ ok, stdout, output,
+ * sqlstate }`; `stdout` is unaligned tuples only.
+ */
+export function psqlRunner(url) {
+  const target = new URL(url);
+  target.search = '';
+  return (script) => {
+    const result = spawnSync(
+      'psql',
+      [
+        target.toString(),
+        '-X',
+        '-q',
+        '-At',
+        '-v',
+        'ON_ERROR_STOP=1',
+        '-v',
+        'VERBOSITY=verbose',
+        '-c',
+        script,
+      ],
+      { encoding: 'utf8' },
+    );
+    const stdout = result.stdout ?? '';
+    const stderr = result.stderr ?? (result.error ? String(result.error) : '');
+    return {
+      ok: result.status === 0,
+      stdout,
+      output: `${stdout}${stderr}`,
+      sqlstate: result.status === 0 ? null : sqlstateFrom(stderr),
+    };
+  };
+}
+
+/** SQLSTATE 55006 — `object_in_use`: another backend is still in the database after PostgreSQL's own wait. */
+const OBJECT_IN_USE = '55006';
+
+/**
+ * Creates a scratch database and marks it. `run(sql)` executes against a
+ * database other than the new one (see `psqlRunner`). If the mark fails, the
+ * database this call has just created is dropped again — it is the one case
+ * where provenance is certain without the marker — and the failure returned.
+ */
+export function createScratchDatabase(run, database, purpose) {
+  const sql = scratchDatabaseSql(database, purpose);
+  const created = run(sql.create);
+  if (!created.ok) return { ok: false, output: created.output };
+  const marked = run(sql.mark);
+  if (!marked.ok) {
+    run(sql.drop);
+    return { ok: false, output: marked.output };
+  }
+  return { ok: true, output: '' };
+}
+
+/**
+ * Drops a scratch database: `inspect`, and only if it is this role's marked
+ * scratch database, `prepare` and `drop` — retrying the drop while another
+ * backend is still leaving, decided on SQLSTATE 55006 alone. Returns
+ * `{ ok, refused, output, attempts }` and never throws, so a caller's cleanup
+ * path can report and carry on. An absent database is `ok` with 0 attempts.
  */
 export function dropScratchDatabase(
   run,
   database,
+  purpose,
   { attempts = 3, pauseMs = 1000, pause = sleepSync } = {},
 ) {
-  const steps = scratchDatabaseDropSteps(database);
-  const prepared = run(steps.prepare);
-  if (!prepared.ok) return { ok: false, output: prepared.output, attempts: 0 };
+  const sql = scratchDatabaseSql(database, purpose);
+  const inspected = run(sql.inspect);
+  if (!inspected.ok) return { ok: false, refused: false, output: inspected.output, attempts: 0 };
+  const state = inspected.stdout.trim();
+  if (state === 'absent') return { ok: true, refused: false, output: '', attempts: 0 };
+  if (state !== 'marked') {
+    return {
+      ok: false,
+      refused: true,
+      output: `refusing to drop "${database}": ${state.replace(/^refuse:/, '')}`,
+      attempts: 0,
+    };
+  }
+  const prepared = run(sql.prepare);
+  if (!prepared.ok) return { ok: false, refused: false, output: prepared.output, attempts: 0 };
   let last = { ok: false, output: '' };
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    last = run(steps.drop);
-    if (last.ok) return { ok: true, output: last.output, attempts: attempt };
-    if (!STILL_IN_USE.test(last.output))
-      return { ok: false, output: last.output, attempts: attempt };
+    last = run(sql.drop);
+    if (last.ok) return { ok: true, refused: false, output: last.output, attempts: attempt };
+    if (last.sqlstate !== OBJECT_IN_USE) {
+      return { ok: false, refused: false, output: last.output, attempts: attempt };
+    }
     if (attempt < attempts) pause(pauseMs);
   }
-  return { ok: false, output: last.output, attempts };
+  return { ok: false, refused: false, output: last.output, attempts };
 }
 
 function sleepSync(ms) {

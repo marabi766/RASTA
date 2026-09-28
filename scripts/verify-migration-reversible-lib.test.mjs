@@ -9,12 +9,16 @@ import {
   EXPECTED,
   assertionScript,
   assertSnapshotScript,
+  createScratchDatabase,
   dropScratchDatabase,
   ledgerAssertionScript,
+  psqlRunner,
   recordSnapshotScript,
-  scratchDatabaseDropSteps,
+  scratchDatabaseName,
+  scratchDatabaseSql,
   snapshotQuery,
   snapshotStoreScript,
+  sqlstateFrom,
 } from './verify-migration-reversible-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -768,16 +772,22 @@ if (process.env.MIGRATION_LIB_TEST_DATABASE_REQUIRED === 'true' && !libDatabaseU
   );
 }
 
-/** Drops a scratch database the way the verifier does: as its owner, never FORCE. */
+/** What the scratch databases this file creates say they are for. */
+const LIB_PURPOSE = 'migration-lib-test';
+
+/** A scratch database's name for this file: the reserved prefix, a label, and a unique suffix. */
+const libScratchName = (label) =>
+  scratchDatabaseName('mlt', label, String(process.pid), String(Math.floor(Math.random() * 1e9)));
+
+/** Creates and marks a scratch database the way the verifier does. */
+function createAsOwner(database) {
+  const created = createScratchDatabase(psqlRunner(libDatabaseUrl), database, LIB_PURPOSE);
+  assert.equal(created.ok, true, created.output);
+}
+
+/** Drops a scratch database the way the verifier does: marked, as its owner, never FORCE. */
 function dropAsOwner(database, options) {
-  return dropScratchDatabase(
-    (script) => {
-      const result = psqlAt(libDatabaseUrl, script);
-      return { ok: result.status === 0, output: `${result.stdout}${result.stderr}` };
-    },
-    database,
-    options,
-  );
+  return dropScratchDatabase(psqlRunner(libDatabaseUrl), database, LIB_PURPOSE, options);
 }
 
 function psqlAt(url, script, database) {
@@ -791,11 +801,14 @@ function psqlAt(url, script, database) {
 
 /** Runs `down` after a citext 1.5 "deploy", then the down-script assertion. */
 function keptExtensionCase(down, keptExtensions) {
-  const database = `mlt_kept_ext_${process.pid}_${Math.floor(Math.random() * 1e9)}`;
+  const database = libScratchName('kept_ext');
   const must = (result, what) => {
     if (result.status !== 0) throw new Error(`${what}: ${result.stderr}`);
   };
-  must(psqlAt(libDatabaseUrl, `CREATE DATABASE "${database}" TEMPLATE template1;`), 'create');
+  createAsOwner(database);
+  // A failed cleanup fails the test — but never hides the failure the case
+  // itself hit first, which stays the one reported (review of #133, finding 3).
+  let primary = null;
   try {
     const run = (script) => psqlAt(libDatabaseUrl, script, database);
     must(
@@ -820,8 +833,13 @@ function keptExtensionCase(down, keptExtensions) {
         keptFrom: 'post-up',
       }),
     );
+  } catch (error) {
+    primary = error;
+    throw error;
   } finally {
-    dropAsOwner(database);
+    const dropped = dropAsOwner(database);
+    // eslint-disable-next-line no-unsafe-finally
+    if (!primary && !dropped.ok) throw new Error(`cleanup failed: ${dropped.output}`);
   }
 }
 
@@ -871,72 +889,144 @@ test(
 );
 
 // ---------------------------------------------------------------------------
-// Dropping a scratch database as its owner (not a superuser)
+// Scratch databases: created marked, dropped only if marked, as their owner
 //
 // CI verifies as the service roles, which own their scratch databases but are
 // not superusers. `DROP DATABASE … WITH (FORCE)` failed there once (main,
 // cd0c39a): FORCE must terminate every backend in the database, and a role
 // that is not a superuser may terminate only its own — an autovacuum worker,
 // or any other role's session, fails the whole statement with "permission
-// denied to terminate process". `scratchDatabaseDropSteps` closes the database
-// to new connections, terminates only the owner's own sessions, and drops
-// without FORCE, which lets PostgreSQL stop autovacuum workers itself.
+// denied to terminate process". The helper drops without FORCE (PostgreSQL
+// then stops autovacuum workers itself), retries only on SQLSTATE 55006, and
+// touches nothing that is not this role's marked scratch database.
 // ---------------------------------------------------------------------------
 
-test("the scratch drop never uses FORCE and terminates only the caller's own sessions", () => {
-  const { prepare, drop } = scratchDatabaseDropSteps('rasta_organization_migration_check');
-  assert.doesNotMatch(prepare + drop, /FORCE/);
-  assert.match(prepare, /ALLOW_CONNECTIONS false/);
-  assert.match(prepare, /usename = current_user/);
-  assert.equal(drop, 'DROP DATABASE IF EXISTS "rasta_organization_migration_check";');
-});
-
-test('the scratch drop refuses a name that is not a plain scratch identifier', () => {
-  for (const name of ['', 'Upper', 'a"; DROP DATABASE postgres; --', 'a b', `a${'x'.repeat(63)}`]) {
-    assert.throws(() => scratchDatabaseDropSteps(name), /Not a scratch database name/);
+test('scratch databases are named with the reserved prefix, and nothing else is accepted', () => {
+  assert.equal(
+    scratchDatabaseName('rasta_organization', 'migration_check'),
+    'rasta_scratch_rasta_organization_migration_check',
+  );
+  for (const name of [
+    'postgres',
+    'template0',
+    'template1',
+    'rasta_identity',
+    'rasta_organization_migration_check',
+    '',
+    'Rasta_scratch_x',
+    'rasta_scratch_a"; DROP DATABASE postgres; --',
+    `rasta_scratch_${'x'.repeat(50)}`,
+  ]) {
+    assert.throws(() => scratchDatabaseSql(name, LIB_PURPOSE), /Not a scratch database name/);
   }
+  assert.throws(
+    () => scratchDatabaseSql('rasta_scratch_x', "p'; --"),
+    /Not a scratch database purpose/,
+  );
 });
 
-test('the scratch drop retries only while another backend is still leaving, and a bounded number of times', () => {
-  const inUse = { ok: false, output: 'ERROR:  database "d" is being accessed by other users' };
+test('the drop never uses FORCE, marks on create, and checks provenance before it changes anything', () => {
+  const sql = scratchDatabaseSql('rasta_scratch_x', LIB_PURPOSE);
+  assert.doesNotMatch(Object.values(sql).join('\n'), /FORCE/);
+  assert.equal(
+    sql.mark,
+    `COMMENT ON DATABASE "rasta_scratch_x" IS 'rasta-scratch:${LIB_PURPOSE}';`,
+  );
+  assert.equal(sql.drop, 'DROP DATABASE IF EXISTS "rasta_scratch_x";');
+  // The prepare block refuses before ALTER DATABASE, and terminates only its own sessions.
+  const refuse = sql.prepare.indexOf('RAISE EXCEPTION');
+  assert.ok(refuse > 0 && refuse < sql.prepare.indexOf('ALTER DATABASE'));
+  for (const check of ['current_database()', 'current_user', `'rasta-scratch:${LIB_PURPOSE}'`]) {
+    assert.ok(sql.inspect.includes(check) && sql.prepare.includes(check), check);
+  }
+  assert.match(sql.prepare, /usename = current_user/);
+});
+
+test('the SQLSTATE is read from its field, never from the message', () => {
+  // English, a localized severity and message, a notice before the error, a
+  // database whose name contains 55006 failing for another reason, and none.
+  assert.equal(
+    sqlstateFrom(
+      'ERROR:  55006: database "rasta_scratch_x" is being accessed by other users\nDETAIL:  There is 1 other session using the database.',
+    ),
+    '55006',
+  );
+  assert.equal(
+    sqlstateFrom(
+      'FEHLER:  55006: auf Datenbank »rasta_scratch_x« wird von anderen Benutzern zugegriffen',
+    ),
+    '55006',
+  );
+  assert.equal(
+    sqlstateFrom(
+      'NOTICE:  00000: database "rasta_scratch_y" does not exist, skipping\nERROR:  42501: must be owner of database rasta_scratch_d55006',
+    ),
+    '42501',
+  );
+  assert.equal(
+    sqlstateFrom('ERROR:  42501: must be owner of database rasta_scratch_d55006'),
+    '42501',
+  );
+  assert.equal(sqlstateFrom('psql: error: connection to server failed'), null);
+});
+
+test('the drop retries on SQLSTATE 55006 alone, a bounded number of times', () => {
+  const marked = { ok: true, stdout: 'marked\n', output: '', sqlstate: null };
+  const fine = { ok: true, stdout: '', output: '', sqlstate: null };
+  const inUseLocalized = {
+    ok: false,
+    stdout: '',
+    output: 'FEHLER:  55006: auf Datenbank »rasta_scratch_x« wird zugegriffen',
+    sqlstate: '55006',
+  };
+  const ownerNamed55006 = {
+    ok: false,
+    stdout: '',
+    output:
+      'ERROR:  42501: must be owner of database rasta_scratch_d55006 (is being accessed by other users)',
+    sqlstate: '42501',
+  };
   const script = (answers) => {
     const calls = [];
     return {
       calls,
       run: (sql) => {
-        calls.push(sql.startsWith('DROP') ? 'drop' : 'prepare');
-        return answers.shift() ?? { ok: true, output: '' };
+        calls.push(
+          sql.startsWith('SELECT') ? 'inspect' : sql.startsWith('DO') ? 'prepare' : 'drop',
+        );
+        return answers.shift() ?? fine;
       },
     };
   };
   const pause = () => {};
+  const drop = (run, options = {}) =>
+    dropScratchDatabase(run, 'rasta_scratch_x', LIB_PURPOSE, { pause, ...options });
 
-  const leaving = script([{ ok: true, output: '' }, inUse, inUse]);
-  assert.deepEqual(dropScratchDatabase(leaving.run, 'd', { pause }), {
-    ok: true,
-    output: '',
-    attempts: 3,
-  });
-  assert.deepEqual(leaving.calls, ['prepare', 'drop', 'drop', 'drop']);
+  // A localized 55006 — no English phrase anywhere — is retried.
+  const leaving = script([marked, fine, inUseLocalized, inUseLocalized]);
+  assert.deepEqual(drop(leaving.run), { ok: true, refused: false, output: '', attempts: 3 });
+  assert.deepEqual(leaving.calls, ['inspect', 'prepare', 'drop', 'drop', 'drop']);
 
-  const staying = script([{ ok: true, output: '' }, inUse, inUse, inUse]);
-  const refused = dropScratchDatabase(staying.run, 'd', { pause });
+  // 42501 with "55006" and the English phrase in the text is not.
+  const notOwner = script([marked, fine, ownerNamed55006]);
+  const refused = drop(notOwner.run);
   assert.equal(refused.ok, false);
-  assert.equal(refused.attempts, 3);
-  assert.match(refused.output, /being accessed by other users/);
+  assert.equal(refused.attempts, 1);
+  assert.deepEqual(notOwner.calls, ['inspect', 'prepare', 'drop']);
 
-  const otherError = script([
-    { ok: true, output: '' },
-    { ok: false, output: 'ERROR: must be owner' },
-  ]);
-  assert.equal(dropScratchDatabase(otherError.run, 'd', { pause }).attempts, 1);
+  // Bounded.
+  const staying = script([marked, fine, inUseLocalized, inUseLocalized, inUseLocalized]);
+  assert.equal(drop(staying.run).attempts, 3);
 
-  const unprepared = script([{ ok: false, output: 'ERROR: connection refused' }]);
-  assert.deepEqual(dropScratchDatabase(unprepared.run, 'd', { pause }), {
-    ok: false,
-    output: 'ERROR: connection refused',
-    attempts: 0,
-  });
+  // Absent: nothing to do. Refused by inspection: nothing prepared, nothing dropped.
+  const absent = script([{ ...marked, stdout: 'absent\n' }]);
+  assert.deepEqual(drop(absent.run), { ok: true, refused: false, output: '', attempts: 0 });
+  assert.deepEqual(absent.calls, ['inspect']);
+  const unmarked = script([{ ...marked, stdout: 'refuse:it does not carry the scratch marker\n' }]);
+  const refusal = drop(unmarked.run);
+  assert.equal(refusal.refused, true);
+  assert.match(refusal.output, /does not carry the scratch marker/);
+  assert.deepEqual(unmarked.calls, ['inspect']);
 });
 
 // Another role's session in the scratch database, as a stand-in for the
@@ -948,6 +1038,7 @@ if (process.env.MIGRATION_LIB_TEST_DATABASE_REQUIRED === 'true' && !foreignDatab
     'MIGRATION_LIB_TEST_DATABASE_REQUIRED is set but MIGRATION_LIB_TEST_FOREIGN_DATABASE_URL is not',
   );
 }
+const noDatabase = !libDatabaseUrl && 'MIGRATION_LIB_TEST_DATABASE_URL is not set';
 const noForeign =
   (!libDatabaseUrl || !foreignDatabaseUrl) &&
   'MIGRATION_LIB_TEST_DATABASE_URL and MIGRATION_LIB_TEST_FOREIGN_DATABASE_URL are not both set';
@@ -978,28 +1069,133 @@ async function foreignSession(database, seconds) {
 
 /** One value, unaligned, as the dropping role, from its own database. */
 function scalarAt(sql) {
-  const target = new URL(libDatabaseUrl);
-  target.search = '';
-  const result = spawnSync(
-    'psql',
-    [target.toString(), '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-c', sql],
-    {
-      encoding: 'utf8',
-    },
-  );
-  assert.equal(result.status, 0, result.stderr);
+  const result = psqlRunner(libDatabaseUrl)(sql);
+  assert.equal(result.ok, true, result.output);
   return result.stdout.trim();
 }
 
-function freshScratch() {
-  const database = `mlt_drop_${process.pid}_${Math.floor(Math.random() * 1e9)}`;
-  const created = psqlAt(libDatabaseUrl, `CREATE DATABASE "${database}" TEMPLATE template1;`);
-  assert.equal(created.status, 0, created.stderr);
+function freshScratch(label = 'drop') {
+  const database = libScratchName(label);
+  createAsOwner(database);
   return database;
 }
 
 const exists = (database) =>
   scalarAt(`SELECT count(*) FROM pg_database WHERE datname = '${database}'`) === '1';
+const allowsConnections = (database) =>
+  scalarAt(`SELECT datallowconn FROM pg_database WHERE datname = '${database}'`) === 't';
+
+/** Connects to `database` as the dropping role and reads one value: proves it is still usable. */
+const connectable = (database) => {
+  const target = new URL(libDatabaseUrl);
+  target.search = '';
+  target.pathname = `/${database}`;
+  return psqlRunner(target.toString())('SELECT 1').stdout.trim() === '1';
+};
+
+test(
+  'a created scratch database carries the marker, and the drop removes it',
+  { skip: noDatabase },
+  () => {
+    const database = freshScratch();
+    assert.equal(
+      scalarAt(
+        `SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = '${database}'`,
+      ),
+      `rasta-scratch:${LIB_PURPOSE}`,
+    );
+    const dropped = dropAsOwner(database);
+    assert.equal(dropped.ok, true, dropped.output);
+    assert.equal(exists(database), false);
+  },
+);
+
+test(
+  'a database with a scratch name but no marker is refused, and left untouched and connectable',
+  { skip: noDatabase },
+  () => {
+    const database = libScratchName('unmarked');
+    const created = psqlRunner(libDatabaseUrl)(`CREATE DATABASE "${database}" TEMPLATE template1;`);
+    assert.equal(created.ok, true, created.output);
+    try {
+      const refused = dropAsOwner(database);
+      assert.equal(refused.ok, false);
+      assert.equal(refused.refused, true);
+      assert.match(refused.output, /does not carry the scratch marker/);
+      assert.equal(exists(database), true);
+      assert.equal(allowsConnections(database), true);
+      assert.equal(connectable(database), true);
+    } finally {
+      // Only this test knows the database is its own, so it cleans up directly.
+      psqlRunner(libDatabaseUrl)(`DROP DATABASE IF EXISTS "${database}";`);
+    }
+  },
+);
+
+test(
+  'a database marked for another purpose is refused and left untouched',
+  { skip: noDatabase },
+  () => {
+    const database = libScratchName('other_purpose');
+    assert.equal(
+      createScratchDatabase(psqlRunner(libDatabaseUrl), database, 'migration-reversibility').ok,
+      true,
+    );
+    try {
+      const refused = dropAsOwner(database);
+      assert.equal(refused.refused, true);
+      assert.equal(exists(database), true);
+      assert.equal(allowsConnections(database), true);
+    } finally {
+      assert.equal(
+        dropScratchDatabase(psqlRunner(libDatabaseUrl), database, 'migration-reversibility').ok,
+        true,
+      );
+    }
+  },
+);
+
+test(
+  'the database the session is connected to is refused, marker or not',
+  { skip: noDatabase },
+  () => {
+    const database = freshScratch('self');
+    const target = new URL(libDatabaseUrl);
+    target.search = '';
+    target.pathname = `/${database}`;
+    const fromInside = dropScratchDatabase(psqlRunner(target.toString()), database, LIB_PURPOSE);
+    assert.equal(fromInside.refused, true);
+    assert.match(fromInside.output, /connected to/);
+    assert.equal(allowsConnections(database), true);
+    assert.equal(dropAsOwner(database).ok, true);
+  },
+);
+
+test(
+  'another role’s marked scratch database is refused and left untouched; its 42501 is not retried',
+  { skip: noForeign },
+  () => {
+    // Named with 55006 in it, so a text match on the output would have retried.
+    const database = libScratchName('d55006');
+    const foreign = psqlRunner(foreignDatabaseUrl);
+    assert.equal(createScratchDatabase(foreign, database, LIB_PURPOSE).ok, true);
+    try {
+      const refused = dropAsOwner(database);
+      assert.equal(refused.refused, true);
+      assert.match(refused.output, /owned by another role/);
+      assert.equal(exists(database), true);
+      assert.equal(allowsConnections(database), true);
+      // And if the drop is attempted anyway, PostgreSQL's answer is 42501,
+      // read from the field — the name's "55006" does not make it retryable.
+      const direct = psqlRunner(libDatabaseUrl)(`DROP DATABASE "${database}";`);
+      assert.equal(direct.ok, false);
+      assert.equal(direct.sqlstate, '42501');
+      assert.match(direct.output, /55006/);
+    } finally {
+      assert.equal(dropScratchDatabase(foreign, database, LIB_PURPOSE).ok, true);
+    }
+  },
+);
 
 test(
   'the failure CI met: FORCE, as the owner, is refused while another role is connected',
@@ -1008,9 +1204,10 @@ test(
     const database = freshScratch();
     const holder = await foreignSession(database, 3);
     try {
-      const forced = psqlAt(libDatabaseUrl, `DROP DATABASE "${database}" WITH (FORCE);`);
-      assert.notEqual(forced.status, 0, 'FORCE dropped a database another role was connected to');
-      assert.match(forced.stderr, /permission denied to terminate process/);
+      const forced = psqlRunner(libDatabaseUrl)(`DROP DATABASE "${database}" WITH (FORCE);`);
+      assert.equal(forced.ok, false, 'FORCE dropped a database another role was connected to');
+      assert.equal(forced.sqlstate, '42501');
+      assert.match(forced.output, /terminate process/);
     } finally {
       await holder.exited;
       assert.equal(dropAsOwner(database).ok, true);
@@ -1040,7 +1237,7 @@ test(
     try {
       const refused = dropAsOwner(database, { attempts: 1 });
       assert.equal(refused.ok, false);
-      assert.match(refused.output, /being accessed by other users/);
+      assert.match(refused.output, /55006/);
       // The other role's session is still running: it was waited for, not killed.
       assert.equal(holder.child.exitCode, null);
       assert.equal(exists(database), true);
