@@ -45,6 +45,17 @@ import { kafkaClientConfig, type KafkaConnectionOptions } from '../kafka/connect
  * for. If even the dead-letter write fails, the error propagates, kafkajs
  * retries, and the partition stalls. A stalled partition is visible in lag
  * metrics and recoverable; a silently skipped financial event is neither.
+ *
+ * **What its log lines and dead-letter headers may carry (S-09).** Never the
+ * message body: an unparseable one is described by fixed text and its size,
+ * never by the parser's words. Of the original Kafka headers, only the
+ * platform's own (`EVENT_HEADERS`) ride along to the dead-letter topic — an
+ * `authorization` or any other header a client library added does not. A
+ * handler's error message is service-authored and operators need it, but it
+ * is not trusted blindly: every line and `x-dlq-error` is a fixed
+ * classification, the `DlqReason`, and the message with control characters
+ * stripped and cut to {@link HANDLER_MESSAGE_MAX} characters. The rule for
+ * whoever writes those messages is on {@link UnprocessableEventError}.
  */
 
 /** Every platform service's name ends so (`fleet-service`, `audit-service`). */
@@ -134,8 +145,15 @@ export type EventHandler = (
  * Only for a verdict. A handler that merely *failed* (a timeout, a database
  * blip) throws anything else and is retried as before.
  *
- * The message goes into `x-dlq-error`, so it must name what disagreed and
- * never carry a secret, a token or a value that is not the platform's to copy.
+ * The message goes into `x-dlq-error` and the log, so it must name what
+ * disagreed and never carry a secret, a token or a value that is not the
+ * platform's to copy. **Identifiers yes, payload values no** (S-09): an event
+ * id, an aggregate id, a field name or a closed code such as
+ * `amount_mismatch` — never an amount, a name, an address or free text from
+ * the payload. The same holds for any error a handler lets escape, since its
+ * message reaches the same places. The consumer strips control characters and
+ * bounds the length ({@link handlerMessage}); it cannot tell a value from an
+ * identifier, so that part is the handler's.
  */
 export class UnprocessableEventError extends Error {
   constructor(
@@ -348,11 +366,11 @@ export class EventConsumer {
       const where = `${topic}[${partition}]${offset === undefined ? '' : `@${offset}`}`;
       this.logger.error(`Unparseable message on ${where}: ${reason}`);
       await this.deadLetter(
-        topic,
+        { topic, partition, offset },
         value,
         headers,
         DLQ_REASONS.VALIDATION_FAILED,
-        new Error(reason),
+        `Unparseable message (${DLQ_REASONS.VALIDATION_FAILED}): ${reason}`,
         0,
       );
       return;
@@ -379,7 +397,14 @@ export class EventConsumer {
           `eventId=${logField(envelope.eventId)} eventName=${logField(envelope.eventName)} ` +
           `producer=${logField(envelope.producer)}`,
       );
-      await this.deadLetter(topic, value, headers, refusal.reason, refusal, 0);
+      await this.deadLetter(
+        { topic, partition, offset },
+        value,
+        headers,
+        refusal.reason,
+        `Refused before any handler (${refusal.reason}): ${refusal.message}`,
+        0,
+      );
       return;
     }
 
@@ -404,25 +429,39 @@ export class EventConsumer {
         );
         return;
       } catch (error) {
+        // The envelope's eventId is the sender's text, so it is a quoted,
+        // escaped field; the handler's message is sanitised and bounded.
+        const event = `${envelope.eventName} ${logField(envelope.eventId)}`;
+        const message = handlerMessage(error);
+
         if (error instanceof UnprocessableEventError) {
-          this.logger.error(
-            `Handler refused ${envelope.eventName} ${envelope.eventId} (${error.reason}): ${error.message}`,
+          this.logger.error(`Handler refused ${event} (${error.reason}): ${message}`);
+          await this.deadLetter(
+            { topic, partition, offset },
+            value,
+            headers,
+            error.reason,
+            `Handler refused (${error.reason}): ${message}`,
+            attempt,
           );
-          await this.deadLetter(topic, value, headers, error.reason, error, attempt);
           return;
         }
 
         if (attempt === maxRetries) {
-          this.logger.error(
-            `Handler failed ${maxRetries}x for ${envelope.eventName} ${envelope.eventId}: ${describe(error)}`,
+          const reason = exhaustedReason(error);
+          this.logger.error(`Handler failed ${maxRetries}x for ${event} (${reason}): ${message}`);
+          await this.deadLetter(
+            { topic, partition, offset },
+            value,
+            headers,
+            reason,
+            `Handler failed ${maxRetries}x (${reason}): ${message}`,
+            attempt,
           );
-          await this.deadLetter(topic, value, headers, exhaustedReason(error), error, attempt);
           return;
         }
 
-        this.logger.warn(
-          `Attempt ${attempt}/${maxRetries} failed for ${envelope.eventName} ${envelope.eventId}: ${describe(error)}`,
-        );
+        this.logger.warn(`Attempt ${attempt}/${maxRetries} failed for ${event}: ${message}`);
         await sleep(backoff * attempt);
       }
     }
@@ -433,8 +472,13 @@ export class EventConsumer {
    *
    * Unaltered matters: whoever replays it needs the message the producer
    * actually sent, not this consumer's re-serialization of it. The reason,
-   * the error and the original topic ride along as headers so the runbook
-   * (docs/runbooks/replay-dlq.md) can triage without opening the body.
+   * the error text and where the original sat (topic, partition, offset) ride
+   * along as headers so the runbook (docs/runbooks/replay-dlq.md) can triage
+   * without opening the body.
+   *
+   * Of the original headers, only the platform's own are copied
+   * ({@link forwardedHeaders}); `detail` is text the caller already built
+   * from fixed words and sanitised parts, never an error object to describe.
    *
    * `rasta_dlq_messages_total` counts completed publishes, so it moves only
    * after `send` resolves: a rejected send propagates without counting, and a
@@ -443,13 +487,14 @@ export class EventConsumer {
    * topic and the `DlqReason` — and never an event, tenant or error value.
    */
   private async deadLetter(
-    originalTopic: string,
+    original: { topic: string; partition: number; offset: string | undefined },
     value: Buffer | null,
     headers: IHeaders | undefined,
     reason: DlqReason,
-    error: unknown,
+    detail: string,
     attempts: number,
   ): Promise<void> {
+    const originalTopic = original.topic;
     const target = this.options.deadLetterTopic;
     if (!target) {
       this.logger.error(
@@ -467,11 +512,15 @@ export class EventConsumer {
         {
           value,
           headers: {
-            ...(headers ?? {}),
+            ...forwardedHeaders(headers),
             [DLQ_HEADERS.reason]: reason,
             [DLQ_HEADERS.originalTopic]: originalTopic,
+            [DLQ_HEADERS.originalPartition]: String(original.partition),
+            ...(original.offset === undefined
+              ? {}
+              : { [DLQ_HEADERS.originalOffset]: original.offset }),
             [DLQ_HEADERS.attempts]: String(attempts),
-            [DLQ_HEADERS.error]: describe(error).slice(0, 1000),
+            [DLQ_HEADERS.error]: detail.slice(0, 1000),
             [DLQ_HEADERS.firstFailedAt]: new Date().toISOString(),
             [EVENT_HEADERS.producer]: this.options.clientId,
           },
@@ -527,6 +576,50 @@ export function logField(value: string, max = 64): string {
     (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`,
   );
   return value.length > max ? `"${escaped}"...(${value.length} chars)` : `"${escaped}"`;
+}
+
+/**
+ * The original headers a dead letter keeps: the platform's own, which the
+ * outbox relay sets from the envelope (`EVENT_HEADERS` — event id and name,
+ * version, correlation and causation ids, tenant, producer, `traceparent`,
+ * stream sequence). Those are identifiers and trace context, and they are what
+ * a replay to the original topic republishes. Anything else a sender attached
+ * — an `authorization`, a cookie, a custom header — is dropped (S-09): the
+ * dead-letter topic is read by operators, and it is not this consumer's to
+ * copy. Names match exactly; the relay writes them in lower case.
+ */
+const FORWARDED_HEADERS: ReadonlySet<string> = new Set(Object.values(EVENT_HEADERS));
+
+export function forwardedHeaders(headers: IHeaders | undefined): IHeaders {
+  const kept: IHeaders = {};
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    if (FORWARDED_HEADERS.has(name) && value !== undefined) kept[name] = value;
+  }
+  return kept;
+}
+
+/** The longest handler message a log line or `x-dlq-error` repeats, in characters. */
+export const HANDLER_MESSAGE_MAX = 200;
+
+/**
+ * A handler's error message, fit for a log line and a header: `Name: message`
+ * (the refusal's own message for {@link UnprocessableEventError}, whose
+ * reason is stated beside it), with control characters, line and paragraph
+ * separators and bidirectional overrides replaced by a space — so it cannot
+ * forge a second log line or disguise itself — and cut to
+ * {@link HANDLER_MESSAGE_MAX} characters with an ellipsis. Persian text passes
+ * through: the message is the service's own, and operators read it.
+ */
+export function handlerMessage(error: unknown): string {
+  const text = error instanceof UnprocessableEventError ? error.message : describe(error);
+  const flat = text
+    .replace(/[\p{Cc}\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+/gu, ' ')
+    .replace(/ {2,}/g, ' ')
+    .trim();
+  const chars = Array.from(flat);
+  return chars.length > HANDLER_MESSAGE_MAX
+    ? `${chars.slice(0, HANDLER_MESSAGE_MAX - 1).join('')}…`
+    : flat;
 }
 
 /**

@@ -54,13 +54,22 @@ docker compose exec kafka kafka-console-consumer.sh \
 
 Headerهای کلیدی:
 
-| Header                  | معنا                  |
-| ----------------------- | --------------------- |
-| `x-dlq-reason`          | دلیل دسته‌بندی‌شده    |
-| `x-dlq-original-topic`  | Topic مبدأ            |
-| `x-dlq-attempts`        | تعداد تلاش پیش از DLQ |
-| `x-dlq-error`           | متن خطا               |
-| `x-dlq-first-failed-at` | نخستین شکست           |
+| Header                     | معنا                       |
+| -------------------------- | -------------------------- |
+| `x-dlq-reason`             | دلیل دسته‌بندی‌شده         |
+| `x-dlq-original-topic`     | Topic مبدأ                 |
+| `x-dlq-attempts`           | تعداد تلاش پیش از DLQ      |
+| `x-dlq-error`              | متن خطا                    |
+| `x-dlq-first-failed-at`    | نخستین شکست                |
+| `x-dlq-original-partition` | پارتیشن پیام در Topic مبدأ |
+| `x-dlq-original-offset`    | Offset پیام در Topic مبدأ  |
+
+`x-dlq-error` همیشه «دسته‌بندی ثابت (کد `DlqReason`): پیام» است — مثلاً `Handler failed 3x (MAX_RETRIES_EXCEEDED): …` یا
+`Unparseable message (VALIDATION_FAILED): the body is not valid JSON (N bytes)` — و محتوای بدنه را تکرار نمی‌کند؛ پیام Handler
+پاک‌سازی‌شده و حداکثر ۲۰۰ نویسه است. از Headerهای پیام اصلی فقط Headerهای پلتفرم (`EVENT_HEADERS`، از جمله
+`x-correlation-id` و `traceparent`) در پیام DLQ می‌مانند؛ Header دیگری (مثلاً `authorization`) منتقل نمی‌شود (S-09). برای
+بازپخش همین‌ها کافی است: بدنهٔ دست‌نخورده، `x-dlq-original-topic` و Headerهای پلتفرم. `x-producer` در پیام DLQ نام
+مصرف‌کننده‌ای است که آن را نوشت، نه ناشر اصلی؛ ناشر اصلی در `producer` بدنه است.
 
 ### ۲. عمق DLQ به تفکیک دلیل
 

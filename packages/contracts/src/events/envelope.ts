@@ -205,6 +205,12 @@ export const DLQ_HEADERS = {
   attempts: 'x-dlq-attempts',
   error: 'x-dlq-error',
   firstFailedAt: 'x-dlq-first-failed-at',
+  /**
+   * Where the original sat on `originalTopic` — so a triager can find the
+   * message the broker delivered, and its neighbours, without opening the body.
+   */
+  originalPartition: 'x-dlq-original-partition',
+  originalOffset: 'x-dlq-original-offset',
 } as const;
 
 export const DLQ_REASONS = {

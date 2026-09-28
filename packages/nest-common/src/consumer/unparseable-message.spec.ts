@@ -149,7 +149,7 @@ describe('an unparseable message (S-09)', () => {
     expect(message?.value?.toString('utf8')).toContain(SENTINEL);
     expect(message?.headers[DLQ_HEADERS.reason]).toBe(DLQ_REASONS.VALIDATION_FAILED);
     expect(message?.headers[DLQ_HEADERS.error]).toBe(
-      `Error: the body is not valid JSON (${body.length} bytes)`,
+      `Unparseable message (VALIDATION_FAILED): the body is not valid JSON (${body.length} bytes)`,
     );
   });
 
@@ -174,7 +174,7 @@ describe('an unparseable message (S-09)', () => {
       'error Unparseable message on rasta.asset.v1[1]@9: the message has no body',
     );
     expect(dlq.sent[0]?.messages[0]?.headers[DLQ_HEADERS.error]).toBe(
-      'Error: the message has no body',
+      'Unparseable message (VALIDATION_FAILED): the message has no body',
     );
   });
 });

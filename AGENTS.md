@@ -111,6 +111,10 @@ Stack پیش‌فرض در `docs/01-executive-architecture.md` تثبیت شده
 | S-09 | داده حساس هرگز در Log، URL یا پیام خطا ظاهر نمی‌شود.                                            |
 | S-10 | عبارت‌هایی مانند «Military Grade Security» یا «100% Secure» در هیچ سند یا UI به کار نمی‌روند.   |
 
+**S-09 برای Handler رویداد:** پیام `UnprocessableEventError` و پیام هر خطایی که Handler بیرون می‌دهد به Log و `x-dlq-error`
+می‌رسد؛ پس **شناسه** دارد (شناسهٔ رویداد یا Aggregate، نام میدان، کد بسته) و هرگز **مقدار Payload** (مبلغ، نام، نشانی، متن
+آزاد). جزئیات: [`docs/07`](docs/07-event-architecture.md) § ۷٫۶.
+
 هر Feature جدید که داده مستأجر را لمس می‌کند باید یک **Tenant Isolation Test** داشته باشد که
 ثابت کند مستأجر A نمی‌تواند داده مستأجر B را بخواند یا تغییر دهد.
 

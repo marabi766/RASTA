@@ -198,8 +198,17 @@ COMMIT ──► Commit Offset
 
 **قواعد DLQ:**
 
-- هر پیام DLQ Headerهای `x-dlq-reason`، `x-dlq-original-topic`، `x-dlq-attempts`،
-  `x-dlq-error` و `x-dlq-first-failed-at` را حمل می‌کند.
+- هر پیام DLQ Headerهای `x-dlq-reason`، `x-dlq-original-topic`، `x-dlq-original-partition`،
+  `x-dlq-original-offset`، `x-dlq-attempts`، `x-dlq-error` و `x-dlq-first-failed-at` را حمل می‌کند. بدنه، بایت‌به‌بایت
+  همان پیام اصلی است.
+- **S-09 در مسیر DLQ** (بازبینی #135). از Headerهای پیام اصلی فقط Headerهای خود پلتفرم (`EVENT_HEADERS` — شناسه و نام
+  رویداد، نسخه، `x-correlation-id`، `x-causation-id`، `x-tenant-id`، `x-producer`، `traceparent`، `x-stream-seq`) منتقل
+  می‌شوند؛ `authorization`، Cookie یا هر Header دیگری که فرستنده افزوده باشد منتقل **نمی‌شود**. متن Log و `x-dlq-error`
+  همیشه «دسته‌بندی ثابت + کد `DlqReason` + پیام» است: پیام Parser هرگز (فقط اندازهٔ بدنه و مسیر/کد zod)، و پیام Handler با
+  حذف نویسه‌های کنترلی و شکست خط و حداکثر ۲۰۰ نویسه.
+- **قاعدهٔ پیام Handler.** پیام `UnprocessableEventError` و پیام هر خطایی که Handler بیرون می‌دهد **شناسه** دارد، نه
+  **مقدار Payload**: شناسهٔ رویداد یا Aggregate، نام میدان، یا کد بسته مانند `amount_mismatch` — هرگز مبلغ، نام، نشانی یا متن
+  آزاد. `EventConsumer` پاک‌سازی و کوتاه‌سازی می‌کند اما مقدار را از شناسه تشخیص نمی‌دهد؛ آن مسئولیت نویسندهٔ Handler است.
 - ورود پیام به DLQ **هشدار تولید می‌کند** — DLQ صندوق فراموشی نیست.
 - بازپخش دستی از راه Runbook: [`runbooks/replay-dlq.md`](runbooks/replay-dlq.md)
 - **CONSTRAINT.** پیام DLQ حاوی رویداد مالی هرگز خودکار بازپخش نمی‌شود؛ نیازمند بررسی انسانی.
