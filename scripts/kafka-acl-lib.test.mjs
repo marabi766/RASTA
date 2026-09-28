@@ -32,32 +32,52 @@ test('names every password the way @rasta/config does', () => {
   assert.equal(passwordVariable('admin'), 'KAFKA_SASL_PASSWORD_ADMIN');
 });
 
-test('every generated principal, and the admin, has its own placeholder in .env.example', () => {
-  const spec = JSON.parse(read('infrastructure/docker/kafka/broker-acls.json'));
-  const example = read('.env.example');
+test('every development principal, and the admin, has its credential where it belongs', () => {
+  // Services' own in .env.example (every service loads it); the admin's,
+  // ops-replay's and the observer's in the bootstrap-only example; the two
+  // tools' as compose's fixed development defaults (review of #131, #1).
+  const spec = JSON.parse(read('infrastructure/docker/kafka/broker-acls.development.json'));
+  const where = {
+    env: read('.env.example'),
+    bootstrap: read('infrastructure/docker/kafka/bootstrap.env.example'),
+    compose: read('docker-compose.yml'),
+  };
   const variables = [spec.admin, ...spec.principals].map(passwordVariable);
-  assert.equal(
-    new Set(variables).size,
-    variables.length,
-    'two principals share a password variable',
-  );
-  for (const variable of variables) {
-    assert.match(
-      example,
-      new RegExp(`^${variable}=\\S+$`, 'm'),
-      `${variable} is missing from .env.example`,
-    );
+  assert.equal(new Set(variables).size, variables.length, 'two principals share a password variable');
+  for (const principal of [spec.admin, ...spec.principals]) {
+    const variable = passwordVariable(principal);
+    const home = principal.endsWith('-service')
+      ? 'env'
+      : ['kafka-ui', 'kafka-exporter'].includes(principal)
+        ? 'compose'
+        : 'bootstrap';
+    const pattern =
+      home === 'compose'
+        ? new RegExp(`\\$\\{${variable}:-\\S+\\}`)
+        : new RegExp(`^${variable}=\\S+$`, 'm');
+    assert.match(where[home], pattern, `${variable} is missing from its ${home} file`);
   }
 });
 
-test('principals.txt lists exactly the generated principals', () => {
-  const spec = JSON.parse(read('infrastructure/docker/kafka/broker-acls.json'));
-  const listed = read('infrastructure/docker/kafka/principals.txt')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith('#'));
-  assert.deepEqual(listed, spec.principals);
-  assert.ok(!listed.includes(spec.admin), 'the admin is formatted separately, never from the list');
+for (const profile of ['development', 'deployment']) {
+  test(`principals.${profile}.txt lists exactly the generated ${profile} principals`, () => {
+    const spec = JSON.parse(read(`infrastructure/docker/kafka/broker-acls.${profile}.json`));
+    assert.equal(spec.profile, profile);
+    const listed = read(`infrastructure/docker/kafka/principals.${profile}.txt`)
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'));
+    assert.deepEqual(listed, spec.principals);
+    assert.ok(!listed.includes(spec.admin), 'the admin is formatted separately, never from the list');
+  });
+}
+
+test('the deployment profile has none of the development-only principals', () => {
+  const spec = JSON.parse(read('infrastructure/docker/kafka/broker-acls.deployment.json'));
+  for (const principal of ['itest-observer', 'kafka-ui', 'kafka-exporter']) {
+    assert.ok(!spec.principals.includes(principal), principal);
+    assert.ok(!spec.acls.some((acl) => acl.principal === principal), principal);
+  }
 });
 
 test('connects as the principal over SCRAM-SHA-512 and TLS when both are configured', () => {
@@ -159,4 +179,14 @@ test('diff adds what is missing, removes what is extra, keeps what matches', () 
   assert.deepEqual(add, [missing]);
   assert.deepEqual(remove, [stale]);
   assert.notEqual(aclKey(keep), aclKey({ ...keep, patternType: 'PREFIXED' }));
+});
+
+test('the applier refuses to run without an explicit profile (review of #131, #5)', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const script = resolve(ROOT, 'scripts/kafka-acl.mjs');
+  for (const args of [['apply'], ['apply', '--profile'], ['apply', '--profile', 'production']]) {
+    const result = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', env: {} });
+    assert.equal(result.status, 2, args.join(' '));
+    assert.match(result.stderr, /--profile development\|deployment/);
+  }
 });

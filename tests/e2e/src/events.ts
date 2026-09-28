@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { EVENT_HEADERS } from '@rasta/contracts';
 import { e2eConfig, type E2eConfig } from './env';
+import { OBSERVER_PRINCIPAL, observerKafkaSettings } from './kafka-observer';
 
 /**
  * Reads what economic-service actually published.
@@ -17,29 +18,24 @@ import { e2eConfig, type E2eConfig } from './env';
  * cluster the service produces to.
  */
 
-/** The development observer's principal (RUN-006, broker-acls.json). */
-export const OBSERVER_PRINCIPAL = 'itest-observer';
+export { OBSERVER_PRINCIPAL } from './kafka-observer';
 
 /**
  * How the harness reaches the authenticated broker (RUN-006, ADR-061 § 3): as
  * the development observer, which may read every platform topic under its own
  * `itest-observer.` groups and write none, over TLS trusting the CA the local
- * bootstrap exported. Without `KAFKA_SASL_PASSWORD_ITEST_OBSERVER` it connects
- * PLAINTEXT, which the authenticated broker refuses.
+ * bootstrap exported. Its credential and TLS settings are loaded explicitly,
+ * and only those (`observerKafkaSettings`, review of #131 finding 6).
  */
 export function observerClient(config: E2eConfig, clientId: string): KafkaConfig {
-  const password = process.env.KAFKA_SASL_PASSWORD_ITEST_OBSERVER?.trim();
-  const caFile = process.env.KAFKA_SSL_CA_FILE?.trim();
-  const ssl = /^(true|1|yes|on)$/i.test(process.env.KAFKA_SSL?.trim() ?? '');
+  const { password, caFile } = observerKafkaSettings();
   return {
     clientId,
     brokers: config.kafkaBrokers,
     ...(password
       ? { sasl: { mechanism: 'scram-sha-512', username: OBSERVER_PRINCIPAL, password } }
       : {}),
-    ...(ssl
-      ? { ssl: caFile ? { ca: [readFileSync(caFile, 'utf8')], rejectUnauthorized: true } : true }
-      : {}),
+    ...(caFile ? { ssl: { ca: [readFileSync(caFile, 'utf8')], rejectUnauthorized: true } } : {}),
   };
 }
 

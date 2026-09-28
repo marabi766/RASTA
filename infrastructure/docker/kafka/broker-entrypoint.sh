@@ -14,10 +14,10 @@
 #
 # Authorisation: StandardAuthorizer, allow.everyone.if.no.acl.found=false,
 # super users `admin` (bootstrap only) and the loopback controller peer. Every
-# other principal can do exactly what `broker-acls.json` grants — nothing
-# until the bootstrap applies it.
+# other principal can do exactly what `broker-acls.<profile>.json` grants —
+# nothing until the bootstrap applies it.
 #
-# Credentials: every principal in principals.txt, and `admin`, is added as a
+# Credentials: every principal in principals.<profile>.txt, and `admin`, is added as a
 # SCRAM-SHA-512 credential when the storage is formatted, from
 # KAFKA_SASL_PASSWORD_<NAME> (fleet-service -> KAFKA_SASL_PASSWORD_FLEET). A
 # missing one stops the broker: a principal with no credential is a service
@@ -30,6 +30,18 @@ set -euo pipefail
 
 TLS_DIR="${TLS_DIR:-/tls}"
 BOOTSTRAP_DIR="${BOOTSTRAP_DIR:-/bootstrap}"
+# The ACL profile whose principals get a credential (review of #131, #5): no
+# default, so a broker never provisions the development-only principals by
+# accident. `development` in compose and CI; `deployment` has none of them.
+PROFILE="${KAFKA_ACL_PROFILE:-}"
+case "${PROFILE}" in
+  development | deployment) ;;
+  *)
+    echo "broker: KAFKA_ACL_PROFILE must be development or deployment" >&2
+    exit 1
+    ;;
+esac
+PRINCIPALS_FILE="${BOOTSTRAP_DIR}/principals.${PROFILE}.txt"
 LOG_DIRS="${KAFKA_LOG_DIRS:-/tmp/kraft-combined-logs}"
 
 password_variable() {
@@ -101,7 +113,7 @@ if [ ! -s "${LOG_DIRS}/meta.properties" ]; then
     case "${principal}" in '' | \#*) continue ;; esac
     scram+=(--add-scram "SCRAM-SHA-512=[name=${principal},password=$(password_of "${principal}")]")
     count=$((count + 1))
-  done < "${BOOTSTRAP_DIR}/principals.txt"
+  done < "${PRINCIPALS_FILE}"
 
   format="$(mktemp)"
   cat > "${format}" <<EOF

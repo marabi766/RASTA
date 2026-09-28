@@ -91,7 +91,15 @@ jobs:
         # is missing), each principal's connection, and that every generated
         # principal has its own password placeholder in .env.example. No
         # broker; the broker itself is exercised by the integration job.
-        run: pnpm run test:kafka-acl-lib
+        #
+        # And no service process is given a Kafka credential but its own: the
+        # admin's, ops-replay's and the observer's stay out of .env and out of
+        # every service start step, and nothing exports one to $GITHUB_ENV
+        # (review of #131, finding 1).
+        run: |
+          pnpm run test:kafka-acl-lib
+          pnpm run test:kafka-credential-scope
+          pnpm run check:kafka-credential-scope
 
       - name: Role passwords are distinct and checked before any role changes
         # L7-33: the bootstrap and `pnpm db:rotate-role-passwords` refuse two
@@ -469,12 +477,16 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/rasta-web-e2e-logs
 
-          ( cd services/identity-service && \
+          ( kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh service identity-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/identity-service && \
             PORT=3101 SERVICE_NAME=identity-service \
             DATABASE_URL=postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public \
             node dist/main.js > /tmp/rasta-web-e2e-logs/identity.log 2>&1 & )
 
-          ( cd services/fleet-service && \
+          ( kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh service fleet-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/fleet-service && \
             PORT=3104 SERVICE_NAME=fleet-service \
             DATABASE_URL=postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public \
             node dist/main.js > /tmp/rasta-web-e2e-logs/fleet.log 2>&1 & )
@@ -860,7 +872,10 @@ jobs:
         # PostgreSQL they measured shared WAL load, not the upsert (docs/14
         # § 14.3). Never `turbo run test:integration` directly — that runs
         # the workspace phase only; `check:test-phases` enforces it.
-        run: pnpm run test:integration
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm run test:integration
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -912,7 +927,10 @@ jobs:
         # settlement rollback exist only in the database, so a unit-only
         # measurement would both understate the number and reward mocking the
         # very things `docs/10` § 10.12 requires to be tested for real.
-        run: pnpm --filter @rasta/economic-service run test:coverage
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/economic-service run test:coverage
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -929,7 +947,10 @@ jobs:
         # number far below the truth and fail a gate that should pass. In band
         # for the same reason every other integration step here is: the suites
         # share one database.
-        run: pnpm --filter @rasta/marketplace-service run test:coverage
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/marketplace-service run test:coverage
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -945,7 +966,10 @@ jobs:
         # database and a real bucket, so a unit-only measurement would report a
         # number far below the truth and reward mocking exactly the systems
         # ADR-014 is about.
-        run: pnpm --filter @rasta/document-service run test:coverage
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/document-service run test:coverage
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -981,7 +1005,10 @@ jobs:
         # HTTP surface only exist against a real database, and a unit-only
         # measurement would both report a number far below the truth and reward
         # mocking exactly the systems this service's correctness rests on.
-        run: pnpm --filter @rasta/supplier-service run test:coverage
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/supplier-service run test:coverage
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -995,7 +1022,10 @@ jobs:
         # that serialises need and project commands, the tenant-bound foreign
         # key, the PostGIS validity check, the outbox coupling and the HTTP
         # surface exist only against a real database and broker.
-        run: pnpm --filter @rasta/construction-service run test:coverage
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/construction-service run test:coverage
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -1008,7 +1038,10 @@ jobs:
         # projector's behaviour lives against a real broker -- a unit-only
         # number would reward mocking exactly the systems this service's
         # correctness rests on.
-        run: pnpm --filter @rasta/audit-service run test:coverage
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/audit-service run test:coverage
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -1025,7 +1058,10 @@ jobs:
         # dedupe upsert, the deferred foreign key, the fenced claim, the CHECK
         # constraints — live in PostgreSQL, and a unit-only number would reward
         # mocking exactly the system this service's correctness depends on.
-        run: pnpm --filter @rasta/notification-service run test:coverage
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/notification-service run test:coverage
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -1052,7 +1088,10 @@ jobs:
         #
         # Scoped to the one file the defect was found in. Widening it is a
         # deliberate act, not a default, because each name costs a jest start.
-        run: pnpm run test:independence
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm run test:independence
         env:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -1090,6 +1129,8 @@ jobs:
         # second command, where `concurren` selects its two 500-write proofs
         # (`check:test-phases`). The first command is unit suites only.
         run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
           pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"
           pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)"
         env:
@@ -1249,7 +1290,10 @@ jobs:
         # producer on WRITE alone. Refuses to run without the bootstrap's
         # environment rather than skip. Last in the job: its allowed writes
         # are marker records on real topics, which no suite above should read.
-        run: pnpm run test:kafka-acl-broker
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh admin)"
+          eval "${kafka_credentials}"
+          pnpm run test:kafka-acl-broker
 
   # ---------------------------------------------------------------------------
   # End-to-end. The economic critical path through the whole stack.
@@ -1451,7 +1495,10 @@ jobs:
         # write held after its read while an administrator changes the account
         # (ADR-060 § 5, docs/23 D-037). Here and not in `integration` because
         # this is the job with a Keycloak; it adds seconds, not a container.
-        run: pnpm --filter @rasta/identity-service run test:keycloak-live
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/identity-service run test:keycloak-live
         env:
           # The suite creates, changes and deletes users, so it refuses unless
           # it is opted in here — and only here — NODE_ENV=test, the Keycloak
@@ -1655,28 +1702,38 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/rasta-logs
 
-          ( cd services/identity-service && \
+          ( kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh service identity-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/identity-service && \
             PORT=3101 SERVICE_NAME=identity-service \
             DATABASE_URL=postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public \
             node dist/main.js > /tmp/rasta-logs/identity.log 2>&1 & )
 
-          ( cd services/economic-service && \
+          ( kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh service economic-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/economic-service && \
             PORT=3112 SERVICE_NAME=economic-service \
             node dist/main.js > /tmp/rasta-logs/economic.log 2>&1 & )
 
-          ( cd services/marketplace-service && \
+          ( kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh service marketplace-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/marketplace-service && \
             PORT=3106 SERVICE_NAME=marketplace-service \
             DATABASE_URL=postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public \
             node dist/main.js > /tmp/rasta-logs/marketplace.log 2>&1 & )
 
-          ( cd services/document-service && \
+          ( kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh service document-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/document-service && \
             PORT=3114 SERVICE_NAME=document-service \
             DATABASE_URL=postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public \
             node dist/main.js > /tmp/rasta-logs/document.log 2>&1 & )
 
           # The runtime role, never the migrator: audit-service must not be able
           # to alter or drop what it writes (ADR-053 § 6).
-          ( cd services/audit-service && \
+          ( kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh service audit-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/audit-service && \
             PORT=3115 SERVICE_NAME=audit-service \
             DATABASE_URL_AUDIT=postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit \
             node dist/main.js > /tmp/rasta-logs/audit.log 2>&1 & )
@@ -1684,14 +1741,18 @@ jobs:
           # Q-70 (7): the hierarchy construction-service confirms a union's
           # policy against. Only construction-service's service token is
           # admitted, on GET /v1/organizations/:id alone.
-          ( cd services/organization-service && \
+          ( kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh service organization-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/organization-service && \
             PORT=3102 SERVICE_NAME=organization-service \
             DATABASE_URL=postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public \
             node dist/main.js > /tmp/rasta-logs/organization.log 2>&1 & )
 
           # CON-001: its project scenarios, and the audit record they produce.
           # No widened roles: the union writes, the platform approves (Q-70 (7)).
-          ( cd services/construction-service && \
+          ( kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh service construction-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/construction-service && \
             PORT=3110 SERVICE_NAME=construction-service \
             DATABASE_URL=postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public \
             node dist/main.js > /tmp/rasta-logs/construction.log 2>&1 & )
@@ -1746,7 +1807,10 @@ jobs:
         # Playwright fails a run that matches no tests, and that default is kept
         # deliberately — `--pass-with-no-tests` appears nowhere in this
         # repository.
-        run: pnpm run test:e2e
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh observer)"
+          eval "${kafka_credentials}"
+          pnpm run test:e2e
         env:
           # The suite refuses to start without both, and refuses any endpoint
           # off loopback (tests/e2e/src/target-guard.ts).

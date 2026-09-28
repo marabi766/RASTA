@@ -2,9 +2,13 @@
 /**
  * Applies the generated principals' ACLs to the broker (RUN-006, ADR-061 § 3).
  *
- *   node scripts/kafka-acl.mjs apply
+ *   node scripts/kafka-acl.mjs apply --profile development|deployment
  *
- * Reads `infrastructure/docker/kafka/broker-acls.json` — generated from
+ * The profile is required (review of #131, #5): `development` adds the
+ * development-only principals (test observer, Kafka UI, exporter) and exists
+ * only for compose and CI; nothing picks it by default.
+ *
+ * Reads `infrastructure/docker/kafka/broker-acls.<profile>.json` — generated from
  * TOPIC_PRODUCERS and TOPIC_CONSUMERS (`pnpm kafka:acl:generate`), checked by
  * `packages/contracts` — and makes the broker hold exactly those bindings:
  * missing ones are created in one request, any other ALLOW binding (a stale
@@ -16,8 +20,10 @@
  * `infrastructure/docker/kafka/ci-up.sh`); otherwise — the repository `.env`
  * names it relative to a service's directory — the CA certificate
  * `pnpm infra:up` exported to `infrastructure/docker/kafka/.tls/ca.pem`.
- * `pnpm infra:up` runs it on the host after `docker compose up -d`, with the
- * repository `.env`, so nothing beyond Node and pnpm is needed.
+ * `pnpm infra:up` runs it on the host after `docker compose up -d` with the
+ * bootstrap-only env file (`infrastructure/docker/kafka/bootstrap.env`, from
+ * its committed example) — the admin's password is never in the services'
+ * `.env` — so nothing beyond Node and pnpm is needed.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
@@ -35,15 +41,20 @@ const {
 } = kafkajs;
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const command = process.argv[2];
-if (command !== 'apply') {
-  process.stderr.write('usage: node scripts/kafka-acl.mjs apply\n');
+const [command, flag, profile] = process.argv.slice(2);
+const PROFILES = ['development', 'deployment'];
+if (command !== 'apply' || flag !== '--profile' || !PROFILES.includes(profile)) {
+  process.stderr.write('usage: node scripts/kafka-acl.mjs apply --profile development|deployment\n');
   process.exit(2);
 }
 
 const spec = JSON.parse(
-  readFileSync(resolve(root, 'infrastructure/docker/kafka/broker-acls.json'), 'utf8'),
+  readFileSync(resolve(root, `infrastructure/docker/kafka/broker-acls.${profile}.json`), 'utf8'),
 );
+if (spec.profile !== profile) {
+  process.stderr.write(`kafka acl: broker-acls.${profile}.json says profile ${spec.profile}\n`);
+  process.exit(1);
+}
 const exportedCa = resolve(root, 'infrastructure/docker/kafka/.tls/ca.pem');
 const configuredCa = process.env.KAFKA_SSL_CA_FILE?.trim();
 const env = {
@@ -53,7 +64,7 @@ const env = {
 const connection = connectionFor(spec.admin, env, (path) => readFileSync(path, 'utf8'));
 if (!connection.sasl || !connection.ssl) {
   process.stderr.write(
-    'kafka acl: KAFKA_SASL_PASSWORD_ADMIN is required (copy .env.example to .env)\n',
+    'kafka acl: KAFKA_SASL_PASSWORD_ADMIN is required (infrastructure/docker/kafka/bootstrap.env.example)\n',
   );
   process.exit(1);
 }
@@ -107,7 +118,7 @@ try {
     process.exit(1);
   }
   process.stdout.write(
-    `kafka acl: ${spec.acls.length} bindings for ${spec.principals.length} principals in place ` +
+    `kafka acl: ${profile}: ${spec.acls.length} bindings for ${spec.principals.length} principals in place ` +
       `(${add.length} added, ${remove.length} removed)\n`,
   );
 } finally {

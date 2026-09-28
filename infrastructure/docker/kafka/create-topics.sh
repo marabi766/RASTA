@@ -1,6 +1,10 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
-# Creates every Rasta platform topic plus its retry and dead-letter companions.
+# Creates every Rasta platform topic the contracts declare: each topic and its
+# `.retry` twin, and each consumer's dead-letter topic — read from topics.txt,
+# which `pnpm kafka:acl:generate` writes from TOPIC_PRODUCERS and
+# TOPIC_CONSUMERS together with the ACLs, so the two cannot disagree (RUN-006).
+# TOPICS_FILE defaults to the copy next to this script.
 #
 # Broker auto-creation is OFF on purpose (ADR-006): producing to an unknown
 # topic is a contract violation and must fail loudly rather than silently
@@ -19,49 +23,8 @@ PARTITIONS="${KAFKA_TOPIC_PARTITIONS:-3}"
 REPLICATION="${KAFKA_TOPIC_REPLICATION:-1}"
 RETENTION_MS="${KAFKA_TOPIC_RETENTION_MS:-604800000}" # 7 days
 
-DOMAINS=(
-  identity
-  organization
-  asset
-  fleet
-  maintenance
-  insurance
-  marketplace
-  procurement
-  supplier
-  inventory
-  construction
-  contract
-  economic
-  notification
-  document
-  audit
-)
-
-# RUN-006: the broker authenticates. With the admin's password in the
-# environment this connects as `admin` over SASL_SSL, trusting the throwaway CA
-# tls.sh wrote; without it, PLAINTEXT as before.
-ADMIN_CONFIG=()
-if [ -n "${KAFKA_SASL_PASSWORD_ADMIN:-}" ]; then
-  admin_properties="$(mktemp)"
-  escaped="$(printf '%s' "${KAFKA_SASL_PASSWORD_ADMIN}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-  {
-    echo 'security.protocol=SASL_SSL'
-    echo 'sasl.mechanism=SCRAM-SHA-512'
-    echo "sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"admin\" password=\"${escaped}\";"
-    echo 'ssl.truststore.type=PEM'
-    echo "ssl.truststore.location=${KAFKA_CA_FILE:-/tls/ca.pem}"
-  } > "${admin_properties}"
-  ADMIN_CONFIG=(--command-config "${admin_properties}")
-fi
-
-echo "==> Waiting for Kafka at ${BOOTSTRAP}"
-for _ in $(seq 1 30); do
-  if "${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" --list >/dev/null 2>&1; then
-    break
-  fi
-  sleep 2
-done
+TOPICS_FILE="${TOPICS_FILE:-$(dirname "$0")/topics.txt}"
+[ -s "${TOPICS_FILE}" ] || { echo "==> ${TOPICS_FILE} missing; run pnpm kafka:acl:generate" >&2; exit 1; }
 
 create_topic() {
   local name="$1"
@@ -81,39 +44,42 @@ create_topic() {
   echo "    - ${name} (partitions=${partitions})"
 }
 
-create_domain() {
-  local domain="$1"
-  create_topic "rasta.${domain}.v1" "${PARTITIONS}" "${RETENTION_MS}"
-  # Retry topic: consumers republish here with a backoff attempt counter.
-  create_topic "rasta.${domain}.v1.retry" "${PARTITIONS}" "${RETENTION_MS}"
-  # DLQ: retained far longer — these need human eyes, not expiry.
-  create_topic "rasta.${domain}.v1.dlq" 1 "2592000000" # 30 days
+# Partitions and retention by kind. Dead letters need human eyes, not expiry;
+# the audit trail is the platform's tamper-evident record — never expire it in
+# a real deployment, 30 days here only to keep laptops from filling up.
+create_kind() {
+  local name="$1"
+  case "$2" in
+    stream | retry) create_topic "${name}" "${PARTITIONS}" "${RETENTION_MS}" ;;
+    dead-letter) create_topic "${name}" 1 "2592000000" ;;
+    audit-trail) create_topic "${name}" "${PARTITIONS}" "2592000000" ;;
+    *)
+      echo "==> ${name}: unknown kind $2" >&2
+      return 1
+      ;;
+  esac
 }
 
-# Each kafka-topics.sh call is a JVM start, so a few domains run at once
-# (KAFKA_TOPIC_PARALLELISM, default 4). Any failure still fails the script.
-echo "==> Creating domain topics"
-PARALLELISM="${KAFKA_TOPIC_PARALLELISM:-4}"
+# Each kafka-topics.sh call is a JVM start, so a few run at once
+# (KAFKA_TOPIC_PARALLELISM, default 6). Any failure still fails the script.
+echo "==> Creating topics from $(basename "${TOPICS_FILE}")"
+PARALLELISM="${KAFKA_TOPIC_PARALLELISM:-6}"
 pids=()
 failed=0
-for domain in "${DOMAINS[@]}"; do
-  create_domain "${domain}" &
+while read -r name kind; do
+  case "${name}" in '' | \#*) continue ;; esac
+  create_kind "${name}" "${kind}" &
   pids+=("$!")
   if [ "${#pids[@]}" -ge "${PARALLELISM}" ]; then
     for pid in "${pids[@]}"; do wait "${pid}" || failed=1; done
     pids=()
   fi
-done
+done < "${TOPICS_FILE}"
 for pid in "${pids[@]}"; do wait "${pid}" || failed=1; done
 if [ "${failed}" -ne 0 ]; then
   echo "==> A topic could not be created" >&2
   exit 1
 fi
-
-echo "==> Creating compacted state topics"
-# The audit stream is the platform's tamper-evident record: never expire it in
-# a real deployment. 30 days here only to keep laptops from filling up.
-create_topic "rasta.audit.trail.v1" "${PARTITIONS}" "2592000000"
 
 # A freshly started broker lists topics while `__consumer_offsets` is still
 # loading, and a consumer joining in that window is told the coordinator is

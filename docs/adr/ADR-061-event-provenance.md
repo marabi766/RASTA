@@ -89,19 +89,34 @@ PLAINTEXT می‌ماند» بالا جایگزین می‌شود: Compose هم�
   `infrastructure/docker/kafka/.tls/ca.pem` کپی می‌شود تا سرویس‌ها و آزمون‌های روی میزبان به آن اعتماد کنند.
 - **Principalها.** یکی برای هر سرویس، به نام `SERVICE_NAME` آن، با گذرواژهٔ `KAFKA_SASL_PASSWORD_<SERVICE>`؛ `admin`
   فقط برای Bootstrap (ساخت Topic و اعمال ACL) و هرگز در یک سرویس؛ `ops-replay`، **تنها** نویسندهٔ Topicهای `.retry` و
-  **تنها** خوانندهٔ DLQها بیرون از مالکشان (`docs/runbooks/replay-dlq.md`)؛ و سه Principal فقط-توسعه که در مجموعهٔ ACL
-  هیچ محیط دیگری نیستند: `itest-observer` (خواندن همهٔ Topicها زیر گروه‌های `itest-observer.` برای آزمون‌ها)،
-  `kafka-ui` و `kafka-exporter`. گذرواژه‌ها در توسعه مقادیر `.env.example` اند و در CI برای هر اجرا تازه و Mask‌شده.
+  **تنها** خوانندهٔ DLQها بیرون از مالکشان (`docs/runbooks/replay-dlq.md`)؛ و سه Principal فقط-توسعه که فقط در پروفایل
+  `development` هستند: `itest-observer` (فقط `READ` روی همهٔ Topicها زیر گروه‌های `itest-observer.` برای
+  آزمون‌ها، هرگز `WRITE`)، `kafka-ui` و `kafka-exporter`.
+- **اعتبارها فقط به صاحبشان.** (بازبینی دور ۱ #131) گذرواژهٔ `admin`، `ops-replay` و `itest-observer` هرگز در محیط
+  پروسهٔ یک سرویس نیست: در `infrastructure/docker/kafka/bootstrap.env` (Git-Ignored؛ نمونه و پیش‌فرض‌های توسعه در
+  `bootstrap.env.example`) می‌مانند و Compose آن را فقط به `kafka` و `kafka-init` می‌دهد؛ `pnpm infra:up` و
+  `pnpm kafka:acl:apply` آن را صریحاً می‌خوانند. `.env.example` فقط گذرواژهٔ سرویس‌ها را دارد — نگه داشتن همهٔ آن‌ها در
+  یک `.env` مشترک توسعه، مانند `DATABASE_URL_<SERVICE>`، باقی‌ماندهٔ پذیرفتهٔ **فقط-توسعه** است؛ استقرار به هر سرویس فقط
+  Secret خودش را می‌دهد. در CI گذرواژه‌ها برای هر اجرا تازه، Mask‌شده و فقط در فایل‌های `KAFKA_SECRETS_DIR` اند (هرگز در
+  `$GITHUB_ENV`)، و هر Step با `kafka-credentials.sh` فقط Scope خودش را می‌گیرد: شروع هر سرویس فقط گذرواژهٔ همان سرویس،
+  آزمون‌ها سرویس‌ها و observer، و فقط آزمون Broker گذرواژهٔ `admin`. Playwright فقط گذرواژهٔ observer و CA را می‌خواند
+  (`tests/e2e/src/kafka-observer.ts`). `pnpm check:kafka-credential-scope` این مرزها را در Workflow، Compose و فایل‌های
+  نمونه نگه می‌دارد.
 - **ACL از قرارداد.** `packages/contracts/src/events/broker-acls.ts` مجموعهٔ ACL را از `TOPIC_PRODUCERS` و
-  `TOPIC_CONSUMERS` می‌سازد (`pnpm kafka:acl:generate` ← `broker-acls.json` و `principals.txt`) و آزمونی Drift فایل
-  Commitشده را با قرارداد می‌سنجد: مالک `WRITE` روی Topic خودش؛ Consumer اعلام‌شده `READ` روی Topicهای مشترکش و
-  `.retry` آن‌ها، `READ` روی گروه‌های PREFIXED `<service>.`، و `WRITE` فقط روی DLQ خودش؛ هیچ Principalی جز `admin`
-  Topic نمی‌سازد. `scripts/kafka-acl.mjs apply` Broker را دقیقاً به همین مجموعه می‌رساند (کم‌ها را می‌افزاید، هر ALLOW
-  دیگر را حذف می‌کند، و نتیجه را بازخوانی و مقایسه می‌کند)؛ `pnpm infra:up` و `ci-up.sh` آن را اجرا می‌کنند.
+  `TOPIC_CONSUMERS` می‌سازد — در دو پروفایل: `development` (Compose و CI) و `deployment` (بی Principalهای توسعه و
+  آزمون). `pnpm kafka:acl:generate` ← `broker-acls.<profile>.json`، `principals.<profile>.txt` و `topics.txt` (هر Topic
+  اعلام‌شده، `.retry` آن — `rasta.audit.trail.v1.retry` هم — و DLQ هر Consumer)؛ آزمون‌های Drift فایل‌های Commitشده را با
+  قرارداد می‌سنجند و آزمون قرارداد-به-Bootstrap نشان می‌دهد هر Topicی که قرارداد یا ACL نام می‌برد ساخته می‌شود و
+  برعکس. قواعد: مالک `WRITE` روی Topic خودش؛ Consumer اعلام‌شده `READ` روی Topicهای مشترکش و `.retry` آن‌ها، `READ` روی
+  گروه‌های PREFIXED `<service>.`، و `WRITE` فقط روی DLQ خودش؛ هیچ Principalی جز `admin` Topic نمی‌سازد.
+  `scripts/kafka-acl.mjs apply --profile <development|deployment>` Broker را دقیقاً به همین مجموعه می‌رساند (کم‌ها را
+  می‌افزاید، هر ALLOW دیگر را حذف می‌کند، و نتیجه را بازخوانی و مقایسه می‌کند) و بی پروفایل صریح اجرا نمی‌شود؛ Broker هم
+  بی `KAFKA_ACL_PROFILE` بالا نمی‌آید. `pnpm infra:up` و `ci-up.sh` پروفایل `development` را اعمال می‌کنند.
 - **اثبات روی Broker.** `scripts/kafka-acl.broker.test.mjs` در Job یکپارچگی CI از خود Broker می‌پرسد: فقط مالک
-  می‌نویسد، Consumer فقط اشتراکش را در فضای گروه خودش می‌خواند، DLQ و `.retry` همان‌اند که بالا آمد، اعتبار غلط یا نبودش
-  و PLAINTEXT رد می‌شوند، هیچ سرویسی Topic نمی‌سازد، و Producerِ Idempotent با همان `WRITE` کار می‌کند. همهٔ آزمون‌های
-  یکپارچگی و E2E با همین Broker اجرا می‌شوند، هر کدام با اعتبار Principalی که نقشش را بازی می‌کند.
+  می‌نویسد، Consumer فقط اشتراکش را در فضای گروه خودش می‌خواند، DLQ و `.retry` همان‌اند که بالا آمد، اعتبار غلط یا نبودش،
+  SASL/PLAIN حتی با گذرواژهٔ درست، و PLAINTEXT رد می‌شوند، هیچ سرویسی Topic نمی‌سازد، و Producerِ Idempotent با همان
+  `WRITE` کار می‌کند. همهٔ آزمون‌های یکپارچگی و E2E با همین Broker اجرا می‌شوند، هر کدام با اعتبار Principalی که نقشش را
+  بازی می‌کند.
 - **Gate استقرار سر جایش است.** برای هر محیط غیرتوسعه همین قواعد با CA واقعی و Secretهای مدیریت‌شدهٔ استقرار لازم است؛
   سرویسی که اعتبار خودش و TLS را ندارد **هیچ‌جا** بالا نمی‌آید، مگر با انصراف صریح `KAFKA_ALLOW_PLAINTEXT=true` و
   `NODE_ENV` صراحتاً `development` یا `test` — در `staging`، `production` یا بی `NODE_ENV` همان انصراف در راه‌اندازی رد

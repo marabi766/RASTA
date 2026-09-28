@@ -107,6 +107,8 @@ export {
   brokerPrincipals,
   brokerAcls,
   brokerAclDocument,
+  brokerTopics,
+  BROKER_PROFILES,
 } from './events/broker-acls';
 export type {
   AclBinding,
@@ -114,6 +116,8 @@ export type {
   AclPatternType,
   AclResourceType,
   BrokerProfile,
+  BrokerTopic,
+  BrokerTopicKind,
 } from './events/broker-acls';
 
 export {

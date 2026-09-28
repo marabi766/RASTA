@@ -200,7 +200,7 @@ export class EventConsumer {
     // must be declared, authenticated or not. A principal that is not a
     // service (the development `itest-observer`, `ops-replay`) is not in
     // TOPIC_CONSUMERS at all: what it may read is the broker's ACLs alone
-    // (broker-acls.json), so it is left to the topic check above.
+    // (broker-acls.<profile>.json), so it is left to the topic check above.
     const service = options.sasl?.username ?? consumerGroupService(options.groupId);
     if (
       service !== undefined &&

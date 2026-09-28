@@ -7,6 +7,8 @@ import {
   brokerAclDocument,
   brokerAcls,
   brokerPrincipals,
+  brokerTopics,
+  BROKER_PROFILES,
   type AclBinding,
   type BrokerProfile,
 } from './broker-acls';
@@ -19,9 +21,11 @@ import { TOPIC_CONSUMERS } from './topic-consumers';
  * (`scripts/kafka-acl.broker.test.mjs`) then prove the broker enforces it.
  */
 
-const PROFILES: BrokerProfile[] = ['deployment', 'development'];
+const PROFILES: readonly BrokerProfile[] = BROKER_PROFILES;
 const DECLARED_TOPICS = Object.keys(TOPIC_PRODUCERS);
-const DEAD_LETTERS = Object.values(TOPIC_CONSUMERS).map((entry) => entry.deadLetterTopic);
+const DEAD_LETTERS: readonly string[] = Object.values(TOPIC_CONSUMERS).map(
+  (entry) => entry.deadLetterTopic,
+);
 const DEVELOPMENT = new Set<string>(Object.values(DEVELOPMENT_PRINCIPALS));
 
 const where = (acls: AclBinding[], match: Partial<AclBinding>) =>
@@ -157,18 +161,60 @@ describe('profiles', () => {
   });
 });
 
+describe('the development principals', () => {
+  it('only ever read or describe: the observer, the UI and the exporter write nothing', () => {
+    const acls = brokerAcls('development');
+    for (const principal of DEVELOPMENT) {
+      expect(where(acls, { principal, operation: 'WRITE' })).toEqual([]);
+    }
+  });
+});
+
 describe('the committed bootstrap files', () => {
   const dir = resolve(__dirname, '../../../../infrastructure/docker/kafka');
-
-  it('broker-acls.json is what the contracts generate (run `pnpm kafka:acl:generate`)', () => {
-    const committed: unknown = JSON.parse(readFileSync(resolve(dir, 'broker-acls.json'), 'utf8'));
-    expect(committed).toEqual(brokerAclDocument('development'));
-  });
-
-  it('principals.txt lists the same principals, one per line', () => {
-    const committed = readFileSync(resolve(dir, 'principals.txt'), 'utf8')
+  const lines = (file: string) =>
+    readFileSync(resolve(dir, file), 'utf8')
       .split('\n')
       .filter((line) => line.length > 0 && !line.startsWith('#'));
-    expect(committed).toEqual(brokerPrincipals('development'));
+
+  it.each(PROFILES)(
+    'broker-acls.%s.json is what the contracts generate (run `pnpm kafka:acl:generate`)',
+    (profile) => {
+      const committed: unknown = JSON.parse(
+        readFileSync(resolve(dir, `broker-acls.${profile}.json`), 'utf8'),
+      );
+      expect(committed).toEqual(brokerAclDocument(profile));
+    },
+  );
+
+  it.each(PROFILES)('principals.%s.txt lists the same principals, one per line', (profile) => {
+    expect(lines(`principals.${profile}.txt`)).toEqual(brokerPrincipals(profile));
+  });
+
+  it('topics.txt is what the contracts generate', () => {
+    expect(lines('topics.txt')).toEqual(brokerTopics().map((t) => `${t.name} ${t.kind}`));
+  });
+
+  it('creates exactly the topics the contracts and the ACLs name — no more, no fewer (review of #131, #2)', () => {
+    const created = new Set(brokerTopics().map((topic) => topic.name));
+    const named = new Set<string>();
+    for (const name of DECLARED_TOPICS) {
+      named.add(name);
+      named.add(`${name}.retry`);
+    }
+    for (const name of DEAD_LETTERS) named.add(name);
+    for (const profile of PROFILES) {
+      for (const acl of brokerAcls(profile)) {
+        if (acl.resourceType === 'TOPIC' && acl.patternType === 'LITERAL') named.add(acl.resourceName);
+      }
+    }
+    expect([...created].sort()).toEqual([...named].sort());
+    expect(created).toContain('rasta.audit.trail.v1.retry');
+  });
+
+  it('create-topics.sh creates from topics.txt, with no topic list of its own', () => {
+    const script = readFileSync(resolve(dir, 'create-topics.sh'), 'utf8');
+    expect(script).toContain('topics.txt');
+    expect(script).not.toMatch(/rasta\.[a-z]+\.v1/);
   });
 });

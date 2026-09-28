@@ -16,13 +16,14 @@
  * this against a broker nothing else is consuming from — CI runs it last.
  *
  * The rules under test come from TOPIC_PRODUCERS and TOPIC_CONSUMERS through
- * the generated `broker-acls.json`; each case below is one of them, observed:
+ * the generated `broker-acls.development.json` (the profile compose and CI
+ * apply); each case below is one of them, observed:
  *   - only a topic's owner writes it; a service reads only what it subscribes
  *     to, under groups in its own namespace;
  *   - a service writes only its own dead-letter topic; only `ops-replay`
  *     writes `.retry` topics and reads dead-letter topics;
- *   - no password, a wrong password or an unknown principal is refused, and
- *     so is PLAINTEXT;
+ *   - no password, a wrong password, an unknown principal or SASL/PLAIN (even
+ *     with a real password) is refused, and so is PLAINTEXT;
  *   - no principal but the admin creates a topic, by request or by producing;
  *   - an idempotent producer needs nothing beyond WRITE on its topic.
  */
@@ -46,7 +47,7 @@ const {
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const spec = JSON.parse(
-  readFileSync(resolve(ROOT, 'infrastructure/docker/kafka/broker-acls.json'), 'utf8'),
+  readFileSync(resolve(ROOT, 'infrastructure/docker/kafka/broker-acls.development.json'), 'utf8'),
 );
 const configuredCa = process.env.KAFKA_SSL_CA_FILE?.trim();
 const env = {
@@ -64,7 +65,8 @@ const missing = [spec.admin, ...spec.principals]
 if (missing.length > 0) {
   throw new Error(
     `the broker tests need the bootstrap's environment; missing ${missing.join(', ')} ` +
-      '(run infrastructure/docker/kafka/ci-up.sh, or `pnpm infra:up` with .env)',
+      '(in CI, the `admin` scope of infrastructure/docker/kafka/kafka-credentials.sh; locally, ' +
+      '`pnpm test:kafka-acl-broker`, which loads .env and infrastructure/docker/kafka/bootstrap.env.example)',
   );
 }
 
@@ -173,7 +175,7 @@ after(async () => {
 });
 
 describe('the broker holds exactly the generated ACLs', () => {
-  test('describeAcls as admin equals broker-acls.json', async () => {
+  test('describeAcls as admin equals broker-acls.development.json', async () => {
     const admin = await connected(client(spec.admin).admin());
     const { resources } = await admin.describeAcls({
       resourceType: AclResourceTypes.ANY,
@@ -353,6 +355,15 @@ describe('6. authentication', () => {
       password: `any-${run}`,
     };
     assert.equal(await refusal(write({ sasl })), 'KafkaJSSASLAuthenticationError');
+  });
+
+  test('SASL/PLAIN is refused, even with fleet-service’s real password', async () => {
+    const sasl = {
+      mechanism: 'plain',
+      username: 'fleet-service',
+      password: process.env[passwordVariable('fleet-service')],
+    };
+    assert.notEqual(await refusal(write({ sasl })), 'ALLOWED');
   });
 
   test('TLS without SASL is refused', async () => {

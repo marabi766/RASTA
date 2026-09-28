@@ -282,7 +282,7 @@ describe('EventConsumer and TOPIC_CONSUMERS', () => {
 
   it('leaves a principal that is not a service to the broker ACLs', () => {
     // The development observer reads every topic under its own group prefix;
-    // TOPIC_CONSUMERS does not describe it, broker-acls.json does.
+    // TOPIC_CONSUMERS does not describe it, broker-acls.development.json does.
     expect(() =>
       build({
         ...fleet,

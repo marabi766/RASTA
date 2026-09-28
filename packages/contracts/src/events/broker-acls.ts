@@ -1,5 +1,6 @@
 import { TOPIC_PRODUCERS, RETRY_TOPIC_SUFFIX } from './topic-producers';
 import { CONSUMER_GROUP_SEPARATOR, TOPIC_CONSUMERS } from './topic-consumers';
+import { AUDIT_TRAIL_TOPIC } from './envelope';
 
 /**
  * The broker's principals and ACLs, derived from the topology contracts
@@ -25,11 +26,18 @@ import { CONSUMER_GROUP_SEPARATOR, TOPIC_CONSUMERS } from './topic-consumers';
  * only to bootstrap and is not in this list.
  *
  * A pure function of the contracts: `broker-acls.spec.ts` states the rules,
- * and the generated `infrastructure/docker/kafka/broker-acls.json`, which the
- * bootstrap applies, is checked against it.
+ * and the generated `infrastructure/docker/kafka/broker-acls.<profile>.json`,
+ * which the bootstrap applies, is checked against it.
  */
 
-export type BrokerProfile = 'deployment' | 'development';
+/**
+ * `deployment` holds the services and `ops-replay` only; `development` adds
+ * the principals that exist only where no real data does (compose and CI):
+ * the read-only test observer, Kafka UI and the exporter. The bootstrap never
+ * assumes one: the applier and the broker refuse to run without it named.
+ */
+export const BROKER_PROFILES = ['deployment', 'development'] as const;
+export type BrokerProfile = (typeof BROKER_PROFILES)[number];
 
 export type AclResourceType = 'TOPIC' | 'GROUP' | 'CLUSTER';
 export type AclPatternType = 'LITERAL' | 'PREFIXED';
@@ -162,7 +170,7 @@ export function brokerAcls(profile: BrokerProfile): AclBinding[] {
   );
 }
 
-/** The document the bootstrap applies: `infrastructure/docker/kafka/broker-acls.json`. */
+/** The document the bootstrap applies: `infrastructure/docker/kafka/broker-acls.<profile>.json`. */
 export function brokerAclDocument(profile: BrokerProfile): {
   profile: BrokerProfile;
   admin: string;
@@ -175,4 +183,36 @@ export function brokerAclDocument(profile: BrokerProfile): {
     principals: brokerPrincipals(profile),
     acls: brokerAcls(profile),
   };
+}
+
+/**
+ * What a bootstrap topic is for, which decides its partitions and retention
+ * (`infrastructure/docker/kafka/create-topics.sh`).
+ */
+export type BrokerTopicKind = 'stream' | 'retry' | 'dead-letter' | 'audit-trail';
+
+export interface BrokerTopic {
+  readonly name: string;
+  readonly kind: BrokerTopicKind;
+}
+
+/**
+ * Every topic the broker must hold, derived from the same contracts as the
+ * ACLs (review of #131, finding 2): each declared topic and its `.retry` twin,
+ * and each consumer's dead-letter topic. Auto-creation is off (ADR-006), so a
+ * topic the ACLs name but the bootstrap does not create is a replay or a
+ * dead letter that fails at run time; generated together, the two cannot
+ * disagree. Sorted by name.
+ */
+export function brokerTopics(): BrokerTopic[] {
+  const out = new Map<string, BrokerTopic>();
+  const add = (name: string, kind: BrokerTopicKind): void => {
+    out.set(name, { name, kind });
+  };
+  for (const name of declaredTopics()) {
+    add(name, name === AUDIT_TRAIL_TOPIC ? 'audit-trail' : 'stream');
+    add(`${name}${RETRY_TOPIC_SUFFIX}`, 'retry');
+  }
+  for (const [, { deadLetterTopic }] of consumers()) add(deadLetterTopic, 'dead-letter');
+  return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
