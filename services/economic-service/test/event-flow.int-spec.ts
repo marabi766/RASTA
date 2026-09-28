@@ -160,6 +160,8 @@ describeWithKafka('economic event flow over Kafka', () => {
             ...kafkaConnectionFor('economic-service', `economic-itest-settlement-${suffix}`),
             groupId: `economic-service.itest-settlement-${suffix}`,
             topics: [MAINTENANCE_TOPIC],
+            // Required of every economic-service consumer (TOPIC_CONSUMERS).
+            deadLetterTopic: 'rasta.economic.v1.dlq',
             fromBeginning: false,
           },
           handler,
@@ -178,6 +180,8 @@ describeWithKafka('economic event flow over Kafka', () => {
             ...kafkaConnectionFor('economic-service', `economic-itest-reward-${suffix}`),
             groupId: `economic-service.itest-reward-${suffix}`,
             topics: [MAINTENANCE_TOPIC],
+            // Required of every economic-service consumer (TOPIC_CONSUMERS).
+            deadLetterTopic: 'rasta.economic.v1.dlq',
             fromBeginning: false,
           },
           handler,

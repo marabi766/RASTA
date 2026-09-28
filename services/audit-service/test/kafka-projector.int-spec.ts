@@ -330,6 +330,8 @@ describeWithKafka('domain projector over Kafka', () => {
             ...kafkaConnectionFor('audit-service', 'audit-itest-replay'),
             groupId: replayGroup,
             topics: ['rasta.maintenance.v1'],
+            // Required of every audit-service consumer (TOPIC_CONSUMERS).
+            deadLetterTopic: 'rasta.audit.v1.dlq',
             fromBeginning: true,
           },
           handler,
