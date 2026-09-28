@@ -198,7 +198,8 @@ export class KeycloakAdminClient {
    *
    * What is still read-then-written, and so can still lose a change made in
    * the few milliseconds between the two, is those three profile fields and
-   * any non-platform attribute: `docs/23` D-037.
+   * any non-platform attribute — and the email is a sign-in and reset
+   * identifier in this realm, not display data: `docs/23` D-037.
    *
    * Throws when the write does not land. Whether that is fatal is the
    * caller's decision (`KeycloakProjector`), not this client's.

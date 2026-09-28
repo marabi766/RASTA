@@ -19,6 +19,10 @@ module.exports = {
     {
       displayName: 'unit',
       rootDir: 'src',
+      // The keycloak-live suite's write gate is checked here, on every run,
+      // not only in the job that has a Keycloak. Its `*.live-spec.ts` itself
+      // does not match this regex.
+      roots: ['<rootDir>', '<rootDir>/../test/keycloak-live'],
       testEnvironment: 'node',
       testRegex: '.*\\.spec\\.ts$',
       transform: swcTransform,

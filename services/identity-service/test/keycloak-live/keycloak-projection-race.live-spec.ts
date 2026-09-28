@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { KeycloakAdminClient } from '../../src/keycloak/keycloak.client';
 import type { PlatformAttributes } from '../../src/keycloak/platform-attributes';
+import { assertDisposableTarget } from './live-target-guard';
 
 /**
  * A projection never undoes a concurrent change to what it does not own —
@@ -20,8 +21,9 @@ import type { PlatformAttributes } from '../../src/keycloak/platform-attributes'
  * opens and the assertion is on what Keycloak holds.
  *
  * Run by the `e2e` CI job, which has the Keycloak (`pnpm --filter
- * @rasta/identity-service test:keycloak-live`). It creates throwaway users in
- * the development realm, so it refuses any Keycloak off loopback.
+ * @rasta/identity-service test:keycloak-live`). It creates throwaway users, so
+ * before its first write it passes `live-target-guard.ts`: `NODE_ENV=test`, a
+ * loopback Keycloak, **and** a realm that carries the disposable-stack marker.
  */
 
 const realFetch = globalThis.fetch;
@@ -40,11 +42,6 @@ const config = {
   admin: required('KEYCLOAK_ADMIN', 'admin'),
   adminPassword: required('KEYCLOAK_ADMIN_PASSWORD', 'admin_dev_password'),
 };
-
-const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
-if (!LOOPBACK.has(new URL(config.url).hostname)) {
-  throw new Error(`Refusing to create test users in a Keycloak off loopback: ${config.url}`);
-}
 
 interface KeycloakUser {
   id: string;
@@ -137,6 +134,15 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
     enabled: true,
   });
   const created: string[] = [];
+
+  // Before any write: the environment, then one read-only GET of the realm.
+  beforeAll(async () => {
+    await assertDisposableTarget({
+      env: { NODE_ENV: process.env.NODE_ENV, KEYCLOAK_URL: config.url },
+      realm: config.realm,
+      readRealm: async () => (await admin('')).json(),
+    });
+  });
 
   /** An account exactly as identity-service provisions one. */
   async function provisioned(): Promise<{ keycloakId: string; userId: string }> {
@@ -271,7 +277,50 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
     ]);
   });
 
-  it('D-037: the residual is the profile fields, and only them', async () => {
+  it('D-037: a concurrent EMAIL change is reverted — the login identifier, not only display data', async () => {
+    // The realm has `loginWithEmailAllowed: true`, so the email is a sign-in
+    // and password-reset identifier. An account-console email change resets
+    // `emailVerified`; the projection wrote the old address back but — it does
+    // not send `emailVerified` — left the reset in place. Result: the OLD
+    // address, now marked unverified. This pins the residual `docs/23` D-037
+    // records at its real significance; if it ever stops holding, revisit it.
+    const { keycloakId, userId } = await provisioned();
+    await change(keycloakId, { emailVerified: true });
+    const before = await read(keycloakId);
+    const moved = `moved.${randomUUID().slice(0, 8)}@example.test`;
+
+    await projectAround(keycloakId, platform(userId, ['OPERATOR']), () =>
+      change(keycloakId, { email: moved, emailVerified: false }),
+    );
+
+    const user = await read(keycloakId);
+    expect(user.email).toBe(before.email);
+    expect(user.email).not.toBe(moved);
+    expect(user.emailVerified).toBe(false);
+    const byNewAddress = (await (
+      await admin(`/users?email=${encodeURIComponent(moved)}&exact=true`)
+    ).json()) as KeycloakUser[];
+    expect(byNewAddress).toEqual([]);
+  });
+
+  it('Keycloak still offers no conditional update — the reason D-037 exists', async () => {
+    // Measured by hand on 26.0.8 first; pinned here so CI notices if a
+    // Keycloak upgrade adds one, and the residual could then be closed with a
+    // version-checked write instead of documented.
+    const { keycloakId } = await provisioned();
+    const got = await admin(`/users/${keycloakId}`);
+    expect(got.headers.get('etag')).toBeNull();
+
+    const stale = await admin(`/users/${keycloakId}`, {
+      method: 'PUT',
+      headers: { 'if-match': '"not-the-current-version"' },
+      body: JSON.stringify({ emailVerified: true }),
+    });
+    expect(stale.status).toBe(204);
+    expect((await read(keycloakId)).emailVerified).toBe(true);
+  });
+
+  it('D-037: a concurrent name change is reverted too; what it does not send is kept', async () => {
     // Keycloak erases `email`, `firstName` and `lastName` from a body carrying
     // `attributes` unless they are sent, and it has no version check, so the
     // projection still reads and writes those three. A name changed inside
