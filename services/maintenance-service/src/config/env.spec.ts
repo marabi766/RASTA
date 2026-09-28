@@ -23,6 +23,7 @@ const BASE: NodeJS.ProcessEnv = {
   OIDC_JWKS_URI: 'http://localhost:8080/realms/rasta/protocol/openid-connect/certs',
   OIDC_AUDIENCE: 'rasta-api',
   INTERNAL_TOKEN_SECRET: 'a_secret_that_is_at_least_thirty_two_chars',
+  ASSET_SERVICE_URL: 'http://localhost:3103',
 };
 
 const load = (value?: string) =>

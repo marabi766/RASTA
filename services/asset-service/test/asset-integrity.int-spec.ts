@@ -3,6 +3,7 @@ import type { EventEnvelope } from '@rasta/contracts';
 import { runUnscoped } from '@rasta/nest-common';
 import { AssetRepository } from '../src/asset/asset.repository';
 import { AssetService } from '../src/asset/asset.service';
+import { TransferClearanceClient } from '../src/asset/transfer-clearance';
 import { ASSET_EVENTS, INSURANCE_EVENTS } from '../src/asset/events';
 import { createAssetSchema } from '../src/asset/dto';
 import { InsuranceService } from '../src/insurance/insurance.service';
@@ -10,6 +11,7 @@ import { ClaimService } from '../src/insurance/claim.service';
 import { TimelineConsumer } from '../src/consumers/timeline.consumer';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, id, newPrisma, tenants } from './helpers';
+import { clearingOwners } from './transfer-clearance.fake';
 
 /**
  * Asset integrity under concurrency, against a real PostgreSQL.
@@ -138,7 +140,7 @@ describe('asset integrity', () => {
     await prisma.onModuleInit();
 
     repository = new AssetRepository(prisma);
-    assets = new AssetService(repository);
+    assets = new AssetService(repository, undefined, clearingOwners());
     insurance = new InsuranceService(repository, assets, 30);
     claims = new ClaimService(repository, assets, {
       decisionRoles: ['ORGANIZATION_ADMIN'],
@@ -422,6 +424,86 @@ describe('asset integrity', () => {
       },
     );
 
+    // ADR-062, docs/23 D-033: the status above is built from events. Work its
+    // owners have not published yet is found by asking them.
+    describe('clearance from the owners of the work (ADR-062)', () => {
+      const transferWith = (service: AssetService, assetId: string) =>
+        asActor(admin(org.a), () =>
+          service.transfer(assetId, { toOrganizationId: org.b, reason: 'واگذاری آزمون' }),
+        );
+
+      const nothingMoved = async (assetId: string) => {
+        expect(await statusOf(assetId)).toEqual({ status: 'ACTIVE', organizationId: org.a });
+        const transfers = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+          `SELECT count(*)::int AS n FROM asset_transfer WHERE asset_id = $1`,
+          assetId,
+        );
+        expect(transfers[0]!.n).toBe(0);
+        expect(
+          (await outboxFor(assetId)).filter((row) => row.eventName === 'ASSET_TRANSFERRED'),
+        ).toEqual([]);
+      };
+
+      it('keeps an ACTIVE asset whose repair maintenance has not published yet', async () => {
+        const assetId = await machine(org.a);
+        await setStatus(assetId, 'ACTIVE');
+        const owners = clearingOwners();
+        owners.ask = async (owner) => {
+          owners.asked.push(owner);
+          return owner === 'maintenance-service'
+            ? { clear: false, open: { openRequests: 1, openRepairOrders: 1 } }
+            : { clear: true };
+        };
+
+        await expect(
+          transferWith(new AssetService(repository, undefined, owners), assetId),
+        ).rejects.toMatchObject({
+          code: 'BUSINESS_RULE_VIOLATION',
+          internalContext: expect.objectContaining({ owner: 'maintenance-service' }),
+        });
+        await nothingMoved(assetId);
+        expect(owners.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+      });
+
+      it('rolls back every write of a transfer that commits after half the fence', async () => {
+        const assetId = await machine(org.a);
+        await setStatus(assetId, 'ACTIVE');
+        const owners = clearingOwners();
+        // Asked at 0; by the end of the transaction, 400 s have passed on the
+        // monotonic clock, past half of the 600 s fence.
+        let reads = 0;
+        owners.now = () => (reads++ === 0 ? 0 : 400_000);
+
+        await expect(
+          transferWith(new AssetService(repository, undefined, owners), assetId),
+        ).rejects.toThrow(/took too long to confirm/);
+        await nothingMoved(assetId);
+        expect(owners.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+      });
+
+      it('fails closed when the owners cannot be reached, with the real client', async () => {
+        const assetId = await machine(org.a);
+        await setStatus(assetId, 'ACTIVE');
+        // Port 9 (discard): nothing listens, so the connection is refused.
+        const unreachable = new TransferClearanceClient({
+          baseUrls: {
+            'fleet-service': 'http://127.0.0.1:9',
+            'maintenance-service': 'http://127.0.0.1:9',
+          },
+          timeoutMs: 500,
+          fenceTtlSeconds: 600,
+          tokens: { issue: async () => 'itest-token' },
+        });
+
+        await expect(
+          transferWith(new AssetService(repository, undefined, unreachable), assetId),
+        ).rejects.toMatchObject({
+          code: expect.stringMatching(/^UPSTREAM_(UNAVAILABLE|TIMEOUT)$/),
+        });
+        await nothingMoved(assetId);
+      });
+    });
+
     it('moves the insurance and inspection record with the asset, and only then', async () => {
       const assetId = await machine(org.a);
       await setStatus(assetId, 'ACTIVE');
@@ -500,7 +582,11 @@ describe('asset integrity', () => {
       // docs/24 Q-66, the project owner's decision (2026-09-25): the insurance
       // follows the vehicle. First a deployment that narrowed the rule to no
       // coverage at all: the inherited policy is history there.
-      const narrowAssets = new AssetService(repository, { coveragesFollowingVehicle: [] });
+      const narrowAssets = new AssetService(
+        repository,
+        { coveragesFollowingVehicle: [] },
+        clearingOwners(),
+      );
       const narrowClaims = new ClaimService(repository, narrowAssets, {
         decisionRoles: ['ORGANIZATION_ADMIN'],
         approvalCeilingMinor: null,

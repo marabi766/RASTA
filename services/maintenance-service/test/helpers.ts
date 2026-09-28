@@ -158,6 +158,7 @@ export async function cleanup(
     'maintenance_schedule',
     'asset_ref',
     'asset_usage_meter',
+    'asset_transfer_fence',
     'outbox_message',
   ]) {
     await client.$executeRawUnsafe(

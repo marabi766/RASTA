@@ -41,6 +41,22 @@ export const duplicateRequestsTotal = new Counter({
   registers: [registry],
 });
 
+/**
+ * Open work found under the previous owner when a transfer is consumed
+ * (ADR-062 § 5, docs/24 Q-74).
+ *
+ * A transfer is refused while the owner has open work, so this should stay at
+ * zero. Anything else is work from before that rule, or one of the bounded
+ * windows ADR-062 names, and it waits for a person: the work is neither
+ * cancelled nor moved.
+ */
+export const transferOpenWorkTotal = new Counter({
+  name: 'rasta_maintenance_transfer_open_work_total',
+  help: 'Open maintenance requests and repair orders left with the previous owner of a transferred machine',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
 export const requestsCompletedTotal = new Counter({
   name: 'rasta_maintenance_requests_completed_total',
   help: 'Maintenance requests completed',
@@ -127,5 +143,20 @@ export const usageReadingsAppliedTotal = new Counter({
   name: 'rasta_maintenance_usage_readings_applied_total',
   help: 'USAGE_RECORDED events folded into the asset usage meter',
   labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/**
+ * Expired transfer fences resolved against asset-service (ADR-062 § 3b).
+ *
+ * `outcome` is a closed set: `recorded` (the transfer landed; the work was
+ * refused), `not_recorded` (the fence was lifted) and `unavailable` (no
+ * answer; the work was refused). A steady `recorded` means the asset-sync
+ * consumer lags past the fence's life.
+ */
+export const transferFenceResolutionsTotal = new Counter({
+  name: 'rasta_maintenance_transfer_fence_resolutions_total',
+  help: 'Expired transfer fences resolved against asset-service, by outcome',
+  labelNames: ['service', 'outcome'] as const,
   registers: [registry],
 });

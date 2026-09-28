@@ -30,8 +30,29 @@ export interface CreateKeycloakUserInput {
 /** What the admin API returns for a user — only the fields this client reads. */
 interface KeycloakUserRepresentation {
   id: string;
+  email?: string;
+  firstName?: string;
+  lastName?: string;
   attributes?: Record<string, string[]>;
   [field: string]: unknown;
+}
+
+/**
+ * The body of the platform-attribute write: exactly these keys, and nothing
+ * else from the representation (see `replacePlatformAttributes`). The three
+ * profile fields are here only because Keycloak erases them when a body with
+ * `attributes` leaves them out.
+ */
+function platformAttributesWrite(
+  current: KeycloakUserRepresentation,
+  attributes: Record<string, string[]>,
+): Pick<KeycloakUserRepresentation, 'email' | 'firstName' | 'lastName' | 'attributes'> {
+  return {
+    email: current.email,
+    firstName: current.firstName,
+    lastName: current.lastName,
+    attributes,
+  };
 }
 
 export interface KeycloakClientOptions {
@@ -161,13 +182,24 @@ export class KeycloakAdminClient {
   }
 
   /**
-   * Replaces the platform attributes of one user — all four, in one write.
+   * Replaces the platform attributes of one user — all four, in one write —
+   * and sends nothing it does not own.
    *
-   * Read-modify-write of the whole representation, never a partial body: the
-   * admin `PUT` treats what it is sent as the complete user, so a body carrying
-   * only `attributes` erased the other platform attributes *and* the user's
-   * email and names (verified on Keycloak 26.0). Attributes this service does
-   * not own are carried over untouched.
+   * Measured on Keycloak 26.0.8 (ADR-060 § 5): the admin `PUT` has no version
+   * check (no ETag; `If-Match` is ignored) and no attribute-level form, but it
+   * changes only the fields present in its body — except that a body carrying
+   * `attributes` removes every attribute it omits, the profile's `email`,
+   * `firstName` and `lastName` included. So the body is an allowlist: those
+   * three as read a moment before, the attributes this service does not own as
+   * read, and the four platform attributes. `requiredActions`, `enabled`,
+   * `emailVerified` and the rest of the representation are never sent, so a
+   * concurrent change to them — an administrator disabling the account, a
+   * user completing `UPDATE_PASSWORD` — is never undone by a projection.
+   *
+   * What is still read-then-written, and so can still lose a change made in
+   * the few milliseconds between the two, is those three profile fields and
+   * any non-platform attribute — and the email is a sign-in and reset
+   * identifier in this realm, not display data: `docs/23` D-037.
    *
    * Throws when the write does not land. Whether that is fatal is the
    * caller's decision (`KeycloakProjector`), not this client's.
@@ -187,7 +219,7 @@ export class KeycloakAdminClient {
 
     const response = await this.admin(`/users/${keycloakId}`, {
       method: 'PUT',
-      body: JSON.stringify({ ...current, attributes: { ...others, ...attributes } }),
+      body: JSON.stringify(platformAttributesWrite(current, { ...others, ...attributes })),
     });
 
     if (!response.ok) {

@@ -5,6 +5,14 @@ import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
 import { assignmentConflictsTotal, assignmentsCreatedTotal } from '../observability/metrics';
 import { FleetRepository, isUniqueViolation, violatedConstraint } from './fleet.repository';
 import { FLEET_EVENTS, validateFleetPayload } from './events';
+import {
+  TRANSFER_RECORD_SOURCE,
+  UNCONFIGURED_TRANSFER_RECORD_SOURCE,
+  ownerChanged,
+  settleExpiredFence,
+  transferInProgress,
+  type TransferRecordSource,
+} from './transfer-record';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
 import { assertOwnDriverRecord, currentFleetScope } from './access';
 import { isAssignable } from './driver-lifecycle';
@@ -50,6 +58,11 @@ export class AssignmentService {
     @Optional()
     @Inject(DISPATCH_POLICY)
     private readonly dispatchPolicy: DispatchPolicy = DEFAULT_DISPATCH_POLICY,
+    // Optional for the same reason. Without a source, an expired transfer
+    // fence is never lifted: the assignment is refused (ADR-062 § 3b).
+    @Optional()
+    @Inject(TRANSFER_RECORD_SOURCE)
+    private readonly records: TransferRecordSource = UNCONFIGURED_TRANSFER_RECORD_SOURCE,
   ) {}
 
   // =========================================================================
@@ -115,6 +128,25 @@ export class AssignmentService {
         `A ${driver.status.toLowerCase()} driver cannot be given a new assignment.`,
         { rule: 'DRIVER_NOT_ASSIGNABLE', driverId: driver.id, status: driver.status },
       );
+    }
+
+    // The machine must be the caller's before anything is asked about its
+    // fence (review #127 round 2, #1): otherwise another organization could
+    // tell a recorded transfer from an absent fence, or lift a fence that is
+    // not its own. The same 404 as for an absent machine.
+    await this.assertAssetOwned(dto.assetId);
+
+    // An expired transfer fence is resolved at its source, never by time
+    // (ADR-062 § 3b): a transfer that landed refuses the assignment.
+    if (
+      (await settleExpiredFence(
+        this.repository,
+        this.records,
+        dto.assetId,
+        getOrganizationId(),
+      )) === 'RECORDED'
+    ) {
+      throw ownerChanged(dto.assetId);
     }
 
     await this.assertAssetAssignable(dto.assetId);
@@ -283,17 +315,29 @@ export class AssignmentService {
    * never appears is a typo or another tenant's machine, and assigning a
    * driver to it would create an assignment nobody can ever see.
    */
-  private async assertAssetAssignable(assetId: string, tx?: ExtendedPrismaClient): Promise<void> {
+  /**
+   * The machine as the replica sees it, only if it belongs to the caller's
+   * organization. Absent and elsewhere are the same 404: confirming the
+   * machine exists elsewhere would let a caller enumerate another
+   * organization's fleet.
+   */
+  private async assertAssetOwned(assetId: string, tx?: ExtendedPrismaClient) {
     const asset = await this.repository.findAssetRef(assetId, tx);
-
-    if (!asset) {
+    if (!asset || asset.organizationId !== getOrganizationId()) {
       throw RastaError.notFound('Asset', assetId);
     }
+    return asset;
+  }
 
-    if (asset.organizationId !== getOrganizationId()) {
-      // Reported as absent, not as forbidden: confirming the machine exists
-      // elsewhere would let a caller enumerate another organization's fleet.
-      throw RastaError.notFound('Asset', assetId);
+  private async assertAssetAssignable(assetId: string, tx?: ExtendedPrismaClient): Promise<void> {
+    const asset = await this.assertAssetOwned(assetId, tx);
+
+    // A transfer asked whether the machine is free and was told yes (ADR-062).
+    // Under `lockAssetRef` this is exact: the fence and this insert cannot
+    // both succeed. Any fence, expired or not: an expired one that was not
+    // resolved before the lock (or appeared since) is no answer either.
+    if (await this.repository.hasTransferFence(tx ?? this.repository.client, assetId)) {
+      throw transferInProgress(assetId);
     }
 
     // Independent causes (L3-02): a machine can be blocked on inspection,

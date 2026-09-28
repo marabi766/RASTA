@@ -58,8 +58,10 @@ describe('a transfer ends the assignments still open on the machine', () => {
     payload,
   });
 
+  // Tenant = the new owner, as asset-service stamps it; the consumer now
+  // dead-letters anything else (review #127 #5).
   const transfer = (assetId: string, from = org.a, to = org.b) =>
-    event('ASSET_TRANSFERRED', from, {
+    event('ASSET_TRANSFERRED', to, {
       assetId,
       fromOrganizationId: from,
       toOrganizationId: to,
