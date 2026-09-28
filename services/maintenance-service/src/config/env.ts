@@ -4,6 +4,7 @@ import {
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  httpUrlSchema,
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
@@ -17,6 +18,21 @@ export const maintenanceEnvSchema = baseEnvSchema
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),
+
+    /**
+     * asset-service, asked whether a transfer was recorded when a work-start
+     * meets an expired transfer fence (ADR-062 § 3b). Required, with no
+     * default: a missing one is found at boot, not at the first expired fence.
+     */
+    ASSET_SERVICE_URL: httpUrlSchema,
+
+    /** One such question, body included. A timeout refuses the work. */
+    ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(30_000)
+      .default(3000),
 
     /**
      * How far ahead of its due point a schedule announces itself, when the

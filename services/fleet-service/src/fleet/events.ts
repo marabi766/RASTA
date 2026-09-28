@@ -229,3 +229,28 @@ export const assetSourceSchema = z
   .passthrough();
 
 export type AssetSourceEvent = z.infer<typeof assetSourceSchema>;
+
+/**
+ * `ASSET_TRANSFERRED`, held to more than {@link assetSourceSchema} (review
+ * #127 #5).
+ *
+ * This event moves the replica to a new owner, ends the previous owner's
+ * assignments and lifts its transfer fence (ADR-062). One without
+ * `toOrganizationId` would keep the old owner in the replica yet still lift
+ * the fence, and be marked processed; one without `fromOrganizationId` would
+ * leave the fence standing. So every field the handler acts on is required,
+ * the two organizations must differ, and the handler checks the envelope
+ * agrees (`aggregateId` is the asset, `tenantId` the new owner — what
+ * asset-service stamps). Still `.passthrough()` for fields added later.
+ */
+export const assetTransferredSchema = z
+  .object({
+    assetId: z.string().min(1),
+    fromOrganizationId: z.string().min(1),
+    toOrganizationId: z.string().min(1),
+    transferredAt: z.string().datetime({ offset: true }),
+  })
+  .passthrough()
+  .refine((payload) => payload.fromOrganizationId !== payload.toOrganizationId, {
+    message: 'a transfer moves the asset to another organization',
+  });

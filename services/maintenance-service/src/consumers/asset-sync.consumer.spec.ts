@@ -21,9 +21,14 @@ interface Upsert {
 }
 
 function harness(
-  options: { existing?: { organizationId: string } | null; already?: boolean } = {},
+  options: {
+    existing?: { organizationId: string } | null;
+    already?: boolean;
+    openWork?: { openRequests: number; openRepairOrders: number };
+  } = {},
 ) {
   const upserts: Upsert[] = [];
+  const calls: string[] = [];
 
   const repository = {
     async transaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T> {
@@ -36,11 +41,23 @@ function harness(
       return options.existing ?? null;
     },
     async upsertAssetRef(_tx: unknown, data: Upsert): Promise<void> {
+      calls.push('upsert');
       upserts.push(data);
+    },
+    async lockAssetForWork(_tx: unknown, assetId: string, mode: string): Promise<void> {
+      calls.push(`lock:${assetId}:${mode}`);
+    },
+    async dropTransferFences(_tx: unknown, assetId: string, organizationId: string) {
+      calls.push(`drop:${assetId}:${organizationId}`);
+      return 1;
+    },
+    async countOpenWork(_tx: unknown, assetId: string, organizationId: string) {
+      calls.push(`count:${assetId}:${organizationId}`);
+      return options.openWork ?? { openRequests: 0, openRepairOrders: 0 };
     },
   } as unknown as MaintenanceRepository;
 
-  return { consumer: new AssetSyncConsumer(null, repository), upserts };
+  return { consumer: new AssetSyncConsumer(null, repository), upserts, calls };
 }
 
 function envelope(eventName: string, payload: object, tenantId?: string): EventEnvelope {
@@ -59,6 +76,93 @@ function envelope(eventName: string, payload: object, tenantId?: string): EventE
 }
 
 describe('asset reference replica', () => {
+  describe('a transfer landing (ADR-062)', () => {
+    const transfer = () =>
+      envelope(
+        'ASSET_TRANSFERRED',
+        {
+          assetId: 'AST-SEED-0001',
+          fromOrganizationId: 'ORG-DEH-0001',
+          toOrganizationId: 'ORG-DEH-0002',
+          transferredAt: '2026-09-27T10:00:00.000Z',
+        },
+        'ORG-DEH-0002',
+      );
+
+    it('locks exclusively, moves the replica, then lifts the previous owner’s fence', async () => {
+      const { consumer, calls } = harness({ existing: { organizationId: 'ORG-DEH-0001' } });
+
+      await consumer.handle(transfer());
+
+      expect(calls).toEqual([
+        'lock:AST-SEED-0001:EXCLUSIVE',
+        'upsert',
+        'drop:AST-SEED-0001:ORG-DEH-0001',
+        'count:AST-SEED-0001:ORG-DEH-0001',
+      ]);
+    });
+
+    it('counts open work left with the previous owner and leaves it where it is (Q-74)', async () => {
+      const { transferOpenWorkTotal } = await import('../observability/metrics');
+      const before = (await transferOpenWorkTotal.get()).values[0]?.value ?? 0;
+      const { consumer, calls } = harness({
+        existing: { organizationId: 'ORG-DEH-0001' },
+        openWork: { openRequests: 2, openRepairOrders: 1 },
+      });
+
+      await consumer.handle(transfer());
+
+      const after = (await transferOpenWorkTotal.get()).values[0]?.value ?? 0;
+      // Requests and repair orders both (review #127 #6).
+      expect(after - before).toBe(3);
+      // Nothing cancelled, nothing moved: the repository was only counted.
+      expect(calls.filter((call) => !/^(lock|upsert|drop|count)/.test(call))).toEqual([]);
+    });
+
+    it.each([
+      ['no toOrganizationId', { toOrganizationId: undefined }, {}],
+      ['no fromOrganizationId', { fromOrganizationId: undefined }, {}],
+      ['no transferredAt', { transferredAt: undefined }, {}],
+      ['an unreadable transferredAt', { transferredAt: 'yesterday' }, {}],
+      [
+        'one organization twice',
+        { toOrganizationId: 'ORG-DEH-0001' },
+        { tenantId: 'ORG-DEH-0001' },
+      ],
+      ['an envelope tenant other than the new owner', {}, { tenantId: 'ORG-DEH-0003' }],
+      ['no envelope tenant', {}, { tenantId: undefined }],
+      ['an aggregate other than the asset', {}, { aggregateId: 'AST-OTHER' }],
+    ])(
+      'dead-letters a transfer with %s, before any marker or effect (review #127 #5)',
+      async (_label, payloadOverride, envelopeOverride) => {
+        const { consumer, calls, upserts } = harness({
+          existing: { organizationId: 'ORG-DEH-0001' },
+        });
+        const base = transfer();
+        const event = {
+          ...base,
+          ...envelopeOverride,
+          payload: { ...(base.payload as object), ...payloadOverride },
+        } as EventEnvelope;
+
+        await expect(consumer.handle(event)).rejects.toMatchObject({
+          name: 'UnprocessableEventError',
+          reason: 'VALIDATION_FAILED',
+        });
+        expect(calls).toEqual([]);
+        expect(upserts).toEqual([]);
+      },
+    );
+
+    it('takes no lock and touches no fence for any other event', async () => {
+      const { consumer, calls } = harness({ existing: { organizationId: 'ORG-DEH-0001' } });
+
+      await consumer.handle(envelope('ASSET_DECOMMISSIONED', { assetId: 'AST-SEED-0001' }));
+
+      expect(calls).toEqual(['upsert']);
+    });
+  });
+
   it('records a new machine from ASSET_CREATED', async () => {
     const { consumer, upserts } = harness();
 
@@ -111,11 +215,16 @@ describe('asset reference replica', () => {
     const { consumer, upserts } = harness({ existing: { organizationId: 'ORG-DEH-0001' } });
 
     await consumer.handle(
-      envelope('ASSET_TRANSFERRED', {
-        assetId: 'AST-SEED-0001',
-        fromOrganizationId: 'ORG-DEH-0001',
-        toOrganizationId: 'ORG-DEH-0002',
-      }),
+      envelope(
+        'ASSET_TRANSFERRED',
+        {
+          assetId: 'AST-SEED-0001',
+          fromOrganizationId: 'ORG-DEH-0001',
+          toOrganizationId: 'ORG-DEH-0002',
+          transferredAt: '2026-09-27T10:00:00.000Z',
+        },
+        'ORG-DEH-0002',
+      ),
     );
 
     expect(upserts[0]).toMatchObject({

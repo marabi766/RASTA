@@ -20,6 +20,7 @@ import {
   startRepairSchema,
   updateScheduleSchema,
 } from '../maintenance/dto';
+import { transferClearanceSchema } from '../maintenance/transfer-clearance';
 
 /**
  * Completes the OpenAPI document Nest builds from the decorators.
@@ -52,6 +53,7 @@ const REQUEST_BODIES: Record<string, JsonSchema> = {
   'POST /v1/repair-orders/{id}/parts': toJsonSchema(recordPartSchema),
   'POST /v1/repair-orders/{id}/labour': toJsonSchema(recordLabourSchema),
   'POST /v1/repair-orders/{id}/costs': toJsonSchema(recordCostSchema),
+  'POST /v1/internal/assets/{assetId}/transfer-clearance': toJsonSchema(transferClearanceSchema),
 };
 
 /** Query schemas, so filtering and pagination are described, not implied. */
@@ -72,6 +74,8 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
 const COMMON = [401, 403, 500] as const;
 const READ_ONE = [...COMMON, 404] as const;
 const WRITE = [...COMMON, 400, 404, 409, 422] as const;
+// ADR-062 § 3b: a write that starts work on a machine whose transfer fence has
+// expired asks asset-service first; no answer is a retryable 503/504.
 
 const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/maintenance-schedules': COMMON,
@@ -82,13 +86,13 @@ const ERRORS: Record<string, readonly number[]> = {
   'POST /v1/maintenance-schedules/{id}/status': WRITE,
   'GET /v1/maintenance-requests': COMMON,
   'GET /v1/maintenance-requests/{id}': READ_ONE,
-  'POST /v1/maintenance-requests': WRITE,
-  'POST /v1/maintenance-requests/{id}/assign': WRITE,
+  'POST /v1/maintenance-requests': [...WRITE, 503, 504],
+  'POST /v1/maintenance-requests/{id}/assign': [...WRITE, 503, 504],
   'POST /v1/maintenance-requests/{id}/approve': WRITE,
   'POST /v1/maintenance-requests/{id}/cancel': WRITE,
   'GET /v1/repair-orders': COMMON,
   'GET /v1/repair-orders/{id}': READ_ONE,
-  'POST /v1/repair-orders/{id}/start': WRITE,
+  'POST /v1/repair-orders/{id}/start': [...WRITE, 503, 504],
   'POST /v1/repair-orders/{id}/complete': WRITE,
   'POST /v1/repair-orders/{id}/cancel': WRITE,
   'POST /v1/repair-orders/{id}/parts': WRITE,
@@ -96,6 +100,10 @@ const ERRORS: Record<string, readonly number[]> = {
   'POST /v1/repair-orders/{id}/costs': WRITE,
   // A tenant claim the token does not carry is a 403; a record outside it, 404.
   'GET /v1/internal/maintenance-requests/{id}': READ_ONE,
+  // ADR-062: 404 for a machine the replica places elsewhere, 409 while another
+  // transfer holds the fence.
+  'POST /v1/internal/assets/{assetId}/transfer-clearance': [...COMMON, 400, 404, 409, 503, 504],
+  'DELETE /v1/internal/assets/{assetId}/transfer-clearance/{fenceId}': [...COMMON, 400],
 };
 
 const STATUS_TEXT: Record<number, string> = {
@@ -106,6 +114,8 @@ const STATUS_TEXT: Record<number, string> = {
   409: 'Conflict: the state transition is illegal, or another request changed it first',
   422: 'The request is well-formed but a business rule refuses it (see `code` and the `rule` it names)',
   500: 'Unexpected server error',
+  503: 'A service this operation depends on gave no usable answer (UPSTREAM_UNAVAILABLE); retry',
+  504: 'A service this operation depends on did not answer in time (UPSTREAM_TIMEOUT); retry',
 };
 
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {

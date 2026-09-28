@@ -50,6 +50,7 @@ function buildConsumer(options: {
     }),
     findAssetRef: jest.fn(async () => options.existing ?? null),
     lockAssetRef: jest.fn(async () => undefined),
+    dropTransferFences: jest.fn(async () => 0),
     transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn({})),
     markEventProcessed: jest.fn(async (_tx: unknown, eventId: string) => {
       if (options.alreadyProcessed) return false;
@@ -82,6 +83,46 @@ function envelope(overrides: Partial<EventEnvelope> & { eventName: string }): Ev
 }
 
 describe('AssetSyncConsumer', () => {
+  describe('the transfer fence (ADR-062)', () => {
+    it('lifts the previous owner’s fence under the asset lock, and only on a transfer', async () => {
+      const { consumer, repository } = buildConsumer({
+        existing: { organizationId: 'ORG-DEH-0001', status: 'ACTIVE' },
+      });
+
+      await consumer.handle(
+        envelope({
+          eventName: 'ASSET_TRANSFERRED',
+          tenantId: 'ORG-DEH-0002',
+          payload: {
+            assetId: 'AST-SEED-0001',
+            fromOrganizationId: 'ORG-DEH-0001',
+            toOrganizationId: 'ORG-DEH-0002',
+            transferredAt: '2026-08-27T10:00:00.000Z',
+            reason: 'x',
+          },
+        }),
+      );
+
+      expect(repository.dropTransferFences).toHaveBeenCalledWith(
+        expect.anything(),
+        'AST-SEED-0001',
+        'ORG-DEH-0001',
+      );
+      const lock = (repository.lockAssetRef as jest.Mock).mock.invocationCallOrder[0]!;
+      const drop = (repository.dropTransferFences as jest.Mock).mock.invocationCallOrder[0]!;
+      expect(lock).toBeLessThan(drop);
+
+      await consumer.handle(
+        envelope({
+          eventId: 'EVT-STATUS-1',
+          eventName: 'ASSET_STATUS_CHANGED',
+          payload: { assetId: 'AST-SEED-0001', newStatus: 'ACTIVE' },
+        }),
+      );
+      expect(repository.dropTransferFences).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('events it does not project', () => {
     it('skips rather than failing', async () => {
       // These topics carry far more than this service cares about — every
@@ -158,10 +199,12 @@ describe('AssetSyncConsumer', () => {
       await consumer.handle(
         envelope({
           eventName: 'ASSET_TRANSFERRED',
+          tenantId: 'ORG-DEH-0002',
           payload: {
             assetId: 'AST-SEED-0001',
             fromOrganizationId: 'ORG-DEH-0001',
             toOrganizationId: 'ORG-DEH-0002',
+            transferredAt: '2026-08-27T10:00:00.000Z',
             reason: 'واگذاری',
           },
         }),
@@ -208,15 +251,49 @@ describe('AssetSyncConsumer', () => {
       envelope({
         eventId: 'EVT-TRANSFER-1',
         eventName: 'ASSET_TRANSFERRED',
+        tenantId: 'ORG-DEH-0002',
         correlationId: 'corr-transfer',
         payload: {
           assetId: 'AST-SEED-0001',
           fromOrganizationId: 'ORG-DEH-0001',
           toOrganizationId: 'ORG-DEH-0002',
+          transferredAt: '2026-08-27T10:00:00.000Z',
           reason: 'واگذاری',
         },
         ...overrides,
       });
+
+    it.each([
+      ['no toOrganizationId', { toOrganizationId: undefined }, {}],
+      ['no fromOrganizationId', { fromOrganizationId: undefined }, {}],
+      ['no transferredAt', { transferredAt: undefined }, {}],
+      [
+        'one organization twice',
+        { toOrganizationId: 'ORG-DEH-0001' },
+        { tenantId: 'ORG-DEH-0001' },
+      ],
+      ['an envelope tenant other than the new owner', {}, { tenantId: 'ORG-DEH-0003' }],
+      ['an aggregate other than the asset', {}, { aggregateId: 'AST-OTHER' }],
+    ])(
+      'dead-letters a transfer with %s, before any marker or effect (review #127 #5)',
+      async (_label, payloadOverride, envelopeOverride) => {
+        const { consumer, repository, recorded } = buildConsumer({
+          existing: { organizationId: 'ORG-DEH-0001', status: 'ACTIVE' },
+        });
+        const base = transfer();
+
+        await expect(
+          consumer.handle({
+            ...base,
+            ...envelopeOverride,
+            payload: { ...(base.payload as object), ...payloadOverride },
+          } as EventEnvelope),
+        ).rejects.toMatchObject({ name: 'UnprocessableEventError', reason: 'VALIDATION_FAILED' });
+        expect(repository.transaction).not.toHaveBeenCalled();
+        expect(repository.markEventProcessed).not.toHaveBeenCalled();
+        expect(recorded.upserts).toEqual([]);
+      },
+    );
 
     const open: OpenAssignment = {
       id: 'ASG-1',

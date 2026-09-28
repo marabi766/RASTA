@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import {
   Module,
   type MiddlewareConsumer,
@@ -41,7 +42,20 @@ import { DueScanner } from './maintenance/due-scanner';
 import { WorkshopDirectory, UnverifiedWorkshopDirectory } from './maintenance/workshop.directory';
 import { ScheduleController } from './maintenance/schedule.controller';
 import { RequestController } from './maintenance/request.controller';
-import { MaintenanceInternalController } from './maintenance/internal.controller';
+import {
+  MaintenanceInternalController,
+  MaintenanceTransferClearanceController,
+} from './maintenance/internal.controller';
+import {
+  CLEARANCE_CLOCK,
+  ClearanceArrivalMiddleware,
+  TransferClearanceService,
+} from './maintenance/transfer-clearance';
+import {
+  TRANSFER_RECORD_SOURCE,
+  TransferRecordClient,
+  type TransferRecordSource,
+} from './maintenance/transfer-record';
 import { MaintenanceFactService } from './maintenance/source-fact';
 import { RepairOrderController } from './maintenance/repair-order.controller';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
@@ -92,6 +106,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
     RequestController,
     RepairOrderController,
     MaintenanceInternalController,
+    MaintenanceTransferClearanceController,
     HealthController,
     MetricsController,
   ],
@@ -136,6 +151,10 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
     ScheduleService,
     RequestService,
     MaintenanceFactService,
+    TransferClearanceService,
+    // One monotonic clock for the clearance bound, read by the arrival
+    // middleware and the service alike (ADR-062 § 2); a test replaces it.
+    { provide: CLEARANCE_CLOCK, useValue: () => performance.now() },
     RepairOrderService,
     DueAnnouncerService,
     DueScanner,
@@ -144,6 +163,24 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
     // platform can honestly provide today. Filling the gap is a second class
     // and this one line (ADR-029).
     { provide: WorkshopDirectory, useClass: UnverifiedWorkshopDirectory },
+
+    // ADR-062 § 3b: asset-service, asked whether a transfer was recorded when
+    // a work-start meets an expired transfer fence. Its own
+    // `InternalTokenService`, from the same secret the guard verifies with.
+    {
+      provide: TRANSFER_RECORD_SOURCE,
+      inject: [ENV],
+      useFactory: (env: MaintenanceEnv): TransferRecordSource =>
+        new TransferRecordClient({
+          baseUrl: env.ASSET_SERVICE_URL,
+          timeoutMs: env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS,
+          tokens: new InternalTokenService(
+            env.INTERNAL_TOKEN_SECRET,
+            env.INTERNAL_TOKEN_ISSUER,
+            env.INTERNAL_TOKEN_TTL_SECONDS,
+          ),
+        }),
+    },
 
     {
       provide: UsageConsumer,
@@ -268,6 +305,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
+    // First, so a clearance's arrival is stamped before anything else runs
+    // for it — guards and pipes included (ADR-062 § 2).
+    consumer.apply(ClearanceArrivalMiddleware).forRoutes(MaintenanceTransferClearanceController);
     // Middleware rather than an interceptor: it must wrap the guards too, so
     // the auth guard has a context to record the resolved tenant into.
     consumer.apply(RequestContextMiddleware).forRoutes('*');

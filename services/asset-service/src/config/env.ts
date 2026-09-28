@@ -85,6 +85,25 @@ export const assetEnvSchema = baseEnvSchema
             message: 'INSURANCE_COVERAGES_FOLLOWING_VEHICLE lists a coverage more than once',
           }),
       ),
+
+    /**
+     * The services that own a machine's open work, asked before every
+     * transfer (ADR-062). Required, with no default: without them no transfer
+     * can be cleared, which is better found at boot than at the first one.
+     */
+    FLEET_SERVICE_URL: z.string().url(),
+    MAINTENANCE_SERVICE_URL: z.string().url(),
+
+    /** One clearance exchange, body included. A timeout refuses the transfer. */
+    ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+
+    /**
+     * How long an owner keeps the machine fenced for a transfer that neither
+     * lands nor is released: the backstop for a crash between the question and
+     * the commit. The transfer itself must commit within half of it. The
+     * owners accept 30 to 3600.
+     */
+    ASSET_TRANSFER_FENCE_TTL_SECONDS: z.coerce.number().int().min(30).max(3600).default(600),
   });
 
 export type AssetEnv = z.infer<typeof assetEnvSchema>;

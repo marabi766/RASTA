@@ -1,6 +1,7 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import type { EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
+  UnprocessableEventError,
   createSystemContext,
   runWithContext,
   type EventConsumer,
@@ -20,6 +21,7 @@ import {
   CONSUMED_EVENTS,
   FLEET_EVENTS,
   assetSourceSchema,
+  assetTransferredSchema,
   validateFleetPayload,
   type ConsumedEventName,
 } from '../fleet/events';
@@ -300,6 +302,12 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     // (docs/07 § 7.6).
     if (!projection) return 'SKIPPED';
 
+    if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
+      // Before any marker or effect: a transfer this service cannot trust is
+      // dead-lettered, not applied halfway (review #127 #5).
+      assertTransferEnvelope(envelope);
+    }
+
     const parsed = assetSourceSchema.safeParse(envelope.payload);
     if (!parsed.success) {
       // An event this service projects, that names no machine. A producer
@@ -386,6 +394,14 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
 
       if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
         await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
+        // The fence the previous owner placed to clear this transfer
+        // (ADR-062). The replica now names the new owner, which refuses the
+        // previous one from here on; left in place, the fence would refuse the
+        // new owner until it expired.
+        const previousOwner = payload.fromOrganizationId;
+        if (typeof previousOwner === 'string' && previousOwner.length > 0) {
+          await this.repository.dropTransferFences(tx, assetId, previousOwner);
+        }
       }
     });
 
@@ -469,6 +485,32 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
 /** The later of two instants, either of which may be missing. */
 function later(a: Date | null | undefined, b: Date): Date {
   return a && a > b ? a : b;
+}
+
+/**
+ * Refuses an `ASSET_TRANSFERRED` whose payload lacks what the handler acts on,
+ * or whose envelope disagrees with it. The message is fixed text and the
+ * event id: nothing the publisher wrote is repeated (ADR-061 § 2).
+ */
+function assertTransferEnvelope(envelope: EventEnvelope): void {
+  const parsed = assetTransferredSchema.safeParse(envelope.payload);
+  if (!parsed.success) {
+    throw new UnprocessableEventError(
+      DLQ_REASONS.VALIDATION_FAILED,
+      `ASSET_TRANSFERRED ${envelope.eventId} lacks assetId, fromOrganizationId, ` +
+        'toOrganizationId or transferredAt, or names one organization twice',
+    );
+  }
+  if (
+    envelope.aggregateId !== parsed.data.assetId ||
+    envelope.tenantId !== parsed.data.toOrganizationId
+  ) {
+    throw new UnprocessableEventError(
+      DLQ_REASONS.VALIDATION_FAILED,
+      `ASSET_TRANSFERRED ${envelope.eventId}: the envelope's aggregate or tenant ` +
+        'disagrees with the transferred asset or its new owner',
+    );
+  }
 }
 
 /** Reads a string field, tolerating the absence the loose schema allows. */

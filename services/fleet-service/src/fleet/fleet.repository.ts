@@ -18,6 +18,9 @@ import type {
   UtilizationQuery,
 } from './dto';
 
+/** Expired release tombstones removed per release or clearance (ADR-062 § 2). */
+const RELEASE_PURGE_BATCH = 100;
+
 /**
  * Data access for fleet.
  *
@@ -296,6 +299,173 @@ export class FleetRepository {
         await tx.$queryRaw`SELECT id FROM asset_ref WHERE id = ${assetId} FOR UPDATE`;
       },
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // Transfer fence (ADR-062)
+  //
+  // Raw SQL, all of it: the expiry is compared with the database's clock, the
+  // same one that set it, and never with this process's. The table is keyed by
+  // the asset, not scoped by tenant, because the check that reads it must see
+  // a fence whichever organization's work is asking. Every caller holds
+  // `lockAssetRef` first.
+  // -------------------------------------------------------------------------
+
+  /** Active assignments on one machine in the caller's organization. Scoped. */
+  async countActiveAssignmentsForAsset(tx: ExtendedPrismaClient, assetId: string) {
+    return tx.assignment.count({ where: { assetId, endedAt: null } });
+  }
+
+  /**
+   * Places the fence, or renews it for the same transfer. Returns its expiry,
+   * or `null` when any other fence stands on the machine — live or expired.
+   *
+   * An expired fence is never taken over here (review #127 #2): whether its
+   * transfer landed is asked of asset-service first
+   * ({@link settleExpiredFence}), and only a NOT_RECORDED answer removes it.
+   */
+  async placeTransferFence(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    organizationId: string,
+    fenceId: string,
+    ttlSeconds: number,
+  ): Promise<Date | null> {
+    const rows = await tx.$queryRaw<{ expires_at: Date }[]>`
+      INSERT INTO asset_transfer_fence (asset_id, organization_id, fence_id, expires_at, created_at)
+      VALUES (${assetId}, ${organizationId}, ${fenceId},
+              now() + make_interval(secs => ${ttlSeconds}::int), now())
+      ON CONFLICT (asset_id) DO UPDATE
+        SET expires_at = EXCLUDED.expires_at,
+            created_at = EXCLUDED.created_at
+        WHERE asset_transfer_fence.fence_id = EXCLUDED.fence_id
+          AND asset_transfer_fence.organization_id = EXCLUDED.organization_id
+      RETURNING expires_at`;
+    return rows[0]?.expires_at ?? null;
+  }
+
+  /**
+   * Whether any fence stands on the machine, live or expired. An expired one
+   * still refuses an assignment: expiry is not an answer (ADR-062 § 3b).
+   */
+  async hasTransferFence(tx: ExtendedPrismaClient, assetId: string): Promise<boolean> {
+    const rows = await tx.$queryRaw<{ fence_id: string }[]>`
+      SELECT fence_id FROM asset_transfer_fence WHERE asset_id = ${assetId}`;
+    return rows.length > 0;
+  }
+
+  /** The machine's fence, if any, and whether it has expired by the database's clock. */
+  async findTransferFence(
+    assetId: string,
+  ): Promise<{ fenceId: string; organizationId: string; expired: boolean } | null> {
+    const rows = await this.client.$queryRaw<
+      { fence_id: string; organization_id: string; expired: boolean }[]
+    >`
+      SELECT fence_id, organization_id, expires_at <= now() AS expired
+      FROM asset_transfer_fence WHERE asset_id = ${assetId}`;
+    const row = rows[0];
+    return row
+      ? { fenceId: row.fence_id, organizationId: row.organization_id, expired: row.expired }
+      : null;
+  }
+
+  /**
+   * Removes one expired fence whose transfer asset-service says was not
+   * recorded, under {@link lockAssetRef}. Only that fence, and only while
+   * expired: a fence renewed or replaced in between is left alone.
+   */
+  async clearExpiredFence(assetId: string, fenceId: string): Promise<void> {
+    await this.transaction(async (tx) => {
+      await this.lockAssetRef(tx, assetId);
+      await tx.$executeRaw`
+        DELETE FROM asset_transfer_fence
+        WHERE asset_id = ${assetId} AND fence_id = ${fenceId} AND expires_at <= now()`;
+    });
+  }
+
+  /**
+   * Lifts one transfer's fence and remembers that the transfer was released.
+   * Only the organization that placed it can.
+   *
+   * Under the per-asset lock the clearance holds while it counts and fences
+   * (review #127 #4): a release that arrives while that clearance is still
+   * running waits for its fence and removes it. And one that arrives before
+   * the clearance has taken the lock at all leaves a tombstone the clearance
+   * then finds, so it fences nothing (review #127 round 2, #2). The
+   * tombstone outlives the longest fence. Expired ones are removed after the
+   * commit, never in here ({@link purgeExpiredReleases}).
+   */
+  async releaseTransferFence(
+    assetId: string,
+    organizationId: string,
+    fenceId: string,
+    keepSeconds: number,
+  ): Promise<number> {
+    return this.transaction(async (tx) => {
+      await this.lockAssetRef(tx, assetId);
+      await tx.$executeRaw`
+        INSERT INTO asset_transfer_release
+          (asset_id, fence_id, organization_id, released_at, expires_at)
+        VALUES (${assetId}, ${fenceId}, ${organizationId}, now(),
+                now() + make_interval(secs => ${keepSeconds}::int))
+        ON CONFLICT (asset_id, fence_id) DO NOTHING`;
+      return tx.$executeRaw`
+        DELETE FROM asset_transfer_fence
+        WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}`;
+    });
+  }
+
+  /** The transfer landed: whatever the previous owner fenced is moot. */
+  async dropTransferFences(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    organizationId: string,
+  ): Promise<number> {
+    return tx.$executeRaw`
+      DELETE FROM asset_transfer_fence
+      WHERE asset_id = ${assetId} AND organization_id = ${organizationId}`;
+  }
+
+  /**
+   * Removes a bounded batch of expired release tombstones, of any machine,
+   * oldest first (review #127 round 3, #1), so the table stays as small as
+   * the releases of the last hour. A clearance cannot outlive a tombstone
+   * (ADR-062 § 2), so an expired one protects nothing.
+   *
+   * Its own short transaction, run after a release or clearance has
+   * committed — never inside one (review #127 round 4, #2). Inside the
+   * per-asset lock, a DELETE of other machines' rows could wait on a row
+   * locked elsewhere: stalling this machine, letting a release time out and
+   * roll back without its tombstone, and ordering locks across machines.
+   * `SKIP LOCKED` leaves a row someone else holds for a later purge, so this
+   * never waits on one either.
+   */
+  async purgeExpiredReleases(): Promise<number> {
+    return this.transaction(
+      (tx) => tx.$executeRaw`
+        DELETE FROM asset_transfer_release
+        WHERE (asset_id, fence_id) IN (
+          SELECT asset_id, fence_id FROM asset_transfer_release
+          WHERE expires_at < now()
+          ORDER BY expires_at
+          LIMIT ${RELEASE_PURGE_BATCH}
+          FOR UPDATE SKIP LOCKED
+        )`,
+    );
+  }
+
+  /** Whether this organization released this transfer on this machine, and the tombstone is live. Under the lock. */
+  async isTransferReleased(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    organizationId: string,
+    fenceId: string,
+  ): Promise<boolean> {
+    const rows = await tx.$queryRaw<{ fence_id: string }[]>`
+      SELECT fence_id FROM asset_transfer_release
+      WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}
+        AND expires_at > now()`;
+    return rows.length > 0;
   }
 
   /**

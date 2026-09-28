@@ -75,3 +75,18 @@ export const assetsUnavailableTotal = new Gauge({
   labelNames: ['service', 'reason'] as const,
   registers: [registry],
 });
+
+/**
+ * Expired transfer fences resolved against asset-service (ADR-062 § 3b).
+ *
+ * `outcome` is a closed set: `recorded` (the transfer landed; the assignment
+ * was refused), `not_recorded` (the fence was lifted) and `unavailable` (no
+ * answer; the assignment was refused). A steady `recorded` means the
+ * asset-sync consumer lags past the fence's life.
+ */
+export const transferFenceResolutionsTotal = new Counter({
+  name: 'rasta_fleet_transfer_fence_resolutions_total',
+  help: 'Expired transfer fences resolved against asset-service, by outcome',
+  labelNames: ['service', 'outcome'] as const,
+  registers: [registry],
+});
