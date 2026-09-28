@@ -4,20 +4,40 @@ import {
   disposableRealmRefusal,
   environmentRefusals,
   isLoopbackHost,
+  LIVE_WRITE_OPT_IN,
   LiveTargetRefusedError,
 } from './live-target-guard';
 
 /**
  * The `keycloak-live` suite's write gate, without a Keycloak (review of #129,
- * finding 1). Runs in the `unit` project, so every CI run checks it — not
+ * rounds 1 and 2). Runs in the `unit` project, so every CI run checks it — not
  * only the `e2e` job that has a Keycloak.
  */
 
 const DISPOSABLE = { realm: 'rasta', attributes: { [DISPOSABLE_REALM_ATTRIBUTE]: 'true' } };
-const TEST_ENV = { NODE_ENV: 'test', KEYCLOAK_URL: 'http://localhost:8080' };
+const TEST_ENV = {
+  KEYCLOAK_LIVE_ALLOW_WRITES: 'true',
+  NODE_ENV: 'test',
+  KEYCLOAK_URL: 'http://localhost:8080',
+};
 
 describe('keycloak-live target guard', () => {
   describe('the environment, before anything is contacted', () => {
+    it.each([undefined, '', 'false', 'TRUE', 'yes', '1', ' true'])(
+      'refuses without the explicit opt-in (%p), first',
+      (KEYCLOAK_LIVE_ALLOW_WRITES) => {
+        expect(environmentRefusals({ ...TEST_ENV, KEYCLOAK_LIVE_ALLOW_WRITES })).toEqual([
+          `${LIVE_WRITE_OPT_IN} is not exactly "true"`,
+        ]);
+      },
+    );
+
+    it('names the missing opt-in first even when everything else is wrong too', () => {
+      expect(environmentRefusals({ KEYCLOAK_URL: 'http://keycloak.staging.example' })[0]).toBe(
+        `${LIVE_WRITE_OPT_IN} is not exactly "true"`,
+      );
+    });
+
     it('accepts NODE_ENV=test and a loopback Keycloak', () => {
       expect(environmentRefusals(TEST_ENV)).toEqual([]);
       expect(environmentRefusals({ ...TEST_ENV, KEYCLOAK_URL: 'http://127.0.0.2:8080' })).toEqual(
@@ -103,6 +123,33 @@ describe('keycloak-live target guard', () => {
           readRealm: async () => ({ realm: 'rasta', attributes: {} }),
         }),
       ).rejects.toBeInstanceOf(LiveTargetRefusedError);
+    });
+
+    it('refuses an unopted run — even at a disposable, loopback realm — with no network call', async () => {
+      const readRealm = jest.fn(async () => DISPOSABLE);
+      const refusal = await assertDisposableTarget({
+        env: { ...TEST_ENV, KEYCLOAK_LIVE_ALLOW_WRITES: undefined },
+        realm: 'rasta',
+        readRealm,
+      }).catch((error: unknown) => error);
+
+      expect(refusal).toBeInstanceOf(LiveTargetRefusedError);
+      expect((refusal as LiveTargetRefusedError).stage).toBe('environment');
+      expect((refusal as Error).message).toContain('Nothing was contacted.');
+      expect(readRealm).not.toHaveBeenCalled();
+    });
+
+    it('says what a realm refusal did happen: one authentication and one read, no user touched', async () => {
+      const refusal = await assertDisposableTarget({
+        env: TEST_ENV,
+        realm: 'rasta',
+        readRealm: async () => ({ realm: 'rasta', attributes: {} }),
+      }).catch((error: unknown) => error);
+
+      expect((refusal as LiveTargetRefusedError).stage).toBe('realm');
+      expect((refusal as Error).message).toContain(
+        'One admin authentication and one realm read happened; no user was created, changed or deleted.',
+      );
     });
 
     it('refuses the environment without contacting Keycloak at all', async () => {

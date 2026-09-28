@@ -1584,9 +1584,11 @@ jobs:
         # this is the job with a Keycloak; it adds seconds, not a container.
         run: pnpm --filter @rasta/identity-service run test:keycloak-live
         env:
-          # The suite writes users, so it refuses unless NODE_ENV=test, the
-          # Keycloak is on loopback, and the realm carries the disposable-stack
-          # marker (test/keycloak-live/live-target-guard.ts).
+          # The suite creates, changes and deletes users, so it refuses unless
+          # it is opted in here — and only here — NODE_ENV=test, the Keycloak
+          # is on loopback, and the realm carries the disposable-stack marker
+          # (test/keycloak-live/live-target-guard.ts).
+          KEYCLOAK_LIVE_ALLOW_WRITES: 'true'
           NODE_ENV: test
           KEYCLOAK_URL: http://localhost:8080
           KEYCLOAK_REALM: rasta

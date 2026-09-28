@@ -21,9 +21,12 @@ import { assertDisposableTarget } from './live-target-guard';
  * opens and the assertion is on what Keycloak holds.
  *
  * Run by the `e2e` CI job, which has the Keycloak (`pnpm --filter
- * @rasta/identity-service test:keycloak-live`). It creates throwaway users, so
- * before its first write it passes `live-target-guard.ts`: `NODE_ENV=test`, a
- * loopback Keycloak, **and** a realm that carries the disposable-stack marker.
+ * @rasta/identity-service test:keycloak-live`, with
+ * `KEYCLOAK_LIVE_ALLOW_WRITES=true`). It creates, changes and deletes throwaway
+ * users, so it first passes `live-target-guard.ts`: the opt-in, `NODE_ENV=test`
+ * and a loopback Keycloak — checked with no network call — and then a realm
+ * that carries the disposable-stack marker, which costs one admin
+ * authentication and one realm read. No user is touched before all pass.
  */
 
 const realFetch = globalThis.fetch;
@@ -135,10 +138,15 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
   });
   const created: string[] = [];
 
-  // Before any write: the environment, then one read-only GET of the realm.
+  // Before any user is touched: the environment (no network call), then one
+  // admin authentication and one read of the realm.
   beforeAll(async () => {
     await assertDisposableTarget({
-      env: { NODE_ENV: process.env.NODE_ENV, KEYCLOAK_URL: config.url },
+      env: {
+        KEYCLOAK_LIVE_ALLOW_WRITES: process.env.KEYCLOAK_LIVE_ALLOW_WRITES,
+        NODE_ENV: process.env.NODE_ENV,
+        KEYCLOAK_URL: config.url,
+      },
       realm: config.realm,
       readRealm: async () => (await admin('')).json(),
     });
