@@ -15,6 +15,28 @@ name: rasta
 x-restart: &restart
   restart: unless-stopped
 
+# The broker's SCRAM credentials (RUN-006, ADR-061 § 3): one per principal in
+# infrastructure/docker/kafka/principals.txt, plus the admin. The same values
+# the services read from .env; the defaults equal .env.example's.
+x-kafka-credentials: &kafka-credentials
+  KAFKA_SASL_PASSWORD_IDENTITY: ${KAFKA_SASL_PASSWORD_IDENTITY:-rasta_identity_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_ORGANIZATION: ${KAFKA_SASL_PASSWORD_ORGANIZATION:-rasta_organization_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_ASSET: ${KAFKA_SASL_PASSWORD_ASSET:-rasta_asset_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_FLEET: ${KAFKA_SASL_PASSWORD_FLEET:-rasta_fleet_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_MAINTENANCE: ${KAFKA_SASL_PASSWORD_MAINTENANCE:-rasta_maintenance_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_MARKETPLACE: ${KAFKA_SASL_PASSWORD_MARKETPLACE:-rasta_marketplace_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_SUPPLIER: ${KAFKA_SASL_PASSWORD_SUPPLIER:-rasta_supplier_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_CONSTRUCTION: ${KAFKA_SASL_PASSWORD_CONSTRUCTION:-rasta_construction_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_ECONOMIC: ${KAFKA_SASL_PASSWORD_ECONOMIC:-rasta_economic_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_NOTIFICATION: ${KAFKA_SASL_PASSWORD_NOTIFICATION:-rasta_notification_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_DOCUMENT: ${KAFKA_SASL_PASSWORD_DOCUMENT:-rasta_document_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_AUDIT: ${KAFKA_SASL_PASSWORD_AUDIT:-rasta_audit_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_ADMIN: ${KAFKA_SASL_PASSWORD_ADMIN:-rasta_admin_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_OPS_REPLAY: ${KAFKA_SASL_PASSWORD_OPS_REPLAY:-rasta_ops_replay_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_ITEST_OBSERVER: ${KAFKA_SASL_PASSWORD_ITEST_OBSERVER:-rasta_itest_observer_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_KAFKA_UI: ${KAFKA_SASL_PASSWORD_KAFKA_UI:-rasta_kafka_ui_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_KAFKA_EXPORTER: ${KAFKA_SASL_PASSWORD_KAFKA_EXPORTER:-rasta_kafka_exporter_kafka_dev_password}
+
 services:
   # ----------------------------------------------------------------- database
   postgres:
@@ -74,6 +96,26 @@ services:
       retries: 10
 
   # ---------------------------------------------------------- event backbone
+  # The broker's TLS material (RUN-006): a throwaway CA and the broker
+  # certificate, generated inside this image with its own keytool — nothing to
+  # install on the host, Windows included — into the kafka-tls volume. Only the
+  # public CA certificate is copied out, to the git-ignored
+  # infrastructure/docker/kafka/.tls/, for the services and tests on the host.
+  # Idempotent: kept while valid.
+  kafka-tls:
+    image: apache/kafka:3.9.0
+    container_name: rasta-kafka-tls
+    user: '0'
+    entrypoint: ['/bin/bash', '/bootstrap/tls.sh']
+    environment:
+      TLS_DIR: /tls
+      CA_EXPORT_DIR: /export
+    volumes:
+      - kafka-tls:/tls
+      - ./infrastructure/docker/kafka:/bootstrap:ro
+      - ./infrastructure/docker/kafka/.tls:/export
+    restart: 'no'
+
   kafka:
     <<: *restart
     # The official Apache image. We started on bitnami/kafka and it stopped
@@ -81,13 +123,16 @@ services:
     # is one publishing decision away from breaking every clone of this repo.
     image: apache/kafka:3.9.0
     container_name: rasta-kafka
+    # KRaft, single node (controller + broker). Production runs a 3-node
+    # quorum — see docs/deployment/README.md. Authenticated and authorised as
+    # CI's broker is (RUN-006): SASL_SSL with SCRAM-SHA-512 on both listeners,
+    # StandardAuthorizer with no access for a principal without an ACL. The
+    # listeners, TLS and credentials are set by broker-entrypoint.sh, shared
+    # with CI so the two cannot drift; the ACLs by `pnpm infra:up`.
+    entrypoint: ['/bin/bash', '/bootstrap/broker-entrypoint.sh']
     environment:
-      # KRaft, single node (controller + broker). Production runs a 3-node
-      # quorum — see docs/deployment/README.md.
-      KAFKA_NODE_ID: '1'
-      KAFKA_PROCESS_ROLES: 'controller,broker'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
-      KAFKA_LISTENERS: 'PLAINTEXT://:9094,CONTROLLER://:9093,EXTERNAL://:9092'
+      <<: *kafka-credentials
+      CLUSTER_ID: 'rasta-local-cluster-000001'
       # The external advertised address must match the *host* port, because a
       # client connecting from the host is redirected to whatever this says.
       # It is configurable for the same reason POSTGRES_PORT is: a Windows
@@ -95,41 +140,45 @@ services:
       # (`netsh interface ipv4 show excludedportrange protocol=tcp`), and
       # Docker then refuses to publish it at all. Defaults to 9092 so CI and
       # every other machine are unaffected.
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9094,EXTERNAL://localhost:${KAFKA_HOST_PORT:-9092}'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT'
-      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
-      # An unknown topic is a contract violation, not a typo to absorb (ADR-006).
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_ADVERTISED_EXTERNAL: 'localhost:${KAFKA_HOST_PORT:-9092}'
+      KAFKA_ADVERTISED_BROKER: 'kafka:9094'
       KAFKA_LOG_RETENTION_HOURS: '168'
-      CLUSTER_ID: 'rasta-local-cluster-000001'
+    volumes:
+      - kafka-tls:/tls:ro
+      - ./infrastructure/docker/kafka:/bootstrap:ro
     ports:
       - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:${KAFKA_HOST_PORT:-9092}:9092'
-    # Deliberately no named volume. The container runs as uid 1000, and a named
-    # volume mounts root-owned, so the broker cannot write its log dir. Local
-    # Kafka data is disposable anyway — kafka-init recreates every topic on each
-    # `up`, and the outbox means nothing is lost when the log is (ADR-021).
+    depends_on:
+      kafka-tls:
+        condition: service_completed_successfully
+    # Deliberately no named volume for the log. The container runs as uid 1000,
+    # and a named volume mounts root-owned, so the broker cannot write its log
+    # dir. Local Kafka data is disposable anyway — kafka-init recreates every
+    # topic on each `up`, and the outbox means nothing is lost when the log is
+    # (ADR-021). A recreated container formats again, with the credentials
+    # then in .env: that is how a changed password takes effect
+    # (docs/runbooks/kafka-credential-rotation.md).
     healthcheck:
       test:
         - CMD-SHELL
-        - '/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9094 --list || exit 1'
+        - '/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9094 --command-config /tmp/admin.properties --list || exit 1'
       interval: 15s
       timeout: 10s
       retries: 12
       start_period: 40s
 
-  # Creates the platform topics once, then exits.
+  # Creates the platform topics once, as the broker's admin, then exits.
   kafka-init:
     image: apache/kafka:3.9.0
     container_name: rasta-kafka-init
     depends_on:
       kafka:
         condition: service_healthy
+    environment:
+      KAFKA_SASL_PASSWORD_ADMIN: ${KAFKA_SASL_PASSWORD_ADMIN:-rasta_admin_kafka_dev_password}
+      KAFKA_CA_FILE: /tls/ca.pem
     volumes:
+      - kafka-tls:/tls:ro
       - ./infrastructure/docker/kafka/create-topics.sh:/create-topics.sh:ro
     entrypoint: ['/bin/bash', '/create-topics.sh']
     restart: 'no'
@@ -429,9 +478,19 @@ services:
     <<: *restart
     image: danielqsj/kafka-exporter:v1.9.0
     container_name: rasta-kafka-exporter
+    # As `kafka-exporter`, a development-only principal that may describe the
+    # platform's topics and consumer groups and read nothing (RUN-006).
     command:
       - '--kafka.server=kafka:9094'
       - '--offset.show-all'
+      - '--sasl.enabled'
+      - '--sasl.mechanism=scram-sha512'
+      - '--sasl.username=kafka-exporter'
+      - '--sasl.password=${KAFKA_SASL_PASSWORD_KAFKA_EXPORTER:-rasta_kafka_exporter_kafka_dev_password}'
+      - '--tls.enabled'
+      - '--tls.ca-file=/tls/ca.pem'
+    volumes:
+      - kafka-tls:/tls:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -475,7 +534,16 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: rasta-local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9094
+      # As `kafka-ui`, a development-only principal: it may browse (describe
+      # and read) the platform's topics and groups, and write nothing (RUN-006).
+      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: SASL_SSL
+      KAFKA_CLUSTERS_0_PROPERTIES_SASL_MECHANISM: SCRAM-SHA-512
+      KAFKA_CLUSTERS_0_PROPERTIES_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="kafka-ui" password="${KAFKA_SASL_PASSWORD_KAFKA_UI:-rasta_kafka_ui_kafka_dev_password}";'
+      KAFKA_CLUSTERS_0_PROPERTIES_SSL_TRUSTSTORE_TYPE: PEM
+      KAFKA_CLUSTERS_0_PROPERTIES_SSL_TRUSTSTORE_LOCATION: /tls/ca.pem
       DYNAMIC_CONFIG_ENABLED: 'true'
+    volumes:
+      - kafka-tls:/tls:ro
     ports:
       - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:8081:8080'
     depends_on:
@@ -494,6 +562,9 @@ services:
 
 volumes:
   postgres-data:
+  # The broker's keystore and the throwaway CA certificate (kafka-tls). Never
+  # in the repository; `pnpm infra:reset` removes it with the rest.
+  kafka-tls:
   redis-data:
   minio-data:
   # Persistent, and load-bearing. Without it every restart re-downloads roughly

@@ -9,8 +9,8 @@
 #      repository value. One already in the environment is kept.
 #   2. the throwaway CA and broker certificate (tls.sh, inside the image)
 #   3. the broker (broker-entrypoint.sh): SASL_SSL on localhost:9092
-#   4. every platform topic (create-topics.sh, as admin), and the group
-#      coordinator loaded before any test joins a group
+#   4. every platform topic and the group coordinator (create-topics.sh, as
+#      admin), before any test joins a group
 #   5. the generated ACLs (scripts/kafka-acl.mjs apply), read back and compared
 #
 # Later steps then see KAFKA_BROKERS, KAFKA_SSL, KAFKA_SSL_CA_FILE and every
@@ -102,11 +102,6 @@ echo "==> Broker up after $(($(date +%s) - started)) s"
 # ---------------------------------------------------------------- 4. topics
 docker exec -e KAFKA_SASL_PASSWORD_ADMIN -e KAFKA_CA_FILE=/tls/ca.pem -e KAFKA_BOOTSTRAP=kafka:9094 \
   "${NAME}" bash /bootstrap/create-topics.sh >/dev/null
-# A freshly started broker lists topics while `__consumer_offsets` is still
-# loading; a consumer joining in that window is told the coordinator is not
-# available and the test waits on the wrong thing. Listing groups loads it.
-docker exec "${NAME}" /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:9094 \
-  --command-config /tmp/admin.properties --list >/dev/null
 echo "==> Topics ready after $(($(date +%s) - started)) s"
 
 # ---------------------------------------------------------------- 5. ACLs

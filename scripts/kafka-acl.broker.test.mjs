@@ -10,6 +10,11 @@
  * them it refuses to run rather than skip — a skipped broker test is a green
  * that proves nothing.
  *
+ * Every allowed write here is a real record, `{"aclTest":"<run>"}`, on a real
+ * platform topic (a producer's, a dead-letter or a retry topic). A consumer
+ * running against the same broker dead-letters it as VALIDATION_FAILED; run
+ * this against a broker nothing else is consuming from — CI runs it last.
+ *
  * The rules under test come from TOPIC_PRODUCERS and TOPIC_CONSUMERS through
  * the generated `broker-acls.json`; each case below is one of them, observed:
  *   - only a topic's owner writes it; a service reads only what it subscribes
@@ -120,10 +125,27 @@ async function refusal(action) {
 }
 
 /**
+ * Waits until the broker can coordinate `groupId`, asked as the admin.
+ *
+ * Each group lives on one `__consumer_offsets` partition, and on a broker that
+ * has just started those partitions finish loading one by one. Until then a
+ * join fails with "coordinator not found" — which is also how kafkajs reports
+ * a GROUP_AUTHORIZATION_FAILED. Asking first as the admin, for the very same
+ * group, is what makes a later refusal an answer about the ACLs alone.
+ */
+async function coordinatorReady(groupId) {
+  const admin = await connected(
+    client(spec.admin, { retry: { initialRetryTime: 300, retries: 10 } }).admin(),
+  );
+  await admin.describeGroups([groupId]);
+}
+
+/**
  * Joins `groupId` as `principal`, subscribed to `topic`, and resolves once the
  * group is joined — or with the refusal that stopped it.
  */
 async function consume(principal, groupId, topic) {
+  await coordinatorReady(groupId);
   const consumer = client(principal).consumer({
     groupId,
     sessionTimeout: 10_000,
@@ -186,6 +208,23 @@ describe('3. only a topic’s owner writes it', () => {
     );
   });
 
+  test('only marketplace-service writes rasta.marketplace.v1 — the source D-036 depends on', async () => {
+    // supplier-service's performance consumer records facts from this topic.
+    // SASL alone would still let every authenticated service write it; the
+    // per-topic ACL is what leaves marketplace-service the only writer.
+    assert.equal(
+      await refusal(() => produce('marketplace-service', 'rasta.marketplace.v1')),
+      'ALLOWED',
+    );
+    for (const principal of ['supplier-service', 'economic-service', 'ops-replay']) {
+      assert.equal(
+        await refusal(() => produce(principal, 'rasta.marketplace.v1')),
+        'TOPIC_AUTHORIZATION_FAILED',
+        principal,
+      );
+    }
+  });
+
   test('the development observer and Kafka UI write nothing', async () => {
     for (const principal of ['itest-observer', 'kafka-ui', 'kafka-exporter']) {
       assert.equal(
@@ -207,8 +246,8 @@ describe('4. a service reads what it subscribes to, in its own group namespace',
 
   test('maintenance-service may not join a group in fleet-service’s namespace', async () => {
     // The broker answers FindCoordinator with GROUP_AUTHORIZATION_FAILED, which
-    // kafkajs reports as "coordinator not found". The join above, on the same
-    // broker and topic, is the control: the coordinator is there.
+    // kafkajs reports as "coordinator not found". `consume` has just had the
+    // admin find this group's coordinator, so it is there.
     assert.equal(
       await consume('maintenance-service', `fleet-service.acl-test-${run}`, 'rasta.fleet.v1'),
       'KafkaJSGroupCoordinatorNotFound',

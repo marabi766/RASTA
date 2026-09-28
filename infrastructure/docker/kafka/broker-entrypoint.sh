@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The development broker, authenticated and authorised (RUN-006, ADR-061 § 3,
-# amendment 2026-09-27). The same script starts the compose broker and the CI
+# amendment 2026-09-28). The same script starts the compose broker and the CI
 # broker, so neither can drift from the other.
 #
 # Listeners:

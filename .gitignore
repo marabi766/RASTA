@@ -46,3 +46,7 @@ Thumbs.db
 
 # Docker volumes mounted locally
 .docker-data/
+
+# RUN-006: the local broker's throwaway CA certificate, copied out of the
+# kafka-tls docker volume for the services on the host. Generated, never committed.
+infrastructure/docker/kafka/.tls/

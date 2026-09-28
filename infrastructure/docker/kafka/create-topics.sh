@@ -115,5 +115,11 @@ echo "==> Creating compacted state topics"
 # a real deployment. 30 days here only to keep laptops from filling up.
 create_topic "rasta.audit.trail.v1" "${PARTITIONS}" "2592000000"
 
+# A freshly started broker lists topics while `__consumer_offsets` is still
+# loading, and a consumer joining in that window is told the coordinator is
+# not available — so a test waits on the wrong thing. Asking for the groups
+# loads it now, before anything joins one.
+"${KAFKA_BIN}"/kafka-consumer-groups.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" --list >/dev/null
+
 echo "==> Kafka topics ready"
 "${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" --list | sort
