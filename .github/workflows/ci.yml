@@ -1576,6 +1576,26 @@ jobs:
           docker logs rasta-e2e-keycloak
           exit 1
 
+      - name: Keycloak projection vs concurrent changes (live Keycloak)
+        # identity-service's `keycloak-live` jest project: the real
+        # KeycloakAdminClient against this job's Keycloak, with a projection's
+        # write held after its read while an administrator changes the account
+        # (ADR-060 § 5, docs/23 D-037). Here and not in `integration` because
+        # this is the job with a Keycloak; it adds seconds, not a container.
+        run: pnpm --filter @rasta/identity-service run test:keycloak-live
+        env:
+          # The suite creates, changes and deletes users, so it refuses unless
+          # it is opted in here — and only here — NODE_ENV=test, the Keycloak
+          # is on loopback, and the realm carries the disposable-stack marker
+          # (test/keycloak-live/live-target-guard.ts).
+          KEYCLOAK_LIVE_ALLOW_WRITES: 'true'
+          NODE_ENV: test
+          KEYCLOAK_URL: http://localhost:8080
+          KEYCLOAK_REALM: rasta
+          KEYCLOAK_BACKEND_CLIENT_ID: rasta-backend
+          KEYCLOAK_BACKEND_CLIENT_SECRET: backend_dev_secret_change_me
+          KEYCLOAK_ADMIN: admin
+
       - name: Start Temporal
         # marketplace-service's order saga needs a real Temporal server. An
         # in-memory `dev-server` rather than the compose stack's Postgres-backed

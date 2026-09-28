@@ -3,10 +3,13 @@ import { KeycloakAdminClient } from './keycloak.client';
 /**
  * The one Keycloak write the platform attributes go through.
  *
- * On Keycloak 26 the admin `PUT /users/:id` takes its body as the whole user:
- * sent only `{ attributes }`, it erased the other platform attributes and the
- * user's email and names. So the write must read the representation, replace
- * the platform attributes in it, and send the whole thing back.
+ * On Keycloak 26 the admin `PUT /users/:id` changes the fields its body
+ * carries, and a body with `attributes` erases every attribute it omits — the
+ * user's email and names included (measured on 26.0.8, ADR-060 § 5). So the
+ * write reads the user, and sends back exactly the profile fields, the
+ * attributes it does not own, and the four it does: never a field it does not
+ * own, so a concurrent change to one is never undone. The same interleaving
+ * against a real Keycloak: `test/keycloak-live/`.
  */
 describe('KeycloakAdminClient.replacePlatformAttributes', () => {
   const calls: { url: string; method: string; body?: unknown }[] = [];
@@ -16,7 +19,16 @@ describe('KeycloakAdminClient.replacePlatformAttributes', () => {
     email: 'someone@example.test',
     firstName: 'Some',
     lastName: 'One',
-    enabled: true,
+    // Not the projector's. A projection read these a moment before an
+    // administrator or the user changed them; sending them back would undo it.
+    enabled: false,
+    emailVerified: true,
+    requiredActions: ['UPDATE_PASSWORD'],
+    federationLink: 'ldap-1',
+    totp: false,
+    notBefore: 0,
+    access: { manage: true },
+    createdTimestamp: 1_790_000_000_000,
     attributes: {
       locale: ['fa'],
       organization_ids: ['ORG-OLD'],
@@ -53,7 +65,7 @@ describe('KeycloakAdminClient.replacePlatformAttributes', () => {
       enabled: true,
     });
 
-  it('writes the whole representation back, with every platform attribute replaced', async () => {
+  it('writes the profile fields, the attributes it does not own, and every platform attribute', async () => {
     await client().replacePlatformAttributes('kc-1', {
       rasta_user_id: ['USR_1'],
       organization_ids: ['ORG-A'],
@@ -64,7 +76,10 @@ describe('KeycloakAdminClient.replacePlatformAttributes', () => {
     const put = calls.find((call) => call.method === 'PUT');
     expect(put?.url).toBe('http://keycloak.test/admin/realms/rasta/users/kc-1');
     expect(put?.body).toEqual({
-      ...stored,
+      // Sent only because Keycloak erases them from a body with `attributes`.
+      email: 'someone@example.test',
+      firstName: 'Some',
+      lastName: 'One',
       attributes: {
         // Not ours — carried over untouched.
         locale: ['fa'],
@@ -75,6 +90,37 @@ describe('KeycloakAdminClient.replacePlatformAttributes', () => {
         active_organization_id: [],
       },
     });
+  });
+
+  it('never sends a field it does not own, whatever the read returned', async () => {
+    await client().replacePlatformAttributes('kc-1', {
+      rasta_user_id: ['USR_1'],
+      organization_ids: [],
+      organization_roles: [],
+      active_organization_id: [],
+    });
+
+    const body = calls.find((call) => call.method === 'PUT')?.body as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(['attributes', 'email', 'firstName', 'lastName']);
+  });
+
+  it('leaves out a profile field the user does not have, rather than inventing one', async () => {
+    const { email: _none, ...withoutEmail } = stored;
+    const originalGet = globalThis.fetch;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+      (init?.method ?? 'GET') === 'GET' && !String(input).endsWith('/token')
+        ? new Response(JSON.stringify(withoutEmail))
+        : originalGet(input, init)) as typeof fetch;
+
+    await client().replacePlatformAttributes('kc-1', {
+      rasta_user_id: ['USR_1'],
+      organization_ids: [],
+      organization_roles: [],
+      active_organization_id: [],
+    });
+
+    const body = calls.find((call) => call.method === 'PUT')?.body as Record<string, unknown>;
+    expect(body).not.toHaveProperty('email');
   });
 
   it('makes exactly one write', async () => {
