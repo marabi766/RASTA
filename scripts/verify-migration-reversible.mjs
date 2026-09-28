@@ -50,10 +50,11 @@ import {
   createScratchDatabase,
   dropScratchDatabase,
   ledgerAssertionScript,
+  newScratchDatabase,
   psqlRunner,
   recordSnapshotScript,
-  scratchDatabaseName,
   snapshotStoreScript,
+  staleScratchDatabases,
 } from './verify-migration-reversible-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -137,16 +138,15 @@ const extensionHome = targetSchema;
 /** The label the target's own state is recorded under, right after its deploy. */
 const POST_UP = 'post-up';
 /**
- * The throwaway database, when there is one: the reserved scratch prefix, the
- * service database's name and the scratch schema's. It is created marked, and
- * only a database carrying that mark is ever dropped (scratchDatabaseSql) — a
- * database that merely has this name is refused and left alone.
+ * The throwaway database, when there is one: this run's own, under a name no
+ * other run can hold, created marked with this run's id — and only ever
+ * dropped by this run (newScratchDatabase, scratchDatabaseSql). Two runs
+ * against one server never touch each other's database.
  */
-const scratchDatabase = inDatabase
-  ? scratchDatabaseName(new URL(baseUrl).pathname.slice(1), scratchSchema)
-  : null;
-/** What a scratch database made by this script says it is for. */
-const SCRATCH_PURPOSE = 'migration-reversibility';
+const scratch = inDatabase ? newScratchDatabase('migration-reversibility', service) : null;
+const scratchDatabase = scratch?.name ?? null;
+/** Set once this run has created its scratch database: nothing is dropped before that. */
+let scratchCreated = false;
 
 /** A throwaway schema (or database). Nothing this script does can reach the real one. */
 function scratchUrl(schema = targetSchema) {
@@ -267,9 +267,10 @@ function fail(message) {
 /** Removes everything this run created. Best effort: also called on failure. */
 function dropScratch() {
   if (scratchDatabase) {
-    // As its owner, only if marked, never `WITH (FORCE)`: see scratchDatabaseSql.
-    // psql rather than Prisma, whose errors carry no SQLSTATE.
-    return dropScratchDatabase(psqlRunner(baseUrl), scratchDatabase, SCRATCH_PURPOSE);
+    // Only this run's own database, as its owner, never `WITH (FORCE)`: see
+    // scratchDatabaseSql. psql rather than Prisma, whose errors carry no SQLSTATE.
+    if (!scratchCreated) return { ok: true, output: '' };
+    return dropScratchDatabase(psqlRunner(baseUrl), scratch);
   }
   return sql(
     `DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE; ` +
@@ -295,13 +296,17 @@ console.log(
 console.log('');
 
 if (scratchDatabase) {
-  // A leftover from an earlier run first — only if it is this role's marked
-  // scratch database — then the new one, created and marked.
-  const leftover = dropScratch();
-  if (!leftover.ok) fail(`scratch database: removing a leftover failed:\n${leftover.output}`);
-  const created = createScratchDatabase(psqlRunner(baseUrl), scratchDatabase, SCRATCH_PURPOSE);
+  // A crashed run's database is not this run's to drop; it is only reported.
+  for (const stale of staleScratchDatabases(psqlRunner(baseUrl))) {
+    console.warn(
+      `  ! ${stale.name} is a scratch database left since ${stale.createdAt}; ` +
+        'remove it by hand once no run is using it',
+    );
+  }
+  const created = createScratchDatabase(psqlRunner(baseUrl), scratch);
   if (!created.ok) fail(`scratch database: creating ${scratchDatabase} failed:\n${created.output}`);
-  console.log('  ✓ clean scratch database');
+  scratchCreated = true;
+  console.log('  ✓ scratch database created and marked');
 } else {
   mustRun(
     'clean scratch schema',
