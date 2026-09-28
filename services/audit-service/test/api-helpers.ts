@@ -159,6 +159,11 @@ function applyEnvironment(maxQueryWindowDays?: number): void {
   process.env.SERVICE_NAME ??= SERVICE_NAME;
   process.env.PORT ??= '3115';
   process.env.KAFKA_BROKERS ??= 'localhost:9092';
+  // Nothing built here reaches the broker (the relay and consumers are
+  // inert), so the app may be built without this service's broker
+  // credential: the explicit opt-out, honoured only under NODE_ENV test
+  // (RUN-006). A suite that does reach the broker authenticates.
+  process.env.KAFKA_ALLOW_PLAINTEXT ??= 'true';
   process.env.OIDC_ISSUER_URL ??= 'http://audittest.invalid/realms/rasta';
   process.env.OIDC_JWKS_URI ??= 'http://audittest.invalid/realms/rasta/certs';
   process.env.OIDC_AUDIENCE ??= 'rasta-api';

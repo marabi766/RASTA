@@ -205,8 +205,8 @@ export const kafkaEnvSchema = z.object({
   /**
    * The service's broker credential (ADR-061 § 3, RUN-006): SASL/SCRAM, one
    * principal per service, named after it. Both absent means PLAINTEXT, which
-   * only a non-production environment accepts (`kafkaConnection` in
-   * `nest-common` refuses to connect a production service without them).
+   * `kafkaConnection` (`nest-common`) refuses unless `KAFKA_ALLOW_PLAINTEXT`
+   * is explicitly allowed in development or test.
    *
    * Never committed: `.env.example` holds placeholders only. When
    * `KAFKA_SASL_PASSWORD` is unset, `loadEnv` reads
@@ -218,8 +218,17 @@ export const kafkaEnvSchema = z.object({
   KAFKA_SASL_PASSWORD: z.string().min(1).optional(),
   KAFKA_SASL_MECHANISM: z.enum(KAFKA_SASL_MECHANISMS).default('scram-sha-512'),
 
-  /** TLS to the broker. A production service requires it together with SASL. */
+  /** TLS to the broker. Required together with SASL unless PLAINTEXT is allowed below. */
   KAFKA_SSL: booleanEnv(false),
+  /**
+   * The explicit opt-out from the broker credential and TLS (ADR-061 § 3,
+   * RUN-006): PLAINTEXT is allowed only with this `true` **and** `NODE_ENV`
+   * set explicitly to `development` or `test` ({@link KAFKA_PLAINTEXT_ENVIRONMENTS}).
+   * Everywhere else — `staging`, `production`, or `NODE_ENV` left unset — a
+   * service connects with its SASL credential and `KAFKA_SSL=true` or refuses
+   * to start. Secure by default: forgetting a variable fails closed.
+   */
+  KAFKA_ALLOW_PLAINTEXT: booleanEnv(false),
   /** PEM file of the CA that signed the broker's certificate; absent = the system trust store. */
   KAFKA_SSL_CA_FILE: z.string().min(1).optional(),
 
@@ -287,6 +296,28 @@ export const authEnvSchema = z.object({
   INTERNAL_TOKEN_TTL_SECONDS: z.coerce.number().int().min(30).max(900).default(300),
 });
 
+/**
+ * The environments in which `KAFKA_ALLOW_PLAINTEXT=true` is honoured, as
+ * `DEMO_SEED_ENVIRONMENTS` is for seeds: `staging` holds data somebody cares
+ * about, and an unset `NODE_ENV` is refused rather than read as its
+ * `development` default.
+ */
+export const KAFKA_PLAINTEXT_ENVIRONMENTS = ['development', 'test'] as const;
+
+/**
+ * Whether this service may reach Kafka without a credential and TLS: the
+ * explicit opt-out, in a development or test environment. `kafkaConnection`
+ * (`nest-common`) refuses everything else that lacks SASL and TLS.
+ */
+export function kafkaPlaintextAllowed(
+  env: Pick<BaseEnv, 'NODE_ENV'> & Partial<Pick<KafkaEnv, 'KAFKA_ALLOW_PLAINTEXT'>>,
+): boolean {
+  return (
+    env.KAFKA_ALLOW_PLAINTEXT === true &&
+    (KAFKA_PLAINTEXT_ENVIRONMENTS as readonly string[]).includes(env.NODE_ENV)
+  );
+}
+
 export type EnvIssue = { path: string; message: string };
 
 export class EnvValidationError extends Error {
@@ -317,7 +348,29 @@ export function loadEnv<S extends z.ZodTypeAny>(
     );
   }
 
+  assertKafkaPlaintextOptOut(source, result.data);
   return result.data;
+}
+
+/**
+ * `KAFKA_ALLOW_PLAINTEXT=true` anywhere it is not honoured is refused at boot
+ * rather than ignored: an operator who set it believes it does something. The
+ * check reads `NODE_ENV` as given, so an unset one — which the schema would
+ * default to `development` — does not count as development.
+ */
+function assertKafkaPlaintextOptOut(source: NodeJS.ProcessEnv, parsed: unknown): void {
+  if (typeof parsed !== 'object' || parsed === null) return;
+  if ((parsed as { KAFKA_ALLOW_PLAINTEXT?: unknown }).KAFKA_ALLOW_PLAINTEXT !== true) return;
+  const given = source.NODE_ENV?.trim();
+  if (given && (KAFKA_PLAINTEXT_ENVIRONMENTS as readonly string[]).includes(given)) return;
+  throw new EnvValidationError([
+    {
+      path: 'KAFKA_ALLOW_PLAINTEXT',
+      message:
+        `is honoured only with NODE_ENV set explicitly to ${KAFKA_PLAINTEXT_ENVIRONMENTS.join(' or ')}; ` +
+        'anywhere else the service connects with its SASL credential and KAFKA_SSL=true (ADR-061 § 3)',
+    },
+  ]);
 }
 
 /**

@@ -187,6 +187,9 @@ export async function startIdentityApi(
     KAFKA_CLIENT_ID: `identity-itest-${ulid().slice(-8)}`,
     // RUN-006: the broker authenticates. The app connects as identity-service
     // with its own password and the CA, exactly as `pnpm dev` does from .env.
+    // A suite that never reaches the broker may build the app without them:
+    // the explicit opt-out, honoured only under NODE_ENV test.
+    KAFKA_ALLOW_PLAINTEXT: process.env.KAFKA_ALLOW_PLAINTEXT ?? 'true',
     ...Object.fromEntries(
       ['KAFKA_SASL_PASSWORD_IDENTITY', 'KAFKA_SSL', 'KAFKA_SSL_CA_FILE'].flatMap((name) =>
         process.env[name] ? [[name, process.env[name]]] : [],
