@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Catch,
   HttpException,
   HttpStatus,
@@ -50,7 +51,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const response = host.switchToHttp().getResponse<MinimalResponse>();
     const context = tryGetContext();
 
-    const { status, code, message, details, internalContext } = this.normalize(exception);
+    const { status, code, message, details, internalContext, logged } = this.normalize(exception);
 
     const body: ApiError = {
       code,
@@ -63,7 +64,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     };
 
     const logPayload = {
-      err: loggableError(exception),
+      err: logged ?? loggableError(exception),
       errorCode: code,
       status,
       internalContext,
@@ -92,6 +93,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
     message: string;
     details?: ErrorDetail[];
     internalContext?: Record<string, unknown>;
+    /** How the error is logged, when its own message may not be. */
+    logged?: LoggedError;
   } {
     if (isRastaError(exception)) {
       return {
@@ -100,6 +103,25 @@ export class AllExceptionsFilter implements ExceptionFilter {
         message: exception.message,
         details: exception.details,
         internalContext: exception.internalContext,
+      };
+    }
+
+    // Nest's own reading of a request it could not parse (S-09). The platform
+    // never throws `BadRequestException` itself — its 400s are `RastaError`s —
+    // so one reaching here was made by the framework from client input: Nest
+    // maps body-parser's `SyntaxError` (a malformed JSON body) and Express's
+    // `URIError` (a malformed percent-encoding) to `new
+    // BadRequestException(err.message)`, and V8's JSON message quotes the
+    // bytes it choked on. The client and the log get fixed text; the log
+    // keeps the frames. Which text is chosen reads the message, but nothing of
+    // it is repeated.
+    if (exception instanceof BadRequestException) {
+      const message = /JSON/.test(exception.message) ? MALFORMED_JSON_BODY : MALFORMED_REQUEST;
+      return {
+        status: HttpStatus.BAD_REQUEST,
+        code: httpStatusToCode(HttpStatus.BAD_REQUEST),
+        message,
+        logged: { ...loggableError(exception), message },
       };
     }
 
@@ -136,6 +158,12 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
 /** What a client is told about a failure that is the server's. */
 const GENERIC_SERVER_ERROR = 'An unexpected error occurred';
+
+/** What a client is told when its body is not JSON — never the parser's words. */
+const MALFORMED_JSON_BODY = 'The request body is not valid JSON';
+
+/** What a client is told about any other request the framework could not read. */
+const MALFORMED_REQUEST = 'The request could not be read';
 
 /** How deep a chain of `cause`s is followed into the log. */
 const MAX_CAUSE_DEPTH = 3;

@@ -171,9 +171,13 @@ Endpoint در Schema اعلام می‌شود. مرتب‌سازی آزاد رو
 **S-09 در پاسخ خطا.** `details` فقط واقعیت‌های Schema را دارد، نه ورودی کاربر (`ZodValidationPipe`، `toErrorDetails`):
 پیام `invalid_enum_value` فقط گزینه‌های مجاز را می‌گوید (بی «received»)، `unrecognized_keys` فقط تعداد کلیدهای اضافه را، و
 بخشی از `path` که کلاینت انتخاب کرده (کلید `z.record` یا `.catchall()`) `*` می‌شود. پیام نوشتهٔ Schema (`refine`،
-`errorMap`، پیام Regex) باید متن ثابت باشد؛ اگر مقدار ورودی را تکرار کند، پیام ثابت همان کد جایش می‌نشیند. پاسخ هر 5xx
-پیام عمومی است — پیام خطای ناشناخته یا `HttpException` 5xx هرگز به کلاینت نمی‌رسد — و آن پیام فقط در Log سرور، پاک‌سازی‌شده
-و حداکثر ۲۰۰ نویسه (`safeLogText`) ثبت می‌شود.
+`errorMap`، پیام Regex) باید متن ثابت باشد: **نویسندهٔ Schema هرگز مقدار ورودی را در پیام سفارشی نمی‌گذارد** — نه با
+`refine((v) => ({ message: … }))`، نه با `ctx.data` در `errorMap`، نه با `addIssue` در `superRefine`. پشتیبان فقط تکرار مقدارِ زیر
+مسیر همان Issue را، از سه نویسه به بالا، می‌گیرد و پیام را با پیام ثابت همان کد عوض می‌کند؛ مقدار میدان دیگر یا ورودی کوتاه‌تر را
+نمی‌گیرد. پاسخ هر 5xx پیام عمومی است — پیام خطای ناشناخته یا `HttpException` 5xx هرگز به کلاینت نمی‌رسد — و آن پیام فقط در Log
+سرور، پاک‌سازی‌شده و حداکثر ۲۰۰ نویسه (`safeLogText`) ثبت می‌شود. درخواستی که Nest نتواند بخواند (بدنهٔ JSON نامعتبر، کدگذاری
+درصدی نادرست در مسیر) `400 VALIDATION_FAILED` با متن ثابت می‌گیرد («The request body is not valid JSON» یا «The request could
+not be read»)؛ متن Parser که بایت‌های کلاینت را نقل می‌کند نه به پاسخ می‌رسد نه به Log.
 
 فهرست کامل کدها: [`packages/contracts/src/common/errors.ts`](../packages/contracts/src/common/errors.ts)
 

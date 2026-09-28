@@ -113,11 +113,44 @@ describe('AllExceptionsFilter, 5xx (S-09)', () => {
   });
 });
 
-describe('AllExceptionsFilter, what stays as it was', () => {
-  it('a 4xx HttpException keeps its message for the client', () => {
-    const { status, body } = run(new BadRequestException('page must be a positive integer'));
+describe('AllExceptionsFilter, a request the framework could not read (S-09)', () => {
+  // What Nest builds from body-parser's SyntaxError: `new BadRequestException(err.message)`.
+  const parserText = `Unexpected token 'S', ..."ionalId": ${SENTINEL}"... is not valid JSON`;
+
+  it('a malformed JSON body: fixed text for the client and the log, frames kept', () => {
+    const { status, body, lines } = run(new BadRequestException(parserText));
+
     expect(status).toBe(400);
-    expect(body).toMatchObject({ message: 'page must be a positive integer' });
+    expect(body).toMatchObject({
+      code: 'VALIDATION_FAILED',
+      message: 'The request body is not valid JSON',
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.level).toBe('debug');
+    expect(lines[0]?.payload.err).toMatchObject({
+      type: 'BadRequestException',
+      message: 'The request body is not valid JSON',
+    });
+    expect(lines[0]?.payload.err.stack).toMatch(/^\s+at /);
+    expect(JSON.stringify(body)).not.toContain('SENTINEL');
+    expect(JSON.stringify(lines)).not.toContain('SENTINEL');
+  });
+
+  it('a malformed URL encoding, or any other framework 400: the general fixed text', () => {
+    const { body, lines } = run(new BadRequestException('URI malformed'));
+    expect(body).toMatchObject({
+      code: 'VALIDATION_FAILED',
+      message: 'The request could not be read',
+    });
+    expect(JSON.stringify(lines)).not.toContain('URI malformed');
+  });
+});
+
+describe('AllExceptionsFilter, what stays as it was', () => {
+  it('a 4xx HttpException other than a 400 keeps its message for the client', () => {
+    const { status, body } = run(new HttpException('Slow down', HttpStatus.TOO_MANY_REQUESTS));
+    expect(status).toBe(429);
+    expect(body).toMatchObject({ code: 'RATE_LIMIT_EXCEEDED', message: 'Slow down' });
   });
 
   it('a RastaError keeps its message and code, and the log keeps its internal context', () => {
