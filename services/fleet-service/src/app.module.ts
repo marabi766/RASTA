@@ -20,6 +20,7 @@ import {
   TokenVerifier,
   toLogContext,
   type AuthGuardOptions,
+  kafkaConnection,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
@@ -117,10 +118,7 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
       provide: KafkaEventPublisher,
       inject: [ENV],
       useFactory: (env: FleetEnv) =>
-        new KafkaEventPublisher({
-          brokers: brokersOf(env),
-          clientId: env.KAFKA_CLIENT_ID,
-        }),
+        new KafkaEventPublisher(kafkaConnection(env, env.KAFKA_CLIENT_ID)),
     },
 
     {
@@ -168,8 +166,7 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
           (handler) =>
             new EventConsumer(
               {
-                brokers: brokersOf(env),
-                clientId: `${env.KAFKA_CLIENT_ID}-asset-sync`,
+                ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-asset-sync`),
                 // One group per (service, purpose), never shared: a second
                 // consumer on the same group would steal partitions and each
                 // would see half the stream (docs/07 § 7.10).
@@ -297,8 +294,4 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.relay.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }
-}
-
-function brokersOf(env: FleetEnv): string[] {
-  return env.KAFKA_BROKERS.split(',').map((broker) => broker.trim());
 }

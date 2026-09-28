@@ -20,6 +20,7 @@ import {
   TokenVerifier,
   toLogContext,
   type AuthGuardOptions,
+  kafkaConnection,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { HealthController } from './health/health.controller';
@@ -46,7 +47,7 @@ import {
 import { AUDIT_TRAIL_CONSUMER } from './audit/audit-trail.mapper';
 import { auditPartitionRows, initializeExpectedProducerSeries } from './observability/metrics';
 import { ENV, LOGGER } from './tokens';
-import { brokersOf, loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/env';
+import { loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/env';
 
 /** The logger the shared `EventConsumer` writes to, over the service logger. */
 function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsumer>[2] {
@@ -218,8 +219,7 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
           (handler) =>
             new EventConsumer(
               {
-                brokers: brokersOf(env),
-                clientId: env.KAFKA_CLIENT_ID,
+                ...kafkaConnection(env, env.KAFKA_CLIENT_ID),
                 // A constant, never `env.KAFKA_CONSUMER_GROUP` — see the header.
                 groupId: DOMAIN_PROJECTOR_CONSUMER,
                 topics: [...DOMAIN_TOPICS],
@@ -261,8 +261,7 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
           (handler) =>
             new EventConsumer(
               {
-                brokers: brokersOf(env),
-                clientId: env.KAFKA_CLIENT_ID,
+                ...kafkaConnection(env, env.KAFKA_CLIENT_ID),
                 // Fixed, for the reason in the header: this name is also the
                 // path-B `processed_event` key.
                 groupId: AUDIT_TRAIL_CONSUMER,

@@ -16,6 +16,7 @@ import {
   RequestContextMiddleware,
   TokenVerifier,
   type AuthGuardOptions,
+  kafkaConnection,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { EventConsumer, toLogContext } from '@rasta/nest-common';
@@ -134,10 +135,7 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
       provide: KafkaEventPublisher,
       inject: [ENV],
       useFactory: (env: IdentityEnv) =>
-        new KafkaEventPublisher({
-          brokers: env.KAFKA_BROKERS.split(',').map((b) => b.trim()),
-          clientId: env.KAFKA_CLIENT_ID,
-        }),
+        new KafkaEventPublisher(kafkaConnection(env, env.KAFKA_CLIENT_ID)),
     },
 
     {
@@ -180,8 +178,7 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
             ? (handler) =>
                 new EventConsumer(
                   {
-                    brokers: env.KAFKA_BROKERS.split(',').map((b) => b.trim()),
-                    clientId: `${env.KAFKA_CLIENT_ID}-keycloak-projection`,
+                    ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-keycloak-projection`),
                     // Its own group: the outbox relay publishes this topic, and
                     // any other reader of it must not share partitions with
                     // this one (docs/07 § 7.10).

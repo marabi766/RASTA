@@ -18,6 +18,7 @@ import {
   TokenVerifier,
   toLogContext,
   type AuthGuardOptions,
+  kafkaConnection,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
@@ -72,10 +73,7 @@ export const LOGGER = Symbol('ORGANIZATION_LOGGER');
       provide: KafkaEventPublisher,
       inject: [ENV],
       useFactory: (env: OrganizationEnv) =>
-        new KafkaEventPublisher({
-          brokers: env.KAFKA_BROKERS.split(',').map((b) => b.trim()),
-          clientId: env.KAFKA_CLIENT_ID,
-        }),
+        new KafkaEventPublisher(kafkaConnection(env, env.KAFKA_CLIENT_ID)),
     },
 
     PrismaOutboxStore,

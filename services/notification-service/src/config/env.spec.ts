@@ -70,6 +70,26 @@ describe('notification-service configuration', () => {
     expect(IDENTITY_SERVICE).toBe('identity-service');
   });
 
+  it('accepts a dispatcher group inside its own namespace', () => {
+    const env = loadNotificationEnv({
+      ...REQUIRED,
+      KAFKA_CONSUMER_GROUP: 'notification-service.dispatcher-blue',
+    });
+    expect(env.KAFKA_CONSUMER_GROUP).toBe('notification-service.dispatcher-blue');
+  });
+
+  it.each([
+    'economic-service.settlement-authority',
+    'notification-service',
+    'notification-service.',
+    'dispatcher',
+    'notification-service.Dispatcher',
+  ])('refuses the consumer group %p at boot: it escapes its namespace (RUN-006)', (group) => {
+    expect(() => loadNotificationEnv({ ...REQUIRED, KAFKA_CONSUMER_GROUP: group })).toThrow(
+      /KAFKA_CONSUMER_GROUP/,
+    );
+  });
+
   it('applies the ADR-054 defaults for the tunables', () => {
     const env = loadNotificationEnv(REQUIRED);
     expect(env.NOTIFICATION_MAX_RECIPIENTS_PER_INTENT).toBe(500);

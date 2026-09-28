@@ -1,11 +1,10 @@
 import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import { Kafka, type Producer, CompressionTypes } from 'kafkajs';
+import { kafkaClientConfig, type KafkaConnectionOptions } from '@rasta/nest-common';
 import type { EventPublisher, OutboxRow } from '@rasta/nest-common';
 
-export interface KafkaPublisherOptions {
-  brokers: string[];
-  clientId: string;
-}
+/** The service's connection to the broker, SASL and TLS included (RUN-006). */
+export type KafkaPublisherOptions = KafkaConnectionOptions;
 
 /**
  * Kafka side of the outbox relay.
@@ -49,8 +48,7 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
 
   constructor(private readonly options: KafkaPublisherOptions) {
     this.kafka = new Kafka({
-      clientId: options.clientId,
-      brokers: options.brokers,
+      ...kafkaClientConfig(options),
       retry: { initialRetryTime: 300, retries: 8 },
       logLevel: 1, // ERROR — kafkajs is extremely chatty at INFO
     });

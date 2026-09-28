@@ -76,6 +76,10 @@ describe('GET /v1/organizations/:id for construction-service (Q-70 (7) contract)
     process.env.OIDC_AUDIENCE ??= 'rasta-api';
     process.env.INTERNAL_TOKEN_SECRET = SECRET;
     process.env.KAFKA_BROKERS ??= 'localhost:9092';
+    // The app is built against the local PLAINTEXT broker, which a service
+    // accepts only with the explicit opt-out under NODE_ENV test (RUN-006;
+    // PR B replaces it with the service's own credential).
+    process.env.KAFKA_ALLOW_PLAINTEXT ??= 'true';
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(KafkaEventPublisher)

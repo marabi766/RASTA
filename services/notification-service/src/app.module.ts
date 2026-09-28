@@ -20,6 +20,7 @@ import {
   TokenVerifier,
   toLogContext,
   type AuthGuardOptions,
+  kafkaConnection,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { HealthController } from './health/health.controller';
@@ -48,7 +49,6 @@ import { MailWorker } from './channels/mail.worker';
 import { templateReader } from './channels/template.reader';
 import { seedEmailTemplates } from './channels/template.seeder';
 import {
-  brokersOf,
   DISPATCHER_CONSUMER_GROUP,
   loadNotificationEnv,
   NOTIFICATION_DLQ_TOPIC,
@@ -181,10 +181,7 @@ import {
       provide: KafkaEventPublisher,
       inject: [ENV],
       useFactory: (env: NotificationEnv): KafkaEventPublisher =>
-        new KafkaEventPublisher({
-          brokers: brokersOf(env),
-          clientId: `${env.KAFKA_CLIENT_ID}-outbox`,
-        }),
+        new KafkaEventPublisher(kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-outbox`)),
     },
     {
       provide: OutboxRelay,
@@ -266,8 +263,7 @@ import {
           (handler) =>
             new EventConsumer(
               {
-                brokers: brokersOf(env),
-                clientId: env.KAFKA_CLIENT_ID,
+                ...kafkaConnection(env, env.KAFKA_CLIENT_ID),
                 groupId: env.KAFKA_CONSUMER_GROUP ?? DISPATCHER_CONSUMER_GROUP,
                 topics: [...SUBSCRIBED_TOPICS],
                 // A first deployment must not replay seven days of warnings

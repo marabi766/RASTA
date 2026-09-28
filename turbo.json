@@ -45,10 +45,21 @@
     // withheld it from the child even with it exported, so `pnpm test` and
     // `pnpm verify` reported green while the Kafka evidence never ran. A run
     // with no broker configured still skips — that is the only case that should.
+    // KAFKA_ALLOW_PLAINTEXT is the same trap for the opt-out (RUN-006): withheld,
+    // every suite that boots a service against the PLAINTEXT broker would be
+    // refused at startup.
     "test": {
       "dependsOn": ["^build", "db:generate"],
       "outputs": ["coverage/**"],
-      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "KAFKA_BROKERS", "S3_*", "DOCUMENT_*"]
+      "env": [
+        "DATABASE_URL",
+        "DATABASE_URL_*",
+        "REDIS_URL",
+        "KAFKA_BROKERS",
+        "KAFKA_ALLOW_PLAINTEXT",
+        "S3_*",
+        "DOCUMENT_*"
+      ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
     "test:integration": {
@@ -69,7 +80,15 @@
       // with no scanner address at all and every document suite fails at
       // startup — on a developer machine the same command passes, because the
       // shell exported them directly.
-      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "KAFKA_BROKERS", "S3_*", "DOCUMENT_*"]
+      "env": [
+        "DATABASE_URL",
+        "DATABASE_URL_*",
+        "REDIS_URL",
+        "KAFKA_BROKERS",
+        "KAFKA_ALLOW_PLAINTEXT",
+        "S3_*",
+        "DOCUMENT_*"
+      ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
     // parallel workspace phase by `scripts/run-test-phases.mjs` (docs/14
@@ -79,7 +98,13 @@
     "test:aggregation-stress": {
       "cache": false,
       "dependsOn": ["^build", "db:generate"],
-      "env": ["DATABASE_URL", "DATABASE_URL_*", "REDIS_URL", "KAFKA_BROKERS"]
+      "env": [
+        "DATABASE_URL",
+        "DATABASE_URL_*",
+        "REDIS_URL",
+        "KAFKA_BROKERS",
+        "KAFKA_ALLOW_PLAINTEXT"
+      ]
     },
     // Turbo runs tasks in a strict environment, so anything the E2E harness
     // reads has to be declared here or it simply is not there — and the
@@ -93,6 +118,7 @@
         "E2E_*",
         "KEYCLOAK_*",
         "KAFKA_BROKERS",
+        "KAFKA_ALLOW_PLAINTEXT",
         "INTERNAL_TOKEN_SECRET",
         "PORT_API_GATEWAY",
         "PORT_ECONOMIC",
