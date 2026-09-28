@@ -205,7 +205,8 @@ describe('the committed bootstrap files', () => {
     for (const name of DEAD_LETTERS) named.add(name);
     for (const profile of PROFILES) {
       for (const acl of brokerAcls(profile)) {
-        if (acl.resourceType === 'TOPIC' && acl.patternType === 'LITERAL') named.add(acl.resourceName);
+        if (acl.resourceType === 'TOPIC' && acl.patternType === 'LITERAL')
+          named.add(acl.resourceName);
       }
     }
     expect([...created].sort()).toEqual([...named].sort());
@@ -216,5 +217,14 @@ describe('the committed bootstrap files', () => {
     const script = readFileSync(resolve(dir, 'create-topics.sh'), 'utf8');
     expect(script).toContain('topics.txt');
     expect(script).not.toMatch(/rasta\.[a-z]+\.v1/);
+  });
+
+  it('create-topics.sh connects only as the admin over SASL_SSL', () => {
+    const script = readFileSync(resolve(dir, 'create-topics.sh'), 'utf8');
+    expect(script).toContain(':?the admin password is not set');
+    expect(script).toContain("echo 'security.protocol=SASL_SSL'");
+    const calls = script.split('\n').filter((line) => /"\$\{KAFKA_BIN\}"\/kafka-/.test(line));
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) expect(call).toContain('"${ADMIN_CONFIG[@]}"');
   });
 });

@@ -283,8 +283,8 @@ test('CI losing the exclusive invocation or its security selection is caught', (
   const direct = real();
   direct.ciWorkflow = replaceOnce(
     direct.ciWorkflow,
-    'run: pnpm run test:integration\n',
-    'run: pnpm exec turbo run test:integration\n',
+    '          pnpm run test:integration\n',
+    '          pnpm exec turbo run test:integration\n',
   );
   expectProblem(direct, /"Integration tests" must run `pnpm run test:integration`/);
   expectProblem(direct, /through turbo directly, bypassing the two-phase orchestrator/);

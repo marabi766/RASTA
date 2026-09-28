@@ -26,6 +26,29 @@ RETENTION_MS="${KAFKA_TOPIC_RETENTION_MS:-604800000}" # 7 days
 TOPICS_FILE="${TOPICS_FILE:-$(dirname "$0")/topics.txt}"
 [ -s "${TOPICS_FILE}" ] || { echo "==> ${TOPICS_FILE} missing; run pnpm kafka:acl:generate" >&2; exit 1; }
 
+# RUN-006: the broker authenticates, so this connects as `admin` over
+# SASL_SSL, trusting the throwaway CA tls.sh wrote. The admin's password comes
+# from the bootstrap-only env file (compose) or ci-up.sh; without it, stop.
+: "${KAFKA_SASL_PASSWORD_ADMIN:?the admin password is not set (infrastructure/docker/kafka/bootstrap.env.example)}"
+admin_properties="$(mktemp)"
+escaped="$(printf '%s' "${KAFKA_SASL_PASSWORD_ADMIN}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+{
+  echo 'security.protocol=SASL_SSL'
+  echo 'sasl.mechanism=SCRAM-SHA-512'
+  echo "sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"admin\" password=\"${escaped}\";"
+  echo 'ssl.truststore.type=PEM'
+  echo "ssl.truststore.location=${KAFKA_CA_FILE:-/tls/ca.pem}"
+} > "${admin_properties}"
+ADMIN_CONFIG=(--command-config "${admin_properties}")
+
+echo "==> Waiting for Kafka at ${BOOTSTRAP}"
+for _ in $(seq 1 30); do
+  if "${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" --list >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+
 create_topic() {
   local name="$1"
   local partitions="$2"

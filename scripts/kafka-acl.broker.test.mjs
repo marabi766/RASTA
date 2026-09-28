@@ -59,9 +59,20 @@ const env = {
 };
 const read = (path) => readFileSync(path, 'utf8');
 
+// Kafka UI's and the exporter's development passwords live only in
+// docker-compose.yml's interpolation defaults — in no env file, so no process
+// loads them by accident. Locally, take them from there; CI's `admin` scope
+// sets them explicitly, and an explicit value always wins.
+const compose = read(resolve(ROOT, 'docker-compose.yml'));
+for (const principal of ['kafka-ui', 'kafka-exporter']) {
+  const variable = passwordVariable(principal);
+  const fallback = new RegExp(`\\$\\{${variable}:-([^}]+)\\}`).exec(compose);
+  if (!env[variable] && fallback) env[variable] = fallback[1];
+}
+
 const missing = [spec.admin, ...spec.principals]
   .map(passwordVariable)
-  .filter((variable) => !process.env[variable]);
+  .filter((variable) => !env[variable]);
 if (missing.length > 0) {
   throw new Error(
     `the broker tests need the bootstrap's environment; missing ${missing.join(', ')} ` +
@@ -361,9 +372,9 @@ describe('6. authentication', () => {
     const sasl = {
       mechanism: 'plain',
       username: 'fleet-service',
-      password: process.env[passwordVariable('fleet-service')],
+      password: env[passwordVariable('fleet-service')],
     };
-    assert.notEqual(await refusal(write({ sasl })), 'ALLOWED');
+    assert.equal(await refusal(write({ sasl })), 'UNSUPPORTED_SASL_MECHANISM');
   });
 
   test('TLS without SASL is refused', async () => {
