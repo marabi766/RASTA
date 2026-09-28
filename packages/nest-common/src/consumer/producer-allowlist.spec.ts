@@ -292,7 +292,7 @@ describe('the producer claim is never repeated as raw text (Codex review of #124
 
     const error = String(dlq.sent[0]?.messages[0]?.headers[DLQ_HEADERS.error]);
     expect(error).toBe(
-      "UnprocessableEventError: The envelope's producer is not declared for rasta.marketplace.v1 (ADR-061 § 2)",
+      "Refused before any handler (PRODUCER_NOT_ALLOWED): The envelope's producer is not declared for rasta.marketplace.v1 (ADR-061 § 2)",
     );
     expect(error).not.toContain('economic-service');
     // The log keeps the claim for the security review — quoted, as a field.

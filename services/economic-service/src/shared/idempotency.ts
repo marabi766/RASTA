@@ -81,7 +81,7 @@ export class IdempotencyStore {
     }
     // Every attempt found the key vanishing under it: other requests are
     // churning it right now. The same answer as a key in flight.
-    throw inFlight(endpoint, key);
+    throw inFlight(endpoint);
   }
 
   /**
@@ -137,10 +137,10 @@ export class IdempotencyStore {
     }
 
     if (existing.requestHash !== requestHash) {
-      throw RastaError.idempotencyKeyReused(keyDigest(key));
+      throw RastaError.idempotencyKeyReused();
     }
 
-    if (existing.state === 'IN_PROGRESS') throw inFlight(endpoint, key);
+    if (existing.state === 'IN_PROGRESS') throw inFlight(endpoint);
 
     idempotentReplaysTotal.inc({ service: SERVICE_NAME, endpoint });
     return {
@@ -248,9 +248,14 @@ const CLAIM_ATTEMPTS = 3;
 /** An attempt that reserved nothing and must be made again. */
 const RETRY_CLAIM = Symbol('retry-claim');
 
-function inFlight(endpoint: string, key: string): RastaError {
+/**
+ * Nothing derived from the key (S-09, review of #135): a truncated SHA-256 of
+ * a client-chosen key is guessable when the key has little entropy. The
+ * endpoint and the request's correlationId locate the clash.
+ */
+function inFlight(endpoint: string): RastaError {
   return new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
-    internalContext: { endpoint, key: keyDigest(key), retryAfterSeconds: 1 },
+    internalContext: { endpoint, retryAfterSeconds: 1 },
   });
 }
 
@@ -270,18 +275,6 @@ function inFlight(endpoint: string, key: string): RastaError {
  */
 export function targeted(id: string, body?: unknown): { id: string; body?: unknown } {
   return body === undefined ? { id } : { id, body };
-}
-
-/**
- * A one-way, bounded fingerprint of an idempotency key, for errors and logs
- * (Codex round 3 on #121, M2; AGENTS.md S-09).
- *
- * The key is client-chosen and may carry anything, and an error's
- * `internalContext` reaches the debug log. Sixteen hex characters of its
- * SHA-256 are enough to correlate two log lines and reveal nothing.
- */
-export function keyDigest(key: string): string {
-  return createHash('sha256').update(key).digest('hex').slice(0, 16);
 }
 
 /**
