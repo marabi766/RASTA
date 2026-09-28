@@ -139,10 +139,15 @@ export function consumerDeclarationProblem(
   if (undeclared.length > 0) {
     return `${service} does not declare a subscription to ${undeclared.join(', ')}`;
   }
-  if (
-    consumer.deadLetterTopic !== undefined &&
-    consumer.deadLetterTopic !== declared.deadLetterTopic
-  ) {
+  // Required, not merely checked when present (Codex review of #128, round 2):
+  // a consumer without a dead-letter topic logs what it cannot process and
+  // commits past it, so a malformed or retry-exhausted event — a financial
+  // one included — is lost. Every declared consumer dead-letters; there is no
+  // exception, and none is inferred from an omission.
+  if (consumer.deadLetterTopic === undefined) {
+    return `${service} must dead-letter to ${declared.deadLetterTopic}; without it an unprocessable event is lost`;
+  }
+  if (consumer.deadLetterTopic !== declared.deadLetterTopic) {
     return `${service} dead-letters to ${declared.deadLetterTopic}, not ${consumer.deadLetterTopic}`;
   }
   return undefined;
