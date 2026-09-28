@@ -3,6 +3,7 @@ import {
   databaseEnvSchema,
   kafkaEnvSchema,
   kafkaPasswordVariable,
+  kafkaPlaintextAllowed,
   kafkaSaslConfigured,
   loadEnv,
   EnvValidationError,
@@ -209,7 +210,7 @@ describe('boolean flags in the shared schemas', () => {
 /**
  * RUN-006: the broker credential. Read from the environment only; whether a
  * service may run without one is decided by `kafkaConnection` (nest-common),
- * which refuses PLAINTEXT only in production.
+ * which refuses PLAINTEXT unless `kafkaPlaintextAllowed` (below).
  */
 describe('Kafka SASL credential', () => {
   const kafkaService = baseEnvSchema.merge(kafkaEnvSchema);
@@ -281,5 +282,62 @@ describe('Kafka SASL credential', () => {
     ['api-gateway', 'KAFKA_SASL_PASSWORD_API_GATEWAY'],
   ])('names %s’s shared variable %s', (service, variable) => {
     expect(kafkaPasswordVariable(service)).toBe(variable);
+  });
+});
+
+/**
+ * RUN-006, PM decision on #128: secure by default. PLAINTEXT only with the
+ * explicit opt-out in an explicitly named development or test environment;
+ * the opt-out anywhere else is refused at boot rather than ignored.
+ */
+describe('KAFKA_ALLOW_PLAINTEXT', () => {
+  const kafkaService = baseEnvSchema.merge(kafkaEnvSchema);
+  const source = {
+    SERVICE_NAME: 'fleet-service',
+    PORT: '3104',
+    KAFKA_BROKERS: 'localhost:9092',
+    KAFKA_CLIENT_ID: 'fleet-service',
+  } as NodeJS.ProcessEnv;
+  const load = (extra: Record<string, string> = {}) =>
+    loadEnv(kafkaService, { ...source, ...extra } as NodeJS.ProcessEnv);
+
+  it('is false by default, in every environment', () => {
+    for (const NODE_ENV of ['development', 'test', 'staging', 'production']) {
+      const env = load({ NODE_ENV });
+      expect(env.KAFKA_ALLOW_PLAINTEXT).toBe(false);
+      expect(kafkaPlaintextAllowed(env)).toBe(false);
+    }
+    expect(kafkaPlaintextAllowed(load())).toBe(false); // NODE_ENV omitted
+  });
+
+  it.each(['development', 'test'])('allows PLAINTEXT in %s with the opt-out', (NODE_ENV) => {
+    for (const value of ['true', 'TRUE', '1', 'yes', 'on']) {
+      const env = load({ NODE_ENV, KAFKA_ALLOW_PLAINTEXT: value });
+      expect(kafkaPlaintextAllowed(env)).toBe(true);
+    }
+  });
+
+  it.each(['staging', 'production'])('refuses the opt-out at boot in %s', (NODE_ENV) => {
+    expect(() => load({ NODE_ENV, KAFKA_ALLOW_PLAINTEXT: 'true' })).toThrow(
+      /KAFKA_ALLOW_PLAINTEXT: is honoured only with NODE_ENV set explicitly to development or test/,
+    );
+  });
+
+  it('refuses the opt-out with NODE_ENV omitted, although the schema defaults it to development', () => {
+    expect(() => load({ KAFKA_ALLOW_PLAINTEXT: 'true' })).toThrow(EnvValidationError);
+    expect(() => load({ NODE_ENV: ' ', KAFKA_ALLOW_PLAINTEXT: 'true' })).toThrow(
+      EnvValidationError,
+    );
+  });
+
+  it('refuses a spelling it does not know rather than guessing', () => {
+    expect(() => load({ NODE_ENV: 'development', KAFKA_ALLOW_PLAINTEXT: 'si' })).toThrow(
+      EnvValidationError,
+    );
+  });
+
+  it('an explicit false is false', () => {
+    const env = load({ NODE_ENV: 'development', KAFKA_ALLOW_PLAINTEXT: 'false' });
+    expect(kafkaPlaintextAllowed(env)).toBe(false);
   });
 });

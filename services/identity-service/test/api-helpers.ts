@@ -185,6 +185,10 @@ export async function startIdentityApi(
     DATABASE_URL: withConnectionLimit(databaseUrl(), options.connectionLimit),
     KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:9092',
     KAFKA_CLIENT_ID: `identity-itest-${ulid().slice(-8)}`,
+    // The local PLAINTEXT broker is accepted only with the explicit opt-out
+    // under NODE_ENV test (RUN-006; PR B replaces it with identity's own
+    // credential).
+    KAFKA_ALLOW_PLAINTEXT: process.env.KAFKA_ALLOW_PLAINTEXT ?? 'true',
     OIDC_ISSUER_URL: 'http://identitytest.invalid/realms/rasta',
     OIDC_JWKS_URI: 'http://identitytest.invalid/realms/rasta/certs',
     OIDC_AUDIENCE: 'rasta-api',

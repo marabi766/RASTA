@@ -9,6 +9,8 @@ export {
   kafkaEnvSchema,
   KAFKA_SASL_MECHANISMS,
   kafkaSaslConfigured,
+  kafkaPlaintextAllowed,
+  KAFKA_PLAINTEXT_ENVIRONMENTS,
   kafkaPasswordVariable,
   redisEnvSchema,
   authEnvSchema,

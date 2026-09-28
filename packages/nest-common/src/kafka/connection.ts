@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs';
 import type { KafkaConfig } from 'kafkajs';
-import { isProduction, kafkaSaslConfigured, type BaseEnv, type KafkaEnv } from '@rasta/config';
+import {
+  KAFKA_PLAINTEXT_ENVIRONMENTS,
+  kafkaPlaintextAllowed,
+  kafkaSaslConfigured,
+  type BaseEnv,
+  type KafkaEnv,
+} from '@rasta/config';
 
 /**
  * How every Kafka client on the platform reaches the broker (ADR-061 § 3,
@@ -30,6 +36,7 @@ export type KafkaConnectionEnv = Pick<BaseEnv, 'NODE_ENV' | 'SERVICE_NAME'> &
     | 'KAFKA_SASL_MECHANISM'
     | 'KAFKA_SSL'
     | 'KAFKA_SSL_CA_FILE'
+    | 'KAFKA_ALLOW_PLAINTEXT'
   >;
 
 export class KafkaConnectionConfigError extends Error {
@@ -43,15 +50,17 @@ export class KafkaConnectionConfigError extends Error {
  * The connection for one client of this service.
  *
  * Refuses, at startup (the providers that call it are built at boot):
- *   - in production, a service without a SASL credential or without TLS: a
+ *   - a service without its SASL credential and TLS, unless PLAINTEXT is
+ *     explicitly allowed: `KAFKA_ALLOW_PLAINTEXT=true` with `NODE_ENV`
+ *     `development` or `test` (`kafkaPlaintextAllowed`). Secure by default —
+ *     `staging`, `production` and a forgotten variable all fail closed. A
  *     deployment in which anyone who reaches the broker can publish as this
  *     service is the gap ADR-061 § 3 makes a gate;
  *   - anywhere, a username without a password, a credential issued to a
  *     principal other than this service, and a CA file without TLS — each a
  *     configuration that does not do what it looks like it does.
  *
- * Development and test keep PLAINTEXT when no credential is set, until the
- * local and CI brokers authenticate (RUN-006, PR B).
+ * The messages name variables, never their values.
  */
 export function kafkaConnection(
   env: KafkaConnectionEnv,
@@ -71,10 +80,12 @@ export function kafkaConnection(
   if (env.KAFKA_SSL_CA_FILE && !env.KAFKA_SSL) {
     throw new KafkaConnectionConfigError('KAFKA_SSL_CA_FILE is set but KAFKA_SSL is not true');
   }
-  if (isProduction(env) && !(kafkaSaslConfigured(env) && env.KAFKA_SSL)) {
+  if (!kafkaPlaintextAllowed(env) && !(kafkaSaslConfigured(env) && env.KAFKA_SSL)) {
     throw new KafkaConnectionConfigError(
-      `${env.SERVICE_NAME} refuses to reach Kafka in production without its SASL credential ` +
-        'and TLS (KAFKA_SASL_PASSWORD, KAFKA_SSL=true; ADR-061 § 3)',
+      `${env.SERVICE_NAME} refuses to reach Kafka without its SASL credential and TLS ` +
+        '(KAFKA_SASL_PASSWORD or KAFKA_SASL_PASSWORD_<SERVICE>, and KAFKA_SSL=true). PLAINTEXT is ' +
+        `allowed only with KAFKA_ALLOW_PLAINTEXT=true and NODE_ENV ${KAFKA_PLAINTEXT_ENVIRONMENTS.join(' or ')} ` +
+        '(ADR-061 § 3)',
     );
   }
 
