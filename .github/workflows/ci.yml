@@ -1251,6 +1251,11 @@ jobs:
         run: pnpm run test:migration-lib
         env:
           MIGRATION_LIB_TEST_DATABASE_URL: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity
+          # A second role, connected to a scratch database while the first one
+          # drops it: the case that made `DROP DATABASE … WITH (FORCE)` fail
+          # here once (an autovacuum worker, on main cd0c39a). The scratch drop
+          # must wait for it, never kill it.
+          MIGRATION_LIB_TEST_FOREIGN_DATABASE_URL: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization
           MIGRATION_LIB_TEST_DATABASE_REQUIRED: 'true'
 
       - name: Demo seeds refuse outside development and test

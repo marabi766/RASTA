@@ -47,9 +47,14 @@ import {
   EXPECTED,
   assertionScript,
   assertSnapshotScript,
+  createScratchDatabase,
+  dropScratchDatabase,
   ledgerAssertionScript,
+  newScratchDatabase,
+  psqlRunner,
   recordSnapshotScript,
   snapshotStoreScript,
+  staleScratchDatabases,
 } from './verify-migration-reversible-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -88,8 +93,7 @@ const serviceKey = `DATABASE_URL_${service.replaceAll('-', '_').toUpperCase()}`;
  * also the role its migrations really run as. Opt-in: audit's migrator owns only
  * its schema, not the database, and keeps verifying as before.
  */
-const envKey =
-  EXPECTED[service]?.connectAs === 'migrator' ? `${serviceKey}_MIGRATOR` : serviceKey;
+const envKey = EXPECTED[service]?.connectAs === 'migrator' ? `${serviceKey}_MIGRATOR` : serviceKey;
 const baseUrl = process.env.DATABASE_URL ?? process.env[envKey];
 if (!baseUrl) {
   console.error(
@@ -133,9 +137,16 @@ const extensionHome = targetSchema;
 
 /** The label the target's own state is recorded under, right after its deploy. */
 const POST_UP = 'post-up';
-const scratchDatabase = inDatabase
-  ? `${new URL(baseUrl).pathname.slice(1)}_${scratchSchema}`
-  : null;
+/**
+ * The throwaway database, when there is one: this run's own, under a name no
+ * other run can hold, created marked with this run's id — and only ever
+ * dropped by this run (newScratchDatabase, scratchDatabaseSql). Two runs
+ * against one server never touch each other's database.
+ */
+const scratch = inDatabase ? newScratchDatabase('migration-reversibility', service) : null;
+const scratchDatabase = scratch?.name ?? null;
+/** Set once this run has created its scratch database: nothing is dropped before that. */
+let scratchCreated = false;
 
 /** A throwaway schema (or database). Nothing this script does can reach the real one. */
 function scratchUrl(schema = targetSchema) {
@@ -256,9 +267,10 @@ function fail(message) {
 /** Removes everything this run created. Best effort: also called on failure. */
 function dropScratch() {
   if (scratchDatabase) {
-    return prisma(['db', 'execute', '--url', baseUrl, '--stdin'], {
-      stdin: `DROP DATABASE IF EXISTS "${scratchDatabase}" WITH (FORCE);`,
-    });
+    // Only this run's own database, as its owner, never `WITH (FORCE)`: see
+    // scratchDatabaseSql. psql rather than Prisma, whose errors carry no SQLSTATE.
+    if (!scratchCreated) return { ok: true, output: '' };
+    return dropScratchDatabase(psqlRunner(baseUrl), scratch);
   }
   return sql(
     `DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE; ` +
@@ -284,16 +296,17 @@ console.log(
 console.log('');
 
 if (scratchDatabase) {
-  // Two calls: CREATE DATABASE refuses to run inside the implicit transaction
-  // a multi-statement script gets.
-  for (const statement of [
-    `DROP DATABASE IF EXISTS "${scratchDatabase}" WITH (FORCE);`,
-    `CREATE DATABASE "${scratchDatabase}" TEMPLATE template1;`,
-  ]) {
-    const result = prisma(['db', 'execute', '--url', baseUrl, '--stdin'], { stdin: statement });
-    if (!result.ok) fail(`scratch database: ${statement} failed:\n${result.output}`);
+  // A crashed run's database is not this run's to drop; it is only reported.
+  for (const stale of staleScratchDatabases(psqlRunner(baseUrl))) {
+    console.warn(
+      `  ! ${stale.name} is a scratch database left since ${stale.createdAt}; ` +
+        'remove it by hand once no run is using it',
+    );
   }
-  console.log('  ✓ clean scratch database');
+  const created = createScratchDatabase(psqlRunner(baseUrl), scratch);
+  if (!created.ok) fail(`scratch database: creating ${scratchDatabase} failed:\n${created.output}`);
+  scratchCreated = true;
+  console.log('  ✓ scratch database created and marked');
 } else {
   mustRun(
     'clean scratch schema',
