@@ -47,6 +47,7 @@ import {
   EXPECTED,
   assertionScript,
   assertSnapshotScript,
+  dropScratchDatabase,
   ledgerAssertionScript,
   recordSnapshotScript,
   snapshotStoreScript,
@@ -88,8 +89,7 @@ const serviceKey = `DATABASE_URL_${service.replaceAll('-', '_').toUpperCase()}`;
  * also the role its migrations really run as. Opt-in: audit's migrator owns only
  * its schema, not the database, and keeps verifying as before.
  */
-const envKey =
-  EXPECTED[service]?.connectAs === 'migrator' ? `${serviceKey}_MIGRATOR` : serviceKey;
+const envKey = EXPECTED[service]?.connectAs === 'migrator' ? `${serviceKey}_MIGRATOR` : serviceKey;
 const baseUrl = process.env.DATABASE_URL ?? process.env[envKey];
 if (!baseUrl) {
   console.error(
@@ -256,9 +256,12 @@ function fail(message) {
 /** Removes everything this run created. Best effort: also called on failure. */
 function dropScratch() {
   if (scratchDatabase) {
-    return prisma(['db', 'execute', '--url', baseUrl, '--stdin'], {
-      stdin: `DROP DATABASE IF EXISTS "${scratchDatabase}" WITH (FORCE);`,
-    });
+    // Not `WITH (FORCE)`: the service role may not terminate an autovacuum
+    // worker, and FORCE then fails the whole drop (scratchDatabaseDropSteps).
+    return dropScratchDatabase(
+      (script) => prisma(['db', 'execute', '--url', baseUrl, '--stdin'], { stdin: script }),
+      scratchDatabase,
+    );
   }
   return sql(
     `DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE; ` +
@@ -284,15 +287,14 @@ console.log(
 console.log('');
 
 if (scratchDatabase) {
-  // Two calls: CREATE DATABASE refuses to run inside the implicit transaction
-  // a multi-statement script gets.
-  for (const statement of [
-    `DROP DATABASE IF EXISTS "${scratchDatabase}" WITH (FORCE);`,
-    `CREATE DATABASE "${scratchDatabase}" TEMPLATE template1;`,
-  ]) {
-    const result = prisma(['db', 'execute', '--url', baseUrl, '--stdin'], { stdin: statement });
-    if (!result.ok) fail(`scratch database: ${statement} failed:\n${result.output}`);
-  }
+  // A leftover from an earlier run first, then the new one. Separate calls:
+  // CREATE DATABASE refuses to run inside the implicit transaction a
+  // multi-statement script gets.
+  const leftover = dropScratch();
+  if (!leftover.ok) fail(`scratch database: removing a leftover failed:\n${leftover.output}`);
+  const statement = `CREATE DATABASE "${scratchDatabase}" TEMPLATE template1;`;
+  const created = prisma(['db', 'execute', '--url', baseUrl, '--stdin'], { stdin: statement });
+  if (!created.ok) fail(`scratch database: ${statement} failed:\n${created.output}`);
   console.log('  ✓ clean scratch database');
 } else {
   mustRun(

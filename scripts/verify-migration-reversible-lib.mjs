@@ -1487,3 +1487,85 @@ BEGIN${removedCheck}
 END
 $ledger$;`;
 }
+
+// ---------------------------------------------------------------------------
+// Dropping a scratch database as a role that is not a superuser
+// ---------------------------------------------------------------------------
+
+/**
+ * The statements that remove a throwaway database, for a caller that owns it
+ * but is not a superuser — the service roles CI verifies as.
+ *
+ * Why not `DROP DATABASE … WITH (FORCE)`: FORCE terminates **every** backend
+ * connected to the database first, and a role that is not a superuser may only
+ * terminate its own. Any other backend there makes the whole statement fail
+ * with "permission denied to terminate process" — and the one CI meets is an
+ * **autovacuum worker**, which a freshly migrated database attracts within a
+ * second and which runs under no ordinary role (reproduced on PostgreSQL
+ * 16.13; seen once on main, cd0c39a).
+ *
+ * What these do instead, all within the owner's own rights:
+ *
+ *   1. `prepare` — if the database exists, close it to new connections
+ *      (`ALLOW_CONNECTIONS false`, which binds a superuser too) and terminate
+ *      only this role's own sessions there, e.g. one a crashed run left behind.
+ *   2. `drop` — a plain `DROP DATABASE`. PostgreSQL itself signals autovacuum
+ *      workers in the database and waits up to five seconds for every other
+ *      backend to leave; one that stays makes it fail with SQLSTATE 55006
+ *      ("is being accessed by other users"), which `dropScratchDatabase`
+ *      retries a bounded number of times.
+ *
+ * Nothing here terminates another role's session: a backend that is not ours
+ * and does not leave is reported, never killed.
+ */
+export function scratchDatabaseDropSteps(database) {
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(database)) {
+    throw new Error(`Not a scratch database name: ${database}`);
+  }
+  return {
+    prepare: `DO $drop$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_database WHERE datname = '${database}') THEN
+    EXECUTE format('ALTER DATABASE %I ALLOW_CONNECTIONS false', '${database}');
+    PERFORM pg_terminate_backend(pid)
+      FROM pg_stat_activity
+     WHERE datname = '${database}' AND usename = current_user AND pid <> pg_backend_pid();
+  END IF;
+END
+$drop$;`,
+    drop: `DROP DATABASE IF EXISTS "${database}";`,
+  };
+}
+
+/** SQLSTATE 55006 — `object_in_use`: the database still has another backend after PostgreSQL's own wait. */
+const STILL_IN_USE = /is being accessed by other users|55006/;
+
+/**
+ * Drops a scratch database with `scratchDatabaseDropSteps`, retrying the drop
+ * while another backend is still leaving. `run(sql)` executes one script
+ * against a database other than the one being dropped and returns
+ * `{ ok, output }`; `pause(ms)` waits. Returns `{ ok, output, attempts }`:
+ * never throws, so a caller's cleanup path can report and carry on.
+ */
+export function dropScratchDatabase(
+  run,
+  database,
+  { attempts = 3, pauseMs = 1000, pause = sleepSync } = {},
+) {
+  const steps = scratchDatabaseDropSteps(database);
+  const prepared = run(steps.prepare);
+  if (!prepared.ok) return { ok: false, output: prepared.output, attempts: 0 };
+  let last = { ok: false, output: '' };
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    last = run(steps.drop);
+    if (last.ok) return { ok: true, output: last.output, attempts: attempt };
+    if (!STILL_IN_USE.test(last.output))
+      return { ok: false, output: last.output, attempts: attempt };
+    if (attempt < attempts) pause(pauseMs);
+  }
+  return { ok: false, output: last.output, attempts };
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}

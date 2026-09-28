@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,8 +9,10 @@ import {
   EXPECTED,
   assertionScript,
   assertSnapshotScript,
+  dropScratchDatabase,
   ledgerAssertionScript,
   recordSnapshotScript,
+  scratchDatabaseDropSteps,
   snapshotQuery,
   snapshotStoreScript,
 } from './verify-migration-reversible-lib.mjs';
@@ -766,6 +768,18 @@ if (process.env.MIGRATION_LIB_TEST_DATABASE_REQUIRED === 'true' && !libDatabaseU
   );
 }
 
+/** Drops a scratch database the way the verifier does: as its owner, never FORCE. */
+function dropAsOwner(database, options) {
+  return dropScratchDatabase(
+    (script) => {
+      const result = psqlAt(libDatabaseUrl, script);
+      return { ok: result.status === 0, output: `${result.stdout}${result.stderr}` };
+    },
+    database,
+    options,
+  );
+}
+
 function psqlAt(url, script, database) {
   const target = new URL(url);
   target.search = '';
@@ -807,7 +821,7 @@ function keptExtensionCase(down, keptExtensions) {
       }),
     );
   } finally {
-    psqlAt(libDatabaseUrl, `DROP DATABASE IF EXISTS "${database}" WITH (FORCE);`);
+    dropAsOwner(database);
   }
 }
 
@@ -853,5 +867,186 @@ test(
     const result = keptExtensionCase(null, []);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /extension citext version=1\.5 schema=\(target\)/);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Dropping a scratch database as its owner (not a superuser)
+//
+// CI verifies as the service roles, which own their scratch databases but are
+// not superusers. `DROP DATABASE … WITH (FORCE)` failed there once (main,
+// cd0c39a): FORCE must terminate every backend in the database, and a role
+// that is not a superuser may terminate only its own — an autovacuum worker,
+// or any other role's session, fails the whole statement with "permission
+// denied to terminate process". `scratchDatabaseDropSteps` closes the database
+// to new connections, terminates only the owner's own sessions, and drops
+// without FORCE, which lets PostgreSQL stop autovacuum workers itself.
+// ---------------------------------------------------------------------------
+
+test("the scratch drop never uses FORCE and terminates only the caller's own sessions", () => {
+  const { prepare, drop } = scratchDatabaseDropSteps('rasta_organization_migration_check');
+  assert.doesNotMatch(prepare + drop, /FORCE/);
+  assert.match(prepare, /ALLOW_CONNECTIONS false/);
+  assert.match(prepare, /usename = current_user/);
+  assert.equal(drop, 'DROP DATABASE IF EXISTS "rasta_organization_migration_check";');
+});
+
+test('the scratch drop refuses a name that is not a plain scratch identifier', () => {
+  for (const name of ['', 'Upper', 'a"; DROP DATABASE postgres; --', 'a b', `a${'x'.repeat(63)}`]) {
+    assert.throws(() => scratchDatabaseDropSteps(name), /Not a scratch database name/);
+  }
+});
+
+test('the scratch drop retries only while another backend is still leaving, and a bounded number of times', () => {
+  const inUse = { ok: false, output: 'ERROR:  database "d" is being accessed by other users' };
+  const script = (answers) => {
+    const calls = [];
+    return {
+      calls,
+      run: (sql) => {
+        calls.push(sql.startsWith('DROP') ? 'drop' : 'prepare');
+        return answers.shift() ?? { ok: true, output: '' };
+      },
+    };
+  };
+  const pause = () => {};
+
+  const leaving = script([{ ok: true, output: '' }, inUse, inUse]);
+  assert.deepEqual(dropScratchDatabase(leaving.run, 'd', { pause }), {
+    ok: true,
+    output: '',
+    attempts: 3,
+  });
+  assert.deepEqual(leaving.calls, ['prepare', 'drop', 'drop', 'drop']);
+
+  const staying = script([{ ok: true, output: '' }, inUse, inUse, inUse]);
+  const refused = dropScratchDatabase(staying.run, 'd', { pause });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.attempts, 3);
+  assert.match(refused.output, /being accessed by other users/);
+
+  const otherError = script([
+    { ok: true, output: '' },
+    { ok: false, output: 'ERROR: must be owner' },
+  ]);
+  assert.equal(dropScratchDatabase(otherError.run, 'd', { pause }).attempts, 1);
+
+  const unprepared = script([{ ok: false, output: 'ERROR: connection refused' }]);
+  assert.deepEqual(dropScratchDatabase(unprepared.run, 'd', { pause }), {
+    ok: false,
+    output: 'ERROR: connection refused',
+    attempts: 0,
+  });
+});
+
+// Another role's session in the scratch database, as a stand-in for the
+// autovacuum worker CI met (whose timing a test cannot control). CI points it
+// at a second service role; REQUIRED makes a missing URL an error there.
+const foreignDatabaseUrl = process.env.MIGRATION_LIB_TEST_FOREIGN_DATABASE_URL;
+if (process.env.MIGRATION_LIB_TEST_DATABASE_REQUIRED === 'true' && !foreignDatabaseUrl) {
+  throw new Error(
+    'MIGRATION_LIB_TEST_DATABASE_REQUIRED is set but MIGRATION_LIB_TEST_FOREIGN_DATABASE_URL is not',
+  );
+}
+const noForeign =
+  (!libDatabaseUrl || !foreignDatabaseUrl) &&
+  'MIGRATION_LIB_TEST_DATABASE_URL and MIGRATION_LIB_TEST_FOREIGN_DATABASE_URL are not both set';
+
+/** Another role connected to `database` for `seconds`, once it is visibly there. */
+async function foreignSession(database, seconds) {
+  const target = new URL(foreignDatabaseUrl);
+  target.search = '';
+  target.pathname = `/${database}`;
+  const child = spawn(
+    'psql',
+    [target.toString(), '-X', '-q', '-c', `SELECT pg_sleep(${seconds})`],
+    {
+      stdio: 'ignore',
+    },
+  );
+  const exited = new Promise((resolveExit) => child.on('exit', resolveExit));
+  for (let i = 0; i < 100; i += 1) {
+    const seen = scalarAt(
+      `SELECT count(*) FROM pg_stat_activity WHERE datname = '${database}' AND usename <> current_user`,
+    );
+    if (seen === '1') return { child, exited };
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  child.kill();
+  throw new Error('the foreign session never connected');
+}
+
+/** One value, unaligned, as the dropping role, from its own database. */
+function scalarAt(sql) {
+  const target = new URL(libDatabaseUrl);
+  target.search = '';
+  const result = spawnSync(
+    'psql',
+    [target.toString(), '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-c', sql],
+    {
+      encoding: 'utf8',
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+function freshScratch() {
+  const database = `mlt_drop_${process.pid}_${Math.floor(Math.random() * 1e9)}`;
+  const created = psqlAt(libDatabaseUrl, `CREATE DATABASE "${database}" TEMPLATE template1;`);
+  assert.equal(created.status, 0, created.stderr);
+  return database;
+}
+
+const exists = (database) =>
+  scalarAt(`SELECT count(*) FROM pg_database WHERE datname = '${database}'`) === '1';
+
+test(
+  'the failure CI met: FORCE, as the owner, is refused while another role is connected',
+  { skip: noForeign },
+  async () => {
+    const database = freshScratch();
+    const holder = await foreignSession(database, 3);
+    try {
+      const forced = psqlAt(libDatabaseUrl, `DROP DATABASE "${database}" WITH (FORCE);`);
+      assert.notEqual(forced.status, 0, 'FORCE dropped a database another role was connected to');
+      assert.match(forced.stderr, /permission denied to terminate process/);
+    } finally {
+      await holder.exited;
+      assert.equal(dropAsOwner(database).ok, true);
+    }
+  },
+);
+
+test(
+  "the owner's drop waits for another role's session to leave, then drops",
+  { skip: noForeign },
+  async () => {
+    const database = freshScratch();
+    const holder = await foreignSession(database, 2);
+    const dropped = dropAsOwner(database);
+    await holder.exited;
+    assert.equal(dropped.ok, true, dropped.output);
+    assert.equal(exists(database), false);
+  },
+);
+
+test(
+  "the owner's drop never terminates a session that is not its own: it reports it",
+  { skip: noForeign },
+  async () => {
+    const database = freshScratch();
+    const holder = await foreignSession(database, 9);
+    try {
+      const refused = dropAsOwner(database, { attempts: 1 });
+      assert.equal(refused.ok, false);
+      assert.match(refused.output, /being accessed by other users/);
+      // The other role's session is still running: it was waited for, not killed.
+      assert.equal(holder.child.exitCode, null);
+      assert.equal(exists(database), true);
+    } finally {
+      await holder.exited;
+      assert.equal(dropAsOwner(database).ok, true);
+    }
   },
 );
