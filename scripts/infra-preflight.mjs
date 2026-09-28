@@ -4,8 +4,8 @@
  *
  * Reads `.env` the way compose does (the shell's environment wins), prints
  * warnings, and exits non-zero only on an error. Prints no value. Also refuses
- * a bootstrap-only Kafka credential in `.env`, which every service loads
- * (check-kafka-credential-scope-lib.mjs).
+ * any Kafka credential in `.env` that is not a service's own, since every
+ * service loads it (check-kafka-credential-scope-lib.mjs).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -18,7 +18,13 @@ const envFile = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.env');
 const fromFile = {};
 const kafkaProblems = [];
 if (existsSync(envFile)) {
-  kafkaProblems.push(...checkLocalEnv(readFileSync(envFile, 'utf8')));
+  const services = readFileSync(
+    resolve(dirname(envFile), 'infrastructure/docker/kafka/principals.development.txt'),
+    'utf8',
+  )
+    .split('\n')
+    .filter((line) => line.endsWith('-service'));
+  kafkaProblems.push(...checkLocalEnv(readFileSync(envFile, 'utf8'), services));
   for (const { name, value } of parseEnvAssignments(readFileSync(envFile, 'utf8')).assignments) {
     fromFile[name] = value;
   }

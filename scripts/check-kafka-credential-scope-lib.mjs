@@ -27,9 +27,13 @@
  * The accepted CI residual (ADR-061 § 3): every step runs as the same runner
  * user, so test code pointed at a secrets directory can read what is in it.
  *
- * Pure: file texts in, problems out. Text rather than a YAML parse, as the
- * repository's other static checks do.
+ * Pure: file texts in, problems out. The workflow is read as YAML (review of
+ * #131, verify pass) — workflow `env`, every job's `env` (and its service
+ * containers' and container's), and every step, named or not, with its `env`
+ * and `run` — so neither flow-style mappings nor an unnamed step slip past;
+ * the other files are line-oriented and read as text.
  */
+import { parse as parseYaml } from 'yaml';
 
 export const BOOTSTRAP_ONLY = ['ADMIN', 'OPS_REPLAY', 'ITEST_OBSERVER'];
 export const TOOLS = ['KAFKA_UI', 'KAFKA_EXPORTER'];
@@ -69,17 +73,21 @@ export function checkEnvExample(text, services) {
 
 /**
  * Problems in a developer's own `.env`, which every service's dev script
- * loads whole: it may not assign a bootstrap-only credential (those belong in
- * infrastructure/docker/kafka/bootstrap.env).
+ * loads whole: like `.env.example`, it may assign no Kafka credential but a
+ * service's own — not a bootstrap-only one (admin, ops-replay, the observer:
+ * infrastructure/docker/kafka/bootstrap.env) and not a tool's (Kafka UI, the
+ * exporter: compose's own defaults), with which a service could authenticate
+ * as that principal (review of #131, verify pass).
  */
-export function checkLocalEnv(text) {
+export function checkLocalEnv(text, services) {
+  const allowed = new Set(services.map(serviceStem));
   const problems = [];
   for (const line of text.split('\n')) {
     const match = /^\s*(?:export\s+)?KAFKA_SASL_PASSWORD_([A-Z0-9_]+)\s*=/.exec(line);
-    if (match && BOOTSTRAP_ONLY.includes(match[1])) {
+    if (match && !allowed.has(match[1])) {
       problems.push(
-        `.env assigns KAFKA_SASL_PASSWORD_${match[1]}, which every service would load; ` +
-          'move it to infrastructure/docker/kafka/bootstrap.env',
+        `.env assigns KAFKA_SASL_PASSWORD_${match[1]}, which is not a service's own and which every ` +
+          'service would load; bootstrap-only credentials belong in infrastructure/docker/kafka/bootstrap.env',
       );
     }
   }
@@ -98,51 +106,93 @@ export function checkBootstrapExample(text) {
       ];
 }
 
-/** The workflow's steps, as `{ name, text }`, split on `- name:` at step indentation. */
+const isMapping = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const keysOf = (value) => (isMapping(value) ? Object.keys(value) : []);
+
+/**
+ * The workflow's steps, named or not, as `{ job, name, env, run }`. A step
+ * without a name is labelled by its job and position, and by `uses` if it has one.
+ */
 export function workflowSteps(text) {
+  const workflow = parseYaml(text) ?? {};
   const steps = [];
-  const pattern = /^ {6}- name: (.+)$/gm;
-  const starts = [...text.matchAll(pattern)];
-  starts.forEach((match, index) => {
-    const end = index + 1 < starts.length ? starts[index + 1].index : text.length;
-    steps.push({ name: match[1].trim(), text: text.slice(match.index, end) });
-  });
+  for (const [job, definition] of Object.entries(isMapping(workflow.jobs) ? workflow.jobs : {})) {
+    const list = Array.isArray(definition?.steps) ? definition.steps : [];
+    list.forEach((step, index) => {
+      if (!isMapping(step)) return;
+      const name =
+        typeof step.name === 'string'
+          ? step.name
+          : `${job} step ${index + 1}${step.uses ? ` (${step.uses})` : ''}`;
+      steps.push({
+        job,
+        name,
+        env: isMapping(step.env) ? step.env : {},
+        run: typeof step.run === 'string' ? step.run : '',
+      });
+    });
+  }
   return steps;
+}
+
+/** Every `env` above step level: the workflow's, each job's, and each job's containers'. */
+function envAboveSteps(workflow) {
+  const scopes = [{ where: 'the workflow-level env', env: workflow.env }];
+  for (const [job, definition] of Object.entries(isMapping(workflow.jobs) ? workflow.jobs : {})) {
+    if (!isMapping(definition)) continue;
+    scopes.push({ where: `job "${job}"'s env`, env: definition.env });
+    if (isMapping(definition.container)) {
+      scopes.push({ where: `job "${job}"'s container env`, env: definition.container.env });
+    }
+    for (const [service, container] of Object.entries(
+      isMapping(definition.services) ? definition.services : {},
+    )) {
+      scopes.push({ where: `job "${job}"'s service "${service}" env`, env: container?.env });
+    }
+  }
+  return scopes;
 }
 
 /** Problems in ci.yml. */
 export function checkWorkflow(text) {
   const problems = [];
-  const code = uncommented(text);
-  for (const line of code.split('\n')) {
-    if (/^\s+KAFKA_SASL_PASSWORD_[A-Z0-9_]+\s*:/.test(line)) {
-      problems.push(
-        `ci.yml sets ${line.trim()} in an env block; take a kafka-credentials.sh scope instead`,
-      );
-    }
-    if (line.includes('GITHUB_ENV') && PASSWORD.test(line)) {
-      problems.push(`ci.yml exports a Kafka password to later steps: ${line.trim()}`);
-    }
-    for (const dir of SECRETS_DIRS) {
-      if (!line.includes(dir)) continue;
-      if (line.includes('GITHUB_ENV')) {
-        problems.push(`ci.yml exports ${dir} to later steps: ${line.trim()}`);
-      }
-      const key = new RegExp(`^(\\s*)${dir}\\s*:`).exec(line);
-      // A step's own env keys sit at ten spaces; a job's at six, the workflow's at two.
-      if (key && key[1].length !== 10) {
-        problems.push(
-          `ci.yml sets ${dir} in a job- or workflow-level env; give it to the steps that need it`,
-        );
+  let workflow;
+  try {
+    workflow = parseYaml(text) ?? {};
+  } catch (error) {
+    return [`ci.yml is not valid YAML: ${error.message}`];
+  }
+  // No Kafka password and no secrets directory above step level: those reach
+  // every step of the job, service starts included.
+  for (const { where, env } of envAboveSteps(workflow)) {
+    for (const key of keysOf(env)) {
+      if (PASSWORD.test(key) || SECRETS_DIRS.includes(key)) {
+        problems.push(`ci.yml sets ${key} in ${where}; give it to the steps that need it`);
       }
     }
   }
-  for (const step of workflowSteps(code)) {
-    if (/kafka-credentials\.sh admin\b/.test(step.text) && step.name !== ADMIN_SCOPE_STEP) {
+  for (const step of workflowSteps(text)) {
+    const envKeys = keysOf(step.env);
+    const run = uncommented(step.run);
+    for (const key of envKeys.filter((key) => PASSWORD.test(key))) {
+      problems.push(
+        `"${step.name}" sets ${key} in its env; take a kafka-credentials.sh scope instead`,
+      );
+    }
+    for (const line of run.split('\n')) {
+      if (!line.includes('GITHUB_ENV')) continue;
+      if (PASSWORD.test(line)) {
+        problems.push(`"${step.name}" exports a Kafka password to later steps: ${line.trim()}`);
+      }
+      for (const dir of SECRETS_DIRS.filter((dir) => line.includes(dir))) {
+        problems.push(`"${step.name}" exports ${dir} to later steps: ${line.trim()}`);
+      }
+    }
+    if (/kafka-credentials\.sh admin\b/.test(run) && step.name !== ADMIN_SCOPE_STEP) {
       problems.push(`"${step.name}" takes the admin scope, which only "${ADMIN_SCOPE_STEP}" may`);
     }
     if (
-      step.text.includes('KAFKA_ADMIN_SECRETS_DIR') &&
+      (envKeys.includes('KAFKA_ADMIN_SECRETS_DIR') || run.includes('KAFKA_ADMIN_SECRETS_DIR')) &&
       ![ADMIN_SCOPE_STEP, BOOTSTRAP_STEP].includes(step.name)
     ) {
       problems.push(
@@ -150,36 +200,38 @@ export function checkWorkflow(text) {
       );
     }
     if (
-      /^\s+KAFKA_SECRETS_DIR\s*:/m.test(step.text) &&
-      !/kafka-credentials\.sh|kafka\/ci-up\.sh/.test(step.text)
+      envKeys.includes('KAFKA_SECRETS_DIR') &&
+      !/kafka-credentials\.sh|kafka\/ci-up\.sh/.test(run)
     ) {
       problems.push(
         `"${step.name}" is given KAFKA_SECRETS_DIR but calls neither kafka-credentials.sh nor ci-up.sh`,
       );
     }
-    if (!step.text.includes('dist/main.js')) continue;
+    if (!run.includes('dist/main.js')) continue;
     // A step that starts services: the directory leaves the environment
     // before the first process is launched, so none inherits it.
-    const run = step.text.slice(Math.max(0, step.text.indexOf('run:')));
     const unset = run.indexOf('unset KAFKA_SECRETS_DIR');
     const firstLaunch = Math.min(
       ...['cd services/', 'dist/main.js']
         .map((marker) => run.indexOf(marker))
         .filter((i) => i >= 0),
     );
-    if (step.text.includes('KAFKA_SECRETS_DIR') && (unset < 0 || unset > firstLaunch)) {
+    if (
+      (envKeys.includes('KAFKA_SECRETS_DIR') || run.includes('KAFKA_SECRETS_DIR')) &&
+      (unset < 0 || unset > firstLaunch)
+    ) {
       problems.push(`"${step.name}" starts services without first unsetting KAFKA_SECRETS_DIR`);
     }
-    // A step that starts services: each service with its own password only.
-    if (/kafka-credentials\.sh (tests|admin|observer)\b/.test(step.text)) {
+    // Each service with its own password only.
+    if (/kafka-credentials\.sh (tests|admin|observer)\b/.test(run)) {
       problems.push(`"${step.name}" starts services with a scope wider than one service's own`);
     }
     for (const name of [...BOOTSTRAP_ONLY, ...TOOLS]) {
-      if (step.text.includes(`KAFKA_SASL_PASSWORD_${name}`)) {
+      if (run.includes(`KAFKA_SASL_PASSWORD_${name}`)) {
         problems.push(`"${step.name}" starts services and names KAFKA_SASL_PASSWORD_${name}`);
       }
     }
-    const lines = step.text.split('\n');
+    const lines = run.split('\n');
     lines.forEach((line, index) => {
       const cd = /cd services\/([a-z-]+-service)\b/.exec(line);
       if (!cd) return;

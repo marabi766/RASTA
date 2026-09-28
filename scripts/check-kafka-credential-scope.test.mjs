@@ -33,9 +33,14 @@ test('the committed files give no service a Kafka credential but its own', () =>
 
 test('the parsers see what they are meant to check', () => {
   const steps = workflowSteps(read('.github/workflows/ci.yml'));
-  const starts = steps.filter((step) => step.text.includes('dist/main.js'));
+  const starts = steps.filter((step) => step.run.includes('dist/main.js'));
   assert.ok(starts.length >= 2, 'both service start steps are found');
   assert.ok(steps.some((step) => step.name === 'Broker authorisation, asked of the broker'));
+  // Unnamed steps are seen too (`- run: pnpm run db:generate` and the like).
+  assert.ok(
+    steps.some((step) => /^[a-z-]+ step \d+/.test(step.name)),
+    'unnamed steps are listed',
+  );
   const compose = composeServices(read('docker-compose.yml')).map((service) => service.name);
   for (const name of ['kafka', 'kafka-init', 'kafka-ui', 'kafka-exporter', 'postgres']) {
     assert.ok(compose.includes(name), name);
@@ -63,7 +68,9 @@ test('the bootstrap example holds exactly the bootstrap-only credentials', () =>
   );
 });
 
-const step = (name, body) => `      - name: ${name}\n${body}`;
+/** A workflow with one job whose steps are `fragments` (each at step indentation). */
+const workflow = (...fragments) => `jobs:\n  j:\n    runs-on: x\n    steps:\n${fragments.join('')}`;
+const step = (name, body) => workflow(`      - name: ${name}\n${body}`);
 
 test('CI may not export a Kafka password to later steps or set one in an env block', () => {
   assert.equal(
@@ -127,28 +134,48 @@ test('compose gives the bootstrap env file to the broker and kafka-init only, an
   );
 });
 
-test('a developer’s .env may not hold a bootstrap-only credential', () => {
-  for (const name of ['ADMIN', 'OPS_REPLAY', 'ITEST_OBSERVER']) {
-    assert.equal(checkLocalEnv(`KAFKA_SASL_PASSWORD_${name}=x\n`).length, 1, name);
-    assert.equal(checkLocalEnv(`export KAFKA_SASL_PASSWORD_${name}=x\n`).length, 1, name);
+test('a developer’s .env may hold no Kafka credential but a service’s own', () => {
+  for (const name of [
+    'ADMIN',
+    'OPS_REPLAY',
+    'ITEST_OBSERVER',
+    'KAFKA_UI',
+    'KAFKA_EXPORTER',
+    'ANYTHING_ELSE',
+  ]) {
+    assert.equal(checkLocalEnv(`KAFKA_SASL_PASSWORD_${name}=x\n`, SERVICES).length, 1, name);
+    assert.equal(checkLocalEnv(`export KAFKA_SASL_PASSWORD_${name}=x\n`, SERVICES).length, 1, name);
   }
   assert.deepEqual(
-    checkLocalEnv('KAFKA_SASL_PASSWORD_FLEET=x\n# KAFKA_SASL_PASSWORD_ADMIN=y\n'),
+    checkLocalEnv('KAFKA_SASL_PASSWORD_FLEET=x\n# KAFKA_SASL_PASSWORD_KAFKA_UI=y\n', SERVICES),
     [],
   );
+  // Every service's own, as .env.example has them, passes.
+  assert.deepEqual(checkLocalEnv(read('.env.example'), SERVICES), []);
 });
 
 test('neither secrets directory reaches $GITHUB_ENV or a job- or workflow-level env', () => {
   for (const dir of ['KAFKA_SECRETS_DIR', 'KAFKA_ADMIN_SECRETS_DIR']) {
     assert.ok(
       checkWorkflow(step('x', `        run: echo "${dir}=/tmp/s" >> "$GITHUB_ENV"\n`)).some(
-        (problem) => problem.startsWith(`ci.yml exports ${dir} to later steps`),
+        (problem) => problem.startsWith(`"x" exports ${dir} to later steps`),
       ),
       dir,
     );
-    const job = `  integration:\n    env:\n      ${dir}: /tmp/s\n    steps:\n`;
+    const job = `jobs:\n  integration:\n    env:\n      ${dir}: /tmp/s\n    steps:\n      - run: true\n`;
     assert.ok(checkWorkflow(job).length >= 1, `${dir} at job level`);
-    assert.ok(checkWorkflow(`env:\n  ${dir}: /tmp/s\n`).length >= 1, `${dir} at workflow level`);
+    assert.ok(
+      checkWorkflow(`env:\n  ${dir}: /tmp/s\njobs: {}\n`).length >= 1,
+      `${dir} at workflow level`,
+    );
+    // Flow style is the same mapping (review of #131, verify pass).
+    const flow = `jobs:\n  x:\n    env: { ${dir}: /tmp/s }\n    steps:\n      - run: true\n`;
+    assert.ok(
+      checkWorkflow(flow).some((problem) => problem.includes(`sets ${dir} in job "x"'s env`)),
+      `${dir} in a flow-style job env`,
+    );
+    const container = `jobs:\n  x:\n    services:\n      db:\n        image: y\n        env: { ${dir}: /tmp/s }\n    steps: []\n`;
+    assert.ok(checkWorkflow(container).length >= 1, `${dir} in a service container's env`);
   }
   assert.equal(
     checkCiUp(
@@ -193,6 +220,33 @@ test('a service start step unsets the secrets directory before it launches anyth
   assert.deepEqual(checkWorkflow(start(unset + launch + gateway)), []);
   assert.equal(checkWorkflow(start(launch + gateway)).length, 1, 'never unset');
   assert.equal(checkWorkflow(start(gateway + unset + launch)).length, 1, 'unset after a launch');
+});
+
+test('an unnamed step, or one written in flow style, is checked like any other', () => {
+  // Review of #131, verify pass: `- env: {KAFKA_SECRETS_DIR: …} run: node dist/main.js`.
+  const unnamed = workflow(
+    '      - env: { KAFKA_SECRETS_DIR: /tmp/s }\n        run: bash infrastructure/docker/kafka/kafka-credentials.sh service fleet-service; cd services/fleet-service && node dist/main.js\n',
+  );
+  assert.ok(
+    checkWorkflow(unnamed).some((problem) =>
+      /"j step 1" starts services without first unsetting KAFKA_SECRETS_DIR/.test(problem),
+    ),
+  );
+  const unnamedAdmin = workflow(
+    '      - { env: { KAFKA_ADMIN_SECRETS_DIR: /tmp/a }, run: pnpm test }\n',
+  );
+  assert.ok(
+    checkWorkflow(unnamedAdmin).some((problem) =>
+      /"j step 1" is given KAFKA_ADMIN_SECRETS_DIR/.test(problem),
+    ),
+  );
+  const flowPassword = workflow(
+    '      - { name: y, env: { KAFKA_SASL_PASSWORD_ADMIN: z }, run: true }\n',
+  );
+  assert.ok(
+    checkWorkflow(flowPassword).some((problem) => /sets KAFKA_SASL_PASSWORD_ADMIN/.test(problem)),
+  );
+  assert.equal(checkWorkflow('jobs: [unclosed').length, 1, 'invalid YAML is a problem, not a pass');
 });
 
 test('the real workflow fails the check when a start step keeps the directory or a test step takes the admin’s', () => {

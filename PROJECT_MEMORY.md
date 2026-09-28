@@ -2817,7 +2817,7 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
   اشتراکش را زیر گروه‌های `<service>.` می‌خواند؛ فقط `ops-replay` روی `.retry` می‌نویسد و DLQها را می‌خواند؛
   `itest-observer` فقط READ دارد و فقط در پروفایل development. اعتبار admin، ops-replay و observer در
   `infrastructure/docker/kafka/bootstrap.env` (Git-Ignored؛ نمونه `bootstrap.env.example`) است و هرگز در محیط پروسهٔ
-  سرویس نیست (`pnpm infra:up` آن‌ها را در `.env` رد می‌کند)؛ در CI دو پوشهٔ Secret جدا (سرویس‌ها+observer؛ admin/ops-replay/
+  سرویس نیست (`pnpm infra:up` هر اعتبار غیرسرویس را در `.env` رد می‌کند)؛ در CI دو پوشهٔ Secret جدا (سرویس‌ها+observer؛ admin/ops-replay/
   ابزارها)، هیچ‌کدام در `$GITHUB_ENV`، هر Step فقط Scope خودش را از `kafka-credentials.sh` می‌گیرد و Step شروع سرویس‌ها
   مسیر را پیش از راه‌اندازی برمی‌دارد (`pnpm check:kafka-credential-scope`). گذرواژهٔ هر سرویس در `.env` مشترک توسعه، و
   خواندن پوشه‌ها توسط کد آزمونِ هم‌کاربر در CI، باقی‌مانده‌های پذیرفته‌اند (ADR-061 § ۳). دادهٔ Broker Compose در Volume

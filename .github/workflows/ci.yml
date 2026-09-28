@@ -102,6 +102,7 @@ jobs:
           pnpm run test:kafka-acl-lib
           pnpm run test:kafka-credential-scope
           pnpm run check:kafka-credential-scope
+          pnpm run test:kafka-outbox-tables
 
       - name: Role passwords are distinct and checked before any role changes
         # L7-33: the bootstrap and `pnpm db:rotate-role-passwords` refuse two

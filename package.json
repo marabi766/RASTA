@@ -33,6 +33,7 @@
     "kafka:acl:generate": "pnpm --filter @rasta/contracts build && node scripts/kafka-acl-generate.mjs",
     "test:kafka-acl-lib": "node --test scripts/kafka-acl-lib.test.mjs",
     "test:kafka-credential-scope": "node --test scripts/check-kafka-credential-scope.test.mjs",
+    "test:kafka-outbox-tables": "node --test scripts/kafka-outbox-tables.test.mjs",
     "check:kafka-credential-scope": "node scripts/check-kafka-credential-scope.mjs",
     "kafka:acl:apply:dev": "node --env-file-if-exists=.env --env-file=infrastructure/docker/kafka/bootstrap.env.example --env-file-if-exists=infrastructure/docker/kafka/bootstrap.env scripts/kafka-acl.mjs apply --profile development",
     "test:kafka-acl-broker": "node --env-file-if-exists=.env --env-file=infrastructure/docker/kafka/bootstrap.env.example --env-file-if-exists=infrastructure/docker/kafka/bootstrap.env --test scripts/kafka-acl.broker.test.mjs",
@@ -74,7 +75,7 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
     "clean": "turbo run clean && rimraf node_modules",
-    "verify": "pnpm run progress:check && pnpm run test:progress && pnpm run ci:image-matrix && pnpm run test:image-matrix && pnpm run test:outbox-b1 && pnpm run test:outbox-b2 && pnpm run test:migration-lib && pnpm run test:audit-correction-lib && pnpm run test:service-boundaries-lib && pnpm run check:service-boundaries && pnpm run test:local-postgres-config && pnpm run check:local-postgres-config && pnpm run test:keycloak-dev-realm && pnpm run check:keycloak-dev-realm && pnpm run test:compose-ports && pnpm run check:compose-ports && pnpm run test:kafka-acl-lib && pnpm run test:kafka-credential-scope && pnpm run check:kafka-credential-scope && pnpm run test:infra-preflight && pnpm run test:container-scope && pnpm run test:dockerfile-pins && pnpm run check:dockerfile-pins && pnpm run test:tenant-index-order && pnpm run check:tenant-index-order && pnpm run test:test-phases && pnpm run check:test-phases && pnpm run test:aggregation-evidence-lib && pnpm run test:grafana-dashboard-lib && pnpm run check:grafana-dashboard && pnpm run test:grafana-live-isolation-lib && pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run test:seed-guard",
+    "verify": "pnpm run progress:check && pnpm run test:progress && pnpm run ci:image-matrix && pnpm run test:image-matrix && pnpm run test:outbox-b1 && pnpm run test:outbox-b2 && pnpm run test:migration-lib && pnpm run test:audit-correction-lib && pnpm run test:service-boundaries-lib && pnpm run check:service-boundaries && pnpm run test:local-postgres-config && pnpm run check:local-postgres-config && pnpm run test:keycloak-dev-realm && pnpm run check:keycloak-dev-realm && pnpm run test:compose-ports && pnpm run check:compose-ports && pnpm run test:kafka-acl-lib && pnpm run test:kafka-credential-scope && pnpm run test:kafka-outbox-tables && pnpm run check:kafka-credential-scope && pnpm run test:infra-preflight && pnpm run test:container-scope && pnpm run test:dockerfile-pins && pnpm run check:dockerfile-pins && pnpm run test:tenant-index-order && pnpm run check:tenant-index-order && pnpm run test:test-phases && pnpm run check:test-phases && pnpm run test:aggregation-evidence-lib && pnpm run test:grafana-dashboard-lib && pnpm run check:grafana-dashboard && pnpm run test:grafana-live-isolation-lib && pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run test:seed-guard",
     "infra:up": "node scripts/infra-preflight.mjs && docker compose up -d && node --env-file-if-exists=.env --env-file=infrastructure/docker/kafka/bootstrap.env.example --env-file-if-exists=infrastructure/docker/kafka/bootstrap.env scripts/kafka-acl.mjs apply --profile development",
     "infra:down": "docker compose down",
     "infra:reset": "node scripts/infra-preflight.mjs && docker compose down -v && docker compose up -d && node --env-file-if-exists=.env --env-file=infrastructure/docker/kafka/bootstrap.env.example --env-file-if-exists=infrastructure/docker/kafka/bootstrap.env scripts/kafka-acl.mjs apply --profile development",
@@ -96,6 +97,7 @@
     "rimraf": "^6.0.1",
     "turbo": "^2.5.9",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.46.4"
+    "typescript-eslint": "^8.46.4",
+    "yaml": "^2.9.0"
   }
 }

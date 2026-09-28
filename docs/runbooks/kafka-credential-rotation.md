@@ -26,7 +26,8 @@ Volume `kafka-data` می‌مانند و با بازسازی Container از بی
 نام متغیر از نام Principal می‌آید: پسوند `-service` حذف، `-` به `_`، و حروف بزرگ (`fleet-service` ←
 `KAFKA_SASL_PASSWORD_FLEET`، `ops-replay` ← `KAFKA_SASL_PASSWORD_OPS_REPLAY`). **هرگز** مقدار واقعی Commit نمی‌شود؛
 `.env.example` و `bootstrap.env.example` فقط مقادیر توسعه دارند. اعتبار admin، ops-replay و observer هرگز در محیط یک
-پروسهٔ سرویس نیست؛ `pnpm infra:up` اگر یکی از آن‌ها در `.env` باشد اجرا نمی‌شود و `pnpm check:kafka-credential-scope`
+پروسهٔ سرویس نیست؛ `pnpm infra:up` اگر `.env` هر اعتبار Kafkaی جز گذرواژهٔ خود سرویس‌ها داشته باشد (admin، ops-replay،
+observer، Kafka UI، Exporter) اجرا نمی‌شود و `pnpm check:kafka-credential-scope`
 همین را نگه می‌دارد.
 
 **CI چیزی برای چرخاندن ندارد:** هر اجرا گذرواژه‌ها و CA خودش را می‌سازد و با پایان Job دور می‌ریزد.
@@ -161,8 +162,13 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
   --bootstrap-server kafka:9094 --command-config /tmp/admin.properties \
   --describe --all-groups
 
-# ۳. پس از توقف: در پایگاه دادهٔ هر سرویسی که Outbox دارد (همه جز audit-service)، در Schema خودش، هیچ ردیف منتشرنشده‌ای نیست
-#    SELECT count(*) FROM outbox_message WHERE published_at IS NULL;   -- باید 0 باشد
+# ۳. پس از توقف: در **هر** جدول Outbox هر سرویس، در پایگاه داده و Schema همان سرویس، هیچ ردیف منتشرنشده‌ای نیست.
+#    فهرست از Schemaهای Prisma خوانده می‌شود — `outbox_message` هر سرویس و جدول‌های دیگر مانند `security_event_outbox`
+#    در identity-service — و هر سطرش پرسشی است که باید 0 بدهد:
+node scripts/kafka-outbox-tables.mjs
+#    identity-service	SELECT count(*) FROM security_event_outbox WHERE published_at IS NULL;   ← و بقیه
+#    ردیف‌های security_event_outbox تا پایان پنجرهٔ تجمیع خود (window_ends_at) منتشر نمی‌شوند: اگر ردیفی ماند، سرویس را
+#    پس از آن زمان دوباره راه بینداز تا منتشر کند.
 
 # ۴. Topicهای dead-letter و retry — هیچ گروهی امروز .retry را نمی‌خواند (D-039)، پس گام ۲ آن را نشان نمی‌دهد:
 #    هر رکورد یا طبق replay-dlq رسیدگی شده، یا بیرون برده و آگاهانه کنار گذاشته شده

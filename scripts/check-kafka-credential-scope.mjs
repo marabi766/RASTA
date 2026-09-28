@@ -28,7 +28,7 @@ const problems = [
   ...checkWorkflow(read('.github/workflows/ci.yml')),
   ...checkCiUp(read('infrastructure/docker/kafka/ci-up.sh')),
   ...checkCompose(read('docker-compose.yml')),
-  ...(existsSync(resolve(root, '.env')) ? checkLocalEnv(read('.env')) : []),
+  ...(existsSync(resolve(root, '.env')) ? checkLocalEnv(read('.env'), services) : []),
 ];
 if (problems.length > 0) {
   for (const problem of problems) process.stderr.write(`kafka credential scope: ${problem}\n`);

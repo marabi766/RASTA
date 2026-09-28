@@ -95,7 +95,8 @@ PLAINTEXT می‌ماند» بالا جایگزین می‌شود: Compose هم�
 - **اعتبارها فقط به صاحبشان.** (بازبینی‌های دور ۱ و ۲ #131) گذرواژهٔ `admin`، `ops-replay` و `itest-observer` هرگز در
   محیط پروسهٔ یک سرویس نیست: در `infrastructure/docker/kafka/bootstrap.env` (Git-Ignored؛ نمونه و پیش‌فرض‌های توسعه در
   `bootstrap.env.example`) می‌مانند و Compose آن را فقط به `kafka` و `kafka-init` می‌دهد؛ `pnpm infra:up` و
-  `pnpm kafka:acl:apply:dev` آن را صریحاً می‌خوانند، و `pnpm infra:up` اگر یکی از آن‌ها در `.env` باشد اجرا نمی‌شود.
+  `pnpm kafka:acl:apply:dev` آن را صریحاً می‌خوانند، و `pnpm infra:up` اگر `.env` هر اعتبار Kafkaی جز گذرواژهٔ خود
+  سرویس‌ها داشته باشد — ابزارها (Kafka UI، Exporter) هم — اجرا نمی‌شود.
   `.env.example` فقط گذرواژهٔ سرویس‌ها را دارد — نگه داشتن همهٔ آن‌ها در یک `.env` مشترک توسعه، مانند
   `DATABASE_URL_<SERVICE>`، باقی‌ماندهٔ پذیرفتهٔ **فقط-توسعه** است؛ استقرار به هر سرویس فقط Secret خودش را می‌دهد و ACL را
   با `kafka-acl.mjs apply --profile deployment` از Secret Store خودش اعمال می‌کند، هرگز از فایل‌های این Repository.
