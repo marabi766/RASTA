@@ -46,6 +46,10 @@ describe('transfer clearance over HTTP: the bound runs from arrival', () => {
     const env = loadFleetEnv({
       ...process.env,
       NODE_ENV: 'test',
+      // The relay and consumers are inert: nothing here reaches the broker, so
+      // the app may be built without the service's broker credential — the
+      // explicit opt-out, honoured only under NODE_ENV test (RUN-006).
+      KAFKA_ALLOW_PLAINTEXT: process.env.KAFKA_ALLOW_PLAINTEXT ?? 'true',
       DATABASE_URL: databaseUrl(),
       KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:9092',
       OIDC_ISSUER_URL: 'http://auth.invalid/realms/rasta',

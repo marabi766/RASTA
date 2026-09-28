@@ -2805,7 +2805,7 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
   ACLهای تولیدشده از `TOPIC_PRODUCERS` و `TOPIC_CONSUMERS` (`infrastructure/docker/kafka/broker-acls.json`، ۱۶ Principal،
   ۱۶۷ Binding). فقط مالک روی Topicش می‌نویسد؛ Consumer فقط اشتراکش را زیر گروه‌های `<service>.` می‌خواند؛ فقط
   `ops-replay` روی `.retry` می‌نویسد و DLQها را می‌خواند. ADR-061 § ۳ اصلاحیهٔ 2026-09-28. **شکاف باز:** ابزار بازپخش DLQ
-  وجود ندارد و هیچ Consumerی `.retry` را Subscribe نمی‌کند (D-037).
+  وجود ندارد و هیچ Consumerی `.retry` را Subscribe نمی‌کند (D-038).
 - کاتالوگ کامل رویدادها: [`docs/events/README.md`](docs/events/README.md) —
   این جلسه با کد Sync شد (۵ رویداد گم‌شده اضافه، نام فیلدهای غلط اصلاح).
 
