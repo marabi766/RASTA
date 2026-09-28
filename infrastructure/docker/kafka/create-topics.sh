@@ -6,6 +6,10 @@
 # TOPIC_CONSUMERS together with the ACLs, so the two cannot disagree (RUN-006).
 # TOPICS_FILE defaults to the copy next to this script.
 #
+# With KAFKA_PROVISION_PROFILE (compose's kafka-init) it first gives a
+# credential to any principal of that profile that has none — one added to
+# the contracts after the broker's log was formatted. It never overwrites one.
+#
 # Broker auto-creation is OFF on purpose (ADR-006): producing to an unknown
 # topic is a contract violation and must fail loudly rather than silently
 # spawning a topic with default settings.
@@ -48,6 +52,33 @@ for _ in $(seq 1 30); do
   fi
   sleep 2
 done
+
+# The broker adds credentials only when it formats an empty log. With the log
+# kept across recreation (compose's kafka-data volume), a principal added to
+# the contracts later has none: give it one from the environment, as the
+# format would have. An existing credential is never touched — a rotated
+# password stays rotated. CI formats a fresh broker every run and skips this.
+if [ -n "${KAFKA_PROVISION_PROFILE:-}" ]; then
+  principals_file="$(dirname "$0")/principals.${KAFKA_PROVISION_PROFILE}.txt"
+  [ -s "${principals_file}" ] || { echo "==> ${principals_file} missing" >&2; exit 1; }
+  existing="$("${KAFKA_BIN}"/kafka-configs.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" \
+    --describe --entity-type users)"
+  while IFS= read -r principal; do
+    case "${principal}" in '' | \#*) continue ;; esac
+    if grep -q "user-principal '${principal}'" <<< "${existing}"; then continue; fi
+    stem="${principal%-service}"
+    stem="${stem//-/_}"
+    variable="KAFKA_SASL_PASSWORD_${stem^^}"
+    [ -n "${!variable:-}" ] || { echo "==> ${variable} is not set; ${principal} has no credential" >&2; exit 1; }
+    # On the command line, as the broker's own format passes --add-scram:
+    # inside this bootstrap container only. (--add-config-file mangles the
+    # SCRAM key.)
+    "${KAFKA_BIN}"/kafka-configs.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" \
+      --alter --entity-type users --entity-name "${principal}" \
+      --add-config "SCRAM-SHA-512=[password=${!variable}]" >/dev/null
+    echo "==> Credential added for ${principal}, which had none"
+  done < "${principals_file}"
+fi
 
 create_topic() {
   local name="$1"

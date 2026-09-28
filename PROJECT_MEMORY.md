@@ -2811,16 +2811,20 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
   مجوزدهی می‌کند** — SASL_SSL با SCRAM-SHA-512، یک Principal برای هر سرویس، `allow.everyone.if.no.acl.found=false`، و
   ACLهای تولیدشده از `TOPIC_PRODUCERS` و `TOPIC_CONSUMERS` در دو پروفایل: `broker-acls.development.json` (Compose و CI؛
   ۱۶ Principal، ۱۶۷ Binding) و `broker-acls.deployment.json` (۱۳ Principal، ۱۰۷ Binding — بی `itest-observer`، Kafka UI
-  و Exporter). اعمال‌کننده (`pnpm kafka:acl:apply` ← `kafka-acl.mjs apply --profile …`) و Broker بی پروفایل صریح اجرا
+  و Exporter). اعمال‌کننده (`pnpm kafka:acl:apply:dev` ← `kafka-acl.mjs apply --profile …`) و Broker بی پروفایل صریح اجرا
   نمی‌شوند. فهرست Topicهای Bootstrap (`topics.txt`، ۳۴ Topic، شامل `rasta.audit.trail.v1.retry`) هم تولیدی است و آزمون
   قرارداد-به-Bootstrap برابری‌اش را با قراردادها و ACLها نگه می‌دارد. فقط مالک روی Topicش می‌نویسد؛ Consumer فقط
   اشتراکش را زیر گروه‌های `<service>.` می‌خواند؛ فقط `ops-replay` روی `.retry` می‌نویسد و DLQها را می‌خواند؛
   `itest-observer` فقط READ دارد و فقط در پروفایل development. اعتبار admin، ops-replay و observer در
   `infrastructure/docker/kafka/bootstrap.env` (Git-Ignored؛ نمونه `bootstrap.env.example`) است و هرگز در محیط پروسهٔ
-  سرویس نیست؛ در CI هر Step فقط Scope خودش را از `kafka-credentials.sh` می‌گیرد (`pnpm check:kafka-credential-scope`).
-  گذرواژهٔ هر سرویس در `.env` مشترک توسعه، باقی‌ماندهٔ پذیرفتهٔ فقط-توسعه است. ADR-061 § ۳ اصلاحیهٔ 2026-09-28؛ چرخش:
-  [`docs/runbooks/kafka-credential-rotation.md`](docs/runbooks/kafka-credential-rotation.md) (درجا با شرط سکون؛
-  بازسازی فقط پس از تخلیه). **شکاف باز:** ابزار بازپخش DLQ وجود ندارد و هیچ Consumerی `.retry` را Subscribe نمی‌کند
+  سرویس نیست (`pnpm infra:up` آن‌ها را در `.env` رد می‌کند)؛ در CI دو پوشهٔ Secret جدا (سرویس‌ها+observer؛ admin/ops-replay/
+  ابزارها)، هیچ‌کدام در `$GITHUB_ENV`، هر Step فقط Scope خودش را از `kafka-credentials.sh` می‌گیرد و Step شروع سرویس‌ها
+  مسیر را پیش از راه‌اندازی برمی‌دارد (`pnpm check:kafka-credential-scope`). گذرواژهٔ هر سرویس در `.env` مشترک توسعه، و
+  خواندن پوشه‌ها توسط کد آزمونِ هم‌کاربر در CI، باقی‌مانده‌های پذیرفته‌اند (ADR-061 § ۳). دادهٔ Broker Compose در Volume
+  `kafka-data` ماندگار است؛ `kafka-init` به Principal بی‌اعتبار اعتبار می‌دهد. اعمال ACL: `pnpm kafka:acl:apply:dev`؛
+  استقرار فقط `kafka-acl.mjs apply --profile deployment` از Secret Store. ADR-061 § ۳ اصلاحیهٔ 2026-09-28؛ چرخش:
+  [`docs/runbooks/kafka-credential-rotation.md`](docs/runbooks/kafka-credential-rotation.md) (همه درجا با شرط سکون و
+  بی از دست رفتن داده — آزموده روی Broker توسعه؛ پاک کردن داده راه چرخش نیست). **شکاف باز:** ابزار بازپخش DLQ وجود ندارد و هیچ Consumerی `.retry` را Subscribe نمی‌کند
   (D-039).
 - کاتالوگ کامل رویدادها: [`docs/events/README.md`](docs/events/README.md) —
   این جلسه با کد Sync شد (۵ رویداد گم‌شده اضافه، نام فیلدهای غلط اصلاح).

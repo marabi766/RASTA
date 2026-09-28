@@ -20,10 +20,16 @@
  * `infrastructure/docker/kafka/ci-up.sh`); otherwise — the repository `.env`
  * names it relative to a service's directory — the CA certificate
  * `pnpm infra:up` exported to `infrastructure/docker/kafka/.tls/ca.pem`.
- * `pnpm infra:up` runs it on the host after `docker compose up -d` with the
- * bootstrap-only env file (`infrastructure/docker/kafka/bootstrap.env`, from
- * its committed example) — the admin's password is never in the services'
- * `.env` — so nothing beyond Node and pnpm is needed.
+ *
+ * Development: `pnpm infra:up` (and `pnpm kafka:acl:apply:dev`) run it on the
+ * host after `docker compose up -d` with the bootstrap-only env file
+ * (`infrastructure/docker/kafka/bootstrap.env`, from its committed example) —
+ * the admin's password is never in the services' `.env` — so nothing beyond
+ * Node and pnpm is needed. There is no profile-less command (review of #131).
+ *
+ * A deployment calls it directly, `--profile deployment`, with the admin's
+ * password, KAFKA_BROKERS and the CA from its own secret store — never from
+ * any file in this repository, and never from bootstrap.env.example.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
@@ -64,7 +70,9 @@ const env = {
 const connection = connectionFor(spec.admin, env, (path) => readFileSync(path, 'utf8'));
 if (!connection.sasl || !connection.ssl) {
   process.stderr.write(
-    'kafka acl: KAFKA_SASL_PASSWORD_ADMIN is required (infrastructure/docker/kafka/bootstrap.env.example)\n',
+    'kafka acl: KAFKA_SASL_PASSWORD_ADMIN is required — in development from ' +
+      'infrastructure/docker/kafka/bootstrap.env (`pnpm kafka:acl:apply:dev`); ' +
+      'in a deployment from its secret store\n',
   );
   process.exit(1);
 }

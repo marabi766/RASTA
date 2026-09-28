@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
  * No service process is given a Kafka credential that is not its own
- * (RUN-006, review of #131 finding 1). See check-kafka-credential-scope-lib.mjs.
+ * (RUN-006, reviews of #131). See check-kafka-credential-scope-lib.mjs.
+ * Checks a developer's own `.env` too, when there is one.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -11,6 +12,7 @@ import {
   checkCiUp,
   checkCompose,
   checkEnvExample,
+  checkLocalEnv,
   checkWorkflow,
 } from './check-kafka-credential-scope-lib.mjs';
 
@@ -26,9 +28,12 @@ const problems = [
   ...checkWorkflow(read('.github/workflows/ci.yml')),
   ...checkCiUp(read('infrastructure/docker/kafka/ci-up.sh')),
   ...checkCompose(read('docker-compose.yml')),
+  ...(existsSync(resolve(root, '.env')) ? checkLocalEnv(read('.env')) : []),
 ];
 if (problems.length > 0) {
   for (const problem of problems) process.stderr.write(`kafka credential scope: ${problem}\n`);
   process.exit(1);
 }
-process.stdout.write('kafka credential scope: no service is given a Kafka credential but its own\n');
+process.stdout.write(
+  'kafka credential scope: no service is given a Kafka credential but its own\n',
+);

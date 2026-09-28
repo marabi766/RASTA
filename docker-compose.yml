@@ -161,21 +161,25 @@ services:
       KAFKA_ADVERTISED_EXTERNAL: 'localhost:${KAFKA_HOST_PORT:-9092}'
       KAFKA_ADVERTISED_BROKER: 'kafka:9094'
       KAFKA_LOG_RETENTION_HOURS: '168'
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
     volumes:
       - kafka-tls:/tls:ro
       - ./infrastructure/docker/kafka:/bootstrap:ro
+      - kafka-data:/var/lib/kafka/data
     ports:
       - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:${KAFKA_HOST_PORT:-9092}:9092'
     depends_on:
       kafka-tls:
         condition: service_completed_successfully
-    # Deliberately no named volume for the log. The container runs as uid 1000,
-    # and a named volume mounts root-owned, so the broker cannot write its log
-    # dir. Local Kafka data is disposable anyway — kafka-init recreates every
-    # topic on each `up`, and the outbox means nothing is lost when the log is
-    # (ADR-021). A recreated container formats again, with the credentials
-    # then in .env: that is how a changed password takes effect
-    # (docs/runbooks/kafka-credential-rotation.md).
+    # The log, the SCRAM credentials and every consumer offset live in the
+    # `kafka-data` volume and survive a recreated container, so rotating a
+    # password or the CA never costs data (review of #131, round 2). The
+    # image's /var/lib/kafka/data belongs to its uid 1000, and a fresh named
+    # volume takes that ownership. The broker formats — and takes credentials
+    # from the environment — only on an empty volume; later a password changes
+    # in place (docs/runbooks/kafka-credential-rotation.md). Losing this
+    # volume loses every event not yet consumed: the outbox does not cover a
+    # record the broker already acknowledged. `pnpm infra:reset` removes it.
     healthcheck:
       test:
         - CMD-SHELL
@@ -185,7 +189,10 @@ services:
       retries: 12
       start_period: 40s
 
-  # Creates the platform topics once, as the broker's admin, then exits.
+  # As the broker's admin, then exits: gives a credential to any principal of
+  # the profile that has none yet (one added to the contracts after the
+  # volume was formatted — an existing credential is never overwritten), and
+  # creates the platform topics.
   kafka-init:
     image: apache/kafka:3.9.0
     container_name: rasta-kafka-init
@@ -194,7 +201,9 @@ services:
         condition: service_healthy
     env_file: *kafka-bootstrap-env
     environment:
+      <<: *kafka-credentials
       KAFKA_CA_FILE: /tls/ca.pem
+      KAFKA_PROVISION_PROFILE: development
     volumes:
       - kafka-tls:/tls:ro
       - ./infrastructure/docker/kafka:/bootstrap:ro
@@ -583,6 +592,9 @@ services:
 
 volumes:
   postgres-data:
+  # The broker's log, SCRAM credentials and offsets (RUN-006): kept across a
+  # recreated container; removed only by `pnpm infra:reset`.
+  kafka-data:
   # The broker's keystore and the throwaway CA certificate (kafka-tls). Never
   # in the repository; `pnpm infra:reset` removes it with the rest.
   kafka-tls:

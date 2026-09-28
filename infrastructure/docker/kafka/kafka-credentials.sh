@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
 # Prints `export` lines for exactly the Kafka credentials one CI step needs
-# (RUN-006, review of #131 finding 1), from the per-run files ci-up.sh wrote
-# to KAFKA_SECRETS_DIR. Nothing reaches $GITHUB_ENV; a step takes its scope
-# explicitly and only for itself:
+# (RUN-006, reviews of #131), from the per-run files ci-up.sh wrote. Nothing
+# reaches $GITHUB_ENV, and neither directory is published: a step is given the
+# directory in its own `env:` and takes its scope explicitly, for itself:
 #
-#   eval "$(bash infrastructure/docker/kafka/kafka-credentials.sh service fleet-service)"
+#   kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+#   eval "${kafka_credentials}"
 #
-# Scopes:
-#   service <name>  that service's own password only — what a service process
-#                   is started with; refused for anything not a declared
-#                   `-service` principal
-#   observer        the read-only test observer only (the E2E harness)
-#   tests           every service's password and the observer's: the
-#                   integration suites publish as each topic's owner and
-#                   observe as itest-observer. Never the admin's or ops-replay's.
-#   admin           everything, the admin included: the broker tests alone
+# Scopes, and the directory each reads:
+#   service <name>  KAFKA_SECRETS_DIR: that service's own password only — what a
+#                   service process is started with; refused for anything not
+#                   a declared `-service` principal. The start step unsets the
+#                   directory before launching the service.
+#   observer        KAFKA_SECRETS_DIR: the read-only test observer only (E2E)
+#   tests           KAFKA_SECRETS_DIR: every service's password and the
+#                   observer's — the integration suites publish as each topic's
+#                   owner and observe as itest-observer. Test steps only; never
+#                   the admin's, ops-replay's or a tool's.
+#   admin           KAFKA_ADMIN_SECRETS_DIR as well: everything, the admin
+#                   included — the broker tests alone
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SECRETS_DIR="${KAFKA_SECRETS_DIR:?KAFKA_SECRETS_DIR is not set; run ci-up.sh first}"
 PRINCIPALS_FILE="${HERE}/principals.development.txt"
 
 password_variable() {
@@ -27,18 +30,23 @@ password_variable() {
   printf 'KAFKA_SASL_PASSWORD_%s' "${stem^^}"
 }
 
+# emit <principal> <directory>
 emit() {
   local variable
   variable="$(password_variable "$1")"
-  if [ ! -s "${SECRETS_DIR}/${variable}" ]; then
-    echo "kafka-credentials: no credential for $1 in ${SECRETS_DIR}" >&2
+  if [ ! -s "$2/${variable}" ]; then
+    echo "kafka-credentials: no credential for $1 in $2" >&2
     exit 1
   fi
-  printf "export %s='%s'\n" "${variable}" "$(cat "${SECRETS_DIR}/${variable}")"
+  printf "export %s='%s'\n" "${variable}" "$(cat "$2/${variable}")"
 }
 
 services() {
   grep -v '^#' "${PRINCIPALS_FILE}" | grep -e '-service$' || true
+}
+
+services_dir() {
+  printf '%s' "${KAFKA_SECRETS_DIR:?KAFKA_SECRETS_DIR is not set for this step}"
 }
 
 case "${1:-}" in
@@ -48,20 +56,26 @@ case "${1:-}" in
       echo "kafka-credentials: '${name}' is not a service principal" >&2
       exit 1
     fi
-    emit "${name}"
+    emit "${name}" "$(services_dir)"
     ;;
   observer)
-    emit itest-observer
+    emit itest-observer "$(services_dir)"
     ;;
   tests)
-    while IFS= read -r name; do emit "${name}"; done < <(services)
-    emit itest-observer
+    dir="$(services_dir)"
+    while IFS= read -r name; do emit "${name}" "${dir}"; done < <(services)
+    emit itest-observer "${dir}"
     ;;
   admin)
-    emit admin
+    dir="$(services_dir)"
+    admin_dir="${KAFKA_ADMIN_SECRETS_DIR:?KAFKA_ADMIN_SECRETS_DIR is not set for this step}"
+    emit admin "${admin_dir}"
     while IFS= read -r name; do
-      case "${name}" in '' | \#*) continue ;; esac
-      emit "${name}"
+      case "${name}" in
+        '' | \#*) continue ;;
+        *-service | itest-observer) emit "${name}" "${dir}" ;;
+        *) emit "${name}" "${admin_dir}" ;;
+      esac
     done < "${PRINCIPALS_FILE}"
     ;;
   *)

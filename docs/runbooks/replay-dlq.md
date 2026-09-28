@@ -112,7 +112,10 @@ docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh \
 سرویس‌های دیگر را **می‌خواند**، زیر گروه‌های `ops-replay.`. نه روی Topic اصلی می‌نویسد، نه روی DLQ؛ Topic اصلی فقط مال
 ناشر است، پس پیام بازپخش‌شده هرگز به نام ناشر روی Topic او نمی‌نشیند. مصرف‌کننده `.retry` هر Topic مشترکش را با همان
 اعلام `TOPIC_CONSUMERS` می‌خواند و بررسی ناشر (ADR-061 § ۲) همان‌جا دوباره اجرا می‌شود. گذرواژه:
-`KAFKA_SASL_PASSWORD_OPS_REPLAY` (در توسعه از `.env`؛ چرخش: [kafka-credential-rotation](kafka-credential-rotation.md)).
+`KAFKA_SASL_PASSWORD_OPS_REPLAY` — در توسعه از `infrastructure/docker/kafka/bootstrap.env` (پیش‌فرض‌ها در
+`bootstrap.env.example`)، **هرگز** از `.env` مشترکی که هر سرویس می‌خواند (`pnpm infra:up` و
+`pnpm check:kafka-credential-scope` آن را در `.env` رد می‌کنند)؛ در استقرار از Secret Store اپراتور. چرخش:
+[kafka-credential-rotation](kafka-credential-rotation.md).
 
 **مسیر:** `rasta.<domain>.v1.dlq` ← (خواندن با `ops-replay`) ← بررسی ← `rasta.<domain>.v1.retry` (نوشتن با
 `ops-replay`). Broker هر مسیر دیگری را رد می‌کند؛ `scripts/kafka-acl.broker.test.mjs` همین را در CI نشان می‌دهد.

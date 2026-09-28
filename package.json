@@ -34,7 +34,7 @@
     "test:kafka-acl-lib": "node --test scripts/kafka-acl-lib.test.mjs",
     "test:kafka-credential-scope": "node --test scripts/check-kafka-credential-scope.test.mjs",
     "check:kafka-credential-scope": "node scripts/check-kafka-credential-scope.mjs",
-    "kafka:acl:apply": "node --env-file-if-exists=.env --env-file=infrastructure/docker/kafka/bootstrap.env.example --env-file-if-exists=infrastructure/docker/kafka/bootstrap.env scripts/kafka-acl.mjs apply --profile development",
+    "kafka:acl:apply:dev": "node --env-file-if-exists=.env --env-file=infrastructure/docker/kafka/bootstrap.env.example --env-file-if-exists=infrastructure/docker/kafka/bootstrap.env scripts/kafka-acl.mjs apply --profile development",
     "test:kafka-acl-broker": "node --env-file-if-exists=.env --env-file=infrastructure/docker/kafka/bootstrap.env.example --env-file-if-exists=infrastructure/docker/kafka/bootstrap.env --test scripts/kafka-acl.broker.test.mjs",
     "test:local-postgres-config": "node --test scripts/check-local-postgres-config.test.mjs",
     "check:local-postgres-config": "node scripts/check-local-postgres-config.mjs",

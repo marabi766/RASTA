@@ -92,16 +92,30 @@ PLAINTEXT می‌ماند» بالا جایگزین می‌شود: Compose هم�
   **تنها** خوانندهٔ DLQها بیرون از مالکشان (`docs/runbooks/replay-dlq.md`)؛ و سه Principal فقط-توسعه که فقط در پروفایل
   `development` هستند: `itest-observer` (فقط `READ` روی همهٔ Topicها زیر گروه‌های `itest-observer.` برای
   آزمون‌ها، هرگز `WRITE`)، `kafka-ui` و `kafka-exporter`.
-- **اعتبارها فقط به صاحبشان.** (بازبینی دور ۱ #131) گذرواژهٔ `admin`، `ops-replay` و `itest-observer` هرگز در محیط
-  پروسهٔ یک سرویس نیست: در `infrastructure/docker/kafka/bootstrap.env` (Git-Ignored؛ نمونه و پیش‌فرض‌های توسعه در
+- **اعتبارها فقط به صاحبشان.** (بازبینی‌های دور ۱ و ۲ #131) گذرواژهٔ `admin`، `ops-replay` و `itest-observer` هرگز در
+  محیط پروسهٔ یک سرویس نیست: در `infrastructure/docker/kafka/bootstrap.env` (Git-Ignored؛ نمونه و پیش‌فرض‌های توسعه در
   `bootstrap.env.example`) می‌مانند و Compose آن را فقط به `kafka` و `kafka-init` می‌دهد؛ `pnpm infra:up` و
-  `pnpm kafka:acl:apply` آن را صریحاً می‌خوانند. `.env.example` فقط گذرواژهٔ سرویس‌ها را دارد — نگه داشتن همهٔ آن‌ها در
-  یک `.env` مشترک توسعه، مانند `DATABASE_URL_<SERVICE>`، باقی‌ماندهٔ پذیرفتهٔ **فقط-توسعه** است؛ استقرار به هر سرویس فقط
-  Secret خودش را می‌دهد. در CI گذرواژه‌ها برای هر اجرا تازه، Mask‌شده و فقط در فایل‌های `KAFKA_SECRETS_DIR` اند (هرگز در
-  `$GITHUB_ENV`)، و هر Step با `kafka-credentials.sh` فقط Scope خودش را می‌گیرد: شروع هر سرویس فقط گذرواژهٔ همان سرویس،
-  آزمون‌ها سرویس‌ها و observer، و فقط آزمون Broker گذرواژهٔ `admin`. Playwright فقط گذرواژهٔ observer و CA را می‌خواند
-  (`tests/e2e/src/kafka-observer.ts`). `pnpm check:kafka-credential-scope` این مرزها را در Workflow، Compose و فایل‌های
-  نمونه نگه می‌دارد.
+  `pnpm kafka:acl:apply:dev` آن را صریحاً می‌خوانند، و `pnpm infra:up` اگر یکی از آن‌ها در `.env` باشد اجرا نمی‌شود.
+  `.env.example` فقط گذرواژهٔ سرویس‌ها را دارد — نگه داشتن همهٔ آن‌ها در یک `.env` مشترک توسعه، مانند
+  `DATABASE_URL_<SERVICE>`، باقی‌ماندهٔ پذیرفتهٔ **فقط-توسعه** است؛ استقرار به هر سرویس فقط Secret خودش را می‌دهد و ACL را
+  با `kafka-acl.mjs apply --profile deployment` از Secret Store خودش اعمال می‌کند، هرگز از فایل‌های این Repository.
+- **در CI.** گذرواژه‌ها برای هر اجرا تازه و Mask‌شده‌اند و فقط در دو پوشهٔ خصوصی (mode 700) نوشته می‌شوند:
+  `KAFKA_SECRETS_DIR` برای سرویس‌ها و observer، و `KAFKA_ADMIN_SECRETS_DIR` جدا برای admin، ops-replay، Kafka UI و
+  Exporter. هیچ‌کدام — نه گذرواژه، نه مسیر پوشه — به `$GITHUB_ENV` یا `env:` سطح Job نمی‌رسد؛ هر Step مسیر لازمش را در
+  `env:` خودش می‌گیرد و با `kafka-credentials.sh` فقط Scope خودش را: شروع هر سرویس فقط گذرواژهٔ همان سرویس، و Step شروع
+  سرویس‌ها مسیر را پیش از راه‌اندازی هر پروسه‌ای از محیط برمی‌دارد (`unset`)؛ Stepهای آزمون Scope `tests`؛ E2E فقط
+  observer؛ و پوشهٔ admin فقط به Bootstrap Broker و آزمون Broker. Scope `tests` عمداً گذرواژهٔ **همهٔ** سرویس‌ها را دارد:
+  Harnessهای آزمون هر Topic را به نام مالکش منتشر می‌کنند — و فقط به Stepهای آزمون داده می‌شود، هرگز به یک سرویس.
+  Playwright فقط گذرواژهٔ observer و CA را می‌خواند (`tests/e2e/src/kafka-observer.ts`). `pnpm check:kafka-credential-scope`
+  این مرزها را در Workflow، `ci-up.sh`، Compose، فایل‌های نمونه و `.env` محلی نگه می‌دارد.
+  **باقی‌ماندهٔ پذیرفتهٔ CI:** همهٔ Stepها با یک کاربر Runner اجرا می‌شوند، پس کد آزمونی که به یک پوشهٔ Secret اشاره
+  شود می‌تواند آن را بخواند، و محیط Container Broker (که همهٔ اعتبارها را برای Format می‌گیرد) با `docker inspect` خواندنی
+  است. جداسازی واقعی سرویس‌های CI را Container جدا لازم دارد و در این PR نیست؛ Secretها یک‌بارمصرف و Broker موقت است.
+  استقرار به هر سرویس فقط Secret خودش را تزریق می‌کند.
+- **دادهٔ Broker توسعه ماندگار است.** Log، اعتبارهای SCRAM و Offsetها در Volume `kafka-data` می‌مانند و با بازسازی
+  Container از بین نمی‌روند، پس چرخش گذرواژه یا CA هرگز داده از دست نمی‌دهد (درجا، `docs/runbooks/kafka-credential-rotation.md`).
+  Broker اعتبار را فقط هنگام Format یک Volume خالی از محیط می‌گیرد؛ `kafka-init` به Principalی که پس از آن به قراردادها
+  افزوده شده و اعتباری ندارد اعتبار می‌دهد و اعتبار موجود را هرگز بازنویسی نمی‌کند.
 - **ACL از قرارداد.** `packages/contracts/src/events/broker-acls.ts` مجموعهٔ ACL را از `TOPIC_PRODUCERS` و
   `TOPIC_CONSUMERS` می‌سازد — در دو پروفایل: `development` (Compose و CI) و `deployment` (بی Principalهای توسعه و
   آزمون). `pnpm kafka:acl:generate` ← `broker-acls.<profile>.json`، `principals.<profile>.txt` و `topics.txt` (هر Topic
@@ -111,7 +125,8 @@ PLAINTEXT می‌ماند» بالا جایگزین می‌شود: Compose هم�
   گروه‌های PREFIXED `<service>.`، و `WRITE` فقط روی DLQ خودش؛ هیچ Principalی جز `admin` Topic نمی‌سازد.
   `scripts/kafka-acl.mjs apply --profile <development|deployment>` Broker را دقیقاً به همین مجموعه می‌رساند (کم‌ها را
   می‌افزاید، هر ALLOW دیگر را حذف می‌کند، و نتیجه را بازخوانی و مقایسه می‌کند) و بی پروفایل صریح اجرا نمی‌شود؛ Broker هم
-  بی `KAFKA_ACL_PROFILE` بالا نمی‌آید. `pnpm infra:up` و `ci-up.sh` پروفایل `development` را اعمال می‌کنند.
+  بی `KAFKA_ACL_PROFILE` بالا نمی‌آید. `pnpm infra:up`، `pnpm kafka:acl:apply:dev` و `ci-up.sh` پروفایل `development` را
+  اعمال می‌کنند؛ دستوری بی پروفایل وجود ندارد.
 - **اثبات روی Broker.** `scripts/kafka-acl.broker.test.mjs` در Job یکپارچگی CI از خود Broker می‌پرسد: فقط مالک
   می‌نویسد، Consumer فقط اشتراکش را در فضای گروه خودش می‌خواند، DLQ و `.retry` همان‌اند که بالا آمد، اعتبار غلط یا نبودش،
   SASL/PLAIN حتی با گذرواژهٔ درست، و PLAINTEXT رد می‌شوند، هیچ سرویسی Topic نمی‌سازد، و Producerِ Idempotent با همان
