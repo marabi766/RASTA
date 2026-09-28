@@ -30,6 +30,11 @@ function context(overrides: Partial<RequestContext> = {}): RequestContext {
   };
 }
 
+/** The platform operator: `SYSTEM_ADMIN`, acting for the union's organization as in the seed. */
+const operatorContext = (o: Partial<RequestContext> = {}) =>
+  context({ organizationId: 'ORG-UNION-YAZD', roles: ['SYSTEM_ADMIN'], ...o });
+
+/** A union administrator — not a platform operator (Q-80): its own subtree, nothing more. */
 const unionContext = (o: Partial<RequestContext> = {}) =>
   context({ organizationId: 'ORG-UNION-YAZD', roles: ['UNION_ADMIN'], ...o });
 
@@ -251,7 +256,7 @@ describe('subtree visibility', () => {
       childCount: 0,
     } as never);
 
-    const result = await runWithContext(unionContext(), () => h.service.get(DEH2));
+    const result = await runWithContext(operatorContext(), () => h.service.get(DEH2));
     expect(result.id).toBe(DEH2);
   });
 
@@ -268,11 +273,116 @@ describe('subtree visibility', () => {
 
   it('does not restrict a list for a platform operator', async () => {
     const h = harness();
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.list({ limit: 25, cursor: undefined } as never),
     );
 
     expect(h.repository.list).toHaveBeenCalledWith(expect.anything(), null);
+  });
+});
+
+describe('UNION_ADMIN is not a platform operator (docs/24 Q-80)', () => {
+  // In the seeded tree the union is a leaf beside the county, so every other
+  // organization here is outside its subtree. Until 2026-09-28 each of these
+  // was answered as for SYSTEM_ADMIN.
+  const refusal = (run: () => Promise<unknown>) =>
+    runWithContext(unionContext(), () =>
+      run().then(
+        () => 'ALLOWED',
+        (e: RastaError) => e.code,
+      ),
+    );
+
+  it('reads a dehyari beside it as 404 — never 403, never the record', async () => {
+    const h = harness();
+    h.repository.findDetailById.mockResolvedValue({
+      ...orgRow(DEH2),
+      locations: [],
+      contacts: [],
+      childCount: 0,
+    } as never);
+    expect(await refusal(() => h.service.get(DEH2))).toBe('NOT_FOUND');
+    expect(h.repository.findDetailById).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['children', (h: ReturnType<typeof harness>) => h.service.children(COUNTY)],
+    ['subtree', (h: ReturnType<typeof harness>) => h.service.subtree(PROVINCE)],
+    ['ancestors', (h: ReturnType<typeof harness>) => h.service.ancestors(DEH1)],
+    ['effective policies', (h: ReturnType<typeof harness>) => h.service.effectivePolicies(DEH1)],
+  ])('answers 404 for the %s of an organization outside it', async (_label, run) => {
+    expect(await refusal(() => run(harness()))).toBe('NOT_FOUND');
+  });
+
+  it('scopes a list and a radius search to its own organization', async () => {
+    const h = harness();
+    await runWithContext(unionContext(), async () => {
+      await h.service.list({ limit: 25, cursor: undefined } as never);
+      await h.service.nearby({ lat: 31.9, lng: 54.3, radiusKm: 10, limit: 10 } as never);
+    });
+    expect(h.repository.list).toHaveBeenCalledWith(expect.anything(), 'ORG-UNION-YAZD');
+    expect(h.repository.findNearby).toHaveBeenCalledWith(expect.anything(), 'ORG-UNION-YAZD');
+  });
+
+  it.each([
+    ['PATCH', (h: ReturnType<typeof harness>) => h.service.update(COUNTY, { name: 'x' } as never)],
+    [
+      'a child beneath it',
+      (h: ReturnType<typeof harness>) =>
+        h.service.create({ name: 'x', type: 'DEHYARI', parentId: COUNTY, metadata: {} } as never),
+    ],
+    [
+      'governance policy',
+      (h: ReturnType<typeof harness>) =>
+        h.service.setPolicy(DEH1, {
+          key: 'approval.threshold',
+          value: 1,
+          inheritable: true,
+        } as never),
+    ],
+  ])('answers 404 to %s on an organization outside it, and writes nothing', async (_label, run) => {
+    const h = harness();
+    h.repository.findById.mockImplementation(async (id: string) => orgRow(id) as never);
+    expect(await refusal(() => run(h))).toBe('NOT_FOUND');
+    expect(h.enqueued).toEqual([]);
+  });
+
+  it.each([
+    [
+      'a new root',
+      (h: ReturnType<typeof harness>) =>
+        h.service.create({ name: 'x', type: 'UNION', metadata: {} } as never),
+    ],
+    [
+      'a move — even of itself',
+      (h: ReturnType<typeof harness>) =>
+        h.service.move('ORG-UNION-YAZD', { parentId: PROVINCE, reason: 'x' } as never),
+    ],
+    [
+      'a status change — even of itself',
+      (h: ReturnType<typeof harness>) =>
+        h.service.changeStatus('ORG-UNION-YAZD', { status: 'SUSPENDED', reason: 'x' } as never),
+    ],
+  ])('refuses %s with 403, before looking anything up', async (_label, run) => {
+    const h = harness();
+    expect(await refusal(() => run(h))).toBe('FORBIDDEN');
+    expect(h.repository.findById).not.toHaveBeenCalled();
+    expect(h.repository.transaction).not.toHaveBeenCalled();
+    expect(h.enqueued).toEqual([]);
+  });
+
+  it('still reads and writes its own organization', async () => {
+    const h = harness();
+    h.repository.findDetailById.mockResolvedValue({
+      ...orgRow('ORG-UNION-YAZD'),
+      locations: [],
+      contacts: [],
+      childCount: 0,
+    } as never);
+    h.repository.findById.mockImplementation(async (id: string) => orgRow(id) as never);
+    await expect(
+      runWithContext(unionContext(), () => h.service.get('ORG-UNION-YAZD')),
+    ).resolves.toMatchObject({ id: 'ORG-UNION-YAZD' });
   });
 });
 
@@ -282,7 +392,7 @@ describe('hierarchy integrity', () => {
     h.repository.findById.mockResolvedValue(orgRow(COUNTY) as never);
 
     await expect(
-      runWithContext(unionContext(), () =>
+      runWithContext(operatorContext(), () =>
         h.service.move(COUNTY, { parentId: COUNTY, reason: 'nonsense' }),
       ),
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
@@ -294,7 +404,7 @@ describe('hierarchy integrity', () => {
     const h = harness();
     h.repository.findById.mockResolvedValue(orgRow(PROVINCE, { depth: 0 }) as never);
 
-    const error = await runWithContext(unionContext(), () =>
+    const error = await runWithContext(operatorContext(), () =>
       h.service.move(PROVINCE, { parentId: DEH1, reason: 'cycle attempt' }).catch((e) => e),
     );
 
@@ -309,7 +419,7 @@ describe('hierarchy integrity', () => {
       h.repository.client as unknown as { organization: { update: jest.Mock } }
     ).organization.update.mockResolvedValue(orgRow(DEH2, { parentId: PROVINCE }));
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.move(DEH2, { parentId: PROVINCE, reason: 'county dissolved' }),
     );
 
@@ -348,7 +458,7 @@ describe('creation', () => {
     // DEH1 is at depth 2, so its child would be at 3.
     const h = harness({}, { maxDepth: 2 });
 
-    const error = await runWithContext(unionContext(), () =>
+    const error = await runWithContext(operatorContext(), () =>
       h.service
         .create({ name: 'خیلی عمیق', type: 'DEHYARI', parentId: DEH1, metadata: {} } as never)
         .catch((e) => e),
@@ -365,7 +475,7 @@ describe('creation', () => {
       h.repository.client as unknown as { organization: { create: jest.Mock } }
     ).organization.create.mockResolvedValue(orgRow('ORG_NEW'));
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.create({
         name: 'دهیاری تازه',
         type: 'DEHYARI',
@@ -418,7 +528,7 @@ describe('governance policy', () => {
       effectiveTo: null,
     });
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.setPolicy(PROVINCE, {
         key: 'approval.project.required',
         value: false,
@@ -448,7 +558,7 @@ describe('status changes', () => {
     h.repository.cascadeStatus.mockResolvedValue([DEH1, DEH2]);
     h.tx.organization.findFirstOrThrow.mockResolvedValue(orgRow(COUNTY, { status: 'SUSPENDED' }));
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.changeStatus(COUNTY, { status: 'SUSPENDED', reason: 'under investigation' }),
     );
 
@@ -476,7 +586,7 @@ describe('status changes', () => {
     h.repository.findById.mockResolvedValue(orgRow(COUNTY, { status: 'SUSPENDED' }) as never);
     h.tx.organization.findFirstOrThrow.mockResolvedValue(orgRow(COUNTY));
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.changeStatus(COUNTY, { status: 'ACTIVE', reason: 'cleared' }),
     );
 
@@ -495,7 +605,7 @@ describe('status changes', () => {
     h.repository.findById.mockResolvedValue(orgRow(DEH1, { status: 'DEACTIVATED' }) as never);
 
     await expect(
-      runWithContext(unionContext(), () =>
+      runWithContext(operatorContext(), () =>
         h.service.changeStatus(DEH1, { status: 'ACTIVE', reason: 'oops' }),
       ),
     ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
@@ -508,7 +618,7 @@ describe('status changes', () => {
     h.repository.findById.mockResolvedValue(orgRow(DEH1, { status: 'SUSPENDED' }) as never);
     h.tx.organization.findFirstOrThrow.mockResolvedValue(orgRow(DEH1));
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.changeStatus(DEH1, { status: 'ACTIVE', reason: 'cleared' }),
     );
 
@@ -530,7 +640,7 @@ describe('status changes', () => {
     h.repository.findById.mockResolvedValue(orgRow(DEH1, { status: 'SUSPENDED' }) as never);
     h.repository.compareAndSetStatus.mockResolvedValue(0);
 
-    const error = await runWithContext(unionContext(), () =>
+    const error = await runWithContext(operatorContext(), () =>
       h.service.changeStatus(DEH1, { status: 'ACTIVE', reason: 'stale' }).catch((e) => e),
     );
 
@@ -547,7 +657,7 @@ describe('status changes', () => {
     h.repository.compareAndSetStatus.mockResolvedValue(0);
 
     await expect(
-      runWithContext(unionContext(), () =>
+      runWithContext(operatorContext(), () =>
         h.service.changeStatus(COUNTY, { status: 'SUSPENDED', reason: 'stale' }),
       ),
     ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
@@ -564,7 +674,7 @@ describe('status changes', () => {
         chainOf(id, { [PROVINCE]: ancestorStatus }, o.includeSelf),
       );
 
-      const error = await runWithContext(unionContext(), () =>
+      const error = await runWithContext(operatorContext(), () =>
         h.service.changeStatus(DEH1, { status: 'ACTIVE', reason: 'cleared' }).catch((e) => e),
       );
 
@@ -584,7 +694,7 @@ describe('status changes', () => {
     h.repository.findById.mockResolvedValue(orgRow(DEH1, { status: 'SUSPENDED' }) as never);
     h.tx.organization.findFirstOrThrow.mockResolvedValue(orgRow(DEH1));
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.changeStatus(DEH1, { status: 'ACTIVE', reason: 'cleared' }),
     );
 
@@ -602,7 +712,7 @@ describe('status changes', () => {
     h.tx.organization.findFirstOrThrow.mockResolvedValue(orgRow(DEH1, { status: 'SUSPENDED' }));
 
     await expect(
-      runWithContext(unionContext(), () =>
+      runWithContext(operatorContext(), () =>
         h.service.changeStatus(DEH1, { status: 'SUSPENDED', reason: 'own reasons' }),
       ),
     ).resolves.toMatchObject({ status: 'SUSPENDED' });
@@ -623,7 +733,7 @@ describe('nearby visibility', () => {
 
   it('does not restrict a platform operator', async () => {
     const h = harness();
-    await runWithContext(unionContext(), () => h.service.nearby(query));
+    await runWithContext(operatorContext(), () => h.service.nearby(query));
 
     expect(h.repository.findNearby).toHaveBeenCalledWith(query, null);
   });
@@ -661,7 +771,7 @@ describe('move integrity', () => {
     );
     h.repository.deepestDepthUnder.mockResolvedValue(2);
 
-    const error = await runWithContext(unionContext(), () =>
+    const error = await runWithContext(operatorContext(), () =>
       h.service.move(COUNTY, { parentId: 'ORG-UNION-YAZD', reason: 'too deep' }).catch((e) => e),
     );
 
@@ -679,7 +789,7 @@ describe('move integrity', () => {
     h.tx.organization.update.mockResolvedValue(orgRow(COUNTY, { parentId: 'ORG-UNION-YAZD' }));
 
     // UNION is at depth 1: county lands at 2, its leaves at 3.
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.move(COUNTY, { parentId: 'ORG-UNION-YAZD', reason: 'fits' }),
     );
     expect(h.repository.rewriteSubtreePath).toHaveBeenCalledTimes(1);
@@ -700,7 +810,7 @@ describe('move integrity', () => {
     });
     h.tx.organization.update.mockResolvedValue(orgRow(DEH2, { parentId: PROVINCE }));
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.move(DEH2, { parentId: PROVINCE, reason: 'order' }),
     );
 
@@ -719,7 +829,7 @@ describe('move integrity', () => {
     ]);
 
     await expect(
-      runWithContext(unionContext(), () =>
+      runWithContext(operatorContext(), () =>
         h.service.move(DEH2, { parentId: 'ORG-UNION-YAZD', reason: 'ring' }),
       ),
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
@@ -732,7 +842,7 @@ describe('move integrity', () => {
       chainOf(id, { 'ORG-UNION-YAZD': 'SUSPENDED' }, o.includeSelf),
     );
 
-    const error = await runWithContext(unionContext(), () =>
+    const error = await runWithContext(operatorContext(), () =>
       h.service.move(DEH2, { parentId: 'ORG-UNION-YAZD', reason: 'x' }).catch((e) => e),
     );
 
@@ -748,7 +858,7 @@ describe('move integrity', () => {
     h.repository.statusesUnder.mockResolvedValue(['SUSPENDED', 'DEACTIVATED']);
     h.tx.organization.update.mockResolvedValue(orgRow(DEH2));
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.move(DEH2, { parentId: 'ORG-UNION-YAZD', reason: 'x' }),
     );
     expect(h.repository.rewriteSubtreePath).toHaveBeenCalledTimes(1);
@@ -758,7 +868,7 @@ describe('move integrity', () => {
     const h = harness();
     h.tx.organization.update.mockResolvedValue(orgRow(DEH2, { parentId: PROVINCE }));
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.move(DEH2, { parentId: PROVINCE, reason: 'x' }),
     );
 
@@ -779,7 +889,7 @@ describe('creation beneath a stopped ancestor', () => {
       chainOf(id, statuses, o.includeSelf),
     );
 
-    const error = await runWithContext(unionContext(), () =>
+    const error = await runWithContext(operatorContext(), () =>
       h.service
         .create({ name: 'دهیاری تازه', type: 'DEHYARI', parentId: COUNTY, metadata: {} } as never)
         .catch((e) => e),
@@ -808,7 +918,7 @@ describe('creation beneath a stopped ancestor', () => {
     });
     h.tx.organization.create.mockResolvedValue(orgRow('ORG_NEW'));
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.create({
         name: 'دهیاری تازه',
         type: 'DEHYARI',
@@ -830,7 +940,7 @@ describe('creation beneath a stopped ancestor', () => {
     h.repository.lockAncestorChain.mockResolvedValue([]);
 
     await expect(
-      runWithContext(unionContext(), () =>
+      runWithContext(operatorContext(), () =>
         h.service.create({
           name: 'دهیاری تازه',
           type: 'DEHYARI',
@@ -980,7 +1090,7 @@ describe('governance policy authority and validity', () => {
     const h = harness();
     h.repository.findById.mockResolvedValue(orgRow(PROVINCE) as never);
 
-    const error = await runWithContext(unionContext(), () =>
+    const error = await runWithContext(operatorContext(), () =>
       h.service.setPolicy(PROVINCE, { ...policy, ...dates } as never).catch((e) => e),
     );
 
@@ -1000,7 +1110,7 @@ describe('governance policy authority and validity', () => {
     const inAMonth = new Date(Date.now() + 30 * 86_400_000);
 
     await expect(
-      runWithContext(unionContext(), () =>
+      runWithContext(operatorContext(), () =>
         h.service.setPolicy(PROVINCE, {
           ...policy,
           effectiveFrom: inAYear.toISOString(),
@@ -1016,7 +1126,7 @@ describe('governance policy authority and validity', () => {
     withPolicyRow(h);
     const inAYear = new Date(Date.now() + 365 * 86_400_000).toISOString();
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.setPolicy(PROVINCE, { ...policy, effectiveTo: inAYear } as never),
     );
 
@@ -1054,7 +1164,7 @@ describe('reactivation reads the tree under the hierarchy lock', () => {
     h.repository.findById.mockResolvedValue(orgRow(DEH1, { status: 'SUSPENDED' }) as never);
     h.tx.organization.findFirstOrThrow.mockResolvedValue(orgRow(DEH1));
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.changeStatus(DEH1, { status: 'ACTIVE', reason: 'cleared' }),
     );
 
@@ -1070,7 +1180,7 @@ describe('reactivation reads the tree under the hierarchy lock', () => {
     h.repository.findById.mockResolvedValue(orgRow(DEH1) as never);
     h.tx.organization.findFirstOrThrow.mockResolvedValue(orgRow(DEH1, { status: 'SUSPENDED' }));
 
-    await runWithContext(unionContext(), () =>
+    await runWithContext(operatorContext(), () =>
       h.service.changeStatus(DEH1, { status: 'SUSPENDED', reason: 'x' }),
     );
 
@@ -1170,7 +1280,7 @@ describe('writes are authorized inside the transaction, after the hierarchy lock
     h.repository.findById.mockResolvedValue(orgRow(DEH1) as never);
     h.tx.organization.update.mockResolvedValue(orgRow(DEH1));
 
-    await runWithContext(unionContext(), () => h.service.update(DEH1, { name: 'n' } as never));
+    await runWithContext(operatorContext(), () => h.service.update(DEH1, { name: 'n' } as never));
 
     expect(h.repository.lockHierarchy).not.toHaveBeenCalled();
   });
@@ -1185,14 +1295,14 @@ describe('ancestors stop at the caller visible root', () => {
 
   it('passes null — the whole chain — for a platform operator', async () => {
     const h = harness();
-    await runWithContext(unionContext(), () => h.service.ancestors(DEH1));
+    await runWithContext(operatorContext(), () => h.service.ancestors(DEH1));
     expect(h.repository.findAncestors).toHaveBeenCalledWith(DEH1, null, h.tx);
   });
 });
 
 describe('policy timeline', () => {
   const setImmediate = (h: Harness) =>
-    runWithContext(unionContext(), () =>
+    runWithContext(operatorContext(), () =>
       h.service.setPolicy(PROVINCE, {
         key: 'approval.project.required',
         value: true,
@@ -1341,7 +1451,7 @@ describe('reads check visibility and read data in one snapshot', () => {
 describe('effectivePolicies evaluates one instant', () => {
   it('uses the same timestamp for both ends of the period test', async () => {
     const h = harness();
-    await runWithContext(unionContext(), () => h.service.effectivePolicies(DEH1));
+    await runWithContext(operatorContext(), () => h.service.effectivePolicies(DEH1));
 
     const where = h.tx.organizationPolicy.findMany.mock.calls[0]?.[0]?.where as {
       effectiveFrom: { lte: Date };
@@ -1362,7 +1472,7 @@ describe('a dated policy that expires while waiting for its locks', () => {
       () => new Promise((resolve) => setTimeout(resolve, 120)),
     );
 
-    const error = await runWithContext(unionContext(), () =>
+    const error = await runWithContext(operatorContext(), () =>
       h.service
         .setPolicy(PROVINCE, {
           key: 'approval.project.required',

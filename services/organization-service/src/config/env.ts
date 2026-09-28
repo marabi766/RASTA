@@ -40,7 +40,14 @@ export const organizationEnvSchema = baseEnvSchema
      * UNION_ADMIN, the default below, as the final decision. It stays
      * configuration so a later decision needs no code change. SYSTEM_ADMIN is
      * honoured regardless, as everywhere else. A role that is not a platform
-     * operator is additionally confined to its own subtree.
+     * operator is additionally confined to its own subtree — and since
+     * `docs/24` Q-80 (provisional, 2026-09-28) that includes UNION_ADMIN: the
+     * union sets policy for its own organization and what is beneath it.
+     *
+     * This list says **who writes policy**. It never makes a role a platform
+     * operator: that scope is `GLOBAL_ROLES` in `@rasta/nest-common`, a
+     * constant, because it is the trust model rather than a governance
+     * setting (ADR-060 § 2).
      */
     GOVERNANCE_POLICY_SETTER_ROLES: z
       .string()

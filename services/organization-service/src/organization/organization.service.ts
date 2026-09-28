@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
-import { RastaError, RolesGuard, getContext } from '@rasta/nest-common';
+import { GLOBAL_ROLES, RastaError, RolesGuard, getContext } from '@rasta/nest-common';
 import {
   OrganizationRepository,
   toLabel,
@@ -28,8 +28,19 @@ import type {
   UpdateOrganizationDto,
 } from './dto';
 
-/** Roles that may act across the whole organization tree. */
-const PLATFORM_ROLES = ['SYSTEM_ADMIN', 'UNION_ADMIN'] as const;
+/**
+ * Roles that may act across the whole organization tree: the platform's
+ * global roles (`GLOBAL_ROLES`, ADR-060 § 2) — today `SYSTEM_ADMIN` alone.
+ *
+ * `UNION_ADMIN` is not one of them (`docs/24` Q-80, provisional answer,
+ * 2026-09-28). It used to be listed here, which let a union administrator
+ * acting for its own union read, restructure, suspend and set policy for any
+ * organization in the registry — including the dehyaris beside it, not
+ * beneath it. It now has exactly the scope every other role has: its own
+ * organization and the subtree beneath it. The list is the trust model, not a
+ * business setting, so it is the shared constant, never configuration.
+ */
+const PLATFORM_OPERATOR_ROLES: readonly string[] = GLOBAL_ROLES;
 
 /**
  * Statuses under which nothing beneath may be ACTIVE. Suspension and
@@ -66,10 +77,13 @@ export class OrganizationService {
   // organizationId" rule cannot apply: it would make the hierarchy
   // unreadable. Visibility is subtree-based instead.
   //
-  //   Platform roles          the entire tree.
+  //   SYSTEM_ADMIN            the entire tree (the only platform operator).
   //   Everyone else           their own organization and everything beneath
-  //                           it. A county sees its dehyaris; a dehyari sees
-  //                           itself; neither sees a sibling.
+  //   — UNION_ADMIN included  it. A county sees its dehyaris; a dehyari sees
+  //     (Q-80)                itself; neither sees a sibling. Creating a
+  //                           root, moving and changing status are the
+  //                           platform operator's alone, refused before any
+  //                           lookup.
   //
   // Both checks answer NOT_FOUND rather than FORBIDDEN for anything outside
   // that subtree, so identifiers cannot be probed for existence.
@@ -77,7 +91,7 @@ export class OrganizationService {
 
   private isPlatformOperator(): boolean {
     const { roles } = getContext();
-    return PLATFORM_ROLES.some((role) => roles.includes(role));
+    return PLATFORM_OPERATOR_ROLES.some((role) => roles.includes(role));
   }
 
   /**
