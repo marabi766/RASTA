@@ -490,8 +490,9 @@ describe('payment authorisation atomicity (real database)', () => {
       (error: unknown) => error,
     )) as { code: string; internalContext?: unknown };
     expect(refused).toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
-    // S-09 (M2): a digest of the key reaches the log, never the key.
-    expect(JSON.stringify(refused.internalContext)).not.toContain(key);
+    // S-09 (M2): the key never reaches the log — nor, since the shared helper
+    // stopped taking it, anything derived from it.
+    expect(JSON.stringify(refused.internalContext ?? {})).not.toContain(key);
     expect(credit).not.toHaveBeenCalled();
     expect((await intentsOf(organizationId))[0]).toMatchObject({
       status: 'AUTHORIZED',

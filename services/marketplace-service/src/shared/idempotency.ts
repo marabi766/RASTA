@@ -106,12 +106,14 @@ export class IdempotencyStore {
     }
 
     if (existing.requestHash !== requestHash) {
-      throw RastaError.idempotencyKeyReused(key);
+      throw RastaError.idempotencyKeyReused();
     }
 
+    // Nothing of the key in the context the exception filter logs (S-09): the
+    // endpoint and the request's correlationId locate the clash.
     if (existing.state === 'IN_PROGRESS') {
       throw new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
-        internalContext: { endpoint, key, retryAfterSeconds: 1 },
+        internalContext: { endpoint, retryAfterSeconds: 1 },
       });
     }
 

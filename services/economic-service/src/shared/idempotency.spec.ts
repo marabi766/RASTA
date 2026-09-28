@@ -1,5 +1,8 @@
-import { createSystemContext, runWithContext } from '@rasta/nest-common';
-import { IdempotencyStore, hashRequestBody, keyDigest, targeted } from './idempotency';
+import { createHash } from 'node:crypto';
+import type { ArgumentsHost } from '@nestjs/common';
+import type { Logger } from '@rasta/logging';
+import { AllExceptionsFilter, createSystemContext, runWithContext } from '@rasta/nest-common';
+import { IdempotencyStore, hashRequestBody, targeted } from './idempotency';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { EconomicEnv } from '../config/env';
 
@@ -210,34 +213,66 @@ describe('IdempotencyStore.claim — who may proceed', () => {
     );
   });
 
-  // Codex round 3 on #121, M2: the key is client text and `internalContext`
-  // reaches the debug log (AGENTS.md S-09).
-  const RAW_KEY = 'client-chosen-key-with-anything-in-it';
+  // Codex round 3 on #121, M2, and the review of #135: the key is client
+  // text, and `internalContext` reaches the debug log (AGENTS.md S-09). Neither
+  // refusal carries the key or anything derived from it — not even the
+  // truncated SHA-256 this service used to log, which a low-entropy key makes
+  // guessable. Checked through the real exception filter: what it logs and
+  // what it answers.
+  const RAW_KEY = 'SENTINEL-client-chosen-key-4471';
+  const OLD_DIGEST = createHash('sha256').update(RAW_KEY).digest('hex').slice(0, 16);
+
+  function throughTheFilter(error: unknown): { logged: string; body: string } {
+    const lines: unknown[] = [];
+    const record = (...args: unknown[]) => {
+      lines.push(args);
+    };
+    const logger = { debug: record, warn: record, error: record } as unknown as Logger;
+    let body: unknown;
+    const response = {
+      status: () => response,
+      json: (sent: unknown) => {
+        body = sent;
+      },
+    };
+    new AllExceptionsFilter(logger).catch(error, {
+      switchToHttp: () => ({ getResponse: () => response }),
+    } as unknown as ArgumentsHost);
+    const dump = (value: unknown) =>
+      JSON.stringify(value, (_key, field: unknown) =>
+        field instanceof Error
+          ? { ...field, name: field.name, message: field.message, stack: field.stack }
+          : field,
+      );
+    return { logged: dump(lines), body: dump(body) };
+  }
 
   it.each([
     ['reused with another body', 'COMPLETED', { other: true }, 'IDEMPOTENCY_KEY_REUSED'],
     ['in flight', 'IN_PROGRESS', {}, 'CONFLICT'],
-  ])('keeps the raw key out of the error when it is %s', async (_case, state, body, code) => {
-    const { store } = storeWith({
-      create: jest.fn().mockRejectedValue(uniqueViolation),
-      findUnique: jest.fn().mockResolvedValue({
-        requestHash: hashRequestBody({}),
-        state,
-        expiresAt: new Date(Date.now() + hour),
-      }),
-    });
+  ])(
+    'keeps the key and its digest out of the error when it is %s',
+    async (_case, state, body, code) => {
+      const { store } = storeWith({
+        create: jest.fn().mockRejectedValue(uniqueViolation),
+        findUnique: jest.fn().mockResolvedValue({
+          requestHash: hashRequestBody({}),
+          state,
+          expiresAt: new Date(Date.now() + hour),
+        }),
+      });
 
-    const error = (await asTenant(() => store.claim('POST /x', RAW_KEY, body)).catch(
-      (thrown: unknown) => thrown,
-    )) as { code: string; internalContext?: unknown };
-    expect(error).toMatchObject({ code });
-    expect(JSON.stringify(error.internalContext)).not.toContain(RAW_KEY);
-    expect(JSON.stringify(error.internalContext)).toContain(keyDigest(RAW_KEY));
-  });
-
-  it('fingerprints a key one way, bounded and stably', () => {
-    expect(keyDigest(RAW_KEY)).toMatch(/^[0-9a-f]{16}$/);
-    expect(keyDigest(RAW_KEY)).toBe(keyDigest(RAW_KEY));
-    expect(keyDigest(RAW_KEY)).not.toBe(keyDigest(`${RAW_KEY}!`));
-  });
+      const error = (await asTenant(() => store.claim('POST /x', RAW_KEY, body)).catch(
+        (thrown: unknown) => thrown,
+      )) as { code: string; internalContext?: unknown };
+      expect(error).toMatchObject({ code });
+      const { logged, body: answered } = throughTheFilter(error);
+      expect(logged).toContain(code); // the line was written
+      for (const text of [JSON.stringify(error.internalContext ?? {}), logged, answered]) {
+        expect(text).not.toContain(RAW_KEY);
+        expect(text).not.toContain('SENTINEL');
+        expect(text).not.toContain(OLD_DIGEST);
+      }
+    },
+  );
 });

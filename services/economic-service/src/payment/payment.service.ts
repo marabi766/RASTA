@@ -23,7 +23,7 @@ import { PAYMENT_PROVIDER } from '../tokens';
 import { SERVICE_NAME } from '../config/env';
 import type { PaymentProvider } from './provider';
 import type { TopUpDto } from './dto';
-import { hashRequestBody, keyDigest } from '../shared/idempotency';
+import { hashRequestBody } from '../shared/idempotency';
 import type { PaymentIntent } from '../generated/prisma';
 
 /**
@@ -406,9 +406,9 @@ export class PaymentService {
     // The whole request, first (Codex round 3 on #121, H2): a retry that
     // changed the instrument was resumed as if it were the original. An intent
     // written before the hash existed has none and is never resumed. The key
-    // itself stays out of the error: only a one-way digest of it (S-09).
+    // itself stays out of the error entirely (S-09).
     if (intent.requestHash !== requestHash) {
-      throw RastaError.idempotencyKeyReused(keyDigest(intent.idempotencyKey));
+      throw RastaError.idempotencyKeyReused();
     }
     if (intent.status === 'CAPTURED') return this.capturedView(intent);
     // Refunded since: answering CAPTURED would describe money that went back
