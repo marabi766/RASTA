@@ -958,4 +958,108 @@ describe('transfer clearance', () => {
       });
     });
   });
+  describe('round 4: the purge runs after the commit, and never waits (#2)', () => {
+    const tombstones = async (assetId: string) =>
+      (
+        await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+          `SELECT count(*)::int AS n FROM asset_transfer_release WHERE asset_id = $1`,
+          assetId,
+        )
+      )[0]!.n;
+
+    const expiredTombstone = (assetId: string) =>
+      prisma.client.$executeRawUnsafe(
+        `INSERT INTO asset_transfer_release (asset_id, fence_id, organization_id, released_at, expires_at)
+         VALUES ($1, $2, $3, now() - interval '2 hours', now() - interval '1 hour')`,
+        assetId,
+        fence(),
+        org.a,
+      );
+
+    /** Another session holds a row lock on this machine's tombstone until released. */
+    async function lockTombstone(assetId: string) {
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+      const done = prisma.client.$transaction(
+        async (tx) => {
+          await tx.$queryRawUnsafe(
+            `SELECT 1 FROM asset_transfer_release WHERE asset_id = $1 FOR UPDATE`,
+            assetId,
+          );
+          locked();
+          await released;
+        },
+        { timeout: 60_000 },
+      );
+      await isLocked;
+      return async () => {
+        release();
+        await done;
+      };
+    }
+
+    const promptly = <T>(promise: Promise<T>, what: string) =>
+      Promise.race([
+        promise,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`${what} waited on another machine's row`)), 5_000),
+        ),
+      ]);
+
+    it('a release completes promptly and records its tombstone while another machine’s expired tombstone is locked; the purge skips only that row', async () => {
+      const held = await machine(org.a);
+      const stale = await machine(org.a);
+      await expiredTombstone(held);
+      await expiredTombstone(stale);
+      const unlock = await lockTombstone(held);
+      try {
+        const assetId = await machine(org.a);
+        await promptly(
+          asService(CLEARANCE_CALLER, org.a, () => clearance.release(assetId, fence())),
+          'the release',
+        );
+
+        expect(await tombstones(assetId)).toBe(1);
+        expect(await tombstones(held)).toBe(1); // locked elsewhere: skipped, not waited for
+        expect(await tombstones(stale)).toBe(0);
+      } finally {
+        await unlock();
+      }
+    });
+
+    it('a clearance completes promptly while another machine’s expired tombstone is locked', async () => {
+      const held = await machine(org.a);
+      await expiredTombstone(held);
+      const unlock = await lockTombstone(held);
+      try {
+        const assetId = await machine(org.a);
+        await expect(promptly(ask(org.a, assetId), 'the clearance')).resolves.toMatchObject({
+          clear: true,
+        });
+        expect(await fenceRow(assetId)).toMatchObject({ organization_id: org.a });
+      } finally {
+        await unlock();
+      }
+    });
+
+    it('a failing purge never fails the release, and the release has already committed', async () => {
+      const failing = Object.assign(Object.create(repository) as MaintenanceRepository, {
+        purgeExpiredReleases: async () => {
+          throw new Error('purge unavailable');
+        },
+      });
+      const assetId = await machine(org.a);
+      const fenceId = fence();
+      await ask(org.a, assetId, fenceId);
+
+      await asService(CLEARANCE_CALLER, org.a, () =>
+        new TransferClearanceService(failing).release(assetId, fenceId),
+      );
+
+      expect(await fenceRow(assetId)).toBeUndefined();
+      expect(await tombstones(assetId)).toBe(1);
+    });
+  });
 });

@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Post, Req } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
 import { AllowService, zodPipe } from '@rasta/nest-common';
 import {
@@ -10,6 +10,7 @@ import {
 import {
   CLEARANCE_CALLER,
   TransferClearanceService,
+  clearanceArrival,
   assetIdParamSchema,
   fenceIdSchema,
   transferClearanceSchema,
@@ -70,10 +71,12 @@ export class FleetTransferClearanceController {
       'lands, the fence is released, or it expires. `409` while another transfer holds a fence.',
   })
   clear(
+    @Req() request: object,
     @Param('assetId', zodPipe(assetIdParamSchema)) assetId: string,
     @Body(zodPipe(transferClearanceSchema)) dto: TransferClearanceDto,
   ): Promise<TransferClearanceView> {
-    return this.clearance.clear(assetId, dto);
+    // The bound runs from arrival, stamped before any guard (review #127 round 4, #1).
+    return this.clearance.clear(assetId, dto, clearanceArrival(request));
   }
 
   @Delete(':assetId/transfer-clearance/:fenceId')

@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type NestMiddleware } from '@nestjs/common';
 import { z } from 'zod';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
 import { FleetRepository } from './fleet.repository';
@@ -56,6 +56,39 @@ export const CLEARANCE_HANDLER_MAX_MS = 60_000;
 /** The monotonic clock the bound is measured on; replaced in tests. */
 export const CLEARANCE_CLOCK = Symbol('TRANSFER_CLEARANCE_CLOCK');
 
+/** Where the arrival stamp is kept on the request; a symbol, so no header or body can set it. */
+const CLEARANCE_ARRIVAL = Symbol('TRANSFER_CLEARANCE_ARRIVAL');
+
+/**
+ * Stamps a clearance request's arrival on this service's monotonic clock, as
+ * the first thing the process does with it (review #127 round 4, #1).
+ *
+ * Nest runs middleware before guards and pipes, so the bound
+ * ({@link CLEARANCE_HANDLER_MAX_MS}) is measured from here, not from the
+ * handler: a request held in the internal-token verification or anywhere else
+ * on the way to `clear()` has already spent that time. What remains unbounded
+ * is a process frozen before its own middleware runs (ADR-062 § 2).
+ */
+@Injectable()
+export class ClearanceArrivalMiddleware implements NestMiddleware {
+  constructor(
+    @Optional()
+    @Inject(CLEARANCE_CLOCK)
+    private readonly clock: () => number = () => performance.now(),
+  ) {}
+
+  use(request: object, _response: unknown, next: () => void): void {
+    (request as Record<symbol, number>)[CLEARANCE_ARRIVAL] = this.clock();
+    next();
+  }
+}
+
+/** The arrival {@link ClearanceArrivalMiddleware} stamped, if it ran for this request. */
+export function clearanceArrival(request: object): number | undefined {
+  const stamp = (request as Record<symbol, unknown>)[CLEARANCE_ARRIVAL];
+  return typeof stamp === 'number' ? stamp : undefined;
+}
+
 /** Bounds on the fence's life, whatever the caller asks for. */
 export const FENCE_TTL_MIN_SECONDS = 30;
 export const FENCE_TTL_MAX_SECONDS = 3600;
@@ -97,6 +130,8 @@ export function assertClearanceCaller(): void {
 
 @Injectable()
 export class TransferClearanceService {
+  private readonly logger = new Logger(TransferClearanceService.name);
+
   constructor(
     private readonly repository: FleetRepository,
     @Optional()
@@ -107,8 +142,16 @@ export class TransferClearanceService {
     private readonly clock: () => number = () => performance.now(),
   ) {}
 
-  async clear(assetId: string, dto: TransferClearanceDto): Promise<TransferClearanceView> {
-    const arrivedAt = this.clock();
+  /**
+   * `arrivedAt` is the request's arrival on {@link CLEARANCE_CLOCK}, stamped by
+   * {@link ClearanceArrivalMiddleware} before any guard; the bound is measured
+   * from it. Without one (a direct call), from now.
+   */
+  async clear(
+    assetId: string,
+    dto: TransferClearanceDto,
+    arrivedAt: number = this.clock(),
+  ): Promise<TransferClearanceView> {
     assertClearanceCaller();
     // A token with no organization is a 403 here, before any query.
     const organizationId = getOrganizationId();
@@ -137,10 +180,21 @@ export class TransferClearanceService {
       throw anotherTransfer();
     }
 
+    try {
+      return await this.fence(assetId, dto, organizationId, arrivedAt);
+    } finally {
+      await this.purgeExpiredReleases();
+    }
+  }
+
+  private fence(
+    assetId: string,
+    dto: TransferClearanceDto,
+    organizationId: string,
+    arrivedAt: number,
+  ): Promise<TransferClearanceView> {
     return this.repository.transaction(async (tx) => {
       await this.repository.lockAssetRef(tx, assetId);
-
-      await this.repository.purgeExpiredReleases(tx);
 
       // Released already: asset-service gave up on this transfer, and its
       // release reached the lock first (review #127 round 2, #2). No fence
@@ -202,6 +256,23 @@ export class TransferClearanceService {
       fenceId,
       FENCE_TTL_MAX_SECONDS,
     );
+    await this.purgeExpiredReleases();
+  }
+
+  /**
+   * Expired tombstones, removed after the request's own transaction has
+   * committed (review #127 round 4, #2). Best effort: a failure is logged and
+   * never fails the clearance or release that triggered it; the next one
+   * tries again.
+   */
+  private async purgeExpiredReleases(): Promise<void> {
+    try {
+      await this.repository.purgeExpiredReleases();
+    } catch (error) {
+      this.logger.warn(
+        `Expired transfer-release tombstones not purged: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 }
 

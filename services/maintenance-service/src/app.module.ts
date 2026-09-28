@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import {
   Module,
   type MiddlewareConsumer,
@@ -45,7 +46,11 @@ import {
   MaintenanceInternalController,
   MaintenanceTransferClearanceController,
 } from './maintenance/internal.controller';
-import { TransferClearanceService } from './maintenance/transfer-clearance';
+import {
+  CLEARANCE_CLOCK,
+  ClearanceArrivalMiddleware,
+  TransferClearanceService,
+} from './maintenance/transfer-clearance';
 import {
   TRANSFER_RECORD_SOURCE,
   TransferRecordClient,
@@ -147,6 +152,9 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
     RequestService,
     MaintenanceFactService,
     TransferClearanceService,
+    // One monotonic clock for the clearance bound, read by the arrival
+    // middleware and the service alike (ADR-062 § 2); a test replaces it.
+    { provide: CLEARANCE_CLOCK, useValue: () => performance.now() },
     RepairOrderService,
     DueAnnouncerService,
     DueScanner,
@@ -297,6 +305,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
+    // First, so a clearance's arrival is stamped before anything else runs
+    // for it — guards and pipes included (ADR-062 § 2).
+    consumer.apply(ClearanceArrivalMiddleware).forRoutes(MaintenanceTransferClearanceController);
     // Middleware rather than an interceptor: it must wrap the guards too, so
     // the auth guard has a context to record the resolved tenant into.
     consumer.apply(RequestContextMiddleware).forRoutes('*');

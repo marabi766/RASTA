@@ -505,8 +505,8 @@ export class MaintenanceRepository {
    * running waits for its fence and removes it. And one that arrives before
    * the clearance has taken the lock at all leaves a tombstone the clearance
    * then finds, so it fences nothing (review #127 round 2, #2). The
-   * tombstone outlives the longest fence; this machine's expired ones are
-   * removed here.
+   * tombstone outlives the longest fence. Expired ones are removed after the
+   * commit, never in here ({@link purgeExpiredReleases}).
    */
   async releaseTransferFence(
     assetId: string,
@@ -516,7 +516,6 @@ export class MaintenanceRepository {
   ): Promise<number> {
     return this.transaction(async (tx) => {
       await this.lockAssetForWork(tx, assetId, 'EXCLUSIVE');
-      await this.purgeExpiredReleases(tx);
       await tx.$executeRaw`
         INSERT INTO asset_transfer_release
           (asset_id, fence_id, organization_id, released_at, expires_at)
@@ -549,20 +548,30 @@ export class MaintenanceRepository {
 
   /**
    * Removes a bounded batch of expired release tombstones, of any machine,
-   * oldest first (review #127 round 3, #1). Called from every release and
-   * clearance, so the table stays as small as the releases of the last hour.
-   * A clearance cannot outlive a tombstone (ADR-062 § 2), so an expired one
-   * protects nothing.
+   * oldest first (review #127 round 3, #1), so the table stays as small as
+   * the releases of the last hour. A clearance cannot outlive a tombstone
+   * (ADR-062 § 2), so an expired one protects nothing.
+   *
+   * Its own short transaction, run after a release or clearance has
+   * committed — never inside one (review #127 round 4, #2). Inside the
+   * per-asset lock, a DELETE of other machines' rows could wait on a row
+   * locked elsewhere: stalling this machine, letting a release time out and
+   * roll back without its tombstone, and ordering locks across machines.
+   * `SKIP LOCKED` leaves a row someone else holds for a later purge, so this
+   * never waits on one either.
    */
-  async purgeExpiredReleases(tx: ExtendedPrismaClient): Promise<number> {
-    return tx.$executeRaw`
-      DELETE FROM asset_transfer_release
-      WHERE (asset_id, fence_id) IN (
-        SELECT asset_id, fence_id FROM asset_transfer_release
-        WHERE expires_at < now()
-        ORDER BY expires_at
-        LIMIT ${RELEASE_PURGE_BATCH}
-      )`;
+  async purgeExpiredReleases(): Promise<number> {
+    return this.transaction(
+      (tx) => tx.$executeRaw`
+        DELETE FROM asset_transfer_release
+        WHERE (asset_id, fence_id) IN (
+          SELECT asset_id, fence_id FROM asset_transfer_release
+          WHERE expires_at < now()
+          ORDER BY expires_at
+          LIMIT ${RELEASE_PURGE_BATCH}
+          FOR UPDATE SKIP LOCKED
+        )`,
+    );
   }
 
   /** Whether this organization released this transfer on this machine, and the tombstone is live. Under the lock. */

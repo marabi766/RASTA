@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import {
   Module,
   type MiddlewareConsumer,
@@ -45,7 +46,11 @@ import {
   FleetInternalController,
   FleetTransferClearanceController,
 } from './fleet/internal.controller';
-import { TransferClearanceService } from './fleet/transfer-clearance';
+import {
+  CLEARANCE_CLOCK,
+  ClearanceArrivalMiddleware,
+  TransferClearanceService,
+} from './fleet/transfer-clearance';
 import {
   TRANSFER_RECORD_SOURCE,
   TransferRecordClient,
@@ -133,6 +138,9 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
     UsageService,
     UsageFactService,
     TransferClearanceService,
+    // One monotonic clock for the clearance bound, read by the arrival
+    // middleware and the service alike (ADR-062 § 2); a test replaces it.
+    { provide: CLEARANCE_CLOCK, useValue: () => performance.now() },
     // ADR-062 § 3b: asset-service, asked whether a transfer was recorded when
     // an assignment meets an expired transfer fence. Its own
     // `InternalTokenService`, from the same secret the guard verifies with.
@@ -249,6 +257,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
+    // First, so a clearance's arrival is stamped before anything else runs
+    // for it — guards and pipes included (ADR-062 § 2).
+    consumer.apply(ClearanceArrivalMiddleware).forRoutes(FleetTransferClearanceController);
     // Middleware rather than an interceptor: it must wrap the guards too, so
     // the auth guard has a context to record the resolved tenant into.
     consumer.apply(RequestContextMiddleware).forRoutes('*');
