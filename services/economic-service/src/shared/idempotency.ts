@@ -137,7 +137,7 @@ export class IdempotencyStore {
     }
 
     if (existing.requestHash !== requestHash) {
-      throw RastaError.idempotencyKeyReused(keyDigest(key));
+      throw RastaError.idempotencyKeyReused();
     }
 
     if (existing.state === 'IN_PROGRESS') throw inFlight(endpoint, key);

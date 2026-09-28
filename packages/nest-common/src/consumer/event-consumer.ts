@@ -280,7 +280,13 @@ export class EventConsumer {
         // reason the producer sets a partition key; processing concurrently
         // inside a partition would throw it away.
         eachMessage: async ({ topic, partition, message }) => {
-          await this.handleMessage(topic, partition, message.value, message.headers);
+          await this.handleMessage(
+            topic,
+            partition,
+            message.value,
+            message.headers,
+            message.offset,
+          );
         },
       });
     } catch (error) {
@@ -319,6 +325,7 @@ export class EventConsumer {
     partition: number,
     value: Buffer | null,
     headers: IHeaders | undefined,
+    offset?: string,
   ): Promise<void> {
     let envelope: EventEnvelope;
 
@@ -331,8 +338,23 @@ export class EventConsumer {
       envelope = { ...parsed, payload: parsed.payload };
     } catch (error) {
       // Unprocessable by construction — no number of retries changes the bytes.
-      this.logger.error(`Unparseable message on ${topic}[${partition}]: ${describe(error)}`);
-      await this.deadLetter(topic, value, headers, DLQ_REASONS.VALIDATION_FAILED, error, 0);
+      //
+      // Never the parser's own message (S-09): Node's JSON.parse quotes a
+      // snippet of the bytes it choked on, and a zod message can repeat a
+      // received value. The log line and the dead-letter header carry fixed
+      // text and metadata only; the dead-lettered message keeps the original
+      // bytes, which is what it is for.
+      const reason = unparseableReason(error, value);
+      const where = `${topic}[${partition}]${offset === undefined ? '' : `@${offset}`}`;
+      this.logger.error(`Unparseable message on ${where}: ${reason}`);
+      await this.deadLetter(
+        topic,
+        value,
+        headers,
+        DLQ_REASONS.VALIDATION_FAILED,
+        new Error(reason),
+        0,
+      );
       return;
     }
 
@@ -505,6 +527,43 @@ export function logField(value: string, max = 64): string {
     (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`,
   );
   return value.length > max ? `"${escaped}"...(${value.length} chars)` : `"${escaped}"`;
+}
+
+/**
+ * Why a message could not be read as an event envelope, in words that contain
+ * nothing from the message itself: fixed text, the body's size, and — for an
+ * envelope that parsed as JSON but failed the schema — each issue's path and
+ * zod code. Paths name schema fields (escaped and bounded all the same);
+ * messages are left out because some repeat the value received.
+ */
+export function unparseableReason(error: unknown, value: Buffer | null): string {
+  if (!value) return 'the message has no body';
+  const size = `${value.length} bytes`;
+  if (isZodError(error)) {
+    const issues = error.issues
+      .slice(0, 5)
+      .map((issue) => `${logField(issue.path.join('.') || '(root)', 48)} ${issue.code}`)
+      .join('; ');
+    const more = error.issues.length > 5 ? `; and ${error.issues.length - 5} more` : '';
+    return `the body is not a valid event envelope (${size}): ${issues}${more}`;
+  }
+  if (error instanceof SyntaxError) return `the body is not valid JSON (${size})`;
+  return `the body could not be read (${size}, ${error instanceof Error ? error.name : 'unknown error'})`;
+}
+
+/**
+ * A zod validation error, recognised by shape rather than `instanceof`: the
+ * envelope schema lives in `@rasta/contracts`, whose zod need not be the same
+ * module instance as this package's.
+ */
+function isZodError(
+  error: unknown,
+): error is { issues: { path: (string | number)[]; code: string }[] } {
+  return (
+    error instanceof Error &&
+    error.name === 'ZodError' &&
+    Array.isArray((error as { issues?: unknown }).issues)
+  );
 }
 
 function describe(error: unknown): string {

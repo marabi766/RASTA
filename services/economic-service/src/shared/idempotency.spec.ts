@@ -214,26 +214,33 @@ describe('IdempotencyStore.claim — who may proceed', () => {
   // reaches the debug log (AGENTS.md S-09).
   const RAW_KEY = 'client-chosen-key-with-anything-in-it';
 
+  // The reuse refusal carries nothing key-derived at all since the shared
+  // helper stopped taking the key; the in-flight one is this service's own
+  // and keeps its digest.
   it.each([
-    ['reused with another body', 'COMPLETED', { other: true }, 'IDEMPOTENCY_KEY_REUSED'],
-    ['in flight', 'IN_PROGRESS', {}, 'CONFLICT'],
-  ])('keeps the raw key out of the error when it is %s', async (_case, state, body, code) => {
-    const { store } = storeWith({
-      create: jest.fn().mockRejectedValue(uniqueViolation),
-      findUnique: jest.fn().mockResolvedValue({
-        requestHash: hashRequestBody({}),
-        state,
-        expiresAt: new Date(Date.now() + hour),
-      }),
-    });
+    ['reused with another body', 'COMPLETED', { other: true }, 'IDEMPOTENCY_KEY_REUSED', false],
+    ['in flight', 'IN_PROGRESS', {}, 'CONFLICT', true],
+  ])(
+    'keeps the raw key out of the error when it is %s',
+    async (_case, state, body, code, digest) => {
+      const { store } = storeWith({
+        create: jest.fn().mockRejectedValue(uniqueViolation),
+        findUnique: jest.fn().mockResolvedValue({
+          requestHash: hashRequestBody({}),
+          state,
+          expiresAt: new Date(Date.now() + hour),
+        }),
+      });
 
-    const error = (await asTenant(() => store.claim('POST /x', RAW_KEY, body)).catch(
-      (thrown: unknown) => thrown,
-    )) as { code: string; internalContext?: unknown };
-    expect(error).toMatchObject({ code });
-    expect(JSON.stringify(error.internalContext)).not.toContain(RAW_KEY);
-    expect(JSON.stringify(error.internalContext)).toContain(keyDigest(RAW_KEY));
-  });
+      const error = (await asTenant(() => store.claim('POST /x', RAW_KEY, body)).catch(
+        (thrown: unknown) => thrown,
+      )) as { code: string; internalContext?: unknown };
+      expect(error).toMatchObject({ code });
+      const context = JSON.stringify(error.internalContext ?? {});
+      expect(context).not.toContain(RAW_KEY);
+      expect(context.includes(keyDigest(RAW_KEY))).toBe(digest);
+    },
+  );
 
   it('fingerprints a key one way, bounded and stably', () => {
     expect(keyDigest(RAW_KEY)).toMatch(/^[0-9a-f]{16}$/);
