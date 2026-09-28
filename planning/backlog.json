@@ -1059,8 +1059,10 @@
       "acceptanceCriteria": [
         "Every service authenticates to Kafka with its own SASL/SCRAM-SHA-512 principal over TLS, and allow.everyone.if.no.acl.found is false",
         "WRITE on each topic is granted only to the principals ADR-061's TOPIC_PRODUCERS names for it, and READ only to declared consumer groups",
-        "CI runs the integration suites against a broker with these ACLs, and a write to another service's topic with the wrong credentials is refused by the broker",
-        "No environment holding real tenant data is deployed without it; the development compose stays plaintext and is marked development-only"
+        "The ACLs are generated from TOPIC_PRODUCERS and TOPIC_CONSUMERS and checked for drift; a consumer reads only under groups prefixed with its own service name and writes only its own dead-letter topic; only the ops-replay principal writes .retry topics and reads dead-letter topics",
+        "CI runs the integration and end-to-end suites against a broker with these ACLs, and the broker itself is shown refusing a write to another service's topic, a read outside a service's subscriptions or group namespace, a wrong or missing credential, PLAINTEXT, and topic creation",
+        "The development compose runs the same authenticated broker as CI (ADR-061 § 3, amendment 2026-09-28): SASL_SSL with a throwaway CA generated inside a container and never committed, credentials from .env, and the generated ACLs applied by pnpm infra:up",
+        "No environment holding real tenant data is deployed without it: in production a service refuses to start without its credential and TLS, and credentials rotate per docs/runbooks/kafka-credential-rotation.md"
       ],
       "dependencies": [],
       "sourceRefs": ["docs/adr/ADR-061-event-provenance.md"],

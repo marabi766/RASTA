@@ -73,6 +73,39 @@
 - **بدیل «امضای Envelope» رد شد** (§ Alternatives): توزیع کلید هر ناشر به هر Consumer، همان مسئلهٔ ADR-020 است با
   سطح بزرگ‌تر؛ ACL همان تضمین را در لایه‌ای می‌دهد که Kafka برایش ساخته شده.
 
+**اصلاحیه 2026-09-28 (RUN-006، تصمیم مدیر پروژه) — Compose توسعه دیگر PLAINTEXT نمی‌ماند.** بند «Compose توسعه
+PLAINTEXT می‌ماند» بالا جایگزین می‌شود: Compose همان Broker احرازشده‌ای را بالا می‌آورد که CI اجرا می‌کند.
+
+- **چرا.** Broker باز در توسعه یعنی آزمونی که روی Topic سرویس دیگری می‌نویسد، یا بیرون از اشتراک اعلام‌شده‌اش
+  می‌خواند، روی ماشین توسعه‌دهنده سبز است و خطای ACL فقط پس از استقرار دیده می‌شود — همان فاصلهٔ «روی ماشین من کار
+  می‌کند» که این ADR برای بستنش است. هزینه‌اش برای توسعه‌دهنده صفر است: چیزی بیش از Docker، Node و pnpm لازم نیست.
+- **یک Broker، دو جا.** `infrastructure/docker/kafka/broker-entrypoint.sh` هم Broker Compose و هم Broker CI
+  (`ci-up.sh`) را راه می‌اندازد، پس از هم دور نمی‌شوند: SASL_SSL با SCRAM-SHA-512 روی هر دو Listener (بیرونی `:9092`،
+  شبکهٔ Docker `:9094`)، Controllerِ KRaft فقط روی Loopback درون Container، `StandardAuthorizer` با
+  `allow.everyone.if.no.acl.found=false`، و ساخت خودکار Topic خاموش.
+- **TLS بی ابزار میزبان.** CA یک‌بارمصرف و گواهی Broker (SAN: `kafka`، `localhost`، `127.0.0.1`) درون Image خود Kafka
+  با `keytool` ساخته می‌شوند (`tls.sh`) — روی Windows هم همان — و کلید خصوصی CA بلافاصله پس از امضا پاک می‌شود. در
+  Volume داکر (`kafka-tls`) می‌مانند و هرگز Commit نمی‌شوند؛ فقط گواهی عمومی CA به مسیر git-ignoredِ
+  `infrastructure/docker/kafka/.tls/ca.pem` کپی می‌شود تا سرویس‌ها و آزمون‌های روی میزبان به آن اعتماد کنند.
+- **Principalها.** یکی برای هر سرویس، به نام `SERVICE_NAME` آن، با گذرواژهٔ `KAFKA_SASL_PASSWORD_<SERVICE>`؛ `admin`
+  فقط برای Bootstrap (ساخت Topic و اعمال ACL) و هرگز در یک سرویس؛ `ops-replay`، **تنها** نویسندهٔ Topicهای `.retry` و
+  **تنها** خوانندهٔ DLQها بیرون از مالکشان (`docs/runbooks/replay-dlq.md`)؛ و سه Principal فقط-توسعه که در مجموعهٔ ACL
+  هیچ محیط دیگری نیستند: `itest-observer` (خواندن همهٔ Topicها زیر گروه‌های `itest-observer.` برای آزمون‌ها)،
+  `kafka-ui` و `kafka-exporter`. گذرواژه‌ها در توسعه مقادیر `.env.example` اند و در CI برای هر اجرا تازه و Mask‌شده.
+- **ACL از قرارداد.** `packages/contracts/src/events/broker-acls.ts` مجموعهٔ ACL را از `TOPIC_PRODUCERS` و
+  `TOPIC_CONSUMERS` می‌سازد (`pnpm kafka:acl:generate` ← `broker-acls.json` و `principals.txt`) و آزمونی Drift فایل
+  Commitشده را با قرارداد می‌سنجد: مالک `WRITE` روی Topic خودش؛ Consumer اعلام‌شده `READ` روی Topicهای مشترکش و
+  `.retry` آن‌ها، `READ` روی گروه‌های PREFIXED `<service>.`، و `WRITE` فقط روی DLQ خودش؛ هیچ Principalی جز `admin`
+  Topic نمی‌سازد. `scripts/kafka-acl.mjs apply` Broker را دقیقاً به همین مجموعه می‌رساند (کم‌ها را می‌افزاید، هر ALLOW
+  دیگر را حذف می‌کند، و نتیجه را بازخوانی و مقایسه می‌کند)؛ `pnpm infra:up` و `ci-up.sh` آن را اجرا می‌کنند.
+- **اثبات روی Broker.** `scripts/kafka-acl.broker.test.mjs` در Job یکپارچگی CI از خود Broker می‌پرسد: فقط مالک
+  می‌نویسد، Consumer فقط اشتراکش را در فضای گروه خودش می‌خواند، DLQ و `.retry` همان‌اند که بالا آمد، اعتبار غلط یا نبودش
+  و PLAINTEXT رد می‌شوند، هیچ سرویسی Topic نمی‌سازد، و Producerِ Idempotent با همان `WRITE` کار می‌کند. همهٔ آزمون‌های
+  یکپارچگی و E2E با همین Broker اجرا می‌شوند، هر کدام با اعتبار Principalی که نقشش را بازی می‌کند.
+- **Gate استقرار سر جایش است.** برای هر محیط غیرتوسعه همین قواعد با CA واقعی و Secretهای مدیریت‌شدهٔ استقرار لازم است؛
+  سرویس در `NODE_ENV=production` بی اعتبار و TLS بالا نمی‌آید (RUN-006 PR A). چرخش گذرواژه‌ها:
+  `docs/runbooks/kafka-credential-rotation.md`.
+
 ### ۴. Consumerی که از رویداد **پول** می‌سازد، واقعیت را از منبع می‌پرسد
 
 بندهای ۲ و ۳ ناشر را احراز می‌کنند؛ آنچه ناشرِ احرازشده ادعا می‌کند را نه. برای اثر مالی این کافی نیست: یک باگ در
@@ -225,6 +258,10 @@ _ترتیب اجرا طبق تصمیم مدیر پروژه: ۳ ← ۱ ← ۲._
 
 **جدا از این سه PR، تصمیم استقرار:** SASL/SCRAM و ACL برای هر محیط غیرتوسعه، و Broker با ACL در CI. مالکش باید
 مدیر پروژه تعیین کند؛ این ADR فقط شرط Gate بودنش را تثبیت می‌کند.
+
+**وضعیت RUN-006 (§ ۳):** PR A (#128) — `TOPIC_CONSUMERS`، پیکربندی SASL/TLS هر سرویس از محیط و رد راه‌اندازی بی اعتبار
+در تولید؛ PR B (`chore/kafka-sasl-acl-broker`) — Broker احرازشده با ACL تولیدشده در CI و Compose، طبق اصلاحیهٔ
+2026-09-28 بالا.
 
 ## تصمیم مدیر پروژه — 2026-09-25
 

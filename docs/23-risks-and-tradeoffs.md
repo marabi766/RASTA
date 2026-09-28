@@ -739,6 +739,28 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   پروژه ثبت می‌کند.
 - **اولویت:** متوسط — شرط روشن‌کردن Consumer
 - **ثبت‌شده:** 2026-09-26 · **به‌روز:** 2026-09-27 (بازبینی Codex روی #126، یافتهٔ ۱)
+- **شاهد RUN-006 برای راه (۱) — 2026-09-28:** Broker احرازشدهٔ CI و Compose (RUN-006 PR B) اکنون فقط به
+  `marketplace-service` اجازهٔ نوشتن روی `rasta.marketplace.v1` می‌دهد، و `scripts/kafka-acl.broker.test.mjs` در CI رد
+  نوشتن `supplier-service`، `economic-service` و `ops-replay` روی آن را از خود Broker نشان می‌دهد. شرط برداشتن Gate
+  **SASL به‌همراه ACL هر Topic** است، **نه SASL به‌تنهایی**: با SASL بی ACL هر Principal احرازشده‌ای می‌تواند روی همین
+  Topic بنویسد و «احراز» همان «هم‌خوانی» می‌ماند. تغییر `brokerConnectionIsAuthenticated` (در
+  `services/supplier-service/src/config/env.ts`) با مالک supplier-service است و در این PR نیست.
+
+### D-037 · بازپخش DLQ ابزار ندارد و هیچ Consumerی `.retry` را نمی‌خواند
+
+- **چه چیزی:** `docs/runbooks/replay-dlq.md` بازپخش را با `replay-dlq.js` شرح می‌داد که هرگز ساخته نشد. RUN-006 مسیر
+  مجاز را بست: فقط Principal `ops-replay` DLQ را می‌خواند و فقط او روی `<topic>.retry` می‌نویسد؛ هیچ‌کس جز ناشر روی Topic
+  اصلی نمی‌نویسد. `TOPIC_CONSUMERS` و ACLها به هر Consumer اجازهٔ خواندن `.retry` Topicهای مشترکش را می‌دهند، اما هیچ
+  `EventConsumer`ی امروز `.retry` را Subscribe نمی‌کند.
+- **چرا:** بازپخش پیش از RUN-006 هم ابزار نداشت؛ ACL فقط نشان داد که مسیرِ «نوشتن دوباره روی Topic اصلی» که Runbook
+  فرض می‌کرد، همان جعل ناشر است که ADR-061 می‌بندد.
+- **ریسک:** پیامی که به DLQ می‌رود تا ساخت ابزار فقط با بازسازی اثرش از مسیر عادی سرویس مالک جبران می‌شود؛ وسوسهٔ دور
+  زدن با اعتبار یک سرویس. Broker آن را رد می‌کند، اما هزینهٔ عملیاتی می‌ماند.
+- **رفع:** (۱) `EventConsumer` هر Topic مشترک را همراه `.retry` آن Subscribe کند (بررسی ناشر § ۲ همان‌جا اجرا می‌شود)؛
+  (۲) ابزار بازپخش با `ops-replay`: خواندن از DLQ، `--dry-run` پیش‌فرض، نوشتن فقط روی `<topic>.retry`، و هرگز خودکار
+  برای رویداد مالی. تصمیم و مالک با مدیر پروژه.
+- **اولویت:** متوسط
+- **ثبت‌شده:** 2026-09-28
 
 ## ۲۳٫۶ ثبت بدهی معماری
 

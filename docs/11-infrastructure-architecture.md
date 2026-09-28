@@ -104,9 +104,10 @@ Production: **PgBouncer** در حالت Transaction Pooling جلوی Cluster —
 **تنظیمات Consumer:** `enable.auto.commit=false` (Commit دستی پس از پردازش موفق) ·
 `isolation.level=read_committed` · `max.poll.records=100`.
 
-**MVP → PRODUCTION.** MVP: PLAINTEXT در شبکه داخلی. Production: **SASL/SCRAM + TLS**
-با ACL به‌ازای سرویس — هر سرویس فقط روی Topicهای خودش می‌نویسد. این کنترل تهدید
-Event Spoofing (P1 در Threat Model) است.
+**MVP → PRODUCTION.** از 2026-09-28 (RUN-006، ADR-061 § ۳ اصلاحیه) Broker توسعه و CI هم **SASL/SCRAM + TLS** با
+ACL به‌ازای سرویس دارند — هر سرویس فقط روی Topicهای خودش می‌نویسد و فقط اشتراکش را می‌خواند؛ CA آن‌ها یک‌بارمصرف است.
+Production همین قواعد را با CA واقعی و Secretهای مدیریت‌شده می‌خواهد. این کنترل تهدید Event Spoofing (P1 در Threat
+Model) است.
 
 ---
 
@@ -270,7 +271,7 @@ Data Layer  ── NetworkPolicy: فقط از سرویس مالک همان پا�
 | -------------- | --------------------------------------- | --------------------------------------------------- |
 | PostgreSQL     | تک‌گره، ۱۶ DB منطقی                     | Primary + Standby، PgBouncer، Cluster جدا برای مالی |
 | Redis          | تک‌گره                                  | Sentinel/Cluster با AOF                             |
-| Kafka          | تک‌گره KRaft، PLAINTEXT                 | ۳ گره، RF=3، **SASL/SCRAM + TLS + ACL**             |
+| Kafka          | تک‌گره KRaft، SASL_SSL + ACL (RUN-006)  | ۳ گره، RF=3، **SASL/SCRAM + TLS + ACL**             |
 | Keycloak       | `start-dev`، تک‌گره                     | حالت Production، TLS، چند Replica، MFA اجباری       |
 | Temporal       | `auto-setup`، تک‌گره                    | Cluster، Namespace جدا                              |
 | Object Storage | MinIO تک‌گره                            | S3 مدیریت‌شده یا MinIO توزیع‌شده، Versioning        |

@@ -2793,6 +2793,12 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
   **به‌روزرسانی 2026-09-27:** `supplier-service` مصرف‌کنندهٔ `rasta.marketplace.v1` است (Consumer `supplier-service.performance`،
   ADR-052 گام ۵، #126) — شش رویداد، فقط ثبت واقعیت عملکرد، **پیش‌فرض خاموش** تا احراز Broker (RUN-006، D-036). ۴۹ Topic از قبل در Kafka ساخته شده
   (`infrastructure/docker/kafka/create-topics.sh`) — بقیه خالی منتظرند.
+  **به‌روزرسانی 2026-09-28 (RUN-006، PR A #128 + PR B `chore/kafka-sasl-acl-broker`):** Broker توسعه و CI **احراز و
+  مجوزدهی می‌کند** — SASL_SSL با SCRAM-SHA-512، یک Principal برای هر سرویس، `allow.everyone.if.no.acl.found=false`، و
+  ACLهای تولیدشده از `TOPIC_PRODUCERS` و `TOPIC_CONSUMERS` (`infrastructure/docker/kafka/broker-acls.json`، ۱۶ Principal،
+  ۱۶۷ Binding). فقط مالک روی Topicش می‌نویسد؛ Consumer فقط اشتراکش را زیر گروه‌های `<service>.` می‌خواند؛ فقط
+  `ops-replay` روی `.retry` می‌نویسد و DLQها را می‌خواند. ADR-061 § ۳ اصلاحیهٔ 2026-09-28. **شکاف باز:** ابزار بازپخش DLQ
+  وجود ندارد و هیچ Consumerی `.retry` را Subscribe نمی‌کند (D-037).
 - کاتالوگ کامل رویدادها: [`docs/events/README.md`](docs/events/README.md) —
   این جلسه با کد Sync شد (۵ رویداد گم‌شده اضافه، نام فیلدهای غلط اصلاح).
 
@@ -2968,6 +2974,17 @@ Database خالی، بدون Schema) — منتظر سرویس‌های نساخ
 `docker-compose.yml` — پیش‌فرض (`pnpm infra:up`) این‌ها را بالا می‌آورد:
 `postgres, redis, kafka, kafka-init, keycloak, minio, minio-init, temporal,`
 **`clamav, clamav-freshclam`** (ADR-049، افزوده‌شده 2026-08-31).
+
+**Kafka احرازشده (RUN-006 PR B، 2026-09-28).** `kafka-tls` (یک‌بار، درون Image خود Kafka با `keytool`؛ CA یک‌بارمصرف
+در Volume `kafka-tls`، فقط `ca.pem` به `infrastructure/docker/kafka/.tls/` git-ignored کپی می‌شود) ← `kafka`
+(`broker-entrypoint.sh`، مشترک با CI) ← `kafka-init` (Topicها به‌عنوان `admin`، و بارگذاری Coordinator گروه‌ها). سپس
+`pnpm infra:up` روی میزبان `scripts/kafka-acl.mjs apply` را با `.env` اجرا می‌کند (چیزی جز Node و pnpm لازم نیست؛ روی
+Windows هم). گذرواژه‌ها در `.env.example` مقادیر توسعه‌اند و Compose همان‌ها را پیش‌فرض دارد. `kafka-ui` و
+`kafka-exporter` با Principal فقط-توسعهٔ خودشان وصل می‌شوند. CI همین Broker را با `ci-up.sh` و گذرواژهٔ تازهٔ هر اجرا
+بالا می‌آورد (به‌جای Service Container PLAINTEXT در سه Job). چرخش: `docs/runbooks/kafka-credential-rotation.md`.
+**Live-Verify محلی (2026-09-28):** Broker Compose از صفر با `.env.example`؛ ۱۶۷ ACL اعمال و بار دوم «0 added»؛
+`kafka.broker.test` ۲۴/۲۴ روی Broker تازه؛ `kafka-ui` روی SASL_SSL آنلاین (۴۹ Topic، گروه‌ها دیده می‌شوند)؛ چرخش درجای
+SCRAM و بازسازی CA همان‌طور که Runbook می‌گوید؛ `kafka-exporter` روی SASL_SSL (`kafka_brokers 1`، Offset گروه‌ها).
 
 **ClamAV:** پین‌شده به Digest تغییرناپذیر، غیر-root (uid 100)، Rootfs فقط-خواندنی،
 TCP فقط روی `127.0.0.1:3310`. `clamav-freshclam` Container جداگانه‌ای است که روی Volume
