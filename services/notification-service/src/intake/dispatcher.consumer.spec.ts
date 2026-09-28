@@ -161,8 +161,14 @@ describe('DispatcherConsumer.handle', () => {
       rule_key: 'maintenance.due',
     });
 
+    // A value that cannot occur in anything else the log line carries: the
+    // event id is a ULID, whose Crockford base32 alphabet has no I, L, O or U.
+    // '999' was used before and failed once, when a random ULID contained it.
+    const bidValue = 'bid-value-ILOU';
+    expect(bidValue).toMatch(/[ILOU]/);
+
     await consumer.handle(
-      envelope({ payload: { ...(envelope().payload as object), bidAmount: '999', extra: 'x' } }),
+      envelope({ payload: { ...(envelope().payload as object), bidAmount: bidValue, extra: 'x' } }),
       delivery,
     );
 
@@ -172,7 +178,7 @@ describe('DispatcherConsumer.handle', () => {
         rule_key: 'maintenance.due',
       }),
     ).toBe(before + 3);
-    expect(logger.lines.join('\n')).not.toContain('999');
+    expect(logger.lines.join('\n')).not.toContain(bidValue);
     expect(logger.lines.join('\n')).not.toContain('bidAmount');
   });
 
