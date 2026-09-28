@@ -67,9 +67,14 @@ Headerهای کلیدی:
 `x-dlq-error` همیشه «دسته‌بندی ثابت (کد `DlqReason`): پیام» است — مثلاً `Handler failed 3x (MAX_RETRIES_EXCEEDED): …` یا
 `Unparseable message (VALIDATION_FAILED): the body is not valid JSON (N bytes)` — و محتوای بدنه را تکرار نمی‌کند؛ پیام Handler
 پاک‌سازی‌شده و حداکثر ۲۰۰ نویسه است. از Headerهای پیام اصلی فقط Headerهای پلتفرم (`EVENT_HEADERS`، از جمله
-`x-correlation-id` و `traceparent`) در پیام DLQ می‌مانند؛ Header دیگری (مثلاً `authorization`) منتقل نمی‌شود (S-09). برای
-بازپخش همین‌ها کافی است: بدنهٔ دست‌نخورده، `x-dlq-original-topic` و Headerهای پلتفرم. `x-producer` در پیام DLQ نام
-مصرف‌کننده‌ای است که آن را نوشت، نه ناشر اصلی؛ ناشر اصلی در `producer` بدنه است.
+`x-correlation-id` و `traceparent`) در پیام DLQ می‌مانند؛ Header دیگری (مثلاً `authorization`) منتقل نمی‌شود (S-09).
+`x-producer` در پیام DLQ نام مصرف‌کننده‌ای است که آن را نوشت، نه ناشر اصلی؛ ناشر اصلی در `producer` بدنه است.
+
+**آنچه برای ابزار بازپخش آینده نگه داشته می‌شود** (ابزار هنوز نیست — گام ۳): بدنهٔ بایت‌به‌بایت دست‌نخورده، Headerهای
+پلتفرم (`EVENT_HEADERS`)، و `x-dlq-original-topic`، `x-dlq-original-partition` و `x-dlq-original-offset`. **کلید پیام Kafka
+نگه داشته نمی‌شود** ([D-040](../23-risks-and-tradeoffs.md)): پیام DLQ بی‌کلید نوشته می‌شود، و کلید اصلی (کلید پارتیشن
+ناشر) همیشه از بدنه بازسازی‌پذیر نیست — پیش‌فرضش `aggregateId` است، اما ناشری که کلید صریح می‌دهد آن را فقط در `streamKey`
+بدنه (وقتی Sequence دارد) یا ردیف Outbox خودش نگه می‌دارد.
 
 ### ۲. عمق DLQ به تفکیک دلیل
 
@@ -112,23 +117,23 @@ docker compose exec kafka kafka-run-class.sh kafka.tools.GetOffsetShell \
 
 ### گام ۳ — بازپخش
 
-**رویداد غیرمالی:**
+> ⚠️ **ابزار بازپخش پیاده نشده است.** `dist/scripts/replay-dlq.js` که نسخه‌های پیشین این Runbook نام می‌بردند در مخزن
+> وجود ندارد و هرگز ساخته نشد (ADR-051 § R6). هیچ فرمان بازپخشی در مخزن نیست؛ فرمانی را که اینجا نیامده اجرا نکن.
 
-```bash
-pnpm --filter @rasta/<service> exec node dist/scripts/replay-dlq.js \
-  --topic rasta.marketplace.v1.dlq \
-  --target rasta.marketplace.v1 \
-  --max 100 \
-  --dry-run          # ← اول همیشه با dry-run
+**امروز چه می‌توان کرد (رویداد غیرمالی):**
 
-# پس از بررسی خروجی:
-pnpm --filter @rasta/<service> exec node dist/scripts/replay-dlq.js \
-  --topic rasta.marketplace.v1.dlq \
-  --target rasta.marketplace.v1 \
-  --max 100
-```
+1. **دیدن پیام:** فرمان «۱. چه چیزی در DLQ است؟» بالا، یا Kafka UI (`docker compose --profile tools up -d kafka-ui`، سپس
+   `http://127.0.0.1:8081`): بدنه، Headerهای `x-dlq-*` و Headerهای پلتفرم.
+2. **رفع علت** (گام ۲).
+3. **بازسازی اثر در سرویس مالک، از مسیر عادی خودش** — همان API یا فرمانی که بار اول اثر را می‌ساخت — نه با نوشتن دستی پیام روی
+   Topic ناشر: نوشتن به نام ناشر همان جعلی است که ADR-061 § ۲ می‌بندد، و ترتیب نسبت به رویدادهای بعدی را هم نگه نمی‌دارد
+   (ADR-051 § R6).
+4. اگر اثر نباید ساخته شود: گام ۴.
 
-بازپخش امن است چون مصرف‌کننده‌ها Idempotent‌اند (`processed_event`).
+آنچه ابزار آینده لازم دارد و امروز نگه داشته می‌شود — و آنچه نمی‌شود (کلید پیام، D-040) — زیر «Headerهای کلیدی» بالا آمده است.
+
+Idempotency مصرف‌کننده‌ها (`processed_event`) پیام **تکراری** را بی‌اثر می‌کند، اما رویداد **کهنه** را که پس از وضعیتی
+جدیدتر برسد نه (ADR-051 § R6)؛ پس بازپخش، حتی با ابزار آینده، خودبه‌خود امن نیست.
 
 **رویداد مالی:** ⛔
 
