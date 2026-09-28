@@ -77,11 +77,20 @@ export class RastaError extends Error {
     );
   }
 
-  static idempotencyKeyReused(key: string): RastaError {
+  /**
+   * The key is not a parameter, on purpose (S-09). It used to be carried in
+   * `internalContext`, which the exception filter logs — so every refusal
+   * wrote a client's raw Idempotency-Key into the log. Nothing derived from it
+   * is carried either: an unkeyed digest of a client-chosen key can be
+   * reversed by guessing, a keyed one needs a secret this package does not
+   * hold, and the request's correlation id already ties the refusal to its
+   * request. A service that wants more context records it itself, in its own
+   * terms (construction's endpoint, for one).
+   */
+  static idempotencyKeyReused(): RastaError {
     return new RastaError(
       ERROR_CODES.IDEMPOTENCY_KEY_REUSED,
       'This Idempotency-Key was already used with a different request body',
-      { internalContext: { key } },
     );
   }
 

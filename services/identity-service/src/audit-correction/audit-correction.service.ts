@@ -107,7 +107,7 @@ export function replayOrRefuse(
   requestHash: string,
 ): AuditCorrectionAccepted {
   if (record.requestHash !== requestHash) {
-    throw RastaError.idempotencyKeyReused(record.idempotencyKey);
+    throw RastaError.idempotencyKeyReused();
   }
   return acceptedResponse(record.responseBody);
 }
