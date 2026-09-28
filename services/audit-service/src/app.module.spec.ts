@@ -108,6 +108,9 @@ const ENVIRONMENT = {
   DATABASE_URL_AUDIT: 'postgresql://rasta_audit:pw@localhost:5433/rasta_audit?schema=audit',
   KAFKA_BROKERS: 'localhost:9092',
   NODE_ENV: 'test',
+  // The consumers are built, never connected; without a credential that is
+  // allowed only by the explicit opt-out (ADR-061 § 3, RUN-006).
+  KAFKA_ALLOW_PLAINTEXT: 'true',
   // Required as of AUD-002: the service now serves two private endpoints behind
   // a global `AuthGuard`, so it verifies tokens and must be configured to.
   OIDC_ISSUER_URL: 'http://auth.invalid/realms/rasta',

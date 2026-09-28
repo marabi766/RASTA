@@ -18,6 +18,7 @@ import {
   TokenVerifier,
   toLogContext,
   type AuthGuardOptions,
+  kafkaConnection,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
@@ -98,10 +99,7 @@ import { clamdAddress, loadDocumentEnv, SERVICE_NAME, type DocumentEnv } from '.
       provide: KafkaEventPublisher,
       inject: [ENV],
       useFactory: (env: DocumentEnv) =>
-        new KafkaEventPublisher({
-          brokers: brokersOf(env),
-          clientId: env.KAFKA_CLIENT_ID,
-        }),
+        new KafkaEventPublisher(kafkaConnection(env, env.KAFKA_CLIENT_ID)),
     },
 
     {
@@ -274,10 +272,4 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.scanWorker.stop();
     await this.relay.stop();
   }
-}
-
-function brokersOf(env: DocumentEnv): string[] {
-  return env.KAFKA_BROKERS.split(',')
-    .map((broker) => broker.trim())
-    .filter((broker) => broker.length > 0);
 }

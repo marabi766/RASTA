@@ -89,6 +89,15 @@ export {
 export type { DeclaredTopic, DeclaredProducer } from './events/topic-producers';
 
 export {
+  TOPIC_CONSUMERS,
+  CONSUMER_GROUP_SEPARATOR,
+  isDeclaredConsumer,
+  consumerGroupService,
+  consumerDeclarationProblem,
+} from './events/topic-consumers';
+export type { DeclaredConsumer } from './events/topic-consumers';
+
+export {
   AUDIT_EVENT_RECORDED,
   AUDIT_EVENT_RECORDED_VERSION,
   AUDIT_OUTCOMES,

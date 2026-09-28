@@ -66,6 +66,21 @@ export const notificationEnvSchema = baseEnvSchema
   .merge(kafkaEnvSchema)
   .merge(authEnvSchema)
   .extend({
+    /**
+     * The dispatcher's consumer group. Overridable — an operator can run a
+     * second dispatcher group, e.g. for a cut-over — but only inside this
+     * service's own namespace (RUN-006): the broker grants this principal
+     * READ on `notification-service.*` groups and nothing else, and
+     * `EventConsumer` refuses a declared service's group elsewhere. Refused at
+     * boot rather than at the first join.
+     */
+    KAFKA_CONSUMER_GROUP: z
+      .string()
+      .regex(
+        /^notification-service\.[a-z0-9][a-z0-9.-]{0,120}$/,
+        'must be a group in the notification-service. namespace',
+      ),
+
     CORS_ORIGINS: z.string().default(''),
 
     /** Where recipient resolution goes. Never the gateway (D-007). */

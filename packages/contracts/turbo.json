@@ -1,0 +1,16 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    // `topic-consumers.repo.spec.ts` reads every service's source to check
+    // each EventConsumer against TOPIC_CONSUMERS (RUN-006). Without the
+    // services as inputs, turbo would replay a cached green after a service
+    // added a consumer the contract does not declare.
+    "test": {
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/services/*/src/**/*.ts"]
+    },
+    "test:unit": {
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/services/*/src/**/*.ts"]
+    }
+  }
+}

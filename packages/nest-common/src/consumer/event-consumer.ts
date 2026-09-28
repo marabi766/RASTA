@@ -3,8 +3,11 @@ import {
   DLQ_HEADERS,
   DLQ_REASONS,
   EVENT_HEADERS,
+  consumerDeclarationProblem,
+  consumerGroupService,
   eventEnvelopeSchema,
   isAllowedProducer,
+  isDeclaredConsumer,
   isDeclaredTopic,
   type DlqReason,
   type EventEnvelope,
@@ -12,6 +15,7 @@ import {
 import { dlqMessagesTotal } from '@rasta/observability';
 import { createSystemContext, runWithContext } from '../context/request-context';
 import { RastaError } from '../errors/rasta-error';
+import { kafkaClientConfig, type KafkaConnectionOptions } from '../kafka/connection';
 
 /**
  * The consuming half of the outbox pattern (ADR-021).
@@ -43,9 +47,10 @@ import { RastaError } from '../errors/rasta-error';
  * metrics and recoverable; a silently skipped financial event is neither.
  */
 
-export interface EventConsumerOptions {
-  brokers: string[];
-  clientId: string;
+/** Every platform service's name ends so (`fleet-service`, `audit-service`). */
+const SERVICE_NAME_SUFFIX = '-service';
+
+export interface EventConsumerOptions extends KafkaConnectionOptions {
   /**
    * Kafka consumer group. One per (service, purpose) — never shared between
    * two services, or they would steal each other's partitions and each see
@@ -54,8 +59,12 @@ export interface EventConsumerOptions {
   groupId: string;
   topics: string[];
   /**
-   * Where messages go when they cannot be processed. Omit only for a consumer
-   * whose failures are genuinely safe to drop; there are very few of those.
+   * Where messages go when they cannot be processed. **Required** for every
+   * service's consumer: it must be the service's own dead-letter topic as
+   * `TOPIC_CONSUMERS` declares it, or the consumer refuses to start — without
+   * one an unprocessable event is logged and committed past, i.e. lost
+   * (RUN-006, Codex review of #128). Only a non-service observer (a test's
+   * `itest-observer`) may omit it.
    */
   deadLetterTopic?: string;
   /** In-process attempts before dead-lettering. */
@@ -182,9 +191,32 @@ export class EventConsumer {
       );
     }
 
+    // RUN-006: a consumer in a declared service's namespace reads only what
+    // TOPIC_CONSUMERS declares for it and dead-letters where it says. Once
+    // the consumer authenticates, its principal is the service it acts for,
+    // and its group must be in that namespace — the same rule the broker's
+    // ACLs enforce, refused here first so it fails at startup, legibly.
+    // A group in any `<name>-service.` namespace is a service's consumer and
+    // must be declared, authenticated or not; other groups (test observers)
+    // are left to the topic check above until they authenticate.
+    const service = options.sasl?.username ?? consumerGroupService(options.groupId);
+    if (
+      service !== undefined &&
+      (options.sasl !== undefined ||
+        isDeclaredConsumer(service) ||
+        service.endsWith(SERVICE_NAME_SUFFIX))
+    ) {
+      const problem = consumerDeclarationProblem(service, options);
+      if (problem !== undefined) {
+        throw new Error(
+          `${options.groupId}: ${problem} (@rasta/contracts TOPIC_CONSUMERS, RUN-006). ` +
+            'Declare the subscription there first.',
+        );
+      }
+    }
+
     this.kafka = new Kafka({
-      clientId: options.clientId,
-      brokers: options.brokers,
+      ...kafkaClientConfig(options),
       retry: { initialRetryTime: 300, retries: 8 },
       logLevel: 1, // ERROR — kafkajs is extremely chatty at INFO
     });

@@ -105,6 +105,10 @@ export {
 } from './tenancy/tenant-guard.extension';
 export type { TenantGuardOptions } from './tenancy/tenant-guard.extension';
 
+// Kafka connection (RUN-006) ---------------------------------------------------
+export { kafkaConnection, kafkaClientConfig, KafkaConnectionConfigError } from './kafka/connection';
+export type { KafkaConnectionOptions, KafkaConnectionEnv } from './kafka/connection';
+
 // Event consumption ----------------------------------------------------------
 export { EventConsumer, UnprocessableEventError } from './consumer/event-consumer';
 export type {

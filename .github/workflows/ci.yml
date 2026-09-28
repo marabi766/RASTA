@@ -292,6 +292,13 @@ jobs:
     permissions:
       contents: read
 
+    # RUN-006: this job's broker is still PLAINTEXT, and a service without its
+    # SASL credential and TLS refuses to start unless PLAINTEXT is explicitly
+    # allowed — which is honoured only with NODE_ENV test or development. PR B
+    # removes this when the CI broker authenticates.
+    env:
+      KAFKA_ALLOW_PLAINTEXT: 'true'
+
     services:
       postgres:
         image: postgis/postgis:16-3.4
@@ -625,6 +632,13 @@ jobs:
     # job proves nothing either way; the budget follows the work.
     timeout-minutes: 40
     needs: quality
+
+    # RUN-006: this job's broker is still PLAINTEXT, and a service without its
+    # SASL credential and TLS refuses to start unless PLAINTEXT is explicitly
+    # allowed — which is honoured only with NODE_ENV test or development. PR B
+    # removes this when the CI broker authenticates.
+    env:
+      KAFKA_ALLOW_PLAINTEXT: 'true'
 
     services:
       postgres:
@@ -1354,6 +1368,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: quality
+
+    # RUN-006: this job's broker is still PLAINTEXT, and a service without its
+    # SASL credential and TLS refuses to start unless PLAINTEXT is explicitly
+    # allowed — which is honoured only with NODE_ENV test or development. PR B
+    # removes this when the CI broker authenticates.
+    env:
+      KAFKA_ALLOW_PLAINTEXT: 'true'
 
     services:
       postgres:
