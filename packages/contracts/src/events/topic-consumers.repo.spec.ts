@@ -17,9 +17,13 @@ import { TOPIC_CONSUMERS, consumerDeclarationProblem } from './topic-consumers';
  *   - every `new X(...)` whose instance type is nest-common's `EventConsumer`,
  *     however `X` is reached — an aliased import, a namespace import, a local
  *     re-binding — and every class that extends it;
- *   - every `.consumer` taken from a kafkajs `Kafka` client in production
- *     code: a consumer outside `EventConsumer` is outside every check, so it
- *     is refused outright;
+ *   - every use of kafkajs's own `consumer` method — decided by the member's
+ *     declaration, so `Pick<Kafka, 'consumer'>`, a parameter or a subclass
+ *     changes nothing — and every call whose result is kafkajs's `Consumer`:
+ *     a consumer outside `EventConsumer` is outside every check, so it is
+ *     refused outright (Codex review of #128, round 2);
+ *   - an `EventConsumer` of a declared service without its dead-letter topic
+ *     (`consumerDeclarationProblem` requires it; round 2 as well);
  *   - each `EventConsumer`'s `groupId`, `topics` and `deadLetterTopic`,
  *     evaluated from literals, constants (followed across files and
  *     packages), templates, spreads and literal types. A topic list computed
@@ -235,12 +239,25 @@ function isEventConsumerType(type: ts.Type | undefined): boolean {
   );
 }
 
-function isKafkaClientType(type: ts.Type): boolean {
-  const symbol = type.getSymbol();
-  return (
-    symbol?.getName() === 'Kafka' &&
-    (symbol.getDeclarations() ?? []).some((d) => isFromPackage(d, '/kafkajs/'))
-  );
+/** A symbol declared by kafkajs itself (its `types/index.d.ts`). */
+function isKafkajs(symbol: ts.Symbol | undefined): boolean {
+  return (symbol?.getDeclarations() ?? []).some((d) => isFromPackage(d, '/kafkajs/'));
+}
+
+/**
+ * kafkajs's `Kafka#consumer` method, reached however the receiver is typed —
+ * `Kafka`, `Pick<Kafka, 'consumer'>`, a subclass, a parameter (Codex review of
+ * #128, round 2): the member's own declaration decides, not the receiver's
+ * type name.
+ */
+function isKafkajsConsumerMethod(symbol: ts.Symbol | undefined): boolean {
+  return symbol?.getName() === 'consumer' && isKafkajs(symbol);
+}
+
+/** kafkajs's `Consumer` type, whatever produced the value. */
+function isKafkajsConsumerType(type: ts.Type): boolean {
+  const symbol = type.aliasSymbol ?? type.getSymbol();
+  return symbol?.getName() === 'Consumer' && isKafkajs(symbol);
 }
 
 /**
@@ -279,7 +296,7 @@ function scanConsumers(
   const checker = program.getTypeChecker();
   const evaluator = new Evaluator(checker);
   const consumers: FoundConsumer[] = [];
-  const violations: string[] = [];
+  const violations = new Set<string>();
 
   for (const service of services) {
     for (const path of byService.get(service)!) {
@@ -297,40 +314,40 @@ function scanConsumers(
           for (const clause of node.heritageClauses ?? []) {
             for (const base of clause.types) {
               if (isEventConsumerType(checker.getTypeAtLocation(base))) {
-                violations.push(`${where(base)}: extends EventConsumer — construct one instead`);
+                violations.add(`${where(base)}: extends EventConsumer — construct one instead`);
               }
             }
           }
         }
-        const accessed =
+        // A kafkajs consumer outside EventConsumer is outside every check:
+        // the `consumer` member of kafkajs's client, however it is reached
+        // (property, element access, destructuring), and any call whose
+        // result is kafkajs's `Consumer`.
+        const member =
           ts.isPropertyAccessExpression(node) && node.name.text === 'consumer'
-            ? node.expression
+            ? checker.getSymbolAtLocation(node.name)
             : ts.isElementAccessExpression(node) &&
                 ts.isStringLiteralLike(node.argumentExpression) &&
                 node.argumentExpression.text === 'consumer'
-              ? node.expression
-              : undefined;
-        if (accessed && isKafkaClientType(checker.getTypeAtLocation(accessed))) {
-          violations.push(
+              ? checker.getSymbolAtLocation(node.argumentExpression)
+              : ts.isBindingElement(node) &&
+                  (node.propertyName ?? node.name).getText() === 'consumer'
+                ? checker.getTypeAtLocation(node.parent).getProperty('consumer')
+                : undefined;
+        if (
+          isKafkajsConsumerMethod(member) ||
+          (ts.isCallExpression(node) && isKafkajsConsumerType(checker.getTypeAtLocation(node)))
+        ) {
+          violations.add(
             `${where(node)}: a kafkajs consumer outside EventConsumer — nothing checks it against TOPIC_CONSUMERS`,
           );
-        }
-        if (
-          ts.isBindingElement(node) &&
-          (node.propertyName ?? node.name).getText() === 'consumer' &&
-          ts.isObjectBindingPattern(node.parent) &&
-          ts.isVariableDeclaration(node.parent.parent) &&
-          node.parent.parent.initializer &&
-          isKafkaClientType(checker.getTypeAtLocation(node.parent.parent.initializer))
-        ) {
-          violations.push(`${where(node)}: a kafkajs consumer outside EventConsumer`);
         }
         ts.forEachChild(node, visit);
       };
       visit(source);
     }
   }
-  return { consumers, violations, program };
+  return { consumers, violations: [...violations], program };
 }
 
 function readOptions(
@@ -489,16 +506,38 @@ export function make(options: EventConsumerOptions) {
       expect(problemsOf(result.consumers).join('\n')).toMatch(/factory\.ts: cannot evaluate/);
     }, 60_000);
 
-    it('a direct kafkajs consumer', () => {
-      const text = `import { Kafka } from 'kafkajs';
+    it('a direct kafkajs consumer, however the client is typed or reached', () => {
+      const text = `import { Kafka, type Consumer } from 'kafkajs';
 const kafka = new Kafka({ clientId: 'fleet', brokers: ['b:9092'] });
 export const direct = kafka.consumer({ groupId: 'fleet-service.direct' });
 export const { consumer: destructured } = kafka;
+const narrowed: Pick<Kafka, 'consumer'> = kafka;
+export const picked = narrowed.consumer({ groupId: 'fleet-service.picked' });
+export function fromParameter(client: Kafka) {
+  return client.consumer({ groupId: 'fleet-service.parameter' });
+}
+class RawKafka extends Kafka {}
+export const subclassed = new RawKafka({ clientId: 'x', brokers: ['b'] }).consumer({ groupId: 'y' });
+export const indexed = kafka['consumer']({ groupId: 'fleet-service.indexed' });
+declare function make(): Consumer;
+export const made = make();
 `;
       const result = mutate('fleet-service', { 'services/fleet-service/src/direct.ts': text });
-      expect(result.violations).toHaveLength(2);
-      expect(result.violations[0]).toMatch(
-        /direct\.ts:3: a kafkajs consumer outside EventConsumer/,
+      const lines = result.violations.map((v) => /direct\.ts:(\d+):/.exec(v)?.[1]);
+      expect(lines).toEqual(['3', '4', '6', '8', '11', '12', '14']);
+      for (const violation of result.violations) {
+        expect(violation).toMatch(/a kafkajs consumer outside EventConsumer/);
+      }
+    }, 60_000);
+
+    it('a consumer without its dead-letter topic', () => {
+      const ECONOMIC_MODULE = 'services/economic-service/src/app.module.ts';
+      const original = read(ECONOMIC_MODULE);
+      const text = original.replace(/\n\s*deadLetterTopic: ECONOMIC_DLQ_TOPIC,/, '');
+      expect(text).not.toBe(original);
+      const result = mutate('economic-service', { [ECONOMIC_MODULE]: text });
+      expect(problemsOf(result.consumers).join('\n')).toMatch(
+        /economic-service must dead-letter to rasta\.economic\.v1\.dlq/,
       );
     }, 60_000);
 

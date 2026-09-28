@@ -231,6 +231,15 @@ describe('EventConsumer and TOPIC_CONSUMERS', () => {
     );
   });
 
+  it('refuses to start a declared service’s consumer without its dead-letter topic', () => {
+    // Codex review of #128, round 2: without one, an unprocessable event is
+    // logged and committed past — lost.
+    const { deadLetterTopic: _omitted, ...withoutDlq } = fleet;
+    expect(() => build(withoutDlq)).toThrow(/must dead-letter to rasta\.fleet\.v1\.dlq/);
+    expect(() => build({ ...withoutDlq, sasl })).toThrow(/must dead-letter to/);
+    expect(() => build({ ...fleet, deadLetterTopic: undefined })).toThrow(/must dead-letter to/);
+  });
+
   it('refuses, in a declared namespace, another dead-letter topic', () => {
     expect(() => build({ ...fleet, deadLetterTopic: 'rasta.asset.v1.dlq' })).toThrow(
       /dead-letters to rasta\.fleet\.v1\.dlq/,

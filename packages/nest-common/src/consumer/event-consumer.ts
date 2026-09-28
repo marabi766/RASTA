@@ -59,8 +59,12 @@ export interface EventConsumerOptions extends KafkaConnectionOptions {
   groupId: string;
   topics: string[];
   /**
-   * Where messages go when they cannot be processed. Omit only for a consumer
-   * whose failures are genuinely safe to drop; there are very few of those.
+   * Where messages go when they cannot be processed. **Required** for every
+   * service's consumer: it must be the service's own dead-letter topic as
+   * `TOPIC_CONSUMERS` declares it, or the consumer refuses to start — without
+   * one an unprocessable event is logged and committed past, i.e. lost
+   * (RUN-006, Codex review of #128). Only a non-service observer (a test's
+   * `itest-observer`) may omit it.
    */
   deadLetterTopic?: string;
   /** In-process attempts before dead-lettering. */

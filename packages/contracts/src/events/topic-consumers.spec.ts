@@ -108,14 +108,30 @@ describe('consumerDeclarationProblem', () => {
     expect(consumerDeclarationProblem('fleet-service', fleet)).toBeUndefined();
   });
 
-  it('accepts a subset of the declared topics, their retry twins, and no dead-letter topic', () => {
+  it('accepts a subset of the declared topics and their retry twins', () => {
     expect(
       consumerDeclarationProblem('fleet-service', {
         groupId: 'fleet-service.replay',
         topics: ['rasta.asset.v1.retry'],
+        deadLetterTopic: 'rasta.fleet.v1.dlq',
       }),
     ).toBeUndefined();
   });
+
+  it.each(Object.keys(TOPIC_CONSUMERS))(
+    'refuses a %s consumer without its dead-letter topic: an unprocessable event would be lost',
+    (service) => {
+      const declared = TOPIC_CONSUMERS[service as keyof typeof TOPIC_CONSUMERS];
+      expect(
+        consumerDeclarationProblem(service, {
+          groupId: `${service}.x`,
+          topics: [declared.subscribes[0]!],
+        }),
+      ).toMatch(
+        new RegExp(`must dead-letter to ${declared.deadLetterTopic.replace(/\./g, '\\.')}`),
+      );
+    },
+  );
 
   it('refuses an undeclared service', () => {
     expect(
