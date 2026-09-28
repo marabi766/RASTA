@@ -70,11 +70,11 @@ describe('UNION_ADMIN in the organization registry (docs/24 Q-80)', () => {
   let systemAdmin: string;
   /** The union administrator's own token, acting for the dehyari where it is only a DRIVER. */
   let unionAdminAsDriver: string;
+  /** A union administrator who is also ORGANIZATION_ADMIN of the county beside it. */
+  let unionAndCountyAdmin: string;
 
   const http = () => request(app.getHttpServer());
   const missing = () => `ORG_${ulid()}`;
-  /** Unique per run, so a root that should never exist is counted by its own name. */
-  const refusedRoot = `ریشهٔ ناروا ${ulid().slice(-6)}`;
 
   beforeAll(async () => {
     process.env.DATABASE_URL = databaseUrl();
@@ -154,6 +154,10 @@ describe('UNION_ADMIN in the organization registry (docs/24 Q-80)', () => {
       orgRoles: { [union]: ['UNION_ADMIN'], [dehyari]: ['DRIVER'] },
     });
     unionAdminAsDriver = unionAdmin;
+    unionAndCountyAdmin = bearer({
+      active: union,
+      orgRoles: { [union]: ['UNION_ADMIN'], [county]: ['ORGANIZATION_ADMIN'] },
+    });
     systemAdmin = bearer({
       active: union,
       orgRoles: { [union]: ['ORGANIZATION_ADMIN'] },
@@ -340,10 +344,6 @@ describe('UNION_ADMIN in the organization registry (docs/24 Q-80)', () => {
   describe('the platform operator’s alone: 403 before anything is looked up — even inside its own subtree', () => {
     it.each([
       [
-        'a new root',
-        () => http().post('/v1/organizations').send({ name: refusedRoot, type: 'UNION' }),
-      ],
-      [
         'a move of the county',
         () =>
           http()
@@ -394,17 +394,26 @@ describe('UNION_ADMIN in the organization registry (docs/24 Q-80)', () => {
       expect(await footprint(everyone)).toEqual(before);
     });
 
-    it('a root is refused without a row appearing anywhere', async () => {
-      const roots = async () =>
-        Number(
-          (
-            (await prisma.client.$queryRawUnsafe(
-              `SELECT count(*) AS n FROM organization WHERE name = $1`,
-              refusedRoot,
-            )) as { n: bigint }[]
-          )[0]?.n ?? 0,
+    it('a new root → 403, and neither a row nor an event appears', async () => {
+      // Self-contained: its own name, its own request, its own counts.
+      const name = `ریشهٔ ناروا ${ulid().slice(-6)}`;
+      const count = async (sql: string) =>
+        Number(((await prisma.client.$queryRawUnsafe(sql, name)) as { n: bigint }[])[0]?.n ?? 0);
+      const rows = () => count(`SELECT count(*) AS n FROM organization WHERE name = $1`);
+      const events = () =>
+        count(
+          `SELECT count(*) AS n FROM outbox_message
+            WHERE event_name = 'ORGANIZATION_CREATED' AND payload->>'name' = $1`,
         );
-      expect(await roots()).toBe(0);
+      expect([await rows(), await events()]).toEqual([0, 0]);
+
+      const response = await http()
+        .post('/v1/organizations')
+        .set('authorization', unionAdmin)
+        .send({ name, type: 'UNION' });
+
+      expect(response.status).toBe(403);
+      expect([await rows(), await events()]).toEqual([0, 0]);
     });
   });
 
@@ -417,7 +426,11 @@ describe('UNION_ADMIN in the organization registry (docs/24 Q-80)', () => {
         .get(`/v1/organizations/${union}/children`)
         .set('authorization', unionAdmin)
         .expect(200);
-      expect((children.body as { id: string }[]).map((row) => row.id)).toEqual([unionChild]);
+      // Its child is there and nothing from outside is; other tests may add
+      // children of their own, so this is not an exact list.
+      const childIds = (children.body as { id: string }[]).map((row) => row.id);
+      expect(childIds).toContain(unionChild);
+      for (const outside of [province, county, dehyari]) expect(childIds).not.toContain(outside);
       const ancestors = await http()
         .get(`/v1/organizations/${unionChild}/ancestors`)
         .set('authorization', unionAdmin)
@@ -488,13 +501,19 @@ describe('UNION_ADMIN in the organization registry (docs/24 Q-80)', () => {
         .set('authorization', systemAdmin)
         .send({ parentId: union, reason: 'آزمون جابه‌جایی' })
         .expect(200);
-      await http().get(`/v1/organizations/${dehyari}`).set('authorization', unionAdmin).expect(200);
-      // And back, so the rest of the suite sees the seeded shape.
-      await http()
-        .post(`/v1/organizations/${dehyari}/move`)
-        .set('authorization', systemAdmin)
-        .send({ parentId: county, reason: 'آزمون بازگشت' })
-        .expect(200);
+      try {
+        await http()
+          .get(`/v1/organizations/${dehyari}`)
+          .set('authorization', unionAdmin)
+          .expect(200);
+      } finally {
+        // Back, whatever happened, so no other test depends on this one's outcome.
+        await http()
+          .post(`/v1/organizations/${dehyari}/move`)
+          .set('authorization', systemAdmin)
+          .send({ parentId: county, reason: 'آزمون بازگشت' })
+          .expect(200);
+      }
       await http().get(`/v1/organizations/${dehyari}`).set('authorization', unionAdmin).expect(404);
     });
   });
@@ -524,6 +543,116 @@ describe('UNION_ADMIN in the organization registry (docs/24 Q-80)', () => {
         .set('x-organization-id', dehyari)
         .send({ status: 'SUSPENDED', reason: 'آزمون تعلیق' })
         .expect(403);
+    });
+
+    it('acting for the county where it is ORGANIZATION_ADMIN, it has that scope there — and only there', async () => {
+      const asCounty = (req: request.Test) =>
+        req.set('authorization', unionAndCountyAdmin).set('x-organization-id', county);
+      // The county's administrator: the county and what is beneath it.
+      await asCounty(http().get(`/v1/organizations/${county}`)).expect(200);
+      await asCounty(http().get(`/v1/organizations/${dehyari}`)).expect(200);
+      await asCounty(http().patch(`/v1/organizations/${county}`))
+        .send({ shortName: 'شهرستان' })
+        .expect(200);
+      // Not the union's authority: the union and the province are outside.
+      await asCounty(http().get(`/v1/organizations/${union}`)).expect(404);
+      await asCounty(http().get(`/v1/organizations/${province}`)).expect(404);
+      // And not a platform operator's either.
+      await asCounty(http().post(`/v1/organizations/${dehyari}/move`))
+        .send({ parentId: county, reason: 'آزمون جابه‌جایی' })
+        .expect(403);
+      await asCounty(http().post(`/v1/organizations/${dehyari}/status`))
+        .send({ status: 'SUSPENDED', reason: 'آزمون تعلیق' })
+        .expect(403);
+      await asCounty(http().post('/v1/organizations'))
+        .send({ name: `ریشهٔ شهرستان ${ulid().slice(-6)}`, type: 'GOVERNMENT' })
+        .expect(403);
+    });
+
+    it('the same token, acting for the union, does not carry the county role back', async () => {
+      await http()
+        .get(`/v1/organizations/${county}`)
+        .set('authorization', unionAndCountyAdmin)
+        .expect(404);
+      await http()
+        .patch(`/v1/organizations/${county}`)
+        .set('authorization', unionAndCountyAdmin)
+        .send({ shortName: 'ناروا' })
+        .expect(404);
+    });
+  });
+
+  /**
+   * Pinned, not endorsed: behaviour that predates Q-80 and applies to every
+   * non-operator, recorded as `docs/23` D-038 and left to the owner (`docs/24`
+   * Q-67 for what is visible above one's own organization, Q-80 for
+   * `externalCode`). These tests fail the moment it changes, so any change is
+   * a decision, not an accident.
+   */
+  describe('pinned, pre-existing (docs/23 D-038): what a non-operator learns about organizations above or beside it', () => {
+    it('GET /:id of its own organization names its parent and the full path above it (Q-67)', async () => {
+      const own = await http()
+        .get(`/v1/organizations/${union}`)
+        .set('authorization', unionAdmin)
+        .expect(200);
+      expect(own.body.parentId).toBe(province);
+      // The materialized path starts at the province, above the visible root —
+      // while GET /:id/ancestors stops at the union itself.
+      expect((own.body.path as string).split('.')).toHaveLength(2);
+      const ancestors = await http()
+        .get(`/v1/organizations/${union}/ancestors`)
+        .set('authorization', unionAdmin)
+        .expect(200);
+      expect(ancestors.body).toEqual([]);
+    });
+
+    it('GET /:id/policies shows an inherited policy with its source above the visible root (Q-67)', async () => {
+      const key = `governance.pin_${ulid().slice(-6).toLowerCase()}`;
+      await http()
+        .post(`/v1/organizations/${province}/policies`)
+        .set('authorization', systemAdmin)
+        .send({ key, value: 'province-wide', inheritable: true, description: 'منبع بالادست' })
+        .expect(201);
+      const policies = await http()
+        .get(`/v1/organizations/${union}/policies`)
+        .set('authorization', unionAdmin)
+        .expect(200);
+      const inherited = (policies.body as Record<string, unknown>[]).find((p) => p.key === key);
+      // Provisional stance (Q-67): the key and value govern the union, so they
+      // stay visible. The rest is the source's metadata — pinned here.
+      expect(inherited).toMatchObject({
+        key,
+        value: 'province-wide',
+        inheritedFrom: province,
+        description: 'منبع بالادست',
+        id: expect.any(String),
+      });
+    });
+
+    it('externalCode is unique across the whole registry: an occupied code answers 409 (Q-80)', async () => {
+      const code = `EXT-PIN-${ulid().slice(-8)}`;
+      await http()
+        .patch(`/v1/organizations/${county}`)
+        .set('authorization', systemAdmin)
+        .send({ externalCode: code })
+        .expect(200);
+      // The county is outside the union's subtree, yet its code is not free.
+      await http()
+        .post('/v1/organizations')
+        .set('authorization', unionAdmin)
+        .send({ name: 'واحد کد', type: 'COOPERATIVE', parentId: unionChild, externalCode: code })
+        .expect(409);
+      const free = await http()
+        .post('/v1/organizations')
+        .set('authorization', unionAdmin)
+        .send({
+          name: 'واحد کد آزاد',
+          type: 'COOPERATIVE',
+          parentId: unionChild,
+          externalCode: `${code}-FREE`,
+        })
+        .expect(201);
+      created.push(free.body.id as string);
     });
   });
 });
