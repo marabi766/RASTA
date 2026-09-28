@@ -130,7 +130,9 @@ export class OrganizationController {
 
   @Post(':id/move')
   @HttpCode(200)
-  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN')
+  // The platform operator's alone (Q-80): refused here, before the body is
+  // read or the organization looked up, and again in the service.
+  @Roles('SYSTEM_ADMIN')
   @ApiOperation({ summary: 'Re-parent an organization and its subtree' })
   move(@Param('id') id: string, @Body(zodPipe(moveOrganizationSchema)) dto: MoveOrganizationDto) {
     return this.organizations.move(id, dto);
@@ -138,7 +140,9 @@ export class OrganizationController {
 
   @Post(':id/status')
   @HttpCode(200)
-  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN')
+  // The platform operator's alone (Q-80): refused here, before the body is
+  // read or the organization looked up, and again in the service.
+  @Roles('SYSTEM_ADMIN')
   @ApiOperation({ summary: 'Change status; suspension and deactivation cascade downward' })
   changeStatus(@Param('id') id: string, @Body(zodPipe(changeStatusSchema)) dto: ChangeStatusDto) {
     return this.organizations.changeStatus(id, dto);

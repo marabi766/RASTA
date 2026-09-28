@@ -108,7 +108,7 @@ Rate Limit سراسری جلوی این می‌نشیند. این Gateway مسئ
 | **Publishes**    | `ORGANIZATION_CREATED` · `ORGANIZATION_UPDATED` · `ORGANIZATION_MOVED` · `ORGANIZATION_DEACTIVATED` · `ORGANIZATION_POLICY_CHANGED`                                                                                          |
 | **Consumes**     | — (بالادست‌ترین سرویس دامنه)                                                                                                                                                                                                 |
 | **Dependencies** | PostgreSQL + PostGIS · Kafka                                                                                                                                                                                                 |
-| **مرز امنیتی**   | نوشتن فقط `SYSTEM_ADMIN` و `UNION_ADMIN`. خواندن محدود به زیردرخت مجاز کاربر.                                                                                                                                                |
+| **مرز امنیتی**   | ساخت ریشه، جابه‌جایی و تغییر وضعیت فقط `SYSTEM_ADMIN`. بقیه — `UNION_ADMIN` هم (Q-80) — فقط سازمان خود و زیردرختش را می‌خوانند و می‌نویسند؛ بیرون از آن `404`.                                                               |
 | **Scale**        | خواندن‌محور، تغییر بسیار کم. Cache تهاجمی (TTL ۵ دقیقه) + ابطال با رویداد.                                                                                                                                                   |
 | **Failure**      | افت آن APIهای نوشتن را می‌خواباند اما سرویس‌های دیگر با Replica محلی کار می‌کنند.                                                                                                                                            |
 
