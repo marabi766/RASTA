@@ -312,7 +312,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           in: 'header',
           required: false,
           description:
-            'Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).',
+            'Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).',
           schema: toJsonSchema(z.string().min(1).max(255)),
         });
       }

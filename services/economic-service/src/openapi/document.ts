@@ -198,7 +198,8 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
             description:
               'Required. A retry with the same key returns the first response without ' +
               'executing again; the same key with a different body is refused with 409 ' +
-              'IDEMPOTENCY_KEY_REUSED. Keys are honoured for 24 hours.',
+              'IDEMPOTENCY_KEY_REUSED, and while the first request is still in flight with ' +
+              'CONFLICT and a Retry-After header, in seconds. Keys are honoured for 24 hours.',
           },
         ];
       }

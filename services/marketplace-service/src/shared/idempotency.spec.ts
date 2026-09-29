@@ -40,13 +40,22 @@ function dump(value: unknown): string {
   );
 }
 
-function throughTheFilter(error: unknown): { logged: string; body: string; status: number } {
+function throughTheFilter(error: unknown): {
+  logged: string;
+  body: string;
+  status: number;
+  headers: Record<string, string>;
+} {
   const lines: unknown[] = [];
   const record = (...args: unknown[]) => {
     lines.push(args);
   };
   const logger = { debug: record, warn: record, error: record } as unknown as Logger;
-  const sent: { status: number; body: unknown } = { status: 0, body: undefined };
+  const sent: { status: number; body: unknown; headers: Record<string, string> } = {
+    status: 0,
+    body: undefined,
+    headers: {},
+  };
   const response = {
     status: (code: number) => {
       sent.status = code;
@@ -55,11 +64,19 @@ function throughTheFilter(error: unknown): { logged: string; body: string; statu
     json: (body: unknown) => {
       sent.body = body;
     },
+    setHeader: (name: string, value: string) => {
+      sent.headers[name] = value;
+    },
   };
   new AllExceptionsFilter(logger).catch(error, {
     switchToHttp: () => ({ getResponse: () => response }),
   } as unknown as ArgumentsHost);
-  return { logged: dump(lines), body: dump(sent.body), status: sent.status };
+  return {
+    logged: dump(lines),
+    body: dump(sent.body),
+    status: sent.status,
+    headers: sent.headers,
+  };
 }
 
 describe('IdempotencyStore conflicts carry nothing of the key (S-09)', () => {
@@ -75,10 +92,10 @@ describe('IdempotencyStore conflicts carry nothing of the key (S-09)', () => {
       ).catch((thrown: unknown) => thrown)) as { code: string; internalContext?: unknown };
 
       expect(error).toMatchObject({ code });
-      const { logged, body: answered, status } = throughTheFilter(error);
+      const { logged, body: answered, status, headers } = throughTheFilter(error);
       expect(status).toBe(409);
       expect(logged).toContain(code); // the line was written
-      for (const text of [dump(error.internalContext ?? {}), logged, answered]) {
+      for (const text of [dump(error.internalContext ?? {}), logged, answered, dump(headers)]) {
         expect(text).not.toContain(RAW_KEY);
         expect(text).not.toContain('SENTINEL');
       }
@@ -91,6 +108,18 @@ describe('IdempotencyStore conflicts carry nothing of the key (S-09)', () => {
       () => storeFinding('IN_PROGRESS').claim('POST /v1/orders', RAW_KEY, {}),
     ).catch((thrown: unknown) => thrown)) as { internalContext?: unknown };
 
-    expect(error.internalContext).toEqual({ endpoint: 'POST /v1/orders', retryAfterSeconds: 1 });
+    // The endpoint for the log; the wait as a typed field, never as context.
+    expect(error.internalContext).toEqual({ endpoint: 'POST /v1/orders' });
+    expect(error).toMatchObject({ retryAfterSeconds: 1 });
+    expect(throughTheFilter(error).headers).toEqual({ 'Retry-After': '1' });
+  });
+
+  it('a key reused with another body is not a wait: no Retry-After', async () => {
+    const error = await runWithContext(
+      createSystemContext({ correlationId: 'unit-claim', organizationId: 'ORG-UNIT' }),
+      () => storeFinding('COMPLETED').claim('POST /v1/orders', RAW_KEY, { other: true }),
+    ).catch((thrown: unknown) => thrown);
+
+    expect(throughTheFilter(error).headers).toEqual({});
   });
 });

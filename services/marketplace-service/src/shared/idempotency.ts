@@ -47,6 +47,9 @@ import { SERVICE_NAME, type MarketplaceEnv } from '../config/env';
  * financial write that is the right way round — a caller retrying too early is
  * a nuisance, and a caller charged twice is an incident.
  */
+/** `Retry-After` on the in-flight 409, as docs/06 § 6.8 states it. */
+const IN_FLIGHT_RETRY_AFTER_SECONDS = 1;
+
 @Injectable()
 export class IdempotencyStore {
   constructor(
@@ -110,10 +113,12 @@ export class IdempotencyStore {
     }
 
     // Nothing of the key in the context the exception filter logs (S-09): the
-    // endpoint and the request's correlationId locate the clash.
+    // endpoint and the request's correlationId locate the clash. The wait is
+    // the typed field the filter sends as `Retry-After`, not context.
     if (existing.state === 'IN_PROGRESS') {
       throw new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
-        internalContext: { endpoint, retryAfterSeconds: 1 },
+        internalContext: { endpoint },
+        retryAfterSeconds: IN_FLIGHT_RETRY_AFTER_SECONDS,
       });
     }
 

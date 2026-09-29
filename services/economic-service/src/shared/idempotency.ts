@@ -248,14 +248,19 @@ const CLAIM_ATTEMPTS = 3;
 /** An attempt that reserved nothing and must be made again. */
 const RETRY_CLAIM = Symbol('retry-claim');
 
+/** `Retry-After` on the in-flight 409, as docs/06 § 6.8 states it. */
+const IN_FLIGHT_RETRY_AFTER_SECONDS = 1;
+
 /**
  * Nothing derived from the key (S-09, review of #135): a truncated SHA-256 of
  * a client-chosen key is guessable when the key has little entropy. The
- * endpoint and the request's correlationId locate the clash.
+ * endpoint and the request's correlationId locate the clash. The wait is the
+ * typed field the exception filter sends as `Retry-After`, not context.
  */
 function inFlight(endpoint: string): RastaError {
   return new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
-    internalContext: { endpoint, retryAfterSeconds: 1 },
+    internalContext: { endpoint },
+    retryAfterSeconds: IN_FLIGHT_RETRY_AFTER_SECONDS,
   });
 }
 

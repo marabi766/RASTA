@@ -16,6 +16,7 @@ import type { ServiceUrls } from '../config/routes';
 import { loadGatewayEnv } from '../config/env';
 import { applyTrustProxy, trustProxySetting } from './trust-proxy';
 import { assertCanonicalPath } from './canonical-path';
+import { corsOptions } from './cors';
 
 /**
  * L1-03, L1-04 and L1-06, over real HTTP.
@@ -135,11 +136,15 @@ async function startGateway(options: {
   upstream: Upstream;
   context: RequestContext;
   trustedProxies?: string[];
+  /** Applies the gateway's CORS policy for these origins, as main.ts does. */
+  corsOrigins?: string[];
 }) {
   const { limiter, keys } = recordingLimiter();
   const controller = new GatewayController(proxyTo(options.upstream), limiter, PLATFORM_ENV);
 
-  const app = new ExpressAdapter().getInstance();
+  const adapter = new ExpressAdapter();
+  if (options.corsOrigins) adapter.enableCors(corsOptions(options.corsOrigins));
+  const app = adapter.getInstance();
   applyTrustProxy(app, options.trustedProxies ?? []);
   app.all(/^\/v1\/.*/, (req: never, res: never) => {
     runWithContext(options.context, () => controller.handle(req, res)).catch((error: unknown) => {
@@ -547,6 +552,73 @@ describe('L1-06: a non-platform 5xx body is replaced, never reflected', () => {
 
       expect(response.status).toBe(404);
       expect(String(response.headers['content-type'])).toMatch(/^application\/json/);
+    } finally {
+      await gateway.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// docs/06 § 6.8 — Retry-After on a key still in flight
+// ---------------------------------------------------------------------------
+
+describe('Retry-After from the owning service reaches the caller', () => {
+  let upstream: Upstream;
+  beforeEach(async () => (upstream = await startUpstream()));
+  afterEach(async () => upstream.close());
+
+  const origin = 'https://app.sample.test';
+  const envelope = {
+    code: 'CONFLICT',
+    message: 'This request is already being processed; retry shortly',
+    correlationId: 'req-sample-correlation',
+    timestamp: new Date(0).toISOString(),
+  };
+
+  it('forwards it with the in-flight 409, and exposes it to an allowed origin', async () => {
+    // The service answers a key still in flight with `409 CONFLICT` and
+    // `Retry-After`. Forwarding is not enough for a browser: a header off the
+    // CORS expose list arrives but the calling script cannot read it, so the
+    // client told to wait could not learn for how long.
+    upstream.respond = (res) => {
+      res.writeHead(409, { 'content-type': 'application/json', 'retry-after': '1' });
+      res.end(JSON.stringify(envelope));
+    };
+    const gateway = await startGateway({ upstream, context: userContext, corsOrigins: [origin] });
+    try {
+      const response = await gateway.send(
+        '/v1/orders',
+        { origin, 'idempotency-key': 'sample-key-0001' },
+        'POST',
+      );
+
+      expect(response.status).toBe(409);
+      expect(JSON.parse(response.body)).toEqual(envelope);
+      expect(response.headers['retry-after']).toBe('1');
+      expect(response.headers['access-control-allow-origin']).toBe(origin);
+      expect(String(response.headers['access-control-expose-headers']).split(',')).toContain(
+        'retry-after',
+      );
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it('adds none of its own when the service sent none', async () => {
+    upstream.respond = (res) => {
+      res.writeHead(409, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ...envelope, code: 'IDEMPOTENCY_KEY_REUSED' }));
+    };
+    const gateway = await startGateway({ upstream, context: userContext, corsOrigins: [origin] });
+    try {
+      const response = await gateway.send(
+        '/v1/orders',
+        { origin, 'idempotency-key': 'sample-key-0002' },
+        'POST',
+      );
+
+      expect(response.status).toBe(409);
+      expect(response.headers['retry-after']).toBeUndefined();
     } finally {
       await gateway.close();
     }

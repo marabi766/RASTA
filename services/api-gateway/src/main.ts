@@ -30,6 +30,7 @@ import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { applyTrustProxy } from './http/trust-proxy';
+import { corsOptions } from './http/cors';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -54,20 +55,7 @@ async function bootstrap(): Promise<void> {
 
   const origins = corsOrigins(env);
   if (origins.length > 0) {
-    app.enableCors({
-      origin: origins,
-      credentials: true,
-      allowedHeaders: [
-        'authorization',
-        'content-type',
-        'x-correlation-id',
-        'x-organization-id',
-        'idempotency-key',
-        'if-match',
-      ],
-      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag'],
-      maxAge: 600,
-    });
+    app.enableCors(corsOptions(origins));
   }
 
   // A request body large enough to matter here is a malformed or hostile one.

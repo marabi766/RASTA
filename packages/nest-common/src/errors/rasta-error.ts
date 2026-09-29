@@ -1,5 +1,15 @@
 import { ERROR_CODES, ERROR_STATUS, type ErrorCode, type ErrorDetail } from '@rasta/contracts';
 
+/** The shortest `Retry-After` the exception filter sends: "now" is not a wait. */
+export const RETRY_AFTER_MIN_SECONDS = 1;
+
+/**
+ * The longest `Retry-After` the exception filter sends. An hour: longer than
+ * any wait this platform asks for, and short enough that a mistaken value
+ * cannot tell a client to give up for a day.
+ */
+export const RETRY_AFTER_MAX_SECONDS = 3600;
+
 /**
  * The one error type domain code throws.
  *
@@ -35,6 +45,17 @@ export class RastaError extends Error {
    * reach the client.
    */
   readonly clientSafe: boolean;
+  /**
+   * How long the client should wait before retrying, in seconds — sent as the
+   * `Retry-After` response header (docs/06 § 6.8: a key still in flight). The
+   * one response header an error may set, and set only from this field: the
+   * exception filter never reads a header, or its value, out of
+   * `internalContext`, which stays server-side (S-09). The filter sends it as
+   * an integer between {@link RETRY_AFTER_MIN_SECONDS} and
+   * {@link RETRY_AFTER_MAX_SECONDS}; a value that is not a finite number is
+   * not sent at all.
+   */
+  readonly retryAfterSeconds?: number;
 
   constructor(
     code: ErrorCode,
@@ -45,6 +66,8 @@ export class RastaError extends Error {
       cause?: unknown;
       /** See {@link RastaError.clientSafe}. */
       clientSafe?: boolean;
+      /** See {@link RastaError.retryAfterSeconds}. */
+      retryAfterSeconds?: number;
     },
   ) {
     super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
@@ -54,6 +77,7 @@ export class RastaError extends Error {
     this.details = options?.details;
     this.internalContext = options?.internalContext;
     this.clientSafe = options?.clientSafe === true;
+    this.retryAfterSeconds = options?.retryAfterSeconds;
     Error.captureStackTrace?.(this, RastaError);
   }
 

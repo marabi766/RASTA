@@ -222,17 +222,25 @@ describe('IdempotencyStore.claim — who may proceed', () => {
   const RAW_KEY = 'SENTINEL-client-chosen-key-4471';
   const OLD_DIGEST = createHash('sha256').update(RAW_KEY).digest('hex').slice(0, 16);
 
-  function throughTheFilter(error: unknown): { logged: string; body: string } {
+  function throughTheFilter(error: unknown): {
+    logged: string;
+    body: string;
+    headers: Record<string, string>;
+  } {
     const lines: unknown[] = [];
     const record = (...args: unknown[]) => {
       lines.push(args);
     };
     const logger = { debug: record, warn: record, error: record } as unknown as Logger;
     let body: unknown;
+    const headers: Record<string, string> = {};
     const response = {
       status: () => response,
       json: (sent: unknown) => {
         body = sent;
+      },
+      setHeader: (name: string, value: string) => {
+        headers[name] = value;
       },
     };
     new AllExceptionsFilter(logger).catch(error, {
@@ -244,15 +252,15 @@ describe('IdempotencyStore.claim — who may proceed', () => {
           ? { ...field, name: field.name, message: field.message, stack: field.stack }
           : field,
       );
-    return { logged: dump(lines), body: dump(body) };
+    return { logged: dump(lines), body: dump(body), headers };
   }
 
   it.each([
-    ['reused with another body', 'COMPLETED', { other: true }, 'IDEMPOTENCY_KEY_REUSED'],
-    ['in flight', 'IN_PROGRESS', {}, 'CONFLICT'],
+    ['reused with another body', 'COMPLETED', { other: true }, 'IDEMPOTENCY_KEY_REUSED', {}],
+    ['in flight', 'IN_PROGRESS', {}, 'CONFLICT', { 'Retry-After': '1' }],
   ])(
     'keeps the key and its digest out of the error when it is %s',
-    async (_case, state, body, code) => {
+    async (_case, state, body, code, expectedHeaders) => {
       const { store } = storeWith({
         create: jest.fn().mockRejectedValue(uniqueViolation),
         findUnique: jest.fn().mockResolvedValue({
@@ -266,9 +274,18 @@ describe('IdempotencyStore.claim — who may proceed', () => {
         (thrown: unknown) => thrown,
       )) as { code: string; internalContext?: unknown };
       expect(error).toMatchObject({ code });
-      const { logged, body: answered } = throughTheFilter(error);
+      const { logged, body: answered, headers } = throughTheFilter(error);
       expect(logged).toContain(code); // the line was written
-      for (const text of [JSON.stringify(error.internalContext ?? {}), logged, answered]) {
+      // Only the in-flight refusal asks for a wait, and only from its typed
+      // field, never from its context.
+      expect(headers).toEqual(expectedHeaders);
+      expect(error.internalContext ?? {}).not.toHaveProperty('retryAfterSeconds');
+      for (const text of [
+        JSON.stringify(error.internalContext ?? {}),
+        logged,
+        answered,
+        JSON.stringify(headers),
+      ]) {
         expect(text).not.toContain(RAW_KEY);
         expect(text).not.toContain('SENTINEL');
         expect(text).not.toContain(OLD_DIGEST);
