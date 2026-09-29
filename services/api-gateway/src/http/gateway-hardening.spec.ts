@@ -575,13 +575,29 @@ describe('Retry-After from the owning service reaches the caller', () => {
     timestamp: new Date(0).toISOString(),
   };
 
+  /**
+   * What a service with its own CORS policy sends: a wildcard origin and an
+   * expose list without `retry-after`. None of it is the gateway's to repeat.
+   */
+  const SERVICE_CORS = {
+    'access-control-allow-origin': '*',
+    'access-control-allow-credentials': 'false',
+    'access-control-expose-headers': 'x-correlation-id',
+    'access-control-max-age': '5',
+  };
+
   it('forwards it with the in-flight 409, and exposes it to an allowed origin', async () => {
     // The service answers a key still in flight with `409 CONFLICT` and
     // `Retry-After`. Forwarding is not enough for a browser: a header off the
     // CORS expose list arrives but the calling script cannot read it, so the
-    // client told to wait could not learn for how long.
+    // client told to wait could not learn for how long. The service's own
+    // CORS headers used to overwrite the gateway's (review of #141).
     upstream.respond = (res) => {
-      res.writeHead(409, { 'content-type': 'application/json', 'retry-after': '1' });
+      res.writeHead(409, {
+        'content-type': 'application/json',
+        'retry-after': '1',
+        ...SERVICE_CORS,
+      });
       res.end(JSON.stringify(envelope));
     };
     const gateway = await startGateway({ upstream, context: userContext, corsOrigins: [origin] });
@@ -595,10 +611,44 @@ describe('Retry-After from the owning service reaches the caller', () => {
       expect(response.status).toBe(409);
       expect(JSON.parse(response.body)).toEqual(envelope);
       expect(response.headers['retry-after']).toBe('1');
+      // Every Access-Control-* value is the gateway's policy, none the service's.
       expect(response.headers['access-control-allow-origin']).toBe(origin);
+      expect(response.headers['access-control-allow-credentials']).toBe('true');
+      expect(String(response.headers['access-control-expose-headers']).split(',')).toEqual(
+        corsOptions([origin]).exposedHeaders,
+      );
       expect(String(response.headers['access-control-expose-headers']).split(',')).toContain(
         'retry-after',
       );
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it('never repeats a service’s CORS headers — without a gateway policy there are none', async () => {
+    // No `GATEWAY_CORS_ORIGINS`: the gateway grants no origin, so a service's
+    // wildcard must not grant one on its behalf.
+    upstream.respond = (res) => {
+      res.writeHead(409, {
+        'content-type': 'application/json',
+        'retry-after': '1',
+        ...SERVICE_CORS,
+      });
+      res.end(JSON.stringify(envelope));
+    };
+    const gateway = await startGateway({ upstream, context: userContext });
+    try {
+      const response = await gateway.send(
+        '/v1/orders',
+        { origin, 'idempotency-key': 'sample-key-0003' },
+        'POST',
+      );
+
+      expect(response.status).toBe(409);
+      expect(response.headers['retry-after']).toBe('1');
+      expect(
+        Object.keys(response.headers).filter((name) => name.startsWith('access-control-')),
+      ).toEqual([]);
     } finally {
       await gateway.close();
     }

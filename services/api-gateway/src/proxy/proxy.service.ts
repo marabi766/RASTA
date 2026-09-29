@@ -56,6 +56,9 @@ const HOP_BY_HOP = new Set([
   'content-length',
 ]);
 
+/** Response headers that belong to the gateway's CORS policy, never an upstream's. */
+const CORS_HEADER_PREFIX = 'access-control-';
+
 @Injectable()
 export class ProxyService {
   private readonly logger = new Logger(ProxyService.name);
@@ -290,6 +293,11 @@ export class ProxyService {
       // upstream's type must not travel with it: a `text/html` label on a
       // reflected body is how a JSON response gets rendered as a page.
       if (lower === 'content-type') return;
+      // CORS is the gateway's policy, set by its own middleware before the
+      // upstream answers (http/cors.ts). A service's `Access-Control-*` copied
+      // on top would replace it — its expose list hid `Retry-After` from the
+      // browser (review of #141) — or grant an origin the gateway never allowed.
+      if (lower.startsWith(CORS_HEADER_PREFIX)) return;
       result[lower] = value;
     });
     return result;

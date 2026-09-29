@@ -9,6 +9,10 @@ import type { CorsOptions } from '@nestjs/common/interfaces/external/cors-option
  * platform promises it on the in-flight idempotency `409` (docs/06 § 6.8) and
  * on a rate-limit `429`: a browser client that cannot read the header cannot
  * keep that promise's other half and wait.
+ *
+ * These are the only `Access-Control-*` headers a caller receives: the proxy
+ * drops an upstream service's own (`ProxyService.responseHeaders`), which would
+ * otherwise overwrite this policy after the middleware set it.
  */
 export function corsOptions(origins: string[]): CorsOptions {
   return {
