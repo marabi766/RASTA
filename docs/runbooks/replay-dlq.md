@@ -74,7 +74,7 @@ Headerهای کلیدی:
 `x-correlation-id` و `traceparent`) در پیام DLQ می‌مانند؛ Header دیگری (مثلاً `authorization`) منتقل نمی‌شود (S-09).
 `x-producer` در پیام DLQ نام مصرف‌کننده‌ای است که آن را نوشت، نه ناشر اصلی؛ ناشر اصلی در `producer` بدنه است.
 
-**آنچه برای ابزار بازپخش آینده نگه داشته می‌شود** (ابزار هنوز نیست — گام ۳): بدنهٔ بایت‌به‌بایت دست‌نخورده، Headerهای
+**آنچه ابزار بازپخش (گام ۳) لازم دارد و نگه داشته می‌شود:** بدنهٔ بایت‌به‌بایت دست‌نخورده، Headerهای
 پلتفرم (`EVENT_HEADERS`)، و `x-dlq-original-topic`، `x-dlq-original-partition` و `x-dlq-original-offset`. **کلید پیام Kafka
 نگه داشته نمی‌شود** ([D-040](../23-risks-and-tradeoffs.md)): پیام DLQ بی‌کلید نوشته می‌شود، و کلید اصلی (کلید پارتیشن
 ناشر) همیشه از بدنه بازسازی‌پذیر نیست — پیش‌فرضش `aggregateId` است، اما ناشری که کلید صریح می‌دهد آن را فقط در `streamKey`
@@ -123,41 +123,70 @@ docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh \
 ### گام ۳ — بازپخش
 
 **چه کسی.** فقط Principal `ops-replay` (RUN-006، ADR-061 § ۳): تنها Principalی که Topicهای `.retry` را **می‌نویسد** و DLQ
-سرویس‌های دیگر را **می‌خواند**، زیر گروه‌های `ops-replay.`. نه روی Topic اصلی می‌نویسد، نه روی DLQ؛ Topic اصلی فقط مال
-ناشر است، پس پیام بازپخش‌شده هرگز به نام ناشر روی Topic او نمی‌نشیند. مصرف‌کننده `.retry` هر Topic مشترکش را با همان
-اعلام `TOPIC_CONSUMERS` می‌خواند و بررسی ناشر (ADR-061 § ۲) همان‌جا دوباره اجرا می‌شود. گذرواژه:
-`KAFKA_SASL_PASSWORD_OPS_REPLAY` — در توسعه از `infrastructure/docker/kafka/bootstrap.env` (پیش‌فرض‌ها در
-`bootstrap.env.example`)، **هرگز** از `.env` مشترکی که هر سرویس می‌خواند (`pnpm infra:up` و
+سرویس‌های دیگر را **می‌خواند**، زیر گروه‌های `ops-replay.`؛ و برای بررسی کهنگی، Topicهای مبدأ مشترک را فقط **می‌خواند**
+(همان گروه‌ها). نه روی Topic اصلی می‌نویسد، نه روی DLQ؛ Topic اصلی فقط مال ناشر است، پس پیام بازپخش‌شده هرگز به نام ناشر روی
+Topic او نمی‌نشیند. گذرواژه: `KAFKA_SASL_PASSWORD_OPS_REPLAY` — در توسعه از `infrastructure/docker/kafka/bootstrap.env`
+(پیش‌فرض‌ها در `bootstrap.env.example`)، **هرگز** از `.env` مشترکی که هر سرویس می‌خواند (`pnpm infra:up` و
 `pnpm check:kafka-credential-scope` آن را در `.env` رد می‌کنند)؛ در استقرار از Secret Store اپراتور. چرخش:
 [kafka-credential-rotation](kafka-credential-rotation.md).
 
-**مسیر:** `rasta.<domain>.v1.dlq` ← (خواندن با `ops-replay`) ← بررسی ← `rasta.<domain>.v1.retry` (نوشتن با
-`ops-replay`). Broker هر مسیر دیگری را رد می‌کند؛ `scripts/kafka-acl.broker.test.mjs` همین را در CI نشان می‌دهد.
+**مسیر:** `rasta.<domain>.v1.dlq` ← (خواندن با `ops-replay`) ← بررسی ← `<Topic مبدأ>.retry` (نوشتن با `ops-replay`). Broker
+هر مسیر دیگری را رد می‌کند؛ `scripts/kafka-acl.broker.test.mjs` همین را در CI نشان می‌دهد.
 
-> ⚠️ **ابزار بازپخش پیاده نشده است.** `dist/scripts/replay-dlq.js` که نسخه‌های پیشین این Runbook نام می‌بردند در مخزن
-> وجود ندارد و هرگز ساخته نشد (ADR-051 § R6). هیچ فرمان بازپخشی در مخزن نیست؛ فرمانی را که اینجا نیامده اجرا نکن.
+> ⚠️ **D-039:** هیچ Consumerی امروز `.retry` را Subscribe نمی‌کند (مجوزش را دارد، اشتراکش را نه). تا رفع آن در
+> `packages/nest-common` (`EventConsumer` هر Topic را همراه `.retry`اش بخواند، با همان بررسی ناشر § ۲)، رکوردی که ابزار
+> می‌نویسد به هیچ مصرف‌کننده‌ای **نمی‌رسد**. تا آن زمان راه عملی برای رویداد غیرمالی همان است که بود: علت را رفع کن و اثر را در
+> سرویس مالک از **مسیر عادی خودش** (API یا فرمانی که بار اول اثر را ساخت) دوباره بساز — نه با نوشتن دستی روی Topic ناشر، که همان
+> جعلی است که ADR-061 § ۲ می‌بندد.
 
-**امروز چه می‌توان کرد (رویداد غیرمالی):**
+**ابزار:** `scripts/replay-dlq.mjs` (قواعد: `scripts/replay-dlq-lib.mjs`). همیشه **اول Dry-run** — پیش‌فرض همین است و چیزی
+نمی‌نویسد:
 
-1. **دیدن پیام:** فرمان «۱. چه چیزی در DLQ است؟» بالا، یا Kafka UI (`docker compose --profile tools up -d kafka-ui`، سپس
-   `http://127.0.0.1:8081`): بدنه، Headerهای `x-dlq-*` و Headerهای پلتفرم.
-2. **رفع علت** (گام ۲).
-3. **بازسازی اثر در سرویس مالک، از مسیر عادی خودش** — همان API یا فرمانی که بار اول اثر را می‌ساخت — نه با نوشتن دستی پیام روی
-   Topic ناشر: نوشتن به نام ناشر همان جعلی است که ADR-061 § ۲ می‌بندد، و ترتیب نسبت به رویدادهای بعدی را هم نگه نمی‌دارد
-   (ADR-051 § R6).
-4. اگر اثر نباید ساخته شود: گام ۴.
+```bash
+# توسعه: گذرواژهٔ ops-replay از فایل Bootstrap؛ استقرار: KAFKA_BROKERS، گذرواژه و CA از Secret Store، نه از این Repository
+node --env-file=infrastructure/docker/kafka/bootstrap.env.example \
+  --env-file-if-exists=infrastructure/docker/kafka/bootstrap.env \
+  scripts/replay-dlq.mjs --dlq rasta.maintenance.v1.dlq --event-id EVT_… [--event-id …] \
+  [--report replay.jsonl]
 
-آنچه ابزار آینده لازم دارد و امروز نگه داشته می‌شود — و آنچه نمی‌شود (کلید پیام، D-040) — زیر «Headerهای کلیدی» بالا آمده است.
+# یا بازه‌ای از Offsetهای یک پارتیشن DLQ
+node … scripts/replay-dlq.mjs --dlq rasta.maintenance.v1.dlq --partition 0 --from-offset 120 --to-offset 124
+```
 
-Idempotency مصرف‌کننده‌ها (`processed_event`) پیام **تکراری** را بی‌اثر می‌کند، اما رویداد **کهنه** را که پس از وضعیتی
-جدیدتر برسد نه (ADR-051 § R6)؛ پس بازپخش، حتی با ابزار آینده، خودبه‌خود امن نیست.
+انتخاب همیشه **صریح و محدود** است: یا `--event-id`، یا یک بازهٔ Offset؛ پیش‌فرض حداکثر ۱۰ و سقف `--max 100` — هرگز «کل DLQ».
+گزارش (خروجی و `--report`) برای هر رکورد یک خط JSON است: شناسه‌ها، نام رویداد، دلیل، Offsetها، مقصد، کلید جریان، کهنگی و حکم —
+**هرگز** Payload.
 
-> **D-039:** هیچ Consumerی امروز `.retry` را Subscribe نمی‌کند (مجوزش را دارد، اشتراکش را نه)، پس حتی نوشتن مجاز
-> `ops-replay` روی `.retry` امروز به هیچ مصرف‌کننده‌ای نمی‌رسد. هیچ دور زدنی با اعتبار یک سرویس مجاز نیست.
+**اجرا** فقط وقتی Dry-run رضایت‌بخش بود، و با همان انتخاب:
 
-وقتی ابزار ساخته شد، دو قاعده‌اش همین‌اند: اول همیشه `--dry-run`، و هدف همیشه `<topic>.retry`، نه `<topic>`.
+```bash
+REPLAY_OPERATOR=<نام اپراتور، بی Secret> node … scripts/replay-dlq.mjs --dlq … --event-id EVT_… \
+  --execute --expect-count <تعدادی که Dry-run انتخاب کرد>
+```
 
-**رویداد مالی:** ⛔
+**قواعد ابزار** — هر کدام در گزارش با نام رد می‌شود:
+
+- **مقصد همیشه `<Topic مبدأ>.retry`** از `x-dlq-original-topic`، و Topic مبدأ باید از اشتراک‌های همان مصرف‌کننده‌ای باشد که DLQ
+  مال اوست؛ هرگز Topic اصلی.
+- **بدنه بایت‌به‌بایت**، با **فقط** Headerهای پلتفرم (`EVENT_HEADERS`) که پیام DLQ داشت و مهر
+  `x-replay-id: <reportId>/<operator>` — هیچ Header `x-dlq-*`. Header پلتفرمی که با بدنه نخواند رد می‌شود، اصلاح نمی‌شود.
+- **کلید پیام = `streamKey` پاکت.** رویداد بی Sequence (`UNSEQUENCED`) رد می‌شود تا D-040 (نگه‌داشتن کلید در DLQ) برسد —
+  هیچ حدسی از `aggregateId`.
+- **رد می‌شوند:** `NEVER_AUTO_REPLAY` (همهٔ رویدادهای economic و `ORDER_RECEIPT_CONFIRMED`، `STATEMENT_APPROVED`) — بی هیچ
+  Override؛ و دلیل‌هایی که بازپخش عوضشان نمی‌کند: `PRODUCER_NOT_ALLOWED`، `SOURCE_UNCONFIRMED`، `BACKFILL_REQUIRED`.
+- **کهنگی (ADR-051 § R6):** Dry-run Topic مبدأ را از پس از Offset اصلی می‌خواند؛ اگر رویداد تازه‌تری با همان کلید جریان هست
+  `stale: true`، و اگر نمی‌تواند ببیند (مبدأ `.retry`، یا بی موقعیت) `UNKNOWN`. `--execute` چنین رکوردی را رد می‌کند مگر
+  `--allow-stale <eventId>` آن را **نام ببرد**. Idempotency مصرف‌کننده (`processed_event`) فقط تکرار را بی‌اثر می‌کند، نه کهنه را.
+- **همه یا هیچ:** اجرا فقط وقتی می‌نویسد که **همهٔ** رکوردهای انتخاب قابل‌بازپخش باشند و تعدادشان دقیقاً `--expect-count` باشد؛
+  انتخابی که ردشده دارد تنگ‌تر می‌شود، نیمه‌بازپخش نمی‌شود. سپس یکی‌یکی (`acks=-1`، Producer Idempotent)، به ترتیب DLQ، و
+  در نخستین شکست توقف.
+- **بازپخش به همهٔ مشترکان می‌رسد:** `<topic>.retry` را (پس از D-039) هر مصرف‌کنندهٔ آن Topic می‌خواند، نه فقط آن که DLQ
+  کرد؛ برای بقیه تکراری است و `processed_event` آن را بی‌اثر می‌کند.
+- **ممیزی:** هر رکورد بازپخش‌شده `x-replay-id` دارد و گزارش نگه داشته می‌شود. رکورد ممیزی پلتفرم برای هر بازپخش (Topic
+  `rasta.ops.replay.v1`، ناشر فقط `ops-replay`، مصرف‌کننده audit-service) کار بعدی است.
+
+**رویداد مالی:** ⛔ ابزار این رویدادها را **همیشه** رد می‌کند (`NEVER_AUTO_REPLAY`). اثرشان فقط دستی و از مسیر عادی سرویس
+مالک:
 
 ```
 ۱. اثر مالی را دستی بررسی کن:
@@ -165,7 +194,7 @@ Idempotency مصرف‌کننده‌ها (`processed_event`) پیام **تکرا
    - آیا Journal ناقصی Post شده؟
    - وضعیت واقعی سفارش یا صورت‌وضعیت چیست؟
 ۲. تأیید بگیر (مسئول عملیات مالی)
-۳. تک‌پیام بازپخش کن، نه دسته‌ای
+۳. اثر را تک‌به‌تک از مسیر عادی سرویس مالک بساز، نه دسته‌ای — هرگز با بازپخش
 ۴. بلافاصله توازن دفتر کل را بررسی کن
 ```
 

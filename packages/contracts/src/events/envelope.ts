@@ -213,6 +213,16 @@ export const DLQ_HEADERS = {
   originalOffset: 'x-dlq-original-offset',
 } as const;
 
+/**
+ * Stamped on every record the DLQ replay tool publishes (docs/runbooks/replay-dlq.md):
+ * `<reportId>/<operator>`, the tool's report id and the operator named in its
+ * environment — no secret. A consumer or an auditor can tell a replay from an
+ * original, and find the report that explains it.
+ */
+export const REPLAY_HEADERS = {
+  replayId: 'x-replay-id',
+} as const;
+
 export const DLQ_REASONS = {
   VALIDATION_FAILED: 'VALIDATION_FAILED',
   SCHEMA_VERSION_UNSUPPORTED: 'SCHEMA_VERSION_UNSUPPORTED',

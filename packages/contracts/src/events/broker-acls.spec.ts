@@ -96,6 +96,27 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
     );
   });
 
+  it('lets ops-replay read every subscribed topic — for the staleness check — and write none', () => {
+    const subscribed = new Set(Object.values(TOPIC_CONSUMERS).flatMap((c) => [...c.subscribes]));
+    const reads = where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation: 'READ' })
+      .filter((acl) => acl.resourceType === 'TOPIC' && !DEAD_LETTERS.includes(acl.resourceName))
+      .map((acl) => acl.resourceName)
+      .sort();
+    expect(reads).toEqual([...subscribed].sort());
+    // Its WRITE is the .retry twins alone: never an original, never a dead letter.
+    for (const acl of where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation: 'WRITE' })) {
+      expect(acl.resourceName.endsWith('.retry')).toBe(true);
+    }
+    // And its groups stay in its own namespace.
+    expect(
+      where(acls, { principal: OPS_REPLAY_PRINCIPAL, resourceType: 'GROUP' }).map((acl) => [
+        acl.resourceName,
+        acl.patternType,
+        acl.operation,
+      ]),
+    ).toEqual([[`${OPS_REPLAY_PRINCIPAL}.`, 'PREFIXED', 'READ']]);
+  });
+
   it('grants groups only by prefix, and only within the principal’s own namespace (tools only describe)', () => {
     for (const acl of where(acls, { resourceType: 'GROUP' })) {
       expect(acl.patternType).toBe('PREFIXED');

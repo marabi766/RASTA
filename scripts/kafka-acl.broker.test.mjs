@@ -21,7 +21,9 @@
  *   - only a topic's owner writes it; a service reads only what it subscribes
  *     to, under groups in its own namespace;
  *   - a service writes only its own dead-letter topic; only `ops-replay`
- *     writes `.retry` topics and reads dead-letter topics;
+ *     writes `.retry` topics and reads dead-letter topics, and it reads an
+ *     original topic (the replay tool's staleness check) only in its own
+ *     groups, never writing it;
  *   - no password, a wrong password, an unknown principal or SASL/PLAIN (even
  *     with a real password) is refused, and so is PLAINTEXT;
  *   - no principal but the admin creates a topic, by request or by producing;
@@ -332,6 +334,23 @@ describe('5. dead-letter and retry topics', () => {
     );
     assert.equal(
       await refusal(() => produce('ops-replay', 'rasta.fleet.v1.dlq')),
+      'TOPIC_AUTHORIZATION_FAILED',
+    );
+  });
+
+  test('ops-replay reads an original topic — the staleness check — only in its own groups, and never writes it', async () => {
+    assert.equal(
+      await consume('ops-replay', `ops-replay.acl-stale-${run}`, 'rasta.fleet.v1'),
+      'JOINED',
+    );
+    // Another namespace's group: refused as GROUP_AUTHORIZATION_FAILED, which
+    // kafkajs reports as "coordinator not found" (as in § 4).
+    assert.equal(
+      await consume('ops-replay', `maintenance-service.acl-stale-${run}`, 'rasta.fleet.v1'),
+      'KafkaJSGroupCoordinatorNotFound',
+    );
+    assert.equal(
+      await refusal(() => produce('ops-replay', 'rasta.fleet.v1')),
       'TOPIC_AUTHORIZATION_FAILED',
     );
   });

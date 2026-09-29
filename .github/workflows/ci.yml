@@ -105,6 +105,7 @@ jobs:
           pnpm run test:kafka-credential-scope
           pnpm run check:kafka-credential-scope
           pnpm run test:kafka-outbox-tables
+          pnpm run test:replay-dlq-lib
 
       - name: Role passwords are distinct and checked before any role changes
         # L7-33: the bootstrap and `pnpm db:rotate-role-passwords` refuse two
@@ -1321,13 +1322,19 @@ jobs:
         # topic's owner writes it, a service reads what it subscribes to under
         # its own group namespace, dead-letter and retry topics, refused
         # credentials and PLAINTEXT, no topic creation, and the idempotent
-        # producer on WRITE alone. Refuses to run without the bootstrap's
-        # environment rather than skip. Last in the job: its allowed writes
-        # are marker records on real topics, which no suite above should read.
+        # producer on WRITE alone. Then the DLQ replay tool, as ops-replay:
+        # dry-run by default, every refusal, one record to .retry with only
+        # the platform headers and its stream key, never the original topic.
+        # Both refuse to run without the bootstrap's environment rather than
+        # skip. Last in the job: their allowed writes are marker records on
+        # real topics, which no suite above should read.
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh admin)"
           eval "${kafka_credentials}"
           pnpm run test:kafka-acl-broker
+          # The DLQ replay tool, as ops-replay, end to end (docs/runbooks/replay-dlq.md).
+          pnpm --filter @rasta/contracts build
+          pnpm run test:replay-dlq-broker
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
