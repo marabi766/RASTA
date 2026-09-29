@@ -11,7 +11,7 @@ import {
   AuditTrailRejectedError,
   toAuditTrailRecord,
 } from '../audit/audit-trail.mapper';
-import type { ConsumerFactory } from './domain-projector.consumer';
+import { asOriginalDelivery, type ConsumerFactory } from './domain-projector.consumer';
 import { trailSourceServiceLabel } from '../audit/audit-producer-topology';
 import {
   auditIngestionFailuresTotal,
@@ -127,7 +127,9 @@ export class AuditTrailConsumer implements OnModuleDestroy {
   ) {}
 
   async start(): Promise<void> {
-    this.consumer = this.createConsumer((envelope, delivery) => this.handle(envelope, delivery));
+    this.consumer = this.createConsumer((envelope, delivery) =>
+      this.handle(envelope, asOriginalDelivery(delivery)),
+    );
     await this.consumer.start();
   }
 

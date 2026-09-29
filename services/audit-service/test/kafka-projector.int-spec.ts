@@ -512,6 +512,139 @@ describeWithKafka('domain projector over Kafka', () => {
     }
   }, 300_000);
 
+  /**
+   * D-039: what `ops-replay` republishes on `<topic>.retry` is consumed like the
+   * original. Only `ops-replay` may write a `.retry` topic (RUN-006), and its
+   * password is deliberately not in the shared `.env` nor in CI's test scope
+   * (`bootstrap.env` locally): without it these tests are skipped, and say so.
+   */
+  const replayPassword = process.env.KAFKA_SASL_PASSWORD_OPS_REPLAY;
+  const itWithReplay = replayPassword ? it : it.skip;
+  if (!replayPassword) {
+    console.warn('[audit] KAFKA_SASL_PASSWORD_OPS_REPLAY is not set — skipping the .retry tests');
+  }
+
+  async function publishRetry(topic: string, body: unknown, key: string): Promise<void> {
+    const client = new Kafka({
+      ...kafkaClientConfig(kafkaConnectionFor('ops-replay', 'audit-itest-ops-replay')),
+      logLevel: 1,
+    });
+    const producer = client.producer({ idempotent: true, maxInFlightRequests: 1 });
+    await producer.connect();
+    try {
+      await producer.send({
+        topic: `${topic}.retry`,
+        messages: [{ key, value: JSON.stringify(body) }],
+      });
+    } finally {
+      await producer.disconnect();
+    }
+  }
+
+  itWithReplay(
+    'applies a record replayed on .retry exactly once, and a second replay or an already-processed eventId is a duplicate',
+    async () => {
+      const replayed = envelope({ producer: ownerOf('rasta.fleet.v1') });
+      await publishRetry('rasta.fleet.v1', replayed, replayed.aggregateId);
+      const row = await waitFor('the replayed row', rowFor(replayed.eventId), DELIVERY_TIMEOUT_MS);
+      // A replay is the same event as the original: recorded under its topic.
+      expect(row.sourceTopic).toBe('rasta.fleet.v1');
+
+      // The same record replayed again, and the original published afterwards.
+      await publishRetry('rasta.fleet.v1', replayed, replayed.aggregateId);
+      await publish('rasta.fleet.v1', replayed);
+
+      // An event processed first on the original topic, then replayed.
+      const original = envelope({ producer: ownerOf('rasta.maintenance.v1') });
+      await publish('rasta.maintenance.v1', original);
+      await waitFor('the original row', rowFor(original.eventId), DELIVERY_TIMEOUT_MS);
+      await publishRetry('rasta.maintenance.v1', original, original.aggregateId);
+
+      // Settle, then count: a count taken at once could pass because the
+      // duplicates had not arrived yet.
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      for (const source of [replayed, original]) {
+        expect(
+          await prisma.client.auditEvent.count({ where: { sourceEventId: source.eventId } }),
+        ).toBe(1);
+        expect(
+          await prisma.client.processedEvent.count({ where: { eventId: source.eventId } }),
+        ).toBe(1);
+      }
+    },
+    300_000,
+  );
+
+  itWithReplay(
+    'dead-letters a forged producer on .retry as PRODUCER_NOT_ALLOWED, keeping the message key',
+    async () => {
+      const dlqTopic = 'rasta.audit.v1.dlq';
+      const dlq = new Kafka({
+        ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'audit-itest-retry-dlq-reader')),
+        logLevel: 1,
+      });
+      const dlqConsumer = dlq.consumer({
+        groupId: `itest-observer.audit-retry-dlq-${ulid().slice(-12)}`,
+      });
+      const seen: { key?: string; reason?: string; originalTopic?: string; body: string }[] = [];
+
+      const admin = dlq.admin();
+      await admin.connect();
+      let startAt: ReadonlyMap<number, string>;
+      try {
+        startAt = new Map(
+          (await admin.fetchTopicOffsets(dlqTopic)).map(({ partition, offset }) => [
+            partition,
+            offset,
+          ]),
+        );
+      } finally {
+        await admin.disconnect();
+      }
+      const reader = pinToOffsets(dlqConsumer, dlqTopic, startAt);
+
+      try {
+        await dlqConsumer.connect();
+        await dlqConsumer.subscribe({ topic: dlqTopic, fromBeginning: false });
+        await dlqConsumer.run({
+          eachMessage: async ({ message }) => {
+            seen.push({
+              key: message.key?.toString('utf8'),
+              reason: message.headers?.[DLQ_HEADERS.reason]?.toString(),
+              originalTopic: message.headers?.[DLQ_HEADERS.originalTopic]?.toString(),
+              body: message.value?.toString('utf8') ?? '',
+            });
+          },
+        });
+        await reader.joined();
+
+        const forged = envelope({
+          producer: ownerOf('rasta.asset.v1'),
+          aggregateType: 'Document',
+          payload: { probe: `FORGED-RETRY-${RUN_TAG}` },
+        });
+        const key = `KEY-${RUN_TAG}-${forged.eventId}`;
+        await publishRetry('rasta.document.v1', forged, key);
+
+        const dead = await waitFor(
+          'the forged .retry record on the dlq',
+          async () => seen.find((message) => message.body.includes(forged.eventId)),
+          DELIVERY_TIMEOUT_MS,
+        );
+        expect(dead.reason).toBe('PRODUCER_NOT_ALLOWED');
+        expect(dead.originalTopic).toBe('rasta.document.v1.retry');
+        expect(dead.key).toBe(key);
+        expect(
+          await prisma.client.auditEvent.count({ where: { sourceEventId: forged.eventId } }),
+        ).toBe(0);
+      } finally {
+        reader.stop();
+        await dlqConsumer.disconnect();
+      }
+    },
+    300_000,
+  );
+
   it('never marks an event processed when the write fails', async () => {
     // The invariant that matters most: an event marked processed without its
     // row is evidence lost with no trace it was lost. Forced by handing the

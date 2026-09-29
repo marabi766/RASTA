@@ -1,4 +1,4 @@
-import { EventConsumer, UnprocessableEventError } from './event-consumer';
+import { EventConsumer, UnprocessableEventError, subscribedTopics } from './event-consumer';
 import { RastaError } from '../errors/rasta-error';
 import type {
   ConsumerLogger,
@@ -306,7 +306,7 @@ describe('EventConsumer startup failure', () => {
 
     // The later failure point: every subscription was accepted, so the group
     // membership is fully established by the time this fails.
-    expect(fake.subscribed).toEqual(TOPICS);
+    expect(fake.subscribed).toEqual(subscribedTopics(TOPICS));
     expect(fake.disconnects).toBe(1);
     expect(consumer.isRunning()).toBe(false);
 
@@ -339,7 +339,13 @@ describe('EventConsumer startup failure', () => {
 
     await consumer.start();
 
-    expect(fake.subscribed).toEqual(TOPICS);
+    // D-039: each declared topic and its `.retry` twin, in that order.
+    expect(fake.subscribed).toEqual([
+      'rasta.identity.v1',
+      'rasta.identity.v1.retry',
+      'rasta.asset.v1',
+      'rasta.asset.v1.retry',
+    ]);
     expect(fake.runs).toBe(1);
     expect(consumer.isRunning()).toBe(true);
 
@@ -741,12 +747,14 @@ describe('EventConsumer dead-letter metric zero series', () => {
     new EventConsumer(options, async () => undefined, silent);
 
     const samples = await exposedFor(CLIENT_ID);
-    const expected = TOPICS.flatMap((topic) =>
-      Object.values(DLQ_REASONS).map((reason) => key({ service: CLIENT_ID, topic, reason })),
-    ).sort();
+    const expected = subscribedTopics(TOPICS)
+      .flatMap((topic) =>
+        Object.values(DLQ_REASONS).map((reason) => key({ service: CLIENT_ID, topic, reason })),
+      )
+      .sort();
 
     expect(samples.map((sample) => key(sample.labels)).sort()).toEqual(expected);
-    expect(samples).toHaveLength(TOPICS.length * Object.keys(DLQ_REASONS).length);
+    expect(samples).toHaveLength(subscribedTopics(TOPICS).length * Object.keys(DLQ_REASONS).length);
     for (const sample of samples) {
       expect(sample.value).toBe(0);
       expect(Object.keys(sample.labels).sort()).toEqual(['reason', 'service', 'topic']);
@@ -794,7 +802,7 @@ describe('EventConsumer dead-letter metric zero series', () => {
     new EventConsumer(options, async () => undefined, silent);
 
     const samples = await exposedFor(CLIENT_ID);
-    expect(samples).toHaveLength(TOPICS.length * Object.keys(DLQ_REASONS).length);
+    expect(samples).toHaveLength(subscribedTopics(TOPICS).length * Object.keys(DLQ_REASONS).length);
     const counted = samples.filter((sample) => sample.value > 0);
     expect(counted).toEqual([
       {

@@ -1,5 +1,5 @@
 import { Injectable, type OnModuleDestroy } from '@nestjs/common';
-import type { EventEnvelope } from '@rasta/contracts';
+import { ownerTopicOf, type EventEnvelope } from '@rasta/contracts';
 import type { EventConsumer, EventDelivery } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 // Type-only, like `Logger` above: this provider is built by an explicit
@@ -22,6 +22,18 @@ import {
   auditRecordsIngestedTotal,
   INGESTION_FAILURE_REASONS,
 } from '../observability/metrics';
+
+/**
+ * A delivery on `<topic>.retry` (a replay, D-039) is the same event as on
+ * `<topic>`: the mappers, the organization projection and the metric labels all
+ * key on the topic that owns the event, so a replay must not fall outside them
+ * and be recorded without its projection or under an unknown topic. The broker
+ * observation is unchanged for every other delivery.
+ */
+export function asOriginalDelivery(delivery: EventDelivery): EventDelivery {
+  const topic = ownerTopicOf(delivery.topic);
+  return topic === delivery.topic ? delivery : Object.freeze({ ...delivery, topic });
+}
 
 /** Builds the platform consumer this projector runs on. */
 export type ConsumerFactory = (
@@ -59,7 +71,9 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
   ) {}
 
   async start(): Promise<void> {
-    this.consumer = this.createConsumer((envelope, delivery) => this.handle(envelope, delivery));
+    this.consumer = this.createConsumer((envelope, delivery) =>
+      this.handle(envelope, asOriginalDelivery(delivery)),
+    );
     await this.consumer.start();
   }
 
