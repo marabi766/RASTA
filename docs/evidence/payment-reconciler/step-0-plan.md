@@ -89,7 +89,7 @@ transaction:
 
 A crash at any point therefore leaves a row the reconciler will find. The reconciler never needs to
 infer that something might be stuck. The grace period (config) keeps it away from requests that are
-still in flight; correctness does not depend on the grace period (see § 2.5).
+still in flight; correctness does not depend on the grace period (see § 2.4).
 
 The operator refund becomes two-phase in the same way, so R1 and R2 cannot strand anything:
 
