@@ -16,8 +16,13 @@ import { cleanup } from './helpers';
  *
  * B reserved nothing. It used to proceed anyway, so its completion matched no
  * row, K stayed free, and the next request with K — C — claimed it and placed
- * a second order (an order's `idempotencyKey` is not unique). The rule this
- * pins: `PROCEED` only from an insert this request made itself.
+ * a second order (an order's `idempotencyKey` was not unique then). The rule
+ * this pins: `PROCEED` only from an insert this request made itself.
+ *
+ * And the second way a key used to come free under a committed order (round 2
+ * of the review): the order commits, recording its response fails, and the
+ * claim was released anyway. Now the claim is kept, and should it still be
+ * lost, `uq_order_org_idempotency_key` refuses the second order as a 409.
  */
 describe('an Idempotency-Key whose claim vanishes under a request (real database)', () => {
   let harness: ApiHarness;
@@ -156,5 +161,64 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
     expect(c.status).toBe(201);
     expect(c.body.id).toBe(b.body.id);
     expect(await ordersUnder(key)).toBe(1);
+  });
+
+  it('the order commits and recording its response fails: the claim is kept, never a second order', async () => {
+    const offerId = await publishOffer();
+    const key = apiKey('race-record');
+    const body = { lines: [{ offerId, quantity: 1 }] };
+    const place = () =>
+      request(http)
+        .post('/v1/orders')
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .set('idempotency-key', key)
+        .send(body);
+    const claimState = () =>
+      runUnscoped('the suite reads the key whose recording failed', () =>
+        harness.prisma.client.idempotencyKey.findUnique({
+          where: {
+            organizationId_endpoint_key: { organizationId: buyerOrg, endpoint: ENDPOINT, key },
+          },
+        }),
+      ).then((row) => row?.state);
+
+    // The work commits; the write that records its response fails, once.
+    const recording = jest
+      .spyOn(store, 'complete')
+      .mockRejectedValueOnce(new Error('connection reset while recording the response'));
+    let first: request.Response;
+    try {
+      first = await place();
+    } finally {
+      recording.mockRestore();
+    }
+    expect(first.status).toBe(500);
+    expect(await ordersUnder(key)).toBe(1);
+
+    // The claim was not released: the key is still in flight, not free.
+    expect(await claimState()).toBe('IN_PROGRESS');
+    const retried = await place();
+    expect(retried.status).toBe(409);
+    expect(retried.body.code).toBe('CONFLICT');
+    expect(retried.headers['retry-after']).toBe('1');
+    expect(await ordersUnder(key)).toBe(1);
+
+    // Defence in depth: the claim is lost anyway (expired and purged, say).
+    // The retry claims the key and runs the work again — and the unique index
+    // refuses the second order as a conflict, not a 500, and frees the claim.
+    await runUnscoped('the suite removes the claim, as the expiry purge would', () =>
+      harness.prisma.client.idempotencyKey.deleteMany({
+        where: { organizationId: buyerOrg, endpoint: ENDPOINT, key },
+      }),
+    );
+    const afterPurge = await place();
+    expect(afterPurge.status).toBe(409);
+    expect(afterPurge.body).toMatchObject({
+      code: 'CONFLICT',
+      message: 'An order has already been placed with this Idempotency-Key',
+    });
+    expect(afterPurge.headers['retry-after']).toBeUndefined();
+    expect(await ordersUnder(key)).toBe(1);
+    expect(await claimState()).toBeUndefined();
   });
 });
