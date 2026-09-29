@@ -5,6 +5,7 @@ import {
   booleanEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
+  kafkaSaslConfigured,
   loadEnv,
 } from '@rasta/config';
 
@@ -42,9 +43,11 @@ export const supplierEnvSchema = baseEnvSchema
     /**
      * The ADR-052 step-5 performance consumer. **Off by default, and it fails
      * closed**: it writes append-only facts into the tenant a payload names,
-     * so it stays off until the broker authenticates who publishes
-     * (ADR-061 § 3, RUN-006). Turning it on without that is refused at
+     * so it may run only where the broker authenticates who publishes
+     * (ADR-061 § 3, RUN-006). Turning it on anywhere else is refused at
      * startup — see `assertPerformanceConsumerMayStart`. Codex review of #126.
+     * Default stays `false` even where it may run: enabling it is a
+     * deployment decision (docs/23 D-036).
      */
     SUPPLIER_PERFORMANCE_CONSUMER_ENABLED: booleanEnv(false),
   });
@@ -87,19 +90,45 @@ export function loadSupplierEnv(source: NodeJS.ProcessEnv = process.env): Suppli
  * Whether this service's Kafka client authenticates to the broker, so that
  * the broker — not the envelope — says who published (ADR-061 § 3).
  *
- * **Always `false` today**: RUN-006 (SASL/SCRAM and per-topic ACLs) has not
- * landed, and no configuration on `main` makes the client authenticate. When
- * it lands, this reads the setting it adds, and nothing else changes.
+ * True exactly when this service connects **as itself, with its SASL
+ * credential, over TLS**: a username and password (`kafkaSaslConfigured`), the
+ * username this service's own name (the one principal the broker's ACLs know
+ * it by; `kafkaConnection` refuses any other), and `KAFKA_SSL`. Anything less
+ * is refused, and so is the development/test PLAINTEXT opt-out
+ * (`KAFKA_ALLOW_PLAINTEXT`): an environment that sets it asserts nothing about
+ * who may publish, whatever else it sets.
+ *
+ * What it relies on beyond this client (RUN-006, #128/#131): the broker
+ * authenticates every client with SASL/SCRAM over TLS, and the only principal
+ * with WRITE on `rasta.marketplace.v1` is `marketplace-service` — so a fact on
+ * that topic was published by marketplace-service, and `EventConsumer`'s
+ * producer check (ADR-061 § 2) agrees with the broker rather than trusting the
+ * envelope. `scripts/kafka-acl.broker.test.mjs` proves that ACL on a live
+ * broker in CI.
  */
-export function brokerConnectionIsAuthenticated(_env: SupplierEnv): boolean {
-  return false;
+export function brokerConnectionIsAuthenticated(
+  env: Pick<
+    SupplierEnv,
+    | 'SERVICE_NAME'
+    | 'KAFKA_SASL_USERNAME'
+    | 'KAFKA_SASL_PASSWORD'
+    | 'KAFKA_SSL'
+    | 'KAFKA_ALLOW_PLAINTEXT'
+  >,
+): boolean {
+  return (
+    !env.KAFKA_ALLOW_PLAINTEXT &&
+    env.KAFKA_SSL &&
+    kafkaSaslConfigured(env) &&
+    env.KAFKA_SASL_USERNAME === env.SERVICE_NAME
+  );
 }
 
 /**
- * Refuses to start with the performance consumer enabled over a broker that
- * does not authenticate producers (Codex review of #126, finding 1).
+ * Refuses to start with the performance consumer enabled over a connection
+ * the broker does not authenticate (Codex review of #126, finding 1).
  *
- * Until then anyone who can reach the broker can publish on
+ * Without it anyone who can reach the broker can publish on
  * `rasta.marketplace.v1` as marketplace-service, with a buyer tenant that
  * passes ADR-061 § 5 and any supplier they like — and the fact would land,
  * append-only and uncleanable, in that supplier's tenant. So the flag is not
@@ -108,10 +137,10 @@ export function brokerConnectionIsAuthenticated(_env: SupplierEnv): boolean {
 export function assertPerformanceConsumerMayStart(env: SupplierEnv): void {
   if (env.SUPPLIER_PERFORMANCE_CONSUMER_ENABLED && !brokerConnectionIsAuthenticated(env)) {
     throw new Error(
-      'SUPPLIER_PERFORMANCE_CONSUMER_ENABLED=true is refused: the Kafka client is not configured ' +
-        'to authenticate to the broker, so a performance fact could be forged in any supplier’s ' +
-        'name. Enable it only once RUN-006 (SASL/ACL, ADR-061 § 3) is in place — or once facts are ' +
-        'verified at source (docs/23 D-036).',
+      'SUPPLIER_PERFORMANCE_CONSUMER_ENABLED=true is refused: the Kafka client does not ' +
+        'authenticate to the broker as this service (its SASL credential, KAFKA_SSL=true, and no ' +
+        'KAFKA_ALLOW_PLAINTEXT), so a performance fact could be forged in any supplier’s name ' +
+        '(RUN-006, ADR-061 § 3, docs/23 D-036).',
     );
   }
 }

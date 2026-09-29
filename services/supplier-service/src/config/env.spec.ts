@@ -165,24 +165,68 @@ describe('what is deliberately not configurable', () => {
 });
 
 describe('the performance consumer is off by default and fails closed (Codex review of #126)', () => {
-  it('is off unless asked for', () => {
+  /** This service's own credential over TLS, as CI's and compose's broker take it. */
+  const AUTHENTICATED: NodeJS.ProcessEnv = {
+    KAFKA_SASL_PASSWORD_SUPPLIER: 'a-supplier-broker-password',
+    KAFKA_SSL: 'true',
+  };
+  const ENABLED: NodeJS.ProcessEnv = { SUPPLIER_PERFORMANCE_CONSUMER_ENABLED: 'true' };
+  const REFUSED = /SUPPLIER_PERFORMANCE_CONSUMER_ENABLED=true is refused.*RUN-006.*D-036/s;
+
+  it('is off unless asked for — even where it may run', () => {
     expect(load().SUPPLIER_PERFORMANCE_CONSUMER_ENABLED).toBe(false);
+    expect(load(AUTHENTICATED).SUPPLIER_PERFORMANCE_CONSUMER_ENABLED).toBe(false);
     expect(
       load({ SUPPLIER_PERFORMANCE_CONSUMER_ENABLED: 'false' })
         .SUPPLIER_PERFORMANCE_CONSUMER_ENABLED,
     ).toBe(false);
   });
 
-  it('refuses to start when asked for over a broker that does not authenticate producers', () => {
-    // RUN-006 has not landed, so no configuration authenticates the client:
-    // enabling is refused unconditionally, and the message says why and what
-    // unblocks it.
-    expect(() => load({ SUPPLIER_PERFORMANCE_CONSUMER_ENABLED: 'true' })).toThrow(
-      /SUPPLIER_PERFORMANCE_CONSUMER_ENABLED=true is refused.*RUN-006.*D-036/s,
-    );
+  it('starts over this service’s own SASL credential and TLS', () => {
+    const env = load({ ...AUTHENTICATED, ...ENABLED });
+    expect(env.SUPPLIER_PERFORMANCE_CONSUMER_ENABLED).toBe(true);
+    expect(brokerConnectionIsAuthenticated(env)).toBe(true);
+    // The explicit variables, not only the repository fallback.
+    expect(
+      brokerConnectionIsAuthenticated(
+        load({ KAFKA_SASL_PASSWORD: 'p', KAFKA_SSL: 'true', ...ENABLED }),
+      ),
+    ).toBe(true);
   });
 
-  it('knows of no broker authentication today', () => {
+  it('refuses the development/test PLAINTEXT opt-out', () => {
+    expect(() => load({ NODE_ENV: 'test', KAFKA_ALLOW_PLAINTEXT: 'true', ...ENABLED })).toThrow(
+      REFUSED,
+    );
+    // Even beside a credential and TLS: the opt-out asserts nothing about who publishes.
+    expect(() =>
+      load({ NODE_ENV: 'test', KAFKA_ALLOW_PLAINTEXT: 'true', ...AUTHENTICATED, ...ENABLED }),
+    ).toThrow(REFUSED);
+  });
+
+  it('refuses SASL without TLS', () => {
+    expect(() =>
+      load({ KAFKA_SASL_PASSWORD_SUPPLIER: 'p', KAFKA_SSL: 'false', ...ENABLED }),
+    ).toThrow(REFUSED);
+  });
+
+  it('refuses TLS without SASL', () => {
+    expect(() => load({ KAFKA_SSL: 'true', ...ENABLED })).toThrow(REFUSED);
+  });
+
+  it('refuses another principal’s credential', () => {
+    expect(() =>
+      load({
+        KAFKA_SASL_USERNAME: 'marketplace-service',
+        KAFKA_SASL_PASSWORD: 'p',
+        KAFKA_SSL: 'true',
+        ...ENABLED,
+      }),
+    ).toThrow(REFUSED);
+  });
+
+  it('refuses when nothing is configured', () => {
+    expect(() => load(ENABLED)).toThrow(REFUSED);
     expect(brokerConnectionIsAuthenticated(load())).toBe(false);
   });
 });
