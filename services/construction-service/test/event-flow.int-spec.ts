@@ -1,6 +1,6 @@
 import { Kafka, type Consumer } from 'kafkajs';
 import type { EventEnvelope } from '@rasta/contracts';
-import { OutboxRelay } from '@rasta/nest-common';
+import { OutboxRelay, kafkaClientConfig, kafkaConnectionFor } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
@@ -41,7 +41,7 @@ interface Delivered {
 
 describeWithKafka('construction event flow over Kafka', () => {
   const org = newOrganizationId();
-  const groupId = `construction-itest-${ulid().slice(-12)}`;
+  const groupId = `itest-observer.construction-${ulid().slice(-12)}`;
 
   let w: Wiring;
   let publisher: KafkaEventPublisher;
@@ -51,15 +51,13 @@ describeWithKafka('construction event flow over Kafka', () => {
 
   beforeAll(async () => {
     w = wire();
-    publisher = new KafkaEventPublisher({
-      brokers: brokerList as string[],
-      clientId: 'construction-itest-producer',
-    });
+    publisher = new KafkaEventPublisher(
+      kafkaConnectionFor('construction-service', 'construction-itest-producer'),
+    );
     relay = new OutboxRelay({ store: new PrismaOutboxStore(w.prisma), publisher });
 
     const kafka = new Kafka({
-      clientId: 'construction-itest',
-      brokers: brokerList as string[],
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'construction-itest')),
       logLevel: 1,
     });
     consumer = kafka.consumer({ groupId, sessionTimeout: 30_000 });

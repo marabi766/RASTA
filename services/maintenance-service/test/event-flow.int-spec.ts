@@ -1,6 +1,6 @@
 import { Kafka, type Consumer, type Producer } from 'kafkajs';
 import type { EventEnvelope } from '@rasta/contracts';
-import { OutboxRelay } from '@rasta/nest-common';
+import { OutboxRelay, kafkaClientConfig, kafkaConnectionFor } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
@@ -62,8 +62,10 @@ const FLEET_TOPIC = 'rasta.fleet.v1';
 
 describeWithKafka('maintenance event flow over Kafka', () => {
   const org = tenants();
-  const groupId = `maintenance-itest-${ulid().slice(-12)}`;
-  const usageGroupId = `maintenance-usage-itest-${ulid().slice(-12)}`;
+  // RUN-006: the observer reads under its own group prefix; the consumer
+  // under test is maintenance-service's own, so its group is in that namespace.
+  const groupId = `itest-observer.maintenance-${ulid().slice(-12)}`;
+  const usageGroupId = `maintenance-service.itest-usage-${ulid().slice(-12)}`;
 
   let prisma: PrismaService;
   let repository: MaintenanceRepository;
@@ -112,22 +114,24 @@ describeWithKafka('maintenance event flow over Kafka', () => {
     repairOrders = new RepairOrderService(repository, new UnverifiedWorkshopDirectory());
     announcer = new DueAnnouncerService(repository);
 
-    publisher = new KafkaEventPublisher({
-      brokers: brokerList as string[],
-      clientId: 'maintenance-itest-producer',
-    });
+    publisher = new KafkaEventPublisher(
+      kafkaConnectionFor('maintenance-service', 'maintenance-itest-producer'),
+    );
     relay = new OutboxRelay({ store: new PrismaOutboxStore(prisma), publisher });
 
     const kafka = new Kafka({
-      clientId: 'maintenance-itest',
-      brokers: brokerList as string[],
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'maintenance-itest')),
       logLevel: 1,
     });
 
     // Stands in for fleet-service. Publishing a real message onto the real
     // fleet topic is the only way to prove this service consumes what
-    // fleet-service actually emits.
-    fleetProducer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
+    // fleet-service actually emits — and only fleet-service may write it.
+    const fleet = new Kafka({
+      ...kafkaClientConfig(kafkaConnectionFor('fleet-service', 'maintenance-itest-fleet')),
+      logLevel: 1,
+    });
+    fleetProducer = fleet.producer({ idempotent: true, maxInFlightRequests: 1 });
     await fleetProducer.connect();
 
     // A dedicated consumer group per run, reading only what this run
@@ -278,8 +282,7 @@ describeWithKafka('maintenance event flow over Kafka', () => {
       (handler) =>
         new EventConsumer(
           {
-            brokers: brokerList as string[],
-            clientId: 'maintenance-itest-usage',
+            ...kafkaConnectionFor('maintenance-service', 'maintenance-itest-usage'),
             groupId: usageGroupId,
             topics: [FLEET_TOPIC],
             deadLetterTopic: 'rasta.maintenance.v1.dlq',

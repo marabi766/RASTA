@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import type { KafkaConfig } from 'kafkajs';
 import {
   KAFKA_PLAINTEXT_ENVIRONMENTS,
+  NODE_ENVS,
+  kafkaPasswordVariable,
   kafkaPlaintextAllowed,
   kafkaSaslConfigured,
   type BaseEnv,
@@ -130,4 +132,45 @@ export function kafkaClientConfig(
     ...(connection.sasl ? { sasl: { ...connection.sasl } } : {}),
     ...(connection.ssl ? { ssl: connection.ssl } : {}),
   };
+}
+
+/**
+ * The connection for a named principal, from the environment: for a test
+ * harness or a script that acts as one service (publishing on the topic that
+ * service owns) or as the development observer, never for a service itself —
+ * a service reads its own configuration through {@link kafkaConnection}.
+ *
+ * The password is `KAFKA_SASL_PASSWORD_<PRINCIPAL>` (`fleet-service` →
+ * `..._FLEET`, `itest-observer` → `..._ITEST_OBSERVER`); without one the
+ * connection is PLAINTEXT, which is refused unless `KAFKA_ALLOW_PLAINTEXT=true`
+ * with `NODE_ENV` development or test — the rule a service follows.
+ * `KAFKA_SSL` and `KAFKA_SSL_CA_FILE` as for a service.
+ */
+export function kafkaConnectionFor(
+  principal: string,
+  clientId: string,
+  source: NodeJS.ProcessEnv = process.env,
+  readFile?: (path: string) => string,
+): KafkaConnectionOptions {
+  const password = source[kafkaPasswordVariable(principal)] || undefined;
+  const flag = (value: string | undefined) => /^(true|1|yes|on)$/i.test((value ?? '').trim());
+  const given = source.NODE_ENV?.trim();
+  return kafkaConnection(
+    {
+      // Unset or unknown reads as production: PLAINTEXT is refused, as for a service.
+      NODE_ENV: (NODE_ENVS as readonly string[]).includes(given ?? '')
+        ? (given as BaseEnv['NODE_ENV'])
+        : 'production',
+      SERVICE_NAME: principal,
+      KAFKA_BROKERS: source.KAFKA_BROKERS || 'localhost:9092',
+      KAFKA_SASL_USERNAME: password ? principal : undefined,
+      KAFKA_SASL_PASSWORD: password,
+      KAFKA_SASL_MECHANISM: 'scram-sha-512',
+      KAFKA_SSL: flag(source.KAFKA_SSL),
+      KAFKA_SSL_CA_FILE: source.KAFKA_SSL_CA_FILE || undefined,
+      KAFKA_ALLOW_PLAINTEXT: flag(source.KAFKA_ALLOW_PLAINTEXT),
+    },
+    clientId,
+    readFile,
+  );
 }

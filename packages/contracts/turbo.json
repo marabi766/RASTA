@@ -5,12 +5,22 @@
     // `topic-consumers.repo.spec.ts` reads every service's source to check
     // each EventConsumer against TOPIC_CONSUMERS (RUN-006). Without the
     // services as inputs, turbo would replay a cached green after a service
-    // added a consumer the contract does not declare.
+    // added a consumer the contract does not declare. `broker-acls.spec.ts`
+    // compares the generated broker files with the contracts, so they are
+    // inputs too: a hand edit to them must not replay a cached green.
     "test": {
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/services/*/src/**/*.ts"]
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/services/*/src/**/*.ts",
+        "$TURBO_ROOT$/infrastructure/docker/kafka/*"
+      ]
     },
     "test:unit": {
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/services/*/src/**/*.ts"]
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/services/*/src/**/*.ts",
+        "$TURBO_ROOT$/infrastructure/docker/kafka/*"
+      ]
     }
   }
 }

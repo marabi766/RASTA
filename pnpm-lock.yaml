@@ -28,6 +28,9 @@ importers:
       eslint-config-prettier:
         specifier: ^10.1.8
         version: 10.1.8(eslint@9.39.5(jiti@2.7.0)(supports-color@8.1.1))
+      kafkajs:
+        specifier: ^2.2.4
+        version: 2.2.4
       prettier:
         specifier: ^3.6.2
         version: 3.9.6
@@ -43,6 +46,9 @@ importers:
       typescript-eslint:
         specifier: ^8.46.4
         version: 8.68.0(eslint@9.39.5(jiti@2.7.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@5.9.3)
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
 
   apps/web:
     dependencies:

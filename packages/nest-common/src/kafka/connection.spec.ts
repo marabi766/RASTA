@@ -9,6 +9,7 @@ import {
   KafkaConnectionConfigError,
   kafkaClientConfig,
   kafkaConnection,
+  kafkaConnectionFor,
   type KafkaConnectionEnv,
 } from './connection';
 
@@ -146,6 +147,48 @@ describe('kafkaConnection', () => {
   });
 });
 
+describe('kafkaConnectionFor', () => {
+  it('connects as the named principal with its own password, over TLS when asked', () => {
+    const connection = kafkaConnectionFor(
+      'fleet-service',
+      'fleet-itest',
+      {
+        KAFKA_BROKERS: 'localhost:9092',
+        KAFKA_SASL_PASSWORD_FLEET: 'fleet-secret',
+        KAFKA_SASL_PASSWORD_ASSET: 'asset-secret',
+        KAFKA_SSL: 'true',
+        KAFKA_SSL_CA_FILE: '/ca.pem',
+      },
+      () => 'PEM',
+    );
+    expect(connection).toEqual({
+      brokers: ['localhost:9092'],
+      clientId: 'fleet-itest',
+      sasl: { mechanism: 'scram-sha-512', username: 'fleet-service', password: 'fleet-secret' },
+      ssl: { ca: ['PEM'], rejectUnauthorized: true },
+    });
+  });
+
+  it('is PLAINTEXT without a password only with the explicit opt-out, in test', () => {
+    const source = { KAFKA_BROKERS: 'b:9092', NODE_ENV: 'test', KAFKA_ALLOW_PLAINTEXT: 'true' };
+    expect(kafkaConnectionFor('itest-observer', 'x', source)).toEqual({
+      brokers: ['b:9092'],
+      clientId: 'x',
+    });
+  });
+
+  it.each([
+    ['without the opt-out', { NODE_ENV: 'test' }],
+    ['with NODE_ENV unset', { KAFKA_ALLOW_PLAINTEXT: 'true' }],
+    ['in staging', { NODE_ENV: 'staging', KAFKA_ALLOW_PLAINTEXT: 'true' }],
+    ['with an unknown NODE_ENV', { NODE_ENV: 'qa', KAFKA_ALLOW_PLAINTEXT: 'true' }],
+  ])('refuses PLAINTEXT %s, as a service would', (_label, extra) => {
+    expect(() =>
+      kafkaConnectionFor('itest-observer', 'x', { KAFKA_BROKERS: 'b:9092', ...extra }),
+    ).toThrow(KafkaConnectionConfigError);
+  });
+});
+
 describe('kafkaClientConfig', () => {
   it('leaves out what is not configured, so kafkajs connects PLAINTEXT', () => {
     expect(kafkaClientConfig({ brokers: ['b:9092'], clientId: 'c' })).toEqual({
@@ -232,9 +275,25 @@ describe('EventConsumer and TOPIC_CONSUMERS', () => {
   });
 
   it('leaves an unauthenticated group outside every declared namespace to the topic check alone', () => {
-    // Test observers (`fleet-itest-…`) until PR B gives them credentials.
     expect(() =>
       build({ ...fleet, groupId: 'fleet-itest-01JABC', topics: ['rasta.economic.v1'] }),
     ).not.toThrow();
+  });
+
+  it('leaves a principal that is not a service to the broker ACLs', () => {
+    // The development observer reads every topic under its own group prefix;
+    // TOPIC_CONSUMERS does not describe it, broker-acls.development.json does.
+    expect(() =>
+      build({
+        ...fleet,
+        groupId: 'itest-observer.audit-trail-01JABC',
+        topics: ['rasta.audit.trail.v1'],
+        deadLetterTopic: undefined,
+        sasl: { ...sasl, username: 'itest-observer' },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      build({ ...fleet, groupId: 'itest-observer.x', sasl: { ...sasl, username: 'ops-service' } }),
+    ).toThrow(/ops-service is not declared/);
   });
 });

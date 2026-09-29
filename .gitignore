@@ -46,3 +46,10 @@ Thumbs.db
 
 # Docker volumes mounted locally
 .docker-data/
+
+# RUN-006: the local broker's throwaway CA certificate, copied out of the
+# kafka-tls docker volume for the services on the host. Generated, never committed.
+infrastructure/docker/kafka/.tls/
+# RUN-006: local overrides of the bootstrap-only Kafka credentials (the
+# committed bootstrap.env.example holds the development defaults).
+infrastructure/docker/kafka/bootstrap.env

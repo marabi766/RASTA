@@ -1,0 +1,1193 @@
+{
+  "profile": "development",
+  "admin": "admin",
+  "principals": [
+    "asset-service",
+    "audit-service",
+    "construction-service",
+    "document-service",
+    "economic-service",
+    "fleet-service",
+    "identity-service",
+    "itest-observer",
+    "kafka-exporter",
+    "kafka-ui",
+    "maintenance-service",
+    "marketplace-service",
+    "notification-service",
+    "ops-replay",
+    "organization-service",
+    "supplier-service"
+  ],
+  "acls": [
+    {
+      "principal": "asset-service",
+      "resourceType": "GROUP",
+      "resourceName": "asset-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.insurance.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "GROUP",
+      "resourceName": "audit-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.audit.trail.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.audit.trail.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.audit.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.document.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.document.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.identity.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.identity.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.insurance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.insurance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.notification.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.notification.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.supplier.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.supplier.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "construction-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "document-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.document.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "economic-service",
+      "resourceType": "GROUP",
+      "resourceName": "economic-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "economic-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "economic-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "economic-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "economic-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "economic-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "economic-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "fleet-service",
+      "resourceType": "GROUP",
+      "resourceName": "fleet-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "fleet-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "fleet-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "fleet-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "fleet-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "fleet-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.insurance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "fleet-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.insurance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "fleet-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "fleet-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "identity-service",
+      "resourceType": "GROUP",
+      "resourceName": "identity-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "identity-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.audit.trail.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "identity-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.identity.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "identity-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.identity.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "identity-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.identity.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "identity-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.identity.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "GROUP",
+      "resourceName": "itest-observer.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.audit.trail.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.audit.trail.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.audit.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.document.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.document.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.identity.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.identity.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.identity.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.insurance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.insurance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.notification.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.notification.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.notification.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.supplier.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.supplier.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.supplier.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "CLUSTER",
+      "resourceName": "kafka-cluster",
+      "patternType": "LITERAL",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
+      "resourceName": "asset-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
+      "resourceName": "audit-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
+      "resourceName": "economic-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
+      "resourceName": "fleet-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
+      "resourceName": "identity-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
+      "resourceName": "itest-observer.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
+      "resourceName": "maintenance-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
+      "resourceName": "notification-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
+      "resourceName": "ops-replay.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
+      "resourceName": "supplier-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "CLUSTER",
+      "resourceName": "kafka-cluster",
+      "patternType": "LITERAL",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "asset-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "audit-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "economic-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "fleet-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "identity-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "itest-observer.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "maintenance-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "notification-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "ops-replay.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "supplier-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "maintenance-service",
+      "resourceType": "GROUP",
+      "resourceName": "maintenance-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "maintenance-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "maintenance-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "maintenance-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "maintenance-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "maintenance-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "maintenance-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "marketplace-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "notification-service",
+      "resourceType": "GROUP",
+      "resourceName": "notification-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "notification-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.insurance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "notification-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.insurance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "notification-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "notification-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "notification-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.notification.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "notification-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.notification.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "GROUP",
+      "resourceName": "ops-replay.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.audit.trail.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.audit.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.document.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.identity.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.identity.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.insurance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.notification.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.notification.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.supplier.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.supplier.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "organization-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "supplier-service",
+      "resourceType": "GROUP",
+      "resourceName": "supplier-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "supplier-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "supplier-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "supplier-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.supplier.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "supplier-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.supplier.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    }
+  ]
+}

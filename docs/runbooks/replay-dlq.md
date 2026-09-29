@@ -45,12 +45,16 @@
 ### ۱. چه چیزی در DLQ است؟
 
 ```bash
-docker compose exec kafka kafka-console-consumer.sh \
-  --bootstrap-server localhost:9094 \
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server kafka:9094 --consumer.config /tmp/admin.properties \
   --topic rasta.marketplace.v1.dlq \
   --from-beginning --max-messages 20 \
   --property print.headers=true
 ```
+
+Broker توسعه احراز می‌کند (ADR-061 § ۳، اصلاحیهٔ 2026-09-28): ابزارهای خط فرمان درون Container با
+`/tmp/admin.properties` وصل می‌شوند که `broker-entrypoint.sh` از `KAFKA_SASL_PASSWORD_ADMIN` می‌سازد. `admin` فقط برای
+تشخیص محلی است؛ در محیط واقعی خواندن DLQ با Principal `ops-replay` است (گام ۳).
 
 Headerهای کلیدی:
 
@@ -82,8 +86,9 @@ Headerهای کلیدی:
 (`delta(topic:kafka_topic_retained_records:sum[1h])` مثبت یعنی نوشتن تازه). برای هر Topic دیگر، یا در نبود Prometheus:
 
 ```bash
-docker compose exec kafka kafka-run-class.sh kafka.tools.GetOffsetShell \
-  --bootstrap-server localhost:9094 --topic rasta.marketplace.v1.dlq
+docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh \
+  --bootstrap-server kafka:9094 --command-config /tmp/admin.properties \
+  --topic rasta.marketplace.v1.dlq
 ```
 
 ### ۳. آیا رویداد مالی است؟
@@ -117,6 +122,18 @@ docker compose exec kafka kafka-run-class.sh kafka.tools.GetOffsetShell \
 
 ### گام ۳ — بازپخش
 
+**چه کسی.** فقط Principal `ops-replay` (RUN-006، ADR-061 § ۳): تنها Principalی که Topicهای `.retry` را **می‌نویسد** و DLQ
+سرویس‌های دیگر را **می‌خواند**، زیر گروه‌های `ops-replay.`. نه روی Topic اصلی می‌نویسد، نه روی DLQ؛ Topic اصلی فقط مال
+ناشر است، پس پیام بازپخش‌شده هرگز به نام ناشر روی Topic او نمی‌نشیند. مصرف‌کننده `.retry` هر Topic مشترکش را با همان
+اعلام `TOPIC_CONSUMERS` می‌خواند و بررسی ناشر (ADR-061 § ۲) همان‌جا دوباره اجرا می‌شود. گذرواژه:
+`KAFKA_SASL_PASSWORD_OPS_REPLAY` — در توسعه از `infrastructure/docker/kafka/bootstrap.env` (پیش‌فرض‌ها در
+`bootstrap.env.example`)، **هرگز** از `.env` مشترکی که هر سرویس می‌خواند (`pnpm infra:up` و
+`pnpm check:kafka-credential-scope` آن را در `.env` رد می‌کنند)؛ در استقرار از Secret Store اپراتور. چرخش:
+[kafka-credential-rotation](kafka-credential-rotation.md).
+
+**مسیر:** `rasta.<domain>.v1.dlq` ← (خواندن با `ops-replay`) ← بررسی ← `rasta.<domain>.v1.retry` (نوشتن با
+`ops-replay`). Broker هر مسیر دیگری را رد می‌کند؛ `scripts/kafka-acl.broker.test.mjs` همین را در CI نشان می‌دهد.
+
 > ⚠️ **ابزار بازپخش پیاده نشده است.** `dist/scripts/replay-dlq.js` که نسخه‌های پیشین این Runbook نام می‌بردند در مخزن
 > وجود ندارد و هرگز ساخته نشد (ADR-051 § R6). هیچ فرمان بازپخشی در مخزن نیست؛ فرمانی را که اینجا نیامده اجرا نکن.
 
@@ -134,6 +151,11 @@ docker compose exec kafka kafka-run-class.sh kafka.tools.GetOffsetShell \
 
 Idempotency مصرف‌کننده‌ها (`processed_event`) پیام **تکراری** را بی‌اثر می‌کند، اما رویداد **کهنه** را که پس از وضعیتی
 جدیدتر برسد نه (ADR-051 § R6)؛ پس بازپخش، حتی با ابزار آینده، خودبه‌خود امن نیست.
+
+> **D-039:** هیچ Consumerی امروز `.retry` را Subscribe نمی‌کند (مجوزش را دارد، اشتراکش را نه)، پس حتی نوشتن مجاز
+> `ops-replay` روی `.retry` امروز به هیچ مصرف‌کننده‌ای نمی‌رسد. هیچ دور زدنی با اعتبار یک سرویس مجاز نیست.
+
+وقتی ابزار ساخته شد، دو قاعده‌اش همین‌اند: اول همیشه `--dry-run`، و هدف همیشه `<topic>.retry`، نه `<topic>`.
 
 **رویداد مالی:** ⛔
 
@@ -165,8 +187,9 @@ Idempotency مصرف‌کننده‌ها (`processed_event`) پیام **تکرا
 
 ```bash
 # DLQ نباید رشد کند
-docker compose exec kafka kafka-run-class.sh kafka.tools.GetOffsetShell \
-  --bootstrap-server localhost:9094 --topic rasta.marketplace.v1.dlq
+docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh \
+  --bootstrap-server kafka:9094 --command-config /tmp/admin.properties \
+  --topic rasta.marketplace.v1.dlq
 ```
 
 - متریک `rasta_dlq_messages_total` برای همان `service`/`topic` پس از بازپخش دوباره افزایش نیافته (شمارنده با راه‌اندازی دوبارهٔ فرایند صفر می‌شود؛ معیار اصلی همان Offset بالاست)

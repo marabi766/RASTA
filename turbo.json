@@ -45,9 +45,11 @@
     // withheld it from the child even with it exported, so `pnpm test` and
     // `pnpm verify` reported green while the Kafka evidence never ran. A run
     // with no broker configured still skips — that is the only case that should.
-    // KAFKA_ALLOW_PLAINTEXT is the same trap for the opt-out (RUN-006): withheld,
-    // every suite that boots a service against the PLAINTEXT broker would be
-    // refused at startup.
+    //
+    // KAFKA_SASL_* and KAFKA_SSL* (RUN-006): the broker authenticates, so a
+    // suite reaches it only with its principal's password and the CA. The
+    // same trap once more — withheld, a Kafka suite would connect PLAINTEXT
+    // and be refused, or skip.
     "test": {
       "dependsOn": ["^build", "db:generate"],
       "outputs": ["coverage/**"],
@@ -56,7 +58,8 @@
         "DATABASE_URL_*",
         "REDIS_URL",
         "KAFKA_BROKERS",
-        "KAFKA_ALLOW_PLAINTEXT",
+        "KAFKA_SASL_*",
+        "KAFKA_SSL*",
         "S3_*",
         "DOCUMENT_*"
       ]
@@ -85,7 +88,8 @@
         "DATABASE_URL_*",
         "REDIS_URL",
         "KAFKA_BROKERS",
-        "KAFKA_ALLOW_PLAINTEXT",
+        "KAFKA_SASL_*",
+        "KAFKA_SSL*",
         "S3_*",
         "DOCUMENT_*"
       ]
@@ -103,7 +107,8 @@
         "DATABASE_URL_*",
         "REDIS_URL",
         "KAFKA_BROKERS",
-        "KAFKA_ALLOW_PLAINTEXT"
+        "KAFKA_SASL_*",
+        "KAFKA_SSL*"
       ]
     },
     // Turbo runs tasks in a strict environment, so anything the E2E harness
@@ -118,7 +123,8 @@
         "E2E_*",
         "KEYCLOAK_*",
         "KAFKA_BROKERS",
-        "KAFKA_ALLOW_PLAINTEXT",
+        "KAFKA_SASL_*",
+        "KAFKA_SSL*",
         "INTERNAL_TOKEN_SECRET",
         "PORT_API_GATEWAY",
         "PORT_ECONOMIC",

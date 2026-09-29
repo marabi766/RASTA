@@ -98,6 +98,29 @@ export {
 export type { DeclaredConsumer } from './events/topic-consumers';
 
 export {
+  BROKER_ADMIN_PRINCIPAL,
+  OPS_REPLAY_PRINCIPAL,
+  DEVELOPMENT_PRINCIPALS,
+  KAFKA_CLUSTER_RESOURCE,
+  PLATFORM_TOPIC_PREFIX,
+  DLQ_TOPIC_SUFFIX,
+  brokerPrincipals,
+  brokerAcls,
+  brokerAclDocument,
+  brokerTopics,
+  BROKER_PROFILES,
+} from './events/broker-acls';
+export type {
+  AclBinding,
+  AclOperation,
+  AclPatternType,
+  AclResourceType,
+  BrokerProfile,
+  BrokerTopic,
+  BrokerTopicKind,
+} from './events/broker-acls';
+
+export {
   AUDIT_EVENT_RECORDED,
   AUDIT_EVENT_RECORDED_VERSION,
   AUDIT_OUTCOMES,

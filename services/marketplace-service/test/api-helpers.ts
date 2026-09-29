@@ -186,9 +186,10 @@ function applyEnvironment(): void {
   process.env.OIDC_AUDIENCE ??= 'rasta-api';
   process.env.INTERNAL_TOKEN_SECRET = INTERNAL_SECRET;
   process.env.KAFKA_BROKERS ??= 'localhost:9092';
-  // The app is built against the local PLAINTEXT broker, which a service
-  // accepts only with the explicit opt-out under NODE_ENV test (RUN-006;
-  // PR B replaces it with the service's own credential).
+  // Nothing built here reaches the broker (the relay and consumers are
+  // inert), so the app may be built without this service's broker
+  // credential: the explicit opt-out, honoured only under NODE_ENV test
+  // (RUN-006). A suite that does reach the broker authenticates.
   process.env.KAFKA_ALLOW_PLAINTEXT ??= 'true';
   // No Temporal server in this suite. The saga client is real and takes its
   // disabled path, which is the path a developer without Temporal gets.

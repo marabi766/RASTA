@@ -2,7 +2,7 @@ import { request } from '@playwright/test';
 import { Kafka, logLevel } from 'kafkajs';
 import { e2eConfig } from './src/env';
 import { accessToken, ensureTenantBUser, E2E_USERS, verifyDisposableRealm } from './src/keycloak';
-import { waitFor } from './src/events';
+import { observerClient, waitFor } from './src/events';
 import { assertDisposableE2eTarget } from './src/target-guard';
 
 /**
@@ -177,9 +177,10 @@ export default async function globalSetup(): Promise<void> {
     // Required, not optional. The correlation scenario asserts on what the
     // service published, and a broker that is merely assumed to be there turns
     // that scenario into one that silently proves nothing.
+    // As the development observer: it may describe and read every platform
+    // topic, so a missing topic reads as missing rather than as unauthorised.
     const kafka = new Kafka({
-      clientId: 'e2e-global-setup',
-      brokers: config.kafkaBrokers,
+      ...observerClient(config, 'e2e-global-setup'),
       logLevel: logLevel.ERROR,
     });
     const admin = kafka.admin();

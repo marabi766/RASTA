@@ -1,7 +1,7 @@
 import { Kafka, type Producer } from 'kafkajs';
 import { ulid } from 'ulid';
-import { EventConsumer } from '@rasta/nest-common';
-import { DLQ_HEADERS, type EventEnvelope } from '@rasta/contracts';
+import { EventConsumer, kafkaClientConfig, kafkaConnectionFor } from '@rasta/nest-common';
+import { DLQ_HEADERS, producersOf, type EventEnvelope } from '@rasta/contracts';
 import { DispatcherConsumer } from '../src/intake/dispatcher.consumer';
 import { SUBSCRIBED_TOPICS } from '../src/rules/rules';
 import {
@@ -57,10 +57,12 @@ if (!brokerList) {
 describeWithKafka('event flow over Kafka', () => {
   let w: Wiring;
   let dispatcher: DispatcherConsumer;
-  let producer: Producer;
+  // RUN-006: one producer per topic owner — the broker lets only asset-service
+  // write the insurance topic and only maintenance-service the maintenance one.
+  const producers = new Map<string, Producer>();
   let kafka: Kafka;
   const organizations: string[] = [];
-  const groupId = `notification-itest-${ulid().slice(-12)}`;
+  const groupId = `notification-service.itest-${ulid().slice(-12)}`;
   const dlqTopic = 'rasta.notification.v1.dlq';
 
   function organization(): string {
@@ -70,6 +72,8 @@ describeWithKafka('event flow over Kafka', () => {
   }
 
   async function publish(topic: string, envelope: EventEnvelope): Promise<void> {
+    const producer = producers.get(topic);
+    if (!producer) throw new Error(`no producer for ${topic} in this suite`);
     await producer.send({
       topic,
       messages: [{ key: envelope.aggregateId, value: JSON.stringify(envelope) }],
@@ -87,20 +91,27 @@ describeWithKafka('event flow over Kafka', () => {
     w = wire();
     await w.prisma.onModuleInit();
 
+    for (const topic of [INSURANCE_TOPIC, MAINTENANCE_TOPIC]) {
+      const [owner] = producersOf(topic);
+      const client = new Kafka({
+        ...kafkaClientConfig(kafkaConnectionFor(owner!, `notification-itest-${owner}`)),
+        logLevel: 1,
+      });
+      const producer = client.producer({ idempotent: true, maxInFlightRequests: 1 });
+      await producer.connect();
+      producers.set(topic, producer);
+    }
+    // The dead-letter reader below, as the development observer.
     kafka = new Kafka({
-      clientId: 'notification-itest-producer',
-      brokers: brokerList as string[],
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'notification-itest-dlq')),
       logLevel: 1,
     });
-    producer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
-    await producer.connect();
 
     dispatcher = new DispatcherConsumer(
       (handler) =>
         new EventConsumer(
           {
-            brokers: brokerList as string[],
-            clientId: 'notification-itest',
+            ...kafkaConnectionFor('notification-service', 'notification-itest'),
             groupId,
             topics: [...SUBSCRIBED_TOPICS],
             fromBeginning: false,
@@ -139,7 +150,7 @@ describeWithKafka('event flow over Kafka', () => {
 
   afterAll(async () => {
     await dispatcher?.onModuleDestroy();
-    await producer?.disconnect();
+    await Promise.all([...producers.values()].map((producer) => producer.disconnect()));
     await cleanup(w.prisma, organizations);
     await w.prisma.onModuleDestroy();
   }, 120_000);
@@ -235,7 +246,10 @@ describeWithKafka('event flow over Kafka', () => {
     });
 
     // A reader on the dlq, pinned to the tail before the poison is published.
-    const reader = kafka.consumer({ groupId: `${groupId}-dlq`, sessionTimeout: 60_000 });
+    const reader = kafka.consumer({
+      groupId: `itest-observer.notification-dlq-${ulid().slice(-12)}`,
+      sessionTimeout: 60_000,
+    });
     await reader.connect();
     await reader.subscribe({ topic: dlqTopic, fromBeginning: false });
     const seen: { eventId?: string; reason?: string; value: string }[] = [];
