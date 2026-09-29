@@ -944,6 +944,36 @@ pnpm --filter @rasta/asset-service test -- --testNamePattern="tenant isolation"
 pnpm verify                     # دروازه کامل کیفیت
 ```
 
+**اجرای محلی Suite یکپارچگی یک سرویس (از #131، Broker با SASL_SSL).** Suiteها `.env` را خودشان نمی‌خوانند؛ باید در Shell
+Export شود. CI همین متغیرها را صریح در `env:` هر گام می‌دهد (`.github/workflows/ci.yml`، گام «Integration tests»).
+
+```bash
+cp .env.example .env            # یک بار؛ پس از هر تغییر .env.example دوباره مقایسه کن
+pnpm infra:up                   # تغییر قالب Broker (مثل #131): pnpm infra:reset — Volumeها پاک می‌شوند
+pnpm db:migrate
+pnpm exec turbo run build --filter="./packages/*"   # پس از هر Pull؛ Suiteها dist بسته‌ها را می‌خوانند
+set -a; . ./.env
+eval "$(grep '^KAFKA_SASL_PASSWORD_ITEST_OBSERVER=' infrastructure/docker/kafka/bootstrap.env.example)"
+set +a
+pnpm --filter @rasta/identity-service test:integration
+```
+
+- **Kafka:** `.env.example` اکنون `KAFKA_BROKERS=localhost:9092`، `KAFKA_SSL=true`،
+  `KAFKA_SSL_CA_FILE=../../infrastructure/docker/kafka/.tls/ca.pem` (نسبی به `services/<name>`؛ `pnpm infra:up` آن را از
+  Volume ‏`kafka-tls` بیرون کپی می‌کند) و `KAFKA_SASL_PASSWORD_<SERVICE>` هر سرویس را دارد، و دیگر `KAFKA_ALLOW_PLAINTEXT` ندارد.
+  `.env`ِ ساخته‌شده از `.env.example` پیش از #131 باید دوباره ساخته شود.
+- **Observer:** Specهای Kafka به‌عنوان `itest-observer` می‌خوانند و گذرواژه‌اش فقط در
+  `infrastructure/docker/kafka/bootstrap.env.example` (یا `bootstrap.env` محلی) است، نه `.env` — فقط همان یک خط را Export کن، نه
+  گذرواژهٔ admin یا ops-replay. بی آن، Spec با `KafkaConnectionConfigError: itest-observer refuses to reach Kafka …`
+  شکست می‌خورد.
+- **Skip بی‌صدا:** بی `KAFKA_BROKERS` این ده Spec با یک `console.warn` کنار گذاشته می‌شوند و اجرا سبز است:
+  `identity-service/test/security-event-kafka`، `audit-service/test/kafka-projector`،
+  `supplier-service/test/performance-consumer`، و `test/event-flow` در `fleet`، `maintenance`، `marketplace`، `supplier`،
+  `economic`، `construction` و `notification` (همه `.int-spec.ts`). عدد `Tests:` را با اجرای کامل مقایسه کن.
+- `pnpm --filter` فقط فاز Workspace است؛ اثبات فشار identity جداست: `pnpm test:aggregation-stress` (§ ۱۴٫۳).
+- `document-service` Bucket ‏`rasta-documents` را می‌خواهد؛ `docker ps -a` باید `rasta-minio-init` را `Exited (0)` نشان دهد
+  (کران‌دار: اگر MinIO بالا نیاید، پس از ۳۰ تلاش با کد ۱ خارج می‌شود — `docker logs rasta-minio-init`).
+
 **پیکربندی و قواعد هشدار Prometheus.** Job مستقل `prometheus-rules` در CI (روی هر PR و `main`، بی وابستگی Node و بیرون از
 Job سریع `quality`) همان Image سرویس `prometheus` در `docker-compose.yml` را با کل پوشهٔ
 `infrastructure/docker/prometheus` به‌صورت فقط‌خواندنی در `/etc/prometheus` اجرا می‌کند؛ پس مسیر `rule_files` همان است که در
