@@ -220,8 +220,10 @@ export class AuditCorrectionService {
       }
       if (error instanceof RastaError) throw error;
       // The command and its outbox row share one transaction, so a failure
-      // here left neither behind.
-      throw RastaError.internal(
+      // here left neither behind — and the client needs to know that to retry
+      // with the same key. A fixed, input-free sentence, so it is opted in to
+      // reach the client past the generic 5xx answer (S-09).
+      throw RastaError.internalClientSafe(
         'The correction could not be recorded; nothing was changed and it is safe to retry',
       );
     }

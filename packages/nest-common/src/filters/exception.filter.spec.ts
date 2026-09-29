@@ -173,6 +173,38 @@ describe('AllExceptionsFilter, a RastaError of 5xx (S-09)', () => {
   });
 });
 
+describe('AllExceptionsFilter, a client-safe 5xx (explicit opt-in)', () => {
+  const RETRY_SAFE =
+    'The correction could not be recorded; nothing was changed and it is safe to retry';
+
+  it('an opted-in message reaches the client; status and code stay', () => {
+    const { status, body, lines } = run(RastaError.internalClientSafe(RETRY_SAFE));
+    expect(status).toBe(500);
+    expect(body).toMatchObject({ code: 'INTERNAL_ERROR', message: RETRY_SAFE });
+    // Logged like any 5xx: error level, the original through safeLogText.
+    expect(lines[0]?.level).toBe('error');
+    expect(lines[0]?.payload.internalContext?.originalMessage).toBe(RETRY_SAFE);
+  });
+
+  it('is read from the flag, never from the content: the same words without it stay generic', () => {
+    const { body } = run(RastaError.internal(RETRY_SAFE));
+    expect(body).toMatchObject({ code: 'INTERNAL_ERROR', message: 'An unexpected error occurred' });
+  });
+
+  it('the log still sanitises an opted-in message', () => {
+    const { lines } = run(RastaError.internalClientSafe('retry is safe\nforged line'));
+    expect(lines[0]?.payload.internalContext?.originalMessage).toBe('retry is safe forged line');
+    expect(lines[0]?.payload.err.message).toBe('retry is safe forged line');
+  });
+
+  it('is off by default, and only the factory or the explicit option sets it', () => {
+    expect(RastaError.internal('x').clientSafe).toBe(false);
+    expect(new RastaError('INTERNAL_ERROR', 'x').clientSafe).toBe(false);
+    expect(new RastaError('INTERNAL_ERROR', 'x', { clientSafe: true }).clientSafe).toBe(true);
+    expect(RastaError.internalClientSafe('x').clientSafe).toBe(true);
+  });
+});
+
 describe('AllExceptionsFilter, body-parser refusals', () => {
   /** What body-parser throws (an `http-errors` error): a status and a `type`. */
   const bodyParserError = (status: number, type: string, message: string) =>

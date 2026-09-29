@@ -101,11 +101,15 @@ export class AllExceptionsFilter implements ExceptionFilter {
       // with the server: a service writes those messages for operators, and
       // they name records ("Approval <id> vanished …"). The client gets the
       // generic text; the log gets the original, made safe.
+      //
+      // The one exception is an explicit opt-in (`clientSafe`, set by
+      // `RastaError.internalClientSafe`) for a fixed, input-free message the
+      // client needs. It is read from the flag, never from the content.
       if (exception.status >= HttpStatus.INTERNAL_SERVER_ERROR) {
         return {
           status: exception.status,
           code: exception.code,
-          message: GENERIC_SERVER_ERROR,
+          message: exception.clientSafe ? exception.message : GENERIC_SERVER_ERROR,
           internalContext: {
             ...exception.internalContext,
             originalMessage: safeLogText(exception.message),
