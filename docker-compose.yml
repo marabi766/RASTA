@@ -252,13 +252,17 @@ services:
 
   # ------------------------------------------------------------ object storage
   #
-  # Chainguard's signed builds, pinned by index digest — the same digests CI
-  # pins (.github/workflows/ci.yml, MINIO_IMAGE / MC_IMAGE). MinIO's own
+  # Chainguard's signed builds, pinned by index digest. The server digest is
+  # CI's too (.github/workflows/ci.yml, MINIO_IMAGE); the client's is not, on
+  # purpose. CI runs `mc` as the entrypoint, one command per container, so
+  # MC_IMAGE is the shell-less `minio-client`; minio-init below is a script
+  # and needs the shell of its `-dev` variant. Both hold the same `mc` binary
+  # (amd64, compared 2026-09-29): bump the two together. MinIO's own
   # images stopped being publicly pullable on 2026-09-24: quay.io answers 401
   # and Docker Hub's minio/minio is gone.
   #
   # The server image has no shell and no `mc`, so it carries no healthcheck;
-  # minio-init waits with `mc ready` instead. It runs as root here, as the
+  # minio-init waits for it instead (below). It runs as root here, as the
   # previous official image did, so an existing `minio-data` volume stays
   # readable — the Chainguard default is uid 65532.
   minio:
@@ -278,6 +282,15 @@ services:
 
   minio-init:
     # The `-dev` variant, for the shell this multi-step init needs.
+    #
+    # `mc alias set` probes the server, so it fails while MinIO is still
+    # starting and has to be retried with the readiness check; and `mc ready`
+    # on its own retries forever against an unreachable server, hence the
+    # `timeout` on each call. At most 30 attempts, 2s apart, then exit 1 with
+    # a message instead of hanging: about a minute when MinIO is down, a few
+    # minutes at worst when it accepts connections but never answers. `set -e`
+    # so a failed `mb` or `anonymous set` fails the container rather than
+    # printing "ready".
     image: cgr.dev/chainguard/minio-client@sha256:614e083a12c6dc779f13f97e01b13afda4021a8ce3f4021a2fcf23ec86f46837
     container_name: rasta-minio-init
     depends_on:
@@ -287,8 +300,17 @@ services:
       - /bin/sh
       - -c
       - |
-        mc -C /tmp/.mc alias set rasta http://minio:9000 "${S3_ACCESS_KEY:-rasta_minio_admin}" "${S3_SECRET_KEY:-rasta_minio_dev_password}"
-        until mc -C /tmp/.mc ready rasta; do sleep 2; done
+        set -eu
+        attempt=1
+        until timeout 5 mc -C /tmp/.mc alias set rasta http://minio:9000 "${S3_ACCESS_KEY:-rasta_minio_admin}" "${S3_SECRET_KEY:-rasta_minio_dev_password}" >/dev/null &&
+          timeout 5 mc -C /tmp/.mc ready rasta >/dev/null; do
+          if [ "$$attempt" -ge 30 ]; then
+            echo "minio-init: MinIO at http://minio:9000 not ready after $$attempt attempts; giving up" >&2
+            exit 1
+          fi
+          attempt=$$((attempt + 1))
+          sleep 2
+        done
         mc -C /tmp/.mc mb --ignore-existing "rasta/${S3_BUCKET_DOCUMENTS:-rasta-documents}"
         mc -C /tmp/.mc anonymous set none "rasta/${S3_BUCKET_DOCUMENTS:-rasta-documents}"
         echo 'MinIO buckets ready'

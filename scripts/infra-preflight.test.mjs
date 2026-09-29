@@ -5,8 +5,11 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseEnvAssignments } from './check-local-postgres-config-lib.mjs';
 import {
   checkInfraEnv,
+  checkKafkaClientEnv,
+  kafkaServicesFromPrincipals,
   passwordVariable,
   ROLE_LIBRARY,
   rolesFromLibrary,
@@ -86,6 +89,113 @@ test('a role set to another role default is caught too', () => {
   const { errors } = checkInfraEnv({ POSTGRES_PASSWORD_ASSET: 'rasta_fleet_dev_password' });
   assert.equal(errors.length, 1);
   assert.match(errors[0], /POSTGRES_PASSWORD_(ASSET|FLEET) equals POSTGRES_PASSWORD_(ASSET|FLEET)/);
+});
+
+// ---------------------------------------------------------------------------
+// A .env copied before the local broker authenticated (#131)
+// ---------------------------------------------------------------------------
+
+const envOf = (text) =>
+  Object.fromEntries(parseEnvAssignments(text).assignments.map(({ name, value }) => [name, value]));
+
+/**
+ * The Kafka section of .env.example as it stood before #131 (ff0a884): every
+ * assignment and placeholder as it was, the long comment shortened.
+ */
+const PRE_131_ENV = `NODE_ENV=development
+KAFKA_HOST_PORT=9092
+KAFKA_BROKERS=localhost:9092
+KAFKA_CLIENT_ID=rasta
+KAFKA_SCHEMA_STRICT=true
+
+# Broker credentials (ADR-061 § 3, RUN-006): one SASL/SCRAM-SHA-512 principal
+# per service, named after it; a service reads KAFKA_SASL_PASSWORD_<SERVICE>
+# when KAFKA_SASL_PASSWORD is unset, and connects as its own SERVICE_NAME.
+KAFKA_ALLOW_PLAINTEXT=true
+# KAFKA_SASL_PASSWORD_IDENTITY=change-me-identity-kafka
+# KAFKA_SASL_PASSWORD_ORGANIZATION=change-me-organization-kafka
+# KAFKA_SASL_PASSWORD_ASSET=change-me-asset-kafka
+# KAFKA_SASL_PASSWORD_FLEET=change-me-fleet-kafka
+# KAFKA_SASL_PASSWORD_MAINTENANCE=change-me-maintenance-kafka
+# KAFKA_SASL_PASSWORD_MARKETPLACE=change-me-marketplace-kafka
+# KAFKA_SASL_PASSWORD_SUPPLIER=change-me-supplier-kafka
+# KAFKA_SASL_PASSWORD_CONSTRUCTION=change-me-construction-kafka
+# KAFKA_SASL_PASSWORD_ECONOMIC=change-me-economic-kafka
+# KAFKA_SASL_PASSWORD_NOTIFICATION=change-me-notification-kafka
+# KAFKA_SASL_PASSWORD_DOCUMENT=change-me-document-kafka
+# KAFKA_SASL_PASSWORD_AUDIT=change-me-audit-kafka
+# KAFKA_SSL=false
+# KAFKA_SSL_CA_FILE=
+`;
+
+/** The gaps a stale-.env warning lists, without the fixed advice after them. */
+const gaps = (warning) => /fail to reach Kafka: (.*?)\. Copy /.exec(warning)?.[1];
+
+const CURRENT_EXAMPLE = envOf(readFileSync(join(ROOT, '.env.example'), 'utf8'));
+
+test('the broker has one password variable per service, twelve in all', () => {
+  assert.equal(kafkaServicesFromPrincipals().length, 12);
+  for (const service of kafkaServicesFromPrincipals()) {
+    const variable = `KAFKA_SASL_PASSWORD_${service.replace(/-service$/, '').toUpperCase()}`;
+    assert.ok(CURRENT_EXAMPLE[variable], `.env.example does not set ${variable}`);
+  }
+});
+
+test('a .env copied from the current .env.example raises no Kafka warning', () => {
+  assert.deepEqual(checkKafkaClientEnv(CURRENT_EXAMPLE), []);
+});
+
+test('a pre-#131 .env warns, names every gap and what to copy, and prints no value', () => {
+  const warnings = checkKafkaClientEnv(envOf(PRE_131_ENV));
+  assert.equal(warnings.length, 2);
+  const [stale, plaintext] = warnings;
+  assert.match(stale, /predates the authenticated local broker \(#131\)/);
+  assert.match(stale, /the stack starts, but every service and integration suite/);
+  assert.equal(
+    gaps(stale),
+    'KAFKA_SSL is not true; KAFKA_SSL_CA_FILE is unset; no KAFKA_SASL_PASSWORD_<SERVICE> is set',
+  );
+  assert.match(stale, /"Broker credentials" block of \.env\.example/);
+  assert.match(plaintext, /KAFKA_ALLOW_PLAINTEXT is on/);
+  assert.match(plaintext, /Delete it/);
+  noValues(warnings, 'change-me', 'localhost:9092');
+});
+
+test('a partly updated .env names exactly the variables still missing, never their values', () => {
+  const env = { ...CURRENT_EXAMPLE, KAFKA_SASL_PASSWORD_FLEET: '', KAFKA_SASL_PASSWORD_AUDIT: ' ' };
+  delete env.KAFKA_SASL_PASSWORD_ASSET;
+  const warnings = checkKafkaClientEnv(env);
+  assert.equal(warnings.length, 1);
+  assert.equal(
+    gaps(warnings[0]),
+    'KAFKA_SASL_PASSWORD_ASSET, KAFKA_SASL_PASSWORD_AUDIT, KAFKA_SASL_PASSWORD_FLEET are unset',
+  );
+  noValues(
+    warnings,
+    ...Object.entries(CURRENT_EXAMPLE)
+      .filter(([name]) => name.startsWith('KAFKA_SASL_PASSWORD_'))
+      .map(([, value]) => value),
+  );
+});
+
+test('TLS switched off or without the local CA is a warning on its own', () => {
+  const off = checkKafkaClientEnv({ ...CURRENT_EXAMPLE, KAFKA_SSL: 'false' });
+  assert.equal(off.length, 1);
+  assert.equal(gaps(off[0]), 'KAFKA_SSL is not true');
+
+  const noCa = { ...CURRENT_EXAMPLE };
+  delete noCa.KAFKA_SSL_CA_FILE;
+  assert.equal(gaps(checkKafkaClientEnv(noCa)[0]), 'KAFKA_SSL_CA_FILE is unset');
+
+  // Read the way @rasta/config reads a boolean.
+  assert.deepEqual(checkKafkaClientEnv({ ...CURRENT_EXAMPLE, KAFKA_SSL: ' ON ' }), []);
+});
+
+test('KAFKA_ALLOW_PLAINTEXT alone, on an otherwise complete .env, is its own warning', () => {
+  const warnings = checkKafkaClientEnv({ ...CURRENT_EXAMPLE, KAFKA_ALLOW_PLAINTEXT: 'true' });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /^KAFKA_ALLOW_PLAINTEXT is on/);
+  assert.deepEqual(checkKafkaClientEnv({ ...CURRENT_EXAMPLE, KAFKA_ALLOW_PLAINTEXT: 'false' }), []);
 });
 
 // ---------------------------------------------------------------------------
