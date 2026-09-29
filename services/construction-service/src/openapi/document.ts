@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
+import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
 import { toJsonSchema } from './zod-schema';
 import { ProjectController } from '../project/project.controller';
 import { ProjectService } from '../project/project.service';
@@ -217,6 +218,19 @@ const HIERARCHY_CHECKED = new Set([
 /** A create that can lose a race on a unique key (409 CONFLICT, retry). */
 const RACING_CREATES = new Set(['POST /v1/approval-policies']);
 
+/**
+ * `Retry-After` on an idempotent route's 409 (docs/06 § 6.8). Optional: only
+ * the in-flight `CONFLICT` carries it, never `IDEMPOTENCY_KEY_REUSED`, a stale
+ * version or a racing create. The bounds are the exception filter's own.
+ */
+const RETRY_AFTER_HEADER = {
+  required: false,
+  description:
+    'Sent only when this Idempotency-Key is still being processed (CONFLICT): the ' +
+    'seconds to wait before retrying with the same key. Absent on every other 409.',
+  schema: { type: 'integer', minimum: RETRY_AFTER_MIN_SECONDS, maximum: RETRY_AFTER_MAX_SECONDS },
+};
+
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
@@ -358,6 +372,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         if ((status === '503' || status === '504') && !HIERARCHY_CHECKED.has(key)) continue;
         operation.responses[status] ??= {
           description,
+          ...(status === '409' && IDEMPOTENT.has(key)
+            ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
+            : {}),
           content: { 'application/json': { schema: { $ref: '#/components/schemas/ApiError' } } },
         };
       }

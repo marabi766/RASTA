@@ -96,6 +96,33 @@ describe('enrichOpenApiDocument', () => {
     expect(key?.in).toBe('header');
   });
 
+  it('declares an optional integer Retry-After on an idempotent route’s 409, and only there', () => {
+    // docs/06 § 6.8: the in-flight CONFLICT carries it. A route with no
+    // Idempotency-Key has no in-flight state, so its 409 must not promise one.
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/orders': { post: { responses: {} } },
+      '/v1/offers': { post: { responses: {} } },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document, OPTIONS);
+    const conflictOf = (path: string) =>
+      (
+        (enriched.paths[path] as Record<string, never>).post as unknown as {
+          responses: Record<string, { headers?: Record<string, unknown> }>;
+        }
+      ).responses['409'];
+
+    expect(conflictOf('/v1/orders')?.headers).toEqual({
+      'Retry-After': expect.objectContaining({
+        required: false,
+        schema: { type: 'integer', minimum: 1, maximum: 3600 },
+      }),
+    });
+    expect(conflictOf('/v1/offers')).toBeDefined();
+    expect(conflictOf('/v1/offers')?.headers).toBeUndefined();
+  });
+
   describe('the retention window the key description states', () => {
     /** The `Idempotency-Key` parameter of `POST /v1/orders`, as published. */
     function keyDescription(idempotencyTtlHours: number): string {
