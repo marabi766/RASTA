@@ -95,6 +95,29 @@ describe('the committed OpenAPI document', () => {
     expect(headerOf('/v1/projects/{id}', 'patch')).toBeUndefined();
   });
 
+  it('declares an optional integer Retry-After on an idempotent create’s 409, and only there', () => {
+    // docs/06 § 6.8: the in-flight CONFLICT carries it. A versioned command has
+    // no Idempotency-Key, so its 409 (a stale version) must not promise one.
+    const document = buildConstructionOpenApiDocument(app);
+    const conflictOf = (path: string) =>
+      (
+        (document.paths?.[path] as Record<string, never>).post as unknown as {
+          responses: Record<string, { headers?: Record<string, unknown> }>;
+        }
+      ).responses['409'];
+
+    for (const path of ['/v1/projects', '/v1/projects/{id}/needs', '/v1/approval-policies']) {
+      expect(conflictOf(path)?.headers).toEqual({
+        'Retry-After': expect.objectContaining({
+          required: false,
+          schema: { type: 'integer', minimum: 1, maximum: 3600 },
+        }),
+      });
+    }
+    expect(conflictOf('/v1/projects/{id}/cancel')).toBeDefined();
+    expect(conflictOf('/v1/projects/{id}/cancel')?.headers).toBeUndefined();
+  });
+
   it('keeps the health probes out of the contract', () => {
     const document = buildConstructionOpenApiDocument(app);
     expect(Object.keys(document.paths ?? {}).some((path) => path.startsWith('/health'))).toBe(

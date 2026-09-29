@@ -158,23 +158,31 @@ describe('nothing of the Idempotency-Key in an error (S-09)', () => {
   // which a low-entropy key makes reversible by guessing (review of #135).
   const OLD_DIGEST = createHash('sha256').update(RAW, 'utf8').digest('hex').slice(0, 16);
 
-  function throughTheFilter(error: unknown): { logged: string; body: string } {
+  function throughTheFilter(error: unknown): {
+    logged: string;
+    body: string;
+    headers: Record<string, string>;
+  } {
     const lines: unknown[] = [];
     const record = (...args: unknown[]) => {
       lines.push(args);
     };
     const logger = { debug: record, warn: record, error: record } as unknown as Logger;
     let body: unknown;
+    const headers: Record<string, string> = {};
     const response = {
       status: () => response,
       json: (sent: unknown) => {
         body = sent;
       },
+      setHeader: (name: string, value: string) => {
+        headers[name] = value;
+      },
     };
     new AllExceptionsFilter(logger).catch(error, {
       switchToHttp: () => ({ getResponse: () => response }),
     } as unknown as ArgumentsHost);
-    return { logged: JSON.stringify(lines), body: JSON.stringify(body) };
+    return { logged: JSON.stringify(lines), body: JSON.stringify(body), headers };
   }
 
   it.each([
@@ -183,11 +191,12 @@ describe('nothing of the Idempotency-Key in an error (S-09)', () => {
       row({ state: 'COMPLETED', responseBody: {} }),
       { a: 2 },
       'IDEMPOTENCY_KEY_REUSED',
+      {},
     ],
-    ['still in flight', row({}), { a: 1 }, 'CONFLICT'],
+    ['still in flight', row({}), { a: 1 }, 'CONFLICT', { 'Retry-After': '1' }],
   ])(
-    '%s: neither the key nor its digest, in the context, the log or the body',
-    async (_case, existing, body, code) => {
+    '%s: neither the key nor its digest, in the context, the log, the body or a header',
+    async (_case, existing, body, code, expectedHeaders) => {
       const { store, delegate } = fakeStore();
       delegate.create.mockRejectedValue(UNIQUE);
       delegate.findUnique.mockResolvedValue(existing);
@@ -198,10 +207,18 @@ describe('nothing of the Idempotency-Key in an error (S-09)', () => {
 
       expect(error.code).toBe(code);
       // Where the clash was stays: the endpoint (and the request's correlationId).
-      expect(error.internalContext).toMatchObject({ endpoint: ENDPOINT });
-      const { logged, body: answered } = throughTheFilter(error);
+      expect(error.internalContext).toEqual({ endpoint: ENDPOINT });
+      const { logged, body: answered, headers } = throughTheFilter(error);
       expect(logged).toContain(code); // the line was written
-      for (const text of [JSON.stringify(error.internalContext), error.message, logged, answered]) {
+      // Only the in-flight refusal asks for a wait, from its typed field.
+      expect(headers).toEqual(expectedHeaders);
+      for (const text of [
+        JSON.stringify(error.internalContext),
+        error.message,
+        logged,
+        answered,
+        JSON.stringify(headers),
+      ]) {
         expect(text).not.toContain('SENTINEL');
         expect(text).not.toContain(OLD_DIGEST);
       }

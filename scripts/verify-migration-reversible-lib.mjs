@@ -575,6 +575,10 @@ export const EXPECTED = {
       'ck_order_cancelled_has_cause',
       'ck_dispute_resolved_has_responsibility',
     ],
+    // Added by 20260929120100_order_idempotency_key_unique (review of #141):
+    // one Idempotency-Key places at most one order per organization, even
+    // after its idempotency record is gone.
+    indexes: ['uq_order_org_idempotency_key'],
     types: ['ResponsibilityAttribution'],
     dataRollback: MARKETPLACE_DATA_ROLLBACK,
   },

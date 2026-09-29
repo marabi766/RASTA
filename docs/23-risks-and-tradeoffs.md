@@ -767,21 +767,31 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   آن تأمین‌کننده بنشاند. بررسی ناشر فقط «هم‌خوانی» است، نه احراز.
 - **کاهش امروز (بازبینی Codex روی #126، تصمیم مدیر پروژه):** Consumer **به‌طور پیش‌فرض خاموش است** و بسته شکست می‌خورد:
   `SUPPLIER_PERFORMANCE_CONSUMER_ENABLED` پیش‌فرض `false` است و با `false` هیچ اشتراکی ساخته و هیچ چیزی ثبت نمی‌شود؛
-  `true` در راه‌اندازی رد می‌شود مگر کلاینت Kafka برای احراز در Broker پیکربندی شده باشد — و چون چنین پیکربندی‌ای هنوز
-  روی `main` نیست (RUN-006)، امروز بی‌قیدوشرط رد می‌شود (`brokerConnectionIsAuthenticated`). هیچ امتیازی هم محاسبه یا
-  منتشر نمی‌شود.
+  `true` در راه‌اندازی رد می‌شود مگر کلاینت Kafka با اعتبار خود سرویس در Broker احراز شود
+  (`brokerConnectionIsAuthenticated`؛ از 2026-09-29 برآوردنی است — پایین). هیچ امتیازی هم محاسبه یا منتشر نمی‌شود.
 - **رفع:** یکی از دو راه، پیش از روشن‌کردن Consumer: (۱) **RUN-006** — SASL/SCRAM و ACL هر Topic، و خواندن پیکربندی آن در
   `brokerConnectionIsAuthenticated`؛ یا (۲) **پرسیدن از منبع** — یک Endpoint داخلی خواندنی در marketplace (مثل
   `GET /v1/internal/orders/{id}` با توکن داخلی و مستأجر امضاشده، ADR-035) و تأیید هر واقعیت پیش از شمردن. پیگیری را مدیر
   پروژه ثبت می‌کند.
 - **اولویت:** متوسط — شرط روشن‌کردن Consumer
-- **ثبت‌شده:** 2026-09-26 · **به‌روز:** 2026-09-27 (بازبینی Codex روی #126، یافتهٔ ۱)
+- **ثبت‌شده:** 2026-09-26 · **به‌روز:** 2026-09-27 (بازبینی Codex روی #126، یافتهٔ ۱)؛ 2026-09-29 (Gate برآوردنی است)
 - **شاهد RUN-006 برای راه (۱) — 2026-09-28:** Broker احرازشدهٔ CI و Compose (RUN-006 PR B) اکنون فقط به
   `marketplace-service` اجازهٔ نوشتن روی `rasta.marketplace.v1` می‌دهد، و `scripts/kafka-acl.broker.test.mjs` در CI رد
   نوشتن `supplier-service`، `economic-service` و `ops-replay` روی آن را از خود Broker نشان می‌دهد. شرط برداشتن Gate
   **SASL به‌همراه ACL هر Topic** است، **نه SASL به‌تنهایی**: با SASL بی ACL هر Principal احرازشده‌ای می‌تواند روی همین
-  Topic بنویسد و «احراز» همان «هم‌خوانی» می‌ماند. تغییر `brokerConnectionIsAuthenticated` (در
-  `services/supplier-service/src/config/env.ts`) با مالک supplier-service است و در این PR نیست.
+  Topic بنویسد و «احراز» همان «هم‌خوانی» می‌ماند.
+- **Gate برآوردنی است — 2026-09-29 (`feat/supplier-gate-on-authenticated-broker`):** `brokerConnectionIsAuthenticated`
+  (`services/supplier-service/src/config/env.ts`) دقیقاً وقتی `true` است که supplier-service **با اعتبار SASL خودش**
+  (نام کاربری همان `SERVICE_NAME`) و **روی TLS** (`KAFKA_SSL=true`) وصل شود و انصراف PLAINTEXT
+  (`KAFKA_ALLOW_PLAINTEXT`) تنظیم **نشده** باشد — آن انصراف حتی کنار اعتبار و TLS هم رد می‌شود. آنچه بر آن تکیه دارد: Broker
+  هر کلاینت را با SASL/SCRAM روی TLS احراز می‌کند و **تنها** Principal دارای `WRITE` روی `rasta.marketplace.v1`،
+  `marketplace-service` است (RUN-006، #128/#131؛ `scripts/kafka-acl.broker.test.mjs`)، پس بررسی ناشر در `EventConsumer`
+  (ADR-061 § ۲) با Broker هم‌خوان است نه با ادعای پاکت. `test/performance-consumer-gate.int-spec.ts` همین را روی Broker
+  احرازشده نشان می‌دهد: `AppModule` واقعی با Consumer روشن بالا می‌آید، به نام supplier-service به گروهش می‌پیوندد و
+  واقعیتی را که marketplace-service منتشر کرده ثبت می‌کند؛ و با انصراف PLAINTEXT راه‌اندازی رد می‌شود.
+  **`SUPPLIER_PERFORMANCE_CONSUMER_ENABLED` پیش‌فرض `false` می‌ماند:** روشن‌کردن تصمیم استقرار است. **آنچه باز می‌ماند:**
+  پرسیدن از منبع (§ ۴) هنوز انجام نمی‌شود — ناشرِ احرازشده می‌تواند با باگ یا اعتبار نشت‌کرده واقعیت نادرست بنویسد؛ راه (۲)
+  بالا هنوز ارزش دارد.
 
 ### D-037 · Projector کیکلوک ایمیل، نام و هر صفت غیرپلتفرمی را «بخوان-بنویس» می‌کند — ایمیل شناسهٔ ورود است
 

@@ -10,7 +10,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": false,
-            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
             "schema": {
               "type": "string",
               "minLength": 1,
@@ -186,6 +186,17 @@
           },
           "409": {
             "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1269,7 +1280,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": false,
-            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
             "schema": {
               "type": "string",
               "minLength": 1,
@@ -1416,6 +1427,17 @@
           },
           "409": {
             "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -3425,7 +3447,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": false,
-            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
             "schema": {
               "type": "string",
               "minLength": 1,
@@ -3572,6 +3594,17 @@
           },
           "409": {
             "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -4325,7 +4358,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": false,
-            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
             "schema": {
               "type": "string",
               "minLength": 1,
@@ -4529,6 +4562,17 @@
           },
           "409": {
             "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
