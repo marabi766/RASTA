@@ -21,7 +21,9 @@ env:
   # Object storage for document-service. Chainguard's signed builds, pinned by
   # multi-arch index digest: MinIO's own images stopped being publicly
   # pullable on 2026-09-24 (quay.io answers 401; Docker Hub's minio/minio is
-  # gone). docker-compose.yml pins the same digests.
+  # gone). docker-compose.yml pins the same MINIO_IMAGE. Its minio-init pins
+  # the `-dev` variant of MC_IMAGE instead, for the shell its script needs;
+  # here `mc` is the entrypoint and needs none. Bump the two together.
   MINIO_IMAGE: 'cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1'
   MC_IMAGE: 'cgr.dev/chainguard/minio-client@sha256:b8b144ab34694ecea25aa352c4be9de4c26ee2a02701521dce02ee5593c57338'
 
