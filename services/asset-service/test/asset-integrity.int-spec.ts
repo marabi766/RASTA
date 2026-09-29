@@ -172,6 +172,7 @@ describe('asset integrity', () => {
     );
     for (const table of [
       'asset_timeline_entry',
+      'asset_event_position',
       'insurance_claim',
       'insurance_policy',
       'technical_inspection',
@@ -708,6 +709,97 @@ describe('asset integrity', () => {
   // ---------------------------------------------------------------------------
   // L4-03 — the consumer's marker and its effects
   // ---------------------------------------------------------------------------
+
+  describe('a status event replayed after a newer one (D-039)', () => {
+    const sequenced = (
+      eventName: string,
+      assetId: string,
+      streamSeq: number,
+      occurredAt: string,
+    ): EventEnvelope => ({
+      ...envelope(eventName, assetId, org.a),
+      occurredAt,
+      streamSeq,
+      streamKey: assetId,
+    });
+
+    const timelineNames = async (assetId: string) =>
+      (
+        await prisma.client.$queryRawUnsafe<{ event_name: string }[]>(
+          `SELECT event_name FROM asset_timeline_entry WHERE asset_id = $1`,
+          assetId,
+        )
+      ).map((row) => row.event_name);
+
+    it('keeps the dossier entry of the older MAINTENANCE_STARTED but does not set the status back', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'IN_MAINTENANCE');
+      const started = sequenced('MAINTENANCE_STARTED', assetId, 5, '2026-09-29T10:00:00.000Z');
+      const completed = sequenced('MAINTENANCE_COMPLETED', assetId, 6, '2026-09-29T11:00:00.000Z');
+
+      // STARTED failed and went to the dead-letter topic; COMPLETED was applied.
+      await asActor(manager(org.a), () => consumer.handle(completed));
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+
+      // The replay of STARTED arrives on `.retry`, afterwards.
+      await expect(
+        asActor(manager(org.a), () => consumer.handle(started)),
+      ).resolves.toBeUndefined();
+
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+      expect(await timelineNames(assetId)).toEqual(
+        expect.arrayContaining(['MAINTENANCE_STARTED', 'MAINTENANCE_COMPLETED']),
+      );
+      const statusEvents = (await outboxFor(assetId)).filter(
+        (e) => e.eventName === ASSET_EVENTS.ASSET_STATUS_CHANGED,
+      );
+      expect(statusEvents).toHaveLength(1);
+      expect(await markerExists(started.eventId)).toBe(true);
+    });
+
+    it('applies an event at an equal or later position, and a redelivery changes nothing', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const started = sequenced('MAINTENANCE_STARTED', assetId, 7, '2026-09-29T10:00:00.000Z');
+      await asActor(manager(org.a), () => consumer.handle(started));
+      expect((await statusOf(assetId)).status).toBe('IN_MAINTENANCE');
+
+      // The same position under another event id is not older: it applies.
+      const twin = {
+        ...sequenced('MAINTENANCE_COMPLETED', assetId, 7, '2026-09-29T10:00:00.000Z'),
+      };
+      await asActor(manager(org.a), () => consumer.handle(twin));
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+
+      await expect(asActor(manager(org.a), () => consumer.handle(started))).resolves.toBe(
+        'SKIPPED',
+      );
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+    });
+
+    it('shows the stored positions to the owning organization only', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'IN_MAINTENANCE');
+      await asActor(manager(org.a), () =>
+        consumer.handle(sequenced('MAINTENANCE_COMPLETED', assetId, 3, '2026-09-29T10:00:00.000Z')),
+      );
+
+      const read = (organizationId: string) =>
+        asActor(manager(organizationId), () =>
+          repository.transaction((tx) => repository.readEventPositions(tx, assetId)),
+        );
+      expect(Object.keys(await read(org.a))).toEqual(['maintenance-service']);
+      expect(await read(org.b)).toEqual({});
+    });
+
+    const markerExists = async (eventId: string) =>
+      (
+        await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+          `SELECT count(*)::int AS n FROM processed_event WHERE event_id = $1`,
+          eventId,
+        )
+      )[0]!.n > 0;
+  });
 
   describe('the timeline consumer (audit L4-03)', () => {
     const markerExists = async (eventId: string) => {

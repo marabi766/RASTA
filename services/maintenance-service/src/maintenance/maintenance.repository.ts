@@ -4,6 +4,7 @@ import {
   buildOutboxRow,
   runUnscoped,
   type OutboxMessageInput,
+  type SourcePositions,
 } from '@rasta/nest-common';
 import { resolvePartitionKey } from './routing';
 import type { MaintenanceEventName } from './events';
@@ -637,6 +638,21 @@ export class MaintenanceRepository {
   // Reference replicas
   // -------------------------------------------------------------------------
 
+  /**
+   * Serializes the writers of one machine's replica row, so the position read
+   * before an event is applied is still the newest when it is written (D-039).
+   * Its own key: the work lock above is the one requests take.
+   */
+  async lockAssetRef(tx: ExtendedPrismaClient, assetId: string): Promise<void> {
+    await runUnscoped(
+      'serializes concurrent replica writers for one asset; the replica row is platform-wide',
+      async () => {
+        await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`asset_ref:${assetId}`}, 0))`;
+        await tx.$queryRaw`SELECT id FROM asset_ref WHERE id = ${assetId} FOR UPDATE`;
+      },
+    );
+  }
+
   async findAssetRef(id: string, tx?: ExtendedPrismaClient) {
     return runUnscoped('asset reference replica is platform-wide, not tenant data', () =>
       (tx ?? this.client).assetRef.findFirst({ where: { id } }),
@@ -666,6 +682,8 @@ export class MaintenanceRepository {
       assetType?: string | null;
       assetTag?: string | null;
       status?: string;
+      /** Per producer, where the last state-setting event stood (D-039). */
+      sourcePositions?: SourcePositions;
       sourceEvent: string;
     },
   ) {

@@ -515,16 +515,23 @@ describeWithKafka('domain projector over Kafka', () => {
   /**
    * D-039: what `ops-replay` republishes on `<topic>.retry` is consumed like the
    * original. Only `ops-replay` may write a `.retry` topic (RUN-006), and its
-   * password is deliberately not in the shared `.env` nor in CI's test scope
-   * (`bootstrap.env` locally): without it these tests are skipped, and say so.
+   * password is deliberately not in the shared `.env` nor in the `tests` scope
+   * (`bootstrap.env` locally). Without it these tests are skipped, and say so;
+   * CI's "Retry replay, published as ops-replay" step sets RETRY_REPLAY_REQUIRED
+   * and takes the `replay` scope, and there a missing credential fails them.
+   * Their titles carry `retry-replay`, which is how that step selects them.
    */
   const replayPassword = process.env.KAFKA_SASL_PASSWORD_OPS_REPLAY;
-  const itWithReplay = replayPassword ? it : it.skip;
-  if (!replayPassword) {
+  const replayRequired = process.env.RETRY_REPLAY_REQUIRED === 'true';
+  const itWithReplay = replayPassword || replayRequired ? it : it.skip;
+  if (!replayPassword && !replayRequired) {
     console.warn('[audit] KAFKA_SASL_PASSWORD_OPS_REPLAY is not set — skipping the .retry tests');
   }
 
   async function publishRetry(topic: string, body: unknown, key: string): Promise<void> {
+    if (!replayPassword) {
+      throw new Error('KAFKA_SASL_PASSWORD_OPS_REPLAY is required here and is not set');
+    }
     const client = new Kafka({
       ...kafkaClientConfig(kafkaConnectionFor('ops-replay', 'audit-itest-ops-replay')),
       logLevel: 1,
@@ -542,7 +549,7 @@ describeWithKafka('domain projector over Kafka', () => {
   }
 
   itWithReplay(
-    'applies a record replayed on .retry exactly once, and a second replay or an already-processed eventId is a duplicate',
+    '[retry-replay] applies a record replayed on .retry exactly once, and a second replay or an already-processed eventId is a duplicate',
     async () => {
       const replayed = envelope({ producer: ownerOf('rasta.fleet.v1') });
       await publishRetry('rasta.fleet.v1', replayed, replayed.aggregateId);
@@ -576,7 +583,7 @@ describeWithKafka('domain projector over Kafka', () => {
   );
 
   itWithReplay(
-    'dead-letters a forged producer on .retry as PRODUCER_NOT_ALLOWED, keeping the message key',
+    '[retry-replay] dead-letters a forged producer on .retry as PRODUCER_NOT_ALLOWED, keeping the message key',
     async () => {
       const dlqTopic = 'rasta.audit.v1.dlq';
       const dlq = new Kafka({

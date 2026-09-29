@@ -1,7 +1,7 @@
 import type { EventEnvelope } from '@rasta/contracts';
 import type { EventConsumer, EventDelivery } from '@rasta/nest-common';
 import { REDACTED, SENSITIVE_KEYS, type Logger } from '@rasta/logging';
-import { DomainProjectorConsumer, asOriginalDelivery } from './domain-projector.consumer';
+import { DomainProjectorConsumer } from './domain-projector.consumer';
 import type { AuditRepository, IngestOutcome } from '../audit/audit.repository';
 import type { AuditEventRecord } from '../audit/audit.mapper';
 import {
@@ -599,19 +599,5 @@ describe('source_service label on path A', () => {
     expect((await labelValues()).sort()).toEqual(['asset-service', 'fleet-service', 'unknown']);
     expect(await series()).toHaveLength(4);
     expect(await countOf({ source_service: 'unknown' })).toBe(100);
-  });
-});
-
-describe('asOriginalDelivery (D-039)', () => {
-  it('reads a delivery on <topic>.retry as one on <topic>, keeping the partition', () => {
-    expect(asOriginalDelivery({ topic: 'rasta.organization.v1.retry', partition: 4 })).toEqual({
-      topic: 'rasta.organization.v1',
-      partition: 4,
-    });
-  });
-
-  it('returns any other delivery as it is', () => {
-    const delivery: EventDelivery = Object.freeze({ topic: 'rasta.audit.trail.v1', partition: 0 });
-    expect(asOriginalDelivery(delivery)).toBe(delivery);
   });
 });

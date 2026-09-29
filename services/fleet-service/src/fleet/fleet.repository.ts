@@ -4,6 +4,7 @@ import {
   buildOutboxRow,
   runUnscoped,
   type OutboxMessageInput,
+  type SourcePositions,
 } from '@rasta/nest-common';
 import { resolvePartitionKey } from './routing';
 import type { FleetEventName } from './events';
@@ -669,6 +670,8 @@ export class FleetRepository {
       insuranceLapsedCoverages?: string[];
       insuranceLapsedAt?: Date | null;
       insuranceCover?: InsuranceCover;
+      /** Per producer, where the last state-setting event stood (D-039). */
+      sourcePositions?: SourcePositions;
       sourceEvent: string;
     },
   ) {

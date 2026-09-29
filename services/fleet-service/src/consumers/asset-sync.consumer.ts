@@ -3,10 +3,14 @@ import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   UnprocessableEventError,
   createSystemContext,
+  isOlderThanApplied,
+  readSourcePositions,
   runWithContext,
+  sourcePositionOf,
   type EventConsumer,
   type EventHandler,
 } from '@rasta/nest-common';
+import { staleStateEventsTotal } from '../observability/metrics';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
 import { FleetRepository } from '../fleet/fleet.repository';
 import {
@@ -83,6 +87,7 @@ interface CurrentAssetRef {
   insuranceLapsedCoverages: string[];
   insuranceLapsedAt: Date | null;
   insuranceCover: unknown;
+  sourcePositions: unknown;
 }
 
 interface AssetRefPatch {
@@ -243,6 +248,38 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
   },
 };
 
+/**
+ * The events that set the replica's state (status, owner, the in-maintenance
+ * flag), and so carry a position per producer (D-039). The safety events are
+ * absent on purpose: they never regress anything, an older one is still a
+ * lapse or a failure that must be seen, and they must not advance the position
+ * a later state event is judged against.
+ */
+const STATE_EVENTS: ReadonlySet<string> = new Set([
+  CONSUMED_EVENTS.ASSET_CREATED,
+  CONSUMED_EVENTS.ASSET_UPDATED,
+  CONSUMED_EVENTS.ASSET_ACTIVATED,
+  CONSUMED_EVENTS.ASSET_STATUS_CHANGED,
+  CONSUMED_EVENTS.ASSET_TRANSFERRED,
+  CONSUMED_EVENTS.ASSET_DECOMMISSIONED,
+  CONSUMED_EVENTS.MAINTENANCE_STARTED,
+  CONSUMED_EVENTS.MAINTENANCE_COMPLETED,
+]);
+
+/** What a stale event must not write; everything else in a patch is order-insensitive. */
+function withoutStateFields(patch: AssetRefPatch): AssetRefPatch {
+  const {
+    organizationId: _organizationId,
+    name: _name,
+    assetType: _assetType,
+    assetTag: _assetTag,
+    status: _status,
+    inMaintenance: _inMaintenance,
+    ...rest
+  } = patch;
+  return rest;
+}
+
 const CONSUMER_NAME = 'fleet-service.asset-sync';
 
 /** Who ended an assignment nobody ended by hand; the same value as elsewhere. */
@@ -367,7 +404,25 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       // transfer, is applied to the row as it now stands, under its current
       // owner: the policy is the vehicle's, not the organization's (docs/24
       // Q-66). The tenant below comes from the row, never from such an event.
-      const patch = projection.patch(payload, current, now, occurredAt);
+      let patch = projection.patch(payload, current, now, occurredAt);
+
+      // D-039: `<topic>` and `<topic>.retry` are separate streams, so a replay
+      // can arrive after a newer event. One older than the event that last set
+      // this machine's state (per producer) must not set it back — the
+      // replica fields it would write are dropped; the safety fields, which
+      // carry their own order-insensitive rules, are still applied.
+      const position = sourcePositionOf(envelope);
+      const positions = readSourcePositions(current?.sourcePositions);
+      const guarded = STATE_EVENTS.has(envelope.eventName);
+      const stale = guarded && isOlderThanApplied(positions[envelope.producer], position);
+      if (stale) {
+        patch = withoutStateFields(patch);
+        staleStateEventsTotal.inc({ service: SERVICE_NAME, event: envelope.eventName });
+        this.logger.warn(
+          `${envelope.eventName} ${envelope.eventId} is older than the state already applied ` +
+            `to ${assetId}; state unchanged`,
+        );
+      }
 
       // Narrowed rather than asserted: the guard above already established
       // that one of these is present, and spelling it out here keeps that true
@@ -378,21 +433,29 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      await this.repository.upsertAssetRef(tx, {
-        // The patch first, then the resolved values — never the other way
-        // round. A patch key present but undefined (an ASSET_CREATED whose
-        // payload omits the organization, with the tenant only on the
-        // envelope) would otherwise overwrite the value resolved above with
-        // `undefined`, and the row would be written with no organization.
-        ...patch,
-        id: assetId,
-        // An existing row keeps its organization unless the event explicitly
-        // moves it, which only a transfer does.
-        organizationId: tenant,
-        sourceEvent: envelope.eventName,
-      });
+      if (!stale || Object.keys(patch).length > 0) {
+        await this.repository.upsertAssetRef(tx, {
+          // The patch first, then the resolved values — never the other way
+          // round. A patch key present but undefined (an ASSET_CREATED whose
+          // payload omits the organization, with the tenant only on the
+          // envelope) would otherwise overwrite the value resolved above with
+          // `undefined`, and the row would be written with no organization.
+          ...patch,
+          id: assetId,
+          // An existing row keeps its organization unless the event explicitly
+          // moves it, which only a transfer does.
+          organizationId: tenant,
+          sourceEvent: envelope.eventName,
+          ...(guarded && !stale
+            ? { sourcePositions: { ...positions, [envelope.producer]: position } }
+            : {}),
+        });
+      }
 
-      if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
+      // A stale transfer neither ends assignments nor drops fences: the
+      // machine has moved on since, and what is open now belongs to its
+      // current owner.
+      if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED && !stale) {
         await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
         // The fence the previous owner placed to clear this transfer
         // (ADR-062). The replica now names the new owner, which refuses the

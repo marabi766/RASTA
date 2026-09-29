@@ -1,6 +1,6 @@
 import { Injectable, type OnModuleDestroy } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
-import type { EventConsumer, EventDelivery } from '@rasta/nest-common';
+import { originalDelivery, type EventConsumer, type EventDelivery } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 // Type-only, like `Logger` above: this provider is built by an explicit
 // `useFactory` in `app.module.ts`, exactly as the domain projector is.
@@ -11,7 +11,7 @@ import {
   AuditTrailRejectedError,
   toAuditTrailRecord,
 } from '../audit/audit-trail.mapper';
-import { asOriginalDelivery, type ConsumerFactory } from './domain-projector.consumer';
+import type { ConsumerFactory } from './domain-projector.consumer';
 import { trailSourceServiceLabel } from '../audit/audit-producer-topology';
 import {
   auditIngestionFailuresTotal,
@@ -128,7 +128,7 @@ export class AuditTrailConsumer implements OnModuleDestroy {
 
   async start(): Promise<void> {
     this.consumer = this.createConsumer((envelope, delivery) =>
-      this.handle(envelope, asOriginalDelivery(delivery)),
+      this.handle(envelope, originalDelivery(delivery)),
     );
     await this.consumer.start();
   }

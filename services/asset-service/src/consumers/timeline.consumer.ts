@@ -1,10 +1,15 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
-import type { EventConsumer, EventHandler } from '@rasta/nest-common';
+import {
+  isOlderThanApplied,
+  sourcePositionOf,
+  type EventConsumer,
+  type EventHandler,
+} from '@rasta/nest-common';
 import { AssetRepository } from '../asset/asset.repository';
 import { AssetService } from '../asset/asset.service';
 import { SERVICE_NAME } from '../config/env';
-import { timelineEventsSkippedTotal } from '../observability/metrics';
+import { staleStateEventsTotal, timelineEventsSkippedTotal } from '../observability/metrics';
 import { CONSUMED_EVENT_CATEGORY, timelineSourceSchema } from '../asset/events';
 import type { AssetStatus } from '../asset/lifecycle';
 
@@ -202,12 +207,31 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
       // does throw, so everything above rolls back and the redelivery is
       // judged again.
       if (projection.status) {
+        // An event older than the one that last set this asset's status — a
+        // replay from `<topic>.retry` after a newer event was applied — keeps
+        // its dossier entry (a fact) but must not move the status back
+        // (D-039). The position is per producer: the topics are separate
+        // streams, and the sequence is only comparable within one.
+        const position = sourcePositionOf(envelope);
+        const positions = await this.repository.readEventPositions(tx, assetId);
+        if (isOlderThanApplied(positions[envelope.producer], position)) {
+          staleStateEventsTotal.inc({ service: SERVICE_NAME, event: envelope.eventName });
+          this.logger.warn(
+            `${envelope.eventName} ${envelope.eventId} is older than the status already set ` +
+              `for ${assetId}; dossier entry kept, status unchanged`,
+          );
+          return true;
+        }
         await this.assets.applyEventStatusChange(
           tx,
           assetId,
           projection.status,
           `${envelope.eventName} از ${envelope.producer}`,
         );
+        await this.repository.writeEventPositions(tx, assetId, asset.organizationId, {
+          ...positions,
+          [envelope.producer]: position,
+        });
       }
 
       return true;

@@ -185,6 +185,39 @@ test('neither secrets directory reaches $GITHUB_ENV or a job- or workflow-level 
   );
 });
 
+test('only the retry-replay step takes the replay scope, and it runs nothing but the replay specs', () => {
+  const REPLAY = 'Retry replay, published as ops-replay';
+  const body = (command, extra = '') =>
+    `        run: |\n          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh replay)"\n          eval "$kafka_credentials"\n          ${command}\n        env:\n          KAFKA_SECRETS_DIR: /tmp/s\n          KAFKA_ADMIN_SECRETS_DIR: /tmp/a\n${extra}`;
+  assert.deepEqual(checkWorkflow(step(REPLAY, body('pnpm run test:retry-replay'))), []);
+  // Any other step, including the ordinary integration tests, may not take it.
+  assert.ok(
+    checkWorkflow(step('Integration tests', body('pnpm run test:retry-replay'))).some((problem) =>
+      /takes the replay scope/.test(problem),
+    ),
+  );
+  assert.ok(
+    checkWorkflow(step('Integration tests', body('pnpm run test:retry-replay'))).some((problem) =>
+      /is given KAFKA_ADMIN_SECRETS_DIR/.test(problem),
+    ),
+  );
+  // The replay step itself may not run the wider suites or start services.
+  for (const command of ['pnpm run test:integration', 'pnpm run test:e2e', 'node dist/main.js']) {
+    assert.ok(
+      checkWorkflow(step(REPLAY, body(command))).some((problem) =>
+        /test:retry-replay/.test(problem),
+      ),
+      command,
+    );
+  }
+  // And it is the only step, in the committed workflow, that names the scope.
+  const steps = workflowSteps(read('.github/workflows/ci.yml'));
+  assert.deepEqual(
+    steps.filter((s) => /kafka-credentials\.sh replay\b/.test(s.run ?? '')).map((s) => s.name),
+    [REPLAY],
+  );
+});
+
 test('the admin’s secrets directory goes to the broker bootstrap and the broker tests alone', () => {
   const given = (name) =>
     checkWorkflow(
@@ -326,7 +359,15 @@ test('kafka-credentials.sh hands out exactly each scope, each from its own direc
     for (const name of ['ADMIN', 'OPS_REPLAY', 'KAFKA_UI', 'KAFKA_EXPORTER']) {
       assert.ok(!tests.includes(`KAFKA_SASL_PASSWORD_${name}`), name);
     }
-    // Every scope but admin works with the services' directory alone.
+    // `replay` is `tests` plus ops-replay's password, from the admin directory —
+    // and nothing else: not the admin's, not a tool's.
+    assert.deepEqual(
+      variables(run(both, 'replay').stdout),
+      [...tests, 'KAFKA_SASL_PASSWORD_OPS_REPLAY'].sort(),
+    );
+    assert.notEqual(run({ KAFKA_SECRETS_DIR: services }, 'replay').status, 0);
+    assert.equal(run({ KAFKA_SECRETS_DIR: services }, 'replay').stdout, '');
+    // Every scope but admin and replay works with the services' directory alone.
     assert.equal(run({ KAFKA_SECRETS_DIR: services }, 'tests').status, 0);
     const admin = variables(run(both, 'admin').stdout);
     assert.deepEqual(

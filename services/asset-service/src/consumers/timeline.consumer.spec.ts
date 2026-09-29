@@ -77,6 +77,9 @@ function harness(
     transaction,
     markEventProcessed: markProcessed,
     lockAsset,
+    // D-039: no position stored yet, so nothing is stale; writes are recorded.
+    readEventPositions: jest.fn(async () => ({})),
+    writeEventPositions: jest.fn(async () => undefined),
     assetExistsInAnyTenant: jest.fn(async () => options.elsewhere ?? options.lockFails ?? false),
   } as unknown as AssetRepository;
 

@@ -568,6 +568,11 @@ model AssetRef {
   /// the producer's side does not require a migration here.
   status String
 
+  /// Where in the producer's stream the last state-setting event was applied
+  /// (`{ "asset-service": { seq, streamKey, at, eventId } }`). An older event,
+  /// e.g. one replayed from `<topic>.retry`, must not regress `status` (D-039).
+  sourcePositions Json @default("{}") @map("source_positions")
+
   syncedAt    DateTime @map("synced_at")
   sourceEvent String   @map("source_event")
 

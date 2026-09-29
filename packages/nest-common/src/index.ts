@@ -128,6 +128,13 @@ export type {
   HandlerOutcome,
   ConsumerLogger,
 } from './consumer/event-consumer';
+export {
+  isOlderThanApplied,
+  originalDelivery,
+  readSourcePositions,
+  sourcePositionOf,
+} from './consumer/source-position';
+export type { SourcePosition, SourcePositions } from './consumer/source-position';
 
 // Outbox ---------------------------------------------------------------------
 export {

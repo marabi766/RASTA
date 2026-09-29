@@ -1316,6 +1316,29 @@ jobs:
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
 
+      - name: Retry replay, published as ops-replay
+        # D-039: a record the operator's replay principal publishes on
+        # `<topic>.retry` is consumed like the original — applied once,
+        # a forged producer dead-lettered with the message key kept. Only
+        # ops-replay may write a `.retry` topic (RUN-006), so this is the one
+        # step that gets its password (`kafka-credentials.sh replay`: the
+        # `tests` scope plus ops-replay's), and it runs only the specs tagged
+        # [retry-replay]. No other step's scope changes; `check:kafka-credential-scope`
+        # allows exactly this step to take it. It fails, rather than skips,
+        # without the credential.
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh replay)"
+          eval "${kafka_credentials}"
+          pnpm run test:retry-replay
+        env:
+          KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
+          KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          RETRY_REPLAY_REQUIRED: 'true'
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
+
       - name: Broker authorisation, asked of the broker
         # RUN-006: the generated ACLs observed on the live broker — only a
         # topic's owner writes it, a service reads what it subscribes to under

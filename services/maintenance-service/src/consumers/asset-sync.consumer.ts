@@ -1,6 +1,13 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
-import { UnprocessableEventError, type EventConsumer, type EventHandler } from '@rasta/nest-common';
+import {
+  UnprocessableEventError,
+  isOlderThanApplied,
+  readSourcePositions,
+  sourcePositionOf,
+  type EventConsumer,
+  type EventHandler,
+} from '@rasta/nest-common';
 import { MaintenanceRepository } from '../maintenance/maintenance.repository';
 import {
   CONSUMED_EVENTS,
@@ -10,7 +17,7 @@ import {
 } from '../maintenance/events';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
-import { transferOpenWorkTotal } from '../observability/metrics';
+import { staleStateEventsTotal, transferOpenWorkTotal } from '../observability/metrics';
 
 /**
  * Keeps maintenance's picture of the machines accurate.
@@ -182,6 +189,23 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         await this.repository.lockAssetForWork(tx, assetId, 'EXCLUSIVE');
       }
 
+      // D-039: `<topic>` and `<topic>.retry` are separate streams, so a replay
+      // can arrive after a newer event. One older than the event that last set
+      // this machine's replica must not set it back; it is marked processed
+      // (above) and does nothing else.
+      await this.repository.lockAssetRef(tx, assetId);
+      const current = await this.repository.findAssetRef(assetId, tx);
+      const position = sourcePositionOf(envelope);
+      const positions = readSourcePositions(current?.sourcePositions);
+      if (isOlderThanApplied(positions[envelope.producer], position)) {
+        staleStateEventsTotal.inc({ service: SERVICE_NAME, event: envelope.eventName });
+        this.logger.warn(
+          `${envelope.eventName} ${envelope.eventId} is older than the state already applied ` +
+            `to ${assetId}; state unchanged`,
+        );
+        return;
+      }
+
       await this.repository.upsertAssetRef(tx, {
         // The patch first, then the resolved values — never the other way
         // round. A patch key present but undefined (an ASSET_CREATED whose
@@ -196,6 +220,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         // moves it, which only a transfer does.
         organizationId: tenant,
         sourceEvent: envelope.eventName,
+        sourcePositions: { ...positions, [envelope.producer]: position },
       });
 
       const previousOwner = str(payload.fromOrganizationId);
