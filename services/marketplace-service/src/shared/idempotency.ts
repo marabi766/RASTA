@@ -7,6 +7,31 @@ import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type MarketplaceEnv } from '../config/env';
 
+/** `Retry-After` on the in-flight 409, as docs/06 § 6.8 states it. */
+const IN_FLIGHT_RETRY_AFTER_SECONDS = 1;
+
+/**
+ * How many times one `claim` tries to reserve a key it keeps finding vanished
+ * or expired. A few is plenty: each retry means another request changed the
+ * row in between, and the answer after the last is the in-flight 409.
+ */
+const CLAIM_ATTEMPTS = 3;
+
+/** An attempt that reserved nothing and must be made again. */
+const RETRY_CLAIM = Symbol('retry-claim');
+
+/**
+ * Nothing of the key in the context the exception filter logs (S-09): the
+ * endpoint and the request's correlationId locate the clash. The wait is the
+ * typed field the filter sends as `Retry-After`, not context.
+ */
+function inFlight(endpoint: string): RastaError {
+  return new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
+    internalContext: { endpoint },
+    retryAfterSeconds: IN_FLIGHT_RETRY_AFTER_SECONDS,
+  });
+}
+
 /**
  * Idempotent financial writes (docs/06 § 6.8).
  *
@@ -74,8 +99,39 @@ export class IdempotencyStore {
     key: string,
     body: unknown,
   ): Promise<{ kind: 'PROCEED' } | { kind: 'REPLAY'; status: number; body: unknown }> {
-    const organizationId = getOrganizationId();
     const requestHash = this.hash(body);
+    for (let attempt = 1; attempt <= CLAIM_ATTEMPTS; attempt += 1) {
+      const outcome = await this.claimOnce(endpoint, key, requestHash);
+      if (outcome !== RETRY_CLAIM) return outcome;
+    }
+    // Every attempt found the key vanishing under it: other requests are
+    // churning it right now. The same answer as a key in flight.
+    throw inFlight(endpoint);
+  }
+
+  /**
+   * One attempt at the reservation.
+   *
+   * **`PROCEED` is returned only by the insert that wrote the row** (review of
+   * #141). A request that lost the insert and then found no row, or an expired
+   * one, reserved nothing, so it tries the insert again rather than
+   * proceeding. Proceeding there ran the work with no claim behind it: its
+   * completion matched no row, the key stayed free, and the next request with
+   * the same key placed a second order. economic-service settled the same race
+   * the same way (economic batch 2, item g).
+   *
+   * An expired row is removed **only while it is still expired**. Deleting by
+   * key alone could remove the fresh claim a concurrent request had just put
+   * in its place, and a `delete` of a row a racer had already removed threw.
+   */
+  private async claimOnce(
+    endpoint: string,
+    key: string,
+    requestHash: string,
+  ): Promise<
+    { kind: 'PROCEED' } | { kind: 'REPLAY'; status: number; body: unknown } | typeof RETRY_CLAIM
+  > {
+    const organizationId = getOrganizationId();
     const now = new Date();
     const expiresAt = new Date(
       now.getTime() + this.env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000,
@@ -94,28 +150,22 @@ export class IdempotencyStore {
       where: { organizationId_endpoint_key: { organizationId, endpoint, key } },
     });
 
-    // Expired between the failed insert and this read. Treat it as absent and
-    // let the caller retry the whole claim rather than guessing.
-    if (!existing) return { kind: 'PROCEED' };
+    // Released, purged or expired-and-removed between the failed insert and
+    // this read: nothing is reserved yet.
+    if (!existing) return RETRY_CLAIM;
 
     if (existing.expiresAt <= now) {
-      await this.prisma.client.idempotencyKey.delete({
-        where: { organizationId_endpoint_key: { organizationId, endpoint, key } },
+      await this.prisma.client.idempotencyKey.deleteMany({
+        where: { organizationId, endpoint, key, expiresAt: { lte: now } },
       });
-      return this.claim(endpoint, key, body);
+      return RETRY_CLAIM;
     }
 
     if (existing.requestHash !== requestHash) {
       throw RastaError.idempotencyKeyReused();
     }
 
-    // Nothing of the key in the context the exception filter logs (S-09): the
-    // endpoint and the request's correlationId locate the clash.
-    if (existing.state === 'IN_PROGRESS') {
-      throw new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
-        internalContext: { endpoint, retryAfterSeconds: 1 },
-      });
-    }
+    if (existing.state === 'IN_PROGRESS') throw inFlight(endpoint);
 
     idempotentReplaysTotal.inc({ service: SERVICE_NAME, endpoint });
     return {
@@ -133,7 +183,8 @@ export class IdempotencyStore {
    * this write then failed, the money has moved and a retry would find
    * `IN_PROGRESS` and be refused — annoying, and safe. If it shared the
    * transaction, a failure here would roll back a settlement that had already
-   * succeeded, which is not.
+   * succeeded, which is not. "Safe" holds only because {@link execute} never
+   * releases the claim after this fails.
    */
   async complete(endpoint: string, key: string, status: number, body: unknown): Promise<void> {
     const organizationId = getOrganizationId();
@@ -196,14 +247,20 @@ export class IdempotencyStore {
     const claim = await this.claim(endpoint, key, body);
     if (claim.kind === 'REPLAY') return { result: claim.body as T, executed: false };
 
+    // Only a failure of `work` releases the claim. A failure to record the
+    // response comes after the work committed — the order exists — so the
+    // claim is kept and the error surfaces: retries meet the in-flight 409
+    // until the claim expires, rather than a freed key placing a second
+    // order (review of #141). The release used to cover both.
+    let result: T;
     try {
-      const result = await work();
-      await this.complete(endpoint, key, successStatus, result);
-      return { result, executed: true };
+      result = await work();
     } catch (error) {
       await this.release(endpoint, key);
       throw error;
     }
+    await this.complete(endpoint, key, successStatus, result);
+    return { result, executed: true };
   }
 
   /**

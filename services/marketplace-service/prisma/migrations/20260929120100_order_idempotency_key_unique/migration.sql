@@ -1,0 +1,35 @@
+-- Review of #141: an Idempotency-Key places at most one order per organization.
+--
+-- The idempotency record is the first guard: a retry replays the stored
+-- response. It is not the only one any more. A record that is lost — released
+-- after the order committed, purged after it expired — used to leave the key
+-- free, and the next request with it placed a second order. This index makes
+-- that insert fail; OrderService.place answers it as 409 CONFLICT.
+--
+-- A full index rather than `WHERE idempotency_key IS NOT NULL`: the column is
+-- NOT NULL (init migration), so that predicate would cover every row and add
+-- nothing, and a full index is one schema.prisma can declare (@@unique).
+-- Leads with organization_id, like every index on a tenant table (ADR-011).
+--
+-- Built CONCURRENTLY, so orders can still be placed during the build. One
+-- statement, on purpose: CONCURRENTLY cannot run inside a transaction block,
+-- and PostgreSQL runs a multi-statement script as one implicit transaction.
+-- The previous migration refuses to let this run over duplicates.
+--
+-- IF IT FAILS (P3018 — a duplicate that arrived after the pre-check, a
+-- cancellation, a timeout), it leaves an INVALID index that enforces nothing,
+-- and Prisma keeps the failed record: every deploy is refused with P3009. In
+-- order:
+--   1. fix the cause (a duplicate: re-key it, as for the pre-check);
+--   2. DROP INDEX CONCURRENTLY IF EXISTS "uq_order_org_idempotency_key";
+--      — alone, outside any transaction;
+--   3. prisma migrate resolve --rolled-back 20260929120100_order_idempotency_key_unique
+--   4. deploy.
+-- Skip step 2 and the deploy fails with "already exists": there is no
+-- IF NOT EXISTS, on purpose, so a leftover INVALID index is never taken for
+-- the real one. Exact commands:
+-- docs/runbooks/database-bootstrap.md#marketplace-order-key-index
+-- (sequence verified on a throwaway schema in PR #141).
+
+CREATE UNIQUE INDEX CONCURRENTLY "uq_order_org_idempotency_key"
+    ON "order" ("organization_id", "idempotency_key");

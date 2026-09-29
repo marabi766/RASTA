@@ -9,7 +9,12 @@ import {
 } from '@nestjs/common';
 import { ERROR_CODES, type ApiError, type ErrorCode, type ErrorDetail } from '@rasta/contracts';
 import type { Logger } from '@rasta/logging';
-import { RastaError, isRastaError } from '../errors/rasta-error';
+import {
+  RETRY_AFTER_MAX_SECONDS,
+  RETRY_AFTER_MIN_SECONDS,
+  RastaError,
+  isRastaError,
+} from '../errors/rasta-error';
 import { safeLogText } from '../errors/safe-log-text';
 import { tryGetContext } from '../context/request-context';
 
@@ -18,6 +23,7 @@ export const EXCEPTION_FILTER_LOGGER = Symbol('RASTA_EXCEPTION_FILTER_LOGGER');
 interface MinimalResponse {
   status(code: number): MinimalResponse;
   json(body: unknown): void;
+  setHeader(name: string, value: string): unknown;
 }
 
 /**
@@ -42,6 +48,10 @@ interface MinimalResponse {
  * object, so neither its message nor an enumerable property of it (a driver's
  * `meta`, say) escapes that rule; the stack keeps its frames, not its first
  * line, which repeats the message.
+ *
+ * The response carries one header of the error's own, and only one:
+ * `Retry-After`, from {@link RastaError.retryAfterSeconds} — a typed field the
+ * thrower sets on purpose. Nothing in `internalContext` ever becomes a header.
  */
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -83,6 +93,11 @@ export class AllExceptionsFilter implements ExceptionFilter {
     } else {
       this.logger.debug(logPayload, `Request rejected: ${code}`);
     }
+
+    const retryAfter = isRastaError(exception)
+      ? retryAfterHeader(exception.retryAfterSeconds)
+      : undefined;
+    if (retryAfter !== undefined) response.setHeader('Retry-After', retryAfter);
 
     response.status(status).json(body);
   }
@@ -186,6 +201,21 @@ export class AllExceptionsFilter implements ExceptionFilter {
       },
     };
   }
+}
+
+/**
+ * The `Retry-After` value for a wait in seconds: delay-seconds (RFC 9110
+ * § 10.2.3), a whole number rounded up, clamped to
+ * [{@link RETRY_AFTER_MIN_SECONDS}, {@link RETRY_AFTER_MAX_SECONDS}].
+ * Undefined — no header — for anything that is not a finite number.
+ */
+function retryAfterHeader(seconds: unknown): string | undefined {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return undefined;
+  const bounded = Math.min(
+    RETRY_AFTER_MAX_SECONDS,
+    Math.max(RETRY_AFTER_MIN_SECONDS, Math.ceil(seconds)),
+  );
+  return String(bounded);
 }
 
 /** What a client is told about a failure that is the server's. */

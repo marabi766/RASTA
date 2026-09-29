@@ -25,13 +25,22 @@ interface Captured {
   message: string;
 }
 
-function run(exception: unknown): { status: number; body: unknown; lines: Captured[] } {
+function run(exception: unknown): {
+  status: number;
+  body: unknown;
+  headers: Record<string, string>;
+  lines: Captured[];
+} {
   const lines: Captured[] = [];
   const at = (level: string) => (payload: Captured['payload'], message: string) => {
     lines.push({ level, payload, message });
   };
   const logger = { debug: at('debug'), warn: at('warn'), error: at('error') } as unknown as Logger;
-  const sent: { status: number; body: unknown } = { status: 0, body: undefined };
+  const sent: { status: number; body: unknown; headers: Record<string, string> } = {
+    status: 0,
+    body: undefined,
+    headers: {},
+  };
   const response = {
     status: (code: number) => {
       sent.status = code;
@@ -39,6 +48,9 @@ function run(exception: unknown): { status: number; body: unknown; lines: Captur
     },
     json: (body: unknown) => {
       sent.body = body;
+    },
+    setHeader: (name: string, value: string) => {
+      sent.headers[name] = value;
     },
   };
   new AllExceptionsFilter(logger).catch(exception, {
@@ -261,6 +273,88 @@ describe('AllExceptionsFilter, what stays as it was', () => {
       resourceType: 'Asset',
       id: 'AST_01JFILTERSPEC0000000001',
     });
+  });
+});
+
+describe('AllExceptionsFilter, Retry-After (docs/06 § 6.8)', () => {
+  const inFlight = (retryAfterSeconds?: number) =>
+    new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
+      internalContext: { endpoint: 'POST /v1/orders' },
+      ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+    });
+
+  it('a key in flight: 409 CONFLICT with Retry-After, the only header the error sets', () => {
+    const { status, body, headers } = run(inFlight(1));
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ code: 'CONFLICT' });
+    expect(headers).toEqual({ 'Retry-After': '1' });
+    // The wait is a header, not a field of the body.
+    expect(JSON.stringify(body)).not.toContain('retryAfter');
+  });
+
+  it('absent when the error does not set it', () => {
+    expect(run(inFlight()).headers).toEqual({});
+    expect(run(RastaError.idempotencyKeyReused()).headers).toEqual({});
+    expect(run(RastaError.notFound('Asset', 'AST_1')).headers).toEqual({});
+  });
+
+  it('never derived from internalContext, whatever it holds', () => {
+    const error = new RastaError('CONFLICT', 'x', {
+      internalContext: {
+        retryAfterSeconds: 5,
+        'Retry-After': '5',
+        headers: { 'Retry-After': '5', 'Set-Cookie': 'session=1' },
+      },
+    });
+    const { headers, lines } = run(error);
+    expect(headers).toEqual({});
+    // The context still reaches the log, as it always did.
+    expect(lines[0]?.payload.internalContext).toMatchObject({ retryAfterSeconds: 5 });
+  });
+
+  it('never read from a thrown value that is not a RastaError', () => {
+    const lookalike = Object.assign(new HttpException('Busy', HttpStatus.CONFLICT), {
+      retryAfterSeconds: 5,
+    });
+    expect(run(lookalike).headers).toEqual({});
+    expect(run(Object.assign(new Error('x'), { retryAfterSeconds: 5 })).headers).toEqual({});
+  });
+
+  it.each([
+    [1, '1'],
+    [30, '30'],
+    [3600, '3600'],
+    [1.2, '2'],
+    [0, '1'],
+    [-5, '1'],
+    [0.001, '1'],
+    [7200, '3600'],
+    [Number.MAX_SAFE_INTEGER, '3600'],
+  ])('bounded to a whole number of seconds in 1..3600: %p → %p', (seconds, sent) => {
+    expect(run(inFlight(seconds)).headers).toEqual({ 'Retry-After': sent });
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'not sent at all for %p',
+    (seconds) => {
+      expect(run(inFlight(seconds)).headers).toEqual({});
+    },
+  );
+
+  it('sent on a 5xx as well, beside the generic message', () => {
+    const unavailable = new RastaError('UPSTREAM_UNAVAILABLE', 'fleet-service is down', {
+      retryAfterSeconds: 10,
+    });
+    const { status, body, headers } = run(unavailable);
+    expect(status).toBe(503);
+    expect(body).toMatchObject({ message: 'An unexpected error occurred' });
+    expect(headers).toEqual({ 'Retry-After': '10' });
+  });
+
+  it('the field is only what the constructor was given', () => {
+    expect(inFlight(1).retryAfterSeconds).toBe(1);
+    expect(inFlight().retryAfterSeconds).toBeUndefined();
+    expect(RastaError.internal('x').retryAfterSeconds).toBeUndefined();
   });
 });
 

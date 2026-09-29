@@ -15,7 +15,7 @@ import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
  * | new key                            | execute, store the response, return   |
  * | same key, same body                | the stored response, no re-execution  |
  * | same key, different body           | `409 IDEMPOTENCY_KEY_REUSED`          |
- * | key currently in flight            | `409 CONFLICT`                        |
+ * | key currently in flight            | `409 CONFLICT` + `Retry-After: 1`     |
  *
  * Used by the four create endpoints (`POST /v1/projects`,
  * `POST /v1/projects/{id}/needs`, `POST /v1/projects/{id}/progress` and
@@ -66,6 +66,9 @@ interface Claim {
 
 /** How often a claim retries the atomic insert after its collision vanished. */
 const CLAIM_ATTEMPTS = 3;
+
+/** `Retry-After` on the in-flight 409, as docs/06 § 6.8 states it. */
+const IN_FLIGHT_RETRY_AFTER_SECONDS = 1;
 
 @Injectable()
 export class IdempotencyStore {
@@ -286,11 +289,13 @@ export class IdempotencyStore {
   // can be guessable or meaningful, and whoever holds it can replay the stored
   // response. Not a digest either — an unkeyed SHA-256 of a low-entropy key is
   // reversed by guessing (review of #135). The endpoint and the request's
-  // correlationId locate the clash.
+  // correlationId locate the clash. The wait is the typed field the exception
+  // filter sends as `Retry-After`, not context.
 
   private inFlight(endpoint: string): RastaError {
     return new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
-      internalContext: { endpoint, retryAfterSeconds: 1 },
+      internalContext: { endpoint },
+      retryAfterSeconds: IN_FLIGHT_RETRY_AFTER_SECONDS,
     });
   }
 
