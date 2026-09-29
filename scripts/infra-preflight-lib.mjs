@@ -16,17 +16,29 @@
  *     is earlier.
  *
  * The role list is read from `lib/role-passwords.bash`, so this check and the
- * bootstrap cannot disagree about which roles exist. Messages name variables,
- * never values.
+ * bootstrap cannot disagree about which roles exist.
+ *
+ * A third mistake is about Kafka, and is also silent: a `.env` copied before
+ * the local broker started authenticating (#131, SASL/SCRAM over TLS) still
+ * says PLAINTEXT. Compose's own defaults give the broker its credentials, so
+ * the stack starts and the ACLs apply; it is every service and integration
+ * suite loading `.env` that then cannot connect. That is a **warning** naming
+ * what to copy from `.env.example` (`checkKafkaClientEnv`).
+ *
+ * Messages name variables, never values.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { serviceStem } from './check-kafka-credential-scope-lib.mjs';
 
-export const ROLE_LIBRARY = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  '..',
-  'infrastructure/docker/postgres/lib/role-passwords.bash',
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+export const ROLE_LIBRARY = resolve(ROOT, 'infrastructure/docker/postgres/lib/role-passwords.bash');
+
+export const KAFKA_PRINCIPALS = resolve(
+  ROOT,
+  'infrastructure/docker/kafka/principals.development.txt',
 );
 
 /**
@@ -89,4 +101,54 @@ export function checkInfraEnv(env, roles = rolesFromLibrary()) {
     }
   }
   return { errors, warnings };
+}
+
+/** The broker's service principals (`fleet-service`, …), each with a password in `.env`. */
+export function kafkaServicesFromPrincipals(text = readFileSync(KAFKA_PRINCIPALS, 'utf8')) {
+  return text.split('\n').filter((line) => line.endsWith('-service'));
+}
+
+/** How `@rasta/config` reads a boolean variable. */
+const isOn = (value) => /^(true|1|yes|on)$/i.test(String(value ?? '').trim());
+const isSet = (value) => String(value ?? '').trim() !== '';
+
+/**
+ * What a service loading this environment needs to reach the local broker,
+ * which accepts only SASL/SCRAM over TLS with a certificate from its own CA.
+ * `env` is `.env` overlaid by the shell, as a service sees it. Returns
+ * warnings only: the stack itself starts either way. Never contains a value.
+ */
+export function checkKafkaClientEnv(env, services = kafkaServicesFromPrincipals()) {
+  const missing = [];
+  if (!isOn(env.KAFKA_SSL)) missing.push('KAFKA_SSL is not true');
+  if (!isSet(env.KAFKA_SSL_CA_FILE)) missing.push('KAFKA_SSL_CA_FILE is unset');
+  const unset = services
+    .map((service) => `KAFKA_SASL_PASSWORD_${serviceStem(service)}`)
+    .filter((variable) => !isSet(env[variable]));
+  if (unset.length === services.length && unset.length > 0) {
+    missing.push('no KAFKA_SASL_PASSWORD_<SERVICE> is set');
+  } else if (unset.length > 0) {
+    missing.push(`${unset.join(', ')} ${unset.length === 1 ? 'is' : 'are'} unset`);
+  }
+
+  const warnings = [];
+  if (missing.length > 0) {
+    warnings.push(
+      '.env predates the authenticated local broker (#131): the stack starts, but every service ' +
+        `and integration suite that loads .env will fail to reach Kafka: ${missing.join('; ')}. ` +
+        'Copy the "Broker credentials" block of .env.example into .env — every ' +
+        'KAFKA_SASL_PASSWORD_<SERVICE> line, KAFKA_SSL and KAFKA_SSL_CA_FILE — replacing the ' +
+        'commented-out placeholders. Their values are development-only and must agree with the ' +
+        "broker's, which compose takes from the same .env.",
+    );
+  }
+  if (isOn(env.KAFKA_ALLOW_PLAINTEXT)) {
+    warnings.push(
+      'KAFKA_ALLOW_PLAINTEXT is on, and the local broker accepts no PLAINTEXT client. Delete it ' +
+        'from .env (.env.example no longer sets it): with it, a service missing its credential ' +
+        'tries PLAINTEXT and loses the connection instead of refusing at boot with a message ' +
+        'naming the variable.',
+    );
+  }
+  return warnings;
 }

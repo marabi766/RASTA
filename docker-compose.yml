@@ -252,8 +252,12 @@ services:
 
   # ------------------------------------------------------------ object storage
   #
-  # Chainguard's signed builds, pinned by index digest — the same digests CI
-  # pins (.github/workflows/ci.yml, MINIO_IMAGE / MC_IMAGE). MinIO's own
+  # Chainguard's signed builds, pinned by index digest. The server digest is
+  # CI's too (.github/workflows/ci.yml, MINIO_IMAGE); the client's is not, on
+  # purpose. CI runs `mc` as the entrypoint, one command per container, so
+  # MC_IMAGE is the shell-less `minio-client`; minio-init below is a script
+  # and needs the shell of its `-dev` variant. Both hold the same `mc` binary
+  # (amd64, compared 2026-09-29): bump the two together. MinIO's own
   # images stopped being publicly pullable on 2026-09-24: quay.io answers 401
   # and Docker Hub's minio/minio is gone.
   #
