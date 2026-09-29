@@ -22,7 +22,12 @@ export {
 export type { RequestContext, AuthType } from './context/request-context';
 
 // Errors ---------------------------------------------------------------------
-export { RastaError, isRastaError } from './errors/rasta-error';
+export {
+  RastaError,
+  isRastaError,
+  RETRY_AFTER_MAX_SECONDS,
+  RETRY_AFTER_MIN_SECONDS,
+} from './errors/rasta-error';
 
 // Decorators -----------------------------------------------------------------
 export {

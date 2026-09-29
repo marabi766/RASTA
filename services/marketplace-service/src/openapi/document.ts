@@ -1,5 +1,6 @@
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
+import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
 import { toJsonSchema, type JsonSchema } from './zod-schema';
 import {
   cancelOrderSchema,
@@ -123,6 +124,19 @@ const STATUS_TEXT: Record<number, string> = {
   500: 'Unexpected server error',
 };
 
+/**
+ * `Retry-After` on an idempotent route's 409 (docs/06 § 6.8). Optional: only
+ * the in-flight `CONFLICT` carries it, never `IDEMPOTENCY_KEY_REUSED` or a
+ * state conflict. The bounds are the exception filter's own.
+ */
+const RETRY_AFTER_HEADER = {
+  required: false,
+  description:
+    'Sent only when this Idempotency-Key is still being processed (CONFLICT): the ' +
+    'seconds to wait before retrying with the same key. Absent on every other 409.',
+  schema: { type: 'integer', minimum: RETRY_AFTER_MIN_SECONDS, maximum: RETRY_AFTER_MAX_SECONDS },
+};
+
 export interface OpenApiOptions {
   /**
    * How long a recorded idempotency key is replayed for, from the running
@@ -181,7 +195,9 @@ export function enrichOpenApiDocument(
             description:
               'Required. A retry with the same key returns the first response without ' +
               'executing again; the same key with a different body is refused with 409 ' +
-              `IDEMPOTENCY_KEY_REUSED. Keys are honoured for ${retention}, which is ` +
+              'IDEMPOTENCY_KEY_REUSED, and while the first request is still in flight with ' +
+              'CONFLICT and a Retry-After header, in seconds. ' +
+              `Keys are honoured for ${retention}, which is ` +
               'this deployment’s configured retention window and not a platform constant.',
           },
         ];
@@ -198,6 +214,9 @@ export function enrichOpenApiDocument(
       for (const status of ERRORS[key] ?? []) {
         operation.responses[String(status)] = {
           description: STATUS_TEXT[status] ?? 'Error',
+          ...(status === 409 && IDEMPOTENT_ROUTES.has(key)
+            ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
+            : {}),
           content: {
             'application/json': { schema: { $ref: '#/components/schemas/ApiError' } },
           },
