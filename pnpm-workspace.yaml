@@ -41,6 +41,12 @@ overrides:
   # postcss, so the patched release has to come from here. 8.5.18 is the first
   # version that closes both.
   'postcss@<8.5.18': '8.5.18'
+  # CVE-2026-84292 and CVE-2026-84394 — authority injection through an
+  # unvalidated port, and host confusion through an unbalanced URI. Reached
+  # through ajv 8 (Nest's schema tooling and the build chain), which still
+  # resolves an affected fast-uri. 3.1.7 is the first fixed 3.x; 3.1.8 is the
+  # newest one past the seven-day minimum release age.
+  'fast-uri@<3.1.7': '3.1.8'
 
 # A transitive dependency may not arrive from a git URL or a tarball over
 # http. Everything here comes from the registry, and a sub-dependency that
